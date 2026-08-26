@@ -302,7 +302,8 @@ def test_app_bootstrap_defers_heavy_catalog_and_hydrates_skills_asynchronously()
     ]
     assert "await refreshWithRetry(target);" in startup_refresh
     assert "refreshWithRetry(target, options)" not in startup_refresh
-    assert "void refreshProjectList(target, { allowDuringStartup: true });" in startup_refresh
+    assert "scheduleProjectRefresh(target);" in startup_refresh
+    assert "Let the cached bootstrap render and the first paint complete" in app
     assert 'fetchBootstrap(target, { deferAgentCatalog: true })' in app
     assert "bootstrap?.agentManifest?.skills ?? []" in app
     assert "const bootstrapRequestSequenceRef = useRef(0)" in app

@@ -51,6 +51,7 @@ namespace VRCForge.Editor
         private static readonly HashSet<string> PreviewTools = new HashSet<string>(StringComparer.Ordinal)
         {
             "vrc_set_material_shader",
+            "vrc_set_material_texture",
             "vrc_duplicate_scene_object",
             "vrc_duplicate_project_asset",
             "vrc_save_scene_object_as_prefab",

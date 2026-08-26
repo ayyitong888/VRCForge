@@ -90,6 +90,8 @@ def test_unity_status_service_projects_existing_core_schema_with_fake_client(mon
     assert calls == [(project, 10, "execution")]
     assert status == {
         "connected": True,
+        "executionReady": True,
+        "blockerCode": "",
         "mcpServerReachable": True,
         "unityInstanceRegistered": True,
         "selectedInstanceMatched": True,
@@ -152,6 +154,8 @@ def test_unity_status_service_preserves_core_error_and_missing_project_contract(
     missing = make_service(selected_project="", core_installed=lambda _project: False).build_unity_status_snapshot()
 
     assert offline["error"] == "offline"
+    assert offline["executionReady"] is False
+    assert offline["blockerCode"] == "unity_core_contract_invalid"
     assert offline["causeCode"] == "unity_core_contract_invalid"
     assert offline["tools"] == {
         "ok": False,
@@ -163,6 +167,8 @@ def test_unity_status_service_preserves_core_error_and_missing_project_contract(
     }
     assert missing["error"] == "No Unity project is selected."
     assert missing["causeCode"] == "unity_project_not_selected"
+    assert missing["executionReady"] is False
+    assert missing["blockerCode"] == "unity_project_not_selected"
     assert missing["projectPath"] == ""
     assert missing["tools"]["missingRequiredVrcForgeTools"] == ["vrc_alpha", "vrc_beta"]
 
@@ -191,6 +197,38 @@ def test_settings_project_path_overrides_the_persisted_selected_project(
 
     assert observed == [requested]
     assert status["projectPath"] == str(requested).replace("\\", "/")
+
+
+def test_unity_status_keeps_connection_but_blocks_execution_for_exact_reload_dialog(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    class FakeCoreClient:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def list_tools(self, *, exposure_layer: str) -> list[dict[str, str]]:
+            assert exposure_layer == "execution"
+            return [{"name": "vrc_alpha"}, {"name": "vrc_beta"}]
+
+    monkeypatch.setattr(unity_status_service, "UnityMcpCoreClient", FakeCoreClient)
+    monkeypatch.setattr(
+        unity_status_service,
+        "probe_unity_reload_dialog",
+        lambda project: {
+            "projectPath": str(Path(project).resolve()),
+            "blocked": True,
+            "blockerCode": "unity_editor_reload_dialog",
+            "dialog": {"title": "Unity", "reloadLabel": "reload"},
+        },
+    )
+    status = make_service().build_unity_status_snapshot(
+        SimpleNamespace(unity_mcp_timeout_seconds=5), tmp_path / "Project"
+    )
+    assert status["connected"] is True
+    assert status["executionReady"] is False
+    assert status["blockerCode"] == "unity_editor_reload_dialog"
+    assert status["editorBlocker"]["projectPath"].endswith("Project")
 
 
 def test_gateway_status_and_tools_handlers_forward_the_requested_project(

@@ -38,6 +38,7 @@ namespace VRCForge.Editor
             [VRCForgeInput("Requested compression level.", IsRequired = true)] public string compression { get; set; } = "";
             [VRCForgeInput("Enable crunch compression.", IsRequired = true)] public bool? crunch { get; set; }
             [VRCForgeInput("Requested compression quality.", IsRequired = true)] public int? quality { get; set; }
+            [VRCForgeInput("Optional mipmap-streaming state; omit to preserve the current importer value.", IsRequired = false)] public bool? streamingMipmaps { get; set; }
             [VRCForgeInput("Exact active Unity project root.", IsRequired = false)] public string expectedProjectPath { get; set; } = "";
             [VRCForgeInput("Return a non-mutating importer preview.", IsRequired = false)] public bool? preview { get; set; } = false;
             [VRCForgeInput("Save and reimport during apply; required for apply.", IsRequired = false)] public bool? saveAndReimport { get; set; } = false;
@@ -199,6 +200,9 @@ namespace VRCForge.Editor
                 var compressionName = ReadCanonicalChoice(@params, "compression", CompressionValues.Keys);
                 var crunch = ReadStrictBool(@params, "crunch");
                 var quality = ReadStrictInt(@params, "quality");
+                var requestedStreamingMipmaps = @params?["streamingMipmaps"] == null
+                    ? (bool?)null
+                    : ReadStrictBool(@params, "streamingMipmaps");
                 var preview = ReadOptionalBool(@params, "preview", false);
                 var saveAndReimport = ReadOptionalBool(@params, "saveAndReimport", false);
                 var expectedProjectPath = (@params?["expectedProjectPath"]?.ToString() ?? string.Empty).Trim();
@@ -239,7 +243,8 @@ namespace VRCForge.Editor
                     formatName,
                     compressionName,
                     crunch,
-                    quality
+                    quality,
+                    requestedStreamingMipmaps ?? evidence.importer.streamingMipmaps
                 );
                 var targetSettingsDigest = ComputeSettingsDigest(importerType, targetSettings);
                 var wouldChange = !SettingsEqual(beforeSettings, targetSettings);
@@ -374,6 +379,7 @@ namespace VRCForge.Editor
                         nativeSettings.crunchedCompression = crunch;
                         nativeSettings.compressionQuality = quality;
                         mutationStarted = true;
+                        evidence.importer.streamingMipmaps = targetSettings.streamingMipmaps;
                         evidence.importer.SetPlatformTextureSettings(nativeSettings);
                         evidence.importer.SaveAndReimport();
 
@@ -543,6 +549,7 @@ namespace VRCForge.Editor
                 {
                     importer.SetPlatformTextureSettings(beforeNativeSettings);
                 }
+                importer.streamingMipmaps = beforeSettings.streamingMipmaps;
                 importer.SaveAndReimport();
 
                 var restoredEvidence = InspectTextureAsset(textureAssetPath);
@@ -774,7 +781,8 @@ namespace VRCForge.Editor
                 compression = CanonicalCompression(settings.textureCompression),
                 crunch = settings.crunchedCompression,
                 quality = settings.compressionQuality,
-                ignorePlatformSupport = settings.ignorePlatformSupport
+                ignorePlatformSupport = settings.ignorePlatformSupport,
+                streamingMipmaps = importer.streamingMipmaps
             };
         }
 
@@ -784,7 +792,8 @@ namespace VRCForge.Editor
             string format,
             string compression,
             bool crunch,
-            int quality
+            int quality,
+            bool streamingMipmaps
         )
         {
             return new ImportSettingsEvidence
@@ -797,7 +806,8 @@ namespace VRCForge.Editor
                 compression = compression,
                 crunch = crunch,
                 quality = quality,
-                ignorePlatformSupport = false
+                ignorePlatformSupport = false,
+                streamingMipmaps = streamingMipmaps
             };
         }
 
@@ -811,7 +821,8 @@ namespace VRCForge.Editor
                 && left.compression == right.compression
                 && left.crunch == right.crunch
                 && left.quality == right.quality
-                && left.ignorePlatformSupport == right.ignorePlatformSupport;
+                && left.ignorePlatformSupport == right.ignorePlatformSupport
+                && left.streamingMipmaps == right.streamingMipmaps;
         }
 
         private static string ComputeSettingsDigest(string importerType, ImportSettingsEvidence settings)
@@ -828,6 +839,7 @@ namespace VRCForge.Editor
             AppendDigestField(builder, settings.crunch ? "true" : "false");
             AppendDigestField(builder, settings.quality.ToString(CultureInfo.InvariantCulture));
             AppendDigestField(builder, settings.ignorePlatformSupport ? "true" : "false");
+            AppendDigestField(builder, settings.streamingMipmaps ? "true" : "false");
             using (var sha256 = SHA256.Create())
             {
                 return BitConverter.ToString(sha256.ComputeHash(Encoding.UTF8.GetBytes(builder.ToString())))
@@ -1352,6 +1364,7 @@ namespace VRCForge.Editor
             public bool crunch;
             public int quality;
             public bool ignorePlatformSupport;
+            public bool streamingMipmaps;
         }
     }
 }

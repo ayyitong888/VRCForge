@@ -43,7 +43,10 @@ import {
 import { DEFAULT_BACKGROUND_MAX_AGENTIC_TURNS } from "../lib/api/agent-runtime";
 import { projectVisionFailureNotice } from "../lib/vision-failure-notice";
 
-export const MAX_BACKGROUND_TURNS = 2;
+// Keep the client launch cap aligned with RuntimeLaneBudget's 12 background
+// slots; the backend retains four interactive slots within the total 16.
+export const MAX_BACKGROUND_TURNS = 12;
+export const MAX_BACKGROUND_TURNS_PER_SCOPE = 4;
 
 export type QueuedTurn = {
   id: string;
@@ -598,17 +601,20 @@ export function useChatRunController({
   }
 
   async function runBackgroundTurn(chatId: string, turn: QueuedTurn): Promise<boolean> {
+    const chat = getChatById(chatId);
+    const scopeKey = `${turn.sessionId || chat?.sessionId || ""}:${turn.projectPath || chat?.projectPath || ""}`;
+    const scopeCount = [...backgroundTurnAbortRefs.current.keys()].filter((id) => id.startsWith(`${scopeKey}:`)).length;
     if (
       !turn.goalDelivery?.deliveryId
-      || backgroundTurnAbortRefs.current.has(turn.id)
+      || [...backgroundTurnAbortRefs.current.keys()].some((id) => id.endsWith(`:${turn.id}`))
       || backgroundTurnAbortRefs.current.size >= MAX_BACKGROUND_TURNS
+      || scopeCount >= MAX_BACKGROUND_TURNS_PER_SCOPE
     ) {
       return false;
     }
     const abortController = new AbortController();
-    backgroundTurnAbortRefs.current.set(turn.id, abortController);
+    backgroundTurnAbortRefs.current.set(`${scopeKey}:${turn.id}`, abortController);
     try {
-      const chat = getChatById(chatId);
       return await runSingleTurn(chatId, turn, {
         background: true,
         abortController,
@@ -616,7 +622,7 @@ export function useChatRunController({
         sessionId: turn.sessionId || chat?.sessionId || undefined,
       });
     } finally {
-      backgroundTurnAbortRefs.current.delete(turn.id);
+      backgroundTurnAbortRefs.current.delete(`${scopeKey}:${turn.id}`);
     }
   }
 

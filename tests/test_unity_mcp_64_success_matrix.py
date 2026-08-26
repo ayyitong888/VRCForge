@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from unity_mcp_tool_contract import EXPECTED_TOOL_NAMES
+from unity_mcp_tool_contract import EXPECTED_TOOL_COUNT, EXPECTED_TOOL_NAMES
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -14,6 +14,9 @@ SCRIPT = ROOT / "scripts" / "validate_unity_mcp_64_success_matrix.py"
 AVATAR_PRIMITIVE_CRUD = (
     ROOT / "Assets" / "VRCForge" / "Editor" / "Generic" / "UnityAvatarPrimitiveCrud.cs"
 ).read_text(encoding="utf-8-sig")
+VRCHAT_BUILD_TEST = (ROOT / "Assets" / "VRCForge" / "Editor" / "VrchatBuildTestTool.cs").read_text(encoding="utf-8-sig")
+VRCHAT_ALERTS = (ROOT / "Assets" / "VRCForge" / "Editor" / "VrchatSdkBuilderAlertsTool.cs").read_text(encoding="utf-8-sig")
+VRCHAT_CONSTRAINT = (ROOT / "Assets" / "VRCForge" / "Editor" / "VrchatConstraintConversionTool.cs").read_text(encoding="utf-8-sig")
 
 
 def load_validator():
@@ -24,10 +27,10 @@ def load_validator():
     return module
 
 
-def test_catalog_covers_exact_80_tools_once_with_real_success_contracts() -> None:
+def test_catalog_covers_exact_current_tools_once_with_real_success_contracts() -> None:
     validator = load_validator()
     cases = validator.load_catalog()
-    assert len(cases) == 80
+    assert len(cases) == EXPECTED_TOOL_COUNT
     assert {case["tool"] for case in cases} == EXPECTED_TOOL_NAMES
     assert all(case["arguments"] is not None for case in cases)
     assert all(case["requiredFixtures"] for case in cases)
@@ -91,7 +94,7 @@ def test_live_schema_gate_rejects_empty_or_missing_catalog_parameters() -> None:
                 },
             }
         )
-    assert validator.validate_tool_schemas(cases, tools)["toolCount"] == 80
+    assert validator.validate_tool_schemas(cases, tools)["toolCount"] == EXPECTED_TOOL_COUNT
 
     broken = [dict(item) for item in tools]
     broken[0] = {
@@ -100,6 +103,56 @@ def test_live_schema_gate_rejects_empty_or_missing_catalog_parameters() -> None:
     }
     with pytest.raises(ValueError, match="exposes no parameters"):
         validator.validate_tool_schemas(cases, broken)
+
+
+def test_acceptance_tools_declare_all_catalog_input_schema_fields() -> None:
+    """Raw-JObject handlers still need explicit Core schemas for MCP clients."""
+    validator = load_validator()
+    cases = {
+        case["tool"]: {key for key in case["arguments"] if not key.startswith("${")}
+        for case in validator.load_catalog()
+        if case["tool"] in {
+            "vrc_build_test_avatar",
+            "vrc_read_vrchat_sdk_builder_alerts",
+            "vrc_avatar_upload_readiness",
+            "vrc_build_and_upload_avatar",
+            "vrc_convert_unity_constraint",
+        }
+    }
+    sources = {
+        "vrc_build_test_avatar": VRCHAT_BUILD_TEST,
+        "vrc_read_vrchat_sdk_builder_alerts": VRCHAT_ALERTS,
+        "vrc_avatar_upload_readiness": VRCHAT_BUILD_TEST,
+        "vrc_build_and_upload_avatar": VRCHAT_BUILD_TEST,
+        "vrc_convert_unity_constraint": VRCHAT_CONSTRAINT,
+    }
+    classes = {
+        "vrc_build_test_avatar": "VrchatBuildTestTool",
+        "vrc_read_vrchat_sdk_builder_alerts": "VrchatSdkBuilderAlertsTool",
+        "vrc_avatar_upload_readiness": "VrchatAvatarUploadReadinessTool",
+        "vrc_build_and_upload_avatar": "VrchatAvatarUploadTool",
+        "vrc_convert_unity_constraint": "VrchatConstraintConversionTool",
+    }
+
+    for tool, expected in cases.items():
+        source = sources[tool]
+        class_match = re.search(rf"public static class {classes[tool]}\s*\{{", source)
+        assert class_match, tool
+        parameter_start = source.index("public sealed class Parameters", class_match.start())
+        body_start = source.index("{", parameter_start)
+        depth = 0
+        for index in range(body_start, len(source)):
+            if source[index] == "{":
+                depth += 1
+            elif source[index] == "}":
+                depth -= 1
+                if depth == 0:
+                    parameter_body = source[body_start:index]
+                    break
+        else:
+            raise AssertionError(f"unterminated Parameters for {tool}")
+        fields = set(re.findall(r"public\s+[\w<>,\[\]?]+\s+(\w+)\s*\{", parameter_body))
+        assert expected <= fields, f"{tool} catalog keys missing from Parameters: {sorted(expected - fields)}"
 
 
 def test_avatar_primitive_crud_commands_expose_nonempty_schemas_covering_catalog_inputs() -> None:

@@ -23,6 +23,7 @@ import time
 import urllib.error
 import urllib.request
 import zipfile
+from ctypes import wintypes
 from collections import deque
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -31,6 +32,7 @@ from datetime import datetime, timedelta, timezone
 from http.cookies import SimpleCookie
 from pathlib import Path, PurePosixPath
 from threading import Event, Lock, RLock, Thread
+from types import SimpleNamespace
 from typing import Any, Callable, Literal, Mapping
 from urllib.parse import urlsplit
 
@@ -106,6 +108,7 @@ from agent_gateway import (
     summarize_text,
 )
 from agent_skill_registry import USER_SKILL_MANIFEST_MAX_BYTES
+from external_installed_skill_registry import ExternalInstalledSkillRegistryService
 from desktop_computer_use_service import DESKTOP_BRIDGE_ACTION_TYPES
 from agent_question_service import (
     AgentQuestionServiceError,
@@ -164,6 +167,10 @@ from material_shader_assignment import (
     TOOL_NAME as MATERIAL_SHADER_ASSIGNMENT_TOOL,
     build_wrapper_arguments as build_material_shader_wrapper_arguments,
 )
+from material_texture_assignment import (
+    TOOL_NAME as MATERIAL_TEXTURE_ASSIGNMENT_TOOL,
+    build_wrapper_arguments as build_material_texture_wrapper_arguments,
+)
 from atomic_reference_rename import (
     TOOL_NAME as ATOMIC_REFERENCE_RENAME_TOOL,
     build_wrapper_arguments as build_atomic_reference_rename_wrapper_arguments,
@@ -189,6 +196,10 @@ from scene_asset_save_current import (
 from texture_import_settings import (
     TOOL_NAME as TEXTURE_IMPORT_SETTINGS_TOOL,
     build_wrapper_arguments as build_texture_import_settings_wrapper_arguments,
+)
+from unity_editor_window_probe import (
+    confirm_unity_reload_dialog,
+    prepare_unity_reload_confirmation,
 )
 from project_asset_copy import (
     TOOL_NAME as PROJECT_ASSET_COPY_TOOL,
@@ -774,6 +785,7 @@ VRCFORGE_UNITY_TOOL_REGISTRY = (
     "vrc_set_constraint_sources",
     "vrc_set_gameobject_active",
     "vrc_set_material_shader",
+    "vrc_set_material_texture",
     "vrc_set_property",
     "vrc_set_texture_import_settings",
     "vrc_setup_outfit",
@@ -832,6 +844,7 @@ VRCFORGE_UNITY_MCP_BACKED_WRITE_TARGETS = frozenset(
         "vrcforge_duplicate_scene_object",
         "vrcforge_duplicate_project_asset",
         "vrcforge_set_material_shader",
+        "vrcforge_set_material_texture",
         "vrcforge_set_constraint_sources",
         "vrcforge_convert_unity_constraint",
         "vrcforge_save_scene_object_as_prefab",
@@ -862,6 +875,7 @@ VRCFORGE_UNITY_MCP_WRITE_ALLOWLIST = frozenset(
         "vrc_build_test_avatar",
         "vrc_rollback_avatar_parameters",
         "vrc_set_material_shader",
+        MATERIAL_TEXTURE_ASSIGNMENT_TOOL,
         "vrc_duplicate_scene_object",
         PROJECT_ASSET_COPY_TOOL,
         "vrc_save_scene_object_as_prefab",
@@ -914,9 +928,11 @@ LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 MATERIAL_SEMANTIC_PROPERTIES = {
     "base_color",
+    "main_saturation",
     "shade_color",
     "shadow_strength",
     "shadow_softness",
+    "shadow_border",
     "smoothness",
     "specular_strength",
     "rim_color",
@@ -2606,6 +2622,7 @@ AGENT_GATEWAY = AgentGateway(
     runtime_status_changed=broadcast_runtime_status,
     runtime_timeline_changed=broadcast_runtime_status,
 )
+EXTERNAL_INSTALLED_SKILL_REGISTRY = ExternalInstalledSkillRegistryService(AGENT_GATEWAY.skills)
 _SESSION_HANDOFF_SERVICE: SessionHandoffService | None = None
 _SESSION_HANDOFF_SERVICE_LOCK = RLock()
 _SESSION_HANDOFF_QUEUE_LOCK = RLock()
@@ -10349,15 +10366,12 @@ def agent_runtime_session(session_id: str, request: Request) -> dict[str, Any]:
 async def call_agent_tool(tool_name: str, request: Request, tool_request: AgentToolRequest) -> dict[str, Any]:
     authenticate_agent_request(request, allow_disabled=False)
     try:
-        if tool_name == "vrcforge_agent_desktop_action":
-            payload = await asyncio.to_thread(
-                AGENT_GATEWAY.call_tool,
-                tool_name,
-                tool_request.params,
-                tool_request.agent_name,
-            )
-        else:
-            payload = AGENT_GATEWAY.call_tool(tool_name, tool_request.params, agent_name=tool_request.agent_name)
+        payload = await asyncio.to_thread(
+            AGENT_GATEWAY.call_tool,
+            tool_name,
+            tool_request.params,
+            tool_request.agent_name,
+        )
     except AgentGatewayError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     params = ensure_dict(tool_request.params or {})
@@ -17145,7 +17159,7 @@ def build_plan_change_preview(
 
 def verify_live_blendshape_changes(
     settings: Settings,
-    selected_avatar: SelectedAvatar,
+    selected_avatar: SelectedAvatar | Mapping[str, Any],
     change_preview: list[dict[str, Any]],
     tolerance: float = 0.25,
 ) -> list[dict[str, Any]]:
@@ -17154,7 +17168,21 @@ def verify_live_blendshape_changes(
 
     try:
         export_payload = export_blendshapes(settings)
-        live_index = build_allowed_blendshape_index(export_payload, selected_avatar.avatar_path)
+        # AvatarTuningLiveContext crosses a serialization boundary before the
+        # post-write verifier runs.  Accept the serialized form while keeping
+        # the selected avatar path explicit; do not fall back to another
+        # avatar or to the current Unity selection.
+        if isinstance(selected_avatar, Mapping):
+            avatar_path = str(
+                selected_avatar.get("avatarPath")
+                or selected_avatar.get("avatar_path")
+                or ""
+            )
+        else:
+            avatar_path = str(getattr(selected_avatar, "avatar_path", "") or "")
+        if not avatar_path:
+            raise ValueError("Selected avatar path is missing for live verification.")
+        live_index = build_allowed_blendshape_index(export_payload, avatar_path)
     except Exception as exc:
         emit_log("warning", "pipeline", "Failed to re-read blendshape export for verification.", {"error": str(exc)})
         return [
@@ -18183,6 +18211,61 @@ class UnityProcessDiscoveryUnavailable(RuntimeError):
     """Raised when running-process evidence cannot be collected reliably."""
 
 
+def _enumerate_windows_process_names(*, require_discovery_evidence: bool = False) -> list[dict[str, Any]]:
+    """Fast native PID/name scan; expensive command-line reads happen only for Unity."""
+
+    if os.name != "nt":
+        return []
+    try:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        class ProcessEntry32W(ctypes.Structure):
+            _fields_ = [
+                ("dwSize", wintypes.DWORD),
+                ("cntUsage", wintypes.DWORD),
+                ("th32ProcessID", wintypes.DWORD),
+                ("th32DefaultHeapID", ctypes.POINTER(ctypes.c_ulong)),
+                ("th32ModuleID", wintypes.DWORD),
+                ("cntThreads", wintypes.DWORD),
+                ("th32ParentProcessID", wintypes.DWORD),
+                ("pcPriClassBase", wintypes.LONG),
+                ("dwFlags", wintypes.DWORD),
+                ("szExeFile", wintypes.WCHAR * 260),
+            ]
+
+        kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+        kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        kernel32.Process32FirstW.argtypes = [wintypes.HANDLE, ctypes.POINTER(ProcessEntry32W)]
+        kernel32.Process32FirstW.restype = wintypes.BOOL
+        kernel32.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.POINTER(ProcessEntry32W)]
+        kernel32.Process32NextW.restype = wintypes.BOOL
+        snapshot = kernel32.CreateToolhelp32Snapshot(0x00000002, 0)
+        invalid_handle = ctypes.c_void_p(-1).value
+        snapshot_value = getattr(snapshot, "value", snapshot)
+        if snapshot is None or snapshot_value is None or snapshot_value == invalid_handle:
+            raise ctypes.WinError(ctypes.get_last_error())
+        entry = ProcessEntry32W()
+        entry.dwSize = ctypes.sizeof(ProcessEntry32W)
+        rows: list[dict[str, Any]] = []
+        try:
+            if not kernel32.Process32FirstW(snapshot, ctypes.byref(entry)):
+                raise ctypes.WinError(ctypes.get_last_error())
+            while True:
+                rows.append({"pid": int(entry.th32ProcessID), "name": str(entry.szExeFile or "")})
+                if not kernel32.Process32NextW(snapshot, ctypes.byref(entry)):
+                    if ctypes.get_last_error() != 18:  # ERROR_NO_MORE_FILES
+                        raise ctypes.WinError(ctypes.get_last_error())
+                    break
+        finally:
+            kernel32.CloseHandle(snapshot)
+        return rows
+    except Exception as exc:  # noqa: BLE001 - strict callers must not accept partial evidence.
+        if require_discovery_evidence:
+            raise UnityProcessDiscoveryUnavailable("Windows process discovery did not produce usable evidence.") from exc
+        return []
+
+
 def _iter_processes(*, require_discovery_evidence: bool = False) -> list[Any]:
     if psutil is None:
         if require_discovery_evidence:
@@ -18209,14 +18292,27 @@ def list_running_unity_processes(
             )
         return []
     processes: list[dict[str, Any]] = []
-    for process in _iter_processes(
-        require_discovery_evidence=require_discovery_evidence
-    ):
-        if _process_name_text(
-            process,
-            require_discovery_evidence=require_discovery_evidence,
-        ).casefold() != "unity.exe":
-            continue
+    if os.name == "nt":
+        candidates = _enumerate_windows_process_names(require_discovery_evidence=require_discovery_evidence)
+        if psutil is None:
+            if require_discovery_evidence:
+                raise UnityProcessDiscoveryUnavailable("Process discovery is unavailable.")
+            return []
+        process_items: list[Any] = []
+        for candidate in candidates:
+            if str(candidate.get("name") or "").casefold() != "unity.exe":
+                continue
+            try:
+                process = psutil.Process(int(candidate["pid"]))
+                info = process.as_dict(attrs=["pid", "name", "exe", "cmdline"])
+                process_items.append(SimpleNamespace(info=info, pid=int(candidate["pid"])))
+            except Exception as exc:  # noqa: BLE001 - processes may exit during discovery.
+                if require_discovery_evidence:
+                    raise UnityProcessDiscoveryUnavailable("A Unity process could not be read.") from exc
+    else:
+        process_items = _iter_processes(require_discovery_evidence=require_discovery_evidence)
+
+    for process in process_items:
         try:
             process_id = int(process.info.get("pid") if hasattr(process, "info") else process.pid)
         except Exception as exc:  # noqa: BLE001
@@ -19569,18 +19665,84 @@ def build_agent_shader_request(params: dict[str, Any]) -> ShaderMaterialPlanRequ
 
 
 def _preview_agent_blendshape_adapter(params: dict[str, Any]) -> dict[str, Any]:
+    params = dict(params or {})
     avatar_path = str(params.get("avatar_path") or params.get("avatarPath") or params.get("avatar") or "").strip()
-    adjustments = params.get("adjustments") or []
     if not avatar_path:
         raise RuntimeError("avatar_path is required for blendshape apply preview.")
+    adjustments = params.get("adjustments")
     if not isinstance(adjustments, list):
         raise RuntimeError("adjustments must be a list.")
-    payload = render_manual_blendshape_payload_json(avatar_path, adjustments)
+    if not adjustments:
+        raise RuntimeError("No blendshape adjustments were provided.")
+
+    # The agent preview is deliberately read-only, but it still needs the same
+    # project-scoped export used by the manual editor.  Rendering JSON alone
+    # made a typo in a renderer or BlendShape look like a successful preview.
+    # Keep the old payload-only compatibility path for callers that provide no
+    # project context at all; there is no live avatar against which such a
+    # request could truthfully be checked.  Agent calls with a projectPath (the
+    # normal path) always take the strict live-export path below.
+    has_project_context = any(
+        str(params.get(key) or "").strip()
+        for key in ("projectPath", "project_path", "projectRoot", "project_root", "unityInstance", "unity_instance")
+    ) or bool(str(getattr(DASHBOARD_STATE, "selected_project_path", "") or "").strip())
+    request = build_agent_dashboard_request(params)
+    selected_avatar = None
+    export_source = "payload-only-compatibility"
+    using_mock_execute = False
+    allowed_targets: dict[tuple[str, str], dict[str, Any]] = {}
+    if has_project_context:
+        settings = load_dashboard_settings(request)
+        export_payload, export_source, using_mock_execute = load_dashboard_export_payload(settings, request)
+        selected_avatar = resolve_avatar_selection(export_payload, request.avatar)
+        allowed_targets = build_allowed_blendshape_index(export_payload, selected_avatar.avatar_path)
+
+    normalized: list[dict[str, Any]] = []
+    invalid: list[str] = []
+    for index, raw_item in enumerate(adjustments):
+        if not isinstance(raw_item, dict):
+            invalid.append(f"adjustments[{index}] must be an object")
+            continue
+        renderer_path = str(raw_item.get("rendererPath") or raw_item.get("renderer_path") or "").strip()
+        blendshape_name = str(raw_item.get("blendshapeName") or raw_item.get("blendshape_name") or "").strip()
+        if not renderer_path or not blendshape_name:
+            invalid.append(f"adjustments[{index}] requires rendererPath and blendshapeName")
+            continue
+        if has_project_context and (renderer_path, blendshape_name) not in allowed_targets:
+            invalid.append(
+                f"adjustments[{index}] target not found: rendererPath={renderer_path!r}, "
+                f"blendshapeName={blendshape_name!r}"
+            )
+            continue
+        target_value = raw_item.get("targetWeight", raw_item.get("target_weight"))
+        try:
+            target_weight = float(target_value)
+        except (TypeError, ValueError):
+            invalid.append(f"adjustments[{index}].targetWeight must be a number")
+            continue
+        if not 0.0 <= target_weight <= 100.0:
+            invalid.append(f"adjustments[{index}].targetWeight must be between 0 and 100")
+            continue
+        normalized.append(
+            {
+                "rendererPath": renderer_path,
+                "blendshapeName": blendshape_name,
+                "targetWeight": target_weight,
+            }
+        )
+
+    if invalid:
+        raise RuntimeError("Invalid blendshape preview adjustments: " + "; ".join(invalid))
+
+    output_avatar_path = selected_avatar.avatar_path if selected_avatar is not None else avatar_path
+    payload = render_manual_blendshape_payload_json(output_avatar_path, normalized)
     return {
         "ok": True,
         "targetTool": "vrcforge_apply_blendshapes",
-        "avatarPath": avatar_path,
-        "adjustmentCount": len(adjustments),
+        "avatarPath": output_avatar_path,
+        "adjustmentCount": len(normalized),
+        "exportSource": export_source,
+        "executionMode": "mock" if using_mock_execute else "live-unity",
         "applyPayload": payload,
     }
 
@@ -20659,6 +20821,24 @@ def prepare_material_shader_assignment_request(
 
     return prepare_unity_mcp_write_request(
         build_material_shader_wrapper_arguments(params or {}),
+        caller_preview,
+    )
+
+
+def preview_material_texture_assignment_sync(params: dict[str, Any]) -> dict[str, Any]:
+    _arguments, preview = prepare_unity_mcp_write_request(
+        build_material_texture_wrapper_arguments(params or {}),
+        None,
+    )
+    return {"ok": True, "preview": preview}
+
+
+def prepare_material_texture_assignment_request(
+    params: dict[str, Any],
+    caller_preview: Any,
+) -> tuple[dict[str, Any], Any]:
+    return prepare_unity_mcp_write_request(
+        build_material_texture_wrapper_arguments(params or {}),
         caller_preview,
     )
 
@@ -24551,6 +24731,12 @@ def register_agent_gateway_tools() -> None:
         if name in VRCFORGE_UNITY_MCP_BACKED_WRITE_TARGETS:
             metadata["requires_approved_execution_context"] = True
             metadata["checkpoint_prepare_handler"] = prepare_authoritative_unity_checkpoint_sync
+            # Screenshot capture only overwrites the dashboard's managed PNG
+            # artifact. It never mutates Assets/Packages/ProjectSettings, so
+            # binding the Unity-project checkpoint helper would be misleading
+            # even though the handler remains approval-bound.
+            if name in {"vrcforge_capture_screenshot", "vrcforge_capture_multi_screenshot"}:
+                metadata["checkpoint_prepare_handler"] = None
         if name in SCENE_EXECUTION_PLAN_TARGETS:
             metadata["approved_execution_plan_builder"] = (
                 lambda arguments, exact_target=name: build_scene_execution_plan(
@@ -24923,6 +25109,18 @@ def register_agent_gateway_tools() -> None:
     AGENT_GATEWAY.register_tool("vrcforge_execute_approved_shell", "When to use: apply the exact stored payload of a Shell approval through its checkpoint transaction. When NOT to use: do not call it with a new command or without the approval owner flow.", "supervised-write", AGENT_GATEWAY.shell.execute_approved, write=True)
     AGENT_GATEWAY.register_tool("vrcforge_skill_manifest", "List VRCForge Agent Gateway skills.", "read/debug", lambda params: AGENT_GATEWAY.build_manifest(normalize_exposure_layer(ensure_dict(params).get("exposureLayer"))))
     AGENT_GATEWAY.register_tool("vrcforge_skill_check", "Validate VRCForge Agent Gateway skill packages.", "read/debug", lambda params: AGENT_GATEWAY.skills.check_skill_registry(exposure_layer=normalize_exposure_layer(ensure_dict(params).get("exposureLayer"))))
+    AGENT_GATEWAY.register_tool(
+        "vrcforge_list_installed_skills",
+        "When to use: discover enabled user-installed Skills through their lightweight names, titles, and descriptions before selecting one. When NOT to use: do not request full instructions, support-file content, builtin tools, or package import/export from the compact index.",
+        "read/debug",
+        EXTERNAL_INSTALLED_SKILL_REGISTRY.list_installed_skills,
+    )
+    AGENT_GATEWAY.register_tool(
+        "vrcforge_read_installed_skill",
+        "When to use: read one enabled installed Skill's instructions and declared support-file index, or read one exact declared support file when needed. When NOT to use: do not list all Skills, read arbitrary host files, invoke a Skill, or bypass approval for its tools.",
+        "read/debug",
+        EXTERNAL_INSTALLED_SKILL_REGISTRY.read_installed_skill,
+    )
     AGENT_GATEWAY.register_tool("vrcforge_tool_registry", "List standardized VRCForge tool metadata for Desktop, MCP, and CLI surfaces.", "read/debug", lambda params: AGENT_GATEWAY.build_tool_registry(exposure_layer=normalize_exposure_layer(ensure_dict(params).get("exposureLayer"))))
     AGENT_GATEWAY.register_tool("vrcforge_external_agent_connectors", "Generate loopback MCP connector templates for external coding agents without exposing plaintext tokens.", "read/debug", connector_bundle_sync)
     AGENT_GATEWAY.register_tool("vrcforge_list_skill_packages", "List installed community .vsk skill packages.", "read/debug", list_skill_packages_sync)
@@ -25240,6 +25438,12 @@ def register_agent_gateway_tools() -> None:
         SHADER_VISION_PROTECTION.preview_material_shader_assignment,
     )
     AGENT_GATEWAY.register_tool(
+        "vrcforge_preview_material_texture_assignment",
+        "When to use: inspect one existing project Material, one whitelisted texture slot, and one existing Texture2D without writing. When NOT to use: do not edit pixels, create textures, change shader parameters, or treat a preview as an applied texture assignment. Negative example: do not call it to repaint a face texture.",
+        "plan/preview",
+        preview_material_texture_assignment_sync,
+    )
+    AGENT_GATEWAY.register_tool(
         "vrcforge_preview_scene_object_duplicate",
         "Preview one create-new scene object duplicate without writing project files.",
         "plan/preview",
@@ -25253,8 +25457,8 @@ def register_agent_gateway_tools() -> None:
     )
     AGENT_GATEWAY.register_tool(
         "vrcforge_preview_project_asset_duplicate",
-        "When to use: preview one create-new copy of a controller, ScriptableObject asset, animation, or override controller into Assets/VRCForge/Generated before deriving final Avatar assets. "
-        "When NOT to use: do not overwrite, move, merge, import, or copy scripts, DLLs, prefabs, textures, or arbitrary files. "
+        "When to use: preview one create-new copy of a material (.mat), controller, ScriptableObject asset, animation, or override controller into Assets/VRCForge/Generated before deriving final Avatar assets. "
+        "When NOT to use: do not overwrite or modify the source material, move, merge, import, or copy scripts, DLLs, prefabs, textures, or arbitrary files. "
         "Negative example: do not call this tool to replace an existing FX controller in place.",
         "plan/preview",
         preview_project_asset_copy_sync,
@@ -25348,6 +25552,12 @@ def register_agent_gateway_tools() -> None:
         rollback_project_catalog_registration_sync,
         pre_write_checkpoint_required=False,
     )
+    register_write_handler(
+        "vrcforge_create_installed_skill",
+        "When to use: create and immediately install one new user-authored Skill with explicit instructions in VRCForge's existing shared Skill registry. When NOT to use: do not overwrite an existing Skill, bypass approval, import a .vsk package, or create arbitrary host files.",
+        "medium",
+        EXTERNAL_INSTALLED_SKILL_REGISTRY.create_installed_skill,
+    )
     register_write_handler("vrcforge_import_skill_package", "When to use: atomically import one verified local .vsk package into the user Skill store. When NOT to use: do not use it only to inspect package identity or contents. Negative example: call preflight, not import, for a read-only package check.", "medium", SKILL_PACKAGE_CONTROLLER.import_package)
     register_write_handler(
         "vrcforge_export_skill_package",
@@ -25383,7 +25593,8 @@ def register_agent_gateway_tools() -> None:
     )
     register_write_handler(
         "vrcforge_capture_screenshot",
-        "Capture one fixed dashboard scene-view artifact through VRCForge approval and checkpoint controls. "
+        "Capture one fixed dashboard scene-view artifact through VRCForge approval. "
+        "The only writable target is the managed dashboard latest PNG; no Unity project checkpoint or rollback is used. "
         "When to use: capture one requested current view or one named angle; an external Agent may call this "
         "atomic tool once per angle while it owns the multi-angle audit loop. "
         "When NOT to use: do not treat one capture as complete multi-angle coverage, and do not request multiple "
@@ -25393,6 +25604,7 @@ def register_agent_gateway_tools() -> None:
         request_preparer=prepare_capture_screenshot_request,
         requires_approved_execution_context=True,
         approved_execution_plan_builder=build_prepared_execution_plan,
+        pre_write_checkpoint_required=False,
         approval_category="visual-capture",
         allow_future_category=True,
     )
@@ -25423,6 +25635,14 @@ def register_agent_gateway_tools() -> None:
         "When to use: request one explicit Unity Play Mode state, then poll capture/status until the requested state is observed. When NOT to use: do not treat transition_scheduled as final verification and do not use it while Unity is compiling or updating. Negative example: do not repeatedly toggle Play Mode when one pending transition has not completed.",
         "low",
         set_play_mode_sync,
+        pre_write_checkpoint_required=False,
+    )
+    register_write_handler(
+        "vrcforge_confirm_unity_reload_dialog",
+        "When to use: after explicit confirmation, click only the exact Reload button on the selected Unity project's verified external-modification dialog. When NOT to use: do not dismiss another dialog, click Ignore, target a different Unity Editor, or treat Reload as safe for unsaved changes. Negative example: never accept an unbound Reload dialog while multiple Unity projects are open.",
+        "high",
+        confirm_unity_reload_dialog,
+        request_preparer=prepare_unity_reload_confirmation,
         pre_write_checkpoint_required=False,
     )
     register_write_handler(
@@ -25459,6 +25679,15 @@ def register_agent_gateway_tools() -> None:
         "medium",
         unity_mcp_write_sync,
         request_preparer=prepare_material_shader_assignment_request,
+        requires_approved_execution_context=True,
+        approved_execution_plan_builder=build_unity_mcp_write_execution_plan,
+    )
+    register_write_handler(
+        "vrcforge_set_material_texture",
+        "When to use: assign one existing Assets Texture2D to one whitelisted texture slot on one exact preview-bound persistent Material, then verify the saved asset. When NOT to use: do not edit pixels, create or batch assets, change the shader, or bypass the checkpoint. Negative example: do not rewrite every material merely because one face texture needs a localized repair.",
+        "medium",
+        unity_mcp_write_sync,
+        request_preparer=prepare_material_texture_assignment_request,
         requires_approved_execution_context=True,
         approved_execution_plan_builder=build_unity_mcp_write_execution_plan,
     )
@@ -25510,7 +25739,8 @@ def register_agent_gateway_tools() -> None:
     )
     register_write_handler(
         "vrcforge_capture_multi_screenshot",
-        "Capture up to four fixed-angle dashboard scene-view artifacts through VRCForge approval and checkpoint controls. "
+        "Capture up to four fixed-angle dashboard scene-view artifacts through VRCForge approval. "
+        "The only writable targets are the managed dashboard latest PNGs; no Unity project checkpoint or rollback is used. "
         "When to use: the task asks for two or more named angles, full view coverage, comparison, or a multi-angle visual audit. "
         "When NOT to use: the task asks for only one current view or one screenshot.",
         "medium",
@@ -25518,6 +25748,7 @@ def register_agent_gateway_tools() -> None:
         request_preparer=prepare_capture_multi_screenshot_request,
         requires_approved_execution_context=True,
         approved_execution_plan_builder=build_prepared_execution_plan,
+        pre_write_checkpoint_required=False,
         approval_category="visual-capture",
         allow_future_category=True,
     )

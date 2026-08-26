@@ -577,7 +577,7 @@ namespace VRCForge.Editor
             };
         }
 
-        private static MaterialAssetEvidence InspectWritableMaterialAsset(Material material)
+        internal static MaterialAssetEvidence InspectWritableMaterialAsset(Material material)
         {
             var normalizedPath = (AssetDatabase.GetAssetPath(material) ?? string.Empty).Replace("\\", "/").Trim();
             if (!AssetDatabase.Contains(material)
@@ -630,7 +630,7 @@ namespace VRCForge.Editor
             };
         }
 
-        private static void EnsureNoReparseBoundary(string assetsRoot, string filePath)
+        internal static void EnsureNoReparseBoundary(string assetsRoot, string filePath)
         {
             var rootAttributes = File.GetAttributes(assetsRoot);
             if ((rootAttributes & FileAttributes.ReparsePoint) != 0)
@@ -656,7 +656,7 @@ namespace VRCForge.Editor
             throw new InvalidOperationException("Material path did not resolve below the project Assets directory.");
         }
 
-        private static string ComputeFileSha256(string filePath)
+        internal static string ComputeFileSha256(string filePath)
         {
             using (var sha256 = SHA256.Create())
             using (var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read))
@@ -850,7 +850,7 @@ namespace VRCForge.Editor
             target.Append(safeValue.Length).Append(':').Append(safeValue);
         }
 
-        private static string NormalizeHex(string value, int expectedLength, bool allowEmpty)
+        internal static string NormalizeHex(string value, int expectedLength, bool allowEmpty)
         {
             var normalized = (value ?? string.Empty).Trim().ToLowerInvariant();
             if (allowEmpty && string.IsNullOrWhiteSpace(normalized))
@@ -864,7 +864,7 @@ namespace VRCForge.Editor
             return normalized;
         }
 
-        private static string NormalizeOptionalAssetPath(string value, bool allowPackages)
+        internal static string NormalizeOptionalAssetPath(string value, bool allowPackages)
         {
             var normalized = (value ?? string.Empty).Replace("\\", "/").Trim();
             if (string.IsNullOrWhiteSpace(normalized))
@@ -897,7 +897,7 @@ namespace VRCForge.Editor
             return NormalizeOptionalAssetPath(normalized, allowPackages: true);
         }
 
-        private static bool MatchesCurrentProject(string expectedProjectPath)
+        internal static bool MatchesCurrentProject(string expectedProjectPath)
         {
             if (string.IsNullOrWhiteSpace(expectedProjectPath) || !Path.IsPathRooted(expectedProjectPath))
             {
@@ -957,7 +957,7 @@ namespace VRCForge.Editor
             public int slotIndex;
         }
 
-        private sealed class MaterialAssetEvidence
+        internal sealed class MaterialAssetEvidence
         {
             public string assetPath = string.Empty;
             public string assetGuid = string.Empty;
@@ -994,6 +994,337 @@ namespace VRCForge.Editor
             public string digest = string.Empty;
             public string displayDigest = string.Empty;
             public string tailDigest = string.Empty;
+        }
+    }
+
+    [VRCForgeCommand(
+        toolId: "vrc_set_material_texture",
+        Summary = "Preview or assign one existing project Texture2D to one exact persistent Material texture property. When to use: one verified existing Assets material, whitelisted texture slot, and existing Assets Texture2D. When NOT to use: do not edit texture pixels, batch materials, create assets, or change a shader."
+    )]
+    public static class MaterialTextureTool
+    {
+        private const string ResultSchema = "vrcforge.material_texture_assignment.v1";
+        private static readonly HashSet<string> AllowedTextureProperties =
+            new HashSet<string>(StringComparer.Ordinal)
+            {
+                "_MainTex",
+                "_Main2ndTex",
+                "_Main3rdTex",
+                "_ShadowColorTex"
+            };
+
+        public sealed class Parameters
+        {
+            [VRCForgeInput("Exact persistent Assets/... .mat material asset.", IsRequired = true)]
+            public string materialAssetPath { get; set; } = string.Empty;
+            [VRCForgeInput("Whitelisted material texture property such as _MainTex.", IsRequired = true)]
+            public string propertyName { get; set; } = string.Empty;
+            [VRCForgeInput("Exact existing Assets/... Texture2D source asset.", IsRequired = true)]
+            public string textureAssetPath { get; set; } = string.Empty;
+            [VRCForgeInput("Exact active Unity project root.", IsRequired = false)]
+            public string expectedProjectPath { get; set; } = string.Empty;
+            [VRCForgeInput("Return a strictly non-mutating assignment preview.", IsRequired = false)]
+            public bool? preview { get; set; } = false;
+            [VRCForgeInput("Persist the exact material asset during apply.", IsRequired = false)]
+            public bool? saveAssets { get; set; } = true;
+            [VRCForgeInput("Material asset GUID frozen by preview.", IsRequired = false)]
+            public string expectedMaterialAssetGuid { get; set; } = string.Empty;
+            [VRCForgeInput("Material file SHA-256 frozen by preview.", IsRequired = false)]
+            public string expectedMaterialFileDigest { get; set; } = string.Empty;
+            [VRCForgeInput("Current texture asset path frozen by preview.", IsRequired = false)]
+            public string expectedBeforeTextureAssetPath { get; set; } = string.Empty;
+            [VRCForgeInput("Current texture asset GUID frozen by preview.", IsRequired = false)]
+            public string expectedBeforeTextureAssetGuid { get; set; } = string.Empty;
+            [VRCForgeInput("Target Texture2D asset GUID frozen by preview.", IsRequired = false)]
+            public string expectedTextureAssetGuid { get; set; } = string.Empty;
+            [VRCForgeInput("Target Texture2D source SHA-256 frozen by preview.", IsRequired = false)]
+            public string expectedTextureFileDigest { get; set; } = string.Empty;
+        }
+
+        public static object HandleCommand(JObject @params)
+        {
+            Material material = null;
+            MaterialShaderTool.MaterialAssetEvidence evidence = null;
+            Texture beforeTexture = null;
+            var propertyName = string.Empty;
+            byte[] beforeBytes = null;
+            var undoGroup = -1;
+            var mutationStarted = false;
+            var failurePhase = "pre_mutation_validation";
+            try
+            {
+                var materialAssetPath = MaterialShaderTool.NormalizeOptionalAssetPath(
+                    @params?["materialAssetPath"]?.ToString(), allowPackages: false);
+                propertyName = (@params?["propertyName"]?.ToString() ?? string.Empty).Trim();
+                var textureAssetPath = MaterialShaderTool.NormalizeOptionalAssetPath(
+                    @params?["textureAssetPath"]?.ToString(), allowPackages: false);
+                var expectedProjectPath = (@params?["expectedProjectPath"]?.ToString() ?? string.Empty).Trim();
+                var preview = @params?["preview"]?.Value<bool?>() ?? false;
+                var saveAssets = @params?["saveAssets"]?.Value<bool?>() ?? true;
+                if (!MaterialShaderTool.MatchesCurrentProject(expectedProjectPath))
+                {
+                    throw new InvalidOperationException("The selected Unity project does not match the active Editor.");
+                }
+                if (!AllowedTextureProperties.Contains(propertyName))
+                {
+                    throw new InvalidOperationException("The requested material texture property is not allowed.");
+                }
+                if (string.IsNullOrEmpty(materialAssetPath) || string.IsNullOrEmpty(textureAssetPath))
+                {
+                    throw new InvalidOperationException("An exact persistent material and existing Texture2D are required.");
+                }
+
+                material = AssetDatabase.LoadAssetAtPath<Material>(materialAssetPath);
+                if (material == null)
+                {
+                    throw new InvalidOperationException("The requested persistent material asset does not exist.");
+                }
+                if (!material.HasProperty(propertyName)
+                    || !material.GetTexturePropertyNames().Contains(propertyName, StringComparer.Ordinal))
+                {
+                    throw new InvalidOperationException("The material does not expose the requested texture property.");
+                }
+                evidence = MaterialShaderTool.InspectWritableMaterialAsset(material);
+                if (!string.Equals(evidence.assetPath, materialAssetPath, StringComparison.Ordinal))
+                {
+                    throw new InvalidOperationException("The resolved material asset does not match the requested path.");
+                }
+
+                var texture = AssetDatabase.LoadAssetAtPath<Texture2D>(textureAssetPath);
+                if (texture == null || !AssetDatabase.IsMainAsset(texture)
+                    || !string.Equals(AssetDatabase.GetAssetPath(texture), textureAssetPath, StringComparison.Ordinal))
+                {
+                    throw new InvalidOperationException("The requested source must be one existing project Texture2D.");
+                }
+                var textureGuid = MaterialShaderTool.NormalizeHex(
+                    AssetDatabase.AssetPathToGUID(textureAssetPath), 32, allowEmpty: false);
+                var textureFilePath = ResolveTextureFilePath(textureAssetPath);
+                var textureDigest = MaterialShaderTool.ComputeFileSha256(textureFilePath);
+                beforeTexture = material.GetTexture(propertyName);
+                var beforeTexturePath = beforeTexture != null
+                    ? (AssetDatabase.GetAssetPath(beforeTexture) ?? string.Empty)
+                    : string.Empty;
+                var beforeTextureGuid = string.IsNullOrEmpty(beforeTexturePath)
+                    ? string.Empty
+                    : MaterialShaderTool.NormalizeHex(
+                        AssetDatabase.AssetPathToGUID(beforeTexturePath), 32, allowEmpty: false);
+
+                if (!preview)
+                {
+                    if (!saveAssets)
+                    {
+                        throw new InvalidOperationException("saveAssets must be true for material texture apply.");
+                    }
+                    if (!string.Equals(
+                            MaterialShaderTool.NormalizeHex(@params?["expectedMaterialAssetGuid"]?.ToString(), 32, allowEmpty: false),
+                            evidence.assetGuid, StringComparison.OrdinalIgnoreCase)
+                        || !string.Equals(
+                            MaterialShaderTool.NormalizeHex(@params?["expectedMaterialFileDigest"]?.ToString(), 64, allowEmpty: false),
+                            evidence.fileDigest, StringComparison.OrdinalIgnoreCase)
+                        || !string.Equals(
+                            (@params?["expectedBeforeTextureAssetPath"]?.ToString() ?? string.Empty).Trim(),
+                            beforeTexturePath, StringComparison.Ordinal)
+                        || !string.Equals(
+                            (@params?["expectedBeforeTextureAssetGuid"]?.ToString() ?? string.Empty).Trim(),
+                            beforeTextureGuid, StringComparison.OrdinalIgnoreCase)
+                        || !string.Equals(
+                            MaterialShaderTool.NormalizeHex(@params?["expectedTextureAssetGuid"]?.ToString(), 32, allowEmpty: false),
+                            textureGuid, StringComparison.OrdinalIgnoreCase)
+                        || !string.Equals(
+                            MaterialShaderTool.NormalizeHex(@params?["expectedTextureFileDigest"]?.ToString(), 64, allowEmpty: false),
+                            textureDigest, StringComparison.OrdinalIgnoreCase))
+                    {
+                        throw new InvalidOperationException("The material or texture no longer matches its verified preview.");
+                    }
+                }
+
+                var wouldChange = beforeTexture != texture;
+                var changed = false;
+                var persistedReadback = false;
+                var materialFileDigestAfter = evidence.fileDigest;
+                if (!preview && wouldChange)
+                {
+                    failurePhase = "capture_pre_mutation_state";
+                    beforeBytes = File.ReadAllBytes(evidence.filePath);
+                    undoGroup = Undo.GetCurrentGroup();
+                    Undo.RegisterCompleteObjectUndo(material, "Assign VRCForge material texture");
+                    mutationStarted = true;
+                    failurePhase = "assign_material_texture";
+                    material.SetTexture(propertyName, texture);
+                    EditorUtility.SetDirty(material);
+                    failurePhase = "save_material_asset";
+                    AssetDatabase.SaveAssets();
+                    AssetDatabase.ImportAsset(
+                        materialAssetPath,
+                        ImportAssetOptions.ForceSynchronousImport | ImportAssetOptions.ForceUpdate);
+                    failurePhase = "persisted_material_readback";
+                    var persisted = AssetDatabase.LoadAssetAtPath<Material>(materialAssetPath);
+                    var persistedTexture = persisted != null ? persisted.GetTexture(propertyName) : null;
+                    if (persistedTexture != texture
+                        || !string.Equals(AssetDatabase.GetAssetPath(persistedTexture), textureAssetPath, StringComparison.Ordinal)
+                        || !string.Equals(MaterialShaderTool.ComputeFileSha256(textureFilePath), textureDigest, StringComparison.OrdinalIgnoreCase))
+                    {
+                        throw new InvalidOperationException("Material texture persisted readback did not match its approved target.");
+                    }
+                    materialFileDigestAfter = MaterialShaderTool.ComputeFileSha256(evidence.filePath);
+                    if (string.Equals(materialFileDigestAfter, evidence.fileDigest, StringComparison.OrdinalIgnoreCase))
+                    {
+                        throw new InvalidOperationException("Material texture assignment did not persist changed material bytes.");
+                    }
+                    Undo.CollapseUndoOperations(undoGroup);
+                    changed = true;
+                    persistedReadback = true;
+                }
+                else if (!preview)
+                {
+                    persistedReadback = true;
+                }
+
+                return VRCForgeToolResult.Completed(
+                    preview ? "Material texture preview completed." : "Material texture assignment applied.",
+                    new
+                    {
+                        schema = ResultSchema,
+                        ok = true,
+                        preview,
+                        verified = true,
+                        changed,
+                        wouldChange,
+                        saved = changed,
+                        persistedReadback,
+                        projectPath = Path.GetFullPath(Path.Combine(Application.dataPath, "..")),
+                        materialAssetPath,
+                        materialAssetGuid = evidence.assetGuid,
+                        materialFileDigestBefore = evidence.fileDigest,
+                        materialFileDigestAfter,
+                        propertyName,
+                        beforeTextureAssetPath = beforeTexturePath,
+                        beforeTextureAssetGuid = beforeTextureGuid,
+                        textureAssetPath,
+                        textureAssetGuid = textureGuid,
+                        textureFileDigest = textureDigest,
+                        afterTextureAssetPath = textureAssetPath,
+                        afterTextureAssetGuid = textureGuid,
+                        mutationStarted,
+                        committed = !preview,
+                        commitState = preview ? "not_started" : changed ? "committed" : "no_change",
+                        checkpointRecoveryRequired = false
+                    });
+            }
+            catch (Exception exception)
+            {
+                if (!mutationStarted)
+                {
+                    return VRCForgeToolResult.RejectedBeforeMutation(
+                        "material_texture_rejected",
+                        exception.Message,
+                        "unity_core_tool",
+                        failurePhase,
+                        false);
+                }
+                var restored = RestoreTexturePreState(
+                    material,
+                    evidence,
+                    propertyName,
+                    beforeTexture,
+                    beforeBytes,
+                    undoGroup);
+                return VRCForgeToolResult.FailedWithCode(
+                    "material_texture_failed_after_mutation",
+                    exception.Message,
+                    new
+                    {
+                        failureLayer = "unity_core_tool",
+                        failurePhase,
+                        toolRoutingStarted = true,
+                        mutationStarted = true,
+                        committed = false,
+                        commitState = restored ? "rolled_back" : "unknown",
+                        commitStateKnown = restored,
+                        retryable = false,
+                        checkpointRecoveryRequired = !restored,
+                        restored,
+                        materialAssetPath = evidence != null ? evidence.assetPath : string.Empty
+                    });
+            }
+        }
+
+        private static string ResolveTextureFilePath(string textureAssetPath)
+        {
+            var projectRoot = Path.GetFullPath(Path.Combine(Application.dataPath, ".."));
+            var assetsRoot = Path.GetFullPath(Application.dataPath);
+            var filePath = Path.GetFullPath(
+                Path.Combine(projectRoot, textureAssetPath.Replace('/', Path.DirectorySeparatorChar)));
+            var prefix = assetsRoot.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+                + Path.DirectorySeparatorChar;
+            if (!filePath.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException("Texture source resolved outside the project Assets directory.");
+            }
+            MaterialShaderTool.EnsureNoReparseBoundary(assetsRoot, filePath);
+            if (!File.Exists(filePath) || (File.GetAttributes(filePath) & FileAttributes.ReparsePoint) != 0)
+            {
+                throw new InvalidOperationException("Texture source is missing or crosses a reparse boundary.");
+            }
+            return filePath;
+        }
+
+        private static bool RestoreTexturePreState(
+            Material material,
+            MaterialShaderTool.MaterialAssetEvidence evidence,
+            string propertyName,
+            Texture expectedBeforeTexture,
+            byte[] originalBytes,
+            int undoGroup)
+        {
+            try
+            {
+                Undo.RevertAllDownToGroup(undoGroup);
+            }
+            catch
+            {
+                // Exact material bytes and reimport below remain authoritative.
+            }
+            if (material == null || evidence == null || originalBytes == null)
+            {
+                return false;
+            }
+            var tempPath = evidence.filePath + ".vrcforge-restore-" + Guid.NewGuid().ToString("N") + ".tmp";
+            try
+            {
+                File.WriteAllBytes(tempPath, originalBytes);
+                File.Replace(tempPath, evidence.filePath, null);
+                AssetDatabase.ImportAsset(
+                    evidence.assetPath,
+                    ImportAssetOptions.ForceSynchronousImport | ImportAssetOptions.ForceUpdate);
+                var restored = AssetDatabase.LoadAssetAtPath<Material>(evidence.assetPath);
+                return restored != null
+                    && restored.HasProperty(propertyName)
+                    && restored.GetTexture(propertyName) == expectedBeforeTexture
+                    && string.Equals(
+                        MaterialShaderTool.ComputeFileSha256(evidence.filePath),
+                        evidence.fileDigest,
+                        StringComparison.OrdinalIgnoreCase)
+                    && File.ReadAllBytes(evidence.filePath).SequenceEqual(originalBytes);
+            }
+            catch
+            {
+                return false;
+            }
+            finally
+            {
+                try
+                {
+                    if (File.Exists(tempPath))
+                    {
+                        File.Delete(tempPath);
+                    }
+                }
+                catch
+                {
+                    // Failure receipts conservatively require checkpoint recovery.
+                }
+            }
         }
     }
 }

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import asyncio
 import contextvars
 import hashlib
 from itertools import count
@@ -18,6 +19,7 @@ import threading
 import time
 import zipfile
 import zlib
+from copy import deepcopy
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -63,6 +65,7 @@ from optimization_service import (
     OPTIMIZATION_TOOL_DEFINITIONS,
     STABLE_OPTIMIZATION_APPLY_REQUEST_GATEWAY_NAMES,
 )
+from path_to_skill_controller import PATH_TO_SKILL_PREVIEW_INPUT_SCHEMA, PATH_TO_SKILL_WRITE_INPUT_SCHEMA
 from agent_runtime_session_state import AgentRuntimeSessionState, AgentRuntimeSessionStatePorts
 from agent_runtime_followup_queue import AgentRuntimeFollowupQueue, FollowupQueuePorts
 from agent_runtime_run_ledger import AgentRuntimeRunLedger, AgentRuntimeRunLedgerPorts
@@ -98,7 +101,10 @@ from approved_unity_execution import (
     validate_frozen_approved_unity_execution_plan,
 )
 from agent_mcp_2026 import Mcp2026Router, create_agent_mcp_2026_asgi_app
-from avatar_composition_workflow_skills import AVATAR_COMPOSITION_WORKFLOW_SKILLS
+from avatar_composition_workflow_skills import (
+    AVATAR_COMPOSITION_RUNTIME_CONTRACT_FIELDS,
+    AVATAR_COMPOSITION_WORKFLOW_SKILLS,
+)
 from unity_mcp_core_client import capture_unity_mcp_core_call_audits
 
 
@@ -143,10 +149,12 @@ LOCAL_STATE_CHECKPOINT_SCOPE = ("skill-packages", "skills")
 PROJECT_CHAT_CHECKPOINT_TARGET = "vrcforge_repair_project_chat_store"
 PROJECT_CHAT_CHECKPOINT_MEMBER = ".vrcforge/chat-transcripts.json"
 LOCAL_STATE_CHECKPOINT_TARGETS = {
+    "vrcforge_create_installed_skill",
     "vrcforge_import_skill_package",
     "vrcforge_export_skill_package",
     "vrcforge_set_skill_package_enabled",
     "vrcforge_uninstall_skill_package",
+    "vrcforge_write_path_to_skill",
 }
 APPLY_RECOVERY_ACTIVE_STATUSES = {"applying", "needs_recovery", "restore_failed"}
 APPLY_RECOVERY_EXEMPT_WRITE_TARGETS = {
@@ -421,7 +429,7 @@ EXTERNAL_MCP_TOOL_BLOCK_BRANCHES: dict[str, tuple[str, ...]] = {
         "integrations/vrcfury",
         "integrations/gesture-manager",
     ),
-    "skills": ("skills/vsk",),
+    "skills": ("skills/installed", "skills/vsk"),
 }
 EXTERNAL_MCP_TOOL_BLOCK_ROOTS = (
     "core",
@@ -446,6 +454,7 @@ EXTERNAL_MCP_TOOL_BLOCKS = frozenset(
         "integrations/modular-avatar",
         "integrations/vrcfury",
         "integrations/gesture-manager",
+        "skills/installed",
         "skills/vsk",
         "optimization",
         "checkpoint",
@@ -530,6 +539,7 @@ EXTERNAL_MCP_READ_TOOL_BLOCKS: dict[str, frozenset[str]] = {
         {
             "vrcforge_plan_shader_tuning",
             "vrcforge_preview_material_shader_assignment",
+            "vrcforge_preview_material_texture_assignment",
             "vrcforge_preview_shader_apply",
             "vrcforge_scan_materials",
             "vrcforge_preview_texture_import_settings",
@@ -554,7 +564,12 @@ EXTERNAL_MCP_READ_TOOL_BLOCKS: dict[str, frozenset[str]] = {
             "vrcforge_gesture_manager_status",
         }
     ),
-    "skills/vsk": frozenset({"vrcforge_preflight_skill_package"}),
+    "skills/installed": frozenset(
+        {"vrcforge_list_installed_skills", "vrcforge_read_installed_skill"}
+    ),
+    "skills/vsk": frozenset(
+        {"vrcforge_preflight_skill_package", "vrcforge_preview_path_to_skill"}
+    ),
     "optimization": frozenset(
         {
             "vrcforge_optimization_aao_hidden_body_cut_plan",
@@ -693,6 +708,10 @@ TEXTURE_IMPORT_SETTINGS_PUBLIC_INPUT_SCHEMA: dict[str, Any] = {
         },
         "crunch": {"type": "boolean"},
         "quality": {"type": "integer", "minimum": 0, "maximum": 100},
+        "streamingMipmaps": {
+            "type": "boolean",
+            "description": "Optional mipmap-streaming state; omit to preserve the existing importer setting.",
+        },
     },
 }
 
@@ -703,6 +722,29 @@ _PROJECT_PATH_PROPERTY = {
 _AVATAR_PATH_PROPERTY = {
     "type": "string",
     "description": "Exact loaded-scene avatar hierarchy path.",
+}
+
+MATERIAL_TEXTURE_ASSIGNMENT_PUBLIC_INPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["projectPath", "materialAssetPath", "propertyName", "textureAssetPath"],
+    "properties": {
+        "projectPath": _PROJECT_PATH_PROPERTY,
+        "materialAssetPath": {
+            "type": "string",
+            "pattern": "^Assets/.*\\.mat$",
+            "description": "Exact existing persistent Assets/... .mat material.",
+        },
+        "propertyName": {
+            "type": "string",
+            "enum": ["_MainTex", "_Main2ndTex", "_Main3rdTex", "_ShadowColorTex"],
+        },
+        "textureAssetPath": {
+            "type": "string",
+            "pattern": "^Assets/.+",
+            "description": "Exact existing project Texture2D asset to assign.",
+        },
+    },
 }
 
 SCENE_OBJECT_DUPLICATE_PUBLIC_INPUT_SCHEMA: dict[str, Any] = {
@@ -928,6 +970,7 @@ UNITY_READ_TOOL_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
             "componentIndex": {"type": "integer", "minimum": 0, "default": 0},
         },
     },
+    "vrcforge_preview_material_texture_assignment": MATERIAL_TEXTURE_ASSIGNMENT_PUBLIC_INPUT_SCHEMA,
     "vrcforge_preview_scene_object_duplicate": SCENE_OBJECT_DUPLICATE_PUBLIC_INPUT_SCHEMA,
     "vrcforge_preview_write_avatar_descriptor": AVATAR_DESCRIPTOR_WRITE_PUBLIC_INPUT_SCHEMA,
     "vrcforge_preview_write_animation_curve": ANIMATION_CURVE_WRITE_PUBLIC_INPUT_SCHEMA,
@@ -996,6 +1039,34 @@ UNITY_READ_TOOL_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
             },
         },
     },
+    "vrcforge_list_installed_skills": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "includeDisabled": {
+                "type": "boolean",
+                "default": False,
+                "description": "Include valid disabled Skills so their package can be explicitly re-enabled.",
+            },
+        },
+    },
+    "vrcforge_read_installed_skill": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["name"],
+        "properties": {
+            "name": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9_.-]{1,80}$",
+                "description": "Exact enabled Skill name returned by vrcforge_list_installed_skills.",
+            },
+            "file": {
+                "type": "string",
+                "description": "Optional exact support-file path declared by this Skill; omit to read its instructions.",
+            },
+        },
+    },
+    "vrcforge_preview_path_to_skill": PATH_TO_SKILL_PREVIEW_INPUT_SCHEMA,
     "vrcforge_preflight_skill_package": {
         "type": "object",
         "additionalProperties": False,
@@ -1272,7 +1343,7 @@ EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
     "vrcforge_save_current_scene": {
         "type": "object",
         "additionalProperties": False,
-        "required": ["projectPath"],
+        "required": ["projectPath", "scenePath"],
         "properties": {
             "projectPath": {
                 "type": "string",
@@ -1281,8 +1352,40 @@ EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
             "scenePath": {
                 "type": "string",
                 "pattern": "^Assets/.*\\.unity$",
-                "description": "Optional exact current Assets/... .unity path used as an identity check.",
+                "description": "Exact current Assets/... .unity path used as an identity check.",
             },
+        },
+    },
+    "vrcforge_create_installed_skill": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["name", "description", "instructions"],
+        "properties": {
+            "name": {"type": "string", "pattern": "^[a-z][a-z0-9_.-]{1,80}$"},
+            "title": {"type": "string", "maxLength": 120},
+            "description": {"type": "string", "minLength": 1, "maxLength": 500},
+            "instructions": {"type": "string", "minLength": 1, "maxLength": 262144},
+            "allowedTools": {
+                "type": "array", "items": {"type": "string"}, "maxItems": 64
+            },
+            "entrypointTool": {"type": "string"},
+            "permissionMode": {
+                "type": "string",
+                "enum": ["instruction_only", "read_only", "preview", "approval_required"],
+            },
+            "riskLevel": {"type": "string", "enum": ["low", "medium", "high"]},
+            "whenToUse": {"type": "string", "maxLength": 1000},
+            "tags": {"type": "array", "items": {"type": "string"}, "maxItems": 32},
+        },
+    },
+    "vrcforge_write_path_to_skill": PATH_TO_SKILL_WRITE_INPUT_SCHEMA,
+    "vrcforge_set_skill_package_enabled": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["skillPackageId", "enabled"],
+        "properties": {
+            "skillPackageId": {"type": "string", "minLength": 1},
+            "enabled": {"type": "boolean"},
         },
     },
     "vrcforge_import_skill_package": {
@@ -1322,6 +1425,7 @@ EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
             "shaderAssetPath": {"type": "string", "description": "Optional exact Assets/... or Packages/... shader asset path used to bind the preview."},
         },
     },
+    "vrcforge_set_material_texture": MATERIAL_TEXTURE_ASSIGNMENT_PUBLIC_INPUT_SCHEMA,
     "vrcforge_set_constraint_sources": {
         "type": "object",
         "additionalProperties": False,
@@ -1592,6 +1696,18 @@ EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
             "isPlaying": {"type": "boolean", "description": "True to enter Play Mode; false to exit Play Mode."},
         },
     },
+    "vrcforge_confirm_unity_reload_dialog": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["projectPath", "confirmReload"],
+        "properties": {
+            "projectPath": {
+                "type": "string",
+                "description": "Exact existing Unity project whose bound Editor displays the Reload dialog.",
+            },
+            "confirmReload": {"type": "boolean", "const": True},
+        },
+    },
 }
 
 
@@ -1635,6 +1751,34 @@ def canonical_unity_write_tool_input_schema(tool_name: str) -> dict[str, Any]:
         "additionalProperties": True,
     }
 
+
+def bind_runtime_unity_project(
+    schema: Mapping[str, Any],
+    arguments: Mapping[str, Any],
+    project_root: str,
+) -> dict[str, Any]:
+    """Bind every Unity schema that exposes projectPath to its runtime scope."""
+
+    bound = dict(arguments)
+    root = str(project_root or "").strip()
+    if not root or "projectPath" not in ensure_dict(schema.get("properties")):
+        return bound
+    submitted = str(bound.get("projectPath") or "").strip()
+    if submitted:
+        try:
+            submitted_key = command_safety.normalize_filesystem_path(submitted)
+            bound_key = command_safety.normalize_filesystem_path(root)
+        except (OSError, ValueError):
+            submitted_key = submitted.casefold()
+            bound_key = root.casefold()
+        if submitted_key != bound_key:
+            raise AgentGatewayError(
+                "projectPath does not match the runtime-bound projectRoot.",
+                status_code=409,
+            )
+    bound.setdefault("projectPath", root)
+    return bound
+
 EXTERNAL_MCP_WRITE_TOOL_BLOCKS: dict[str, frozenset[str]] = {
     "project": frozenset(
         {
@@ -1649,6 +1793,7 @@ EXTERNAL_MCP_WRITE_TOOL_BLOCKS: dict[str, frozenset[str]] = {
             "vrcforge_rollback_project_lifecycle",
             "vrcforge_select_project",
             "vrcforge_set_play_mode",
+            "vrcforge_confirm_unity_reload_dialog",
         }
     ),
     "avatar": frozenset(
@@ -1712,6 +1857,7 @@ EXTERNAL_MCP_WRITE_TOOL_BLOCKS: dict[str, frozenset[str]] = {
             "vrcforge_restore_shader_tuning",
             "vrcforge_set_texture_import_settings",
             "vrcforge_set_material_shader",
+            "vrcforge_set_material_texture",
         }
     ),
     "integrations/modular-avatar": frozenset(
@@ -1727,10 +1873,13 @@ EXTERNAL_MCP_WRITE_TOOL_BLOCKS: dict[str, frozenset[str]] = {
             "vrcforge_gesture_manager_set_parameter",
         }
     ),
+    "skills/installed": frozenset({"vrcforge_create_installed_skill"}),
     "skills/vsk": frozenset(
         {
             "vrcforge_import_skill_package",
             "vrcforge_export_skill_package",
+            "vrcforge_set_skill_package_enabled",
+            "vrcforge_write_path_to_skill",
         }
     ),
     "optimization": frozenset(
@@ -3280,6 +3429,11 @@ class AgentGateway:
         # after a real client request and turns off after the client goes idle.
         self._external_mcp_last_seen_epoch = 0.0
         self._external_mcp_last_seen_at: str | None = None
+        # External MCP has no durable project/session binding. Remember the
+        # exact project roots observed on this gateway lifetime so an omitted
+        # optional projectPath can remain compatible for one project but fail
+        # closed once the bridge has seen multiple project scopes.
+        self._external_mcp_project_paths: set[str] = set()
         self._skill_package_write_lock_bound = skill_package_write_lock is not None
         self._skill_package_write_lock = skill_package_write_lock or nullcontext()
         self._lock = threading.RLock()
@@ -3805,6 +3959,15 @@ class AgentGateway:
                 blocked_skills=frozenset(RUNTIME_BLOCKED_SKILLS),
                 direct_categories=frozenset(RUNTIME_DIRECT_SKILL_CATEGORIES),
                 direct_write_tools=frozenset({"vrcforge_shell_process"}),
+                request_supervised_write=lambda name, arguments, agent_name: (
+                    self.approval_transactions.create_apply_request(
+                        {
+                            "target_tool": name,
+                            "arguments": arguments,
+                            "agent_name": agent_name,
+                        }
+                    )
+                ),
             )
         )
 
@@ -4399,8 +4562,9 @@ class AgentGateway:
             "integrations/modular-avatar": "Modular Avatar inspection, Setup Outfit, and atomic component authoring.",
             "integrations/vrcfury": "VRCFury inspection and public-API-backed Toggle or Armature Link authoring.",
             "integrations/gesture-manager": "Gesture Manager Play Mode status, menu identity, and atomic runtime parameters.",
-            "skills": "User Skill package operations; expand this branch before loading a package format.",
-            "skills/vsk": "Read-only preflight and atomic import/export for local .vsk Skill packages.",
+            "skills": "Installed user Skills and package operations; expand this branch before loading one family.",
+            "skills/installed": "Discover, read, and safely create enabled user Skills in the shared registry.",
+            "skills/vsk": "Skill capture previews, approved source/package creation, and .vsk import/export.",
             "optimization": "Avatar performance audits and optimization applies.",
             "checkpoint": "Checkpoint, backup, recovery, and explicit restore tools.",
             "diagnostics": "Screenshots, validation, logs, and runtime diagnostics.",
@@ -4886,6 +5050,46 @@ class AgentGateway:
             )
             return redact_sensitive(payload)
 
+    def _guard_external_mcp_project_scope(
+        self,
+        tool_name: str,
+        arguments: Mapping[str, Any],
+    ) -> None:
+        """Reject ambiguous optional-project calls after multiple scopes appear."""
+
+        schema = (
+            canonical_unity_write_tool_input_schema(tool_name)
+            if tool_name in EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS
+            else canonical_unity_read_tool_input_schema(tool_name)
+        )
+        properties = ensure_dict(schema.get("properties"))
+        if "projectPath" not in properties:
+            return
+        raw_project = str(arguments.get("projectPath") or "").strip()
+        if raw_project:
+            self._register_runtime_project_scope(raw_project)
+            return
+        if "projectPath" in ensure_list(schema.get("required")):
+            return
+        with self._lock:
+            scope_count = len(self._external_mcp_project_paths)
+        if scope_count > 1:
+            raise AgentGatewayError(
+                "projectPath is required for this external MCP call because multiple Unity project scopes are active.",
+                status_code=409,
+            )
+
+    def _register_runtime_project_scope(self, project_root: str) -> None:
+        raw_project = str(project_root or "").strip()
+        if not raw_project:
+            return
+        try:
+            project_key = command_safety.normalize_filesystem_path(raw_project)
+        except (OSError, ValueError):
+            project_key = raw_project.casefold()
+        with self._lock:
+            self._external_mcp_project_paths.add(project_key)
+
     def call_external_mcp_tool(
         self,
         name: str,
@@ -4899,6 +5103,7 @@ class AgentGateway:
         if not config.enabled:
             raise AgentGatewayError("Agent Gateway is disabled in config/agent_gateway.json.", status_code=403)
         arguments = dict(params or {})
+        self._guard_external_mcp_project_scope(name, arguments)
         write_handler = self._write_handlers.get(name)
         if write_handler is None:
             tool = self._tools.get(name)
@@ -5976,6 +6181,7 @@ class AgentGateway:
         if history:
             self._runtime_session_state.restore_session(session_id, history, now)
         project_root = str(params.get("projectRoot") or params.get("project_root") or params.get("projectPath") or "").strip()
+        self._register_runtime_project_scope(project_root)
         project_context_active = (
             params.get("_projectContextActive") is not False
             if "_projectContextActive" in params
@@ -6882,9 +7088,11 @@ class AgentGateway:
                     if action_kind == "write"
                     else canonical_unity_read_tool_input_schema(schema_tool)
                 )
-                required_fields = ensure_list(schema.get("required"))
-                if "projectPath" in required_fields:
-                    execution_arguments.setdefault("projectPath", project_root)
+                execution_arguments = bind_runtime_unity_project(
+                    schema,
+                    execution_arguments,
+                    project_root,
+                )
             if action_kind in {"skill", "write"}:
                 execution_argument_validation = self.runtime_planner.validate_tool_arguments(
                     planned_tool,
@@ -9006,8 +9214,13 @@ def create_agent_mcp_app(
             tool_blocks=params.get("toolBlocks"),
         )
 
-    def call_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        return gateway.call_external_mcp_tool(name, arguments, agent_name="mcp-agent")
+    async def call_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        return await asyncio.to_thread(
+            gateway.call_external_mcp_tool,
+            name,
+            arguments,
+            agent_name="mcp-agent",
+        )
 
     def validate_bearer(token: str) -> bool:
         config = gateway.ensure_config()
@@ -9331,7 +9544,7 @@ def build_runtime_skill_payload(
 ) -> dict[str, Any]:
     arguments = str(params.get("arguments") or params.get("rawArguments") or params.get("skillArguments") or "").strip()
     resolved_instructions = resolve_skill_arguments(str(skill.get("instructions") or ""), arguments)
-    return {
+    payload = {
         "name": skill.get("name"),
         "title": skill.get("title"),
         "source": skill.get("source"),
@@ -9355,6 +9568,14 @@ def build_runtime_skill_payload(
         "availabilityReasons": skill.get("availabilityReasons"),
         "tags": skill.get("tags"),
     }
+    payload.update(
+        {
+            field: deepcopy(skill[field])
+            for field in AVATAR_COMPOSITION_RUNTIME_CONTRACT_FIELDS
+            if field in skill
+        }
+    )
+    return payload
 
 
 def _path_is_link_like(path: Path) -> bool:

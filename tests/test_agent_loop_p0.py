@@ -3270,7 +3270,7 @@ class AgentLoopP0Tests(unittest.TestCase):
     def test_schema_failure_requires_a_real_valid_action_before_exact_completion(self) -> None:
         gateway = self.gateway
         project = self._unity_project()
-        valid_arguments = {"avatarPath": "Avatar"}
+        valid_arguments = {"avatarPath": "Avatar", "projectPath": str(project)}
         completed_action_id = canonical_action_id(
             "skill",
             "vrcforge_scan_materials",

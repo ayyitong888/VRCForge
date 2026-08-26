@@ -31,7 +31,7 @@ const SKILL_DOMAIN_RULES: Array<{ label: string; pattern: RegExp }> = [
 const SKILL_DOMAIN_FALLBACK = "skills.domainFallback";
 const SKILL_DOMAIN_ORDER = [...SKILL_DOMAIN_RULES.map((rule) => rule.label), SKILL_DOMAIN_FALLBACK];
 const SKILLS_WORKSPACE_GRID = {
-  gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 30rem), 1fr))",
+  gridTemplateColumns: "minmax(0, 1fr)",
 };
 const SKILL_FIELD_GRID = {
   gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 14rem), 1fr))",
@@ -144,13 +144,17 @@ export function SkillsWorkspace({
   const selectedCheck = skillCheck?.checks.find((item) => item.name === draft.name);
   const checkTone = selectedCheck?.status === "error" ? "danger" : selectedCheck?.status === "warning" ? "warn" : "muted";
   const [skillQuery, setSkillQuery] = useState("");
+  const [showBuiltinSkills, setShowBuiltinSkills] = useState(false);
   const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({});
   const query = skillQuery.trim().toLowerCase();
+  const selectableSkills = showBuiltinSkills || (draft.source === "builtin" && selectedSkillName)
+    ? skills
+    : skills.filter((skill) => skill.source !== "builtin" || skill.name === selectedSkillName);
   const visibleSkills = query
-    ? skills.filter((skill) =>
+    ? selectableSkills.filter((skill) =>
         `${skill.name} ${skill.title || ""} ${skill.description || ""} ${skill.category || ""}`.toLowerCase().includes(query),
       )
-    : skills;
+    : selectableSkills;
   const groupedSkills = useMemo(() => {
     const map = new Map<string, AgentSkill[]>();
     for (const skill of visibleSkills) {
@@ -172,12 +176,37 @@ export function SkillsWorkspace({
         className="mx-auto grid max-w-6xl gap-6"
         style={SKILLS_WORKSPACE_GRID}
       >
-        <section className="min-w-0 rounded-xl border border-border bg-card p-4 shadow-panel">
+        <SkillPackageManagerPanel
+          packages={packages}
+          endpoint={endpoint}
+          packageStore={packageStore}
+          loading={packagesLoading}
+          message={packageMessage}
+          error={packageError}
+          governance={packageGovernance}
+          audit={packageAudit}
+          pathToSkillDraftSeed={pathToSkillDraftSeed}
+          onRefresh={onRefreshPackages}
+          onPreflight={onPreflightPackage}
+          onImport={onImportPackage}
+          onExport={onExportPackage}
+          onSetEnabled={onSetPackageEnabled}
+          onUninstall={onUninstallPackage}
+          onSetSafeMode={onSetSafeMode}
+          onTrustSigner={onTrustSigner}
+          onRevokeSigner={onRevokeSigner}
+          onBlockPackage={onBlockPackage}
+          onPreviewPathToSkill={onPreviewPathToSkill}
+          onWritePathToSkill={onWritePathToSkill}
+        />
+        <details className="order-last min-w-0 rounded-xl border border-border bg-card p-4 shadow-panel" data-vrcforge-skill-catalog>
+          <summary className="cursor-pointer text-sm font-semibold">{i18n.t("skills.title")} · {visibleSkills.length}</summary>
+        <section className="mt-4 min-w-0">
           <div className="mb-4 flex items-center gap-2">
             <Wrench className="h-4 w-4 shrink-0 text-primary" />
             <div className="truncate text-sm font-semibold">{i18n.t("skills.title")}</div>
             <Badge tone="muted" className="ml-auto shrink-0">
-              {skillCount}
+              {visibleSkills.length}
             </Badge>
             <Button type="button" variant="ghost" className="h-7 px-2 text-xs" onClick={onCheck} disabled={saving}>
               {i18n.t("skills.check")}
@@ -191,6 +220,15 @@ export function SkillsWorkspace({
               placeholder={i18n.t("skills.searchPlaceholder")}
               className="h-9 w-full rounded-md border border-border bg-background pl-9 pr-3 text-sm outline-none focus:border-primary"
             />
+            <label className="mt-2 flex items-center gap-2 px-1 text-xs text-muted-foreground">
+              <input
+                type="checkbox"
+                checked={showBuiltinSkills}
+                onChange={(event) => setShowBuiltinSkills(event.target.checked)}
+                data-vrcforge-show-builtin-skills
+              />
+              <span>{i18n.t("skills.showBuiltinTools")}</span>
+            </label>
           </div>
           <div className="max-h-[calc(100vh-230px)] space-y-2 overflow-auto pr-1">
             {groupedSkills.length === 0 ? (
@@ -240,9 +278,12 @@ export function SkillsWorkspace({
             })}
           </div>
         </section>
+        </details>
 
         <div className="grid min-w-0 gap-6">
-        <form onSubmit={onSave} className="min-w-0 rounded-xl border border-border bg-card p-5 shadow-panel">
+        <details className="order-2 rounded-xl border border-border bg-card p-4 shadow-panel" data-vrcforge-skill-editor>
+          <summary className="cursor-pointer text-sm font-semibold">{i18n.t("skills.editorSection")}</summary>
+        <form onSubmit={onSave} className="mt-4 min-w-0 rounded-xl border border-border bg-card p-5 shadow-panel">
           <div className="mb-5 flex items-center gap-2">
             <div className="truncate text-sm font-semibold">{editable ? i18n.t("skills.userSkill") : i18n.t("skills.readOnlySkill")}</div>
             <Badge tone={checkTone} className="ml-auto shrink-0">
@@ -518,29 +559,7 @@ export function SkillsWorkspace({
             </Button>
           </div>
         </form>
-        <SkillPackageManagerPanel
-          packages={packages}
-          endpoint={endpoint}
-          packageStore={packageStore}
-          loading={packagesLoading}
-          message={packageMessage}
-          error={packageError}
-          governance={packageGovernance}
-          audit={packageAudit}
-          pathToSkillDraftSeed={pathToSkillDraftSeed}
-          onRefresh={onRefreshPackages}
-          onPreflight={onPreflightPackage}
-          onImport={onImportPackage}
-          onExport={onExportPackage}
-          onSetEnabled={onSetPackageEnabled}
-          onUninstall={onUninstallPackage}
-          onSetSafeMode={onSetSafeMode}
-          onTrustSigner={onTrustSigner}
-          onRevokeSigner={onRevokeSigner}
-          onBlockPackage={onBlockPackage}
-          onPreviewPathToSkill={onPreviewPathToSkill}
-          onWritePathToSkill={onWritePathToSkill}
-        />
+        </details>
         </div>
       </div>
     </div>

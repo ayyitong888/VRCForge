@@ -158,7 +158,7 @@ assert.match(clearTransient, /item\.type === "streaming"/);
 const backgroundTurnStart = runController.indexOf("async function runBackgroundTurn");
 const backgroundTurnEnd = runController.indexOf("async function runSingleTurn", backgroundTurnStart);
 const backgroundTurn = runController.slice(backgroundTurnStart, backgroundTurnEnd);
-assert.match(runController, /export const MAX_BACKGROUND_TURNS = 2/);
+assert.match(runController, /export const MAX_BACKGROUND_TURNS = 12/);
 assert.match(backgroundTurn, /backgroundTurnAbortRefs\.current\.size >= MAX_BACKGROUND_TURNS/);
 assert.match(backgroundTurn, /background: true/);
 assert.doesNotMatch(backgroundTurn, /sendingRef|setSending|setCurrentTurn|activeTurnAbortRef/);

@@ -101,6 +101,51 @@ def test_authoritative_preview_failure_preserves_non_mutating_failure_details(tm
     assert captured.value.details["commitState"] == "not_started"
 
 
+@pytest.mark.parametrize(
+    ("mutation_started", "commit_state", "recovery_required"),
+    [(False, "not_started", False), (True, "unknown", True)],
+)
+def test_structured_core_preview_failure_preserves_nested_reason_and_commit_facts(
+    tmp_path: Path,
+    mutation_started: bool,
+    commit_state: str,
+    recovery_required: bool,
+) -> None:
+    (tmp_path / "Assets").mkdir()
+    wrapper = build_wrapper_arguments(
+        {"projectPath": str(tmp_path), "scenePath": "Assets/AvatarAssembly.unity"}
+    )
+    rejection = {
+        "isError": True,
+        "structuredContent": {
+            "success": False,
+            "code": "current_scene_save_rejected",
+            "error": "current_scene_save_rejected",
+            "data": {
+                "message": "scenePath is invalid.",
+                "mutationStarted": mutation_started,
+                "commitState": commit_state,
+                "checkpointRestoreRequired": recovery_required,
+                "manualRecoveryRequired": recovery_required,
+            },
+        },
+    }
+
+    with pytest.raises(AuthoritativeUnityWriteError) as captured:
+        prepare_authoritative_unity_write(wrapper, None, lambda _tool, _args: rejection)
+
+    assert str(captured.value) == "scenePath is invalid."
+    assert captured.value.details["error"] == "scenePath is invalid."
+    assert captured.value.details["errorCode"] == "current_scene_save_rejected"
+    assert captured.value.details["mutationStarted"] is mutation_started
+    assert captured.value.details["commitState"] == commit_state
+    assert captured.value.details["requestMayHaveCommitted"] is mutation_started
+    assert captured.value.details["checkpointRecoveryRequired"] is recovery_required
+    assert captured.value.raw_result["message"] == "scenePath is invalid."
+    assert captured.value.raw_result["mutationStarted"] is mutation_started
+    assert captured.value.raw_result["commitState"] == commit_state
+
+
 def test_external_preview_rejection_preserves_core_reason_at_gateway_boundary(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -139,6 +184,50 @@ def test_external_preview_rejection_preserves_core_reason_at_gateway_boundary(
     assert details["committed"] is False
     assert details["commitState"] == "not_started"
     assert details["rawResult"]["message"] == "The active scene is clean."
+
+
+def test_external_preview_rejection_exposes_nested_unity_core_reason(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (tmp_path / "Assets").mkdir()
+    core_rejection = {
+        "isError": True,
+        "structuredContent": {
+            "success": False,
+            "code": "current_scene_save_rejected",
+            "error": "current_scene_save_rejected",
+            "data": {
+                "message": "The active scene has no unsaved changes to persist.",
+                "mutationStarted": False,
+                "commitState": "not_started",
+                "checkpointRestoreRequired": False,
+            },
+        },
+    }
+    monkeypatch.setattr(
+        dashboard_server,
+        "_invoke_authoritative_unity_preview",
+        lambda _request, _tool_name, _preview_arguments: core_rejection,
+    )
+
+    with pytest.raises(dashboard_server.AgentGatewayError) as captured:
+        dashboard_server.prepare_save_current_scene_request(
+            {"projectPath": str(tmp_path), "scenePath": "Assets/AvatarAssembly.unity"},
+            None,
+        )
+
+    rejected = dashboard_server.AGENT_GATEWAY._external_mcp_no_write_error(
+        "vrcforge_save_current_scene",
+        "write_preparation",
+        captured.value,
+    )
+
+    assert rejected["error"] == "The active scene has no unsaved changes to persist."
+    assert rejected["errorDetails"]["errorCode"] == "current_scene_save_rejected"
+    assert rejected["errorDetails"]["rawResult"]["message"] == rejected["error"]
+    assert rejected["errorDetails"]["mutationStarted"] is False
+    assert rejected["errorDetails"]["commitState"] == "not_started"
 
 
 def test_apply_receipt_requires_committed_clean_scene_and_unchanged_metadata(tmp_path: Path) -> None:
@@ -197,7 +286,7 @@ def test_external_facade_exposes_high_risk_current_scene_save() -> None:
         for tool in tools
         if tool["name"] == "vrcforge_save_current_scene"
     )
-    assert current_scene_save["inputSchema"]["required"] == ["projectPath"]
+    assert current_scene_save["inputSchema"]["required"] == ["projectPath", "scenePath"]
     assert current_scene_save["inputSchema"]["additionalProperties"] is False
 
 

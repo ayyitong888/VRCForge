@@ -158,6 +158,14 @@
       "cleanup": "Restore material from the run-owned backup/checkpoint."
     },
     {
+      "tool": "vrc_set_material_texture",
+      "mode": "approved_apply_after_preview",
+      "minimalArguments": { "materialAssetPath": "${PERSISTENT_MATERIAL_PATH}", "propertyName": "_MainTex", "textureAssetPath": "${TEXTURE_PATH}", "expectedProjectPath": "${PROJECT_PATH}", "preview": false, "saveAssets": true, "${MATERIAL_TEXTURE_PREVIEW_RECEIPT}": null },
+      "requiredFixtures": ["persistent material in Assets", "existing project Texture2D", "previous exact texture-slot preview evidence"],
+      "successFields": ["verified", "changed", "saved", "persistedReadback", "materialAssetGuid", "textureAssetGuid", "afterTextureAssetGuid", "materialFileDigestAfter"],
+      "cleanup": "Restore the material from the run-owned checkpoint; never edit the texture source."
+    },
+    {
       "tool": "vrc_set_play_mode",
       "mode": "approved_apply",
       "minimalArguments": { "isPlaying": true },

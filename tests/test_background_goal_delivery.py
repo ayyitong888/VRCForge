@@ -12,7 +12,11 @@ from background_goal_delivery import (
     GoalLifecyclePort,
     RuntimeExecutionPort,
 )
-from background_goal_runtime import ProviderPreflightCache, RuntimeLaneBudget
+from background_goal_runtime import (
+    BACKGROUND_CONCURRENCY_LIMIT,
+    ProviderPreflightCache,
+    RuntimeLaneBudget,
+)
 
 
 class FakeGoalService:
@@ -182,8 +186,8 @@ class BackgroundGoalDeliveryCoordinatorTests(unittest.TestCase):
     def test_full_background_lane_defers_without_consuming_the_delivery(self):
         gateway = FakeGoalService()
         coordinator, lanes, states = self.coordinator(gateway)
-        self.assertTrue(lanes.acquire("background", "occupied-1"))
-        self.assertTrue(lanes.acquire("background", "occupied-2"))
+        occupied = [f"occupied-{index}" for index in range(BACKGROUND_CONCURRENCY_LIMIT)]
+        self.assertTrue(all(lanes.acquire("background", token) for token in occupied))
 
         deferred = execute(coordinator)
 
@@ -191,8 +195,8 @@ class BackgroundGoalDeliveryCoordinatorTests(unittest.TestCase):
         self.assertEqual(deferred["status"], "background_capacity")
         self.assertFalse(any(call[0] == "begin" for call in gateway.calls))
         self.assertEqual(states[-1]["delivery"]["status"], "interrupted")
-        lanes.release("occupied-1")
-        lanes.release("occupied-2")
+        for token in occupied:
+            lanes.release(token)
 
         completed = execute(coordinator)
         self.assertTrue(completed["ok"])

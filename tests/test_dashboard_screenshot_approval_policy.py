@@ -58,11 +58,28 @@ def test_screenshot_tools_are_registered_as_approved_context_writes_not_direct_r
         assert "allow_future_category=True" in block
         assert tool_name in dashboard_server.VRCFORGE_UNITY_MCP_BACKED_WRITE_TARGETS
         handler = dashboard_server.AGENT_GATEWAY._write_handlers[tool_name]
-        assert handler.checkpoint_prepare_handler is dashboard_server.prepare_authoritative_unity_checkpoint_sync
+        assert handler.pre_write_checkpoint_required is False
+        assert handler.checkpoint_prepare_handler is None
         assert handler.approval_category == "visual-capture"
         assert handler.allow_future_category is True
     assert "vrcforge_vision_audit" in dashboard_server.AGENT_GATEWAY._tools
     assert "vrcforge_vision_audit_multi" in dashboard_server.AGENT_GATEWAY._tools
+
+
+def test_capture_manifest_is_local_artifact_only_and_unity_asset_writes_keep_checkpoint() -> None:
+    capture_handler = dashboard_server.AGENT_GATEWAY._write_handlers["vrcforge_capture_screenshot"]
+    capture_policy = dashboard_server.AGENT_GATEWAY.approval_transactions._write_handler_rollback_policy(capture_handler)
+    assert capture_policy["kind"] == "local_artifact_overwrite"
+    assert capture_policy["required"] is False
+    assert capture_policy["preWriteCheckpointRequired"] is False
+    assert capture_policy["checkpointScope"] == []
+    assert capture_policy["artifactRoots"] == ["dashboard/latest"]
+
+    asset_handler = dashboard_server.AGENT_GATEWAY._write_handlers["vrcforge_set_material_shader"]
+    asset_policy = dashboard_server.AGENT_GATEWAY.approval_transactions._write_handler_rollback_policy(asset_handler)
+    assert asset_handler.pre_write_checkpoint_required is True
+    assert asset_policy["kind"] == "unity_project_checkpoint"
+    assert asset_policy["preWriteCheckpointRequired"] is True
 
 
 def test_single_capture_preparer_freezes_only_the_fixed_dashboard_output_path() -> None:

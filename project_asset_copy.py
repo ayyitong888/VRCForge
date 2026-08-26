@@ -17,7 +17,7 @@ PREVIEW_DIGEST_SCHEMA = "vrcforge.project_asset_copy_preview.v2"
 
 _HEX_32 = re.compile(r"^[0-9a-f]{32}$")
 _HEX_64 = re.compile(r"^[0-9a-f]{64}$")
-_ALLOWED_EXTENSIONS = {".controller", ".asset", ".anim", ".overridecontroller"}
+_ALLOWED_EXTENSIONS = {".controller", ".asset", ".anim", ".overridecontroller", ".mat"}
 _REQUEST_KEYS = ("sourceAssetPath", "destinationAssetPath")
 
 
@@ -279,9 +279,16 @@ def _target(value: Any) -> dict[str, Any]:
 
 def _source_path(value: Any) -> str:
     path = _asset_path(value, "sourceAssetPath")
-    if not path.startswith("Assets/") or path.startswith(f"{GENERATED_ROOT}/"):
+    if not path.startswith("Assets/"):
         raise ProjectAssetCopyError("Source must be an existing non-generated Assets authoring asset.")
-    _extension(path)
+    extension = _extension(path)
+    generated_prefix = f"{GENERATED_ROOT}/"
+    if path.startswith(generated_prefix):
+        generated_leaf = path[len(generated_prefix) :]
+        if extension != ".mat" or "/" in generated_leaf:
+            raise ProjectAssetCopyError(
+                "Only an existing generated material may be copied from the generated root."
+            )
     return path
 
 

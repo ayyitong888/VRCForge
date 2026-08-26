@@ -5,6 +5,7 @@ import os
 import secrets
 import shutil
 import tempfile
+from copy import deepcopy
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -13,6 +14,7 @@ from typing import Any, Callable
 from agent_gateway import (
     BUILTIN_SKILL_GROUPS,
     BUILTIN_SKILL_OVERRIDES,
+    AVATAR_COMPOSITION_RUNTIME_CONTRACT_FIELDS,
     AgentGatewayConfig,
     AgentGatewayError,
     EXPOSURE_LAYER_EXECUTION,
@@ -162,6 +164,11 @@ class AgentSkillRegistryService:
         available = bool(group.get("enabled", True)) and all(
             self._skill_dependency_visible(tool_name, config) for tool_name in allowed_tools
         )
+        structured_contracts = {
+            field: deepcopy(group[field])
+            for field in AVATAR_COMPOSITION_RUNTIME_CONTRACT_FIELDS
+            if field in group
+        }
         return {
             "schema": "vrcforge.skill.v1",
             "name": str(group.get("name") or ""),
@@ -195,6 +202,7 @@ class AgentSkillRegistryService:
             "advanced": permission_mode == "advanced_power_mode",
             "write": permission_mode in {"approval_required", "advanced_power_mode"},
             "tags": sorted({"builtin", "group", *ensure_string_list(group.get("tags"))}),
+            **structured_contracts,
         }
 
     def _skill_from_tool(self, tool: SkillToolDescriptor, config: AgentGatewayConfig) -> dict[str, Any]:
@@ -385,8 +393,11 @@ class AgentSkillRegistryService:
                     )
                 projected_state = self._load_projected_skill_state(skill_file)
                 if projected_state is not None:
-                    normalized["enabled"] = projected_state
-                    normalized["available"] = projected_state
+                    normalized["enabled"] = projected_state["enabled"]
+                    normalized["available"] = projected_state["enabled"]
+                    package_id = str(projected_state.get("packageId") or "").strip()
+                    if package_id:
+                        normalized["packageId"] = package_id
                 normalized["storagePath"] = str(skill_file)
                 skills.append(normalized)
             except Exception as exc:  # noqa: BLE001 - one broken user skill must not break startup.
@@ -408,7 +419,7 @@ class AgentSkillRegistryService:
             "write": False, "tags": ["user", "invalid"], "storagePath": str(skill_file), "loadError": str(exc),
         }
 
-    def _load_projected_skill_state(self, skill_file: Path) -> bool | None:
+    def _load_projected_skill_state(self, skill_file: Path) -> dict[str, Any] | None:
         state_path = skill_file.parent / PROJECTED_SKILL_STATE_NAME
         if not os.path.lexists(state_path):
             return None
@@ -435,7 +446,7 @@ class AgentSkillRegistryService:
             or not isinstance(state.get("enabled"), bool)
         ):
             raise AgentGatewayError("Projected skill state has an invalid schema.", status_code=400)
-        return bool(state["enabled"])
+        return state
 
     def find_user_skill(self, skill_id: str) -> dict[str, Any] | None:
         with self.write_lock:

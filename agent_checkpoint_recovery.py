@@ -114,6 +114,8 @@ class AgentCheckpointRecoveryService:
     """
 
     __slots__ = (
+        "_archive_validation_cache",
+        "_checkpoint_entry_cache",
         "_checkpoint_project_root_resolver",
         "_checkpoint_restore_handler",
         "_checkpoint_restore_prepare_handler",
@@ -123,6 +125,13 @@ class AgentCheckpointRecoveryService:
 
     def __init__(self, ports: CheckpointRecoveryPorts) -> None:
         self._ports = ports
+        # Access is serialized by checkpoint_storage_lock. Cache entries are
+        # bounded and tied to both archive identity and recovery metadata, so a
+        # replaced archive or edited pathspec can never reuse a stale verdict.
+        self._archive_validation_cache: dict[tuple[str, int, int, str], tuple[bool, str]] = {}
+        self._checkpoint_entry_cache: dict[
+            tuple[str, int, int], tuple[dict[str, Any], ...]
+        ] = {}
         self._project_chat_checkpoint_lock = ports.project_chat_checkpoint_lock
         self._checkpoint_project_root_resolver: Callable[[], str] | None = None
         self._checkpoint_restore_prepare_handler: Callable[[Path], dict[str, Any]] | None = None
@@ -376,7 +385,11 @@ class AgentCheckpointRecoveryService:
             normalized = normalize_filesystem_path(project_filter)
             entries = [entry for entry in entries if normalize_filesystem_path(str(entry.get("projectRoot") or "")) == normalized]
         entries = entries[:limit]
-        return {"ok": True, "checkpoints": entries, "count": len(entries)}
+        projected: list[dict[str, Any]] = []
+        for entry in entries:
+            metadata = self._checkpoint_archive_metadata_available(entry)
+            projected.append(entry if metadata.get("ok") else ensure_dict(metadata.get("checkpoint")))
+        return {"ok": True, "checkpoints": projected, "count": len(projected)}
 
     def checkpoint_archive_usage(self, config: AgentGatewayConfig | None = None) -> dict[str, Any]:
         with self._ports.state.checkpoint_storage_lock:
@@ -2822,55 +2835,201 @@ class AgentCheckpointRecoveryService:
                 return Path(value)
         return None
 
+    @staticmethod
+    def _checkpoint_unavailable(
+        checkpoint: dict[str, Any],
+        *,
+        error: str,
+        reason_code: str,
+        next_action: str,
+    ) -> dict[str, Any]:
+        projected = dict(checkpoint)
+        projected.update(
+            {
+                "status": "unavailable",
+                "available": False,
+                "availabilityError": error,
+                "availabilityReasonCode": reason_code,
+                "nextAction": next_action,
+            }
+        )
+        return {
+            "ok": False,
+            "status": "unavailable",
+            "available": False,
+            "checkpoint": projected,
+            "reasonCode": reason_code,
+            "nextAction": next_action,
+            "error": error,
+        }
+
+    def _checkpoint_archive_metadata_available(
+        self, checkpoint: dict[str, Any]
+    ) -> dict[str, Any]:
+        strategy = str(checkpoint.get("strategy") or "")
+        if strategy not in {"archive", "local_state_archive", "project_chat_archive"}:
+            return {"ok": True}
+        pathspecs = ensure_string_list(checkpoint.get("pathspecs"))
+        if strategy == "project_chat_archive":
+            valid_pathspecs = pathspecs == [PROJECT_CHAT_CHECKPOINT_MEMBER]
+        elif strategy == "local_state_archive":
+            valid_pathspecs = bool(pathspecs) and set(pathspecs) <= set(LOCAL_STATE_CHECKPOINT_SCOPE)
+        else:
+            valid_pathspecs = bool(pathspecs) and set(pathspecs) <= set(UNITY_PROJECT_CHECKPOINT_SCOPE)
+        if not valid_pathspecs:
+            return self._checkpoint_unavailable(
+                checkpoint,
+                error="Checkpoint recovery scope metadata is missing or unsafe.",
+                reason_code="checkpoint_scope_metadata_invalid",
+                next_action="Create a new checkpoint before attempting this restore.",
+            )
+        try:
+            archive_path = self._resolve_checkpoint_archive_path(checkpoint, strategy)
+        except (OSError, ValueError):
+            return self._checkpoint_unavailable(
+                checkpoint,
+                error="Checkpoint archive metadata is missing or invalid.",
+                reason_code="checkpoint_archive_metadata_invalid",
+                next_action="Verify checkpoint storage settings or create a new checkpoint.",
+            )
+        try:
+            exists = archive_path.is_file()
+        except OSError:
+            exists = False
+        if not exists:
+            return self._checkpoint_unavailable(
+                checkpoint,
+                error="Checkpoint archive file is missing from configured storage.",
+                reason_code="checkpoint_archive_missing",
+                next_action="Verify checkpoint storage settings or create a new checkpoint.",
+            )
+        return {"ok": True, "archivePath": archive_path}
+
+    @staticmethod
+    def _checkpoint_archive_metadata_digest(checkpoint: dict[str, Any]) -> str:
+        protected_metadata = {
+            key: checkpoint.get(key)
+            for key in (
+                "id",
+                "strategy",
+                "archivePath",
+                "projectRoot",
+                "pathspecs",
+                "stateRoots",
+                "fileCount",
+                "uncompressedBytes",
+                "sourceExisted",
+                "sourceDigest",
+            )
+        }
+        encoded = json.dumps(
+            protected_metadata,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    def _cached_archive_validation(
+        self,
+        checkpoint: dict[str, Any],
+        archive_path: Path,
+        validate: Callable[[Path], None],
+    ) -> tuple[bool, str]:
+        try:
+            metadata = archive_path.stat()
+            key = (
+                os.path.normcase(str(archive_path.resolve())),
+                int(metadata.st_size),
+                int(metadata.st_mtime_ns),
+                self._checkpoint_archive_metadata_digest(checkpoint),
+            )
+        except (OSError, TypeError, ValueError) as exc:
+            return False, f"archive stat failed: {exc}"
+        cached = self._archive_validation_cache.get(key)
+        if cached is not None:
+            return cached
+        try:
+            validate(archive_path)
+            result = (True, "")
+        except Exception as exc:  # noqa: BLE001 - validation failure is returned, never bypassed.
+            result = (False, str(exc))
+        self._archive_validation_cache[key] = result
+        while len(self._archive_validation_cache) > 128:
+            self._archive_validation_cache.pop(next(iter(self._archive_validation_cache)))
+        return result
+
     def _checkpoint_available(self, checkpoint: dict[str, Any]) -> dict[str, Any]:
         if not checkpoint.get("ok"):
-            return {"ok": False, "checkpoint": checkpoint, "error": str(checkpoint.get("error") or "Checkpoint is unavailable.")}
+            return self._checkpoint_unavailable(
+                checkpoint,
+                error=str(checkpoint.get("error") or "Checkpoint is unavailable."),
+                reason_code="checkpoint_creation_failed",
+                next_action="Review the checkpoint failure and create a new checkpoint.",
+            )
         if checkpoint.get("strategy") == "local_state_archive":
-            pathspecs = ensure_string_list(checkpoint.get("pathspecs"))
-            try:
-                archive_path = self._resolve_checkpoint_archive_path(checkpoint, "local_state_archive")
-            except ValueError as exc:
-                return {"ok": False, "checkpoint": checkpoint, "error": f"Local state checkpoint metadata is invalid: {exc}"}
-            if not archive_path.is_file() or not pathspecs:
-                return {"ok": False, "checkpoint": checkpoint, "error": "Local state checkpoint metadata is incomplete."}
-            try:
-                with zipfile.ZipFile(archive_path, "r") as archive:
+            metadata = self._checkpoint_archive_metadata_available(checkpoint)
+            if not metadata.get("ok"):
+                return metadata
+            archive_path = Path(metadata["archivePath"])
+
+            def validate_local_state(path: Path) -> None:
+                with zipfile.ZipFile(path, "r") as archive:
                     if archive.testzip() is not None:
                         raise ValueError("archive CRC validation failed")
                     for info in archive.infolist():
                         if not info.is_dir():
                             self._validate_local_state_archive_member(info.filename)
-            except Exception as exc:  # noqa: BLE001
-                return {"ok": False, "checkpoint": checkpoint, "error": f"Local state checkpoint is unreadable: {exc}"}
+            valid, error = self._cached_archive_validation(
+                checkpoint, archive_path, validate_local_state
+            )
+            if not valid:
+                return self._checkpoint_unavailable(
+                    checkpoint,
+                    error=f"Local state checkpoint is unreadable: {error}",
+                    reason_code="checkpoint_archive_unreadable",
+                    next_action="Create a new checkpoint; do not restore the damaged archive.",
+                )
             return {"ok": True}
         if checkpoint.get("strategy") == "project_chat_archive":
-            pathspecs = ensure_string_list(checkpoint.get("pathspecs"))
-            if pathspecs != [PROJECT_CHAT_CHECKPOINT_MEMBER]:
-                return {"ok": False, "checkpoint": checkpoint, "error": "Project chat checkpoint metadata is incomplete."}
+            metadata = self._checkpoint_archive_metadata_available(checkpoint)
+            if not metadata.get("ok"):
+                return metadata
             try:
                 self._project_chat_checkpoint_source(checkpoint)
                 self._read_project_chat_checkpoint_bytes(checkpoint)
             except Exception as exc:  # noqa: BLE001
-                return {"ok": False, "checkpoint": checkpoint, "error": f"Project chat checkpoint is unreadable: {exc}"}
+                return self._checkpoint_unavailable(
+                    checkpoint,
+                    error=f"Project chat checkpoint is unreadable: {exc}",
+                    reason_code="checkpoint_archive_unreadable",
+                    next_action="Create a new checkpoint; do not restore the damaged archive.",
+                )
             return {"ok": True}
         if checkpoint.get("strategy") == "archive":
-            pathspecs = ensure_string_list(checkpoint.get("pathspecs"))
-            try:
-                archive_path = self._resolve_checkpoint_archive_path(checkpoint, "archive")
-            except ValueError as exc:
-                return {"ok": False, "checkpoint": checkpoint, "error": f"Archive checkpoint metadata is invalid: {exc}"}
-            if not archive_path.is_file() or not pathspecs:
-                return {"ok": False, "checkpoint": checkpoint, "error": "Archive checkpoint metadata is incomplete."}
-            try:
-                with zipfile.ZipFile(archive_path, "r") as archive:
+            metadata = self._checkpoint_archive_metadata_available(checkpoint)
+            if not metadata.get("ok"):
+                return metadata
+            archive_path = Path(metadata["archivePath"])
+
+            def validate_project_archive(path: Path) -> None:
+                with zipfile.ZipFile(path, "r") as archive:
                     if archive.testzip() is not None:
                         raise ValueError("archive CRC validation failed")
                     allowed = set(UNITY_PROJECT_CHECKPOINT_SCOPE)
                     for info in archive.infolist():
                         if not info.is_dir():
                             self._normalize_project_archive_member(info.filename, allowed)
-            except Exception as exc:  # noqa: BLE001
-                return {"ok": False, "checkpoint": checkpoint, "error": f"Archive checkpoint is unreadable: {exc}"}
+            valid, error = self._cached_archive_validation(
+                checkpoint, archive_path, validate_project_archive
+            )
+            if not valid:
+                return self._checkpoint_unavailable(
+                    checkpoint,
+                    error=f"Archive checkpoint is unreadable: {error}",
+                    reason_code="checkpoint_archive_unreadable",
+                    next_action="Create a new checkpoint; do not restore the damaged archive.",
+                )
             return {"ok": True}
         git_root = Path(str(checkpoint.get("gitRoot") or ""))
         ref = str(checkpoint.get("checkpointRef") or "")
@@ -2889,6 +3048,7 @@ class AgentCheckpointRecoveryService:
             with self._ports.checkpoint_log_path().open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(record, ensure_ascii=False) + "\n")
                 flush_and_fsync(handle)
+            self._checkpoint_entry_cache.clear()
         self._maybe_record_adjustment_checkpoint(record)
 
     def _checkpoint_archive_files(self) -> list[dict[str, Any]]:
@@ -2949,21 +3109,35 @@ class AgentCheckpointRecoveryService:
             current = current.parent
 
     def _read_checkpoint_entries(self, limit: int = 500) -> list[dict[str, Any]]:
-        if not self._ports.checkpoint_log_path().exists():
-            return []
-        entries: list[dict[str, Any]] = []
+        log_path = self._ports.checkpoint_log_path()
         try:
-            lines = _split_lf_jsonl_lines(self._ports.checkpoint_log_path().read_bytes())
+            metadata = log_path.stat()
+            cache_key = (
+                os.path.normcase(str(log_path.resolve())),
+                int(metadata.st_size),
+                int(metadata.st_mtime_ns),
+            )
         except OSError:
             return []
-        for index, raw_line in enumerate(lines):
+        entries = self._checkpoint_entry_cache.get(cache_key)
+        if entries is None:
             try:
-                line = raw_line.decode("utf-8-sig" if index == 0 else "utf-8")
-                payload = _load_strict_json(line)
-            except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
-                continue
-            if _checkpoint_record_state(payload) == "valid":
-                entries.append(payload)
+                lines = _split_lf_jsonl_lines(log_path.read_bytes())
+            except OSError:
+                return []
+            parsed: list[dict[str, Any]] = []
+            for index, raw_line in enumerate(lines):
+                try:
+                    line = raw_line.decode("utf-8-sig" if index == 0 else "utf-8")
+                    payload = _load_strict_json(line)
+                except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+                    continue
+                if _checkpoint_record_state(payload) == "valid":
+                    parsed.append(payload)
+            entries = tuple(parsed[-1000:])
+            self._checkpoint_entry_cache[cache_key] = entries
+            while len(self._checkpoint_entry_cache) > 4:
+                self._checkpoint_entry_cache.pop(next(iter(self._checkpoint_entry_cache)))
         return list(reversed(entries[-max(1, min(limit, 1000)) :]))
 
     def _load_checkpoint(self, checkpoint_id: str) -> dict[str, Any] | None:

@@ -46,9 +46,11 @@ namespace VRCForge.Editor
         public static readonly HashSet<string> KnownSemanticProperties = new HashSet<string>(StringComparer.Ordinal)
         {
             "base_color",
+            "main_saturation",
             "shade_color",
             "shadow_strength",
             "shadow_softness",
+            "shadow_border",
             "smoothness",
             "specular_strength",
             "rim_color",
@@ -93,7 +95,9 @@ namespace VRCForge.Editor
                     type = pair.Value.kind == SemanticPropertyKind.Color ? "color" : "float",
                     value = pair.Value.kind == SemanticPropertyKind.Color
                         ? ColorToHex(material.GetColor(propertyName))
-                        : (object)material.GetFloat(propertyName),
+                        : pair.Value.kind == SemanticPropertyKind.VectorComponent
+                            ? (object)material.GetVector(propertyName)[pair.Value.vectorComponent]
+                            : material.GetFloat(propertyName),
                     writable = true
                 };
             }
@@ -168,6 +172,15 @@ namespace VRCForge.Editor
                 var color = (Color)clampedValue;
                 material.SetColor(propertyName, color);
                 appliedValue = ColorToHex(color);
+            }
+            else if (mapping.kind == SemanticPropertyKind.VectorComponent)
+            {
+                var vector = material.GetVector(propertyName);
+                previousValue = material.GetVector(propertyName)[mapping.vectorComponent];
+                var number = (float)clampedValue;
+                vector[mapping.vectorComponent] = number;
+                material.SetVector(propertyName, vector);
+                appliedValue = number;
             }
             else
             {
@@ -265,9 +278,11 @@ namespace VRCForge.Editor
             : base("lilToon", new Dictionary<string, SemanticPropertyMapping>
             {
                 ["base_color"] = SemanticPropertyMapping.Color("_Color", "_MainColor"),
+                ["main_saturation"] = SemanticPropertyMapping.VectorComponent(0f, 1f, 1, "_MainTexHSVG"),
                 ["shade_color"] = SemanticPropertyMapping.Color("_ShadeColor", "_ShadowColor"),
                 ["shadow_strength"] = SemanticPropertyMapping.Float(0f, 1f, "_ShadowStrength", "_Shadow2ndColorTex_Power"),
                 ["shadow_softness"] = SemanticPropertyMapping.Float(0f, 1f, "_ShadowBlur", "_ShadowBorder"),
+                ["shadow_border"] = SemanticPropertyMapping.Float(0f, 1f, "_ShadowBorder"),
                 ["smoothness"] = SemanticPropertyMapping.Float(0f, 1f, "_Smoothness", "_Glossiness"),
                 ["specular_strength"] = SemanticPropertyMapping.Float(0f, 1f, "_SpecularStrength", "_SpecularPower"),
                 ["rim_color"] = SemanticPropertyMapping.Color("_RimColor"),
@@ -362,7 +377,8 @@ namespace VRCForge.Editor
     public enum SemanticPropertyKind
     {
         Float,
-        Color
+        Color,
+        VectorComponent
     }
 
     public sealed class SemanticPropertyMapping
@@ -371,6 +387,7 @@ namespace VRCForge.Editor
         public float min;
         public float max;
         public string[] aliases;
+        public int vectorComponent;
 
         public static SemanticPropertyMapping Float(float min, float max, params string[] aliases)
         {
@@ -391,6 +408,18 @@ namespace VRCForge.Editor
                 min = 0f,
                 max = 1f,
                 aliases = aliases
+            };
+        }
+
+        public static SemanticPropertyMapping VectorComponent(float min, float max, int component, params string[] aliases)
+        {
+            return new SemanticPropertyMapping
+            {
+                kind = SemanticPropertyKind.VectorComponent,
+                min = min,
+                max = max,
+                aliases = aliases,
+                vectorComponent = component
             };
         }
     }

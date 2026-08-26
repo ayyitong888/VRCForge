@@ -3,6 +3,7 @@ from __future__ import annotations
 import hmac
 import json
 import secrets
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -86,6 +87,15 @@ AVATAR_UPLOAD_MANUAL_APPROVAL_REASON = (
     "VRChat avatar upload always requires one exact user confirmation because remote metadata, "
     "visibility, thumbnail, or bundle changes cannot be undone by a local checkpoint."
 )
+ROLLBACK_MANUAL_APPROVAL_TOOLS = frozenset(
+    {
+        "vrcforge_restore_checkpoint",
+        "vrcforge_rollback_parameters",
+        "vrcforge_rollback_project_lifecycle",
+        "vrcforge_rollback_project_catalog_registration",
+    }
+)
+ROLLBACK_MANUAL_APPROVAL_REASON = "Rollback operations always require explicit manual user confirmation."
 def _write_failure_facts(
     failure_result: Any,
     *,
@@ -242,6 +252,8 @@ class AgentApprovalTransactionService:
         "_runtime_run_append",
         "_auto_approval_reviewer",
         "_scoped_approval_reviewer",
+        "_project_write_locks",
+        "_project_write_locks_guard",
     )
 
     def __init__(
@@ -258,7 +270,57 @@ class AgentApprovalTransactionService:
         self._checkpoint_prepare_handler: Callable[[Path], dict[str, Any]] | None = None
         self._auto_approval_reviewer: Callable[[dict[str, Any]], str] | None = None
         self._scoped_approval_reviewer: Callable[[dict[str, Any]], str] | None = None
+        # Project-scoped, non-blocking gates.  The gate is process-local and
+        # shared by internal approvals and external MCP writes through this
+        # service; unknown project scope deliberately uses the global key.
+        self._project_write_locks: dict[str, threading.Lock] = {}
+        self._project_write_locks_guard = threading.Lock()
         self._restore_pending_approvals()
+
+    @staticmethod
+    def _project_lock_key(project_root: Any) -> str:
+        raw = str(project_root or "").strip()
+        if not raw:
+            return "__global__"
+        try:
+            return normalize_filesystem_path(str(Path(raw).resolve(strict=False))).casefold()
+        except (OSError, RuntimeError, TypeError, ValueError):
+            return "__global__"
+
+    def _try_acquire_project_write(self, project_root: Any) -> tuple[str, bool]:
+        key = self._project_lock_key(project_root)
+        with self._project_write_locks_guard:
+            lock = self._project_write_locks.setdefault(key, threading.Lock())
+        return key, lock.acquire(blocking=False)
+
+    def _release_project_write(self, key: str) -> None:
+        with self._project_write_locks_guard:
+            lock = self._project_write_locks.get(key)
+        if lock is not None and lock.locked():
+            lock.release()
+
+    @staticmethod
+    def _entry_project_key(entry: Mapping[str, Any]) -> str:
+        return AgentApprovalTransactionService._project_lock_key(
+            entry.get("projectRoot") or entry.get("projectPath")
+        )
+
+    def _project_has_in_flight_write(self, project_root: Any) -> bool:
+        target = self._project_lock_key(project_root)
+        return any(
+            self._entry_project_key(entry) in {target, "__global__"}
+            or target == "__global__"
+            for entry in self._ports.state.in_flight_apply_writes.values()
+            if isinstance(entry, Mapping)
+        )
+
+    def _project_has_background_read(self, project_root: Any) -> bool:
+        target = self._project_lock_key(project_root)
+        for raw in self._ports.state.background_project_read_leases:
+            key = str(raw).split("\x00", 1)[0] if "\x00" in str(raw) else "__global__"
+            if key in {target, "__global__"} or target == "__global__":
+                return True
+        return False
 
     def _pending_approval_snapshot_path(self) -> Path:
         """Return the host-private, pending-only approval proposal snapshot.
@@ -772,8 +834,10 @@ class AgentApprovalTransactionService:
         always_manual_reason = (
             CHECKPOINT_RESTORE_MANUAL_APPROVAL_REASON
             if target_tool == "vrcforge_restore_checkpoint"
+            else ROLLBACK_MANUAL_APPROVAL_REASON
+            if target_tool in ROLLBACK_MANUAL_APPROVAL_TOOLS
             else AVATAR_UPLOAD_MANUAL_APPROVAL_REASON
-            if target_tool == "vrcforge_build_and_upload_avatar"
+            if target_tool == "vrcforge_build_and_upload_avatar" and not full_permission_auto
             else ""
         )
         requires_explicit_for_mode = bool(always_manual_reason) or (
@@ -1070,6 +1134,8 @@ class AgentApprovalTransactionService:
         if not approval_id:
             raise AgentGatewayError("approval_id is required.")
         self._ports.signal_background_activity("approved_write")
+        project_lock_key = ""
+        project_lock_acquired = False
 
         with self._ports.state.shared_state_lock:
             approval = self._ports.state.approvals.get(approval_id)
@@ -1105,7 +1171,8 @@ class AgentApprovalTransactionService:
             if not write_handler:
                 raise AgentGatewayError(f"Write target is no longer available: {target_tool}", status_code=404)
 
-            if self._ports.state.background_project_read_leases:
+            project_root = self._approval_project_root(approval)
+            if self._project_has_background_read(project_root):
                 self._ports.append_audit(
                     {
                         "event": "approval_blocked_by_background_project_read",
@@ -1121,7 +1188,15 @@ class AgentApprovalTransactionService:
                     "error": "A background project read is active. Retry this approved write after it finishes.",
                 }
 
-            in_flight_writes = [dict(entry) for entry in self._ports.state.in_flight_apply_writes.values()]
+            in_flight_writes = [
+                dict(entry)
+                for entry in self._ports.state.in_flight_apply_writes.values()
+                if isinstance(entry, Mapping)
+                and (
+                    self._entry_project_key(entry) in {self._project_lock_key(project_root), "__global__"}
+                    or self._project_lock_key(project_root) == "__global__"
+                )
+            ]
             if in_flight_writes:
                 self._ports.append_audit(
                     {
@@ -1139,7 +1214,30 @@ class AgentApprovalTransactionService:
                     "error": "Another approved write is still applying. Wait for it to finish (or fail into recovery) before running this write.",
                 }
 
-            active_recoveries = self._ports.checkpoint.active_apply_recoveries()
+            project_lock_key, project_lock_acquired = self._try_acquire_project_write(project_root)
+            if not project_lock_acquired:
+                self._ports.append_audit(
+                    {
+                        "event": "approval_blocked_by_project_write_lock",
+                        "approvalId": approval_id,
+                        "targetTool": target_tool,
+                        "projectRoot": project_root,
+                    }
+                )
+                return {
+                    "ok": False,
+                    "status": "blocked_concurrent_write",
+                    "approval": approval,
+                    "inFlightWrites": [{"projectRoot": project_root}],
+                    "error": "Another write for this Unity project is still applying. Retry after it finishes.",
+                }
+
+            active_recoveries = [
+                recovery
+                for recovery in self._ports.checkpoint.active_apply_recoveries()
+                if self._entry_project_key(recovery) in {self._project_lock_key(project_root), "__global__"}
+                or self._project_lock_key(project_root) == "__global__"
+            ]
             if active_recoveries and target_tool not in APPLY_RECOVERY_EXEMPT_WRITE_TARGETS:
                 self._ports.append_audit(
                     {
@@ -1149,6 +1247,9 @@ class AgentApprovalTransactionService:
                         "recoveries": active_recoveries,
                     }
                 )
+                if project_lock_acquired:
+                    self._release_project_write(project_lock_key)
+                    project_lock_acquired = False
                 return {
                     "ok": False,
                     "status": "blocked_recovery",
@@ -1161,7 +1262,8 @@ class AgentApprovalTransactionService:
             self._ports.state.in_flight_apply_writes[approval_id] = {
                 "approvalId": approval_id,
                 "targetTool": target_tool,
-                "projectRoot": ensure_dict(approval.get("arguments")).get("projectRoot") or "",
+                "projectRoot": project_root,
+                "projectLockKey": project_lock_key,
                 "startedAt": utc_now_iso(),
             }
             try:
@@ -1186,6 +1288,9 @@ class AgentApprovalTransactionService:
                 approval["status"] = "approved"
                 self._ports.state.approvals[approval_id] = approval
                 self._ports.state.in_flight_apply_writes.pop(approval_id, None)
+                if project_lock_acquired:
+                    self._release_project_write(project_lock_key)
+                    project_lock_acquired = False
                 try:
                     self._ports.append_audit(
                         {
@@ -1648,6 +1753,8 @@ class AgentApprovalTransactionService:
         finally:
             with self._ports.state.shared_state_lock:
                 self._ports.state.in_flight_apply_writes.pop(approval_id, None)
+            if project_lock_acquired:
+                self._release_project_write(project_lock_key)
 
     def list_approvals(
         self,
@@ -2117,24 +2224,27 @@ class AgentApprovalTransactionService:
                 if isinstance(approval, dict)
             )
 
-    def try_acquire_background_project_read(self, token: str) -> bool:
+    def try_acquire_background_project_read(self, token: str, project_root: str = "") -> bool:
         normalized = str(token or "").strip()
         if not normalized:
             return False
+        key = self._project_lock_key(project_root)
+        stored = f"{key}\x00{normalized}" if project_root else normalized
         with self._ports.state.shared_state_lock:
-            if self.has_in_flight_project_write() or self._ports.state.background_project_read_leases:
+            if self._project_has_in_flight_write(project_root) or self._project_has_background_read(project_root):
                 return False
-            self._ports.state.background_project_read_leases.add(normalized)
+            self._ports.state.background_project_read_leases.add(stored)
             return True
 
-    def release_background_project_read(self, token: str) -> bool:
+    def release_background_project_read(self, token: str, project_root: str = "") -> bool:
         normalized = str(token or "").strip()
         if not normalized:
             return False
+        stored = f"{self._project_lock_key(project_root)}\x00{normalized}" if project_root else normalized
         with self._ports.state.shared_state_lock:
-            if normalized not in self._ports.state.background_project_read_leases:
+            if stored not in self._ports.state.background_project_read_leases:
                 return False
-            self._ports.state.background_project_read_leases.remove(normalized)
+            self._ports.state.background_project_read_leases.remove(stored)
             return True
 
     def _apply_recovery_blocks_writes(self, recovery: dict[str, Any]) -> bool:
@@ -2372,6 +2482,44 @@ class AgentApprovalTransactionService:
                     "Its result reports the observed state, and the declared atomic restore tool can explicitly "
                     "restore the prior value, selection, or Play Mode state; no project checkpoint or automatic "
                     "rollback is claimed."
+                ),
+            }
+        if handler.name == "vrcforge_confirm_unity_reload_dialog":
+            return {
+                "schema": ROLLBACK_POLICY_SCHEMA,
+                "required": False,
+                "kind": "irreversible_ephemeral_editor_reload",
+                "approvalRequired": True,
+                "preWriteCheckpointRequired": False,
+                "checkpointScope": [],
+                "restoreTool": "",
+                "coverageAudit": "vrcforge.unity_reload_confirmation.v1",
+                "postRestoreValidationRequired": False,
+                "note": (
+                    "This project-, process-, dialog-, and button-bound action confirms only the exact "
+                    "Unity Editor Reload dialog. It does not claim an asset checkpoint or rollback; "
+                    "unsaved in-memory scene or Editor changes may be discarded and cannot be restored."
+                ),
+            }
+        if handler.name in {
+            "vrcforge_capture_screenshot",
+            "vrcforge_capture_multi_screenshot",
+        }:
+            return {
+                "schema": ROLLBACK_POLICY_SCHEMA,
+                "required": False,
+                "kind": "local_artifact_overwrite",
+                "approvalRequired": True,
+                "preWriteCheckpointRequired": False,
+                "checkpointScope": [],
+                "restoreTool": "",
+                "coverageAudit": "vrcforge.visual_capture_artifact.v1",
+                "artifactRoots": ["dashboard/latest"],
+                "postRestoreValidationRequired": False,
+                "note": (
+                    "This operation overwrites only VRCForge-managed dashboard screenshot PNG artifacts under "
+                    "dashboard/latest. It does not mutate Assets, Packages, or ProjectSettings and does not claim "
+                    "a Unity-project checkpoint or rollback."
                 ),
             }
         if handler.name in {
@@ -2651,7 +2799,7 @@ class AgentApprovalTransactionService:
         target_tool: str,
         params: Mapping[str, Any] | None,
     ) -> dict[str, Any]:
-        """Prepare one real MCP write without consulting the internal Agent mode."""
+        """Prepare one real MCP write under the user's selected permission policy."""
 
         config = self._ports.ensure_config()
         if not config.allow_write_requests:
@@ -2743,17 +2891,20 @@ class AgentApprovalTransactionService:
             arguments,
             preview,
         )
+        full_permission = normalize_execution_mode(config.execution_mode) == "roslyn_full_auto"
         confirmation_reason = str(
             CHECKPOINT_RESTORE_MANUAL_APPROVAL_REASON
             if normalized_target == "vrcforge_restore_checkpoint"
+            else ROLLBACK_MANUAL_APPROVAL_REASON
+            if normalized_target in ROLLBACK_MANUAL_APPROVAL_TOOLS
             else AVATAR_UPLOAD_MANUAL_APPROVAL_REASON
-            if normalized_target == "vrcforge_build_and_upload_avatar"
+            if normalized_target == "vrcforge_build_and_upload_avatar" and not full_permission
             else (
                 mandatory_confirmation_reason
                 or destructive_reason
                 or "This external MCP tool is declared high risk and requires user confirmation."
             )
-            if effective_risk_level in {"high", "critical"}
+            if effective_risk_level in {"high", "critical"} and not full_permission
             else ""
         ).strip()
         if authoritative_preview_only:
@@ -2995,22 +3146,31 @@ class AgentApprovalTransactionService:
         )
         self._ports.signal_background_activity("external_mcp_write")
         project_root = extract_project_root(arguments)
+        project_lock_key = ""
+        project_lock_acquired = False
 
         with self._ports.state.shared_state_lock:
-            if self._ports.state.background_project_read_leases:
+            if self._project_has_background_read(project_root):
                 raise AgentGatewayError(
                     "A background project read is active. Retry this external write after it finishes.",
                     status_code=409,
                 )
-            if self._ports.state.in_flight_apply_writes:
+            if self._project_has_in_flight_write(project_root):
                 raise AgentGatewayError(
                     "Another Unity write is active. Retry this external write after it finishes.",
+                    status_code=409,
+                )
+            project_lock_key, project_lock_acquired = self._try_acquire_project_write(project_root)
+            if not project_lock_acquired:
+                raise AgentGatewayError(
+                    "Another Unity write is active for this project. Retry after it finishes.",
                     status_code=409,
                 )
             self._ports.state.in_flight_apply_writes[operation_id] = {
                 "operationId": operation_id,
                 "targetTool": target_tool,
                 "projectRoot": str(project_root or ""),
+                "projectLockKey": project_lock_key,
                 "startedAt": utc_now_iso(),
                 "source": "external_mcp",
             }
@@ -3023,7 +3183,30 @@ class AgentApprovalTransactionService:
         core_call_audits: list[dict[str, Any]] = []
         failure_layer = "external_mcp_transaction"
         handler_started = False
+        checkpoint: dict[str, Any] | None = None
         try:
+            if (
+                write_handler.requires_approved_execution_context
+                and write_handler.pre_write_checkpoint_required
+                and arguments.get("preview") is not True
+                and (extract_project_root(arguments) is not None)
+                and extract_project_root(arguments).is_dir()
+            ):
+                failure_layer = "checkpoint"
+                checkpoint = self._create_pre_write_checkpoint(
+                    {
+                        "id": operation_id,
+                        "targetTool": target_tool,
+                        "agentName": str(agent_name or "mcp-agent")[:120],
+                        "arguments": arguments,
+                    },
+                    arguments,
+                )
+                if not checkpoint or checkpoint.get("ok") is not True:
+                    raise AgentGatewayError(
+                        str((checkpoint or {}).get("error") or "Pre-write checkpoint failed."),
+                        status_code=409,
+                    )
             if write_handler.verification_prepare_handler is not None:
                 failure_layer = "completion_verification_baseline"
                 verification_arguments = dict(arguments)
@@ -3100,6 +3283,8 @@ class AgentApprovalTransactionService:
                 )
             if request_trace is not None:
                 payload["requestTrace"] = request_trace
+            if checkpoint is not None:
+                payload["checkpoint"] = checkpoint
             self._ports.append_audit(
                 {
                     "event": "external_mcp_write_completed",
@@ -3254,6 +3439,8 @@ class AgentApprovalTransactionService:
                 )
             if request_trace is not None:
                 payload["requestTrace"] = request_trace
+            if checkpoint is not None:
+                payload["checkpoint"] = checkpoint
             self._ports.append_audit(
                 {
                     "event": "external_mcp_write_failed",
@@ -3270,6 +3457,8 @@ class AgentApprovalTransactionService:
         finally:
             with self._ports.state.shared_state_lock:
                 self._ports.state.in_flight_apply_writes.pop(operation_id, None)
+            if project_lock_acquired:
+                self._release_project_write(project_lock_key)
 
     def _approval_project_root(self, approval: dict[str, Any]) -> str:
         arguments = ensure_dict(approval.get("arguments"))

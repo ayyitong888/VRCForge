@@ -412,13 +412,22 @@ class MemoryReviewHost:
     ) -> MemoryReviewSourceInventory:
         if scope.kind != "project":
             return self._source_inventory(self._collect_sources(scope, canonical_project))
-        acquired = self._acquire_background_lease(token)
+        try:
+            acquired = self._acquire_background_lease(token, canonical_project)
+        except TypeError:
+            # Compatibility for host fixtures that still expose the legacy
+            # token-only lease callback; the production gateway accepts scope.
+            acquired = self._acquire_background_lease(token)
         if not acquired:
             raise MemoryReviewCommitDeferred("Project state is changing; retry the review scan.")
         try:
             return self._source_inventory(self._collect_sources(scope, canonical_project))
         finally:
-            if not self._release_background_lease(token):
+            try:
+                released = self._release_background_lease(token, canonical_project)
+            except TypeError:
+                released = self._release_background_lease(token)
+            if not released:
                 raise MemoryConsolidationError("Memory Review project-read lease was lost.")
 
     async def update_config(self, request: MemoryReviewConfigRequest) -> dict[str, Any]:
@@ -935,7 +944,10 @@ class MemoryReviewHost:
                 commit_token = f"memory-review-commit:{run_id}"
                 commit_lease = False
                 if scope.kind == "project":
-                    commit_lease = self._acquire_background_lease(commit_token)
+                    try:
+                        commit_lease = self._acquire_background_lease(commit_token, canonical_project)
+                    except TypeError:
+                        commit_lease = self._acquire_background_lease(commit_token)
                     if not commit_lease:
                         raise MemoryReviewCommitDeferred(
                             "Project state is changing; retry the review commit."
@@ -963,8 +975,13 @@ class MemoryReviewHost:
                             complete_source_types=fresh_inventory.complete_source_types,
                         )
                 finally:
-                    if commit_lease and not self._release_background_lease(commit_token):
-                        raise MemoryConsolidationError("Memory Review project-read lease was lost.")
+                    if commit_lease:
+                        try:
+                            released = self._release_background_lease(commit_token, canonical_project)
+                        except TypeError:
+                            released = self._release_background_lease(commit_token)
+                        if not released:
+                            raise MemoryConsolidationError("Memory Review project-read lease was lost.")
 
             if lane == "background":
                 if not self._idle_gate.run_if_current(

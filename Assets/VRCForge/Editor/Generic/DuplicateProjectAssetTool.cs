@@ -33,6 +33,7 @@ namespace VRCForge.Editor
             ".asset",
             ".anim",
             ".overridecontroller",
+            ".mat",
         };
 
         public class Parameters
@@ -402,12 +403,18 @@ namespace VRCForge.Editor
         private static string NormalizeSourcePath(string value)
         {
             var path = NormalizeAssetPath(value, "sourceAssetPath");
-            if (!path.StartsWith("Assets/", StringComparison.Ordinal)
-                || path.StartsWith(GeneratedRoot + "/", StringComparison.Ordinal))
+            if (!path.StartsWith("Assets/", StringComparison.Ordinal))
             {
                 throw new ProjectAssetCopyException("The source must be an existing non-generated Assets authoring asset.");
             }
             ValidateExtension(path);
+            var generatedPrefix = GeneratedRoot + "/";
+            if (path.StartsWith(generatedPrefix, StringComparison.Ordinal)
+                && (!string.Equals(Path.GetExtension(path), ".mat", StringComparison.OrdinalIgnoreCase)
+                    || path.Substring(generatedPrefix.Length).Contains("/")))
+            {
+                throw new ProjectAssetCopyException("Only an existing generated material may be copied from the generated root.");
+            }
             return path;
         }
 
@@ -452,7 +459,7 @@ namespace VRCForge.Editor
             var extension = Path.GetExtension(path) ?? string.Empty;
             if (!AllowedExtensions.Contains(extension, StringComparer.OrdinalIgnoreCase))
             {
-                throw new ProjectAssetCopyException("Only controller, asset, animation, and override-controller authoring assets can be copied.");
+                throw new ProjectAssetCopyException("Only controller, asset, animation, override-controller, and material authoring assets can be copied.");
             }
         }
 

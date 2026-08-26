@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import contextvars
 import json
 import math
 from dataclasses import dataclass
@@ -1044,7 +1045,18 @@ class AvatarTuningPreparedService:
             if item["rendererPath"] == adjustment["rendererPath"]
             and item["blendshapeName"] == adjustment["blendshapeName"]
         ]
-        verified_changes = self._ports.verify_live_changes(context, change_preview)
+        # The approved Unity execution capability is one-use and remains bound
+        # until this handler returns.  Verification is a separate read-only
+        # operation, so do not let it inherit that write capability: otherwise
+        # the export used for readback is rejected as a second approved call and
+        # every change is reported as ``unreadable`` after a successful write.
+        # Running in a fresh Context preserves the active approval on this
+        # handler while giving the verifier an independent read lane.
+        verified_changes = contextvars.Context().run(
+            self._ports.verify_live_changes,
+            context,
+            change_preview,
+        )
         undo_items = evidence.get("undoItems")
         if not isinstance(undo_items, list):
             raise RuntimeError("Prepared Blendshape undo evidence is invalid.")

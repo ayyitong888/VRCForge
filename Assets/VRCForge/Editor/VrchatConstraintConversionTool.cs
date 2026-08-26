@@ -20,6 +20,23 @@ namespace VRCForge.Editor
     )]
     public static class VrchatConstraintConversionTool
     {
+        public sealed class Parameters
+        {
+            [VRCForgeInput("Saved scene asset path.", IsRequired = true)] public string scenePath { get; set; } = string.Empty;
+            [VRCForgeInput("Exact active Unity project root.", IsRequired = true)] public string projectPath { get; set; } = string.Empty;
+            [VRCForgeInput("Exact avatar hierarchy path.", IsRequired = true)] public string avatarPath { get; set; } = string.Empty;
+            [VRCForgeInput("Exact constraint host hierarchy path.", IsRequired = true)] public string gameObjectPath { get; set; } = string.Empty;
+            [VRCForgeInput("Concrete Unity constraint component type.", IsRequired = true)] public string componentType { get; set; } = string.Empty;
+            [VRCForgeInput("Zero-based matching constraint component index.", IsRequired = true)] public int componentIndex { get; set; }
+            [VRCForgeInput("Return a verified non-mutating preview.", IsRequired = true)] public bool preview { get; set; }
+            [VRCForgeInput("Save the scene during conversion; required for apply.", IsRequired = true)] public bool saveScene { get; set; }
+            [VRCForgeInput("Expected avatar identity from preview.", IsRequired = false)] public string expectedAvatarGlobalObjectId { get; set; } = string.Empty;
+            [VRCForgeInput("Expected component identity from preview.", IsRequired = false)] public string expectedComponentGlobalObjectId { get; set; } = string.Empty;
+            [VRCForgeInput("Expected scene GUID from preview.", IsRequired = false)] public string expectedSceneGuid { get; set; } = string.Empty;
+            [VRCForgeInput("Expected scene file digest from preview.", IsRequired = false)] public string expectedSceneFileDigest { get; set; } = string.Empty;
+            [VRCForgeInput("Expected pre-conversion digest from preview.", IsRequired = false)] public string expectedBeforeDigest { get; set; } = string.Empty;
+        }
+
         public const string ToolName = "vrc_convert_unity_constraint";
         private const string Schema = "vrcforge.vrchat_constraint_conversion.v1";
         private const int ConsoleEntryLimit = 120;

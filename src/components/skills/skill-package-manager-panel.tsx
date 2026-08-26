@@ -1,5 +1,7 @@
-import { Check, Copy, Eye, EyeOff, Loader2, Plus, RefreshCw, Shield, Trash2, X } from "lucide-react";
-import { useEffect, useState, type ReactNode } from "react";
+import { Check, Copy, Eye, EyeOff, FileUp, Loader2, Plus, RefreshCw, Shield, Trash2, X } from "lucide-react";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import type { DragDropEvent } from "@tauri-apps/api/webview";
 import i18n from "../../i18n";
 import type {
   PathToSkillCaptureRequest,
@@ -15,6 +17,7 @@ import { Button } from "../ui/button";
 import { DataLine } from "../ui/data-line";
 import { PathToSkillCapturePanel } from "./path-to-skill-capture-panel";
 import { SkillPackageAuditList } from "./skill-package-audit-list";
+import { hasTauriInternals } from "../../lib/api/http";
 
 export function SkillPackageManagerPanel({
   packages,
@@ -48,7 +51,7 @@ export function SkillPackageManagerPanel({
   governance: Record<string, unknown>;
   audit: Array<Record<string, unknown>>;
   pathToSkillDraftSeed: PathToSkillDraftSeed | null;
-  onRefresh: () => void;
+  onRefresh: () => void | Promise<void>;
   onPreflight: (packagePath: string) => Promise<SkillPackagePreflight>;
   onImport: (packagePath: string) => Promise<unknown>;
   onExport: (skillName: string, outputPath: string, release: boolean, privateKeyPath?: string) => Promise<unknown>;
@@ -73,12 +76,24 @@ export function SkillPackageManagerPanel({
   const [governanceReason, setGovernanceReason] = useState("");
   const [signerFingerprint, setSignerFingerprint] = useState("");
   const [blockPackageId, setBlockPackageId] = useState("");
+  const [draggingPackage, setDraggingPackage] = useState(false);
+  const [showAdvanced, setShowAdvanced] = useState(false);
   const [officialKey, setOfficialKey] = useState<OfficialKeyStatus | null>(null);
   const [officialKeyOutputPath, setOfficialKeyOutputPath] = useState("");
   const [officialKeyBackupPath, setOfficialKeyBackupPath] = useState("");
   const [officialKeyExportPassphrase, setOfficialKeyExportPassphrase] = useState("");
   const [officialKeyImportPassphrase, setOfficialKeyImportPassphrase] = useState("");
   const [officialKeyBusy, setOfficialKeyBusy] = useState(false);
+  const packageDropzoneRef = useRef<HTMLDivElement | null>(null);
+  function isInsidePackageDropzone(position: { x: number; y: number }) {
+    const element = packageDropzoneRef.current;
+    if (!element) return false;
+    const ratio = window.devicePixelRatio || 1;
+    const bounds = element.getBoundingClientRect();
+    const x = position.x / ratio;
+    const y = position.y / ratio;
+    return x >= bounds.left && x <= bounds.right && y >= bounds.top && y <= bounds.bottom;
+  }
   const preview = normalizeSkillPackagePreview(preflight);
   const safeModeEnabled = skillPackageSafeModeEnabled(governance);
   useEffect(() => {
@@ -145,6 +160,45 @@ export function SkillPackageManagerPanel({
       setLocalError(cause instanceof Error ? cause.message : String(cause));
     }
   }
+  useEffect(() => {
+    if (!hasTauriInternals()) {
+      return;
+    }
+    let unlisten: (() => void) | undefined;
+    void getCurrentWebview().onDragDropEvent((event: { payload: DragDropEvent }) => {
+      const payload = event.payload;
+      if (payload.type === "enter" || payload.type === "over") {
+        setDraggingPackage(isInsidePackageDropzone(payload.position));
+        return;
+      }
+      if (payload.type === "leave") {
+        setDraggingPackage(false);
+        return;
+      }
+      if (payload.type !== "drop" || !isInsidePackageDropzone(payload.position)) return;
+      setDraggingPackage(false);
+      const path = payload.paths.find((candidate) => candidate.toLowerCase().endsWith(".vsk"));
+      if (!path) {
+        setLocalError(i18n.t("package.dropInvalid"));
+        return;
+      }
+      setPackagePath(path);
+      setLocalMessage("");
+      setLocalError("");
+      void (async () => {
+        try {
+          const previewPayload = await onPreflight(path);
+          setPreflight(previewPayload);
+          await onImport(path);
+          setPreflight(null);
+          setLocalMessage(i18n.t("package.messages.packageImported"));
+        } catch (cause) {
+          setLocalError(cause instanceof Error ? cause.message : String(cause));
+        }
+      })();
+    }).then((cleanup) => { unlisten = cleanup; });
+    return () => { unlisten?.(); };
+  }, [onImport, onPreflight]);
   async function runExport() {
     const privateKeyPath = exportPrivateKeyPath.trim();
     if (!exportSkillName.trim() || !exportPath.trim() || (releaseExport && !privateKeyPath)) {
@@ -158,6 +212,10 @@ export function SkillPackageManagerPanel({
     } catch (cause) {
       setLocalError(cause instanceof Error ? cause.message : String(cause));
     }
+  }
+  function preparePackageExport(pkg: SkillPackageEntry) {
+    setExportSkillName(skillPackageTitle(pkg));
+    setShowAdvanced(true);
   }
   async function runSetEnabled(skillPackageIdValue: string, enabled: boolean) {
     if (!skillPackageIdValue || skillPackageIdValue === "-") {
@@ -266,26 +324,122 @@ export function SkillPackageManagerPanel({
   const displayMessage = localMessage || message;
   const displayError = localError || error;
   return (
-    <section className="min-w-0 rounded-xl border border-border bg-card p-5 shadow-panel">
-      <div className="mb-5 flex min-w-0 items-center gap-2">
+    <details open className="order-first min-w-0 rounded-xl border border-border bg-card p-5 shadow-panel" data-vrcforge-installed-skills>
+      <summary className="flex min-w-0 cursor-pointer list-none items-center gap-2">
         <Shield className="h-4 w-4 shrink-0 text-primary" />
         <div className="min-w-0 flex-1 truncate text-sm font-semibold">{i18n.t("package.title")}</div>
         <Badge tone="muted" className="shrink-0">
           {packages.length}
         </Badge>
-        <Button type="button" variant="ghost" className="h-7 px-2 text-xs" onClick={onRefresh} disabled={loading}>
+        <Button
+          type="button"
+          variant="ghost"
+          className="h-7 px-2 text-xs"
+          onClick={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            onRefresh();
+          }}
+          disabled={loading}
+        >
           {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
         </Button>
-      </div>
+      </summary>
 
-      <div className="grid gap-4">
+      <div className="mt-5 grid gap-4">
         <div className="grid gap-3">
-          <DataLine label={i18n.t("package.store")} value={packageStore || "-"} />
-          {displayMessage ? <Badge tone="ok" className="w-fit">{displayMessage}</Badge> : null}
+          {displayMessage ? <Badge tone={skillPackageMessageTone(displayMessage)} className="w-fit">{displayMessage}</Badge> : null}
           {displayError ? <div className="rounded-md border border-destructive/20 bg-destructive/5 px-3 py-2 text-xs text-destructive">{displayError}</div> : null}
         </div>
 
-        <div className="grid gap-3 rounded-lg border border-border bg-background p-3">
+        <div className="grid gap-2">
+          {packages.length === 0 ? (
+            <div className="px-3 py-6 text-center text-xs text-muted-foreground">{i18n.t("package.noPackages")}</div>
+          ) : null}
+          {packages.map((pkg, index) => {
+            const id = skillPackageId(pkg);
+            const enabled = skillPackageEnabled(pkg);
+            const busy = loading || packageActionId === id;
+            return (
+              <div key={`${id}-${index}`} className="grid min-w-0 gap-3 rounded-lg border border-border/60 bg-card px-3 py-3 text-xs sm:grid-cols-[minmax(0,1fr)_auto]" data-vrcforge-installed-skill-card>
+                <div className="min-w-0">
+                  <div className="break-words font-medium">{skillPackageTitle(pkg)}</div>
+                  <div className="break-all text-muted-foreground">{id}</div>
+                  <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1">
+                    <Badge tone={skillPackageLabelTone(skillPackageRisk(pkg))} className="h-5 px-1.5 text-[10px]">{skillPackageRiskLabel(pkg)}</Badge>
+                    {skillPackageLabels(pkg).map((label) => (
+                      <Badge key={label} title={skillPackageExecutionDescription(pkg)} tone={skillPackageLabelTone(label)} className="h-5 px-1.5 text-[10px]">{label}</Badge>
+                    ))}
+                  </div>
+                </div>
+                <div className="flex min-w-0 flex-wrap items-center justify-end gap-2">
+                  <SkillSwitch
+                    checked={enabled}
+                    busy={busy}
+                    label={enabled ? i18n.t("package.disable") : i18n.t("package.enable")}
+                    onChange={() => void runSetEnabled(id, !enabled)}
+                  />
+                  <Button type="button" variant="outline" className="h-8 px-2 text-xs" disabled={busy || id === "-"} onClick={() => preparePackageExport(pkg)}>
+                    <Copy className="h-3.5 w-3.5" />
+                    {i18n.t("package.export")}
+                  </Button>
+                  <details className="relative">
+                    <summary className="flex h-8 cursor-pointer list-none items-center rounded-md border border-border px-2 text-xs text-muted-foreground">{i18n.t("package.advancedActions")}</summary>
+                    <div className="absolute right-0 z-10 mt-1 flex min-w-40 flex-col gap-1 rounded-md border border-border bg-card p-1 shadow-panel">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="h-8 px-2 text-xs"
+                    disabled={busy || skillPackageSigner(pkg) === "-"}
+                    onClick={() => void runTrustSigner(skillPackageSigner(pkg))}
+                  >
+                    <Check className="h-3.5 w-3.5" />
+                    {i18n.t("package.trust")}
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="h-8 px-2 text-xs"
+                    disabled={busy || skillPackageSigner(pkg) === "-"}
+                    onClick={() => void runRevokeSigner(skillPackageSigner(pkg))}
+                  >
+                    <X className="h-3.5 w-3.5" />
+                    {i18n.t("package.revoke")}
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="danger"
+                    className="h-8 px-2 text-xs"
+                    disabled={busy || id === "-"}
+                    onClick={() => void runBlockPackage(pkg)}
+                  >
+                    <EyeOff className="h-3.5 w-3.5" />
+                    {i18n.t("package.block")}
+                  </Button>
+                    </div>
+                  </details>
+                  <Button
+                    type="button"
+                    variant="danger"
+                    className="h-8 px-2 text-xs"
+                    disabled={busy || id === "-"}
+                    onClick={() => void runUninstall(id)}
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                    {i18n.t("package.uninstall")}
+                  </Button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+        <details className="grid gap-3 rounded-lg border border-border bg-background p-3">
+          <summary className="cursor-pointer text-sm font-medium">
+            {i18n.t("package.governance")}
+            <span className="ml-2 text-xs font-normal text-muted-foreground">{safeModeEnabled ? i18n.t("package.safeMode") : i18n.t("package.standard")}</span>
+          </summary>
+          <DataLine label={i18n.t("package.store")} value={packageStore || "-"} />
           <div className="flex min-w-0 items-center gap-2">
             <span className="min-w-0 flex-1 truncate text-sm font-medium">{i18n.t("package.governance")}</span>
             <Badge tone={safeModeEnabled ? "warn" : "muted"} className="shrink-0">
@@ -371,9 +525,14 @@ export function SkillPackageManagerPanel({
               </div>
             </div>
           </details>
-        </div>
+        </details>
 
-        <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_auto_auto]">
+        <div ref={packageDropzoneRef} className={`grid gap-3 rounded-lg border p-3 transition-colors ${draggingPackage ? "border-primary bg-primary/5" : "border-border bg-background"}`} data-vrcforge-skill-dropzone>
+          <div className="flex items-center gap-2 text-xs text-muted-foreground">
+            <FileUp className="h-4 w-4 text-primary" />
+            <span>{i18n.t("package.dropHint")}</span>
+          </div>
+          <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_auto_auto]">
           <SkillFieldLabel label={i18n.t("package.packagePath")}>
             <input
               value={packagePath}
@@ -387,8 +546,9 @@ export function SkillPackageManagerPanel({
           </Button>
           <Button type="button" className="self-end" disabled={loading || !packagePath.trim()} onClick={() => void runImport()}>
             {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
-            Import
+            {i18n.t("package.import")}
           </Button>
+          </div>
         </div>
 
         {preview ? (
@@ -396,14 +556,14 @@ export function SkillPackageManagerPanel({
             <div className="flex min-w-0 items-center gap-2">
               <span className="min-w-0 flex-1 truncate text-sm font-medium">{skillPackageTitle(preview)}</span>
               {skillPackageLabels(preview).map((label) => (
-                <Badge key={label} tone={skillPackageLabelTone(label)} className="h-6 shrink-0">
+                <Badge key={label} title={skillPackageExecutionDescription(preview)} tone={skillPackageLabelTone(label)} className="h-6 shrink-0">
                   {label}
                 </Badge>
               ))}
             </div>
             <div className="grid gap-2 md:grid-cols-3">
               <DataLine label="Version" value={String(preview.version || "-")} />
-              <DataLine label={i18n.t("package.tableRisk")} value={skillPackageRisk(preview)} />
+              <DataLine label={i18n.t("package.tableRisk")} value={skillPackageRiskLabel(preview)} />
               <DataLine label="Signer" value={skillPackageSigner(preview)} mono />
             </div>
             <SkillOutputBlock label="Permissions" value={skillPackagePermissions(preview).join("\n")} />
@@ -413,14 +573,21 @@ export function SkillPackageManagerPanel({
           </div>
         ) : null}
 
-        <PathToSkillCapturePanel
-          key={pathToSkillDraftSeed?.revision ?? "manual"}
-          initialSummary={pathToSkillDraftSeed?.summary}
-          onPreview={onPreviewPathToSkill}
-          onWrite={onWritePathToSkill}
-        />
+        <details className="rounded-lg border border-border bg-background p-3">
+          <summary className="cursor-pointer text-sm font-medium">{i18n.t("package.pathToSkillAdvanced")}</summary>
+          <div className="mt-3">
+            <PathToSkillCapturePanel
+              key={pathToSkillDraftSeed?.revision ?? "manual"}
+              initialSummary={pathToSkillDraftSeed?.summary}
+              onPreview={onPreviewPathToSkill}
+              onWrite={onWritePathToSkill}
+            />
+          </div>
+        </details>
 
-        <div className="grid gap-3 rounded-lg border border-border bg-background p-3">
+        <details className="rounded-lg border border-border bg-background p-3" open={showAdvanced} onToggle={(event) => setShowAdvanced(event.currentTarget.open)}>
+          <summary className="cursor-pointer text-sm font-medium">{i18n.t("package.exportSection")}</summary>
+          <div className="mt-3 grid gap-3">
           <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
             <SkillFieldLabel label={i18n.t("package.skillName")}>
               <input
@@ -461,94 +628,29 @@ export function SkillPackageManagerPanel({
               {i18n.t("package.export")}
             </Button>
           </div>
-        </div>
-
-        <div className="overflow-hidden rounded-lg border border-border">
-          <div className="grid grid-cols-[minmax(0,1fr)_76px_150px_minmax(300px,390px)] gap-2 border-b border-border bg-muted/40 px-3 py-2 text-xs font-medium text-muted-foreground">
-            <span className="truncate">{i18n.t("subagent.roles.outfitPackageInspection")}</span>
-            <span className="truncate">{i18n.t("package.tableRisk")}</span>
-            <span className="truncate">{i18n.t("connector.status")}</span>
-            <span className="truncate">{i18n.t("package.tableActions")}</span>
           </div>
-          {packages.length === 0 ? (
-            <div className="px-3 py-6 text-center text-xs text-muted-foreground">{i18n.t("package.noPackages")}</div>
-          ) : null}
-          {packages.map((pkg, index) => {
-            const id = skillPackageId(pkg);
-            const enabled = skillPackageEnabled(pkg);
-            const busy = loading || packageActionId === id;
-            return (
-              <div key={`${id}-${index}`} className="grid grid-cols-[minmax(0,1fr)_76px_150px_minmax(300px,390px)] gap-2 border-b border-border/60 px-3 py-2 text-xs last:border-b-0">
-                <div className="min-w-0">
-                  <div className="truncate font-medium">{skillPackageTitle(pkg)}</div>
-                  <div className="truncate text-muted-foreground">{id}</div>
-                </div>
-                <span className="truncate">{skillPackageRisk(pkg)}</span>
-                <div className="flex min-w-0 flex-wrap gap-1">
-                  {skillPackageLabels(pkg).map((label) => (
-                    <Badge key={label} tone={skillPackageLabelTone(label)} className="h-5 px-1.5 text-[10px]">
-                      {label}
-                    </Badge>
-                  ))}
-                </div>
-                <div className="flex min-w-0 flex-wrap justify-end gap-1">
-                  <Button
-                    type="button"
-                    variant="outline"
-                    className="h-8 px-2 text-xs"
-                    disabled={busy || id === "-"}
-                    onClick={() => void runSetEnabled(id, !enabled)}
-                  >
-                    {packageActionId === id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : enabled ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
-                    {enabled ? i18n.t("package.disable") : i18n.t("package.enable")}
-                  </Button>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    className="h-8 px-2 text-xs"
-                    disabled={busy || skillPackageSigner(pkg) === "-"}
-                    onClick={() => void runTrustSigner(skillPackageSigner(pkg))}
-                  >
-                    <Check className="h-3.5 w-3.5" />
-                    {i18n.t("package.trust")}
-                  </Button>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    className="h-8 px-2 text-xs"
-                    disabled={busy || skillPackageSigner(pkg) === "-"}
-                    onClick={() => void runRevokeSigner(skillPackageSigner(pkg))}
-                  >
-                    <X className="h-3.5 w-3.5" />
-                    {i18n.t("package.revoke")}
-                  </Button>
-                  <Button
-                    type="button"
-                    variant="danger"
-                    className="h-8 px-2 text-xs"
-                    disabled={busy || id === "-"}
-                    onClick={() => void runBlockPackage(pkg)}
-                  >
-                    <EyeOff className="h-3.5 w-3.5" />
-                    {i18n.t("package.block")}
-                  </Button>
-                  <Button
-                    type="button"
-                    variant="danger"
-                    className="h-8 px-2 text-xs"
-                    disabled={busy || id === "-"}
-                    onClick={() => void runUninstall(id)}
-                  >
-                    <Trash2 className="h-3.5 w-3.5" />
-                    {i18n.t("package.uninstall")}
-                  </Button>
-                </div>
-              </div>
-            );
-          })}
-        </div>
+        </details>
+
+
       </div>
-    </section>
+    </details>
+  );
+}
+
+function SkillSwitch({ checked, busy, label, onChange }: { checked: boolean; busy: boolean; label: string; onChange: () => void }) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      aria-label={label}
+      data-vrcforge-skill-package-enabled={checked ? "true" : "false"}
+      disabled={busy}
+      onClick={onChange}
+      className={`relative h-7 w-12 shrink-0 overflow-hidden rounded-full border transition-colors ${checked ? "border-primary bg-primary" : "border-border bg-muted"} ${busy ? "cursor-not-allowed opacity-50" : ""}`}
+    >
+      <span className={`absolute left-0 top-1/2 h-5 w-5 -translate-y-1/2 rounded-full bg-white shadow-sm transition-transform ${checked ? "translate-x-[26px]" : "translate-x-[2px]"}`} />
+    </button>
   );
 }
 
@@ -564,11 +666,23 @@ function skillPackageId(pkg: SkillPackageEntry): string {
 }
 
 function skillPackageTitle(pkg: SkillPackageEntry): string {
-  return String(pkg.title || pkg.manifest?.title || skillPackageId(pkg));
+  return String(pkg.title || pkg.name || pkg.manifest?.title || pkg.manifest?.name || skillPackageId(pkg));
 }
 
 function skillPackageRisk(pkg: SkillPackageEntry): string {
   return String(pkg.risk_level || pkg.riskLevel || "low");
+}
+
+function skillPackageRiskLabel(pkg: SkillPackageEntry): string {
+  const risk = skillPackageRisk(pkg).toLowerCase();
+  const key = risk === "high" || risk === "medium" || risk === "low" ? risk : "low";
+  return i18n.t(`package.risk.${key}`);
+}
+
+function skillPackageMessageTone(message: string): "ok" | "warn" | "muted" {
+  if (message === i18n.t("package.messages.packageEnabled")) return "ok";
+  if (message === i18n.t("package.messages.packageDisabled")) return "muted";
+  return "warn";
 }
 
 function skillPackageSigner(pkg: SkillPackageEntry): string {
@@ -592,6 +706,7 @@ function skillPackagePermissions(pkg: SkillPackageEntry): string[] {
 
 function skillPackageLabels(pkg: SkillPackageEntry): string[] {
   const labels: string[] = [];
+  labels.push(i18n.t(`package.executionMode.${skillPackageExecutionMode(pkg)}`));
   const status = String(pkg.signature_status || pkg.signatureStatus || "").toLowerCase();
   const errorText = [...(pkg.errors || []), ...(pkg.warnings || [])].join(" ").toLowerCase();
   const governance = skillPackageGovernance(pkg);
@@ -601,6 +716,9 @@ function skillPackageLabels(pkg: SkillPackageEntry): string[] {
   const safeMode = skillPackageSafeMode(governance);
   if (pkg.source === "builtin") {
     labels.push("Built-in");
+  }
+  if (pkg.official === true) {
+    labels.push("Official");
   }
   if (status === "signed") {
     labels.push("Signed");
@@ -637,8 +755,24 @@ function skillPackageLabels(pkg: SkillPackageEntry): string[] {
   return [...new Set(labels)];
 }
 
+function skillPackageExecutionMode(pkg: SkillPackageEntry): "deterministic" | "agentic" {
+  const manifest = pkg.manifest || {};
+  const workflow = (manifest.workflow && typeof manifest.workflow === "object" ? manifest.workflow : {}) as Record<string, unknown>;
+  const raw = String(pkg.execution || manifest.execution || pkg.executionMode || pkg.execution_mode || manifest.executionMode || manifest.execution_mode || workflow.executionMode || workflow.execution_mode || "").toLowerCase();
+  return ["deterministic", "fixed", "fixed_steps", "fixed-steps"].includes(raw) ? "deterministic" : "agentic";
+}
+
+function skillPackageExecutionDescription(pkg: SkillPackageEntry): string {
+  const manifestEntrypoints = pkg.manifest && typeof pkg.manifest.entrypoints === "object"
+    ? (pkg.manifest.entrypoints as Record<string, unknown>)
+    : {};
+  return i18n.t(`package.executionMode.${skillPackageExecutionMode(pkg)}Description`, {
+    hasPlan: Boolean(pkg.entrypoints?.executionPlan || manifestEntrypoints.executionPlan),
+  });
+}
+
 function skillPackageLabelTone(label: string): "ok" | "warn" | "danger" | "muted" {
-  if (label === "Signed" || label === "Built-in" || label === "Trusted signer") {
+  if (label === "Signed" || label === "Built-in" || label === "Official" || label === "Trusted signer") {
     return "ok";
   }
   if (label === "Signature mismatch" || label === "Blocked" || label === "Revoked signer" || label.includes("blocked")) {

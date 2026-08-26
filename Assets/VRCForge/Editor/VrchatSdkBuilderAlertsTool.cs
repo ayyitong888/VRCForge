@@ -23,6 +23,12 @@ namespace VRCForge.Editor
     )]
     public static class VrchatSdkBuilderAlertsTool
     {
+        public sealed class Parameters
+        {
+            [VRCForgeInput("Exact active Unity project root.", IsRequired = true)] public string projectPath { get; set; } = string.Empty;
+            [VRCForgeInput("Exact loaded-scene hierarchy path of the avatar root.", IsRequired = true)] public string avatarPath { get; set; } = string.Empty;
+        }
+
         private const string Schema = "vrcforge.vrchat_sdk_builder_alerts.v1";
         private const string SupportedSdkVersion = "3.10.4";
 

@@ -6,6 +6,8 @@ import json
 import os
 import socket
 import threading
+import time
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -17,6 +19,9 @@ from unity_mcp_core_client import (
     TRANSPORT_SCHEMA,
     UnityMcpCoreClient,
     UnityMcpCoreError,
+    UnityMcpCoreBusyError,
+    PROJECT_CORE_BUSY_WAIT_SECONDS,
+    _project_core_slot,
     canonical_arguments_sha256,
     probe_unity_mcp_core_diagnostics,
 )
@@ -44,6 +49,35 @@ def test_canonical_argument_hash_is_ordered_and_type_preserving() -> None:
     assert canonical_arguments_sha256({"value": 1}) != canonical_arguments_sha256({"value": 1.0})
     with pytest.raises(ValueError, match="JSON-compatible"):
         canonical_arguments_sha256({"value": float("nan")})
+
+
+def test_project_core_connection_limit_is_canonical_bounded_and_retryable(tmp_path: Path) -> None:
+    project = tmp_path / "Project"
+    project.mkdir()
+    entered = threading.Barrier(4)
+    release = threading.Event()
+
+    def hold_slot() -> None:
+        with _project_core_slot(project, wait_seconds=1):
+            entered.wait(2)
+            release.wait(2)
+
+    holders = [threading.Thread(target=hold_slot) for _ in range(3)]
+    for holder in holders:
+        holder.start()
+    entered.wait(2)
+    started = time.monotonic()
+    with pytest.raises(UnityMcpCoreBusyError) as raised:
+        with _project_core_slot(project, wait_seconds=PROJECT_CORE_BUSY_WAIT_SECONDS):
+            pass
+    assert time.monotonic() - started < 1.0
+    assert raised.value.retryable is True
+    assert raised.value.cause_code == "unity_core_project_busy"
+    assert raised.value.details["maxConcurrent"] == 3
+    release.set()
+    for holder in holders:
+        holder.join(2)
+        assert not holder.is_alive()
 
 
 def test_canonical_argument_hash_normalizes_negative_zero_inside_quaternion() -> None:
@@ -317,6 +351,29 @@ def test_pre_handshake_diagnostics_returns_compiled_identity_and_compile_failure
     assert result["coreInfo"]["versionSource"] == "compiled_constant"
     assert result["compileResult"]["structuredContent"]["data"]["errorCount"] == 1
     assert result["handshakeError"]["code"] == -32022
+
+
+def test_probe_diagnostics_preserves_structured_retryable_busy(monkeypatch, core_files):
+    project, descriptor_path, descriptor = core_files
+    _write_descriptor(descriptor_path, descriptor, 1)
+
+    @contextmanager
+    def busy_slot(*_args, **_kwargs):
+        raise UnityMcpCoreBusyError(project.resolve(), wait_seconds=0.25, active=3)
+        yield
+
+    monkeypatch.setattr("unity_mcp_core_client._project_core_slot", busy_slot)
+    result = probe_unity_mcp_core_diagnostics(project)
+
+    assert result["transportErrorCauseCode"] == "unity_core_project_busy"
+    assert result["transportErrorRetryable"] is True
+    assert result["transportErrorDetails"] == {
+        "kind": "project_connection_limit",
+        "projectPath": str(project.resolve()),
+        "maxConcurrent": 3,
+        "active": 3,
+        "waitSeconds": 0.25,
+    }
 
 
 def test_execution_exposure_returns_the_exact_fixed_64(core_files):

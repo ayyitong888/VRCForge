@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from agent_gateway import EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS, UNITY_READ_TOOL_INPUT_SCHEMAS
 from texture_import_settings import (
     APPROVAL_PREVIEW_SCHEMA,
     RESULT_SCHEMA,
@@ -136,6 +137,115 @@ def test_request_normalization_is_explicit_and_canonical() -> None:
         "crunch": True,
         "quality": 82,
     }
+
+
+def test_streaming_mipmaps_is_optional_in_the_shared_preview_and_apply_schema() -> None:
+    preview_schema = UNITY_READ_TOOL_INPUT_SCHEMAS["vrcforge_preview_texture_import_settings"]
+    apply_schema = EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS["vrcforge_set_texture_import_settings"]
+
+    assert preview_schema is apply_schema
+    assert preview_schema["properties"]["streamingMipmaps"]["type"] == "boolean"
+    assert "streamingMipmaps" not in preview_schema["required"]
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_optional_streaming_mipmaps_is_preserved_through_normalization_and_preview(enabled: bool) -> None:
+    arguments = requested_arguments()
+    arguments["streamingMipmaps"] = enabled
+
+    assert normalize_requested_settings(arguments)["streamingMipmaps"] is enabled
+    assert build_wrapper_arguments({"projectPath": PROJECT_PATH, **arguments})["arguments"] == arguments
+    assert build_preview_arguments(arguments)["streamingMipmaps"] is enabled
+
+
+@pytest.mark.parametrize("invalid", [0, 1, "true", None])
+def test_optional_streaming_mipmaps_rejects_non_boolean_values(invalid: object) -> None:
+    arguments = requested_arguments()
+    arguments["streamingMipmaps"] = invalid
+
+    with pytest.raises(TextureImportSettingsError, match="streamingMipmaps"):
+        normalize_requested_settings(arguments)
+
+
+def test_streaming_mipmaps_preview_is_bound_into_receipts_and_approved_apply() -> None:
+    wrapper = wrapper_arguments()
+    wrapper["arguments"]["streamingMipmaps"] = True
+    payload = preview_payload()
+    payload["beforeSettings"]["streamingMipmaps"] = False
+    payload["targetSettings"]["streamingMipmaps"] = True
+    before_digest = compute_settings_digest("Default", payload["beforeSettings"])
+    target_digest = compute_settings_digest("Default", payload["targetSettings"])
+    payload["importerSettingsDigestBefore"] = before_digest
+    payload["importerSettingsDigestAfter"] = before_digest
+    payload["targetSettingsDigest"] = target_digest
+
+    canonical, approval = bind_authoritative_preview(wrapper, payload)
+
+    assert canonical["arguments"]["streamingMipmaps"] is True
+    assert canonical["arguments"]["expectedImporterSettingsDigest"] == before_digest
+    assert canonical["arguments"]["expectedTargetSettingsDigest"] == target_digest
+    assert approval["change"]["before"]["streamingMipmaps"] is False
+    assert approval["change"]["after"]["streamingMipmaps"] is True
+
+
+def test_omitted_streaming_mipmaps_preserves_current_state_in_updated_core_preview() -> None:
+    wrapper = wrapper_arguments()
+    payload = preview_payload()
+    payload["beforeSettings"]["streamingMipmaps"] = True
+    payload["targetSettings"]["streamingMipmaps"] = True
+    before_digest = compute_settings_digest("Default", payload["beforeSettings"])
+    payload["importerSettingsDigestBefore"] = before_digest
+    payload["importerSettingsDigestAfter"] = before_digest
+    payload["targetSettingsDigest"] = compute_settings_digest("Default", payload["targetSettings"])
+
+    canonical, approval = bind_authoritative_preview(wrapper, payload)
+
+    assert "streamingMipmaps" not in canonical["arguments"]
+    assert approval["change"]["before"]["streamingMipmaps"] is True
+    assert approval["change"]["after"]["streamingMipmaps"] is True
+
+
+def test_streaming_mipmaps_only_change_is_treated_as_an_approved_mutation() -> None:
+    wrapper = wrapper_arguments()
+    wrapper["arguments"]["streamingMipmaps"] = True
+    payload = preview_payload()
+    payload["beforeSettings"] = target_settings()
+    payload["beforeSettings"]["streamingMipmaps"] = False
+    payload["targetSettings"]["streamingMipmaps"] = True
+    before_digest = compute_settings_digest("Default", payload["beforeSettings"])
+    payload["importerSettingsDigestBefore"] = before_digest
+    payload["importerSettingsDigestAfter"] = before_digest
+    payload["targetSettingsDigest"] = compute_settings_digest("Default", payload["targetSettings"])
+
+    _, approval = bind_authoritative_preview(wrapper, payload)
+
+    assert approval["change"]["wouldChange"] is True
+    assert approval["change"]["before"]["streamingMipmaps"] is False
+    assert approval["change"]["after"]["streamingMipmaps"] is True
+
+
+def test_streaming_mipmaps_preview_rejects_requested_state_substitution() -> None:
+    wrapper = wrapper_arguments()
+    wrapper["arguments"]["streamingMipmaps"] = True
+    payload = preview_payload()
+    payload["beforeSettings"]["streamingMipmaps"] = False
+    payload["targetSettings"]["streamingMipmaps"] = False
+    before_digest = compute_settings_digest("Default", payload["beforeSettings"])
+    payload["importerSettingsDigestBefore"] = before_digest
+    payload["importerSettingsDigestAfter"] = before_digest
+    payload["targetSettingsDigest"] = compute_settings_digest("Default", payload["targetSettings"])
+
+    with pytest.raises(TextureImportSettingsError, match="requested settings"):
+        bind_authoritative_preview(wrapper, payload)
+
+
+def test_streaming_mipmaps_digest_changes_when_only_streaming_changes() -> None:
+    before = before_settings()
+    before["streamingMipmaps"] = False
+    after = deepcopy(before)
+    after["streamingMipmaps"] = True
+
+    assert compute_settings_digest("Default", before) != compute_settings_digest("Default", after)
 
 
 @pytest.mark.parametrize(
@@ -313,6 +423,11 @@ def test_csharp_domain_module_keeps_preview_zero_write_and_apply_exact() -> None
     assert "checkpointRestoreRequired" in source
     assert "cleanupRequired" in source
     assert "TryRestoreBeforeSettings" in source
+    assert 'ReadStrictBool(@params, "streamingMipmaps")' in source
+    assert "streamingMipmaps = importer.streamingMipmaps" in source
+    assert "evidence.importer.streamingMipmaps = targetSettings.streamingMipmaps;" in source
+    assert "importer.streamingMipmaps = beforeSettings.streamingMipmaps;" in source
+    assert "settings.streamingMipmaps ? \"true\" : \"false\"" in source
     apply_source, restore_source = source.split("private static bool TryRestoreBeforeSettings", 1)
     assert apply_source.count(".SaveAndReimport();") == 1
     assert restore_source.count(".SaveAndReimport();") == 1

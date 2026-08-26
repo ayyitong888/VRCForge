@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from unity_mcp_core_client import UnityMcpCoreClient, UnityMcpCoreError
+from unity_editor_window_probe import probe_unity_reload_dialog
 
 
 @dataclass(frozen=True)
@@ -70,6 +71,8 @@ class UnityStatusService:
         missing = list(self._ports.required_tools)
         return {
             "connected": False,
+            "executionReady": False,
+            "blockerCode": cause_code,
             "mcpServerReachable": False,
             "unityInstanceRegistered": False,
             "selectedInstanceMatched": False,
@@ -137,8 +140,10 @@ class UnityStatusService:
                 "cliSelectorStable": True,
                 "cliInstanceId": "project-scoped",
             }
-            return {
+            status = {
                 "connected": True,
+                "executionReady": True,
+                "blockerCode": "",
                 "mcpServerReachable": True,
                 "unityInstanceRegistered": True,
                 "selectedInstanceMatched": True,
@@ -158,9 +163,12 @@ class UnityStatusService:
                 "parsed": None,
                 "error": "",
             }
+            return _apply_editor_readiness(status, project_root)
         except UnityMcpCoreError as exc:
             return {
                 "connected": False,
+                "executionReady": False,
+                "blockerCode": getattr(exc, "cause_code", "unity_core_contract_invalid"),
                 "mcpServerReachable": False,
                 "unityInstanceRegistered": False,
                 "selectedInstanceMatched": False,
@@ -188,3 +196,21 @@ class UnityStatusService:
                 "error": str(exc),
                 "causeCode": getattr(exc, "cause_code", "unity_core_contract_invalid"),
             }
+
+
+
+def _apply_editor_readiness(status: dict[str, Any], project_root: Path) -> dict[str, Any]:
+    """Inspect, but never act on, the exact project's native Reload dialog."""
+
+    blocker = probe_unity_reload_dialog(project_root)
+    if blocker.get("blocked") is True:
+        status["executionReady"] = False
+        status["blockerCode"] = str(blocker.get("blockerCode") or "unity_editor_reload_dialog")
+        status["editorBlocker"] = blocker
+    elif isinstance(blocker.get("probeError"), dict):
+        status["executionReady"] = False
+        status["blockerCode"] = str(
+            blocker["probeError"].get("code") or "unity_editor_window_probe_failed"
+        )
+        status["editorBlocker"] = blocker
+    return status

@@ -1,4 +1,6 @@
 import { Archive, Camera, Check, ChevronDown, Globe, MessageSquare, MousePointer2, Paperclip, Pencil, Plus, Send, Shield, Square, Target, X } from "lucide-react";
+import { getCurrentWebview, type DragDropEvent } from "@tauri-apps/api/webview";
+import { convertFileSrc } from "@tauri-apps/api/core";
 import { type ClipboardEvent, type DragEvent, type FormEvent, type ReactNode, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import i18n from "../../i18n";
@@ -9,6 +11,7 @@ import type { ChatAttachment, ComposerAction, ComposerActionId, ComposerSlashCom
 import { SELECTED_TEXT_ATTACHMENT_NAME } from "../../lib/chat-types";
 import type { AgentGoal, PermissionState, ExecutionMode } from "../../lib/api";
 import { Button } from "../ui/button";
+import { hasTauriInternals } from "../../lib/api/http";
 
 function composerActionIcon(action: ComposerActionId): ReactNode {
   switch (action) {
@@ -91,6 +94,7 @@ export function Composer({
   const [paletteDismissed, setPaletteDismissed] = useState(false);
   const [dragDepth, setDragDepth] = useState(0);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const composerRef = useRef<HTMLFormElement | null>(null);
   const currentMode = (permission?.executionMode || "approval") as ExecutionMode;
   const currentModeVisual = permissionVisualState(permission, currentMode);
   const canSubmit = !disabledReason && (input.trim().length > 0 || attachments.length > 0);
@@ -175,6 +179,33 @@ export function Composer({
     setDragDepth(0);
     onAttachFiles?.(event.dataTransfer.files);
   };
+  useEffect(() => {
+    if (!hasTauriInternals()) return;
+    let unlisten: (() => void) | undefined;
+    void getCurrentWebview().onDragDropEvent(async (event: { payload: DragDropEvent }) => {
+      const payload = event.payload;
+      if (payload.type !== "drop" || !composerRef.current) return;
+      const ratio = window.devicePixelRatio || 1;
+      const bounds = composerRef.current.getBoundingClientRect();
+      const x = payload.position.x / ratio;
+      const y = payload.position.y / ratio;
+      if (x < bounds.left || x > bounds.right || y < bounds.top || y > bounds.bottom) return;
+      const files: File[] = [];
+      for (const path of payload.paths) {
+        try {
+          const response = await fetch(convertFileSrc(path));
+          if (!response.ok) throw new Error(`Dropped file could not be read (${response.status}).`);
+          const blob = await response.blob();
+          const name = path.split(/[\\/]/).pop() || "dropped-file";
+          files.push(new File([blob], name, { type: blob.type }));
+        } catch {
+          // The existing attachment pipeline reports metadata/read failures after this point.
+        }
+      }
+      if (files.length) onAttachFiles?.(files);
+    }).then((cleanup) => { unlisten = cleanup; });
+    return () => { unlisten?.(); };
+  }, [onAttachFiles]);
   const handlePaste = (event: ClipboardEvent<HTMLFormElement>) => {
     const pastedFiles = [
       ...Array.from(event.clipboardData.files || []),
@@ -200,12 +231,14 @@ export function Composer({
   };
   return (
     <form
+      ref={composerRef}
       onSubmit={onSubmit}
       onDragEnter={handleDragEnter}
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
       onPaste={handlePaste}
+      data-vrcforge-composer-dropzone
       className={cn("relative rounded-3xl bg-muted/70 shadow-composer", dragActive && "ring-2 ring-primary/35")}
     >
       {paletteOpen ? (

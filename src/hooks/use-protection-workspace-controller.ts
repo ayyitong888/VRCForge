@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { ActiveView } from "../lib/app-view";
 import { fetchAvatars, planAvatarEncryption, requestAvatarEncryptionApply } from "../lib/api";
 import type { AvatarEncryptionPlanResult, AvatarListItem } from "../lib/api";
@@ -35,6 +35,8 @@ export function useProtectionWorkspaceController({
   const [protectionMessage, setProtectionMessage] = useState("");
   const [protectionAvatarMessage, setProtectionAvatarMessage] = useState("");
   const [requestingProtectionFamily, setRequestingProtectionFamily] = useState("");
+  const protectionPlanCache = useRef(new Map<string, AvatarEncryptionPlanResult>());
+  const protectionAvatarCache = useRef(new Map<string, Awaited<ReturnType<typeof fetchAvatars>>>());
 
   useEffect(() => {
     if (activeView === "protection" && runtimeConnected) {
@@ -48,14 +50,43 @@ export function useProtectionWorkspaceController({
     }
   }, [activeView, runtimeConnected, endpoint, activeProjectPath]);
 
-  async function openProtection() {
+  function openProtection() {
     setActiveView("protection");
     setError("");
-    await loadProtectionPlan();
-    await loadProtectionAvatars();
+    if (!runtimeConnected) {
+      void startRuntime();
+    }
   }
 
-  async function loadProtectionPlan(target = endpoint, profile = protectionProfile) {
+  function applyProtectionPlan(payload: AvatarEncryptionPlanResult) {
+    setProtectionPlan(payload);
+    const plan = protectionPlanPayload(payload);
+    const candidateCount = Number(plan.selectedCandidateCount ?? 0);
+    const connector = (plan.externalAddon || {}) as Record<string, unknown>;
+    const connectorConfigured = Boolean(connector.configured);
+    const writeStatus = String(plan.writeStatus || "");
+    setProtectionMessage(
+      payload.ok
+        ? connectorConfigured && writeStatus !== "blocked"
+          ? `${candidateCount} target${candidateCount === 1 ? "" : "s"} ready for private addon request`
+          : `${candidateCount} target${candidateCount === 1 ? "" : "s"} found; private addon required`
+        : payload.error || "Protection plan returned warnings",
+    );
+  }
+
+  async function loadProtectionPlan(target = endpoint, profile = protectionProfile, force = false) {
+    const cacheKey = JSON.stringify([
+      target,
+      activeProjectPath,
+      protectionAvatarPath.trim(),
+      profile,
+      protectionOwnsAssets,
+    ]);
+    const cached = protectionPlanCache.current.get(cacheKey);
+    if (!force && cached) {
+      applyProtectionPlan(cached);
+      return;
+    }
     setLoadingProtection(true);
     setProtectionMessage("");
     try {
@@ -74,19 +105,8 @@ export function useProtectionWorkspaceController({
         protectionProfile: profile,
         confirmCreatorOwnedAssets: protectionOwnsAssets,
       });
-      setProtectionPlan(payload);
-      const plan = protectionPlanPayload(payload);
-      const candidateCount = Number(plan.selectedCandidateCount ?? 0);
-      const connector = (plan.externalAddon || {}) as Record<string, unknown>;
-      const connectorConfigured = Boolean(connector.configured);
-      const writeStatus = String(plan.writeStatus || "");
-      setProtectionMessage(
-        payload.ok
-          ? connectorConfigured && writeStatus !== "blocked"
-            ? `${candidateCount} target${candidateCount === 1 ? "" : "s"} ready for private addon request`
-            : `${candidateCount} target${candidateCount === 1 ? "" : "s"} found; private addon required`
-          : payload.error || "Protection plan returned warnings",
-      );
+      protectionPlanCache.current.set(cacheKey, payload);
+      applyProtectionPlan(payload);
     } catch (cause) {
       setProtectionMessage(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -94,7 +114,28 @@ export function useProtectionWorkspaceController({
     }
   }
 
-  async function loadProtectionAvatars(target = endpoint) {
+  function applyProtectionAvatars(payload: Awaited<ReturnType<typeof fetchAvatars>>) {
+    const avatars = (payload.avatars ?? []).filter((item) => Boolean(item.avatarPath));
+    setProtectionAvatars(avatars);
+    if (!protectionAvatarPath.trim() && avatars.length === 1 && avatars[0].avatarPath) {
+      setProtectionAvatarPath(avatars[0].avatarPath);
+    }
+    setProtectionAvatarMessage(
+      payload.ok
+        ? avatars.length
+          ? `${avatars.length} avatar${avatars.length === 1 ? "" : "s"} found`
+          : "No scene avatars found"
+        : "Avatar scan returned warnings",
+    );
+  }
+
+  async function loadProtectionAvatars(target = endpoint, force = false) {
+    const cacheKey = JSON.stringify([target, activeProjectPath]);
+    const cached = protectionAvatarCache.current.get(cacheKey);
+    if (!force && cached) {
+      applyProtectionAvatars(cached);
+      return;
+    }
     setLoadingProtectionAvatars(true);
     setProtectionAvatarMessage("");
     try {
@@ -109,18 +150,8 @@ export function useProtectionWorkspaceController({
       const payload = await fetchAvatars(targetEndpoint, {
         projectPath: activeProjectPath || undefined,
       });
-      const avatars = (payload.avatars ?? []).filter((item) => Boolean(item.avatarPath));
-      setProtectionAvatars(avatars);
-      if (!protectionAvatarPath.trim() && avatars.length === 1 && avatars[0].avatarPath) {
-        setProtectionAvatarPath(avatars[0].avatarPath);
-      }
-      setProtectionAvatarMessage(
-        payload.ok
-          ? avatars.length
-            ? `${avatars.length} avatar${avatars.length === 1 ? "" : "s"} found`
-            : "No scene avatars found"
-          : "Avatar scan returned warnings",
-      );
+      protectionAvatarCache.current.set(cacheKey, payload);
+      applyProtectionAvatars(payload);
     } catch (cause) {
       setProtectionAvatarMessage(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -160,7 +191,7 @@ export function useProtectionWorkspaceController({
       });
       setProtectionMessage(payload.approval ? `Approval queued: ${payload.approval.id}` : payload.error || "Request queued.");
       await refreshSilently(targetEndpoint);
-      await loadProtectionPlan(targetEndpoint);
+      await loadProtectionPlan(targetEndpoint, protectionProfile, true);
     } catch (cause) {
       setProtectionMessage(cause instanceof Error ? cause.message : String(cause));
     } finally {

@@ -47,8 +47,8 @@ class StatusError(RuntimeError):
 
 
 def test_policy_constants_are_bounded_and_phase_specific() -> None:
-    assert TOTAL_CONCURRENCY_LIMIT == 5
-    assert BACKGROUND_CONCURRENCY_LIMIT == 2
+    assert TOTAL_CONCURRENCY_LIMIT == 16
+    assert BACKGROUND_CONCURRENCY_LIMIT == 12
     assert PROVIDER_PREFLIGHT_CACHE_SECONDS == 300
     assert TOTAL_PROVIDER_ATTEMPTS == 3
     assert PROVIDER_RETRY_BACKOFF_SECONDS == (60, 120, 300)
@@ -151,27 +151,25 @@ def test_lane_budget_enforces_total_and_background_limits() -> None:
     clock = FakeClock()
     budget = RuntimeLaneBudget(clock=clock)
 
-    assert budget.acquire("background", "b-1") is True
-    assert budget.acquire("background", "b-2") is True
-    assert budget.acquire("background", "b-3") is False
-    assert budget.acquire("interactive", "i-1") is True
-    assert budget.acquire("interactive", "i-2") is True
-    assert budget.acquire("interactive", "i-3") is True
-    assert budget.acquire("interactive", "i-4") is False
+    assert all(budget.acquire("background", f"b-{index}") for index in range(BACKGROUND_CONCURRENCY_LIMIT))
+    assert budget.acquire("background", "b-over") is False
+    remaining_interactive = TOTAL_CONCURRENCY_LIMIT - BACKGROUND_CONCURRENCY_LIMIT
+    assert all(budget.acquire("interactive", f"i-{index}") for index in range(remaining_interactive))
+    assert budget.acquire("interactive", "i-over") is False
 
     assert budget.snapshot() == {
-        "total": 5,
-        "background": 2,
-        "interactive": 3,
-        "totalLimit": 5,
-        "backgroundLimit": 2,
+        "total": TOTAL_CONCURRENCY_LIMIT,
+        "background": BACKGROUND_CONCURRENCY_LIMIT,
+        "interactive": TOTAL_CONCURRENCY_LIMIT - BACKGROUND_CONCURRENCY_LIMIT,
+        "totalLimit": TOTAL_CONCURRENCY_LIMIT,
+        "backgroundLimit": BACKGROUND_CONCURRENCY_LIMIT,
         "availableTotal": 0,
         "availableBackground": 0,
         "oldestLeaseAgeSeconds": 0.0,
     }
 
-    assert budget.release("b-1") is True
-    assert budget.acquire("background", "b-3") is True
+    assert budget.release("b-0") is True
+    assert budget.acquire("background", "b-over") is True
     assert budget.release("missing") is False
 
 
@@ -193,9 +191,9 @@ def test_lane_budget_reports_capacity_separately_from_duplicate_ownership() -> N
 
 def test_interactive_lane_can_use_idle_total_capacity() -> None:
     budget = RuntimeLaneBudget()
-    assert all(budget.acquire("interactive", f"interactive-{index}") for index in range(5))
+    assert all(budget.acquire("interactive", f"interactive-{index}") for index in range(TOTAL_CONCURRENCY_LIMIT))
     assert budget.acquire("background", "background") is False
-    assert budget.snapshot()["interactive"] == 5
+    assert budget.snapshot()["interactive"] == TOTAL_CONCURRENCY_LIMIT
 
 
 def test_lane_snapshot_uses_injected_clock_without_exposing_tokens() -> None:

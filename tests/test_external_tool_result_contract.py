@@ -71,6 +71,33 @@ def test_missing_post_route_write_facts_remain_unknown() -> None:
     assert error["commitStateKnown"] is False
 
 
+def test_canonical_facts_preserve_dispatch_retry_and_exact_recovery_flags() -> None:
+    facts = canonical_result_facts(
+        [
+            {
+                "ok": False,
+                "errorCode": "write_response_timeout",
+                "error": "The write response timed out after dispatch.",
+                "toolRoutingStarted": True,
+                "mutationStarted": None,
+                "committed": None,
+                "commitState": "unknown",
+                "retryable": True,
+                "checkpointRecoveryRequired": True,
+                "temporaryCleanupRequired": False,
+            }
+        ],
+        success=False,
+        status="failed",
+    )
+
+    assert facts["toolRoutingStarted"] is True
+    assert facts["retryable"] is True
+    assert facts["safeToRetry"] is False
+    assert facts["checkpointRecoveryRequired"] is True
+    assert facts["temporaryCleanupRequired"] is False
+
+
 def test_write_failure_view_only_exposes_known_retryability() -> None:
     unknown = build_external_tool_error(
         error="Unity was busy before the write started.",

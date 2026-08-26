@@ -30,7 +30,11 @@ assert.equal((settings.match(/data-memory-toggle=/g) || []).length, 1, "toggle m
 assert.match(settings, /testId="memory"/);
 assert.match(settings, /testId="cross-session"/);
 assert.match(settings, /role="switch"/);
-assert.match(settings, /disabled=\{!memoryEnabled\}/);
+assert.match(settings, /const ready = runtimeConnected && Boolean\(snapshot\)/);
+assert.match(settings, /disabled=\{!ready\}/);
+assert.match(settings, /disabled=\{!ready \|\| !memoryEnabled\}/);
+assert.doesNotMatch(settings, /controller\.loading \|\| !snapshot/);
+assert.doesNotMatch(settings, /settings\.memoryPreferencesLoading/);
 assert.match(settings, /mode: "off"/);
 assert.match(settings, /automaticCaptureEnabled: effectiveCrossSession/);
 assert.match(settings, /settings\.memoryPreferencesTitle/);
@@ -54,6 +58,8 @@ for (const forbidden of [
   assert.doesNotMatch(settings, new RegExp(forbidden), `advanced Memory UI must stay hidden: ${forbidden}`);
 }
 assert.doesNotMatch(workspace, /MemorySettingsPanel/);
+assert.match(workspace, /<section className="pb-6" hidden=\{visibleSection !== "memory"\}>\s*<MemoryReviewSettings/);
+assert.doesNotMatch(workspace, /\{visibleSection === "memory" \? \(\s*<section/);
 
 const localeNames = ["en-US", "ja-JP", "zh-CN", "zh-TW"];
 const locales = localeNames.map((name) => [name, JSON.parse(read(`src/locales/${name}.json`))]);

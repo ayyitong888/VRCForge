@@ -1,4 +1,4 @@
-import { Brain, Loader2 } from "lucide-react";
+import { Brain } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { MemoryReviewSnapshot } from "../../lib/api/memory-review";
 import {
@@ -99,6 +99,7 @@ export function MemoryReviewSettings({
     refreshSignal,
   });
   const snapshot = controller.snapshot;
+  const ready = runtimeConnected && Boolean(snapshot);
   const memoryEnabled = snapshot?.memoryEnabled !== false;
   const crossSessionEnabled = memoryEnabled && snapshot?.crossSessionEnabled !== false;
   const busy = controller.busyKey === "config";
@@ -122,32 +123,26 @@ export function MemoryReviewSettings({
         </div>
       </div>
 
-      {!runtimeConnected || controller.loading || !snapshot ? (
-        <div className="flex items-center gap-2 rounded-xl border border-border bg-card px-5 py-4 text-sm text-muted-foreground">
-          <Loader2 className="h-4 w-4 animate-spin" />
-          {t("settings.memoryPreferencesLoading")}
-        </div>
-      ) : (
-        <div className="space-y-3">
-          <ToggleRow
-            checked={memoryEnabled}
-            busy={busy}
-            label={t("settings.memoryEnabled")}
-            description={t("settings.memoryEnabledDesc")}
-            testId="memory"
-            onChange={(checked) => updatePreferences(checked, checked ? crossSessionEnabled : false)}
-          />
-          <ToggleRow
-            checked={crossSessionEnabled}
-            disabled={!memoryEnabled}
-            busy={busy}
-            label={t("settings.crossSessionMemory")}
-            description={t("settings.crossSessionMemoryDesc")}
-            testId="cross-session"
-            onChange={(checked) => updatePreferences(memoryEnabled, checked)}
-          />
-        </div>
-      )}
+      <div className="space-y-3">
+        <ToggleRow
+          checked={memoryEnabled}
+          disabled={!ready}
+          busy={busy}
+          label={t("settings.memoryEnabled")}
+          description={t("settings.memoryEnabledDesc")}
+          testId="memory"
+          onChange={(checked) => updatePreferences(checked, checked ? crossSessionEnabled : false)}
+        />
+        <ToggleRow
+          checked={crossSessionEnabled}
+          disabled={!ready || !memoryEnabled}
+          busy={busy}
+          label={t("settings.crossSessionMemory")}
+          description={t("settings.crossSessionMemoryDesc")}
+          testId="cross-session"
+          onChange={(checked) => updatePreferences(memoryEnabled, checked)}
+        />
+      </div>
 
       {controller.error ? (
         <div className="text-sm text-destructive">

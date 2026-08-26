@@ -506,8 +506,7 @@ export function SettingsWorkspace({
         </section>
         ) : null}
 
-        {visibleSection === "memory" ? (
-        <section className="pb-6">
+        <section className="pb-6" hidden={visibleSection !== "memory"}>
           <MemoryReviewSettings
             endpoint={endpoint}
             runtimeConnected={runtimeConnected}
@@ -515,7 +514,6 @@ export function SettingsWorkspace({
             refreshSignal={memoryReviewRefreshSignal}
           />
         </section>
-        ) : null}
 
         {visibleSection === "storage" ? (
         <section className="pb-6">

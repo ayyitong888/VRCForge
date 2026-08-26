@@ -6,6 +6,7 @@ from pathlib import Path
 
 from unity_mcp_tool_contract import (
     CORE_IDENTITY,
+    EXPECTED_TOOL_COUNT,
     EXPECTED_TOOL_NAMES,
     HANDSHAKE_PROTOCOL,
     PLANNING_TOOL_NAMES,
@@ -610,9 +611,9 @@ def test_uninstall_menu_stops_core_clears_only_owned_preference_and_removes_prod
     assert lifecycle.count("EditorPrefs.DeleteKey(") == 1
 
 
-def test_core_has_a_fixed_80_tool_contract_and_never_rediscoveres_at_invoke_time() -> None:
-    assert "ToolCount = 80" in CONTRACT
-    assert CONTRACT.count('{ "vrc_') == 80
+def test_core_has_a_fixed_current_tool_contract_and_never_rediscoveres_at_invoke_time() -> None:
+    assert f"ToolCount = {EXPECTED_TOOL_COUNT}" in CONTRACT
+    assert CONTRACT.count('{ "vrc_') == EXPECTED_TOOL_COUNT
     assert "SnapshotExact" in SERVER
     assert "var registry = VRCForgeToolRegistry.DiscoverLoadedAssemblies();" not in SERVER
     assert "ApprovedAppCoreTools" in SERVER
@@ -625,7 +626,7 @@ def test_core_has_a_fixed_80_tool_contract_and_never_rediscoveres_at_invoke_time
     assert '"vrcforge_apply_blendshapes"' not in SERVER
 
 
-def test_csharp_contract_exactly_matches_the_80_owned_tool_declarations() -> None:
+def test_csharp_contract_exactly_matches_the_current_owned_tool_declarations() -> None:
     contract = dict(re.findall(r'\{ "(vrc_[^"]+)", "([^"]+)" \}', CONTRACT))
     declared: dict[str, str] = {}
     for path in (ROOT / "Assets" / "VRCForge" / "Editor").rglob("*.cs"):
@@ -637,7 +638,7 @@ def test_csharp_contract_exactly_matches_the_80_owned_tool_declarations() -> Non
             source,
         ):
             declared[match.group(1)] = f"{namespace.group(1)}.{match.group(2)}"
-    assert len(contract) == 80
+    assert len(contract) == EXPECTED_TOOL_COUNT
     assert set(contract) == EXPECTED_TOOL_NAMES
     assert contract == declared
 
@@ -729,8 +730,9 @@ def test_fixed_lanes_derive_approved_write_without_stale_hardcoded_counts() -> N
     safety_block = SERVER[SERVER.index("SafetyControlTools =") : SERVER.index("private enum InvocationLane")]
     preview_names = set(re.findall(r'"(vrc_[^"]+)"', preview_block))
     safety_names = set(re.findall(r'"(vrc_[^"]+)"', safety_block))
-    assert len(preview_names) == 25
+    assert len(preview_names) == 26
     assert "vrc_convert_unity_constraint" in preview_names
+    assert "vrc_set_material_texture" in preview_names
     assert len(safety_names) == 2
     assert preview_names <= EXPECTED_TOOL_NAMES
     assert safety_names <= EXPECTED_TOOL_NAMES

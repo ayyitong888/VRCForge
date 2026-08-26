@@ -221,6 +221,18 @@ class ExportResult:
         return {
             "package_path": str(self.package_path),
             "manifest": dict(self.manifest),
+            "execution": str(
+                self.manifest.get("execution")
+                or self.manifest.get("executionMode")
+                or self.manifest.get("execution_mode")
+                or "agentic"
+            ),
+            "executionMode": str(
+                self.manifest.get("execution")
+                or self.manifest.get("executionMode")
+                or self.manifest.get("execution_mode")
+                or "agentic"
+            ),
             "signature_status": self.signature_status,
             "signer_fingerprint": self.signer_fingerprint,
             "lock_sha256": self.lock_sha256,
@@ -252,6 +264,18 @@ class ImportPreview:
             "package_path": str(self.package_path),
             "package_sha256": self.package_sha256,
             "manifest": dict(self.manifest),
+            "execution": str(
+                self.manifest.get("execution")
+                or self.manifest.get("executionMode")
+                or self.manifest.get("execution_mode")
+                or "agentic"
+            ),
+            "executionMode": str(
+                self.manifest.get("execution")
+                or self.manifest.get("executionMode")
+                or self.manifest.get("execution_mode")
+                or "agentic"
+            ),
             "signature_status": self.signature_status,
             "signer_fingerprint": self.signer_fingerprint,
             "lock_sha256": self.lock_sha256,
@@ -618,6 +642,19 @@ class SkillPackageService:
                 raise ManifestValidationError(f"{field} must be a non-empty string of at most {maximum} characters.")
         _parse_semver(normalized.get("version"), "version")
         _parse_semver(normalized.get("min_vrcforge_version"), "min_vrcforge_version")
+        provided_modes = {
+            key: normalized[key]
+            for key in ("execution", "executionMode", "execution_mode")
+            if key in normalized
+        }
+        if any(
+            not isinstance(value, str) or value not in {"agentic", "deterministic"}
+            for value in provided_modes.values()
+        ):
+            raise ManifestValidationError("execution must be agentic or deterministic.")
+        if len(set(provided_modes.values())) > 1:
+            raise ManifestValidationError("Skill execution aliases must agree.")
+        execution_mode = next(iter(provided_modes.values()), "agentic")
 
         permissions = normalized.get("permissions")
         if not isinstance(permissions, list) or any(not isinstance(item, str) for item in permissions):
@@ -633,7 +670,9 @@ class SkillPackageService:
             raise ManifestValidationError("entrypoints must be a non-empty object.")
         normalized_entrypoints: dict[str, str] = {}
         for name, value in entrypoints.items():
-            if not isinstance(name, str) or not TOKEN_RE.fullmatch(name):
+            if not isinstance(name, str) or (
+                name != "executionPlan" and not TOKEN_RE.fullmatch(name)
+            ):
                 raise ManifestValidationError(f"Invalid entrypoint name: {name!r}.")
             if not isinstance(value, str):
                 raise ManifestValidationError(f"Entrypoint {name!r} must be a path string.")
@@ -641,6 +680,10 @@ class SkillPackageService:
             if normalized_entrypoints[name] in RESERVED_PACKAGE_FILES:
                 raise ManifestValidationError(f"Entrypoint cannot target package metadata: {value}.")
         normalized["entrypoints"] = normalized_entrypoints
+        if execution_mode == "deterministic" and "executionPlan" not in normalized_entrypoints:
+            raise ManifestValidationError(
+                "A deterministic Skill requires one fixed executionPlan entrypoint."
+            )
 
         dependencies = normalized.get("skill_dependencies")
         if dependencies is not None:
@@ -672,7 +715,118 @@ class SkillPackageService:
                     raise ManifestValidationError(f"Entrypoint cannot use symlinks or junctions: {relative}.")
                 if not candidate.is_file():
                     raise ManifestValidationError(f"Entrypoint does not exist as a regular file: {relative}.")
+            if execution_mode == "deterministic":
+                self._validate_deterministic_workflow(
+                    (root / normalized_entrypoints["executionPlan"]).read_bytes()
+                )
         return normalized
+
+    @staticmethod
+    def _validate_deterministic_workflow(value: bytes) -> dict[str, Any]:
+        try:
+            document = _load_json_bytes(value, "deterministic workflow")
+        except (ValueError, SkillPackageError) as exc:
+            raise ManifestValidationError(
+                "A deterministic workflow must contain valid JSON."
+            ) from exc
+        if not isinstance(document, dict):
+            raise ManifestValidationError("A deterministic workflow must contain a JSON object.")
+        if document.get("schema") != "vrcforge.deterministic_execution_plan.v1":
+            raise ManifestValidationError(
+                "A deterministic execution plan requires the vrcforge.deterministic_execution_plan.v1 schema."
+            )
+        dynamic_fields = {
+            "branch", "branches", "branchSelector", "loop", "loops", "dynamicTools", "toolSelector",
+        }
+        if dynamic_fields.intersection(document):
+            raise ManifestValidationError(
+                "A deterministic workflow cannot branch, loop, or select tools dynamically."
+            )
+        steps = document.get("steps")
+        if not isinstance(steps, list) or not steps or len(steps) > 256:
+            raise ManifestValidationError(
+                "A deterministic workflow requires 1 to 256 fixed ordered atomic steps."
+            )
+        blocked_tools = {
+            "vrcforge_request_apply", "vrcforge_apply_approved", "vrcforge_restore_checkpoint",
+            "vrcforge_restore_last_backup",
+        }
+        normalized_steps: list[dict[str, Any]] = []
+        contains_write = False
+        for index, step in enumerate(steps):
+            if not isinstance(step, dict):
+                raise ManifestValidationError(f"Deterministic workflow step {index} must be an object.")
+            tool = step.get("tool")
+            if not isinstance(tool, str) or re.fullmatch(r"vrcforge_[a-z][a-z0-9_]{0,120}", tool) is None:
+                raise ManifestValidationError(
+                    f"Deterministic workflow step {index} requires one fixed VRCForge atomic tool."
+                )
+            if (
+                tool in blocked_tools
+                or tool.startswith("vrcforge_rollback_")
+                or {"tools", "conditional", "conditionalRoutes", "branch", "branches", "loop", "when"}.intersection(step)
+            ):
+                raise ManifestValidationError(
+                    f"Deterministic workflow step {index} cannot branch or bypass supervised approval."
+                )
+            arguments = step.get("arguments", {})
+            if not isinstance(arguments, dict):
+                raise ManifestValidationError(
+                    f"Deterministic workflow step {index} arguments must be an object."
+                )
+            writes = step.get("writes", False)
+            if not isinstance(writes, bool):
+                raise ManifestValidationError(
+                    f"Deterministic workflow step {index} writes must be a boolean."
+                )
+            if writes and (
+                step.get("runtimeApprovalRequired") is not True
+                and step.get("runtimePermissionGateRequired") is not True
+            ):
+                raise ManifestValidationError(
+                    f"Deterministic workflow write step {index} requires runtime approval or permission gating."
+                )
+            contains_write = contains_write or writes
+            normalized_steps.append(dict(step))
+        if contains_write:
+            approval = document.get("approval")
+            checkpoint = document.get("checkpoint")
+            rollback = document.get("rollback")
+            if (
+                not isinstance(approval, dict) or approval.get("required") is not True
+                or not isinstance(checkpoint, dict) or checkpoint.get("required") is not True
+                or not isinstance(rollback, dict)
+                or rollback.get("required") is not True
+                or rollback.get("requiresSeparateApproval") is not True
+            ):
+                raise ManifestValidationError(
+                    "Deterministic write workflows require approval, checkpoint, and separately approved rollback."
+                )
+        return {
+            "execution": "deterministic",
+            "executionMode": "deterministic",
+            "workflowSteps": normalized_steps,
+            "workflowDigest": sha256_bytes(canonical_json_bytes(normalized_steps)),
+            "runtimeEnforced": True,
+        }
+
+    @staticmethod
+    def _manifest_execution(manifest: Mapping[str, Any]) -> str:
+        return str(
+            manifest.get("execution")
+            or manifest.get("executionMode")
+            or manifest.get("execution_mode")
+            or "agentic"
+        )
+
+    def _execution_descriptor(
+        self, manifest: Mapping[str, Any], package_root: Path
+    ) -> dict[str, Any]:
+        mode = self._manifest_execution(manifest)
+        if mode != "deterministic":
+            return {"execution": "agentic", "executionMode": "agentic"}
+        relative = str(manifest["entrypoints"]["executionPlan"])
+        return self._validate_deterministic_workflow((package_root / relative).read_bytes())
 
     def export_dev(
         self,
@@ -1399,6 +1553,15 @@ class SkillPackageService:
                     or lock_sha256 != entry.get("lock_sha256")
                     or risk_level != entry.get("risk_level")
                     or list(manifest["permissions"]) != list(entry.get("permissions") or [])
+                    or self._manifest_execution(manifest)
+                    != str(entry.get("execution") or entry.get("executionMode") or "agentic")
+                ):
+                    continue
+                execution = self._execution_descriptor(manifest, resolved_root)
+                if execution["execution"] == "deterministic" and (
+                    signature_status != "signed"
+                    or execution["workflowDigest"] != entry.get("workflowDigest")
+                    or execution["workflowSteps"] != entry.get("workflowSteps")
                 ):
                     continue
                 decorated = self._decorate_installed_entry(dict(entry), registry)
@@ -1412,6 +1575,7 @@ class SkillPackageService:
                         "signatureStatus": signature_status,
                         "signerFingerprint": verified_signer,
                         "signerTrustStatus": decorated.get("signer_trust_status"),
+                        **execution,
                     }
                 )
             except (OSError, ValueError, SkillPackageError):
@@ -1680,6 +1844,20 @@ class SkillPackageService:
         governance = entry.get("governance")
         if governance is not None and not isinstance(governance, dict):
             raise PackageIntegrityError(f"{label} governance must be an object.")
+        execution = entry.get("execution", entry.get("executionMode", "agentic"))
+        if execution not in {"agentic", "deterministic"}:
+            raise PackageIntegrityError(f"{label} has an invalid execution mode.")
+        if "executionMode" in entry and entry["executionMode"] != execution:
+            raise PackageIntegrityError(f"{label} execution mode aliases do not match.")
+        if execution == "deterministic":
+            if signature_status != "signed":
+                raise PackageIntegrityError(f"{label} deterministic package must be signed.")
+            sequence = entry.get("workflowSteps")
+            digest = entry.get("workflowDigest")
+            if not isinstance(sequence, list) or not sequence:
+                raise PackageIntegrityError(f"{label} deterministic tool sequence is missing.")
+            if digest != sha256_bytes(canonical_json_bytes(sequence)):
+                raise PackageIntegrityError(f"{label} deterministic tool sequence digest does not match.")
         if allow_versions:
             versions = entry.get("versions", [])
             if not isinstance(versions, list) or any(not isinstance(item, str) for item in versions):
@@ -2031,8 +2209,32 @@ class SkillPackageService:
 
     def _decorate_installed_entry(self, entry: dict[str, Any], registry: Mapping[str, Any]) -> dict[str, Any]:
         governance = self._evaluate_installed_governance(entry, registry)
+        signer = str(entry.get("signer_fingerprint") or "")
+        policy = self._normalize_governance(registry.get("governance"))
+        designation = policy["official_signers"].get(signer)
+        official = False
+        if (
+            designation is not None
+            and entry.get("signature_status") == "signed"
+            and governance.get("signerTrustStatus") == "trusted"
+            and signer not in policy["revoked_signers"]
+        ):
+            try:
+                _, verified = self._verified_installed_projection_candidate(
+                    str(entry.get("id") or ""),
+                    str(entry.get("version") or ""),
+                )
+                official = (
+                    verified.signature_status == "signed"
+                    and verified.signer_fingerprint == signer
+                    and verified.lock_sha256 == entry.get("lock_sha256")
+                )
+            except (OSError, ValueError, SkillPackageError):
+                official = False
         entry["governance"] = governance
-        entry["verified"] = False
+        entry["verified"] = official
+        entry["official"] = official
+        entry["officialPublisher"] = str(designation.get("publisher") or "") if official else None
         entry["signer_trust_status"] = governance["signerTrustStatus"]
         entry["safe_mode_disabled"] = bool(governance.get("safeMode", {}).get("disablesRiskLevel"))
         return entry
@@ -2119,6 +2321,12 @@ class SkillPackageService:
                 raise ManifestValidationError(
                     f"Entrypoint is missing or was excluded from export: {entrypoint}."
                 )
+        if self._manifest_execution(manifest) == "deterministic":
+            if package_mode != "release":
+                raise PackageSignatureError("Deterministic Skill packages must be signed releases.")
+            self._validate_deterministic_workflow(
+                payload[manifest["entrypoints"]["executionPlan"]]
+            )
 
         lock = {
             "algorithm": "sha256",
@@ -2495,6 +2703,8 @@ class SkillPackageService:
             if has_signature:
                 raise PackageSignatureError("Dev packages must not contain a signature.")
             signature_status = "dev"
+        if self._manifest_execution(manifest) == "deterministic" and signature_status != "signed":
+            raise PackageSignatureError("Deterministic Skill packages must be signed releases.")
 
         permissions = tuple(manifest["permissions"])
         tiers = self._permission_tiers(permissions)
@@ -2767,6 +2977,7 @@ class SkillPackageService:
                 "lock_sha256": preview.lock_sha256,
                 "risk_level": preview.risk_level,
                 "permissions": list(preview.permissions),
+                **self._execution_descriptor(preview.manifest, extracted_root),
                 "governance": {
                     "signer_trust_status": governance.get("signerTrustStatus"),
                     "verified": False,

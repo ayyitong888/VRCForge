@@ -11,6 +11,13 @@ from material_shader_assignment import (
     bind_authoritative_preview as bind_material_shader_preview,
     build_preview_arguments as build_material_shader_preview_arguments,
 )
+from material_texture_assignment import (
+    TOOL_NAME as MATERIAL_TEXTURE_ASSIGNMENT_TOOL,
+    MaterialTextureAssignmentError,
+    bind_authoritative_preview as bind_material_texture_preview,
+    build_preview_arguments as build_material_texture_preview_arguments,
+    validate_apply_result as validate_material_texture_apply_result,
+)
 from atomic_reference_rename import (
     TOOL_NAME as ATOMIC_REFERENCE_RENAME_TOOL,
     AtomicReferenceRenameError,
@@ -122,6 +129,18 @@ _SPECS = {
         build_preview=build_material_shader_preview_arguments,
         bind_preview=bind_material_shader_preview,
         include_project_path_in_preview=True,
+    ),
+    MATERIAL_TEXTURE_ASSIGNMENT_TOOL: AuthoritativeUnityWriteSpec(
+        tool_name=MATERIAL_TEXTURE_ASSIGNMENT_TOOL,
+        request_error="Material texture arguments are required.",
+        bridge_error="Material texture preview could not be verified against the current project.",
+        receipt_error="Material texture preview returned an invalid verification receipt.",
+        domain_error=MaterialTextureAssignmentError,
+        build_preview=build_material_texture_preview_arguments,
+        bind_preview=bind_material_texture_preview,
+        include_project_path_in_preview=True,
+        validate_apply=validate_material_texture_apply_result,
+        result_error="Material texture apply returned an invalid persisted verification receipt.",
     ),
     DUPLICATE_TOOL_NAME: AuthoritativeUnityWriteSpec(
         tool_name=DUPLICATE_TOOL_NAME,
@@ -273,17 +292,46 @@ def prepare_authoritative_unity_write(
         if payload.get("isError") is True or structured.get("ok") is False or (
             "code" in structured and "schema" not in structured
         ):
+            nested = structured.get("data") if isinstance(structured.get("data"), dict) else {}
             code = str(structured.get("code") or structured.get("errorCode") or "preview_failed").strip()
-            reason = str(structured.get("message") or structured.get("error") or spec.bridge_error).strip()
-            raw_failure = dict(structured)
+            reason = str(
+                structured.get("message")
+                or nested.get("message")
+                or nested.get("error")
+                or structured.get("error")
+                or spec.bridge_error
+            ).strip()
+            raw_failure = {**nested, **structured, "message": reason, "error": reason}
+            mutation_started = raw_failure.get("mutationStarted")
+            if not isinstance(mutation_started, bool):
+                mutation_started = False
+            commit_state = str(raw_failure.get("commitState") or "").strip() or (
+                "unknown" if mutation_started else "not_started"
+            )
+            committed = raw_failure.get("committed")
+            if not isinstance(committed, bool):
+                committed = (
+                    True if commit_state in {"committed", "complete"}
+                    else False if commit_state == "not_started"
+                    else None
+                )
+            request_may_have_committed = raw_failure.get("requestMayHaveCommitted")
+            if not isinstance(request_may_have_committed, bool):
+                request_may_have_committed = mutation_started and commit_state != "not_started"
+            recovery_required = raw_failure.get("checkpointRecoveryRequired")
+            if not isinstance(recovery_required, bool):
+                recovery_required = bool(
+                    raw_failure.get("checkpointRestoreRequired")
+                    or raw_failure.get("manualRecoveryRequired")
+                )
             raw_failure.setdefault("failureLayer", "unity_core_preview")
             raw_failure.setdefault("failurePhase", "preview_rejected")
             raw_failure.setdefault("toolRoutingStarted", False)
-            raw_failure.setdefault("mutationStarted", False)
-            raw_failure.setdefault("committed", False)
-            raw_failure.setdefault("commitState", "not_started")
-            raw_failure.setdefault("requestMayHaveCommitted", False)
-            raw_failure.setdefault("checkpointRecoveryRequired", False)
+            raw_failure["mutationStarted"] = mutation_started
+            raw_failure["committed"] = committed
+            raw_failure["commitState"] = commit_state
+            raw_failure["requestMayHaveCommitted"] = request_may_have_committed
+            raw_failure["checkpointRecoveryRequired"] = recovery_required
             raise AuthoritativeUnityWriteError(
                 reason,
                 status_code=409,
@@ -292,11 +340,11 @@ def prepare_authoritative_unity_write(
                     "failurePhase": "preview_rejected",
                     "errorCode": code,
                     "error": reason,
-                    "mutationStarted": False,
-                    "committed": False,
-                    "commitState": "not_started",
-                    "requestMayHaveCommitted": False,
-                    "checkpointRecoveryRequired": False,
+                    "mutationStarted": mutation_started,
+                    "committed": committed,
+                    "commitState": commit_state,
+                    "requestMayHaveCommitted": request_may_have_committed,
+                    "checkpointRecoveryRequired": recovery_required,
                 },
                 raw_result=raw_failure,
             )

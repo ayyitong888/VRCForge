@@ -21,6 +21,7 @@ REQUEST_ARGUMENT_KEYS = (
     "compression",
     "crunch",
     "quality",
+    "streamingMipmaps",
 )
 
 _PRECONDITION_KEYS = (
@@ -170,7 +171,7 @@ def normalize_requested_settings(arguments: dict[str, Any]) -> dict[str, Any]:
     if texture_format not in _UNCOMPRESSED_FORMATS | {"automatic"} and compression == "uncompressed":
         raise TextureImportSettingsError("A compressed format cannot use compression=uncompressed.")
 
-    return {
+    normalized = {
         "platform": platform,
         "maxTextureSize": max_texture_size,
         "format": texture_format,
@@ -178,6 +179,12 @@ def normalize_requested_settings(arguments: dict[str, Any]) -> dict[str, Any]:
         "crunch": crunch,
         "quality": quality,
     }
+    if "streamingMipmaps" in arguments:
+        normalized["streamingMipmaps"] = _strict_bool(
+            arguments["streamingMipmaps"],
+            label="streamingMipmaps",
+        )
+    return normalized
 
 
 def bind_authoritative_preview(
@@ -274,6 +281,17 @@ def bind_authoritative_preview(
         "quality": requested_settings["quality"],
         "ignorePlatformSupport": False,
     }
+    before_has_streaming = "streamingMipmaps" in before_settings
+    target_has_streaming = "streamingMipmaps" in target_settings
+    if before_has_streaming != target_has_streaming:
+        raise TextureImportSettingsError("Texture import preview streamingMipmaps evidence is inconsistent.")
+    if target_has_streaming:
+        expected_target["streamingMipmaps"] = requested_settings.get(
+            "streamingMipmaps",
+            before_settings["streamingMipmaps"],
+        )
+    elif "streamingMipmaps" in requested_settings:
+        raise TextureImportSettingsError("Texture import preview omitted the requested streamingMipmaps state.")
     if target_settings != expected_target:
         raise TextureImportSettingsError("Texture import preview changed the requested settings.")
 
@@ -372,6 +390,8 @@ def compute_settings_digest(importer_type: str, settings: dict[str, Any]) -> str
         str(_bounded_int(settings.get("quality"), label="quality", minimum=0, maximum=100)),
         _bool_digest_value(settings.get("ignorePlatformSupport"), label="ignorePlatformSupport"),
     ]
+    if "streamingMipmaps" in settings:
+        fields.append(_bool_digest_value(settings["streamingMipmaps"], label="streamingMipmaps"))
     framed = "".join(f"{_utf16_length(value)}:{value}" for value in fields)
     return hashlib.sha256(framed.encode("utf-8")).hexdigest()
 
@@ -409,7 +429,7 @@ def _canonical_settings(
         settings.get("ignorePlatformSupport"),
         label="ignorePlatformSupport",
     )
-    return {
+    normalized = {
         "platform": platform,
         "platformName": platform_name,
         "overridden": overridden,
@@ -420,6 +440,12 @@ def _canonical_settings(
         "quality": quality,
         "ignorePlatformSupport": ignore_platform_support,
     }
+    if "streamingMipmaps" in settings:
+        normalized["streamingMipmaps"] = _strict_bool(
+            settings["streamingMipmaps"],
+            label="streamingMipmaps",
+        )
+    return normalized
 
 
 def _canonical_importer_type(value: Any) -> str:

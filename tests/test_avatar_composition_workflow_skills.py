@@ -3,10 +3,12 @@ from __future__ import annotations
 import dashboard_server
 from agent_gateway import (
     EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS,
+    build_runtime_skill_payload,
     canonical_unity_read_tool_input_schema,
     canonical_unity_write_tool_input_schema,
 )
 from avatar_composition_workflow_skills import (
+    AVATAR_COMPOSITION_RUNTIME_CONTRACT_FIELDS,
     AVATAR_COMPOSITION_WORKFLOW_SKILL_NAMES,
     AVATAR_COMPOSITION_WORKFLOW_SKILLS,
 )
@@ -96,6 +98,49 @@ def test_composition_workflow_definitions_project_unchanged_into_internal_agent_
         } == {
             field: source[field] for field in projected_fields
         }
+
+        for field in AVATAR_COMPOSITION_RUNTIME_CONTRACT_FIELDS:
+            if field in source:
+                assert internal[field] == source[field]
+
+
+def test_builtin_composition_runtime_payload_keeps_structured_contracts() -> None:
+    by_name = {
+        skill["name"]: skill for skill in AVATAR_COMPOSITION_WORKFLOW_SKILLS
+    }
+
+    internal_by_name = {
+        skill["name"]: skill
+        for skill in dashboard_server.AGENT_GATEWAY.build_manifest("execution")["skills"]
+        if skill["name"] in by_name
+    }
+
+    for name in (
+        "avatar-head-swap",
+        "face-tracking-four-piece-merge",
+        "avatar-head-swap-face-tracked",
+        "avatar-head-swap-gesture-only",
+        "source-avatar-part-transplant",
+    ):
+        payload = build_runtime_skill_payload(
+            internal_by_name[name],
+            {"arguments": "preserve structured workflow contracts"},
+        )
+        source = by_name[name]
+        for field in AVATAR_COMPOSITION_RUNTIME_CONTRACT_FIELDS:
+            if field in source:
+                assert payload[field] == source[field]
+
+    part_payload = build_runtime_skill_payload(
+        internal_by_name["source-avatar-part-transplant"], {}
+    )
+    assert part_payload["partRoutingContract"]
+    assert part_payload["transplantModes"]
+    assert part_payload["catEarDeformationDiagnosticsContract"]
+    assert part_payload["dynamicAcceptance"]
+    assert "partRoutingContract" not in build_runtime_skill_payload(
+        internal_by_name["avatar-head-swap"], {}
+    )
 
 
 def test_composition_workflow_atoms_have_internal_external_contract_parity() -> None:
@@ -249,6 +294,128 @@ def test_head_swap_has_two_executable_branches_and_generic_part_transplant() -> 
     assert "static and gm motion" in transplant_acceptance
 
 
+def test_head_workflows_require_active_renderer_consumer_and_face_contract_closure() -> None:
+    by_name = {skill["name"]: skill for skill in AVATAR_COMPOSITION_WORKFLOW_SKILLS}
+    for name in (
+        "avatar-head-swap",
+        "avatar-head-swap-face-tracked",
+        "avatar-head-swap-gesture-only",
+    ):
+        contract = by_name[name]["headRendererConsumerClosureContract"]
+        assert contract["requiredBeforeOldHeadRemoval"] is True
+        assert {
+            "descriptorVisemeSkinnedMesh",
+            "descriptorLipSync",
+            "allExpectedVisemeBindings",
+            "allExpectedExpressionBindings",
+            "allExpectedGestureBindings",
+        } <= set(contract["activeRenderer"]["requiredTargets"])
+        assert contract["inactiveOrDonorRenderer"] == {
+            "mayRemainDescriptorTarget": False,
+            "mayRemainSoleAnimatorTarget": False,
+            "maySatisfyExpectedBindingOnlyOnInactivePath": False,
+        }
+        assert contract["failure"]["ready"] is False
+
+    face = by_name["avatar-head-swap-face-tracked"]
+    closure = face["headRendererConsumerClosureContract"]["faceTrackedBranch"]
+    assert {
+        "activeRendererBlendShapes",
+        "fxControllerBindings",
+        "expressionParameters",
+        "expressionsMenu",
+        "descriptorReferences",
+    } == set(closure["requiredClosure"])
+    assert closure["everyParameterAndMenuControlMustReachControllerAndActiveRendererConsumer"] is True
+    assert closure["everyExpectedControllerBlendShapeMustExistOnActiveRenderer"] is True
+    assert closure["inactiveOrDonorOnlyConsumerCount"] == 0
+    face_text = " ".join(
+        [*face["problemBreakdown"], *(step["goal"] for step in face["steps"]), *face["acceptance"]]
+    )
+    assert "Descriptor.VisemeSkinnedMesh" in face_text
+    assert "inactive/donor" in face_text
+    assert "Parameters, and Menu" in face_text
+
+
+def test_community_avatar_rules_are_explicit_without_weakening_install_sway_contract() -> None:
+    by_name = {skill["name"]: skill for skill in AVATAR_COMPOSITION_WORKFLOW_SKILLS}
+    head = by_name["avatar-head-swap"]["communityAvatarModificationContract"]
+    part = by_name["source-avatar-part-transplant"]["communityAvatarModificationContract"]
+
+    for contract in (head, part):
+        assert "overrides generic matrix/bindpose/neck-ring diagnostic gates" in contract["precedence"]
+        assert contract["matrixPolicy"]["default"] == "prohibited"
+        assert contract["matrixPolicy"]["requiresSeparateExplicitUserAuthorization"] is True
+        assert contract["matrixPolicy"]["neverCountsTowardVisualAcceptance"] is True
+        assert contract["visibleCandidateTimebox"] == {
+            "minutesPerStep": 20,
+            "onNoVisibleCandidate": "stop_report_current_state_with_screenshot_and_ask_for_direction",
+            "mustNot": "continue_exploring_after_timebox",
+        }
+        assert contract["visualAcceptance"]["normalViewingDistanceMeters"] == [1.0, 2.0]
+
+    head_route = head["headSwap"]
+    assert head_route["classification"] == "full_head_transplant_not_rigid_or_independent_accessory_or_clothing_part_route"
+    assert "does_not_authorize_setup_outfit_for_rigid_or_independent_accessories" in head_route["mergeArmatureScope"]
+    assert head_route["method"] == "unity_first_modular_avatar_merge_armature_replace_object_and_layered_neck_seam_resolution"
+    assert {
+        "ma_setup_outfit_then_merge_armature",
+        "ma_replace_object_head_body_reference_to_target_body_path",
+        "preserve_user_selected_body_material_and_texture",
+        "match_shader_probe_anchor_and_shadow_lighting",
+        "identify_exact_visible_head_renderer_material_slot_and_neck_uv_region",
+        "reconfigure_eye_bone_lipsync_visemes_eyelids_and_viewpoint",
+    } <= set(head_route["steps"])
+    assert head_route["visualAcceptance"]["poses"] == ["Rest", "AFK"]
+    assert head_route["capabilityBoundary"]["maReplaceObject"] == "manual_or_capability_gap_when_no_exact_atom"
+    assert "verified_head_mesh_overlap" in head_route["legacyConcealmentRequiresExplicitUserChoice"]
+    assert head_route["capabilityBoundary"]["localTextureAuthoring"] == "external_manual_or_capability_gap_when_no_exact_atom"
+
+    assert part["rigidAccessory"]["visualAcceptanceMinimumViews"] == 2
+    assert part["independentPhysBoneAccessory"]["classification"] == "accessory_not_head_swap"
+    assert "uniform_size_fit_on_installContainer_only" in part["independentPhysBoneAccessory"]["steps"]
+    assert "keep_swayChainRoot_and_descendant_bones_rest_scale_one" in part["independentPhysBoneAccessory"]["steps"]
+    assert "ma_setup_outfit" in part["clothing"]["compatible"]
+    assert "external_mochi_fitter" in part["clothing"]["nonCompatiblePreferred"]
+    for skill in (by_name["avatar-head-swap"], by_name["source-avatar-part-transplant"]):
+        assert "separate explicit user authorization" in skill["skinningContract"]["communityRouteOverride"]
+        assert "direct Unity head fitting" in skill["geometryAlignmentContract"]["communityHeadRouteOverride"]
+        assert "explicit user acceptance" in skill["geometryAlignmentContract"]["communityHeadRouteOverride"]
+        assert "separately explicitly authorized" in skill["rigAndShapeContract"]["communityRouteOverride"]
+        assert "requires separate explicit authorization" in skill["singleSlotRemapContract"]["communityRouteOverride"]
+
+
+def test_unity_first_head_seam_preserves_current_body_and_fails_closed_for_uv_authoring() -> None:
+    skills = {skill["name"]: skill for skill in AVATAR_COMPOSITION_WORKFLOW_SKILLS}
+    for name in ("avatar-head-swap", "avatar-head-swap-face-tracked", "avatar-head-swap-gesture-only"):
+        contract = skills[name]["neckSeamResolutionContract"]
+        assert contract["defaultRoute"] == "unity_first_modular_avatar_head_swap"
+        assert contract["classifyInOrder"] == [
+            "visible_geometry", "pose_dependent_weights", "lighting_and_shader",
+            "renderer_slot_ownership", "localized_head_texture",
+        ]
+        assert "the user's actual currently assigned" in contract["bodyBaseline"]["source"]
+        assert {"material_asset", "main_texture", "masks", "body_details"} <= set(
+            contract["bodyBaseline"]["mustPreserve"]
+        )
+        assert contract["localizedTexture"]["authoringAtomAvailable"] is False
+        assert contract["localizedTexture"]["onMissingAuthoringAtom"] == {
+            "capabilityGap": True,
+            "ready": False,
+            "failureCause": "seam_authoring_atom_unavailable",
+            "nextAction": "user_owned_external_texture_authoring_then_approved_unity_texture_assignment",
+        }
+        assert {"mouth", "nose", "eyes", "heterochromia", "alpha"} <= set(
+            contract["localizedTexture"]["protect"]
+        )
+
+    assert "materials" in skills["avatar-head-swap"]["toolBlocks"]
+    assert {
+        "vrcforge_scan_materials", "vrcforge_plan_shader_tuning",
+        "vrcforge_preview_material_texture_assignment", "vrcforge_set_material_texture",
+    } <= set(skills["avatar-head-swap"]["allowedTools"])
+
+
 def test_workflow_evidence_language_distinguishes_proof_plans_and_commits() -> None:
     by_name = {skill["name"]: skill for skill in AVATAR_COMPOSITION_WORKFLOW_SKILLS}
     for skill in AVATAR_COMPOSITION_WORKFLOW_SKILLS:
@@ -396,8 +563,12 @@ def test_transplants_gate_rest_delta_single_slot_remap_and_cat_ear_physbone_isol
         diagnostics = skill["catEarDeformationDiagnosticsContract"]
         assert diagnostics["tool"] == "vrcforge_inspect_skinned_mesh_deformation"
         assert diagnostics["diagnosticOnly"] is True
+        assert diagnostics["requiresSeparateExplicitUserAuthorization"] is True
+        assert diagnostics["countsTowardVisualAcceptance"] is False
         assert diagnostics["perPose"] == ["Rest", "AFK", "HeadDown", "HeadTurnLeft", "HeadTurnRight"]
         assert diagnostics["sameCameraRestMotionPairs"] is True
+        assert diagnostics["sameFramingRestAfkMultiViewPairs"] is True
+        assert diagnostics["attachment"]["swayChainRoot"]["requireEveryDescendantBoneRestScaleOne"] is True
         assert {"ear_root_shifts_from_head", "ear_root_gap_or_seam_changes_size_between_poses"} <= set(diagnostics["failIf"])
 
 
@@ -426,20 +597,66 @@ def test_part_transplant_routes_rigid_physbone_and_weighted_smr_without_cross_wi
     assert physbone["defaultRootScale"] == [1.0, 1.0, 1.0]
     assert physbone["skinningPolicy"].startswith("preserve_internal_mesh_to_sway_chain_binding")
     assert {"completeBoundedBoneChain", "physBoneRootTransform", "consumedColliderReferences", "rendererUsedBoneClosure", "restAndPerPoseDeformationReadback"} <= set(physbone["required"])
-    assert "uniform whole-prefab/container scale" in physbone["unitySizeFit"]
+    assert "uniform whole-prefab/installContainer scale" in physbone["unitySizeFit"]
     assert physbone["deformationReadbackTool"] == "vrcforge_inspect_skinned_mesh_deformation"
     assert "stable_aabb_and_skin_matrix_metrics" in physbone["acceptance"]
     assert {"setup_outfit", "merge_armature", "partial_chain_copy"} <= set(physbone["forbidden"])
     assert "armature merge" in part["partRoutingContract"]["weightedSmr"]["requiredOperation"]
 
+    nodes = physbone["nodeContract"]
+    assert set(nodes) == {"installContainer", "swayChainRoot"}
+    assert nodes["installContainer"]["uniformLocalScaleAllowed"] is True
+    assert nodes["swayChainRoot"]["mustBeDistinctFromInstallContainer"] is True
+    assert nodes["swayChainRoot"]["localScale"] == [1.0, 1.0, 1.0]
+    assert nodes["swayChainRoot"]["descendantBoneRestLocalScale"] == [1.0, 1.0, 1.0]
+    assert nodes["swayChainRoot"]["requireEveryDescendantBoneRestScaleOne"] is True
+    cat_attachment = physbone["attachmentTargetByClass"]["cat_ears"]
+    assert cat_attachment == {
+        "maBoneProxyTarget": "Head",
+        "directMountEquivalent": "installContainer_parent_is_target_avatar_Head",
+        "targetIsFixed": True,
+    }
+    closure = physbone["externalReferenceClosure"]
+    assert {
+        "physBoneRootTransform",
+        "physBoneColliderReferences",
+        "probeAnchorReferences",
+        "constraintSourceReferences",
+        "contactReferences",
+        "allExternalObjectReferences",
+    } <= set(closure["required"])
+    assert closure["allowedRoots"] == ["copiedAccessoryBranch", "targetAvatarHierarchy"]
+    assert closure["sourceAvatarReferencesRemaining"] == 0
+    assert closure["unresolvedReferences"] == 0
+    assert closure["scanMustBeCompleteAndNonTruncated"] is True
+
+    diagnostics = part["catEarDeformationDiagnosticsContract"]
+    attachment = diagnostics["attachment"]
+    assert attachment["targetBone"] == "Head"
+    assert attachment["maBoneProxyTarget"] == "Head"
+    assert attachment["directMountEquivalent"] == "installContainer_parent_is_target_avatar_Head"
+    assert attachment["installContainer"]["uniformLocalScaleAllowed"] is True
+    assert attachment["rootLocalScaleMeaning"] == "swayChainRoot_rest_scale_not_installContainer_scale"
+    assert attachment["swayChainRoot"] == {
+        "mustBeDistinctFromInstallContainer": True,
+        "localScale": [1.0, 1.0, 1.0],
+        "descendantBoneRestLocalScale": [1.0, 1.0, 1.0],
+        "requireEveryDescendantBoneRestScaleOne": True,
+        "preserveInternalLocalTrs": True,
+    }
+    assert "descendantBoneRestLocalScales" in attachment["requiredReadback"]
+    assert diagnostics["sameFramingRestAfkMultiViewPairs"] is True
+
     rigid = part["partRoutingContract"]["rigidAccessory"]
+    assert "nodeContract" not in rigid
+    assert "attachmentTargetByClass" not in part["partRoutingContract"]["weightedSmr"]
     assert rigid["attachment"] == ["direct_reparent", "ma_bone_proxy"]
     assert set(rigid["requiredReadback"]) == {
         "targetBoneOrProxyTarget", "localPosition", "localRotation", "localScale",
     }
     assert {"vrcforge_preview_add_modular_avatar_component", "vrcforge_add_modular_avatar_component"} <= set(part["allowedTools"])
     assert "vrcforge_inspect_skinned_mesh_deformation" in part["allowedTools"]
-    assert "vrcforge_setup_outfit" not in part["allowedTools"]
+    assert "vrcforge_setup_outfit" in part["allowedTools"]
     remap_gate = next(step for step in part["steps"] if step.get("requiredAtomicCapability") == "vrcforge_remap_skinned_mesh_bone")
     assert remap_gate["conditionalRoutes"] == ["same_skeleton_smr", "foreign_skeleton_smr"]
 

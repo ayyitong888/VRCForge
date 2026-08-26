@@ -743,6 +743,44 @@ def test_external_advanced_medium_write_is_not_misclassified_as_high_risk(
     assert executed == [{"projectRoot": str(project)}]
 
 
+def test_external_unity_write_creates_checkpoint_before_handler(monkeypatch, tmp_path: Path) -> None:
+    gateway = _external_gateway(tmp_path)
+    project = tmp_path / "UnityProject"
+    for marker in ("Assets", "Packages", "ProjectSettings"):
+        (project / marker).mkdir(parents=True, exist_ok=True)
+    service = gateway.approval_transactions
+    gateway.approval_transactions.register_write_handler(
+        "vrcforge_external_unity_checkpoint",
+        "External Unity-backed write.",
+        "medium",
+        lambda _args: {"ok": True},
+        requires_approved_execution_context=True,
+        approved_execution_plan_builder=lambda _args: [("vrc_test_write", {})],
+    )
+    prepared = service.prepare_external_mcp_write(
+        "vrcforge_external_unity_checkpoint",
+        {"projectRoot": str(project)},
+    )
+    observed: list[dict] = []
+
+    def fake_checkpoint(approval, arguments):
+        observed.append({"approval": dict(approval), "arguments": dict(arguments)})
+        return {"ok": True, "status": "ready", "id": "ckpt_external", "projectRoot": str(project)}
+
+    monkeypatch.setattr(type(service), "_create_pre_write_checkpoint", lambda _self, approval, arguments: fake_checkpoint(approval, arguments))
+    monkeypatch.setattr(
+        type(service),
+        "_call_external_mcp_write_handler",
+        lambda *_args: {"ok": True, "status": "applied"},
+    )
+
+    result = service.execute_prepared_external_mcp_write(prepared)
+
+    assert result["ok"] is True
+    assert result["checkpoint"]["id"] == "ckpt_external"
+    assert observed[0]["approval"]["targetTool"] == "vrcforge_external_unity_checkpoint"
+
+
 def test_external_write_returns_raw_handler_result_and_adjacent_console_facts(
     tmp_path: Path,
 ) -> None:

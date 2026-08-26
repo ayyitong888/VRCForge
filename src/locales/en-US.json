@@ -836,7 +836,9 @@
     "checkOk": "Ready",
     "checkWarning": "Needs attention",
     "checkError": "Error",
-    "domainFallback": "Other"
+    "domainFallback": "Other",
+    "showBuiltinTools": "Show built-in tools",
+    "editorSection": "Create / edit Skill"
   },
   "skillStatus": {
     "executed": "Executed",
@@ -1376,7 +1378,7 @@
     }
   },
   "package": {
-    "title": ".vsk Package Manager",
+    "title": ".vsk Skill Packages",
     "store": "Store",
     "governance": "Governance",
     "safeMode": "Safe Mode",
@@ -1400,8 +1402,8 @@
       "disabledSkillIds": "Disabled skills"
     },
     "pathToSkill": {
-      "title": "Save operation path as a skill",
-      "description": "Preview the sanitized, portable source before writing files or exporting a .vsk package.",
+      "title": "Create a Skill from recorded operations",
+      "description": "A Skill includes execution steps, conditions, and atomic tools. Preview sanitized, portable content before writing or exporting a .vsk package.",
       "operationSummary": "Operation path JSON",
       "invalidJson": "Operation path is not valid JSON: {{detail}}",
       "objectRequired": "Operation path must be a JSON object.",
@@ -1440,6 +1442,11 @@
     "packagePath": "Package Path",
     "preflight": "Preflight",
     "import": "Import",
+    "dropHint": "Drop a .vsk here to preflight and import it",
+    "dropInvalid": "Drop a .vsk file.",
+    "pathToSkillAdvanced": "Create Skill from recorded operations (Advanced)",
+    "exportSection": "Export Skill",
+    "advancedActions": "Advanced actions",
     "skillName": "Skill Name",
     "outputPath": "Output Path",
     "privateKeyPath": "Private Key Path",
@@ -1451,8 +1458,15 @@
     "officialKeyExport": "Export encrypted backup",
     "officialKeyImport": "Import encrypted backup",
     "export": "Export",
+    "executionMode": {
+      "deterministic": "Deterministic steps",
+      "deterministicDescription": "A signed fixed atomic sequence follows the current permission mode: prompt when approval is required, execute when already authorized; checkpoints, audit, and rollback remain in both cases.",
+      "agentic": "Smart execution",
+      "agenticDescription": "The model dynamically chooses steps and atomic tools within the same Skill; uncertainty still stops for confirmation."
+    },
     "tablePackage": "Package",
     "tableRisk": "Risk",
+    "risk": {"high": "High risk", "medium": "Medium risk", "low": "Low risk"},
     "tableStatus": "Status",
     "tableActions": "Actions",
     "noPackages": "No installed .vsk packages.",
@@ -1481,8 +1495,8 @@
       "packageImported": "Package imported",
       "releaseExported": "Release package exported",
       "devExported": "Dev package exported",
-      "packageEnabled": "Package enabled",
-      "packageDisabled": "Package disabled",
+      "packageEnabled": "Enabled",
+      "packageDisabled": "Disabled",
       "packageUninstalled": "Package uninstalled",
       "safeModeEnabled": "Safe Mode enabled",
       "safeModeDisabled": "Safe Mode disabled",

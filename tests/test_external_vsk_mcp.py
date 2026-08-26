@@ -69,21 +69,30 @@ def tool_map(layer: str) -> dict[str, dict[str, object]]:
     }
 
 
-def test_external_vsk_block_is_lazy_and_exposes_exactly_three_narrow_tools() -> None:
+def test_external_vsk_block_lazily_exposes_preview_write_import_and_state_tools() -> None:
     with isolated_external_vsk_gateway():
         planning = tool_map("planning")
         execution = tool_map("execution")
-        assert set(planning) == {"vrcforge_preflight_skill_package"}
+        assert set(planning) == {
+            "vrcforge_preflight_skill_package",
+            "vrcforge_preview_path_to_skill",
+        }
         assert set(execution) == {
             "vrcforge_preflight_skill_package",
+            "vrcforge_preview_path_to_skill",
             "vrcforge_import_skill_package",
             "vrcforge_export_skill_package",
+            "vrcforge_set_skill_package_enabled",
+            "vrcforge_write_path_to_skill",
         }
 
         export_schema = execution["vrcforge_export_skill_package"]["inputSchema"]
         assert export_schema["additionalProperties"] is False
         assert "privateKeyPath" in export_schema["properties"]
         assert "privateKeyPem" not in export_schema["properties"]
+        state_schema = execution["vrcforge_set_skill_package_enabled"]["inputSchema"]
+        assert set(state_schema["required"]) == {"skillPackageId", "enabled"}
+        assert "syncProjectedSkill" not in state_schema["properties"]
 
         index = dashboard_server.AGENT_GATEWAY.external_mcp_tool_block_index(
             {"block": "skills/vsk"}

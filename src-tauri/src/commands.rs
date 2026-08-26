@@ -1053,7 +1053,7 @@ pub fn request_approval_revision(
 }
 
 #[tauri::command]
-pub fn fetch_checkpoints(request: DesktopCheckpointsRequest) -> Result<serde_json::Value, String> {
+pub async fn fetch_checkpoints(request: DesktopCheckpointsRequest) -> Result<serde_json::Value, String> {
     let mut query = Vec::new();
     if let Some(value) = request
         .project_root
@@ -1070,19 +1070,17 @@ pub fn fetch_checkpoints(request: DesktopCheckpointsRequest) -> Result<serde_jso
     } else {
         format!("?{}", query.join("&"))
     };
-    backend_json_request(
-        "GET",
-        format!("/api/app/checkpoints{suffix}"),
-        None,
-        request.timeout_ms,
-    )
+    let timeout_ms = request.timeout_ms;
+    blocking_backend_json_request(move || backend_json_request(
+        "GET", format!("/api/app/checkpoints{suffix}"), None, timeout_ms,
+    )).await
 }
 
 #[tauri::command]
-pub fn preview_restore_checkpoint(
+pub async fn preview_restore_checkpoint(
     request: DesktopCheckpointIdRequest,
 ) -> Result<serde_json::Value, String> {
-    backend_json_request(
+    blocking_backend_json_request(move || backend_json_request(
         "POST",
         format!(
             "/api/app/checkpoints/{}/preview",
@@ -1090,7 +1088,7 @@ pub fn preview_restore_checkpoint(
         ),
         None,
         request.timeout_ms,
-    )
+    )).await
 }
 
 #[tauri::command]
@@ -1109,7 +1107,7 @@ pub fn request_restore_checkpoint(
 }
 
 #[tauri::command]
-pub fn fetch_interrupted_apply_recoveries(
+pub async fn fetch_interrupted_apply_recoveries(
     request: DesktopRecoveriesRequest,
 ) -> Result<serde_json::Value, String> {
     let mut query = Vec::new();
@@ -1131,19 +1129,17 @@ pub fn fetch_interrupted_apply_recoveries(
     } else {
         format!("?{}", query.join("&"))
     };
-    backend_json_request(
-        "GET",
-        format!("/api/app/recoveries{suffix}"),
-        None,
-        request.timeout_ms,
-    )
+    let timeout_ms = request.timeout_ms;
+    blocking_backend_json_request(move || backend_json_request(
+        "GET", format!("/api/app/recoveries{suffix}"), None, timeout_ms,
+    )).await
 }
 
 #[tauri::command]
-pub fn preview_interrupted_apply_recovery(
+pub async fn preview_interrupted_apply_recovery(
     request: DesktopRecoveryIdRequest,
 ) -> Result<serde_json::Value, String> {
-    backend_json_request(
+    blocking_backend_json_request(move || backend_json_request(
         "POST",
         format!(
             "/api/app/recoveries/{}/preview",
@@ -1151,7 +1147,7 @@ pub fn preview_interrupted_apply_recovery(
         ),
         None,
         request.timeout_ms,
-    )
+    )).await
 }
 
 #[tauri::command]
@@ -1654,7 +1650,7 @@ mod project_index_transport_tests {
 }
 
 #[tauri::command]
-pub fn fetch_adjustment_checkpoints(
+pub async fn fetch_adjustment_checkpoints(
     request: DesktopAdjustmentCheckpointsRequest,
 ) -> Result<serde_json::Value, String> {
     let mut query = Vec::new();
@@ -1689,13 +1685,12 @@ pub fn fetch_adjustment_checkpoints(
     } else {
         format!("?{}", query.join("&"))
     };
-    backend_json_request(
+    blocking_backend_json_request(move || backend_json_request(
         "GET",
         format!("/api/app/adjustment-checkpoints{suffix}"),
         None,
         request.timeout_ms.or(Some(30_000)),
-    )
-    .map(sanitize_webview_response)
+    ).map(sanitize_webview_response)).await
 }
 
 #[tauri::command]
@@ -1797,10 +1792,10 @@ pub fn apply_adjustment_checkpoint(
 }
 
 #[tauri::command]
-pub fn preview_adjustment_checkpoint(
+pub async fn preview_adjustment_checkpoint(
     request: DesktopAdjustmentCheckpointIdRequest,
 ) -> Result<serde_json::Value, String> {
-    backend_json_request(
+    blocking_backend_json_request(move || backend_json_request(
         "POST",
         format!(
             "/api/app/adjustment-checkpoints/{}/preview",
@@ -1808,8 +1803,7 @@ pub fn preview_adjustment_checkpoint(
         ),
         None,
         request.timeout_ms.or(Some(60_000)),
-    )
-    .map(sanitize_webview_response)
+    ).map(sanitize_webview_response)).await
 }
 
 pub(crate) fn post_json_body_command(
@@ -1923,8 +1917,11 @@ pub(crate) fn bounded_memory_review_run_timeout(timeout_ms: Option<u64>) -> u64 
 }
 
 #[tauri::command]
-pub fn fetch_avatars(request: DesktopJsonBodyRequest) -> Result<serde_json::Value, String> {
-    post_json_body_command("/api/app/avatars", request, 60_000)
+pub async fn fetch_avatars(request: DesktopJsonBodyRequest) -> Result<serde_json::Value, String> {
+    blocking_backend_json_request(move || {
+        post_json_body_command("/api/app/avatars", request, 60_000)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -1959,17 +1956,23 @@ pub fn request_package_install(
 }
 
 #[tauri::command]
-pub fn plan_avatar_encryption(
+pub async fn plan_avatar_encryption(
     request: DesktopJsonBodyRequest,
 ) -> Result<serde_json::Value, String> {
-    post_json_body_command("/api/avatar-encryption/plan", request, 120_000)
+    blocking_backend_json_request(move || {
+        post_json_body_command("/api/avatar-encryption/plan", request, 120_000)
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn request_avatar_encryption_apply(
+pub async fn request_avatar_encryption_apply(
     request: DesktopJsonBodyRequest,
 ) -> Result<serde_json::Value, String> {
-    post_json_body_command("/api/avatar-encryption/apply-request", request, 120_000)
+    blocking_backend_json_request(move || {
+        post_json_body_command("/api/avatar-encryption/apply-request", request, 120_000)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -3025,7 +3028,6 @@ pub fn save_chats(request: DesktopJsonBodyRequest) -> Result<serde_json::Value, 
 /// enforces the real per-kind caps (512MB archives / 64MB images); this only
 /// bounds what the IPC bridge is willing to carry.
 const CHAT_ATTACHMENT_UPLOAD_CHUNK_MAX_BYTES: usize = 8 * 1024 * 1024;
-
 #[tauri::command]
 pub async fn begin_chat_attachment_upload(
     request: DesktopJsonBodyRequest,

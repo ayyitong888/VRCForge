@@ -7,6 +7,12 @@ export type SkillPackageEntry = {
   author_id?: string;
   authorId?: string;
   title?: string;
+  official?: boolean;
+  officialPublisher?: string;
+  execution?: "deterministic" | "agentic" | string;
+  executionMode?: string;
+  execution_mode?: string;
+  entrypoints?: Record<string, unknown>;
   version?: string;
   source?: string;
   enabled?: boolean;

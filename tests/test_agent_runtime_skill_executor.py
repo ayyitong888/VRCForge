@@ -107,6 +107,7 @@ def test_gateway_and_subagents_share_one_least_authority_runtime_skill_owner(tmp
         "blocked_skills",
         "direct_categories",
         "direct_write_tools",
+        "request_supervised_write",
     }
 
 

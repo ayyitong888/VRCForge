@@ -84,8 +84,8 @@ def build_safety_posture(
         "rollback": {
             "availableForCheckpointedWrite": True,
             "approvalRecordRequired": True,
-            "manualApprovalRequired": not full_permission,
-            "restoreMayAutoExecute": full_permission,
+            "manualApprovalRequired": True,
+            "restoreMayAutoExecute": False,
         },
         "externalAgent": {
             "requestOnly": True,

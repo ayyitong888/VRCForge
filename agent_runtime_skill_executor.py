@@ -35,8 +35,9 @@ class AgentRuntimeSkillExecutorPorts:
 
     The owner may resolve read/direct tools, load verified projected Skills,
     invoke only the already-filtered tool handler, and append audit events. It
-    has no write-handler registry, approval, checkpoint, Provider, session,
-    filesystem-write, process, or network capability of its own.
+    can submit signed fixed-plan writes only through the existing supervised
+    approval transaction. It has no raw write-handler registry, checkpoint,
+    Provider, session, filesystem-write, process, or network capability.
     """
 
     ensure_config: Callable[[], Any]
@@ -58,6 +59,7 @@ class AgentRuntimeSkillExecutorPorts:
     blocked_skills: frozenset[str]
     direct_categories: frozenset[str]
     direct_write_tools: frozenset[str]
+    request_supervised_write: Callable[[str, dict[str, Any], str], dict[str, Any]] | None = None
 
 
 class AgentRuntimeSkillExecutor:
@@ -274,6 +276,33 @@ class AgentRuntimeSkillExecutor:
             )
             return payload
 
+        execution = str(
+            package_audit_context.get("execution")
+            or package_audit_context.get("executionMode")
+            or "agentic"
+        )
+        payload["execution"] = execution
+        payload["executionMode"] = execution
+        if execution == "deterministic":
+            return self._execute_deterministic_skill(
+                skill,
+                params,
+                agent_name,
+                config,
+                owner_id,
+                payload,
+                package_audit_context,
+            )
+        if skill.get("packageId") and not package_audit_context:
+            payload.update(
+                {
+                    "ok": False,
+                    "status": "blocked",
+                    "error": "The installed Skill package identity could not be verified.",
+                }
+            )
+            return payload
+
         entrypoint = str(skill.get("entrypointTool") or "").strip()
         if entrypoint:
             entrypoint_result = self._execute_skill_entrypoint(
@@ -314,6 +343,174 @@ class AgentRuntimeSkillExecutor:
                 "status": payload["status"],
                 "entrypointTool": entrypoint,
                 **package_audit_context,
+            }
+        )
+        return payload
+
+    def _execute_deterministic_skill(
+        self,
+        skill: dict[str, Any],
+        params: dict[str, Any],
+        agent_name: str,
+        config: Any,
+        owner_id: str,
+        payload: dict[str, Any],
+        package_audit_context: dict[str, Any],
+    ) -> dict[str, Any]:
+        steps = package_audit_context.get("workflowSteps")
+        digest = str(package_audit_context.get("workflowDigest") or "")
+        if (
+            package_audit_context.get("signatureStatus") != "signed"
+            or package_audit_context.get("signerTrustStatus") != "trusted"
+            or not isinstance(steps, list)
+            or not steps
+            or not digest
+        ):
+            payload.update(
+                {
+                    "ok": False,
+                    "status": "blocked",
+                    "error": "The signed deterministic execution plan could not be verified.",
+                }
+            )
+            return payload
+
+        completed: list[dict[str, Any]] = []
+        payload["workflowDigest"] = digest
+        payload["runtimeEnforced"] = True
+        payload["steps"] = completed
+        audit_context = {
+            key: value
+            for key, value in package_audit_context.items()
+            if key != "workflowSteps"
+        }
+        for index, step in enumerate(steps):
+            if not isinstance(step, dict):
+                payload.update(
+                    {
+                        "ok": False,
+                        "status": "blocked",
+                        "failedStep": index,
+                        "error": "The signed deterministic execution step is invalid.",
+                    }
+                )
+                return payload
+            tool_name = str(step.get("tool") or "")
+            registered_tool = self._ports.tool_for_name(tool_name)
+            arguments = step.get("arguments", {})
+            if not isinstance(arguments, dict):
+                payload.update(
+                    {
+                        "ok": False,
+                        "status": "blocked",
+                        "failedStep": index,
+                        "error": "The signed deterministic execution arguments are invalid.",
+                    }
+                )
+                break
+            if bool(step.get("writes")) or (
+                registered_tool is not None and bool(registered_tool.write)
+            ):
+                request_write = self._ports.request_supervised_write
+                allowed_tools = self._ports.ensure_string_list(
+                    skill.get("allowedTools") or skill.get("tools")
+                )
+                disallowed_tools = self._ports.ensure_string_list(skill.get("disallowedTools"))
+                if (
+                    request_write is None
+                    or tool_name in disallowed_tools
+                    or (allowed_tools and tool_name not in allowed_tools)
+                ):
+                    payload.update(
+                        {
+                            "ok": False,
+                            "status": "blocked",
+                            "failedStep": index,
+                            "targetTool": tool_name,
+                            "error": "The signed deterministic write is not authorized by this Skill.",
+                        }
+                    )
+                    break
+                try:
+                    write_result = self._ports.redact(
+                        request_write(tool_name, {**params, **arguments}, agent_name)
+                    )
+                except Exception as exc:  # noqa: BLE001 - unsupported writes fail closed.
+                    payload.update(
+                        {
+                            "ok": False,
+                            "status": "blocked",
+                            "failedStep": index,
+                            "targetTool": tool_name,
+                            "error": str(exc),
+                        }
+                    )
+                    break
+                completed.append({"index": index, "tool": tool_name, "result": write_result})
+                approval_id = _result_approval_id(write_result)
+                if approval_id:
+                    payload["approvalId"] = approval_id
+                    payload["approval_id"] = approval_id
+                write_status = str(write_result.get("status") or "")
+                if write_status == "executed" and write_result.get("ok"):
+                    continue
+                payload.update(
+                    {
+                        "ok": write_status in {"pending", "needs_user_action"},
+                        "status": (
+                            "needs_user_action"
+                            if write_status in {"pending", "needs_user_action"}
+                            else "failed"
+                        ),
+                        "failedStep": index,
+                        "targetTool": tool_name,
+                        "requiresApproval": True,
+                        "checkpointRequired": True,
+                        "rollbackRequiresSeparateApproval": True,
+                        "summary": str(
+                            write_result.get("message")
+                            or "Deterministic execution paused under the current write permission policy."
+                        ),
+                    }
+                )
+                if write_result.get("error"):
+                    payload["error"] = str(write_result["error"])
+                break
+            step_result = self._execute_skill_entrypoint(
+                skill,
+                tool_name,
+                {**params, **arguments},
+                agent_name,
+                config,
+                owner_id,
+                package_audit_context=audit_context,
+            )
+            completed.append({"index": index, "tool": tool_name, "result": step_result})
+            if step_result.get("status") != "executed":
+                payload.update(
+                    {
+                        "ok": False,
+                        "status": str(step_result.get("status") or "failed"),
+                        "failedStep": index,
+                        "error": str(
+                            step_result.get("error")
+                            or "A deterministic execution step did not complete."
+                        ),
+                    }
+                )
+                break
+        else:
+            payload["status"] = "executed"
+            payload["ok"] = True
+
+        self._ports.append_audit(
+            {
+                "event": "runtime_skill_package_loaded",
+                "skill": skill.get("name"),
+                "agent": agent_name,
+                "status": payload["status"],
+                "completedStepCount": len(completed),
+                **audit_context,
             }
         )
         return payload

@@ -11,6 +11,7 @@ from atomic_reference_rename import TOOL_NAME as ATOMIC_REFERENCE_RENAME_TOOL
 from component_feature_write import TOOL_NAME as COMPONENT_FEATURE_TOOL
 from constraint_source_write import TOOL_NAME as CONSTRAINT_TOOL
 from material_shader_assignment import TOOL_NAME as MATERIAL_TOOL
+from material_texture_assignment import TOOL_NAME as MATERIAL_TEXTURE_TOOL
 from parameter_bit_packing import TOOL_NAME as PARAMETER_BIT_PACKING_TOOL
 from project_asset_copy import TOOL_NAME as PROJECT_ASSET_COPY_TOOL
 from scene_asset_save import TOOL_NAME as SAVE_NEW_SCENE_TOOL
@@ -22,6 +23,7 @@ from texture_import_settings import TOOL_NAME as TEXTURE_TOOL
 def test_registry_contains_only_the_guarded_write_protocols() -> None:
     assert writes.AUTHORITATIVE_UNITY_WRITE_TOOLS == {
         MATERIAL_TOOL,
+        MATERIAL_TEXTURE_TOOL,
         DUPLICATE_TOOL_NAME,
         PREFAB_TOOL_NAME,
         TEXTURE_TOOL,

@@ -50,8 +50,9 @@ EXTERNAL_TOOL_BLOCK_DESCRIPTIONS = {
     "checkpoint": "Checkpoints and approved recovery.",
     "diagnostics": "Logs and validation.",
     "encryption": "Private avatar-encryption integration.",
-    "skills": "Local Skill package workflows; expand this branch before loading VSK tools.",
+    "skills": "Installed Skill workflows and local VSK package management; expand this branch before loading one family.",
     "skills/vsk": "Read-only preflight and atomic import/export for local .vsk Skill packages.",
+    "skills/installed": "Read-only discovery and on-demand instructions for enabled installed user Skills.",
 }
 EXTERNAL_TOOL_BLOCK_DO_NOT_USE = {
     "core": "Do not use for project creation, asset edits, or recovery.",
@@ -67,8 +68,9 @@ EXTERNAL_TOOL_BLOCK_DO_NOT_USE = {
     "checkpoint": "Do not use checkpoint restore as an automatic response to a failed tool call.",
     "diagnostics": "Do not use diagnostic tools to mutate the avatar or clear evidence.",
     "encryption": "Do not use unless the private encryption integration is explicitly in scope.",
-    "skills": "Do not load Skill packaging tools for Unity avatar or project operations.",
+    "skills": "Do not load unrelated Skill families or treat reading a workflow as approval to execute it.",
     "skills/vsk": "Do not use preflight as installation proof or overwrite an existing export path.",
+    "skills/installed": "Do not import packages, read arbitrary host files, execute a Skill, or bypass write approval.",
 }
 EXTERNAL_TOOL_BLOCK_INDEXES = {
     "1": "core",
@@ -89,13 +91,14 @@ EXTERNAL_TOOL_BLOCK_BRANCHES = {
         "integrations/vrcfury",
         "integrations/gesture-manager",
     ),
-    "skills": ("skills/vsk",),
+    "skills": ("skills/vsk", "skills/installed"),
 }
 EXTERNAL_TOOL_BLOCK_LEAF_INDEXES = {
     "6.1": "integrations/modular-avatar",
     "6.2": "integrations/vrcfury",
     "6.3": "integrations/gesture-manager",
     "11.1": "skills/vsk",
+    "11.2": "skills/installed",
 }
 EXTERNAL_TOOL_BLOCK_NAME_INDEXES = {
     name: index
@@ -1003,7 +1006,13 @@ def run_stdio_server(
                     details={"selector": selector},
                     loadedBlocks=sorted(loaded_blocks),
                 )
-            targets = EXTERNAL_TOOL_BLOCK_BRANCHES.get(block, (block,))
+            # Preserve historical `skills` package-management loading. Installed
+            # workflow instructions stay hidden until their leaf is requested.
+            targets = (
+                ("skills/vsk",)
+                if block == "skills"
+                else EXTERNAL_TOOL_BLOCK_BRANCHES.get(block, (block,))
+            )
             if tool_name == "vrcforge_load_tool_block":
                 changed = any(target not in loaded_blocks for target in targets)
                 loaded_blocks.update(targets)

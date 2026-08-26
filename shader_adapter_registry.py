@@ -11,7 +11,7 @@ _SHADER_ADAPTER_DEFINITIONS: dict[str, dict[str, Any]] = {
     "liltoon": {
         "label": "lilToon",
         "knownPackageIds": ["jp.lilxyzw.liltoon"],
-        "safeSemanticProperties": ["main_color", "shade_color", "smoothness", "emission_strength", "rendering_mode"],
+        "safeSemanticProperties": ["main_color", "main_saturation", "shade_color", "shadow_border", "smoothness", "emission_strength", "rendering_mode"],
         "blockedProperties": ["raw_property_name", "unknown_texture_slot", "render_queue_without_adapter"],
         "semanticTuning": True,
         "restoreEncryption": True,

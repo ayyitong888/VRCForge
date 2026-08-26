@@ -305,6 +305,38 @@ def test_model_observation_includes_precise_internal_failure_facts_without_raw_d
     assert "privateDump" not in observation
 
 
+def test_model_observation_preserves_canonical_dispatch_retry_and_recovery_flags() -> None:
+    observation = service()._llm_loop_step_observation(
+        {
+            "tool": "vrcforge_set_material_texture",
+            "status": "failed",
+            "result": {"privateDump": "must-not-enter-model-context"},
+            "outcome": {
+                "status": "failed",
+                "summary": "Unity did not return its write receipt.",
+                "verification": {"state": "not_required"},
+                "error": {"code": "unity_write_response_timeout", "retryable": True},
+                "toolRoutingStarted": True,
+                "mutationStarted": None,
+                "committed": None,
+                "commitState": "unknown",
+                "commitStateKnown": False,
+                "retryable": True,
+                "safeToRetry": False,
+                "checkpointRecoveryRequired": True,
+                "temporaryCleanupRequired": False,
+            },
+        }
+    )
+
+    assert '"toolRoutingStarted":true' in observation
+    assert '"retryable":true' in observation
+    assert '"safeToRetry":false' in observation
+    assert '"checkpointRecoveryRequired":true' in observation
+    assert '"temporaryCleanupRequired":false' in observation
+    assert "privateDump" not in observation
+
+
 def test_internal_tool_block_observation_keeps_compact_indices_without_schemas() -> None:
     observation = service()._llm_loop_step_observation(
         {

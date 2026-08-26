@@ -1,4 +1,4 @@
-"""Validate the exact 80-command live Unity MCP acceptance catalog.
+"""Validate the exact current live Unity MCP acceptance catalog.
 
 This helper validates acceptance inputs only. It never calls Unity, the App,
 or a provider, and it never treats a missing dependency as a successful tool
@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from unity_mcp_tool_contract import EXPECTED_TOOL_NAMES
+from unity_mcp_tool_contract import EXPECTED_TOOL_COUNT, EXPECTED_TOOL_NAMES
 
 CATALOG_TOOL_NAMES = EXPECTED_TOOL_NAMES
 
@@ -119,8 +119,10 @@ def load_catalog(paths: Iterable[Path] = DEFAULT_PARTS) -> list[dict[str, Any]]:
             )
     missing = sorted(CATALOG_TOOL_NAMES - seen_tools)
     extra = sorted(seen_tools - CATALOG_TOOL_NAMES)
-    if missing or extra or len(cases) != 80:
-        raise ValueError(f"catalog must cover exactly 80 tools; missing={missing}, extra={extra}")
+    if missing or extra or len(cases) != EXPECTED_TOOL_COUNT:
+        raise ValueError(
+            f"catalog must cover exactly {EXPECTED_TOOL_COUNT} tools; missing={missing}, extra={extra}"
+        )
     return sorted(cases, key=lambda item: item["tool"])
 
 
@@ -197,7 +199,7 @@ def validate_tool_schemas(
             raise ValueError(f"tools/list contains a duplicate or missing name: {name!r}")
         by_name[name] = tool
     if set(by_name) != CATALOG_TOOL_NAMES:
-        raise ValueError("tools/list does not match the exact 80-command contract")
+        raise ValueError(f"tools/list does not match the exact {EXPECTED_TOOL_COUNT}-command contract")
 
     for case in cases:
         name = case["tool"]
@@ -247,7 +249,9 @@ def validate_tool_schemas(
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Validate the exact 80-tool live acceptance catalog.")
+    parser = argparse.ArgumentParser(
+        description=f"Validate the exact {EXPECTED_TOOL_COUNT}-tool live acceptance catalog."
+    )
     parser.add_argument("--context-json", type=Path)
     parser.add_argument("--unity-project", type=Path)
     args = parser.parse_args()

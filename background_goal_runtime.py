@@ -26,8 +26,10 @@ from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 
-TOTAL_CONCURRENCY_LIMIT = 5
-BACKGROUND_CONCURRENCY_LIMIT = 2
+# Keep four interactive slots available while allowing independent background
+# projects/sessions to make progress concurrently.
+TOTAL_CONCURRENCY_LIMIT = 16
+BACKGROUND_CONCURRENCY_LIMIT = 12
 PROVIDER_PREFLIGHT_CACHE_SECONDS = 300
 TOTAL_PROVIDER_ATTEMPTS = 3
 PROVIDER_RETRY_BACKOFF_SECONDS = (60, 120, 300)

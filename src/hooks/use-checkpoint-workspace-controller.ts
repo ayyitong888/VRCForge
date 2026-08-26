@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { ActiveView } from "../lib/app-view";
 import {
@@ -64,6 +64,10 @@ export function useCheckpointWorkspaceController({
   const [checkpointMessage, setCheckpointMessage] = useState("");
   const [recoveryMessage, setRecoveryMessage] = useState("");
   const [adjustmentMessage, setAdjustmentMessage] = useState("");
+  const checkpointPreviewCacheRef = useRef(new Map<string, AgentCheckpointPreview>());
+  const checkpointPreviewInflightRef = useRef(new Map<string, Promise<AgentCheckpointPreview>>());
+  const checkpointListCacheRef = useRef(new Map<string, AgentCheckpoint[]>());
+  const checkpointLoadInflightRef = useRef(new Map<string, Promise<void>>());
 
   useEffect(() => {
     if (activeView === "checkpoints" && runtimeConnected) {
@@ -73,12 +77,21 @@ export function useCheckpointWorkspaceController({
 
   async function openCheckpoints() {
     setActiveView("checkpoints");
-    await loadCheckpoints();
   }
 
-  async function loadCheckpoints(target = endpoint) {
+  async function loadCheckpoints(target = endpoint, options: { force?: boolean } = {}) {
+    const cacheKey = `${target}|${activeProjectPath || "-"}`;
+    const cachedList = checkpointListCacheRef.current.get(cacheKey);
+    if (cachedList && !options.force) {
+      setCheckpoints(cachedList);
+      return;
+    }
+    const pending = checkpointLoadInflightRef.current.get(cacheKey);
+    if (pending && !options.force) {
+      return pending;
+    }
     setLoadingCheckpoints(true);
-    try {
+    const work = (async () => {
       let targetEndpoint = target;
       if (!runtimeConnected) {
         const readyEndpoint = await startRuntime();
@@ -87,15 +100,16 @@ export function useCheckpointWorkspaceController({
         }
         targetEndpoint = readyEndpoint;
       }
-      const [payload, recoveryPayload, adjustmentPayload] = await Promise.all([
-        fetchCheckpoints(targetEndpoint, activeProjectPath || undefined),
+      const payload = await fetchCheckpoints(targetEndpoint, activeProjectPath || undefined);
+      const nextCheckpoints = payload.checkpoints || [];
+      checkpointListCacheRef.current.set(cacheKey, nextCheckpoints);
+      setCheckpoints(nextCheckpoints);
+      const [recoveryResult, adjustmentResult] = await Promise.allSettled([
         fetchInterruptedApplyRecoveries(targetEndpoint, { projectRoot: activeProjectPath || undefined }),
         fetchAdjustmentCheckpoints(targetEndpoint, { projectRoot: activeProjectPath || undefined }),
       ]);
-      const nextCheckpoints = payload.checkpoints || [];
-      const nextRecoveries = recoveryPayload.recoveries || [];
-      const nextAdjustmentCheckpoints = adjustmentPayload.checkpoints || [];
-      setCheckpoints(nextCheckpoints);
+      const nextRecoveries = recoveryResult.status === "fulfilled" ? recoveryResult.value.recoveries || [] : interruptedRecoveries;
+      const nextAdjustmentCheckpoints = adjustmentResult.status === "fulfilled" ? adjustmentResult.value.checkpoints || [] : adjustmentCheckpoints;
       setInterruptedRecoveries(nextRecoveries);
       setAdjustmentCheckpoints(nextAdjustmentCheckpoints);
       if (checkpointPreview?.checkpoint?.id && !nextCheckpoints.some((item) => item.id === checkpointPreview.checkpoint?.id)) {
@@ -109,9 +123,10 @@ export function useCheckpointWorkspaceController({
       if (adjustmentId && !nextAdjustmentCheckpoints.some((item) => item.id === adjustmentId)) {
         setAdjustmentPreview(null);
       }
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
+    })().catch((cause) => { setError(cause instanceof Error ? cause.message : String(cause)); });
+    checkpointLoadInflightRef.current.set(cacheKey, work);
+    try { await work; } finally {
+      checkpointLoadInflightRef.current.delete(cacheKey);
       setLoadingCheckpoints(false);
     }
   }
@@ -120,13 +135,23 @@ export function useCheckpointWorkspaceController({
     setLoadingCheckpoints(true);
     setCheckpointMessage("");
     try {
-      const payload = await previewRestoreCheckpoint(endpoint, checkpointId);
-      setCheckpointPreview(payload);
-      if (!payload.ok) {
-        setError(payload.error || "Checkpoint preview failed.");
+      const cached = checkpointPreviewCacheRef.current.get(checkpointId);
+      const pending = checkpointPreviewInflightRef.current.get(checkpointId);
+      const payload = cached || pending || previewRestoreCheckpoint(endpoint, checkpointId);
+      if (!cached && !pending) {
+        checkpointPreviewInflightRef.current.set(checkpointId, payload as Promise<AgentCheckpointPreview>);
+      }
+      const resolvedPayload = await payload;
+      checkpointPreviewCacheRef.current.set(checkpointId, resolvedPayload);
+      checkpointPreviewInflightRef.current.delete(checkpointId);
+      setCheckpointPreview(resolvedPayload);
+      setRecoveryPreview(null);
+      setAdjustmentPreview(null);
+      if (!resolvedPayload.ok) {
+        setCheckpointMessage(resolvedPayload.error || "Checkpoint preview unavailable; the checkpoint metadata is incomplete.");
       }
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      setCheckpointMessage(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setLoadingCheckpoints(false);
     }
@@ -161,6 +186,8 @@ export function useCheckpointWorkspaceController({
     try {
       const payload = await previewInterruptedApplyRecovery(endpoint, recoveryId);
       setRecoveryPreview(payload);
+      setCheckpointPreview(null);
+      setAdjustmentPreview(null);
       if (!payload.ok) {
         setError(payload.error || "Recovery preview failed.");
       }
@@ -299,6 +326,8 @@ export function useCheckpointWorkspaceController({
     try {
       const payload = await previewAdjustmentCheckpoint(endpoint, checkpointId);
       setAdjustmentPreview(payload);
+      setCheckpointPreview(null);
+      setRecoveryPreview(null);
       if (!payload.ok) {
         setError(payload.error || "Adjustment preview failed.");
       }

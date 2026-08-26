@@ -142,6 +142,35 @@ class ConcurrentApplyWriteGuardTests(unittest.TestCase):
             self.assertTrue(applied["ok"])
             self.assertEqual(len(calls), 1)
 
+    def test_background_project_read_lease_allows_other_project_write(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project_a = create_unity_project(root, "UnityProjectA")
+            project_b = create_unity_project(root, "UnityProjectB")
+            gateway = create_gateway(root)
+            gateway.approval_transactions.register_write_handler(
+                "vrcforge_test_write",
+                "Test write",
+                "high",
+                lambda args: {"ok": True, "projectRoot": args.get("projectRoot")},
+            )
+            approval_id = approved_apply_request(gateway, "vrcforge_test_write", project_b)
+
+            self.assertTrue(
+                gateway.approval_transactions.try_acquire_background_project_read(
+                    "memory-review-background", str(project_a)
+                )
+            )
+            try:
+                applied = gateway.approval_transactions.apply_approved({"approval_id": approval_id})
+            finally:
+                self.assertTrue(
+                    gateway.approval_transactions.release_background_project_read(
+                        "memory-review-background", str(project_a)
+                    )
+                )
+            self.assertTrue(applied["ok"], applied)
+
     def test_only_allowlisted_applied_readback_emits_validated_memory_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -378,7 +407,7 @@ class ConcurrentApplyWriteGuardTests(unittest.TestCase):
             self.assertTrue(exempt["ok"])
             self.assertEqual(len(resolve_calls), 1)
 
-    def test_global_write_lane_also_serializes_different_projects(self) -> None:
+    def test_project_write_lanes_allow_different_projects_to_progress(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             project_a = create_unity_project(root, "UnityProjectA")
@@ -398,22 +427,37 @@ class ConcurrentApplyWriteGuardTests(unittest.TestCase):
             slow_id = approved_apply_request(gateway, "vrcforge_test_slow_write", project_a)
             fast_id = approved_apply_request(gateway, "vrcforge_test_fast_write", project_b)
 
+            slow_result: dict = {}
             worker = threading.Thread(
-                target=lambda: gateway.approval_transactions.apply_approved({"approval_id": slow_id}),
+                target=lambda: slow_result.update(
+                    gateway.approval_transactions.apply_approved({"approval_id": slow_id})
+                ),
                 daemon=True,
             )
             worker.start()
             self.assertTrue(entered_write.wait(timeout=30), "slow write handler never started")
 
-            blocked = gateway.approval_transactions.apply_approved({"approval_id": fast_id})
-            self.assertFalse(blocked["ok"])
-            self.assertEqual(blocked["status"], "blocked_concurrent_write")
-            self.assertEqual(gateway.checkpoint_recovery.list_checkpoints({"projectRoot": str(project_b)})["count"], 0)
+            fast_result: dict = {}
+            fast_worker = threading.Thread(
+                target=lambda: fast_result.update(
+                    gateway.approval_transactions.apply_approved({"approval_id": fast_id})
+                ),
+                daemon=True,
+            )
+            fast_worker.start()
+            fast_worker.join(timeout=30)
+            self.assertFalse(fast_worker.is_alive())
+            self.assertTrue(fast_result.get("ok"), fast_result)
+            self.assertEqual(
+                gateway.checkpoint_recovery.list_checkpoints({"projectRoot": str(project_b)})["count"],
+                1,
+            )
 
             release_write.set()
             worker.join(timeout=30)
             self.assertFalse(worker.is_alive())
-            self.assertTrue(gateway.approval_transactions.apply_approved({"approval_id": fast_id})["ok"])
+            self.assertTrue(slow_result.get("ok"), slow_result)
+            self.assertEqual(gateway._approvals[fast_id]["status"], "applied")
 
 
 class CheckpointStorageIsolationTests(unittest.TestCase):

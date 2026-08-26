@@ -4861,7 +4861,10 @@ class DashboardServerTests(unittest.TestCase):
         self.assertTrue(status["connected"])
         self.assertTrue(status["selectedInstanceMatched"])
         self.assertEqual(status["missingRequiredVrcForgeTools"], [])
-        self.assertEqual(status["tools"]["vrcForgeToolsCount"], 80)
+        self.assertEqual(
+            status["tools"]["vrcForgeToolsCount"],
+            len(dashboard_server.REQUIRED_VRCFORGE_UNITY_TOOLS),
+        )
         self.assertEqual(status["mcpHealth"]["protocolVersion"], "2026-07-28")
 
     def test_core_only_repair_never_starts_or_registers_an_external_connector(self) -> None:

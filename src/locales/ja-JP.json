@@ -836,7 +836,9 @@
     "checkOk": "正常",
     "checkWarning": "要確認",
     "checkError": "エラー",
-    "domainFallback": "その他"
+    "domainFallback": "その他",
+    "showBuiltinTools": "内蔵ツールを表示",
+    "editorSection": "スキルの作成 / 編集"
   },
   "skillStatus": {
     "executed": "実行済み",
@@ -1376,7 +1378,7 @@
     }
   },
   "package": {
-    "title": ".vsk Package Manager",
+    "title": ".vsk スキル管理",
     "store": "Store",
     "governance": "Governance",
     "safeMode": "Safe Mode",
@@ -1400,8 +1402,8 @@
       "disabledSkillIds": "無効化されたスキル"
     },
     "pathToSkill": {
-      "title": "操作パスをスキルとして保存",
-      "description": "ファイルの書き込みや .vsk の出力前に、匿名化された移植可能なプレビューを確認します。",
+      "title": "操作履歴からスキルを作成",
+      "description": "スキルには実行手順、条件、アトミックツールの組み合わせが含まれます。保存や .vsk 出力前に匿名化された内容を確認してください。",
       "operationSummary": "操作パス JSON",
       "invalidJson": "操作パスは有効な JSON ではありません：{{detail}}",
       "objectRequired": "操作パスは JSON オブジェクトである必要があります。",
@@ -1440,6 +1442,11 @@
     "packagePath": "Package Path",
     "preflight": "Preflight",
     "import": "Import",
+    "dropHint": ".vsk をここにドロップして事前確認とインポート",
+    "dropInvalid": ".vsk ファイルをドロップしてください。",
+    "pathToSkillAdvanced": "操作履歴からスキルを作成（詳細）",
+    "exportSection": "スキルを出力",
+    "advancedActions": "詳細操作",
     "skillName": "Skill Name",
     "outputPath": "Output Path",
     "privateKeyPath": "Private Key Path",
@@ -1451,8 +1458,15 @@
     "officialKeyExport": "暗号化バックアップをエクスポート",
     "officialKeyImport": "暗号化バックアップをインポート",
     "export": "Export",
+    "executionMode": {
+      "deterministic": "決定論的な固定手順",
+      "deterministicDescription": "署名済み固定アトミック手順です。現在の権限モードに従い、承認が必要なら確認し、既に許可されていれば実行します。どちらの場合もチェックポイント・監査・ロールバックを保持します。",
+      "agentic": "スマート実行",
+      "agenticDescription": "同じ Skill 内でモデルが状況に応じて手順とアトミックツールを動的に選びます。不確実な場合は確認のため停止します。"
+    },
     "tablePackage": "Package",
-    "tableRisk": "Risk",
+    "tableRisk": "リスク",
+    "risk": {"high": "高リスク", "medium": "中リスク", "low": "低リスク"},
     "tableStatus": "Status",
     "tableActions": "Actions",
     "noPackages": "インストール済みの .vsk パッケージはありません。",
@@ -1481,8 +1495,8 @@
       "packageImported": "パッケージをインポートしました",
       "releaseExported": "リリースパッケージをエクスポートしました",
       "devExported": "Dev パッケージをエクスポートしました",
-      "packageEnabled": "パッケージを有効にしました",
-      "packageDisabled": "パッケージを無効にしました",
+      "packageEnabled": "有効化しました",
+      "packageDisabled": "無効化しました",
       "packageUninstalled": "パッケージをアンインストールしました",
       "safeModeEnabled": "Safe Mode を有効にしました",
       "safeModeDisabled": "Safe Mode を無効にしました",

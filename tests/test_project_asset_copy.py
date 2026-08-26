@@ -6,6 +6,7 @@ from unittest.mock import patch
 import pytest
 
 import dashboard_server
+from unity_mcp_tool_contract import EXPECTED_TOOL_COUNT
 
 from project_asset_copy import (
     ANCHOR_ROOT,
@@ -154,6 +155,42 @@ def test_preview_binds_exact_source_destination_and_absence_evidence() -> None:
     assert approval["overwrite"] is False
 
 
+@pytest.mark.parametrize(
+    "source_path",
+    [
+        "Assets/Avatar/Face.mat",
+        f"{GENERATED_ROOT}/FinalAvatar_Face_SkinQuality_M3.mat",
+    ],
+)
+def test_material_copy_preserves_create_new_identity_and_rollback(source_path: str) -> None:
+    destination = f"{GENERATED_ROOT}/FinalAvatar_Face_SkinQuality_M4.mat"
+    request = build_wrapper_arguments(
+        {
+            "projectPath": "D:/DisposableUnityProject",
+            "sourceAssetPath": source_path,
+            "destinationAssetPath": destination,
+        }
+    )
+    payload = preview_payload()
+    payload["source"]["assetPath"] = source_path
+    payload["source"]["mainAssetType"] = "UnityEngine.Material"
+    payload["target"]["assetPath"] = destination
+    payload["previewDigest"] = compute_preview_digest(payload)
+
+    canonical, approval = bind_authoritative_preview(request, payload)
+    result = apply_payload(canonical)
+
+    assert canonical["arguments"]["sourceAssetPath"] == source_path
+    assert canonical["arguments"]["destinationAssetPath"] == destination
+    assert canonical["arguments"]["expectedSourceMainAssetType"] == "UnityEngine.Material"
+    assert canonical["arguments"]["expectedDestinationAbsent"] is True
+    assert approval["rollbackRequired"] is True
+    assert approval["createNew"] is True
+    assert approval["overwrite"] is False
+    assert validate_apply_result(canonical["arguments"], result) == result
+    assert result["target"]["guid"] != result["source"]["guid"]
+
+
 def test_absent_generated_root_is_bound_as_second_create_new_mutation() -> None:
     canonical, approval = bind_authoritative_preview(wrapper(), preview_payload(generated_root_exists=False))
 
@@ -169,6 +206,8 @@ def test_absent_generated_root_is_bound_as_second_create_new_mutation() -> None:
         ("Assets/A.controller", "Assets/Elsewhere/A.controller"),
         ("Assets/A.asset", f"{GENERATED_ROOT}/A.controller"),
         (f"{GENERATED_ROOT}/A.asset", f"{GENERATED_ROOT}/B.asset"),
+        (f"{GENERATED_ROOT}/Nested/A.mat", f"{GENERATED_ROOT}/B.mat"),
+        (f"{GENERATED_ROOT}/A.mat", f"{GENERATED_ROOT}/Nested/B.mat"),
     ],
 )
 def test_unsupported_or_unsafe_copy_requests_fail_closed(source: str, destination: str) -> None:
@@ -220,7 +259,7 @@ def test_core_and_external_registry_include_only_the_atomic_copy_surface() -> No
     gateway = (root / "agent_gateway.py").read_text(encoding="utf-8")
     tool = (root / "Assets/VRCForge/Editor/Generic/DuplicateProjectAssetTool.cs").read_text(encoding="utf-8")
 
-    assert 'internal const int ToolCount = 80;' in contract
+    assert f'internal const int ToolCount = {EXPECTED_TOOL_COUNT};' in contract
     assert f'{{ "{TOOL_NAME}", "VRCForge.Editor.DuplicateProjectAssetTool" }}' in contract
     assert f'"{TOOL_NAME}",' in server
     assert '"vrcforge_duplicate_project_asset"' in dashboard
@@ -229,6 +268,8 @@ def test_core_and_external_registry_include_only_the_atomic_copy_surface() -> No
     assert "AssetDatabase.MoveAsset" not in tool
     assert "overwrite is not supported" in tool
     assert "Assets/VRCForge/Generated" in tool
+    assert '".mat",' in tool
+    assert 'string.Equals(Path.GetExtension(path), ".mat", StringComparison.OrdinalIgnoreCase)' in tool
 
 
 def test_external_copy_handler_binds_the_exact_core_execution_plan() -> None:

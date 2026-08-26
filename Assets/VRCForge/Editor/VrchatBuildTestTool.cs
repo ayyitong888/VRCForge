@@ -1468,6 +1468,17 @@ namespace VRCForge.Editor
     )]
     public static class VrchatAvatarUploadReadinessTool
     {
+        public sealed class Parameters
+        {
+            [VRCForgeInput("Exact active Unity project root.", IsRequired = true)] public string projectPath { get; set; } = string.Empty;
+            [VRCForgeInput("Exact loaded-scene hierarchy path of the avatar root.", IsRequired = true)] public string avatarPath { get; set; } = string.Empty;
+            [VRCForgeInput("Create or update upload mode.", IsRequired = true)] public string uploadMode { get; set; } = string.Empty;
+            [VRCForgeInput("Requested build type.", IsRequired = true)] public string buildType { get; set; } = string.Empty;
+            [VRCForgeInput("Requested build target platforms.", IsRequired = true)] public JArray platforms { get; set; } = new JArray();
+            [VRCForgeInput("Explicit upload metadata.", IsRequired = true)] public JObject metadata { get; set; } = new JObject();
+            [VRCForgeInput("Run-owned thumbnail descriptor.", IsRequired = true)] public JObject thumbnail { get; set; } = new JObject();
+        }
+
         public static object HandleCommand(JObject @params)
         {
             try
@@ -1511,6 +1522,23 @@ namespace VRCForge.Editor
     )]
     public static class VrchatAvatarUploadTool
     {
+        public sealed class Parameters
+        {
+            [VRCForgeInput("Exact active Unity project root.", IsRequired = true)] public string projectPath { get; set; } = string.Empty;
+            [VRCForgeInput("Exact loaded-scene hierarchy path of the avatar root.", IsRequired = true)] public string avatarPath { get; set; } = string.Empty;
+            [VRCForgeInput("Create or update upload mode.", IsRequired = true)] public string uploadMode { get; set; } = string.Empty;
+            [VRCForgeInput("Requested build type.", IsRequired = true)] public string buildType { get; set; } = string.Empty;
+            [VRCForgeInput("Requested build target platforms.", IsRequired = true)] public JArray platforms { get; set; } = new JArray();
+            [VRCForgeInput("Explicit upload metadata.", IsRequired = true)] public JObject metadata { get; set; } = new JObject();
+            [VRCForgeInput("Run-owned thumbnail descriptor.", IsRequired = true)] public JObject thumbnail { get; set; } = new JObject();
+            [VRCForgeInput("Expected avatar identity from readiness.", IsRequired = true)] public string expectedAvatarGlobalObjectId { get; set; } = string.Empty;
+            [VRCForgeInput("Expected current pipeline id from readiness.", IsRequired = true)] public string expectedCurrentPipelineId { get; set; } = string.Empty;
+            [VRCForgeInput("Expected SDK user id from readiness.", IsRequired = true)] public string expectedSdkUserId { get; set; } = string.Empty;
+            [VRCForgeInput("Expected platform from readiness.", IsRequired = true)] public string expectedPlatform { get; set; } = string.Empty;
+            [VRCForgeInput("Readiness digest from the preceding readiness call.", IsRequired = true)] public string readinessDigest { get; set; } = string.Empty;
+            [VRCForgeInput("Existing upload job id to poll.", IsRequired = false)] public string jobId { get; set; } = string.Empty;
+        }
+
         public const string ToolName = "vrc_build_and_upload_avatar";
         private const string Schema = "vrcforge.vrchat_avatar_upload.v1";
         private const string JobPrefix = "VRCForge.VrchatAvatarUpload.Job.";

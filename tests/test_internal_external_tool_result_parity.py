@@ -36,11 +36,15 @@ CANONICAL_SUCCESS_FACT_FIELDS = (
 )
 CANONICAL_FAILURE_EXECUTION_FIELDS = (
     "errorCode",
+    "toolRoutingStarted",
     "mutationStarted",
     "committed",
     "commitState",
     "commitStateKnown",
+    "retryable",
     "safeToRetry",
+    "checkpointRecoveryRequired",
+    "temporaryCleanupRequired",
 )
 
 
@@ -184,11 +188,15 @@ def test_internal_agent_and_external_mcp_2026_keep_identical_canonical_results(
             "required": False,
             "reason": "No build or upload mutation started.",
         },
+        "toolRoutingStarted": True,
         "mutationStarted": False,
         "committed": False,
         "commitState": "not_started",
         "commitStateKnown": True,
+        "retryable": True,
         "safeToRetry": False,
+        "checkpointRecoveryRequired": False,
+        "temporaryCleanupRequired": False,
         "failedStep": "inspect_neck_seam",
         "diagnostics": {"schema": "synthetic.v1", "cause": "bone binding"},
     }

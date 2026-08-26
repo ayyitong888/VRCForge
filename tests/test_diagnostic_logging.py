@@ -296,8 +296,8 @@ def test_safety_posture_describes_auto_execution_and_restore_exception_truthfull
     assert posture["rollback"] == {
         "availableForCheckpointedWrite": True,
         "approvalRecordRequired": True,
-        "manualApprovalRequired": False,
-        "restoreMayAutoExecute": True,
+        "manualApprovalRequired": True,
+        "restoreMayAutoExecute": False,
     }
 
 

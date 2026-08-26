@@ -135,7 +135,7 @@ def test_internal_blocks_classify_general_tools_without_exposing_them_externally
     assert internal_tool_block_for_name("vrcforge_install_vpm_package", "unity") == "unity/project"
 
 
-def test_path_to_skill_creator_is_lazy_internal_only_and_reuses_controller_owners() -> None:
+def test_path_to_skill_creator_is_lazy_shared_and_reuses_controller_owners() -> None:
     gateway = dashboard_server.AGENT_GATEWAY
     preview_name = "vrcforge_preview_path_to_skill"
     write_name = "vrcforge_write_path_to_skill"
@@ -194,11 +194,17 @@ def test_path_to_skill_creator_is_lazy_internal_only_and_reuses_controller_owner
         },
     )["ok"] is False
 
-    external_names = {
+    external_planning = {
         item["name"]
-        for item in gateway.build_external_mcp_tools("execution", tool_blocks=["*"])
+        for item in gateway.build_external_mcp_tools("planning", tool_blocks=["skills/vsk"])
     }
-    assert {preview_name, write_name}.isdisjoint(external_names)
+    external_execution = {
+        item["name"]
+        for item in gateway.build_external_mcp_tools("execution", tool_blocks=["skills/vsk"])
+    }
+    assert preview_name in external_planning
+    assert write_name not in external_planning
+    assert {preview_name, write_name} <= external_execution
 
 
 def test_shared_unity_facades_reuse_external_blocks_and_schemas_inside() -> None:

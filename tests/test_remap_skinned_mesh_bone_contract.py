@@ -22,6 +22,7 @@ def test_remap_schema_is_shared_and_exposed_in_avatar_block() -> None:
     assert unity_mcp_tool_contract.PREVIOUS_CORE_TOOL_CONTRACT_VERSION == "82"
     assert len(unity_mcp_tool_contract.PREVIOUS_CORE_TOOL_NAMES) == 80
     assert "vrc_inspect_skinned_mesh_deformation" in unity_mcp_tool_contract.PREVIOUS_CORE_TOOL_NAMES
+    assert "vrc_set_material_texture" not in unity_mcp_tool_contract.PREVIOUS_CORE_TOOL_NAMES
 
 
 def test_remap_execution_plan_freezes_one_exact_core_call() -> None:

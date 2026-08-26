@@ -230,11 +230,21 @@ def canonical_result_facts(
                     break
 
     for key, names in (
+        ("toolRoutingStarted", ("toolRoutingStarted",)),
         ("mutationStarted", ("mutationStarted",)),
         ("committed", ("committed",)),
     ):
         raw_value = _first_present(expanded_sources, *names)
         if raw_value is not _UNSET and (raw_value is None or isinstance(raw_value, bool)):
+            facts[key] = raw_value
+
+    for key in (
+        "retryable",
+        "checkpointRecoveryRequired",
+        "temporaryCleanupRequired",
+    ):
+        raw_value = _first_present(expanded_sources, key)
+        if isinstance(raw_value, bool):
             facts[key] = raw_value
 
     raw_commit_state = _first_present(expanded_sources, "commitState")

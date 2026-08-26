@@ -82,7 +82,7 @@ export function CheckpointWorkspace({
     <div className="min-h-0 flex-1 overflow-auto px-6 py-8">
       <div className="mx-auto grid max-w-6xl gap-6 lg:grid-cols-[380px_minmax(0,1fr)]">
         <div className="grid min-w-0 gap-6">
-          <section className="min-w-0 rounded-xl border border-border bg-card p-4 shadow-panel">
+          {interruptedRecoveries.length > 0 || recoveryPreview ? <section className="min-w-0 rounded-xl border border-border bg-card p-4 shadow-panel">
             <div className="mb-4 flex items-center gap-2">
               <AlertTriangle className="h-4 w-4 shrink-0 text-amber-600" />
               <div className="truncate text-sm font-semibold">{i18n.t("checkpoint.interruptedWrites")}</div>
@@ -162,20 +162,32 @@ export function CheckpointWorkspace({
                 );
               })}
             </div>
-          </section>
+          </section> : null}
 
-          <section className="min-w-0 rounded-xl border border-border bg-card p-4 shadow-panel">
-            <div className="mb-4 flex items-center gap-2">
+          <details open className="min-w-0 rounded-xl border border-border bg-card p-4 shadow-panel" data-vrcforge-checkpoint-list>
+            <summary className="flex cursor-pointer list-none items-center gap-2">
               <History className="h-4 w-4 shrink-0 text-primary" />
-              <div className="truncate text-sm font-semibold">{i18n.t("checkpoint.checkpoints")}</div>
+              <div className="truncate text-sm font-semibold" title={selectedProjectPath || undefined}>
+                {i18n.t("checkpoint.checkpoints")}
+              </div>
               <Badge tone="muted" className="ml-auto shrink-0">
                 {checkpoints.length}
               </Badge>
-              <Button type="button" variant="ghost" className="h-7 px-2 text-xs" onClick={onRefresh} disabled={loading}>
+              <Button
+                type="button"
+                variant="ghost"
+                className="h-7 px-2 text-xs"
+                onClick={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  onRefresh();
+                }}
+                disabled={loading}
+              >
                 {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
               </Button>
-            </div>
-            {selectedProjectPath ? <div className="mb-3 truncate text-xs text-muted-foreground">{selectedProjectPath}</div> : null}
+            </summary>
+          <section className="mt-4 min-w-0">
             <div className="max-h-[34vh] space-y-2 overflow-auto pr-1">
               {checkpoints.length === 0 ? (
                 <div className="rounded-md border border-dashed border-border px-3 py-6 text-center text-xs text-muted-foreground">
@@ -186,6 +198,7 @@ export function CheckpointWorkspace({
                 <button
                   key={checkpoint.id}
                   type="button"
+                  title={checkpoint.id}
                   onClick={() => onPreview(checkpoint.id)}
                   className={cn(
                     "grid w-full min-w-0 gap-1 rounded-md border px-3 py-2 text-left text-sm transition-colors",
@@ -195,19 +208,23 @@ export function CheckpointWorkspace({
                   )}
                 >
                   <div className="flex min-w-0 items-center gap-2">
-                    <span className="min-w-0 flex-1 truncate font-mono text-xs">{checkpoint.id}</span>
+                    <span className="min-w-0 flex-1 truncate text-xs font-medium">
+                      {checkpoint.targetTool || checkpoint.id}
+                    </span>
                     <Badge tone={checkpoint.ok ? "ok" : "warn"} className="h-6 shrink-0">
                       {checkpoint.status || (checkpoint.ok ? i18n.t("connector.ready") : "unavailable")}
                     </Badge>
                   </div>
-                  <div className="truncate text-xs text-muted-foreground">{checkpoint.targetTool || "-"}</div>
                   <div className="truncate text-xs text-muted-foreground">{formatCheckpointTime(checkpoint.createdAt)}</div>
                 </button>
               ))}
             </div>
           </section>
+          </details>
 
-          <section className="min-w-0 rounded-xl border border-border bg-card p-4 shadow-panel">
+          <details className="min-w-0 rounded-xl border border-border bg-card p-4 shadow-panel">
+            <summary className="cursor-pointer text-sm font-semibold">{i18n.t("checkpoint.adjustmentTimeline")} · {adjustmentCheckpoints.length}</summary>
+          <section className="mt-4 min-w-0">
             <div className="mb-4 flex items-center gap-2">
               <Sparkles className="h-4 w-4 shrink-0 text-primary" />
               <div className="truncate text-sm font-semibold">{i18n.t("checkpoint.adjustmentTimeline")}</div>
@@ -344,10 +361,11 @@ export function CheckpointWorkspace({
               })}
             </div>
           </section>
+          </details>
         </div>
 
         <div className="grid min-w-0 gap-6">
-          <section className="min-w-0 rounded-xl border border-border bg-card p-5 shadow-panel">
+          {recoveryPreview ? <section className="min-w-0 rounded-xl border border-border bg-card p-5 shadow-panel" data-vrcforge-checkpoint-detail>
             <div className="mb-5 flex items-center gap-2">
               <AlertTriangle className="h-4 w-4 shrink-0 text-amber-600" />
               <div className="truncate text-sm font-semibold">{i18n.t("checkpoint.recoveryPreview")}</div>
@@ -382,7 +400,7 @@ export function CheckpointWorkspace({
                     onClick={() => recoveryPreview.recovery?.id && onExportRecoveryBundle(recoveryPreview.recovery.id)}
                   >
                     {recoveryBusyId.startsWith("bundle:") ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
-                    Bundle
+                    {i18n.t("checkpoint.bundle")}
                   </Button>
                   <Button
                     type="button"
@@ -395,14 +413,14 @@ export function CheckpointWorkspace({
                     ) : (
                       <RotateCcw className="h-4 w-4" />
                     )}
-                    Restore
+                    {i18n.t("checkpoint.restore")}
                   </Button>
                 </div>
               </div>
             )}
-          </section>
+          </section> : null}
 
-          <section className="min-w-0 rounded-xl border border-border bg-card p-5 shadow-panel">
+          {!recoveryPreview && preview ? <section className="min-w-0 rounded-xl border border-border bg-card p-5 shadow-panel" data-vrcforge-checkpoint-detail>
             <div className="mb-5 flex items-center gap-2">
               <RotateCcw className="h-4 w-4 shrink-0 text-primary" />
               <div className="truncate text-sm font-semibold">{i18n.t("checkpoint.restorePreview")}</div>
@@ -437,14 +455,14 @@ export function CheckpointWorkspace({
                     onClick={() => preview.checkpoint?.id && onRestore(preview.checkpoint.id)}
                   >
                     {restoringId ? <Loader2 className="h-4 w-4 animate-spin" /> : <RotateCcw className="h-4 w-4" />}
-                    Restore
+                    {i18n.t("checkpoint.restore")}
                   </Button>
                 </div>
               </div>
             )}
-          </section>
+          </section> : null}
 
-          <section className="min-w-0 rounded-xl border border-border bg-card p-5 shadow-panel">
+          {!recoveryPreview && !preview && adjustmentPreview ? <section className="min-w-0 rounded-xl border border-border bg-card p-5 shadow-panel" data-vrcforge-checkpoint-detail>
             <div className="mb-5 flex items-center gap-2">
               <Sparkles className="h-4 w-4 shrink-0 text-primary" />
               <div className="truncate text-sm font-semibold">{i18n.t("checkpoint.adjustmentPreview")}</div>
@@ -486,12 +504,17 @@ export function CheckpointWorkspace({
                     ) : (
                       <RotateCcw className="h-4 w-4" />
                     )}
-                    Apply
+                    {i18n.t("checkpoint.apply")}
                   </Button>
                 </div>
               </div>
             )}
-          </section>
+          </section> : null}
+          {!recoveryPreview && !preview && !adjustmentPreview ? (
+            <section className="min-w-0 rounded-xl border border-border bg-card p-4 shadow-panel" data-vrcforge-checkpoint-detail>
+              <div className="text-sm text-muted-foreground">{i18n.t("checkpoint.selectCheckpoint")}</div>
+            </section>
+          ) : null}
         </div>
       </div>
     </div>

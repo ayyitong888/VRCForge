@@ -155,6 +155,7 @@ import {
   SubAgentTaskList,
   ApiError,
   AppBootstrap,
+  ProjectSnapshot,
   AdvancedSettingsState,
   acknowledgeSubAgentHandoff,
   DoctorReport,
@@ -224,6 +225,28 @@ type EditingMessageDraft = {
 
 const MAX_ATTACHMENTS_PER_TURN = 8;
 const STARTUP_BACKGROUND_REFRESH_DELAY_MS = 1200;
+const PROJECT_SNAPSHOT_CACHE_KEY = "vrcforge_project_snapshot_cache";
+
+function loadCachedProjectSnapshot(): ProjectSnapshot | null {
+  try {
+    const raw = window.localStorage.getItem(PROJECT_SNAPSHOT_CACHE_KEY);
+    if (!raw) {
+      return null;
+    }
+    const parsed = JSON.parse(raw) as ProjectSnapshot;
+    return parsed && typeof parsed === "object" && Array.isArray(parsed.projects) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function cacheProjectSnapshot(snapshot: ProjectSnapshot): void {
+  try {
+    window.localStorage.setItem(PROJECT_SNAPSHOT_CACHE_KEY, JSON.stringify(snapshot));
+  } catch {
+    // A blocked or full preference store must not delay startup.
+  }
+}
 const AsyncAppSidebar = lazy(() =>
   import("./components/sidebar/app-sidebar").then((module) => ({ default: module.AppSidebar })),
 );
@@ -266,6 +289,7 @@ export default function App() {
   const initialSubAgentTask = useMemo(() => createSubAgentContextSmokeTask(), []);
   const [endpoint, setEndpoint] = useState(FALLBACK_ENDPOINT);
   const [bootstrap, setBootstrap] = useState<AppBootstrap | null>(null);
+  const [cachedProjectSnapshot, setCachedProjectSnapshot] = useState<ProjectSnapshot | null>(() => loadCachedProjectSnapshot());
   const [agentApprovals, setAgentApprovals] = useState<AgentApproval[] | null>(null);
   const [backendMessage, setBackendMessage] = useState("starting");
   const [loading, setLoading] = useState(false);
@@ -382,6 +406,7 @@ export default function App() {
   >([]);
   const healthRefreshInFlightRef = useRef(false);
   const projectRefreshInFlightRef = useRef(false);
+  const projectRefreshTimerRef = useRef<number | null>(null);
   const bootstrapRequestSequenceRef = useRef(0);
   const bootstrapForegroundRequestRef = useRef(0);
   const desktopEventBootstrapTimerRef = useRef<number | null>(null);
@@ -659,7 +684,8 @@ export default function App() {
     }
     return list;
   }, [computerUseEnabled, developerOptionsEnabled, t]);
-  const projects = bootstrap?.health.projects?.projects ?? [];
+  // Keep the last known project list visible while backend startup/refresh is still pending.
+  const projects = bootstrap?.health.projects?.projects ?? cachedProjectSnapshot?.projects ?? [];
   const onboardingSelectedProjectReady = Boolean(
     activeProjectPath
     && projects.some(
@@ -2053,6 +2079,15 @@ export default function App() {
   }, [runtimeConnected, endpoint, activeProjectPath]);
 
   useEffect(() => {
+    return () => {
+      if (projectRefreshTimerRef.current !== null) {
+        window.clearTimeout(projectRefreshTimerRef.current);
+        projectRefreshTimerRef.current = null;
+      }
+    };
+  }, []);
+
+  useEffect(() => {
     if (!isTauriRuntime()) {
       return;
     }
@@ -2148,6 +2183,16 @@ export default function App() {
       });
   }
 
+  function scheduleProjectRefresh(target: string) {
+    if (projectRefreshTimerRef.current !== null) {
+      window.clearTimeout(projectRefreshTimerRef.current);
+    }
+    projectRefreshTimerRef.current = window.setTimeout(() => {
+      projectRefreshTimerRef.current = null;
+      void refreshProjectList(target, { allowDuringStartup: true });
+    }, STARTUP_BACKGROUND_REFRESH_DELAY_MS);
+  }
+
   async function refreshStartupWithMetrics(target: string, options: { refreshProjects?: boolean } = {}) {
     const startedAt = performance.now();
     try {
@@ -2157,7 +2202,9 @@ export default function App() {
       metrics.bootstrapRefreshMs ??= Math.round(performance.now() - startedAt);
     }
     if (options.refreshProjects) {
-      void refreshProjectList(target, { allowDuringStartup: true });
+      // Let the cached bootstrap render and the first paint complete before
+      // starting the potentially expensive project discovery scan.
+      scheduleProjectRefresh(target);
     }
   }
 
@@ -2317,6 +2364,10 @@ export default function App() {
         return;
       }
       setBootstrap(payload);
+      if (payload.health.projects) {
+        setCachedProjectSnapshot(payload.health.projects);
+        cacheProjectSnapshot(payload.health.projects);
+      }
       setStartupIssue("");
     } catch (cause) {
       if (sequence !== bootstrapRequestSequenceRef.current) {
@@ -2341,6 +2392,10 @@ export default function App() {
         return;
       }
       setBootstrap(payload);
+      if (payload.health.projects) {
+        setCachedProjectSnapshot(payload.health.projects);
+        cacheProjectSnapshot(payload.health.projects);
+      }
       setStartupIssue("");
       setError((current) => (current.toLowerCase().includes("fetch") ? "" : current));
     } catch (cause) {
@@ -2392,6 +2447,8 @@ export default function App() {
             }
           : current,
       );
+      setCachedProjectSnapshot(projectsPayload);
+      cacheProjectSnapshot(projectsPayload);
       setError((current) => (current.toLowerCase().includes("project") ? "" : current));
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -3762,7 +3819,7 @@ export default function App() {
               message={checkpointMessage}
               recoveryMessage={recoveryMessage}
               adjustmentMessage={adjustmentMessage}
-              onRefresh={() => void loadCheckpoints()}
+              onRefresh={() => void loadCheckpoints(endpoint, { force: true })}
               onPreview={previewCheckpoint}
               onRestore={restoreCheckpoint}
               onPreviewRecovery={previewRecovery}
@@ -3793,8 +3850,8 @@ export default function App() {
               onAvatarPathChange={setProtectionAvatarPath}
               onProfileChange={setProtectionProfile}
               onOwnsAssetsChange={setProtectionOwnsAssets}
-              onRefresh={() => void loadProtectionPlan()}
-              onRefreshAvatars={() => void loadProtectionAvatars()}
+              onRefresh={() => void loadProtectionPlan(endpoint, protectionProfile, true)}
+              onRefreshAvatars={() => void loadProtectionAvatars(endpoint, true)}
               onRequestApply={(family) => void requestProtectionApply(family)}
             />
           ) : activeView === "optimization" ? (

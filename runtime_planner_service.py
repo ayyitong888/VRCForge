@@ -2511,11 +2511,15 @@ class RuntimePlannerService:
                     "causeChain",
                     "nextAction",
                     "recovery",
+                    "toolRoutingStarted",
                     "mutationStarted",
                     "committed",
                     "commitState",
                     "commitStateKnown",
+                    "retryable",
                     "safeToRetry",
+                    "checkpointRecoveryRequired",
+                    "temporaryCleanupRequired",
                 ):
                     if key in outcome:
                         canonical_outcome[key] = redact_sensitive(outcome[key])

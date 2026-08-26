@@ -9,6 +9,7 @@ import math
 import os
 import socket
 import struct
+import threading
 import time
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -38,6 +39,8 @@ APP_BUILD_TEST_POLL_LANE = "app_build_test_poll"
 SUPPORTED_PROTOCOL_VERSIONS = (MODERN_PROTOCOL_VERSION,)
 MAX_FRAME_BYTES = 1024 * 1024
 DEFAULT_TIMEOUT_SECONDS = 5.0
+PROJECT_CORE_MAX_CONCURRENT = 3
+PROJECT_CORE_BUSY_WAIT_SECONDS = 0.25
 _ACTIVE_CALL_AUDIT_CAPTURE: ContextVar[list[dict[str, Any]] | None] = ContextVar(
     "vrcforge_unity_mcp_call_audit_capture",
     default=None,
@@ -56,6 +59,60 @@ class UnityMcpCoreConnectionError(UnityMcpCoreError):
 
     cause_code = "unity_core_unavailable"
     retryable = True
+
+
+class UnityMcpCoreBusyError(UnityMcpCoreError):
+    """The exact project has reached its bounded Core connection capacity."""
+
+    cause_code = "unity_core_project_busy"
+    retryable = True
+
+    def __init__(self, project_root: Path, *, wait_seconds: float, active: int) -> None:
+        self.details = {
+            "kind": "project_connection_limit",
+            "projectPath": str(project_root),
+            "maxConcurrent": PROJECT_CORE_MAX_CONCURRENT,
+            "active": active,
+            "waitSeconds": wait_seconds,
+        }
+        super().__init__(
+            f"Unity MCP Core is busy for project '{project_root}' "
+            f"({PROJECT_CORE_MAX_CONCURRENT} concurrent connections already active)."
+        )
+
+
+_PROJECT_CORE_CONDITION = threading.Condition()
+_PROJECT_CORE_ACTIVE: dict[str, int] = {}
+
+
+@contextmanager
+def _project_core_slot(project_root: str | Path, *, wait_seconds: float = PROJECT_CORE_BUSY_WAIT_SECONDS) -> Iterator[None]:
+    """Bound Core work per canonical project without queueing or replaying calls."""
+
+    root = _resolve_project_root(project_root)
+    key = str(root).casefold() if os.name == "nt" else str(root)
+    deadline = time.monotonic() + max(0.0, float(wait_seconds))
+    with _PROJECT_CORE_CONDITION:
+        while _PROJECT_CORE_ACTIVE.get(key, 0) >= PROJECT_CORE_MAX_CONCURRENT:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise UnityMcpCoreBusyError(
+                    root,
+                    wait_seconds=max(0.0, float(wait_seconds)),
+                    active=_PROJECT_CORE_ACTIVE.get(key, 0),
+                )
+            _PROJECT_CORE_CONDITION.wait(remaining)
+        _PROJECT_CORE_ACTIVE[key] = _PROJECT_CORE_ACTIVE.get(key, 0) + 1
+    try:
+        yield
+    finally:
+        with _PROJECT_CORE_CONDITION:
+            active = _PROJECT_CORE_ACTIVE.get(key, 0) - 1
+            if active > 0:
+                _PROJECT_CORE_ACTIVE[key] = active
+            else:
+                _PROJECT_CORE_ACTIVE.pop(key, None)
+            _PROJECT_CORE_CONDITION.notify_all()
 
 
 def probe_unity_mcp_core_diagnostics(
@@ -115,54 +172,64 @@ def probe_unity_mcp_core_diagnostics(
         "coreInfo": None,
         "compileResult": None,
         "transportError": "",
+        "transportErrorCauseCode": "",
+        "transportErrorRetryable": False,
+        "transportErrorDetails": None,
         "handshakeError": None,
     }
     try:
-        with socket.create_connection(("127.0.0.1", port), timeout_seconds) as connection:
-            connection.settimeout(timeout_seconds)
-            core_info_response = _probe_core_request(connection, token, 0, "server/core-info", {})
-            result["coreInfo"] = _probe_result_or_core_info(core_info_response)
-            if isinstance(result["coreInfo"], dict) and isinstance(result["coreInfo"].get("compileSnapshot"), dict):
-                result["compileResult"] = {
-                    "structuredContent": {"data": result["coreInfo"]["compileSnapshot"]}
-                }
+        with _project_core_slot(root):
+            with socket.create_connection(("127.0.0.1", port), timeout_seconds) as connection:
+                connection.settimeout(timeout_seconds)
+                core_info_response = _probe_core_request(connection, token, 0, "server/core-info", {})
+                result["coreInfo"] = _probe_result_or_core_info(core_info_response)
+                if isinstance(result["coreInfo"], dict) and isinstance(result["coreInfo"].get("compileSnapshot"), dict):
+                    result["compileResult"] = {
+                        "structuredContent": {"data": result["coreInfo"]["compileSnapshot"]}
+                    }
 
-            discover_response = _probe_core_request(
-                connection,
-                token,
-                1,
-                "server/discover",
-                {"_meta": metadata},
-            )
-            discover_message = discover_response.get("message") if isinstance(discover_response, dict) else None
-            discover_error = discover_message.get("error") if isinstance(discover_message, dict) else None
-            if isinstance(discover_error, dict):
-                result["handshakeError"] = discover_error
-                if result["coreInfo"] is None:
-                    data = discover_error.get("data")
-                    if isinstance(data, dict) and isinstance(data.get("coreInfo"), dict):
-                        result["coreInfo"] = data["coreInfo"]
-                return result
+                discover_response = _probe_core_request(
+                    connection,
+                    token,
+                    1,
+                    "server/discover",
+                    {"_meta": metadata},
+                )
+                discover_message = discover_response.get("message") if isinstance(discover_response, dict) else None
+                discover_error = discover_message.get("error") if isinstance(discover_message, dict) else None
+                if isinstance(discover_error, dict):
+                    result["handshakeError"] = discover_error
+                    if result["coreInfo"] is None:
+                        data = discover_error.get("data")
+                        if isinstance(data, dict) and isinstance(data.get("coreInfo"), dict):
+                            result["coreInfo"] = data["coreInfo"]
+                    return result
 
-            compile_response = _probe_core_request(
-                connection,
-                token,
-                2,
-                "tools/call",
-                {
-                    "name": "vrc_get_compile_errors",
-                    "arguments": {
-                        "maxErrors": max(1, min(int(max_errors), 200)),
-                        "includeConsoleFallback": True,
+                compile_response = _probe_core_request(
+                    connection,
+                    token,
+                    2,
+                    "tools/call",
+                    {
+                        "name": "vrc_get_compile_errors",
+                        "arguments": {
+                            "maxErrors": max(1, min(int(max_errors), 200)),
+                            "includeConsoleFallback": True,
+                        },
+                        "_meta": metadata,
                     },
-                    "_meta": metadata,
-                },
-            )
-            compile_message = compile_response.get("message") if isinstance(compile_response, dict) else None
-            if isinstance(compile_message, dict):
-                result["compileResult"] = compile_message.get("result")
+                )
+                compile_message = compile_response.get("message") if isinstance(compile_response, dict) else None
+                if isinstance(compile_message, dict):
+                    result["compileResult"] = compile_message.get("result")
     except (OSError, UnicodeError, json.JSONDecodeError, UnityMcpCoreError) as exc:
         result["transportError"] = str(exc)
+        result["transportErrorCauseCode"] = str(
+            getattr(exc, "cause_code", "unity_core_diagnostics_failed")
+        )
+        result["transportErrorRetryable"] = bool(getattr(exc, "retryable", False))
+        details = getattr(exc, "details", None)
+        result["transportErrorDetails"] = dict(details) if isinstance(details, dict) else None
     return result
 
 
@@ -472,26 +539,27 @@ class UnityMcpCoreClient:
         request_id: int | None = None,
     ) -> Any:
         try:
-            with self._open_connection() as connection:
-                self._send_modern(connection, 1, "server/discover", {})
-                discovery = self._receive_modern_response(connection, 1)
-                supported = discovery.get("supportedVersions") if isinstance(discovery, dict) else None
-                if not isinstance(supported, list) or not all(isinstance(version, str) for version in supported) \
-                        or self._connection.negotiated_protocol_version not in supported \
-                        or discovery.get("coreIdentity") != self._connection.core_identity \
-                        or discovery.get("handshakeProtocol") != self._connection.handshake_protocol \
-                        or discovery.get("productVersion") != self._connection.product_version \
-                        or discovery.get("toolContractVersion") != self._connection.tool_contract_version \
-                        or discovery.get("instanceId") != self._connection.instance_id \
-                        or discovery.get("projectId") != self._connection.project_id \
-                        or discovery.get("protocolRange") != {
-                            "minimum": self._connection.minimum_protocol_version,
-                            "maximum": self._connection.maximum_protocol_version,
-                        }:
-                    raise UnityMcpCoreError("Unity MCP Core modern discovery failed.")
-                call_id = request_id if request_id is not None else 2
-                self._send_modern(connection, call_id, method, params, execution_context=execution_context)
-                return self._receive_modern_response(connection, call_id)
+            with _project_core_slot(self._connection.project_root):
+                with self._open_connection() as connection:
+                    self._send_modern(connection, 1, "server/discover", {})
+                    discovery = self._receive_modern_response(connection, 1)
+                    supported = discovery.get("supportedVersions") if isinstance(discovery, dict) else None
+                    if not isinstance(supported, list) or not all(isinstance(version, str) for version in supported) \
+                            or self._connection.negotiated_protocol_version not in supported \
+                            or discovery.get("coreIdentity") != self._connection.core_identity \
+                            or discovery.get("handshakeProtocol") != self._connection.handshake_protocol \
+                            or discovery.get("productVersion") != self._connection.product_version \
+                            or discovery.get("toolContractVersion") != self._connection.tool_contract_version \
+                            or discovery.get("instanceId") != self._connection.instance_id \
+                            or discovery.get("projectId") != self._connection.project_id \
+                            or discovery.get("protocolRange") != {
+                                "minimum": self._connection.minimum_protocol_version,
+                                "maximum": self._connection.maximum_protocol_version,
+                            }:
+                        raise UnityMcpCoreError("Unity MCP Core modern discovery failed.")
+                    call_id = request_id if request_id is not None else 2
+                    self._send_modern(connection, call_id, method, params, execution_context=execution_context)
+                    return self._receive_modern_response(connection, call_id)
         except UnityMcpCoreError:
             raise
         except (OSError, UnicodeError, json.JSONDecodeError) as exc:
