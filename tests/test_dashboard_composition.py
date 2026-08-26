@@ -11,8 +11,9 @@ import dashboard_server
 
 
 CONTRACT_PATH = Path(__file__).parent / "fixtures" / "dashboard_composition_contract_v1.json"
+ROOT_SOURCE_PATH = Path(__file__).parents[1] / "dashboard_server.py"
 EVENT_SOURCE_PATHS = (
-    Path(__file__).parents[1] / "dashboard_server.py",
+    ROOT_SOURCE_PATH,
     Path(__file__).parents[1] / "memory_review_composition.py",
 )
 
@@ -61,7 +62,16 @@ def _observed_literal_event_types() -> list[str]:
     return sorted(event_types)
 
 
-def test_route_and_openapi_contract_match_the_1_5_entry_baseline() -> None:
+def _top_level_composition_calls() -> list[str]:
+    tree = ast.parse(ROOT_SOURCE_PATH.read_text(encoding="utf-8-sig"))
+    return [
+        ast.unparse(statement.value)
+        for statement in tree.body
+        if isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Call)
+    ]
+
+
+def test_route_table_contract_matches_the_entry_baseline() -> None:
     contract = json.loads(CONTRACT_PATH.read_text(encoding="utf-8"))
     assert contract["schema"] == "vrcforge.dashboard_composition_contract.v1"
     manifest = _route_manifest()
@@ -72,16 +82,57 @@ def test_route_and_openapi_contract_match_the_1_5_entry_baseline() -> None:
         for method in item["methods"]
     )
 
+    assert manifest == contract["routes"]["items"]
     assert len(manifest) == contract["routes"]["count"]
     assert dict(sorted(route_kinds.items())) == contract["routes"]["kinds"]
     assert dict(sorted(method_counts.items())) == contract["routes"]["methods"]
     assert _canonical_sha256(manifest) == contract["routes"]["tableSha256"]
 
+
+def test_openapi_contract_matches_the_entry_baseline() -> None:
+    contract = json.loads(CONTRACT_PATH.read_text(encoding="utf-8"))
     openapi = copy.deepcopy(dashboard_server.app.openapi())
     openapi.setdefault("info", {})["version"] = "<runtime-version>"
+    schemas = openapi.get("components", {}).get("schemas", {})
     assert len(openapi.get("paths", {})) == contract["openApi"]["pathCount"]
-    assert len(openapi.get("components", {}).get("schemas", {})) == contract["openApi"]["schemaCount"]
+    assert len(schemas) == contract["openApi"]["schemaCount"]
+    assert sorted(schemas) == contract["openApi"]["schemaNames"]
+    assert _canonical_sha256(schemas) == contract["openApi"]["schemasSha256"]
     assert _canonical_sha256(openapi) == contract["openApi"]["sha256WithoutRuntimeVersion"]
+
+
+def test_catch_all_agent_mcp_mount_is_registered_last() -> None:
+    routes = dashboard_server.app.routes
+    catch_all = [
+        (index, route)
+        for index, route in enumerate(routes)
+        if type(route).__name__ == "Mount"
+        and str(getattr(route, "name", "")) == "agent_mcp"
+    ]
+
+    assert len(catch_all) == 1
+    index, route = catch_all[0]
+    assert index == len(routes) - 1
+    assert str(getattr(route, "path", "")) == ""
+    assert "app.mount('/', AGENT_MCP_MOUNT, name='agent_mcp')" in _top_level_composition_calls()
+
+
+def test_composition_root_calls_are_exactly_once() -> None:
+    top_level_calls = _top_level_composition_calls()
+    calls = Counter(top_level_calls)
+    expected_order = [
+        "register_agent_gateway_tools()",
+        "AGENT_GATEWAY.bind_runtime_planner(RUNTIME_PLANNER)",
+        "install_primitive_basis_live_runtime(PRIMITIVE_BASIS_LIVE_SESSION)",
+        "app.mount('/', AGENT_MCP_MOUNT, name='agent_mcp')",
+    ]
+
+    assert calls["register_agent_gateway_tools()"] == 1
+    assert calls["AGENT_GATEWAY.bind_runtime_planner(RUNTIME_PLANNER)"] == 1
+    assert calls["install_primitive_basis_live_runtime(PRIMITIVE_BASIS_LIVE_SESSION)"] == 1
+    assert [top_level_calls.index(call) for call in expected_order] == sorted(
+        top_level_calls.index(call) for call in expected_order
+    )
 
 
 def test_event_envelope_contract_keeps_exact_public_keys() -> None:

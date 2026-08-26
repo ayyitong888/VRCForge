@@ -1,30 +1,2283 @@
 {
   "schema": "vrcforge.dashboard_composition_contract.v1",
   "baseline": {
-    "sourceCommit": "0ef026e",
+    "sourceCommit": "7787177",
     "runtimeCommit": "49aa5d1"
   },
   "routes": {
-    "count": 262,
+    "count": 265,
     "kinds": {
-      "APIRoute": 253,
+      "APIRoute": 256,
       "APIWebSocketRoute": 1,
       "Mount": 4,
       "Route": 4
     },
     "methods": {
       "DELETE": 6,
-      "GET": 72,
+      "GET": 73,
       "HEAD": 4,
-      "POST": 176,
+      "POST": 178,
       "PUT": 3
     },
-    "tableSha256": "ad3ec877fc960343165abb1280f4f082173fe58a9e323d732c343c86d898f1e3"
+    "tableSha256": "2b99f5ead581df1de46749d2a1839c00a7f7812bb5a5bd705d13004ffdd3824a",
+    "items": [
+      {
+        "kind": "Route",
+        "name": "openapi",
+        "path": "/openapi.json",
+        "methods": [
+          "GET",
+          "HEAD"
+        ]
+      },
+      {
+        "kind": "Route",
+        "name": "swagger_ui_html",
+        "path": "/docs",
+        "methods": [
+          "GET",
+          "HEAD"
+        ]
+      },
+      {
+        "kind": "Route",
+        "name": "swagger_ui_redirect",
+        "path": "/docs/oauth2-redirect",
+        "methods": [
+          "GET",
+          "HEAD"
+        ]
+      },
+      {
+        "kind": "Route",
+        "name": "redoc_html",
+        "path": "/redoc",
+        "methods": [
+          "GET",
+          "HEAD"
+        ]
+      },
+      {
+        "kind": "Mount",
+        "name": "dashboard",
+        "path": "/dashboard",
+        "methods": []
+      },
+      {
+        "kind": "Mount",
+        "name": "artifacts",
+        "path": "/artifacts",
+        "methods": []
+      },
+      {
+        "kind": "Mount",
+        "name": "runtime_artifacts",
+        "path": "/runtime-artifacts",
+        "methods": []
+      },
+      {
+        "kind": "APIRoute",
+        "name": "read_dashboard",
+        "path": "/",
+        "methods": [
+          "GET"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "read_dashboard_alias",
+        "path": "/dashboard/",
+        "methods": [
+          "GET"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "read_dashboard_alias",
+        "path": "/dashboard",
+        "methods": [
+          "GET"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "read_health",
+        "path": "/api/health",
+        "methods": [
+          "GET"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "read_app_session",
+        "path": "/api/app/session",
+        "methods": [
+          "GET"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "read_app_session_challenge",
+        "path": "/api/app/session-challenge",
+        "methods": [
+          "GET"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "request_internal_runtime_shutdown",
+        "path": "/api/app/runtime/shutdown",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "read_agentic_app_bootstrap",
+        "path": "/api/app/bootstrap",
+        "methods": [
+          "GET"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "check_agentic_app_update",
+        "path": "/api/app/update",
+        "methods": [
+          "GET"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "read_workspace_diff",
+        "path": "/api/app/workspace/diff",
+        "methods": [
+          "GET"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "read_app_runtime_snapshot",
+        "path": "/api/app/runtime/snapshot",
+        "methods": [
+          "GET"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "refresh_app_unity_readiness",
+        "path": "/api/app/unity/readiness/refresh",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "read_agentic_app_permission",
+        "path": "/api/app/permission",
+        "methods": [
+          "GET"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "update_agentic_app_permission",
+        "path": "/api/app/permission",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "read_agentic_app_advanced_settings",
+        "path": "/api/app/advanced-settings",
+        "methods": [
+          "GET"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "create_developer_options_challenge",
+        "path": "/api/app/advanced-settings/developer-challenge",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "cancel_developer_options_challenge",
+        "path": "/api/app/advanced-settings/developer-challenge/{challenge_id}",
+        "methods": [
+          "DELETE"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "update_agentic_app_advanced_settings",
+        "path": "/api/app/advanced-settings",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_agent_runtime_message",
+        "path": "/api/app/agent/message",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "issue_agent_harness_journey",
+        "path": "/api/app/agent/harness/journey",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "verify_agent_harness_journey",
+        "path": "/api/app/agent/harness/journey/verify",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_issue_computer_use_turn_grant",
+        "path": "/api/app/agent/computer-use/grants",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_agent_compact",
+        "path": "/api/app/agent/compact",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_agent_runtime_session",
+        "path": "/api/app/agent/session/{session_id}",
+        "methods": [
+          "GET"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_agent_runtime_runs",
+        "path": "/api/app/agent/runs",
+        "methods": [
+          "GET"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_agent_runtime_cancel",
+        "path": "/api/app/agent/runs/cancel",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_agent_runtime_queue",
+        "path": "/api/app/agent/runs/queue",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_agent_runtime_queue_list",
+        "path": "/api/app/agent/runs/queue",
+        "methods": [
+          "GET"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_agent_runtime_queue_claim",
+        "path": "/api/app/agent/runs/queue/claim",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_agent_runtime_queue_ack",
+        "path": "/api/app/agent/runs/queue/{queue_id}/ack",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_agent_runtime_queue_cancel",
+        "path": "/api/app/agent/runs/queue/{queue_id}/cancel",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_agent_desktop_actions",
+        "path": "/api/app/agent/desktop-actions",
+        "methods": [
+          "GET"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_agent_desktop_action_result",
+        "path": "/api/app/agent/desktop-actions/{action_id}/result",
+        "methods": [
+          "GET"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_agent_desktop_action",
+        "path": "/api/app/agent/desktop-actions",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_agent_desktop_bridge_status",
+        "path": "/api/app/agent/desktop-bridge",
+        "methods": [
+          "GET"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_agent_desktop_bridge_register",
+        "path": "/api/app/agent/desktop-bridge/register",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_agent_desktop_bridge_heartbeat",
+        "path": "/api/app/agent/desktop-bridge/heartbeat",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_agent_desktop_action_claim",
+        "path": "/api/app/agent/desktop-actions/claim",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_agent_desktop_action_complete",
+        "path": "/api/app/agent/desktop-actions/complete",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_agent_desktop_action_cancel",
+        "path": "/api/app/agent/desktop-actions/{action_id}/cancel",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_agent_goals",
+        "path": "/api/app/agent/goals",
+        "methods": [
+          "GET"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_due_agent_goals",
+        "path": "/api/app/agent/goals/due",
+        "methods": [
+          "GET"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_create_agent_goal",
+        "path": "/api/app/agent/goals",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_wake_agent_goal",
+        "path": "/api/app/agent/goals/{goal_id}/wake",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_bind_agent_goal_owner",
+        "path": "/api/app/agent/goals/{goal_id}/bind-owner",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_recoverable_agent_goal_deliveries",
+        "path": "/api/app/agent/goals/deliveries/recoverable",
+        "methods": [
+          "GET"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_agent_goal_background_state",
+        "path": "/api/app/agent/goals/background",
+        "methods": [
+          "GET"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_acknowledge_agent_goal_background_state",
+        "path": "/api/app/agent/goals/background/ack",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_materialize_agent_goal_delivery",
+        "path": "/api/app/agent/goals/deliveries/{delivery_id}/materialized",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_defer_agent_goal_delivery",
+        "path": "/api/app/agent/goals/deliveries/{delivery_id}/defer",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_update_agent_goal",
+        "path": "/api/app/agent/goals/{goal_id}",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_agent_progress",
+        "path": "/api/app/agent/progress",
+        "methods": [
+          "GET"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_replace_agent_progress",
+        "path": "/api/app/agent/progress/replace",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_create_agent_progress",
+        "path": "/api/app/agent/progress",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_update_agent_progress",
+        "path": "/api/app/agent/progress/{progress_id}",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_delete_agent_progress",
+        "path": "/api/app/agent/progress/{progress_id}",
+        "methods": [
+          "DELETE"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_agent_questions",
+        "path": "/api/app/agent/questions",
+        "methods": [
+          "GET"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_create_agent_question",
+        "path": "/api/app/agent/questions",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_answer_agent_question",
+        "path": "/api/app/agent/questions/{question_id}/answer",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "read_review",
+        "path": "/api/app/agent/memory/review",
+        "methods": [
+          "GET"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "update_review",
+        "path": "/api/app/agent/memory/review/config",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "run_review",
+        "path": "/api/app/agent/memory/review/run",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "cancel_review",
+        "path": "/api/app/agent/memory/review/cancel",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "mutate_candidate",
+        "path": "/api/app/agent/memory/review/candidates/{candidate_id}/{action}",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_agent_memory",
+        "path": "/api/app/agent/memory",
+        "methods": [
+          "GET"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_create_agent_memory",
+        "path": "/api/app/agent/memory",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_delete_agent_memory",
+        "path": "/api/app/agent/memory/{memory_id}",
+        "methods": [
+          "DELETE"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_clear_agent_memory",
+        "path": "/api/app/agent/memory/clear",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_agent_approvals",
+        "path": "/api/app/agent/approvals",
+        "methods": [
+          "GET"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_list_checkpoints",
+        "path": "/api/app/checkpoints",
+        "methods": [
+          "GET"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_preview_restore_checkpoint",
+        "path": "/api/app/checkpoints/{checkpoint_id}/preview",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_request_restore_checkpoint",
+        "path": "/api/app/checkpoints/{checkpoint_id}/restore",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_start_primitive_basis_model_part_live",
+        "path": "/api/app/primitive-basis/live/model-part/start",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_primitive_basis_model_part_live_status",
+        "path": "/api/app/primitive-basis/live/model-part/status",
+        "methods": [
+          "GET"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_readback_primitive_basis_model_part_live",
+        "path": "/api/app/primitive-basis/live/model-part/readback",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_prepare_primitive_basis_model_part_cleanup",
+        "path": "/api/app/primitive-basis/live/model-part/prepare-cleanup",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_finalize_primitive_basis_model_part_live",
+        "path": "/api/app/primitive-basis/live/model-part/finalize",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_list_interrupted_apply_recoveries",
+        "path": "/api/app/recoveries",
+        "methods": [
+          "GET"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_preview_interrupted_apply_recovery",
+        "path": "/api/app/recoveries/{recovery_id}/preview",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_request_restore_interrupted_apply_recovery",
+        "path": "/api/app/recoveries/{recovery_id}/restore",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_request_resolve_interrupted_apply_recovery",
+        "path": "/api/app/recoveries/{recovery_id}/resolve",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_export_interrupted_apply_incident_bundle",
+        "path": "/api/app/recoveries/{recovery_id}/incident-bundle",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_list_adjustment_checkpoints",
+        "path": "/api/app/adjustment-checkpoints",
+        "methods": [
+          "GET"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_create_adjustment_checkpoint",
+        "path": "/api/app/adjustment-checkpoints",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_get_selected_adjustment_checkpoints",
+        "path": "/api/app/adjustment-checkpoints/selection",
+        "methods": [
+          "GET"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_get_adjustment_checkpoint",
+        "path": "/api/app/adjustment-checkpoints/{entry_id}",
+        "methods": [
+          "GET"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_update_adjustment_checkpoint",
+        "path": "/api/app/adjustment-checkpoints/{entry_id}",
+        "methods": [
+          "PUT"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_delete_adjustment_checkpoint",
+        "path": "/api/app/adjustment-checkpoints/{entry_id}",
+        "methods": [
+          "DELETE"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_select_adjustment_checkpoint",
+        "path": "/api/app/adjustment-checkpoints/{entry_id}/select",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_overwrite_adjustment_checkpoint",
+        "path": "/api/app/adjustment-checkpoints/{entry_id}/overwrite",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_apply_adjustment_checkpoint",
+        "path": "/api/app/adjustment-checkpoints/{entry_id}/apply",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_preview_adjustment_checkpoint_restore",
+        "path": "/api/app/adjustment-checkpoints/{entry_id}/preview",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_request_restore_adjustment_checkpoint",
+        "path": "/api/app/adjustment-checkpoints/{entry_id}/restore",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_agent_approve_and_execute",
+        "path": "/api/app/agent/approvals/{approval_id}/approve",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_agent_reject",
+        "path": "/api/app/agent/approvals/{approval_id}/reject",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_agent_request_approval_revision",
+        "path": "/api/app/agent/approvals/{approval_id}/revision",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "read_agent_notes",
+        "path": "/api/app/agent-notes",
+        "methods": [
+          "GET"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "write_agent_notes",
+        "path": "/api/app/agent-notes",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "read_chat_transcripts",
+        "path": "/api/app/chats",
+        "methods": [
+          "GET"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "write_chat_transcripts",
+        "path": "/api/app/chats",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_session_handoff_send",
+        "path": "/api/app/session-handoff/send",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_session_handoff_get",
+        "path": "/api/app/session-handoff/{handoff_id}",
+        "methods": [
+          "GET"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_session_handoff_consume",
+        "path": "/api/app/session-handoff/consume",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "<lambda>",
+        "path": "/api/app/session-handoff/{handoff_id}/deliver",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "<lambda>",
+        "path": "/api/app/session-handoff/{handoff_id}/accept",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "<lambda>",
+        "path": "/api/app/session-handoff/{handoff_id}/dismiss",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "<lambda>",
+        "path": "/api/app/session-handoff/{handoff_id}/cancel",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "<lambda>",
+        "path": "/api/app/session-handoff/{handoff_id}/pause",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "<lambda>",
+        "path": "/api/app/session-handoff/{handoff_id}/resume",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_begin_chat_attachment_upload",
+        "path": "/api/app/chat-attachments/uploads",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_append_chat_attachment_upload",
+        "path": "/api/app/chat-attachments/uploads/{upload_id}/chunks",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_finish_chat_attachment_upload",
+        "path": "/api/app/chat-attachments/uploads/finish",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_abort_chat_attachment_upload",
+        "path": "/api/app/chat-attachments/uploads/abort",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_read_chat_attachment",
+        "path": "/api/app/chat-attachments/{payload_hash}",
+        "methods": [
+          "GET"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_request_chat_attachment_import",
+        "path": "/api/app/chat-attachments/import",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "read_project_prefs",
+        "path": "/api/app/projects/prefs",
+        "methods": [
+          "GET"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "write_project_prefs",
+        "path": "/api/app/projects/prefs",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_agent_skills",
+        "path": "/api/app/skills",
+        "methods": [
+          "GET"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_agent_skills_check",
+        "path": "/api/app/skills/check",
+        "methods": [
+          "GET"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_create_agent_skill",
+        "path": "/api/app/skills",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_update_agent_skill",
+        "path": "/api/app/skills/{skill_id}",
+        "methods": [
+          "PUT"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_delete_agent_skill",
+        "path": "/api/app/skills/{skill_id}",
+        "methods": [
+          "DELETE"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_external_agent_connectors",
+        "path": "/api/app/external-agent/connectors",
+        "methods": [
+          "GET"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_external_agent_connectors_custom",
+        "path": "/api/app/external-agent/connectors",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_update_external_agent_gateway",
+        "path": "/api/app/external-agent/gateway",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_install_external_agent_connector",
+        "path": "/api/app/external-agent/connectors/install",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_uninstall_external_agent_connector",
+        "path": "/api/app/external-agent/connectors/uninstall",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_list_skill_packages",
+        "path": "/api/app/skill-packages",
+        "methods": [
+          "GET"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_preflight_skill_package",
+        "path": "/api/app/skill-packages/preflight",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_official_skill_signing_key_status",
+        "path": "/api/app/skill-packages/official-key",
+        "methods": [
+          "GET"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_export_official_skill_signing_key",
+        "path": "/api/app/skill-packages/official-key/export",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_import_official_skill_signing_key",
+        "path": "/api/app/skill-packages/official-key/import",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_import_skill_package",
+        "path": "/api/app/skill-packages/import",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_set_skill_package_safe_mode",
+        "path": "/api/app/skill-packages/safe-mode",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_trust_skill_package_signer",
+        "path": "/api/app/skill-packages/trust-signer",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_revoke_skill_package_signer",
+        "path": "/api/app/skill-packages/revoke-signer",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_block_skill_package",
+        "path": "/api/app/skill-packages/block-package",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_export_skill_package",
+        "path": "/api/app/skill-packages/export",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_preview_path_to_skill",
+        "path": "/api/app/path-to-skill/preview",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_write_path_to_skill",
+        "path": "/api/app/path-to-skill/write",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_set_skill_package_enabled",
+        "path": "/api/app/skill-packages/{skill_package_id}",
+        "methods": [
+          "PUT"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_uninstall_skill_package",
+        "path": "/api/app/skill-packages/{skill_package_id}",
+        "methods": [
+          "DELETE"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_validation_report",
+        "path": "/api/app/validation/report",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_build_test_readiness",
+        "path": "/api/app/build-test/readiness",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_list_avatars",
+        "path": "/api/app/avatars",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_optimization_plan",
+        "path": "/api/app/optimization/plan",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_optimization_tool",
+        "path": "/api/app/optimization/tool",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_optimization_apply_request",
+        "path": "/api/app/optimization/apply-request",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_optimization_validation_delta",
+        "path": "/api/app/optimization/validation-delta",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_optimization_proof_index",
+        "path": "/api/app/optimization/proofs",
+        "methods": [
+          "GET"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_optimization_proof_detail",
+        "path": "/api/app/optimization/proofs/{run_id}",
+        "methods": [
+          "GET"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_optimization_proof_screenshot",
+        "path": "/api/app/optimization/proofs/{run_id}/screenshots/{stage}",
+        "methods": [
+          "GET"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_project_index_scan",
+        "path": "/api/app/project-index/scan",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_outfit_package_inspect",
+        "path": "/api/app/outfit-packages/inspect",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_outfit_import_plan",
+        "path": "/api/app/outfit-imports/plan",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_request_outfit_import",
+        "path": "/api/app/outfit-imports/request",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_package_install_diagnostics",
+        "path": "/api/app/package-install/diagnose",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_package_install_plan",
+        "path": "/api/app/package-install/plan",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_package_install_request",
+        "path": "/api/app/package-install/request",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_list_sub_agents",
+        "path": "/api/app/sub-agents",
+        "methods": [
+          "GET"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_create_sub_agent",
+        "path": "/api/app/sub-agents",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_get_sub_agent",
+        "path": "/api/app/sub-agents/{task_id}",
+        "methods": [
+          "GET"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_cancel_sub_agent",
+        "path": "/api/app/sub-agents/{task_id}/cancel",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_retry_sub_agent",
+        "path": "/api/app/sub-agents/{task_id}/retry",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_merge_sub_agent",
+        "path": "/api/app/sub-agents/{task_id}/merge",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_acknowledge_sub_agent_handoff",
+        "path": "/api/app/sub-agents/{task_id}/handoff-ack",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "read_agent_external_connectors",
+        "path": "/api/agent/external-agent/connectors",
+        "methods": [
+          "GET"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "read_agent_skill_packages",
+        "path": "/api/agent/skill-packages",
+        "methods": [
+          "GET"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "read_agentic_app_doctor",
+        "path": "/api/app/doctor",
+        "methods": [
+          "GET"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "repair_agentic_app_unity_mcp",
+        "path": "/api/app/doctor/unity-mcp/repair",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "fix_agentic_app_doctor_check",
+        "path": "/api/app/doctor/fix/{check_id}",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "read_app_diagnostics",
+        "path": "/api/app/diagnostics",
+        "methods": [
+          "GET"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "update_app_diagnostics",
+        "path": "/api/app/diagnostics",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "create_app_support_bundle",
+        "path": "/api/app/support-bundle",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "read_app_tool_registry",
+        "path": "/api/app/tools/registry",
+        "methods": [
+          "GET"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "read_agent_manifest",
+        "path": "/api/agent/manifest",
+        "methods": [
+          "GET"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "read_agent_tool_registry",
+        "path": "/api/agent/tools/registry",
+        "methods": [
+          "GET"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "read_agent_health",
+        "path": "/api/agent/health",
+        "methods": [
+          "GET"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "read_agent_skills",
+        "path": "/api/agent/skills",
+        "methods": [
+          "GET"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "read_agent_skills_check",
+        "path": "/api/agent/skills/check",
+        "methods": [
+          "GET"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "create_agent_session",
+        "path": "/api/agent/session",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "agent_runtime_message",
+        "path": "/api/agent/runtime/message",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "agent_runtime_session",
+        "path": "/api/agent/runtime/session/{session_id}",
+        "methods": [
+          "GET"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "call_agent_tool",
+        "path": "/api/agent/tool/{tool_name}",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "read_agent_approvals",
+        "path": "/api/agent/approvals",
+        "methods": [
+          "GET"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "approve_agent_approval",
+        "path": "/api/agent/approvals/{approval_id}/approve",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "reject_agent_approval",
+        "path": "/api/agent/approvals/{approval_id}/reject",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "read_agent_logs",
+        "path": "/api/agent/logs",
+        "methods": [
+          "GET"
+        ]
+      },
+      {
+        "kind": "APIWebSocketRoute",
+        "name": "dashboard_socket",
+        "path": "/ws",
+        "methods": []
+      },
+      {
+        "kind": "APIRoute",
+        "name": "read_projects",
+        "path": "/api/projects",
+        "methods": [
+          "GET"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "refresh_projects",
+        "path": "/api/projects/refresh",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "update_state",
+        "path": "/api/state",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "read_api_config",
+        "path": "/api/config",
+        "methods": [
+          "GET"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "update_api_config",
+        "path": "/api/config",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "update_vision_config",
+        "path": "/api/config/vision",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "read_api_models",
+        "path": "/api/models",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "test_api_provider",
+        "path": "/api/app/provider/test",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "read_reasoning_variants",
+        "path": "/api/app/provider/reasoning-variants",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "request_mcp_selection_acceptance",
+        "path": "/api/app/provider/mcp-selection",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "verify_mcp_selection_acceptance",
+        "path": "/api/app/provider/mcp-selection/verify",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "install_project",
+        "path": "/api/projects/install",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "open_project",
+        "path": "/api/projects/open",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "read_unity_status",
+        "path": "/api/unity/status",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "read_unity_instances",
+        "path": "/api/unity/instances",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "read_unity_tools",
+        "path": "/api/unity/tools",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "read_scene_avatars",
+        "path": "/api/scene/avatars",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "read_avatars",
+        "path": "/api/avatars",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "read_avatar_blendshapes",
+        "path": "/api/avatar/blendshapes",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "build_pipeline_plan",
+        "path": "/api/pipeline/plan",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "run_pipeline",
+        "path": "/api/pipeline/run",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "apply_manual_blendshapes",
+        "path": "/api/blendshapes/apply",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "undo_manual_blendshapes",
+        "path": "/api/blendshapes/undo",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "read_tuning_history",
+        "path": "/api/tuning/history",
+        "methods": [
+          "GET"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "reapply_tuning_history",
+        "path": "/api/tuning/history/{history_id}/reapply",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "read_tuning_presets",
+        "path": "/api/tuning/presets",
+        "methods": [
+          "GET"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "create_tuning_preset",
+        "path": "/api/tuning/presets",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "apply_tuning_preset",
+        "path": "/api/tuning/presets/{preset_id}/apply",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "rename_tuning_preset",
+        "path": "/api/tuning/presets/{preset_id}/rename",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "duplicate_tuning_preset",
+        "path": "/api/tuning/presets/{preset_id}/duplicate",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "delete_tuning_preset",
+        "path": "/api/tuning/presets/{preset_id}/delete",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "read_tuning_locks",
+        "path": "/api/tuning/locks",
+        "methods": [
+          "GET"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "update_tuning_locks",
+        "path": "/api/tuning/locks",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "ai_select_tuning_locks",
+        "path": "/api/tuning/locks/ai-select",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "scan_clothes",
+        "path": "/api/clothes/scan",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "toggle_clothing",
+        "path": "/api/clothes/toggle",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "generate_clothing_fx",
+        "path": "/api/clothes/generate-fx",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "apply_clothing_fx",
+        "path": "/api/clothes/apply-fx",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "scan_avatar_parameters",
+        "path": "/api/parameters/scan",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "optimize_avatar_parameters",
+        "path": "/api/parameters/optimize",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "apply_parameter_optimization",
+        "path": "/api/parameters/apply-optimization",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "rollback_parameter_optimization",
+        "path": "/api/parameters/rollback",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "scan_shader_materials",
+        "path": "/api/shader/materials/scan",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "generate_shader_material_plan",
+        "path": "/api/shader/plan",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "apply_shader_material_plan",
+        "path": "/api/shader/apply",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "restore_shader_material_plan",
+        "path": "/api/shader/restore",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "read_shader_tuning_history",
+        "path": "/api/shader/history",
+        "methods": [
+          "GET"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "reapply_shader_tuning_history",
+        "path": "/api/shader/history/{history_id}/reapply",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "read_shader_tuning_presets",
+        "path": "/api/shader/presets",
+        "methods": [
+          "GET"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "create_shader_tuning_preset",
+        "path": "/api/shader/presets",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "apply_shader_tuning_preset",
+        "path": "/api/shader/presets/{preset_id}/apply",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "rename_shader_tuning_preset",
+        "path": "/api/shader/presets/{preset_id}/rename",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "duplicate_shader_tuning_preset",
+        "path": "/api/shader/presets/{preset_id}/duplicate",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "delete_shader_tuning_preset",
+        "path": "/api/shader/presets/{preset_id}/delete",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "read_shader_tuning_locks",
+        "path": "/api/shader/locks",
+        "methods": [
+          "GET"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "update_shader_tuning_locks",
+        "path": "/api/shader/locks",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "review_shader_material_vision",
+        "path": "/api/shader/vision-review",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "avatar_encryption_research_report",
+        "path": "/api/avatar-encryption/research-report",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "avatar_encryption_scan",
+        "path": "/api/avatar-encryption/scan",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "avatar_encryption_plan",
+        "path": "/api/avatar-encryption/plan",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "avatar_encryption_preview",
+        "path": "/api/avatar-encryption/preview",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "avatar_encryption_apply_request",
+        "path": "/api/avatar-encryption/apply-request",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "avatar_encryption_remove_request",
+        "path": "/api/avatar-encryption/remove-request",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "capture_avatar_screenshot",
+        "path": "/api/vision/capture",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "read_vision_capture_status",
+        "path": "/api/vision/capture-status",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "capture_avatar_multi_screenshot",
+        "path": "/api/vision/capture-multi",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "audit_avatar_screenshot",
+        "path": "/api/vision/audit",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "audit_avatar_multi_screenshot",
+        "path": "/api/vision/audit-multi",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "Mount",
+        "name": "agent_mcp",
+        "path": "",
+        "methods": []
+      }
+    ]
   },
   "openApi": {
-    "pathCount": 227,
-    "schemaCount": 132,
-    "sha256WithoutRuntimeVersion": "498f7f55ade10ce356f7075646446b5bff0b2bc45956e6f1adf0ec379386d2bc"
+    "pathCount": 230,
+    "schemaCount": 134,
+    "schemaNames": [
+      "AdjustmentCheckpointCreateRequest",
+      "AdjustmentCheckpointOverwriteRequest",
+      "AdjustmentCheckpointSelectRequest",
+      "AdjustmentCheckpointUpdateRequest",
+      "AdvancedSettingsRequest",
+      "AgentApprovalRevisionRequest",
+      "AgentApprovalScopeRequest",
+      "AgentCompactRequest",
+      "AgentDesktopActionRequest",
+      "AgentGoalBackgroundAcknowledgeItem",
+      "AgentGoalBackgroundAcknowledgeRequest",
+      "AgentGoalCreateRequest",
+      "AgentGoalDeliveryDeferRequest",
+      "AgentGoalDeliveryMaterializeRequest",
+      "AgentGoalOwnerBindRequest",
+      "AgentGoalUpdateRequest",
+      "AgentGoalWakeRequest",
+      "AgentHarnessJourneyReceiptRequest",
+      "AgentMemoryClearRequest",
+      "AgentMemoryCreateRequest",
+      "AgentMemoryDeleteRequest",
+      "AgentNotesRequest",
+      "AgentPermissionRequest",
+      "AgentProgressItemRequest",
+      "AgentProgressReplaceRequest",
+      "AgentQuestionAnswerRequest",
+      "AgentQuestionCreateRequest",
+      "AgentRuntimeCancelRequest",
+      "AgentRuntimeMessageRequest",
+      "AgentRuntimeQueueAckRequest",
+      "AgentRuntimeQueueCancelRequest",
+      "AgentRuntimeQueueClaimRequest",
+      "AgentRuntimeQueueRequest",
+      "AgentSessionRequest",
+      "AgentToolRequest",
+      "ApiConfigRequest",
+      "ApiModelListRequest",
+      "AvatarBlendshapeListRequest",
+      "AvatarEncryptionApplyRequest",
+      "AvatarEncryptionPlanRequest",
+      "AvatarEncryptionPreviewRequest",
+      "AvatarEncryptionRemoveRequest",
+      "AvatarEncryptionResearchRequest",
+      "AvatarEncryptionScanRequest",
+      "AvatarSceneScanRequest",
+      "AvatarScopedConnectionRequest",
+      "BuildTestReadinessRequest",
+      "CameraVector3",
+      "ChatAttachmentImportRequest",
+      "ChatAttachmentUploadBeginRequest",
+      "ChatAttachmentUploadFinishRequest",
+      "ChatTranscriptsRequest",
+      "ClothingApplyFxRequest",
+      "ClothingToggleRequest",
+      "ComputerUseTurnGrantRequest",
+      "ConnectionRequest",
+      "DashboardRequest",
+      "DashboardStateRequest",
+      "DesktopActionCancelRequest",
+      "DesktopActionClaimRequest",
+      "DesktopActionCompleteRequest",
+      "DesktopBridgeHeartbeatRequest",
+      "DesktopBridgeRegisterRequest",
+      "DiagnosticsConfigRequest",
+      "DoctorFixRequest",
+      "ExternalAgentConnectorActionRequest",
+      "ExternalAgentConnectorRequest",
+      "ExternalAgentGatewayUpdateRequest",
+      "HTTPValidationError",
+      "InterruptedApplyRecoveryResolveRequest",
+      "ManualBlendshapeApplyRequest",
+      "ManualBlendshapeItem",
+      "McpSelectionAcceptanceRequest",
+      "McpSelectionAcceptanceVerifyRequest",
+      "MemoryReviewCancelRequest",
+      "MemoryReviewCandidateRequest",
+      "MemoryReviewConfigRequest",
+      "MemoryReviewRunRequest",
+      "OfficialSkillSigningKeyExportRequest",
+      "OfficialSkillSigningKeyImportRequest",
+      "OptimizationApplyRequest",
+      "OptimizationPlanRequest",
+      "OptimizationToolRequest",
+      "OptimizationValidationDeltaRequest",
+      "OutfitImportPlanRequest",
+      "OutfitPackageInspectRequest",
+      "PackageInstallDiagnosticsRequest",
+      "PackageInstallPlanRequest",
+      "ParameterApplyOptimizationRequest",
+      "ParameterRollbackRequest",
+      "PathToSkillCaptureRequest",
+      "PrimitiveBasisLiveStartRequest",
+      "ProjectActionRequest",
+      "ProjectIndexScanRequest",
+      "ProjectInstallRequest",
+      "ProjectPrefsRequest",
+      "ProviderTestRequest",
+      "ReasoningVariantsRequest",
+      "SessionHandoffSendRequest",
+      "ShaderMaterialApplyRequest",
+      "ShaderMaterialPlanRequest",
+      "ShaderMaterialRestoreRequest",
+      "ShaderMaterialScanRequest",
+      "ShaderTuningLocksUpdateRequest",
+      "ShaderTuningPresetCreateRequest",
+      "ShaderTuningPresetDuplicateRequest",
+      "ShaderTuningPresetRenameRequest",
+      "ShaderVisionReviewRequest",
+      "SkillPackageBlockRequest",
+      "SkillPackageExportRequest",
+      "SkillPackagePathRequest",
+      "SkillPackageSafeModeRequest",
+      "SkillPackageSignerRequest",
+      "SkillPackageStateRequest",
+      "SkillPackageUninstallRequest",
+      "SubAgentCreateRequest",
+      "SubAgentHandoffAckRequest",
+      "SubAgentMergeRequest",
+      "SupportBundleRequest",
+      "TuningLocksAiSelectRequest",
+      "TuningLocksUpdateRequest",
+      "TuningPresetCreateRequest",
+      "TuningPresetDuplicateRequest",
+      "TuningPresetRenameRequest",
+      "UndoBlendshapeRequest",
+      "UnityMcpRepairRequest",
+      "ValidationError",
+      "ValidationReportRequest",
+      "VisionAuditMultiRequest",
+      "VisionAuditRequest",
+      "VisionCaptureMultiRequest",
+      "VisionCaptureRequest",
+      "VisionCaptureStatusRequest",
+      "VisionConfigRequest"
+    ],
+    "schemasSha256": "63cd38132832cdb29a0fbc06cab15d9eb6bfd5d4644f1958e792d386a8c84ac5",
+    "sha256WithoutRuntimeVersion": "fe647527246df0a9ab43cabdbc03503de4ad9435369c1415b6231723a4d5ca9f"
   },
   "events": {
     "envelopeKeys": [
