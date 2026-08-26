@@ -132,6 +132,8 @@ def test_write_avatar_descriptor_returns_persisted_descriptor_state() -> None:
     assert "before = JToken.Parse(beforeJson)" in block
     assert "after = JToken.Parse(EditorJsonUtility.ToJson(readbackDescriptor))" in block
     assert "after = JToken.Parse(unchangedJson)" in block
+    assert block.count("count = plan.changedFields.Count") == 2
+    assert "count = plan.changedFields.Length" not in block
     assert "items = plan.changedFields.Take(20).ToArray()" in block
     assert "handle = descriptorGlobalObjectId" in block
 

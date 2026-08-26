@@ -451,7 +451,7 @@ namespace VRCForge.Editor
                         after = JToken.Parse(unchangedJson),
                         affected = new
                         {
-                            count = plan.changedFields.Length,
+                            count = plan.changedFields.Count,
                             items = plan.changedFields.Take(20).ToArray(),
                             handle = descriptorGlobalObjectId
                         },
@@ -499,7 +499,7 @@ namespace VRCForge.Editor
                     after = JToken.Parse(EditorJsonUtility.ToJson(readbackDescriptor)),
                     affected = new
                     {
-                        count = plan.changedFields.Length,
+                        count = plan.changedFields.Count,
                         items = plan.changedFields.Take(20).ToArray(),
                         handle = descriptorGlobalObjectId
                     },
