@@ -71,6 +71,7 @@ function splitLines(value: string): string[] {
 
 
 export function SkillsWorkspace({
+  endpoint,
   skills,
   skillCount,
   skillCheck,
@@ -104,6 +105,7 @@ export function SkillsWorkspace({
   onPreviewPathToSkill,
   onWritePathToSkill,
 }: {
+  endpoint: string;
   skills: AgentSkill[];
   skillCount: number;
   skillCheck: AgentSkillCheck | null;
@@ -518,6 +520,7 @@ export function SkillsWorkspace({
         </form>
         <SkillPackageManagerPanel
           packages={packages}
+          endpoint={endpoint}
           packageStore={packageStore}
           loading={packagesLoading}
           message={packageMessage}

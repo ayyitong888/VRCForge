@@ -1468,12 +1468,61 @@ class SkillPackageService:
         self._atomic_write_json(self.registry_path, document)
         return {"ok": True, "changed": not previous, "governance": document["governance"]}
 
+    def designate_official_signer(
+        self,
+        signer_fingerprint: str,
+        *,
+        reason: str | None = None,
+        publisher: str = "VRCForge",
+    ) -> dict[str, Any]:
+        """Explicitly designate and trust one public-key fingerprint as official."""
+
+        fingerprint = self._normalize_signer_fingerprint(signer_fingerprint)
+        publisher_name = str(publisher or "").strip()[:120]
+        if not publisher_name:
+            raise PackageSecurityError("An official signer requires a publisher name.")
+        registry = self.load_registry()
+        governance = self._normalize_governance(registry.get("governance"))
+        if fingerprint in governance["revoked_signers"]:
+            raise PackageSecurityError("A revoked signer cannot be designated as official.")
+        previous = governance["official_signers"].get(fingerprint)
+        timestamp = self._utc_timestamp()
+        reason_text = self._normalize_reason(reason)
+        governance["trusted_signers"].setdefault(
+            fingerprint,
+            {"trusted_at": timestamp, "reason": reason_text},
+        )
+        governance["official_signers"][fingerprint] = {
+            "official_at": timestamp,
+            "reason": reason_text,
+            "publisher": publisher_name,
+        }
+        document = self._registry_document(
+            registry,
+            governance=governance,
+            audit_event={
+                "event": "skill_package_signer_designated_official",
+                "signer_fingerprint": fingerprint,
+                "publisher": publisher_name,
+                "reason": reason_text,
+            },
+        )
+        self._atomic_write_json(self.registry_path, document)
+        return {
+            "ok": True,
+            "changed": previous is None or previous.get("publisher") != publisher_name,
+            "signerFingerprint": fingerprint,
+            "officialPublisher": publisher_name,
+            "governance": document["governance"],
+        }
+
     def revoke_signer(self, signer_fingerprint: str, *, reason: str | None = None) -> dict[str, Any]:
         fingerprint = self._normalize_signer_fingerprint(signer_fingerprint)
         registry = self.load_registry()
         governance = self._normalize_governance(registry.get("governance"))
         previous = fingerprint in governance["revoked_signers"]
         governance["trusted_signers"].pop(fingerprint, None)
+        governance["official_signers"].pop(fingerprint, None)
         governance["revoked_signers"][fingerprint] = {
             "revoked_at": self._utc_timestamp(),
             "reason": self._normalize_reason(reason),
@@ -1674,6 +1723,7 @@ class SkillPackageService:
                 "block_enable": True,
             },
             "trusted_signers": {},
+            "official_signers": {},
             "revoked_signers": {},
             "blocked_packages": {
                 "ids": {},
@@ -1712,6 +1762,7 @@ class SkillPackageService:
                 "block_enable": bool(safe_mode.get("block_enable", default["safe_mode"]["block_enable"])),
             },
             "trusted_signers": cls._normalize_signer_map(value.get("trusted_signers"), timestamp_key="trusted_at"),
+            "official_signers": cls._normalize_signer_map(value.get("official_signers"), timestamp_key="official_at"),
             "revoked_signers": cls._normalize_signer_map(value.get("revoked_signers"), timestamp_key="revoked_at"),
             "blocked_packages": {
                 "ids": cls._normalize_blocked_id_map(blocked.get("ids")),
@@ -1733,6 +1784,11 @@ class SkillPackageService:
             normalized[fingerprint] = {
                 timestamp_key: str(meta.get(timestamp_key) or ""),
                 "reason": str(meta.get("reason") or "")[:500],
+                **(
+                    {"publisher": str(meta.get("publisher") or "VRCForge").strip()[:120]}
+                    if timestamp_key == "official_at"
+                    else {}
+                ),
             }
         return normalized
 

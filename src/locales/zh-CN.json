@@ -1443,6 +1443,13 @@
     "skillName": "Skill Name",
     "outputPath": "Output Path",
     "privateKeyPath": "Private Key Path",
+    "officialKey": "Official 签名密钥（备份/导入）",
+    "officialKeyFingerprint": "公钥指纹",
+    "officialKeyExportPath": "备份输出路径",
+    "officialKeyBackupPath": "备份文件路径",
+    "officialKeyPassphrase": "备份密码（至少 8 位）",
+    "officialKeyExport": "导出加密备份",
+    "officialKeyImport": "导入加密备份",
     "export": "Export",
     "tablePackage": "Package",
     "tableRisk": "风险",
@@ -1468,6 +1475,8 @@
       "blocked": "Blocked"
     },
     "messages": {
+      "officialKeyExported": "Official 签名密钥已加密备份",
+      "officialKeyImported": "Official 签名密钥已导入，包列表已刷新",
       "preflightComplete": "Preflight complete",
       "packageImported": "Package imported",
       "releaseExported": "Release package exported",

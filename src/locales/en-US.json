@@ -1443,6 +1443,13 @@
     "skillName": "Skill Name",
     "outputPath": "Output Path",
     "privateKeyPath": "Private Key Path",
+    "officialKey": "Official signing key (backup / import)",
+    "officialKeyFingerprint": "Public key fingerprint",
+    "officialKeyExportPath": "Backup output path",
+    "officialKeyBackupPath": "Backup file path",
+    "officialKeyPassphrase": "Backup passphrase (8+ characters)",
+    "officialKeyExport": "Export encrypted backup",
+    "officialKeyImport": "Import encrypted backup",
     "export": "Export",
     "tablePackage": "Package",
     "tableRisk": "Risk",
@@ -1468,6 +1475,8 @@
       "blocked": "Blocked"
     },
     "messages": {
+      "officialKeyExported": "Official signing key encrypted backup exported",
+      "officialKeyImported": "Official signing key imported; package list refreshed",
       "preflightComplete": "Preflight complete",
       "packageImported": "Package imported",
       "releaseExported": "Release package exported",

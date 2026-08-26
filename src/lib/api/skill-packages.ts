@@ -117,6 +117,52 @@ export type SkillPackageGovernanceActionResult = {
   projectedSkills?: Array<Record<string, unknown>>;
 };
 
+export type OfficialKeyStatus = {
+  exists: boolean;
+  fingerprint: string | null;
+  publisher: string | null;
+  publicKeyPath: string | null;
+};
+
+export type OfficialKeyBackupResult = Partial<OfficialKeyStatus> & {
+  ok?: boolean;
+  outputPath?: string;
+  backupPath?: string;
+};
+
+type OfficialKeyStatusResponse = { ok?: boolean; key?: Partial<OfficialKeyStatus> | null };
+
+function normalizeOfficialKeyStatus(payload: OfficialKeyStatusResponse): OfficialKeyStatus {
+  const key = payload.key || {};
+  return {
+    exists: key.exists === true,
+    fingerprint: typeof key.fingerprint === "string" ? key.fingerprint : null,
+    publisher: typeof key.publisher === "string" ? key.publisher : null,
+    publicKeyPath: typeof key.publicKeyPath === "string" ? key.publicKeyPath : null,
+  };
+}
+
+export async function fetchOfficialKey(endpoint: string): Promise<OfficialKeyStatus> {
+  if (hasTauriInternals()) {
+    return normalizeOfficialKeyStatus(await invokeTauriWithAbort<OfficialKeyStatusResponse>("fetch_official_skill_signing_key", {}));
+  }
+  return normalizeOfficialKeyStatus(await requestJson<OfficialKeyStatusResponse>(`${endpoint}/api/app/skill-packages/official-key`));
+}
+
+export async function exportOfficialKey(endpoint: string, request: { outputPath: string; passphrase: string }): Promise<OfficialKeyBackupResult> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort<OfficialKeyBackupResult>("export_official_skill_signing_key", { request: { body: request, timeoutMs: 60000 } });
+  }
+  return requestJson<OfficialKeyBackupResult>(`${endpoint}/api/app/skill-packages/official-key/export`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(request) });
+}
+
+export async function importOfficialKey(endpoint: string, request: { backupPath: string; passphrase: string }): Promise<OfficialKeyBackupResult> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort<OfficialKeyBackupResult>("import_official_skill_signing_key", { request: { body: request, timeoutMs: 60000 } });
+  }
+  return requestJson<OfficialKeyBackupResult>(`${endpoint}/api/app/skill-packages/official-key/import`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(request) });
+}
+
 export async function fetchSkillPackages(endpoint: string): Promise<SkillPackageList> {
   if (hasTauriInternals()) {
     return invokeTauriWithAbort<SkillPackageList>("fetch_skill_packages", {});

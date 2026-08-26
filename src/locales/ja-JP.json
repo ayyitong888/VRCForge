@@ -1443,6 +1443,13 @@
     "skillName": "Skill Name",
     "outputPath": "Output Path",
     "privateKeyPath": "Private Key Path",
+    "officialKey": "Official 署名鍵（バックアップ／インポート）",
+    "officialKeyFingerprint": "公開鍵フィンガープリント",
+    "officialKeyExportPath": "バックアップ出力先",
+    "officialKeyBackupPath": "バックアップファイルのパス",
+    "officialKeyPassphrase": "バックアップパスフレーズ（8文字以上）",
+    "officialKeyExport": "暗号化バックアップをエクスポート",
+    "officialKeyImport": "暗号化バックアップをインポート",
     "export": "Export",
     "tablePackage": "Package",
     "tableRisk": "Risk",
@@ -1468,6 +1475,8 @@
       "blocked": "Blocked"
     },
     "messages": {
+      "officialKeyExported": "Official 署名鍵の暗号化バックアップをエクスポートしました",
+      "officialKeyImported": "Official 署名鍵をインポートし、パッケージ一覧を更新しました",
       "preflightComplete": "プリフライト完了",
       "packageImported": "パッケージをインポートしました",
       "releaseExported": "リリースパッケージをエクスポートしました",

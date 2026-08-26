@@ -3712,6 +3712,7 @@ export default function App() {
             />
           ) : activeView === "skills" ? (
             <SkillsWorkspace
+              endpoint={endpoint}
               skills={skills}
               skillCount={skillCount}
               skillCheck={skillCheck}

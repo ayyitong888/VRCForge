@@ -39,7 +39,7 @@ from fastapi import BackgroundTasks, FastAPI, HTTPException, Request, WebSocket,
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, SecretStr, model_validator
 
 from bounded_process import BoundedProcessResult, run_bounded_process
 from app_update_service import AppUpdateService
@@ -447,6 +447,7 @@ from shader_adapter_registry import (
     shader_family_label,
 )
 from skill_packages import SkillPackageError, SkillPackageService, _load_json_bytes
+from skill_signing_key_migration import SkillSigningKeyMigrationService
 from skill_package_controller import (
     SkillPackageController,
     SkillPackageControllerPorts,
@@ -1903,6 +1904,21 @@ class SkillPackagePathRequest(BaseModel):
     dev_mode: bool = Field(default=False, alias="devMode")
     project_to_user_skills: bool = Field(default=True, alias="projectToUserSkills")
     dry_run: bool = Field(default=False, alias="dryRun")
+
+    model_config = {"populate_by_name": True}
+
+
+class OfficialSkillSigningKeyExportRequest(BaseModel):
+    output_path: str = Field(alias="outputPath")
+    passphrase: SecretStr = Field(min_length=8)
+
+    model_config = {"populate_by_name": True}
+
+
+class OfficialSkillSigningKeyImportRequest(BaseModel):
+    backup_path: str = Field(alias="backupPath")
+    passphrase: SecretStr = Field(min_length=8)
+    replace: bool = False
 
     model_config = {"populate_by_name": True}
 
@@ -7937,6 +7953,46 @@ def app_list_skill_packages() -> dict[str, Any]:
 def app_preflight_skill_package(request: SkillPackagePathRequest) -> dict[str, Any]:
     try:
         return preflight_skill_package_sync(request.model_dump(by_alias=True))
+    except Exception as exc:  # noqa: BLE001
+        raise skill_package_error_response(exc) from exc
+
+
+@app.get("/api/app/skill-packages/official-key")
+def app_official_skill_signing_key_status() -> dict[str, Any]:
+    try:
+        return SkillSigningKeyMigrationService(
+            skill_package_service(), USER_DATA_DIR / "signing"
+        ).status()
+    except Exception as exc:  # noqa: BLE001
+        raise skill_package_error_response(exc) from exc
+
+
+@app.post("/api/app/skill-packages/official-key/export")
+def app_export_official_skill_signing_key(
+    request: OfficialSkillSigningKeyExportRequest,
+) -> dict[str, Any]:
+    try:
+        with AGENT_GATEWAY.local_state_write_guard(), SKILL_PACKAGE_WRITE_LOCK, AGENT_GATEWAY.skills.write_lock:
+            return SkillSigningKeyMigrationService(
+                skill_package_service(), USER_DATA_DIR / "signing"
+            ).export_backup(request.output_path, request.passphrase.get_secret_value())
+    except Exception as exc:  # noqa: BLE001
+        raise skill_package_error_response(exc) from exc
+
+
+@app.post("/api/app/skill-packages/official-key/import")
+def app_import_official_skill_signing_key(
+    request: OfficialSkillSigningKeyImportRequest,
+) -> dict[str, Any]:
+    try:
+        with AGENT_GATEWAY.local_state_write_guard(), SKILL_PACKAGE_WRITE_LOCK, AGENT_GATEWAY.skills.write_lock:
+            return SkillSigningKeyMigrationService(
+                skill_package_service(), USER_DATA_DIR / "signing"
+            ).import_backup(
+                request.backup_path,
+                request.passphrase.get_secret_value(),
+                replace=request.replace,
+            )
     except Exception as exc:  # noqa: BLE001
         raise skill_package_error_response(exc) from exc
 

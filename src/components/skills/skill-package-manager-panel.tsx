@@ -1,12 +1,14 @@
 import { Check, Copy, Eye, EyeOff, Loader2, Plus, RefreshCw, Shield, Trash2, X } from "lucide-react";
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import i18n from "../../i18n";
 import type {
   PathToSkillCaptureRequest,
   PathToSkillCaptureResult,
+  OfficialKeyStatus,
   SkillPackageEntry,
   SkillPackagePreflight,
 } from "../../lib/api";
+import { exportOfficialKey, fetchOfficialKey, importOfficialKey } from "../../lib/api/skill-packages";
 import type { PathToSkillDraftSeed } from "../../lib/path-to-skill-context";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
@@ -16,6 +18,7 @@ import { SkillPackageAuditList } from "./skill-package-audit-list";
 
 export function SkillPackageManagerPanel({
   packages,
+  endpoint,
   packageStore,
   loading,
   message,
@@ -37,6 +40,7 @@ export function SkillPackageManagerPanel({
   onWritePathToSkill,
 }: {
   packages: SkillPackageEntry[];
+  endpoint: string;
   packageStore: string;
   loading: boolean;
   message: string;
@@ -69,8 +73,50 @@ export function SkillPackageManagerPanel({
   const [governanceReason, setGovernanceReason] = useState("");
   const [signerFingerprint, setSignerFingerprint] = useState("");
   const [blockPackageId, setBlockPackageId] = useState("");
+  const [officialKey, setOfficialKey] = useState<OfficialKeyStatus | null>(null);
+  const [officialKeyOutputPath, setOfficialKeyOutputPath] = useState("");
+  const [officialKeyBackupPath, setOfficialKeyBackupPath] = useState("");
+  const [officialKeyExportPassphrase, setOfficialKeyExportPassphrase] = useState("");
+  const [officialKeyImportPassphrase, setOfficialKeyImportPassphrase] = useState("");
+  const [officialKeyBusy, setOfficialKeyBusy] = useState(false);
   const preview = normalizeSkillPackagePreview(preflight);
   const safeModeEnabled = skillPackageSafeModeEnabled(governance);
+  useEffect(() => {
+    let active = true;
+    void fetchOfficialKey(endpoint).then((payload) => {
+      if (active) setOfficialKey(payload);
+    }).catch(() => {
+      if (active) setOfficialKey(null);
+    });
+    return () => { active = false; };
+  }, [endpoint]);
+  async function runOfficialKeyExport() {
+    if (officialKeyExportPassphrase.length < 8 || !officialKeyOutputPath.trim()) return;
+    setOfficialKeyBusy(true); setLocalMessage(""); setLocalError("");
+    try {
+      await exportOfficialKey(endpoint, { outputPath: officialKeyOutputPath.trim(), passphrase: officialKeyExportPassphrase });
+      setOfficialKeyExportPassphrase("");
+      setLocalMessage(i18n.t("package.messages.officialKeyExported"));
+    } catch (cause) { setLocalError(cause instanceof Error ? cause.message : String(cause)); }
+    finally { setOfficialKeyBusy(false); }
+  }
+  async function runOfficialKeyImport() {
+    if (officialKeyImportPassphrase.length < 8 || !officialKeyBackupPath.trim()) return;
+    setOfficialKeyBusy(true); setLocalMessage(""); setLocalError("");
+    try {
+      const payload = await importOfficialKey(endpoint, { backupPath: officialKeyBackupPath.trim(), passphrase: officialKeyImportPassphrase });
+      setOfficialKey((current) => ({
+        exists: payload.exists === true || current?.exists === true,
+        fingerprint: payload.fingerprint ?? current?.fingerprint ?? null,
+        publisher: payload.publisher ?? current?.publisher ?? null,
+        publicKeyPath: payload.publicKeyPath ?? current?.publicKeyPath ?? null,
+      }));
+      setOfficialKeyImportPassphrase("");
+      setLocalMessage(i18n.t("package.messages.officialKeyImported"));
+      await Promise.resolve(onRefresh());
+    } catch (cause) { setLocalError(cause instanceof Error ? cause.message : String(cause)); }
+    finally { setOfficialKeyBusy(false); }
+  }
   async function runPreflight() {
     if (!packagePath.trim()) {
       return;
@@ -299,6 +345,32 @@ export function SkillPackageManagerPanel({
             </Button>
           </div>
           <SkillPackageAuditList audit={audit} />
+          <details className="rounded-md border border-border/70 bg-background px-3 py-2">
+            <summary className="cursor-pointer text-xs font-medium">{i18n.t("package.officialKey")}</summary>
+            <div className="mt-3 grid gap-3">
+              <DataLine label={i18n.t("package.officialKeyFingerprint")} value={officialKey?.fingerprint || "-"} mono />
+              <div className="grid gap-3 md:grid-cols-2">
+                <div className="grid gap-2">
+                  <SkillFieldLabel label={i18n.t("package.officialKeyExportPath")}>
+                    <input value={officialKeyOutputPath} onChange={(event) => setOfficialKeyOutputPath(event.target.value)} className="h-9 w-full rounded-md border border-border bg-card px-3 text-xs outline-none focus:border-primary" />
+                  </SkillFieldLabel>
+                  <SkillFieldLabel label={i18n.t("package.officialKeyPassphrase")}>
+                    <input type="password" minLength={8} value={officialKeyExportPassphrase} onChange={(event) => setOfficialKeyExportPassphrase(event.target.value)} className="h-9 w-full rounded-md border border-border bg-card px-3 text-xs outline-none focus:border-primary" autoComplete="new-password" />
+                  </SkillFieldLabel>
+                  <Button type="button" variant="outline" className="h-8 w-fit text-xs" disabled={officialKeyBusy || officialKeyExportPassphrase.length < 8 || !officialKeyOutputPath.trim()} onClick={() => void runOfficialKeyExport()}>{i18n.t("package.officialKeyExport")}</Button>
+                </div>
+                <div className="grid gap-2">
+                  <SkillFieldLabel label={i18n.t("package.officialKeyBackupPath")}>
+                    <input value={officialKeyBackupPath} onChange={(event) => setOfficialKeyBackupPath(event.target.value)} className="h-9 w-full rounded-md border border-border bg-card px-3 text-xs outline-none focus:border-primary" />
+                  </SkillFieldLabel>
+                  <SkillFieldLabel label={i18n.t("package.officialKeyPassphrase")}>
+                    <input type="password" minLength={8} value={officialKeyImportPassphrase} onChange={(event) => setOfficialKeyImportPassphrase(event.target.value)} className="h-9 w-full rounded-md border border-border bg-card px-3 text-xs outline-none focus:border-primary" autoComplete="current-password" />
+                  </SkillFieldLabel>
+                  <Button type="button" variant="outline" className="h-8 w-fit text-xs" disabled={officialKeyBusy || officialKeyImportPassphrase.length < 8 || !officialKeyBackupPath.trim()} onClick={() => void runOfficialKeyImport()}>{i18n.t("package.officialKeyImport")}</Button>
+                </div>
+              </div>
+            </div>
+          </details>
         </div>
 
         <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_auto_auto]">

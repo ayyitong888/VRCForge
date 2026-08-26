@@ -1979,6 +1979,40 @@ pub fn fetch_skill_packages() -> Result<serde_json::Value, String> {
 }
 
 #[tauri::command]
+pub async fn fetch_official_skill_signing_key() -> Result<serde_json::Value, String> {
+    blocking_backend_json_request(move || {
+        backend_json_request(
+            "GET",
+            "/api/app/skill-packages/official-key".to_string(),
+            None,
+            Some(10_000),
+        )
+        .map(sanitize_webview_response)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn export_official_skill_signing_key(
+    request: DesktopJsonBodyRequest,
+) -> Result<serde_json::Value, String> {
+    blocking_backend_json_request(move || {
+        post_json_body_command("/api/app/skill-packages/official-key/export", request, 60_000)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn import_official_skill_signing_key(
+    request: DesktopJsonBodyRequest,
+) -> Result<serde_json::Value, String> {
+    blocking_backend_json_request(move || {
+        post_json_body_command("/api/app/skill-packages/official-key/import", request, 60_000)
+    })
+    .await
+}
+
+#[tauri::command]
 pub fn preflight_skill_package(
     request: DesktopJsonBodyRequest,
 ) -> Result<serde_json::Value, String> {
