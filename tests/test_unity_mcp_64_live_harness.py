@@ -1,23 +1,60 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import sys
+import tarfile
 from pathlib import Path
 from types import ModuleType
 from typing import Any
 
 import pytest
 
+from unity_mcp_tool_contract import EXPECTED_TOOL_COUNT
+
 
 ROOT = Path(__file__).resolve().parents[1]
 HARNESS_PATH = ROOT / "artifacts" / "acceptance-harness" / "smoke_unity_mcp_64_live.py"
 PROFILE_PATH = ROOT / "artifacts" / "acceptance-harness" / "mcp64-live-profile.json"
+SEED_CONTEXT_PATH = ROOT / "artifacts" / "acceptance-harness" / "mcp80-live-context.seed.json"
+SEED_GAP_PATH = ROOT / "artifacts" / "acceptance-harness" / "mcp80-live-context-gap-report.json"
+SEED_PROJECT_PATH = (
+    ROOT / "artifacts" / "acceptance-harness" / "disposable-projects" / "live80-20260824-seed"
+)
+CLONE_CONTEXT_PATH = ROOT / "artifacts" / "acceptance-harness" / "mcp80-live-context.dogfood-clone.json"
+CLONE_GAP_PATH = (
+    ROOT / "artifacts" / "acceptance-harness" / "mcp80-live-context-dogfood-clone-gap-report.json"
+)
+CLONE_PROJECT_PATH = (
+    ROOT / "artifacts" / "acceptance-harness" / "disposable-projects" / "live80-20260824-dogfood-clone"
+)
+CLONE_PACKAGE_PATH = ROOT / "artifacts" / "acceptance-harness" / "live80-import-fixture.unitypackage"
 
 pytestmark = pytest.mark.skipif(
     not HARNESS_PATH.is_file(),
     reason="local Unity MCP live acceptance harness is not part of a clean source checkout",
+)
+requires_seed_fixtures = pytest.mark.skipif(
+    not (
+        SEED_PROJECT_PATH.is_dir()
+        and SEED_CONTEXT_PATH.is_file()
+        and SEED_GAP_PATH.is_file()
+    ),
+    reason="local Unity MCP seed project fixtures are not part of a clean source checkout",
+)
+requires_clone_fixtures = pytest.mark.skipif(
+    not (
+        CLONE_PROJECT_PATH.is_dir()
+        and CLONE_CONTEXT_PATH.is_file()
+        and CLONE_GAP_PATH.is_file()
+    ),
+    reason="local Unity MCP dogfood clone fixtures are not part of a clean source checkout",
+)
+requires_clone_package_fixtures = pytest.mark.skipif(
+    not (CLONE_CONTEXT_PATH.is_file() and CLONE_PACKAGE_PATH.is_file()),
+    reason="local Unity MCP package fixtures are not part of a clean source checkout",
 )
 
 
@@ -51,6 +88,171 @@ def make_args(tmp_path: Path, **overrides: Any) -> argparse.Namespace:
     }
     values.update(overrides)
     return argparse.Namespace(**values)
+
+
+def test_live_endpoint_is_restricted_to_loopback(live: ModuleType, tmp_path: Path) -> None:
+    with pytest.raises(live.HarnessError, match="loopback"):
+        live.UnityMcp64LiveHarness(make_args(tmp_path, base_url="https://gateway.example.test:8757"))
+
+
+def test_approved_live_run_rejects_unmarked_project_outside_disposable_root(
+    live: ModuleType, tmp_path: Path
+) -> None:
+    harness = live.UnityMcp64LiveHarness(make_args(tmp_path, execute=True, allow_approved_writes=True))
+    with pytest.raises(live.HarnessError, match="disposable-projects"):
+        harness.run()
+
+
+def test_disposable_marker_binds_exact_project_and_context_digest(
+    live: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    allowed = tmp_path / "disposable-projects"
+    project = allowed / "case-project"
+    (project / "Assets").mkdir(parents=True)
+    (project / "Packages").mkdir()
+    (project / "ProjectSettings").mkdir()
+    (project / "Packages" / "manifest.json").write_text("{}", encoding="utf-8")
+    (project / "ProjectSettings" / "ProjectVersion.txt").write_text(
+        "m_EditorVersion: 2022.3.22f1\n", encoding="utf-8"
+    )
+    marker = project / live.DISPOSABLE_MARKER_NAME
+    marker.write_text(
+        json.dumps(
+            {
+                "schema": live.DISPOSABLE_MARKER_SCHEMA,
+                "projectRoot": str(project),
+                "deleteAfterRun": True,
+                "remoteUploadAllowed": False,
+            }
+        ),
+        encoding="utf-8",
+    )
+    context = tmp_path / "context.json"
+    context.write_text(
+        json.dumps(
+            {
+                "DISPOSABLE_PROJECT": True,
+                "DISPOSABLE_PROJECT_MARKER_SHA256": hashlib.sha256(marker.read_bytes()).hexdigest(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(live, "DISPOSABLE_PROJECTS_ROOT", allowed.resolve())
+    harness = live.UnityMcp64LiveHarness(make_args(project, context_json=context))
+
+    attestation = harness._verify_disposable_project()  # noqa: SLF001
+
+    assert attestation["verified"] is True
+    assert attestation["projectRoot"] == str(project.resolve())
+    assert attestation["remoteUploadAllowed"] is False
+
+
+def test_context_audit_separates_static_missing_from_causal_deferred_bindings(
+    live: ModuleType, tmp_path: Path
+) -> None:
+    harness = live.UnityMcp64LiveHarness(make_args(tmp_path))
+    audit = harness._context_audit(harness.cases)  # noqa: SLF001
+    assert "AVATAR_PATH" in audit["missingPlaceholders"]
+    assert "SAFE_BACKUP_ID" in audit["deferredPlaceholders"]
+    assert "UPLOAD_READINESS_DIGEST" in audit["deferredPlaceholders"]
+    assert "MATERIAL_PREVIEW_RECEIPT" in audit["deferredPlaceholders"]
+    assert "MATERIAL_TEXTURE_PREVIEW_RECEIPT" in audit["deferredPlaceholders"]
+    assert "PROJECT_ROOT" not in audit["missingPlaceholders"]
+    assert audit["contextCompleteForStart"] is False
+
+
+@requires_seed_fixtures
+def test_seed_context_gap_report_matches_runner_and_exact_disposable_tree(live: ModuleType) -> None:
+    harness = live.UnityMcp64LiveHarness(
+        make_args(SEED_PROJECT_PATH, context_json=SEED_CONTEXT_PATH)
+    )
+    attestation = harness._verify_disposable_project()  # noqa: SLF001
+    audit = harness._context_audit(harness.cases)  # noqa: SLF001
+    gap = json.loads(SEED_GAP_PATH.read_text(encoding="utf-8"))
+    files = sorted(path for path in SEED_PROJECT_PATH.rglob("*") if path.is_file())
+    digest = hashlib.sha256()
+    for path in files:
+        digest.update(path.relative_to(SEED_PROJECT_PATH).as_posix().encode())
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+
+    assert attestation["verified"] is True
+    assert gap["executeReady"] is False
+    assert gap["projectFileCount"] == len(files)
+    assert gap["projectTotalBytes"] == sum(path.stat().st_size for path in files)
+    assert gap["projectTreeSha256"] == digest.hexdigest()
+    assert gap["markerSha256"] == attestation["markerSha256"]
+    assert gap["missingPlaceholders"] == audit["missingPlaceholders"]
+    assert gap["deferredPlaceholders"] == audit["deferredPlaceholders"]
+
+
+@requires_clone_fixtures
+def test_isolated_clone_context_and_gap_are_bound_without_excluded_roots(live: ModuleType) -> None:
+    harness = live.UnityMcp64LiveHarness(
+        make_args(CLONE_PROJECT_PATH, context_json=CLONE_CONTEXT_PATH)
+    )
+    attestation = harness._verify_disposable_project()  # noqa: SLF001
+    audit = harness._context_audit(harness.cases)  # noqa: SLF001
+    gap = json.loads(CLONE_GAP_PATH.read_text(encoding="utf-8"))
+    context = json.loads(CLONE_CONTEXT_PATH.read_text(encoding="utf-8"))
+    marker = json.loads(
+        (CLONE_PROJECT_PATH / live.DISPOSABLE_MARKER_NAME).read_text(encoding="utf-8")
+    )
+
+    assert attestation["verified"] is True
+    assert attestation["copiedTree"]["fileCount"] == 8207
+    assert marker["copiedRoots"] == ["Assets", "Packages", "ProjectSettings"]
+    assert all(not (CLONE_PROJECT_PATH / name).exists() for name in marker["excludedRoots"])
+    assert gap["missingPlaceholders"] == audit["missingPlaceholders"]
+    assert gap["deferredPlaceholders"] == audit["deferredPlaceholders"]
+    assert gap["providedPlaceholderCount"] == 85
+    assert gap["missingPlaceholderCount"] == 14
+    assert gap["deferredPlaceholderCount"] == 13
+    assert gap["executeReady"] is False
+    assert context["BLENDSHAPE"] == "mouth_a"
+    assert context["BLENDSHAPE_RENDERER_PATH"].endswith("/SapphyHeadRig/Body")
+    assert context["OUTERMOST_PREFAB_INSTANCE_PATH"].startswith("__VRCForge_")
+    assert len(context["PREVIEW_PREFAB_GUID"]) == 32
+    assert "fixedPrimitiveRuntime" in gap["classification"]["needsInstalledDependencies"]
+
+
+@requires_clone_package_fixtures
+def test_run_owned_unitypackage_has_one_exact_text_asset() -> None:
+    context = json.loads(CLONE_CONTEXT_PATH.read_text(encoding="utf-8"))
+    with tarfile.open(CLONE_PACKAGE_PATH, mode="r:gz") as archive:
+        names = sorted(member.name for member in archive.getmembers())
+
+    assert names == [
+        "80a11ce0000000000000000000000080/asset",
+        "80a11ce0000000000000000000000080/asset.meta",
+        "80a11ce0000000000000000000000080/pathname",
+    ]
+    assert context["PACKAGE_PATH"] == str(CLONE_PACKAGE_PATH.resolve())
+    assert context["PACKAGE_EXPECTED_ASSET_PATH"] == "Assets/VRCForgeAcceptance/Live80Imported.txt"
+    assert context["PACKAGE_SIZE_BYTES"] == CLONE_PACKAGE_PATH.stat().st_size
+    assert context["PACKAGE_SHA256_LOWER"] == hashlib.sha256(CLONE_PACKAGE_PATH.read_bytes()).hexdigest()
+
+
+@requires_clone_fixtures
+def test_blendshape_profile_overrides_catalog_body_with_discovered_renderer(live: ModuleType) -> None:
+    harness = live.UnityMcp64LiveHarness(
+        make_args(CLONE_PROJECT_PATH, context_json=CLONE_CONTEXT_PATH)
+    )
+    case = next(item for item in harness.cases if item["tool"] == "vrc_apply_blendshapes")
+    mapping = harness.profile["caseMappings"]["vrc_apply_blendshapes"]
+    arguments = harness._apply_mapping_arguments(  # noqa: SLF001
+        harness._resolve_arguments(case),  # noqa: SLF001
+        mapping,
+    )
+
+    assert arguments["adjustments"] == [
+        {
+            "rendererPath": harness.dynamic_context["BLENDSHAPE_RENDERER_PATH"],
+            "blendshapeName": "mouth_a",
+            "targetWeight": 50.0,
+        }
+    ]
 
 
 def test_mcp_calls_are_execution_layer_with_unique_matching_ids(live: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -269,6 +471,51 @@ def test_cleanup_fingerprint_mismatch_is_terminal_failure(live: ModuleType, tmp_
     assert harness.stop_reason == "write_checkpoint_restore_verification_failed"
 
 
+def test_pending_build_test_is_polled_to_terminal_with_the_same_job_id(live: ModuleType, tmp_path: Path) -> None:
+    harness = live.UnityMcp64LiveHarness(make_args(tmp_path, execute=True))
+    calls: list[tuple[str, dict[str, Any]]] = []
+    responses = iter(
+        [
+            {
+                "ok": True,
+                "result": {"jobId": "a" * 32, "status": "running", "pending": True},
+            },
+            {
+                "ok": True,
+                "result": {
+                    "jobId": "a" * 32,
+                    "status": "completed",
+                    "localOnly": True,
+                    "uploadAttempted": False,
+                },
+            },
+        ]
+    )
+
+    def mcp_call(name: str, arguments: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+        calls.append((name, arguments))
+        return next(responses), {"requestId": f"poll-{len(calls)}"}
+
+    harness._mcp_call = mcp_call  # type: ignore[method-assign]  # noqa: SLF001
+    mapping = harness.profile["caseMappings"]["vrc_build_test_avatar"]
+    terminal, outer = harness._poll_existing_job(  # noqa: SLF001
+        {"tool": "vrc_build_test_avatar"},
+        {
+            "status": "applied",
+            "result": {"jobId": "a" * 32, "status": "pending", "pending": True},
+        },
+        mapping,
+    )
+
+    assert [name for name, _arguments in calls] == [
+        "vrcforge_get_build_test_status",
+        "vrcforge_get_build_test_status",
+    ]
+    assert all(arguments == {"projectPath": str(tmp_path), "jobId": "a" * 32} for _name, arguments in calls)
+    assert harness._best_payload(terminal, ["status"])["status"] == "completed"  # noqa: SLF001
+    assert outer["requestId"] == "poll-2"
+
+
 def test_call_audit_lookup_uses_exact_catalog_tool_and_never_outer_id(
     live: ModuleType, tmp_path: Path
 ) -> None:
@@ -416,7 +663,8 @@ def test_safe_backup_chain_creates_real_observed_restore_without_consuming_setup
         "vrcforge_restore_checkpoint",
     ]
     assert result["cleanup"]["status"] == "passed"
-    assert result["cleanup"]["kind"] == "safe_backup_chain_retained_audit"
+    assert result["cleanup"]["kind"] == "safe_backup_chain_removed_backup"
+    assert not (tmp_path / "Library" / "VRCForge" / "Backups" / "backup-1").exists()
     assert result["actualCallCount"] == 9
     assert harness.observed_results["vrc_restore_safe_backup"]["confirmed"] is True
     setup_evidence = [item for item in result["evidence"] if item["tool"] == "vrc_setup_outfit"]
@@ -464,7 +712,116 @@ def test_primitive_report_file_cannot_count_as_catalog_success(live: ModuleType,
     assert "fixed primitive live runtime" in record["error"]
 
 
-def test_fake_service_can_only_claim_64_with_unique_tool_and_request_evidence(
+def test_profile_maps_the_exact_current_case_catalog_and_upload_is_reject_only(live: ModuleType, tmp_path: Path) -> None:
+    harness = live.UnityMcp64LiveHarness(make_args(tmp_path))
+    assert len(harness.cases) == EXPECTED_TOOL_COUNT
+    assert set(harness.profile["caseMappings"]) == {case["tool"] for case in harness.cases}
+    upload = harness.profile["caseMappings"]["vrc_build_and_upload_avatar"]
+    assert upload["approvalTarget"] == "vrcforge_build_and_upload_avatar"
+    assert upload["cleanup"] == "remote_reject"
+    assert harness.profile["remoteUploadPolicy"] == "proposal_then_reject_only"
+    build_test = harness.profile["caseMappings"]["vrc_build_test_avatar"]
+    assert build_test["cleanup"] == "retain_disposable"
+    prepared_targets = {
+        "vrc_build_test_avatar": "vrcforge_build_test_avatar",
+        "vrc_convert_unity_constraint": "vrcforge_convert_unity_constraint",
+        "vrc_export_vrm": "vrcforge_export_vrm",
+        "vrc_save_current_scene": "vrcforge_save_current_scene",
+        "vrc_save_new_scene": "vrcforge_save_new_scene",
+        "vrc_save_scene_object_as_prefab": "vrcforge_save_scene_object_as_prefab",
+        "vrc_set_constraint_sources": "vrcforge_set_constraint_sources",
+        "vrc_set_material_shader": "vrcforge_set_material_shader",
+        "vrc_set_material_texture": "vrcforge_set_material_texture",
+        "vrc_set_texture_import_settings": "vrcforge_set_texture_import_settings",
+    }
+    assert {
+        tool: harness.profile["caseMappings"][tool]["approvalTarget"]
+        for tool in prepared_targets
+    } == prepared_targets
+    package_import = harness.profile["caseMappings"]["vrc_import_unitypackage"]
+    assert package_import["approvalTarget"] == "vrcforge_unity_mcp_write"
+    assert package_import["pollExternalTool"] == "vrcforge_get_unitypackage_import_status"
+    assert "renameArguments" not in package_import
+    assert "dropArguments" not in package_import
+
+
+def test_restore_safe_backup_special_route_runs_the_bound_chain_once(
+    live: ModuleType, tmp_path: Path
+) -> None:
+    harness = live.UnityMcp64LiveHarness(make_args(tmp_path, execute=True, allow_approved_writes=True))
+    harness.dynamic_context.update(
+        {
+            "SAFE_BACKUP_SCENE_ASSET_PATH": "Assets/Acceptance/Scene.unity",
+            "SAFE_BACKUP_AVATAR_PATH": "MatrixRoot/MatrixAvatar",
+            "SAFE_BACKUP_OUTFIT_PATH": "MatrixRoot/MatrixAvatar/Outfit",
+        }
+    )
+    calls: list[dict[str, str]] = []
+
+    def run_chain(**arguments: str) -> dict[str, Any]:
+        calls.append(arguments)
+        harness.observed_results["vrc_restore_safe_backup"] = {
+            "confirmed": True,
+            "project_identity_matches": True,
+            "restored": ["Assets/Acceptance/Scene.unity"],
+            "summary": {"restoredCount": 1},
+        }
+        return {"ok": True}
+
+    harness.run_safe_backup_chain = run_chain  # type: ignore[method-assign]
+    case = next(case for case in harness.cases if case["tool"] == "vrc_restore_safe_backup")
+    record = harness._new_record(case)  # noqa: SLF001
+
+    harness._run_special_or_block(record)  # noqa: SLF001
+
+    assert calls == [
+        {
+            "scene_asset_path": "Assets/Acceptance/Scene.unity",
+            "avatar_path": "MatrixRoot/MatrixAvatar",
+            "outfit_path": "MatrixRoot/MatrixAvatar/Outfit",
+        }
+    ]
+    assert record["status"] == "passed"
+
+
+def test_remote_upload_case_is_rejected_without_approval_or_execution(live: ModuleType, tmp_path: Path) -> None:
+    harness = live.UnityMcp64LiveHarness(make_args(tmp_path, execute=True, allow_approved_writes=True))
+    harness.credentials = live.Credentials(gateway_token="gateway", app_token="app")
+    approval_calls: list[str] = []
+    rejection_calls: list[str] = []
+    harness._request_apply = lambda _params: (  # type: ignore[method-assign]  # noqa: SLF001
+        {
+            "ok": True,
+            "approval": {
+                "id": "upload-approval",
+                "status": "pending",
+                "requiresExplicitApproval": True,
+            },
+        },
+        {"requestId": "upload-request"},
+    )
+    harness._approve_once = lambda approval_id: approval_calls.append(approval_id)  # type: ignore[method-assign]  # noqa: SLF001
+    harness._reject_once = lambda approval_id: (  # type: ignore[method-assign]  # noqa: SLF001
+        rejection_calls.append(approval_id)
+        or {"ok": True, "approval": {"id": approval_id, "status": "denied"}}
+    )
+    record = harness._new_record(  # noqa: SLF001
+        next(case for case in harness.cases if case["tool"] == "vrc_build_and_upload_avatar")
+    )
+
+    harness._run_remote_upload_rejection(record, {"projectPath": str(tmp_path)})  # noqa: SLF001
+
+    assert approval_calls == []
+    assert rejection_calls == ["upload-approval"]
+    assert record["status"] == "passed"
+    assert record["verificationKind"] == "remote_upload_rejected"
+    assert record["remoteUploadExecuted"] is False
+    assert record["mutationStarted"] is False
+    assert record["committed"] is False
+    assert record["commitState"] == "not_started"
+
+
+def test_fake_service_can_only_claim_80_with_unique_tool_and_request_evidence(
     live: ModuleType,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -480,16 +837,21 @@ def test_fake_service_can_only_claim_64_with_unique_tool_and_request_evidence(
             "successFields": ["ok"],
             "cleanup": ["none"],
         }
-        for index in range(64)
+        for index in range(80)
     ]
     monkeypatch.setattr(live.catalog, "load_catalog", lambda: copy_cases(cases))
-    harness = live.UnityMcp64LiveHarness(make_args(tmp_path, execute=True))
-    harness.profile["caseMappings"] = {
+    profile = {
+        "schema": "vrcforge.unity_mcp_80_live_profile.v1",
+        "caseMappings": {
         case["tool"]: {"externalTool": f"external_{case['tool']}"} for case in cases
+        },
     }
+    profile_path = tmp_path / "fake-profile.json"
+    profile_path.write_text(json.dumps(profile), encoding="utf-8")
+    harness = live.UnityMcp64LiveHarness(make_args(tmp_path, execute=True, profile_json=profile_path))
     harness._load_credentials = lambda: live.Credentials("gateway", "app")  # type: ignore[method-assign]  # noqa: SLF001
-    harness._runtime_preflight = lambda: {"ok": True, "executionToolCount": 64}  # type: ignore[method-assign]  # noqa: SLF001
-    sequence = iter(range(64))
+    harness._runtime_preflight = lambda: {"ok": True, "executionToolCount": 80}  # type: ignore[method-assign]  # noqa: SLF001
+    sequence = iter(range(80))
 
     def fake_call(_name: str, _arguments: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
         index = next(sequence)
@@ -507,9 +869,11 @@ def test_fake_service_can_only_claim_64_with_unique_tool_and_request_evidence(
 
     harness._mcp_call = fake_call  # type: ignore[method-assign]  # noqa: SLF001
     report = harness.run()
-    assert report["all64Passed"] is True
-    assert report["evidenceToolCount"] == 64
-    assert report["uniqueEvidenceCount"] == 64
+    assert report["all80CasesPassed"] is True
+    assert report["all80ToolsReturnedSuccess"] is True
+    assert report["all64Passed"] is False
+    assert report["evidenceToolCount"] == 80
+    assert report["uniqueEvidenceCount"] == 80
 
 
 def copy_cases(cases: list[dict[str, Any]]) -> list[dict[str, Any]]:
