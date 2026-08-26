@@ -663,12 +663,19 @@ def test_duplicate_preview_preserves_managed_peer_error_state(tmp_path: Path) ->
         write_handler.checkpoint_prepare_handler
         is dashboard_server.prepare_authoritative_unity_checkpoint_sync
     )
+    managed_artifact_targets = {
+        "vrcforge_capture_screenshot",
+        "vrcforge_capture_multi_screenshot",
+    }
     for target_name in dashboard_server.VRCFORGE_UNITY_MCP_BACKED_WRITE_TARGETS:
         target = dashboard_server.AGENT_GATEWAY._write_handlers[target_name]
-        assert (
-            target.checkpoint_prepare_handler
-            is dashboard_server.prepare_authoritative_unity_checkpoint_sync
-        )
+        if target_name in managed_artifact_targets:
+            assert target.checkpoint_prepare_handler is None
+        else:
+            assert (
+                target.checkpoint_prepare_handler
+                is dashboard_server.prepare_authoritative_unity_checkpoint_sync
+            )
     for nested_tool in (PARAMETER_BIT_PACKING_TOOL_NAME, ATOMIC_REFERENCE_RENAME_TOOL_NAME):
         assert write_handler.manual_approval_resolver({"toolName": nested_tool}, {})
     assert write_handler.manual_approval_resolver({"toolName": DUPLICATE_TOOL_NAME}, {}) == ""

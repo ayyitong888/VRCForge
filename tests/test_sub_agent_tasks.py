@@ -793,9 +793,9 @@ def test_shared_runtime_lane_reserves_interactive_headroom(tmp_path):
         return {"ok": True, "summaryText": "done"}
 
     lanes = RuntimeLaneBudget()
-    assert lanes.acquire("background", "goal-a") is True
-    assert lanes.acquire("background", "goal-b") is True
-    assert lanes.acquire("background", "goal-c") is False
+    background_tokens = [f"goal-{index}" for index in range(12)]
+    assert all(lanes.acquire("background", token) for token in background_tokens)
+    assert lanes.acquire("background", "goal-over-limit") is False
     registry = SubAgentTaskRegistry(
         tmp_path,
         roles=[SubAgentRole("project_index_review", "Project", "Read local project index.")],
@@ -805,14 +805,14 @@ def test_shared_runtime_lane_reserves_interactive_headroom(tmp_path):
     )
     task_ids: list[str] = []
     try:
-        for index in range(3):
+        for index in range(4):
             created = registry.create_task(
                 role="project_index_review",
                 task=f"scan {index}",
                 display_name=f"Worker {index}",
             )
             task_ids.append(created["task"]["id"])
-        assert lanes.snapshot()["total"] == 5
+        assert lanes.snapshot()["total"] == 16
         with pytest.raises(RuntimeError, match="Shared runtime concurrency limit"):
             registry.create_task(
                 role="project_index_review",
@@ -820,19 +820,20 @@ def test_shared_runtime_lane_reserves_interactive_headroom(tmp_path):
                 display_name="Worker blocked",
             )
 
-        assert lanes.release("goal-a") is True
+        assert lanes.release(background_tokens.pop()) is True
         created = registry.create_task(
             role="project_index_review",
             task="interactive slot after one background release",
             display_name="Worker 4",
         )
         task_ids.append(created["task"]["id"])
-        assert lanes.snapshot()["total"] == 5
+        assert lanes.snapshot()["total"] == 16
     finally:
         release.set()
         for task_id in task_ids:
             _wait_for_status(registry, task_id, {"completed", "failed", "cancelled"})
-        lanes.release("goal-b")
+        for token in background_tokens:
+            lanes.release(token)
 
     assert lanes.snapshot()["total"] == 0
 

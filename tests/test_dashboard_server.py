@@ -11708,7 +11708,7 @@ class DashboardServerTests(unittest.TestCase):
             restored = gateway.checkpoint_recovery.restore_checkpoint({"checkpointId": checkpoint["id"], "confirmRestore": True})
 
             self.assertFalse(preview["ok"])
-            self.assertIn("outside configured storage", preview["error"])
+            self.assertEqual(preview["reasonCode"], "checkpoint_archive_metadata_invalid")
             self.assertFalse(restored["ok"])
             self.assertEqual((project / "Assets" / "existing.txt").read_text(encoding="utf-8"), "before")
 
@@ -11741,7 +11741,7 @@ class DashboardServerTests(unittest.TestCase):
             restored = gateway.checkpoint_recovery.restore_checkpoint({"checkpointId": checkpoint["id"], "confirmRestore": True})
 
             self.assertFalse(preview["ok"])
-            self.assertIn("outside configured storage", preview["error"])
+            self.assertEqual(preview["reasonCode"], "checkpoint_archive_metadata_invalid")
             self.assertFalse(restored["ok"])
             self.assertEqual((skill_dir / "SKILL.md").read_text(encoding="utf-8"), "before")
 
@@ -12449,17 +12449,40 @@ class DashboardServerTests(unittest.TestCase):
             "vrcforge_rollback_project_catalog_registration",
             "vrcforge_restore_unity_core",
         }
+        managed_artifact_tools = {
+            "vrcforge_capture_screenshot",
+            "vrcforge_capture_multi_screenshot",
+        }
+        irreversible_ephemeral_tools = {
+            "vrcforge_confirm_unity_reload_dialog",
+        }
         for name, target in targets.items():
             policy = target.get("rollbackPolicy")
             self.assertIsInstance(policy, dict, name)
             self.assertEqual(policy["schema"], "vrcforge.write_rollback_policy.v1")
             self.assertTrue(policy["approvalRequired"], name)
-            if name in explicit_rollback_tools:
+            if (
+                name in explicit_rollback_tools
+                or name in managed_artifact_tools
+                or name in irreversible_ephemeral_tools
+            ):
                 self.assertFalse(policy["required"], name)
-                self.assertEqual(policy["restoreTool"], "")
+                if name in explicit_rollback_tools:
+                    self.assertEqual(policy["restoreTool"], "")
             else:
                 self.assertTrue(policy["required"], name)
                 self.assertTrue(policy["restoreTool"], name)
+
+        for name in managed_artifact_tools:
+            policy = targets[name]["rollbackPolicy"]
+            self.assertEqual(policy["kind"], "local_artifact_overwrite")
+            self.assertFalse(policy["preWriteCheckpointRequired"])
+            self.assertEqual(policy["artifactRoots"], ["dashboard/latest"])
+
+        reload_policy = targets["vrcforge_confirm_unity_reload_dialog"]["rollbackPolicy"]
+        self.assertEqual(reload_policy["kind"], "irreversible_ephemeral_editor_reload")
+        self.assertFalse(reload_policy["preWriteCheckpointRequired"])
+        self.assertEqual(reload_policy["restoreTool"], "")
 
         unity_policy = targets["vrcforge_add_modular_avatar_component"]["rollbackPolicy"]
         self.assertEqual(unity_policy["kind"], "unity_project_checkpoint")
