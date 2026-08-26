@@ -37,7 +37,6 @@ from unity_mcp_tool_contract import READ_ONLY_TOOL_NAMES
 from unity_editor_window_probe import probe_unity_reload_dialog
 
 
-DEFAULT_SETTINGS_PATH = Path(".gemini/settings.json")
 DEFAULT_MIN_CONFIDENCE = 0.65
 DEFAULT_MVP_EXPORT_PATH = Path("examples/mvp_blendshapes_export.json")
 DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
@@ -231,6 +230,8 @@ def _unity_mcp_pre_route_error(
 
 
 def main() -> int:
+    import vrcforge_runtime_paths as runtime_paths
+
     parser = argparse.ArgumentParser(
         description="Use an LLM provider and Unity MCP to tune VRChat avatar blendshapes from natural language."
     )
@@ -239,7 +240,7 @@ def main() -> int:
         nargs="?",
         help='Natural language expression tweak, e.g. "Open the eyes wider and raise the mouth corners".',
     )
-    parser.add_argument("--settings", type=Path, default=DEFAULT_SETTINGS_PATH, help="Path to settings.json")
+    parser.add_argument("--settings", type=Path, default=runtime_paths.DEFAULT_SETTINGS_PATH, help="Path to settings.json")
     parser.add_argument(
         "--model",
         help="Optional provider model override, e.g. gemini-2.5-flash, deepseek-chat, or claude-opus-4-6.",

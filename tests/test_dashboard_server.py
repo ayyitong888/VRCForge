@@ -22,6 +22,7 @@ from pydantic import ValidationError
 
 import dashboard_server
 import unity_status_service
+import vrcforge_runtime_paths as runtime_paths
 from agent_task_loop import canonical_action_id
 from path_to_skill import build_path_to_skill_source
 from agent_command_safety import normalize_filesystem_path
@@ -4931,7 +4932,7 @@ class DashboardServerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "settings.json"
             service = dashboard_server.app_doctor_service()
-            with patch("dashboard_server.RUNTIME_SETTINGS_PATH", path):
+            with patch.object(runtime_paths, "RUNTIME_SETTINGS_PATH", path):
                 path.write_text('{"llm":{"provider":"ollama"}}', encoding="utf-8")
                 healthy = service.detect("app.runtime_settings")
 
@@ -6108,8 +6109,8 @@ class DashboardServerTests(unittest.TestCase):
             dashboard_server.APP_SESSION_TOKEN = original_token
 
     def test_source_mode_app_session_handshake_is_local_and_lightweight(self) -> None:
-        original_portable = dashboard_server.PORTABLE_MODE
-        dashboard_server.PORTABLE_MODE = False
+        original_portable = runtime_paths.PORTABLE_MODE
+        runtime_paths.PORTABLE_MODE = False
         try:
             with TestClient(dashboard_server.app) as client:
                 missing_origin = client.get("/api/app/session")
@@ -6132,7 +6133,7 @@ class DashboardServerTests(unittest.TestCase):
             )
             self.assertNotIn("appSessionToken", challenge.json())
         finally:
-            dashboard_server.PORTABLE_MODE = original_portable
+            runtime_paths.PORTABLE_MODE = original_portable
 
     def test_app_cors_preflight_is_not_blocked_by_session_auth(self) -> None:
         original_required = dashboard_server.APP_AUTH_REQUIRED
@@ -6242,13 +6243,13 @@ class DashboardServerTests(unittest.TestCase):
                 patch.object(dashboard_server.sys, "frozen", True, create=True),
                 patch.object(dashboard_server.sys, "executable", str(backend_exe)),
             ):
-                self.assertEqual(dashboard_server.default_runtime_root(), payload_root.resolve())
+                self.assertEqual(runtime_paths.default_runtime_root(), payload_root.resolve())
 
     def test_packaged_backend_defaults_to_user_data_root(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             with patch.dict(os.environ, {"LOCALAPPDATA": tmp}):
                 expected = Path(tmp) / "VRCForge" / "agentic-app"
-                self.assertEqual(dashboard_server.default_user_data_root(), expected)
+                self.assertEqual(runtime_paths.default_user_data_root(), expected)
 
     def test_agentic_permission_full_auto_does_not_wait_for_unity_acknowledgement(self) -> None:
         with TestClient(dashboard_server.app) as client:
@@ -8988,8 +8989,8 @@ class DashboardServerTests(unittest.TestCase):
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["mcp"]["url"], "http://127.0.0.1:8757/mcp")
         stdio = payload["clientConfigs"]["codexStdio"]["config"]["mcp_servers"]["vrcforge_local"]
-        self.assertEqual(Path(stdio["cwd"]), dashboard_server.ROOT_DIR)
-        self.assertEqual(Path(stdio["args"][0]), dashboard_server.ROOT_DIR / "tools" / "vrcforge_agent_mcp_stdio.py")
+        self.assertEqual(Path(stdio["cwd"]), runtime_paths.ROOT_DIR)
+        self.assertEqual(Path(stdio["args"][0]), runtime_paths.ROOT_DIR / "tools" / "vrcforge_agent_mcp_stdio.py")
         self.assertIn("--no-start", stdio["args"])
         self.assertIn("CUSTOM_VRCFORGE_TOKEN", rendered)
         self.assertNotIn("real-token", rendered)
@@ -9002,7 +9003,7 @@ class DashboardServerTests(unittest.TestCase):
             backend_exe = backend_dir / "vrcforge_backend.exe"
             backend_exe.write_text("", encoding="utf-8")
 
-            with patch("dashboard_server.ROOT_DIR", root):
+            with patch.object(runtime_paths, "ROOT_DIR", root):
                 payload = dashboard_server.connector_bundle_sync({})
 
         stdio = payload["clientConfigs"]["codexStdio"]["config"]["mcp_servers"]["vrcforge"]
@@ -14670,7 +14671,7 @@ class DashboardServerTests(unittest.TestCase):
             editor = editor_dir / "Unity.exe"
             editor.write_text("", encoding="utf-8")
 
-            internal_dir = str(dashboard_server.ROOT_DIR / "backend" / "_internal")
+            internal_dir = str(runtime_paths.ROOT_DIR / "backend" / "_internal")
             with (
                 patch.dict(dashboard_server.os.environ, {"PATH": internal_dir + os.pathsep + r"C:\Windows"}),
                 patch("dashboard_server.pyinstaller_internal_dir", return_value=Path(internal_dir)),
@@ -14721,7 +14722,7 @@ class DashboardServerTests(unittest.TestCase):
                     self.assertEqual(command[1], "-projectPath")
                     self.assertEqual(Path(command[2]).resolve(), project.resolve())
                     self.assertEqual(mock_popen.call_args.kwargs["cwd"], str(editor_dir))
-                    self.assertNotIn(str(dashboard_server.ROOT_DIR / "backend" / "_internal"), mock_popen.call_args.kwargs["env"]["PATH"])
+                    self.assertNotIn(str(runtime_paths.ROOT_DIR / "backend" / "_internal"), mock_popen.call_args.kwargs["env"]["PATH"])
             finally:
                 dashboard_server.DASHBOARD_STATE.unity_editor_path = previous_editor
                 dashboard_server.DASHBOARD_STATE.selected_project_path = previous_selected
@@ -15732,11 +15733,11 @@ namespace VRCForge.Editor
         if os.environ.get("VRCFORGE_CONFIG_PATH") or os.environ.get("VRCFORGE_CONFIG_DIR"):
             self.skipTest("config location is explicitly overridden")
 
-        source_root_config = (dashboard_server.ROOT_DIR / "config.json").resolve()
+        source_root_config = (runtime_paths.ROOT_DIR / "config.json").resolve()
 
         self.assertNotEqual(dashboard_server.CONFIG_PATH.resolve(), source_root_config)
-        self.assertNotEqual(dashboard_server.CONFIG_PATH.resolve().parent, dashboard_server.ROOT_DIR.resolve())
-        self.assertEqual(dashboard_server.CONFIG_PATH.resolve().parent, dashboard_server.CONFIG_DIR.resolve())
+        self.assertNotEqual(dashboard_server.CONFIG_PATH.resolve().parent, runtime_paths.ROOT_DIR.resolve())
+        self.assertEqual(dashboard_server.CONFIG_PATH.resolve().parent, runtime_paths.CONFIG_DIR.resolve())
 
     def test_api_config_endpoint_persists_and_returns_effective_provider(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

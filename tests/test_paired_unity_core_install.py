@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 import dashboard_server
+import vrcforge_runtime_paths as runtime_paths
 from agent_gateway import EXTERNAL_MCP_WRITE_TOOL_BLOCKS
 
 
@@ -72,7 +73,7 @@ def test_verified_unity_core_install_retains_previous_tree(monkeypatch: pytest.M
     payload = tmp_path / "payload"
     _write_verified_payload(payload)
     project = _write_project(tmp_path / "project")
-    monkeypatch.setattr(dashboard_server, "ROOT_DIR", payload)
+    monkeypatch.setattr(runtime_paths, "ROOT_DIR", payload)
     monkeypatch.setattr(
         dashboard_server,
         "resolve_target_project",
@@ -111,7 +112,7 @@ def test_verified_unity_core_install_preserves_generated_and_unmanaged_project_a
     user_extension = project / "Assets" / "VRCForge" / "Editor" / "UserExtension.txt"
     user_extension.parent.mkdir(exist_ok=True)
     user_extension.write_text("keep me", encoding="utf-8")
-    monkeypatch.setattr(dashboard_server, "ROOT_DIR", payload)
+    monkeypatch.setattr(runtime_paths, "ROOT_DIR", payload)
     monkeypatch.setattr(
         dashboard_server,
         "resolve_target_project",
@@ -138,7 +139,7 @@ def test_invalid_payload_integrity_is_rejected_before_project_write(
     payload = tmp_path / "payload"
     _write_verified_payload(payload, integrity_valid=False)
     project = _write_project(tmp_path / "project")
-    monkeypatch.setattr(dashboard_server, "ROOT_DIR", payload)
+    monkeypatch.setattr(runtime_paths, "ROOT_DIR", payload)
     monkeypatch.setattr(
         dashboard_server,
         "resolve_target_project",
@@ -161,7 +162,7 @@ def test_packaged_generic_project_install_requires_verified_core_source(
     payload = tmp_path / "payload"
     _write_verified_payload(payload, integrity_valid=False)
     project = _write_project(tmp_path / "project")
-    monkeypatch.setattr(dashboard_server, "ROOT_DIR", payload)
+    monkeypatch.setattr(runtime_paths, "ROOT_DIR", payload)
 
     with pytest.raises(RuntimeError, match="integrity does not match"):
         dashboard_server.install_vrcforge_into_unity_project(
@@ -190,7 +191,7 @@ def test_failed_core_install_restores_previous_tree_and_retains_backup(
     payload = tmp_path / "payload"
     source = _write_verified_payload(payload)
     project = _write_project(tmp_path / "project")
-    monkeypatch.setattr(dashboard_server, "ROOT_DIR", payload)
+    monkeypatch.setattr(runtime_paths, "ROOT_DIR", payload)
     monkeypatch.setattr(
         dashboard_server,
         "resolve_target_project",
@@ -227,7 +228,7 @@ def test_manual_core_restore_requires_exact_receipt_and_preserves_safety_copy(
     payload = tmp_path / "payload"
     _write_verified_payload(payload)
     project = _write_project(tmp_path / "project")
-    monkeypatch.setattr(dashboard_server, "ROOT_DIR", payload)
+    monkeypatch.setattr(runtime_paths, "ROOT_DIR", payload)
     monkeypatch.setattr(
         dashboard_server,
         "resolve_target_project",
@@ -259,7 +260,7 @@ def test_manual_core_restore_refuses_changed_installed_tree_without_writing(
     payload = tmp_path / "payload"
     _write_verified_payload(payload)
     project = _write_project(tmp_path / "project")
-    monkeypatch.setattr(dashboard_server, "ROOT_DIR", payload)
+    monkeypatch.setattr(runtime_paths, "ROOT_DIR", payload)
     monkeypatch.setattr(
         dashboard_server,
         "resolve_target_project",
@@ -289,7 +290,7 @@ def test_failed_manual_core_restore_compensates_from_its_own_safety_copy(
     payload = tmp_path / "payload"
     _write_verified_payload(payload)
     project = _write_project(tmp_path / "project")
-    monkeypatch.setattr(dashboard_server, "ROOT_DIR", payload)
+    monkeypatch.setattr(runtime_paths, "ROOT_DIR", payload)
     monkeypatch.setattr(
         dashboard_server,
         "resolve_target_project",

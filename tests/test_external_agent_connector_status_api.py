@@ -8,6 +8,7 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 import dashboard_server
+import vrcforge_runtime_paths as runtime_paths
 from external_agent_connector_installer import install_connector
 
 
@@ -29,7 +30,7 @@ def test_generic_connector_status_query_is_scoped_to_config_path(tmp_path: Path)
         encoding="utf-8",
     )
 
-    with patch("dashboard_server.ROOT_DIR", root), TestClient(dashboard_server.app) as client:
+    with patch.object(runtime_paths, "ROOT_DIR", root), TestClient(dashboard_server.app) as client:
         managed_response = client.get(
             "/api/app/external-agent/connectors",
             params={"configPath": str(managed)},

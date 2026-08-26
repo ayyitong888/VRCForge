@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import vrcforge_runtime_paths as runtime_paths
 from skill_packages import SkillPackageService
 from skill_signing_key_migration import (
     PRIVATE_KEY_FILENAME,
@@ -207,7 +208,7 @@ def test_dashboard_routes_use_expected_paths_aliases_and_redact_password(
 
     source_root = tmp_path / "source"
     source_service, _, pair = make_owner(source_root, create_key=True, publisher="VRCForge Studio")
-    monkeypatch.setattr(dashboard_server, "USER_DATA_DIR", source_root)
+    monkeypatch.setattr(runtime_paths, "USER_DATA_DIR", source_root)
     monkeypatch.setattr(dashboard_server, "skill_package_service", lambda: source_service)
     monkeypatch.setattr(
         dashboard_server,
@@ -229,7 +230,7 @@ def test_dashboard_routes_use_expected_paths_aliases_and_redact_password(
 
     target_root = tmp_path / "target"
     target_service, _, _ = make_owner(target_root)
-    monkeypatch.setattr(dashboard_server, "USER_DATA_DIR", target_root)
+    monkeypatch.setattr(runtime_paths, "USER_DATA_DIR", target_root)
     monkeypatch.setattr(dashboard_server, "skill_package_service", lambda: target_service)
     import_request = dashboard_server.OfficialSkillSigningKeyImportRequest.model_validate(
         {"backupPath": str(backup), "passphrase": PASSPHRASE, "replace": False}

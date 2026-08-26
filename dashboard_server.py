@@ -533,7 +533,6 @@ from vrchat_blendshape_agent import (
     BlendshapePlan,
     DEFAULT_LLM_PROVIDER,
     DEFAULT_MVP_EXPORT_PATH,
-    DEFAULT_SETTINGS_PATH,
     McpResult,
     SelectedAvatar,
     Settings,
@@ -582,50 +581,12 @@ from unity_mcp_core_client import (
     probe_unity_mcp_core_diagnostics,
 )
 from unity_status_service import UnityStatusPorts, UnityStatusService
+import vrcforge_runtime_paths as runtime_paths
 
 
-def resolve_runtime_path(env_name: str, default: Path) -> Path:
-    value = os.environ.get(env_name, "").strip()
-    if not value:
-        return default.resolve()
-    return Path(value).expanduser().resolve()
-
-
-def default_runtime_root() -> Path:
-    if getattr(sys, "frozen", False):
-        executable = Path(sys.executable).resolve()
-        if executable.parent.name.lower() == "backend":
-            return executable.parent.parent
-        return executable.parent
-    return Path(__file__).resolve().parent
-
-
-def default_user_data_root() -> Path:
-    local_app_data = os.environ.get("LOCALAPPDATA", "").strip()
-    if local_app_data:
-        return Path(local_app_data).expanduser() / "VRCForge" / "agentic-app"
-    return default_runtime_root()
-
-
-ROOT_DIR = resolve_runtime_path("VRCFORGE_APP_DIR", default_runtime_root())
-PORTABLE_MODE = bool(getattr(sys, "frozen", False)) or any(
-    os.environ.get(name, "").strip()
-    for name in (
-        "VRCFORGE_APP_DIR",
-        "VRCFORGE_USER_DATA_DIR",
-        "VRCFORGE_CONFIG_DIR",
-        "VRCFORGE_CONFIG_PATH",
-        "VRCFORGE_LOG_DIR",
-        "VRCFORGE_ARTIFACTS_DIR",
-        "VRCFORGE_DASHBOARD_DIR",
-        "VRCFORGE_SETTINGS_PATH",
-    )
-)
-USER_DATA_DIR = resolve_runtime_path("VRCFORGE_USER_DATA_DIR", default_user_data_root())
-DASHBOARD_DIR = resolve_runtime_path("VRCFORGE_DASHBOARD_DIR", ROOT_DIR / "dashboard")
-CONFIG_DIR = resolve_runtime_path("VRCFORGE_CONFIG_DIR", USER_DATA_DIR / "config")
-LOG_DIR = resolve_runtime_path("VRCFORGE_LOG_DIR", USER_DATA_DIR / "logs") if PORTABLE_MODE else ROOT_DIR / "artifacts" / "dashboard"
-ARTIFACTS_DIR = resolve_runtime_path("VRCFORGE_ARTIFACTS_DIR", USER_DATA_DIR / "artifacts") if PORTABLE_MODE else ROOT_DIR / "artifacts"
+DASHBOARD_DIR = runtime_paths.resolve_runtime_path("VRCFORGE_DASHBOARD_DIR", runtime_paths.ROOT_DIR / "dashboard")
+LOG_DIR = runtime_paths.resolve_runtime_path("VRCFORGE_LOG_DIR", runtime_paths.USER_DATA_DIR / "logs") if runtime_paths.PORTABLE_MODE else runtime_paths.ROOT_DIR / "artifacts" / "dashboard"
+ARTIFACTS_DIR = runtime_paths.resolve_runtime_path("VRCFORGE_ARTIFACTS_DIR", runtime_paths.USER_DATA_DIR / "artifacts") if runtime_paths.PORTABLE_MODE else runtime_paths.ROOT_DIR / "artifacts"
 DASHBOARD_ARTIFACTS_DIR = ARTIFACTS_DIR / "dashboard"
 PARAMETER_SNAPSHOT_DIR = DASHBOARD_ARTIFACTS_DIR / "parameter_snapshots"
 TUNING_HISTORY_PATH = DASHBOARD_ARTIFACTS_DIR / "tuning_history.json"
@@ -634,28 +595,24 @@ TUNING_LOCKS_PATH = DASHBOARD_ARTIFACTS_DIR / "tuning_locks.json"
 SHADER_TUNING_HISTORY_PATH = DASHBOARD_ARTIFACTS_DIR / "shader_tuning_history.json"
 SHADER_TUNING_PRESETS_PATH = DASHBOARD_ARTIFACTS_DIR / "shader_tuning_presets.json"
 SHADER_TUNING_LOCKS_PATH = DASHBOARD_ARTIFACTS_DIR / "shader_tuning_locks.json"
-TOOLS_DIR = ROOT_DIR / "tools"
-CONFIG_PATH = resolve_runtime_path("VRCFORGE_CONFIG_PATH", CONFIG_DIR / "config.json")
+TOOLS_DIR = runtime_paths.ROOT_DIR / "tools"
+CONFIG_PATH = runtime_paths.resolve_runtime_path("VRCFORGE_CONFIG_PATH", runtime_paths.CONFIG_DIR / "config.json")
 CONFIG_DOCUMENT_LOCK = RLock()
-RUNTIME_SETTINGS_PATH = resolve_runtime_path(
-    "VRCFORGE_SETTINGS_PATH",
-    CONFIG_DIR / "settings.json" if PORTABLE_MODE else ROOT_DIR / DEFAULT_SETTINGS_PATH,
-)
 PROJECT_SELECTION_SCHEMA = "vrcforge.selected_project.v1"
 LOCAL_LOG_PATH = LOG_DIR / "dashboard.log"
 LOG_RETENTION = timedelta(days=5)
-AGENT_GATEWAY_CONFIG_PATH = CONFIG_DIR / "agent_gateway.json"
+AGENT_GATEWAY_CONFIG_PATH = runtime_paths.CONFIG_DIR / "agent_gateway.json"
 AGENT_GATEWAY_AUDIT_DIR = DASHBOARD_ARTIFACTS_DIR / "agent_gateway"
-DIAGNOSTICS_CONFIG_PATH = CONFIG_DIR / "diagnostics.json"
+DIAGNOSTICS_CONFIG_PATH = runtime_paths.CONFIG_DIR / "diagnostics.json"
 INTERACTION_LOG_PATH = LOG_DIR / "interactions.jsonl"
 SUPPORT_BUNDLE_DIR = DASHBOARD_ARTIFACTS_DIR / "support-bundles"
-PROJECT_MEMORY_INDEX_DIR = USER_DATA_DIR / "project-indexes"
+PROJECT_MEMORY_INDEX_DIR = runtime_paths.USER_DATA_DIR / "project-indexes"
 SUB_AGENT_TASK_DIR = DASHBOARD_ARTIFACTS_DIR / "sub-agents"
 
 
 def read_vrcforge_version() -> str:
     try:
-        value = (ROOT_DIR / "VERSION").read_text(encoding="utf-8").strip()
+        value = (runtime_paths.ROOT_DIR / "VERSION").read_text(encoding="utf-8").strip()
     except OSError:
         return os.environ.get("VRCFORGE_VERSION", "").strip() or "0.0.0-dev"
     return value or os.environ.get("VRCFORGE_VERSION", "").strip() or "0.0.0-dev"
@@ -665,7 +622,7 @@ def resolve_app_session_token() -> str:
     token = os.environ.get("VRCFORGE_APP_SESSION_TOKEN", "").strip()
     if token:
         return token
-    token_path = CONFIG_DIR / "app-session-token"
+    token_path = runtime_paths.CONFIG_DIR / "app-session-token"
     try:
         if token_path.exists():
             existing = token_path.read_text(encoding="utf-8").strip()
@@ -923,7 +880,7 @@ MANAGED_VISUAL_CAPTURE_AUTHORITY = ManagedVisualCaptureAuthority(
     DASHBOARD_ARTIFACTS_DIR / "latest",
     trusted_anchor=ARTIFACTS_DIR,
 )
-CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+runtime_paths.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 MATERIAL_SEMANTIC_PROPERTIES = {
@@ -1015,7 +972,7 @@ AVATAR_ENCRYPTION_PROFILES: dict[str, dict[str, Any]] = {
 
 
 def runtime_settings_path() -> str:
-    return str(RUNTIME_SETTINGS_PATH)
+    return str(runtime_paths.RUNTIME_SETTINGS_PATH)
 
 
 class DashboardRequest(BaseModel):
@@ -2308,7 +2265,7 @@ APP_UPDATE_SERVICE_LOCK = Lock()
 APP_UPDATE_SERVICE: AppUpdateService | None = None
 UVICORN_SERVER_LOCK = Lock()
 CURRENT_UVICORN_SERVER: uvicorn.Server | None = None
-DIAGNOSTIC_PRIVACY = DiagnosticPrivacy(CONFIG_DIR)
+DIAGNOSTIC_PRIVACY = DiagnosticPrivacy(runtime_paths.CONFIG_DIR)
 DIAGNOSTIC_LOGGER = DiagnosticLogManager(LOG_DIR, DIAGNOSTICS_CONFIG_PATH, DIAGNOSTIC_PRIVACY)
 DEVELOPER_OPTIONS_GUARD = DeveloperOptionsGuard()
 RECENT_LOGS = DIAGNOSTIC_LOGGER.recent_entries
@@ -2348,7 +2305,7 @@ PROVIDER_CONFIGURATION = ProviderConfigurationService(
     ProviderConfigurationPersistencePorts(
         config_path=CONFIG_PATH,
         load_runtime_settings=lambda: load_runtime_settings_safely(
-            RUNTIME_SETTINGS_PATH,
+            runtime_paths.RUNTIME_SETTINGS_PATH,
             loader=load_settings,
         ),
         atomic_write_json=lambda path, payload: atomic_write_json(path, payload),
@@ -2425,8 +2382,8 @@ PROJECT_SNAPSHOT_SELECTION = ProjectSnapshotSelectionService(
         utc_now_iso=lambda: utc_now_iso(),
         broadcast_projects=lambda payload: EVENT_BUS.broadcast_from_sync("projects", payload),
     ),
-    cache_path=USER_DATA_DIR / "project-cache.json",
-    selection_path=CONFIG_DIR / "selected-project.json",
+    cache_path=runtime_paths.USER_DATA_DIR / "project-cache.json",
+    selection_path=runtime_paths.CONFIG_DIR / "selected-project.json",
     selection_schema=PROJECT_SELECTION_SCHEMA,
 )
 UNITY_STATUS = UnityStatusService(
@@ -3322,7 +3279,7 @@ def build_public_health_payload() -> dict[str, Any]:
         "ok": True,
         "schema": "vrcforge.public_health.v1",
         "version": app.version,
-        "portableMode": PORTABLE_MODE,
+        "portableMode": runtime_paths.PORTABLE_MODE,
         "authRequired": APP_AUTH_REQUIRED,
     }
 
@@ -3339,7 +3296,7 @@ def health_request_has_app_auth(request: Request) -> bool:
 
 def build_full_health_payload() -> dict[str, Any]:
     settings = load_runtime_settings_safely(
-        RUNTIME_SETTINGS_PATH,
+        runtime_paths.RUNTIME_SETTINGS_PATH,
         llm_override=PROVIDER_CONFIGURATION.serialize_api_config(include_secret=True),
         loader=load_settings,
     )
@@ -3347,14 +3304,14 @@ def build_full_health_payload() -> dict[str, Any]:
     return {
         "ok": not any(component["status"] == "error" for component in components.values()),
         "version": app.version,
-        "portableMode": PORTABLE_MODE,
-        "projectRoot": str(ROOT_DIR),
-        "settingsPath": str(RUNTIME_SETTINGS_PATH),
+        "portableMode": runtime_paths.PORTABLE_MODE,
+        "projectRoot": str(runtime_paths.ROOT_DIR),
+        "settingsPath": str(runtime_paths.RUNTIME_SETTINGS_PATH),
         "configPath": str(CONFIG_PATH),
         "paths": {
-            "programDir": str(ROOT_DIR),
-            "userDataDir": str(USER_DATA_DIR),
-            "configDir": str(CONFIG_DIR),
+            "programDir": str(runtime_paths.ROOT_DIR),
+            "userDataDir": str(runtime_paths.USER_DATA_DIR),
+            "configDir": str(runtime_paths.CONFIG_DIR),
             "logsDir": str(LOG_DIR),
             "artifactsDir": str(ARTIFACTS_DIR),
             "dashboardDir": str(DASHBOARD_DIR),
@@ -3543,7 +3500,7 @@ WORKSPACE_DIFF_PATCH_MAX_CHARS = 40000
 
 
 def build_workspace_diff_summary(root: str = "", include_patch: bool = False) -> dict[str, Any]:
-    requested_root = Path(root).expanduser() if root.strip() else ROOT_DIR
+    requested_root = Path(root).expanduser() if root.strip() else runtime_paths.ROOT_DIR
     try:
         requested_root = requested_root.resolve()
     except OSError as exc:
@@ -7710,11 +7667,11 @@ def scan_project_index_sync(params: dict[str, Any]) -> dict[str, Any]:
 
 def connector_bundle_sync(params: dict[str, Any] | None = None) -> dict[str, Any]:
     params = params or {}
-    bridge = resolve_stdio_bridge(ROOT_DIR)
+    bridge = resolve_stdio_bridge(runtime_paths.ROOT_DIR)
     stdio_command = str(params.get("stdioCommand") or params.get("stdio_command") or bridge.command)
     stdio_script = params.get("stdioScript") or params.get("stdio_script") or (bridge.args[0] if bridge.args else "")
     stdio_cwd = params.get("stdioCwd") or params.get("stdio_cwd") or bridge.cwd
-    smoke_script = params.get("smokeScript") or params.get("smoke_script") or (ROOT_DIR / "scripts" / "smoke_external_agent_bridge.py")
+    smoke_script = params.get("smokeScript") or params.get("smoke_script") or (runtime_paths.ROOT_DIR / "scripts" / "smoke_external_agent_bridge.py")
     options = ExternalAgentConnectorOptions(
         server_name=str(params.get("serverName") or params.get("server_name") or "vrcforge"),
         mcp_url=str(params.get("mcpUrl") or params.get("mcp_url") or "http://127.0.0.1:8757/mcp"),
@@ -7773,7 +7730,7 @@ def external_agent_status_sync(project_path: str | None = None, generic_config_p
     return {
         **connector_bundle_sync({}),
         "clients": connector_client_statuses(
-            root_dir=ROOT_DIR,
+            root_dir=runtime_paths.ROOT_DIR,
             project_path=selected_project_path,
             generic_config_path_value=generic_config_path,
         ),
@@ -7859,7 +7816,7 @@ def install_external_agent_connector_sync(params: dict[str, Any]) -> dict[str, A
     project_path = _selected_project_path_or(params.get("projectPath") or params.get("project_path"))
     config_path = str(params.get("configPath") or params.get("config_path") or "").strip() or None
     try:
-        action = install_connector(client, root_dir=ROOT_DIR, project_path=project_path, config_path=config_path)
+        action = install_connector(client, root_dir=runtime_paths.ROOT_DIR, project_path=project_path, config_path=config_path)
     except ConnectorInstallError as exc:
         action = exc.as_result(client=client or "unknown", action="install")
     except Exception as exc:  # noqa: BLE001 - connector UX should return diagnostics instead of crashing Settings.
@@ -7894,7 +7851,7 @@ def uninstall_external_agent_connector_sync(params: dict[str, Any]) -> dict[str,
     project_path = _selected_project_path_or(params.get("projectPath") or params.get("project_path"))
     config_path = str(params.get("configPath") or params.get("config_path") or "").strip() or None
     try:
-        action = uninstall_connector(client, root_dir=ROOT_DIR, project_path=project_path, config_path=config_path)
+        action = uninstall_connector(client, root_dir=runtime_paths.ROOT_DIR, project_path=project_path, config_path=config_path)
     except ConnectorInstallError as exc:
         action = exc.as_result(client=client or "unknown", action="uninstall")
     except Exception as exc:  # noqa: BLE001
@@ -7979,7 +7936,7 @@ def app_preflight_skill_package(request: SkillPackagePathRequest) -> dict[str, A
 def app_official_skill_signing_key_status() -> dict[str, Any]:
     try:
         return SkillSigningKeyMigrationService(
-            skill_package_service(), USER_DATA_DIR / "signing"
+            skill_package_service(), runtime_paths.USER_DATA_DIR / "signing"
         ).status()
     except Exception as exc:  # noqa: BLE001
         raise skill_package_error_response(exc) from exc
@@ -7992,7 +7949,7 @@ def app_export_official_skill_signing_key(
     try:
         with AGENT_GATEWAY.local_state_write_guard(), SKILL_PACKAGE_WRITE_LOCK, AGENT_GATEWAY.skills.write_lock:
             return SkillSigningKeyMigrationService(
-                skill_package_service(), USER_DATA_DIR / "signing"
+                skill_package_service(), runtime_paths.USER_DATA_DIR / "signing"
             ).export_backup(request.output_path, request.passphrase.get_secret_value())
     except Exception as exc:  # noqa: BLE001
         raise skill_package_error_response(exc) from exc
@@ -8005,7 +7962,7 @@ def app_import_official_skill_signing_key(
     try:
         with AGENT_GATEWAY.local_state_write_guard(), SKILL_PACKAGE_WRITE_LOCK, AGENT_GATEWAY.skills.write_lock:
             return SkillSigningKeyMigrationService(
-                skill_package_service(), USER_DATA_DIR / "signing"
+                skill_package_service(), runtime_paths.USER_DATA_DIR / "signing"
             ).import_backup(
                 request.backup_path,
                 request.passphrase.get_secret_value(),
@@ -8370,14 +8327,14 @@ def build_agentic_app_health() -> dict[str, Any]:
         return {
             "ok": False,
             "version": app.version,
-            "portableMode": PORTABLE_MODE,
-            "projectRoot": str(ROOT_DIR),
-            "settingsPath": str(RUNTIME_SETTINGS_PATH),
+            "portableMode": runtime_paths.PORTABLE_MODE,
+            "projectRoot": str(runtime_paths.ROOT_DIR),
+            "settingsPath": str(runtime_paths.RUNTIME_SETTINGS_PATH),
             "configPath": str(CONFIG_PATH),
             "paths": {
-                "programDir": str(ROOT_DIR),
-                "userDataDir": str(USER_DATA_DIR),
-                "configDir": str(CONFIG_DIR),
+                "programDir": str(runtime_paths.ROOT_DIR),
+                "userDataDir": str(runtime_paths.USER_DATA_DIR),
+                "configDir": str(runtime_paths.CONFIG_DIR),
                 "logsDir": str(LOG_DIR),
                 "artifactsDir": str(ARTIFACTS_DIR),
                 "dashboardDir": str(DASHBOARD_DIR),
@@ -8386,7 +8343,7 @@ def build_agentic_app_health() -> dict[str, Any]:
                 "backend": health_component(
                     "ok",
                     "Backend process is responding.",
-                    {"version": app.version, "programDir": str(ROOT_DIR), "portableMode": PORTABLE_MODE},
+                    {"version": app.version, "programDir": str(runtime_paths.ROOT_DIR), "portableMode": runtime_paths.PORTABLE_MODE},
                 ),
                 "startupDegraded": health_component(
                     "warning",
@@ -8424,7 +8381,7 @@ def build_bootstrap_app_health(
         "backend": health_component(
             "ok",
             "Backend process is responding.",
-            {"version": app.version, "programDir": str(ROOT_DIR), "portableMode": PORTABLE_MODE},
+            {"version": app.version, "programDir": str(runtime_paths.ROOT_DIR), "portableMode": runtime_paths.PORTABLE_MODE},
         ),
         "dashboardFiles": health_component(
             "ok" if dashboard_index.exists() else "error",
@@ -8432,9 +8389,9 @@ def build_bootstrap_app_health(
             {"index": str(dashboard_index), "dashboardUrl": "http://127.0.0.1:8757/"},
         ),
         "configReadWrite": health_component(
-            "ok" if CONFIG_DIR.exists() and RUNTIME_SETTINGS_PATH.exists() else "warning",
-            "Config path is available." if CONFIG_DIR.exists() else "Config directory is not initialized yet.",
-            {"directory": str(CONFIG_DIR), "settingsPath": str(RUNTIME_SETTINGS_PATH)},
+            "ok" if runtime_paths.CONFIG_DIR.exists() and runtime_paths.RUNTIME_SETTINGS_PATH.exists() else "warning",
+            "Config path is available." if runtime_paths.CONFIG_DIR.exists() else "Config directory is not initialized yet.",
+            {"directory": str(runtime_paths.CONFIG_DIR), "settingsPath": str(runtime_paths.RUNTIME_SETTINGS_PATH)},
         ),
         "logsWrite": health_component("unknown", "Log write diagnostics are refreshing.", {"directory": str(LOG_DIR)}),
         "artifactsWrite": health_component("unknown", "Artifact write diagnostics are refreshing.", {"directory": str(ARTIFACTS_DIR)}),
@@ -8512,14 +8469,14 @@ def build_bootstrap_app_health(
         "schema": "vrcforge.bootstrap_health.v1",
         "deferredDiagnostics": True,
         "version": app.version,
-        "portableMode": PORTABLE_MODE,
-        "projectRoot": str(ROOT_DIR),
-        "settingsPath": str(RUNTIME_SETTINGS_PATH),
+        "portableMode": runtime_paths.PORTABLE_MODE,
+        "projectRoot": str(runtime_paths.ROOT_DIR),
+        "settingsPath": str(runtime_paths.RUNTIME_SETTINGS_PATH),
         "configPath": str(CONFIG_PATH),
         "paths": {
-            "programDir": str(ROOT_DIR),
-            "userDataDir": str(USER_DATA_DIR),
-            "configDir": str(CONFIG_DIR),
+            "programDir": str(runtime_paths.ROOT_DIR),
+            "userDataDir": str(runtime_paths.USER_DATA_DIR),
+            "configDir": str(runtime_paths.CONFIG_DIR),
             "logsDir": str(LOG_DIR),
             "artifactsDir": str(ARTIFACTS_DIR),
             "dashboardDir": str(DASHBOARD_DIR),
@@ -8905,7 +8862,7 @@ def build_support_bundle(request: SupportBundleRequest) -> dict[str, Any]:
         "schema": "vrcforge.support-bundle.v1",
         "generatedAt": generated_at.isoformat(),
         "version": app.version,
-        "portableMode": PORTABLE_MODE,
+        "portableMode": runtime_paths.PORTABLE_MODE,
         "logLevel": DIAGNOSTIC_LOGGER.log_level,
         "debugLogging": debug_logging_enabled(),
         "includeFullPathsRequested": bool(request.include_full_paths),
@@ -9938,8 +9895,8 @@ def _detect_runtime_settings_doctor(_context: dict[str, Any]) -> dict[str, Any]:
     # Refresh the path-bound diagnostic from disk on every Doctor run. The
     # loader is read-only and falls back in memory, so external corruption is
     # visible without making Doctor itself unavailable.
-    load_runtime_settings_safely(RUNTIME_SETTINGS_PATH, loader=load_settings)
-    diagnostic = runtime_settings_diagnostic(RUNTIME_SETTINGS_PATH)
+    load_runtime_settings_safely(runtime_paths.RUNTIME_SETTINGS_PATH, loader=load_settings)
+    diagnostic = runtime_settings_diagnostic(runtime_paths.RUNTIME_SETTINGS_PATH)
     return {
         "status": diagnostic.get("status", "unknown"),
         "message": diagnostic.get("message", "Runtime settings status is unavailable."),
@@ -10019,7 +9976,7 @@ def build_doctor_service_context() -> dict[str, Any]:
     )
     full_permission = bool(gateway_config.allow_write_requests and execution_mode == "roslyn_full_auto")
     packaged = bool(getattr(sys, "frozen", False))
-    backend_path = Path(sys.executable) if packaged else ROOT_DIR / "backend" / "vrcforge_backend.exe"
+    backend_path = Path(sys.executable) if packaged else runtime_paths.ROOT_DIR / "backend" / "vrcforge_backend.exe"
     return {
         "health": health,
         "selected_project_path": selected_project,
@@ -10034,12 +9991,12 @@ def build_doctor_service_context() -> dict[str, Any]:
         },
         "desktop_install": {
             "packaged": packaged,
-            "manifestPath": ROOT_DIR / "payload-integrity.json",
+            "manifestPath": runtime_paths.ROOT_DIR / "payload-integrity.json",
             "desktopVersion": os.environ.get("VRCFORGE_DESKTOP_VERSION", app.version),
-            "desktopPath": ROOT_DIR / "VRCForge.exe",
+            "desktopPath": runtime_paths.ROOT_DIR / "VRCForge.exe",
             "backendPath": backend_path,
-            "versionPath": ROOT_DIR / "VERSION",
-            "stateDir": USER_DATA_DIR,
+            "versionPath": runtime_paths.ROOT_DIR / "VERSION",
+            "stateDir": runtime_paths.USER_DATA_DIR,
         },
         "security": {
             "external_writes": {
@@ -10669,8 +10626,8 @@ def verify_mcp_selection_acceptance(request: McpSelectionAcceptanceVerifyRequest
 
 def _resolve_install_source_assets() -> Path:
     candidates = [
-        ROOT_DIR / "Assets" / "VRCForge",
-        ROOT_DIR / "unity_plugin" / "Assets" / "VRCForge",
+        runtime_paths.ROOT_DIR / "Assets" / "VRCForge",
+        runtime_paths.ROOT_DIR / "unity_plugin" / "Assets" / "VRCForge",
     ]
     for candidate in candidates:
         if candidate.is_dir():
@@ -10714,9 +10671,9 @@ def _unity_core_tree_identity(root: Path) -> dict[str, Any]:
 def _verified_unity_core_source_identity(source_assets: Path) -> dict[str, Any]:
     """Verify packaged payload integrity and fingerprint the Core source tree."""
 
-    payload_manifest_path = ROOT_DIR / "payload-integrity.json"
-    desktop_path = ROOT_DIR / "VRCForge.exe"
-    backend_path = ROOT_DIR / "backend" / "vrcforge_backend.exe"
+    payload_manifest_path = runtime_paths.ROOT_DIR / "payload-integrity.json"
+    desktop_path = runtime_paths.ROOT_DIR / "VRCForge.exe"
+    backend_path = runtime_paths.ROOT_DIR / "backend" / "vrcforge_backend.exe"
     required = (
         (payload_manifest_path, "packaged payload integrity manifest"),
         (desktop_path, "packaged VRCForge desktop"),
@@ -17282,7 +17239,7 @@ def resolve_parameter_snapshot_path(snapshot_path: str | None) -> Path:
     if snapshot_path:
         candidate = Path(snapshot_path)
         if not candidate.is_absolute():
-            candidate = (ROOT_DIR / candidate).resolve()
+            candidate = (runtime_paths.ROOT_DIR / candidate).resolve()
         else:
             candidate = candidate.resolve()
     elif DASHBOARD_RUNTIME.latest_parameter_snapshot_path:
@@ -18743,7 +18700,7 @@ def pyinstaller_internal_dir() -> Path | None:
     candidates = []
     if getattr(sys, "_MEIPASS", ""):
         candidates.append(Path(str(getattr(sys, "_MEIPASS"))))
-    candidates.append(ROOT_DIR / "backend" / "_internal")
+    candidates.append(runtime_paths.ROOT_DIR / "backend" / "_internal")
     candidates.append(Path(sys.executable).resolve().parent / "_internal")
     for candidate in candidates:
         if candidate.is_dir():
@@ -18761,7 +18718,7 @@ def unity_launch_environment() -> dict[str, str]:
     env = os.environ.copy()
     path_entries = [entry for entry in env.get("PATH", "").split(os.pathsep) if entry]
     blocked_dirs = [
-        ROOT_DIR / "backend" / "_internal",
+        runtime_paths.ROOT_DIR / "backend" / "_internal",
         Path(sys.executable).resolve().parent / "_internal",
     ]
     filtered_entries: list[str] = []
@@ -18969,7 +18926,7 @@ def build_health_components(
     dependencies = manifest_payload.get("dependencies") if isinstance(manifest_payload, dict) else {}
     dependencies = dependencies if isinstance(dependencies, dict) else {}
 
-    config_writable, config_error = probe_directory_write(CONFIG_DIR)
+    config_writable, config_error = probe_directory_write(runtime_paths.CONFIG_DIR)
     logs_writable, logs_error = probe_directory_write(LOG_DIR)
     artifacts_writable, artifacts_error = probe_directory_write(ARTIFACTS_DIR)
 
@@ -18979,7 +18936,7 @@ def build_health_components(
         "backend": health_component(
             "ok",
             "Backend process is responding.",
-            {"version": app.version, "programDir": str(ROOT_DIR), "portableMode": PORTABLE_MODE},
+            {"version": app.version, "programDir": str(runtime_paths.ROOT_DIR), "portableMode": runtime_paths.PORTABLE_MODE},
         ),
         "dashboardFiles": health_component(
             "ok" if dashboard_index.exists() else "error",
@@ -18987,9 +18944,9 @@ def build_health_components(
             {"index": str(dashboard_index), "dashboardUrl": dashboard_url},
         ),
         "configReadWrite": health_component(
-            "ok" if config_writable and RUNTIME_SETTINGS_PATH.exists() else "warning" if config_writable else "error",
+            "ok" if config_writable and runtime_paths.RUNTIME_SETTINGS_PATH.exists() else "warning" if config_writable else "error",
             "Config directory is writable." if config_writable else "Config directory is not writable.",
-            {"directory": str(CONFIG_DIR), "settingsPath": str(RUNTIME_SETTINGS_PATH), "error": config_error},
+            {"directory": str(runtime_paths.CONFIG_DIR), "settingsPath": str(runtime_paths.RUNTIME_SETTINGS_PATH), "error": config_error},
         ),
         "logsWrite": health_component(
             "ok" if logs_writable else "error",
@@ -19339,7 +19296,7 @@ def resolve_target_project(project_path: str | None) -> str:
 
 def resolve_local_path(value: str | Path) -> Path:
     path = value if isinstance(value, Path) else Path(value)
-    return path if path.is_absolute() else (ROOT_DIR / path).resolve()
+    return path if path.is_absolute() else (runtime_paths.ROOT_DIR / path).resolve()
 
 
 def normalize_path_string(value: str) -> str:
@@ -19398,7 +19355,7 @@ def _review_general_auto_approval(approval: dict[str, Any]) -> str:
 
 def resolve_vertex_project_location(value: str) -> tuple[str, str]:
     settings = load_runtime_settings_safely(
-        RUNTIME_SETTINGS_PATH,
+        runtime_paths.RUNTIME_SETTINGS_PATH,
         llm_override={
             "provider": "vertexai",
             "api_key": "",
@@ -19426,7 +19383,7 @@ def provider_auth_label(provider: str) -> str:
 
 
 def load_initial_dashboard_state() -> DashboardState:
-    settings_path = RUNTIME_SETTINGS_PATH
+    settings_path = runtime_paths.RUNTIME_SETTINGS_PATH
     settings = load_runtime_settings_safely(
         settings_path,
         llm_override=PROVIDER_CONFIGURATION.serialize_api_config(include_secret=True),
@@ -19544,7 +19501,7 @@ def attach_dashboard_session_cookie(response: FileResponse) -> None:
 
 
 def validate_app_session_handshake_request(request: Request, *, dev_only: bool) -> None:
-    if dev_only and PORTABLE_MODE:
+    if dev_only and runtime_paths.PORTABLE_MODE:
         raise HTTPException(status_code=404, detail="Development session handshake is unavailable in packaged mode.")
     client_host = request.client.host if request.client else ""
     origin = request.headers.get("origin", "").strip()
@@ -27471,7 +27428,7 @@ def main() -> int:
 
         return cli_main(args.cli_args)
     if args.cleanup_user_data:
-        root = Path(args.cleanup_user_data_root).expanduser() if str(args.cleanup_user_data_root or "").strip() else USER_DATA_DIR
+        root = Path(args.cleanup_user_data_root).expanduser() if str(args.cleanup_user_data_root or "").strip() else runtime_paths.USER_DATA_DIR
         print(json.dumps(cleanup_user_data_root(root), ensure_ascii=False, sort_keys=True))
         return 0
     if args.agent_mcp_stdio:

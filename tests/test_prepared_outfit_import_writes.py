@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 import dashboard_server
+import vrcforge_runtime_paths as runtime_paths
 from prepared_archive_imports import (
     cleanup_owned_zip_materialization,
     execute_zip_member_materialization,
@@ -726,7 +727,7 @@ def test_prepared_import_waits_for_core_descriptor_after_domain_reload(
 
 def test_unitypackage_core_restores_active_job_across_domain_reload() -> None:
     source = (
-        dashboard_server.ROOT_DIR
+        runtime_paths.ROOT_DIR
         / "Assets"
         / "VRCForge"
         / "Editor"
@@ -758,7 +759,7 @@ def test_unitypackage_core_restores_active_job_across_domain_reload() -> None:
 
 def test_unitypackage_event_binding_uses_the_actual_unity_event_name() -> None:
     source = (
-        dashboard_server.ROOT_DIR
+        runtime_paths.ROOT_DIR
         / "Assets"
         / "VRCForge"
         / "Editor"
@@ -983,7 +984,7 @@ def test_preparer_rejects_reserved_and_handler_is_bound() -> None:
 
 
 def test_unitypackage_core_source_holds_read_handle_and_echoes_bound_identity() -> None:
-    source = (dashboard_server.ROOT_DIR / "Assets" / "VRCForge" / "Editor" / "OutfitPackageImporter.cs").read_text(encoding="utf-8")
+    source = (runtime_paths.ROOT_DIR / "Assets" / "VRCForge" / "Editor" / "OutfitPackageImporter.cs").read_text(encoding="utf-8")
     assert "expectedSha256" in source and "expectedSize" in source
     assert "new FileStream(packagePath, FileMode.Open, FileAccess.Read, FileShare.Read)" in source
     assert "SHA256.Create()" in source
@@ -1002,4 +1003,4 @@ def test_unitypackage_core_source_holds_read_handle_and_echoes_bound_identity() 
     assert "job.importEventPackageName = packageName" in source
     assert "string.Equals(job.importEventPackageName, packageName ??" in source
     assert "ActiveJobForEvent(packageName)" in source
-    assert "app_unitypackage_import_poll" in (dashboard_server.ROOT_DIR / "Assets" / "VRCForge" / "Editor" / "MCP" / "VRCForgeMcpCoreServer.cs").read_text(encoding="utf-8")
+    assert "app_unitypackage_import_poll" in (runtime_paths.ROOT_DIR / "Assets" / "VRCForge" / "Editor" / "MCP" / "VRCForgeMcpCoreServer.cs").read_text(encoding="utf-8")

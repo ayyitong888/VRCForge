@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 
 import agent_gateway
 import dashboard_server
+import vrcforge_runtime_paths as runtime_paths
 
 
 @pytest.fixture(autouse=True)
@@ -689,16 +690,16 @@ def test_write_handler_ok_false_marks_approval_failed(tmp_path, monkeypatch) -> 
 
 
 def test_avatar_encryption_public_repo_contains_no_unity_or_shader_implementation() -> None:
-    assert not (dashboard_server.ROOT_DIR / "Assets" / "VRCForge" / "Editor" / "AvatarEncryptionTool.cs").exists()
+    assert not (runtime_paths.ROOT_DIR / "Assets" / "VRCForge" / "Editor" / "AvatarEncryptionTool.cs").exists()
     assert not (
-        dashboard_server.ROOT_DIR
+        runtime_paths.ROOT_DIR
         / "Assets"
         / "VRCForge"
         / "Runtime"
         / "AvatarEncryption"
         / "VRCForgeAvatarEncryptionRestore.shader"
     ).exists()
-    assert not (dashboard_server.ROOT_DIR / "scripts" / "smoke_avatar_encryption_live.py").exists()
+    assert not (runtime_paths.ROOT_DIR / "scripts" / "smoke_avatar_encryption_live.py").exists()
 
 
 def test_avatar_encryption_external_mcp_lists_reads_but_hides_internal_write_requests(
