@@ -86,7 +86,7 @@ def prepare() -> dict[str, object]:
     pair = signer()
     package_root = ARTIFACT_ROOT / "packages"
     package_root.mkdir(parents=True, exist_ok=True)
-    service = SkillPackageService(ARTIFACT_ROOT / "signing-build-store", vrcforge_version="1.7.9")
+    service = SkillPackageService(ARTIFACT_ROOT / "signing-build-store", vrcforge_version="1.7.10")
     packages: list[dict[str, object]] = []
     for package_id, source, filename in PACKAGES:
         source_manifest = json.loads((source / "manifest.json").read_text(encoding="utf-8"))
@@ -195,7 +195,7 @@ def request(method: str, path: str, payload: dict[str, object] | None = None) ->
 
 def install() -> dict[str, object]:
     pair = signer()
-    service = SkillPackageService(STORE, vrcforge_version="1.7.9")
+    service = SkillPackageService(STORE, vrcforge_version="1.7.10")
     service.designate_official_signer(
         pair.fingerprint,
         reason="Explicitly designated by the VRCForge project developer",
@@ -289,7 +289,7 @@ def install() -> dict[str, object]:
         ):
             raise RuntimeError("Encrypted official signing-key backup verification failed.")
         destination_service = SkillPackageService(
-            Path(temp_root) / "destination-store", vrcforge_version="1.7.9"
+            Path(temp_root) / "destination-store", vrcforge_version="1.7.10"
         )
         migrated = SkillSigningKeyMigrationService(
             destination_service, Path(temp_root) / "destination-signing"

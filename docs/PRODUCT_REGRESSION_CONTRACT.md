@@ -1090,7 +1090,7 @@ Each item ends with its version history in this exact form:
   failure, and write-exception preservation; default-preserve/explicit-compress
   Unity transport behavior; explicit pre-route no-write facts; unknown-outcome
   honesty; and live post-import compile-time identity plus Console readback.
-- [首次实现: 1.3.0] [强化/修复: 1.7.9] [最近验证: 1.7.9 source]
+- [首次实现: 1.3.0] [强化/修复: 1.7.9] [最近验证: 1.7.10 source]
 
 ### CMP-002 — DeepSeek Harness and host-side multi-MCP compatibility
 

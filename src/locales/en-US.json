@@ -224,7 +224,7 @@
     "modelProvider": "Model Provider",
     "diagnostics": "Diagnostics",
     "aboutTitle": "About VRCForge",
-    "aboutProduct": "VRCForge 1.7.9",
+    "aboutProduct": "VRCForge 1.7.10",
     "aboutMcp": "VRCForge-owned MCP 2.0 (2026-07-28) Core with 78 Unity tools.",
     "aboutSafety": "Every write requires approval and creates a checkpoint. Rollback requires separate approval.",
     "aboutLicense": "GPL-3.0-only. See the bundled NOTICE and DEPENDENCIES documents for distribution details.",

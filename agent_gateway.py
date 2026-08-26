@@ -9233,7 +9233,7 @@ def create_agent_mcp_app(
         list_tools,
         call_tool,
         server_name="VRCForge Agent Gateway",
-        server_version="1.7.9",
+        server_version="1.7.10",
     )
     return create_agent_mcp_2026_asgi_app(
         router,
