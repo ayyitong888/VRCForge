@@ -12456,6 +12456,15 @@ class DashboardServerTests(unittest.TestCase):
         irreversible_ephemeral_tools = {
             "vrcforge_confirm_unity_reload_dialog",
         }
+        observed_no_rollback_tools = {
+            name
+            for name, target in targets.items()
+            if target["rollbackPolicy"]["required"] is False
+        }
+        self.assertEqual(
+            observed_no_rollback_tools,
+            explicit_rollback_tools | managed_artifact_tools | irreversible_ephemeral_tools,
+        )
         for name, target in targets.items():
             policy = target.get("rollbackPolicy")
             self.assertIsInstance(policy, dict, name)
