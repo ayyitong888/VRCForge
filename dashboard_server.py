@@ -120,6 +120,7 @@ from agent_question_service import (
     AgentQuestionServiceError,
 )
 from agent_runtime_event_projection import project_runtime_turn_event
+import runtime_queue_port as runtime_queue_ports
 from agent_goal_service import AgentGoalServiceError
 from approval_auto_review import (
     review_general_auto_approval,
@@ -1530,6 +1531,44 @@ AGENT_GATEWAY = AgentGateway(
     runtime_status_changed=broadcast_runtime_status,
     runtime_timeline_changed=broadcast_runtime_status,
 )
+RUNTIME_QUEUE_PORT = runtime_queue_ports.CallbackRuntimeQueueAdapter(
+    runtime_queue_ports.RuntimeQueueCallbacks(
+        submit_runtime_steer=lambda params=None: AGENT_GATEWAY.submit_runtime_steer(
+            dict(params or {})
+        ),
+        list_runtime_followups=lambda *, session_id="", include_terminal=True: (
+            AGENT_GATEWAY.list_runtime_followups(
+                session_id=session_id,
+                include_terminal=include_terminal,
+            )
+        ),
+        enqueue_runtime_followup=lambda params: AGENT_GATEWAY.enqueue_runtime_followup(
+            dict(params)
+        ),
+        claim_runtime_followups=lambda *, session_id="", owner_id="", limit=8, queue_id="": (
+            AGENT_GATEWAY.claim_runtime_followups(
+                session_id=session_id,
+                owner_id=owner_id,
+                limit=limit,
+                queue_id=queue_id,
+            )
+        ),
+        ack_runtime_followup=lambda queue_id, session_id="", claim_token="": (
+            AGENT_GATEWAY.ack_runtime_followup(
+                queue_id,
+                session_id,
+                claim_token,
+            )
+        ),
+        cancel_runtime_followup=lambda queue_id, session_id="", claim_token="": (
+            AGENT_GATEWAY.cancel_runtime_followup(
+                queue_id,
+                session_id,
+                claim_token,
+            )
+        ),
+    )
+)
 EXTERNAL_INSTALLED_SKILL_REGISTRY = ExternalInstalledSkillRegistryService(AGENT_GATEWAY.skills)
 _SESSION_HANDOFF_SERVICE: SessionHandoffService | None = None
 _SESSION_HANDOFF_SERVICE_LOCK = RLock()
@@ -2770,7 +2809,7 @@ async def app_agent_runtime_message(runtime_request: AgentRuntimeMessageRequest)
         followup_lane_id = runtime_request.followup_lane_id or runtime_request.session_id
         if not followup_lane_id or not runtime_request.client_turn_id:
             raise HTTPException(status_code=409, detail={"code": "followup_queue_not_ready"})
-        claimed = AGENT_GATEWAY.claim_runtime_followups(
+        claimed = RUNTIME_QUEUE_PORT.claim_runtime_followups(
             session_id=followup_lane_id,
             owner_id=f"app:{runtime_request.client_turn_id}",
             queue_id=runtime_request.followup_queue_id,
@@ -2812,7 +2851,7 @@ async def app_agent_runtime_message(runtime_request: AgentRuntimeMessageRequest)
         followup_lane_id = runtime_request.followup_lane_id or runtime_request.session_id
         if runtime_request.followup_queue_id and followup_lane_id and followup_claim_token:
             try:
-                AGENT_GATEWAY.ack_runtime_followup(
+                RUNTIME_QUEUE_PORT.ack_runtime_followup(
                     runtime_request.followup_queue_id,
                     followup_lane_id,
                     followup_claim_token,
@@ -3016,7 +3055,7 @@ async def app_agent_runtime_queue(queue_request: AgentRuntimeQueueRequest) -> di
     # deterministic. Same-turn steer is text-only and never drops attachments;
     # the request falls through to the durable follow-up lane instead.
     if queue_request.target_client_turn_id and not queue_request.attachments:
-        steer_result = AGENT_GATEWAY.submit_runtime_steer(
+        steer_result = RUNTIME_QUEUE_PORT.submit_runtime_steer(
             {
                 "sessionId": queue_request.session_id,
                 "targetClientTurnId": queue_request.target_client_turn_id,
@@ -3033,7 +3072,7 @@ async def app_agent_runtime_queue(queue_request: AgentRuntimeQueueRequest) -> di
             return steer_result
     followup_lane_id = queue_request.lane_id or queue_request.session_id
     if steer_result is None or steer_result.get("accepted") is not True:
-        payload = AGENT_GATEWAY.enqueue_runtime_followup({
+        payload = RUNTIME_QUEUE_PORT.enqueue_runtime_followup({
             "sessionId": followup_lane_id, "clientTurnId": queue_request.client_turn_id,
             "targetClientTurnId": queue_request.target_client_turn_id,
             "message": queue_request.message, "attachments": queue_request.attachments,
@@ -3050,23 +3089,23 @@ async def app_agent_runtime_queue(queue_request: AgentRuntimeQueueRequest) -> di
 def app_agent_runtime_queue_list(sessionId: str = "", includeTerminal: bool = True) -> dict[str, Any]:
     if not sessionId.strip():
         raise HTTPException(status_code=400, detail={"code": "queue_session_required"})
-    return {"ok": True, "items": AGENT_GATEWAY.list_runtime_followups(session_id=sessionId, include_terminal=includeTerminal)}
+    return {"ok": True, "items": RUNTIME_QUEUE_PORT.list_runtime_followups(session_id=sessionId, include_terminal=includeTerminal)}
 
 
 @app.post("/api/app/agent/runs/queue/claim")
 def app_agent_runtime_queue_claim(request: AgentRuntimeQueueClaimRequest) -> dict[str, Any]:
-    return {"ok": True, "items": AGENT_GATEWAY.claim_runtime_followups(session_id=request.session_id, owner_id=request.owner_id, limit=request.limit, queue_id=request.queue_id or "")}
+    return {"ok": True, "items": RUNTIME_QUEUE_PORT.claim_runtime_followups(session_id=request.session_id, owner_id=request.owner_id, limit=request.limit, queue_id=request.queue_id or "")}
 
 
 @app.post("/api/app/agent/runs/queue/{queue_id}/ack")
 def app_agent_runtime_queue_ack(queue_id: str, request: AgentRuntimeQueueAckRequest) -> dict[str, Any]:
-    ok = AGENT_GATEWAY.ack_runtime_followup(queue_id, request.session_id, request.claim_token)
+    ok = RUNTIME_QUEUE_PORT.ack_runtime_followup(queue_id, request.session_id, request.claim_token)
     return {"ok": ok, "queueId": queue_id, "status": "acked" if ok else "unchanged"}
 
 
 @app.post("/api/app/agent/runs/queue/{queue_id}/cancel")
 def app_agent_runtime_queue_cancel(queue_id: str, request: AgentRuntimeQueueCancelRequest) -> dict[str, Any]:
-    ok = AGENT_GATEWAY.cancel_runtime_followup(queue_id, request.session_id, request.claim_token or "")
+    ok = RUNTIME_QUEUE_PORT.cancel_runtime_followup(queue_id, request.session_id, request.claim_token or "")
     return {"ok": ok, "queueId": queue_id, "status": "cancelled" if ok else "unchanged"}
 
 
