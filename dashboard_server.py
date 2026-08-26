@@ -747,6 +747,7 @@ VRCFORGE_UNITY_TOOL_REGISTRY = (
     "vrc_manage_expression_parameters",
     "vrc_manage_fx_animator",
     "vrc_manage_wardrobe",
+    "vrc_poll_job",
     "vrc_prepare_checkpoint",
     "vrc_read_avatar_descriptor",
     "vrc_refresh_asset_database",
