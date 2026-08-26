@@ -1,0 +1,86 @@
+{
+  "schema": "vrcforge.skill-package.workflow.v1",
+  "mode": "read_only",
+  "selfContained": true,
+  "requiresOtherSkills": [],
+  "scope": [
+    "breast_physbone_audit",
+    "marshmallow_setup",
+    "left_right_bone_references",
+    "collider_constraint_reference_closure",
+    "ndmf_build_time_evidence"
+  ],
+  "uncertaintyPolicy": {
+    "whenUnclear": [
+      "physbone",
+      "marshmallow",
+      "left_right_bones",
+      "collider",
+      "constraint",
+      "ndmf_generated_fx"
+    ],
+    "consult": [
+      "mature_community_guides",
+      "asset_author_instructions",
+      "official_documentation"
+    ],
+    "onInsufficientEvidence": {
+      "capabilityGap": true,
+      "ready": false,
+      "action": "stop_and_report"
+    },
+    "mustNot": [
+      "guess",
+      "invent_tools",
+      "claim_unverified_support",
+      "use_unauthorized_assets"
+    ]
+  },
+  "communityContract": {
+    "readOnly": true,
+    "distinguishAuthoringSourceFromBuildGeneratedOutput": true,
+    "neverAssumeMissingGeneratedFxFromAuthoringController": true,
+    "noDedicatedPhysBoneOrMarshmallowWriteAtom": true,
+    "preserveExistingPhysicsConstraintsCollidersAndSetup": true
+  },
+  "steps": [
+    {
+      "name": "bind_exact_project_and_avatar",
+      "tool": "vrcforge_list_avatars",
+      "tools": [
+        "vrcforge_read_avatar_descriptor",
+        "vrcforge_get_gameobject",
+        "vrcforge_get_property",
+        "vrcforge_scan_avatar_items",
+        "vrcforge_scan_inbound_reference_closure",
+        "vrcforge_scan_animation_bindings",
+        "vrcforge_scan_parameters",
+        "vrcforge_scan_fx_animator",
+        "vrcforge_inspect_skinned_mesh_bone_usage",
+        "vrcforge_run_validation_report"
+      ],
+      "writes": false
+    },
+    {
+      "name": "read_back_exact_scope_without_unrelated_changes",
+      "tool": "vrcforge_run_validation_report",
+      "tools": [
+        "vrcforge_build_test_readiness"
+      ],
+      "writes": false
+    }
+  ],
+  "approval": {
+    "required": false,
+    "owner": "runtime_supervision_layer",
+    "scope": "read_only_no_unity_mutation"
+  },
+  "checkpoint": {
+    "required": false
+  },
+  "rollback": {
+    "required": false,
+    "requiresSeparateApproval": false
+  }
+}
+

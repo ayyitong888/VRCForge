@@ -1,0 +1,104 @@
+{
+  "schema": "vrcforge.skill-package.workflow.v1",
+  "mode": "approval_required",
+  "selfContained": true,
+  "requiresOtherSkills": [],
+  "scope": [
+    "animation_clip",
+    "animation_bindings",
+    "fx_animator_state",
+    "object_activation",
+    "body_blendshape_compensation",
+    "heel_compensation"
+  ],
+  "uncertaintyPolicy": {
+    "whenUnclear": [
+      "animation_clip",
+      "object_path",
+      "blendshape",
+      "heel_compensation",
+      "fx_transition",
+      "off_state_baseline"
+    ],
+    "consult": [
+      "mature_community_guides",
+      "asset_author_instructions",
+      "official_documentation"
+    ],
+    "onInsufficientEvidence": {
+      "capabilityGap": true,
+      "ready": false,
+      "action": "stop_and_report"
+    },
+    "mustNot": [
+      "guess",
+      "invent_tools",
+      "claim_unverified_support",
+      "use_unauthorized_assets"
+    ]
+  },
+  "communityContract": {
+    "keyframeTimeSeconds": 0,
+    "deriveExactEnableDisableUnchangedSets": true,
+    "preserveExistingEmptyOffMotion": true,
+    "writeOnlyVerifiedBodyHeelOrClothingBindings": true,
+    "preserveAdjacentOutfitHairAndAccessoryBehavior": true
+  },
+  "steps": [
+    {
+      "name": "bind_exact_project_and_avatar",
+      "tool": "vrcforge_list_avatars",
+      "tools": [
+        "vrcforge_read_avatar_descriptor",
+        "vrcforge_scan_fx_animator",
+        "vrcforge_scan_animation_bindings",
+        "vrcforge_scan_blendshapes",
+        "vrcforge_get_gameobject",
+        "vrcforge_scan_avatar_controls",
+        "vrcforge_scan_parameters"
+      ],
+      "writes": false
+    },
+    {
+      "name": "ensure_animator_state_through_current_permission_policy",
+      "tool": "vrcforge_preview_ensure_animator_state",
+      "tools": [
+        "vrcforge_ensure_animator_state"
+      ],
+      "writes": true,
+      "runtimePermissionGateRequired": true,
+      "runtimeApprovalRequired": true
+    },
+    {
+      "name": "write_animation_curve_through_current_permission_policy",
+      "tool": "vrcforge_preview_write_animation_curve",
+      "tools": [
+        "vrcforge_write_animation_curve"
+      ],
+      "writes": true,
+      "runtimePermissionGateRequired": true,
+      "runtimeApprovalRequired": true
+    },
+    {
+      "name": "read_back_exact_scope_without_unrelated_changes",
+      "tool": "vrcforge_run_validation_report",
+      "tools": [
+        "vrcforge_build_test_readiness"
+      ],
+      "writes": false
+    }
+  ],
+  "approval": {
+    "required": true,
+    "owner": "runtime_supervision_layer",
+    "scope": "one_exact_write_through_current_permission_policy"
+  },
+  "checkpoint": {
+    "required": true
+  },
+  "rollback": {
+    "required": true,
+    "requiresSeparateApproval": true
+  }
+}
+

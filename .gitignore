@@ -10,6 +10,12 @@ pycache/
 .mypy_cache/
 .gemini/
 artifacts/
+!artifacts/
+artifacts/*
+!artifacts/skills/
+artifacts/skills/*
+!artifacts/skills/vrcforge-avatar-*/
+!artifacts/skills/vrcforge-avatar-*/**
 build/
 dist/
 LocalBuilds/

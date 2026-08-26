@@ -1,0 +1,31 @@
+{
+  "id": "com.vrcforge.skills.avatar_expression_menu",
+  "name": "VRChat 菜单制作",
+  "skill_name": "vrcforge-avatar-expression-menu",
+  "version": "1.0.1",
+  "author": "VRCForge",
+  "description": "Inspect or author an exact standalone VRChat expression-menu category, submenu, pagination or control while preserving existing parameter domains, FacialTracking, icons, aliases, original labels and the eight-control limit.",
+  "min_vrcforge_version": "1.7.9",
+  "execution": "agentic",
+  "permissions": [
+    "read_project",
+    "unity_scan_scene",
+    "unity_modify_prefab",
+    "unity_modify_components",
+    "unity_run_validation",
+    "write_project_files"
+  ],
+  "entrypoints": {
+    "skill": "SKILL.md",
+    "workflow": "workflows/expression-menu.json",
+    "guide": "references/workflow.md"
+  },
+  "targets": {
+    "runtime": "VRCForge",
+    "agents": [
+      "internal",
+      "external-mcp"
+    ],
+    "avatarType": "VRChat"
+  }
+}

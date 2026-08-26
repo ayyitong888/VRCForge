@@ -1,0 +1,138 @@
+{
+  "schema": "vrcforge.skill-package.workflow.v1",
+  "mode": "approval_required",
+  "selfContained": true,
+  "requiresOtherSkills": [],
+  "scope": [
+    "hairstyle_attachment",
+    "hair_bool_selector",
+    "hair_int_migration",
+    "expression_parameters",
+    "fx_animator",
+    "animation_curves",
+    "expression_menu"
+  ],
+  "uncertaintyPolicy": {
+    "whenUnclear": [
+      "hair_bones",
+      "bone_proxy",
+      "physbone",
+      "bool_to_int_migration",
+      "fx_animator",
+      "animation",
+      "expression_menu"
+    ],
+    "consult": [
+      "mature_community_guides",
+      "asset_author_instructions",
+      "official_documentation"
+    ],
+    "onInsufficientEvidence": {
+      "capabilityGap": true,
+      "ready": false,
+      "action": "stop_and_report"
+    },
+    "mustNot": [
+      "guess",
+      "invent_tools",
+      "claim_unverified_support",
+      "use_unauthorized_assets"
+    ]
+  },
+  "communityContract": {
+    "optionCountIncludesDefault": true,
+    "lessThanEight": "one_saved_synced_bool_per_hairstyle",
+    "eightOrMore": "one_saved_synced_group_int",
+    "crossingThresholdRequiresSeparatelyAuthorizedMigration": true,
+    "preserveIndependentLocalBonesAndPhysBones": true,
+    "preserveOriginalHairRestoreAndExistingOptionOrder": true,
+    "menuCategory": "换装 / 头发"
+  },
+  "steps": [
+    {
+      "name": "bind_exact_project_and_avatar",
+      "tool": "vrcforge_list_avatars",
+      "tools": [
+        "vrcforge_read_avatar_descriptor",
+        "vrcforge_scan_avatar_controls",
+        "vrcforge_scan_parameters",
+        "vrcforge_scan_fx_animator",
+        "vrcforge_scan_animation_bindings",
+        "vrcforge_inspect_skinned_mesh_bone_usage",
+        "vrcforge_scan_modular_avatar"
+      ],
+      "writes": false
+    },
+    {
+      "name": "add_modular_avatar_component_through_current_permission_policy",
+      "tool": "vrcforge_preview_add_modular_avatar_component",
+      "tools": [
+        "vrcforge_add_modular_avatar_component"
+      ],
+      "writes": true,
+      "runtimePermissionGateRequired": true,
+      "runtimeApprovalRequired": true
+    },
+    {
+      "name": "manage_expression_parameters_through_current_permission_policy",
+      "tool": "vrcforge_preview_manage_expression_parameters",
+      "tools": [
+        "vrcforge_manage_expression_parameters"
+      ],
+      "writes": true,
+      "runtimePermissionGateRequired": true,
+      "runtimeApprovalRequired": true
+    },
+    {
+      "name": "manage_fx_animator_through_current_permission_policy",
+      "tool": "vrcforge_preview_manage_fx_animator",
+      "tools": [
+        "vrcforge_manage_fx_animator"
+      ],
+      "writes": true,
+      "runtimePermissionGateRequired": true,
+      "runtimeApprovalRequired": true
+    },
+    {
+      "name": "write_animation_curve_through_current_permission_policy",
+      "tool": "vrcforge_preview_write_animation_curve",
+      "tools": [
+        "vrcforge_write_animation_curve"
+      ],
+      "writes": true,
+      "runtimePermissionGateRequired": true,
+      "runtimeApprovalRequired": true
+    },
+    {
+      "name": "manage_expression_menu_through_current_permission_policy",
+      "tool": "vrcforge_preview_manage_expression_menu",
+      "tools": [
+        "vrcforge_manage_expression_menu"
+      ],
+      "writes": true,
+      "runtimePermissionGateRequired": true,
+      "runtimeApprovalRequired": true
+    },
+    {
+      "name": "read_back_exact_scope_without_unrelated_changes",
+      "tool": "vrcforge_run_validation_report",
+      "tools": [
+        "vrcforge_build_test_readiness"
+      ],
+      "writes": false
+    }
+  ],
+  "approval": {
+    "required": true,
+    "owner": "runtime_supervision_layer",
+    "scope": "one_exact_write_through_current_permission_policy"
+  },
+  "checkpoint": {
+    "required": true
+  },
+  "rollback": {
+    "required": true,
+    "requiresSeparateApproval": true
+  }
+}
+

@@ -1,0 +1,31 @@
+{
+  "id": "com.vrcforge.skills.avatar_accessory_switch",
+  "name": "VRChat 饰品安装与开关",
+  "skill_name": "vrcforge-avatar-accessory-switch",
+  "version": "1.0.1",
+  "author": "VRCForge",
+  "description": "Install or configure one independent VRChat accessory with its proven Bone Proxy or existing constraint attachment, dedicated Bool, FX state, activation animation and expression-menu toggle; preserve the exact accessory subtree and existing sources.",
+  "min_vrcforge_version": "1.7.9",
+  "execution": "agentic",
+  "permissions": [
+    "read_project",
+    "unity_scan_scene",
+    "unity_modify_prefab",
+    "unity_modify_components",
+    "unity_run_validation",
+    "write_project_files"
+  ],
+  "entrypoints": {
+    "skill": "SKILL.md",
+    "workflow": "workflows/accessory-switch.json",
+    "guide": "references/workflow.md"
+  },
+  "targets": {
+    "runtime": "VRCForge",
+    "agents": [
+      "internal",
+      "external-mcp"
+    ],
+    "avatarType": "VRChat"
+  }
+}
