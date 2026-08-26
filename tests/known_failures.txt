@@ -1,0 +1,56 @@
+# Frozen failure whitelist for the release gate.
+# Recorded: 2026-08-26; source XML: candidate.xml at baseline commit f0b0e9b.
+# Every nodeid has its own allow reason and removal point.  Do not add entries
+# merely to make the gate green; whitelist changes require independent review.
+
+# Allow reason: the runtime planner is not invoked, so the execution-layer correction pass never runs (observed planner call count 0, expected 2).
+# Fix/remove after: registry/planner ownership is split and the planner-dispatch path is repaired.
+tests/test_agent_loop_p0.py::AgentLoopP0Tests::test_hidden_write_misreported_as_skill_gets_one_execution_layer_correction
+
+# Allow reason: the runtime planner is not invoked, so invalid schema output is not re-fed for the one correction attempt (0 calls, expected 2).
+# Fix/remove after: registry/planner ownership is split and schema-correction dispatch is repaired.
+tests/test_agent_loop_p0.py::AgentLoopP0Tests::test_llm_schema_failure_is_refed_for_correction_without_handler_call
+
+# Allow reason: the missing planner/tool pass reports planner_failed before the canonical tool failure can be preserved as tool_failed.
+# Fix/remove after: registry/planner ownership is split and canonical tool-failure propagation is repaired.
+tests/test_agent_loop_p0.py::AgentLoopP0Tests::test_model_cannot_claim_completion_after_canonical_tool_failure
+
+# Allow reason: the missing planner/tool pass reports planner_failed before the shell failure can be preserved as tool_failed.
+# Fix/remove after: registry/planner ownership is split and shell-failure propagation through the planner is repaired.
+tests/test_agent_loop_p0.py::AgentLoopP0Tests::test_model_cannot_claim_completion_after_shell_failure
+
+# Allow reason: the planner is not invoked, so vrcforge_scan_materials is never executed before the simulated provider failure.
+# Fix/remove after: registry/planner ownership is split and post-tool provider-failure continuation is repaired.
+tests/test_agent_loop_p0.py::AgentLoopP0Tests::test_post_tool_provider_failure_preserves_skill_result_and_marks_run_failed
+
+# Allow reason: the planner is not invoked, so the bounded second schema-correction attempt never occurs (0 calls, expected 2).
+# Fix/remove after: registry/planner ownership is split and bounded schema-correction dispatch is repaired.
+tests/test_agent_loop_p0.py::AgentLoopP0Tests::test_repeated_schema_failure_stops_after_one_correction_without_handler_call
+
+# Allow reason: the planner/tool sequence exits as planner_failed before unresolved tool-failure state can be retained across a retry.
+# Fix/remove after: registry/planner ownership is split and multi-action failure retention is repaired.
+tests/test_agent_loop_p0.py::AgentLoopP0Tests::test_retrying_one_failed_action_cannot_erase_another_unresolved_failure
+
+# Allow reason: the planner is not invoked, so the running shell action is never produced and cannot yield before a follow-up tool (0 calls, expected 1).
+# Fix/remove after: registry/planner ownership is split and running-shell continuation dispatch is repaired.
+tests/test_agent_loop_p0.py::AgentLoopP0Tests::test_running_llm_shell_yields_before_any_follow_up_tool
+
+# Allow reason: the planner is not invoked, so the valid corrected action is never executed and its exact arguments are absent.
+# Fix/remove after: registry/planner ownership is split and schema-correction completion evidence is repaired.
+tests/test_agent_loop_p0.py::AgentLoopP0Tests::test_schema_failure_requires_a_real_valid_action_before_exact_completion
+
+# Allow reason: the planner is not invoked, so sub-agent delegation never reaches waiting_for_tool and terminal evidence cannot resume the task.
+# Fix/remove after: registry/planner ownership is split and sub-agent planner continuation is repaired.
+tests/test_agent_loop_p0.py::AgentLoopP0Tests::test_sub_agent_terminal_result_resumes_the_same_task_with_exact_evidence
+
+# Allow reason: the planner is not invoked, so execution entry and the supervised write correction never reach approval (0 calls, expected 3).
+# Fix/remove after: registry/planner ownership is split and supervised-write classification correction is repaired.
+tests/test_agent_loop_p0.py::AgentLoopP0Tests::test_supervised_write_misclassified_as_skill_is_refed_then_requests_approval
+
+# Allow reason: planner configuration short-circuits as provider_not_configured before the patched provider request can raise provider_request_failed.
+# Fix/remove after: registry/planner ownership is split and provider request dispatch uses the configured runtime planner path.
+tests/test_agent_loop_p0.py::AgentLoopP0Tests::test_unplanned_message_provider_failure_is_typed_not_fake_disconnect
+
+# Allow reason: the planner/tool sequence never creates the expected steps collection, producing KeyError('steps') during unresolved-failure validation.
+# Fix/remove after: registry/planner ownership is split and unresolved multi-tool result projection is repaired.
+tests/test_agent_loop_p0.py::AgentLoopP0Tests::test_unrelated_success_cannot_clear_an_unresolved_tool_failure
