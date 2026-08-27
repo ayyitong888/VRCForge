@@ -8104,6 +8104,15 @@ class AgentGateway:
             if memory_preferences["crossSessionEnabled"]
             else []
         )
+        visible_tool_count = sum(
+            1
+            for tool in self._tools.values()
+            if self._tool_visible(tool, config, EXPOSURE_LAYER_EXECUTION)
+            and (
+                not tool.requires_user_activation
+                or self._desktop.computer_use_model_invocable(config)
+            )
+        )
         return {
             "ok": True,
             "runtime": {
@@ -8129,7 +8138,7 @@ class AgentGateway:
                 "providerRequired": True,
             },
             "tools": {
-                "count": len(self.build_manifest().get("tools", [])),
+                "count": visible_tool_count,
             },
             "skills": summarize_skill_registry(self.skills.build_skill_registry()),
             "goals": {
