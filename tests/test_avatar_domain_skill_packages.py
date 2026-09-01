@@ -123,9 +123,109 @@ def test_wardrobe_skill_contains_complete_menu_parameter_fx_animation_loop() -> 
     } <= set(skill["allowedTools"])
     contract = workflow["communityWardrobeContract"]
     assert contract["selector"]["type"] == "Int"
-    assert contract["fx"]["transitionSource"] == "AnyState"
+    assert contract["selector"] == {
+        "name": "衣柜",
+        "type": "Int",
+        "saved": True,
+        "synced": True,
+        "default": 0,
+        "fixedValueRequiredOnEveryOutfitWrite": True,
+        "automaticMaxPlusOneForbidden": True,
+        "preserveApprovedValuesAndAliases": True,
+    }
+    assert contract["fx"]["outfitSelectionTransitionSource"] == "AnyState"
+    assert contract["fx"]["outfitSelectionCondition"] == "衣柜 == selected_value"
+    assert contract["fx"]["hasExitTime"] is False
+    assert contract["fx"]["durationSeconds"] == 0
+    assert contract["fx"]["preserveVerifiedWorkingExistingTopology"] is True
+    assert contract["fx"]["verifiedUnconditionalAnyStateBaselineMayBePreserved"] is True
+    assert contract["fx"]["mustNotNormalizeWorkingTopologyToIdleOrBase"] is True
+    assert contract["fx"]["newTopologyMustMatchUserConfirmedReference"] is True
+    assert contract["fx"]["removeOnlyTransitionsStatesOrLayersWithProvenConflict"] is True
     assert contract["animation"]["keyframeTimeSeconds"] == 0
+    assert contract["animation"]["fullMutualExclusionMatrixRequired"] is True
+    assert contract["animation"]["rewriteEveryApprovedExistingValue"] is True
+    assert contract["animation"]["writeDefaultsMustNotSubstituteForMatrix"] is True
+    assert set(contract["animation"]["morphInventoryScope"]) == {
+        "current_avatar_body_renderers",
+        "current_outfit_renderers",
+        "existing_animation_bindings",
+        "candidate_animation_bindings",
+    }
+    assert contract["animation"]["inspectExistingAndCandidateOutfitAnimationMorphsFirst"] is True
+    assert contract["animation"]["bodyBaselinePolicy"] == (
+        "preserve_current_accepted_body_baseline_except_inside_an_outfit_that_cannot_fit_it"
+    )
+    assert contract["animation"]["pairedMorphCurvesRequired"] == [
+        "apply_needed_body_or_clothing_morphs_in_target_outfit",
+        "reset_or_restore_body_and_clothing_morphs_in_other_outfits",
+    ]
+    assert contract["animation"]["mustNotForceEveryOutfitToMaximumBodyMorph"] is True
+    assert contract["animation"]["mustNotHardcodeMorphValue100"] is True
+    assert contract["animation"]["projectExamplesOnly"] == {
+        "manuka": [
+            "Breast_big",
+            "Breast_big_PLUS",
+            "Foot_heel",
+            "Foot_heel_high",
+        ]
+    }
+    assert contract["animation"]["projectExamplesAreNotRequiredFields"] is True
+    assert contract["animation"]["visualAcceptanceAfterMorphChange"] == [
+        "body_no_penetration",
+        "outfit_no_penetration",
+        "heel_and_pose_alignment_correct",
+    ]
+    assert contract["protectedSystems"]["preserveAllUserConfiguredPhysics"] is True
+    assert "Marshmallow PB 2.x" in contract["protectedSystems"]["targetProjectExamples"]
+    assert contract["headObjects"]["refitOnlyWhen"] == [
+        "head_or_neck_transplant_detected",
+        "current_head_skeleton_differs_from_original_fit_target",
+        "current_head_surface_differs_from_original_fit_target",
+        "visual_offset_or_penetration_observed",
+    ]
+    assert contract["headObjects"]["preserveWhen"] == [
+        "complete_model_original_fit_is_valid",
+        "existing_outfit_fit_has_no_mismatch_or_visual_defect",
+    ]
+    assert contract["headObjects"]["projectExampleOnly"] == {
+        "targetHead": "Sapphy Head"
+    }
+    assert contract["menu"]["targetProjectRootControls"] == ["面捕", "原模型菜单"]
+    assert contract["menu"]["targetProjectWardrobeParent"] == "原模型菜单"
+    assert contract["menu"]["doNotMigrate"] == ["FT2 hair content"]
     assert contract["menu"]["maximumControlsPerPageIncludingNextPage"] == 8
+    assert contract["perOutfitGate"]["oneOutfitAtATime"] is True
+    assert contract["replacementCleanup"] == {
+        "fixedValueReuseRequiresExactOldBindingRemovalFirst": True,
+        "legacyFxLayerDeletionByExactNameOnly": True,
+        "legacySceneObjectRequiresCompleteInboundClosure": True,
+        "disableBeforeDelete": True,
+        "deleteRequiresSeparateApproval": True,
+        "neverDeleteSourceAvatarOrSourceAsset": True,
+    }
+    assert contract["projectBinding"] == {
+        "everyToolCallRequiresAbsoluteProjectPath": True,
+        "projectPathMustRemainConstant": True,
+    }
+    assert {
+        "vrcforge_scan_inbound_reference_closure",
+        "vrcforge_manage_fx_animator",
+        "vrcforge_write_animation_curve",
+        "vrcforge_set_property",
+        "vrcforge_set_gameobject_active",
+        "vrcforge_delete_gameobject",
+    } <= set(skill["allowedTools"])
+    instructions = (root / "SKILL.md").read_text(encoding="utf-8")
+    assert "max+1" in instructions
+    assert "完整互斥矩阵" in instructions
+    assert "来源 FT2 中已验证可工作的无条件 AnyState 基线不是缺陷" in instructions
+    assert "不得为了理论规范化改成 Idle/Base" in instructions
+    assert "先检查每套衣服现有/候选动画是否已经带形态键" in instructions
+    assert "成对写入必要的 body/clothing `reset/apply` 曲线" in instructions
+    assert "不硬编码 100 或固定名称" in instructions
+    assert "Sapphy Head 仅是当前目标示例" in instructions
+    assert "正常完整模型和已正确适配的衣服保留原配置" in instructions
     assert workflow["requiresOtherSkills"] == []
 
 

@@ -106,16 +106,11 @@ class UnityStatusService:
 
     def build_vrcforge_mcp_core_status(self, project_root: Path, settings: Any) -> dict[str, Any]:
         try:
-            tool_items = UnityMcpCoreClient(
+            core_info = UnityMcpCoreClient(
                 project_root,
                 timeout_seconds=max(1, min(int(settings.unity_mcp_timeout_seconds or 10), 30)),
-            ).list_tools(exposure_layer="execution")
-            names = sorted(
-                str(item.get("name") or "")
-                for item in tool_items
-                if isinstance(item, dict) and str(item.get("name") or "")
-            )
-            missing = [name for name in self._ports.required_tools if name not in set(names)]
+            ).core_info()
+            core_version = str(core_info.get("coreVersion") or "")
             tools = {
                 "ok": True,
                 "reachable": True,
@@ -123,12 +118,14 @@ class UnityStatusService:
                 "host": "127.0.0.1",
                 "port": 0,
                 "instance": "project-scoped",
-                "totalTools": len(names),
+                "totalTools": 0,
                 "defaultToolsCount": 0,
-                "vrcForgeToolsCount": len(names),
-                "toolNames": names,
-                "vrcForgeToolNames": names,
-                "missingRequiredVrcForgeTools": missing,
+                "vrcForgeToolsCount": 0,
+                "toolNames": [],
+                "vrcForgeToolNames": [],
+                "missingRequiredVrcForgeTools": [],
+                "inspectionMode": "core_version_only",
+                "inspectionSkipped": True,
                 "onlyDefaultTools": False,
                 "output": "",
                 "parsed": None,
@@ -155,10 +152,17 @@ class UnityStatusService:
                 "instances": [active_instance],
                 "activeInstanceCount": 1,
                 "tools": tools,
-                "mcpHealth": {"ok": True, "protocolVersion": "2026-07-28", "transport": "vrcforge-mcp-core"},
+                "mcpHealth": {
+                    "ok": True,
+                    "protocolVersion": "2026-07-28",
+                    "transport": "vrcforge-mcp-core",
+                    "version": core_version,
+                },
                 "unityMcpPackageVersion": "vrcforge-core-2026-07-28",
-                "vrcForgeToolsRegistered": bool(names),
-                "missingRequiredVrcForgeTools": missing,
+                "coreVersion": core_version,
+                "coreVersionMatched": True,
+                "vrcForgeToolsRegistered": True,
+                "missingRequiredVrcForgeTools": [],
                 "output": "",
                 "parsed": None,
                 "error": "",
@@ -189,6 +193,8 @@ class UnityStatusService:
                 },
                 "mcpHealth": {"ok": False, "transport": "vrcforge-mcp-core"},
                 "unityMcpPackageVersion": "vrcforge-core-2026-07-28",
+                "coreVersion": "",
+                "coreVersionMatched": False,
                 "vrcForgeToolsRegistered": False,
                 "missingRequiredVrcForgeTools": list(self._ports.required_tools),
                 "output": "",

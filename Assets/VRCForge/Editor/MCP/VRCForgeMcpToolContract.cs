@@ -15,8 +15,8 @@ namespace VRCForge.Editor
         internal const string CoreIdentity = "vrcforge.unity-core";
         internal const string HandshakeProtocol = "vrcforge.core-handshake.v1";
         internal const string ProductVersion = "1.7.10";
-        internal const string ToolContractVersion = "84";
-        internal const int ToolCount = 82;
+        internal const string ToolContractVersion = "86";
+        internal const int ToolCount = 85;
 
         private static readonly Dictionary<string, string> ExpectedTypes =
             new Dictionary<string, string>(StringComparer.Ordinal)
@@ -35,6 +35,7 @@ namespace VRCForge.Editor
                 { "vrc_build_and_upload_avatar", "VRCForge.Editor.VrchatAvatarUploadTool" },
                 { "vrc_build_test_avatar", "VRCForge.Editor.VrchatBuildTestTool" },
                 { "vrc_capture_scene_view", "VRCForge.Editor.SceneViewCaptureTool" },
+                { "vrc_configure_aao_merge_physbone", "VRCForge.Editor.AaoMergePhysBoneTool" },
                 { "vrc_create_component_feature", "VRCForge.Editor.ComponentFeatureWriterTool" },
                 { "vrc_create_gameobject", "VRCForge.Editor.CreateGameObjectTool" },
                 { "vrc_create_safe_backup", "VRCForge.Editor.ConsoleTools" },
@@ -42,6 +43,7 @@ namespace VRCForge.Editor
                 { "vrc_delete_gameobject", "VRCForge.Editor.DeleteGameObjectTool" },
                 { "vrc_duplicate_scene_object", "VRCForge.Editor.DuplicateSceneObjectTool" },
                 { "vrc_duplicate_project_asset", "VRCForge.Editor.DuplicateProjectAssetTool" },
+                { "vrc_duplicate_scene_asset", "VRCForge.Editor.SceneAssetDuplicateTool" },
                 { "vrc_ensure_animator_state", "VRCForge.Editor.EnsureAnimatorStateTool" },
                 { "vrc_ensure_expression_menu_control", "VRCForge.Editor.EnsureExpressionMenuControlTool" },
                 { "vrc_ensure_expression_parameter", "VRCForge.Editor.EnsureExpressionParameterTool" },
@@ -76,6 +78,7 @@ namespace VRCForge.Editor
                 { "vrc_rename_gameobject", "VRCForge.Editor.RenameGameObjectTool" },
                 { "vrc_reparent_gameobject", "VRCForge.Editor.ReparentGameObjectTool" },
                 { "vrc_restore_safe_backup", "VRCForge.Editor.PrefabTools" },
+                { "vrc_revert_removed_component", "VRCForge.Editor.RevertRemovedComponentTool" },
                 { "vrc_rollback_avatar_parameters", "VRCForge.Editor.AvatarParameterRollbackTool" },
                 { "vrc_save_scene_object_as_prefab", "VRCForge.Editor.SaveSceneObjectAsPrefabTool" },
                 { "vrc_save_current_scene", "VRCForge.Editor.SaveCurrentSceneTool" },

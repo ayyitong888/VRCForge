@@ -1,6 +1,8 @@
 {
   "schema": "vrcforge.unitypackage-guid-manifest.v1",
   "entries": [
+    { "path": "Assets/VRCForge/Editor/AaoMergePhysBoneTool.cs", "guid": "7f8f7826b6de4e038506cc59521ccb55" },
+    { "path": "Assets/VRCForge/Editor/SceneAssetDuplicateTool.cs", "guid": "5699d5b0f0c64ac9b2a9e8c6fe42331e" },
     { "path": "Assets/VRCForge", "guid": "e5a9931c984c4fa0bffe353deb4f5b32" },
     { "path": "Assets/VRCForge/Core", "guid": "1f4276f19de2c1b86750484077e07335" },
     { "path": "Assets/VRCForge/Core/MCP", "guid": "127e95001b69bde874acc9964f6abcc2" },
@@ -64,6 +66,7 @@
     { "path": "Assets/VRCForge/Editor/PrimitiveBasisFixtureInspector.cs", "guid": "80b878673ab4475ebea84c182651852f" },
     { "path": "Assets/VRCForge/Editor/PrimitiveBasisLiveGuard.cs", "guid": "990e1e58a5aa4913bb734a9cdd7eea3a" },
     { "path": "Assets/VRCForge/Editor/RendererComponentIdentity.cs", "guid": "2183a304fc67e7e32e2d875c6853d266" },
+    { "path": "Assets/VRCForge/Editor/Generic/RevertRemovedComponentTool.cs", "guid": "7f1c38f0dead30465d05671eea0ea24e" },
     { "path": "Assets/VRCForge/Editor/SaveSceneObjectAsPrefabTool.cs", "guid": "c6a297ca6bb3daa5c07a2e01ba11ef18" },
     { "path": "Assets/VRCForge/Editor/SaveNewSceneTool.cs", "guid": "5e4fd832bca241fc81d514ed857aa89f" },
     { "path": "Assets/VRCForge/Editor/SceneObjectCopyCore.cs", "guid": "7f7c6234ae481dd256aef2a20b626158" },

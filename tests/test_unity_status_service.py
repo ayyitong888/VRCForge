@@ -69,16 +69,22 @@ def test_unity_status_service_has_explicit_read_only_ports_and_no_root_facades()
 
 
 def test_unity_status_service_projects_existing_core_schema_with_fake_client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    calls: list[tuple[Path, int, str]] = []
+    calls: list[tuple[Path, int]] = []
 
     class FakeCoreClient:
         def __init__(self, project_root: Path, *, timeout_seconds: int) -> None:
             self.project_root = project_root
             self.timeout_seconds = timeout_seconds
 
-        def list_tools(self, *, exposure_layer: str) -> list[dict[str, str]]:
-            calls.append((self.project_root, self.timeout_seconds, exposure_layer))
-            return [{"name": "vrc_beta"}, {"name": "vrc_alpha"}, {"name": ""}, {"other": "ignored"}]
+        def core_info(self) -> dict[str, str]:
+            calls.append((self.project_root, self.timeout_seconds))
+            return {
+                "schema": "vrcforge.core_info.v1",
+                "coreIdentity": "vrcforge.unity-core",
+                "coreVersion": "1.7.10",
+                "instanceId": "instance-a",
+                "projectId": "project-a",
+            }
 
     monkeypatch.setattr(unity_status_service, "UnityMcpCoreClient", FakeCoreClient)
     project = tmp_path / "Project"
@@ -87,7 +93,7 @@ def test_unity_status_service_projects_existing_core_schema_with_fake_client(mon
         project,
     )
 
-    assert calls == [(project, 10, "execution")]
+    assert calls == [(project, 10)]
     assert status == {
         "connected": True,
         "executionReady": True,
@@ -119,19 +125,28 @@ def test_unity_status_service_projects_existing_core_schema_with_fake_client(mon
             "host": "127.0.0.1",
             "port": 0,
             "instance": "project-scoped",
-            "totalTools": 2,
+            "totalTools": 0,
             "defaultToolsCount": 0,
-            "vrcForgeToolsCount": 2,
-            "toolNames": ["vrc_alpha", "vrc_beta"],
-            "vrcForgeToolNames": ["vrc_alpha", "vrc_beta"],
+            "vrcForgeToolsCount": 0,
+            "toolNames": [],
+            "vrcForgeToolNames": [],
             "missingRequiredVrcForgeTools": [],
+            "inspectionMode": "core_version_only",
+            "inspectionSkipped": True,
             "onlyDefaultTools": False,
             "output": "",
             "parsed": None,
             "error": "",
         },
-        "mcpHealth": {"ok": True, "protocolVersion": "2026-07-28", "transport": "vrcforge-mcp-core"},
+        "mcpHealth": {
+            "ok": True,
+            "protocolVersion": "2026-07-28",
+            "transport": "vrcforge-mcp-core",
+            "version": "1.7.10",
+        },
         "unityMcpPackageVersion": "vrcforge-core-2026-07-28",
+        "coreVersion": "1.7.10",
+        "coreVersionMatched": True,
         "vrcForgeToolsRegistered": True,
         "missingRequiredVrcForgeTools": [],
         "output": "",
@@ -140,12 +155,53 @@ def test_unity_status_service_projects_existing_core_schema_with_fake_client(mon
     }
 
 
+def test_unity_status_binds_core_version_without_listing_tools(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    calls: list[tuple[str, Path, int]] = []
+
+    class FakeCoreClient:
+        def __init__(self, project_root: Path, *, timeout_seconds: int) -> None:
+            self.project_root = project_root
+            self.timeout_seconds = timeout_seconds
+
+        def core_info(self) -> dict[str, object]:
+            calls.append(("core_info", self.project_root, self.timeout_seconds))
+            return {
+                "schema": "vrcforge.core_info.v1",
+                "coreIdentity": "vrcforge.unity-core",
+                "coreVersion": "1.7.10",
+                "instanceId": "instance-version-only",
+                "projectId": "project-version-only",
+            }
+
+        def list_tools(self, *, exposure_layer: str) -> list[dict[str, str]]:
+            raise AssertionError(f"connection status must not inspect tools ({exposure_layer})")
+
+    monkeypatch.setattr(unity_status_service, "UnityMcpCoreClient", FakeCoreClient)
+    project = tmp_path / "Project"
+    status = make_service().build_unity_status_snapshot(
+        SimpleNamespace(unity_mcp_timeout_seconds=8),
+        project,
+    )
+
+    assert calls == [("core_info", project, 8)]
+    assert status["connected"] is True
+    assert status["executionReady"] is True
+    assert status["coreVersion"] == "1.7.10"
+    assert status["coreVersionMatched"] is True
+    assert status["tools"]["inspectionMode"] == "core_version_only"
+    assert status["tools"]["inspectionSkipped"] is True
+    assert status["missingRequiredVrcForgeTools"] == []
+
+
 def test_unity_status_service_preserves_core_error_and_missing_project_contract(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     class OfflineCoreClient:
         def __init__(self, *_args, **_kwargs) -> None:
             pass
 
-        def list_tools(self, *, exposure_layer: str) -> list[dict[str, str]]:
+        def core_info(self) -> dict[str, str]:
             raise UnityMcpCoreError("offline")
 
     monkeypatch.setattr(unity_status_service, "UnityMcpCoreClient", OfflineCoreClient)
@@ -186,9 +242,8 @@ def test_settings_project_path_overrides_the_persisted_selected_project(
             assert timeout_seconds == 7
             observed.append(project_root)
 
-        def list_tools(self, *, exposure_layer: str) -> list[dict[str, str]]:
-            assert exposure_layer == "execution"
-            return [{"name": "vrc_alpha"}, {"name": "vrc_beta"}]
+        def core_info(self) -> dict[str, str]:
+            return {"coreVersion": "1.7.10"}
 
     monkeypatch.setattr(unity_status_service, "UnityMcpCoreClient", FakeCoreClient)
     status = make_service(selected_project=str(selected)).build_unity_status_snapshot(
@@ -207,9 +262,8 @@ def test_unity_status_keeps_connection_but_blocks_execution_for_exact_reload_dia
         def __init__(self, *_args, **_kwargs) -> None:
             pass
 
-        def list_tools(self, *, exposure_layer: str) -> list[dict[str, str]]:
-            assert exposure_layer == "execution"
-            return [{"name": "vrc_alpha"}, {"name": "vrc_beta"}]
+        def core_info(self) -> dict[str, str]:
+            return {"coreVersion": "1.7.10"}
 
     monkeypatch.setattr(unity_status_service, "UnityMcpCoreClient", FakeCoreClient)
     monkeypatch.setattr(

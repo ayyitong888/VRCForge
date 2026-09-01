@@ -1,39 +1,63 @@
-# VRChat 衣柜制作：服装、参数、FX、动画和菜单完整流程
+# VRChat 衣柜制作：固定值、完整互斥矩阵与逐套验收
 
-这是一个**单独安装即可完整制作衣柜**的 Skill。衣柜菜单、Expression Parameters、FX Animator 和 AnimationClip 都属于衣柜制作本身；不能要求用户额外安装菜单 Skill 或动画 Skill。
+这是一个单独安装即可完成衣柜闭环的 Skill。所有示例中的 `projectPath` 都必须替换为用户选择工程的**绝对路径**，且每次调用都要显式携带；本流程不允许工具自行猜工程。
 
-## 0. 不确定时先查社区
+## 0. 先冻结事实，不先写
 
-骨骼适配、Modular Avatar Setup Outfit、Merge Armature、Expression Parameter、VRChat 菜单分页、FX AnyState 或 AnimationClip 行为拿不准时，先查成熟社区教程、服装作者说明和官方文档。精确原子不存在或证据不足时返回 `capabilityGap=true` 并停止；禁止猜测、虚构工具、使用未获授权的付费服装或删除来源 Avatar。
+1. `vrcforge_list_avatars` 固定 `projectPath`、场景、Avatar；`vrcforge_read_avatar_descriptor` 回读真正绑定的 FX、Parameters、Menu。
+2. 全量调用 `vrcforge_scan_wardrobe`、`vrcforge_scan_parameters`、`vrcforge_scan_fx_animator`、`vrcforge_scan_avatar_controls`、`vrcforge_scan_animation_bindings`、`vrcforge_scan_blendshapes`。记录每个已批准值对应的菜单、状态、clip、套装根、默认鞋/袜/内衣/领带/手环和全部相关形态键。
+3. 先检查每套衣服现有动画和候选动画是否已经包含形态键曲线，再补缺口。盘点必须覆盖当前 Avatar 的身体 Renderer、当前套装 Renderer、现有动画绑定和候选动画绑定。依据套装风格、鞋跟高度、作者说明、已有动画与实际穿模证据，确定该套需要写的身体和衣服形态键及数值。名称相似不是证据。
+4. `Breast_big`、`Breast_big_PLUS`、`Foot_heel`、`Foot_heel_high` 仅是当前 Manuka 目标中可能出现的示例，不是任何其他 Avatar 的必填字段。
+5. 调用 `vrcforge_scan_modular_avatar`、`vrcforge_inspect_skinned_mesh_bone_usage` 检查服装 prefab、Humanoid Hips、SMR、rootBone 和作者组件。保留作者 PhysBone、collider、constraint 和所有用户已调好的物理配置；当前 Manuka 项目中的 Marshmallow PB 2.x 明确禁改。
+6. 得到用户确认的固定值矩阵后才写。任一对象路径、clip、形态键值或菜单归属不明确，返回 `capabilityGap=true` 并停止。
 
-## 1. 固定工程与扫描
+## 1. 建立唯一参数并保留已验证 FX 拓扑
 
-1. 用 `vrcforge_list_avatars` 固定用户明确选择的 `projectPath`、场景和 Avatar。
-2. 用 `vrcforge_read_avatar_descriptor` 读出实际绑定的 FX、Parameters 和 Menu，不替换 Facial Tracking、原模型资产或其他系统。
-3. 依次调用 `vrcforge_scan_wardrobe`、`vrcforge_scan_parameters`、`vrcforge_scan_fx_animator`、`vrcforge_scan_avatar_controls`、`vrcforge_scan_animation_bindings`；记录已用 Int 值、状态、clip、菜单页、别名和对象开关。
-4. 用 `vrcforge_scan_modular_avatar` 和 `vrcforge_inspect_skinned_mesh_bone_usage` 确认服装 prefab、Humanoid Hips、SkinnedMeshRenderer、rootBone 和实际受权重使用的骨骼；保留作者 prefab 自带 PhysBone、collider 和 constraint。
+1. 唯一选择器必须是 saved、synced、默认值 0 的 `衣柜 : Int`。使用 `vrcforge_preview_ensure_expression_parameter` → 批准 → `vrcforge_ensure_expression_parameter`；不要创建每套 Bool。
+2. 先用 `vrcforge_scan_fx_animator` 和实际 Play Mode 切换证明现有状态机拓扑。来源 FT2 中已经正常运行的无条件 AnyState 基线必须保留；不要因为理论偏好把它改成 Idle/Base，也不要重排能工作的状态。
+3. 只对回读和运行证据已证明会冲突的额外层、状态或转换做精确 preview/修改。新建状态机时复现用户确认的参考结构，不自创规范。每套选择转换使用 `AnyState → Outfit_N`、`衣柜 Equals N`、`hasExitTime=false`、`exitTime=0`、`duration=0`、`canTransitionToSelf=false`。
 
-## 2. 装衣服并接入衣柜
+## 2. 一次只安装一套
 
-1. 已在 Avatar 层级的整套服装：`vrcforge_preview_setup_outfit` → 用户当前权限策略 → `vrcforge_setup_outfit`，回读真正生成的 `ModularAvatarMergeArmature`。
-2. 未实例化的完整 prefab：使用对应的 `vrcforge_preview_add_outfit` / `vrcforge_add_outfit`，避免重复 Setup Outfit；如果该原子已经接入衣柜，不再重复创建参数、状态或菜单。
-3. 现有衣柜优先复用一个 saved、synced 的 `衣柜 : Int`，默认值 `0`；用 `vrcforge_preview_ensure_expression_parameter` / `vrcforge_ensure_expression_parameter` 校验或创建，不把每件衣服做成无关 Bool。
-4. 用 `vrcforge_preview_add_wardrobe_outfit` / `vrcforge_add_wardrobe_outfit` 为用户选定的服装分配一个未占用值，保留非连续历史值、已有跨菜单别名和当前默认服装。
+1. 普通完整服装用 `vrcforge_preview_setup_outfit` → 批准 → `vrcforge_setup_outfit`，回读 `ModularAvatarMergeArmature`。未实例化 prefab 可用 Add Outfit，但若需要固定值，衣柜管理必须关闭，随后单独调用衣柜原子。
+2. 所有套装写入都显式传 `value=N`。禁止省略 `value`；准备式 Add Outfit 的衣柜分支会自动 `max+1`，不能用于复用 `value=3` 或其他固定槽位。
+3. 定点替换值 3 时：先 `vrcforge_preview_manage_wardrobe(action=remove_outfit,targetValue=3,deleteObjects=false,deactivateObjects=true,deleteGeneratedAssets=false)`；批准并执行后全量回读，确认 3 的旧菜单/FX 绑定释放，再 `vrcforge_preview_add_wardrobe_outfit(...,value=3)` → 批准 → `vrcforge_add_wardrobe_outfit(...,value=3)`。
 
-## 3. FX 和动画是衣柜的必要组成部分
+## 3. 完整重写所有已批准动画矩阵
 
-1. 保留当前 Descriptor 绑定的 FX controller；服装通常使用 `AnyState → 衣柜 == N → State → Motion/Clip`，过渡时间 `0`、`hasExitTime=false`，不要改其他 layer。
-2. 使用 `vrcforge_preview_ensure_animator_state` / `vrcforge_ensure_animator_state`，必要时通过 `vrcforge_preview_manage_fx_animator` / `vrcforge_manage_fx_animator` 精确处理已证明的状态或条件。
-3. 扫描具体服装的启用、关闭和保持不变对象，分清内衣、袜子、尾巴、高跟与 Body BlendShape；只对有证据的属性使用 `vrcforge_preview_write_animation_curve` / `vrcforge_write_animation_curve`。
-4. 换装 keyframe 应写在 `time=0`；不假设每套历史服装都有 OFF clip，也不凭猜测改胸型、鞋跟或原始身体。
+`vrcforge_add_wardrobe_outfit` 只新增一套，不会改写旧 clip。因此新增/替换后必须对每个已批准值逐个处理：
 
-## 4. 衣柜菜单同样由本 Skill 完成
+1. 对该值的 clip，用 `vrcforge_preview_write_animation_curve` / `vrcforge_write_animation_curve` 在 `time=0` 明确写当前套装根 `m_IsActive=1`，其他所有套装根 `m_IsActive=0`。
+2. 同一个 clip 明确写该套设计的默认鞋、袜、内衣、领带、手环等开关。不要把“保持不变”当成“默认正确”；矩阵未列出的旧开关曲线先预览，再删除陈旧 binding。
+3. 以当前已验收身体形态为基线，并先复用衣服动画中已经正确存在的形态键曲线。适配当前基线的衣服要维持或恢复基线；不适配的衣服只在该套 clip 内把必要的身体形态调到可穿范围，并在其他套 clip 中恢复。衣服自身形态键也按相同方式成对写 `apply/reset`。不能硬编码数值 100、不能从固定名称猜测，也不能要求所有衣服把身体推到最大。
+4. 每个 clip 写完立即用 `vrcforge_scan_animation_bindings` 与 `vrcforge_scan_blendshapes` 回读：当前根必须 ON、所有其他根必须 OFF、默认部件和形态键必须与冻结矩阵完全一致。Write Defaults 或场景默认值不能代替这项检查。
+5. Play Mode 中实际驱动形态键并观察身体与衣服：胸、腰、臀、腿、脚和鞋跟等相关区域不得穿模，鞋跟/脚部姿态必须与套装一致。只验证曲线存在不算视觉通过。
 
-1. 保留既有根菜单顺序，例如 `FacialTracking → 换装 → R18`；服装选项放在 `换装 / 衣服`，不重建根菜单或调整面捕。
-2. 每页最多 8 个控制项，翻页 `下一页` 本身也占一个槽；空参数的 SubMenu 不是服装选项。
-3. 对准确的 `衣柜 = N` 控件使用 `vrcforge_preview_ensure_expression_menu_control` / `vrcforge_ensure_expression_menu_control`；必要时使用现有 expression-menu 管理原子，但如果衣柜原子已经生成控件则不要重复。
-4. 保留现有中文、日文、英文、图标、原始拼写、跨页面别名与没有暴露到菜单的参数。
+## 4. 头部、脸部和颈部对象按需适配
 
-## 5. 权限、检查点和验收
+先检测依附头部、脸部或颈部的套件对象，但不要默认重调：
 
-所有写入必须通过 VRCForge 已配置的当前权限策略；需要确认的配置等待确认，自动允许的配置沿用现有安全通道。每次写入仍绑定精确 preview、checkpoint、作用目标和写后回读；回滚需要单独确认。最后重新核对 `菜单 → Int → FX transition/state → clip curve → 服装对象 / 身体补偿`，运行 `vrcforge_run_validation_report` 和 `vrcforge_build_test_readiness`。不上传模型，不修改任务范围外的资产。
+1. 只有发生接头/换头、当前头骨或头表面与套件原适配目标不一致，或正交/透视证据显示偏移、悬空或穿模时，才进入重新定位流程。正常完整模型和已正确适配的衣服保留作者原配置。
+2. 需要重新适配时，读取当前实际头部的父级、骨架、表面、局部 TRS、constraint/PhysBone 引用；只调整导入对象或安装容器，不缩放身体与 Armature。Sapphy Head 只是当前目标示例，不是通用目标名。
+3. 通过 `vrcforge_set_property` 做精确、可回读的局部位置/旋转/统一缩放。不得自动重建作者组件或改用户物理配置。
+4. 只有发生重新适配时，才强制验收 Front、Left 90、Right 90、Back、Bottom 和 Persp 近景；Play Mode 下转头和 AFK 动作时对象必须继承正确且不穿模/漂移。
+
+## 5. 菜单只放到用户批准层级
+
+1. 通用规则是保留用户批准的现有根结构。当前目标根只保留 `面捕` 与 `原模型菜单`，不要在根新建 `换装`、`R18` 或衣柜分页。
+2. 当前目标在 `原模型菜单` 下组织 `衣服 / 头发 / 配饰`；服装按钮放 `衣服`，写固定 `衣柜=N`。头发和配饰仅整理原模型已有或本任务明确授权内容，不迁移 FT2 头发。
+3. 每页最多 8 个控制项，`下一页` 自身占一个槽。每次先 preview 精确菜单路径，写后回读根与子菜单；禁止工具回退到根菜单。
+
+## 6. 每套闭环后才继续
+
+对当前 N 依次回读：菜单按钮 → `衣柜=N` → 条件式 AnyState → State/Motion → 完整 clip 矩阵 → 场景对象/默认部件/形态键。然后用 Gesture Manager 进入 Play Mode，至少切换 `0 → N → 其他值 → N`，做正面、左右 90、背面、底部并检查所有已改变形态键对应区域的身体/衣服穿模。只有本套触发了头部重新适配，才增加 Persp 近景与转头动作。`vrcforge_run_validation_report` 和 `vrcforge_build_test_readiness` 通过后，才可处理下一套。
+
+## 7. 已证明旧内容的清理
+
+1. 旧 FX 层只能按 `vrcforge_scan_fx_animator` 返回的精确 `layerName`，逐层 preview `delete_layer`、批准、执行、全量回读；不得用模糊名批量删除。
+2. 旧场景实例先 `vrcforge_scan_inbound_reference_closure`。结果必须完整、未截断且所有消费者已解绑；先 `vrcforge_set_gameobject_active(false)` 并完成替换套装的动态验收。
+3. 只有用户对精确对象路径另行批准后，才调用 `vrcforge_delete_gameobject`。删除后回读对象不存在、FX/Menu/Parameters 无残留；来源 prefab/资产和来源 Avatar 永不删除。
+
+## 8. 最短安全调用序列
+
+所有项目内调用均附同一个绝对 `projectPath`：全量扫描 → 先读衣服已有动画 → 冻结固定值、对象、部件和成对形态键矩阵 → 确保 `衣柜` 并保留/复现已确认 FX 拓扑 → 预览/安装一套 → 必要时释放并显式复用固定值 → 全量重写所有已批准 clip 矩阵 → 核对衣柜选择转换且只修已证明冲突 → 必要时按证据适配头部对象 → 定点菜单 → 当前套静态/动态/穿模验收 → 下一套。全部套装闭环后，再逐层清已证明过时的 FX；最后做旧实例引用闭包、禁用、动态复验与单独批准删除。

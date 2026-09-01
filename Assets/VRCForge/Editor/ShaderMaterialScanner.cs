@@ -31,6 +31,12 @@ namespace VRCForge.Editor
 
             [VRCForgeInput("Refresh the Unity AssetDatabase after writing JSON.", IsRequired = false)]
             public bool? refreshAssets { get; set; } = true;
+
+            [VRCForgeInput("Optional exact material IDs to return. When omitted, all material slots are returned.", IsRequired = false)]
+            public List<string> materialIds { get; set; }
+
+            [VRCForgeInput("Include texture dependency metadata in the response.", IsRequired = false)]
+            public bool? includeTextures { get; set; } = true;
         }
 
         [MenuItem("VRCForge/Scan Shader Materials")]
@@ -47,7 +53,10 @@ namespace VRCForge.Editor
 
             try
             {
-                var payload = BuildPayload(parameters.avatarPath ?? "");
+                var payload = BuildPayload(
+                    parameters.avatarPath ?? "",
+                    parameters.materialIds,
+                    parameters.includeTextures ?? true);
                 var requestedPath = parameters.outputPath ?? "";
                 if (!string.IsNullOrWhiteSpace(requestedPath))
                 {
@@ -79,11 +88,19 @@ namespace VRCForge.Editor
             }
         }
 
-        public static MaterialInventoryPayload BuildPayload(string avatarPath)
+        public static MaterialInventoryPayload BuildPayload(
+            string avatarPath,
+            IEnumerable<string> materialIds = null,
+            bool includeTextures = true)
         {
             var normalizedAvatarPath = NormalizePath(avatarPath);
             var avatars = ResolveAvatarRoots(normalizedAvatarPath);
             var materials = new List<MaterialInventoryItem>();
+            var selectedMaterialIds = materialIds == null
+                ? null
+                : new HashSet<string>(
+                    materialIds.Where(value => !string.IsNullOrWhiteSpace(value)).Select(value => value.Trim()),
+                    StringComparer.OrdinalIgnoreCase);
             var rendererCount = 0;
             var sceneNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             var rendererComponentIds = new HashSet<string>(StringComparer.Ordinal);
@@ -91,9 +108,10 @@ namespace VRCForge.Editor
             foreach (var avatarRoot in avatars)
             {
                 sceneNames.Add(avatarRoot.gameObject.scene.name);
+                var scopeIsAvatarRoot = ReferenceEquals(FindAvatarRoot(avatarRoot), avatarRoot);
                 var renderers = avatarRoot.GetComponentsInChildren<Renderer>(true)
                     .Where(IsSceneObject)
-                    .Where(renderer => ReferenceEquals(FindAvatarRoot(renderer.transform), avatarRoot))
+                    .Where(renderer => !scopeIsAvatarRoot || ReferenceEquals(FindAvatarRoot(renderer.transform), avatarRoot))
                     .Select(renderer => new
                     {
                         renderer,
@@ -135,6 +153,10 @@ namespace VRCForge.Editor
                             slotIndex,
                             materialName,
                             shaderName);
+                        if (selectedMaterialIds != null && !selectedMaterialIds.Contains(materialId))
+                        {
+                            continue;
+                        }
 
                         materials.Add(new MaterialInventoryItem
                         {
@@ -160,7 +182,9 @@ namespace VRCForge.Editor
                             shader_family = shaderFamily,
                             category = category,
                             shared_material_key = $"{materialName}|{shaderName}",
-                            textures = ReadTextureDependencies(material),
+                            textures = includeTextures
+                                ? ReadTextureDependencies(material)
+                                : new List<MaterialTextureDependency>(),
                             supported_properties = adapter != null
                                 ? adapter.ReadSupportedProperties(material)
                                 : new Dictionary<string, MaterialPropertyValue>()
@@ -306,8 +330,27 @@ namespace VRCForge.Editor
 
         private static List<Transform> ResolveAvatarRoots(string normalizedAvatarPath)
         {
-            var renderers = Resources.FindObjectsOfTypeAll<Renderer>().Where(IsSceneObject);
+            var renderers = Resources.FindObjectsOfTypeAll<Renderer>().Where(IsSceneObject).ToList();
             var roots = new Dictionary<int, Transform>();
+
+            if (!string.IsNullOrEmpty(normalizedAvatarPath))
+            {
+                var exactScopes = Resources.FindObjectsOfTypeAll<Transform>()
+                    .Where(IsSceneObject)
+                    .Where(transform => string.Equals(
+                        NormalizePath(GetTransformPath(transform)),
+                        normalizedAvatarPath,
+                        StringComparison.OrdinalIgnoreCase))
+                    .Where(transform => transform.GetComponentsInChildren<Renderer>(true).Any(IsSceneObject))
+                    .OrderBy(transform => (transform.gameObject.scene.path ?? string.Empty).Replace("\\", "/"), StringComparer.Ordinal)
+                    .ThenBy(transform => transform.gameObject.scene.handle)
+                    .ThenBy(transform => transform.GetInstanceID())
+                    .ToList();
+                if (exactScopes.Count > 0)
+                {
+                    return exactScopes;
+                }
+            }
 
             foreach (var renderer in renderers)
             {

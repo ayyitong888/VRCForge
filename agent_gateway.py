@@ -533,6 +533,7 @@ EXTERNAL_MCP_READ_TOOL_BLOCKS: dict[str, frozenset[str]] = {
             "vrcforge_get_asset_info",
             "vrcforge_preview_scene_object_prefab",
             "vrcforge_preview_project_asset_duplicate",
+            "vrcforge_preview_scene_asset_duplicate",
         }
     ),
     "materials": frozenset(
@@ -763,6 +764,19 @@ SCENE_OBJECT_DUPLICATE_PUBLIC_INPUT_SCHEMA: dict[str, Any] = {
     },
 }
 
+SCENE_ASSET_DUPLICATE_PUBLIC_INPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["projectPath", "sourceScenePath", "destinationScenePath"],
+    "properties": {
+        "projectPath": _PROJECT_PATH_PROPERTY,
+        "sourceScenePath": {"type": "string", "pattern": "^Assets/.*\\.unity$"},
+        "destinationScenePath": {"type": "string", "pattern": "^Assets/.*\\.unity$"},
+        "openAsOnlyActiveScene": {"type": "boolean", "default": False},
+        "overwrite": {"type": "boolean", "const": False},
+    },
+}
+
 AVATAR_DESCRIPTOR_WRITE_PUBLIC_INPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
@@ -972,6 +986,7 @@ UNITY_READ_TOOL_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
     },
     "vrcforge_preview_material_texture_assignment": MATERIAL_TEXTURE_ASSIGNMENT_PUBLIC_INPUT_SCHEMA,
     "vrcforge_preview_scene_object_duplicate": SCENE_OBJECT_DUPLICATE_PUBLIC_INPUT_SCHEMA,
+    "vrcforge_preview_scene_asset_duplicate": SCENE_ASSET_DUPLICATE_PUBLIC_INPUT_SCHEMA,
     "vrcforge_preview_write_avatar_descriptor": AVATAR_DESCRIPTOR_WRITE_PUBLIC_INPUT_SCHEMA,
     "vrcforge_preview_write_animation_curve": ANIMATION_CURVE_WRITE_PUBLIC_INPUT_SCHEMA,
     "vrcforge_preview_manage_expression_parameters": EXPRESSION_PARAMETERS_MANAGE_PUBLIC_INPUT_SCHEMA,
@@ -1291,6 +1306,7 @@ EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
         },
     },
     "vrcforge_duplicate_scene_object": SCENE_OBJECT_DUPLICATE_PUBLIC_INPUT_SCHEMA,
+    "vrcforge_duplicate_scene_asset": SCENE_ASSET_DUPLICATE_PUBLIC_INPUT_SCHEMA,
     "vrcforge_write_avatar_descriptor": AVATAR_DESCRIPTOR_WRITE_PUBLIC_INPUT_SCHEMA,
     "vrcforge_write_animation_curve": ANIMATION_CURVE_WRITE_PUBLIC_INPUT_SCHEMA,
     "vrcforge_manage_expression_parameters": EXPRESSION_PARAMETERS_MANAGE_PUBLIC_INPUT_SCHEMA,
@@ -1846,6 +1862,7 @@ EXTERNAL_MCP_WRITE_TOOL_BLOCKS: dict[str, frozenset[str]] = {
             "vrcforge_instantiate_prefab",
             "vrcforge_unpack_prefab",
             "vrcforge_duplicate_project_asset",
+            "vrcforge_duplicate_scene_asset",
             "vrcforge_save_scene_object_as_prefab",
         }
     ),

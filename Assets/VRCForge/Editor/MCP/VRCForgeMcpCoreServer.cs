@@ -54,12 +54,15 @@ namespace VRCForge.Editor
             "vrc_set_material_texture",
             "vrc_duplicate_scene_object",
             "vrc_duplicate_project_asset",
+            "vrc_duplicate_scene_asset",
             "vrc_save_scene_object_as_prefab",
             "vrc_save_current_scene",
             "vrc_save_new_scene",
             "vrc_set_texture_import_settings",
             "vrc_set_constraint_sources",
             "vrc_create_component_feature",
+            "vrc_configure_aao_merge_physbone",
+            "vrc_revert_removed_component",
             "vrc_build_parameter_bit_packed_clone",
             "vrc_atomic_reference_rename",
             "vrc_restore_safe_backup",
@@ -1104,7 +1107,17 @@ namespace VRCForge.Editor
             }
             if (string.Equals(toolName, "vrc_scan_avatar_materials", StringComparison.Ordinal))
             {
-                return HasExactKeys(arguments, "avatarPath", "outputPath", "refreshAssets")
+                var basicRead = HasExactKeys(arguments, "avatarPath", "outputPath", "refreshAssets");
+                var boundedRead = HasExactKeys(
+                    arguments,
+                    "avatarPath",
+                    "outputPath",
+                    "refreshAssets",
+                    "materialIds",
+                    "includeTextures")
+                    && HasStringArray(arguments, "materialIds")
+                    && HasBoolean(arguments, "includeTextures");
+                return (basicRead || boundedRead)
                     && HasString(arguments, "avatarPath") && HasEmptyOutputPath(arguments)
                     && HasFalseBoolean(arguments, "refreshAssets");
             }

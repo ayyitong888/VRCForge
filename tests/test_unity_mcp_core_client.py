@@ -388,6 +388,90 @@ def test_execution_exposure_returns_the_exact_fixed_64(core_files):
     assert server.seen[1]["message"]["params"]["exposureLayer"] == "execution"
 
 
+def test_core_info_binds_product_version_without_listing_tools(core_files):
+    project, descriptor_path, descriptor = core_files
+
+    def core_info_handler(connection, seen):
+        discover = _read_line(connection)
+        seen.append(discover)
+        _write_line(connection, {
+            "schema": TRANSPORT_SCHEMA,
+            "message": {"jsonrpc": "2.0", "id": 1, "result": _discovery_result(discover)},
+        })
+        request = _read_line(connection)
+        seen.append(request)
+        _write_line(connection, {
+            "schema": TRANSPORT_SCHEMA,
+            "message": {
+                "jsonrpc": "2.0",
+                "id": request["message"]["id"],
+                "result": {
+                    "schema": "vrcforge.core_info.v1",
+                    "coreIdentity": CORE_IDENTITY,
+                    "coreVersion": PRODUCT_VERSION,
+                    "versionSource": "compiled_constant",
+                    "instanceId": descriptor["instanceId"],
+                    "projectId": descriptor["projectId"],
+                    "resultType": "complete",
+                },
+            },
+        })
+
+    server = FakeCore(core_info_handler)
+    _write_descriptor(descriptor_path, descriptor, server.port)
+    try:
+        info = UnityMcpCoreClient(project).core_info()
+    finally:
+        server.close()
+
+    assert info["coreVersion"] == PRODUCT_VERSION
+    assert [entry["message"]["method"] for entry in server.seen] == [
+        "server/discover",
+        "server/core-info",
+    ]
+
+
+def test_core_info_rejects_only_product_version_mismatch(core_files):
+    project, descriptor_path, descriptor = core_files
+
+    def mismatched_handler(connection, seen):
+        discover = _read_line(connection)
+        seen.append(discover)
+        _write_line(connection, {
+            "schema": TRANSPORT_SCHEMA,
+            "message": {"jsonrpc": "2.0", "id": 1, "result": _discovery_result(discover)},
+        })
+        request = _read_line(connection)
+        seen.append(request)
+        _write_line(connection, {
+            "schema": TRANSPORT_SCHEMA,
+            "message": {
+                "jsonrpc": "2.0",
+                "id": request["message"]["id"],
+                "result": {
+                    "schema": "vrcforge.core_info.v1",
+                    "coreIdentity": CORE_IDENTITY,
+                    "coreVersion": "0.0.0",
+                    "versionSource": "compiled_constant",
+                    "instanceId": descriptor["instanceId"],
+                    "projectId": descriptor["projectId"],
+                    "toolCount": 999,
+                    "resultType": "complete",
+                },
+            },
+        })
+
+    server = FakeCore(mismatched_handler)
+    _write_descriptor(descriptor_path, descriptor, server.port)
+    try:
+        with pytest.raises(UnityMcpCoreError) as raised:
+            UnityMcpCoreClient(project).core_info()
+    finally:
+        server.close()
+
+    assert raised.value.cause_code == "unity_core_version_mismatch"
+
+
 def test_previous_core_contract_uses_protocol_compatibility_without_a_second_version_gate(core_files):
     project, descriptor_path, descriptor = core_files
     descriptor["toolCount"] = PREVIOUS_CORE_TOOL_COUNT

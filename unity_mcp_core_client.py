@@ -421,6 +421,30 @@ class UnityMcpCoreClient:
     def uses_previous_contract(self) -> bool:
         return self._connection.tool_contract_version == PREVIOUS_CORE_TOOL_CONTRACT_VERSION
 
+    def core_info(self) -> dict[str, Any]:
+        """Verify the bound Core identity and product version without listing tools."""
+
+        result = self._request("server/core-info", {})
+        if not isinstance(result, dict) \
+                or result.get("schema") != "vrcforge.core_info.v1" \
+                or result.get("coreIdentity") != CORE_IDENTITY \
+                or result.get("versionSource") != "compiled_constant" \
+                or result.get("instanceId") != self._connection.instance_id \
+                or result.get("projectId") != self._connection.project_id:
+            raise UnityMcpCoreError("Unity MCP Core identity or project binding is invalid.")
+        if result.get("coreVersion") != PRODUCT_VERSION:
+            failure = UnityMcpCoreError(
+                "Unity MCP Core version does not match this VRCForge App."
+            )
+            failure.cause_code = "unity_core_version_mismatch"
+            failure.details = {
+                "kind": "core_version_mismatch",
+                "expectedVersion": PRODUCT_VERSION,
+                "actualVersion": str(result.get("coreVersion") or "")[:80],
+            }
+            raise failure
+        return result
+
     def list_tools(self, *, exposure_layer: str = "planning") -> list[dict[str, Any]]:
         if exposure_layer not in {"planning", "execution"}:
             raise ValueError("exposure_layer must be planning or execution.")

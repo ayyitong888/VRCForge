@@ -37,6 +37,15 @@
       "cleanup": "Restore the pre-write checkpoint only after explicit approval; verify the created scene and metadata are absent."
     },
     {
+      "tool": "vrc_duplicate_scene_asset",
+      "mode": "approved_apply_after_preview",
+      "minimalArguments": { "sourceScenePath": "${SAVED_SCENE_PATH}", "destinationScenePath": "${NEW_SCENE_DUPLICATE_PATH}", "openAsOnlyActiveScene": true, "preview": false, "overwrite": false, "${SCENE_DUPLICATE_PREVIEW_RECEIPT}": null },
+      "runtimeInjectedArguments": ["expectedProjectPath", "expectedSourceGuid", "expectedSourceFileDigest", "expectedSourceFileIdentity", "expectedSourceMetaDigest", "expectedSourceMetaIdentity", "expectedDestinationParentPath", "expectedDestinationAbsent", "expectedSceneSetupDigest", "expectedOpenSceneStateDigest", "expectedOpenAsOnlyActiveScene", "expectedPreviewDigest"],
+      "requiredFixtures": ["saved clean source scene", "previous authoritative create-new scene duplicate preview", "absent target .unity and .meta path", "all loaded scenes saved and clean"],
+      "successFields": ["verified", "changed", "saved", "commitState", "source.unchanged", "target.assetPath", "target.guid", "target.readbackVerified", "target.opened", "target.active"],
+      "cleanup": "Restore the bound original scene setup, then delete only the exact run-owned destination scene and metadata after GUID and digest verification."
+    },
+    {
       "tool": "vrc_save_current_scene",
       "mode": "approved_apply_after_preview",
       "minimalArguments": { "scenePath": "${SAVED_SCENE_PATH}", "preview": false, "${CURRENT_SCENE_SAVE_PREVIEW_RECEIPT}": null },

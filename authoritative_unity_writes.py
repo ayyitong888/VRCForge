@@ -78,6 +78,13 @@ from project_asset_copy import (
     build_preview_arguments as build_project_asset_copy_preview_arguments,
     validate_apply_result as validate_project_asset_copy_apply_result,
 )
+from scene_asset_duplicate import (
+    TOOL_NAME as SCENE_ASSET_DUPLICATE_TOOL,
+    SceneAssetDuplicateError,
+    bind_authoritative_preview as bind_scene_asset_duplicate_preview,
+    build_preview_arguments as build_scene_asset_duplicate_preview_arguments,
+    validate_apply_result as validate_scene_asset_duplicate_apply_result,
+)
 
 
 PreviewInvoker = Callable[[str, dict[str, Any]], Any]
@@ -249,6 +256,18 @@ _SPECS = {
         include_project_path_in_preview=True,
         validate_apply=validate_project_asset_copy_apply_result,
         result_error="Project asset copy apply returned an invalid verification receipt.",
+    ),
+    SCENE_ASSET_DUPLICATE_TOOL: AuthoritativeUnityWriteSpec(
+        tool_name=SCENE_ASSET_DUPLICATE_TOOL,
+        request_error="Scene duplicate arguments are required.",
+        bridge_error="Scene duplicate preview could not be verified against the current project.",
+        receipt_error="Scene duplicate preview returned an invalid verification receipt.",
+        domain_error=SceneAssetDuplicateError,
+        build_preview=build_scene_asset_duplicate_preview_arguments,
+        bind_preview=bind_scene_asset_duplicate_preview,
+        include_project_path_in_preview=True,
+        validate_apply=validate_scene_asset_duplicate_apply_result,
+        result_error="Scene duplicate apply returned an invalid verification receipt.",
     ),
 }
 

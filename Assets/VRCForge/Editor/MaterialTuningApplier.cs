@@ -138,6 +138,7 @@ namespace VRCForge.Editor
         private static Dictionary<string, MaterialTarget> BuildMaterialIndex(string avatarPath)
         {
             var normalizedAvatarPath = NormalizePath(avatarPath);
+            var exactScopes = ResolveExactScopes(normalizedAvatarPath);
             var index = new Dictionary<string, MaterialTarget>(StringComparer.OrdinalIgnoreCase);
             var componentSlots = new HashSet<string>(StringComparer.Ordinal);
             var renderers = Resources.FindObjectsOfTypeAll<Renderer>()
@@ -158,7 +159,14 @@ namespace VRCForge.Editor
                 var rendererIdentity = rendererEntry.identity;
                 var avatarRoot = FindAvatarRoot(renderer.transform);
                 var rootPath = NormalizePath(GetTransformPath(avatarRoot));
-                if (!string.IsNullOrEmpty(normalizedAvatarPath)
+                if (exactScopes.Count > 0)
+                {
+                    if (!exactScopes.Any(scope => ReferenceEquals(renderer.transform, scope) || renderer.transform.IsChildOf(scope)))
+                    {
+                        continue;
+                    }
+                }
+                else if (!string.IsNullOrEmpty(normalizedAvatarPath)
                     && !string.Equals(rootPath, normalizedAvatarPath, StringComparison.OrdinalIgnoreCase)
                     && !rootPath.EndsWith("/" + normalizedAvatarPath, StringComparison.OrdinalIgnoreCase)
                     && !avatarRoot.name.Equals(normalizedAvatarPath, StringComparison.OrdinalIgnoreCase))
@@ -201,6 +209,25 @@ namespace VRCForge.Editor
             }
 
             return index;
+        }
+
+        private static List<Transform> ResolveExactScopes(string normalizedPath)
+        {
+            if (string.IsNullOrEmpty(normalizedPath))
+            {
+                return new List<Transform>();
+            }
+
+            return Resources.FindObjectsOfTypeAll<Transform>()
+                .Where(IsSceneObject)
+                .Where(transform => string.Equals(
+                    NormalizePath(GetTransformPath(transform)),
+                    normalizedPath,
+                    StringComparison.OrdinalIgnoreCase))
+                .OrderBy(transform => (transform.gameObject.scene.path ?? string.Empty).Replace("\\", "/"), StringComparer.Ordinal)
+                .ThenBy(transform => transform.gameObject.scene.handle)
+                .ThenBy(transform => transform.GetInstanceID())
+                .ToList();
         }
 
         private static object ExtractValue(JToken token)

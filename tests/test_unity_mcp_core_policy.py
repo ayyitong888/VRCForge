@@ -129,6 +129,24 @@ def test_direct_mcp_no_write_allowlist_requires_exact_nonwriting_payload_shapes(
     assert "HasExactKeys(arguments" in gate
     assert "vrc_capture_scene_view" in gate
     assert "vrc_create_safe_backup" not in gate
+
+
+def test_material_scan_direct_read_accepts_the_bounded_shader_tuning_shape() -> None:
+    gate_start = SERVER.index("private static bool IsStrictNoWritePayloadRead")
+    gate_end = SERVER.index("private static JObject QueueInvocation", gate_start)
+    gate = SERVER[gate_start:gate_end]
+    material_start = gate.index('string.Equals(toolName, "vrc_scan_avatar_materials"')
+    material_end = gate.index('string.Equals(toolName, "vrc_scan_avatar_items"', material_start)
+    material_gate = gate[material_start:material_end]
+
+    assert 'HasExactKeys(arguments, "avatarPath", "outputPath", "refreshAssets")' in material_gate
+    assert '"materialIds",' in material_gate
+    assert '"includeTextures")' in material_gate
+    assert 'HasStringArray(arguments, "materialIds")' in material_gate
+    assert 'HasBoolean(arguments, "includeTextures")' in material_gate
+    assert "return (basicRead || boundedRead)" in material_gate
+    assert "HasEmptyOutputPath(arguments)" in material_gate
+    assert 'HasFalseBoolean(arguments, "refreshAssets")' in material_gate
     assert "vrc_toggle_scene_object" not in gate
     assert "vrc_apply_blendshapes" not in gate
     assert "vrc_rollback_avatar_parameters" not in gate
@@ -730,7 +748,7 @@ def test_fixed_lanes_derive_approved_write_without_stale_hardcoded_counts() -> N
     safety_block = SERVER[SERVER.index("SafetyControlTools =") : SERVER.index("private enum InvocationLane")]
     preview_names = set(re.findall(r'"(vrc_[^"]+)"', preview_block))
     safety_names = set(re.findall(r'"(vrc_[^"]+)"', safety_block))
-    assert len(preview_names) == 26
+    assert len(preview_names) == 29
     assert "vrc_convert_unity_constraint" in preview_names
     assert "vrc_set_material_texture" in preview_names
     assert len(safety_names) == 2

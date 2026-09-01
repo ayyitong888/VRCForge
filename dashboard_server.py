@@ -212,6 +212,10 @@ from project_asset_copy import (
     TOOL_NAME as PROJECT_ASSET_COPY_TOOL,
     build_wrapper_arguments as build_project_asset_copy_wrapper_arguments,
 )
+from scene_asset_duplicate import (
+    TOOL_NAME as SCENE_ASSET_DUPLICATE_TOOL,
+    build_wrapper_arguments as build_scene_asset_duplicate_wrapper_arguments,
+)
 from context_compaction import ContextCompactionInputError, compact_context
 from session_handoff import SessionHandoffError, SessionHandoffStore
 from session_handoff_service import SessionHandoffService
@@ -658,6 +662,7 @@ VRCFORGE_UNITY_TOOL_REGISTRY = (
     "vrc_build_parameter_bit_packed_clone",
     "vrc_build_test_avatar",
     "vrc_capture_scene_view",
+    "vrc_configure_aao_merge_physbone",
     "vrc_create_component_feature",
     "vrc_create_gameobject",
     "vrc_create_safe_backup",
@@ -665,6 +670,7 @@ VRCFORGE_UNITY_TOOL_REGISTRY = (
     "vrc_delete_gameobject",
     "vrc_duplicate_scene_object",
     "vrc_duplicate_project_asset",
+    "vrc_duplicate_scene_asset",
     "vrc_ensure_animator_state",
     "vrc_ensure_expression_menu_control",
     "vrc_ensure_expression_parameter",
@@ -700,6 +706,7 @@ VRCFORGE_UNITY_TOOL_REGISTRY = (
     "vrc_rename_gameobject",
     "vrc_reparent_gameobject",
     "vrc_restore_safe_backup",
+    "vrc_revert_removed_component",
     "vrc_rollback_avatar_parameters",
     "vrc_save_scene_object_as_prefab",
     "vrc_save_current_scene",
@@ -775,6 +782,7 @@ VRCFORGE_UNITY_MCP_BACKED_WRITE_TARGETS = frozenset(
         "vrcforge_instantiate_prefab",
         "vrcforge_duplicate_scene_object",
         "vrcforge_duplicate_project_asset",
+        "vrcforge_duplicate_scene_asset",
         "vrcforge_set_material_shader",
         "vrcforge_set_material_texture",
         "vrcforge_set_constraint_sources",
@@ -810,6 +818,7 @@ VRCFORGE_UNITY_MCP_WRITE_ALLOWLIST = frozenset(
         MATERIAL_TEXTURE_ASSIGNMENT_TOOL,
         "vrc_duplicate_scene_object",
         PROJECT_ASSET_COPY_TOOL,
+        SCENE_ASSET_DUPLICATE_TOOL,
         "vrc_save_scene_object_as_prefab",
         "vrc_set_texture_import_settings",
         "vrc_set_constraint_sources",
@@ -7422,8 +7431,7 @@ def build_bootstrap_app_health(
     }
     if isinstance(unity_status, dict):
         connected = bool(unity_status.get("connected"))
-        missing_tools = unity_status.get("missingRequiredVrcForgeTools") or []
-        vrcforge_tools_registered = bool(unity_status.get("vrcForgeToolsRegistered"))
+        core_version_matched = bool(unity_status.get("coreVersionMatched"))
         components["unityMcpBridgeReachable"] = health_component(
             "ok" if connected else "warning",
             "Unity MCP bridge is reachable." if connected else "Unity MCP bridge is not reachable.",
@@ -7439,14 +7447,14 @@ def build_bootstrap_app_health(
             },
         )
         components["vrcForgeUnityTools"] = health_component(
-            "ok" if vrcforge_tools_registered and not missing_tools else "warning",
-            "VRCForge Unity tools are registered."
-            if vrcforge_tools_registered and not missing_tools
-            else "Unity MCP is connected, but VRCForge Unity tools are missing or incomplete.",
+            "ok" if core_version_matched else "warning",
+            "VRCForge Unity Core version matches; tool enumeration is not a connection gate."
+            if core_version_matched
+            else "Unity MCP is connected, but the VRCForge Unity Core version does not match.",
             {
-                "totalTools": (unity_status.get("tools") or {}).get("totalTools"),
-                "vrcForgeToolsCount": (unity_status.get("tools") or {}).get("vrcForgeToolsCount"),
-                "missingRequiredVrcForgeTools": missing_tools,
+                "coreVersion": unity_status.get("coreVersion"),
+                "coreVersionMatched": core_version_matched,
+                "inspectionMode": (unity_status.get("tools") or {}).get("inspectionMode"),
             },
         )
     else:
@@ -12600,8 +12608,19 @@ def _prepare_shader_tuning_apply_state(
         raise RuntimeError("The exact avatar path must be known before approval.")
     if not request.changes:
         raise RuntimeError("No shader material changes were provided.")
+    material_ids = dedupe_strings(
+        str(change.get("material_id") or "").strip()
+        for change in request.changes
+        if isinstance(change, dict)
+    )
     inventory = apply_shader_category_overrides(
-        scan_shader_materials_direct(settings, avatar_path), request.category_overrides
+        scan_shader_materials_direct(
+            settings,
+            avatar_path,
+            material_ids=material_ids,
+            include_textures=False,
+        ),
+        request.category_overrides,
     )
     stored_locks = load_shader_tuning_locks(avatar_path)
     locked_materials = set(stored_locks.get("lockedMaterials") or []) | set(request.locked_materials or [])
@@ -12625,6 +12644,8 @@ def _prepare_shader_tuning_apply_state(
         "avatarPath": avatar_path,
         "outputPath": "",
         "refreshAssets": False,
+        "materialIds": material_ids,
+        "includeTextures": False,
     }
     core_arguments = {"avatarPath": avatar_path, "changes": changes, "saveAssets": True}
     return {
@@ -15999,7 +16020,13 @@ def apply_parameter_optimization_direct(
     return ensure_dict_payload(payload, "parameter optimization apply")
 
 
-def scan_shader_materials_direct(settings: Settings, avatar_path: str | None) -> dict[str, Any]:
+def scan_shader_materials_direct(
+    settings: Settings,
+    avatar_path: str | None,
+    *,
+    material_ids: list[str] | None = None,
+    include_textures: bool = True,
+) -> dict[str, Any]:
     output_path = build_dashboard_artifact_path("shader_material_inventory", avatar_path, "json")
     output_path.unlink(missing_ok=True)
     original_timeout = int(settings.unity_mcp_timeout_seconds or 30)
@@ -16012,6 +16039,8 @@ def scan_shader_materials_direct(settings: Settings, avatar_path: str | None) ->
                 "avatarPath": avatar_path or "",
                 "outputPath": "",
                 "refreshAssets": False,
+                **({"materialIds": material_ids} if material_ids is not None else {}),
+                "includeTextures": include_textures,
             },
         )
     finally:
@@ -17082,6 +17111,8 @@ def _unity_repair_status_summary(
         "unityInstanceRegistered": bool(status.get("unityInstanceRegistered")),
         "selectedInstanceMatched": selected_instance_matched,
         "activeInstanceCount": int(status.get("activeInstanceCount") or 0),
+        "coreVersion": str(status.get("coreVersion") or ""),
+        "coreVersionMatched": bool(status.get("coreVersionMatched")),
         "vrcForgeToolsRegistered": bool(status.get("vrcForgeToolsRegistered")),
         "totalTools": int(tools.get("totalTools") or 0),
         "vrcForgeToolsCount": int(tools.get("vrcForgeToolsCount") or 0),
@@ -17424,9 +17455,7 @@ def unity_repair_tools_ready(summary: dict[str, Any]) -> bool:
     return bool(
         summary.get("unityInstanceRegistered")
         and summary.get("selectedInstanceMatched")
-        and summary.get("vrcForgeToolsRegistered")
-        and int(summary.get("totalTools") or 0) > 0
-        and not summary.get("missingRequiredVrcForgeTools")
+        and summary.get("coreVersionMatched")
     )
 
 
@@ -17438,14 +17467,9 @@ def unity_repair_tools_message(summary: dict[str, Any]) -> str:
         return "Unity has not registered with the MCP server yet."
     if not summary.get("selectedInstanceMatched"):
         return "Unity registered, but its active instance is not bound to the selected project."
-    if int(summary.get("totalTools") or 0) <= 0:
-        return "Unity registered, but the MCP tool list is still empty."
-    if not summary.get("vrcForgeToolsRegistered"):
-        return "Unity registered, but VRCForge Unity tools are not registered yet."
-    missing = summary.get("missingRequiredVrcForgeTools") or []
-    if missing:
-        return f"Unity registered, but {len(missing)} required VRCForge tool(s) are missing."
-    return "Unity MCP tools are ready."
+    if not summary.get("coreVersionMatched"):
+        return "Unity registered, but the VRCForge Unity Core version does not match."
+    return "Unity MCP Core version is ready."
 
 
 def recent_unity_mcp_execution_error(window_seconds: int = 300) -> dict[str, Any]:
@@ -19240,17 +19264,7 @@ def _wait_for_checkpoint_reload_ready(
                     project_root,
                     timeout_seconds=min(3.0, remaining),
                 )
-                tools = core_client.list_tools(exposure_layer="execution")
-                tool_names = {
-                    str(item.get("name") or "")
-                    for item in tools
-                    if isinstance(item, dict)
-                }
-                if (
-                    len(tools) != len(REQUIRED_VRCFORGE_UNITY_TOOLS)
-                    or tool_names != set(REQUIRED_VRCFORGE_UNITY_TOOLS)
-                ):
-                    raise UnityMcpCoreError("Unity MCP Core tool contract is not ready.")
+                core_client.core_info()
                 main_thread_read = core_client.call_tool(
                     "vrc_get_compile_errors",
                     {"maxErrors": 1},
@@ -19685,6 +19699,7 @@ def prepare_authoritative_unity_checkpoint_sync(
         ATOMIC_REFERENCE_RENAME_TOOL,
         CONSTRAINT_SOURCE_TOOL,
         DUPLICATE_SCENE_OBJECT_TOOL,
+        SCENE_ASSET_DUPLICATE_TOOL,
         SAVE_SCENE_OBJECT_AS_PREFAB_TOOL,
         SAVE_CURRENT_SCENE_TOOL,
         SAVE_NEW_SCENE_TOOL,
@@ -19818,6 +19833,20 @@ def preview_project_asset_copy_sync(params: dict[str, Any]) -> dict[str, Any]:
         raise
 
 
+def preview_scene_asset_duplicate_sync(params: dict[str, Any]) -> dict[str, Any]:
+    try:
+        _arguments, preview = prepare_unity_mcp_write_request(
+            build_scene_asset_duplicate_wrapper_arguments(params or {}),
+            None,
+        )
+        return {"ok": True, "preview": preview}
+    except AgentGatewayError as exc:
+        details = dict(getattr(exc, "details", {}) or {})
+        if details:
+            return {"ok": False, **details}
+        raise
+
+
 def classify_duplicate_scene_object_risk(params: dict[str, Any]) -> str:
     """Keep create-new duplication medium risk; replacement remains high-risk."""
 
@@ -19940,6 +19969,27 @@ def duplicate_project_asset_sync(params: dict[str, Any]) -> dict[str, Any]:
             "commitState": "not_started",
             "requestMayHaveCommitted": False,
             "checkpointRecoveryRequired": False,
+        }
+    return unity_mcp_write_sync(request)
+
+
+def duplicate_scene_asset_sync(params: dict[str, Any]) -> dict[str, Any]:
+    """Execute the bound create-new scene duplicate/open Core tool."""
+
+    request = dict(params or {})
+    tool_name = str(request.get("toolName") or request.get("tool_name") or "").strip()
+    if tool_name != SCENE_ASSET_DUPLICATE_TOOL:
+        return {
+            "ok": False,
+            "schema": "vrcforge.scene_asset_duplicate.v1",
+            "failureLayer": "gateway_validation",
+            "errorCode": "invalid_tool_name",
+            "error": "Scene duplicate requires the vrc_duplicate_scene_asset binding.",
+            "mutationStarted": False,
+            "committed": False,
+            "commitState": "not_started",
+            "requestMayHaveCommitted": False,
+            "checkpointRestoreRequired": False,
         }
     return unity_mcp_write_sync(request)
 
@@ -24411,6 +24461,14 @@ def register_agent_gateway_tools() -> None:
         preview_project_asset_copy_sync,
     )
     AGENT_GATEWAY.register_tool(
+        "vrcforge_preview_scene_asset_duplicate",
+        "When to use: preview one create-new copy of an exact saved Assets scene and optionally bind opening the copy as the only active scene. "
+        "When NOT to use: do not overwrite, move, rename, merge, save dirty scenes, or copy arbitrary files. "
+        "Negative example: do not call it with an existing destination scene.",
+        "plan/preview",
+        preview_scene_asset_duplicate_sync,
+    )
+    AGENT_GATEWAY.register_tool(
         "vrcforge_preview_texture_import_settings",
         "Preview one bounded texture importer settings change without writing project files.",
         "plan/preview",
@@ -25050,6 +25108,19 @@ def register_agent_gateway_tools() -> None:
         duplicate_project_asset_sync,
         request_preparer=lambda params, caller_preview: prepare_unity_mcp_write_request(
             build_project_asset_copy_wrapper_arguments(params or {}),
+            caller_preview,
+        ),
+        approved_execution_plan_builder=build_unity_mcp_write_execution_plan,
+    )
+    register_write_handler(
+        "vrcforge_duplicate_scene_asset",
+        "When to use: create one independent saved Assets scene copy after an exact preview, optionally making the copy the only open active scene. "
+        "When NOT to use: do not overwrite, move, rename, merge, silently save dirty scenes, or bypass Unity AssetDatabase. "
+        "Negative example: do not call it to replace Assets/2.unity in place.",
+        "medium",
+        duplicate_scene_asset_sync,
+        request_preparer=lambda params, caller_preview: prepare_unity_mcp_write_request(
+            build_scene_asset_duplicate_wrapper_arguments(params or {}),
             caller_preview,
         ),
         approved_execution_plan_builder=build_unity_mcp_write_execution_plan,

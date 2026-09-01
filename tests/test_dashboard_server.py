@@ -1250,6 +1250,8 @@ class DashboardServerTests(unittest.TestCase):
             "unityInstanceRegistered": True,
             "selectedInstanceMatched": True,
             "activeInstanceCount": 1,
+            "coreVersion": "1.7.10",
+            "coreVersionMatched": True,
             "vrcForgeToolsRegistered": True,
             "missingRequiredVrcForgeTools": [],
             "tools": {"totalTools": 80, "vrcForgeToolsCount": 42},
@@ -4845,9 +4847,14 @@ class DashboardServerTests(unittest.TestCase):
                 marker = project / relative
                 marker.parent.mkdir(parents=True, exist_ok=True)
                 marker.write_text("// probe", encoding="utf-8")
-            required = [{"name": name} for name in dashboard_server.REQUIRED_VRCFORGE_UNITY_TOOLS]
             core_client = Mock()
-            core_client.list_tools.return_value = required
+            core_client.core_info.return_value = {
+                "schema": "vrcforge.core_info.v1",
+                "coreIdentity": "vrcforge.unity-core",
+                "coreVersion": "1.7.10",
+                "instanceId": "instance-version-only",
+                "projectId": "project-version-only",
+            }
             try:
                 with (
                     patch("unity_status_service.UnityMcpCoreClient", return_value=core_client),
@@ -4862,11 +4869,12 @@ class DashboardServerTests(unittest.TestCase):
         self.assertTrue(status["connected"])
         self.assertTrue(status["selectedInstanceMatched"])
         self.assertEqual(status["missingRequiredVrcForgeTools"], [])
-        self.assertEqual(
-            status["tools"]["vrcForgeToolsCount"],
-            len(dashboard_server.REQUIRED_VRCFORGE_UNITY_TOOLS),
-        )
+        self.assertTrue(status["coreVersionMatched"])
+        self.assertEqual(status["tools"]["inspectionMode"], "core_version_only")
+        self.assertEqual(status["tools"]["vrcForgeToolsCount"], 0)
         self.assertEqual(status["mcpHealth"]["protocolVersion"], "2026-07-28")
+        core_client.core_info.assert_called_once_with()
+        core_client.list_tools.assert_not_called()
 
     def test_core_only_repair_never_starts_or_registers_an_external_connector(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -4889,6 +4897,8 @@ class DashboardServerTests(unittest.TestCase):
                 "unityInstanceRegistered": True,
                 "selectedInstanceMatched": True,
                 "activeInstanceCount": 1,
+                "coreVersion": "1.7.10",
+                "coreVersionMatched": True,
                 "vrcForgeToolsRegistered": True,
                 "missingRequiredVrcForgeTools": [],
                 "tools": {"totalTools": 68, "vrcForgeToolsCount": 68},
@@ -12353,15 +12363,16 @@ class DashboardServerTests(unittest.TestCase):
         invoke.assert_called_once()
         wait_ready.assert_not_called()
 
-    def test_checkpoint_reload_readiness_requires_same_process_new_instance_and_full_tools(self) -> None:
+    def test_checkpoint_reload_readiness_requires_same_process_new_instance_and_core_version(self) -> None:
         project = Path("C:/Unity/ReloadProject")
         previous = SimpleNamespace(process_id=77, project_hash="project-hash", instance_id="old")
         unchanged = SimpleNamespace(process_id=77, project_hash="project-hash", instance_id="old")
         replaced = SimpleNamespace(process_id=77, project_hash="project-hash", instance_id="new")
         core_client = Mock()
-        core_client.list_tools.return_value = [
-            {"name": name} for name in dashboard_server.REQUIRED_VRCFORGE_UNITY_TOOLS
-        ]
+        core_client.core_info.return_value = {
+            "coreIdentity": "vrcforge.unity-core",
+            "coreVersion": "1.7.10",
+        }
         core_client.call_tool.return_value = {"resultType": "complete", "structuredContent": {"success": True}}
         with (
             patch(
@@ -12383,16 +12394,19 @@ class DashboardServerTests(unittest.TestCase):
         self.assertTrue(result["domainReloadObserved"])
         self.assertTrue(result["mainThreadReadVerified"])
         client_type.assert_called_once_with(project, timeout_seconds=1.0)
-        core_client.list_tools.assert_called_once_with(exposure_layer="execution")
+        core_client.core_info.assert_called_once_with()
+        core_client.list_tools.assert_not_called()
         core_client.call_tool.assert_called_once_with("vrc_get_compile_errors", {"maxErrors": 1})
 
-    def test_checkpoint_reload_readiness_rejects_wrong_process_and_incomplete_tools(self) -> None:
+    def test_checkpoint_reload_readiness_rejects_wrong_process_and_core_version_failure(self) -> None:
         project = Path("C:/Unity/ReloadProject")
         previous = SimpleNamespace(process_id=77, project_hash="project-hash", instance_id="old")
         wrong_process = SimpleNamespace(process_id=88, project_hash="project-hash", instance_id="new-a")
         incomplete = SimpleNamespace(process_id=77, project_hash="project-hash", instance_id="new-b")
         core_client = Mock()
-        core_client.list_tools.return_value = [{"name": "vrc_get_compile_errors"}]
+        core_client.core_info.side_effect = dashboard_server.UnityMcpCoreError(
+            "Unity MCP Core version does not match this VRCForge App."
+        )
         with (
             patch(
                 "dashboard_server.load_unity_mcp_core_connection",
@@ -12414,7 +12428,8 @@ class DashboardServerTests(unittest.TestCase):
 
         self.assertFalse(result["ok"])
         self.assertIn("did not become ready", result["error"])
-        core_client.list_tools.assert_called_once_with(exposure_layer="execution")
+        core_client.core_info.assert_called_once_with()
+        core_client.list_tools.assert_not_called()
 
     def test_checkpoint_tools_registered_with_restore_as_write_target(self) -> None:
         config = dashboard_server.AGENT_GATEWAY.ensure_config()
@@ -14734,7 +14749,7 @@ class DashboardServerTests(unittest.TestCase):
         ).read_text(encoding="utf-8-sig")
         contract_names = set(re.findall(r'\{\s*"(vrc_[a-z0-9_]+)"\s*,\s*"VRCForge\.', contract_text))
         self.assertEqual(contract_names, set(dashboard_server.VRCFORGE_UNITY_TOOL_REGISTRY))
-        self.assertEqual(len(contract_names), 82)
+        self.assertEqual(len(contract_names), 85)
         legacy_hits = [
             path for path in (repo_root / "Assets" / "VRCForge").rglob("*.cs")
             if "McpForUnityTool" in path.read_text(encoding="utf-8-sig")

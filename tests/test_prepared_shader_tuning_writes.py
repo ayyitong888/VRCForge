@@ -14,7 +14,13 @@ def _state(*, after: float = 0.8, locked: list[str] | None = None) -> dict:
     return {
         "settings": SimpleNamespace(),
         "avatarPath": "Scene/A",
-        "scanArguments": {"avatarPath": "Scene/A", "outputPath": "", "refreshAssets": False},
+        "scanArguments": {
+            "avatarPath": "Scene/A",
+            "outputPath": "",
+            "refreshAssets": False,
+            "materialIds": ["mat_skin"],
+            "includeTextures": False,
+        },
         "coreArguments": core_arguments,
         "validatedChanges": changes,
         "skippedChanges": [],
@@ -62,7 +68,12 @@ def test_apply_state_scans_current_inventory_and_ignores_caller_inventory(monkey
     scanned = {"materials": [{"material_id": "live"}]}
     seen: dict[str, object] = {}
     monkeypatch.setattr(dashboard_server, "load_dashboard_settings", lambda _request: SimpleNamespace())
-    monkeypatch.setattr(dashboard_server, "scan_shader_materials_direct", lambda _settings, _avatar: scanned)
+    def scan(_settings, _avatar, *, material_ids=None, include_textures=True):
+        seen["materialIds"] = material_ids
+        seen["includeTextures"] = include_textures
+        return scanned
+
+    monkeypatch.setattr(dashboard_server, "scan_shader_materials_direct", scan)
     monkeypatch.setattr(dashboard_server, "load_shader_tuning_locks", lambda _avatar: {"lockedMaterials": ["store_lock"], "lockedProperties": []})
     monkeypatch.setattr(dashboard_server, "apply_shader_category_overrides", lambda inventory, _overrides: inventory)
 
@@ -73,6 +84,8 @@ def test_apply_state_scans_current_inventory_and_ignores_caller_inventory(monkey
     monkeypatch.setattr(dashboard_server, "validate_shader_material_tuning_plan", validate)
     state = dashboard_server._prepare_shader_tuning_apply_state(dashboard_server.ShaderMaterialApplyRequest(**_arguments()))
     assert seen["inventory"] is scanned
+    assert seen["materialIds"] == ["mat_skin"]
+    assert seen["includeTextures"] is False
     assert "store_lock" in seen["lockedMaterials"]
     assert state["coreArguments"]["changes"][0]["material_id"] == "live"
 
@@ -120,7 +133,11 @@ def test_preview_shader_apply_uses_the_write_validator(monkeypatch: pytest.Monke
 
 def test_apply_state_reports_skipped_validation_reasons(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(dashboard_server, "load_dashboard_settings", lambda _request: SimpleNamespace())
-    monkeypatch.setattr(dashboard_server, "scan_shader_materials_direct", lambda _settings, _avatar: {"materials": []})
+    monkeypatch.setattr(
+        dashboard_server,
+        "scan_shader_materials_direct",
+        lambda _settings, _avatar, **_kwargs: {"materials": []},
+    )
     monkeypatch.setattr(dashboard_server, "load_shader_tuning_locks", lambda _avatar: {})
     monkeypatch.setattr(dashboard_server, "apply_shader_category_overrides", lambda inventory, _overrides: inventory)
     monkeypatch.setattr(
