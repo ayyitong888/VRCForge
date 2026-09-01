@@ -59,9 +59,14 @@ function Resolve-DotNetExe {
         if (-not (Test-Path -LiteralPath $candidate)) {
             continue
         }
-        $sdks = & $candidate --list-sdks
-        if ($sdks) {
-            return $candidate
+        $sdks = @(& $candidate --list-sdks 2>$null)
+        if ($LASTEXITCODE -ne 0) {
+            continue
+        }
+        foreach ($sdk in $sdks) {
+            if ($sdk -match "^\s*(?<major>[0-9]+)\." -and [int]$Matches["major"] -ge 8) {
+                return $candidate
+            }
         }
     }
 

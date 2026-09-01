@@ -207,9 +207,25 @@ def test_release_build_runs_unity_csharp_syntax_gate_before_building_payload() -
     assert gate in source
     assert 'throw "Unity C# syntax gate failed. No release payload was built."' in source
     assert source.index(gate) < source.index("Build-TauriDesktopApp -DestinationExe")
+    resolver = source[source.index("function Resolve-DotNetExe") : source.index("function Resolve-NpmExe")]
+    assert '--list-sdks 2>$null' in resolver
+    assert '[int]$Matches["major"] -ge 8' in resolver
 
 
 def test_unity_csharp_syntax_gate_rejects_invalid_source(tmp_path: Path) -> None:
+    def has_net8_sdk(candidate: str) -> bool:
+        output = subprocess.run(
+            [candidate, "--list-sdks"],
+            capture_output=True,
+            text=True,
+            check=False,
+        ).stdout
+        return any(
+            version.split(".", 1)[0].isdigit() and int(version.split(".", 1)[0]) >= 8
+            for line in output.splitlines()
+            if (version := line.strip().split(" ", 1)[0])
+        )
+
     candidates = [shutil.which("dotnet")]
     local_app_data = os.environ.get("LOCALAPPDATA", "")
     if local_app_data:
@@ -218,14 +234,7 @@ def test_unity_csharp_syntax_gate_rejects_invalid_source(tmp_path: Path) -> None
         (
             candidate
             for candidate in candidates
-            if candidate
-            and Path(candidate).is_file()
-            and subprocess.run(
-                [candidate, "--list-sdks"],
-                capture_output=True,
-                text=True,
-                check=False,
-            ).stdout.strip()
+            if candidate and Path(candidate).is_file() and has_net8_sdk(candidate)
         ),
         None,
     )

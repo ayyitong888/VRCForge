@@ -3,7 +3,7 @@ import { checkAppUpdate, type AppUpdateResult } from "../lib/api/app-update";
 
 export function useAppUpdate(
   endpoint: string,
-  runtimeConnected: boolean,
+  backgroundRuntimeReady: boolean,
   automaticCheckEnabled: boolean,
   onUpdateAvailable: (result: AppUpdateResult) => void,
 ) {
@@ -14,7 +14,7 @@ export function useAppUpdate(
   );
 
   useEffect(() => {
-    if (!runtimeConnected || !automaticCheckEnabled || startedRef.current) return;
+    if (!backgroundRuntimeReady || !automaticCheckEnabled || startedRef.current) return;
     startedRef.current = true;
     const controller = new AbortController();
     void (async () => {
@@ -30,7 +30,7 @@ export function useAppUpdate(
     return () => {
       controller.abort();
     };
-  }, [automaticCheckEnabled, endpoint, runtimeConnected, onUpdateAvailable]);
+  }, [automaticCheckEnabled, backgroundRuntimeReady, endpoint, onUpdateAvailable]);
 
   return checkForAppUpdateNow;
 }

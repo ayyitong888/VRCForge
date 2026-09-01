@@ -145,7 +145,6 @@ fn main() {
                     }
                     "show" => show_main_window(app),
                     "check_update" => {
-                        show_main_window(app);
                         let _ = app.emit("vrcforge-tray-check-update", ());
                     }
                     "quit" => {

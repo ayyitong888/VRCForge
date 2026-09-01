@@ -317,6 +317,7 @@ export default function App() {
   const [savingAdvancedSettings, setSavingAdvancedSettings] = useState(false);
   const [handoffSendOpen, setHandoffSendOpen] = useState(false);
   const [appUpdatePrompt, setAppUpdatePrompt] = useState<AppUpdatePromptState | null>(null);
+  const [backgroundRuntimeReady, setBackgroundRuntimeReady] = useState(false);
   const [automaticUpdateCheckEnabled, setAutomaticUpdateCheckEnabled] = useState(
     () => loadAutomaticUpdateCheckEnabled(),
   );
@@ -435,7 +436,7 @@ export default function App() {
   }, []);
   const checkForAppUpdateNow = useAppUpdate(
     endpoint,
-    runtimeConnected,
+    backgroundRuntimeReady,
     automaticUpdateCheckEnabled,
     showStartupUpdate,
   );
@@ -2113,9 +2114,11 @@ export default function App() {
       void (async () => {
         try {
           const result = await checkForAppUpdateNow();
-          setAppUpdatePrompt({ source: "tray", result });
+          if (result.shouldNotify) {
+            setAppUpdatePrompt({ source: "tray", result });
+          }
         } catch {
-          setAppUpdatePrompt({ source: "tray", result: null });
+          // Manual checks share the same quiet background policy as startup.
         }
       })();
     })
@@ -2177,10 +2180,10 @@ export default function App() {
 
   function refreshStartupInBackground(target: string, options: { refreshProjects?: boolean } = {}) {
     void refreshStartupWithMetrics(target, options).catch((cause) => {
-        const message = cause instanceof Error ? cause.message : String(cause);
-        setError(message);
-        setStartupIssue(message);
-      });
+      const message = cause instanceof Error ? cause.message : String(cause);
+      setError(message);
+      setStartupIssue(message);
+    });
   }
 
   function scheduleProjectRefresh(target: string) {
@@ -2190,10 +2193,15 @@ export default function App() {
     projectRefreshTimerRef.current = window.setTimeout(() => {
       projectRefreshTimerRef.current = null;
       void refreshProjectList(target, { allowDuringStartup: true });
-    }, STARTUP_BACKGROUND_REFRESH_DELAY_MS);
+    }, 0);
   }
 
   async function refreshStartupWithMetrics(target: string, options: { refreshProjects?: boolean } = {}) {
+    if (options.refreshProjects) {
+      // Project discovery is an independent background request. Launch it now
+      // so it can overlap bootstrap hydration and the automatic update check.
+      scheduleProjectRefresh(target);
+    }
     const startedAt = performance.now();
     try {
       await refreshWithRetry(target);
@@ -2201,16 +2209,12 @@ export default function App() {
       const metrics = ((window as any).__vrcforgeStartupMetrics ||= {});
       metrics.bootstrapRefreshMs ??= Math.round(performance.now() - startedAt);
     }
-    if (options.refreshProjects) {
-      // Let the cached bootstrap render and the first paint complete before
-      // starting the potentially expensive project discovery scan.
-      scheduleProjectRefresh(target);
-    }
   }
 
   function resolveBackendReady(target: string, status?: string) {
     backendReadyStatusRef.current = "ready";
     backendReadyEndpointRef.current = target;
+    setBackgroundRuntimeReady(true);
     const startedAt = startupLaunchStartedAtRef.current;
     const metrics = ((window as any).__vrcforgeStartupMetrics ||= {});
     metrics.backendReadyEventMs = startedAt === null ? null : Math.round(performance.now() - startedAt);
@@ -2221,6 +2225,7 @@ export default function App() {
 
   function rejectBackendReady(message: string) {
     backendReadyStatusRef.current = "error";
+    setBackgroundRuntimeReady(false);
     const error = new Error(message);
     const waiters = backendReadyWaitersRef.current.splice(0);
     waiters.forEach((waiter) => waiter.reject(error));
@@ -2273,6 +2278,7 @@ export default function App() {
   function handleRuntimeSessionFailure(message: string) {
     bootstrapRequestSequenceRef.current += 1;
     bootstrapForegroundRequestRef.current = 0;
+    setBackgroundRuntimeReady(false);
     setAppSessionToken("");
     setBootstrap(null);
     setStartupIssue(message);

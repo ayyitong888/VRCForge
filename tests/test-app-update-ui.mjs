@@ -35,6 +35,12 @@ assert.doesNotMatch(hook, /notifyAppUpdate|app-update-notifications|setTimeout|s
 assert.match(app, /const \[appUpdatePrompt, setAppUpdatePrompt\] = useState<AppUpdatePromptState \| null>\(null\);/);
 assert.match(app, /listen\("vrcforge-tray-check-update"/);
 assert.match(app, /checkForAppUpdateNow/);
+const trayUpdateListener = app.slice(
+  app.indexOf('listen("vrcforge-tray-check-update"'),
+  app.indexOf("unlistenTrayCheckUpdate = unlisten"),
+);
+assert.match(trayUpdateListener, /if \(result\.shouldNotify\)/);
+assert.doesNotMatch(trayUpdateListener, /setAppUpdatePrompt\(\{ source: "tray", result: null \}\)/);
 assert.match(app, /setAutomaticUpdateCheckEnabled/);
 assert.match(preferences, /AUTOMATIC_UPDATE_CHECK_DISABLED_KEY = "vrcforge_automatic_update_check_disabled"/);
 assert.match(preferences, /loadAutomaticUpdateCheckEnabled/);
@@ -66,6 +72,11 @@ assert.match(tauriMain, /MenuItem::with_id\(app, "open_chat", "前往对话"/);
 assert.match(tauriMain, /MenuItem::with_id\(app, "show", "显示主窗口"/);
 assert.match(tauriMain, /MenuItem::with_id\(app, "check_update", "检查更新"/);
 assert.match(tauriMain, /vrcforge-tray-check-update/);
+const trayCheckHandler = tauriMain.slice(
+  tauriMain.indexOf('"check_update" => {'),
+  tauriMain.indexOf('"quit" => {'),
+);
+assert.doesNotMatch(trayCheckHandler, /show_main_window/);
 assert.doesNotMatch(service, /DEFAULT_PERIODIC|start_periodic|_periodic_loop|last_notified|periodic/i);
 
 // Update checks are App infrastructure, never an Agent tool surface.
