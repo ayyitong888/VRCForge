@@ -5,8 +5,8 @@ from __future__ import annotations
 CORE_IDENTITY = "vrcforge.unity-core"
 HANDSHAKE_PROTOCOL = "vrcforge.core-handshake.v1"
 PRODUCT_VERSION = "1.7.10"
-TOOL_CONTRACT_VERSION = "86"
-PREVIOUS_CORE_TOOL_CONTRACT_VERSION = "85"
+TOOL_CONTRACT_VERSION = "87"
+PREVIOUS_CORE_TOOL_CONTRACT_VERSION = "86"
 
 EXPECTED_TOOL_NAMES = frozenset(
     {
@@ -22,20 +22,20 @@ EXPECTED_TOOL_NAMES = frozenset(
         "vrc_poll_job", "vrc_prepare_checkpoint", "vrc_read_avatar_descriptor", "vrc_read_vrchat_sdk_builder_alerts", "vrc_refresh_asset_database",
         "vrc_reload_after_checkpoint_restore", "vrc_reload_primitive_basis_fixture", "vrc_remove_component",
         "vrc_rename_gameobject", "vrc_reparent_gameobject", "vrc_restore_safe_backup", "vrc_revert_removed_component", "vrc_rollback_avatar_parameters",
-        "vrc_save_scene_object_as_prefab", "vrc_save_current_scene", "vrc_save_new_scene", "vrc_select_scene_object", "vrc_scan_animation_bindings", "vrc_scan_avatar_controls", "vrc_scan_avatar_items",
+        "vrc_save_scene_object_as_prefab", "vrc_save_current_scene", "vrc_save_new_scene", "vrc_scene_save", "vrc_scene_transition", "vrc_select_scene_object", "vrc_scan_animation_bindings", "vrc_scan_avatar_controls", "vrc_scan_avatar_items",
         "vrc_scan_avatar_materials", "vrc_scan_avatar_parameters", "vrc_scan_avatar_performance", "vrc_scan_fx_animator",
         "vrc_scan_inbound_reference_closure", "vrc_scan_thry_avatar_performance", "vrc_scan_wardrobe", "vrc_set_constraint_sources", "vrc_set_gameobject_active",
-        "vrc_set_material_shader", "vrc_set_material_texture", "vrc_set_play_mode", "vrc_set_property", "vrc_set_texture_import_settings", "vrc_setup_outfit",
-        "vrc_toggle_scene_object", "vrc_unpack_prefab", "vrc_write_animation_curve", "vrc_write_avatar_descriptor",
+        "vrc_set_material_shader", "vrc_set_material_texture", "vrc_set_play_mode", "vrc_set_property", "vrc_set_texture_import_settings", "vrc_setup_outfit", "vrc_texture_patch",
+        "vrc_toggle_scene_object", "vrc_unpack_prefab", "vrc_user_adjustment_handoff", "vrc_write_animation_curve", "vrc_write_avatar_descriptor",
     }
 )
-EXPECTED_TOOL_COUNT = 85
+EXPECTED_TOOL_COUNT = 89
 
 # Contract revisions describe the discovered tool surface; protocol-range
-# negotiation decides whether the App and Core can communicate. Revision 86
-# adds one create-new scene asset duplicate/open atom.
+# negotiation decides whether the App and Core can communicate. Revision 87
+# adds the four Stage 1 atomic scene, texture, and user-handoff tools.
 PREVIOUS_CORE_UPGRADE_MISSING_TOOLS = frozenset(
-    {"vrc_duplicate_scene_asset"}
+    {"vrc_scene_save", "vrc_scene_transition", "vrc_texture_patch", "vrc_user_adjustment_handoff"}
 )
 PREVIOUS_CORE_TOOL_NAMES = EXPECTED_TOOL_NAMES - PREVIOUS_CORE_UPGRADE_MISSING_TOOLS
 PREVIOUS_CORE_TOOL_COUNT = len(PREVIOUS_CORE_TOOL_NAMES)

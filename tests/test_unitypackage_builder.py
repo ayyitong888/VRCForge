@@ -85,7 +85,7 @@ EXCLUDED_PACKAGE_ROOTS = (
     "Assets/VRCForge/Generated",
 )
 
-GUID_MANIFEST_SHA256 = "ef4a1102439197d740f4bc76442b63e0212ce5d753d1ae6872d01ec58e87cb1a"
+GUID_MANIFEST_SHA256 = "17e4f2dab286283913dd1c57d3ea6a51dc8f43112f9c8b1ae0531f41f337fb9a"
 
 
 def test_non_editor_csharp_cannot_leak_unityeditor_references() -> None:
@@ -129,7 +129,7 @@ def test_public_guid_manifest_pins_the_published_1_3_6_common_paths() -> None:
     assert manifest["schema"] == "vrcforge.unitypackage-guid-manifest.v1"
     entries = manifest["entries"]
     entry_map = {entry["path"]: entry["guid"] for entry in entries}
-    assert len(entries) == 82
+    assert len(entries) == 88
     assert {path: entry_map[path] for path in PUBLISHED_1_3_6_COMMON_GUIDS} == PUBLISHED_1_3_6_COMMON_GUIDS
     assert {path: entry_map[path] for path in FROZEN_SOURCE_META_GUIDS} == FROZEN_SOURCE_META_GUIDS
     assert {path: entry_map[path] for path in RELEASE_PAIRING_ASSET_GUIDS} == RELEASE_PAIRING_ASSET_GUIDS

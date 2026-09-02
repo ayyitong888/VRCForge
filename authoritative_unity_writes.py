@@ -85,6 +85,16 @@ from scene_asset_duplicate import (
     build_preview_arguments as build_scene_asset_duplicate_preview_arguments,
     validate_apply_result as validate_scene_asset_duplicate_apply_result,
 )
+from stage1_atomic_writes import (
+    SCENE_SAVE_TOOL,
+    SCENE_TRANSITION_TOOL,
+    TEXTURE_PATCH_TOOL,
+    USER_ADJUSTMENT_HANDOFF_TOOL,
+    Stage1AtomicWriteError,
+    bind_authoritative_preview as bind_stage1_preview,
+    build_preview_arguments as build_stage1_preview_arguments,
+    validate_apply_result as validate_stage1_apply_result,
+)
 
 
 PreviewInvoker = Callable[[str, dict[str, Any]], Any]
@@ -269,6 +279,26 @@ _SPECS = {
         validate_apply=validate_scene_asset_duplicate_apply_result,
         result_error="Scene duplicate apply returned an invalid verification receipt.",
     ),
+    **{
+        tool_name: AuthoritativeUnityWriteSpec(
+            tool_name=tool_name,
+            request_error="Stage 1 atomic Unity arguments are required.",
+            bridge_error="Stage 1 atomic Unity preview could not be verified against the current project.",
+            receipt_error="Stage 1 atomic Unity preview returned an invalid identity receipt.",
+            domain_error=Stage1AtomicWriteError,
+            build_preview=build_stage1_preview_arguments,
+            bind_preview=bind_stage1_preview,
+            include_project_path_in_preview=True,
+            validate_apply=(lambda arguments, payload, exact_name=tool_name: validate_stage1_apply_result(arguments, payload, exact_name)),
+            result_error="Stage 1 atomic Unity apply returned an invalid fresh-readback receipt.",
+        )
+        for tool_name in (
+            SCENE_SAVE_TOOL,
+            SCENE_TRANSITION_TOOL,
+            TEXTURE_PATCH_TOOL,
+            USER_ADJUSTMENT_HANDOFF_TOOL,
+        )
+    },
 }
 
 

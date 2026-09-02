@@ -15,8 +15,8 @@ namespace VRCForge.Editor
         internal const string CoreIdentity = "vrcforge.unity-core";
         internal const string HandshakeProtocol = "vrcforge.core-handshake.v1";
         internal const string ProductVersion = "1.7.10";
-        internal const string ToolContractVersion = "86";
-        internal const int ToolCount = 85;
+        internal const string ToolContractVersion = "87";
+        internal const int ToolCount = 89;
 
         private static readonly Dictionary<string, string> ExpectedTypes =
             new Dictionary<string, string>(StringComparer.Ordinal)
@@ -83,6 +83,8 @@ namespace VRCForge.Editor
                 { "vrc_save_scene_object_as_prefab", "VRCForge.Editor.SaveSceneObjectAsPrefabTool" },
                 { "vrc_save_current_scene", "VRCForge.Editor.SaveCurrentSceneTool" },
                 { "vrc_save_new_scene", "VRCForge.Editor.SaveNewSceneTool" },
+                { "vrc_scene_save", "VRCForge.Editor.SceneSaveTool" },
+                { "vrc_scene_transition", "VRCForge.Editor.SceneTransitionTool" },
                 { "vrc_select_scene_object", "VRCForge.Editor.SelectSceneObjectTool" },
                 { "vrc_scan_animation_bindings", "VRCForge.Editor.AssetTools" },
                 { "vrc_scan_avatar_controls", "VRCForge.Editor.AvatarControlScanner" },
@@ -98,12 +100,14 @@ namespace VRCForge.Editor
                 { "vrc_set_gameobject_active", "VRCForge.Editor.SetGameObjectActiveTool" },
                 { "vrc_set_material_shader", "VRCForge.Editor.MaterialShaderTool" },
                 { "vrc_set_material_texture", "VRCForge.Editor.MaterialTextureTool" },
+                { "vrc_texture_patch", "VRCForge.Editor.TexturePatchTool" },
                 { "vrc_set_play_mode", "VRCForge.Editor.SetPlayModeTool" },
                 { "vrc_set_property", "VRCForge.Editor.SetPropertyTool" },
                 { "vrc_set_texture_import_settings", "VRCForge.Editor.TextureImportSettingsTool" },
                 { "vrc_setup_outfit", "VRCForge.Editor.SetupOutfitTool" },
                 { "vrc_toggle_scene_object", "VRCForge.Editor.SceneObjectToggler" },
                 { "vrc_unpack_prefab", "VRCForge.Editor.UnpackPrefabTool" },
+                { "vrc_user_adjustment_handoff", "VRCForge.Editor.UserAdjustmentHandoffTool" },
                 { "vrc_write_animation_curve", "VRCForge.Editor.WriteAnimationCurveTool" },
                 { "vrc_write_avatar_descriptor", "VRCForge.Editor.WriteAvatarDescriptorTool" },
             };

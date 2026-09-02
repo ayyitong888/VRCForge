@@ -13,7 +13,12 @@ from execution_target import future_provenance_metadata, standard_identity_metad
 
 
 CANONICAL_TOOL_NAMES = {
+    "vrcforge_scene_save": "vrcforge.scene.save",
     "vrcforge_save_current_scene": "vrcforge.scene.save",
+}
+
+LEGACY_TOOL_ALIASES = {
+    "vrcforge_save_current_scene": "vrcforge_scene_save",
 }
 
 
@@ -28,13 +33,22 @@ def canonical_tool_name(name: str) -> str:
 
 def legacy_aliases(name: str) -> list[str]:
     normalized = str(name or "").strip()
-    if normalized == "vrcforge_save_current_scene":
-        return [normalized]
+    if normalized == "vrcforge_scene_save":
+        return ["vrcforge_save_current_scene"]
     return []
+
+
+def canonical_mcp_tool_name(name: str) -> str:
+    """Resolve a callable legacy name to the one displayed MCP Tool name."""
+
+    normalized = str(name or "").strip()
+    return LEGACY_TOOL_ALIASES.get(normalized, normalized)
 
 
 def identity_scope(name: str, *, write: bool = False) -> str:
     normalized = str(name or "").casefold()
+    if "user_adjustment_handoff" in normalized:
+        return "avatar"
     if any(token in normalized for token in ("property", "component", "renderer", "constraint", "material", "texture", "shader")):
         return "component"
     if any(token in normalized for token in ("gameobject", "scene_object", "avatar_object", "hierarchy")):

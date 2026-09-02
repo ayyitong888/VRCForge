@@ -2,6 +2,9 @@
   "schema": "vrcforge.unitypackage-guid-manifest.v1",
   "entries": [
     { "path": "Assets/VRCForge/Editor/AaoMergePhysBoneTool.cs", "guid": "7f8f7826b6de4e038506cc59521ccb55" },
+    { "path": "Assets/VRCForge/Editor/Stage1SceneTools.cs", "guid": "1e9b3a0f3a6c4c3d8d7e9f2a1b5c6d70" },
+    { "path": "Assets/VRCForge/Editor/TexturePatchTool.cs", "guid": "9c3f5f8a2a7d4d1b8e6c0f4a7b2d9e31" },
+    { "path": "Assets/VRCForge/Editor/UserAdjustmentHandoffTool.cs", "guid": "8e98f2b9a48e4c9c9d4a3fca8a5b6c71" },
     { "path": "Assets/VRCForge/Editor/SceneAssetDuplicateTool.cs", "guid": "5699d5b0f0c64ac9b2a9e8c6fe42331e" },
     { "path": "Assets/VRCForge", "guid": "e5a9931c984c4fa0bffe353deb4f5b32" },
     { "path": "Assets/VRCForge/Core", "guid": "1f4276f19de2c1b86750484077e07335" },

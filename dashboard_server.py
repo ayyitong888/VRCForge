@@ -200,6 +200,13 @@ from scene_asset_save_current import (
     TOOL_NAME as SAVE_CURRENT_SCENE_TOOL,
     build_wrapper_arguments as build_current_scene_save_wrapper_arguments,
 )
+from stage1_atomic_writes import (
+    SCENE_SAVE_TOOL,
+    SCENE_TRANSITION_TOOL,
+    TEXTURE_PATCH_TOOL,
+    USER_ADJUSTMENT_HANDOFF_TOOL,
+    build_wrapper_arguments as build_stage1_atomic_wrapper_arguments,
+)
 from texture_import_settings import (
     TOOL_NAME as TEXTURE_IMPORT_SETTINGS_TOOL,
     build_wrapper_arguments as build_texture_import_settings_wrapper_arguments,
@@ -711,6 +718,8 @@ VRCFORGE_UNITY_TOOL_REGISTRY = (
     "vrc_save_scene_object_as_prefab",
     "vrc_save_current_scene",
     "vrc_save_new_scene",
+    "vrc_scene_save",
+    "vrc_scene_transition",
     "vrc_scan_animation_bindings",
     "vrc_scan_avatar_controls",
     "vrc_scan_avatar_items",
@@ -725,6 +734,7 @@ VRCFORGE_UNITY_TOOL_REGISTRY = (
     "vrc_set_gameobject_active",
     "vrc_set_material_shader",
     "vrc_set_material_texture",
+    "vrc_texture_patch",
     "vrc_set_property",
     "vrc_set_texture_import_settings",
     "vrc_setup_outfit",
@@ -732,6 +742,7 @@ VRCFORGE_UNITY_TOOL_REGISTRY = (
     "vrc_unpack_prefab",
     "vrc_write_animation_curve",
     "vrc_write_avatar_descriptor",
+    "vrc_user_adjustment_handoff",
 )
 # The Core registry is the installation acceptance fact: all registered
 # VRCForge tools must be discoverable from the project-scoped descriptor.
@@ -791,7 +802,10 @@ VRCFORGE_UNITY_MCP_BACKED_WRITE_TARGETS = frozenset(
         "vrcforge_build_parameter_bit_packed_clone",
         "vrcforge_atomic_reference_rename",
         "vrcforge_create_component_feature",
-        "vrcforge_save_current_scene",
+        "vrcforge_scene_save",
+        "vrcforge_scene_transition",
+        "vrcforge_texture_patch",
+        "vrcforge_user_adjustment_handoff",
         "vrcforge_save_new_scene",
         "vrcforge_unpack_prefab",
         "vrcforge_configure_optimizer_component",
@@ -854,6 +868,10 @@ VRCFORGE_UNITY_MCP_WRITE_ALLOWLIST = frozenset(
         "vrc_instantiate_prefab",
         "vrc_save_current_scene",
         "vrc_save_new_scene",
+        SCENE_SAVE_TOOL,
+        SCENE_TRANSITION_TOOL,
+        TEXTURE_PATCH_TOOL,
+        USER_ADJUSTMENT_HANDOFF_TOOL,
         "vrc_unpack_prefab",
     }
 )
@@ -19694,6 +19712,18 @@ def prepare_save_current_scene_request(
     return prepare_unity_mcp_write_request(wrapper, caller_preview)
 
 
+def prepare_stage1_atomic_request(
+    params: dict[str, Any],
+    caller_preview: Any,
+    tool_name: str,
+) -> tuple[dict[str, Any], Any]:
+    try:
+        wrapper = build_stage1_atomic_wrapper_arguments(params or {}, tool_name)
+    except ValueError as exc:
+        raise AgentGatewayError(str(exc), status_code=400) from exc
+    return prepare_unity_mcp_write_request(wrapper, caller_preview)
+
+
 def unity_mcp_manual_approval_reason(arguments: dict[str, Any], _preview: Any) -> str:
     nested_tool = str(arguments.get("toolName") or arguments.get("tool_name") or "").strip()
     if nested_tool in {PARAMETER_BIT_PACKING_TOOL, ATOMIC_REFERENCE_RENAME_TOOL}:
@@ -19715,6 +19745,10 @@ def prepare_authoritative_unity_checkpoint_sync(
         SAVE_SCENE_OBJECT_AS_PREFAB_TOOL,
         SAVE_CURRENT_SCENE_TOOL,
         SAVE_NEW_SCENE_TOOL,
+        SCENE_SAVE_TOOL,
+        SCENE_TRANSITION_TOOL,
+        TEXTURE_PATCH_TOOL,
+        USER_ADJUSTMENT_HANDOFF_TOOL,
     }:
         return prepare_unity_checkpoint_sync(project_root)
     approved_write_arguments = copy.deepcopy(arguments)
@@ -25186,13 +25220,35 @@ def register_agent_gateway_tools() -> None:
         lambda params: AGENT_GATEWAY.checkpoint_recovery.resolve_interrupted_apply_recovery(params or {}),
     )
     register_write_handler(
-        "vrcforge_save_current_scene",
-        "when-to-use: persist the one active already-saved dirty Unity scene in place after the external agent presents the exact preview risk and the user explicitly approves. when-NOT-to-use: do not use it for a clean scene, an unsaved new scene, multiple open scenes, another scene path, inspection, or unattended/background execution. Negative example: do not call it automatically just because another write reports unsaved scene changes.",
+        "vrcforge_scene_save",
+        "When to use: save the exact active scene in place, or save it as one new non-existing Assets scene after a bound preview and approval. When NOT to use: do not open, unload, replace, overwrite, or silently save a different or dirty scene. Negative example: do not call save_as with an existing destination or use save merely because another tool reports unsaved changes.",
         "high",
         unity_mcp_write_sync,
-        request_preparer=prepare_save_current_scene_request,
-        checkpoint_prepare_handler=prepare_authoritative_unity_checkpoint_sync,
-        requires_approved_execution_context=True,
+        request_preparer=lambda params, preview: prepare_stage1_atomic_request(params, preview, SCENE_SAVE_TOOL),
+        approved_execution_plan_builder=build_unity_mcp_write_execution_plan,
+    )
+    register_write_handler(
+        "vrcforge_scene_transition",
+        "When to use: explicitly open, add, create-and-save, activate, unload, or cleanly reload one exact Unity scene after preview and approval. When NOT to use: never use it when any affected scene is dirty or when saving the current scene is the goal. Negative example: do not reload a dirty scene to discard edits.",
+        "high",
+        unity_mcp_write_sync,
+        request_preparer=lambda params, preview: prepare_stage1_atomic_request(params, preview, SCENE_TRANSITION_TOOL),
+        approved_execution_plan_builder=build_unity_mcp_write_execution_plan,
+    )
+    register_write_handler(
+        "vrcforge_texture_patch",
+        "When to use: create a new PNG by applying one bounded local pixel patch to an exact source texture, preserving all pixels outside the patch and protected regions. When NOT to use: do not inpaint, generate imagery, overwrite a source/output, edit non-PNG assets, or bind a material. Negative example: do not use this to redesign a whole texture or replace vrcforge_set_material_texture.",
+        "medium",
+        unity_mcp_write_sync,
+        request_preparer=lambda params, preview: prepare_stage1_atomic_request(params, preview, TEXTURE_PATCH_TOOL),
+        approved_execution_plan_builder=build_unity_mcp_write_execution_plan,
+    )
+    register_write_handler(
+        "vrcforge_user_adjustment_handoff",
+        "When to use: prepare, finalize, or abort a checkpointed cross-turn Unity Scene handle that lets the user manually drag one exactly identified Transform, skinned bone, constrained object, or PhysBone chain. When NOT to use: do not guess by hierarchy path, continue after Scene/Avatar/object replacement, or delete user changes on finalize failure. Negative example: do not use this for unattended automatic placement.",
+        "high",
+        unity_mcp_write_sync,
+        request_preparer=lambda params, preview: prepare_stage1_atomic_request(params, preview, USER_ADJUSTMENT_HANDOFF_TOOL),
         approved_execution_plan_builder=build_unity_mcp_write_execution_plan,
     )
     register_write_handler(

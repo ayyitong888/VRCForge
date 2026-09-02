@@ -111,7 +111,12 @@ from execution_target import (
     execution_target_digest,
     validate_runtime_execution_target,
 )
-from mcp_tool_descriptor import identity_scope, standardize_tool_descriptor, canonical_tool_name
+from mcp_tool_descriptor import (
+    canonical_mcp_tool_name,
+    canonical_tool_name,
+    identity_scope,
+    standardize_tool_descriptor,
+)
 from operation_context import bind_operation_context
 
 
@@ -1298,6 +1303,59 @@ UNITY_READ_TOOL_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
 }
 
 EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
+    "vrcforge_scene_save": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["projectPath", "action", "scenePath"],
+        "properties": {
+            "projectPath": _PROJECT_PATH_PROPERTY,
+            "action": {"type": "string", "enum": ["save", "save_as"]},
+            "scenePath": {"type": "string", "pattern": "^Assets/.*\\.unity$", "description": "Exact active scene identity; never a hierarchy-path fallback."},
+            "destinationScenePath": {"type": "string", "pattern": "^Assets/.*\\.unity$", "description": "Required only for save_as and must not exist."},
+        },
+    },
+    "vrcforge_scene_transition": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["projectPath", "action"],
+        "properties": {
+            "projectPath": _PROJECT_PATH_PROPERTY,
+            "action": {"type": "string", "enum": ["open_single", "open_additive", "new_saved", "set_active", "unload", "reload_saved"]},
+            "scenePath": {"type": "string", "pattern": "^Assets/.*\\.unity$"},
+            "destinationScenePath": {"type": "string", "pattern": "^Assets/.*\\.unity$", "description": "Required only for new_saved and must not exist."},
+        },
+    },
+    "vrcforge_texture_patch": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["projectPath", "sourceTexturePath", "targetTexturePath", "region", "red", "green", "blue", "alpha", "opacity", "featherPixels"],
+        "properties": {
+            "projectPath": _PROJECT_PATH_PROPERTY,
+            "sourceTexturePath": {"type": "string", "pattern": "^Assets/.*\\.png$"},
+            "targetTexturePath": {"type": "string", "pattern": "^Assets/.*\\.png$", "description": "Create-new output; it and its .meta must be absent."},
+            "region": {"type": "array", "minItems": 4, "maxItems": 4, "items": {"type": "integer", "minimum": 0}, "description": "Exact [x,y,width,height] pixel rectangle; width and height must be positive."},
+            "protectedRegions": {"type": "array", "maxItems": 128, "items": {"type": "array", "minItems": 4, "maxItems": 4, "items": {"type": "integer", "minimum": 0}}},
+            "red": {"type": "integer", "minimum": 0, "maximum": 255},
+            "green": {"type": "integer", "minimum": 0, "maximum": 255},
+            "blue": {"type": "integer", "minimum": 0, "maximum": 255},
+            "alpha": {"type": "integer", "minimum": 0, "maximum": 255},
+            "opacity": {"type": "number", "minimum": 0, "maximum": 1, "default": 1},
+            "featherPixels": {"type": "integer", "minimum": 0, "maximum": 256, "default": 0},
+        },
+    },
+    "vrcforge_user_adjustment_handoff": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["projectPath", "action", "mode", "avatarGlobalObjectId", "targetGlobalObjectId"],
+        "properties": {
+            "projectPath": _PROJECT_PATH_PROPERTY,
+            "action": {"type": "string", "enum": ["prepare", "finalize", "abort"]},
+            "mode": {"type": "string", "enum": ["transform", "skinned_bone_proxy", "constraint_bound", "physbone_chain"]},
+            "avatarGlobalObjectId": {"type": "string", "pattern": "^GlobalObjectId_V1-"},
+            "targetGlobalObjectId": {"type": "string", "pattern": "^GlobalObjectId_V1-"},
+            "handoffId": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+        },
+    },
     "vrcforge_remap_skinned_mesh_bone": {
         "type": "object",
         "additionalProperties": False,
@@ -1818,6 +1876,7 @@ EXTERNAL_MCP_WRITE_TOOL_BLOCKS: dict[str, frozenset[str]] = {
             "vrcforge_select_project",
             "vrcforge_set_play_mode",
             "vrcforge_confirm_unity_reload_dialog",
+            "vrcforge_scene_transition",
         }
     ),
     "avatar": frozenset(
@@ -1846,8 +1905,9 @@ EXTERNAL_MCP_WRITE_TOOL_BLOCKS: dict[str, frozenset[str]] = {
             "vrcforge_rename_gameobject",
             "vrcforge_reparent_gameobject",
             "vrcforge_rollback_parameters",
-            "vrcforge_save_current_scene",
+            "vrcforge_scene_save",
             "vrcforge_save_new_scene",
+            "vrcforge_user_adjustment_handoff",
             "vrcforge_select_scene_object",
             "vrcforge_set_gameobject_active",
             "vrcforge_set_constraint_sources",
@@ -1883,6 +1943,7 @@ EXTERNAL_MCP_WRITE_TOOL_BLOCKS: dict[str, frozenset[str]] = {
             "vrcforge_set_texture_import_settings",
             "vrcforge_set_material_shader",
             "vrcforge_set_material_texture",
+            "vrcforge_texture_patch",
         }
     ),
     "integrations/modular-avatar": frozenset(
@@ -4612,7 +4673,7 @@ class AgentGateway:
     def external_mcp_tool_block_for_name(self, name: str, *, write: bool) -> str:
         """Return the canonical external Unity block reused by the internal Unity tree."""
 
-        normalized = str(name or "").strip()
+        normalized = canonical_mcp_tool_name(name)
         config = self.ensure_config()
         if write:
             handler = self._write_handlers.get(normalized)
@@ -4623,7 +4684,7 @@ class AgentGateway:
     def resolve_external_mcp_tool_name(self, name: str) -> str:
         """Resolve a canonical/legacy name to the existing registered entry."""
 
-        normalized = str(name or "").strip()
+        normalized = canonical_mcp_tool_name(name)
         if normalized in self._tools or normalized in self._write_handlers:
             return normalized
         for candidate in (*self._tools.keys(), *self._write_handlers.keys()):
