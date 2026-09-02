@@ -40,6 +40,7 @@ namespace VRCForge.Editor
         {
             var p = (raw ?? new JObject()).ToObject<Parameters>() ?? new Parameters();
             var action = (p.action ?? "").Trim();
+            var mutationStarted = false;
             try
             {
                 action = Choice(action, "action", "prepare", "finalize", "abort");
@@ -49,10 +50,27 @@ namespace VRCForge.Editor
                 if (p.preview ?? false)
                     return VRCForgeToolResult.Completed("User adjustment handoff preview completed without mutation.", Preview(snapshot));
                 VerifyApply(p, snapshot);
+                mutationStarted = true;
                 return action == "prepare" ? Prepare(snapshot) : Complete(snapshot, action == "finalize");
             }
             catch (Exception exception)
             {
+                if (mutationStarted)
+                {
+                    return VRCForgeToolResult.FailedWithCode(
+                        "user_adjustment_handoff_failed_after_mutation",
+                        exception.Message,
+                        new
+                        {
+                            schema = ResultSchema,
+                            operation = "user_adjustment_" + action,
+                            mutationStarted = true,
+                            commitState = "unknown",
+                            checkpointRecoveryRequired = true,
+                            failureLayer = "unity_core_tool",
+                            failurePhase = "apply_mutation"
+                        });
+                }
                 return VRCForgeToolResult.RejectedBeforeMutation(
                     "user_adjustment_handoff_rejected", exception.Message,
                     "unity_core_tool", "identity_or_preview_validation", false,
@@ -114,12 +132,7 @@ namespace VRCForge.Editor
                 schema = ResultSchema, operation = "user_adjustment_" + s.Action, ok = true,
                 preview = true, verified = true, changed = false, mutationStarted = false,
                 commitState = "not_started", projectPath = s.ProjectPath, previewDigest = s.PreviewDigest,
-                applyBinding = new
-                {
-                    expectedProjectPath = s.ProjectPath, expectedPreviewDigest = s.PreviewDigest,
-                    expectedScenePath = s.ScenePath, expectedSceneGuid = s.SceneGuid,
-                    expectedHierarchyDigest = s.HierarchyDigest, expectedProxyGlobalObjectId = s.ProxyId
-                },
+                applyBinding = ApplyBinding(s),
                 target = new
                 {
                     avatarGlobalObjectId = s.AvatarId, targetGlobalObjectId = s.TargetId,
@@ -135,7 +148,7 @@ namespace VRCForge.Editor
         private static void VerifyApply(Parameters p, Snapshot s)
         {
             if (!SceneObjectCopyCore.MatchesCurrentProject(p.expectedProjectPath)
-                || p.expectedProjectPath.Replace('\\', '/').TrimEnd('/') != s.ProjectPath
+                || (p.expectedProjectPath ?? string.Empty).Replace('\\', '/').TrimEnd('/') != s.ProjectPath
                 || p.expectedPreviewDigest != s.PreviewDigest || p.expectedScenePath != s.ScenePath
                 || p.expectedSceneGuid != s.SceneGuid || p.expectedHierarchyDigest != s.HierarchyDigest
                 || (s.Action != "prepare" && p.expectedProxyGlobalObjectId != s.ProxyId))
@@ -185,6 +198,13 @@ namespace VRCForge.Editor
                     status = "awaiting_user", operationStatus = "user_confirmation_required",
                     preview = false, verified = true, changed = true, mutationStarted = true,
                     commitState = "committed", projectPath = s.ProjectPath, previewDigest = s.PreviewDigest,
+                    applyBinding = ApplyBinding(new Snapshot
+                    {
+                        Action = s.Action, Mode = s.Mode, ProjectPath = s.ProjectPath,
+                        AvatarId = s.AvatarId, TargetId = s.TargetId, ScenePath = s.ScenePath,
+                        SceneGuid = s.SceneGuid, HierarchyDigest = s.HierarchyDigest, PreviewDigest = s.PreviewDigest,
+                        HandoffId = s.HandoffId, ProxyId = ObjectId(proxyReadback)
+                    }),
                     handoffId = id, nextAction = "After the user finishes dragging, call action=finalize with the same exact identities.",
                     readback = new { avatarGlobalObjectId = s.AvatarId, targetGlobalObjectId = s.TargetId, proxyGlobalObjectId = ObjectId(proxyReadback), targetPath = DisplayPath(targetReadback.transform), proxyPath = DisplayPath(proxyReadback.transform), scenePath = s.ScenePath, sceneGuid = s.SceneGuid }
                 });
@@ -201,19 +221,27 @@ namespace VRCForge.Editor
         private static object Complete(Snapshot s, bool finalize)
         {
             var target = s.Target.transform;
+            var originalWorldPosition = target.position;
+            var originalWorldRotation = target.rotation;
+            var originalWorldScale = target.lossyScale;
             var parentId = s.State["parentGlobalObjectId"]?.ToString() ?? "";
             var parent = string.IsNullOrEmpty(parentId) ? null : Resolve(parentId, "original parent").transform;
+            var originalLocalPosition = ReadVector(s.State["localPosition"], "localPosition");
+            var originalLocalRotation = ReadQuaternion(s.State["localRotation"], "localRotation");
+            var originalLocalScale = ReadVector(s.State["localScale"], "localScale");
             if (finalize)
             {
-                var position = target.position; var rotation = target.rotation; var scale = target.lossyScale;
-                target.SetParent(parent, true); target.position = position; target.rotation = rotation; SetWorldScale(target, scale);
+                target.SetParent(parent, true);
+                target.position = originalWorldPosition;
+                target.rotation = originalWorldRotation;
+                SetWorldScale(target, originalWorldScale);
             }
             else
             {
                 target.SetParent(parent, false);
-                target.localPosition = ReadVector(s.State["localPosition"], "localPosition");
-                target.localRotation = ReadQuaternion(s.State["localRotation"], "localRotation");
-                target.localScale = ReadVector(s.State["localScale"], "localScale");
+                target.localPosition = originalLocalPosition;
+                target.localRotation = originalLocalRotation;
+                target.localScale = originalLocalScale;
             }
             UnityEngine.Object.DestroyImmediate(s.Proxy);
             EditorSceneManager.MarkSceneDirty(s.Target.scene);
@@ -229,9 +257,23 @@ namespace VRCForge.Editor
                 schema = ResultSchema, operation = finalize ? "user_adjustment_finalize" : "user_adjustment_abort",
                 ok = true, status = finalize ? "finalized" : "aborted", preview = false, verified = true,
                 changed = true, mutationStarted = true, commitState = "committed", projectPath = s.ProjectPath,
+                applyBinding = ApplyBinding(s),
                 previewDigest = s.PreviewDigest,
                 readback = new { avatarGlobalObjectId = s.AvatarId, targetGlobalObjectId = ObjectId(readback), targetPath = DisplayPath(readback.transform), proxyDeleted = true, scenePath = s.ScenePath, sceneGuid = s.SceneGuid, hierarchyDigest = SceneHierarchyDigest(readback.scene) }
             });
+        }
+
+        private static object ApplyBinding(Snapshot s)
+        {
+            return new
+            {
+                expectedProjectPath = s.ProjectPath,
+                expectedPreviewDigest = s.PreviewDigest,
+                expectedScenePath = s.ScenePath,
+                expectedSceneGuid = s.SceneGuid,
+                expectedHierarchyDigest = s.HierarchyDigest,
+                expectedProxyGlobalObjectId = s.ProxyId
+            };
         }
 
         private static void VerifyMode(GameObject avatar, GameObject target, string mode)

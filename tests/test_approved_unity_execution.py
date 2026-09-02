@@ -14,6 +14,7 @@ from approved_unity_execution import (
     freeze_approved_unity_execution_plan,
     validate_frozen_approved_unity_execution_plan,
 )
+from execution_target import execution_target_digest
 from unity_mcp_core_client import UnityMcpCoreConnectionError, UnityMcpCoreError
 
 
@@ -35,11 +36,14 @@ def _external_context(
     issued: int = 1_000,
     expires: int = 2_000,
 ) -> dict[str, object]:
+    target = {"schema": "vrcforge.execution_target.v1", "fixture": "exact"}
     return {
         "lane": "external_mcp_write",
         "operationId": "mcpwrite-1",
         "targetTool": "gateway-write",
         "projectRoot": str(project),
+        "executionTarget": target,
+        "executionTargetDigest": execution_target_digest(target),
         "issuedAtUnixMs": issued,
         "expiresAtUnixMs": expires,
     }

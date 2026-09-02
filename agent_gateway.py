@@ -1822,16 +1822,32 @@ def canonical_unity_write_tool_input_schema(tool_name: str) -> dict[str, Any]:
     name = str(tool_name or "").strip()
     registered = EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS.get(name)
     if isinstance(registered, Mapping):
-        return dict(registered)
-    hinted = planner_policy.planner_tool_input_schema(name)
-    if hinted:
-        return dict(hinted)
-    return {
-        "type": "object",
-        "properties": {},
-        "required": [],
-        "additionalProperties": True,
-    }
+        schema = deepcopy(dict(registered))
+    else:
+        hinted = planner_policy.planner_tool_input_schema(name)
+        schema = deepcopy(dict(hinted)) if hinted else {
+            "type": "object",
+            "properties": {},
+            "required": [],
+            "additionalProperties": True,
+        }
+
+    # This is part of the canonical write schema, not an external-MCP-only
+    # decoration. Internal and external Agents must reason over the exact same
+    # namespace lock contract even though their visible Tool projections differ.
+    properties = dict(schema.get("properties") or {})
+    if "projectPath" in properties:
+        properties["executionTarget"] = {
+            "type": "object",
+            "description": (
+                "Exact vrcforge.execution_target.v1 namespace identity envelope. "
+                "Hierarchy paths are display/navigation only and are never write identity."
+            ),
+            "required": ["schema", "namespace", "scope", "project", "editor"],
+            "additionalProperties": True,
+        }
+        schema["properties"] = properties
+    return schema
 
 
 def bind_runtime_unity_project(

@@ -285,6 +285,54 @@
       "requiredFixtures": ["saved clean scene containing one exact Unity constraint on the avatar", "previous exact constraint-conversion preview"],
       "successFields": ["scenePath", "gameObjectPath", "componentTypeBefore", "componentTypeAfter", "convertReferencedAnimationClips", "readback", "consoleDelta", "committed", "commitState"],
       "cleanup": "Restore the fixture scene through the checkpoint/backup lane."
+    },
+    {
+      "tool": "vrc_configure_aao_merge_physbone",
+      "mode": "preview",
+      "minimalArguments": { "scenePath": "${SAVED_SCENE_PATH}", "gameObjectPath": "${AAO_MERGE_HOST_PATH}", "sourcePhysBonePaths": ["${AAO_PHYSBONE_SOURCE_A}", "${AAO_PHYSBONE_SOURCE_B}"], "makeParent": false, "preview": true, "saveScene": false },
+      "requiredFixtures": ["saved clean avatar scene", "AAO 1.9.x", "one exact host without Merge PhysBone", "two exact existing VRCPhysBone sources"],
+      "successFields": ["schema", "preview", "projectPath", "scene", "host", "sources", "target", "previewDigest"],
+      "cleanup": "None; preview must not create a component or dirty the Scene."
+    },
+    {
+      "tool": "vrc_revert_removed_component",
+      "mode": "preview",
+      "minimalArguments": { "gameObjectPath": "${REMOVED_COMPONENT_HOST_PATH}", "sourceComponentGlobalObjectId": "${REMOVED_SOURCE_COMPONENT_GLOBAL_OBJECT_ID}", "componentType": "${REMOVED_COMPONENT_TYPE}", "sourceComponentIndex": 0, "preview": true },
+      "requiredFixtures": ["saved connected Prefab scene instance", "one exact removed-component override", "stable source component GlobalObjectId"],
+      "successFields": ["action", "preview", "gameObjectPath", "componentType", "sourceComponentGlobalObjectId", "sourceComponentIndex", "before", "commitState"],
+      "cleanup": "None; preview must preserve the removed-component override."
+    },
+    {
+      "tool": "vrc_scene_save",
+      "mode": "preview",
+      "minimalArguments": { "action": "save", "scenePath": "${SAVED_SCENE_PATH}", "preview": true },
+      "requiredFixtures": ["active saved Scene with stable GUID, file identity, and hierarchy digest"],
+      "successFields": ["schema", "operation", "preview", "verified", "projectPath", "previewDigest", "applyBinding", "readback", "commitState"],
+      "cleanup": "None; preview must not save or mutate the Scene."
+    },
+    {
+      "tool": "vrc_scene_transition",
+      "mode": "preview",
+      "minimalArguments": { "action": "open_additive", "scenePath": "${SECOND_SAVED_SCENE_PATH}", "preview": true },
+      "requiredFixtures": ["clean active saved Scene", "second saved Scene asset that is not loaded"],
+      "successFields": ["schema", "operation", "preview", "verified", "projectPath", "previewDigest", "applyBinding", "sceneSetupDigest", "openSceneStateDigest", "commitState"],
+      "cleanup": "None; preview must not change loaded or active Scenes."
+    },
+    {
+      "tool": "vrc_texture_patch",
+      "mode": "preview",
+      "minimalArguments": { "sourceTexturePath": "${PATCH_SOURCE_TEXTURE_PATH}", "targetTexturePath": "${PATCH_TARGET_TEXTURE_PATH}", "preview": true, "region": [0, 0, 1, 1], "protectedRegions": [], "red": 255, "green": 0, "blue": 0, "alpha": 255, "opacity": 1.0, "featherPixels": 0 },
+      "requiredFixtures": ["existing readable project PNG", "absent target PNG and metadata path", "one patchable pixel outside protected regions"],
+      "successFields": ["schema", "operation", "preview", "verified", "projectPath", "previewDigest", "applyBinding", "source", "target", "patch", "commitState"],
+      "cleanup": "None; preview must not create the target texture."
+    },
+    {
+      "tool": "vrc_user_adjustment_handoff",
+      "mode": "preview",
+      "minimalArguments": { "action": "prepare", "mode": "transform", "avatarGlobalObjectId": "${HANDOFF_AVATAR_GLOBAL_OBJECT_ID}", "targetGlobalObjectId": "${HANDOFF_TARGET_GLOBAL_OBJECT_ID}", "preview": true },
+      "requiredFixtures": ["saved clean avatar Scene", "exact Avatar GlobalObjectId", "exact child target GlobalObjectId"],
+      "successFields": ["schema", "operation", "preview", "verified", "projectPath", "previewDigest", "applyBinding", "target", "effect", "readback", "commitState"],
+      "cleanup": "None; preview must not create a proxy or handoff state file."
     }
   ]
 }

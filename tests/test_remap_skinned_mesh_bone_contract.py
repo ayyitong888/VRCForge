@@ -25,7 +25,11 @@ def test_remap_schema_is_shared_and_exposed_in_avatar_block() -> None:
     assert "vrc_set_material_texture" in unity_mcp_tool_contract.PREVIOUS_CORE_TOOL_NAMES
     assert "vrc_configure_aao_merge_physbone" in unity_mcp_tool_contract.PREVIOUS_CORE_TOOL_NAMES
     assert "vrc_revert_removed_component" in unity_mcp_tool_contract.PREVIOUS_CORE_TOOL_NAMES
-    assert "vrc_duplicate_scene_asset" not in unity_mcp_tool_contract.PREVIOUS_CORE_TOOL_NAMES
+    assert "vrc_duplicate_scene_asset" in unity_mcp_tool_contract.PREVIOUS_CORE_TOOL_NAMES
+    assert "vrc_scene_save" not in unity_mcp_tool_contract.PREVIOUS_CORE_TOOL_NAMES
+    assert "vrc_scene_transition" not in unity_mcp_tool_contract.PREVIOUS_CORE_TOOL_NAMES
+    assert "vrc_texture_patch" not in unity_mcp_tool_contract.PREVIOUS_CORE_TOOL_NAMES
+    assert "vrc_user_adjustment_handoff" not in unity_mcp_tool_contract.PREVIOUS_CORE_TOOL_NAMES
 
 
 def test_remap_execution_plan_freezes_one_exact_core_call() -> None:

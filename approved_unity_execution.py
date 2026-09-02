@@ -27,6 +27,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
+from execution_target import execution_target_digest
 from unity_mcp_core_client import canonical_arguments_sha256
 
 
@@ -339,9 +340,20 @@ def _validate_context(value: Any) -> dict[str, Any]:
     if lane == "approved_write":
         required_strings = ("approvalId", "checkpointId", "targetTool", "projectRoot")
     elif lane == "external_mcp_write":
-        required_strings = ("operationId", "targetTool", "projectRoot")
+        required_strings = (
+            "operationId",
+            "targetTool",
+            "projectRoot",
+            "executionTargetDigest",
+        )
         if "approvalId" in context or "checkpointId" in context:
             raise ValueError("approved Unity execution context is invalid.")
+        target = context.get("executionTarget")
+        if not isinstance(target, Mapping) or not secrets.compare_digest(
+            str(context.get("executionTargetDigest") or ""),
+            execution_target_digest(target),
+        ):
+            raise ValueError("approved Unity execution context ExecutionTarget is invalid.")
     else:
         raise ValueError("approved Unity execution context is invalid.")
     for key in required_strings:

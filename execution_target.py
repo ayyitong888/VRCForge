@@ -227,9 +227,31 @@ def validate_runtime_execution_target(
         pid = int(descriptor.get("processId") or 0)
     except (TypeError, ValueError) as exc:
         raise ExecutionTargetError("unity_pid_invalid", "Unity Core descriptor has an invalid PID.") from exc
+    observed_process_start = process_start_time(pid)
+    descriptor_process_start = str(descriptor.get("processStartTime") or "").strip()
+    if descriptor_process_start:
+        try:
+            process_start_delta = abs(
+                float(descriptor_process_start) - float(observed_process_start)
+            )
+        except ValueError as exc:
+            raise ExecutionTargetError(
+                "process_identity_mismatch",
+                "Unity Core descriptor process start time is invalid.",
+            ) from exc
+        # Windows Process.StartTime and psutil read the same OS-owned process
+        # creation timestamp through different APIs whose conversions can vary
+        # by a few microseconds.  The Core remains authoritative and later
+        # requires an exact string match; this local cross-check only rejects a
+        # descriptor that no longer identifies the observed PID lifetime.
+        if process_start_delta > 0.01:
+            raise ExecutionTargetError(
+                "process_identity_mismatch",
+                "Unity Core descriptor process start time does not match the running process.",
+            )
     core = {
         "processId": pid,
-        "processStartTime": process_start_time(pid),
+        "processStartTime": descriptor_process_start or observed_process_start,
         "instanceId": descriptor.get("instanceId"),
     }
     return validate_execution_target(

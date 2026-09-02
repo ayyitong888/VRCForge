@@ -748,7 +748,12 @@ def test_fixed_lanes_derive_approved_write_without_stale_hardcoded_counts() -> N
     safety_block = SERVER[SERVER.index("SafetyControlTools =") : SERVER.index("private enum InvocationLane")]
     preview_names = set(re.findall(r'"(vrc_[^"]+)"', preview_block))
     safety_names = set(re.findall(r'"(vrc_[^"]+)"', safety_block))
-    assert len(preview_names) == 29
+    assert {
+        "vrc_scene_save",
+        "vrc_scene_transition",
+        "vrc_texture_patch",
+        "vrc_user_adjustment_handoff",
+    } <= preview_names
     assert "vrc_convert_unity_constraint" in preview_names
     assert "vrc_set_material_texture" in preview_names
     assert len(safety_names) == 2

@@ -265,17 +265,21 @@ def test_apply_receipt_requires_committed_clean_scene_and_unchanged_metadata(tmp
         validate_apply_result(arguments, changed)
 
 
-def test_external_facade_exposes_high_risk_current_scene_save() -> None:
-    handler = dashboard_server.AGENT_GATEWAY._write_handlers["vrcforge_save_current_scene"]
+def test_external_facade_exposes_canonical_high_risk_scene_save() -> None:
+    handler = dashboard_server.AGENT_GATEWAY._write_handlers["vrcforge_scene_save"]
     assert TOOL_NAME == "vrc_save_current_scene"
     assert handler.risk_level == "high"
-    assert handler.request_preparer is dashboard_server.prepare_save_current_scene_request
+    assert handler.request_preparer is not dashboard_server.prepare_save_current_scene_request
     assert handler.requires_approved_execution_context is True
     assert handler.approved_execution_plan_builder is dashboard_server.build_unity_mcp_write_execution_plan
-    assert "when-to-use:" in handler.description
-    assert "when-NOT-to-use:" in handler.description
+    assert "When to use:" in handler.description
+    assert "When NOT to use:" in handler.description
     assert "Negative example:" in handler.description
-    assert "vrcforge_save_current_scene" in dashboard_server.VRCFORGE_UNITY_MCP_BACKED_WRITE_TARGETS
+    assert "vrcforge_scene_save" in dashboard_server.VRCFORGE_UNITY_MCP_BACKED_WRITE_TARGETS
+    assert dashboard_server.AGENT_GATEWAY.resolve_external_mcp_tool_name(
+        "vrcforge_save_current_scene"
+    ) == "vrcforge_scene_save"
+    assert "vrcforge_save_current_scene" not in dashboard_server.AGENT_GATEWAY._write_handlers
     assert TOOL_NAME in dashboard_server.VRCFORGE_UNITY_MCP_WRITE_ALLOWLIST
     tools = dashboard_server.AGENT_GATEWAY.build_external_mcp_tools(
         exposure_layer="execution",
@@ -284,9 +288,14 @@ def test_external_facade_exposes_high_risk_current_scene_save() -> None:
     current_scene_save = next(
         tool
         for tool in tools
-        if tool["name"] == "vrcforge_save_current_scene"
+        if tool["name"] == "vrcforge_scene_save"
     )
-    assert current_scene_save["inputSchema"]["required"] == ["projectPath", "scenePath"]
+    assert current_scene_save["inputSchema"]["required"] == [
+        "projectPath",
+        "action",
+        "scenePath",
+    ]
+    assert "executionTarget" in current_scene_save["inputSchema"]["properties"]
     assert current_scene_save["inputSchema"]["additionalProperties"] is False
 
 

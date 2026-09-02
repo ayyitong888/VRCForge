@@ -47,8 +47,13 @@ def canonical_mcp_tool_name(name: str) -> str:
 
 def identity_scope(name: str, *, write: bool = False) -> str:
     normalized = str(name or "").casefold()
+    if "texture_patch" in normalized:
+        # This operation binds a project asset by exact path and source digest;
+        # an unrelated live Avatar/component identity would be misleading.
+        return "project"
     if "user_adjustment_handoff" in normalized:
-        return "avatar"
+        # The handoff binds both the Avatar and the exact target GameObject.
+        return "object"
     if any(token in normalized for token in ("property", "component", "renderer", "constraint", "material", "texture", "shader")):
         return "component"
     if any(token in normalized for token in ("gameobject", "scene_object", "avatar_object", "hierarchy")):

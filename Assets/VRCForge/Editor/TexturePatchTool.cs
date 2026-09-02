@@ -52,6 +52,14 @@ namespace VRCForge.Editor
             public string expectedSourceHash { get; set; } = "";
             [VRCForgeInput("Preview digest from preview; required for apply.", IsRequired = false)]
             public string expectedPreviewDigest { get; set; } = "";
+            [VRCForgeInput("Source width from preview; required for apply.", IsRequired = false)]
+            public int? expectedSourceWidth { get; set; }
+            [VRCForgeInput("Source height from preview; required for apply.", IsRequired = false)]
+            public int? expectedSourceHeight { get; set; }
+            [VRCForgeInput("Exact absent output path from preview; required for apply.", IsRequired = false)]
+            public string expectedTargetTexturePath { get; set; } = "";
+            [VRCForgeInput("Verified target-absent assertion from preview; required for apply.", IsRequired = false)]
+            public bool? expectedTargetTextureAbsent { get; set; }
         }
 
         public static object HandleCommand(JObject @params)
@@ -154,6 +162,9 @@ namespace VRCForge.Editor
                     var expectedProjectPath = ReadRequiredStringFromBinding(parameters, "expectedProjectPath");
                     var expectedSourceHash = ReadRequiredStringFromBinding(parameters, "expectedSourceHash");
                     var expectedPreviewDigest = ReadRequiredStringFromBinding(parameters, "expectedPreviewDigest");
+                    var expectedSourceWidth = ReadRequiredIntFromBinding(parameters, "expectedSourceWidth");
+                    var expectedSourceHeight = ReadRequiredIntFromBinding(parameters, "expectedSourceHeight");
+                    var expectedTargetTextureAbsent = ReadRequiredBoolFromBinding(parameters, "expectedTargetTextureAbsent");
                     if (!SceneObjectCopyCore.MatchesCurrentProject(expectedProjectPath))
                     {
                         throw new InvalidOperationException("expectedProjectPath does not match the active Unity project.");
@@ -165,6 +176,22 @@ namespace VRCForge.Editor
                     if (!string.Equals(expectedPreviewDigest, request.PreviewDigest, StringComparison.OrdinalIgnoreCase))
                     {
                         throw new InvalidOperationException("The texture patch preview receipt changed.");
+                    }
+                    if (expectedSourceWidth != request.SourceWidth)
+                    {
+                        throw new InvalidOperationException("The source width changed after preview.");
+                    }
+                    if (expectedSourceHeight != request.SourceHeight)
+                    {
+                        throw new InvalidOperationException("The source height changed after preview.");
+                    }
+                    if (!expectedTargetTextureAbsent)
+                    {
+                        throw new InvalidOperationException("The preview did not confirm the target asset is absent.");
+                    }
+                    if (!IsTargetPathAbsent(request.TargetTexturePath, request.TargetFilePath))
+                    {
+                        throw new InvalidOperationException("The target texture is no longer absent.");
                     }
                     if (!string.Equals(targetTexturePath, ReadRequiredStringFromBinding(parameters, "expectedTargetTexturePath"), StringComparison.Ordinal))
                     {
@@ -196,7 +223,9 @@ namespace VRCForge.Editor
                         throw new InvalidOperationException("The patch changed image dimensions.");
                     }
 
-                    VerifyReadback(request, patchedPixels, sourcePixels, sourceWidth, sourceHeight, readbackPixels);
+                    var outsideAndProtectedPixelsUnchanged = false;
+                    var alphaUnchanged = false;
+                    VerifyReadback(request, patchedPixels, sourcePixels, sourceWidth, sourceHeight, readbackPixels, out outsideAndProtectedPixelsUnchanged, out alphaUnchanged);
 
                     var targetHash = ComputeSha256(request.TargetFilePath);
                     return VRCForgeToolResult.Completed(
@@ -222,13 +251,16 @@ namespace VRCForge.Editor
                             targetFileHash = targetHash,
                             region = RectangleToPayload(request.Region),
                             protectedRegions = request.ProtectedRegions.Select(RectangleToPayload).ToArray(),
-                            patchColor = ColorToPayload(request.Patch),
+                            red = request.Patch.R,
+                            green = request.Patch.G,
+                            blue = request.Patch.B,
+                            alpha = request.Patch.A,
                             opacity = request.Opacity,
                             featherPixels = request.FeatherPixels,
                             previewDigest = request.PreviewDigest,
                             mutationStarted = true,
                             committed = true,
-                            commitState = wouldChange ? "committed" : "no_change",
+                            commitState = "committed",
                             checkpointRecoveryRequired = false
                             ,readback = new
                             {
@@ -237,8 +269,8 @@ namespace VRCForge.Editor
                                 width = reloadedWidth,
                                 height = reloadedHeight,
                                 sourceHash = request.SourceFileHash,
-                                outsideAndProtectedPixelsUnchanged = true,
-                                alphaUnchanged = true
+                                outsideAndProtectedPixelsUnchanged = outsideAndProtectedPixelsUnchanged,
+                                alphaUnchanged = alphaUnchanged
                             }
                         });
                 }
@@ -302,7 +334,10 @@ namespace VRCForge.Editor
                 targetTexturePath = request.TargetTexturePath,
                 region = RectangleToPayload(request.Region),
                 protectedRegions = request.ProtectedRegions.Select(RectangleToPayload).ToArray(),
-                patchColor = ColorToPayload(request.Patch),
+                red = request.Patch.R,
+                green = request.Patch.G,
+                blue = request.Patch.B,
+                alpha = request.Patch.A,
                 opacity = request.Opacity,
                 featherPixels = request.FeatherPixels,
                 previewDigest = request.PreviewDigest,
@@ -313,7 +348,8 @@ namespace VRCForge.Editor
                     expectedPreviewDigest = request.PreviewDigest,
                     expectedSourceWidth = request.SourceWidth,
                     expectedSourceHeight = request.SourceHeight,
-                    expectedTargetTexturePath = request.TargetTexturePath
+                    expectedTargetTexturePath = request.TargetTexturePath,
+                    expectedTargetTextureAbsent = true
                 },
                 mutationStarted = false,
                 committed = false,
@@ -321,7 +357,7 @@ namespace VRCForge.Editor
                 checkpointRecoveryRequired = false
                 ,readback = new
                 {
-                    path = request.SourceTexturePath,
+                    path = request.TargetTexturePath,
                     sourceHash = request.SourceFileHash,
                     width = request.SourceWidth,
                     height = request.SourceHeight,
@@ -460,7 +496,9 @@ namespace VRCForge.Editor
             Color32[] sourcePixels,
             int width,
             int height,
-            Color32[] readbackPixels)
+            Color32[] readbackPixels,
+            out bool outsideAndProtectedPixelsUnchanged,
+            out bool alphaUnchanged)
         {
             if (expectedPixels.Length != readbackPixels.Length
                 || sourcePixels.Length != readbackPixels.Length
@@ -469,6 +507,8 @@ namespace VRCForge.Editor
                 throw new InvalidOperationException("Texture patch readback dimensions did not match the source payload.");
             }
 
+            outsideAndProtectedPixelsUnchanged = true;
+            alphaUnchanged = true;
             var protectedMask = BuildProtectedMask(width, height, request.ProtectedRegions);
             var lastX = request.Region.X + request.Region.Width - 1;
             var lastY = request.Region.Y + request.Region.Height - 1;
@@ -488,6 +528,7 @@ namespace VRCForge.Editor
                     {
                         if (!ColorsEqual(readbackPixels[index], sourcePixels[index]))
                         {
+                            outsideAndProtectedPixelsUnchanged = false;
                             throw new InvalidOperationException("Texture patch changed pixels outside the requested patch area.");
                         }
                     }
@@ -499,6 +540,7 @@ namespace VRCForge.Editor
 
                     if (request.SourcePixels != null && sourcePixels[index].a != readbackPixels[index].a)
                     {
+                        alphaUnchanged = false;
                         throw new InvalidOperationException("Texture patch persisted readback altered source alpha.");
                     }
                 }
@@ -518,7 +560,7 @@ namespace VRCForge.Editor
                 return patchedArea;
             }
 
-            var protected = BuildProtectedMask(width, height, protectedRegions);
+            var protectedMask = BuildProtectedMask(width, height, protectedRegions);
             var protectedInside = 0;
             var lastX = area.X + area.Width - 1;
             var lastY = area.Y + area.Height - 1;
@@ -527,7 +569,7 @@ namespace VRCForge.Editor
                 var rowOffset = y * width;
                 for (var x = area.X; x <= lastX; x++)
                 {
-                    if (protected[rowOffset + x])
+                    if (protectedMask[rowOffset + x])
                     {
                         protectedInside++;
                     }
@@ -813,6 +855,26 @@ namespace VRCForge.Editor
             }
         }
 
+        private static bool IsTargetPathAbsent(string targetTexturePath, string absoluteTargetPath)
+        {
+            if (AssetDatabase.LoadAssetAtPath<UnityEngine.Object>(targetTexturePath) != null)
+            {
+                return false;
+            }
+
+            if (File.Exists(absoluteTargetPath))
+            {
+                return false;
+            }
+
+            if (File.Exists(absoluteTargetPath + ".meta"))
+            {
+                return false;
+            }
+
+            return true;
+        }
+
         private static T ReadRequired<T>(JObject parameters, string key, Func<JToken, T> read)
         {
             if (parameters == null || read == null)
@@ -862,6 +924,36 @@ namespace VRCForge.Editor
                 throw new InvalidOperationException("The verified " + key + " is required.");
             }
             return value;
+        }
+
+        private static int ReadRequiredIntFromBinding(JObject parameters, string key)
+        {
+            var rootToken = parameters[key];
+            if (rootToken == null && parameters["applyBinding"] is JObject applyBinding)
+            {
+                rootToken = applyBinding[key];
+            }
+
+            if (rootToken == null || rootToken.Type != JTokenType.Integer)
+            {
+                throw new InvalidOperationException("The verified " + key + " is required.");
+            }
+            return rootToken.Value<int>();
+        }
+
+        private static bool ReadRequiredBoolFromBinding(JObject parameters, string key)
+        {
+            var rootToken = parameters[key];
+            if (rootToken == null && parameters["applyBinding"] is JObject applyBinding)
+            {
+                rootToken = applyBinding[key];
+            }
+
+            if (rootToken == null || rootToken.Type != JTokenType.Boolean)
+            {
+                throw new InvalidOperationException("The verified " + key + " is required.");
+            }
+            return rootToken.Value<bool>();
         }
 
         private static string ReadOptionalString(JObject parameters, string key)
@@ -938,25 +1030,14 @@ namespace VRCForge.Editor
             return BitConverter.ToString(bytes).Replace("-", string.Empty).ToLowerInvariant();
         }
 
-        private static JObject RectangleToPayload(Rectangle rect)
+        private static int[] RectangleToPayload(Rectangle rect)
         {
-            return new JObject
+            return new[]
             {
-                ["x"] = rect.X,
-                ["y"] = rect.Y,
-                ["width"] = rect.Width,
-                ["height"] = rect.Height
-            };
-        }
-
-        private static JObject ColorToPayload(PatchColor color)
-        {
-            return new JObject
-            {
-                ["r"] = color.R,
-                ["g"] = color.G,
-                ["b"] = color.B,
-                ["a"] = color.A
+                rect.X,
+                rect.Y,
+                rect.Width,
+                rect.Height
             };
         }
 

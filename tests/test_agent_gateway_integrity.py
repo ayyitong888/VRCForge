@@ -1072,12 +1072,17 @@ def test_external_unity_write_uses_exact_external_lane_without_internal_transact
         "avatar",
     )
 
+    execution_target = {"schema": "vrcforge.execution_target.v1", "fixture": "exact"}
     result = _external_mcp_call(
         create_agent_mcp_app(gateway),
         "tools/call",
         {
             "name": "vrcforge_external_exact_preview",
-            "arguments": {"projectPath": str(project), "preview": True},
+            "arguments": {
+                "projectPath": str(project),
+                "preview": True,
+                "executionTarget": execution_target,
+            },
         },
         bearer=gateway.ensure_config().token,
     )["result"]["structuredContent"]

@@ -25,7 +25,7 @@ def _gateway(tmp_path: Path, execution_mode: str) -> AgentGateway:
 @pytest.mark.parametrize(
     "tool_name",
     [
-        "vrcforge_save_current_scene",
+        "vrcforge_scene_save",
         "vrcforge_restore_shader_tuning",
         "vrcforge_undo_blendshapes",
         "vrcforge_external_high_risk_unity_write",
@@ -60,11 +60,52 @@ def test_external_full_permission_executes_local_unity_writes_without_confirmati
     assert executed == [{"value": "local edit"}]
 
 
+def test_external_write_promotes_nested_core_receipt_facts(tmp_path: Path) -> None:
+    gateway = _gateway(tmp_path, "roslyn_full_auto")
+    gateway.approval_transactions.register_write_handler(
+        "vrcforge_nested_receipt_write",
+        "Write and read back one exact Unity value.",
+        "medium",
+        lambda _arguments: {
+            "ok": True,
+            "result": {
+                "payload": {
+                    "data": {
+                        "schema": "vrcforge.fixture_write.v1",
+                        "ok": True,
+                        "verified": True,
+                        "changed": True,
+                        "mutationStarted": True,
+                        "commitState": "committed",
+                        "readback": {"value": 2},
+                    }
+                }
+            },
+        },
+    )
+    gateway.register_external_mcp_unity_tool(
+        "vrcforge_nested_receipt_write",
+        "avatar",
+    )
+
+    result = gateway.call_external_mcp_tool(
+        "vrcforge_nested_receipt_write",
+        {"value": 2},
+    )
+
+    assert result["status"] == "executed"
+    assert result["mutationStarted"] is True
+    assert result["mutationApplied"] is True
+    assert result["commitState"] == "committed"
+    assert result["persistenceState"] == "persisted"
+    assert result["readbackState"] == "verified"
+
+
 @pytest.mark.parametrize("execution_mode", ["approval", "auto"])
 @pytest.mark.parametrize(
     "tool_name",
     [
-        "vrcforge_save_current_scene",
+        "vrcforge_scene_save",
         "vrcforge_restore_shader_tuning",
         "vrcforge_external_high_risk_unity_write",
     ],

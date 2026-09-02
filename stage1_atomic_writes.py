@@ -134,11 +134,11 @@ def validate_apply_result(arguments: dict[str, Any], payload: Any, tool_name: st
         raise Stage1AtomicWriteError("Stage 1 apply did not return fresh verification.")
     if result.get("previewDigest") != arguments.get("expectedPreviewDigest"):
         raise Stage1AtomicWriteError("Stage 1 apply preview binding changed.")
-    if result.get("commitState") not in {"committed", "not_started"}:
+    if result.get("commitState") not in {"committed", "not_started", "no_change"}:
         raise Stage1AtomicWriteError("Stage 1 apply commit state is ambiguous.")
     if result.get("commitState") == "committed" and result.get("mutationStarted") is not True:
         raise Stage1AtomicWriteError("Stage 1 apply mutation receipt is invalid.")
-    if result.get("commitState") == "not_started" and result.get("changed") is not False:
+    if result.get("commitState") in {"not_started", "no_change"} and result.get("changed") is not False:
         raise Stage1AtomicWriteError("Stage 1 no-change receipt is invalid.")
     if not isinstance(result.get("readback"), dict):
         raise Stage1AtomicWriteError("Stage 1 apply fresh readback is missing.")

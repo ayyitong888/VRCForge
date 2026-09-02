@@ -146,6 +146,17 @@ namespace VRCForge.Editor
                 message
             };
         }
+
+        internal static object UnknownAfterMutation(string schema, string operation, string projectPath, string message)
+        {
+            return new
+            {
+                schema, operation, ok = false, preview = false, verified = false, changed = true,
+                mutationStarted = true, commitState = "unknown", projectPath,
+                previewDigest = string.Empty, applyBinding = new { }, readback = new { },
+                checkpointRecoveryRequired = true, message
+            };
+        }
     }
 
     [VRCForgeCommand(toolId: "vrc_scene_save", Summary = "when-to-use: preview or explicitly approved save/save-as of Unity scenes with atomic receipt binding. when-NOT-to-use: never overwrite an existing destination or save a dirty scene implicitly.")]
@@ -165,6 +176,8 @@ namespace VRCForge.Editor
             [VRCForgeInput("Expected scene file identity.", IsRequired = false)] public string expectedSceneFileIdentity { get; set; } = "";
             [VRCForgeInput("Expected scene metadata digest.", IsRequired = false)] public string expectedSceneMetaDigest { get; set; } = "";
             [VRCForgeInput("Expected scene metadata identity.", IsRequired = false)] public string expectedSceneMetaIdentity { get; set; } = "";
+            [VRCForgeInput("Expected scene manager setup digest.", IsRequired = false)] public string expectedSceneSetupDigest { get; set; } = "";
+            [VRCForgeInput("Expected open-scene state digest.", IsRequired = false)] public string expectedOpenSceneStateDigest { get; set; } = "";
             [VRCForgeInput("Expected dirty flag.", IsRequired = false)] public bool? expectedSceneDirty { get; set; }
         }
 
@@ -174,6 +187,7 @@ namespace VRCForge.Editor
             var preview = parameters["preview"]?.Value<bool?>() ?? false;
             var action = (parameters["action"]?.ToString() ?? "").Trim().ToLowerInvariant();
             var project = Stage1SceneToolCore.ProjectPath();
+            var mutationStarted = false;
             try
             {
                 CheckpointPrepareTool.EnsureEditorReady();
@@ -196,7 +210,9 @@ namespace VRCForge.Editor
                     ["expectedSceneHandle"] = scene.handle, ["expectedSceneGuid"] = evidence.Guid,
                     ["expectedSceneFileDigest"] = evidence.File.Digest, ["expectedSceneFileIdentity"] = evidence.File.Identity,
                     ["expectedSceneMetaDigest"] = evidence.Meta.Digest, ["expectedSceneMetaIdentity"] = evidence.Meta.Identity,
-                    ["expectedSceneDirty"] = scene.isDirty
+                    ["expectedSceneDirty"] = scene.isDirty,
+                    ["expectedSceneSetupDigest"] = setup,
+                    ["expectedOpenSceneStateDigest"] = open
                 };
                 if (preview)
                     return VRCForgeToolResult.Completed("Scene save preview completed.", SavePayload(action, project, scenePath, destination, digest, binding, scene, evidence, hierarchy, setup, open));
@@ -209,10 +225,13 @@ namespace VRCForge.Editor
                 Stage1SceneToolCore.RequireExpected(parameters, "SceneFileIdentity", evidence.File.Identity, 64);
                 Stage1SceneToolCore.RequireExpected(parameters, "SceneMetaDigest", evidence.Meta.Digest, 64);
                 Stage1SceneToolCore.RequireExpected(parameters, "SceneMetaIdentity", evidence.Meta.Identity, 64);
+                Stage1SceneToolCore.RequireExpected(parameters, "SceneSetupDigest", setup);
+                Stage1SceneToolCore.RequireExpected(parameters, "OpenSceneStateDigest", open);
                 Stage1SceneToolCore.RequireExpectedBool(parameters, "SceneDirty", scene.isDirty);
                 if (action == "save" && !scene.isDirty)
                     return VRCForgeToolResult.Completed("Scene is already clean; no save was needed.", SavePayload(action, project, scenePath, destination, digest, binding, scene, evidence, hierarchy, setup, open, false, true));
                 if (action == "save_as" && SceneObjectCopyCore.AssetOrMetaExists(destination)) throw new SceneObjectCopyException("The save_as destination appeared after preview; overwrite is unsupported.");
+                mutationStarted = true;
                 if (!EditorSceneManager.SaveScene(scene, action == "save_as" ? destination : scenePath, action == "save_as" ? false : false))
                     throw new SceneObjectCopyException("Unity did not confirm the scene save.");
                 AssetDatabase.SaveAssets();
@@ -225,14 +244,19 @@ namespace VRCForge.Editor
             }
             catch (Exception ex)
             {
-                return VRCForgeToolResult.FailedWithCode("scene_save_rejected", ex.Message, Stage1SceneToolCore.NoMutation(Stage1SceneToolCore.SaveSchema, action, project, string.Empty, ex.Message));
+                return VRCForgeToolResult.FailedWithCode(
+                    mutationStarted ? "scene_save_failed_after_mutation" : "scene_save_rejected",
+                    ex.Message,
+                    mutationStarted
+                        ? Stage1SceneToolCore.UnknownAfterMutation(Stage1SceneToolCore.SaveSchema, "scene_save_" + action, project, ex.Message)
+                        : Stage1SceneToolCore.NoMutation(Stage1SceneToolCore.SaveSchema, action, project, string.Empty, ex.Message));
             }
         }
 
         private static object SavePayload(string action, string project, string scenePath, string destination, string digest, Dictionary<string, object> binding, Scene scene, StableAssetEvidence evidence, string hierarchy, string setup, string open, bool changed = false, bool noChange = false)
         {
             var actual = action == "save_as" ? destination : scenePath;
-            return new { schema = Stage1SceneToolCore.SaveSchema, operation = "scene_save_" + action, ok = true, preview = !changed && !noChange, verified = true, changed, mutationStarted = changed, commitState = changed ? "committed" : "not_started", projectPath = project, previewDigest = digest, applyBinding = Stage1SceneToolCore.Binding(binding), readback = new { path = actual, guid = evidence.Guid, fileDigest = evidence.File.Digest, fileIdentity = evidence.File.Identity, metaDigest = evidence.Meta.Digest, metaIdentity = evidence.Meta.Identity, scene = Stage1SceneToolCore.Readback(scene), hierarchyDigest = hierarchy, sceneSetupDigest = setup, openSceneStateDigest = open }, scenePath, destinationScenePath = destination, cleanNoChange = noChange, message = noChange ? "no change" : "verified" };
+            return new { schema = Stage1SceneToolCore.SaveSchema, operation = "scene_save_" + action, ok = true, preview = !changed && !noChange, verified = true, changed, mutationStarted = changed, commitState = changed ? "committed" : noChange ? "no_change" : "not_started", projectPath = project, previewDigest = digest, applyBinding = Stage1SceneToolCore.Binding(binding), readback = new { path = actual, guid = evidence.Guid, fileDigest = evidence.File.Digest, fileIdentity = evidence.File.Identity, metaDigest = evidence.Meta.Digest, metaIdentity = evidence.Meta.Identity, scene = Stage1SceneToolCore.Readback(scene), hierarchyDigest = hierarchy, sceneSetupDigest = setup, openSceneStateDigest = open }, scenePath, destinationScenePath = destination, cleanNoChange = noChange, message = noChange ? "no change" : "verified" };
         }
     }
 
@@ -250,6 +274,11 @@ namespace VRCForge.Editor
             [VRCForgeInput("Expected scene manager setup digest.", IsRequired = false)] public string expectedSceneSetupDigest { get; set; } = "";
             [VRCForgeInput("Expected open-scene state digest.", IsRequired = false)] public string expectedOpenSceneStateDigest { get; set; } = "";
             [VRCForgeInput("Expected destination absent assertion.", IsRequired = false)] public bool? expectedDestinationAbsent { get; set; }
+            [VRCForgeInput("Expected target Scene GUID.", IsRequired = false)] public string expectedSceneGuid { get; set; } = "";
+            [VRCForgeInput("Expected target Scene file digest.", IsRequired = false)] public string expectedSceneFileDigest { get; set; } = "";
+            [VRCForgeInput("Expected target Scene file identity.", IsRequired = false)] public string expectedSceneFileIdentity { get; set; } = "";
+            [VRCForgeInput("Expected target Scene metadata digest.", IsRequired = false)] public string expectedSceneMetaDigest { get; set; } = "";
+            [VRCForgeInput("Expected target Scene metadata identity.", IsRequired = false)] public string expectedSceneMetaIdentity { get; set; } = "";
         }
 
         public static object HandleCommand(JObject p)
@@ -257,6 +286,7 @@ namespace VRCForge.Editor
             var parameters = p ?? new JObject();
             var action = (parameters["action"]?.ToString() ?? "").Trim().ToLowerInvariant();
             var project = Stage1SceneToolCore.ProjectPath();
+            var mutationStarted = false;
             try
             {
                 CheckpointPrepareTool.EnsureEditorReady();
@@ -308,16 +338,22 @@ namespace VRCForge.Editor
                 if (action == "new_saved")
                 {
                     Stage1SceneToolCore.RequireExpectedBool(parameters, "DestinationAbsent", true);
+                    mutationStarted = true;
                     var created = EditorSceneManager.NewScene(NewSceneSetup.EmptyScene, NewSceneMode.Single);
                     if (!EditorSceneManager.SaveScene(created, destination, false)) throw new SceneObjectCopyException("Unity did not confirm new_saved.");
                 }
                 else
                 {
                     var target = SceneManager.GetSceneByPath(path);
-                    if (action == "open_single") target = EditorSceneManager.OpenScene(path, OpenSceneMode.Single);
+                    if (action == "open_single")
+                    {
+                        mutationStarted = true;
+                        target = EditorSceneManager.OpenScene(path, OpenSceneMode.Single);
+                    }
                     else if (action == "open_additive")
                     {
                         if (target.IsValid() && target.isLoaded) throw new SceneObjectCopyException("The requested additive scene is already loaded.");
+                        mutationStarted = true;
                         target = EditorSceneManager.OpenScene(path, OpenSceneMode.Additive);
                     }
                     else if (action == "set_active")
@@ -325,12 +361,14 @@ namespace VRCForge.Editor
                         if (!target.IsValid() || !target.isLoaded) throw new SceneObjectCopyException("The requested scene is not loaded.");
                         if (SceneManager.GetActiveScene().handle == target.handle)
                             return VRCForgeToolResult.Completed("The requested scene is already active.", TransitionPayload(action, project, path, destination, digest, binding, setup, open, false, Stage1SceneToolCore.Readback(target), true));
+                        mutationStarted = true;
                         if (!SceneManager.SetActiveScene(target)) throw new SceneObjectCopyException("Could not set the requested scene active.");
                     }
                     else if (action == "unload")
                     {
                         if (!target.IsValid() || !target.isLoaded || target.isDirty || SceneManager.sceneCount <= 1)
                             throw new SceneObjectCopyException("The requested scene cannot be safely unloaded as the last or a dirty scene.");
+                        mutationStarted = true;
                         if (!EditorSceneManager.CloseScene(target, true)) throw new SceneObjectCopyException("Could not safely unload the requested scene.");
                     }
                     else if (action == "reload_saved")
@@ -339,6 +377,7 @@ namespace VRCForge.Editor
                             throw new SceneObjectCopyException("The requested scene is not loaded and clean; reload was refused.");
                         var wasActive = SceneManager.GetActiveScene().handle == target.handle;
                         var mode = SceneManager.sceneCount == 1 ? OpenSceneMode.Single : OpenSceneMode.Additive;
+                        mutationStarted = true;
                         if (mode == OpenSceneMode.Additive && !EditorSceneManager.CloseScene(target, true))
                             throw new SceneObjectCopyException("Could not close the exact clean scene for reload.");
                         target = EditorSceneManager.OpenScene(path, mode);
@@ -370,13 +409,18 @@ namespace VRCForge.Editor
             }
             catch (Exception ex)
             {
-                return VRCForgeToolResult.FailedWithCode("scene_transition_rejected", ex.Message, Stage1SceneToolCore.NoMutation(Stage1SceneToolCore.TransitionSchema, action, project, string.Empty, ex.Message));
+                return VRCForgeToolResult.FailedWithCode(
+                    mutationStarted ? "scene_transition_failed_after_mutation" : "scene_transition_rejected",
+                    ex.Message,
+                    mutationStarted
+                        ? Stage1SceneToolCore.UnknownAfterMutation(Stage1SceneToolCore.TransitionSchema, "scene_transition_" + action, project, ex.Message)
+                        : Stage1SceneToolCore.NoMutation(Stage1SceneToolCore.TransitionSchema, action, project, string.Empty, ex.Message));
             }
         }
 
         private static object TransitionPayload(string action, string project, string path, string destination, string digest, Dictionary<string, object> binding, string setup, string open, bool changed, object readback, bool noChange = false)
         {
-            return new { schema = Stage1SceneToolCore.TransitionSchema, operation = "scene_transition_" + action, ok = true, preview = !changed && !noChange, verified = true, changed, mutationStarted = changed, commitState = changed ? "committed" : "not_started", projectPath = project, previewDigest = digest, applyBinding = Stage1SceneToolCore.Binding(binding), readback, scenePath = path, destinationScenePath = destination, sceneSetupDigest = setup, openSceneStateDigest = open };
+            return new { schema = Stage1SceneToolCore.TransitionSchema, operation = "scene_transition_" + action, ok = true, preview = !changed && !noChange, verified = true, changed, mutationStarted = changed, commitState = changed ? "committed" : noChange ? "no_change" : "not_started", projectPath = project, previewDigest = digest, applyBinding = Stage1SceneToolCore.Binding(binding), readback, scenePath = path, destinationScenePath = destination, sceneSetupDigest = setup, openSceneStateDigest = open };
         }
     }
 }

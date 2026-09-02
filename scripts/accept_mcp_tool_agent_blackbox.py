@@ -26,7 +26,7 @@ PROTOCOL_VERSION = "2025-11-25"
 
 
 class StdioMcpClient:
-    def __init__(self, *, timeout: float) -> None:
+    def __init__(self, *, timeout: float, exposure_layer: str = "execution") -> None:
         self.timeout = timeout
         self.process = subprocess.Popen(
             [
@@ -36,7 +36,7 @@ class StdioMcpClient:
                 "--protocol-profile",
                 "mcp-1x",
                 "--exposure-layer",
-                "execution",
+                exposure_layer,
             ],
             cwd=ROOT,
             stdin=subprocess.PIPE,
@@ -301,6 +301,75 @@ def main() -> int:
         if not refresh_ok:
             raise RuntimeError("MCP host did not complete the lazy refresh loop")
 
+        for block, expected_names in (
+            ("avatar", {"vrcforge_scene_save", "vrcforge_user_adjustment_handoff"}),
+            ("project", {"vrcforge_scene_transition"}),
+        ):
+            prior_generation = int(after.get("catalogGeneration") or 0)
+            client.request(
+                "tools/call",
+                {"name": "vrcforge_load_tool_block", "arguments": {"block": block}},
+            )
+            block_notifications = client.drain_notifications()
+            after = client.request("tools/list", {})
+            after_tools = list(after.get("tools") or [])
+            visible_names = {str(tool.get("name") or "") for tool in after_tools}
+            block_refresh_ok = (
+                any(item.get("method") == "notifications/tools/list_changed" for item in block_notifications)
+                and int(after.get("catalogGeneration") or 0) > prior_generation
+                and expected_names <= visible_names
+            )
+            report["steps"].append({
+                "name": f"lazy_refresh_exposes_{block}_stage1_tools",
+                "ok": block_refresh_ok,
+                "block": block,
+                "catalogGeneration": after.get("catalogGeneration"),
+                "expectedTools": sorted(expected_names),
+                "visible": sorted(expected_names & visible_names),
+            })
+            if not block_refresh_ok:
+                raise RuntimeError(f"MCP host did not refresh the {block} Tool block")
+
+        stage1_selection_cases = (
+            (
+                "agent_selects_scene_save",
+                "当前已保存的 Unity Scene 有未保存修改。请保存这个精确的当前场景；不要打开、切换、另存或覆盖别的场景。",
+                "vrcforge_scene_save",
+            ),
+            (
+                "agent_selects_scene_transition",
+                "请在确认没有脏场景后，把一个精确的现有 .unity Scene 以 additive 方式打开；这不是保存场景。",
+                "vrcforge_scene_transition",
+            ),
+            (
+                "agent_selects_texture_patch",
+                "请从现有 PNG 创建一个新的 PNG，只改指定矩形像素并保护指定区域；不要生成图片、不要覆盖源文件、不要绑定材质。",
+                "vrcforge_texture_patch",
+            ),
+            (
+                "agent_selects_user_adjustment_handoff",
+                "我要在 Unity Scene 里亲手拖动一个已用 GlobalObjectId 精确识别的骨骼。请先建立可 finalize 或 abort 的人工调整交接；不要自动替我摆放。",
+                "vrcforge_user_adjustment_handoff",
+            ),
+        )
+        for step_name, user_request, expected_tool in stage1_selection_cases:
+            selection = run_codex_selector(user_request, after_tools, timeout=args.timeout)
+            selection_ok = call_names(selection) == [expected_tool]
+            report["steps"].append({
+                "name": step_name,
+                "ok": selection_ok,
+                "expectedTool": expected_tool,
+                "selection": selection,
+            })
+
+        visible_names = {str(tool.get("name") or "") for tool in after_tools}
+        report["steps"].append({
+            "name": "canonical_scene_save_is_listed_once_without_legacy_duplicate",
+            "ok": "vrcforge_scene_save" in visible_names and "vrcforge_save_current_scene" not in visible_names,
+            "canonicalVisible": "vrcforge_scene_save" in visible_names,
+            "legacyVisible": "vrcforge_save_current_scene" in visible_names,
+        })
+
         target_selection = run_codex_selector(
             "只读取并扫描当前 Unity Avatar 使用的材质、Shader 和纹理引用，不要修改任何内容。",
             after_tools,
@@ -393,6 +462,40 @@ def main() -> int:
             "ok": descriptors_ok,
             "checkedToolCount": len(after_tools),
         })
+
+        planning_client = StdioMcpClient(timeout=min(args.timeout, 30.0), exposure_layer="planning")
+        try:
+            planning_client.request(
+                "initialize",
+                {
+                    "protocolVersion": PROTOCOL_VERSION,
+                    "capabilities": {},
+                    "clientInfo": {"name": "VRCForge planning acceptance host", "version": "1"},
+                },
+            )
+            planning_client.request("tools/list", {})
+            for block in ("materials", "avatar", "project"):
+                planning_client.request(
+                    "tools/call",
+                    {"name": "vrcforge_load_tool_block", "arguments": {"block": block}},
+                )
+                planning_client.drain_notifications()
+            planning_tools = list(planning_client.request("tools/list", {}).get("tools") or [])
+            planning_names = {str(tool.get("name") or "") for tool in planning_tools}
+            stage1_write_names = {case[2] for case in stage1_selection_cases}
+            planning_ok = (
+                planning_names.isdisjoint(stage1_write_names)
+                and "vrcforge_scan_materials" in planning_names
+            )
+            report["steps"].append({
+                "name": "planning_layer_keeps_reads_and_hides_stage1_writes",
+                "ok": planning_ok,
+                "toolCount": len(planning_tools),
+                "visibleStage1Writes": sorted(planning_names & stage1_write_names),
+                "readToolVisible": "vrcforge_scan_materials" in planning_names,
+            })
+        finally:
+            planning_client.close()
         report["initialize"] = {
             "serverInfo": initialized.get("serverInfo"),
             "capabilities": initialized.get("capabilities"),

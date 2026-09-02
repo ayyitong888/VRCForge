@@ -478,8 +478,8 @@ def test_real_unitypackage_bundles_first_party_core_and_all_product_sources(tmp_
     manifest = json.loads((repo_root / "packaging" / "unitypackage_guid_manifest.json").read_text(encoding="utf-8"))
     manifest_guids = {entry["path"]: entry["guid"] for entry in manifest["entries"]}
     assert packaged_guids == manifest_guids
-    assert len(packaged_paths) == 82
-    assert len(file_paths) == 75
+    assert len(packaged_paths) == 88
+    assert len(file_paths) == 81
     assert len(directory_paths) == 7
     assert not any(
         path == excluded or path.startswith(f"{excluded}/")

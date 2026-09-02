@@ -18,6 +18,12 @@ from scene_asset_duplicate import TOOL_NAME as SCENE_ASSET_DUPLICATE_TOOL
 from scene_asset_save import TOOL_NAME as SAVE_NEW_SCENE_TOOL
 from scene_asset_save_current import TOOL_NAME as SAVE_CURRENT_SCENE_TOOL
 from scene_object_copy import DUPLICATE_TOOL_NAME, PREFAB_TOOL_NAME
+from stage1_atomic_writes import (
+    SCENE_SAVE_TOOL,
+    SCENE_TRANSITION_TOOL,
+    TEXTURE_PATCH_TOOL,
+    USER_ADJUSTMENT_HANDOFF_TOOL,
+)
 from texture_import_settings import TOOL_NAME as TEXTURE_TOOL
 
 
@@ -36,6 +42,10 @@ def test_registry_contains_only_the_guarded_write_protocols() -> None:
         SAVE_CURRENT_SCENE_TOOL,
         PROJECT_ASSET_COPY_TOOL,
         SCENE_ASSET_DUPLICATE_TOOL,
+        SCENE_SAVE_TOOL,
+        SCENE_TRANSITION_TOOL,
+        TEXTURE_PATCH_TOOL,
+        USER_ADJUSTMENT_HANDOFF_TOOL,
     }
 
 

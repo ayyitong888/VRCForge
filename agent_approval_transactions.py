@@ -78,6 +78,34 @@ from operation_context import bind_operation_context
 from execution_target import execution_target_digest
 
 
+def _domain_write_receipt(value: Any) -> Mapping[str, Any] | Any:
+    """Find the bounded Unity domain receipt inside transport wrappers."""
+
+    if not isinstance(value, Mapping):
+        return value
+    pending: list[tuple[Mapping[str, Any], int]] = [(value, 0)]
+    seen: set[int] = set()
+    while pending:
+        current, depth = pending.pop(0)
+        marker = id(current)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        if (
+            isinstance(current.get("schema"), str)
+            and str(current.get("schema") or "").startswith("vrcforge.")
+            and any(key in current for key in ("commitState", "mutationStarted", "readback"))
+        ):
+            return current
+        if depth >= 5:
+            continue
+        for key in ("structuredContent", "result", "payload", "data", "toolResult"):
+            nested = current.get(key)
+            if isinstance(nested, Mapping):
+                pending.append((nested, depth + 1))
+    return value
+
+
 PENDING_APPROVAL_SNAPSHOT_SCHEMA = "vrcforge.pending-approvals.v1"
 PENDING_APPROVAL_SNAPSHOT_MAX_BYTES = 4 * 1024 * 1024
 PENDING_APPROVAL_SNAPSHOT_MAX_ITEMS = 128
@@ -1516,10 +1544,11 @@ class AgentApprovalTransactionService:
                     or f"{target_tool} returned ok=false."
                 )
                 raise AgentGatewayError(str(message))
+            domain_receipt = _domain_write_receipt(result)
             completion_outcome = ensure_dict(
                 redact_sensitive(
                     normalize_agent_tool_result(
-                        result,
+                        domain_receipt,
                         fallback_summary=write_handler.description,
                         write=True,
                     )
@@ -3199,6 +3228,11 @@ class AgentApprovalTransactionService:
                 "operationId": operation_id,
                 "targetTool": target_tool,
                 "projectRoot": str(project_root or ""),
+                "executionTargetDigest": (
+                    execution_target_digest(arguments["executionTarget"])
+                    if isinstance(arguments.get("executionTarget"), Mapping)
+                    else ""
+                ),
                 "projectLockKey": project_lock_key,
                 "startedAt": utc_now_iso(),
                 "source": "external_mcp",
@@ -3236,6 +3270,14 @@ class AgentApprovalTransactionService:
                         str((checkpoint or {}).get("error") or "Pre-write checkpoint failed."),
                         status_code=409,
                     )
+                if isinstance(arguments.get("executionTarget"), Mapping):
+                    checkpoint = {
+                        **dict(checkpoint),
+                        "operationId": operation_id,
+                        "executionTargetDigest": execution_target_digest(
+                            arguments["executionTarget"]
+                        ),
+                    }
             if write_handler.verification_prepare_handler is not None:
                 failure_layer = "completion_verification_baseline"
                 verification_arguments = dict(arguments)
@@ -3281,10 +3323,11 @@ class AgentApprovalTransactionService:
                 )
                 raise AgentGatewayError(str(message))
 
+            domain_receipt = _domain_write_receipt(result)
             completion_outcome = ensure_dict(
                 redact_sensitive(
                     normalize_agent_tool_result(
-                        result,
+                        domain_receipt,
                         fallback_summary=write_handler.description,
                         write=True,
                     )
@@ -3294,6 +3337,22 @@ class AgentApprovalTransactionService:
                 failure_layer = "result_verification"
                 raise AgentGatewayError(str(completion_outcome.get("summary") or "Write failed."))
 
+            receipt = dict(domain_receipt) if isinstance(domain_receipt, Mapping) else {}
+            receipt_verified = receipt.get("verified") is True
+            receipt_readback = receipt.get("readback")
+            mutation_started = receipt.get("mutationStarted")
+            if not isinstance(mutation_started, bool):
+                mutation_started = completion_outcome.get("mutationStarted")
+            mutation_applied = receipt.get("mutationApplied")
+            if not isinstance(mutation_applied, bool) and isinstance(receipt.get("changed"), bool):
+                mutation_applied = receipt["changed"]
+            if not isinstance(mutation_applied, bool):
+                mutation_applied = completion_outcome.get("mutationApplied")
+            commit_state = str(
+                receipt.get("commitState")
+                or completion_outcome.get("commitState")
+                or "unknown"
+            )
             payload: dict[str, Any] = {
                 "ok": True,
                 "operationId": operation_id,
@@ -3304,11 +3363,23 @@ class AgentApprovalTransactionService:
                 ),
                 "result": redact_sensitive(source_tool_result),
                 "outcome": completion_outcome,
-                "mutationStarted": completion_outcome.get("mutationStarted"),
-                "mutationApplied": completion_outcome.get("mutationApplied"),
-                "commitState": completion_outcome.get("commitState") or "unknown",
-                "persistenceState": "verified" if write_handler.verification_finalize_handler is not None else "handler_reported",
-                "readbackState": "verified" if write_handler.verification_finalize_handler is not None else "handler_reported",
+                "mutationStarted": mutation_started,
+                "mutationApplied": mutation_applied,
+                "commitState": commit_state,
+                "persistenceState": (
+                    "persisted"
+                    if receipt_verified and commit_state in {"committed", "no_change"}
+                    else "verified"
+                    if write_handler.verification_finalize_handler is not None
+                    else "handler_reported"
+                ),
+                "readbackState": (
+                    "verified"
+                    if receipt_verified and isinstance(receipt_readback, Mapping)
+                    else "verified"
+                    if write_handler.verification_finalize_handler is not None
+                    else "handler_reported"
+                ),
                 "cleanupState": completion_outcome.get("cleanupState") or "not_applicable",
                 "retryable": bool(completion_outcome.get("retryable", False)),
                 "nextAction": completion_outcome.get("nextAction"),

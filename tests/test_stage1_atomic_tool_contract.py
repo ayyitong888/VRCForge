@@ -76,12 +76,54 @@ def test_stage1_descriptors_tell_an_agent_when_to_use_and_when_not_to_use() -> N
         assert descriptor["permission"] == "RequiresApproval"
         assert descriptor["freshReadback"]["required"] is True
         assert descriptor["inputSchema"]["additionalProperties"] is False
+        assert "executionTarget" in descriptor["inputSchema"]["properties"]
 
     canonical = dashboard_server.AGENT_GATEWAY.shared_agent_tool_descriptor(
         "vrcforge_scene_save",
         write=True,
     )
     assert canonical["legacyAliases"] == ["vrcforge_save_current_scene"]
+
+
+def test_stage1_internal_and_external_agents_share_one_descriptor_source() -> None:
+    internal = dashboard_server._RuntimePlannerCatalog().read(
+        "execution",
+        project_context_active=True,
+    )
+    internal_by_runtime = {tool.runtime_name: tool for tool in internal.routable_tools}
+    external = {
+        tool["name"]: tool
+        for tool in dashboard_server.AGENT_GATEWAY.build_external_mcp_tools(
+            "execution",
+            tool_blocks=set(agent_gateway.EXTERNAL_MCP_TOOL_BLOCKS),
+        )
+    }
+    for name in STAGE1_PUBLIC_TOOLS:
+        assert name in internal_by_runtime
+        assert name in external
+        assert internal_by_runtime[name].description == external[name]["description"]
+        internal_schema = dict(internal_by_runtime[name].input_schema)
+        external_schema = external[name]["inputSchema"]
+        assert internal_schema["required"] == external_schema["required"]
+        assert internal_schema["additionalProperties"] == external_schema["additionalProperties"]
+        assert set(internal_schema["properties"]) == set(external_schema["properties"])
+        for property_name, internal_property in internal_schema["properties"].items():
+            assert internal_property["type"] == external_schema["properties"][property_name]["type"]
+
+
+def test_stage1_identity_scope_matches_each_tools_real_target() -> None:
+    expected = {
+        "vrcforge_scene_save": "scene",
+        "vrcforge_scene_transition": "scene",
+        "vrcforge_texture_patch": "project",
+        "vrcforge_user_adjustment_handoff": "object",
+    }
+    for name, scope in expected.items():
+        descriptor = dashboard_server.AGENT_GATEWAY.shared_agent_tool_descriptor(
+            name,
+            write=True,
+        )
+        assert descriptor["requiredIdentity"]["scope"] == scope
 
 
 def test_stage1_write_tools_are_hidden_from_planning_exposure() -> None:
@@ -130,6 +172,9 @@ def test_stage1_preview_receipt_binds_only_expected_fields(tmp_path: Path) -> No
 
 
 def test_stage1_core_sources_keep_preview_nonmutating_and_identity_fail_closed() -> None:
+    core_server = (
+        ROOT / "Assets/VRCForge/Editor/MCP/VRCForgeMcpCoreServer.cs"
+    ).read_text(encoding="utf-8-sig")
     scene = (ROOT / "Assets/VRCForge/Editor/Stage1SceneTools.cs").read_text(encoding="utf-8-sig")
     texture = (ROOT / "Assets/VRCForge/Editor/TexturePatchTool.cs").read_text(encoding="utf-8-sig")
     handoff = (ROOT / "Assets/VRCForge/Editor/UserAdjustmentHandoffTool.cs").read_text(encoding="utf-8-sig")
@@ -150,3 +195,14 @@ def test_stage1_core_sources_keep_preview_nonmutating_and_identity_fail_closed()
     assert "GlobalObjectIdentifierToObjectSlow" in handoff
     assert "was deleted, replaced, or recreated." in handoff
     assert "hierarchy path" not in handoff.casefold() or "never resolve by hierarchy path" in handoff.casefold()
+
+    for tool_name in STAGE1_CORE_TOOLS:
+        assert f'"{tool_name}",' in core_server.split(
+            "private static readonly HashSet<string> PreviewTools", 1
+        )[1].split("};", 1)[0]
+    assert "BindTransportExecutionTarget" in core_server
+    assert "ValidateExecutionTargetContext" in core_server
+    assert "GlobalObjectIdentifierToObjectSlow" in core_server
+    assert "ReadUnityMetaGuid" in core_server
+    assert "AssetDatabase.AssetPathToGUID(assetPath)" not in core_server
+    assert 'failureCode = "execution_target_scene_drifted"' in core_server

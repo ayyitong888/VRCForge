@@ -31,6 +31,9 @@ namespace VRCForge.Editor
         private const string MinimumProtocolVersion = "2026-07-28";
         private const string MaximumProtocolVersion = "2026-07-28";
         private const string ApprovedExecutionMetaKey = "io.vrcforge/approvedExecution";
+        private const string ExecutionTargetMetaKey = "io.vrcforge/executionTarget";
+        private const string ExecutionTargetDigestMetaKey = "io.vrcforge/executionTargetDigest";
+        private const string ExecutionTargetVerifiedKey = "_vrcforgeExecutionTargetTransportVerified";
         private const int MaxFrameBytes = 1024 * 1024;
         private const int MaxClients = 4;
         private const int SocketTimeoutMilliseconds = 15000;
@@ -58,6 +61,10 @@ namespace VRCForge.Editor
             "vrc_save_scene_object_as_prefab",
             "vrc_save_current_scene",
             "vrc_save_new_scene",
+            "vrc_scene_save",
+            "vrc_scene_transition",
+            "vrc_texture_patch",
+            "vrc_user_adjustment_handoff",
             "vrc_set_texture_import_settings",
             "vrc_set_constraint_sources",
             "vrc_create_component_feature",
@@ -998,6 +1005,11 @@ namespace VRCForge.Editor
             }
 
             var laneName = (string)executionContext["lane"];
+            if (string.Equals(laneName, "external_mcp_write", StringComparison.Ordinal)
+                && !BindTransportExecutionTarget(executionContext, metadata))
+            {
+                return ToolError("execution_target_invalid", "The exact ExecutionTarget transport binding is invalid.", modern, true);
+            }
             InvocationLane lane;
             if (string.Equals(laneName, "app_preview", StringComparison.Ordinal))
             {
@@ -1622,6 +1634,7 @@ namespace VRCForge.Editor
                 toolName,
                 arguments,
                 externalMcp: false,
+                validateUnityObjectIdentities: true,
                 failureCode: out ignoredFailureCode);
         }
 
@@ -1636,6 +1649,7 @@ namespace VRCForge.Editor
                 toolName,
                 arguments,
                 externalMcp: true,
+                validateUnityObjectIdentities: true,
                 failureCode: out ignoredFailureCode);
         }
 
@@ -1650,6 +1664,7 @@ namespace VRCForge.Editor
                 toolName,
                 arguments,
                 externalMcp: true,
+                validateUnityObjectIdentities: false,
                 failureCode: out failureCode);
         }
 
@@ -1658,6 +1673,7 @@ namespace VRCForge.Editor
             string toolName,
             JObject arguments,
             bool externalMcp,
+            bool validateUnityObjectIdentities,
             out string failureCode)
         {
             failureCode = "context_invalid";
@@ -1697,6 +1713,13 @@ namespace VRCForge.Editor
                 if (externalMcp && (context["approvalId"] != null || context["checkpointId"] != null))
                 {
                     failureCode = "internal_fields_present";
+                    return false;
+                }
+                if (externalMcp && !ValidateExecutionTargetContext(
+                    context,
+                    validateUnityObjectIdentities,
+                    out failureCode))
+                {
                     return false;
                 }
                 if (!ApprovedAppCoreTools.Contains(targetTool))
@@ -1762,6 +1785,195 @@ namespace VRCForge.Editor
             {
                 failureCode = "context_invalid";
                 return false;
+            }
+        }
+
+        private static bool BindTransportExecutionTarget(JObject context, JObject metadata)
+        {
+            if (context == null || metadata == null)
+            {
+                return false;
+            }
+            context[ExecutionTargetVerifiedKey] = false;
+            var contextTarget = context["executionTarget"] as JObject;
+            var transportTarget = metadata[ExecutionTargetMetaKey] as JObject;
+            var contextDigest = RequiredBoundedString(context, "executionTargetDigest", 64);
+            var transportDigest = metadata[ExecutionTargetDigestMetaKey] != null
+                && metadata[ExecutionTargetDigestMetaKey].Type == JTokenType.String
+                ? (string)metadata[ExecutionTargetDigestMetaKey]
+                : null;
+            if (contextTarget == null || transportTarget == null
+                || !IsLowerHex(contextDigest, 64)
+                || !string.Equals(contextDigest, transportDigest, StringComparison.Ordinal)
+                || !JToken.DeepEquals(contextTarget, transportTarget))
+            {
+                return false;
+            }
+            context[ExecutionTargetVerifiedKey] = true;
+            return true;
+        }
+
+        private static bool ValidateExecutionTargetContext(
+            JObject context,
+            bool validateUnityObjectIdentities,
+            out string failureCode)
+        {
+            failureCode = "execution_target_invalid";
+            try
+            {
+                if (context[ExecutionTargetVerifiedKey] == null
+                    || context[ExecutionTargetVerifiedKey].Type != JTokenType.Boolean
+                    || !context[ExecutionTargetVerifiedKey].Value<bool>())
+                {
+                    return false;
+                }
+                var target = context["executionTarget"] as JObject;
+                var project = target == null ? null : target["project"] as JObject;
+                var editor = target == null ? null : target["editor"] as JObject;
+                var scope = target == null ? null : RequiredBoundedString(target, "scope", 32);
+                if (target == null || project == null || editor == null
+                    || !string.Equals((string)target["schema"], "vrcforge.execution_target.v1", StringComparison.Ordinal)
+                    || !(scope == "project" || scope == "scene" || scope == "avatar" || scope == "object" || scope == "component"))
+                {
+                    return false;
+                }
+
+                var projectRoot = Path.GetFullPath(RequiredBoundedString(project, "root", 4096)).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                var currentRoot = Path.GetFullPath(GetProjectRoot()).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                var projectId = RequiredBoundedString(project, "projectId", 64);
+                var unityPid = editor["unityPid"] != null && editor["unityPid"].Type == JTokenType.Integer
+                    ? editor["unityPid"].Value<int>() : 0;
+                if (!string.Equals(projectRoot, currentRoot, StringComparison.OrdinalIgnoreCase)
+                    || !string.Equals(projectId, ComputeProjectId(GetProjectRoot()), StringComparison.Ordinal)
+                    || unityPid != System.Diagnostics.Process.GetCurrentProcess().Id
+                    || !string.Equals(RequiredBoundedString(editor, "coreInstanceId", 128), descriptorInstanceId, StringComparison.Ordinal)
+                    || !string.Equals(RequiredBoundedString(editor, "processStartTime", 64), CurrentProcessStartTime(), StringComparison.Ordinal))
+                {
+                    failureCode = "execution_target_editor_or_project_drifted";
+                    return false;
+                }
+
+                var scene = target["scene"] as JObject;
+                GameObject avatarObject = null;
+                GameObject targetObject = null;
+                if (scope != "project")
+                {
+                    if (!ValidateExecutionTargetScene(scene, currentRoot))
+                    {
+                        failureCode = "execution_target_scene_drifted";
+                        return false;
+                    }
+                }
+                if (validateUnityObjectIdentities
+                    && (scope == "avatar" || scope == "object" || scope == "component"))
+                {
+                    avatarObject = ResolveExecutionTargetGameObject(target["avatar"] as JObject);
+                    if (avatarObject == null || !string.Equals(avatarObject.scene.path.Replace('\\', '/'), (string)scene["assetPath"], StringComparison.Ordinal))
+                    {
+                        failureCode = "execution_target_avatar_drifted";
+                        return false;
+                    }
+                }
+                if (validateUnityObjectIdentities
+                    && (scope == "object" || scope == "component"))
+                {
+                    targetObject = ResolveExecutionTargetGameObject(target["object"] as JObject);
+                    if (targetObject == null || avatarObject == null
+                        || (targetObject != avatarObject && !targetObject.transform.IsChildOf(avatarObject.transform)))
+                    {
+                        failureCode = "execution_target_object_drifted";
+                        return false;
+                    }
+                }
+                if (validateUnityObjectIdentities && scope == "component")
+                {
+                    var componentIdentity = target["component"] as JObject;
+                    GlobalObjectId parsed;
+                    var componentId = componentIdentity == null ? null : RequiredBoundedString(componentIdentity, "globalObjectId", 512);
+                    var componentType = componentIdentity == null ? null : RequiredBoundedString(componentIdentity, "type", 512);
+                    var component = !string.IsNullOrEmpty(componentId) && GlobalObjectId.TryParse(componentId, out parsed)
+                        ? GlobalObjectId.GlobalObjectIdentifierToObjectSlow(parsed) as Component : null;
+                    if (component == null || component.gameObject != targetObject
+                        || !string.Equals(component.GetType().FullName, componentType, StringComparison.Ordinal))
+                    {
+                        failureCode = "execution_target_component_drifted";
+                        return false;
+                    }
+                }
+
+                var expectedNamespace = "vrcforge://projects/" + projectId;
+                if (scene != null) expectedNamespace += "/scenes/" + RequiredBoundedString(scene, "guid", 64);
+                var avatar = target["avatar"] as JObject;
+                var objectIdentity = target["object"] as JObject;
+                var componentSection = target["component"] as JObject;
+                if (avatar != null) expectedNamespace += "/avatars/" + RequiredBoundedString(avatar, "globalObjectId", 512);
+                if (objectIdentity != null) expectedNamespace += "/objects/" + RequiredBoundedString(objectIdentity, "globalObjectId", 512);
+                if (componentSection != null) expectedNamespace += "/components/" + RequiredBoundedString(componentSection, "globalObjectId", 512);
+                if (!string.Equals(RequiredBoundedString(target, "namespace", 4096), expectedNamespace, StringComparison.Ordinal))
+                {
+                    failureCode = "execution_target_namespace_mismatch";
+                    return false;
+                }
+                failureCode = string.Empty;
+                return true;
+            }
+            catch (Exception)
+            {
+                return false;
+            }
+        }
+
+        private static bool ValidateExecutionTargetScene(JObject scene, string projectRoot)
+        {
+            if (scene == null) return false;
+            var assetPath = RequiredBoundedString(scene, "assetPath", 2048);
+            var absolutePath = RequiredBoundedString(scene, "absolutePath", 4096);
+            if (string.IsNullOrEmpty(assetPath) || !assetPath.StartsWith("Assets/", StringComparison.Ordinal)
+                || !assetPath.EndsWith(".unity", StringComparison.OrdinalIgnoreCase)) return false;
+            var expectedAbsolute = Path.GetFullPath(Path.Combine(projectRoot, assetPath.Replace('/', Path.DirectorySeparatorChar)));
+            if (!string.Equals(Path.GetFullPath(absolutePath), expectedAbsolute, StringComparison.OrdinalIgnoreCase)
+                || !File.Exists(expectedAbsolute)) return false;
+            var guid = ReadUnityMetaGuid(expectedAbsolute + ".meta");
+            var revision = File.GetLastWriteTimeUtc(expectedAbsolute).Ticks.ToString(CultureInfo.InvariantCulture);
+            return string.Equals(RequiredBoundedString(scene, "guid", 64), guid, StringComparison.Ordinal)
+                && string.Equals(RequiredBoundedString(scene, "revision", 64), revision, StringComparison.Ordinal)
+                && string.Equals(RequiredBoundedString(scene, "digest", 64), ComputeFileSha256(expectedAbsolute), StringComparison.Ordinal);
+        }
+
+        private static string ReadUnityMetaGuid(string metaPath)
+        {
+            if (!File.Exists(metaPath)) return string.Empty;
+            foreach (var line in File.ReadLines(metaPath))
+            {
+                if (!line.StartsWith("guid:", StringComparison.Ordinal)) continue;
+                var guid = line.Substring("guid:".Length).Trim();
+                return IsLowerHex(guid, 32) ? guid : string.Empty;
+            }
+            return string.Empty;
+        }
+
+        private static GameObject ResolveExecutionTargetGameObject(JObject identity)
+        {
+            GlobalObjectId parsed;
+            var value = identity == null ? null : RequiredBoundedString(identity, "globalObjectId", 512);
+            return !string.IsNullOrEmpty(value) && GlobalObjectId.TryParse(value, out parsed)
+                ? GlobalObjectId.GlobalObjectIdentifierToObjectSlow(parsed) as GameObject : null;
+        }
+
+        private static string CurrentProcessStartTime()
+        {
+            const long unixEpochTicks = 621355968000000000L;
+            var ticks = System.Diagnostics.Process.GetCurrentProcess().StartTime.ToUniversalTime().Ticks - unixEpochTicks;
+            return ((double)ticks / TimeSpan.TicksPerSecond).ToString("F6", CultureInfo.InvariantCulture);
+        }
+
+        private static string ComputeFileSha256(string path)
+        {
+            using (var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+            using (var sha = SHA256.Create())
+            {
+                var digest = sha.ComputeHash(stream);
+                return string.Concat(digest.Select(item => item.ToString("x2", CultureInfo.InvariantCulture)));
             }
         }
 
@@ -2075,6 +2287,8 @@ namespace VRCForge.Editor
                 ["toolContractVersion"] = VRCForgeMcpToolContract.ToolContractVersion,
                 ["toolCount"] = VRCForgeMcpToolContract.ToolCount,
                 ["instanceId"] = descriptorInstanceId,
+                ["processId"] = System.Diagnostics.Process.GetCurrentProcess().Id,
+                ["processStartTime"] = CurrentProcessStartTime(),
                 ["projectId"] = ComputeProjectId(GetProjectRoot()),
                 ["projectIdSource"] = "normalized_project_path_sha256",
                 ["compileSnapshot"] = CompileErrorMonitor.ReadCoreInfoSnapshot(30),
@@ -2233,6 +2447,7 @@ namespace VRCForge.Editor
                 ["authToken"] = Convert.ToBase64String(token),
                 ["instanceId"] = descriptorInstanceId,
                 ["processId"] = System.Diagnostics.Process.GetCurrentProcess().Id,
+                ["processStartTime"] = CurrentProcessStartTime(),
                 ["projectPath"] = root,
                 ["projectId"] = ComputeProjectId(root),
                 ["projectIdSource"] = "normalized_project_path_sha256",
