@@ -118,6 +118,7 @@ from mcp_tool_descriptor import (
     standardize_tool_descriptor,
 )
 from mcp_resource_registry import McpResourceRegistry
+from mcp_prompt_registry import McpPromptRegistry
 from operation_context import bind_operation_context
 
 
@@ -3994,6 +3995,13 @@ class AgentGateway:
                 local_state_write_guard=self.local_state_write_guard,
             )
         )
+        self._mcp_prompts = McpPromptRegistry(
+            lambda: self._skills.build_skill_registry(
+                self.ensure_config(),
+                EXPOSURE_LAYER_EXECUTION,
+            ),
+            lambda layer: self.build_external_mcp_tools(layer, ["*"]),
+        )
         self._desktop = DesktopComputerUseService(
             audit_dir,
             desktop_capture_dir or audit_dir / "desktop-captures",
@@ -4751,6 +4759,15 @@ class AgentGateway:
 
     def read_mcp_resource(self, uri: str) -> dict[str, Any]:
         return self._mcp_resources.read(uri)
+
+    def list_mcp_prompts(self, params: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        return self._mcp_prompts.list(params)
+
+    def get_mcp_prompt(self, name: str, arguments: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        return self._mcp_prompts.get(name, arguments)
+
+    def mcp_prompt_generation(self) -> str:
+        return str(self._mcp_prompts.list({"pageSize": 1}).get("promptGeneration") or "")
 
     def publish_mcp_tool_result_resource(
         self,
@@ -5571,6 +5588,16 @@ class AgentGateway:
             raise AgentGatewayError("Agent Gateway is disabled in config/agent_gateway.json.", status_code=403)
         name = self.resolve_external_mcp_tool_name(name)
         arguments = dict(params or {})
+        try:
+            prompt_skill_provenance = self._mcp_prompts.validate_provenance(
+                arguments.pop("promptSkillProvenance", None)
+            )
+        except ValueError as exc:
+            raise AgentGatewayError(
+                f"Prompt/Skill provenance rejected this Tool call: {exc}",
+                status_code=409,
+                cause_code="prompt_skill_provenance_mismatch",
+            ) from exc
         self._guard_external_mcp_project_scope(name, arguments)
         write_handler = self._write_handlers.get(name)
         if write_handler is None:
@@ -5585,6 +5612,8 @@ class AgentGateway:
             )
             result["canonicalToolName"] = canonical_tool_name(name)
             result["legacyAliasUsed"] = requested_name != name
+            if prompt_skill_provenance is not None:
+                result["promptSkillProvenance"] = prompt_skill_provenance
             return result
         if (
             not self._external_mcp_write_handler_block(write_handler, config)
@@ -5630,6 +5659,8 @@ class AgentGateway:
             )
             result["canonicalToolName"] = canonical_tool_name(name)
             result["legacyAliasUsed"] = requested_name != name
+            if prompt_skill_provenance is not None:
+                result["promptSkillProvenance"] = prompt_skill_provenance
             return result
 
         try:
@@ -5665,10 +5696,13 @@ class AgentGateway:
             )
         if prepared.get("requiresUserConfirmation"):
             try:
-                return self._propose_external_mcp_write(
+                proposal = self._propose_external_mcp_write(
                     prepared,
                     request_arguments_digest=request_arguments_digest,
                 )
+                if prompt_skill_provenance is not None:
+                    proposal["promptSkillProvenance"] = prompt_skill_provenance
+                return proposal
             except AgentGatewayError as exc:
                 return self._external_mcp_no_write_error(
                     name,
@@ -5691,6 +5725,8 @@ class AgentGateway:
                 result["outcome"] = {**dict(result["outcome"]), "operationId": result.get("operationId"), "executionTargetDigest": result["executionTargetDigest"]}
         result["canonicalToolName"] = canonical_tool_name(name)
         result["legacyAliasUsed"] = requested_name != name
+        if prompt_skill_provenance is not None:
+            result["promptSkillProvenance"] = prompt_skill_provenance
         return result
 
     def _propose_external_mcp_write(
@@ -6088,7 +6124,17 @@ class AgentGateway:
         if not tool or not self._tool_visible(tool, config):
             raise AgentGatewayError(f"Unknown or unavailable agent tool: {name}", status_code=404)
 
-        params = params or {}
+        params = dict(params or {})
+        try:
+            prompt_skill_provenance = self._mcp_prompts.validate_provenance(
+                params.pop("promptSkillProvenance", None)
+            )
+        except ValueError as exc:
+            raise AgentGatewayError(
+                f"Prompt/Skill provenance rejected this Tool call: {exc}",
+                status_code=409,
+                cause_code="prompt_skill_provenance_mismatch",
+            ) from exc
         request_id = f"call_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')}_{secrets.token_hex(4)}"
         started_at = time.perf_counter()
         params_summary = self._tool_params_audit(name, params)
@@ -6167,6 +6213,8 @@ class AgentGateway:
                             response[key] = error_object[key]
             if request_trace is not None:
                 response["requestTrace"] = request_trace
+            if prompt_skill_provenance is not None:
+                response["promptSkillProvenance"] = prompt_skill_provenance
             self.publish_mcp_tool_result_resource(
                 name,
                 params,
@@ -9859,6 +9907,9 @@ def create_agent_mcp_app(
         resource_templates=gateway.list_mcp_resource_templates,
         resource_read=gateway.read_mcp_resource,
         resource_list_revision=lambda: gateway._mcp_resources.generation,
+        prompt_list=gateway.list_mcp_prompts,
+        prompt_get=gateway.get_mcp_prompt,
+        prompt_list_revision=gateway.mcp_prompt_generation,
     )
     return create_agent_mcp_2026_asgi_app(
         router,

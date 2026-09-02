@@ -556,6 +556,23 @@ class VRCForgeBridge:
     def resource_generation(self) -> int:
         return int(self.resources(page_size=1).get("resourceGeneration") or 0)
 
+    def prompts(self, *, cursor: str = "", page_size: int = 100) -> dict[str, Any]:
+        token = self.require_token()
+        params: dict[str, Any] = {"pageSize": page_size}
+        if cursor:
+            params["cursor"] = cursor
+        return self._mcp_request("prompts/list", params, token=token)
+
+    def get_prompt(self, name: str, arguments: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        return self._mcp_request(
+            "prompts/get",
+            {"name": name, "arguments": dict(arguments or {})},
+            token=self.require_token(),
+        )
+
+    def prompt_generation(self) -> str:
+        return str(self.prompts(page_size=1).get("promptGeneration") or "")
+
     def _mcp_request(
         self,
         method: str,
@@ -1104,6 +1121,25 @@ def run_stdio_server(
         callback = getattr(bridge, "resource_generation", None)
         return int(callback()) if callable(callback) else 0
 
+    def list_prompts(params: Mapping[str, Any]) -> dict[str, Any]:
+        callback = getattr(bridge, "prompts", None)
+        if not callable(callback):
+            return {"prompts": [], "promptGeneration": ""}
+        return callback(
+            cursor=str(params.get("cursor") or ""),
+            page_size=int(params.get("pageSize") or 100),
+        )
+
+    def get_prompt(name: str, arguments: Mapping[str, Any]) -> dict[str, Any]:
+        callback = getattr(bridge, "get_prompt", None)
+        if not callable(callback):
+            raise ValueError("Prompt registry is unavailable")
+        return callback(name, arguments)
+
+    def prompt_generation() -> str:
+        callback = getattr(bridge, "prompt_generation", None)
+        return str(callback()) if callable(callback) else ""
+
     router_standard = McpStandardRouter(
         lambda: list_tools({"exposureLayer": requested_layer["value"]}),
         call_tool,
@@ -1115,6 +1151,9 @@ def run_stdio_server(
         resource_templates=list_resource_templates,
         resource_read=read_resource,
         resource_list_revision=resource_generation,
+        prompt_list=list_prompts,
+        prompt_get=get_prompt,
+        prompt_list_revision=prompt_generation,
     )
     if protocol_profile == "mcp-1x":
         run_standard_stdio_loop(router_standard)
@@ -1131,6 +1170,9 @@ def run_stdio_server(
         resource_templates=list_resource_templates,
         resource_read=read_resource,
         resource_list_revision=resource_generation,
+        prompt_list=list_prompts,
+        prompt_get=get_prompt,
+        prompt_list_revision=prompt_generation,
     )
     if protocol_profile == "vrcforge-2026":
         run_stdio_loop(router_2026)

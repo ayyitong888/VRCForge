@@ -45,6 +45,8 @@ ToolCallCatalogueCallback = Callable[[Mapping[str, Any]], Sequence[Mapping[str, 
 ResourceListCallback = Callable[[Mapping[str, Any]], Mapping[str, Any] | Awaitable[Mapping[str, Any]]]
 ResourceTemplatesCallback = Callable[[Mapping[str, Any]], Mapping[str, Any] | Awaitable[Mapping[str, Any]]]
 ResourceReadCallback = Callable[[str], Mapping[str, Any] | Awaitable[Mapping[str, Any]]]
+PromptListCallback = Callable[[Mapping[str, Any]], Mapping[str, Any] | Awaitable[Mapping[str, Any]]]
+PromptGetCallback = Callable[[str, Mapping[str, Any]], Mapping[str, Any] | Awaitable[Mapping[str, Any]]]
 
 
 @dataclass(frozen=True)
@@ -330,6 +332,9 @@ class Mcp2026Router:
         resource_templates: ResourceTemplatesCallback | None = None,
         resource_read: ResourceReadCallback | None = None,
         resource_list_revision: ToolListRevisionCallback | None = None,
+        prompt_list: PromptListCallback | None = None,
+        prompt_get: PromptGetCallback | None = None,
+        prompt_list_revision: ToolListRevisionCallback | None = None,
     ) -> None:
         if not _is_nonempty_string(server_name) or not _is_nonempty_string(server_version):
             raise ValueError("server_name and server_version must be non-empty strings")
@@ -344,6 +349,9 @@ class Mcp2026Router:
         self._resource_templates = resource_templates
         self._resource_read = resource_read
         self._resource_list_revision = resource_list_revision
+        self._prompt_list = prompt_list
+        self._prompt_get = prompt_get
+        self._prompt_list_revision = prompt_list_revision
         self._pending_notifications: list[JsonObject] = []
 
     def drain_notifications(self) -> list[JsonObject]:
@@ -373,8 +381,8 @@ class Mcp2026Router:
                                 else {}
                             ),
                             **(
-                                {"prompts": {"listChanged": True}}
-                                if getattr(self, "_prompt_list", None) is not None
+                                {"prompts": {"listChanged": self._prompt_list_revision is not None}}
+                                if self._prompt_list is not None and self._prompt_get is not None
                                 else {}
                             ),
                         },
@@ -417,6 +425,33 @@ class Mcp2026Router:
                     raise Mcp2026Error(-32002, str(exc), 404) from exc
                 if not isinstance(supplied, Mapping) or not isinstance(supplied.get("contents"), Sequence):
                     raise Mcp2026Error(-32603, "Resource registry returned invalid contents", 500)
+                return _success(
+                    request_id,
+                    _strict_json_clone(supplied),
+                    server_name=self.server_name,
+                    server_version=self.server_version,
+                ), 200
+            if method == "prompts/list" and self._prompt_list is not None:
+                supplied = await _resolve(self._prompt_list(params))
+                if not isinstance(supplied, Mapping) or not isinstance(supplied.get("prompts"), Sequence):
+                    raise Mcp2026Error(-32603, "Prompt registry returned an invalid list", 500)
+                return _success(
+                    request_id,
+                    _strict_json_clone(supplied),
+                    server_name=self.server_name,
+                    server_version=self.server_version,
+                ), 200
+            if method == "prompts/get" and self._prompt_get is not None:
+                name = params.get("name")
+                arguments = params.get("arguments", {})
+                if not _is_nonempty_string(name) or not isinstance(arguments, Mapping):
+                    raise Mcp2026Error(-32602, "prompts/get requires a non-empty name and object arguments")
+                try:
+                    supplied = await _resolve(self._prompt_get(str(name), dict(arguments)))
+                except ValueError as exc:
+                    raise Mcp2026Error(-32602, str(exc)) from exc
+                if not isinstance(supplied, Mapping) or not isinstance(supplied.get("messages"), Sequence):
+                    raise Mcp2026Error(-32603, "Prompt registry returned invalid messages", 500)
                 return _success(
                     request_id,
                     _strict_json_clone(supplied),
@@ -485,6 +520,11 @@ class Mcp2026Router:
                     if self._resource_list_revision is not None
                     else None
                 )
+                prompt_revision_before = (
+                    self._prompt_list_revision()
+                    if self._prompt_list_revision is not None
+                    else None
+                )
                 descriptor = catalogue.get(str(resolved_tool_name)) or catalogue.get(str(tool_name)) or {}
                 descriptor_meta = descriptor.get("_meta") if isinstance(descriptor.get("_meta"), Mapping) else {}
                 is_write = bool(
@@ -514,6 +554,15 @@ class Mcp2026Router:
                 if self._resource_list_revision is not None and resource_revision_after != resource_revision_before:
                     self._pending_notifications.append(
                         {"jsonrpc": "2.0", "method": "notifications/resources/list_changed"}
+                    )
+                prompt_revision_after = (
+                    self._prompt_list_revision()
+                    if self._prompt_list_revision is not None
+                    else None
+                )
+                if self._prompt_list_revision is not None and prompt_revision_after != prompt_revision_before:
+                    self._pending_notifications.append(
+                        {"jsonrpc": "2.0", "method": "notifications/prompts/list_changed"}
                     )
                 raw_structured = dict(callback_result) if isinstance(callback_result, Mapping) else {"value": callback_result}
                 outcome = normalize_agent_tool_result(

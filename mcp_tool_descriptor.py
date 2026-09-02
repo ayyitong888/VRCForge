@@ -198,7 +198,28 @@ def standardize_tool_descriptor(
             "required": ["schema", "namespace", "scope", "project", "editor"],
             "additionalProperties": True,
         }
-        result["inputSchema"] = schema
+    else:
+        schema = deepcopy(dict(result.get("inputSchema") or {}))
+        properties = dict(schema.get("properties") or {})
+    properties["promptSkillProvenance"] = {
+        "type": "object",
+        "description": "Optional exact provenance returned by prompts/get; Gateway rejects stale or mismatched Skill identity.",
+        "$ref": "#/$defs/vrcforge.prompt_skill_provenance.v1",
+    }
+    schema["properties"] = properties
+    schema.setdefault("$defs", {})["vrcforge.prompt_skill_provenance.v1"] = {
+        "type": "object",
+        "required": ["skillId", "version", "contentHash"],
+        "properties": {
+            "skillId": {"type": "string"},
+            "version": {"type": "string"},
+            "contentHash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "source": {"type": "string"},
+            "packageId": {"type": "string"},
+        },
+        "additionalProperties": True,
+    }
+    result["inputSchema"] = schema
     result["outputSchema"] = _result_schema(write)
     result["_meta"] = metadata
     return result

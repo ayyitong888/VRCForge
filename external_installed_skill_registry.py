@@ -49,6 +49,10 @@ class ExternalInstalledSkillRegistryService:
                 "title": str(skill.get("title") or ""),
                 "description": str(skill.get("description") or ""),
                 "enabled": bool(skill.get("enabled")),
+                "nativePrompt": {
+                    "method": "prompts/get",
+                    "name": str(skill.get("name") or ""),
+                },
                 **self._execution_metadata(skill, package_metadata, include_sequence=False),
                 **(
                     {"packageId": str(skill["packageId"])}
@@ -161,6 +165,7 @@ class ExternalInstalledSkillRegistryService:
                 "instructions": str(skill.get("instructions") or ""),
                 "allowedTools": ensure_string_list(skill.get("allowedTools")),
                 "supportFiles": support_files,
+                "nativePrompt": {"method": "prompts/get", "name": name},
                 **self._execution_metadata(
                     skill, self._installed_package_metadata(), include_sequence=True
                 ),
