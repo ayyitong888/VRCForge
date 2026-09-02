@@ -41,6 +41,9 @@ ToolCallCallback = Callable[[str, Mapping[str, Any]], Any | Awaitable[Any]]
 ToolListRevisionCallback = Callable[[], Any]
 ToolNameResolver = Callable[[str], str]
 ToolCallCatalogueCallback = Callable[[], Sequence[Mapping[str, Any]] | Awaitable[Sequence[Mapping[str, Any]]]]
+ResourceListCallback = Callable[[Mapping[str, Any]], Mapping[str, Any] | Awaitable[Mapping[str, Any]]]
+ResourceTemplatesCallback = Callable[[Mapping[str, Any]], Mapping[str, Any] | Awaitable[Mapping[str, Any]]]
+ResourceReadCallback = Callable[[str], Mapping[str, Any] | Awaitable[Mapping[str, Any]]]
 
 
 class McpStandardError(Exception):
@@ -113,6 +116,10 @@ class McpStandardRouter:
         tool_list_revision: ToolListRevisionCallback | None = None,
         tool_name_resolver: ToolNameResolver | None = None,
         tool_call_catalogue: ToolCallCatalogueCallback | None = None,
+        resource_list: ResourceListCallback | None = None,
+        resource_templates: ResourceTemplatesCallback | None = None,
+        resource_read: ResourceReadCallback | None = None,
+        resource_list_revision: ToolListRevisionCallback | None = None,
     ) -> None:
         if not _is_nonempty_string(server_name) or not _is_nonempty_string(server_version):
             raise ValueError("server_name and server_version must be non-empty strings")
@@ -123,6 +130,10 @@ class McpStandardRouter:
         self._tool_list_revision = tool_list_revision
         self._tool_name_resolver = tool_name_resolver
         self._tool_call_catalogue = tool_call_catalogue
+        self._resource_list = resource_list
+        self._resource_templates = resource_templates
+        self._resource_read = resource_read
+        self._resource_list_revision = resource_list_revision
         self._pending_notifications: list[JsonObject] = []
         self._initialized = False
 
@@ -175,7 +186,17 @@ class McpStandardRouter:
                                 {"listChanged": True}
                                 if self._tool_list_revision is not None
                                 else {}
-                            )
+                            ),
+                            **(
+                                {"resources": {"listChanged": self._resource_list_revision is not None}}
+                                if self._resource_list is not None and self._resource_read is not None
+                                else {}
+                            ),
+                            **(
+                                {"prompts": {"listChanged": True}}
+                                if getattr(self, "_prompt_list", None) is not None
+                                else {}
+                            ),
                         },
                         "serverInfo": {"name": self.server_name, "version": self.server_version},
                         "instructions": (
@@ -192,6 +213,33 @@ class McpStandardRouter:
                 raise McpStandardError(-32002, "MCP server is not initialized")
             if method == "ping":
                 return None if notification else _success(request_id, {})
+            if method == "resources/list" and self._resource_list is not None:
+                if notification:
+                    return None
+                supplied = await _resolve(self._resource_list(params))
+                if not isinstance(supplied, Mapping) or not isinstance(supplied.get("resources"), Sequence):
+                    raise McpStandardError(-32603, "Resource registry returned an invalid list")
+                return _success(request_id, _strict_json_clone(supplied))
+            if method == "resources/templates/list" and self._resource_templates is not None:
+                if notification:
+                    return None
+                supplied = await _resolve(self._resource_templates(params))
+                if not isinstance(supplied, Mapping) or not isinstance(supplied.get("resourceTemplates"), Sequence):
+                    raise McpStandardError(-32603, "Resource registry returned invalid templates")
+                return _success(request_id, _strict_json_clone(supplied))
+            if method == "resources/read" and self._resource_read is not None:
+                if notification:
+                    return None
+                uri = params.get("uri")
+                if not _is_nonempty_string(uri):
+                    raise McpStandardError(-32602, "resources/read requires a non-empty uri")
+                try:
+                    supplied = await _resolve(self._resource_read(str(uri)))
+                except ValueError as exc:
+                    raise McpStandardError(-32002, str(exc)) from exc
+                if not isinstance(supplied, Mapping) or not isinstance(supplied.get("contents"), Sequence):
+                    raise McpStandardError(-32603, "Resource registry returned invalid contents")
+                return _success(request_id, _strict_json_clone(supplied))
             if method == "tools/list":
                 if notification:
                     return None
@@ -231,6 +279,11 @@ class McpStandardRouter:
                     if self._tool_list_revision is not None
                     else None
                 )
+                resource_revision_before = (
+                    self._resource_list_revision()
+                    if self._resource_list_revision is not None
+                    else None
+                )
                 descriptor = catalogue.get(str(resolved_name)) or catalogue.get(str(name)) or {}
                 descriptor_meta = descriptor.get("_meta") if isinstance(descriptor.get("_meta"), Mapping) else {}
                 is_write = bool(
@@ -250,6 +303,15 @@ class McpStandardRouter:
                 if self._tool_list_revision is not None and revision_after != revision_before:
                     self._pending_notifications.append(
                         {"jsonrpc": "2.0", "method": "notifications/tools/list_changed"}
+                    )
+                resource_revision_after = (
+                    self._resource_list_revision()
+                    if self._resource_list_revision is not None
+                    else None
+                )
+                if self._resource_list_revision is not None and resource_revision_after != resource_revision_before:
+                    self._pending_notifications.append(
+                        {"jsonrpc": "2.0", "method": "notifications/resources/list_changed"}
                     )
                 if not isinstance(result, Mapping):
                     result = {"ok": True, "value": result}

@@ -540,6 +540,22 @@ class VRCForgeBridge:
             token=token,
         )
 
+    def resources(self, *, cursor: str = "", page_size: int = 100) -> dict[str, Any]:
+        token = self.require_token()
+        params: dict[str, Any] = {"pageSize": page_size}
+        if cursor:
+            params["cursor"] = cursor
+        return self._mcp_request("resources/list", params, token=token)
+
+    def resource_templates(self) -> dict[str, Any]:
+        return self._mcp_request("resources/templates/list", {}, token=self.require_token())
+
+    def read_resource(self, uri: str) -> dict[str, Any]:
+        return self._mcp_request("resources/read", {"uri": uri}, token=self.require_token())
+
+    def resource_generation(self) -> int:
+        return int(self.resources(page_size=1).get("resourceGeneration") or 0)
+
     def _mcp_request(
         self,
         method: str,
@@ -1065,6 +1081,29 @@ def run_stdio_server(
             }
         return bridge.call_tool(tool_name, arguments, agent_name="external-stdio-agent")
 
+    def list_resources(params: Mapping[str, Any]) -> dict[str, Any]:
+        callback = getattr(bridge, "resources", None)
+        if not callable(callback):
+            return {"resources": [], "resourceGeneration": 0}
+        return callback(
+            cursor=str(params.get("cursor") or ""),
+            page_size=int(params.get("pageSize") or 100),
+        )
+
+    def list_resource_templates(_params: Mapping[str, Any]) -> dict[str, Any]:
+        callback = getattr(bridge, "resource_templates", None)
+        return callback() if callable(callback) else {"resourceTemplates": []}
+
+    def read_resource(uri: str) -> dict[str, Any]:
+        callback = getattr(bridge, "read_resource", None)
+        if not callable(callback):
+            raise ValueError("Resource registry is unavailable")
+        return callback(uri)
+
+    def resource_generation() -> int:
+        callback = getattr(bridge, "resource_generation", None)
+        return int(callback()) if callable(callback) else 0
+
     router_standard = McpStandardRouter(
         lambda: list_tools({"exposureLayer": requested_layer["value"]}),
         call_tool,
@@ -1072,6 +1111,10 @@ def run_stdio_server(
         server_version="1.7.10",
         tool_list_revision=lambda: tool_list_revision,
         tool_call_catalogue=lambda: list_tools({"exposureLayer": requested_layer["value"]}),
+        resource_list=list_resources,
+        resource_templates=list_resource_templates,
+        resource_read=read_resource,
+        resource_list_revision=resource_generation,
     )
     if protocol_profile == "mcp-1x":
         run_standard_stdio_loop(router_standard)
@@ -1084,6 +1127,10 @@ def run_stdio_server(
         server_version="1.7.10",
         tool_list_revision=lambda: tool_list_revision,
         tool_call_catalogue=lambda _params: list_tools({"exposureLayer": requested_layer["value"]}),
+        resource_list=list_resources,
+        resource_templates=list_resource_templates,
+        resource_read=read_resource,
+        resource_list_revision=resource_generation,
     )
     if protocol_profile == "vrcforge-2026":
         run_stdio_loop(router_2026)

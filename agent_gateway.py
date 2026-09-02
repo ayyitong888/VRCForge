@@ -117,6 +117,7 @@ from mcp_tool_descriptor import (
     identity_scope,
     standardize_tool_descriptor,
 )
+from mcp_resource_registry import McpResourceRegistry
 from operation_context import bind_operation_context
 
 
@@ -3539,6 +3540,13 @@ class AgentGateway:
         self._skill_package_write_lock_bound = skill_package_write_lock is not None
         self._skill_package_write_lock = skill_package_write_lock or nullcontext()
         self._lock = threading.RLock()
+        # One process-owned registry backs the internal Agent and both MCP
+        # protocol projections. Files live under the existing local audit
+        # authority; access remains gated by the Gateway bearer boundary.
+        self._mcp_resources = McpResourceRegistry(
+            self.audit_dir / "mcp-resources",
+            lock=self._lock,
+        )
         self._runtime_shell_completion_ids: set[str] = set()
         self._runtime_shell_completion_order: list[str] = []
         self._runtime_continuation_accepting = True
@@ -4651,6 +4659,224 @@ class AgentGateway:
                 ))
         tools.sort(key=lambda item: str(item.get("name") or ""))
         return tools
+
+    @staticmethod
+    def _mcp_resource_identity(target: Mapping[str, Any] | None) -> dict[str, Any]:
+        target = target if isinstance(target, Mapping) else {}
+        project = target.get("project") if isinstance(target.get("project"), Mapping) else {}
+        editor = target.get("editor") if isinstance(target.get("editor"), Mapping) else {}
+        scene = target.get("scene") if isinstance(target.get("scene"), Mapping) else {}
+        avatar = target.get("avatar") if isinstance(target.get("avatar"), Mapping) else {}
+        obj = target.get("object") if isinstance(target.get("object"), Mapping) else {}
+        component = target.get("component") if isinstance(target.get("component"), Mapping) else {}
+        return {
+            "projectId": project.get("projectId"),
+            "projectRoot": project.get("root"),
+            "unityPid": editor.get("unityPid"),
+            "processStartTime": editor.get("processStartTime"),
+            "coreInstanceId": editor.get("coreInstanceId"),
+            "sceneGuid": scene.get("guid"),
+            "sceneRevision": scene.get("revision"),
+            "sceneDigest": scene.get("digest"),
+            "avatarGlobalObjectId": avatar.get("globalObjectId"),
+            "objectGlobalObjectId": obj.get("globalObjectId"),
+            "componentGlobalObjectId": component.get("globalObjectId"),
+            "componentType": component.get("type"),
+            "namespace": target.get("namespace"),
+            "scope": target.get("scope"),
+            "hierarchyPathIsIdentity": False,
+        }
+
+    def _sync_mcp_resource_catalogue(self) -> None:
+        """Publish shared registry metadata without touching Unity state."""
+
+        planning = self.build_external_mcp_tools(EXPOSURE_LAYER_PLANNING, ["*"])
+        execution = self.build_external_mcp_tools(EXPOSURE_LAYER_EXECUTION, ["*"])
+        catalogue_digest = stable_hash(
+            json.dumps(
+                {"planning": planning, "execution": execution},
+                ensure_ascii=True,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
+        self._mcp_resources.publish(
+            base_uri=f"vrcforge://catalog/tools/{catalogue_digest}",
+            name="VRCForge shared Tool catalog",
+            description="Canonical Tool descriptors shared by internal and external Agents; exposure layers only filter visibility.",
+            resource_type="tool_catalog",
+            data={
+                "catalogGeneration": catalogue_digest,
+                "planning": planning,
+                "execution": execution,
+                "sameDefinitionSource": True,
+            },
+            identity={},
+            source_mode="gateway_registry",
+            refresh_rule="Republish when the canonical Gateway Tool registry changes.",
+        )
+        with self._lock:
+            project_roots = sorted(self._external_mcp_project_paths)
+        self._mcp_resources.publish(
+            base_uri="vrcforge://session/current/identity",
+            name="Current MCP session identity lock",
+            description="Truthful Gateway identity-binding state. Exact Unity identity appears only after an explicitly targeted Tool call.",
+            resource_type="session_identity_lock",
+            data={
+                "status": "unbound" if not project_roots else "project_scope_observed",
+                "observedProjectRoots": project_roots,
+                "exactExecutionTarget": None,
+                "note": "This summary is not write authority; writes require the exact ExecutionTarget envelope.",
+            },
+            identity={
+                "projectId": None,
+                "editorInstanceId": None,
+                "sceneGuid": None,
+                "avatarId": None,
+            },
+            source_mode="gateway_session",
+            refresh_rule="Updated after explicit identity-bound Tool activity.",
+        )
+
+    def list_mcp_resources(self, params: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        self._sync_mcp_resource_catalogue()
+        params = params if isinstance(params, Mapping) else {}
+        return self._mcp_resources.list(
+            cursor=str(params.get("cursor") or ""),
+            page_size=int(params.get("pageSize") or 100),
+        )
+
+    def list_mcp_resource_templates(self, _params: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        return {"resourceTemplates": self._mcp_resources.templates()}
+
+    def read_mcp_resource(self, uri: str) -> dict[str, Any]:
+        return self._mcp_resources.read(uri)
+
+    def publish_mcp_tool_result_resource(
+        self,
+        tool_name: str,
+        arguments: Mapping[str, Any],
+        result: Mapping[str, Any],
+        *,
+        source_mode: str,
+    ) -> dict[str, Any]:
+        target = (
+            result.get("executionTarget")
+            if isinstance(result.get("executionTarget"), Mapping)
+            else arguments.get("executionTarget")
+        )
+        target = target if isinstance(target, Mapping) else None
+        identity = self._mcp_resource_identity(target)
+        operation_id = str(
+            result.get("operationId")
+            or result.get("requestId")
+            or ensure_dict(result.get("outcome")).get("operationId")
+            or ""
+        ).strip()
+        if not operation_id:
+            operation_id = f"resource_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')}_{secrets.token_hex(4)}"
+        receipt = self._mcp_resources.publish(
+            base_uri=f"vrcforge://operation/{operation_id}/receipt",
+            name=f"{tool_name} operation receipt",
+            description="Immutable result captured from the shared Gateway Tool execution path.",
+            resource_type="operation_receipt",
+            data={
+                "tool": tool_name,
+                "operationId": operation_id,
+                "executionTargetDigest": result.get("executionTargetDigest"),
+                "result": self._external_mcp_visible_value(result),
+            },
+            identity=identity,
+            source_mode=source_mode,
+            refresh_rule="Immutable; invoke the Tool again to capture a new operation revision.",
+        )
+        lowered_name = tool_name.casefold()
+        if target is not None:
+            snapshot_scope = str(target.get("scope") or "project")
+            snapshot_id = stable_hash(
+                f"{target.get('namespace') or execution_target_digest(target)}:{tool_name}"
+            )
+            self._mcp_resources.publish(
+                base_uri=f"vrcforge://snapshot/{snapshot_scope}/{snapshot_id}",
+                name=f"{tool_name} Unity snapshot",
+                description="Identity-bound Tool result captured without any implicit Resource read scan.",
+                resource_type="unity_snapshot",
+                data={
+                    "tool": tool_name,
+                    "sourceOperationId": operation_id,
+                    "result": self._external_mcp_visible_value(result),
+                },
+                identity=identity,
+                source_mode=source_mode,
+                refresh_rule="Invoke the corresponding read Tool with a fresh ExecutionTarget.",
+            )
+        if "checkpoint" in lowered_name or "diff" in lowered_name or "restore" in lowered_name:
+            self._mcp_resources.publish(
+                base_uri=f"vrcforge://checkpoint/{operation_id}/diff",
+                name=f"{tool_name} checkpoint evidence",
+                description="Checkpoint or diff evidence captured by the explicit Tool call.",
+                resource_type="checkpoint_diff",
+                data={"tool": tool_name, "sourceOperationId": operation_id, "result": self._external_mcp_visible_value(result)},
+                identity=identity,
+                source_mode=source_mode,
+                refresh_rule="Invoke an explicit checkpoint or diff Tool; resources/read never restores state.",
+            )
+        if any(marker in lowered_name for marker in ("menu", "parameter", "animator", "controller", "control_graph")):
+            self._mcp_resources.publish(
+                base_uri=f"vrcforge://control-graph/{operation_id}",
+                name=f"{tool_name} control graph",
+                description="Menu, parameter or animation graph evidence captured by the explicit Tool call.",
+                resource_type="control_graph",
+                data={"tool": tool_name, "sourceOperationId": operation_id, "result": self._external_mcp_visible_value(result)},
+                identity=identity,
+                source_mode=source_mode,
+                refresh_rule="Invoke the corresponding control-graph read Tool.",
+            )
+        if "gesture_manager" in lowered_name:
+            self._mcp_resources.publish(
+                base_uri=f"vrcforge://gesture-manager/{operation_id}/runtime",
+                name=f"{tool_name} Gesture Manager runtime",
+                description="Gesture Manager runtime evidence captured by the explicit Tool call.",
+                resource_type="gm_runtime",
+                data={"tool": tool_name, "sourceOperationId": operation_id, "result": self._external_mcp_visible_value(result)},
+                identity=identity,
+                source_mode=source_mode,
+                refresh_rule="Invoke an explicit Gesture Manager status or test Tool.",
+            )
+        identity_resource = None
+        if target is not None:
+            identity_resource = self._mcp_resources.publish(
+                base_uri="vrcforge://session/current/identity",
+                name="Current MCP session identity lock",
+                description="Exact ExecutionTarget last verified by the shared Gateway Tool path.",
+                resource_type="session_identity_lock",
+                data={
+                    "status": "bound",
+                    "exactExecutionTarget": dict(target),
+                    "executionTargetDigest": execution_target_digest(target),
+                    "sourceOperationId": operation_id,
+                },
+                identity=identity,
+                source_mode=source_mode,
+                refresh_rule="Replaced only by a later explicit identity-bound Tool operation.",
+            )
+        if isinstance(result, dict):
+            result["resources"] = {
+                "status": "available",
+                "operationReceiptUri": receipt["uri"],
+                "operationReceiptHandle": {
+                    "uri": receipt["uri"],
+                    "resourceType": receipt["resourceType"],
+                    "revision": receipt["revision"],
+                    "contentHash": receipt["contentHash"],
+                },
+                **(
+                    {"identityLockUri": identity_resource["uri"]}
+                    if identity_resource is not None
+                    else {}
+                ),
+            }
+        return receipt
 
     def shared_agent_tool_descriptor(
         self,
@@ -5941,6 +6167,12 @@ class AgentGateway:
                             response[key] = error_object[key]
             if request_trace is not None:
                 response["requestTrace"] = request_trace
+            self.publish_mcp_tool_result_resource(
+                name,
+                params,
+                response,
+                source_mode="internal_agent",
+            )
             return response
         except Exception as exc:  # noqa: BLE001 - tool errors must be returned to external agents.
             duration_ms = round((time.perf_counter() - started_at) * 1000, 3)
@@ -9595,12 +9827,20 @@ def create_agent_mcp_app(
         )
 
     async def call_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        return await asyncio.to_thread(
+        result = await asyncio.to_thread(
             gateway.call_external_mcp_tool,
             name,
             arguments,
             agent_name="mcp-agent",
         )
+        await asyncio.to_thread(
+            gateway.publish_mcp_tool_result_resource,
+            name,
+            arguments,
+            result,
+            source_mode="external_agent",
+        )
+        return result
 
     def validate_bearer(token: str) -> bool:
         config = gateway.ensure_config()
@@ -9615,6 +9855,10 @@ def create_agent_mcp_app(
         server_name="VRCForge Agent Gateway",
         server_version="1.7.10",
         tool_name_resolver=gateway.resolve_external_mcp_tool_name,
+        resource_list=gateway.list_mcp_resources,
+        resource_templates=gateway.list_mcp_resource_templates,
+        resource_read=gateway.read_mcp_resource,
+        resource_list_revision=lambda: gateway._mcp_resources.generation,
     )
     return create_agent_mcp_2026_asgi_app(
         router,
