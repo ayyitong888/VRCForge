@@ -22,6 +22,7 @@ from agent_mcp_2026 import (
 )
 from external_tool_result_contract import build_external_tool_error
 from agent_tool_result_contract import normalize_agent_tool_result
+from operation_context import ensure_operation_result
 
 
 LATEST_PROTOCOL_VERSION = "2025-11-25"
@@ -216,7 +217,12 @@ class McpStandardRouter:
                     raise McpStandardError(-32602, "tools/call requires a non-empty name and object arguments")
                 catalogue_callback = self._tool_call_catalogue or self._tool_list
                 supplied = await _resolve(catalogue_callback())
-                allowed = {str(tool.get("name")) for tool in supplied if isinstance(tool, Mapping) and _is_nonempty_string(tool.get("name"))}
+                catalogue = {
+                    str(tool.get("name")): tool
+                    for tool in supplied
+                    if isinstance(tool, Mapping) and _is_nonempty_string(tool.get("name"))
+                }
+                allowed = set(catalogue)
                 resolved_name = self._tool_name_resolver(name) if self._tool_name_resolver is not None else name
                 if name not in allowed and resolved_name not in allowed:
                     raise McpStandardError(-32602, "Tool is not exposed by this MCP server")
@@ -225,7 +231,17 @@ class McpStandardRouter:
                     if self._tool_list_revision is not None
                     else None
                 )
-                result = _strict_json_clone(await _resolve(self._tool_call(str(resolved_name), dict(arguments))))
+                descriptor = catalogue.get(str(resolved_name)) or catalogue.get(str(name)) or {}
+                descriptor_meta = descriptor.get("_meta") if isinstance(descriptor.get("_meta"), Mapping) else {}
+                is_write = bool(
+                    descriptor.get("write")
+                    or descriptor.get("requiresApproval")
+                    or str(descriptor_meta.get("permission") or "").strip().casefold() == "write"
+                )
+                raw_result = await _resolve(self._tool_call(str(resolved_name), dict(arguments)))
+                result = _strict_json_clone(
+                    ensure_operation_result(raw_result, write=is_write, operation_kind="tool")
+                )
                 revision_after = (
                     self._tool_list_revision()
                     if self._tool_list_revision is not None
@@ -241,7 +257,7 @@ class McpStandardRouter:
                 outcome = normalize_agent_tool_result(
                     structured,
                     fallback_summary=f"{name} completed.",
-                    write=bool(structured.get("write")),
+                    write=is_write,
                 )
                 structured["outcome"] = outcome
                 return _success(

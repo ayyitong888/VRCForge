@@ -311,6 +311,11 @@ def test_all_shared_unity_atoms_keep_internal_external_contract_parity() -> None
         canonical = canonical_unity_read_tool_input_schema(name)
         assert external_catalog[name]["inputSchema"] == canonical
         assert internal.input_schema == bounded_planner_tool_schema(canonical)
+        assert internal.description == external_catalog[name]["description"]
+        assert external_catalog[name]["canonicalName"]
+        assert "When to use:" in internal.description
+        assert "When NOT to use:" in internal.description
+        assert "Negative example:" in internal.description
 
     for name, handler in external_writes.items():
         if name in external_only:
@@ -326,6 +331,9 @@ def test_all_shared_unity_atoms_keep_internal_external_contract_parity() -> None
         canonical = canonical_unity_write_tool_input_schema(name)
         assert external_catalog[name]["inputSchema"] == canonical
         assert internal.input_schema == bounded_planner_tool_schema(canonical)
+        assert internal.description == external_catalog[name]["description"]
+        assert external_catalog[name]["canonicalName"]
+        assert external_catalog[name]["_meta"]["permission"] == "Write"
 
     wrapper_schema = canonical_unity_write_tool_input_schema("vrcforge_install_vpm_package")
     assert external_catalog["vrcforge_install_vpm_package"]["inputSchema"] == wrapper_schema

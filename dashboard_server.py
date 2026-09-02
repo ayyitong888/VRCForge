@@ -15237,11 +15237,17 @@ def _runtime_planner_tool(tool: Any, projection: Any) -> PlannerTool:
     shared_unity_block = AGENT_GATEWAY.external_mcp_tool_block_for_name(
         str(tool.name), write=False
     ) if str(projection.tool_set.value) == "unity" else ""
+    shared_descriptor = AGENT_GATEWAY.shared_agent_tool_descriptor(
+        str(tool.name),
+        write=False,
+        exposure_layer=RUNTIME_PLANNER_EXECUTION_LAYER,
+        block=shared_unity_block,
+    )
     return PlannerTool(
         name=str(projection.model_name),
         runtime_name=str(projection.internal_name),
         capabilities=tuple(projection.capabilities),
-        description=str(tool.description),
+        description=str(shared_descriptor["description"]),
         category=str(tool.category),
         write=bool(tool.write),
         advanced=bool(tool.advanced),
@@ -15253,7 +15259,7 @@ def _runtime_planner_tool(tool: Any, projection: Any) -> PlannerTool:
         input_schema=(
             PATH_TO_SKILL_PREVIEW_INPUT_SCHEMA
             if str(tool.name) == "vrcforge_preview_path_to_skill"
-            else canonical_unity_read_tool_input_schema(str(tool.name))
+            else shared_descriptor["inputSchema"]
         ),
     )
 
@@ -15262,11 +15268,17 @@ def _runtime_planner_write_tool(handler: Any, projection: Any) -> PlannerTool:
     shared_unity_block = AGENT_GATEWAY.external_mcp_tool_block_for_name(
         str(handler.name), write=True
     ) if str(projection.tool_set.value) == "unity" else ""
+    shared_descriptor = AGENT_GATEWAY.shared_agent_tool_descriptor(
+        str(handler.name),
+        write=True,
+        exposure_layer=RUNTIME_PLANNER_EXECUTION_LAYER,
+        block=shared_unity_block,
+    )
     return PlannerTool(
         name=str(projection.model_name),
         runtime_name=str(projection.internal_name),
         capabilities=tuple(projection.capabilities),
-        description=str(handler.description),
+        description=str(shared_descriptor["description"]),
         category="supervised-write",
         write=True,
         advanced=bool(handler.advanced),
@@ -15277,7 +15289,7 @@ def _runtime_planner_write_tool(handler: Any, projection: Any) -> PlannerTool:
         input_schema=(
             PATH_TO_SKILL_WRITE_INPUT_SCHEMA
             if str(handler.name) == "vrcforge_write_path_to_skill"
-            else canonical_unity_write_tool_input_schema(str(handler.name))
+            else shared_descriptor["inputSchema"]
         ),
     )
 

@@ -87,7 +87,7 @@ def production_tool_snapshot_valid(tools: Sequence[Mapping[str, Any]]) -> bool:
 
     names = {str(item.get("name") or "") for item in tools}
     return (
-        len(tools) == len(EXPECTED_TOOL_NAMES) == 64
+        len(tools) == len(EXPECTED_TOOL_NAMES)
         and names == set(EXPECTED_TOOL_NAMES)
         and all(
             bool(str(item.get("description") or "").strip())
@@ -199,7 +199,9 @@ def run_matrix(
     elif not evidence_valid or not trusted_receipt_source:
         not_accepted_reason = "one-use Dashboard provider receipts were missing or invalid"
     elif require_production_tools and not production_snapshot_valid:
-        not_accepted_reason = "the visible tool snapshot was not the exact 65-tool Dashboard/Core contract"
+        not_accepted_reason = (
+            f"the visible tool snapshot was not the exact {len(EXPECTED_TOOL_NAMES)}-tool Dashboard/Core contract"
+        )
     else:
         not_accepted_reason = ""
     return {

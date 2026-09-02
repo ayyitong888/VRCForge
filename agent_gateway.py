@@ -426,9 +426,10 @@ EXTERNAL_MCP_TYPED_WRAPPER_CAPABILITIES = {
 }
 EXTERNAL_MCP_TYPED_WRAPPER_WRITES = frozenset(EXTERNAL_MCP_TYPED_WRAPPER_CAPABILITIES)
 
-# External MCP is its own catalogue. Only explicitly mapped public handlers
-# enter it; chat, memory, generic file/Web access, planner controls, and
-# runtime-management tools remain internal-only.
+# The external MCP view is a block-scoped projection of the same registered
+# Tool definitions and handlers used by the internal Agent. Chat, memory,
+# generic file/Web access, planner controls, and runtime-management tools stay
+# internal-only; shared Unity atoms must never be re-described independently.
 EXTERNAL_MCP_DEFAULT_TOOL_BLOCK = "core"
 EXTERNAL_MCP_TOOL_BLOCK_BRANCHES: dict[str, tuple[str, ...]] = {
     "integrations": (
@@ -4536,7 +4537,7 @@ class AgentGateway:
         exposure_layer: str = EXPOSURE_LAYER_EXECUTION,
         tool_blocks: Any = None,
     ) -> list[dict[str, Any]]:
-        """Return the independent, block-scoped external Unity tool surface."""
+        """Return the block-scoped external view of the shared Agent Tool surface."""
 
         layer = normalize_exposure_layer(exposure_layer)
         selected_blocks = normalize_external_mcp_tool_blocks(tool_blocks)
@@ -4546,11 +4547,12 @@ class AgentGateway:
             block = self._external_mcp_read_tool_block(tool, config)
             if not block or block not in selected_blocks:
                 continue
-            serialized = standardize_tool_descriptor(
-                self._serialize_tool(tool, config),
+            serialized = self.shared_agent_tool_descriptor(
+                tool.name,
                 write=False,
-                block=block,
+                config=config,
                 exposure_layer=layer,
+                block=block,
             )
             serialized["_meta"] = {
                 **dict(serialized.get("_meta") or {}),
@@ -4563,9 +4565,49 @@ class AgentGateway:
                 block = self._external_mcp_write_handler_block(handler, config)
                 if not block or block not in selected_blocks:
                     continue
-                tools.append(self._serialize_external_mcp_write_handler(handler, block, exposure_layer=layer))
+                tools.append(self.shared_agent_tool_descriptor(
+                    handler.name,
+                    write=True,
+                    config=config,
+                    exposure_layer=layer,
+                    block=block,
+                ))
         tools.sort(key=lambda item: str(item.get("name") or ""))
         return tools
+
+    def shared_agent_tool_descriptor(
+        self,
+        name: str,
+        *,
+        write: bool,
+        config: AgentGatewayConfig | None = None,
+        exposure_layer: str = EXPOSURE_LAYER_EXECUTION,
+        block: str = "",
+    ) -> dict[str, Any]:
+        """Build the one canonical descriptor consumed by internal and external Agents."""
+
+        config = config or self.ensure_config()
+        layer = normalize_exposure_layer(exposure_layer)
+        if write:
+            handler = self._write_handlers.get(str(name or "").strip())
+            if handler is None:
+                raise AgentGatewayError(f"Unknown write Tool descriptor: {name}", status_code=404)
+            owner_block = block or self._external_mcp_write_handler_block(handler, config)
+            return self._serialize_external_mcp_write_handler(
+                handler,
+                owner_block,
+                exposure_layer=layer,
+            )
+        tool = self._tools.get(str(name or "").strip())
+        if tool is None:
+            raise AgentGatewayError(f"Unknown read Tool descriptor: {name}", status_code=404)
+        owner_block = block or self._external_mcp_read_tool_block(tool, config)
+        return standardize_tool_descriptor(
+            self._serialize_tool(tool, config),
+            write=bool(tool.write),
+            block=owner_block,
+            exposure_layer=layer,
+        )
 
     def external_mcp_tool_block_for_name(self, name: str, *, write: bool) -> str:
         """Return the canonical external Unity block reused by the internal Unity tree."""
@@ -9298,11 +9340,17 @@ class AgentGateway:
         model_invocable = not tool.requires_user_activation or self._desktop.computer_use_model_invocable(config)
         risk = self._registry_risk_for_tool(tool)
         requires_approval = tool.write or risk in {"write_request", "advanced_write"}
+        shared = self.shared_agent_tool_descriptor(
+            tool.name,
+            write=False,
+            config=config,
+            exposure_layer=EXPOSURE_LAYER_EXECUTION,
+        )
         return {
             "id": self._registry_tool_id(tool.name),
             "name": tool.name,
             "title": tool.name.replace("vrcforge_", "").replace("_", " ").title(),
-            "description": tool_usage_description(tool.name, tool.description, write=tool.write),
+            "description": shared["description"],
             "category": self._registry_category(tool.category, tool.name),
             "risk": risk,
             "requiresApproval": requires_approval,
@@ -9310,24 +9358,33 @@ class AgentGateway:
             "availableInDesktop": available,
             "availableInMcp": available,
             "availableInCli": available,
-            "inputsSchema": canonical_unity_read_tool_input_schema(tool.name),
-            "outputsSchema": self._registry_object_schema(),
+            "inputsSchema": shared["inputSchema"],
+            "outputsSchema": shared["outputSchema"],
             "fallbacks": self._registry_fallbacks_for_tool(tool),
             "source": "gateway-tool",
             "advanced": bool(tool.advanced),
             "directTool": True,
             "requiresUserActivation": tool.requires_user_activation,
             "modelInvocable": model_invocable,
+            "canonicalName": shared["canonicalName"],
+            "whenToUse": shared["whenToUse"],
+            "whenNotToUse": shared["whenNotToUse"],
         }
 
     def _serialize_write_registry_entry(self, handler: AgentWriteHandler, config: AgentGatewayConfig) -> dict[str, Any]:
         visible = self._write_handler_visible(handler, config)
         available = visible and bool(config.allow_write_requests)
+        shared = self.shared_agent_tool_descriptor(
+            handler.name,
+            write=True,
+            config=config,
+            exposure_layer=EXPOSURE_LAYER_EXECUTION,
+        )
         return {
             "id": self._registry_tool_id(handler.name),
             "name": handler.name,
             "title": handler.name.replace("vrcforge_", "").replace("_", " ").title(),
-            "description": tool_usage_description(handler.name, handler.description, write=True),
+            "description": shared["description"],
             "category": self._registry_category("supervised-write", handler.name),
             "risk": "advanced_write" if handler.advanced else "write_request",
             "requiresApproval": True,
@@ -9336,12 +9393,15 @@ class AgentGateway:
             "availableInDesktop": visible,
             "availableInMcp": available,
             "availableInCli": visible,
-            "inputsSchema": self._registry_object_schema(),
-            "outputsSchema": self._registry_object_schema(),
+            "inputsSchema": shared["inputSchema"],
+            "outputsSchema": shared["outputSchema"],
             "fallbacks": ["vrcforge_request_apply"],
             "source": "write-target",
             "advanced": bool(handler.advanced),
             "directTool": False,
+            "canonicalName": shared["canonicalName"],
+            "whenToUse": shared["whenToUse"],
+            "whenNotToUse": shared["whenNotToUse"],
         }
 
     def _registry_tool_id(self, name: str) -> str:

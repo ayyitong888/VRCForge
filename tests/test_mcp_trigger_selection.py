@@ -9,6 +9,8 @@ import dashboard_server
 from mcp_trigger_selection import SelectionReceiptAuthority, plan_mcp_tool_selection, tools_for_exposure_layer
 from provider_configuration_service import ProviderApiConfig
 from provider_test_integration_service import ProviderTestIntegrationService, ProviderTestServicePorts
+from scripts.smoke_mcp_tool_trigger_matrix import production_tool_snapshot_valid
+from unity_mcp_tool_contract import EXPECTED_TOOL_COUNT, EXPECTED_TOOL_NAMES
 
 
 @dataclass
@@ -383,3 +385,26 @@ def test_app_selection_request_accepts_the_bounded_full_gateway_catalog() -> Non
     )
 
     assert len(request.visible_tools) == 128
+
+
+def test_selection_acceptance_uses_current_core_contract_count_not_a_stale_literal() -> None:
+    tools = [
+        {
+            "name": name,
+            "description": (
+                f"When to use: Invoke {name} for its exact Unity operation.\n"
+                "When NOT to use: Do not use it for an unrelated request.\n"
+                f"Negative example: Mention {name} without asking to inspect or change Unity."
+            ),
+            "inputSchema": {"type": "object"},
+            "_meta": {
+                "whenToUse": "Use for the exact declared operation.",
+                "doNotUse": "Do not use for unrelated work.",
+            },
+        }
+        for name in EXPECTED_TOOL_NAMES
+    ]
+
+    assert EXPECTED_TOOL_COUNT == 85
+    assert len(tools) == EXPECTED_TOOL_COUNT
+    assert production_tool_snapshot_valid(tools) is True

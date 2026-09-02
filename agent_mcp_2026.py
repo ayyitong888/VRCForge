@@ -20,6 +20,7 @@ from urllib.parse import urlsplit
 
 from external_tool_result_contract import build_external_tool_error
 from agent_tool_result_contract import normalize_agent_tool_result
+from operation_context import ensure_operation_result
 
 
 PROTOCOL_VERSION = "2026-07-28"
@@ -404,11 +405,12 @@ class Mcp2026Router:
                 supplied_tools = await _resolve(catalogue_callback(catalogue_params))
                 if not isinstance(supplied_tools, Sequence) or isinstance(supplied_tools, (str, bytes, bytearray)):
                     raise Mcp2026Error(-32603, "Tool catalogue must return a sequence", 500)
-                allowed_names = {
-                    str(item.get("name"))
+                catalogue = {
+                    str(item.get("name")): item
                     for item in supplied_tools
                     if isinstance(item, Mapping) and _is_nonempty_string(item.get("name"))
                 }
+                allowed_names = set(catalogue)
                 resolved_tool_name = (
                     self._tool_name_resolver(tool_name)
                     if self._tool_name_resolver is not None
@@ -421,7 +423,18 @@ class Mcp2026Router:
                     if self._tool_list_revision is not None
                     else None
                 )
-                callback_result = await _resolve(self._tool_call(resolved_tool_name, dict(arguments)))
+                descriptor = catalogue.get(str(resolved_tool_name)) or catalogue.get(str(tool_name)) or {}
+                descriptor_meta = descriptor.get("_meta") if isinstance(descriptor.get("_meta"), Mapping) else {}
+                is_write = bool(
+                    descriptor.get("write")
+                    or descriptor.get("requiresApproval")
+                    or str(descriptor_meta.get("permission") or "").strip().casefold() == "write"
+                )
+                callback_result = ensure_operation_result(
+                    await _resolve(self._tool_call(resolved_tool_name, dict(arguments))),
+                    write=is_write,
+                    operation_kind="tool",
+                )
                 revision_after = (
                     self._tool_list_revision()
                     if self._tool_list_revision is not None
@@ -435,7 +448,7 @@ class Mcp2026Router:
                 outcome = normalize_agent_tool_result(
                     raw_structured,
                     fallback_summary=f"{tool_name} completed.",
-                    write=bool(raw_structured.get("write")),
+                    write=is_write,
                 )
                 raw_structured.setdefault("outcome", outcome)
                 structured = _strict_json_clone(raw_structured)

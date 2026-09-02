@@ -114,6 +114,10 @@ def test_standard_stdio_notifies_client_when_tool_blocks_change() -> None:
     output = [json.loads(line) for line in sink.getvalue().splitlines()]
     assert output[0]["result"]["capabilities"] == {"tools": {"listChanged": True}}
     assert output[1]["result"]["structuredContent"]["toolListChanged"] is True
+    assert output[1]["result"]["structuredContent"]["operationId"].startswith("mcpread_")
+    assert output[1]["result"]["structuredContent"]["operationStatus"] == "success"
+    assert output[1]["result"]["structuredContent"]["resources"]["status"] == "unavailable"
+    assert output[1]["result"]["structuredContent"]["promptSkillProvenance"]["status"] == "unavailable"
     assert output[2] == {"jsonrpc": "2.0", "method": "notifications/tools/list_changed"}
 
 
