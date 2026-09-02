@@ -106,6 +106,13 @@ from avatar_composition_workflow_skills import (
     AVATAR_COMPOSITION_WORKFLOW_SKILLS,
 )
 from unity_mcp_core_client import capture_unity_mcp_core_call_audits
+from execution_target import (
+    ExecutionTargetError,
+    execution_target_digest,
+    validate_runtime_execution_target,
+)
+from mcp_tool_descriptor import identity_scope, standardize_tool_descriptor, canonical_tool_name
+from operation_context import bind_operation_context
 
 
 ToolHandler = Callable[[dict[str, Any]], Any]
@@ -4539,7 +4546,12 @@ class AgentGateway:
             block = self._external_mcp_read_tool_block(tool, config)
             if not block or block not in selected_blocks:
                 continue
-            serialized = self._serialize_tool(tool, config)
+            serialized = standardize_tool_descriptor(
+                self._serialize_tool(tool, config),
+                write=False,
+                block=block,
+                exposure_layer=layer,
+            )
             serialized["_meta"] = {
                 **dict(serialized.get("_meta") or {}),
                 "permission": "ReadOnly",
@@ -4551,7 +4563,7 @@ class AgentGateway:
                 block = self._external_mcp_write_handler_block(handler, config)
                 if not block or block not in selected_blocks:
                     continue
-                tools.append(self._serialize_external_mcp_write_handler(handler, block))
+                tools.append(self._serialize_external_mcp_write_handler(handler, block, exposure_layer=layer))
         tools.sort(key=lambda item: str(item.get("name") or ""))
         return tools
 
@@ -4565,6 +4577,17 @@ class AgentGateway:
             return self._external_mcp_write_handler_block(handler, config) if handler else ""
         tool = self._tools.get(normalized)
         return self._external_mcp_read_tool_block(tool, config) if tool else ""
+
+    def resolve_external_mcp_tool_name(self, name: str) -> str:
+        """Resolve a canonical/legacy name to the existing registered entry."""
+
+        normalized = str(name or "").strip()
+        if normalized in self._tools or normalized in self._write_handlers:
+            return normalized
+        for candidate in (*self._tools.keys(), *self._write_handlers.keys()):
+            if canonical_tool_name(candidate) == normalized:
+                return candidate
+        return normalized
 
     def external_mcp_tool_block_index(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         """Return a compact external-only tree; definitions stay lazy per block."""
@@ -4754,9 +4777,11 @@ class AgentGateway:
         self,
         handler: AgentWriteHandler,
         block: str,
+        *,
+        exposure_layer: str = EXPOSURE_LAYER_EXECUTION,
     ) -> dict[str, Any]:
         risk_level = normalize_risk_level(handler.risk_level)
-        return {
+        return standardize_tool_descriptor({
             "name": handler.name,
             "title": handler.name.replace("vrcforge_", "").replace("_", " ").title(),
             "description": tool_usage_description(
@@ -4781,7 +4806,7 @@ class AgentGateway:
                     else "handler_managed_atomic_receipt"
                 ),
             },
-        }
+        }, write=True, block=block, exposure_layer=exposure_layer)
 
     def build_tool_registry(
         self,
@@ -4938,7 +4963,8 @@ class AgentGateway:
                 agent_token = self._tool_agent_context.set(agent_name)
                 owner_token = self._tool_owner_context.set(f"agent:{agent_name}")
                 try:
-                    raw_result = tool.handler(tool_params)
+                    with bind_operation_context(request_id, params.get("executionTarget")):
+                        raw_result = tool.handler(tool_params)
                 finally:
                     self._tool_owner_context.reset(owner_token)
                     self._tool_agent_context.reset(agent_token)
@@ -4953,6 +4979,8 @@ class AgentGateway:
                 fallback_summary=tool.description,
                 write=False,
             )
+            if isinstance(params.get("executionTarget"), Mapping):
+                outcome["executionTargetDigest"] = execution_target_digest(params["executionTarget"])
             outcome_status = str(outcome.get("status") or "failed")
             explicit_failure = outcome_status == "failed"
             status = "failed" if explicit_failure else outcome_status
@@ -4975,6 +5003,15 @@ class AgentGateway:
             payload: dict[str, Any] = {
                 "ok": not explicit_failure,
                 "status": status,
+                "operationId": request_id,
+                "commitState": "not_started",
+                "mutationStarted": False,
+                "mutationApplied": False,
+                "persistenceState": "not_applicable",
+                "readbackState": "complete" if not explicit_failure else "failed",
+                "cleanupState": "not_applicable",
+                "retryable": False,
+                "nextAction": None,
                 "tool": tool.name,
                 "result": self._external_mcp_visible_value(raw_result),
                 "outcome": self._external_mcp_visible_value(outcome),
@@ -5047,6 +5084,15 @@ class AgentGateway:
             payload = {
                 "ok": False,
                 "status": "failed",
+                "operationId": request_id,
+                "commitState": "not_started",
+                "mutationStarted": False,
+                "mutationApplied": False,
+                "persistenceState": "not_applicable",
+                "readbackState": "failed",
+                "cleanupState": "not_applicable",
+                "retryable": False,
+                "nextAction": None,
                 "tool": tool.name,
                 "result": self._external_mcp_visible_value(raw_result),
                 "error": self._external_mcp_visible_value(error_object["error"]),
@@ -5066,6 +5112,64 @@ class AgentGateway:
                 )
             )
             return redact_sensitive(payload)
+
+    def _validate_external_mcp_execution_target(
+        self,
+        tool_name: str,
+        arguments: Mapping[str, Any],
+        *,
+        write_handler: AgentWriteHandler | None = None,
+    ) -> dict[str, Any] | None:
+        """Require and verify the Stage 1 namespace for Unity-bound calls."""
+
+        required = bool(
+            write_handler
+            and write_handler.requires_approved_execution_context
+            and arguments.get("preview") is not True
+        )
+        required = required or tool_name in {"vrcforge_get_property"}
+        if not required:
+            return None
+        target = arguments.get("executionTarget")
+        project_root = arguments.get("projectPath") or arguments.get("projectRoot")
+        if not isinstance(target, Mapping):
+            raise AgentGatewayError(
+                "This Unity MCP call requires arguments.projectPath and an exact executionTarget envelope; hierarchy paths alone are not write identity.",
+                status_code=409,
+                cause_code="execution_target_missing",
+            )
+        try:
+            return validate_runtime_execution_target(
+                target,
+                project_root=str(project_root or ""),
+                required_scope=identity_scope(tool_name, write=bool(write_handler)),
+            )
+        except ExecutionTargetError as exc:
+            raise AgentGatewayError(
+                f"Unity MCP identity lock rejected this call: {exc}",
+                status_code=409,
+                cause_code=exc.code,
+                failure_layer="execution_target",
+                failure_phase="before_unity_core_call",
+                operation_kind="write" if write_handler else "read",
+                tool=tool_name,
+                tool_routing_started=False,
+                mutation_started=False,
+                committed=False,
+            ) from exc
+        except (OSError, UnicodeError, ValueError, TypeError, json.JSONDecodeError) as exc:
+            raise AgentGatewayError(
+                "Unity MCP identity lock could not verify the active Core namespace.",
+                status_code=409,
+                cause_code="execution_target_authority_unavailable",
+                failure_layer="execution_target",
+                failure_phase="before_unity_core_call",
+                operation_kind="write" if write_handler else "read",
+                tool=tool_name,
+                tool_routing_started=False,
+                mutation_started=False,
+                committed=False,
+            ) from exc
 
     def _guard_external_mcp_project_scope(
         self,
@@ -5116,9 +5220,11 @@ class AgentGateway:
     ) -> dict[str, Any]:
         """Dispatch a real external tool without running VRCForge's Agent loop."""
 
+        requested_name = str(name or "").strip()
         config = self.ensure_config()
         if not config.enabled:
             raise AgentGatewayError("Agent Gateway is disabled in config/agent_gateway.json.", status_code=403)
+        name = self.resolve_external_mcp_tool_name(name)
         arguments = dict(params or {})
         self._guard_external_mcp_project_scope(name, arguments)
         write_handler = self._write_handlers.get(name)
@@ -5126,16 +5232,40 @@ class AgentGateway:
             tool = self._tools.get(name)
             if tool is None or not self._external_mcp_read_tool_visible(tool, config):
                 raise AgentGatewayError(f"Unknown or unavailable MCP tool: {name}", status_code=404)
-            return self._call_external_mcp_read_tool(
+            self._validate_external_mcp_execution_target(name, arguments)
+            result = self._call_external_mcp_read_tool(
                 tool,
                 arguments,
                 agent_name=agent_name,
             )
+            result["canonicalToolName"] = canonical_tool_name(name)
+            result["legacyAliasUsed"] = requested_name != name
+            return result
         if (
             not self._external_mcp_write_handler_block(write_handler, config)
             or not config.allow_write_requests
         ):
             raise AgentGatewayError(f"Unknown or unavailable MCP tool: {name}", status_code=404)
+
+        try:
+            execution_target = self._validate_external_mcp_execution_target(
+                name,
+                arguments,
+                write_handler=write_handler,
+            )
+        except AgentGatewayError as exc:
+            return self._external_mcp_no_write_error(
+                name,
+                "external_mcp_project_binding"
+                if not str(arguments.get("projectPath") or arguments.get("projectRoot") or "").strip()
+                else "execution_target",
+                exc,
+                error_code_override=(
+                    "external_mcp_project_binding_missing"
+                    if not str(arguments.get("projectPath") or arguments.get("projectRoot") or "").strip()
+                    else None
+                ),
+            )
 
         confirmation = arguments.pop("confirmation", None)
         request_arguments_digest = stable_hash(
@@ -5147,12 +5277,15 @@ class AgentGateway:
                     name,
                     "confirmation must be an object returned by the first tool call.",
                 )
-            return self._confirm_external_mcp_write(
+            result = self._confirm_external_mcp_write(
                 name,
                 request_arguments_digest,
                 dict(confirmation),
                 agent_name=agent_name,
             )
+            result["canonicalToolName"] = canonical_tool_name(name)
+            result["legacyAliasUsed"] = requested_name != name
+            return result
 
         try:
             prepared = self.approval_transactions.prepare_external_mcp_write(name, arguments)
@@ -5163,6 +5296,27 @@ class AgentGateway:
                 name,
                 "write_preparation",
                 exc,
+            )
+        prepared_target = ensure_dict(prepared.get("arguments")).get("executionTarget")
+        if execution_target is not None and (
+            not isinstance(prepared_target, Mapping)
+            or execution_target_digest(prepared_target) != execution_target_digest(execution_target)
+        ):
+            return self._external_mcp_no_write_error(
+                name,
+                "execution_target",
+                AgentGatewayError(
+                    "The prepared Unity write changed its bound ExecutionTarget.",
+                    status_code=409,
+                    cause_code="execution_target_drifted",
+                    failure_layer="execution_target",
+                    failure_phase="before_unity_core_call",
+                    operation_kind="write",
+                    tool=name,
+                    tool_routing_started=False,
+                    mutation_started=False,
+                    committed=False,
+                ),
             )
         if prepared.get("requiresUserConfirmation"):
             try:
@@ -5183,7 +5337,16 @@ class AgentGateway:
             )
         except AgentGatewayError as exc:
             return self._external_mcp_no_write_error(name, "transaction_start", exc)
-        return self._external_mcp_write_result(name, applied)
+        result = self._external_mcp_write_result(name, applied)
+        if execution_target is not None:
+            result["executionTargetDigest"] = execution_target_digest(execution_target)
+            result["executionTarget"] = execution_target
+            result.setdefault("operationId", str(applied.get("operationId") or ""))
+            if isinstance(result.get("outcome"), Mapping):
+                result["outcome"] = {**dict(result["outcome"]), "operationId": result.get("operationId"), "executionTargetDigest": result["executionTargetDigest"]}
+        result["canonicalToolName"] = canonical_tool_name(name)
+        result["legacyAliasUsed"] = requested_name != name
+        return result
 
     def _propose_external_mcp_write(
         self,
@@ -5235,6 +5398,11 @@ class AgentGateway:
             "ok": True,
             "status": "user_confirmation_required",
             "tool": record["targetTool"],
+            **(
+                {"executionTargetDigest": execution_target_digest(prepared["arguments"]["executionTarget"])}
+                if isinstance(ensure_dict(prepared.get("arguments")).get("executionTarget"), Mapping)
+                else {}
+            ),
             "riskLevel": str(prepared.get("riskLevel") or ""),
             "reason": str(prepared.get("confirmationReason") or ""),
             "preview": redact_sensitive(prepared.get("preview")),
@@ -5322,6 +5490,7 @@ class AgentGateway:
             }
 
         stored_prepared = ensure_dict(record.get("prepared"))
+        stored_prepared["_externalOperationId"] = operation_id
         self.append_audit(
             {
                 "event": "external_mcp_confirmation_accepted",
@@ -5348,6 +5517,16 @@ class AgentGateway:
             applied,
         )
         result["operationId"] = operation_id
+        confirmation_target = ensure_dict(stored_prepared.get("arguments")).get("executionTarget")
+        if isinstance(confirmation_target, Mapping):
+            result["executionTarget"] = dict(confirmation_target)
+            result["executionTargetDigest"] = execution_target_digest(confirmation_target)
+            if isinstance(result.get("outcome"), Mapping):
+                result["outcome"] = {
+                    **dict(result["outcome"]),
+                    "operationId": operation_id,
+                    "executionTargetDigest": result["executionTargetDigest"],
+                }
         return result
 
     def _prune_external_mcp_confirmations_locked(self, now_epoch: float) -> None:
@@ -5398,6 +5577,8 @@ class AgentGateway:
         tool: str,
         failure_layer: str,
         error: str | BaseException,
+        *,
+        error_code_override: str | None = None,
     ) -> dict[str, Any]:
         exception = error if isinstance(error, BaseException) else None
         error_text = str(error)
@@ -5412,11 +5593,17 @@ class AgentGateway:
                 }:
                     exception_code = normalized_value
                     break
+        if error_code_override:
+            exception_code = error_code_override
         error_object = build_external_tool_error(
             error=error_text,
             error_code=exception_code or f"external_{failure_layer}_rejected",
             failure_layer=failure_layer,
-            failure_phase="before_write_handler",
+            failure_phase=(
+                "before_unity_core_call"
+                if failure_layer in {"external_mcp_project_binding", "execution_target"}
+                else "before_write_handler"
+            ),
             operation_kind="write",
             tool=tool,
             tool_routing_started=False,
@@ -5426,11 +5613,24 @@ class AgentGateway:
             retryable=False,
             checkpoint_recovery_required=False,
             temporary_cleanup_required=False,
-            exception=exception,
+            exception=None if error_code_override else exception,
+            details=(
+                {
+                    "requiredArgument": "projectPath",
+                    "acceptedAliases": ["projectPath", "projectRoot", "project_path", "project_root"],
+                    "selectedProjectIsNotAuthority": True,
+                }
+                if failure_layer == "external_mcp_project_binding"
+                else None
+            ),
         )
         payload = {
             "ok": False,
             "status": "failed",
+            "operationId": (
+                f"mcpreject_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')}_"
+                f"{secrets.token_hex(4)}"
+            ),
             "tool": tool,
             "result": None,
             "error": error_object["error"],
@@ -5475,6 +5675,16 @@ class AgentGateway:
             "outcome": self._external_mcp_visible_value(outcome),
         }
         for key in (
+            "operationId",
+            "executionTargetDigest",
+            "commitState",
+            "mutationStarted",
+            "mutationApplied",
+            "persistenceState",
+            "readbackState",
+            "cleanupState",
+            "retryable",
+            "nextAction",
             "result",
             "writeFailure",
             "requestTrace",
@@ -5510,6 +5720,13 @@ class AgentGateway:
                     write=True,
                 )
             )
+        if isinstance(payload.get("outcome"), Mapping):
+            outcome_projection = dict(payload["outcome"])
+            if payload.get("operationId"):
+                outcome_projection["operationId"] = payload["operationId"]
+            if payload.get("executionTargetDigest"):
+                outcome_projection["executionTargetDigest"] = payload["executionTargetDigest"]
+            payload["outcome"] = outcome_projection
         return redact_sensitive(payload)
 
     def call_tool(
@@ -9260,6 +9477,7 @@ def create_agent_mcp_app(
         call_tool,
         server_name="VRCForge Agent Gateway",
         server_version="1.7.10",
+        tool_name_resolver=gateway.resolve_external_mcp_tool_name,
     )
     return create_agent_mcp_2026_asgi_app(
         router,

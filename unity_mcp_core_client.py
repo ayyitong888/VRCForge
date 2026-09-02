@@ -17,6 +17,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator
 
+from operation_context import current_operation_context
+
 from unity_mcp_tool_contract import (
     CORE_IDENTITY,
     EXPECTED_TOOL_NAMES,
@@ -531,6 +533,15 @@ class UnityMcpCoreClient:
         audited = dict(result)
         metadata = dict(audited.get("_meta") or {}) if isinstance(audited.get("_meta"), dict) else {}
         structured = audited.get("structuredContent")
+        operation_context = current_operation_context()
+        if operation_context and isinstance(structured, dict):
+            structured = dict(structured)
+            structured.setdefault("operationId", operation_context.get("operationId"))
+            execution_target = operation_context.get("executionTarget")
+            if isinstance(execution_target, dict):
+                from execution_target import execution_target_digest
+                structured.setdefault("executionTargetDigest", execution_target_digest(execution_target))
+            audited["structuredContent"] = structured
         status = "error" if audited.get("isError") is True else (
             "pending" if isinstance(structured, dict) and structured.get("_mcp_status") == "pending" else "complete"
         )
@@ -619,6 +630,14 @@ class UnityMcpCoreClient:
             approved_execution["projectId"] = self._connection.project_id
             approved_execution["instanceId"] = self._connection.instance_id
             metadata["io.vrcforge/approvedExecution"] = approved_execution
+        operation_context = current_operation_context()
+        if operation_context is not None:
+            metadata["io.vrcforge/operationId"] = operation_context.get("operationId")
+            execution_target = operation_context.get("executionTarget")
+            if isinstance(execution_target, dict):
+                from execution_target import execution_target_digest
+                metadata["io.vrcforge/executionTargetDigest"] = execution_target_digest(execution_target)
+                metadata["io.vrcforge/executionTarget"] = execution_target
         request_params["_meta"] = metadata
         self._write_line(connection, {
             "schema": TRANSPORT_SCHEMA,

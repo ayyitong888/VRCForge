@@ -18,6 +18,7 @@ if str(ROOT_DIR) not in sys.path:
 
 from agent_mcp_2026 import PROTOCOL_VERSION, Mcp2026Router, run_stdio_loop
 from agent_mcp_standard import McpStandardRouter, run_negotiated_stdio_loop, run_standard_stdio_loop
+from mcp_tool_descriptor import standardize_tool_descriptor
 from avatar_composition_workflow_skills import (
     AVATAR_COMPOSITION_WORKFLOW_SKILL_NAMES,
     AVATAR_COMPOSITION_WORKFLOW_SKILLS,
@@ -727,6 +728,7 @@ def run_stdio_server(
 
     loaded_blocks = {"core"}
     tool_list_revision = 0
+    requested_layer = {"value": exposure_layer}
 
     def bridge_tool_block(item: Mapping[str, Any]) -> str:
         meta = item.get("_meta") if isinstance(item.get("_meta"), Mapping) else {}
@@ -747,7 +749,7 @@ def run_stdio_server(
             *EXTERNAL_TOOL_BLOCK_LEAF_INDEXES,
             *EXTERNAL_TOOL_BLOCK_NAME_INDEXES,
         ]
-        return [
+        controls = [
             {
                 "name": "vrcforge_list_tool_blocks",
                 "description": (
@@ -789,6 +791,15 @@ def run_stdio_server(
                     "properties": {"block": {"type": "string", "enum": block_enum}},
                 },
             },
+        ]
+        return [
+            standardize_tool_descriptor(
+                item,
+                write=False,
+                block="core",
+                exposure_layer=requested_layer["value"],
+            )
+            for item in controls
         ]
 
     def block_inventory(selector: Any = "") -> dict[str, Any]:
@@ -936,6 +947,7 @@ def run_stdio_server(
             "ok": True,
             "schema": "vrcforge.external_tool_blocks.v2",
             "loadedBlocks": sorted(loaded_blocks),
+            "catalogGeneration": tool_list_revision,
             "selectedBlock": selected_block,
             "selectionHint": (
                 "Load only the block whose whenToUse matches the task; full tool descriptions and schemas appear after loading."
@@ -947,12 +959,18 @@ def run_stdio_server(
         requested_exposure = str(params.get("exposureLayer") or exposure_layer)
         if requested_exposure not in {"planning", "execution"}:
             raise ValueError("exposureLayer must be planning or execution")
+        if "exposureLayer" in params:
+            requested_layer["value"] = requested_exposure
         tools: list[dict[str, Any]] = [
-            {
+            standardize_tool_descriptor({
                 "name": "vrcforge_bridge_preflight",
-                "description": "Check whether the local VRCForge App gateway is authenticated and ready.",
+                "description": (
+                    "When to use: Check whether the local VRCForge App gateway is authenticated and ready.\n"
+                    "When NOT to use: Inspect or mutate Unity directly.\n"
+                    "Negative example: Treating a reachable bridge as proof that a Unity target is bound."
+                ),
                 "inputSchema": {"type": "object", "additionalProperties": False},
-            }
+            }, write=False, block="core", exposure_layer=requested_exposure)
         ]
         tools.extend(block_controls())
         if not bridge.preflight().get("runtimeOnline"):
@@ -974,7 +992,7 @@ def run_stdio_server(
                 or block not in loaded_blocks
             ):
                 continue
-            tools.append(
+            tools.append(standardize_tool_descriptor(
                 {
                     **item,
                     "name": name,
@@ -982,8 +1000,11 @@ def run_stdio_server(
                     "inputSchema": item.get("inputSchema")
                     if isinstance(item.get("inputSchema"), dict)
                     else {"type": "object", "additionalProperties": True},
-                }
-            )
+                },
+                write=bool(item.get("write")) or str((item.get("_meta") or {}).get("permission") or "").casefold() == "write",
+                block=block,
+                exposure_layer=requested_exposure,
+            ))
         return tools
 
     def call_tool(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -1039,16 +1060,18 @@ def run_stdio_server(
                 "changed": changed,
                 "toolListChanged": changed,
                 "toolListRevision": tool_list_revision,
+                "catalogGeneration": tool_list_revision,
                 "loadedBlocks": sorted(loaded_blocks),
             }
         return bridge.call_tool(tool_name, arguments, agent_name="external-stdio-agent")
 
     router_standard = McpStandardRouter(
-        lambda: list_tools({"exposureLayer": exposure_layer}),
+        lambda: list_tools({"exposureLayer": requested_layer["value"]}),
         call_tool,
         server_name=DEFAULT_SERVER_NAME,
         server_version="1.7.10",
         tool_list_revision=lambda: tool_list_revision,
+        tool_call_catalogue=lambda: list_tools({"exposureLayer": requested_layer["value"]}),
     )
     if protocol_profile == "mcp-1x":
         run_standard_stdio_loop(router_standard)
@@ -1060,6 +1083,7 @@ def run_stdio_server(
         server_name=DEFAULT_SERVER_NAME,
         server_version="1.7.10",
         tool_list_revision=lambda: tool_list_revision,
+        tool_call_catalogue=lambda _params: list_tools({"exposureLayer": requested_layer["value"]}),
     )
     if protocol_profile == "vrcforge-2026":
         run_stdio_loop(router_2026)

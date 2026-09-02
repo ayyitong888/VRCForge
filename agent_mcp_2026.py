@@ -39,6 +39,8 @@ ToolListCallback = Callable[[Mapping[str, Any]], Sequence[Mapping[str, Any]] | A
 ToolCallCallback = Callable[[str, Mapping[str, Any]], Any | Awaitable[Any]]
 BearerValidator = Callable[[str], bool | Awaitable[bool]]
 ToolListRevisionCallback = Callable[[], Any]
+ToolNameResolver = Callable[[str], str]
+ToolCallCatalogueCallback = Callable[[Mapping[str, Any]], Sequence[Mapping[str, Any]] | Awaitable[Sequence[Mapping[str, Any]]]]
 
 
 @dataclass(frozen=True)
@@ -198,6 +200,14 @@ def _normalise_tool(tool: Mapping[str, Any]) -> JsonObject:
         **dict(supplied_meta),
         "permission": str(supplied_meta.get("permission") or ("Write" if is_write else "ReadOnly")),
     }
+    for key in (
+        "canonicalName", "mcpName", "legacyAliases", "domain", "effect", "whenToUse",
+        "whenNotToUse", "negativeExamples", "permission", "sideEffects", "idempotency",
+        "syncMode", "requiredIdentity", "requiredResources", "producedResources", "approval",
+        "checkpoint", "rollback", "freshReadback", "errorModel", "catalogGeneration",
+    ):
+        if key in tool:
+            normalised[key] = tool[key]
     return normalised
 
 
@@ -310,6 +320,8 @@ class Mcp2026Router:
         server_name: str = "VRCForge",
         server_version: str = "1.7.10",
         tool_list_revision: ToolListRevisionCallback | None = None,
+        tool_name_resolver: ToolNameResolver | None = None,
+        tool_call_catalogue: ToolCallCatalogueCallback | None = None,
     ) -> None:
         if not _is_nonempty_string(server_name) or not _is_nonempty_string(server_version):
             raise ValueError("server_name and server_version must be non-empty strings")
@@ -318,6 +330,8 @@ class Mcp2026Router:
         self.server_name = server_name
         self.server_version = server_version
         self._tool_list_revision = tool_list_revision
+        self._tool_name_resolver = tool_name_resolver
+        self._tool_call_catalogue = tool_call_catalogue
         self._pending_notifications: list[JsonObject] = []
 
     def drain_notifications(self) -> list[JsonObject]:
@@ -361,9 +375,12 @@ class Mcp2026Router:
                 tools.sort(key=lambda item: item["name"])
                 if len({item["name"] for item in tools}) != len(tools):
                     raise Mcp2026Error(-32603, "Tool catalogue contains duplicate names", 500)
+                result_payload: dict[str, Any] = {"tools": tools}
+                if self._tool_list_revision is not None:
+                    result_payload["catalogGeneration"] = self._tool_list_revision()
                 return _success(
                     request_id,
-                    {"tools": tools},
+                    result_payload,
                     server_name=self.server_name,
                     server_version=self.server_version,
                 ), 200
@@ -383,7 +400,8 @@ class Mcp2026Router:
                 # catalogue, so a client that already knows an exact atomic
                 # tool may call it without replaying tools/list block hints.
                 catalogue_params.setdefault("toolBlocks", ["*"])
-                supplied_tools = await _resolve(self._tool_list(catalogue_params))
+                catalogue_callback = self._tool_call_catalogue or self._tool_list
+                supplied_tools = await _resolve(catalogue_callback(catalogue_params))
                 if not isinstance(supplied_tools, Sequence) or isinstance(supplied_tools, (str, bytes, bytearray)):
                     raise Mcp2026Error(-32603, "Tool catalogue must return a sequence", 500)
                 allowed_names = {
@@ -391,14 +409,19 @@ class Mcp2026Router:
                     for item in supplied_tools
                     if isinstance(item, Mapping) and _is_nonempty_string(item.get("name"))
                 }
-                if tool_name not in allowed_names:
+                resolved_tool_name = (
+                    self._tool_name_resolver(tool_name)
+                    if self._tool_name_resolver is not None
+                    else tool_name
+                )
+                if tool_name not in allowed_names and resolved_tool_name not in allowed_names:
                     raise Mcp2026Error(-32602, "Unknown or unavailable tool")
                 revision_before = (
                     self._tool_list_revision()
                     if self._tool_list_revision is not None
                     else None
                 )
-                callback_result = await _resolve(self._tool_call(tool_name, dict(arguments)))
+                callback_result = await _resolve(self._tool_call(resolved_tool_name, dict(arguments)))
                 revision_after = (
                     self._tool_list_revision()
                     if self._tool_list_revision is not None

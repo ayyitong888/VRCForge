@@ -74,6 +74,8 @@ from agent_gateway import (
     utc_now_iso,
     validate_frozen_approved_unity_execution_plan,
 )
+from operation_context import bind_operation_context
+from execution_target import execution_target_digest
 
 
 PENDING_APPROVAL_SNAPSHOT_SCHEMA = "vrcforge.pending-approvals.v1"
@@ -2971,8 +2973,10 @@ class AgentApprovalTransactionService:
                 committed=False,
                 commit_state="not_started",
             )
+        plan_arguments = dict(arguments)
+        plan_arguments.pop("executionTarget", None)
         planned_calls = list(
-            write_handler.approved_execution_plan_builder(dict(arguments))
+            write_handler.approved_execution_plan_builder(plan_arguments)
         )
         if arguments.get("preview") is True:
             adjusted_calls: list[tuple[str, dict[str, Any]]] = []
@@ -2997,8 +3001,10 @@ class AgentApprovalTransactionService:
 
         handler_arguments = dict(arguments)
         handler_arguments.pop("_vrcforge_approved_execution", None)
+        execution_target = handler_arguments.pop("executionTarget", None)
         if not write_handler.requires_approved_execution_context:
-            return write_handler.handler(handler_arguments)
+            with bind_operation_context(operation_id, execution_target if isinstance(execution_target, Mapping) else None):
+                return write_handler.handler(handler_arguments)
 
         project_root = extract_project_root(handler_arguments)
         if project_root is None or not project_root.is_dir():
@@ -3070,6 +3076,12 @@ class AgentApprovalTransactionService:
                 "targetTool": target_tool,
                 "projectRoot": str(project_root),
                 "handlerArgumentsSha256": handler_arguments_digest,
+                "executionTarget": execution_target if isinstance(execution_target, Mapping) else None,
+                "executionTargetDigest": (
+                    execution_target_digest(execution_target)
+                    if isinstance(execution_target, Mapping)
+                    else None
+                ),
                 "issuedAtUnixMs": now_ms,
                 "expiresAtUnixMs": now_ms + 60_000,
             },
@@ -3078,7 +3090,8 @@ class AgentApprovalTransactionService:
         result: Any = None
         try:
             with bind_approved_unity_execution(execution_plan):
-                result = write_handler.handler(handler_arguments)
+                with bind_operation_context(operation_id, execution_target if isinstance(execution_target, Mapping) else None):
+                    result = write_handler.handler(handler_arguments)
         finally:
             if not execution_plan.consumed:
                 execution_plan.burn()
@@ -3115,6 +3128,10 @@ class AgentApprovalTransactionService:
             )
 
         if prepared.get("authoritativePreviewOnly") is True:
+            operation_id = (
+                f"mcppreview_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')}_"
+                f"{secrets.token_hex(4)}"
+            )
             preview_value = prepared.get("preview")
             preview_result = (
                 dict(preview_value)
@@ -3135,14 +3152,26 @@ class AgentApprovalTransactionService:
             return {
                 "ok": True,
                 "status": "preview",
+                "operationId": operation_id,
+                **(
+                    {"executionTargetDigest": execution_target_digest(arguments["executionTarget"])}
+                    if isinstance(arguments.get("executionTarget"), Mapping)
+                    else {}
+                ),
                 "result": redact_sensitive(preview_result),
             }
 
         write_handler = self._ports.state.write_handlers[target_tool]
         frozen_execution_plan = ensure_dict(prepared.get("approvedUnityExecutionPlan"))
-        operation_id = (
+        operation_id = str(prepared.get("_externalOperationId") or "").strip() or (
             f"mcpwrite_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')}_"
             f"{secrets.token_hex(4)}"
+        )
+        handler_arguments = dict(arguments)
+        handler_arguments.pop("executionTarget", None)
+        handler_arguments.pop("_vrcforge_approved_execution", None)
+        handler_arguments_digest = stable_hash(
+            json.dumps(handler_arguments, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
         )
         self._ports.signal_background_activity("external_mcp_write")
         project_root = extract_project_root(arguments)
@@ -3223,7 +3252,7 @@ class AgentApprovalTransactionService:
                     target_tool,
                     operation_id,
                     arguments,
-                    actual_digest,
+                    handler_arguments_digest,
                     frozen_execution_plan,
                 )
             source_tool_result = result
@@ -3267,6 +3296,7 @@ class AgentApprovalTransactionService:
 
             payload: dict[str, Any] = {
                 "ok": True,
+                "operationId": operation_id,
                 "status": (
                     "needs_user_action"
                     if completion_outcome.get("status") == "needs_user_action"
@@ -3274,7 +3304,17 @@ class AgentApprovalTransactionService:
                 ),
                 "result": redact_sensitive(source_tool_result),
                 "outcome": completion_outcome,
+                "mutationStarted": completion_outcome.get("mutationStarted"),
+                "mutationApplied": completion_outcome.get("mutationApplied"),
+                "commitState": completion_outcome.get("commitState") or "unknown",
+                "persistenceState": "verified" if write_handler.verification_finalize_handler is not None else "handler_reported",
+                "readbackState": "verified" if write_handler.verification_finalize_handler is not None else "handler_reported",
+                "cleanupState": completion_outcome.get("cleanupState") or "not_applicable",
+                "retryable": bool(completion_outcome.get("retryable", False)),
+                "nextAction": completion_outcome.get("nextAction"),
             }
+            if isinstance(arguments.get("executionTarget"), Mapping):
+                payload["executionTargetDigest"] = execution_target_digest(arguments["executionTarget"])
             if isinstance(result, Mapping) and isinstance(
                 result.get("consoleVerification"), Mapping
             ):
@@ -3426,13 +3466,24 @@ class AgentApprovalTransactionService:
                 }
             payload = {
                 "ok": False,
+                "operationId": operation_id,
                 "status": "failed",
                 "result": redact_sensitive(source_failure_result),
                 "error": str(source_failure_result.get("error") or exception_text),
                 "outcome": completion_outcome,
                 "writeFailure": write_failure,
                 "errorDetails": redact_sensitive(error_object),
+                "mutationStarted": completion_outcome.get("mutationStarted"),
+                "mutationApplied": completion_outcome.get("mutationApplied"),
+                "commitState": completion_outcome.get("commitState") or ("unknown" if handler_started else "not_started"),
+                "persistenceState": "unknown" if handler_started else "not_started",
+                "readbackState": "failed" if handler_started else "not_started",
+                "cleanupState": "unknown" if handler_started else "not_applicable",
+                "retryable": False,
+                "nextAction": None,
             }
+            if isinstance(arguments.get("executionTarget"), Mapping):
+                payload["executionTargetDigest"] = execution_target_digest(arguments["executionTarget"])
             if isinstance(failure_result.get("consoleVerification"), Mapping):
                 payload["consoleVerification"] = redact_sensitive(
                     dict(failure_result["consoleVerification"])

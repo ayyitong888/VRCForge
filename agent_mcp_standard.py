@@ -38,6 +38,8 @@ JsonObject = dict[str, Any]
 ToolListCallback = Callable[[], Sequence[Mapping[str, Any]] | Awaitable[Sequence[Mapping[str, Any]]]]
 ToolCallCallback = Callable[[str, Mapping[str, Any]], Any | Awaitable[Any]]
 ToolListRevisionCallback = Callable[[], Any]
+ToolNameResolver = Callable[[str], str]
+ToolCallCatalogueCallback = Callable[[], Sequence[Mapping[str, Any]] | Awaitable[Sequence[Mapping[str, Any]]]]
 
 
 class McpStandardError(Exception):
@@ -108,6 +110,8 @@ class McpStandardRouter:
         server_name: str = "VRCForge",
         server_version: str = "1.5.1",
         tool_list_revision: ToolListRevisionCallback | None = None,
+        tool_name_resolver: ToolNameResolver | None = None,
+        tool_call_catalogue: ToolCallCatalogueCallback | None = None,
     ) -> None:
         if not _is_nonempty_string(server_name) or not _is_nonempty_string(server_version):
             raise ValueError("server_name and server_version must be non-empty strings")
@@ -116,6 +120,8 @@ class McpStandardRouter:
         self.server_name = server_name
         self.server_version = server_version
         self._tool_list_revision = tool_list_revision
+        self._tool_name_resolver = tool_name_resolver
+        self._tool_call_catalogue = tool_call_catalogue
         self._pending_notifications: list[JsonObject] = []
         self._initialized = False
 
@@ -197,7 +203,10 @@ class McpStandardRouter:
                 tools.sort(key=lambda item: item["name"])
                 if len({item["name"] for item in tools}) != len(tools):
                     raise McpStandardError(-32603, "Tool catalogue contains duplicate names")
-                return _success(request_id, {"tools": tools})
+                result_payload: dict[str, Any] = {"tools": tools}
+                if self._tool_list_revision is not None:
+                    result_payload["catalogGeneration"] = self._tool_list_revision()
+                return _success(request_id, result_payload)
             if method == "tools/call":
                 if notification:
                     return None
@@ -205,16 +214,18 @@ class McpStandardRouter:
                 arguments = params.get("arguments", {})
                 if not _is_nonempty_string(name) or not isinstance(arguments, Mapping):
                     raise McpStandardError(-32602, "tools/call requires a non-empty name and object arguments")
-                supplied = await _resolve(self._tool_list())
+                catalogue_callback = self._tool_call_catalogue or self._tool_list
+                supplied = await _resolve(catalogue_callback())
                 allowed = {str(tool.get("name")) for tool in supplied if isinstance(tool, Mapping) and _is_nonempty_string(tool.get("name"))}
-                if name not in allowed:
+                resolved_name = self._tool_name_resolver(name) if self._tool_name_resolver is not None else name
+                if name not in allowed and resolved_name not in allowed:
                     raise McpStandardError(-32602, "Tool is not exposed by this MCP server")
                 revision_before = (
                     self._tool_list_revision()
                     if self._tool_list_revision is not None
                     else None
                 )
-                result = _strict_json_clone(await _resolve(self._tool_call(str(name), dict(arguments))))
+                result = _strict_json_clone(await _resolve(self._tool_call(str(resolved_name), dict(arguments))))
                 revision_after = (
                     self._tool_list_revision()
                     if self._tool_list_revision is not None
