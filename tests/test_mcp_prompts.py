@@ -15,6 +15,7 @@ def _skills(count: int = 9) -> dict:
                 "title": f"Avatar Workflow {index}",
                 "description": f"Workflow {index}",
                 "source": "user",
+                "skillType": "package",
                 "packageId": f"com.vrcforge.skill.{index}",
                 "enabled": True,
                 "available": True,
@@ -122,6 +123,24 @@ def test_prompt_get_rejects_unknown_id_and_invalid_context() -> None:
             pass
         else:  # pragma: no cover - fail-closed invariant
             raise AssertionError("invalid Prompt request must fail")
+
+
+def test_prompt_provenance_is_exact_and_cannot_authorize_an_undeclared_tool() -> None:
+    registry = _registry()
+    provenance = registry.get("avatar-workflow-1")["_meta"]
+    verified = registry.validate_provenance(provenance, tool_name="vrcforge_read_avatar")
+    assert verified["status"] == "verified"
+    assert verified["skillId"] == "avatar-workflow-1"
+    for changed, tool_name in (
+        ({**provenance, "contentHash": "0" * 64}, "vrcforge_read_avatar"),
+        (provenance, "vrcforge_delete_project"),
+    ):
+        try:
+            registry.validate_provenance(changed, tool_name=tool_name)
+        except McpPromptError:
+            pass
+        else:  # pragma: no cover - fail-closed invariant
+            raise AssertionError("stale or out-of-scope Prompt provenance must fail")
 
 
 def test_standard_mcp_lists_and_gets_native_prompts() -> None:

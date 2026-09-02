@@ -227,6 +227,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Run a real Codex Agent against a fresh lazy MCP tools/list session.")
     parser.add_argument("--timeout", type=float, default=120.0)
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--unity-project", type=Path)
     args = parser.parse_args()
     output = args.output or (
         ROOT
@@ -383,26 +384,33 @@ def main() -> int:
         })
         if target_ok:
             selected_call = target_selection["toolCalls"][0]
-            read_arguments = {
-                key: selected_call[key]
-                for key in ("projectPath", "avatarPath")
-                if selected_call.get(key)
-            }
+            live_read_name = "vrcforge_get_compile_errors" if args.unity_project else selected_call["name"]
+            read_arguments = (
+                {"projectPath": str(args.unity_project.expanduser().resolve())}
+                if args.unity_project
+                else {
+                    key: selected_call[key]
+                    for key in ("projectPath", "avatarPath")
+                    if selected_call.get(key)
+                }
+            )
             read_result = client.request(
                 "tools/call",
-                {"name": selected_call["name"], "arguments": read_arguments},
+                {"name": live_read_name, "arguments": read_arguments},
             )
             read_structured = dict(read_result.get("structuredContent") or {})
             read_contract_ok = (
                 str(read_structured.get("operationId") or "").startswith("mcpread_")
                 and read_structured.get("mutationStarted") is False
-                and read_structured.get("resources", {}).get("status") == "unavailable"
+                and read_structured.get("resources", {}).get("status") == "available"
+                and str(read_structured.get("resources", {}).get("operationReceiptUri") or "").startswith("vrcforge://")
                 and read_structured.get("promptSkillProvenance", {}).get("status") == "unavailable"
             )
             report["steps"].append({
                 "name": "selected_read_tool_returns_stage1_contract",
                 "ok": read_contract_ok,
-                "tool": selected_call["name"],
+                "selectedTool": selected_call["name"],
+                "executedReadTool": live_read_name,
                 "domainStatus": read_structured.get("status"),
                 "operationStatus": read_structured.get("operationStatus"),
                 "operationId": read_structured.get("operationId"),
@@ -421,7 +429,8 @@ def main() -> int:
             and str(write_structured.get("operationId") or "").startswith(("mcpreject_", "mcpwrite_"))
             and write_structured.get("operationStatus") == "failed"
             and write_structured.get("mutationStarted") is False
-            and write_structured.get("resources", {}).get("status") == "unavailable"
+            and write_structured.get("resources", {}).get("status") == "available"
+            and str(write_structured.get("resources", {}).get("operationReceiptUri") or "").startswith("vrcforge://")
             and write_structured.get("promptSkillProvenance", {}).get("status") == "unavailable"
         )
         report["steps"].append({

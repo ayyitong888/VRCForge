@@ -74,7 +74,9 @@ class McpPromptRegistry:
         return [
             item
             for item in skills
-            if item.get("enabled", True)
+            if item.get("source") == "user"
+            and item.get("skillType") == "package"
+            and item.get("enabled", True)
             and item.get("available", True)
             and not item.get("disableModelInvocation", False)
             and str(item.get("name") or "").strip()
@@ -282,22 +284,33 @@ class McpPromptRegistry:
             "_meta": descriptor["_meta"],
         }
 
-    def validate_provenance(self, value: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    def validate_provenance(
+        self,
+        value: Mapping[str, Any] | None,
+        *,
+        tool_name: str = "",
+    ) -> dict[str, Any] | None:
         if value is None:
             return None
         if not isinstance(value, Mapping):
             raise McpPromptError("promptSkillProvenance must be an object returned by prompts/get")
         skill_id = str(value.get("skillId") or "").strip()
-        descriptor = next(
-            (self._descriptor(skill) for skill in self._skills() if str(skill.get("name") or "") == skill_id),
+        skill = next(
+            (skill for skill in self._skills() if str(skill.get("name") or "") == skill_id),
             None,
         )
-        if descriptor is None:
+        if skill is None:
             raise McpPromptError("Prompt/Skill provenance refers to an unavailable Skill")
+        descriptor = self._descriptor(skill)
         current = descriptor["_meta"]
         for field in ("skillId", "version", "contentHash"):
             if str(value.get(field) or "") != str(current.get(field) or ""):
                 raise McpPromptError(f"Prompt/Skill provenance {field} is stale or mismatched")
+        allowed_tools = self._skill_tools(skill)
+        if tool_name and allowed_tools and tool_name not in allowed_tools:
+            raise McpPromptError(
+                f"Tool {tool_name} is outside Skill {skill_id}'s declared allowed Tool set"
+            )
         return {
             "status": "verified",
             "schema": PROMPT_SCHEMA,

@@ -608,6 +608,7 @@ def test_unity_read_schemas_are_precise_for_both_external_and_internal_agents(tm
         "projectPath",
         "avatarPath",
         "controllerPath",
+        "promptSkillProvenance",
     }
     bone_schema = external["vrcforge_inspect_skinned_mesh_bone_usage"]["inputSchema"]
     assert bone_schema["required"] == ["gameObjectPath"]

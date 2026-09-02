@@ -5590,7 +5590,8 @@ class AgentGateway:
         arguments = dict(params or {})
         try:
             prompt_skill_provenance = self._mcp_prompts.validate_provenance(
-                arguments.pop("promptSkillProvenance", None)
+                arguments.pop("promptSkillProvenance", None),
+                tool_name=name,
             )
         except ValueError as exc:
             raise AgentGatewayError(
@@ -6127,7 +6128,8 @@ class AgentGateway:
         params = dict(params or {})
         try:
             prompt_skill_provenance = self._mcp_prompts.validate_provenance(
-                params.pop("promptSkillProvenance", None)
+                params.pop("promptSkillProvenance", None),
+                tool_name=name,
             )
         except ValueError as exc:
             raise AgentGatewayError(
