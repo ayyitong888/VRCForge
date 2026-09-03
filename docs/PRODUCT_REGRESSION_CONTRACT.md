@@ -567,6 +567,13 @@ Each item ends with its version history in this exact form:
   association. Manual acceptance verifies live prose/tool/Sub Agent
   interleaving, complete expanded output, terminal presentation and internal
   scroll stability.
+- Open regression (1.8.0 temporary build): restoring the last project may reopen
+  an old conversation with transport-only `preparing` / `waiting for model` /
+  `receiving response` / `verifying` phases and a busy composer even though no
+  matching live run is proven. Treat this strictly as conversation/runtime-ledger
+  restoration under UX-004; it is independent from the restored-project UI-thread
+  responsiveness contract in LAT-003 and must not be used as evidence for or
+  against native-window dragging.
 - [首次实现: 1.2.0] [强化/修复: 1.6.2] [最近验证: 1.6.2]
 
 ### UX-005 — Edit and copy behavior
@@ -1281,20 +1288,29 @@ Each item ends with its version history in this exact form:
   `System.dll` as a managed framework reference; it binds the .NET process
   working directory to the protected, hash-verified helper directory, rejects a
   local `System.dll` collision there, and uses only the trusted CLR core assembly
-  already loaded by the fixed system Windows PowerShell host.
+  already loaded by the fixed system Windows PowerShell host. PowerShell
+  `Set-Location` / `Push-Location` alone is not an acceptable boundary because
+  `Add-Type` resolves metadata from `[Environment]::CurrentDirectory`; that value
+  must be restored in `finally` after compilation.
 - Acceptance: release-policy tests freeze the absence of finish-page launch and
   name-only termination, the exact installed-resource registration, the bounded
   legacy path/PID/start-time fallback, verified-payload-before-shutdown order,
-  fresh lock readback, the NSIS `System.dll` collision regression and the atomic
-  failure boundary. Packaged Windows acceptance
+  fresh lock readback and the atomic failure boundary.
+  `tests/test_installer_restart_manager_bootstrap.py` copies the actual NSIS
+  x86-unicode native `System.dll` into the .NET process working directory and
+  must successfully compile and call `RmStartSession` through the same isolation
+  boundary as the installer. Packaged Windows acceptance
   first runs `scripts/smoke_restart_manager_shutdown.ps1` against the packaged
   desktop with an isolated profile and observes the exact desktop/backend pair
   exit with no port 8757 listener. It then launches the exact installed
   candidate, runs the matching installer, observes cooperative desktop exit plus
   identity-checked legacy fallback where required, completes upgrade, starts the
   new version from a normal shortcut, and confirms preserved settings, chats,
-  checkpoints and project history.
-- [首次实现: 1.8.0] [最近验证: 源码测试；真实安装升级待重新验收]
+  checkpoints and project history. The running-app upgrade gate additionally
+  requires installer exit code 0, disappearance of the exact pre-upgrade desktop
+  and backend PIDs, release of port 8757, preservation of isolated user data and
+  fresh installed-file hashes matching the packaged payload.
+- [首次实现: 1.8.0] [强化/修复: 1.8.0] [最近验证: 源码、打包及真实运行中升级]
 
 ## Change procedure
 
