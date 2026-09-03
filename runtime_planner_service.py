@@ -504,6 +504,7 @@ class PlannerTool:
     block: str = "core"
     input_contract: tuple[str, ...] = ()
     input_schema: Mapping[str, object] = field(default_factory=dict)
+    definition_digest: str = ""
 
     def __post_init__(self) -> None:
         runtime_name = str(self.runtime_name or self.name).strip()
@@ -521,6 +522,7 @@ class PlannerTool:
         object.__setattr__(self, "capabilities", capabilities)
         object.__setattr__(self, "input_contract", contract)
         object.__setattr__(self, "input_schema", MappingProxyType(schema))
+        object.__setattr__(self, "definition_digest", str(self.definition_digest or "").strip())
 
 
 @dataclass(frozen=True, slots=True)

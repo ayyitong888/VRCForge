@@ -4913,21 +4913,60 @@ class AgentGateway:
             if handler is None:
                 raise AgentGatewayError(f"Unknown write Tool descriptor: {name}", status_code=404)
             owner_block = block or self._external_mcp_write_handler_block(handler, config)
-            return self._serialize_external_mcp_write_handler(
+            descriptor = self._serialize_external_mcp_write_handler(
                 handler,
                 owner_block,
                 exposure_layer=layer,
             )
-        tool = self._tools.get(str(name or "").strip())
+            return self._stamp_shared_tool_definition(descriptor)
+        normalized_name = str(name or "").strip()
+        tool = self._tools.get(normalized_name)
         if tool is None:
             raise AgentGatewayError(f"Unknown read Tool descriptor: {name}", status_code=404)
+        if tool.write and normalized_name in self._write_handlers:
+            handler = self._write_handlers[normalized_name]
+            owner_block = block or self._external_mcp_write_handler_block(handler, config)
+            return self._stamp_shared_tool_definition(self._serialize_external_mcp_write_handler(
+                handler,
+                owner_block,
+                exposure_layer=layer,
+            ))
         owner_block = block or self._external_mcp_read_tool_block(tool, config)
-        return standardize_tool_descriptor(
+        return self._stamp_shared_tool_definition(standardize_tool_descriptor(
             self._serialize_tool(tool, config),
             write=bool(tool.write),
             block=owner_block,
             exposure_layer=layer,
-        )
+        ))
+
+    @staticmethod
+    def _stamp_shared_tool_definition(descriptor: Mapping[str, Any]) -> dict[str, Any]:
+        """Attach a stable identity to the definition shared by every projection."""
+
+        stamped = dict(descriptor)
+        metadata = dict(stamped.get("_meta") or {})
+        definition = {
+            key: stamped.get(key)
+            for key in (
+                "name",
+                "canonicalName",
+                "description",
+                "inputSchema",
+                "outputSchema",
+                "effect",
+                "permission",
+                "approval",
+                "checkpoint",
+                "rollback",
+                "freshReadback",
+                "requiredIdentity",
+            )
+        }
+        digest = stable_hash(json.dumps(definition, ensure_ascii=True, sort_keys=True, separators=(",", ":")))
+        stamped["definitionDigest"] = digest
+        metadata["definitionDigest"] = digest
+        stamped["_meta"] = metadata
+        return stamped
 
     def external_mcp_tool_block_for_name(self, name: str, *, write: bool) -> str:
         """Return the canonical external Unity block reused by the internal Unity tree."""
@@ -5177,27 +5216,77 @@ class AgentGateway:
     ) -> dict[str, Any]:
         exposure_layer = normalize_exposure_layer(exposure_layer)
         config = config or self.ensure_config()
-        tools: list[dict[str, Any]] = []
+        registered_names = {*self._tools, *self._write_handlers}
+        tools_by_name: dict[str, dict[str, Any]] = {}
+
+        def display_name(name: str) -> str:
+            canonical = canonical_mcp_tool_name(name)
+            return canonical if canonical in registered_names else name
+
         for tool in self._tools.values():
             if tool.name in EXTERNAL_AGENT_INTERNAL_TOOLS:
                 continue
             if not self._tool_visible(tool, config, exposure_layer):
                 continue
-            tools.append(self._serialize_tool_registry_entry(tool, config))
+            entry = self._serialize_tool_registry_entry(tool, config)
+            key = display_name(tool.name)
+            if key != tool.name:
+                continue
+            tools_by_name[key] = entry
         for handler in self._write_handlers.values():
             if handler.name in WRAPPER_ONLY_WRITE_TARGETS:
                 continue
             if not self._write_handler_visible(handler, config, exposure_layer):
                 continue
-            tools.append(self._serialize_write_registry_entry(handler, config))
+            key = display_name(handler.name)
+            if key != handler.name:
+                continue
+            write_entry = self._serialize_write_registry_entry(handler, config)
+            direct_entry = tools_by_name.get(key)
+            if direct_entry is None:
+                tools_by_name[key] = write_entry
+                continue
+            # Some host-file writes retain a direct runtime callback while the
+            # approval gateway owns their write policy. They are one Tool, not
+            # two catalogue entries.
+            merged = dict(direct_entry)
+            for field in (
+                "description",
+                "risk",
+                "requiresApproval",
+                "requiresCheckpoint",
+                "rollbackPolicy",
+                "availableInDesktop",
+                "availableInMcp",
+                "availableInCli",
+                "inputsSchema",
+                "outputsSchema",
+                "fallbacks",
+                "canonicalName",
+                "whenToUse",
+                "whenNotToUse",
+                "definitionDigest",
+            ):
+                if field in write_entry:
+                    merged[field] = write_entry[field]
+            merged["definitionSources"] = ["gateway-tool", "gateway-write-handler"]
+            merged["writeTargetPolicy"] = write_entry["writeTargetPolicy"]
+            tools_by_name[key] = merged
+        tools = list(tools_by_name.values())
         tools.sort(key=lambda item: (str(item.get("category") or ""), str(item.get("id") or "")))
         categories = sorted({str(item.get("category") or "misc") for item in tools})
+        canonical_names = [str(item.get("canonicalName") or item.get("name") or "") for item in tools]
+        registry_digest = stable_hash(json.dumps(tools, ensure_ascii=True, sort_keys=True, separators=(",", ":")))
         return {
             "ok": True,
             "schema": "vrcforge.tool_registry.v1",
             "generatedAt": utc_now_iso(),
             "exposureLayer": exposure_layer,
             "count": len(tools),
+            "definitionCount": len(tools),
+            "activeCount": len(tools),
+            "duplicateCanonicalNameCount": len(canonical_names) - len(set(canonical_names)),
+            "registryDigest": registry_digest,
             "categories": categories,
             "tools": tools,
         }
@@ -9728,6 +9817,8 @@ class AgentGateway:
             "canonicalName": shared["canonicalName"],
             "whenToUse": shared["whenToUse"],
             "whenNotToUse": shared["whenNotToUse"],
+            "definitionDigest": shared["definitionDigest"],
+            "definitionSources": ["gateway-tool"],
         }
 
     def _serialize_write_registry_entry(self, handler: AgentWriteHandler, config: AgentGatewayConfig) -> dict[str, Any]:
@@ -9739,6 +9830,13 @@ class AgentGateway:
             config=config,
             exposure_layer=EXPOSURE_LAYER_EXECUTION,
         )
+        rollback_policy = self.approval_transactions._write_handler_rollback_policy(handler)
+        write_target_policy = {
+            "riskLevel": "advanced_write" if handler.advanced else "write_request",
+            "requiresApproval": True,
+            "requiresCheckpoint": bool(handler.pre_write_checkpoint_required),
+            "rollbackPolicy": rollback_policy,
+        }
         return {
             "id": self._registry_tool_id(handler.name),
             "name": handler.name,
@@ -9748,19 +9846,22 @@ class AgentGateway:
             "risk": "advanced_write" if handler.advanced else "write_request",
             "requiresApproval": True,
             "requiresCheckpoint": bool(handler.pre_write_checkpoint_required),
-            "rollbackPolicy": self.approval_transactions._write_handler_rollback_policy(handler),
+            "rollbackPolicy": rollback_policy,
             "availableInDesktop": visible,
             "availableInMcp": available,
             "availableInCli": visible,
             "inputsSchema": shared["inputSchema"],
             "outputsSchema": shared["outputSchema"],
             "fallbacks": ["vrcforge_request_apply"],
-            "source": "write-target",
+            "source": "gateway-write-tool",
+            "definitionSources": ["gateway-write-handler"],
+            "writeTargetPolicy": write_target_policy,
             "advanced": bool(handler.advanced),
             "directTool": False,
             "canonicalName": shared["canonicalName"],
             "whenToUse": shared["whenToUse"],
             "whenNotToUse": shared["whenNotToUse"],
+            "definitionDigest": shared["definitionDigest"],
         }
 
     def _registry_tool_id(self, name: str) -> str:

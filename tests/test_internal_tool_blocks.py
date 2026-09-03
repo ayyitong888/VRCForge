@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from types import SimpleNamespace
 
 import dashboard_server
@@ -14,10 +15,6 @@ from internal_tool_blocks import (
     build_internal_tool_block_tree,
     internal_tool_block_for_name,
     resolve_internal_tool_block_selector,
-)
-from path_to_skill_controller import (
-    PATH_TO_SKILL_PREVIEW_INPUT_SCHEMA,
-    PATH_TO_SKILL_WRITE_INPUT_SCHEMA,
 )
 
 
@@ -172,15 +169,19 @@ def test_path_to_skill_creator_is_lazy_shared_and_reuses_controller_owners() -> 
     execution_by_runtime = {tool.runtime_name: tool for tool in execution.visible_tools}
     planning_routable = {tool.runtime_name: tool for tool in planning.routable_tools}
     assert planning_by_runtime[preview_name].block == "diagnostics"
-    assert planning_by_runtime[preview_name].input_schema == bounded_planner_tool_schema(
-        PATH_TO_SKILL_PREVIEW_INPUT_SCHEMA
-    )
+    preview_schema = gateway.shared_agent_tool_descriptor(
+        preview_name,
+        write=False,
+    )["inputSchema"]
+    assert planning_by_runtime[preview_name].input_schema == bounded_planner_tool_schema(preview_schema)
     assert write_name not in planning_by_runtime
     assert planning_routable[write_name].write is True
     assert execution_by_runtime[write_name].block == "diagnostics"
-    assert execution_by_runtime[write_name].input_schema == bounded_planner_tool_schema(
-        PATH_TO_SKILL_WRITE_INPUT_SCHEMA
-    )
+    write_schema = gateway.shared_agent_tool_descriptor(
+        write_name,
+        write=True,
+    )["inputSchema"]
+    assert execution_by_runtime[write_name].input_schema == bounded_planner_tool_schema(write_schema)
     assert validate_planner_tool_arguments(
         execution_by_runtime[write_name].input_schema,
         {"summary": {"status": "passed", "steps": ["inspect"]}},
@@ -224,8 +225,13 @@ def test_shared_unity_facades_reuse_external_blocks_and_schemas_inside() -> None
             continue
         internal = dashboard_server._runtime_planner_tool(tool, projection(tool.name))
         assert internal.block == f"unity/{external_block}"
-        canonical = canonical_unity_read_tool_input_schema(tool.name)
+        canonical = dashboard_server.AGENT_GATEWAY.shared_agent_tool_descriptor(
+            tool.name,
+            write=False,
+            block=external_block,
+        )["inputSchema"]
         assert internal.input_schema == bounded_planner_tool_schema(canonical)
+        assert internal.definition_digest
 
     for handler in dashboard_server.AGENT_GATEWAY._write_handlers.values():
         external_block = dashboard_server.AGENT_GATEWAY.external_mcp_tool_block_for_name(
@@ -239,8 +245,13 @@ def test_shared_unity_facades_reuse_external_blocks_and_schemas_inside() -> None
             projection(handler.name),
         )
         assert internal.block == f"unity/{external_block}"
-        canonical = canonical_unity_write_tool_input_schema(handler.name)
+        canonical = dashboard_server.AGENT_GATEWAY.shared_agent_tool_descriptor(
+            handler.name,
+            write=True,
+            block=external_block,
+        )["inputSchema"]
         assert internal.input_schema == bounded_planner_tool_schema(canonical)
+        assert internal.definition_digest
 
 
 def test_five_atomic_facades_are_registered_for_both_internal_and_external_execution() -> None:
@@ -308,9 +319,10 @@ def test_all_shared_unity_atoms_keep_internal_external_contract_parity() -> None
         assert internal.block == (
             "unity/" + gateway.external_mcp_tool_block_for_name(name, write=False)
         )
-        canonical = canonical_unity_read_tool_input_schema(name)
+        canonical = external_catalog[name]["inputSchema"]
         assert external_catalog[name]["inputSchema"] == canonical
         assert internal.input_schema == bounded_planner_tool_schema(canonical)
+        assert internal.definition_digest == external_catalog[name]["definitionDigest"]
         assert internal.description == external_catalog[name]["description"]
         assert external_catalog[name]["canonicalName"]
         assert "When to use:" in internal.description
@@ -328,14 +340,18 @@ def test_all_shared_unity_atoms_keep_internal_external_contract_parity() -> None
         assert internal.block == (
             "unity/" + gateway.external_mcp_tool_block_for_name(name, write=True)
         )
-        canonical = canonical_unity_write_tool_input_schema(name)
+        canonical = external_catalog[name]["inputSchema"]
         assert external_catalog[name]["inputSchema"] == canonical
         assert internal.input_schema == bounded_planner_tool_schema(canonical)
+        assert internal.definition_digest == external_catalog[name]["definitionDigest"]
         assert internal.description == external_catalog[name]["description"]
         assert external_catalog[name]["canonicalName"]
         assert external_catalog[name]["_meta"]["permission"] == "Write"
 
-    wrapper_schema = canonical_unity_write_tool_input_schema("vrcforge_install_vpm_package")
+    wrapper_schema = gateway.shared_agent_tool_descriptor(
+        "vrcforge_install_vpm_package",
+        write=True,
+    )["inputSchema"]
     assert external_catalog["vrcforge_install_vpm_package"]["inputSchema"] == wrapper_schema
 
 
@@ -390,7 +406,10 @@ def test_internal_schema_preserves_patterns_and_fx_delete_parameter_branch() -> 
 
     canonical = canonical_unity_write_tool_input_schema("vrcforge_manage_fx_animator")
     internal = bounded_planner_tool_schema(canonical)
-    assert internal == bounded_planner_tool_schema(
+    assert "executionTarget" in internal["properties"]
+    preview_comparable = deepcopy(canonical)
+    preview_comparable["properties"].pop("executionTarget")
+    assert bounded_planner_tool_schema(preview_comparable) == bounded_planner_tool_schema(
         canonical_unity_read_tool_input_schema("vrcforge_preview_manage_fx_animator")
     )
     assert validate_planner_tool_arguments(

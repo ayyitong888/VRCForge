@@ -12541,7 +12541,7 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(restore_policy["kind"], "checkpoint_restore")
         self.assertFalse(restore_policy["preWriteCheckpointRequired"])
 
-        registry_targets = {item["name"]: item for item in registry["tools"] if item.get("source") == "write-target"}
+        registry_targets = {item["name"]: item for item in registry["tools"] if item.get("source") == "gateway-write-tool"}
         self.assertEqual(
             registry_targets["vrcforge_import_skill_package"]["rollbackPolicy"],
             package_policy,

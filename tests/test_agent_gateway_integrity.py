@@ -629,6 +629,40 @@ def test_unity_read_schemas_are_precise_for_both_external_and_internal_agents(tm
     assert internal["vrcforge_scan_inbound_reference_closure"]["inputsSchema"] == closure_schema
 
 
+def test_shared_registry_deduplicates_direct_supervised_writes_and_keeps_one_definition(tmp_path: Path) -> None:
+    gateway = _external_gateway(tmp_path)
+    handler = lambda _args: {"ok": True}
+    gateway.register_tool(
+        "vrcforge_write_file",
+        "Write one exact file.",
+        "supervised-write",
+        handler,
+        write=True,
+    )
+    gateway.approval_transactions.register_write_handler(
+        "vrcforge_write_file",
+        "Write one exact file.",
+        "medium",
+        handler,
+    )
+    registry = gateway.build_tool_registry(exposure_layer="execution")
+    matching = [item for item in registry["tools"] if item["name"] == "vrcforge_write_file"]
+    assert len(matching) == 1
+    assert registry["definitionCount"] == registry["count"]
+    assert registry["duplicateCanonicalNameCount"] == 0
+    assert len(registry["registryDigest"]) == 64
+    assert matching[0]["definitionSources"] == ["gateway-tool", "gateway-write-handler"]
+    assert matching[0]["writeTargetPolicy"]["requiresApproval"] is True
+
+    internal_descriptor = gateway.shared_agent_tool_descriptor("vrcforge_write_file", write=False)
+    external_descriptor = gateway.shared_agent_tool_descriptor("vrcforge_write_file", write=True)
+    assert internal_descriptor["definitionDigest"] == external_descriptor["definitionDigest"]
+    assert external_descriptor["definitionDigest"] == matching[0]["definitionDigest"]
+
+    planning = gateway.build_tool_registry(exposure_layer="planning")
+    assert "vrcforge_write_file" not in {item["name"] for item in planning["tools"]}
+
+
 def test_external_mcp_write_contract_is_real_target_and_two_phase(tmp_path: Path) -> None:
     gateway = _external_gateway(tmp_path)
     executed: list[dict] = []

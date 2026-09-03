@@ -490,8 +490,6 @@ from skill_package_projection import (
     SkillPackageProjectionService,
 )
 from path_to_skill_controller import (
-    PATH_TO_SKILL_PREVIEW_INPUT_SCHEMA,
-    PATH_TO_SKILL_WRITE_INPUT_SCHEMA,
     PathToSkillControllerError,
     PathToSkillPreviewService,
     PathToSkillWritePorts,
@@ -15274,11 +15272,8 @@ def _runtime_planner_tool(tool: Any, projection: Any) -> PlannerTool:
             str(projection.internal_name), str(projection.tool_set.value)
         )),
         input_contract=planner_tool_input_contract(str(tool.name)),
-        input_schema=(
-            PATH_TO_SKILL_PREVIEW_INPUT_SCHEMA
-            if str(tool.name) == "vrcforge_preview_path_to_skill"
-            else shared_descriptor["inputSchema"]
-        ),
+        input_schema=shared_descriptor["inputSchema"],
+        definition_digest=str(shared_descriptor.get("definitionDigest") or ""),
     )
 
 
@@ -15304,11 +15299,8 @@ def _runtime_planner_write_tool(handler: Any, projection: Any) -> PlannerTool:
             str(projection.internal_name), str(projection.tool_set.value)
         )),
         input_contract=planner_tool_input_contract(str(handler.name)),
-        input_schema=(
-            PATH_TO_SKILL_WRITE_INPUT_SCHEMA
-            if str(handler.name) == "vrcforge_write_path_to_skill"
-            else shared_descriptor["inputSchema"]
-        ),
+        input_schema=shared_descriptor["inputSchema"],
+        definition_digest=str(shared_descriptor.get("definitionDigest") or ""),
     )
 
 
