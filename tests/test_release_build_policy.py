@@ -376,6 +376,13 @@ def test_installers_gracefully_close_only_the_installed_app_before_atomic_activa
     assert "RmForceShutdown" not in helper
     assert 'Join-Path $root "VRCForge.exe"' in helper
     assert 'Join-Path $root "backend\\vrcforge_backend.exe"' in helper
+    assert "function Get-ExactInstalledProcessTargets" in helper
+    assert "function Stop-ExactInstalledProcessTargets" in helper
+    assert "$process.StartTime.ToFileTimeUtc()" in helper
+    assert "$process.MainModule.FileName" in helper
+    assert "return $targets.ToArray()" in helper
+    assert "$process.Kill()" in helper
+    assert "GetProcessesByName" not in helper
     assert extract.index("Assert-InstalledPayload $installStage") < extract.index(
         "Request-InstalledAppExit $destination"
     )
@@ -389,6 +396,34 @@ def test_installers_gracefully_close_only_the_installed_app_before_atomic_activa
         assert "$(ActivationFailedText)" in installer
         assert "Please close any running VRCForge instance first" not in installer
         assert "taskkill" not in installer
+
+
+def test_desktop_cooperates_with_restart_manager_without_changing_normal_close_to_tray() -> None:
+    main = (REPO_ROOT / "src-tauri" / "src" / "main.rs").read_text(encoding="utf-8")
+    lifecycle = (
+        REPO_ROOT / "src-tauri" / "src" / "restart_manager_windows.rs"
+    ).read_text(encoding="utf-8")
+
+    assert "mod restart_manager_windows;" in main
+    assert "install_restart_manager_window_hook(&window)" in main
+    close_handler = main[main.index(".on_window_event") : main.index(".run(", main.index(".on_window_event"))]
+    assert close_handler.index("take_restart_manager_shutdown_request()") < close_handler.index(
+        "api.prevent_close()"
+    )
+    assert "shutdown_and_exit_app(window.app_handle())" in close_handler
+    assert "WM_QUERYENDSESSION" in lifecycle
+    assert "WM_ENDSESSION" in lifecycle
+    assert "ENDSESSION_CLOSEAPP" in lifecycle
+    assert "SetWindowSubclass" in lifecycle
+    assert "PostMessageW(hwnd, WM_CLOSE" in lifecycle
+
+    smoke = (
+        REPO_ROOT / "scripts" / "smoke_restart_manager_shutdown.ps1"
+    ).read_text(encoding="utf-8")
+    assert 'Join-Path $packageRoot "VRCForge.exe"' in smoke
+    assert 'Join-Path $packageRoot "backend\\vrcforge_backend.exe"' in smoke
+    assert "[VrcForgeRmSmoke]::RmShutdown($sessionHandle, 0" in smoke
+    assert "GetProcessesByName" not in smoke
 
 
 def test_payload_helper_accepts_only_the_exact_compiled_scope_identity() -> None:

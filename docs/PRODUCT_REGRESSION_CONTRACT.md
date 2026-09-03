@@ -1248,21 +1248,28 @@ Each item ends with its version history in this exact form:
   `$INSTDIR\VRCForge.exe` and
   `$INSTDIR\backend\vrcforge_backend.exe` resources with Windows Restart
   Manager and requests a graceful shutdown. The installer then performs a fresh
-  no-sharing file check before atomic activation. If either binary remains in
-  use, installation stops with a clear error while preserving the complete old
-  installation; it never continues a partial overwrite, kills by broad process
-  name, uses forced termination, or closes a portable/other-directory instance.
+  no-sharing file check before atomic activation. For an older installed build
+  that still converts the Restart Manager close into "hide to tray", setup may
+  terminate only a process whose absolute executable path, PID and process start
+  time still match the exact pre-shutdown snapshot. Any identity drift or
+  remaining lock stops installation with a clear error while preserving the
+  complete old installation; it never continues a partial overwrite, kills by
+  broad process name, or closes a portable/other-directory instance.
 - Forbidden regression: no elevated finish-page launch, inherited administrator
   desktop process, advice-only "close VRCForge first" workflow, opaque file-in-
-  use failure, `taskkill`, forced process termination, path-unbound shutdown,
+  use failure, `taskkill`, name-only or identity-drifted process termination,
   partial activation or user-data deletion during install/upgrade.
 - Acceptance: release-policy tests freeze the absence of finish-page launch and
-  forced/name-only termination, the exact installed-resource registration,
-  verified-payload-before-shutdown order, fresh lock readback and atomic failure
-  boundary. Packaged Windows acceptance launches the exact installed candidate,
-  runs the matching installer, observes graceful desktop/backend exit, completes
-  upgrade, starts the new version from a normal shortcut, and confirms preserved
-  settings, chats, checkpoints and project history.
+  name-only termination, the exact installed-resource registration, the bounded
+  legacy path/PID/start-time fallback, verified-payload-before-shutdown order,
+  fresh lock readback and atomic failure boundary. Packaged Windows acceptance
+  first runs `scripts/smoke_restart_manager_shutdown.ps1` against the packaged
+  desktop with an isolated profile and observes the exact desktop/backend pair
+  exit with no port 8757 listener. It then launches the exact installed
+  candidate, runs the matching installer, observes cooperative desktop exit plus
+  identity-checked legacy fallback where required, completes upgrade, starts the
+  new version from a normal shortcut, and confirms preserved settings, chats,
+  checkpoints and project history.
 - [首次实现: 1.8.0] [最近验证: 源码测试；真实安装升级待重新验收]
 
 ## Change procedure

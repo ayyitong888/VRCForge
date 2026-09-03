@@ -250,6 +250,60 @@ function Assert-InstallNotRunning([string]$Root) {
     }
 }
 
+function Get-ExactInstalledProcessTargets([string[]]$ResourcePaths) {
+    $targets = New-Object 'Collections.Generic.List[object]'
+    foreach ($process in [Diagnostics.Process]::GetProcesses()) {
+        try {
+            $path = [IO.Path]::GetFullPath($process.MainModule.FileName)
+            $matched = $false
+            foreach ($resourcePath in $ResourcePaths) {
+                if ([string]::Equals($path, $resourcePath, [StringComparison]::OrdinalIgnoreCase)) {
+                    $matched = $true
+                    break
+                }
+            }
+            if (-not $matched) { continue }
+            $targets.Add([pscustomobject]@{
+                ProcessId = $process.Id
+                StartTimeFileTimeUtc = $process.StartTime.ToFileTimeUtc()
+                ExecutablePath = $path
+            })
+        } catch {
+            # Inaccessible or already-exited processes are never guessed from a
+            # name. A remaining file lock is caught by the final fresh check.
+        } finally {
+            $process.Dispose()
+        }
+    }
+    return $targets.ToArray()
+}
+
+function Stop-ExactInstalledProcessTargets([object[]]$Targets) {
+    foreach ($target in $Targets) {
+        $process = $null
+        try {
+            $process = [Diagnostics.Process]::GetProcessById([int]$target.ProcessId)
+            $actualPath = [IO.Path]::GetFullPath($process.MainModule.FileName)
+            $actualStart = $process.StartTime.ToFileTimeUtc()
+            if ($actualStart -ne [int64]$target.StartTimeFileTimeUtc -or
+                -not [string]::Equals($actualPath, [string]$target.ExecutablePath, [StringComparison]::OrdinalIgnoreCase)) {
+                Fail "A running VRCForge process identity changed while the installer was requesting shutdown."
+            }
+            # Legacy builds hide on WM_CLOSE and cannot acknowledge the newer
+            # cooperative hook. Installation already authorizes closing this
+            # exact installed generation; never broaden this to name matching.
+            $process.Kill()
+            if (-not $process.WaitForExit(5000)) {
+                Fail "The exact installed VRCForge process did not exit within the bounded shutdown wait."
+            }
+        } catch [ArgumentException] {
+            # The captured process already exited normally.
+        } finally {
+            if ($null -ne $process) { $process.Dispose() }
+        }
+    }
+}
+
 function Request-InstalledAppExit([string]$Root) {
     $root = Assert-SafeProgramFilesDestination $Root
     if (-not [IO.Directory]::Exists($root)) { return }
@@ -267,6 +321,8 @@ function Request-InstalledAppExit([string]$Root) {
         }
     }
     if ($resources.Count -eq 0) { return }
+    [string[]]$registeredResources = $resources.ToArray()
+    [object[]]$capturedTargets = @(Get-ExactInstalledProcessTargets $registeredResources)
 
     if ($null -eq ("VrcForgeInstaller.RestartManagerNative" -as [type])) {
         Add-Type -Language CSharp -TypeDefinition @"
@@ -300,12 +356,12 @@ namespace VrcForgeInstaller {
     }
 
     [uint32]$sessionHandle = 0
+    [int]$shutdownResult = 0
     $sessionKey = New-Object Text.StringBuilder 33
     [void]$sessionKey.Append([Guid]::NewGuid().ToString("N"))
     $result = [VrcForgeInstaller.RestartManagerNative]::RmStartSession([ref]$sessionHandle, 0, $sessionKey)
     if ($result -ne 0) { Fail "Windows Restart Manager could not start a bounded shutdown session (error $result)." }
     try {
-        [string[]]$registeredResources = $resources.ToArray()
         $result = [VrcForgeInstaller.RestartManagerNative]::RmRegisterResources(
             $sessionHandle,
             [uint32]$registeredResources.Length,
@@ -322,9 +378,20 @@ namespace VrcForgeInstaller {
             $sessionHandle,
             0,
             [IntPtr]::Zero)
-        if ($result -ne 0) { Fail "The running installed VRCForge could not close normally (error $result)." }
+        $shutdownResult = $result
     } finally {
         [void][VrcForgeInstaller.RestartManagerNative]::RmEndSession($sessionHandle)
+    }
+
+    $requiresLegacyStop = $shutdownResult -ne 0
+    if (-not $requiresLegacyStop) {
+        try { Assert-InstallNotRunning $root } catch { $requiresLegacyStop = $true }
+    }
+    if ($requiresLegacyStop) {
+        if ($capturedTargets.Count -eq 0) {
+            Fail "The installed VRCForge remained in use, but no exact process identity was available for the legacy shutdown path."
+        }
+        Stop-ExactInstalledProcessTargets $capturedTargets
     }
 }
 

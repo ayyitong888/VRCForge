@@ -38,6 +38,8 @@ mod primitive_evidence_authority_windows;
 #[cfg(windows)]
 #[allow(dead_code)]
 mod primitive_evidence_controller_launcher_windows;
+#[cfg(windows)]
+mod restart_manager_windows;
 mod sanitize;
 mod theme_background;
 
@@ -45,6 +47,8 @@ use approval_notification_windows::*;
 use backend::*;
 use commands::*;
 use event_bridge::*;
+#[cfg(windows)]
+use restart_manager_windows::*;
 use sanitize::*;
 use theme_background::*;
 
@@ -113,7 +117,10 @@ fn main() {
             start_managed_backend_early(app.handle()).map_err(std::io::Error::other)?;
             if let Some(window) = app.get_webview_window("main") {
                 #[cfg(windows)]
-                let _ = bind_main_window_taskbar_icon(&window);
+                {
+                    let _ = bind_main_window_taskbar_icon(&window);
+                    install_restart_manager_window_hook(&window).map_err(std::io::Error::other)?;
+                }
                 restore_main_window(&window);
                 window.set_title(&app_window_title(&app.package_info().version.to_string()))?;
             }
@@ -323,6 +330,11 @@ fn main() {
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                #[cfg(windows)]
+                if take_restart_manager_shutdown_request() {
+                    shutdown_and_exit_app(window.app_handle());
+                    return;
+                }
                 api.prevent_close();
                 let _ = window.hide();
             }
