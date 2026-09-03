@@ -8,28 +8,27 @@ import unity_mcp_tool_contract
 
 
 def test_remap_schema_is_shared_and_exposed_in_avatar_block() -> None:
-    schema = agent_gateway.EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS["vrcforge_remap_skinned_mesh_bone"]
+    source_schema = agent_gateway.EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS["vrcforge_remap_skinned_mesh_bone"]
+    schema = agent_gateway.canonical_unity_write_tool_input_schema("vrcforge_remap_skinned_mesh_bone")
     assert schema["additionalProperties"] is False
     assert schema["required"] == [
         "projectPath", "gameObjectPath", "componentIndex", "boneIndex",
-        "expectedCurrentBonePath", "targetBonePath", "expectedMeshName", "preview",
+        "expectedCurrentBonePath", "targetBonePath", "expectedMeshName", "preview", "executionTarget",
     ]
-    assert agent_gateway.canonical_unity_write_tool_input_schema("vrcforge_remap_skinned_mesh_bone") == schema
+    assert set(source_schema["properties"]) < set(schema["properties"])
+    assert schema["properties"]["executionTarget"]["description"].startswith("Exact vrcforge.execution_target.v1")
     assert "vrcforge_remap_skinned_mesh_bone" in agent_gateway.EXTERNAL_MCP_WRITE_TOOL_BLOCKS["avatar"]
     assert "vrcforge_remap_skinned_mesh_bone" in dashboard_server.AGENT_GATEWAY.approval_transactions.registered_write_target_names()
-    assert unity_mcp_tool_contract.TOOL_CONTRACT_VERSION == "87"
-    assert unity_mcp_tool_contract.EXPECTED_TOOL_COUNT == 89
-    assert unity_mcp_tool_contract.PREVIOUS_CORE_TOOL_CONTRACT_VERSION == "86"
-    assert len(unity_mcp_tool_contract.PREVIOUS_CORE_TOOL_NAMES) == 85
+    assert unity_mcp_tool_contract.TOOL_CONTRACT_VERSION == "88"
+    assert unity_mcp_tool_contract.EXPECTED_TOOL_COUNT == 90
+    assert unity_mcp_tool_contract.PREVIOUS_CORE_TOOL_CONTRACT_VERSION == "87"
+    assert len(unity_mcp_tool_contract.PREVIOUS_CORE_TOOL_NAMES) == 89
     assert "vrc_inspect_skinned_mesh_deformation" in unity_mcp_tool_contract.PREVIOUS_CORE_TOOL_NAMES
     assert "vrc_set_material_texture" in unity_mcp_tool_contract.PREVIOUS_CORE_TOOL_NAMES
     assert "vrc_configure_aao_merge_physbone" in unity_mcp_tool_contract.PREVIOUS_CORE_TOOL_NAMES
     assert "vrc_revert_removed_component" in unity_mcp_tool_contract.PREVIOUS_CORE_TOOL_NAMES
     assert "vrc_duplicate_scene_asset" in unity_mcp_tool_contract.PREVIOUS_CORE_TOOL_NAMES
-    assert "vrc_scene_save" not in unity_mcp_tool_contract.PREVIOUS_CORE_TOOL_NAMES
-    assert "vrc_scene_transition" not in unity_mcp_tool_contract.PREVIOUS_CORE_TOOL_NAMES
-    assert "vrc_texture_patch" not in unity_mcp_tool_contract.PREVIOUS_CORE_TOOL_NAMES
-    assert "vrc_user_adjustment_handoff" not in unity_mcp_tool_contract.PREVIOUS_CORE_TOOL_NAMES
+    assert "vrc_get_execution_targets" not in unity_mcp_tool_contract.PREVIOUS_CORE_TOOL_NAMES
 
 
 def test_remap_execution_plan_freezes_one_exact_core_call() -> None:

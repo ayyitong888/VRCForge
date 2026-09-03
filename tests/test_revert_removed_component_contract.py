@@ -90,11 +90,11 @@ def test_tool_is_in_the_exact_supervised_core_contract_and_preview_lane() -> Non
     ).read_text(encoding="utf-8-sig")
     python_contract = (ROOT / "unity_mcp_tool_contract.py").read_text(encoding="utf-8-sig")
 
-    assert 'internal const string ToolContractVersion = "87";' in contract
-    assert "internal const int ToolCount = 89;" in contract
+    assert 'internal const string ToolContractVersion = "88";' in contract
+    assert "internal const int ToolCount = 90;" in contract
     assert '{ "vrc_revert_removed_component", "VRCForge.Editor.RevertRemovedComponentTool" }' in contract
     preview_block = server[server.index("PreviewTools =") : server.index("SafetyControlTools =")]
     assert '"vrc_revert_removed_component"' in preview_block
-    assert 'TOOL_CONTRACT_VERSION = "87"' in python_contract
-    assert "EXPECTED_TOOL_COUNT = 89" in python_contract
+    assert 'TOOL_CONTRACT_VERSION = "88"' in python_contract
+    assert "EXPECTED_TOOL_COUNT = 90" in python_contract
     assert '"vrc_revert_removed_component"' in python_contract

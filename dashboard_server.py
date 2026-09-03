@@ -22456,6 +22456,100 @@ def read_component_property_sync(params: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
+def list_execution_targets_sync(params: dict[str, Any]) -> dict[str, Any]:
+    raw = dict(params or {})
+    project_path = str(raw.get("projectPath") or "").strip()
+    if not project_path:
+        raise RuntimeError("projectPath is required to enumerate ExecutionTargets.")
+    request = {
+        key: raw[key]
+        for key in (
+            "scope",
+            "avatarGlobalObjectId",
+            "objectGlobalObjectId",
+            "componentGlobalObjectId",
+            "componentType",
+        )
+        if key in raw and raw[key] not in (None, "")
+    }
+    request.setdefault("scope", "avatar")
+    settings = load_dashboard_settings(build_agent_connection_request(raw))
+    payload = ensure_dict_payload(
+        extract_tool_result_payload(invoke_unity_mcp(settings, "vrc_get_execution_targets", request)),
+        "ExecutionTarget discovery",
+    )
+    targets = payload.get("targets")
+    if targets is None and payload.get("schema") == "vrcforge.execution_target.v1" and payload.get("namespace"):
+        targets = [payload]
+    if not isinstance(targets, list) or not all(isinstance(item, dict) for item in targets):
+        raise RuntimeError("Unity Core returned an invalid ExecutionTarget candidate list.")
+    return {
+        **payload,
+        "ok": payload.get("ok", True) is not False,
+        "candidateCount": len(targets),
+        "targets": targets,
+        "projectPath": project_path,
+    }
+
+
+def bind_execution_target_sync(params: dict[str, Any]) -> dict[str, Any]:
+    payload = list_execution_targets_sync(params)
+    targets = payload["targets"]
+    if len(targets) != 1:
+        raise RuntimeError(
+            f"ExecutionTarget binding requires exactly one exact candidate; Core returned {len(targets)}."
+        )
+    binding = AGENT_GATEWAY.bind_execution_target(
+        targets[0],
+        project_root=str(payload["projectPath"]),
+    )
+    return {
+        "ok": True,
+        "status": "bound",
+        "schema": "vrcforge.execution_target_binding.v1",
+        **binding,
+    }
+
+
+def refresh_execution_target_sync(params: dict[str, Any]) -> dict[str, Any]:
+    raw = dict(params or {})
+    previous = raw.get("executionTarget")
+    if not isinstance(previous, dict):
+        raise RuntimeError("executionTarget is required for refresh.")
+    request: dict[str, Any] = {
+        "projectPath": raw.get("projectPath"),
+        "scope": str(previous.get("scope") or "").strip(),
+    }
+    for section, output_key in (
+        ("avatar", "avatarGlobalObjectId"),
+        ("object", "objectGlobalObjectId"),
+        ("component", "componentGlobalObjectId"),
+    ):
+        identity = previous.get(section)
+        if isinstance(identity, dict) and identity.get("globalObjectId"):
+            request[output_key] = identity["globalObjectId"]
+    component = previous.get("component")
+    if isinstance(component, dict) and component.get("type"):
+        request["componentType"] = component["type"]
+    payload = list_execution_targets_sync(request)
+    targets = payload["targets"]
+    if len(targets) != 1:
+        raise RuntimeError(
+            f"ExecutionTarget refresh requires the same exact candidate; Core returned {len(targets)}."
+        )
+    refreshed = AGENT_GATEWAY.refresh_execution_target(
+        str(raw.get("executionTargetHandle") or ""),
+        targets[0],
+        project_root=str(payload["projectPath"]),
+    )
+    return {
+        "ok": True,
+        "status": "refreshed",
+        "schema": "vrcforge.execution_target_binding.v1",
+        **refreshed,
+    }
+
+
 def gesture_manager_status_sync(params: dict[str, Any]) -> dict[str, Any]:
     params = params or {}
     include_parameters = bool(params.get("include_parameters", params.get("includeParameters", False)))
@@ -24187,6 +24281,24 @@ def register_agent_gateway_tools() -> None:
         "Read Unity MCP bridge status.",
         "read/debug",
         lambda params: UNITY_STATUS.build_unity_status_snapshot(load_dashboard_settings(build_agent_connection_request(params))),
+    )
+    AGENT_GATEWAY.register_tool(
+        "vrcforge_list_execution_targets",
+        "When to use: Enumerate exact project, Scene, Avatar, object, or component identities from the currently running project-scoped Unity Core before binding work. When NOT to use: Do not use hierarchy names as identity or treat candidates as write approval. Negative example: Choose one of two same-named Avatars without an exact GlobalObjectId.",
+        "read/debug",
+        list_execution_targets_sync,
+    )
+    AGENT_GATEWAY.register_tool(
+        "vrcforge_bind_execution_target",
+        "When to use: Bind exactly one live Core-issued ExecutionTarget before an identity-sensitive read or supervised write. When NOT to use: Do not bind an ambiguous candidate, another project/Editor, or a hierarchy path fallback. Negative example: Reuse a target after Scene reload or Avatar replacement.",
+        "read/debug",
+        bind_execution_target_sync,
+    )
+    AGENT_GATEWAY.register_tool(
+        "vrcforge_refresh_execution_target",
+        "When to use: Explicitly refresh the saved-scene revision and digest for the same bound project, Editor, Scene, Avatar, object, and component identities. When NOT to use: Do not refresh across replacement, recreation, another Unity process, or another project. Negative example: Turn an identity mismatch into a new target silently.",
+        "read/debug",
+        refresh_execution_target_sync,
     )
     AGENT_GATEWAY.register_tool(
         "vrcforge_unity_tools",

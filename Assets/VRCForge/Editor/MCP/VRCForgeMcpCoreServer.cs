@@ -147,6 +147,11 @@ namespace VRCForge.Editor
         private static VRCForgeToolDescriptor[] tools = new VRCForgeToolDescriptor[0];
         private static SynchronizationContext editorSynchronizationContext;
 
+        internal static string CurrentInstanceId
+        {
+            get { return descriptorInstanceId ?? string.Empty; }
+        }
+
         [InitializeOnLoadMethod]
         private static void RegisterEditorDomainInvocationPump()
         {

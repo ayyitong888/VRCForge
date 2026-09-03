@@ -15,8 +15,8 @@ namespace VRCForge.Editor
         internal const string CoreIdentity = "vrcforge.unity-core";
         internal const string HandshakeProtocol = "vrcforge.core-handshake.v1";
         internal const string ProductVersion = "1.8.0";
-        internal const string ToolContractVersion = "87";
-        internal const int ToolCount = 89;
+        internal const string ToolContractVersion = "88";
+        internal const int ToolCount = 90;
 
         private static readonly Dictionary<string, string> ExpectedTypes =
             new Dictionary<string, string>(StringComparer.Ordinal)
@@ -52,6 +52,7 @@ namespace VRCForge.Editor
                 { "vrc_find_assets", "VRCForge.Editor.FindAssetsTool" },
                 { "vrc_get_asset_info", "VRCForge.Editor.GetAssetInfoTool" },
                 { "vrc_get_compile_errors", "VRCForge.Editor.CompileErrorReader" },
+                { "vrc_get_execution_targets", "VRCForge.Editor.ExecutionTargetInspector" },
                 { "vrc_get_gameobject", "VRCForge.Editor.GetGameObjectTool" },
                 { "vrc_get_property", "VRCForge.Editor.GetPropertyTool" },
                 { "vrc_gesture_manager_enter_play_mode", "VRCForge.Editor.GestureManagerEnterPlayModeTool" },
@@ -118,6 +119,7 @@ namespace VRCForge.Editor
                 "vrc_find_assets",
                 "vrc_get_asset_info",
                 "vrc_get_compile_errors",
+                "vrc_get_execution_targets",
                 "vrc_get_gameobject",
                 "vrc_get_property",
                 "vrc_inspect_skinned_mesh_bone_usage",

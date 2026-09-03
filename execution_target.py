@@ -10,6 +10,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import secrets
+import threading
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -223,6 +225,17 @@ def validate_runtime_execution_target(
         raise ExecutionTargetError("execution_target_authority_unavailable", "Unity MCP identity authority is unavailable.") from exc
     if not isinstance(descriptor, Mapping):
         raise ExecutionTargetError("execution_target_authority_unavailable", "Unity Core descriptor is not an object.")
+    descriptor_root = normalize_project_root(descriptor.get("projectPath"))
+    if os.path.normcase(descriptor_root) != os.path.normcase(root):
+        raise ExecutionTargetError(
+            "project_root_drifted",
+            "Unity Core descriptor belongs to another project root.",
+        )
+    if str(descriptor.get("projectId") or "") != project_identity(root):
+        raise ExecutionTargetError(
+            "project_identity_mismatch",
+            "Unity Core descriptor project identity does not match its normalized root.",
+        )
     try:
         pid = int(descriptor.get("processId") or 0)
     except (TypeError, ValueError) as exc:
@@ -254,6 +267,35 @@ def validate_runtime_execution_target(
         "processStartTime": descriptor_process_start or observed_process_start,
         "instanceId": descriptor.get("instanceId"),
     }
+    target_mapping = _mapping(value, "target")
+    target_scope = _identity_scope_for_target(target_mapping)
+    if target_scope != "project":
+        scene = _mapping(target_mapping.get("scene"), "scene")
+        scene_path = _under_root(scene.get("absolutePath") or scene.get("path"), root, "scene.absolutePath")
+        try:
+            stat = Path(scene_path).stat()
+            digest = hashlib.sha256(Path(scene_path).read_bytes()).hexdigest()
+            meta_lines = Path(scene_path + ".meta").read_text(encoding="utf-8").splitlines()
+        except (OSError, UnicodeError) as exc:
+            raise ExecutionTargetError(
+                "scene_identity_unavailable",
+                "The bound Unity scene identity cannot be read from disk.",
+            ) from exc
+        guid = next(
+            (line.partition(":")[2].strip() for line in meta_lines if line.startswith("guid:")),
+            "",
+        )
+        if not guid:
+            raise ExecutionTargetError("scene_identity_unavailable", "The bound Unity scene GUID is unavailable.")
+        # .NET DateTime ticks and Python nanoseconds both preserve the NTFS
+        # 100 ns file timestamp used by Unity Core.
+        core.update(
+            {
+                "sceneGuid": guid,
+                "sceneRevision": str(621355968000000000 + stat.st_mtime_ns // 100),
+                "sceneDigest": digest,
+            }
+        )
     return validate_execution_target(
         value,
         project_root=root,
@@ -263,8 +305,109 @@ def validate_runtime_execution_target(
 
 
 def execution_target_digest(value: Mapping[str, Any]) -> str:
-    encoded = json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    target = dict(value)
+    identity: dict[str, Any] = {
+        "schema": target.get("schema"),
+        "scope": target.get("scope"),
+        "namespace": target.get("namespace"),
+    }
+    for section, fields in (
+        ("project", ("root", "projectId")),
+        ("editor", ("unityPid", "processStartTime", "coreInstanceId")),
+        ("scene", ("assetPath", "absolutePath", "guid", "revision", "digest")),
+        ("avatar", ("globalObjectId",)),
+        ("object", ("globalObjectId",)),
+        ("component", ("globalObjectId", "type")),
+    ):
+        source = target.get(section)
+        if isinstance(source, Mapping):
+            identity[section] = {field: source.get(field) for field in fields if field in source}
+    encoded = json.dumps(identity, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+class ExecutionTargetBindingRegistry:
+    """Bounded process-owned handles for exact, already verified targets."""
+
+    def __init__(self, *, max_bindings: int = 64, lock: threading.RLock | None = None) -> None:
+        self._max_bindings = max(1, int(max_bindings))
+        self._lock = lock or threading.RLock()
+        self._bindings: dict[str, dict[str, Any]] = {}
+
+    def bind(self, target: Mapping[str, Any], *, project_root: str) -> dict[str, Any]:
+        verified = validate_runtime_execution_target(
+            target,
+            project_root=project_root,
+            required_scope=str(target.get("scope") or "project"),
+        )
+        digest = execution_target_digest(verified)
+        handle = "vrcforge-target-" + secrets.token_urlsafe(24)
+        with self._lock:
+            self._bindings[handle] = {
+                "target": verified,
+                "digest": digest,
+                "projectRoot": normalize_project_root(project_root),
+            }
+            while len(self._bindings) > self._max_bindings:
+                self._bindings.pop(next(iter(self._bindings)))
+        return {
+            "executionTargetHandle": handle,
+            "executionTarget": verified,
+            "executionTargetDigest": digest,
+            "lifetime": "gateway_process_or_explicit_refresh",
+        }
+
+    def refresh(
+        self,
+        handle: str,
+        observed_target: Mapping[str, Any],
+        *,
+        project_root: str,
+    ) -> dict[str, Any]:
+        normalized_handle = str(handle or "").strip()
+        with self._lock:
+            prior = dict(self._bindings.get(normalized_handle) or {})
+        if not prior:
+            raise ExecutionTargetError("execution_target_handle_invalid", "ExecutionTarget handle is unknown or expired.")
+        verified = validate_runtime_execution_target(
+            observed_target,
+            project_root=project_root,
+            required_scope=str(observed_target.get("scope") or "project"),
+        )
+        prior_target = prior.get("target") if isinstance(prior.get("target"), Mapping) else {}
+        for section, field in (
+            ("project", "projectId"),
+            ("editor", "unityPid"),
+            ("editor", "processStartTime"),
+            ("editor", "coreInstanceId"),
+            ("scene", "guid"),
+            ("avatar", "globalObjectId"),
+            ("object", "globalObjectId"),
+            ("component", "globalObjectId"),
+            ("component", "type"),
+        ):
+            prior_section = prior_target.get(section) if isinstance(prior_target.get(section), Mapping) else {}
+            current_section = verified.get(section) if isinstance(verified.get(section), Mapping) else {}
+            if prior_section.get(field) != current_section.get(field):
+                raise ExecutionTargetError(
+                    "execution_target_identity_drifted",
+                    f"ExecutionTarget {section}.{field} changed; bind a new target explicitly.",
+                )
+        digest = execution_target_digest(verified)
+        with self._lock:
+            self._bindings[normalized_handle] = {
+                "target": verified,
+                "digest": digest,
+                "projectRoot": normalize_project_root(project_root),
+            }
+        return {
+            "executionTargetHandle": normalized_handle,
+            "executionTarget": verified,
+            "executionTargetDigest": digest,
+            "previousExecutionTargetDigest": prior.get("digest"),
+            "changed": digest != prior.get("digest"),
+            "lifetime": "gateway_process_or_explicit_refresh",
+        }
 
 
 def standard_identity_metadata(*, scope: str, write: bool) -> dict[str, Any]:

@@ -107,6 +107,7 @@ from avatar_composition_workflow_skills import (
 )
 from unity_mcp_core_client import capture_unity_mcp_core_call_audits
 from execution_target import (
+    ExecutionTargetBindingRegistry,
     ExecutionTargetError,
     execution_target_digest,
     validate_runtime_execution_target,
@@ -485,6 +486,9 @@ EXTERNAL_MCP_READ_TOOL_BLOCKS: dict[str, frozenset[str]] = {
             "vrcforge_unity_status",
             "vrcforge_unity_tools",
             "vrcforge_get_compile_errors",
+            "vrcforge_list_execution_targets",
+            "vrcforge_bind_execution_target",
+            "vrcforge_refresh_execution_target",
             "vrcforge_list_avatars",
             "vrcforge_get_gameobject",
             "vrcforge_get_property",
@@ -974,6 +978,42 @@ UNITY_READ_TOOL_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
         "properties": {
             "projectPath": _PROJECT_PATH_PROPERTY,
             "gameObjectPath": {"type": "string", "description": "Exact hierarchy path or unique scene GameObject name."},
+        },
+    },
+    "vrcforge_list_execution_targets": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["projectPath"],
+        "properties": {
+            "projectPath": _PROJECT_PATH_PROPERTY,
+            "scope": {"type": "string", "enum": ["project", "scene", "avatar", "object", "component"], "default": "avatar"},
+            "avatarGlobalObjectId": {"type": "string"},
+            "objectGlobalObjectId": {"type": "string"},
+            "componentGlobalObjectId": {"type": "string"},
+            "componentType": {"type": "string"},
+        },
+    },
+    "vrcforge_bind_execution_target": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["projectPath", "scope"],
+        "properties": {
+            "projectPath": _PROJECT_PATH_PROPERTY,
+            "scope": {"type": "string", "enum": ["project", "scene", "avatar", "object", "component"]},
+            "avatarGlobalObjectId": {"type": "string"},
+            "objectGlobalObjectId": {"type": "string"},
+            "componentGlobalObjectId": {"type": "string"},
+            "componentType": {"type": "string"},
+        },
+    },
+    "vrcforge_refresh_execution_target": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["projectPath", "executionTargetHandle", "executionTarget"],
+        "properties": {
+            "projectPath": _PROJECT_PATH_PROPERTY,
+            "executionTargetHandle": {"type": "string", "minLength": 16},
+            "executionTarget": {"type": "object", "additionalProperties": True},
         },
     },
     "vrcforge_get_property": {
@@ -1795,21 +1835,53 @@ EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
 }
 
 
+def _with_execution_target_schema(schema: Mapping[str, Any], *, required: bool) -> dict[str, Any]:
+    projected = deepcopy(dict(schema))
+    properties = dict(projected.get("properties") or {})
+    if "projectPath" not in properties:
+        return projected
+    properties["executionTarget"] = {
+        "type": "object",
+        "description": (
+            "Exact vrcforge.execution_target.v1 envelope returned by "
+            "vrcforge_bind_execution_target. Hierarchy paths are display-only "
+            "and never substitute for GlobalObjectId identity."
+        ),
+        "required": ["schema", "namespace", "scope", "project", "editor"],
+        "additionalProperties": True,
+    }
+    projected["properties"] = properties
+    if required:
+        required_fields = list(projected.get("required") or [])
+        if "executionTarget" not in required_fields:
+            required_fields.append("executionTarget")
+        projected["required"] = required_fields
+    return projected
+
+
 def canonical_unity_read_tool_input_schema(tool_name: str) -> dict[str, Any]:
     """Return the one model-facing schema shared by internal and external Agents."""
 
     name = str(tool_name or "").strip()
     registered = UNITY_READ_TOOL_INPUT_SCHEMAS.get(name)
     if isinstance(registered, Mapping):
-        return dict(registered)
+        return (
+            _with_execution_target_schema(registered, required=True)
+            if name in {"vrcforge_get_property"} or name.startswith("vrcforge_preview_")
+            else deepcopy(dict(registered))
+        )
     if name.startswith("vrcforge_preview_"):
         write_name = "vrcforge_" + name.removeprefix("vrcforge_preview_")
         paired = EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS.get(write_name)
         if isinstance(paired, Mapping):
-            return dict(paired)
+            return _with_execution_target_schema(paired, required=True)
     hinted = planner_policy.planner_tool_input_schema(name)
     if hinted:
-        return dict(hinted)
+        return (
+            _with_execution_target_schema(hinted, required=True)
+            if name in {"vrcforge_get_property"}
+            else deepcopy(dict(hinted))
+        )
     return {
         "type": "object",
         "properties": {},
@@ -1837,19 +1909,7 @@ def canonical_unity_write_tool_input_schema(tool_name: str) -> dict[str, Any]:
     # This is part of the canonical write schema, not an external-MCP-only
     # decoration. Internal and external Agents must reason over the exact same
     # namespace lock contract even though their visible Tool projections differ.
-    properties = dict(schema.get("properties") or {})
-    if "projectPath" in properties:
-        properties["executionTarget"] = {
-            "type": "object",
-            "description": (
-                "Exact vrcforge.execution_target.v1 namespace identity envelope. "
-                "Hierarchy paths are display/navigation only and are never write identity."
-            ),
-            "required": ["schema", "namespace", "scope", "project", "editor"],
-            "additionalProperties": True,
-        }
-        schema["properties"] = properties
-    return schema
+    return _with_execution_target_schema(schema, required=True)
 
 
 def bind_runtime_unity_project(
@@ -3541,6 +3601,7 @@ class AgentGateway:
         self._skill_package_write_lock_bound = skill_package_write_lock is not None
         self._skill_package_write_lock = skill_package_write_lock or nullcontext()
         self._lock = threading.RLock()
+        self._execution_target_bindings = ExecutionTargetBindingRegistry(lock=self._lock)
         # One process-owned registry backs the internal Agent and both MCP
         # protocol projections. Files live under the existing local audit
         # authority; access remains gated by the Gateway bearer boundary.
@@ -5585,7 +5646,7 @@ class AgentGateway:
         project_root = arguments.get("projectPath") or arguments.get("projectRoot")
         if not isinstance(target, Mapping):
             raise AgentGatewayError(
-                "This Unity MCP call requires arguments.projectPath and an exact executionTarget envelope; hierarchy paths alone are not write identity.",
+                "This Unity MCP call requires arguments.projectPath and the exact executionTarget returned by vrcforge_bind_execution_target. Call vrcforge_list_execution_targets, then bind one exact candidate. Hierarchy paths alone are never identity.",
                 status_code=409,
                 cause_code="execution_target_missing",
             )
@@ -5621,6 +5682,26 @@ class AgentGateway:
                 mutation_started=False,
                 committed=False,
             ) from exc
+
+    def bind_execution_target(self, target: Mapping[str, Any], *, project_root: str) -> dict[str, Any]:
+        """Mint a bounded handle only after the live Core identity verifies."""
+
+        return self._execution_target_bindings.bind(target, project_root=project_root)
+
+    def refresh_execution_target(
+        self,
+        handle: str,
+        observed_target: Mapping[str, Any],
+        *,
+        project_root: str,
+    ) -> dict[str, Any]:
+        """Refresh scene bytes while rejecting project/editor/object replacement."""
+
+        return self._execution_target_bindings.refresh(
+            handle,
+            observed_target,
+            project_root=project_root,
+        )
 
     def _guard_external_mcp_project_scope(
         self,

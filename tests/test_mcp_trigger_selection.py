@@ -405,6 +405,6 @@ def test_selection_acceptance_uses_current_core_contract_count_not_a_stale_liter
         for name in EXPECTED_TOOL_NAMES
     ]
 
-    assert EXPECTED_TOOL_COUNT == 89
+    assert EXPECTED_TOOL_COUNT == 90
     assert len(tools) == EXPECTED_TOOL_COUNT
     assert production_tool_snapshot_valid(tools) is True

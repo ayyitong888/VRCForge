@@ -1,0 +1,54 @@
+from __future__ import annotations
+
+import re
+from pathlib import Path
+
+import unity_mcp_tool_contract as contract
+
+
+ROOT = Path(__file__).resolve().parents[1]
+INSPECTOR = (ROOT / "Assets" / "VRCForge" / "Editor" / "ExecutionTargetInspector.cs").read_text(encoding="utf-8-sig")
+CORE_SERVER = (ROOT / "Assets" / "VRCForge" / "Editor" / "MCP" / "VRCForgeMcpCoreServer.cs").read_text(encoding="utf-8-sig")
+
+
+def test_execution_target_tool_is_fixed_read_only_core_contract() -> None:
+    assert contract.TOOL_CONTRACT_VERSION == "88"
+    assert contract.EXPECTED_TOOL_COUNT == 90
+    assert "vrc_get_execution_targets" in contract.EXPECTED_TOOL_NAMES
+    assert "vrc_get_execution_targets" in contract.READ_ONLY_TOOL_NAMES
+    assert "vrc_get_execution_targets" not in contract.PREVIOUS_CORE_TOOL_NAMES
+    assert '{ "vrc_get_execution_targets", "VRCForge.Editor.ExecutionTargetInspector" }' in (
+        ROOT / "Assets" / "VRCForge" / "Editor" / "MCP" / "VRCForgeMcpToolContract.cs"
+    ).read_text(encoding="utf-8-sig")
+
+
+def test_inspector_emits_complete_identity_fields_and_never_mutates_scene() -> None:
+    for field in (
+        '"vrcforge.execution_target.v1"', '"projectId"', '"unityPid"',
+        '"processStartTime"', '"coreInstanceId"', '"assetPath"',
+        '"absolutePath"', '"guid"', '"revision"', '"digest"',
+        '"globalObjectId"', '"exactHierarchyPath"', '"namespace"',
+        '"resolutionCandidateCount"', '"ambiguous"',
+        '"targets"',
+    ):
+        assert field in INSPECTOR
+    assert "GlobalObjectId.GetGlobalObjectIdSlow" in INSPECTOR
+    assert "GlobalObjectId.GlobalObjectIdentifierToObjectSlow" in INSPECTOR
+    assert "Selection.activeGameObject" not in INSPECTOR
+    assert "VRCForgeMcpCoreServer.CurrentInstanceId" in INSPECTOR
+    assert "GetField(" not in INSPECTOR
+    assert "File.GetLastWriteTimeUtc" in INSPECTOR
+    assert "SHA256.Create" in INSPECTOR
+    assert "EditorSceneManager.SaveScene" not in INSPECTOR
+    assert "SceneManager.MoveGameObjectToScene" not in INSPECTOR
+    assert "AssetDatabase.SaveAssets" not in INSPECTOR
+
+
+def test_inspector_is_discoverable_by_the_existing_editor_registry_contract() -> None:
+    declaration = re.search(
+        r'\[VRCForgeCommand\([\s\S]{0,500}?toolId:\s*"vrc_get_execution_targets"[\s\S]{0,500}?\)\]\s*public static class ExecutionTargetInspector',
+        INSPECTOR,
+    )
+    assert declaration
+    assert 'Access = VRCForgeCommandAccess.ReadOnly' in declaration.group(0)
+    assert "SnapshotExact" in CORE_SERVER
