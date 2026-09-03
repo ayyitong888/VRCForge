@@ -211,6 +211,7 @@ def _normalise_tool(tool: Mapping[str, Any]) -> JsonObject:
         "whenNotToUse", "negativeExamples", "permission", "sideEffects", "idempotency",
         "syncMode", "requiredIdentity", "requiredResources", "producedResources", "approval",
         "checkpoint", "rollback", "freshReadback", "errorModel", "catalogGeneration",
+        "definitionDigest",
     ):
         if key in tool:
             normalised[key] = tool[key]

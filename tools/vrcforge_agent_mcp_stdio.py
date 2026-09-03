@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import secrets
 import socket
 import subprocess
 import sys
@@ -762,6 +763,9 @@ def run_stdio_server(
     loaded_blocks = {"core"}
     tool_list_revision = 0
     requested_layer = {"value": exposure_layer}
+    # Opaque handles are scoped to this stdio server process, inherit the
+    # authenticated transport, and expire when any covered block unloads.
+    activation_handles: dict[str, dict[str, Any]] = {}
 
     def bridge_tool_block(item: Mapping[str, Any]) -> str:
         meta = item.get("_meta") if isinstance(item.get("_meta"), Mapping) else {}
@@ -831,9 +835,60 @@ def run_stdio_server(
                 write=False,
                 block="core",
                 exposure_layer=requested_layer["value"],
+                catalog_generation=tool_list_revision,
             )
             for item in controls
         ]
+
+    def activation_tools(requested_exposure: str) -> list[dict[str, Any]]:
+        common_schema = {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["activationHandle", "toolName", "arguments"],
+            "properties": {
+                "activationHandle": {
+                    "type": "string",
+                    "minLength": 16,
+                    "description": "Opaque handle returned by vrcforge_load_tool_block in this MCP session.",
+                },
+                "toolName": {"type": "string", "minLength": 1},
+                "arguments": {"type": "object", "additionalProperties": True},
+            },
+        }
+        tools = [
+            standardize_tool_descriptor(
+                {
+                    "name": "vrcforge_invoke_loaded_read_tool",
+                    "description": (
+                        "When to use: Invoke one exact read Tool from a block already activated in this MCP session when the host has not refreshed tools/list.\n"
+                        "When NOT to use: Do not invoke writes, unloaded blocks, guessed Tool names, or reuse a handle after unload/server restart.\n"
+                        "Negative example: Calling a material write through the read bridge after loading only the avatar block."
+                    ),
+                    "inputSchema": common_schema,
+                },
+                write=False,
+                block="core",
+                exposure_layer=requested_exposure,
+                catalog_generation=tool_list_revision,
+            )
+        ]
+        if requested_exposure == "execution":
+            tools.append(standardize_tool_descriptor(
+                {
+                    "name": "vrcforge_invoke_loaded_write_tool",
+                    "description": (
+                        "When to use: Invoke one exact supervised write Tool from a block already activated in this execution MCP session; normal approval, checkpoint, identity, and readback rules still apply.\n"
+                        "When NOT to use: Do not use during planning, for reads, unloaded blocks, guessed Tool names, or to bypass approval.\n"
+                        "Negative example: Treating an activation handle as user approval for a destructive write."
+                    ),
+                    "inputSchema": common_schema,
+                },
+                write=True,
+                block="core",
+                exposure_layer=requested_exposure,
+                catalog_generation=tool_list_revision,
+            ))
+        return tools
 
     def block_inventory(selector: Any = "") -> dict[str, Any]:
         selected_block = resolve_block_selector(selector)
@@ -1003,9 +1058,10 @@ def run_stdio_server(
                     "Negative example: Treating a reachable bridge as proof that a Unity target is bound."
                 ),
                 "inputSchema": {"type": "object", "additionalProperties": False},
-            }, write=False, block="core", exposure_layer=requested_exposure)
+            }, write=False, block="core", exposure_layer=requested_exposure, catalog_generation=tool_list_revision)
         ]
         tools.extend(block_controls())
+        tools.extend(activation_tools(requested_exposure))
         if not bridge.preflight().get("runtimeOnline"):
             return tools
         try:
@@ -1037,8 +1093,112 @@ def run_stdio_server(
                 write=bool(item.get("write")) or str((item.get("_meta") or {}).get("permission") or "").casefold() == "write",
                 block=block,
                 exposure_layer=requested_exposure,
+                catalog_generation=tool_list_revision,
             ))
         return tools
+
+    def invoke_activated_tool(arguments: Mapping[str, Any], *, write: bool) -> dict[str, Any]:
+        handle = str(arguments.get("activationHandle") or "").strip()
+        delegated_name = str(arguments.get("toolName") or "").strip()
+        delegated_arguments = arguments.get("arguments")
+        activation = activation_handles.get(handle)
+        if activation is None:
+            return external_rejection(
+                status="invalid_activation_handle",
+                error="The activation handle is unknown or expired; load the required Tool block again.",
+                error_code="external_tool_activation_handle_invalid",
+                failure_layer="external_tool_discovery",
+                failure_phase="activated_tool_invocation",
+                operation_kind="discovery",
+                details={"toolName": delegated_name},
+                catalogGeneration=tool_list_revision,
+                loadedBlocks=sorted(loaded_blocks),
+            )
+        if not isinstance(delegated_arguments, Mapping) or not delegated_name:
+            return external_rejection(
+                status="invalid_activated_tool_call",
+                error="toolName must be non-empty and arguments must be an object.",
+                error_code="external_tool_activation_call_invalid",
+                failure_layer="external_tool_discovery",
+                failure_phase="activated_tool_invocation",
+                operation_kind="discovery",
+                catalogGeneration=tool_list_revision,
+                loadedBlocks=sorted(loaded_blocks),
+            )
+        covered_blocks = set(activation.get("blocks") or ())
+        if write and activation.get("exposureLayer") != "execution":
+            return external_rejection(
+                status="planning_activation_cannot_write",
+                error="An activation handle minted in planning mode cannot invoke write Tools.",
+                error_code="external_tool_activation_planning_write_blocked",
+                failure_layer="external_tool_permission",
+                failure_phase="activated_tool_invocation",
+                operation_kind="write",
+                details={"toolName": delegated_name},
+                catalogGeneration=tool_list_revision,
+                loadedBlocks=sorted(loaded_blocks),
+            )
+        if not covered_blocks or not covered_blocks.issubset(loaded_blocks):
+            activation_handles.pop(handle, None)
+            return external_rejection(
+                status="expired_activation_handle",
+                error="A Tool block covered by the activation handle was unloaded; load it again.",
+                error_code="external_tool_activation_handle_expired",
+                failure_layer="external_tool_discovery",
+                failure_phase="activated_tool_invocation",
+                operation_kind="discovery",
+                details={"toolName": delegated_name, "blocks": sorted(covered_blocks)},
+                catalogGeneration=tool_list_revision,
+                loadedBlocks=sorted(loaded_blocks),
+            )
+        manifest = bridge.manifest("execution" if write else requested_layer["value"], sorted(covered_blocks))
+        manifest_tools = manifest.get("tools") if isinstance(manifest, Mapping) else []
+        descriptor = next(
+            (
+                item
+                for item in manifest_tools
+                if isinstance(item, Mapping)
+                and str(item.get("name") or "").strip() == delegated_name
+                and bridge_tool_block(item) in covered_blocks
+            ),
+            None,
+        )
+        if descriptor is None:
+            return external_rejection(
+                status="tool_not_activated",
+                error="The requested Tool is not in the block covered by this activation handle.",
+                error_code="external_tool_not_activated",
+                failure_layer="external_tool_discovery",
+                failure_phase="activated_tool_invocation",
+                operation_kind="discovery",
+                details={"toolName": delegated_name, "blocks": sorted(covered_blocks)},
+                catalogGeneration=tool_list_revision,
+                loadedBlocks=sorted(loaded_blocks),
+            )
+        meta = descriptor.get("_meta") if isinstance(descriptor.get("_meta"), Mapping) else {}
+        descriptor_write = bool(descriptor.get("write")) or str(meta.get("permission") or "").strip().casefold() == "write"
+        if descriptor_write != write:
+            expected = "write" if write else "read"
+            return external_rejection(
+                status="activated_tool_effect_mismatch",
+                error=f"The {expected} activation bridge cannot invoke this Tool effect.",
+                error_code="external_tool_activation_effect_mismatch",
+                failure_layer="external_tool_discovery",
+                failure_phase="activated_tool_invocation",
+                operation_kind="discovery",
+                details={"toolName": delegated_name, "requestedWrite": write},
+                catalogGeneration=tool_list_revision,
+                loadedBlocks=sorted(loaded_blocks),
+            )
+        result = bridge.call_tool(delegated_name, dict(delegated_arguments), agent_name="external-stdio-agent")
+        if not isinstance(result, Mapping):
+            return {"ok": True, "value": result, "delegatedToolName": delegated_name}
+        return {
+            **dict(result),
+            "delegatedToolName": delegated_name,
+            "activationCatalogGeneration": activation.get("catalogGeneration"),
+            "catalogGeneration": tool_list_revision,
+        }
 
     def call_tool(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         nonlocal tool_list_revision
@@ -1046,6 +1206,20 @@ def run_stdio_server(
             return bridge.preflight()
         if tool_name == "vrcforge_list_tool_blocks":
             return block_inventory(arguments.get("block"))
+        if tool_name == "vrcforge_invoke_loaded_read_tool":
+            return invoke_activated_tool(arguments, write=False)
+        if tool_name == "vrcforge_invoke_loaded_write_tool":
+            if requested_layer["value"] != "execution":
+                return external_rejection(
+                    status="write_tool_unavailable_in_planning",
+                    error="The activated write bridge is unavailable in planning mode.",
+                    error_code="external_write_tool_planning_blocked",
+                    failure_layer="external_tool_permission",
+                    failure_phase="activated_tool_invocation",
+                    operation_kind="write",
+                    catalogGeneration=tool_list_revision,
+                )
+            return invoke_activated_tool(arguments, write=True)
         if tool_name in {"vrcforge_load_tool_block", "vrcforge_unload_tool_block"}:
             selector = str(arguments.get("block") or "").strip().lower()
             block = resolve_block_selector(selector)
@@ -1083,9 +1257,12 @@ def run_stdio_server(
                     )
                 changed = any(target in loaded_blocks for target in targets)
                 loaded_blocks.difference_update(targets)
+                for handle, activation in list(activation_handles.items()):
+                    if set(activation.get("blocks") or ()).intersection(targets):
+                        activation_handles.pop(handle, None)
             if changed:
                 tool_list_revision += 1
-            return {
+            response = {
                 "ok": True,
                 "status": "loaded" if tool_name == "vrcforge_load_tool_block" else "unloaded",
                 "block": block,
@@ -1096,6 +1273,24 @@ def run_stdio_server(
                 "catalogGeneration": tool_list_revision,
                 "loadedBlocks": sorted(loaded_blocks),
             }
+            if tool_name == "vrcforge_load_tool_block":
+                handle = "vrcforge-act-" + secrets.token_urlsafe(24)
+                activation_handles[handle] = {
+                    "blocks": tuple(targets),
+                    "catalogGeneration": tool_list_revision,
+                    "exposureLayer": requested_layer["value"],
+                }
+                while len(activation_handles) > 64:
+                    activation_handles.pop(next(iter(activation_handles)))
+                response["activationHandle"] = handle
+                response["activation"] = {
+                    "handle": handle,
+                    "blocks": list(targets),
+                    "catalogGeneration": tool_list_revision,
+                    "exposureLayer": requested_layer["value"],
+                    "expiresWhen": "covered_block_unloaded_or_stdio_server_exits",
+                }
+            return response
         return bridge.call_tool(tool_name, arguments, agent_name="external-stdio-agent")
 
     def list_resources(params: Mapping[str, Any]) -> dict[str, Any]:

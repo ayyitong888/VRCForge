@@ -270,10 +270,33 @@ def test_stdio_bridge_exposes_writes_only_in_execution_layer(monkeypatch) -> Non
     assert "vrcforge_request_apply" not in execution_names
     assert "vrcforge_create_gameobject" not in planning_names
     assert "vrcforge_create_gameobject" in execution_names
+    assert "vrcforge_invoke_loaded_write_tool" not in planning_names
+    assert "vrcforge_invoke_loaded_write_tool" in execution_names
+    assert "vrcforge_invoke_loaded_read_tool" in planning_names
+    assert planning["result"]["catalogGeneration"] == execution["result"]["catalogGeneration"] == 1
     for tool in execution["result"]["tools"]:
         assert "When to use:" in tool["description"]
         assert "When NOT to use:" in tool["description"]
         assert "Negative example:" in tool["description"]
+
+    blocked_bridge_write, blocked_bridge_write_status = router.handle(
+        {
+            "jsonrpc": "2.0",
+            "id": 20,
+            "method": "tools/call",
+            "params": {
+                "_meta": meta,
+                "name": "vrcforge_invoke_loaded_write_tool",
+                "arguments": {
+                    "activationHandle": loaded["result"]["structuredContent"]["activationHandle"],
+                    "toolName": "vrcforge_create_gameobject",
+                    "arguments": {"name": "Blocked"},
+                },
+            },
+        }
+    )
+    assert blocked_bridge_write_status == 200
+    assert blocked_bridge_write["result"]["structuredContent"]["status"] == "planning_activation_cannot_write"
 
     called, called_status = router.handle(
         {
@@ -417,6 +440,8 @@ def test_stdio_bridge_loads_external_unity_tool_blocks_on_demand(monkeypatch) ->
         "vrcforge_list_tool_blocks",
         "vrcforge_load_tool_block",
         "vrcforge_unload_tool_block",
+        "vrcforge_invoke_loaded_read_tool",
+        "vrcforge_invoke_loaded_write_tool",
     }.issubset(before_names)
 
     root, root_status = router.handle(
@@ -605,6 +630,13 @@ def test_stdio_bridge_loads_external_unity_tool_blocks_on_demand(monkeypatch) ->
     )
     assert loaded_status == 200
     assert loaded["result"]["structuredContent"]["loadedBlocks"] == ["avatar", "core"]
+    assert loaded["result"]["structuredContent"]["operationId"]
+    activation_handle = loaded["result"]["structuredContent"]["activationHandle"]
+    assert activation_handle.startswith("vrcforge-act-")
+    assert loaded["result"]["structuredContent"]["catalogGeneration"] == 1
+    assert router.drain_notifications() == [
+        {"jsonrpc": "2.0", "method": "notifications/tools/list_changed"}
+    ]
 
     after, after_status = router.handle(
         {"jsonrpc": "2.0", "id": 3, "method": "tools/list", "params": {"_meta": meta}}
@@ -614,6 +646,68 @@ def test_stdio_bridge_loads_external_unity_tool_blocks_on_demand(monkeypatch) ->
     assert "vrcforge_scan_blendshapes" in after_names
     assert "vrcforge_apply_blendshapes" in after_names
     assert Bridge.calls == []
+
+    delegated_read, delegated_read_status = router.handle(
+        {
+            "jsonrpc": "2.0",
+            "id": 30,
+            "method": "tools/call",
+            "params": {
+                "_meta": meta,
+                "name": "vrcforge_invoke_loaded_read_tool",
+                "arguments": {
+                    "activationHandle": activation_handle,
+                    "toolName": "vrcforge_scan_blendshapes",
+                    "arguments": {"avatarPath": "Avatar"},
+                },
+            },
+        }
+    )
+    assert delegated_read_status == 200
+    assert delegated_read["result"]["structuredContent"]["delegatedToolName"] == "vrcforge_scan_blendshapes"
+    assert delegated_read["result"]["structuredContent"]["catalogGeneration"] == 1
+
+    mismatched, mismatched_status = router.handle(
+        {
+            "jsonrpc": "2.0",
+            "id": 31,
+            "method": "tools/call",
+            "params": {
+                "_meta": meta,
+                "name": "vrcforge_invoke_loaded_read_tool",
+                "arguments": {
+                    "activationHandle": activation_handle,
+                    "toolName": "vrcforge_apply_blendshapes",
+                    "arguments": {},
+                },
+            },
+        }
+    )
+    assert mismatched_status == 200
+    assert mismatched["result"]["structuredContent"]["status"] == "activated_tool_effect_mismatch"
+
+    delegated_write, delegated_write_status = router.handle(
+        {
+            "jsonrpc": "2.0",
+            "id": 32,
+            "method": "tools/call",
+            "params": {
+                "_meta": meta,
+                "name": "vrcforge_invoke_loaded_write_tool",
+                "arguments": {
+                    "activationHandle": activation_handle,
+                    "toolName": "vrcforge_apply_blendshapes",
+                    "arguments": {"avatarPath": "Avatar"},
+                },
+            },
+        }
+    )
+    assert delegated_write_status == 200
+    assert delegated_write["result"]["structuredContent"]["delegatedToolName"] == "vrcforge_apply_blendshapes"
+    assert Bridge.calls == [
+        ("vrcforge_scan_blendshapes", {"avatarPath": "Avatar"}),
+        ("vrcforge_apply_blendshapes", {"avatarPath": "Avatar"}),
+    ]
 
     rejected, rejected_status = router.handle(
         {
