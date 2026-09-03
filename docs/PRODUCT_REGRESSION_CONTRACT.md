@@ -1276,11 +1276,17 @@ Each item ends with its version history in this exact form:
 - Forbidden regression: no elevated finish-page launch, inherited administrator
   desktop process, advice-only "close VRCForge first" workflow, opaque file-in-
   use failure, `taskkill`, name-only or identity-drifted process termination,
-  partial activation or user-data deletion during install/upgrade.
+  partial activation or user-data deletion during install/upgrade. Restart
+  Manager interop compilation must not resolve the native NSIS plugin named
+  `System.dll` as a managed framework reference; it binds the .NET process
+  working directory to the protected, hash-verified helper directory, rejects a
+  local `System.dll` collision there, and uses only the trusted CLR core assembly
+  already loaded by the fixed system Windows PowerShell host.
 - Acceptance: release-policy tests freeze the absence of finish-page launch and
   name-only termination, the exact installed-resource registration, the bounded
   legacy path/PID/start-time fallback, verified-payload-before-shutdown order,
-  fresh lock readback and atomic failure boundary. Packaged Windows acceptance
+  fresh lock readback, the NSIS `System.dll` collision regression and the atomic
+  failure boundary. Packaged Windows acceptance
   first runs `scripts/smoke_restart_manager_shutdown.ps1` against the packaged
   desktop with an isolated profile and observes the exact desktop/backend pair
   exit with no port 8757 listener. It then launches the exact installed

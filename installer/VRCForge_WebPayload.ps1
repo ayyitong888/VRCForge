@@ -325,7 +325,21 @@ function Request-InstalledAppExit([string]$Root) {
     [object[]]$capturedTargets = @(Get-ExactInstalledProcessTargets $registeredResources)
 
     if ($null -eq ("VrcForgeInstaller.RestartManagerNative" -as [type])) {
-        Add-Type -Language CSharp -TypeDefinition @"
+        # NSIS extracts a native plugin named System.dll beside payload.zip.
+        # Windows PowerShell's Add-Type resolves default references against the
+        # current directory even when -ReferencedAssemblies is explicit, so
+        # compiling from the NSIS extraction directory aborts before shutdown
+        # with ERROR_BAD_EXE_FORMAT. Compile from the protected, hash-verified
+        # helper directory and reject a local collision there.
+        $restartManagerReferences = @([object].Assembly.Location)
+        $restartManagerCompileRoot = Assert-NoReparsePath $PSScriptRoot
+        if ([IO.File]::Exists((Join-Path $restartManagerCompileRoot "System.dll"))) {
+            Fail "The protected Restart Manager compile directory contains an unexpected System.dll."
+        }
+        $restartManagerPreviousDirectory = [Environment]::CurrentDirectory
+        [Environment]::CurrentDirectory = $restartManagerCompileRoot
+        try {
+            Add-Type -Language CSharp -ReferencedAssemblies $restartManagerReferences -TypeDefinition @"
 using System;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -353,6 +367,9 @@ namespace VrcForgeInstaller {
     }
 }
 "@
+        } finally {
+            [Environment]::CurrentDirectory = $restartManagerPreviousDirectory
+        }
     }
 
     [uint32]$sessionHandle = 0
