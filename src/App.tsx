@@ -3683,7 +3683,7 @@ export default function App() {
           onOpenSettingsSection={openSettingsSection}
           onBackFromSettings={() => setActiveView("chat")}
           onRefreshProjects={() => void refreshProjectList()}
-          onSelectProject={selectProjectByPath}
+          onSelectProject={newConversationForProject}
           onToggleProjectCollapse={toggleProjectCollapse}
           onProjectMenu={(projectPath, event) => {
             event.preventDefault();
