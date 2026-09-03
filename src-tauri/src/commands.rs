@@ -1609,17 +1609,20 @@ pub fn save_project_prefs(
 }
 
 #[tauri::command]
-pub fn scan_project_index(
+pub async fn scan_project_index(
     request: DesktopProjectIndexScanRequest,
 ) -> Result<serde_json::Value, String> {
     let body = project_index_scan_body(&request);
-    backend_json_request(
-        "POST",
-        "/api/app/project-index/scan".to_string(),
-        Some(body),
-        request.timeout_ms.or(Some(120_000)),
-    )
-    .map(sanitize_webview_response)
+    blocking_backend_json_request(move || {
+        backend_json_request(
+            "POST",
+            "/api/app/project-index/scan".to_string(),
+            Some(body),
+            request.timeout_ms.or(Some(120_000)),
+        )
+        .map(sanitize_webview_response)
+    })
+    .await
 }
 
 #[cfg(test)]

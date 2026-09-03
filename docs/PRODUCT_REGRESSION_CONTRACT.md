@@ -990,6 +990,24 @@ Each item ends with its version history in this exact form:
 - Acceptance: cancellation race, queue ownership, restart and ledger tests.
 - [首次实现: 1.5.0] [强化/修复: 1.5.1] [最近验证: 1.5.1]
 
+### LAT-003 — Restored-project background work keeps the desktop responsive
+
+- Priority: P1.
+- Contract: startup may restore the last authoritative Unity project and may
+  schedule its project-index scan after the first usable paint. Every
+  filesystem scan and backend request triggered by that restoration runs off
+  the Tauri event loop. While the scan is pending, the native title bar stays
+  movable and the WebView stays responsive; the completed result is applied
+  only to the same still-active project.
+- Forbidden regression: no synchronous Tauri command may wait for the restored
+  project's index scan, no modal startup layer may capture the drag region, and
+  no stale scan result may replace a newly selected project's index.
+- Acceptance: `tests/test_tauri_project_scan_responsiveness.py` freezes the
+  async blocking-worker boundary; Rust project-index transport tests and a
+  packaged Windows launch with a real restored Unity project verify that the
+  scan may remain busy without freezing title-bar movement.
+- [首次实现: 1.8.0] [最近验证: 源码与打包构建；真实窗口拖动待用户复测]
+
 ## Package, persistence and compatibility contracts
 
 ### PKG-001 — Self-contained Unity package
