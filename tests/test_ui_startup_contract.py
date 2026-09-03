@@ -395,6 +395,8 @@ def test_startup_latency_probe_is_manifest_bound_profile_isolated_and_providerle
     assert 'args.includes("--startup-only")' in source
     assert 'args.includes("--allow-unpushed")' in source
     assert 'args.indexOf("--profile-root")' in source
+    assert 'if (!selfTest && !explicitProfileRoot)' in source
+    assert "production chat and runtime stores must never be used as probe state" in source
     assert 'args.indexOf("--sample")' in source
     assert 'relative(startupProfilesRoot, profileRoot)' in source
     assert 'profileRelative.startsWith("..") || isAbsolute(profileRelative)' in source
@@ -410,6 +412,8 @@ def test_startup_latency_probe_is_manifest_bound_profile_isolated_and_providerle
     assert "portableSha256 !== String(portable.sha256).toLowerCase()" in source
     assert "ExtractToDirectory" in source
     assert "startupLaunchEnvironment()" in source
+    assert "env: startupLaunchEnvironment()" in source
+    assert "...process.env," not in source[source.index("const child = spawn(exe"):source.index("trackedChild = child")]
     for key in (
         "VRCFORGE_USER_DATA_DIR",
         "VRCFORGE_CONFIG_DIR",

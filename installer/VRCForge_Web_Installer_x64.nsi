@@ -74,8 +74,10 @@ BrandingText "VRCForge ${VERSION}"
 !define MUI_ABORTWARNING
 !define MUI_WELCOMEPAGE_TITLE "$(WelcomeTitle)"
 !define MUI_WELCOMEPAGE_TEXT "$(WelcomeText)"
-!define MUI_FINISHPAGE_RUN "$INSTDIR\VRCForge.exe"
-!define MUI_FINISHPAGE_RUN_TEXT "$(RunText)"
+; This installer is elevated. Do not launch the desktop app from the finish
+; page because it would inherit administrator integrity and break normal
+; desktop drag/drop and automation boundaries. The installed shortcuts launch
+; VRCForge at the interactive user's normal integrity level.
 
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_LICENSE "..\LICENSE"
@@ -104,14 +106,10 @@ LangString WelcomeTitle ${LANG_SIMPCHINESE} "欢迎安装 VRCForge ${VERSION}（
 LangString WelcomeTitle ${LANG_TRADCHINESE} "歡迎安裝 VRCForge ${VERSION}（線上安裝）"
 LangString WelcomeTitle ${LANG_JAPANESE} "VRCForge ${VERSION} Web セットアップへようこそ"
 LangString WelcomeTitle ${LANG_ENGLISH} "Welcome to VRCForge ${VERSION} Web Setup"
-LangString WelcomeText ${LANG_SIMPCHINESE} "VRCForge 是面向 VRChat 创作者的本地 AI 工作台。$\r$\n$\r$\n本安装器体积较小，将在安装过程中联网下载完整组件，请保持网络畅通。$\r$\n$\r$\n点击「下一步」继续。"
-LangString WelcomeText ${LANG_TRADCHINESE} "VRCForge 是為 VRChat 創作者打造的本機 AI 工作台。$\r$\n$\r$\n本安裝程式體積較小，將在安裝過程中連線下載完整元件，請保持網路暢通。$\r$\n$\r$\n點選「下一步」繼續。"
-LangString WelcomeText ${LANG_JAPANESE} "VRCForge は VRChat クリエイター向けのローカル AI ワークベンチです。$\r$\n$\r$\nこれは小さな Web インストーラーです。インストール中に完全なコンポーネントをダウンロードするため、ネットワーク接続を維持してください。$\r$\n$\r$\n「次へ」をクリックして続行してください。"
-LangString WelcomeText ${LANG_ENGLISH} "VRCForge is a local AI workbench for VRChat creators.$\r$\n$\r$\nThis is a small web installer: it downloads the full payload during installation, so please stay online.$\r$\n$\r$\nClick Next to continue."
-LangString RunText ${LANG_SIMPCHINESE} "安装完成后启动 VRCForge"
-LangString RunText ${LANG_TRADCHINESE} "安裝完成後啟動 VRCForge"
-LangString RunText ${LANG_JAPANESE} "インストール完了後に VRCForge を起動する"
-LangString RunText ${LANG_ENGLISH} "Launch VRCForge after install"
+LangString WelcomeText ${LANG_SIMPCHINESE} "VRCForge 是面向 VRChat 创作者的本地 AI 工作台。$\r$\n$\r$\n本安装器将联网下载完整组件；替换程序文件前会正常退出已安装的 VRCForge，请保持网络畅通并先保存正在编辑的内容。$\r$\n$\r$\n点击「下一步」继续。"
+LangString WelcomeText ${LANG_TRADCHINESE} "VRCForge 是為 VRChat 創作者打造的本機 AI 工作台。$\r$\n$\r$\n本安裝程式將連線下載完整元件；替換程式檔案前會正常結束已安裝的 VRCForge，請保持網路暢通並先儲存正在編輯的內容。$\r$\n$\r$\n點選「下一步」繼續。"
+LangString WelcomeText ${LANG_JAPANESE} "VRCForge は VRChat クリエイター向けのローカル AI ワークベンチです。$\r$\n$\r$\n完全なコンポーネントをダウンロードし、プログラムファイルを置き換える前にインストール済みの VRCForge を正常終了します。接続を維持し、編集中の内容を先に保存してください。$\r$\n$\r$\n「次へ」をクリックして続行してください。"
+LangString WelcomeText ${LANG_ENGLISH} "VRCForge is a local AI workbench for VRChat creators.$\r$\n$\r$\nSetup downloads the full payload and closes the installed VRCForge normally before replacing program files; stay online and save any work in progress first.$\r$\n$\r$\nClick Next to continue."
 LangString UninstallShortcutName ${LANG_SIMPCHINESE} "卸载 VRCForge.lnk"
 LangString UninstallShortcutName ${LANG_TRADCHINESE} "解除安裝 VRCForge.lnk"
 LangString UninstallShortcutName ${LANG_JAPANESE} "VRCForge をアンインストール.lnk"
@@ -140,6 +138,14 @@ LangString ClearingUserDataText ${LANG_SIMPCHINESE} "正在清除 VRCForge 用�
 LangString ClearingUserDataText ${LANG_TRADCHINESE} "正在清除 VRCForge 使用者資料與已知專案的歷史對話..."
 LangString ClearingUserDataText ${LANG_JAPANESE} "VRCForge のユーザーデータと既知プロジェクトのチャット履歴を削除しています..."
 LangString ClearingUserDataText ${LANG_ENGLISH} "Clearing VRCForge user data and known project chat history..."
+LangString ClosingRunningAppText ${LANG_SIMPCHINESE} "正在正常退出已安装的 VRCForge，以便安全更新..."
+LangString ClosingRunningAppText ${LANG_TRADCHINESE} "正在正常結束已安裝的 VRCForge，以便安全更新..."
+LangString ClosingRunningAppText ${LANG_JAPANESE} "安全に更新するため、インストール済みの VRCForge を正常終了しています..."
+LangString ClosingRunningAppText ${LANG_ENGLISH} "Closing the installed VRCForge normally for a safe update..."
+LangString ActivationFailedText ${LANG_SIMPCHINESE} "无法正常退出正在运行的 VRCForge，或无法安全激活新版本。原安装保持不变；请手动退出 VRCForge 后重试。"
+LangString ActivationFailedText ${LANG_TRADCHINESE} "無法正常結束正在執行的 VRCForge，或無法安全啟用新版本。原安裝保持不變；請手動結束 VRCForge 後重試。"
+LangString ActivationFailedText ${LANG_JAPANESE} "実行中の VRCForge を正常終了できないか、新しいバージョンを安全に有効化できませんでした。以前のインストールは保持されています。VRCForge を手動で終了して再試行してください。"
+LangString ActivationFailedText ${LANG_ENGLISH} "The running VRCForge could not close normally, or the new version could not be activated safely. The prior installation was preserved; close VRCForge manually and retry."
 LangString DownloadingText ${LANG_SIMPCHINESE} "正在下载 VRCForge Windows x64 组件..."
 LangString DownloadingText ${LANG_TRADCHINESE} "正在下載 VRCForge Windows x64 元件..."
 LangString DownloadingText ${LANG_JAPANESE} "VRCForge Windows x64 ペイロードをダウンロードしています..."
@@ -329,6 +335,7 @@ Section "Install"
   DetailPrint "$(ExtractingText)"
   StrCpy $HelperSourcePath "$PLUGINSDIR\VRCForge_WebPayload.ps1"
   StrCpy $HelperStatePath "$HelperSourcePath"
+  DetailPrint "$(ClosingRunningAppText)"
   Call PrepareProtectedHelper
   ${If} $0 == 0
     nsExec::ExecToLog '"$TrustedPowerShellPath" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File "$HelperPayloadPath\VRCForge_WebPayload.ps1" -Action Extract -Version "${VERSION}" -ProgramFilesRoot "$PROGRAMFILES64" -PayloadUrl "${DOWNLOAD_URL}" -ExpectedSha256 "${PAYLOAD_SHA256}" -ExpectedLength "${PAYLOAD_LENGTH}" -StageRoot "$PayloadStageRoot" -DestinationRoot "$INSTDIR" -ExpectedInstallLeaf "${INSTALL_LEAF}" -StateTag "${STATE_TAG}"'
@@ -338,7 +345,7 @@ Section "Install"
     Pop $0
   ${EndIf}
   ${If} $0 != 0
-    MessageBox MB_ICONSTOP "$(ExtractFailedText)"
+    MessageBox MB_ICONSTOP "$(ActivationFailedText)"
     Abort
   ${EndIf}
   StrCpy $UserDataRoot "$LOCALAPPDATA\${USER_DATA_RELATIVE}"

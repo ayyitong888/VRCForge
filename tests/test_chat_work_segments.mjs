@@ -87,4 +87,19 @@ const directAnswer = buildTimelinePresentation([
   { id: "answer-only", sequence: 0, timestamp: "2026-08-14T00:00:09.000Z", kind: "assistant", payload: { summary: "short answer" } },
 ], 0.2);
 assert.equal(directAnswer.elapsedSeconds, undefined, "a direct answer must not add a noisy Handled in 0s marker");
+
+const completedTransportTimeline = buildTimelinePresentation([
+  { id: "phase-preparing", sequence: 0, timestamp: "2026-08-14T00:00:00.000Z", kind: "phase", payload: { phase: "preparing", label: "preparing" } },
+  { id: "phase-waiting", sequence: 1, timestamp: "2026-08-14T00:00:01.000Z", kind: "phase", payload: { phase: "waiting_for_model", label: "waiting for model" } },
+  { id: "phase-receiving", sequence: 2, timestamp: "2026-08-14T00:00:02.000Z", kind: "phase", payload: { phase: "receiving_response", label: "receiving response" } },
+  { id: "phase-verifying", sequence: 3, timestamp: "2026-08-14T00:00:03.000Z", kind: "phase", payload: { phase: "verifying", label: "verifying" } },
+  { id: "phase-answer", sequence: 4, timestamp: "2026-08-14T00:00:04.000Z", kind: "assistant", payload: { summary: "clean final answer", status: "done" } },
+], 12);
+assert.deepEqual(
+  completedTransportTimeline.entries.map((entry) => entry.type),
+  ["assistant"],
+  "completed transport phases stay out of the durable Agent dialogue",
+);
+assert.equal(completedTransportTimeline.entries[0].text, "clean final answer");
+assert.equal(completedTransportTimeline.elapsedSeconds, undefined, "transport phases alone are not a work segment");
 console.log("chat work segments contract: ok");

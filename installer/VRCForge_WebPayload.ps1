@@ -250,6 +250,84 @@ function Assert-InstallNotRunning([string]$Root) {
     }
 }
 
+function Request-InstalledAppExit([string]$Root) {
+    $root = Assert-SafeProgramFilesDestination $Root
+    if (-not [IO.Directory]::Exists($root)) { return }
+    Assert-NoReparseTree $root
+
+    $resources = New-Object 'Collections.Generic.List[string]'
+    foreach ($path in @(
+        (Join-Path $root "VRCForge.exe"),
+        (Join-Path $root "backend\vrcforge_backend.exe")
+    )) {
+        $path = Assert-ContainedPath $root $path
+        if ([IO.File]::Exists($path)) {
+            Assert-NoReparsePath $path | Out-Null
+            $resources.Add($path)
+        }
+    }
+    if ($resources.Count -eq 0) { return }
+
+    if ($null -eq ("VrcForgeInstaller.RestartManagerNative" -as [type])) {
+        Add-Type -Language CSharp -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+
+namespace VrcForgeInstaller {
+    public static class RestartManagerNative {
+        [DllImport("rstrtmgr.dll", CharSet = CharSet.Unicode)]
+        public static extern int RmStartSession(out uint sessionHandle, uint sessionFlags, StringBuilder sessionKey);
+
+        [DllImport("rstrtmgr.dll", CharSet = CharSet.Unicode)]
+        public static extern int RmRegisterResources(
+            uint sessionHandle,
+            uint fileCount,
+            string[] fileNames,
+            uint applicationCount,
+            IntPtr applications,
+            uint serviceCount,
+            string[] serviceNames);
+
+        [DllImport("rstrtmgr.dll")]
+        public static extern int RmShutdown(uint sessionHandle, uint actionFlags, IntPtr statusCallback);
+
+        [DllImport("rstrtmgr.dll")]
+        public static extern int RmEndSession(uint sessionHandle);
+    }
+}
+"@
+    }
+
+    [uint32]$sessionHandle = 0
+    $sessionKey = New-Object Text.StringBuilder 33
+    [void]$sessionKey.Append([Guid]::NewGuid().ToString("N"))
+    $result = [VrcForgeInstaller.RestartManagerNative]::RmStartSession([ref]$sessionHandle, 0, $sessionKey)
+    if ($result -ne 0) { Fail "Windows Restart Manager could not start a bounded shutdown session (error $result)." }
+    try {
+        [string[]]$registeredResources = $resources.ToArray()
+        $result = [VrcForgeInstaller.RestartManagerNative]::RmRegisterResources(
+            $sessionHandle,
+            [uint32]$registeredResources.Length,
+            $registeredResources,
+            0,
+            [IntPtr]::Zero,
+            0,
+            $null)
+        if ($result -ne 0) { Fail "Windows Restart Manager rejected the installed VRCForge resource set (error $result)." }
+
+        # Zero flags requests normal application shutdown only. Never broaden
+        # this installer path to forced termination or process-name matching.
+        $result = [VrcForgeInstaller.RestartManagerNative]::RmShutdown(
+            $sessionHandle,
+            0,
+            [IntPtr]::Zero)
+        if ($result -ne 0) { Fail "The running installed VRCForge could not close normally (error $result)." }
+    } finally {
+        [void][VrcForgeInstaller.RestartManagerNative]::RmEndSession($sessionHandle)
+    }
+}
+
 function New-PrivateStageDirectory([string]$Path) {
     $acl = New-Object System.Security.AccessControl.DirectorySecurity
     $acl.SetAccessRuleProtection($true, $false)
@@ -492,7 +570,6 @@ function Invoke-Prepare {
 function Invoke-ValidateDestination {
     if ([string]::IsNullOrWhiteSpace($DestinationRoot)) { Fail "ValidateDestination requires DestinationRoot." }
     $destination = Assert-SafeProgramFilesDestination $DestinationRoot
-    Assert-InstallNotRunning $destination
     [pscustomobject]@{ schema = $script:StateSchema; validatedDestination = $destination; version = $Version } | ConvertTo-Json -Compress
 }
 
@@ -520,7 +597,6 @@ function Invoke-Extract {
         # passed length, digest, and layout checks and a complete new payload is
         # extracted in a same-volume Program Files sibling.
         $destination = Assert-SafeProgramFilesDestination $DestinationRoot
-        Assert-InstallNotRunning $destination
         $installStage = Get-InstallSiblingPath "Stage"
         New-InstallSiblingDirectory $installStage "Stage"
         $archive = New-Object IO.Compression.ZipArchive($stream, [IO.Compression.ZipArchiveMode]::Read, $true)
@@ -549,6 +625,12 @@ function Invoke-Extract {
             }
         } finally { $archive.Dispose() }
         Assert-InstalledPayload $installStage
+
+        # Keep the current app usable while a web payload downloads and while
+        # either installer verifies/extracts its replacement. Request a normal,
+        # exact-resource shutdown only immediately before atomic activation.
+        Request-InstalledAppExit $destination
+        Assert-InstallNotRunning $destination
 
         if ([IO.Directory]::Exists($destination)) {
             $backup = Get-InstallSiblingPath "Backup"

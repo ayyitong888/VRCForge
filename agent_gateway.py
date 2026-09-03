@@ -9903,7 +9903,7 @@ def create_agent_mcp_app(
         list_tools,
         call_tool,
         server_name="VRCForge Agent Gateway",
-        server_version="1.7.10",
+        server_version="1.8.0",
         tool_name_resolver=gateway.resolve_external_mcp_tool_name,
         resource_list=gateway.list_mcp_resources,
         resource_templates=gateway.list_mcp_resource_templates,

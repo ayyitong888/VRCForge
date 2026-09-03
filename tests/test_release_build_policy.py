@@ -84,6 +84,18 @@ def test_release_payload_keeps_external_stdio_protocol_dependencies_and_smokes_i
         '(Join-Path $payloadRoot "external_tool_result_contract.py") -Force'
     ) in source
     assert (
+        'Copy-Item -LiteralPath .\\operation_context.py -Destination '
+        '(Join-Path $payloadRoot "operation_context.py") -Force'
+    ) in source
+    assert (
+        'Copy-Item -LiteralPath .\\execution_target.py -Destination '
+        '(Join-Path $payloadRoot "execution_target.py") -Force'
+    ) in source
+    assert (
+        'Copy-Item -LiteralPath .\\mcp_tool_descriptor.py -Destination '
+        '(Join-Path $payloadRoot "mcp_tool_descriptor.py") -Force'
+    ) in source
+    assert (
         'Copy-Item -LiteralPath .\\avatar_composition_workflow_skills.py -Destination '
         '(Join-Path $payloadRoot "avatar_composition_workflow_skills.py") -Force'
     ) in source
@@ -341,6 +353,42 @@ def test_installers_bind_shortcuts_to_the_installed_icon_and_working_directory()
         assert 'SetOutPath "$INSTDIR"' in shortcut_block
         for expected in expected_shortcuts:
             assert expected in shortcut_block
+
+
+def test_elevated_installers_never_launch_the_desktop_app_from_the_finish_page() -> None:
+    for name in ("VRCForge_Offline_Installer_x64.nsi", "VRCForge_Web_Installer_x64.nsi"):
+        source = (REPO_ROOT / "installer" / name).read_text(encoding="utf-8")
+
+        assert "RequestExecutionLevel admin" in source
+        assert "MUI_FINISHPAGE_RUN" not in source
+        assert "LangString RunText" not in source
+        assert "would inherit administrator integrity" in source
+
+
+def test_installers_gracefully_close_only_the_installed_app_before_atomic_activation() -> None:
+    helper = (REPO_ROOT / "installer" / "VRCForge_WebPayload.ps1").read_text(encoding="utf-8")
+    extract = helper[helper.index("function Invoke-Extract") :]
+
+    assert "function Request-InstalledAppExit" in helper
+    assert '[VrcForgeInstaller.RestartManagerNative]::RmStartSession' in helper
+    assert '[VrcForgeInstaller.RestartManagerNative]::RmRegisterResources' in helper
+    assert '[VrcForgeInstaller.RestartManagerNative]::RmShutdown' in helper
+    assert "RmForceShutdown" not in helper
+    assert 'Join-Path $root "VRCForge.exe"' in helper
+    assert 'Join-Path $root "backend\\vrcforge_backend.exe"' in helper
+    assert extract.index("Assert-InstalledPayload $installStage") < extract.index(
+        "Request-InstalledAppExit $destination"
+    )
+    assert extract.index("Request-InstalledAppExit $destination") < extract.index(
+        "Assert-InstallNotRunning $destination"
+    )
+
+    for name in ("VRCForge_Offline_Installer_x64.nsi", "VRCForge_Web_Installer_x64.nsi"):
+        installer = (REPO_ROOT / "installer" / name).read_text(encoding="utf-8")
+        assert "$(ClosingRunningAppText)" in installer
+        assert "$(ActivationFailedText)" in installer
+        assert "Please close any running VRCForge instance first" not in installer
+        assert "taskkill" not in installer
 
 
 def test_payload_helper_accepts_only_the_exact_compiled_scope_identity() -> None:

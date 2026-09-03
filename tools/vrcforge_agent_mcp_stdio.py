@@ -586,7 +586,7 @@ class VRCForgeBridge:
             "io.modelcontextprotocol/clientCapabilities": {},
             "io.modelcontextprotocol/clientInfo": {
                 "name": "vrcforge-agent-stdio-bridge",
-                "version": "1.7.10",
+                "version": "1.8.0",
             },
         }
         payload = {
@@ -1144,7 +1144,7 @@ def run_stdio_server(
         lambda: list_tools({"exposureLayer": requested_layer["value"]}),
         call_tool,
         server_name=DEFAULT_SERVER_NAME,
-        server_version="1.7.10",
+        server_version="1.8.0",
         tool_list_revision=lambda: tool_list_revision,
         tool_call_catalogue=lambda: list_tools({"exposureLayer": requested_layer["value"]}),
         resource_list=list_resources,
@@ -1163,7 +1163,7 @@ def run_stdio_server(
         list_tools,
         call_tool,
         server_name=DEFAULT_SERVER_NAME,
-        server_version="1.7.10",
+        server_version="1.8.0",
         tool_list_revision=lambda: tool_list_revision,
         tool_call_catalogue=lambda _params: list_tools({"exposureLayer": requested_layer["value"]}),
         resource_list=list_resources,

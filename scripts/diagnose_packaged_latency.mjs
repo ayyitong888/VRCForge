@@ -14,8 +14,8 @@ const profileRootIndex = args.indexOf("--profile-root");
 const sampleIndex = args.indexOf("--sample");
 const explicitProfileRoot = profileRootIndex >= 0 ? String(args[profileRootIndex + 1] || "").trim() : "";
 const startupSample = sampleIndex >= 0 ? String(args[sampleIndex + 1] || "").trim().toLowerCase() : "";
-if (startupOnly && !explicitProfileRoot) {
-  throw new Error("--startup-only requires --profile-root <isolated-path> so cold and warm runs can be bound explicitly.");
+if (!selfTest && !explicitProfileRoot) {
+  throw new Error("Packaged latency probes require --profile-root <isolated-path>; production chat and runtime stores must never be used as probe state.");
 }
 if (startupOnly && !["cold", "warm"].includes(startupSample)) {
   throw new Error("--startup-only requires --sample cold or --sample warm.");
@@ -760,9 +760,7 @@ let gracefulQuitAttempted = false;
 async function main() {
   await mkdir(dirname(outPath), { recursive: true });
   const releaseBinding = startupOnly ? await prepareStartupPackage() : null;
-  const profileExistedBefore = startupOnly
-    ? (await runPowerShell(`if (Test-Path -LiteralPath '${escapePowerShellLiteral(profileRoot)}') { 'true' } else { 'false' }`)) === "true"
-    : null;
+  const profileExistedBefore = (await runPowerShell(`if (Test-Path -LiteralPath '${escapePowerShellLiteral(profileRoot)}') { 'true' } else { 'false' }`)) === "true";
   let startupPairMarker = null;
   if (startupOnly) {
     if (startupSample === "cold" && profileExistedBefore) {
@@ -774,25 +772,20 @@ async function main() {
     if (startupSample === "warm") {
       startupPairMarker = await requireWarmStartupPairMarker(releaseBinding);
     }
-    await Promise.all([
-      mkdir(configRoot, { recursive: true }),
-      mkdir(resolve(userDataRoot, "logs"), { recursive: true }),
-      mkdir(resolve(userDataRoot, "artifacts"), { recursive: true }),
-      mkdir(hostProfileRoot, { recursive: true }),
-      mkdir(webviewDataRoot, { recursive: true }),
-    ]);
   }
+  await Promise.all([
+    mkdir(configRoot, { recursive: true }),
+    mkdir(resolve(userDataRoot, "logs"), { recursive: true }),
+    mkdir(resolve(userDataRoot, "artifacts"), { recursive: true }),
+    mkdir(hostProfileRoot, { recursive: true }),
+    mkdir(webviewDataRoot, { recursive: true }),
+  ]);
   const beforeLaunch = await assertProbePreflightClear();
   const launchedAt = Date.now();
   const child = spawn(exe, [], {
     detached: startupOnly ? false : !closeOnComplete,
     stdio: "ignore",
-    env: startupOnly
-      ? startupLaunchEnvironment()
-      : {
-          ...process.env,
-          WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${port} --remote-allow-origins=*`,
-        },
+    env: startupLaunchEnvironment(),
   });
   trackedChild = child;
   trackedLaunchIdentity = await captureLaunchIdentity(child.pid);

@@ -557,7 +557,9 @@ Each item ends with its version history in this exact form:
   later occurrence's result for an earlier repeated action,
   append delayed Sub Agent terminal cards at discovery time, attach tool JSON
   to copied prose, display a known Runtime failure as completed prose, expose
-  the raw terminal body, or erase the timeline on acknowledged cancellation.
+  the raw terminal body, replay transport-only `preparing`, `waiting for model`,
+  `receiving response` or `verifying` phases as durable Agent dialogue after a
+  completed/restored turn, or erase the timeline on acknowledged cancellation.
 - Acceptance: backend sequence/timestamp/sanitization tests and frontend
   materialization/fallback/copy/no-duplicate-lifecycle, Runtime-terminal and
   durable-Stop tests are automatic gates. A result longer than 1000 characters
@@ -1232,6 +1234,36 @@ Each item ends with its version history in this exact form:
   Packaged acceptance covers newer, current and offline startup states without
   delaying first usable paint, plus all three explicit tray results.
 - [首次实现: 1.6.2] [强化/修复: 1.7.4] [最近验证: 1.7.4]
+
+### REL-005 — Installer and desktop process lifecycle
+
+- Priority: P1.
+- Contract: offline and web installers are elevated only for their bounded
+  Program Files mutation. They never launch `VRCForge.exe` from the elevated
+  finish page; desktop and Start-menu shortcuts remain the normal-integrity
+  launch boundary so the installed window keeps ordinary drag/drop, title-bar
+  movement and desktop automation behavior.
+- Contract: after the replacement payload has been staged and verified, an
+  install or upgrade registers only the exact existing
+  `$INSTDIR\VRCForge.exe` and
+  `$INSTDIR\backend\vrcforge_backend.exe` resources with Windows Restart
+  Manager and requests a graceful shutdown. The installer then performs a fresh
+  no-sharing file check before atomic activation. If either binary remains in
+  use, installation stops with a clear error while preserving the complete old
+  installation; it never continues a partial overwrite, kills by broad process
+  name, uses forced termination, or closes a portable/other-directory instance.
+- Forbidden regression: no elevated finish-page launch, inherited administrator
+  desktop process, advice-only "close VRCForge first" workflow, opaque file-in-
+  use failure, `taskkill`, forced process termination, path-unbound shutdown,
+  partial activation or user-data deletion during install/upgrade.
+- Acceptance: release-policy tests freeze the absence of finish-page launch and
+  forced/name-only termination, the exact installed-resource registration,
+  verified-payload-before-shutdown order, fresh lock readback and atomic failure
+  boundary. Packaged Windows acceptance launches the exact installed candidate,
+  runs the matching installer, observes graceful desktop/backend exit, completes
+  upgrade, starts the new version from a normal shortcut, and confirms preserved
+  settings, chats, checkpoints and project history.
+- [首次实现: 1.8.0] [最近验证: 源码测试；真实安装升级待重新验收]
 
 ## Change procedure
 

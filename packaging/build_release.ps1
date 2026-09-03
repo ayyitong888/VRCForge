@@ -882,6 +882,9 @@ try {
     Copy-Item -LiteralPath .\agent_mcp_standard.py -Destination (Join-Path $payloadRoot "agent_mcp_standard.py") -Force
     Copy-Item -LiteralPath .\agent_tool_result_contract.py -Destination (Join-Path $payloadRoot "agent_tool_result_contract.py") -Force
     Copy-Item -LiteralPath .\external_tool_result_contract.py -Destination (Join-Path $payloadRoot "external_tool_result_contract.py") -Force
+    Copy-Item -LiteralPath .\operation_context.py -Destination (Join-Path $payloadRoot "operation_context.py") -Force
+    Copy-Item -LiteralPath .\execution_target.py -Destination (Join-Path $payloadRoot "execution_target.py") -Force
+    Copy-Item -LiteralPath .\mcp_tool_descriptor.py -Destination (Join-Path $payloadRoot "mcp_tool_descriptor.py") -Force
     Copy-Item -LiteralPath .\avatar_composition_workflow_skills.py -Destination (Join-Path $payloadRoot "avatar_composition_workflow_skills.py") -Force
     & $pythonExe (Join-Path $payloadRoot "tools\vrcforge_agent_mcp_stdio.py") --help | Out-Null
     if ($LASTEXITCODE -ne 0) {

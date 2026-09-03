@@ -216,7 +216,10 @@ function materializeInvocations(events: ChatTimelineEvent[]): TimelineInvocation
   const openToolCalls = new Map<string, number[]>();
   const openSubagents = new Map<string, number>();
   for (const event of events) {
-    if (event.kind === "assistant") continue;
+    // Transport lifecycle phases belong to the single live status row. Once a
+    // turn is durable they are neither Agent commentary nor user-meaningful
+    // work, so do not replay them as four plain-text conversation messages.
+    if (event.kind === "assistant" || event.kind === "phase") continue;
     const identity = invocationIdentity(event);
 
     if (event.kind === "tool_call") {
