@@ -407,9 +407,7 @@ def test_internal_schema_preserves_patterns_and_fx_delete_parameter_branch() -> 
     canonical = canonical_unity_write_tool_input_schema("vrcforge_manage_fx_animator")
     internal = bounded_planner_tool_schema(canonical)
     assert "executionTarget" in internal["properties"]
-    preview_comparable = deepcopy(canonical)
-    preview_comparable["properties"].pop("executionTarget")
-    assert bounded_planner_tool_schema(preview_comparable) == bounded_planner_tool_schema(
+    assert bounded_planner_tool_schema(canonical) == bounded_planner_tool_schema(
         canonical_unity_read_tool_input_schema("vrcforge_preview_manage_fx_animator")
     )
     assert validate_planner_tool_arguments(
@@ -418,5 +416,16 @@ def test_internal_schema_preserves_patterns_and_fx_delete_parameter_branch() -> 
     )["ok"] is False
     assert validate_planner_tool_arguments(
         internal,
-        {"projectPath": "P", "action": "delete_parameter", "parameterName": "Unused"},
+        {
+            "projectPath": "P",
+            "action": "delete_parameter",
+            "parameterName": "Unused",
+            "executionTarget": {
+                "schema": "vrcforge.execution_target.v1",
+                "namespace": "fixture",
+                "scope": "avatar",
+                "project": {},
+                "editor": {},
+            },
+        },
     )["ok"] is True

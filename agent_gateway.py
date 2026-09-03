@@ -358,6 +358,7 @@ class AgentWriteHandler:
     verification_profile: str = ""
     verification_prepare_handler: CompletionVerificationPrepareHandler | None = None
     verification_finalize_handler: CompletionVerificationFinalizeHandler | None = None
+    fresh_readback_required: bool = False
     requires_approved_execution_context: bool = False
     approved_execution_plan_builder: ApprovedUnityExecutionPlanBuilder | None = None
     # A category may be remembered only when the handler opts in.  This keeps
@@ -5243,7 +5244,7 @@ class AgentGateway:
         exposure_layer: str = EXPOSURE_LAYER_EXECUTION,
     ) -> dict[str, Any]:
         risk_level = normalize_risk_level(handler.risk_level)
-        return standardize_tool_descriptor({
+        descriptor = standardize_tool_descriptor({
             "name": handler.name,
             "title": handler.name.replace("vrcforge_", "").replace("_", " ").title(),
             "description": tool_usage_description(
@@ -5269,6 +5270,15 @@ class AgentGateway:
                 ),
             },
         }, write=True, block=block, exposure_layer=exposure_layer)
+        fresh_readback = {
+            "required": bool(handler.fresh_readback_required),
+            "mustUseExactTarget": bool(handler.requires_approved_execution_context),
+        }
+        descriptor["freshReadback"] = fresh_readback
+        metadata = dict(descriptor.get("_meta") or {})
+        metadata["freshReadback"] = fresh_readback
+        descriptor["_meta"] = metadata
+        return descriptor
 
     def build_tool_registry(
         self,
@@ -5844,6 +5854,16 @@ class AgentGateway:
                 "write_preparation",
                 exc,
             )
+        prepared = dict(prepared)
+        prepared["toolDefinitionDigest"] = str(
+            self.shared_agent_tool_descriptor(
+                name,
+                write=True,
+                config=config,
+                exposure_layer=EXPOSURE_LAYER_EXECUTION,
+            ).get("definitionDigest")
+            or ""
+        )
         prepared_target = ensure_dict(prepared.get("arguments")).get("executionTarget")
         if execution_target is not None and (
             not isinstance(prepared_target, Mapping)
@@ -5911,11 +5931,30 @@ class AgentGateway:
         ttl_seconds = max(30, min(int(config.approval_timeout_seconds or 600), 900))
         expires_at = now + timedelta(seconds=ttl_seconds)
         operation_id = f"mcpop_{now.strftime('%Y%m%d_%H%M%S_%f')}_{secrets.token_hex(8)}"
+        prepared_arguments = ensure_dict(prepared.get("arguments"))
+        execution_target_value = prepared_arguments.get("executionTarget")
+        bound_execution_target_digest = str(
+            prepared.get("executionTargetDigest")
+            or (
+                execution_target_digest(execution_target_value)
+                if isinstance(execution_target_value, Mapping)
+                else ""
+            )
+        )
+        plan_digest = str(
+            prepared.get("planDigest")
+            or ensure_dict(prepared.get("approvedUnityExecutionPlan")).get("planDigest")
+            or ""
+        )
+        tool_definition_digest = str(prepared.get("toolDefinitionDigest") or "")
         record = {
             "operationId": operation_id,
             "targetTool": str(prepared.get("targetTool") or ""),
             "argumentsDigest": request_arguments_digest,
             "preparedArgumentsDigest": str(prepared.get("argumentsDigest") or ""),
+            "executionTargetDigest": bound_execution_target_digest,
+            "planDigest": plan_digest,
+            "toolDefinitionDigest": tool_definition_digest,
             "createdAt": now.isoformat(),
             "createdEpoch": now.timestamp(),
             "expiresAt": expires_at.isoformat(),
@@ -5935,6 +5974,9 @@ class AgentGateway:
             "operationId": operation_id,
             "targetTool": record["targetTool"],
             "argumentsDigest": record["argumentsDigest"],
+            "executionTargetDigest": record["executionTargetDigest"],
+            "planDigest": record["planDigest"],
+            "toolDefinitionDigest": record["toolDefinitionDigest"],
             "expiresAt": record["expiresAt"],
             "requiredDecision": ["approve", "reject"],
             "decisionPlacement": "arguments.confirmation.decision",
@@ -6001,14 +6043,49 @@ class AgentGateway:
                 )
             expected_target = str(record.get("targetTool") or "")
             expected_digest = str(record.get("argumentsDigest") or "")
+            expected_execution_target_digest = str(
+                record.get("executionTargetDigest") or ""
+            )
+            expected_plan_digest = str(record.get("planDigest") or "")
+            expected_tool_definition_digest = str(
+                record.get("toolDefinitionDigest") or ""
+            )
             actual_target = str(target_tool or "")
             actual_digest = str(request_arguments_digest or "")
+            supplied_execution_target_digest = str(
+                confirmation.get("executionTargetDigest") or ""
+            )
+            supplied_plan_digest = str(confirmation.get("planDigest") or "")
+            supplied_tool_definition_digest = str(
+                confirmation.get("toolDefinitionDigest") or ""
+            )
             if (
                 not supplied_digest
                 or not hmac.compare_digest(supplied_digest, expected_digest)
                 or not hmac.compare_digest(actual_digest, expected_digest)
                 or actual_target != expected_target
                 or str(confirmation.get("targetTool") or expected_target) != expected_target
+                or (
+                    expected_execution_target_digest
+                    and not hmac.compare_digest(
+                        supplied_execution_target_digest,
+                        expected_execution_target_digest,
+                    )
+                )
+                or (
+                    expected_plan_digest
+                    and not hmac.compare_digest(
+                        supplied_plan_digest,
+                        expected_plan_digest,
+                    )
+                )
+                or (
+                    expected_tool_definition_digest
+                    and not hmac.compare_digest(
+                        supplied_tool_definition_digest,
+                        expected_tool_definition_digest,
+                    )
+                )
             ):
                 return self._invalid_external_mcp_confirmation(
                     actual_target,
@@ -6019,6 +6096,23 @@ class AgentGateway:
                     actual_target,
                     "The external Agent must return the user's decision as approve or reject.",
                 )
+            if expected_tool_definition_digest:
+                current_definition_digest = str(
+                    self.shared_agent_tool_descriptor(
+                        expected_target,
+                        write=True,
+                        exposure_layer=EXPOSURE_LAYER_EXECUTION,
+                    ).get("definitionDigest")
+                    or ""
+                )
+                if not hmac.compare_digest(
+                    current_definition_digest,
+                    expected_tool_definition_digest,
+                ):
+                    return self._invalid_external_mcp_confirmation(
+                        actual_target,
+                        "The canonical Tool definition changed after confirmation was proposed.",
+                    )
             self._external_mcp_write_confirmations.pop(operation_id, None)
 
         if decision == "reject":

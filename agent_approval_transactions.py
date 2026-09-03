@@ -75,7 +75,12 @@ from agent_gateway import (
     validate_frozen_approved_unity_execution_plan,
 )
 from operation_context import bind_operation_context
-from execution_target import execution_target_digest
+from execution_target import (
+    ExecutionTargetError,
+    execution_target_digest,
+    validate_runtime_execution_target,
+)
+from mcp_tool_descriptor import identity_scope
 
 
 def _domain_write_receipt(value: Any) -> Mapping[str, Any] | Any:
@@ -520,6 +525,7 @@ class AgentApprovalTransactionService:
         verification_profile: str = "",
         verification_prepare_handler: CompletionVerificationPrepareHandler | None = None,
         verification_finalize_handler: CompletionVerificationFinalizeHandler | None = None,
+        fresh_readback_required: bool = False,
         requires_approved_execution_context: bool = False,
         approved_execution_plan_builder: ApprovedUnityExecutionPlanBuilder | None = None,
         approval_category: str = "",
@@ -545,6 +551,7 @@ class AgentApprovalTransactionService:
             verification_profile=bounded_verification_profile,
             verification_prepare_handler=verification_prepare_handler,
             verification_finalize_handler=verification_finalize_handler,
+            fresh_readback_required=bool(fresh_readback_required),
             requires_approved_execution_context=requires_approved_execution_context,
             approved_execution_plan_builder=approved_execution_plan_builder,
             approval_category=str(approval_category or "").strip(),
@@ -2041,6 +2048,15 @@ class AgentApprovalTransactionService:
             "targetTool": target_tool,
             "status": "unavailable",
         }
+        for key in (
+            "operationId",
+            "executionTargetDigest",
+            "planDigest",
+            "toolDefinitionDigest",
+        ):
+            value = str(approval.get(key) or "").strip()
+            if value:
+                base_record[key] = value
         if target_tool in LOCAL_STATE_CHECKPOINT_TARGETS:
             return self._ports.checkpoint.create_local_state_checkpoint(base_record)
         project_root = self._ports.checkpoint.resolve_checkpoint_project_root(arguments)
@@ -2971,6 +2987,12 @@ class AgentApprovalTransactionService:
             "requiresUserConfirmation": bool(confirmation_reason),
             "confirmationReason": confirmation_reason,
             "approvedUnityExecutionPlan": approved_execution_plan,
+            "planDigest": str((approved_execution_plan or {}).get("planDigest") or ""),
+            "executionTargetDigest": (
+                execution_target_digest(arguments["executionTarget"])
+                if isinstance(arguments.get("executionTarget"), Mapping)
+                else ""
+            ),
             "authoritativePreviewOnly": authoritative_preview_only,
             "userConstraints": user_constraints,
         }
@@ -3192,6 +3214,33 @@ class AgentApprovalTransactionService:
 
         write_handler = self._ports.state.write_handlers[target_tool]
         frozen_execution_plan = ensure_dict(prepared.get("approvedUnityExecutionPlan"))
+        expected_plan_digest = str(prepared.get("planDigest") or "").strip()
+        actual_plan_digest = str(frozen_execution_plan.get("planDigest") or "").strip()
+        if expected_plan_digest and not hmac.compare_digest(
+            expected_plan_digest,
+            actual_plan_digest,
+        ):
+            raise AgentGatewayError(
+                "The prepared external MCP write plan no longer matches its approval binding.",
+                status_code=409,
+            )
+        execution_target = arguments.get("executionTarget")
+        expected_execution_target_digest = str(
+            prepared.get("executionTargetDigest") or ""
+        ).strip()
+        if isinstance(execution_target, Mapping):
+            supplied_execution_target_digest = execution_target_digest(execution_target)
+            if (
+                not expected_execution_target_digest
+                or not hmac.compare_digest(
+                    expected_execution_target_digest,
+                    supplied_execution_target_digest,
+                )
+            ):
+                raise AgentGatewayError(
+                    "The prepared external MCP write ExecutionTarget no longer matches its approval binding.",
+                    status_code=409,
+                )
         operation_id = str(prepared.get("_externalOperationId") or "").strip() or (
             f"mcpwrite_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')}_"
             f"{secrets.token_hex(4)}"
@@ -3250,6 +3299,17 @@ class AgentApprovalTransactionService:
         try:
             if (
                 write_handler.requires_approved_execution_context
+                and expected_execution_target_digest
+                and arguments.get("preview") is not True
+            ):
+                failure_layer = "execution_target_before_checkpoint"
+                self._validate_external_write_execution_target(
+                    target_tool,
+                    arguments,
+                    expected_execution_target_digest,
+                )
+            if (
+                write_handler.requires_approved_execution_context
                 and write_handler.pre_write_checkpoint_required
                 and arguments.get("preview") is not True
                 and (extract_project_root(arguments) is not None)
@@ -3262,6 +3322,12 @@ class AgentApprovalTransactionService:
                         "targetTool": target_tool,
                         "agentName": str(agent_name or "mcp-agent")[:120],
                         "arguments": arguments,
+                        "operationId": operation_id,
+                        "executionTargetDigest": expected_execution_target_digest,
+                        "planDigest": actual_plan_digest,
+                        "toolDefinitionDigest": str(
+                            prepared.get("toolDefinitionDigest") or ""
+                        ),
                     },
                     arguments,
                 )
@@ -3270,14 +3336,17 @@ class AgentApprovalTransactionService:
                         str((checkpoint or {}).get("error") or "Pre-write checkpoint failed."),
                         status_code=409,
                     )
-                if isinstance(arguments.get("executionTarget"), Mapping):
-                    checkpoint = {
-                        **dict(checkpoint),
-                        "operationId": operation_id,
-                        "executionTargetDigest": execution_target_digest(
-                            arguments["executionTarget"]
-                        ),
-                    }
+            if (
+                write_handler.requires_approved_execution_context
+                and expected_execution_target_digest
+                and arguments.get("preview") is not True
+            ):
+                failure_layer = "execution_target_before_core_apply"
+                self._validate_external_write_execution_target(
+                    target_tool,
+                    arguments,
+                    expected_execution_target_digest,
+                )
             if write_handler.verification_prepare_handler is not None:
                 failure_layer = "completion_verification_baseline"
                 verification_arguments = dict(arguments)
@@ -3340,6 +3409,26 @@ class AgentApprovalTransactionService:
             receipt = dict(domain_receipt) if isinstance(domain_receipt, Mapping) else {}
             receipt_verified = receipt.get("verified") is True
             receipt_readback = receipt.get("readback")
+            if write_handler.fresh_readback_required and not (
+                receipt_verified and isinstance(receipt_readback, Mapping)
+            ):
+                failure_layer = "fresh_readback"
+                failed_readback = (
+                    dict(result) if isinstance(result, Mapping) else {"result": result}
+                )
+                failed_readback.update(
+                    {
+                        "ok": False,
+                        "status": "failed",
+                        "readbackState": "failed",
+                        "error": (
+                            "The write may have been applied, but the required exact fresh "
+                            "readback was not verified."
+                        ),
+                    }
+                )
+                result = failed_readback
+                raise AgentGatewayError(str(failed_readback["error"]))
             mutation_started = receipt.get("mutationStarted")
             if not isinstance(mutation_started, bool):
                 mutation_started = completion_outcome.get("mutationStarted")
@@ -3383,6 +3472,11 @@ class AgentApprovalTransactionService:
                 "cleanupState": completion_outcome.get("cleanupState") or "not_applicable",
                 "retryable": bool(completion_outcome.get("retryable", False)),
                 "nextAction": completion_outcome.get("nextAction"),
+                "argumentsDigest": actual_digest,
+                "planDigest": actual_plan_digest,
+                "toolDefinitionDigest": str(
+                    prepared.get("toolDefinitionDigest") or ""
+                ),
             }
             if isinstance(arguments.get("executionTarget"), Mapping):
                 payload["executionTargetDigest"] = execution_target_digest(arguments["executionTarget"])
@@ -3581,6 +3675,42 @@ class AgentApprovalTransactionService:
                 self._ports.state.in_flight_apply_writes.pop(operation_id, None)
             if project_lock_acquired:
                 self._release_project_write(project_lock_key)
+
+    @staticmethod
+    def _validate_external_write_execution_target(
+        target_tool: str,
+        arguments: Mapping[str, Any],
+        expected_digest: str,
+    ) -> dict[str, Any]:
+        """Re-attest the same namespace immediately around checkpoint creation."""
+
+        execution_target = arguments.get("executionTarget")
+        project_root = extract_project_root(arguments)
+        if not isinstance(execution_target, Mapping) or project_root is None:
+            raise AgentGatewayError(
+                "The approved Unity write lost its exact ExecutionTarget binding.",
+                status_code=409,
+            )
+        try:
+            verified = validate_runtime_execution_target(
+                execution_target,
+                project_root=str(project_root),
+                required_scope=identity_scope(target_tool, write=True),
+            )
+        except ExecutionTargetError as exc:
+            raise AgentGatewayError(
+                f"Unity MCP identity lock rejected the approved write: {exc}",
+                status_code=409,
+                cause_code=exc.code,
+            ) from exc
+        actual_digest = execution_target_digest(verified)
+        if not expected_digest or not hmac.compare_digest(expected_digest, actual_digest):
+            raise AgentGatewayError(
+                "The approved Unity write ExecutionTarget drifted before Core apply.",
+                status_code=409,
+                cause_code="execution_target_drifted",
+            )
+        return verified
 
     def _approval_project_root(self, approval: dict[str, Any]) -> str:
         arguments = ensure_dict(approval.get("arguments"))

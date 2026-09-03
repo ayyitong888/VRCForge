@@ -13668,7 +13668,19 @@ class DashboardServerTests(unittest.TestCase):
             exit_code=0,
             stdout="ok",
             stderr="",
-            payload={"data": {"action": "set_property", "newValue": False}},
+            payload={
+                "data": {
+                    "action": "set_property",
+                    "gameObjectPath": "Scene/Avatar/Body",
+                    "componentType": "UnityEngine.SkinnedMeshRenderer",
+                    "componentIndex": 0,
+                    "propertyPath": "enabled",
+                    "newValue": False,
+                    "after": False,
+                    "scenePath": "Assets/Scene.unity",
+                    "persistedReadback": True,
+                }
+            },
         )
         missing = dashboard_server.set_component_property_sync({
             "game_object_path": "Scene/Avatar/Body",
@@ -13689,6 +13701,9 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(params["propertyPath"], "enabled")
         self.assertIn("value", params)
         self.assertEqual(params["value"], False)
+        self.assertTrue(result["verified"])
+        self.assertEqual(result["readback"]["value"], False)
+        self.assertEqual(result["readback"]["propertyPath"], "enabled")
 
     def test_generic_gameobject_crud_tool_source_exists(self) -> None:
         editor_dir = Path(__file__).resolve().parents[1] / "Assets" / "VRCForge" / "Editor" / "Generic"

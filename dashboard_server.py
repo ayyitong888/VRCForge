@@ -23136,6 +23136,21 @@ def set_component_property_sync(params: dict[str, Any]) -> dict[str, Any]:
         "set property",
     )
     payload.setdefault("ok", True)
+    if (
+        not preview
+        and payload.get("ok") is not False
+        and payload.get("persistedReadback") is True
+    ):
+        payload["verified"] = True
+        payload["readback"] = {
+            "gameObjectPath": payload.get("gameObjectPath") or go_path,
+            "componentType": payload.get("componentType") or comp_type,
+            "componentIndex": payload.get("componentIndex", request["componentIndex"]),
+            "propertyPath": payload.get("propertyPath") or prop,
+            "value": payload.get("after", payload.get("newValue")),
+            "scenePath": payload.get("scenePath"),
+            "affected": payload.get("affected"),
+        }
     if not preview and payload.get("ok") is not False:
         emit_log("info", "component", "Component property set.", {"gameObjectPath": go_path, "componentType": comp_type, "propertyPath": prop})
     return payload
@@ -25092,6 +25107,7 @@ def register_agent_gateway_tools() -> None:
         verification_profile="persisted_scene_write_console",
         verification_prepare_handler=prepare_persisted_scene_console_verification,
         verification_finalize_handler=finalize_persisted_scene_console_verification,
+        fresh_readback_required=True,
     )
     register_write_handler(
         "vrcforge_write_animation_curve",
