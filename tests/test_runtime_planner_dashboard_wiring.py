@@ -37,7 +37,7 @@ def test_internal_tool_index_lists_only_tools_visible_in_the_requested_planner_l
         runtime_name="vrcforge_unity_status",
         description="Inspect Unity status.",
         category="read/debug",
-        block="unity/diagnostics",
+        block="diagnostics_build/compile_logs",
     )
     snapshot = PlannerCatalogSnapshot(
         visible_tools=(visible,),
@@ -48,7 +48,7 @@ def test_internal_tool_index_lists_only_tools_visible_in_the_requested_planner_l
                 runtime_name="vrcforge_get_compile_errors",
                 description="Unavailable in this layer.",
                 category="read/debug",
-                block="unity/diagnostics",
+                block="diagnostics_build/compile_logs",
             ),
         ),
     )
@@ -61,15 +61,14 @@ def test_internal_tool_index_lists_only_tools_visible_in_the_requested_planner_l
         inventory = dashboard_server.build_internal_tool_block_inventory(
             {
                 "sessionId": "index-layer-test",
+                "block": "diagnostics",
                 "exposureLayer": EXPOSURE_LAYER_PLANNING,
                 "projectContextActive": False,
             }
         )
 
-    diagnostics = next(
-        block for block in inventory["blocks"] if block["name"] == "unity/diagnostics"
-    )
-    assert diagnostics["toolNames"] == ["unity_status"]
+    assert inventory["tree"]["name"] == "diagnostics_build/compile_logs"
+    assert [item["name"] for item in inventory["tree"]["tools"]] == ["unity_status"]
     read.assert_called_once_with(
         EXPOSURE_LAYER_PLANNING,
         project_context_active=False,
@@ -403,23 +402,25 @@ def test_internal_indexed_catalog_loads_per_session_without_leaking_to_external_
     assert root["loadedBlocks"] == ["core"]
 
     branch = dashboard_server.build_internal_tool_block_inventory(
-        {"sessionId": session_id, "index": "8.6", "projectContextActive": True}
+        {"sessionId": session_id, "block": "behavior", "projectContextActive": True}
     )
-    assert branch["tree"]["name"] == "unity/integrations"
-    assert [item["index"] for item in branch["tree"]["children"]] == [
-        "8.6.1",
-        "8.6.2",
-        "8.6.3",
-        "8.6.4",
+    assert branch["tree"]["name"] == "behavior"
+    assert [item["name"] for item in branch["tree"]["children"]] == [
+        "behavior/animator_clips_bindings",
+        "behavior/parameters_menus_layers",
+        "behavior/face_eye_lipsync",
+        "behavior/interaction_generated_systems",
     ]
 
     loaded = dashboard_server.load_internal_tool_block(
-        {"sessionId": session_id, "index": "8.6.2"}
+        {"sessionId": session_id, "block": "integrations/vrcfury"}
     )
-    assert loaded["loadedBlocks"] == ["core", "unity/integrations/vrcfury"]
+    assert loaded["loadedBlocks"] == ["behavior/interaction_generated_systems", "core"]
+    assert loaded["block"] == "behavior/interaction_generated_systems"
     integrations = dashboard_server.build_internal_tool_block_inventory(
-        {"sessionId": session_id, "block": "8.6.2", "projectContextActive": True}
+        {"sessionId": session_id, "block": "integrations/vrcfury", "projectContextActive": True}
     )
+    assert integrations["tree"]["name"] == "behavior/interaction_generated_systems"
     assert any(
         item["name"] == "unity_scan_vrcfury"
         for item in integrations["tree"]["tools"]

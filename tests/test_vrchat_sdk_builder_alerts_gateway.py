@@ -19,7 +19,10 @@ def test_sdk_builder_alert_reader_is_one_shared_lazy_diagnostics_tool() -> None:
         TOOL_NAME not in tools
         for tools in EXTERNAL_MCP_WRITE_TOOL_BLOCKS.values()
     )
-    assert internal_tool_block_for_name(TOOL_NAME, "unity") == "unity/diagnostics"
+    assert dashboard_server.AGENT_GATEWAY.external_mcp_tool_block_for_name(
+        TOOL_NAME, write=False
+    ) == "diagnostics"
+    assert internal_tool_block_for_name(TOOL_NAME, "unity") == "diagnostics_build/build_runtime"
 
     schema = UNITY_READ_TOOL_INPUT_SCHEMAS[TOOL_NAME]
     assert schema["required"] == ["projectPath", "avatarPath"]

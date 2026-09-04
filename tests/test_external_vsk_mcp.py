@@ -102,6 +102,12 @@ def test_external_vsk_block_lazily_exposes_preview_write_import_and_state_tools(
         leaf = index["children"][0]["children"][0]
         assert leaf["block"] == "skills/vsk"
         assert set(leaf["toolNames"]) == set(execution)
+        assert all(
+            item["_meta"]["toolBlock"] == "skills/vsk"
+            for item in dashboard_server.AGENT_GATEWAY.build_external_mcp_tools(
+                "execution", tool_blocks=["skills/vsk"]
+            )
+        )
 
 
 def test_external_vsk_export_rejects_inline_keys_and_existing_outputs_without_writing() -> None:
@@ -291,8 +297,10 @@ def test_external_vsk_roundtrip_crosses_stdio_and_reads_back_an_isolated_import(
             assert status == 200
             return response["result"]["structuredContent"]
 
-        loaded = call(1, "vrcforge_load_tool_block", {"block": "skills"})
-        assert loaded["loadedBlocks"] == ["core", "skills/vsk"]
+        loaded = call(1, "vrcforge_load_tool_block", {"block": "skills/vsk"})
+        assert loaded["loadedBlocks"] == ["core", "project_environment/files"]
+        assert loaded["block"] == "project_environment/files"
+        assert loaded["activation"]["blocks"] == ["project_environment/files"]
 
         exported = call(
             2,

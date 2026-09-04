@@ -12,6 +12,8 @@ from runtime_planner_service import bounded_planner_tool_schema, validate_planne
 from profiled_tool_registry import CapabilityProfile, ToolSet
 
 from internal_tool_blocks import (
+    CANONICAL_TOOL_BLOCKS,
+    CANONICAL_TOOL_LEAVES,
     build_internal_tool_block_tree,
     internal_tool_block_for_name,
     resolve_internal_tool_block_selector,
@@ -26,110 +28,69 @@ def test_internal_index_tree_is_independent_and_unity_is_nested() -> None:
     root = build_internal_tool_block_tree(loaded_blocks={"core"}, leaves=leaves)
 
     assert root["schema"] == "vrcforge.internal_tool_blocks.v1"
-    assert [(node["index"], node["name"]) for node in root["tree"]["children"]] == [
-        ("1", "core"),
-        ("2", "files"),
-        ("3", "web"),
-        ("4", "desktop"),
-        ("5", "shell"),
-        ("6", "attachments"),
-        ("7", "diagnostics"),
-        ("8", "unity"),
+    assert [node["name"] for node in root["tree"]["children"]] == [
+        "avatar_structure", "appearance", "behavior", "project_environment",
+        "diagnostics_build", "research",
     ]
     assert all("tools" not in node for node in root["tree"]["children"])
     directory = {item["name"]: item for item in root["blocks"]}
-    assert directory["files"]["toolNames"] == ["vrcforge_read_text_file"]
-    assert directory["files"]["loadCall"] == {
+    files = next(child for child in directory["project_environment"]["children"] if child["name"] == "project_environment/files")
+    assert files["toolNames"] == ["vrcforge_read_text_file"]
+    assert files["loadCall"] == {
         "skill_tool": "load_internal_tool_block",
-        "skill_params": {"block": "files"},
+        "skill_params": {"block": "project_environment/files"},
     }
-    assert directory["unity/diagnostics"]["toolNames"] == ["vrcforge_get_compile_errors"]
+    assert any("vrcforge_get_compile_errors" in child["toolNames"] for child in directory["diagnostics_build"]["children"])
     assert "inputSchema" not in str(root)
 
-    unity = build_internal_tool_block_tree(selector="8", loaded_blocks={"core"}, leaves=leaves)
-    assert [node["index"] for node in unity["tree"]["children"]] == [
-        "8.1",
-        "8.2",
-        "8.3",
-        "8.4",
-        "8.5",
-        "8.6",
-        "8.7",
-        "8.8",
-        "8.9",
-        "8.10",
-    ]
-    assert resolve_internal_tool_block_selector("8.3") == "unity/avatar"
-    assert resolve_internal_tool_block_selector("unity/avatar") == "unity/avatar"
-    assert resolve_internal_tool_block_selector("8") == ""
-    assert resolve_internal_tool_block_selector("8.6") == ""
-    assert (
-        resolve_internal_tool_block_selector("8.6.1")
-        == "unity/integrations/modular-avatar"
-    )
-    assert (
-        resolve_internal_tool_block_selector("unity/integrations/vrcfury")
-        == "unity/integrations/vrcfury"
-    )
-    assert [item["name"] for item in unity["blocks"]] == [
-        "unity/core",
-        "unity/project",
-        "unity/avatar",
-        "unity/assets",
-        "unity/materials",
-        "unity/integrations/modular-avatar",
-        "unity/integrations/vrcfury",
-        "unity/integrations/ndmf",
-        "unity/integrations/gesture-manager",
-        "unity/optimization",
-        "unity/checkpoint",
-        "unity/diagnostics",
-        "unity/encryption",
-    ]
+    assert resolve_internal_tool_block_selector("project_environment/files") == "project_environment/files"
+    assert resolve_internal_tool_block_selector("files") == "project_environment/files"
+    assert resolve_internal_tool_block_selector("research/web_research") == "research/web_research"
 
-    integrations = build_internal_tool_block_tree(
-        selector="8.6",
-        loaded_blocks={"core"},
-        leaves=leaves,
-    )
-    assert integrations["tree"]["name"] == "unity/integrations"
-    assert [node["index"] for node in integrations["tree"]["children"]] == [
-        "8.6.1",
-        "8.6.2",
-        "8.6.3",
-        "8.6.4",
-    ]
+
+def test_visual_artifact_routing_does_not_misclassify_expression_trigger_as_behavior() -> None:
+    appearance = CANONICAL_TOOL_BLOCKS["appearance"]["routing"]
+    behavior = CANONICAL_TOOL_BLOCKS["behavior"]["routing"]
+    face = CANONICAL_TOOL_LEAVES["behavior/face_eye_lipsync"]["routing"]
+    renderers = CANONICAL_TOOL_LEAVES["appearance/renderers"]["routing"]
+    materials = CANONICAL_TOOL_LEAVES["appearance/materials_shaders"]["routing"]
+
+    assert "expression triggers" in " ".join(appearance["useWhen"])
+    assert "route those to Appearance" in " ".join(behavior["doNotUse"])
+    assert "solid-red" in " ".join(face["doNotUse"])
+    assert "wrong material assignment" in " ".join(renderers["useWhen"])
+    assert "solid red" in " ".join(materials["useWhen"])
 
 
 def test_internal_blocks_classify_general_tools_without_exposing_them_externally() -> None:
-    assert internal_tool_block_for_name("vrcforge_read_text_file", "general") == "files"
-    assert internal_tool_block_for_name("vrcforge_web_search", "general") == "web"
-    assert internal_tool_block_for_name("vrcforge_agent_desktop_action", "core") == "desktop"
-    assert internal_tool_block_for_name("vrcforge_execute_shell", "core") == "shell"
-    assert internal_tool_block_for_name("vrcforge_health", "unity") == "diagnostics"
-    assert internal_tool_block_for_name("vrcforge_capture_screenshot", "unity") == "attachments"
-    assert internal_tool_block_for_name("vrcforge_request_apply", "unity") == "diagnostics"
+    assert internal_tool_block_for_name("vrcforge_read_text_file", "general") == "project_environment/files"
+    assert internal_tool_block_for_name("vrcforge_web_search", "general") == "research/web_research"
+    assert internal_tool_block_for_name("vrcforge_agent_desktop_action", "core") == "project_environment/shell"
+    assert internal_tool_block_for_name("vrcforge_execute_shell", "core") == "project_environment/shell"
+    assert internal_tool_block_for_name("vrcforge_health", "unity") == "diagnostics_build/compile_logs"
+    assert internal_tool_block_for_name("vrcforge_capture_screenshot", "unity") == "diagnostics_build/validation_performance"
+    assert internal_tool_block_for_name("vrcforge_request_apply", "unity") == "diagnostics_build/compile_logs"
     assert (
         internal_tool_block_for_name("vrcforge_scan_vrcfury", "unity")
-        == "unity/integrations/vrcfury"
+        == "behavior/interaction_generated_systems"
     )
     assert (
         internal_tool_block_for_name("vrcforge_scan_modular_avatar", "unity")
-        == "unity/integrations/modular-avatar"
+        == "behavior/interaction_generated_systems"
     )
     assert (
         internal_tool_block_for_name("vrcforge_gesture_manager_status", "unity")
-        == "unity/integrations/gesture-manager"
+        == "behavior/interaction_generated_systems"
     )
     assert (
         internal_tool_block_for_name("vrcforge_gesture_manager_enter_play_mode", "unity")
-        == "unity/integrations/gesture-manager"
+        == "behavior/interaction_generated_systems"
     )
     assert (
         internal_tool_block_for_name("vrcforge_gesture_manager_set_parameter", "unity")
-        == "unity/integrations/gesture-manager"
+        == "behavior/interaction_generated_systems"
     )
-    assert internal_tool_block_for_name("vrcforge_install_vpm_package", "unity") == "unity/project"
+    assert internal_tool_block_for_name("vrcforge_install_vpm_package", "unity") == "project_environment/assets_packages"
 
 
 def test_path_to_skill_creator_is_lazy_shared_and_reuses_controller_owners() -> None:
@@ -143,8 +104,8 @@ def test_path_to_skill_creator_is_lazy_shared_and_reuses_controller_owners() -> 
     assert writer.handler.__self__ is dashboard_server.PATH_TO_SKILL_WRITE
     assert writer.risk_level == "medium"
     assert writer.pre_write_checkpoint_required is True
-    assert internal_tool_block_for_name(preview_name, "general") == "diagnostics"
-    assert internal_tool_block_for_name(write_name, "general") == "diagnostics"
+    assert internal_tool_block_for_name(preview_name, "general") == "project_environment/files"
+    assert internal_tool_block_for_name(write_name, "general") == "project_environment/files"
     assert "when to use:" in preview.description.casefold()
     assert "when not to use:" in preview.description.casefold()
     assert "when to use:" in writer.description.casefold()
@@ -168,7 +129,7 @@ def test_path_to_skill_creator_is_lazy_shared_and_reuses_controller_owners() -> 
     planning_by_runtime = {tool.runtime_name: tool for tool in planning.visible_tools}
     execution_by_runtime = {tool.runtime_name: tool for tool in execution.visible_tools}
     planning_routable = {tool.runtime_name: tool for tool in planning.routable_tools}
-    assert planning_by_runtime[preview_name].block == "diagnostics"
+    assert planning_by_runtime[preview_name].block == "project_environment/files"
     preview_schema = gateway.shared_agent_tool_descriptor(
         preview_name,
         write=False,
@@ -176,7 +137,7 @@ def test_path_to_skill_creator_is_lazy_shared_and_reuses_controller_owners() -> 
     assert planning_by_runtime[preview_name].input_schema == bounded_planner_tool_schema(preview_schema)
     assert write_name not in planning_by_runtime
     assert planning_routable[write_name].write is True
-    assert execution_by_runtime[write_name].block == "diagnostics"
+    assert execution_by_runtime[write_name].block == "project_environment/files"
     write_schema = gateway.shared_agent_tool_descriptor(
         write_name,
         write=True,

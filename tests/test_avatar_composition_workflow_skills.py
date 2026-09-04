@@ -196,9 +196,19 @@ def test_composition_workflow_atoms_have_internal_external_contract_parity() -> 
         # Both model surfaces must be projections of one schema and one exact
         # handler. Handler identity also fixes the downstream Core atom and raw
         # result-normalization route instead of maintaining a second MCP path.
+        shared = gateway.shared_agent_tool_descriptor(
+            name, write=is_write, exposure_layer="execution"
+        )
         external_schema = external["inputSchema"]
-        assert external_schema == canonical_schema, name
-        if internal.input_schema != bounded_planner_tool_schema(canonical_schema):
+        assert external_schema == shared["inputSchema"], name
+        # The shared descriptor adds Prompt provenance to the atomic schema;
+        # neither model surface may omit that envelope or alter atom fields.
+        for field, field_schema in canonical_schema.get("properties", {}).items():
+            assert external_schema["properties"][field] == field_schema, (name, field)
+        assert external_schema.get("required", []) == canonical_schema.get("required", []), name
+        assert external_schema["additionalProperties"] == canonical_schema["additionalProperties"], name
+        assert "promptSkillProvenance" in external_schema["properties"], name
+        if internal.input_schema != bounded_planner_tool_schema(external_schema):
             schema_mismatches.append(name)
 
     assert schema_mismatches == []

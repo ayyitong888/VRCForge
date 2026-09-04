@@ -20,12 +20,16 @@ if str(ROOT_DIR) not in sys.path:
 from agent_mcp_2026 import PROTOCOL_VERSION, Mcp2026Router, run_stdio_loop
 from agent_mcp_standard import McpStandardRouter, run_negotiated_stdio_loop, run_standard_stdio_loop
 from mcp_tool_descriptor import standardize_tool_descriptor
-from avatar_composition_workflow_skills import (
-    AVATAR_COMPOSITION_WORKFLOW_SKILL_NAMES,
-    AVATAR_COMPOSITION_WORKFLOW_SKILLS,
-)
 from external_tool_result_contract import build_external_tool_error
 from agent_tool_result_contract import normalize_agent_tool_result
+from internal_tool_blocks import (
+    CANONICAL_TOOL_BLOCKS,
+    CANONICAL_TOOL_BLOCK_ALIASES,
+    CANONICAL_TOOL_LEAVES,
+    canonical_block_routing,
+    canonical_external_block,
+    canonical_tool_owner,
+)
 
 
 DEFAULT_BASE_URL = "http://127.0.0.1:8757"
@@ -38,69 +42,14 @@ HIDDEN_EXTERNAL_TOOLS = {
     "vrcforge_execute_shell",
     "vrcforge_request_apply",
 }
-EXTERNAL_TOOL_BLOCK_DESCRIPTIONS = {
-    "core": "Connection and basic Unity reads.",
-    "project": "Unity projects and package-manager backends.",
-    "avatar": "Avatar hierarchy, animation, parameters, and menus.",
-    "assets": "Prefab and asset import or inspection.",
-    "materials": "Materials, shaders, and textures.",
-    "integrations": "Installed Unity plugin adapters; expand this branch before loading a family.",
-    "integrations/modular-avatar": "Modular Avatar inspection, Setup Outfit, and atomic components.",
-    "integrations/vrcfury": "VRCFury inspection and public-API-backed features.",
-    "integrations/gesture-manager": "Gesture Manager Play Mode status and atomic runtime parameter control.",
-    "optimization": "Avatar optimization.",
-    "checkpoint": "Checkpoints and approved recovery.",
-    "diagnostics": "Logs and validation.",
-    "encryption": "Private avatar-encryption integration.",
-    "skills": "Installed Skill workflows and local VSK package management; expand this branch before loading one family.",
-    "skills/vsk": "Read-only preflight and atomic import/export for local .vsk Skill packages.",
-    "skills/installed": "Read-only discovery and on-demand instructions for enabled installed user Skills.",
-}
-EXTERNAL_TOOL_BLOCK_DO_NOT_USE = {
-    "core": "Do not use for project creation, asset edits, or recovery.",
-    "project": "Do not use for avatar hierarchy, materials, or visual tuning.",
-    "avatar": "Do not use for package installation, project registration, or log review.",
-    "assets": "Do not use for material tuning, parameter budgets, or checkpoint restore.",
-    "materials": "Do not use for hierarchy edits, package management, or recovery.",
-    "integrations": "Do not load every plugin family when only one installed integration is relevant.",
-    "integrations/modular-avatar": "Do not use for VRCFury features or plain Unity components.",
-    "integrations/vrcfury": "Do not use when VRCFury is absent or for Modular Avatar components.",
-    "integrations/gesture-manager": "Do not use outside Gesture Manager runtime inspection or parameter testing.",
-    "optimization": "Do not use for ordinary edits before a concrete budget or performance need exists.",
-    "checkpoint": "Do not use checkpoint restore as an automatic response to a failed tool call.",
-    "diagnostics": "Do not use diagnostic tools to mutate the avatar or clear evidence.",
-    "encryption": "Do not use unless the private encryption integration is explicitly in scope.",
-    "skills": "Do not load unrelated Skill families or treat reading a workflow as approval to execute it.",
-    "skills/vsk": "Do not use preflight as installation proof or overwrite an existing export path.",
-    "skills/installed": "Do not import packages, read arbitrary host files, execute a Skill, or bypass write approval.",
-}
 EXTERNAL_TOOL_BLOCK_INDEXES = {
-    "1": "core",
-    "2": "project",
-    "3": "avatar",
-    "4": "assets",
-    "5": "materials",
-    "6": "integrations",
-    "7": "optimization",
-    "8": "checkpoint",
-    "9": "diagnostics",
-    "10": "encryption",
-    "11": "skills",
-}
-EXTERNAL_TOOL_BLOCK_BRANCHES = {
-    "integrations": (
-        "integrations/modular-avatar",
-        "integrations/vrcfury",
-        "integrations/gesture-manager",
-    ),
-    "skills": ("skills/vsk", "skills/installed"),
+    str(position): block_id
+    for position, block_id in enumerate(CANONICAL_TOOL_BLOCKS, start=1)
 }
 EXTERNAL_TOOL_BLOCK_LEAF_INDEXES = {
-    "6.1": "integrations/modular-avatar",
-    "6.2": "integrations/vrcfury",
-    "6.3": "integrations/gesture-manager",
-    "11.1": "skills/vsk",
-    "11.2": "skills/installed",
+    f"{root_position}.{leaf_position}": f"{root_id}/{leaf_name}"
+    for root_position, (root_id, root_spec) in enumerate(CANONICAL_TOOL_BLOCKS.items(), start=1)
+    for leaf_position, leaf_name in enumerate(root_spec["children"], start=1)
 }
 EXTERNAL_TOOL_BLOCK_NAME_INDEXES = {
     name: index
@@ -771,20 +720,28 @@ def run_stdio_server(
         meta = item.get("_meta") if isinstance(item.get("_meta"), Mapping) else {}
         return str(meta.get("toolBlock") or "").strip().lower()
 
+    def item_owner(item: Mapping[str, Any]) -> str:
+        return canonical_tool_owner(
+            bridge_tool_block(item),
+            str(item.get("name") or "").strip(),
+        )
+
     def resolve_block_selector(value: Any) -> str:
         selector = str(value or "").strip().lower()
-        if selector in EXTERNAL_TOOL_BLOCK_DESCRIPTIONS:
-            return selector
-        return EXTERNAL_TOOL_BLOCK_INDEXES.get(
-            selector,
-            EXTERNAL_TOOL_BLOCK_LEAF_INDEXES.get(selector, ""),
+        indexed = EXTERNAL_TOOL_BLOCK_INDEXES.get(
+            selector, EXTERNAL_TOOL_BLOCK_LEAF_INDEXES.get(selector, "")
         )
+        canonical = indexed or canonical_external_block(selector)
+        if canonical in CANONICAL_TOOL_BLOCKS or canonical in CANONICAL_TOOL_LEAVES:
+            return canonical
+        return ""
 
     def block_controls() -> list[dict[str, Any]]:
         block_enum = [
             *EXTERNAL_TOOL_BLOCK_INDEXES,
             *EXTERNAL_TOOL_BLOCK_LEAF_INDEXES,
             *EXTERNAL_TOOL_BLOCK_NAME_INDEXES,
+            *CANONICAL_TOOL_BLOCK_ALIASES,
         ]
         controls = [
             {
@@ -903,134 +860,85 @@ def run_stdio_server(
                 details={"selector": str(selector).strip()},
                 loadedBlocks=sorted(loaded_blocks),
             )
-        counts = {
-            block: {"planningToolCount": 0, "executionToolCount": 0}
-            for block in EXTERNAL_TOOL_BLOCK_DESCRIPTIONS
-        }
-        execution_tools: list[Mapping[str, Any]] = []
-        for layer, count_key in (
-            ("planning", "planningToolCount"),
-            ("execution", "executionToolCount"),
-        ):
+        manifests: dict[str, list[Mapping[str, Any]]] = {"planning": [], "execution": []}
+        for layer in manifests:
             try:
                 manifest = bridge.manifest(layer, ["*"])
             except Exception:
                 continue
-            manifest_tools = manifest.get("tools", []) if isinstance(manifest, dict) else []
-            if layer == "execution":
-                execution_tools = [item for item in manifest_tools if isinstance(item, Mapping)]
-            for item in manifest_tools:
-                if not isinstance(item, Mapping):
-                    continue
-                block = bridge_tool_block(item)
-                if block in counts:
-                    counts[block][count_key] += 1
-        for branch, descendants in EXTERNAL_TOOL_BLOCK_BRANCHES.items():
-            for count_key in ("planningToolCount", "executionToolCount"):
-                counts[branch][count_key] = sum(
-                    counts[child][count_key] for child in descendants
-                )
+            manifests[layer] = [
+                item
+                for item in (manifest.get("tools", []) if isinstance(manifest, Mapping) else [])
+                if isinstance(item, Mapping)
+                and str(item.get("name") or "").strip() not in HIDDEN_EXTERNAL_TOOLS
+            ]
 
-        tool_leaves: dict[str, list[dict[str, str]]] = {
-            block: [] for block in EXTERNAL_TOOL_BLOCK_DESCRIPTIONS
+        counts = {
+            leaf_id: {
+                "planningToolCount": sum(item_owner(item) == leaf_id for item in manifests["planning"]),
+                "executionToolCount": sum(item_owner(item) == leaf_id for item in manifests["execution"]),
+            }
+            for leaf_id in CANONICAL_TOOL_LEAVES
         }
-        indexed_blocks = list(EXTERNAL_TOOL_BLOCK_DESCRIPTIONS)
-        for indexed_block in indexed_blocks:
-            selected_tools = sorted(
-                (
-                    item
-                    for item in execution_tools
-                    if bridge_tool_block(item) == indexed_block
-                ),
+
+        def routing_fields(block_id: str) -> dict[str, Any]:
+            routing = canonical_block_routing(block_id)
+            return {
+                "whenToUse": list(routing.get("useWhen", ())),
+                "doNotUse": list(routing.get("doNotUse", ())),
+                "provides": list(routing.get("provides", ())),
+                "planningExposure": routing.get("planningExposure", ""),
+                "executionExposure": routing.get("executionExposure", ""),
+            }
+
+        def leaf_node(leaf_id: str, *, expanded: bool) -> dict[str, Any]:
+            tools = sorted(
+                (item for item in manifests["execution"] if item_owner(item) == leaf_id),
                 key=lambda item: str(item.get("name") or ""),
             )
-            block_index = EXTERNAL_TOOL_BLOCK_NAME_INDEXES[indexed_block]
-            for ordinal, item in enumerate(selected_tools, start=1):
-                meta = item.get("_meta") if isinstance(item.get("_meta"), Mapping) else {}
-                is_write = bool(item.get("write")) or str(meta.get("permission") or "").strip().lower() == "write"
-                tool_leaves[indexed_block].append(
-                    {
-                        "index": f"{block_index}.{ordinal}",
-                        "name": str(item.get("name") or ""),
-                        "mode": "write" if is_write else "read",
-                    }
-                )
-
-        def block_node(block: str, *, expanded: bool) -> dict[str, Any]:
-            descendants = EXTERNAL_TOOL_BLOCK_BRANCHES.get(block, ())
             node: dict[str, Any] = {
-                "index": EXTERNAL_TOOL_BLOCK_NAME_INDEXES[block],
-                "name": block,
-                "whenToUse": EXTERNAL_TOOL_BLOCK_DESCRIPTIONS[block],
-                "whenNotToUse": EXTERNAL_TOOL_BLOCK_DO_NOT_USE[block],
-                "loaded": (
-                    all(child in loaded_blocks for child in descendants)
-                    if descendants
-                    else block in loaded_blocks
-                ),
-                **counts[block],
+                "index": EXTERNAL_TOOL_BLOCK_NAME_INDEXES[leaf_id],
+                "name": leaf_id,
+                "title": CANONICAL_TOOL_LEAVES[leaf_id]["title"],
+                "loaded": leaf_id in loaded_blocks,
+                "loadCall": {"name": "vrcforge_load_tool_block", "arguments": {"block": leaf_id}},
+                **routing_fields(leaf_id),
+                **counts[leaf_id],
             }
-            if descendants:
-                node["expandable"] = True
-                node["children"] = [
-                    block_node(child, expanded=False) for child in descendants
-                ]
-            elif expanded:
-                node["children"] = tool_leaves[block]
-            else:
-                node["toolNames"] = [leaf["name"] for leaf in tool_leaves[block]]
-            if block == "avatar":
-                node["workflowSkillNames"] = list(AVATAR_COMPOSITION_WORKFLOW_SKILL_NAMES)
-                if expanded:
-                    tool_lookup = {
-                        leaf["name"]: {"block": owner, **leaf}
-                        for owner, leaves in tool_leaves.items()
-                        for leaf in leaves
+            if expanded:
+                node["tools"] = [
+                    {
+                        "index": f"{node['index']}.{position}",
+                        "name": str(item.get("name") or ""),
+                        "mode": "write" if bool(item.get("write")) or str((item.get("_meta") or {}).get("permission") or "").casefold() == "write" else "read",
                     }
-                    workflow_skills: list[dict[str, Any]] = []
-                    for skill in AVATAR_COMPOSITION_WORKFLOW_SKILLS:
-                        steps: list[dict[str, Any]] = []
-                        referenced_names: list[str] = []
-                        for ordinal, step in enumerate(skill.get("steps") or (), start=1):
-                            names = [str(name) for name in step.get("tools") or ()]
-                            referenced_names.extend(names)
-                            steps.append(
-                                {
-                                    "order": ordinal,
-                                    "goal": str(step.get("goal") or ""),
-                                    "toolRefs": [tool_lookup[name] for name in names if name in tool_lookup],
-                                }
-                            )
-                        missing_names = sorted(set(referenced_names) - set(tool_lookup))
-                        workflow_skills.append(
-                            {
-                                "schema": "vrcforge.skill.v1",
-                                "name": skill["name"],
-                                "title": skill["title"],
-                                "description": skill["description"],
-                                "whenToUse": skill["whenToUse"],
-                                "whenNotToUse": skill["whenNotToUse"],
-                                "backupRestore": skill["backupRestore"],
-                                "toolBlocks": list(skill["toolBlocks"]),
-                                "problemBreakdown": list(skill["problemBreakdown"]),
-                                "steps": steps,
-                                "acceptance": list(skill["acceptance"]),
-                                "pitfalls": list(skill["pitfalls"]),
-                                "missingToolNames": missing_names,
-                            }
-                        )
-                    node["workflowSkills"] = workflow_skills
+                    for position, item in enumerate(tools, start=1)
+                ]
             return node
 
-        ordered_blocks = list(EXTERNAL_TOOL_BLOCK_INDEXES.values())
-        visible_blocks = [selected_block] if selected_block else ordered_blocks
-        # Keep the index cheap but self-describing: leaf names and read/write
-        # modes are small discovery metadata, while full descriptions and
-        # schemas remain unloaded until the Agent selects a block.
-        nodes = [
-            block_node(block, expanded=bool(selected_block))
-            for block in visible_blocks
-        ]
+        def root_node(root_id: str, *, expanded: bool) -> dict[str, Any]:
+            leaf_ids = [f"{root_id}/{leaf}" for leaf in CANONICAL_TOOL_BLOCKS[root_id]["children"]]
+            return {
+                "index": EXTERNAL_TOOL_BLOCK_NAME_INDEXES[root_id],
+                "name": root_id,
+                "title": CANONICAL_TOOL_BLOCKS[root_id]["title"],
+                "loaded": any(leaf_id in loaded_blocks for leaf_id in leaf_ids),
+                "fullyLoaded": all(leaf_id in loaded_blocks for leaf_id in leaf_ids),
+                "expandable": True,
+                **routing_fields(root_id),
+                "children": [leaf_node(leaf_id, expanded=False) for leaf_id in leaf_ids] if expanded else [],
+            }
+
+        if selected_block in CANONICAL_TOOL_LEAVES:
+            tree: dict[str, Any] = leaf_node(selected_block, expanded=True)
+        elif selected_block in CANONICAL_TOOL_BLOCKS:
+            tree = root_node(selected_block, expanded=True)
+        else:
+            tree = {
+                "index": "0",
+                "name": "capabilities",
+                "children": [root_node(root_id, expanded=False) for root_id in CANONICAL_TOOL_BLOCKS],
+            }
         return {
             "ok": True,
             "schema": "vrcforge.external_tool_blocks.v2",
@@ -1038,9 +946,9 @@ def run_stdio_server(
             "catalogGeneration": tool_list_revision,
             "selectedBlock": selected_block,
             "selectionHint": (
-                "Load only the block whose whenToUse matches the task; full tool descriptions and schemas appear after loading."
+                "Select one of the six capability categories. Load only the matching leaf; the host should re-list after the tools/list_changed notification. If it does not, invoke the exact loaded Tool through the activationHandle fallback. Full schemas appear after loading."
             ),
-            "tree": {"index": "0", "name": "unity", "children": nodes},
+            "tree": tree,
         }
 
     def list_tools(params: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -1065,7 +973,7 @@ def run_stdio_server(
         if not bridge.preflight().get("runtimeOnline"):
             return tools
         try:
-            manifest = bridge.manifest(requested_exposure, sorted(loaded_blocks))
+            manifest = bridge.manifest(requested_exposure, ["*"])
         except Exception:
             return tools
         manifest_tools = manifest.get("tools") if isinstance(manifest, dict) else []
@@ -1073,12 +981,15 @@ def run_stdio_server(
             if not isinstance(item, dict):
                 continue
             name = str(item.get("name") or "").strip()
-            block = bridge_tool_block(item)
+            block = item_owner(item)
             if (
                 not name
                 or name in HIDDEN_EXTERNAL_TOOLS
                 or not block
-                or block not in loaded_blocks
+                or (
+                    bridge_tool_block(item) != "core"
+                    and block not in loaded_blocks
+                )
             ):
                 continue
             tools.append(standardize_tool_descriptor(
@@ -1151,7 +1062,7 @@ def run_stdio_server(
                 catalogGeneration=tool_list_revision,
                 loadedBlocks=sorted(loaded_blocks),
             )
-        manifest = bridge.manifest("execution" if write else requested_layer["value"], sorted(covered_blocks))
+        manifest = bridge.manifest("execution" if write else requested_layer["value"], ["*"])
         manifest_tools = manifest.get("tools") if isinstance(manifest, Mapping) else []
         descriptor = next(
             (
@@ -1159,7 +1070,7 @@ def run_stdio_server(
                 for item in manifest_tools
                 if isinstance(item, Mapping)
                 and str(item.get("name") or "").strip() == delegated_name
-                and bridge_tool_block(item) in covered_blocks
+                and item_owner(item) in covered_blocks
             ),
             None,
         )
@@ -1234,27 +1145,22 @@ def run_stdio_server(
                     details={"selector": selector},
                     loadedBlocks=sorted(loaded_blocks),
                 )
-            # Preserve historical `skills` package-management loading. Installed
-            # workflow instructions stay hidden until their leaf is requested.
-            targets = (
-                ("skills/vsk",)
-                if block == "skills"
-                else EXTERNAL_TOOL_BLOCK_BRANCHES.get(block, (block,))
-            )
+            if block in CANONICAL_TOOL_BLOCKS:
+                return external_rejection(
+                    status="tool_leaf_required",
+                    error="A first-level category is routing-only; select and load one second-level Tool leaf.",
+                    error_code="external_tool_leaf_required",
+                    failure_layer="external_tool_discovery",
+                    failure_phase="block_selection",
+                    operation_kind="discovery",
+                    details={"selector": selector, "category": block},
+                    loadedBlocks=sorted(loaded_blocks),
+                )
+            targets = (block,)
             if tool_name == "vrcforge_load_tool_block":
                 changed = any(target not in loaded_blocks for target in targets)
                 loaded_blocks.update(targets)
             else:
-                if block == "core":
-                    return external_rejection(
-                        status="core_block_required",
-                        error="The core external MCP block cannot be unloaded.",
-                        error_code="external_core_block_required",
-                        failure_layer="external_tool_discovery",
-                        failure_phase="block_unload",
-                        operation_kind="discovery",
-                        loadedBlocks=sorted(loaded_blocks),
-                    )
                 changed = any(target in loaded_blocks for target in targets)
                 loaded_blocks.difference_update(targets)
                 for handle, activation in list(activation_handles.items()):

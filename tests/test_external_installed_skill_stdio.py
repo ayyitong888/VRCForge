@@ -119,19 +119,23 @@ def test_installed_skill_stdio_branch_loads_only_when_requested(
         assert installed_tools.isdisjoint(before)
 
         inventory = call(2, "vrcforge_list_tool_blocks", {"block": "skills"})
-        skill_branch = inventory["tree"]["children"][0]
-        children = {item["name"]: item for item in skill_branch["children"]}
-        assert set(children) == {"skills/vsk", "skills/installed"}
-        assert children["skills/vsk"]["index"] == "11.1"
-        assert children["skills/installed"]["index"] == "11.2"
+        assert inventory["selectedBlock"] == "project_environment/files"
+        assert inventory["tree"]["name"] == "project_environment/files"
+        assert inventory["tree"]["loaded"] is False
 
         legacy = call(3, "vrcforge_load_tool_block", {"block": "skills"})
-        assert legacy["loadedBlocks"] == ["core", "skills/vsk"]
-        still_hidden = {item["name"] for item in rpc(4, "tools/list", {})["tools"]}
-        assert installed_tools.isdisjoint(still_hidden)
+        assert legacy["block"] == "project_environment/files"
+        assert legacy["loadedBlocks"] == ["core", "project_environment/files"]
+        assert legacy["activation"]["blocks"] == ["project_environment/files"]
+        assert legacy["activation"]["exposureLayer"] == exposure_layer
+        visible_after_alias_load = {
+            item["name"] for item in rpc(4, "tools/list", {})["tools"]
+        }
+        assert installed_tools <= visible_after_alias_load
 
-        loaded = call(5, "vrcforge_load_tool_block", {"block": "11.2"})
-        assert loaded["block"] == "skills/installed"
+        loaded = call(5, "vrcforge_load_tool_block", {"block": "skills"})
+        assert loaded["block"] == "project_environment/files"
+        assert loaded["loadedBlocks"] == ["core", "project_environment/files"]
         after = {item["name"] for item in rpc(6, "tools/list", {})["tools"]}
         assert installed_tools <= after
 
@@ -152,6 +156,7 @@ def test_installed_skill_stdio_branch_loads_only_when_requested(
         assert document["result"]["content"] == "Read this declared workflow only."
 
         unloaded = call(10, "vrcforge_unload_tool_block", {"block": "skills/installed"})
-        assert unloaded["loadedBlocks"] == ["core", "skills/vsk"]
+        assert unloaded["block"] == "project_environment/files"
+        assert unloaded["loadedBlocks"] == ["core"]
         hidden_again = {item["name"] for item in rpc(11, "tools/list", {})["tools"]}
         assert installed_tools.isdisjoint(hidden_again)

@@ -459,59 +459,16 @@ def test_stdio_bridge_loads_external_unity_tool_blocks_on_demand(monkeypatch) ->
     assert root_status == 200
     root_tree = root["result"]["structuredContent"]["tree"]
     assert root_tree["index"] == "0"
-    assert root_tree["name"] == "unity"
-    assert [(node["index"], node["name"]) for node in root_tree["children"]] == [
-        ("1", "core"),
-        ("2", "project"),
-        ("3", "avatar"),
-        ("4", "assets"),
-        ("5", "materials"),
-        ("6", "integrations"),
-        ("7", "optimization"),
-        ("8", "checkpoint"),
-        ("9", "diagnostics"),
-        ("10", "encryption"),
-        ("11", "skills"),
+    assert root_tree["name"] == "capabilities"
+    assert [node["name"] for node in root_tree["children"]] == [
+        "avatar_structure", "appearance", "behavior", "project_environment",
+        "diagnostics_build", "research",
     ]
-    root_nodes = {node["name"]: node for node in root_tree["children"]}
-    assert root_nodes["core"]["toolNames"] == ["vrcforge_get_compile_errors"]
-    assert root_nodes["avatar"]["toolNames"] == [
-        "vrcforge_apply_blendshapes",
-        "vrcforge_scan_blendshapes",
-    ]
-    assert root_nodes["avatar"]["workflowSkillNames"] == [
-        "avatar-head-swap",
-        "face-tracking-four-piece-merge",
-        "original-avatar-part-extraction",
-        "avatar-head-swap-face-tracked",
-        "avatar-head-swap-gesture-only",
-        "source-avatar-part-transplant",
-    ]
-    assert "workflowSkills" not in root_nodes["avatar"]
-    integration_children = {
-        node["name"]: node for node in root_nodes["integrations"]["children"]
-    }
-    assert integration_children["integrations/vrcfury"]["toolNames"] == [
-        "vrcforge_scan_vrcfury"
-    ]
-    assert integration_children["integrations/modular-avatar"]["toolNames"] == []
-    assert integration_children["integrations/gesture-manager"]["toolNames"] == [
-        "vrcforge_gesture_manager_enter_play_mode",
-        "vrcforge_gesture_manager_set_parameter",
-        "vrcforge_gesture_manager_status",
-    ]
-    skills_children = {
-        node["name"]: node for node in root_nodes["skills"]["children"]
-    }
-    assert skills_children["skills/vsk"]["toolNames"] == [
-        "vrcforge_export_skill_package",
-        "vrcforge_import_skill_package",
-        "vrcforge_preflight_skill_package",
-    ]
-    assert root_nodes["project"]["toolNames"] == []
-    assert "whenToUse" in root_nodes["avatar"]
-    assert "whenNotToUse" in root_nodes["avatar"]
-    assert "children" not in root_nodes["avatar"]
+    assert all({"whenToUse", "doNotUse", "provides"} <= set(node) for node in root_tree["children"])
+    appearance = next(node for node in root_tree["children"] if node["name"] == "appearance")
+    behavior = next(node for node in root_tree["children"] if node["name"] == "behavior")
+    assert "expression triggers" in " ".join(appearance["whenToUse"])
+    assert "route those to Appearance" in " ".join(behavior["doNotUse"])
     compact_text = root["result"]["content"][0]["text"]
     assert "Full tool-name index is in structuredContent" in compact_text
     assert "vrcforge_apply_blendshapes" not in compact_text
@@ -524,128 +481,92 @@ def test_stdio_bridge_loads_external_unity_tool_blocks_on_demand(monkeypatch) ->
             "params": {
                 "_meta": meta,
                 "name": "vrcforge_list_tool_blocks",
-                "arguments": {"block": "3"},
+                "arguments": {"block": "1"},
             },
         }
     )
     assert avatar_branch_status == 200
-    avatar_node = avatar_branch["result"]["structuredContent"]["tree"]["children"][0]
-    workflow_skills = avatar_node["workflowSkills"]
-    assert [skill["name"] for skill in workflow_skills] == avatar_node["workflowSkillNames"]
-    assert all(skill["schema"] == "vrcforge.skill.v1" for skill in workflow_skills)
-    assert all("checkpoint" in skill["backupRestore"].lower() for skill in workflow_skills)
-    assert all("separately approved" in skill["backupRestore"].lower() for skill in workflow_skills)
-    workflow_by_name = {skill["name"]: skill for skill in workflow_skills}
-    for source in AVATAR_COMPOSITION_WORKFLOW_SKILLS:
-        projected = workflow_by_name[source["name"]]
-        for field in (
-            "name",
-            "title",
-            "description",
-            "whenToUse",
-            "whenNotToUse",
-            "backupRestore",
-            "toolBlocks",
-            "problemBreakdown",
-            "acceptance",
-            "pitfalls",
-        ):
-            assert projected[field] == source[field]
-        assert [step["goal"] for step in projected["steps"]] == [
-            step["goal"] for step in source["steps"]
-        ]
-        projected_tool_names = {
-            ref["name"]
-            for step in projected["steps"]
-            for ref in step["toolRefs"]
-        }
-        assert projected_tool_names | set(projected["missingToolNames"]) == set(
-            source["allowedTools"]
-        )
-    head_swap = workflow_skills[0]
-    first_step_refs = {item["name"]: item for item in head_swap["steps"][0]["toolRefs"]}
-    assert first_step_refs["vrcforge_scan_blendshapes"] == {
-        "block": "avatar",
-        "index": "3.2",
-        "name": "vrcforge_scan_blendshapes",
-        "mode": "read",
-    }
-    assert "vrcforge_list_avatars" in head_swap["missingToolNames"]
-    assert not any(
-        ref["name"].startswith("vrcforge_agent_")
-        for skill in workflow_skills
-        for step in skill["steps"]
-        for ref in step["toolRefs"]
-    )
+    avatar_node = avatar_branch["result"]["structuredContent"]["tree"]
+    assert avatar_node["name"] == "avatar_structure"
+    assert avatar_node["doNotUse"]
+    assert avatar_node["provides"]
+    assert [child["name"] for child in avatar_node["children"]] == [
+        "avatar_structure/hierarchy_components",
+        "avatar_structure/rig_constraints",
+        "avatar_structure/mesh_shape_data",
+    ]
 
-    branch, branch_status = router.handle(
+    mesh_leaf, mesh_leaf_status = router.handle(
         {
             "jsonrpc": "2.0",
-            "id": 21,
+            "id": 23,
             "method": "tools/call",
             "params": {
                 "_meta": meta,
                 "name": "vrcforge_list_tool_blocks",
-                "arguments": {"block": "6"},
+                "arguments": {"block": "1.3"},
             },
         }
     )
-    assert branch_status == 200
-    integration_node = branch["result"]["structuredContent"]["tree"]["children"][0]
-    assert integration_node["index"] == "6"
-    assert integration_node["name"] == "integrations"
-    assert [child["index"] for child in integration_node["children"]] == [
-        "6.1",
-        "6.2",
-        "6.3",
-    ]
-    vrcfury_node = next(
-        child
-        for child in integration_node["children"]
-        if child["name"] == "integrations/vrcfury"
-    )
-    assert vrcfury_node["toolNames"] == ["vrcforge_scan_vrcfury"]
-    gesture_manager_node = next(
-        child
-        for child in integration_node["children"]
-        if child["name"] == "integrations/gesture-manager"
-    )
-    assert gesture_manager_node["toolNames"] == [
-        "vrcforge_gesture_manager_enter_play_mode",
-        "vrcforge_gesture_manager_set_parameter",
-        "vrcforge_gesture_manager_status",
-    ]
+    assert mesh_leaf_status == 200
+    mesh_tree = mesh_leaf["result"]["structuredContent"]["tree"]
+    assert mesh_tree["name"] == "avatar_structure/mesh_shape_data"
+    assert "vrcforge_scan_blendshapes" in {tool["name"] for tool in mesh_tree["tools"]}
 
-    loaded, loaded_status = router.handle(
+    loaded_leaf, loaded_leaf_status = router.handle(
         {
             "jsonrpc": "2.0",
-            "id": 2,
+            "id": 24,
             "method": "tools/call",
             "params": {
                 "_meta": meta,
                 "name": "vrcforge_load_tool_block",
-                "arguments": {"block": "3"},
+                "arguments": {"block": "avatar_structure/mesh_shape_data"},
             },
         }
     )
-    assert loaded_status == 200
-    assert loaded["result"]["structuredContent"]["loadedBlocks"] == ["avatar", "core"]
+    assert loaded_leaf_status == 200
+    assert loaded_leaf["result"]["structuredContent"]["ok"] is True
+    after_leaf, _ = router.handle(
+        {"jsonrpc": "2.0", "id": 25, "method": "tools/list", "params": {"_meta": meta}}
+    )
+    assert "vrcforge_scan_blendshapes" in {tool["name"] for tool in after_leaf["result"]["tools"]}
+    loaded = loaded_leaf
     assert loaded["result"]["structuredContent"]["operationId"]
+    assert loaded["result"]["structuredContent"]["loadedBlocks"] == ["avatar_structure/mesh_shape_data", "core"]
     activation_handle = loaded["result"]["structuredContent"]["activationHandle"]
     assert activation_handle.startswith("vrcforge-act-")
     assert loaded["result"]["structuredContent"]["catalogGeneration"] == 1
     assert router.drain_notifications() == [
         {"jsonrpc": "2.0", "method": "notifications/tools/list_changed"}
     ]
-
-    after, after_status = router.handle(
-        {"jsonrpc": "2.0", "id": 3, "method": "tools/list", "params": {"_meta": meta}}
-    )
-    after_names = {tool["name"] for tool in after["result"]["tools"]}
-    assert after_status == 200
-    assert "vrcforge_scan_blendshapes" in after_names
-    assert "vrcforge_apply_blendshapes" in after_names
+    assert "vrcforge_apply_blendshapes" in {tool["name"] for tool in after_leaf["result"]["tools"]}
     assert Bridge.calls == []
+
+    integration_leaf, integration_status = router.handle(
+        {
+            "jsonrpc": "2.0", "id": 26, "method": "tools/call",
+            "params": {"_meta": meta, "name": "vrcforge_list_tool_blocks",
+                       "arguments": {"block": "behavior/interaction_generated_systems"}},
+        }
+    )
+    assert integration_status == 200
+    integration_tools = {tool["name"] for tool in integration_leaf["result"]["structuredContent"]["tree"]["tools"]}
+    assert {
+        "vrcforge_scan_vrcfury", "vrcforge_gesture_manager_status",
+        "vrcforge_gesture_manager_enter_play_mode", "vrcforge_gesture_manager_set_parameter",
+    }.issubset(integration_tools)
+
+    repeated, _ = router.handle(
+        {
+            "jsonrpc": "2.0", "id": 27, "method": "tools/call",
+            "params": {"_meta": meta, "name": "vrcforge_load_tool_block",
+                       "arguments": {"block": "1.3"}},
+        }
+    )
+    assert repeated["result"]["structuredContent"]["changed"] is False
+    assert repeated["result"]["structuredContent"]["catalogGeneration"] == 1
+    assert router.drain_notifications() == []
 
     delegated_read, delegated_read_status = router.handle(
         {
@@ -723,7 +644,7 @@ def test_stdio_bridge_loads_external_unity_tool_blocks_on_demand(monkeypatch) ->
     )
     assert rejected_status == 200
     rejection = rejected["result"]["structuredContent"]
-    assert rejection["status"] == "core_block_required"
+    assert rejection["status"] == "invalid_tool_block"
     assert rejection["errorDetails"]["schema"] == "vrcforge.external_tool_error.v1"
     assert rejection["errorDetails"]["failureLayer"] == "external_tool_discovery"
     assert rejection["errorDetails"]["mutationStarted"] is False
@@ -742,9 +663,9 @@ def test_stdio_bridge_loads_external_unity_tool_blocks_on_demand(monkeypatch) ->
     )
     assert skills_loaded_status == 200
     assert skills_loaded["result"]["structuredContent"]["loadedBlocks"] == [
-        "avatar",
+        "avatar_structure/mesh_shape_data",
         "core",
-        "skills/vsk",
+        "project_environment/files",
     ]
 
     with_skills, with_skills_status = router.handle(
@@ -757,6 +678,35 @@ def test_stdio_bridge_loads_external_unity_tool_blocks_on_demand(monkeypatch) ->
         "vrcforge_import_skill_package",
         "vrcforge_export_skill_package",
     }.issubset(with_skill_names)
+    assert skills_loaded["result"]["structuredContent"]["catalogGeneration"] == 2
+    assert router.drain_notifications() == [
+        {"jsonrpc": "2.0", "method": "notifications/tools/list_changed"}
+    ]
+    unloaded, _ = router.handle(
+        {
+            "jsonrpc": "2.0", "id": 7, "method": "tools/call",
+            "params": {"_meta": meta, "name": "vrcforge_unload_tool_block",
+                       "arguments": {"block": "avatar_structure/mesh_shape_data"}},
+        }
+    )
+    assert unloaded["result"]["structuredContent"]["catalogGeneration"] == 3
+    assert router.drain_notifications() == [
+        {"jsonrpc": "2.0", "method": "notifications/tools/list_changed"}
+    ]
+    after_unload, _ = router.handle(
+        {"jsonrpc": "2.0", "id": 8, "method": "tools/list", "params": {"_meta": meta}}
+    )
+    assert "vrcforge_scan_blendshapes" not in {tool["name"] for tool in after_unload["result"]["tools"]}
+    stale_handle, _ = router.handle(
+        {
+            "jsonrpc": "2.0", "id": 9, "method": "tools/call",
+            "params": {"_meta": meta, "name": "vrcforge_invoke_loaded_read_tool",
+                       "arguments": {"activationHandle": activation_handle,
+                                     "toolName": "vrcforge_scan_blendshapes", "arguments": {}}},
+        }
+    )
+    assert stale_handle["result"]["structuredContent"]["status"] == "invalid_activation_handle"
+    assert len(Bridge.calls) == 2
 
 
 def test_bridge_uses_http_mcp_for_manifest_and_tool_calls(monkeypatch, tmp_path: Path) -> None:
@@ -827,3 +777,32 @@ def test_tool_transport_timeout_is_structured_and_never_safe_to_blind_retry(
     assert result["errorDetails"]["schema"] == "vrcforge.external_tool_error.v1"
     assert result["errorDetails"]["failureLayer"] == "external_stdio_http_transport"
     assert result["errorDetails"]["commitStateKnown"] is False
+
+
+def test_load_notifies_and_activation_fallback_survives_host_without_relist(monkeypatch) -> None:
+    module = importlib.import_module("tools.vrcforge_agent_mcp_stdio")
+
+    class Bridge:
+        calls = []
+        def preflight(self): return {"runtimeOnline": True}
+        def manifest(self, exposure_layer="planning", tool_blocks=None):
+            names = [{"name": "vrcforge_scan_materials", "description": "Scan materials", "inputSchema": {"type": "object"}, "_meta": {"toolBlock": "materials"}}] if tool_blocks and ("materials" in tool_blocks or "*" in tool_blocks) else []
+            return {"tools": names}
+        def call_tool(self, name, arguments, **_kwargs):
+            self.calls.append((name, arguments)); return {"ok": True, "tool": name}
+
+    captured = {}
+    monkeypatch.setattr(module, "run_stdio_loop", lambda router: captured.setdefault("router", router))
+    module.run_stdio_server(Bridge(), protocol_profile="vrcforge-2026")
+    router = captured["router"]
+    meta = {"io.modelcontextprotocol/protocolVersion": PROTOCOL_VERSION, "io.modelcontextprotocol/clientCapabilities": {}, "io.modelcontextprotocol/clientInfo": {"name": "blackbox", "version": "1"}}
+    before, _ = router.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {"_meta": meta}})
+    loaded, _ = router.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"_meta": meta, "name": "vrcforge_load_tool_block", "arguments": {"block": "materials"}}})
+    assert router.drain_notifications() == [{"jsonrpc": "2.0", "method": "notifications/tools/list_changed"}]
+    after, _ = router.handle({"jsonrpc": "2.0", "id": 3, "method": "tools/list", "params": {"_meta": meta}})
+    assert "vrcforge_scan_materials" in {tool["name"] for tool in after["result"]["tools"]}
+    assert loaded["result"]["structuredContent"]["catalogGeneration"] == 1
+    assert after["result"]["tools"][0]["_meta"]["catalogGeneration"] == 1
+    handle = loaded["result"]["structuredContent"]["activationHandle"]
+    fallback, _ = router.handle({"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"_meta": meta, "name": "vrcforge_invoke_loaded_read_tool", "arguments": {"activationHandle": handle, "toolName": "vrcforge_scan_materials", "arguments": {}}}})
+    assert fallback["result"]["structuredContent"]["delegatedToolName"] == "vrcforge_scan_materials"
