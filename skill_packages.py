@@ -10,6 +10,7 @@ import re
 import shutil
 import stat
 import tempfile
+import time
 import unicodedata
 import uuid
 import zipfile
@@ -531,6 +532,14 @@ def _path_contains_symlink_like(path: Path, root: Path) -> bool:
         current = parent
 
 
+def _path_is_within_root(path: Path, root: Path) -> bool:
+    try:
+        path.absolute().relative_to(root.absolute())
+    except ValueError:
+        return False
+    return True
+
+
 def _decode_fixed_base64(value: bytes, expected_size: int, label: str) -> bytes:
     try:
         text = value.decode("ascii").strip()
@@ -543,6 +552,75 @@ def _decode_fixed_base64(value: bytes, expected_size: int, label: str) -> bytes:
     if len(decoded) != expected_size:
         raise PackageSignatureError(f"{label} must decode to {expected_size} bytes.")
     return decoded
+
+
+_WINDOWS_PUBLISH_RETRY_WINERRORS = frozenset({5, 32, 33})
+_WINDOWS_PUBLISH_RETRY_DELAYS = (0.05, 0.1, 0.2, 0.4)
+
+
+def _is_retryable_windows_publish_error(error: OSError) -> bool:
+    return os.name == "nt" and getattr(error, "winerror", None) in _WINDOWS_PUBLISH_RETRY_WINERRORS
+
+
+def _replace_staging_with_bounded_windows_retry(
+    staging: Path,
+    destination: Path,
+    package_root: Path,
+) -> None:
+    """Publish one untouched staging directory with a bounded Windows retry."""
+
+    if os.path.lexists(destination):
+        raise PackageSecurityError("Refusing to publish over an existing skill version directory.")
+    if not _path_is_within_root(staging, package_root) or not _path_is_within_root(
+        destination.parent, package_root
+    ):
+        raise PackageSecurityError("Skill publish paths must remain inside the package root.")
+    if _path_contains_symlink_like(staging, package_root) or _path_contains_symlink_like(
+        destination.parent, package_root
+    ):
+        raise PackageSecurityError("Skill publish paths cannot contain symlinks or junctions.")
+    try:
+        staging_stat = os.stat(staging, follow_symlinks=False)
+        staging_identity = staging_stat.st_ino, staging_stat.st_dev
+        parent_stat = os.stat(destination.parent, follow_symlinks=False)
+        parent_identity = parent_stat.st_ino, parent_stat.st_dev
+    except OSError:
+        raise
+
+    first_error: OSError | None = None
+    for attempt in range(len(_WINDOWS_PUBLISH_RETRY_DELAYS) + 1):
+        if attempt:
+            if os.path.lexists(destination):
+                raise first_error  # type: ignore[misc]
+            if not _path_is_within_root(staging, package_root) or not _path_is_within_root(
+                destination.parent, package_root
+            ):
+                raise PackageSecurityError("Skill publish paths left the package root.")
+            if _path_contains_symlink_like(staging, package_root) or _path_contains_symlink_like(
+                destination.parent, package_root
+            ):
+                raise PackageSecurityError("Skill publish paths changed to symlinks or junctions.")
+            try:
+                current_staging = os.stat(staging, follow_symlinks=False)
+                current_parent = os.stat(destination.parent, follow_symlinks=False)
+            except OSError:
+                raise first_error  # type: ignore[misc]
+            if (current_staging.st_ino, current_staging.st_dev) != staging_identity:
+                raise PackageSecurityError("Skill staging identity changed during publish retry.")
+            if (current_parent.st_ino, current_parent.st_dev) != parent_identity:
+                raise PackageSecurityError("Skill publish parent changed during retry.")
+        try:
+            os.replace(staging, destination)
+            return
+        except OSError as exc:
+            if not _is_retryable_windows_publish_error(exc):
+                raise
+            first_error = first_error or exc
+            if os.path.lexists(destination):
+                raise first_error
+            if attempt == len(_WINDOWS_PUBLISH_RETRY_DELAYS):
+                raise first_error
+            time.sleep(_WINDOWS_PUBLISH_RETRY_DELAYS[attempt])
 
 
 class SkillPackageService:
@@ -2955,7 +3033,9 @@ class SkillPackageService:
                     raise PackageUpdateError("Installed version directory differs from the incoming immutable version.")
             else:
                 shutil.copytree(extracted_root, staging, symlinks=False)
-                os.replace(staging, version_root)
+                _replace_staging_with_bounded_windows_retry(
+                    staging, version_root, self.skill_store
+                )
                 changed = True
 
             timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")

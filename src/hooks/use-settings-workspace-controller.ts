@@ -122,6 +122,9 @@ export function useSettingsWorkspaceController({
           }
           targetEndpoint = readyEndpoint;
         }
+        // Independent panels must start loading even if notes are slow or fail.
+        void loadConnectors(targetEndpoint);
+        void loadDiagnostics(targetEndpoint);
         const notes = await fetchAgentNotes(targetEndpoint);
         if (
           requestSequence !== settingsInitRequestSequenceRef.current
@@ -132,8 +135,6 @@ export function useSettingsWorkspaceController({
         setAgentNotes(notes.content);
         setAgentNotesPath(notes.path);
         setAgentNotesLoaded(true);
-        void loadConnectors(targetEndpoint);
-        void loadDiagnostics(targetEndpoint);
       } catch (cause) {
         if (
           requestSequence === settingsInitRequestSequenceRef.current

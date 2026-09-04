@@ -858,18 +858,50 @@ Each item ends with its version history in this exact form:
 ### UX-017 — Checkpoint retention reasons stay distinguishable
 
 - Priority: P1.
-- Contract: the two newest checkpoint archives and an archive participating in
-  an active recovery are both protected from deletion, but the Storage page
-  exposes their different reasons as **Latest retained** and **Recovery in
-  progress**. The backend remains the source of the protection reason and the
-  delete action stays unavailable for either class.
+- Contract: automatic cleanup retains the two newest checkpoint archives, but
+  explicit user deletion may remove either or both, down to zero archives.
+  An archive participating in an active recovery remains protected. The Storage
+  page distinguishes automatic retention from **Recovery in progress**, uses
+  backend eligibility, confirms permanent loss of archive-based recovery, and
+  refreshes both the list and measured usage after confirmed deletion.
 - Forbidden regression: no generic **Protected** label that hides why an
   archive cannot be deleted, client-side guessing from list order, active
-  recovery archive deletion, or loss of the latest-two retention floor.
+  recovery archive deletion, treating automatic retention as a manual-delete
+  prohibition, deleting on cancel, or loss of the automatic latest-two floor.
 - Acceptance: checkpoint recovery backend tests and
   `tests/test_external_agent_connector_layout_ui.mjs` freeze the reason field,
-  localized labels and disabled delete path.
-- [首次实现: 1.7.4] [强化/修复: 1.7.4] [最近验证: 1.7.4]
+  localized labels. `tests/test_checkpoint_settings_browser.mjs` verifies the
+  newest-two selection, cancel, confirmed delete and refresh using isolated data.
+  Internal and external writes reserve their checkpoint and start recovery under
+  the same storage lock so manual deletion cannot race an active apply.
+- [首次实现: 1.7.4] [强化/修复: 1.8.0] [最近验证: 1.8.0 源码与隔离浏览器]
+
+### UX-018 — Measured checkpoint overage requires a visible warning
+
+- Contract: archive bytes strictly above the user's positive storage limit show
+  a dismissible warning with usage, limit, excess and a checkpoint-management
+  action. Equality is not overage; zero means unlimited. Acknowledging the same
+  state suppresses repetition, while further growth or a changed limit/directory
+  permits a new warning. The warning never authorizes deletion.
+- Forbidden regression: silently exceeding the limit because automatic retention
+  protects two archives, repeated unchanged popups, or reading the full connector
+  inventory just to decide whether quota is exceeded.
+- Acceptance: quota backend checks and `test_checkpoint_quota_notice.mjs` plus
+  `test_checkpoint_settings_browser.mjs`; real archive deletion is not test setup.
+- [首次实现: 1.8.0] [强化/修复: 1.8.0] [最近验证: 1.8.0 源码与隔离浏览器]
+
+### UX-019 — Settings navigation is not a settings reload
+
+- Contract: switching settings categories changes the visible section without
+  rerunning global initialization. Initialization deduplicates only in-flight
+  work for the exact context; later entry can refresh. Connector/diagnostic
+  panels do not wait for notes, and stale responses cannot overwrite a new
+  context. Blocking backend IPC runs off the desktop UI thread.
+- Acceptance: `test_settings_navigation_responsiveness.mjs`,
+  `test_settings_initialization_browser.mjs`, TypeScript and Rust checks.
+  Source/React fixture success does not substitute for packaged window-drag and
+  category-switch acceptance.
+- [首次实现: 1.8.0] [强化/修复: 1.8.0] [最近验证: 1.8.0 源码与隔离浏览器]
 
 ## Vision contracts
 
