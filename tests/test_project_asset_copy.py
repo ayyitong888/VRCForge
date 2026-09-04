@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
+import agent_gateway
 import dashboard_server
 from unity_mcp_tool_contract import EXPECTED_TOOL_COUNT
 
@@ -256,7 +258,11 @@ def test_core_and_external_registry_include_only_the_atomic_copy_surface() -> No
     contract = (root / "Assets/VRCForge/Editor/MCP/VRCForgeMcpToolContract.cs").read_text(encoding="utf-8")
     server = (root / "Assets/VRCForge/Editor/MCP/VRCForgeMcpCoreServer.cs").read_text(encoding="utf-8")
     dashboard = (root / "dashboard_server.py").read_text(encoding="utf-8")
-    gateway = (root / "agent_gateway.py").read_text(encoding="utf-8")
+    # Verify actual block membership after its definitions move to a leaf owner.
+    gateway = json.dumps({
+        block: sorted(names)
+        for block, names in agent_gateway.EXTERNAL_MCP_READ_TOOL_BLOCKS.items()
+    })
     tool = (root / "Assets/VRCForge/Editor/Generic/DuplicateProjectAssetTool.cs").read_text(encoding="utf-8")
 
     assert f'internal const int ToolCount = {EXPECTED_TOOL_COUNT};' in contract
