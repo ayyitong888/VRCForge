@@ -122,21 +122,24 @@ namespace VRCForge.Editor
                 foreach (var scene in loadedScenes)
                 {
                     var receipt = receipts.First(item => item.Asset == $"scene:{scene.path}");
-                    if (!EditorSceneManager.SaveScene(scene))
+                    if (scene.isDirty)
                     {
-                        receipt.After = DescribeSceneState(scene.path);
-                        receipt.Status = "failed";
-                        receipt.Error = "Unity returned false from EditorSceneManager.SaveScene.";
-                        return VRCForgeToolResult.Failed(
-                            "scene_save_failed",
-                            new
-                            {
-                                message = $"Unity could not save the open scene '{scene.path}' before checkpointing.",
-                                blocking = true,
-                                recoverable = false,
-                                scene = scene.path,
-                                transaction = BuildTransaction(receipts, transactionHandle)
-                            });
+                        if (!EditorSceneManager.SaveScene(scene))
+                        {
+                            receipt.After = DescribeSceneState(scene.path);
+                            receipt.Status = "failed";
+                            receipt.Error = "Unity returned false from EditorSceneManager.SaveScene.";
+                            return VRCForgeToolResult.Failed(
+                                "scene_save_failed",
+                                new
+                                {
+                                    message = $"Unity could not save the open scene '{scene.path}' before checkpointing.",
+                                    blocking = true,
+                                    recoverable = false,
+                                    scene = scene.path,
+                                    transaction = BuildTransaction(receipts, transactionHandle)
+                                });
+                        }
                     }
                     receipt.After = DescribeSceneState(scene.path);
                     receipt.Status = "succeeded";

@@ -12576,6 +12576,12 @@ class DashboardServerTests(unittest.TestCase):
         self.assertIn("reopenErrors", source)
         self.assertIn("recoveryRequired = true", source)
         self.assertIn("EditorSceneManager.SaveScene(scene)", source)
+        self.assertIn(
+            "if (scene.isDirty)\n"
+            "                    {\n"
+            "                        if (!EditorSceneManager.SaveScene(scene))",
+            source,
+        )
         self.assertLess(
             source.index('"unsaved_open_scene"'),
             source.index("AssetDatabase.SaveAssets()"),
