@@ -644,8 +644,5 @@ def test_gateway_old_facades_and_host_proxy_are_gone() -> None:
 
 def test_gateway_skill_registry_size_budget() -> None:
     source = (REPO_ROOT / "agent_gateway.py").read_bytes()
-    # STOPGAP (user-approved 2026-09-05): exact current size, no growth.
-    # Restore 476_574 bytes / 10_422 lines in the dedicated modularization
-    # task. This does not exempt registry or other behavioral tests.
-    assert len(source) <= 522_339
-    assert source.count(b"\n") <= 11_204
+    assert len(source) <= 476_574
+    assert source.count(b"\n") <= 10_422

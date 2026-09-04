@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -261,7 +262,11 @@ def test_core_contract_gateway_and_package_manifest_register_scene_duplicate() -
         encoding="utf-8"
     )
     dashboard = (root / "dashboard_server.py").read_text(encoding="utf-8")
-    gateway = (root / "agent_gateway.py").read_text(encoding="utf-8")
+    # Schema definitions have leaf owners; verify the actual Gateway exports.
+    gateway = json.dumps({
+        "read": agent_gateway.UNITY_READ_TOOL_INPUT_SCHEMAS,
+        "write": agent_gateway.EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS,
+    })
     manifest = (root / "packaging/unitypackage_guid_manifest.json").read_text(
         encoding="utf-8"
     )
