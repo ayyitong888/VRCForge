@@ -196,7 +196,7 @@ def test_reload_confirmation_is_project_scoped_approval_bound_execution_tool() -
 
     schema = canonical_unity_write_tool_input_schema(tool_name)
     assert schema["additionalProperties"] is False
-    assert schema["required"] == ["projectPath", "confirmReload"]
+    assert schema["required"] == ["projectPath", "confirmReload", "executionTarget"]
     assert schema["properties"]["confirmReload"] == {"type": "boolean", "const": True}
 
     planning = dashboard_server._RuntimePlannerCatalog().read("planning")
@@ -210,4 +210,9 @@ def test_reload_confirmation_is_project_scoped_approval_bound_execution_tool() -
         item["name"]: item
         for item in gateway.build_external_mcp_tools("execution", tool_blocks=["project"])
     }
-    assert external[tool_name]["inputSchema"] == schema
+    assert external[tool_name]["inputSchema"]["additionalProperties"] is False
+    assert external[tool_name]["inputSchema"]["required"] == schema["required"]
+    for field, expected in schema["properties"].items():
+        assert external[tool_name]["inputSchema"]["properties"][field] == expected
+    assert "promptSkillProvenance" in external[tool_name]["inputSchema"]["properties"]
+    assert external[tool_name]["inputSchema"]["properties"]["executionTarget"]["type"] == "object"

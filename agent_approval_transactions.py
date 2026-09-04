@@ -83,6 +83,57 @@ from execution_target import (
 from mcp_tool_descriptor import identity_scope
 
 
+PATCH_SET_SCHEMA = "vrcforge.modular_patch_set.v1"
+_UNITY_SERIALIZED_SUFFIXES = frozenset({".unity", ".prefab", ".asset", ".mat", ".controller", ".overridecontroller", ".anim", ".playable", ".mask"})
+
+
+def validate_modular_patch_set(value: Any) -> dict[str, Any]:
+    """Validate a bounded multi-file patch set before any handler is called."""
+    if not isinstance(value, Mapping):
+        raise AgentGatewayError("patchSet must be an object.", status_code=400)
+    operation_id = str(value.get("operationId") or "").strip()
+    files = value.get("files")
+    if not operation_id or len(operation_id) > 160 or not isinstance(files, list) or not files:
+        raise AgentGatewayError("patchSet requires one operationId and a non-empty files array.", status_code=400)
+    registry: dict[str, dict[str, Any]] = {}
+    normalized: list[dict[str, Any]] = []
+    for item in files:
+        if not isinstance(item, Mapping):
+            raise AgentGatewayError("Each patchSet file must be an object.", status_code=400)
+        root = str(item.get("root") or "").strip()
+        relative = str(item.get("relativePath") or "").strip().replace("\\", "/")
+        owner = str(item.get("owner") or "").strip()
+        responsibility = str(item.get("responsibility") or "").strip()
+        if not root or not relative or not owner or not responsibility:
+            raise AgentGatewayError("Each patchSet file requires root, relativePath, owner, and responsibility.", status_code=400)
+        rel_path = Path(relative)
+        if rel_path.is_absolute() or relative.startswith(("/", "\\")) or any(part in {"", ".", ".."} for part in rel_path.parts):
+            raise AgentGatewayError("patchSet relativePath must remain bounded under root.", status_code=400)
+        suffix = rel_path.suffix.casefold()
+        if suffix in _UNITY_SERIALIZED_SUFFIXES:
+            raise AgentGatewayError("Generic patchSet writes cannot modify Unity YAML or serialized assets; use a Unity Core Tool.", status_code=403)
+        if len(root) > 1024 or len(relative) > 512:
+            raise AgentGatewayError("patchSet root or relativePath exceeds the bounded limit.", status_code=400)
+        try:
+            canonical = normalize_filesystem_path(str((Path(root).resolve(strict=False) / rel_path).resolve(strict=False))).casefold()
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise AgentGatewayError("patchSet path could not be canonicalized.", status_code=400) from exc
+        if canonical in registry:
+            raise AgentGatewayError("patchSet contains duplicate canonical paths.", status_code=409, cause_code="duplicateRegistry")
+        has_digest = bool(str(item.get("expectedBeforeDigest") or "").strip())
+        must_not_exist = item.get("mustNotExist") is True
+        if has_digest == must_not_exist:
+            raise AgentGatewayError("Each patchSet file requires exactly one expectedBeforeDigest or mustNotExist=true.", status_code=400)
+        entry = {"root": root, "relativePath": relative, "owner": owner, "responsibility": responsibility}
+        if has_digest:
+            entry["expectedBeforeDigest"] = str(item["expectedBeforeDigest"]).strip()
+        else:
+            entry["mustNotExist"] = True
+        registry[canonical] = entry
+        normalized.append(entry)
+    return {"schema": PATCH_SET_SCHEMA, "operationId": operation_id, "files": normalized, "duplicateRegistry": registry}
+
+
 def _domain_write_receipt(value: Any) -> Mapping[str, Any] | Any:
     """Find the bounded Unity domain receipt inside transport wrappers."""
 
@@ -99,9 +150,54 @@ def _domain_write_receipt(value: Any) -> Mapping[str, Any] | Any:
         if (
             isinstance(current.get("schema"), str)
             and str(current.get("schema") or "").startswith("vrcforge.")
-            and any(key in current for key in ("commitState", "mutationStarted", "readback"))
+            and any(
+                key in current
+                for key in (
+                    "commitState",
+                    "mutationStarted",
+                    "mutationApplied",
+                    "applied",
+                    "committed",
+                    "readback",
+                    "persistedReadback",
+                )
+            )
         ):
-            return current
+            receipt = dict(current)
+            if not isinstance(receipt.get("mutationApplied"), bool) and isinstance(
+                receipt.get("applied"), bool
+            ):
+                receipt["mutationApplied"] = receipt["applied"]
+            if (
+                not isinstance(receipt.get("mutationApplied"), bool)
+                and receipt.get("mutationStarted") is True
+                and receipt.get("committed") is True
+            ):
+                receipt["mutationApplied"] = True
+            if not str(receipt.get("commitState") or "").strip():
+                if receipt.get("committed") is True:
+                    receipt["commitState"] = "committed"
+                elif receipt.get("committed") is False and receipt.get("mutationStarted") is False:
+                    receipt["commitState"] = "not_started"
+            if receipt.get("persistedReadback") is True:
+                receipt["verified"] = True
+                if not isinstance(receipt.get("readback"), Mapping):
+                    receipt["readback"] = {
+                        "persisted": True,
+                        **{
+                            key: receipt[key]
+                            for key in (
+                                "scenePath",
+                                "sceneGuid",
+                                "sceneFileDigest",
+                                "rendererComponentId",
+                                "slotIndex",
+                                "newMaterialAssetPath",
+                            )
+                            if key in receipt
+                        },
+                    }
+            return receipt
         if depth >= 5:
             continue
         for key in ("structuredContent", "result", "payload", "data", "toolResult"):
@@ -289,6 +385,7 @@ class AgentApprovalTransactionService:
         "_scoped_approval_reviewer",
         "_project_write_locks",
         "_project_write_locks_guard",
+        "_receipt_registry",
     )
 
     def __init__(
@@ -310,7 +407,26 @@ class AgentApprovalTransactionService:
         # service; unknown project scope deliberately uses the global key.
         self._project_write_locks: dict[str, threading.Lock] = {}
         self._project_write_locks_guard = threading.Lock()
+        # One process-local receipt registry is shared by all modular patch
+        # set operations; it is never split per file or per Agent surface.
+        self._receipt_registry: dict[str, dict[str, Any]] = {}
         self._restore_pending_approvals()
+
+    def validate_patch_set(self, value: Any) -> dict[str, Any]:
+        return validate_modular_patch_set(value)
+
+    def register_patch_set_receipt(self, patch_set: Any, receipt: Mapping[str, Any]) -> dict[str, Any]:
+        normalized = validate_modular_patch_set(patch_set)
+        operation_id = normalized["operationId"]
+        stored = {"operationId": operation_id, "patchSet": normalized, "receipt": dict(receipt)}
+        with self._ports.state.shared_state_lock:
+            self._receipt_registry[operation_id] = stored
+        return stored
+
+    def get_patch_set_receipt(self, operation_id: str) -> dict[str, Any] | None:
+        with self._ports.state.shared_state_lock:
+            value = self._receipt_registry.get(str(operation_id or "").strip())
+            return dict(value) if value else None
 
     @staticmethod
     def _project_lock_key(project_root: Any) -> str:
@@ -2045,6 +2161,8 @@ class AgentApprovalTransactionService:
             "id": checkpoint_id,
             "createdAt": utc_now_iso(),
             "approvalId": str(approval.get("id") or ""),
+            "operationId": str(approval.get("operationId") or approval.get("id") or ""),
+            "executionTarget": ensure_dict(approval.get("executionTarget")),
             "targetTool": target_tool,
             "status": "unavailable",
         }
@@ -2320,6 +2438,8 @@ class AgentApprovalTransactionService:
             "resolution": "",
             "createdAt": utc_now_iso(),
             "approvalId": str(approval.get("id") or ""),
+            "operationId": str(approval.get("operationId") or approval.get("id") or ""),
+            "executionTarget": ensure_dict(approval.get("executionTarget")),
             "targetTool": target_tool,
             "riskLevel": str(approval.get("riskLevel") or ""),
             "projectRoot": str(checkpoint.get("projectRoot") or arguments.get("projectRoot") or arguments.get("project_root") or ""),
@@ -2363,6 +2483,8 @@ class AgentApprovalTransactionService:
             "resolution": resolution,
             "resolvedAt": utc_now_iso() if status not in APPLY_RECOVERY_ACTIVE_STATUSES else "",
             "approvalId": str(recovery.get("approvalId") or ""),
+            "operationId": str(recovery.get("operationId") or recovery.get("approvalId") or ""),
+            "executionTarget": ensure_dict(recovery.get("executionTarget")),
             "targetTool": str(recovery.get("targetTool") or ""),
             "projectRoot": str(recovery.get("projectRoot") or ""),
             "avatarPath": str(recovery.get("avatarPath") or ""),
@@ -3245,6 +3367,11 @@ class AgentApprovalTransactionService:
             f"mcpwrite_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')}_"
             f"{secrets.token_hex(4)}"
         )
+        patch_set = arguments.get("patchSet")
+        if patch_set is not None:
+            patch_set = dict(validate_modular_patch_set(patch_set))
+            patch_set["operationId"] = operation_id
+            arguments["patchSet"] = patch_set
         handler_arguments = dict(arguments)
         handler_arguments.pop("executionTarget", None)
         handler_arguments.pop("_vrcforge_approved_execution", None)
@@ -3260,6 +3387,26 @@ class AgentApprovalTransactionService:
             if self._project_has_background_read(project_root):
                 raise AgentGatewayError(
                     "A background project read is active. Retry this external write after it finishes.",
+                    status_code=409,
+                )
+            active_recoveries = [
+                recovery
+                for recovery in self._ports.checkpoint.active_apply_recoveries()
+                if self._entry_project_key(recovery) in {self._project_lock_key(project_root), "__global__"}
+                or self._project_lock_key(project_root) == "__global__"
+            ]
+            if active_recoveries and target_tool not in APPLY_RECOVERY_EXEMPT_WRITE_TARGETS:
+                self._ports.append_audit(
+                    {
+                        "event": "external_mcp_write_blocked_by_interrupted_apply_recovery",
+                        "operationId": operation_id,
+                        "targetTool": target_tool,
+                        "projectRoot": str(project_root or ""),
+                        "recoveries": active_recoveries,
+                    }
+                )
+                raise AgentGatewayError(
+                    "A previous write did not finish cleanly. Restore or resolve the interrupted apply recovery before running another write.",
                     status_code=409,
                 )
             if self._project_has_in_flight_write(project_root):
@@ -3296,6 +3443,7 @@ class AgentApprovalTransactionService:
         failure_layer = "external_mcp_transaction"
         handler_started = False
         checkpoint: dict[str, Any] | None = None
+        recovery: dict[str, Any] | None = None
         try:
             if (
                 write_handler.requires_approved_execution_context
@@ -3316,25 +3464,38 @@ class AgentApprovalTransactionService:
                 and extract_project_root(arguments).is_dir()
             ):
                 failure_layer = "checkpoint"
-                checkpoint = self._create_pre_write_checkpoint(
-                    {
-                        "id": operation_id,
-                        "targetTool": target_tool,
-                        "agentName": str(agent_name or "mcp-agent")[:120],
-                        "arguments": arguments,
-                        "operationId": operation_id,
-                        "executionTargetDigest": expected_execution_target_digest,
-                        "planDigest": actual_plan_digest,
-                        "toolDefinitionDigest": str(
-                            prepared.get("toolDefinitionDigest") or ""
-                        ),
-                    },
-                    arguments,
-                )
-                if not checkpoint or checkpoint.get("ok") is not True:
-                    raise AgentGatewayError(
-                        str((checkpoint or {}).get("error") or "Pre-write checkpoint failed."),
-                        status_code=409,
+                with self._ports.state.checkpoint_storage_lock:
+                    checkpoint = self._create_pre_write_checkpoint(
+                        {
+                            "id": operation_id,
+                            "targetTool": target_tool,
+                            "agentName": str(agent_name or "mcp-agent")[:120],
+                            "arguments": arguments,
+                            "operationId": operation_id,
+                            "executionTarget": arguments.get("executionTarget"),
+                            "executionTargetDigest": expected_execution_target_digest,
+                            "planDigest": actual_plan_digest,
+                            "toolDefinitionDigest": str(
+                                prepared.get("toolDefinitionDigest") or ""
+                            ),
+                        },
+                        arguments,
+                    )
+                    if not checkpoint or checkpoint.get("ok") is not True:
+                        raise AgentGatewayError(
+                            str((checkpoint or {}).get("error") or "Pre-write checkpoint failed."),
+                            status_code=409,
+                        )
+                    recovery = self._start_apply_recovery(
+                        {
+                            "id": operation_id,
+                            "operationId": operation_id,
+                            "targetTool": target_tool,
+                            "riskLevel": str(write_handler.risk_level or ""),
+                            "executionTarget": arguments.get("executionTarget"),
+                        },
+                        arguments,
+                        checkpoint,
                     )
             if (
                 write_handler.requires_approved_execution_context
@@ -3442,6 +3603,47 @@ class AgentApprovalTransactionService:
                 or completion_outcome.get("commitState")
                 or "unknown"
             )
+            persistence_state = (
+                "persisted"
+                if receipt_verified and commit_state in {"committed", "no_change"}
+                else "verified"
+                if write_handler.verification_finalize_handler is not None
+                else "handler_reported"
+            )
+            readback_state = (
+                "verified"
+                if receipt_verified and isinstance(receipt_readback, Mapping)
+                else "verified"
+                if write_handler.verification_finalize_handler is not None
+                else "handler_reported"
+            )
+            completion_outcome.update(
+                {
+                    "mutationStarted": mutation_started,
+                    "mutationApplied": mutation_applied,
+                    "commitState": commit_state,
+                    "persistenceState": persistence_state,
+                    "readbackState": readback_state,
+                }
+            )
+            if recovery is not None:
+                finalize_verification = (
+                    isinstance(result, Mapping)
+                    and isinstance(result.get("consoleVerification"), Mapping)
+                    and str(result["consoleVerification"].get("status") or "").casefold()
+                    in {"passed", "verified"}
+                )
+                if not receipt_verified and not finalize_verification:
+                    raise AgentGatewayError(
+                        "The external Unity write returned success without explicit verification.",
+                        status_code=409,
+                    )
+                recovery = self._finish_apply_recovery(
+                    recovery,
+                    status="applied",
+                    resolution="write_completed",
+                    result_summary=summarize_params(completion_outcome),
+                )
             payload: dict[str, Any] = {
                 "ok": True,
                 "operationId": operation_id,
@@ -3455,20 +3657,8 @@ class AgentApprovalTransactionService:
                 "mutationStarted": mutation_started,
                 "mutationApplied": mutation_applied,
                 "commitState": commit_state,
-                "persistenceState": (
-                    "persisted"
-                    if receipt_verified and commit_state in {"committed", "no_change"}
-                    else "verified"
-                    if write_handler.verification_finalize_handler is not None
-                    else "handler_reported"
-                ),
-                "readbackState": (
-                    "verified"
-                    if receipt_verified and isinstance(receipt_readback, Mapping)
-                    else "verified"
-                    if write_handler.verification_finalize_handler is not None
-                    else "handler_reported"
-                ),
+                "persistenceState": persistence_state,
+                "readbackState": readback_state,
                 "cleanupState": completion_outcome.get("cleanupState") or "not_applicable",
                 "retryable": bool(completion_outcome.get("retryable", False)),
                 "nextAction": completion_outcome.get("nextAction"),
@@ -3490,6 +3680,11 @@ class AgentApprovalTransactionService:
                 payload["requestTrace"] = request_trace
             if checkpoint is not None:
                 payload["checkpoint"] = checkpoint
+            if recovery is not None:
+                payload["recovery"] = recovery
+            if patch_set is not None:
+                payload["patchSet"] = patch_set
+                self.register_patch_set_receipt(patch_set, payload)
             self._ports.append_audit(
                 {
                     "event": "external_mcp_write_completed",
@@ -3614,6 +3809,34 @@ class AgentApprovalTransactionService:
                 )
             error_object = build_external_tool_error(**error_constructor_args)
             write_failure = external_write_failure_view(error_object)
+            if recovery is not None:
+                if _confirmed_no_write_failure(write_failure):
+                    recovery = self._finish_apply_recovery(
+                        recovery,
+                        status="not_applied",
+                        resolution="confirmed_no_write",
+                        error=exception_text,
+                        result_summary=summarize_params(failure_result),
+                        write_failure=write_failure,
+                    )
+                elif _temporary_cleanup_only_failure(write_failure):
+                    recovery = self._finish_apply_recovery(
+                        recovery,
+                        status="applied",
+                        resolution="write_completed_cleanup_pending",
+                        error=exception_text,
+                        result_summary=summarize_params(failure_result),
+                        write_failure=write_failure,
+                    )
+                else:
+                    recovery = self._finish_apply_recovery(
+                        recovery,
+                        status="needs_recovery",
+                        resolution="write_failed_after_checkpoint",
+                        error=exception_text,
+                        result_summary=summarize_params(failure_result),
+                        write_failure=write_failure,
+                    )
             completion_outcome = ensure_dict(
                 redact_sensitive(
                     normalize_agent_tool_result(
@@ -3657,6 +3880,8 @@ class AgentApprovalTransactionService:
                 payload["requestTrace"] = request_trace
             if checkpoint is not None:
                 payload["checkpoint"] = checkpoint
+            if recovery is not None:
+                payload["recovery"] = recovery
             self._ports.append_audit(
                 {
                     "event": "external_mcp_write_failed",

@@ -294,6 +294,7 @@ def test_external_facade_exposes_canonical_high_risk_scene_save() -> None:
         "projectPath",
         "action",
         "scenePath",
+        "executionTarget",
     ]
     assert "executionTarget" in current_scene_save["inputSchema"]["properties"]
     assert current_scene_save["inputSchema"]["additionalProperties"] is False

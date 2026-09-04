@@ -55,6 +55,7 @@ namespace VRCForge.Editor
         {
             "vrc_set_material_shader",
             "vrc_set_material_texture",
+            "vrc_set_renderer_material_slot",
             "vrc_duplicate_scene_object",
             "vrc_duplicate_project_asset",
             "vrc_duplicate_scene_asset",

@@ -15,8 +15,8 @@ namespace VRCForge.Editor
         internal const string CoreIdentity = "vrcforge.unity-core";
         internal const string HandshakeProtocol = "vrcforge.core-handshake.v1";
         internal const string ProductVersion = "1.8.0";
-        internal const string ToolContractVersion = "88";
-        internal const int ToolCount = 90;
+        internal const string ToolContractVersion = "89";
+        internal const int ToolCount = 91;
 
         private static readonly Dictionary<string, string> ExpectedTypes =
             new Dictionary<string, string>(StringComparer.Ordinal)
@@ -101,6 +101,7 @@ namespace VRCForge.Editor
                 { "vrc_set_gameobject_active", "VRCForge.Editor.SetGameObjectActiveTool" },
                 { "vrc_set_material_shader", "VRCForge.Editor.MaterialShaderTool" },
                 { "vrc_set_material_texture", "VRCForge.Editor.MaterialTextureTool" },
+                { "vrc_set_renderer_material_slot", "VRCForge.Editor.RendererMaterialSlotTool" },
                 { "vrc_texture_patch", "VRCForge.Editor.TexturePatchTool" },
                 { "vrc_set_play_mode", "VRCForge.Editor.SetPlayModeTool" },
                 { "vrc_set_property", "VRCForge.Editor.SetPropertyTool" },

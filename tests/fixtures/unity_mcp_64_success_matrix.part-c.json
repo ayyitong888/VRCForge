@@ -175,6 +175,14 @@
       "cleanup": "Restore the material from the run-owned checkpoint; never edit the texture source."
     },
     {
+      "tool": "vrc_set_renderer_material_slot",
+      "mode": "approved_apply_after_preview",
+      "minimalArguments": { "rendererPath": "${RENDERER_PATH}", "rendererComponentId": "${RENDERER_COMPONENT_ID}", "slotIndex": 0, "newMaterialAssetPath": "${PERSISTENT_MATERIAL_PATH}", "expectedProjectPath": "${PROJECT_PATH}", "preview": false, "expectedScenePath": "${SAVED_SCENE_PATH}", "expectedSceneGuid": "${SCENE_GUID}", "expectedSceneHandle": 1, "expectedSceneFileDigest": "${SCENE_FILE_DIGEST}", "expectedRendererComponentType": "SkinnedMeshRenderer", "expectedRendererComponentIndex": 0, "expectedBeforeMaterialAssetPath": "${BEFORE_MATERIAL_PATH}", "expectedBeforeMaterialGuid": "${BEFORE_MATERIAL_GUID}", "expectedBeforeMaterialFileDigest": "${BEFORE_MATERIAL_FILE_DIGEST}", "expectedBeforeMaterialShader": "${BEFORE_MATERIAL_SHADER}", "expectedBeforeMaterialRenderQueue": 2000, "expectedNewMaterialGuid": "${NEW_MATERIAL_GUID}", "expectedNewMaterialFileDigest": "${NEW_MATERIAL_FILE_DIGEST}" },
+      "requiredFixtures": ["saved scene with a uniquely resolved Renderer", "persistent replacement material in Assets", "previous exact renderer-slot preview evidence", "stable RendererComponentIdentity and fresh scene/material digests"],
+      "successFields": ["schema", "preview", "mutationStarted", "applied", "committed", "sceneSaved", "persistedReadback", "rendererPath", "rendererComponentId", "rendererComponentType", "rendererComponentIndex", "scenePath", "sceneGuid", "sceneHandle", "sceneFileDigest", "slotIndex", "beforeMaterial", "newMaterial", "newMaterialAssetPath", "newMaterialAssetGuid", "newMaterialFileDigest", "preconditions"],
+      "cleanup": "Restore the saved scene through the run-owned checkpoint/backup lane; never mutate the source material asset."
+    },
+    {
       "tool": "vrc_set_play_mode",
       "mode": "approved_apply",
       "minimalArguments": { "isPlaying": true },

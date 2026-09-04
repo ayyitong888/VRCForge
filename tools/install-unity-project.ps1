@@ -107,6 +107,7 @@ if (-not (Test-Path -LiteralPath $targetProjectSettings)) {
 $legacyBackupPath = $null
 $vrcForgeBackupPath = $null
 $installedVrcForge = $false
+$restoredGeneratedPath = $null
 
 try {
     New-Item -ItemType Directory -Force -Path $backupRoot | Out-Null
@@ -132,6 +133,30 @@ try {
 
     try {
         Copy-DirectoryClean $sourceAssets $targetVrcForge
+
+        # Assets/VRCForge/Generated is user/project output, not plugin source.
+        # A source upgrade must keep those GUID-bearing assets at their exact
+        # paths or existing scenes can silently lose material/prefab references
+        # after the next Unity domain reload.
+        if (-not [string]::IsNullOrWhiteSpace($vrcForgeBackupPath)) {
+            $backupGenerated = Join-Path $vrcForgeBackupPath "Generated"
+            $targetGenerated = Join-Path $targetVrcForge "Generated"
+            if (Test-Path -LiteralPath $backupGenerated) {
+                if (Test-Path -LiteralPath $targetGenerated) {
+                    throw "Refusing to overwrite preserved project output during plugin upgrade: $targetGenerated"
+                }
+                Copy-Item -LiteralPath $backupGenerated -Destination $targetGenerated -Recurse
+                $backupGeneratedMeta = "$backupGenerated.meta"
+                $targetGeneratedMeta = "$targetGenerated.meta"
+                if (Test-Path -LiteralPath $backupGeneratedMeta) {
+                    if (Test-Path -LiteralPath $targetGeneratedMeta) {
+                        throw "Refusing to overwrite preserved project output metadata: $targetGeneratedMeta"
+                    }
+                    Copy-Item -LiteralPath $backupGeneratedMeta -Destination $targetGeneratedMeta
+                }
+                $restoredGeneratedPath = $targetGenerated
+            }
+        }
         $installedVrcForge = $true
     } catch {
         Restore-DirectoryBackup $vrcForgeBackupPath $targetVrcForge
@@ -147,12 +172,15 @@ try {
 
 Write-Host "Installed Assets/VRCForge into: $resolvedProjectPath"
 Write-Host "Project backups are under: $backupRoot"
+if (-not [string]::IsNullOrWhiteSpace($restoredGeneratedPath)) {
+    Write-Host "Preserved project-generated assets at: $restoredGeneratedPath"
+}
 Write-Host ""
 Write-Host "Next steps inside Unity:"
 Write-Host "1. Open the project and wait for VRCForge scripts to compile."
 Write-Host "2. Confirm the Console has no compiler errors and VRCForge MCP Core reports Ready."
 Write-Host "3. Open VRCForge App and select this project; the packaged Core connects automatically."
-Write-Host "4. Optional: use the VRCForge App Doctor if the 64 Unity tools do not appear."
+Write-Host "4. Optional: use the VRCForge App Doctor if the expected Unity tools do not appear."
 
 if ($LaunchUnity) {
     if ([string]::IsNullOrWhiteSpace($UnityEditorPath)) {

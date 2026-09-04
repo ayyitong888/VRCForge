@@ -16,8 +16,8 @@ def test_deformation_schema_is_strict_and_shared_in_avatar_read_block() -> None:
     assert schema["properties"]["componentIndex"]["minimum"] == 0
     assert "vrcforge_inspect_skinned_mesh_deformation" in agent_gateway.EXTERNAL_MCP_READ_TOOL_BLOCKS["core"]
     assert "vrc_inspect_skinned_mesh_deformation" in unity_mcp_tool_contract.EXPECTED_TOOL_NAMES
-    assert unity_mcp_tool_contract.EXPECTED_TOOL_COUNT == 90
-    assert unity_mcp_tool_contract.TOOL_CONTRACT_VERSION == "88"
+    assert unity_mcp_tool_contract.EXPECTED_TOOL_COUNT == 91
+    assert unity_mcp_tool_contract.TOOL_CONTRACT_VERSION == "89"
 
 
 def test_deformation_read_forwards_exact_core_arguments_and_preserves_metrics(monkeypatch) -> None:

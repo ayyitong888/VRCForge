@@ -117,6 +117,10 @@ namespace VRCForge.Editor
                     {
                         return VRCForgeToolResult.RejectedBeforeMutation("free_camera_parameters_conflict", "cameraMode=free is mutually exclusive with setRotation and non-avatar captureScope.", "unity_capture", "argument_validation");
                     }
+                    if (!string.IsNullOrEmpty(avatarPath) && ResolveTransform(avatarPath) == null)
+                    {
+                        return VRCForgeToolResult.RejectedBeforeMutation("capture_target_not_found", "The requested avatarPath could not be resolved; free-camera capture refused without an unverified renderer target.", "unity_capture", "capture_precondition");
+                    }
                 }
                 else if (@params?["cameraPosition"] != null || @params?["targetPosition"] != null || @params?["upVector"] != null
                     || @params?["projection"] != null || @params?["orthographicSize"] != null || @params?["fieldOfView"] != null)
@@ -232,7 +236,7 @@ namespace VRCForge.Editor
                     TryShowGameView();
                     if (cameraMode == "free")
                     {
-                        var freeObservation = CaptureFreeCamera(activeGameCamera, absolutePath, width, height, freeCamera);
+                        var freeObservation = CaptureFreeCamera(activeGameCamera, absolutePath, width, height, freeCamera, avatarPath);
                         return VRCForgeToolResult.Completed($"Captured Game View screenshot: {absolutePath}", new
                         {
                             imagePath = absolutePath.Replace("\\", "/"), width, height, cameraMode, projection = freeCamera.ProjectionName,
@@ -332,7 +336,7 @@ namespace VRCForge.Editor
 
                 if (cameraMode == "free")
                 {
-                    var freeObservation = CaptureFreeCamera(camera, absolutePath, width, height, freeCamera);
+                    var freeObservation = CaptureFreeCamera(camera, absolutePath, width, height, freeCamera, avatarPath);
                     return VRCForgeToolResult.Completed($"Captured SceneView screenshot: {absolutePath}", new
                     {
                         imagePath = absolutePath.Replace("\\", "/"), width, height, cameraMode, projection = freeCamera.ProjectionName,
@@ -691,6 +695,14 @@ namespace VRCForge.Editor
             public Matrix4x4 ViewProjection;
             public object Basis;
             public Vector3 Up;
+            public int CullingMask;
+            public bool TargetSceneValid;
+            public string TargetSceneName;
+            public string TargetPath;
+            public int TargetRendererCount;
+            public int TargetVisibleRendererCount;
+            public int TargetRendererLayerMask;
+            public bool TargetRendererLayersIncluded;
         }
 
         private static string TryParseFreeCamera(JObject parameters, out FreeCameraSpec spec)
@@ -776,6 +788,14 @@ namespace VRCForge.Editor
                 },
                 ["matrixOrder"] = "row_major",
                 ["coordinateSpace"] = "unity_world",
+                ["cullingMask"] = observation.CullingMask,
+                ["targetSceneValid"] = observation.TargetSceneValid,
+                ["targetSceneName"] = observation.TargetSceneName,
+                ["targetPath"] = observation.TargetPath,
+                ["targetRendererCount"] = observation.TargetRendererCount,
+                ["targetVisibleRendererCount"] = observation.TargetVisibleRendererCount,
+                ["targetRendererLayerMask"] = observation.TargetRendererLayerMask,
+                ["targetRendererLayersIncluded"] = observation.TargetRendererLayersIncluded,
             };
             if (observation.ProjectionName == "orthographic")
             {
@@ -788,7 +808,7 @@ namespace VRCForge.Editor
             return evidence;
         }
 
-        private static CameraObservation CaptureFreeCamera(Camera source, string absolutePath, int width, int height, FreeCameraSpec spec)
+        private static CameraObservation CaptureFreeCamera(Camera source, string absolutePath, int width, int height, FreeCameraSpec spec, string avatarPath)
         {
             var go = new GameObject("VRCForge_FreeCaptureCamera") { hideFlags = HideFlags.HideAndDontSave };
             var camera = go.AddComponent<Camera>();
@@ -798,6 +818,7 @@ namespace VRCForge.Editor
                 {
                     camera.CopyFrom(source);
                 }
+                var targetVisibility = IncludeTargetRendererLayers(camera, avatarPath);
                 var rotation = Quaternion.LookRotation((spec.Target - spec.Position).normalized, spec.Up.normalized);
                 camera.transform.SetPositionAndRotation(spec.Position, rotation);
                 camera.aspect = width / (float)height;
@@ -824,10 +845,74 @@ namespace VRCForge.Editor
                     GpuProjection = gpuProjection,
                     ViewProjection = gpuProjection * camera.worldToCameraMatrix,
                     Basis = new { right = ToObject(camera.transform.right), up = ToObject(camera.transform.up), forward = ToObject(camera.transform.forward) },
-                    Up = camera.transform.up
+                    Up = camera.transform.up,
+                    CullingMask = camera.cullingMask,
+                    TargetSceneValid = targetVisibility.SceneValid,
+                    TargetSceneName = targetVisibility.SceneName,
+                    TargetPath = targetVisibility.Path,
+                    TargetRendererCount = targetVisibility.RendererCount,
+                    TargetVisibleRendererCount = targetVisibility.VisibleRendererCount,
+                    TargetRendererLayerMask = targetVisibility.RendererLayerMask,
+                    TargetRendererLayersIncluded = targetVisibility.RendererCount > 0
+                        && (camera.cullingMask & targetVisibility.RendererLayerMask) == targetVisibility.RendererLayerMask
                 };
             }
             finally { UnityEngine.Object.DestroyImmediate(go); }
+        }
+
+        private sealed class TargetVisibility
+        {
+            public bool SceneValid;
+            public string SceneName = string.Empty;
+            public string Path = string.Empty;
+            public int RendererCount;
+            public int VisibleRendererCount;
+            public int RendererLayerMask;
+        }
+
+        private static TargetVisibility IncludeTargetRendererLayers(Camera camera, string avatarPath)
+        {
+            var evidence = new TargetVisibility();
+            if (string.IsNullOrWhiteSpace(avatarPath))
+            {
+                return evidence;
+            }
+
+            var target = ResolveTransform(avatarPath);
+            if (target == null)
+            {
+                return evidence;
+            }
+
+            var scene = target.gameObject.scene;
+            evidence.SceneValid = IsSceneObject(target.gameObject) && scene.isLoaded;
+            evidence.SceneName = scene.IsValid() ? scene.name : string.Empty;
+            evidence.Path = GetTransformPath(target);
+            foreach (var renderer in target.GetComponentsInChildren<Renderer>(true))
+            {
+                if (renderer == null || !IsSceneObject(renderer.gameObject))
+                {
+                    continue;
+                }
+
+                evidence.RendererCount++;
+                if (renderer.gameObject.layer >= 0 && renderer.gameObject.layer < 32)
+                {
+                    evidence.RendererLayerMask |= 1 << renderer.gameObject.layer;
+                }
+
+                if (renderer.enabled && renderer.gameObject.activeInHierarchy)
+                {
+                    evidence.VisibleRendererCount++;
+                }
+            }
+
+            // CopyFrom preserves the active Game camera's mask, which can omit the
+            // avatar layer in Play Mode and leave an otherwise valid free camera
+            // rendering only its skybox. Keep the source mask, but include every
+            // target renderer layer so the explicit free-camera target is visible.
+            camera.cullingMask |= evidence.RendererLayerMask;
+            return evidence;
         }
 
         private static CameraObservation CaptureOrbitCamera(

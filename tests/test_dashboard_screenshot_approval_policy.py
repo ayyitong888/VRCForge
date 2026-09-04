@@ -94,6 +94,27 @@ def test_single_capture_preparer_freezes_only_the_fixed_dashboard_output_path() 
     assert preview["outputPaths"] == [expected_path]
 
 
+def test_single_capture_preparer_preserves_execution_target_envelope() -> None:
+    execution_target = {
+        "schema": "vrcforge.execution_target.v1",
+        "scope": "avatar",
+        "namespace": "vrcforge://projects/example/scenes/example/avatars/example",
+        "project": {"root": r"D:\Unity\Avatar", "projectId": "project-id"},
+        "editor": {"unityPid": 42, "processStartTime": "1", "coreInstanceId": "core-id"},
+    }
+
+    prepared, _preview = dashboard_server.prepare_capture_screenshot_request(
+        {
+            "projectPath": r"D:\Unity\Avatar",
+            "avatarPath": "Avatar",
+            "executionTarget": execution_target,
+        },
+        None,
+    )
+
+    assert prepared["executionTarget"] == execution_target
+
+
 def test_single_capture_preparer_supports_one_named_atomic_angle() -> None:
     prepared, preview = dashboard_server.prepare_capture_screenshot_request(
         {"avatar_path": "Scene/Hero", "angle": "SIDE_LEFT"}, None

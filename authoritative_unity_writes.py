@@ -18,6 +18,13 @@ from material_texture_assignment import (
     build_preview_arguments as build_material_texture_preview_arguments,
     validate_apply_result as validate_material_texture_apply_result,
 )
+from renderer_material_slot_assignment import (
+    TOOL_NAME as RENDERER_MATERIAL_SLOT_TOOL,
+    RendererMaterialSlotError,
+    bind_authoritative_preview as bind_renderer_material_slot_preview,
+    build_preview_arguments as build_renderer_material_slot_preview_arguments,
+    validate_apply_result as validate_renderer_material_slot_apply_result,
+)
 from atomic_reference_rename import (
     TOOL_NAME as ATOMIC_REFERENCE_RENAME_TOOL,
     AtomicReferenceRenameError,
@@ -158,6 +165,18 @@ _SPECS = {
         include_project_path_in_preview=True,
         validate_apply=validate_material_texture_apply_result,
         result_error="Material texture apply returned an invalid persisted verification receipt.",
+    ),
+    RENDERER_MATERIAL_SLOT_TOOL: AuthoritativeUnityWriteSpec(
+        tool_name=RENDERER_MATERIAL_SLOT_TOOL,
+        request_error="Renderer material-slot arguments are required.",
+        bridge_error="Renderer material-slot preview could not be verified against the current project.",
+        receipt_error="Renderer material-slot preview returned an invalid identity receipt.",
+        domain_error=RendererMaterialSlotError,
+        build_preview=build_renderer_material_slot_preview_arguments,
+        bind_preview=bind_renderer_material_slot_preview,
+        include_project_path_in_preview=True,
+        validate_apply=validate_renderer_material_slot_apply_result,
+        result_error="Renderer material-slot apply returned an invalid saved-scene receipt.",
     ),
     DUPLICATE_TOOL_NAME: AuthoritativeUnityWriteSpec(
         tool_name=DUPLICATE_TOOL_NAME,

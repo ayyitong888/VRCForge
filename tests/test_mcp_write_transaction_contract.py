@@ -180,6 +180,60 @@ def test_external_proposal_confirmation_core_readback_and_receipt_share_operatio
     assert result["outcome"]["operationId"] == operation_id
 
 
+def test_nested_core_persisted_receipt_projects_same_success_facts_to_external_agent(
+    tmp_path: Path,
+) -> None:
+    gateway = _gateway(tmp_path)
+
+    gateway.approval_transactions.register_write_handler(
+        "vrcforge_contract_nested_core_write",
+        "Nested Core receipt contract",
+        "high",
+        lambda _args: {
+            "ok": True,
+            "result": {
+                "payload": {
+                    "data": {
+                        "schema": "vrcforge.renderer_material_slot.v1",
+                        "mutationStarted": True,
+                        "applied": True,
+                        "committed": True,
+                        "sceneSaved": True,
+                        "persistedReadback": True,
+                        "scenePath": "Assets/2.unity",
+                        "sceneGuid": "a" * 32,
+                        "sceneFileDigest": "b" * 64,
+                        "rendererComponentId": "c" * 64,
+                        "slotIndex": 0,
+                        "newMaterialAssetPath": "Assets/Expressions.mat",
+                    }
+                }
+            },
+        },
+        pre_write_checkpoint_required=False,
+    )
+    gateway.register_external_mcp_unity_tool(
+        "vrcforge_contract_nested_core_write", "materials"
+    )
+
+    proposal = gateway.call_external_mcp_tool(
+        "vrcforge_contract_nested_core_write", {"value": "same"}
+    )
+    confirmation = {**proposal["confirmation"], "decision": "approve"}
+    result = gateway.call_external_mcp_tool(
+        "vrcforge_contract_nested_core_write",
+        {"value": "same", "confirmation": confirmation},
+    )
+
+    assert result["ok"] is True
+    assert result["mutationStarted"] is True
+    assert result["mutationApplied"] is True
+    assert result["commitState"] == "committed"
+    assert result["persistenceState"] == "persisted"
+    assert result["readbackState"] == "verified"
+    assert result["outcome"]["commitState"] == "committed"
+
+
 def test_confirmation_binds_execution_target_digest() -> None:
     source = (ROOT / "agent_gateway.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
@@ -192,13 +246,22 @@ def test_confirmation_binds_execution_target_digest() -> None:
     assert '"executionTargetDigest"' in confirmation_block
 
 
-@pytest.mark.xfail(strict=True, reason="File/Shell multi-file patch-set contract is not exposed by current API")
-def test_multi_file_writes_are_one_modular_patch_set_with_one_receipt_registry() -> None:
-    source = "\n".join(
-        (ROOT / name).read_text(encoding="utf-8")
-        for name in ("agent_gateway.py", "agent_approval_transactions.py")
-    )
-    assert "patchSet" in source
-    assert "files" in source
-    assert "operationId" in source
-    assert "duplicateRegistry" in source
+def test_multi_file_writes_are_one_modular_patch_set_with_one_receipt_registry(tmp_path: Path) -> None:
+    gateway = _gateway(tmp_path)
+    valid = {
+        "operationId": "mcpop_contract",
+        "files": [
+            {"root": str(tmp_path), "relativePath": "Assets/source.cs", "owner": "files", "responsibility": "source update", "mustNotExist": True},
+            {"root": str(tmp_path), "relativePath": "Packages/manifest.json", "owner": "files", "responsibility": "package metadata", "expectedBeforeDigest": "sha256:before"},
+        ],
+    }
+    normalized = gateway.approval_transactions.validate_patch_set(valid)
+    assert normalized["operationId"] == "mcpop_contract"
+    assert len(normalized["duplicateRegistry"]) == 2
+    stored = gateway.approval_transactions.register_patch_set_receipt(valid, {"verified": True})
+    assert gateway.approval_transactions.get_patch_set_receipt("mcpop_contract") == stored
+
+    with pytest.raises(Exception, match="duplicate canonical paths"):
+        gateway.approval_transactions.validate_patch_set({**valid, "files": [valid["files"][0], {**valid["files"][0], "relativePath": "./Assets/source.cs"}]})
+    with pytest.raises(Exception, match="serialized assets"):
+        gateway.approval_transactions.validate_patch_set({**valid, "files": [{**valid["files"][0], "relativePath": "Assets/avatar.prefab"}]})

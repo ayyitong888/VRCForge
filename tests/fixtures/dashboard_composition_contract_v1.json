@@ -5,21 +5,21 @@
     "runtimeCommit": "49aa5d1"
   },
   "routes": {
-    "count": 265,
+    "count": 266,
     "kinds": {
-      "APIRoute": 256,
+      "APIRoute": 257,
       "APIWebSocketRoute": 1,
       "Mount": 4,
       "Route": 4
     },
     "methods": {
       "DELETE": 6,
-      "GET": 73,
+      "GET": 74,
       "HEAD": 4,
       "POST": 178,
       "PUT": 3
     },
-    "tableSha256": "2b99f5ead581df1de46749d2a1839c00a7f7812bb5a5bd705d13004ffdd3824a",
+    "tableSha256": "c065f658c9cc7800e81b688c0dcb2efc1456ca29645857be791fc366063a3e6d",
     "items": [
       {
         "kind": "Route",
@@ -729,6 +729,14 @@
         "path": "/api/app/recoveries/{recovery_id}/incident-bundle",
         "methods": [
           "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
+        "name": "app_checkpoint_archive_usage",
+        "path": "/api/app/checkpoint-archive-usage",
+        "methods": [
+          "GET"
         ]
       },
       {
@@ -2138,7 +2146,7 @@
     ]
   },
   "openApi": {
-    "pathCount": 230,
+    "pathCount": 231,
     "schemaCount": 134,
     "schemaNames": [
       "AdjustmentCheckpointCreateRequest",
@@ -2277,7 +2285,7 @@
       "VisionConfigRequest"
     ],
     "schemasSha256": "63cd38132832cdb29a0fbc06cab15d9eb6bfd5d4644f1958e792d386a8c84ac5",
-    "sha256WithoutRuntimeVersion": "fe647527246df0a9ab43cabdbc03503de4ad9435369c1415b6231723a4d5ca9f"
+    "sha256WithoutRuntimeVersion": "8848dbd7a733bd69f92831fe8076627beeab2bea7f6e0d01a387f3cd394a508c"
   },
   "events": {
     "envelopeKeys": [

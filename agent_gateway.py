@@ -561,6 +561,7 @@ EXTERNAL_MCP_READ_TOOL_BLOCKS: dict[str, frozenset[str]] = {
             "vrcforge_plan_shader_tuning",
             "vrcforge_preview_material_shader_assignment",
             "vrcforge_preview_material_texture_assignment",
+            "vrcforge_preview_renderer_material_slot",
             "vrcforge_preview_shader_apply",
             "vrcforge_scan_materials",
             "vrcforge_preview_texture_import_settings",
@@ -764,6 +765,31 @@ MATERIAL_TEXTURE_ASSIGNMENT_PUBLIC_INPUT_SCHEMA: dict[str, Any] = {
             "type": "string",
             "pattern": "^Assets/.+",
             "description": "Exact existing project Texture2D asset to assign.",
+        },
+    },
+}
+
+RENDERER_MATERIAL_SLOT_PUBLIC_INPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["projectPath", "rendererPath", "slotIndex", "newMaterialAssetPath"],
+    "properties": {
+        "projectPath": _PROJECT_PATH_PROPERTY,
+        "rendererPath": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Exact loaded-scene renderer hierarchy path used only to locate the stable component identity.",
+        },
+        "rendererComponentId": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$",
+            "description": "Optional for preview; required by the approved apply and copied from authoritative preview evidence.",
+        },
+        "slotIndex": {"type": "integer", "minimum": 0, "maximum": 1024},
+        "newMaterialAssetPath": {
+            "type": "string",
+            "pattern": "^Assets/.*\\.mat$",
+            "description": "One existing persistent material asset to assign to this exact slot.",
         },
     },
 }
@@ -1041,6 +1067,7 @@ UNITY_READ_TOOL_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
         },
     },
     "vrcforge_preview_material_texture_assignment": MATERIAL_TEXTURE_ASSIGNMENT_PUBLIC_INPUT_SCHEMA,
+    "vrcforge_preview_renderer_material_slot": RENDERER_MATERIAL_SLOT_PUBLIC_INPUT_SCHEMA,
     "vrcforge_preview_scene_object_duplicate": SCENE_OBJECT_DUPLICATE_PUBLIC_INPUT_SCHEMA,
     "vrcforge_preview_scene_asset_duplicate": SCENE_ASSET_DUPLICATE_PUBLIC_INPUT_SCHEMA,
     "vrcforge_preview_write_avatar_descriptor": AVATAR_DESCRIPTOR_WRITE_PUBLIC_INPUT_SCHEMA,
@@ -1551,6 +1578,7 @@ EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
         },
     },
     "vrcforge_set_material_texture": MATERIAL_TEXTURE_ASSIGNMENT_PUBLIC_INPUT_SCHEMA,
+    "vrcforge_set_renderer_material_slot": RENDERER_MATERIAL_SLOT_PUBLIC_INPUT_SCHEMA,
     "vrcforge_set_constraint_sources": {
         "type": "object",
         "additionalProperties": False,
@@ -2022,6 +2050,7 @@ EXTERNAL_MCP_WRITE_TOOL_BLOCKS: dict[str, frozenset[str]] = {
             "vrcforge_set_texture_import_settings",
             "vrcforge_set_material_shader",
             "vrcforge_set_material_texture",
+            "vrcforge_set_renderer_material_slot",
             "vrcforge_texture_patch",
         }
     ),
@@ -6368,6 +6397,18 @@ class AgentGateway:
             )
         if isinstance(payload.get("outcome"), Mapping):
             outcome_projection = dict(payload["outcome"])
+            for key in (
+                "commitState",
+                "mutationStarted",
+                "mutationApplied",
+                "persistenceState",
+                "readbackState",
+                "cleanupState",
+                "retryable",
+                "nextAction",
+            ):
+                if key in payload:
+                    outcome_projection[key] = payload[key]
             if payload.get("operationId"):
                 outcome_projection["operationId"] = payload["operationId"]
             if payload.get("executionTargetDigest"):

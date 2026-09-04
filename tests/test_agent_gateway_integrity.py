@@ -806,13 +806,18 @@ def test_external_unity_write_creates_checkpoint_before_handler(monkeypatch, tmp
     monkeypatch.setattr(
         type(service),
         "_call_external_mcp_write_handler",
-        lambda *_args: {"ok": True, "status": "applied"},
+        lambda *_args: {
+            "ok": True, "status": "applied", "schema": "vrcforge.test_write.v1",
+            "mutationStarted": True, "mutationApplied": True, "committed": True,
+            "verified": True, "readback": {"verified": True},
+        },
     )
 
     result = service.execute_prepared_external_mcp_write(prepared)
 
     assert result["ok"] is True
     assert result["checkpoint"]["id"] == "ckpt_external"
+    assert result["recovery"]["status"] == "applied"
     assert observed[0]["approval"]["targetTool"] == "vrcforge_external_unity_checkpoint"
 
 

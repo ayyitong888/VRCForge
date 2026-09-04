@@ -30,6 +30,15 @@
       "cleanup": ["none"]
     },
     {
+      "id": "get-execution-targets",
+      "tool": "vrc_get_execution_targets",
+      "mode": "read_only",
+      "minimalArguments": { "scope": "project" },
+      "requiredFixtures": ["connected current VRCForge Unity Core", "current project identity available"],
+      "successFields": ["schema", "scope", "project.root", "project.projectId", "editor.unityPid", "editor.processStartTime", "editor.coreInstanceId", "namespace", "ambiguous", "resolutionCandidateCount"],
+      "cleanup": ["none; read-only identity discovery has no mutation."]
+    },
+    {
       "id": "get-gameobject",
       "tool": "vrc_get_gameobject",
       "mode": "read_only",

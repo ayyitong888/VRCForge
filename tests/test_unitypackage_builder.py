@@ -85,7 +85,7 @@ EXCLUDED_PACKAGE_ROOTS = (
     "Assets/VRCForge/Generated",
 )
 
-GUID_MANIFEST_SHA256 = "17e4f2dab286283913dd1c57d3ea6a51dc8f43112f9c8b1ae0531f41f337fb9a"
+GUID_MANIFEST_SHA256 = "65293e13494b387756a8f0ec271d47a6a4709036e9896a5641a2a09f02ed396b"
 
 
 def test_non_editor_csharp_cannot_leak_unityeditor_references() -> None:
@@ -129,7 +129,7 @@ def test_public_guid_manifest_pins_the_published_1_3_6_common_paths() -> None:
     assert manifest["schema"] == "vrcforge.unitypackage-guid-manifest.v1"
     entries = manifest["entries"]
     entry_map = {entry["path"]: entry["guid"] for entry in entries}
-    assert len(entries) == 88
+    assert len(entries) == 90
     assert {path: entry_map[path] for path in PUBLISHED_1_3_6_COMMON_GUIDS} == PUBLISHED_1_3_6_COMMON_GUIDS
     assert {path: entry_map[path] for path in FROZEN_SOURCE_META_GUIDS} == FROZEN_SOURCE_META_GUIDS
     assert {path: entry_map[path] for path in RELEASE_PAIRING_ASSET_GUIDS} == RELEASE_PAIRING_ASSET_GUIDS
@@ -478,8 +478,8 @@ def test_real_unitypackage_bundles_first_party_core_and_all_product_sources(tmp_
     manifest = json.loads((repo_root / "packaging" / "unitypackage_guid_manifest.json").read_text(encoding="utf-8"))
     manifest_guids = {entry["path"]: entry["guid"] for entry in manifest["entries"]}
     assert packaged_guids == manifest_guids
-    assert len(packaged_paths) == 88
-    assert len(file_paths) == 81
+    assert len(packaged_paths) == 90
+    assert len(file_paths) == 83
     assert len(directory_paths) == 7
     assert not any(
         path == excluded or path.startswith(f"{excluded}/")

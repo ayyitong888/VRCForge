@@ -13736,6 +13736,10 @@ class DashboardServerTests(unittest.TestCase):
         create_source = source[source.index("public static class CreateGameObjectTool") : source.index("public static class RenameGameObjectTool")]
         get_source = source[source.index("public static class GetGameObjectTool") : source.index("public static class CreateGameObjectTool")]
         self.assertIn('VRCForgeToolResult.FailedWithCode(\n                    "gameobject_not_found"', get_source)
+        self.assertIn("componentIdentities = componentInstances", get_source)
+        self.assertIn("GlobalObjectId.GetGlobalObjectIdSlow(component).ToString()", get_source)
+        self.assertIn("go.GetComponents(component.GetType())", get_source)
+        self.assertIn("componentIdentities = componentIdentities", get_source)
         component_source = (editor_dir / "UnityComponentCrud.cs").read_text(encoding="utf-8")
         self.assertIn("internal sealed class GameObjectNotFoundException", component_source)
         self.assertIn("throw new GameObjectNotFoundException", component_source)
@@ -14770,7 +14774,7 @@ class DashboardServerTests(unittest.TestCase):
         ).read_text(encoding="utf-8-sig")
         contract_names = set(re.findall(r'\{\s*"(vrc_[a-z0-9_]+)"\s*,\s*"VRCForge\.', contract_text))
         self.assertEqual(contract_names, set(dashboard_server.VRCFORGE_UNITY_TOOL_REGISTRY))
-        self.assertEqual(len(contract_names), 89)
+        self.assertEqual(len(contract_names), 91)
         legacy_hits = [
             path for path in (repo_root / "Assets" / "VRCForge").rglob("*.cs")
             if "McpForUnityTool" in path.read_text(encoding="utf-8-sig")

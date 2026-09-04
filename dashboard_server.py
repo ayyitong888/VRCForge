@@ -97,6 +97,7 @@ from agent_gateway import (
     canonical_unity_read_tool_input_schema,
     canonical_unity_write_tool_input_schema,
     EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS,
+    RENDERER_MATERIAL_SLOT_PUBLIC_INPUT_SCHEMA,
     PROJECTED_SKILL_STATE_MAX_BYTES,
     PROJECTED_SKILL_STATE_NAME,
     PROJECTED_SKILL_STATE_SCHEMA,
@@ -177,6 +178,10 @@ from material_shader_assignment import (
 from material_texture_assignment import (
     TOOL_NAME as MATERIAL_TEXTURE_ASSIGNMENT_TOOL,
     build_wrapper_arguments as build_material_texture_wrapper_arguments,
+)
+from renderer_material_slot_assignment import (
+    TOOL_NAME as RENDERER_MATERIAL_SLOT_TOOL,
+    build_wrapper_arguments as build_renderer_material_slot_wrapper_arguments,
 )
 from atomic_reference_rename import (
     TOOL_NAME as ATOMIC_REFERENCE_RENAME_TOOL,
@@ -684,6 +689,7 @@ VRCFORGE_UNITY_TOOL_REGISTRY = (
     "vrc_find_assets",
     "vrc_get_asset_info",
     "vrc_get_compile_errors",
+    "vrc_get_execution_targets",
     "vrc_get_gameobject",
     "vrc_get_property",
     "vrc_gesture_manager_set_parameter",
@@ -731,6 +737,7 @@ VRCFORGE_UNITY_TOOL_REGISTRY = (
     "vrc_set_constraint_sources",
     "vrc_set_gameobject_active",
     "vrc_set_material_shader",
+    "vrc_set_renderer_material_slot",
     "vrc_set_material_texture",
     "vrc_texture_patch",
     "vrc_set_property",
@@ -793,6 +800,7 @@ VRCFORGE_UNITY_MCP_BACKED_WRITE_TARGETS = frozenset(
         "vrcforge_duplicate_project_asset",
         "vrcforge_duplicate_scene_asset",
         "vrcforge_set_material_shader",
+        "vrcforge_set_renderer_material_slot",
         "vrcforge_set_material_texture",
         "vrcforge_set_constraint_sources",
         "vrcforge_convert_unity_constraint",
@@ -827,6 +835,7 @@ VRCFORGE_UNITY_MCP_WRITE_ALLOWLIST = frozenset(
         "vrc_build_test_avatar",
         "vrc_rollback_avatar_parameters",
         "vrc_set_material_shader",
+        "vrc_set_renderer_material_slot",
         MATERIAL_TEXTURE_ASSIGNMENT_TOOL,
         "vrc_duplicate_scene_object",
         PROJECT_ASSET_COPY_TOOL,
@@ -13661,11 +13670,15 @@ def _require_camera_evidence(payload: Mapping[str, Any], expected: Mapping[str, 
 
 def prepare_capture_screenshot_request(arguments: dict[str, Any], preview: Any) -> tuple[dict[str, Any], dict[str, Any]]:
     _reject_capture_reserved_arguments(arguments)
-    request = VisionCaptureRequest(**arguments)
+    request_arguments = dict(arguments)
+    execution_target = request_arguments.pop("executionTarget", None)
+    request = VisionCaptureRequest(**request_arguments)
     angle = _normalize_capture_angles([request.angle])[0] if request.angle else None
     output_path = _vision_capture_output_path("vision_capture.png")
     call = _scene_view_capture_call(request, output_path, angle=angle)
     prepared_base = _prepared_capture_base(request)
+    if execution_target is not None:
+        prepared_base["executionTarget"] = execution_target
     if request.camera_mode != "free":
         prepared_base["rotation"] = {key: call[key] for key in ("pitch", "yaw", "roll")}
     prepared = install_prepared_calls(
@@ -13686,9 +13699,11 @@ def prepare_capture_screenshot_request(arguments: dict[str, Any], preview: Any) 
 
 def prepare_capture_multi_screenshot_request(arguments: dict[str, Any], preview: Any) -> tuple[dict[str, Any], dict[str, Any]]:
     _reject_capture_reserved_arguments(arguments)
-    raw_angles = arguments.get("angles", list(_ANGLE_CAMERA_ROTATIONS))
+    request_arguments = dict(arguments)
+    execution_target = request_arguments.pop("executionTarget", None)
+    raw_angles = request_arguments.get("angles", list(_ANGLE_CAMERA_ROTATIONS))
     angles = _normalize_capture_angles(raw_angles)
-    request = VisionCaptureMultiRequest(**{**arguments, "angles": angles})
+    request = VisionCaptureMultiRequest(**{**request_arguments, "angles": angles})
     calls: list[tuple[str, dict[str, Any]]] = []
     output_paths: list[str] = []
     for angle in angles:
@@ -13696,6 +13711,8 @@ def prepare_capture_multi_screenshot_request(arguments: dict[str, Any], preview:
         calls.append(("vrc_capture_scene_view", _scene_view_capture_call(request, output_path, angle=angle)))
         output_paths.append(str(output_path))
     prepared_base = _prepared_capture_base(request)
+    if execution_target is not None:
+        prepared_base["executionTarget"] = execution_target
     prepared_base["angles"] = angles
     prepared = install_prepared_calls(
         prepared_base,
@@ -19746,6 +19763,7 @@ def prepare_authoritative_unity_checkpoint_sync(
         SCENE_TRANSITION_TOOL,
         TEXTURE_PATCH_TOOL,
         USER_ADJUSTMENT_HANDOFF_TOOL,
+        RENDERER_MATERIAL_SLOT_TOOL,
     }:
         return prepare_unity_checkpoint_sync(project_root)
     approved_write_arguments = copy.deepcopy(arguments)
@@ -19844,6 +19862,24 @@ def prepare_material_texture_assignment_request(
 ) -> tuple[dict[str, Any], Any]:
     return prepare_unity_mcp_write_request(
         build_material_texture_wrapper_arguments(params or {}),
+        caller_preview,
+    )
+
+
+def preview_renderer_material_slot_sync(params: dict[str, Any]) -> dict[str, Any]:
+    _arguments, preview = prepare_unity_mcp_write_request(
+        build_renderer_material_slot_wrapper_arguments(params or {}),
+        None,
+    )
+    return {"ok": True, "preview": preview}
+
+
+def prepare_renderer_material_slot_request(
+    params: dict[str, Any],
+    caller_preview: Any,
+) -> tuple[dict[str, Any], Any]:
+    return prepare_unity_mcp_write_request(
+        build_renderer_material_slot_wrapper_arguments(params or {}),
         caller_preview,
     )
 
@@ -24611,6 +24647,12 @@ def register_agent_gateway_tools() -> None:
         preview_material_texture_assignment_sync,
     )
     AGENT_GATEWAY.register_tool(
+        "vrcforge_preview_renderer_material_slot",
+        "When to use: inspect one exact renderer slot and bind its stable component, scene digest, current material, and replacement material before approval. When NOT to use: do not mutate, batch slots, target by a hierarchy path alone, or use it to tune shader properties. Negative example: do not replace every face material because one expression overlay is opaque.",
+        "plan/preview",
+        preview_renderer_material_slot_sync,
+    )
+    AGENT_GATEWAY.register_tool(
         "vrcforge_preview_scene_object_duplicate",
         "Preview one create-new scene object duplicate without writing project files.",
         "plan/preview",
@@ -24863,6 +24905,15 @@ def register_agent_gateway_tools() -> None:
         "medium",
         unity_mcp_write_sync,
         request_preparer=prepare_material_texture_assignment_request,
+        requires_approved_execution_context=True,
+        approved_execution_plan_builder=build_unity_mcp_write_execution_plan,
+    )
+    register_write_handler(
+        "vrcforge_set_renderer_material_slot",
+        "When to use: replace exactly one preview-bound Renderer.sharedMaterials slot with one existing persistent material, then save and freshly read back the scene. When NOT to use: do not batch renderers, target by hierarchy path alone, change material properties, or replace an already-correct slot. Negative example: do not swap every face slot merely because one expression overlay renders opaque.",
+        "medium",
+        unity_mcp_write_sync,
+        request_preparer=prepare_renderer_material_slot_request,
         requires_approved_execution_context=True,
         approved_execution_plan_builder=build_unity_mcp_write_execution_plan,
     )
@@ -25351,6 +25402,7 @@ def register_agent_gateway_tools() -> None:
         unity_mcp_write_sync,
         request_preparer=lambda params, preview: prepare_stage1_atomic_request(params, preview, SCENE_SAVE_TOOL),
         approved_execution_plan_builder=build_unity_mcp_write_execution_plan,
+        fresh_readback_required=True,
     )
     register_write_handler(
         "vrcforge_scene_transition",
@@ -25359,6 +25411,7 @@ def register_agent_gateway_tools() -> None:
         unity_mcp_write_sync,
         request_preparer=lambda params, preview: prepare_stage1_atomic_request(params, preview, SCENE_TRANSITION_TOOL),
         approved_execution_plan_builder=build_unity_mcp_write_execution_plan,
+        fresh_readback_required=True,
     )
     register_write_handler(
         "vrcforge_texture_patch",
@@ -25367,6 +25420,7 @@ def register_agent_gateway_tools() -> None:
         unity_mcp_write_sync,
         request_preparer=lambda params, preview: prepare_stage1_atomic_request(params, preview, TEXTURE_PATCH_TOOL),
         approved_execution_plan_builder=build_unity_mcp_write_execution_plan,
+        fresh_readback_required=True,
     )
     register_write_handler(
         "vrcforge_user_adjustment_handoff",
@@ -25375,6 +25429,7 @@ def register_agent_gateway_tools() -> None:
         unity_mcp_write_sync,
         request_preparer=lambda params, preview: prepare_stage1_atomic_request(params, preview, USER_ADJUSTMENT_HANDOFF_TOOL),
         approved_execution_plan_builder=build_unity_mcp_write_execution_plan,
+        fresh_readback_required=True,
     )
     register_write_handler(
         "vrcforge_save_new_scene",

@@ -12,11 +12,13 @@ CORE_SERVER = (ROOT / "Assets" / "VRCForge" / "Editor" / "MCP" / "VRCForgeMcpCor
 
 
 def test_execution_target_tool_is_fixed_read_only_core_contract() -> None:
-    assert contract.TOOL_CONTRACT_VERSION == "88"
-    assert contract.EXPECTED_TOOL_COUNT == 90
+    assert contract.TOOL_CONTRACT_VERSION == "89"
+    assert contract.EXPECTED_TOOL_COUNT == 91
     assert "vrc_get_execution_targets" in contract.EXPECTED_TOOL_NAMES
     assert "vrc_get_execution_targets" in contract.READ_ONLY_TOOL_NAMES
     assert "vrc_get_execution_targets" not in contract.PREVIOUS_CORE_TOOL_NAMES
+    assert "vrc_set_renderer_material_slot" not in contract.PREVIOUS_CORE_TOOL_NAMES
+    assert len(contract.PREVIOUS_CORE_TOOL_NAMES) == 89
     assert '{ "vrc_get_execution_targets", "VRCForge.Editor.ExecutionTargetInspector" }' in (
         ROOT / "Assets" / "VRCForge" / "Editor" / "MCP" / "VRCForgeMcpToolContract.cs"
     ).read_text(encoding="utf-8-sig")

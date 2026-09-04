@@ -339,9 +339,21 @@ def test_preview_and_write_share_one_closed_public_input_schema() -> None:
         "sourceScenePath",
         "destinationScenePath",
     ]
-    assert agent_gateway.canonical_unity_read_tool_input_schema(
+    preview_schema = agent_gateway.canonical_unity_read_tool_input_schema(
         "vrcforge_preview_scene_asset_duplicate"
-    ) == write_schema
-    assert agent_gateway.canonical_unity_write_tool_input_schema(
+    )
+    assert preview_schema["additionalProperties"] is False
+    assert preview_schema["required"] == [
+        "projectPath",
+        "sourceScenePath",
+        "destinationScenePath",
+        "executionTarget",
+    ]
+    assert preview_schema["properties"]["executionTarget"]["type"] == "object"
+    canonical_write_schema = agent_gateway.canonical_unity_write_tool_input_schema(
         "vrcforge_duplicate_scene_asset"
-    ) == write_schema
+    )
+    assert canonical_write_schema == preview_schema
+    assert canonical_write_schema["additionalProperties"] is False
+    assert "executionTarget" in canonical_write_schema["required"]
+    assert canonical_write_schema["properties"]["executionTarget"]["type"] == "object"

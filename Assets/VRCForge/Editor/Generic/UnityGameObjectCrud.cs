@@ -30,7 +30,7 @@ namespace VRCForge.Editor
 
     [VRCForgeCommand(
         toolId: "vrc_get_gameobject",
-        Summary = "Describe a scene GameObject: path, active state, tag/layer, parent, children, and components (read-only).",
+        Summary = "Describe a scene GameObject: path, stable object/component identities, active state, tag/layer, parent, children, and components (read-only).",
         Access = VRCForgeCommandAccess.ReadOnly
     )]
     public static class GetGameObjectTool
@@ -63,9 +63,21 @@ namespace VRCForge.Editor
                     });
                 }
 
-                var components = go.GetComponents<Component>()
+                var componentInstances = go.GetComponents<Component>()
                     .Where(c => c != null)
-                    .Select(c => c.GetType().FullName)
+                    .ToArray();
+                var components = componentInstances
+                    .Select(c => c.GetType().FullName ?? c.GetType().Name)
+                    .ToArray();
+                var componentIdentities = componentInstances
+                    .Select(component => new
+                    {
+                        globalObjectId = GlobalObjectId.GetGlobalObjectIdSlow(component).ToString(),
+                        type = component.GetType().FullName ?? component.GetType().Name,
+                        componentIndex = Array.FindIndex(
+                            go.GetComponents(component.GetType()),
+                            candidate => ReferenceEquals(candidate, component))
+                    })
                     .ToArray();
 
                 var payload = new
@@ -89,6 +101,7 @@ namespace VRCForge.Editor
                     childCount = t.childCount,
                     componentCount = components.Length,
                     components = components,
+                    componentIdentities = componentIdentities,
                     children = children
                 };
 

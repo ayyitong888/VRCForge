@@ -1,6 +1,8 @@
 {
   "schema": "vrcforge.unitypackage-guid-manifest.v1",
   "entries": [
+    { "path": "Assets/VRCForge/Editor/ExecutionTargetInspector.cs", "guid": "b49fc46863f2f6b05f98110947f59041" },
+    { "path": "Assets/VRCForge/Editor/RendererMaterialSlotTool.cs", "guid": "c50b11fb4f56d67932b238ab4f9e4fcf" },
     { "path": "Assets/VRCForge/Editor/AaoMergePhysBoneTool.cs", "guid": "7f8f7826b6de4e038506cc59521ccb55" },
     { "path": "Assets/VRCForge/Editor/Stage1SceneTools.cs", "guid": "1e9b3a0f3a6c4c3d8d7e9f2a1b5c6d70" },
     { "path": "Assets/VRCForge/Editor/TexturePatchTool.cs", "guid": "9c3f5f8a2a7d4d1b8e6c0f4a7b2d9e31" },

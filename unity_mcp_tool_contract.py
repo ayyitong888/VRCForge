@@ -5,7 +5,7 @@ from __future__ import annotations
 CORE_IDENTITY = "vrcforge.unity-core"
 HANDSHAKE_PROTOCOL = "vrcforge.core-handshake.v1"
 PRODUCT_VERSION = "1.8.0"
-TOOL_CONTRACT_VERSION = "88"
+TOOL_CONTRACT_VERSION = "89"
 PREVIOUS_CORE_TOOL_CONTRACT_VERSION = "87"
 
 EXPECTED_TOOL_NAMES = frozenset(
@@ -25,17 +25,18 @@ EXPECTED_TOOL_NAMES = frozenset(
         "vrc_save_scene_object_as_prefab", "vrc_save_current_scene", "vrc_save_new_scene", "vrc_scene_save", "vrc_scene_transition", "vrc_select_scene_object", "vrc_scan_animation_bindings", "vrc_scan_avatar_controls", "vrc_scan_avatar_items",
         "vrc_scan_avatar_materials", "vrc_scan_avatar_parameters", "vrc_scan_avatar_performance", "vrc_scan_fx_animator",
         "vrc_scan_inbound_reference_closure", "vrc_scan_thry_avatar_performance", "vrc_scan_wardrobe", "vrc_set_constraint_sources", "vrc_set_gameobject_active",
-        "vrc_set_material_shader", "vrc_set_material_texture", "vrc_set_play_mode", "vrc_set_property", "vrc_set_texture_import_settings", "vrc_setup_outfit", "vrc_texture_patch",
+        "vrc_set_material_shader", "vrc_set_material_texture", "vrc_set_renderer_material_slot", "vrc_set_play_mode", "vrc_set_property", "vrc_set_texture_import_settings", "vrc_setup_outfit", "vrc_texture_patch",
         "vrc_toggle_scene_object", "vrc_unpack_prefab", "vrc_user_adjustment_handoff", "vrc_write_animation_curve", "vrc_write_avatar_descriptor",
     }
 )
-EXPECTED_TOOL_COUNT = 90
+EXPECTED_TOOL_COUNT = 91
 
 # Contract revisions describe the discovered tool surface; protocol-range
 # negotiation decides whether the App and Core can communicate. Revision 88
-# adds the read-only Unity ExecutionTarget identity discovery tool.
+# adds the read-only Unity ExecutionTarget identity discovery tool; revision 89
+# adds renderer-slot assignment. Neither existed in the revision-87 surface.
 PREVIOUS_CORE_UPGRADE_MISSING_TOOLS = frozenset(
-    {"vrc_get_execution_targets"}
+    {"vrc_get_execution_targets", "vrc_set_renderer_material_slot"}
 )
 PREVIOUS_CORE_TOOL_NAMES = EXPECTED_TOOL_NAMES - PREVIOUS_CORE_UPGRADE_MISSING_TOOLS
 PREVIOUS_CORE_TOOL_COUNT = len(PREVIOUS_CORE_TOOL_NAMES)
