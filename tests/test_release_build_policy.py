@@ -96,6 +96,10 @@ def test_release_payload_keeps_external_stdio_protocol_dependencies_and_smokes_i
         '(Join-Path $payloadRoot "mcp_tool_descriptor.py") -Force'
     ) in source
     assert (
+        'Copy-Item -LiteralPath .\\internal_tool_blocks.py -Destination '
+        '(Join-Path $payloadRoot "internal_tool_blocks.py") -Force'
+    ) in source
+    assert (
         'Copy-Item -LiteralPath .\\avatar_composition_workflow_skills.py -Destination '
         '(Join-Path $payloadRoot "avatar_composition_workflow_skills.py") -Force'
     ) in source
@@ -111,6 +115,28 @@ def test_vite_dev_watcher_excludes_generated_and_evidence_trees() -> None:
 
     assert '"**/artifacts/**"' in config
     assert '"**/src-tauri/target/**"' in config
+
+
+def test_external_stdio_import_closure_survives_packaging(tmp_path: Path) -> None:
+    """No source-root imports may hide a missing packaged bridge dependency."""
+    payload = tmp_path / "payload"
+    bridge = payload / "tools" / "vrcforge_agent_mcp_stdio.py"
+    bridge.parent.mkdir(parents=True)
+    shutil.copyfile(REPO_ROOT / "tools" / bridge.name, bridge)
+    for source, destination in re.findall(
+        r'Copy-Item -LiteralPath \.\\([a-z_0-9]+\.py) -Destination '
+        r'\(Join-Path \$payloadRoot "([a-z_0-9]+\.py)"\)',
+        _build_script(),
+    ):
+        shutil.copyfile(REPO_ROOT / source, payload / destination)
+    environment = {key: value for key, value in os.environ.items() if key.upper() != "PYTHONPATH"}
+    # --help exits before config lookup, backend startup, or external requests.
+    result = subprocess.run(
+        [sys.executable, str(bridge), "--help"],
+        cwd=payload, env=environment, capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "--protocol-profile" in result.stdout
 
 
 def test_desktop_project_selection_is_confirmed_before_unity_readiness() -> None:
@@ -843,7 +869,7 @@ def test_packaged_public_docs_track_current_release_identity() -> None:
     published_identity = (
         f"Current source and latest published stable release: `{version}` (`v{version}`)."
     )
-    if "status-release--ready" in readme:
+    if "status-release--ready" in readme or "status-test--candidate" in readme:
         assert candidate_identity in readme
         assert candidate_identity in user_manual
         assert f"current source / target package is `{version}`" in packaging_guide

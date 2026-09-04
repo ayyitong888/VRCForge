@@ -168,8 +168,8 @@ def read_known_failures(path: Path = KNOWN_FAILURES_PATH) -> set[str]:
             raise ValueError(f"{path}:{line_number}: duplicate nodeid: {line}")
         failures.add(line.replace("\\", "/"))
         comments.clear()
-    if not failures:
-        raise ValueError(f"{path}: whitelist is empty")
+    # An empty allowlist means every test must pass; removing resolved
+    # exceptions must not require preserving a known failure forever.
     return failures
 
 

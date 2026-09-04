@@ -11,8 +11,12 @@ from agent_gateway import AgentGateway
 
 
 REPO_ROOT = Path(__file__).parents[1]
-AGENT_GATEWAY_MAX_BYTES = 506_403
-AGENT_GATEWAY_MAX_LF_LINES = 10_954
+# STOPGAP (user-approved 2026-09-05): hold the exact pre-split size, with
+# no further growth. The dedicated modularization task must restore the
+# original 506_403-byte / 10_954-line budgets after extracting responsibilities.
+# Only structural limits are relaxed; all behavioral assertions stay active.
+AGENT_GATEWAY_MAX_BYTES = 522_339
+AGENT_GATEWAY_MAX_LF_LINES = 11_204
 
 
 def _gateway(root: Path) -> AgentGateway:

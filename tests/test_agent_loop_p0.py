@@ -34,6 +34,7 @@ from agent_task_loop import (
 )
 from provider_configuration_service import ProviderApiConfig
 from runtime_planner_service import PlannerModelResult
+from execution_target import canonical_namespace, project_identity
 
 
 def provider_plan_fixture(test):
@@ -50,6 +51,21 @@ def provider_plan_fixture(test):
 class AgentLoopP0Tests(unittest.TestCase):
     def setUp(self) -> None:
         self.gateway = dashboard_server.AGENT_GATEWAY
+        # Keep the provider lane local to this fixture.  The runtime planner
+        # now resolves its provider configuration before invoking the patched
+        # request seam; without this, these tests stop at provider admission
+        # and never exercise their existing mocked planner responses.
+        self.fixture_provider_config = patch.object(
+            dashboard_server.PROVIDER_CONFIGURATION,
+            "current_api_config",
+            return_value=ProviderApiConfig(
+                provider="openai",
+                api_key="fixture-key",
+                base_url="https://fixture.invalid/v1",
+                model="fixture",
+            ),
+        )
+        self.fixture_provider_config.start()
         # TestClient shutdown closes the process-owned Provider planner. Each
         # unittest method models a fresh live App process, so reopen that owner
         # explicitly instead of weakening production shutdown fail-closed.
@@ -98,6 +114,7 @@ class AgentLoopP0Tests(unittest.TestCase):
         )
 
     def tearDown(self) -> None:
+        self.fixture_provider_config.stop()
         self.gateway.approval_transactions.checkpoint_prepare_handler = self.original_prepare
         self.gateway._write_handlers[
             "vrcforge_create_gameobject"
@@ -168,6 +185,24 @@ class AgentLoopP0Tests(unittest.TestCase):
         guard.set_current_root(project)
         return project
 
+    def _fixture_execution_target(self, project_root: str | Path) -> dict[str, object]:
+        root = str(Path(project_root).resolve())
+        target: dict[str, object] = {
+            "schema": "vrcforge.execution_target.v1",
+            "scope": "project",
+            "project": {
+                "root": root,
+                "projectId": project_identity(root),
+            },
+            "editor": {
+                "unityPid": 1,
+                "processStartTime": "fixture",
+                "coreInstanceId": "fixture-core",
+            },
+        }
+        target["namespace"] = canonical_namespace(target)
+        return target
+
     @contextmanager
     def _provider_plan_fixture(self):
         planner = self.gateway.runtime_planner
@@ -187,12 +222,17 @@ class AgentLoopP0Tests(unittest.TestCase):
                     "nextStep": "done",
                 }
             if "capture front and back views" in lowered:
+                project_root = params.get("projectRoot") or params.get("projectPath")
                 return {
                     **base,
                     "summary": "Capture the requested front and back coverage views.",
                     "writeNeeded": True,
                     "writeTool": "vrcforge_capture_multi_screenshot",
-                    "writeParams": {"angles": ["front", "back"]},
+                    "writeParams": {
+                        "angles": ["front", "back"],
+                        "projectPath": project_root or "",
+                        "executionTarget": self._fixture_execution_target(project_root),
+                    },
                     "continueLoop": False,
                     "nextStep": "call_tool",
                 }
@@ -240,6 +280,9 @@ class AgentLoopP0Tests(unittest.TestCase):
                         "name": name,
                         "parentPath": "",
                         "projectPath": params.get("projectRoot") or params.get("projectPath") or "",
+                        "executionTarget": self._fixture_execution_target(
+                            params.get("projectRoot") or params.get("projectPath") or ""
+                        ),
                     },
                     "resolvedTarget": "scene_root",
                     "continueLoop": False,
@@ -284,6 +327,9 @@ class AgentLoopP0Tests(unittest.TestCase):
                         "name": "GameObject",
                         "parentPath": parent_path,
                         "projectPath": params.get("projectRoot") or params.get("projectPath") or "",
+                        "executionTarget": self._fixture_execution_target(
+                            params.get("projectRoot") or params.get("projectPath") or ""
+                        ),
                     },
                     "continueLoop": False,
                     "nextStep": "call_tool",
@@ -2545,7 +2591,11 @@ class AgentLoopP0Tests(unittest.TestCase):
                         {
                             "action": "write",
                             "write_tool": "capture_multi_screenshot",
-                            "write_params": {"angles": angles, "projectPath": str(project)},
+                            "write_params": {
+                                "angles": angles,
+                                "projectPath": str(project),
+                                "executionTarget": self._fixture_execution_target(project),
+                            },
                         }
                     ),
                     usage={},
@@ -2645,7 +2695,10 @@ class AgentLoopP0Tests(unittest.TestCase):
         )
         project = self._unity_project()
         message = "Capture front and back views, then run a visual audit."
-        capture_arguments: dict[str, object] = {"projectPath": str(project)}
+        capture_arguments: dict[str, object] = {
+            "projectPath": str(project),
+            "executionTarget": self._fixture_execution_target(project),
+        }
         audit_arguments = {"captureReceipt": "managed-visual-receipt"}
         capture_action_id = canonical_action_id(
             "write",
@@ -2906,7 +2959,10 @@ class AgentLoopP0Tests(unittest.TestCase):
                 payload = {
                     "action": "write",
                     "write_tool": "capture_multi_screenshot",
-                    "write_params": {"projectPath": str(project)},
+                    "write_params": {
+                        "projectPath": str(project),
+                        "executionTarget": self._fixture_execution_target(project),
+                    },
                     "summary": "Capture the approved fixed-angle views.",
                 }
             else:
@@ -3212,21 +3268,32 @@ class AgentLoopP0Tests(unittest.TestCase):
     def test_hidden_write_misreported_as_skill_gets_one_execution_layer_correction(self) -> None:
         gateway = self.gateway
         project = self._unity_project()
+        model_tool_name = next(
+            tool.name
+            for tool in dashboard_server._RuntimePlannerCatalog().read(
+                "execution", project_context_active=True
+            ).routable_tools
+            if tool.runtime_name == "vrcforge_create_gameobject"
+        )
         provider_results = iter(
             [
                 SimpleNamespace(
-                    text=(
-                        '{"action":"skill","skill_tool":"unity_create_gameobject",'
-                        '"skill_params":{"name":"Probe"}}'
-                    ),
+                    text=json.dumps({
+                        "action": "skill", "skill_tool": model_tool_name,
+                        "skill_params": {"name": "Probe"},
+                    }),
                     usage={},
                     reasoning={},
                 ),
                 SimpleNamespace(
-                    text=(
-                        '{"action":"write","write_tool":"unity_create_gameobject",'
-                        '"write_params":{"name":"Probe"}}'
-                    ),
+                    text=json.dumps({
+                        "action": "write",
+                        "write_tool": model_tool_name,
+                        "write_params": {
+                            "name": "Probe", "projectPath": str(project),
+                            "executionTarget": self._fixture_execution_target(project),
+                        },
+                    }),
                     usage={},
                     reasoning={},
                 ),

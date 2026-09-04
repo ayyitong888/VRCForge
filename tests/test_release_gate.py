@@ -8,11 +8,17 @@ from pathlib import Path
 from scripts import release_gate
 
 
-def test_frozen_known_failure_whitelist_has_exactly_thirteen_reasoned_entries() -> None:
+def test_resolved_known_failures_leave_no_active_exceptions() -> None:
     failures = release_gate.read_known_failures()
 
-    assert len(failures) == 13
-    assert all(nodeid.startswith("tests/test_agent_loop_p0.py::AgentLoopP0Tests::") for nodeid in failures)
+    assert failures == set()
+
+
+def test_empty_allowlist_does_not_allow_any_test_failure() -> None:
+    assert release_gate.compare_failure_sets(set(), set()).ok is True
+    assert release_gate.compare_failure_sets(
+        {"tests/test_example.py::test_failure"}, set()
+    ).ok is False
 
 
 def test_known_failure_whitelist_rejects_entry_without_own_reason(tmp_path: Path) -> None:

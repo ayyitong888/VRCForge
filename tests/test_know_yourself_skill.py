@@ -798,6 +798,12 @@ def test_dashboard_process_discovery_unavailable_or_failed_stays_blocked(
     def run_case(psutil_value: Any) -> dict[str, Any]:
         with monkeypatch.context() as scoped:
             scoped.setattr(dashboard_server, "psutil", psutil_value)
+            # The Windows fast path enumerates names natively, then reads only
+            # Unity PIDs with psutil.Process. Never inspect the test host here.
+            scoped.setattr(
+                dashboard_server, "_enumerate_windows_process_names",
+                lambda **_kwargs: [{"pid": 18, "name": "Unity.exe"}],
+            )
             scoped.setattr(dashboard_server, "build_agent_connection_request", lambda _params: object())
             scoped.setattr(dashboard_server, "load_dashboard_settings", lambda _request: object())
             scoped.setattr(
@@ -839,28 +845,26 @@ def test_dashboard_process_discovery_unavailable_or_failed_stays_blocked(
     def fail_discovery(_attrs: Any) -> list[dict[str, Any]]:
         raise RuntimeError("process discovery unavailable")
 
-    failed = run_case(SimpleNamespace(process_iter=fail_discovery))
+    failed = run_case(SimpleNamespace(Process=fail_discovery))
     unreadable_name = run_case(
         SimpleNamespace(
-            process_iter=lambda _attrs: [
-                SimpleNamespace(
-                    info={"pid": 17, "name": None, "exe": None, "cmdline": []}
-                )
-            ]
+            Process=lambda _pid: SimpleNamespace(
+                as_dict=lambda **_kwargs: {
+                    "pid": 18, "name": None, "exe": None, "cmdline": [],
+                }
+            )
         )
     )
     unreadable_unity_command_line = run_case(
         SimpleNamespace(
-            process_iter=lambda _attrs: [
-                SimpleNamespace(
-                    info={
+            Process=lambda _pid: SimpleNamespace(
+                    as_dict=lambda **_kwargs: {
                         "pid": 18,
                         "name": "Unity.exe",
                         "exe": None,
                         "cmdline": None,
                     }
                 )
-            ]
         )
     )
 

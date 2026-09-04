@@ -259,12 +259,14 @@ def write_evidence_tree(tmp_path: Path) -> None:
 
 def test_stable_readiness_gate_passes_with_public_docs_and_matrix(tmp_path, monkeypatch):
     gate = load_gate()
+    # A tmp_path nested under a checkout must not inherit its ancestor HEAD.
+    monkeypatch.setattr(gate, "current_git_commit", lambda: "a" * 40)
     write_minimum_tree(tmp_path)
     monkeypatch.chdir(tmp_path)
 
     report = gate.build_stable_readiness_gate(make_args(tmp_path))
 
-    assert report["ok"] is True
+    assert report["ok"] is True, report["summary"]
     assert report["summary"]["status"] == "passed"
     assert report["summary"]["blockingSteps"] == []
     assert "local_release_evidence.current" in report["summary"]["warningSteps"]
@@ -510,6 +512,7 @@ def test_freshness_guard_disabled_by_default(tmp_path, monkeypatch):
 
 def test_freshness_guard_passes_when_artifacts_are_recent(tmp_path, monkeypatch):
     gate = load_gate()
+    monkeypatch.setattr(gate, "current_git_commit", lambda: "a" * 40)
     write_minimum_tree(tmp_path)
     monkeypatch.chdir(tmp_path)
 
