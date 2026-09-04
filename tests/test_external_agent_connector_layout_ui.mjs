@@ -11,6 +11,8 @@ const checkpointStorage = await readFile(
   "utf8",
 );
 const zhCn = JSON.parse(await readFile(resolve(import.meta.dirname, "..", "src", "locales", "zh-CN.json"), "utf8"));
+const zhTw = JSON.parse(await readFile(resolve(import.meta.dirname, "..", "src", "locales", "zh-TW.json"), "utf8"));
+const enUs = JSON.parse(await readFile(resolve(import.meta.dirname, "..", "src", "locales", "en-US.json"), "utf8"));
 const genericRow = source.slice(source.indexOf("function GenericConnectorRow"), source.indexOf("function ConnectorToggle"));
 
 assert.match(genericRow, /connector\.genericGuideTitle/);
@@ -31,9 +33,21 @@ assert.ok(
   "transport choices must appear before the optional automatic JSON installation path",
 );
 
-assert.match(checkpointStorage, /protectionReason === "active_recovery"/);
+assert.match(checkpointStorage, /isActiveRecoveryProtection/);
+assert.match(checkpointStorage, /isAutoCleanupProtected/);
 assert.match(checkpointStorage, /checkpointArchiveRecentProtected/);
 assert.match(checkpointStorage, /checkpointArchiveRecoveryProtected/);
+assert.match(checkpointStorage, /checkpointArchiveDeleteConfirm/);
+assert.match(checkpointStorage, /checkpointArchiveDeletePendingWarning/);
+assert.match(checkpointStorage, /t\("common\.cancel"\)/);
+assert.ok(checkpointStorage.includes("setPendingDeleteIds([])"));
+assert.doesNotMatch(checkpointStorage, /window\.confirm/);
+assert.equal(typeof zhCn.settings.checkpointArchiveDeleteConfirm, "string");
+assert.equal(typeof zhCn.settings.checkpointArchiveDeletePendingWarning, "string");
+assert.equal(typeof zhTw.settings.checkpointArchiveDeleteConfirm, "string");
+assert.equal(typeof zhTw.settings.checkpointArchiveDeletePendingWarning, "string");
+assert.equal(typeof enUs.settings.checkpointArchiveDeleteConfirm, "string");
+assert.equal(typeof enUs.settings.checkpointArchiveDeletePendingWarning, "string");
 assert.equal(zhCn.settings.checkpointArchiveRecentProtected, "最新保留");
 assert.equal(zhCn.settings.checkpointArchiveRecoveryProtected, "恢复中保留");
 

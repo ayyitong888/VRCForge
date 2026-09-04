@@ -1,5 +1,14 @@
 import { hasTauriInternals, invokeTauriWithAbort, requestJson } from "./http";
 
+export type CheckpointArchiveUsage = NonNullable<ExternalAgentConnectorStatus["gateway"]["checkpointArchiveUsage"]>;
+
+export async function fetchCheckpointArchiveUsage(endpoint: string, signal?: AbortSignal): Promise<CheckpointArchiveUsage> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort<CheckpointArchiveUsage>("fetch_checkpoint_archive_usage", {}, signal);
+  }
+  return requestJson<CheckpointArchiveUsage>(`${endpoint}/api/app/checkpoint-archive-usage`, { signal, timeoutMs: 5000 });
+}
+
 export type ExternalAgentConnectorStatus = {
   ok: boolean;
   schema: string;
@@ -37,7 +46,11 @@ export type ExternalAgentConnectorStatus = {
       sizeMb?: number;
       archiveCount?: number;
       protectedCount?: number;
+      autoCleanupProtectedCount?: number;
       maxSizeMb?: number;
+      limitEnabled?: boolean;
+      overLimit?: boolean;
+      overLimitBytes?: number;
       archives?: Array<{
         checkpointId?: string;
         path?: string;
@@ -45,6 +58,7 @@ export type ExternalAgentConnectorStatus = {
         sizeMb?: number;
         modifiedAt?: number;
         protected?: boolean;
+        autoCleanupProtected?: boolean;
         protectionReason?: "recent" | "active_recovery" | string;
         label?: string;
       }>;

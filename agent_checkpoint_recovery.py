@@ -395,12 +395,32 @@ class AgentCheckpointRecoveryService:
         with self._ports.state.checkpoint_storage_lock:
             return self._checkpoint_archive_usage_locked(config)
 
+    def checkpoint_archive_usage_summary(self) -> dict[str, Any]:
+        """Read measured quota only; no connector discovery or checkpoint ledger projection."""
+        with self._ports.state.checkpoint_storage_lock:
+            return self._checkpoint_archive_quota(self._ports.ensure_config(), self._checkpoint_archive_files())
+
+    def _checkpoint_archive_quota(self, config: AgentGatewayConfig, archives: list[dict[str, Any]]) -> dict[str, Any]:
+        total_bytes = sum(item["sizeBytes"] for item in archives)
+        max_size_mb = normalize_checkpoint_archive_max_size_mb(config.checkpoint_archive_max_size_mb)
+        excess_bytes = max(0, total_bytes - max_size_mb * CHECKPOINT_ARCHIVE_BYTES_PER_MB) if max_size_mb else 0
+        return {
+            "ok": True,
+            "directory": str(self._ports.checkpoint_store_dir()),
+            "sizeBytes": total_bytes,
+            "sizeMb": round(total_bytes / CHECKPOINT_ARCHIVE_BYTES_PER_MB, 2),
+            "archiveCount": len(archives),
+            "maxSizeMb": max_size_mb,
+            "limitEnabled": max_size_mb > 0,
+            "overLimit": excess_bytes > 0,
+            "overLimitBytes": excess_bytes,
+        }
+
     def _checkpoint_archive_usage_locked(self, config: AgentGatewayConfig | None = None) -> dict[str, Any]:
         config = config or self._ports.ensure_config()
         archives = self._checkpoint_archive_files()
-        total_bytes = sum(item["sizeBytes"] for item in archives)
         active_recovery_ids = self._protected_checkpoint_archive_ids(include_recent=False)
-        protected_ids = self._protected_checkpoint_archive_ids(include_recent=True)
+        protected_ids = self._protected_checkpoint_archive_ids(include_recent=True, archives=archives)
         labels = self._checkpoint_archive_labels()
         items = [
             {
@@ -409,7 +429,8 @@ class AgentCheckpointRecoveryService:
                 "sizeBytes": item["sizeBytes"],
                 "sizeMb": round(item["sizeBytes"] / CHECKPOINT_ARCHIVE_BYTES_PER_MB, 2),
                 "modifiedAt": item["modifiedAt"],
-                "protected": item["checkpointId"] in protected_ids,
+                "protected": item["checkpointId"] in active_recovery_ids,
+                "autoCleanupProtected": item["checkpointId"] in protected_ids,
                 "protectionReason": (
                     "active_recovery"
                     if item["checkpointId"] in active_recovery_ids
@@ -422,16 +443,12 @@ class AgentCheckpointRecoveryService:
             for item in sorted(archives, key=lambda x: x["modifiedAt"], reverse=True)
         ]
         return {
-            "ok": True,
+            **self._checkpoint_archive_quota(config, archives),
             "schema": "vrcforge.checkpoint_archive_storage.v2",
-            "directory": str(self._ports.checkpoint_store_dir()),
             "defaultDirectory": str(self._ports.default_checkpoint_store_dir()),
             "relocated": getattr(self, "_checkpoint_store_override", None) is not None,
-            "sizeBytes": total_bytes,
-            "sizeMb": round(total_bytes / CHECKPOINT_ARCHIVE_BYTES_PER_MB, 2),
-            "archiveCount": len(archives),
             "protectedCount": sum(1 for item in items if item["protected"]),
-            "maxSizeMb": normalize_checkpoint_archive_max_size_mb(config.checkpoint_archive_max_size_mb),
+            "autoCleanupProtectedCount": len(protected_ids),
             "archives": items[:500],
         }
 
@@ -464,7 +481,9 @@ class AgentCheckpointRecoveryService:
             if str(cid).strip()
         }
         archives = self._checkpoint_archive_files()
-        protected_ids = self._protected_checkpoint_archive_ids(include_recent=True)
+        # The recent-two floor belongs to automatic cleanup, not an explicit
+        # user selection. Only an active recovery can temporarily block deletion.
+        protected_ids = self._protected_checkpoint_archive_ids(include_recent=False)
         deleted: list[dict[str, Any]] = []
         protected_skipped: list[str] = []
         for archive in archives:

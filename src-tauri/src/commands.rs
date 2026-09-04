@@ -3149,7 +3149,7 @@ pub fn fetch_optimization_proof(
 }
 
 #[tauri::command]
-pub fn fetch_external_agent_connectors(
+pub async fn fetch_external_agent_connectors(
     request: DesktopExternalAgentConnectorsRequest,
 ) -> Result<serde_json::Value, String> {
     let mut query = Vec::new();
@@ -3160,20 +3160,19 @@ pub fn fetch_external_agent_connectors(
     } else {
         format!("?{}", query.join("&"))
     };
-    backend_json_request(
+    blocking_backend_json_request(move || backend_json_request(
         "GET",
         format!("/api/app/external-agent/connectors{suffix}"),
         None,
         request.timeout_ms.or(Some(30_000)),
-    )
-    .map(sanitize_webview_response)
+    ).map(sanitize_webview_response)).await
 }
 
 #[tauri::command]
-pub fn update_external_agent_gateway(
+pub async fn update_external_agent_gateway(
     request: DesktopExternalAgentGatewayRequest,
 ) -> Result<serde_json::Value, String> {
-    backend_json_request(
+    blocking_backend_json_request(move || backend_json_request(
         "POST",
         "/api/app/external-agent/gateway".to_string(),
         Some(serde_json::json!({
@@ -3185,8 +3184,16 @@ pub fn update_external_agent_gateway(
             "checkpointArchiveDirectory": request.checkpoint_archive_directory,
         })),
         request.timeout_ms.or(Some(60_000)),
-    )
-    .map(sanitize_webview_response)
+    ).map(sanitize_webview_response)).await
+}
+
+#[tauri::command]
+pub async fn fetch_checkpoint_archive_usage() -> Result<serde_json::Value, String> {
+    // Read-only, session-authenticated loopback request. Owned by this IPC call;
+    // blocking HTTP runs off the UI thread and expires after five seconds.
+    blocking_backend_json_request(move || backend_json_request(
+        "GET", "/api/app/checkpoint-archive-usage".to_string(), None, Some(5_000),
+    )).await
 }
 
 #[tauri::command]

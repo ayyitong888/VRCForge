@@ -3868,6 +3868,11 @@ def app_export_interrupted_apply_incident_bundle(recovery_id: str) -> dict[str, 
     return payload
 
 
+@app.get("/api/app/checkpoint-archive-usage")
+def app_checkpoint_archive_usage() -> dict[str, Any]:
+    return AGENT_GATEWAY.checkpoint_recovery.checkpoint_archive_usage_summary()
+
+
 @app.get("/api/app/adjustment-checkpoints")
 def app_list_adjustment_checkpoints(
     kind: str = "",

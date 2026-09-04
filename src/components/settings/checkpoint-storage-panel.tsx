@@ -7,6 +7,22 @@ import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { DataLine } from "../ui/data-line";
 
+type ArchiveUsage = NonNullable<ExternalAgentConnectorStatus["gateway"]["checkpointArchiveUsage"]>;
+type ArchiveEntry = NonNullable<ArchiveUsage["archives"]>[number];
+type ArchiveEntryWithCheckpointId = ArchiveEntry & { checkpointId: string };
+
+function isActiveRecoveryProtection(entry: ArchiveEntry) {
+  return entry.protectionReason === "active_recovery" || (entry.protected === true && entry.protectionReason !== "recent");
+}
+
+function isAutoCleanupProtected(entry: ArchiveEntry) {
+  return entry.autoCleanupProtected === true;
+}
+
+function getProtectionReason(entry: ArchiveEntry): "recent" | "active_recovery" {
+  return entry.protectionReason === "active_recovery" ? "active_recovery" : "recent";
+}
+
 type CheckpointStoragePanelProps = {
   status: ExternalAgentConnectorStatus | null;
   loading: boolean;
@@ -40,15 +56,18 @@ export function CheckpointStoragePanel({
   const directory = usage?.directory || "";
 
   const archives = useMemo(
-    () => (usage?.archives ?? []).filter((item): item is NonNullable<typeof item> & { checkpointId: string } => Boolean(item?.checkpointId)),
+    () => (usage?.archives ?? []).filter(
+      (item): item is ArchiveEntryWithCheckpointId => Boolean(item?.checkpointId),
+    ),
     [usage?.archives],
   );
   const selectableIds = useMemo(
-    () => archives.filter((item) => !item.protected).map((item) => item.checkpointId),
+    () => archives.filter((item) => !isActiveRecoveryProtection(item)).map((item) => item.checkpointId),
     [archives],
   );
 
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [pendingDeleteIds, setPendingDeleteIds] = useState<string[]>([]);
   const [relocateInput, setRelocateInput] = useState("");
 
   useEffect(() => {
@@ -62,6 +81,16 @@ export function CheckpointStoragePanel({
       return next.size === prev.size ? prev : next;
     });
   }, [selectableIds]);
+
+  useEffect(() => {
+    setPendingDeleteIds((prev) => {
+      if (!prev.length) {
+        return prev;
+      }
+      const next = prev.filter((id) => selected.has(id) && selectableIds.includes(id));
+      return next.length === prev.length ? prev : [];
+    });
+  }, [selectableIds, selected]);
 
   const toggleOne = (id: string) => {
     setSelected((prev) => {
@@ -87,9 +116,16 @@ export function CheckpointStoragePanel({
     });
   const cleanSelected = () => {
     const ids = selectableIds.filter((id) => selected.has(id));
-    if (ids.length) {
-      onDeleteSelected(ids);
+    if (ids.length === 0 || disabled) {
+      return;
     }
+    const sameIds = ids.length === pendingDeleteIds.length && ids.every((id) => pendingDeleteIds.includes(id));
+    if (!sameIds) {
+      setPendingDeleteIds(ids);
+      return;
+    }
+    setPendingDeleteIds([]);
+    onDeleteSelected(ids);
   };
   const pickDirectory = async () => {
     const selectedPath = await onPickDirectory(relocateInput || directory);
@@ -99,6 +135,8 @@ export function CheckpointStoragePanel({
   };
   const disabled = loading || !status;
   const selectedCount = selectableIds.filter((id) => selected.has(id)).length;
+  const hasPendingDelete = pendingDeleteIds.length > 0;
+  const pendingDeleteCount = hasPendingDelete ? pendingDeleteIds.length : selectedCount;
 
   return (
     <div className="rounded-2xl border border-border bg-card p-5 shadow-composer">
@@ -169,8 +207,15 @@ export function CheckpointStoragePanel({
           </Button>
           <Button type="button" variant="danger" disabled={disabled || selectedCount === 0} onClick={cleanSelected}>
             <Trash2 className="h-4 w-4 shrink-0" />
-            {t("settings.checkpointArchiveCleanSelected")}
+            {hasPendingDelete
+              ? t("settings.checkpointArchiveDeleteConfirm", { count: pendingDeleteCount })
+              : t("settings.checkpointArchiveCleanSelected")}
           </Button>
+          {hasPendingDelete ? (
+            <Button type="button" variant="outline" disabled={disabled} onClick={() => setPendingDeleteIds([])}>
+              {t("common.cancel")}
+            </Button>
+          ) : null}
         </div>
 
         {selectedCount > 0 ? (
@@ -178,13 +223,17 @@ export function CheckpointStoragePanel({
             {t("settings.checkpointArchiveSelectedCount", { count: selectedCount })}
           </div>
         ) : null}
+        {hasPendingDelete ? (
+          <div className="mt-2 text-xs text-destructive">{t("settings.checkpointArchiveDeletePendingWarning")}</div>
+        ) : null}
 
         {archives.length ? (
           <ul className="mt-3 max-h-72 overflow-auto rounded-lg border border-border">
             {archives.map((item) => {
               const id = item.checkpointId;
-              const isProtected = Boolean(item.protected);
-              const protectionReason = item.protectionReason === "active_recovery" ? "active_recovery" : "recent";
+              const isProtected = isActiveRecoveryProtection(item);
+              const isAutoProtected = isAutoCleanupProtected(item);
+              const protectionReason = getProtectionReason(item);
               const protectionLabel = protectionReason === "active_recovery"
                 ? t("settings.checkpointArchiveRecoveryProtected")
                 : t("settings.checkpointArchiveRecentProtected");
@@ -209,7 +258,7 @@ export function CheckpointStoragePanel({
                     <div className="truncate text-xs text-muted-foreground/80">{item.path || id}</div>
                   </div>
                   <div className="shrink-0 text-xs text-muted-foreground">{formatStorageSize(item.sizeBytes)}</div>
-                  {isProtected ? (
+                  {(isProtected || isAutoProtected) ? (
                     <Badge tone="warn" className="shrink-0" title={protectionHint}>
                       {protectionLabel}
                     </Badge>

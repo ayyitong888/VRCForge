@@ -238,6 +238,7 @@ fn main() {
             fetch_doctor,
             fix_doctor_check,
             fetch_external_agent_connectors,
+            fetch_checkpoint_archive_usage,
             fetch_optimization_proof,
             fetch_optimization_proofs,
             fetch_optimization_plan,

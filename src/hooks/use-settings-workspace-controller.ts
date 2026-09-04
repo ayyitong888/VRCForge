@@ -76,6 +76,12 @@ export function useSettingsWorkspaceController({
   const diagnosticsRequestSequenceRef = useRef(0);
   const diagnosticsPendingRef = useRef(0);
   const diagnosticsWriteQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const settingsInitInflightRef = useRef(new Map<string, Promise<void>>());
+  const settingsInitRequestSequenceRef = useRef(0);
+  const settingsContextKey = `${endpoint}\u0000${activeProjectPath}`;
+  const settingsContextKeyRef = useRef(settingsContextKey);
+  settingsContextKeyRef.current = settingsContextKey;
+  const connectorsRequestSequenceRef = useRef(0);
 
   function beginDiagnosticsRequest() {
     diagnosticsPendingRef.current += 1;
@@ -97,24 +103,52 @@ export function useSettingsWorkspaceController({
     setError("");
     setNotesMessage("");
     setDiagnosticsMessage("");
-    try {
-      let targetEndpoint = endpoint;
-      if (!runtimeConnected) {
-        const readyEndpoint = await startRuntime();
-        if (!readyEndpoint) {
+
+    const initKey = settingsContextKey;
+    const existing = settingsInitInflightRef.current.get(initKey);
+    if (existing) {
+      await existing;
+      return;
+    }
+    const requestSequence = ++settingsInitRequestSequenceRef.current;
+
+    const initialize = (async () => {
+      try {
+        let targetEndpoint = endpoint;
+        if (!runtimeConnected) {
+          const readyEndpoint = await startRuntime();
+          if (!readyEndpoint) {
+            return;
+          }
+          targetEndpoint = readyEndpoint;
+        }
+        const notes = await fetchAgentNotes(targetEndpoint);
+        if (
+          requestSequence !== settingsInitRequestSequenceRef.current
+          || settingsContextKeyRef.current !== initKey
+        ) {
           return;
         }
-        targetEndpoint = readyEndpoint;
+        setAgentNotes(notes.content);
+        setAgentNotesPath(notes.path);
+        setAgentNotesLoaded(true);
+        void loadConnectors(targetEndpoint);
+        void loadDiagnostics(targetEndpoint);
+      } catch (cause) {
+        if (
+          requestSequence === settingsInitRequestSequenceRef.current
+          && settingsContextKeyRef.current === initKey
+        ) {
+          setAgentNotesLoaded(false);
+          setError(cause instanceof Error ? cause.message : String(cause));
+        }
       }
-      const notes = await fetchAgentNotes(targetEndpoint);
-      setAgentNotes(notes.content);
-      setAgentNotesPath(notes.path);
-      setAgentNotesLoaded(true);
-      void loadConnectors(targetEndpoint);
-      void loadDiagnostics(targetEndpoint);
-    } catch (cause) {
-      setAgentNotesLoaded(false);
-      setError(cause instanceof Error ? cause.message : String(cause));
+    })();
+    settingsInitInflightRef.current.set(initKey, initialize);
+    try {
+      await initialize;
+    } finally {
+      settingsInitInflightRef.current.delete(initKey);
     }
   }
 
@@ -231,6 +265,7 @@ export function useSettingsWorkspaceController({
   }
 
   async function loadConnectors(target = endpoint) {
+    const requestSequence = ++connectorsRequestSequenceRef.current;
     setLoadingConnectors(true);
     setConnectorMessage("");
     try {
@@ -242,17 +277,22 @@ export function useSettingsWorkspaceController({
         }
         targetEndpoint = readyEndpoint;
       }
-      setConnectorStatus(
-        await fetchExternalAgentConnectors(
-          targetEndpoint,
-          activeProjectPath || undefined,
-          readStoredGenericConfigPath() || undefined,
-        ),
+      const payload = await fetchExternalAgentConnectors(
+        targetEndpoint,
+        activeProjectPath || undefined,
+        readStoredGenericConfigPath() || undefined,
       );
+      if (requestSequence === connectorsRequestSequenceRef.current) {
+        setConnectorStatus(payload);
+      }
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      if (requestSequence === connectorsRequestSequenceRef.current) {
+        setError(cause instanceof Error ? cause.message : String(cause));
+      }
     } finally {
-      setLoadingConnectors(false);
+      if (requestSequence === connectorsRequestSequenceRef.current) {
+        setLoadingConnectors(false);
+      }
     }
   }
 

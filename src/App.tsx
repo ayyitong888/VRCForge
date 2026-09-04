@@ -41,6 +41,7 @@ import { ProtectionWorkspace } from "./components/protection/protection-workspac
 import { ComputerUseActivitySurface } from "./components/runtime/computer-use-activity-surface";
 import { CheckpointWorkspace } from "./components/checkpoints/checkpoint-workspace";
 import { SettingsWorkspace } from "./components/settings/settings-workspace";
+import { CheckpointQuotaNotice } from "./components/settings/checkpoint-quota-notice";
 import { SidebarMenus } from "./components/sidebar/sidebar-menus";
 import { TransientFailureToast } from "./components/ui/transient-failure-toast";
 import { TextEditContextMenu } from "./components/common/text-edit-context-menu";
@@ -2822,7 +2823,9 @@ export default function App() {
 
   function openSettingsSection(section: SettingsSection = "general") {
     setActiveSettingsSection(section);
-    void openSettings();
+    if (activeView !== "settings") {
+      void openSettings();
+    }
   }
 
   async function createGoalFromSlash(raw: string) {
@@ -4267,6 +4270,13 @@ export default function App() {
       />
 
       <TextEditContextMenu />
+
+      <CheckpointQuotaNotice
+        endpoint={endpoint}
+        connected={runtimeConnected}
+        refreshTrigger={connectorStatus?.gateway?.checkpointArchiveUsage}
+        onManage={() => openSettingsSection("storage")}
+      />
 
       {transientFailure ? (
         <TransientFailureToast
