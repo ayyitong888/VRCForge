@@ -9,7 +9,8 @@ from copy import deepcopy
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any, Callable
+from types import MappingProxyType
+from typing import Any, Callable, Mapping
 
 from agent_gateway import (
     BUILTIN_SKILL_GROUPS,
@@ -71,6 +72,13 @@ class SkillWriteHandlerDescriptor:
 
 
 @dataclass(frozen=True, slots=True)
+class _SkillRegistryInputs:
+    tools: Mapping[str, SkillToolDescriptor]
+    write_handlers: Mapping[str, SkillWriteHandlerDescriptor]
+    known_tools: frozenset[str]
+
+
+@dataclass(frozen=True, slots=True)
 class RuntimeSkillSnapshot:
     skill: dict[str, Any]
     validation: dict[str, Any]
@@ -115,17 +123,32 @@ class AgentSkillRegistryService:
             return Path(user_data_dir) / "skills"
         return config_path.parent / "skills"
 
-    def _tool(self, tool_name: str) -> SkillToolDescriptor | None:
+    def _registry_inputs(self) -> _SkillRegistryInputs:
+        # Metadata belongs to this one build only. Visibility still uses the
+        # live policy ports; the next build reads registration changes again.
+        tools = {tool.name: tool for tool in self._ports.list_tools()}
+        handlers = {handler.name: handler for handler in self._ports.list_write_handlers()}
+        return _SkillRegistryInputs(
+            MappingProxyType(tools),
+            MappingProxyType(handlers),
+            frozenset(tools) | frozenset(handlers),
+        )
+
+    def _tool(self, tool_name: str, inputs: _SkillRegistryInputs | None = None) -> SkillToolDescriptor | None:
+        if inputs is not None:
+            return inputs.tools.get(tool_name)
         return next((tool for tool in self._ports.list_tools() if tool.name == tool_name), None)
 
-    def _write_handler(self, tool_name: str) -> SkillWriteHandlerDescriptor | None:
+    def _write_handler(self, tool_name: str, inputs: _SkillRegistryInputs | None = None) -> SkillWriteHandlerDescriptor | None:
+        if inputs is not None:
+            return inputs.write_handlers.get(tool_name)
         return next((handler for handler in self._ports.list_write_handlers() if handler.name == tool_name), None)
 
-    def _reserved_skill_ids(self) -> set[str]:
+    def _reserved_skill_ids(self, inputs: _SkillRegistryInputs | None = None) -> set[str]:
+        inputs = inputs if inputs is not None else self._registry_inputs()
         return {
             *(normalize_skill_id(str(group.get("name") or "")) for group in BUILTIN_SKILL_GROUPS),
-            *(tool.name for tool in self._ports.list_tools()),
-            *(handler.name for handler in self._ports.list_write_handlers()),
+            *inputs.known_tools,
         }
 
     def validate_projection_name(self, skill_id: str) -> None:
@@ -146,23 +169,28 @@ class AgentSkillRegistryService:
                     status_code=409,
                 )
 
-    def _builtin_skill_definitions(self, config: AgentGatewayConfig) -> list[dict[str, Any]]:
+    def _builtin_skill_definitions(
+        self, config: AgentGatewayConfig, inputs: _SkillRegistryInputs | None = None,
+    ) -> list[dict[str, Any]]:
+        inputs = inputs if inputs is not None else self._registry_inputs()
         skills: list[dict[str, Any]] = []
         for group in BUILTIN_SKILL_GROUPS:
-            skills.append(self._skill_from_builtin_group(group, config))
-        for tool in self._ports.list_tools():
+            skills.append(self._skill_from_builtin_group(group, config, inputs))
+        for tool in inputs.tools.values():
             skills.append(self._skill_from_tool(tool, config))
-        for handler in self._ports.list_write_handlers():
+        for handler in inputs.write_handlers.values():
             if handler.name in WRAPPER_ONLY_WRITE_TARGETS:
                 continue
             skills.append(self._skill_from_write_handler(handler, config))
         return sorted(skills, key=lambda item: (str(item.get("category") or ""), str(item.get("name") or "")))
 
-    def _skill_from_builtin_group(self, group: dict[str, Any], config: AgentGatewayConfig) -> dict[str, Any]:
+    def _skill_from_builtin_group(
+        self, group: dict[str, Any], config: AgentGatewayConfig, inputs: _SkillRegistryInputs | None = None,
+    ) -> dict[str, Any]:
         allowed_tools = ensure_string_list(group.get("allowedTools") or group.get("tools"))
         permission_mode = normalize_skill_permission(group.get("permissionMode"))
         available = bool(group.get("enabled", True)) and all(
-            self._skill_dependency_visible(tool_name, config) for tool_name in allowed_tools
+            self._skill_dependency_visible(tool_name, config, inputs) for tool_name in allowed_tools
         )
         structured_contracts = {
             field: deepcopy(group[field])
@@ -264,12 +292,14 @@ class AgentSkillRegistryService:
             return "preview"
         return "read_only"
 
-    def _skill_dependency_visible(self, tool_name: str, config: AgentGatewayConfig) -> bool:
+    def _skill_dependency_visible(
+        self, tool_name: str, config: AgentGatewayConfig, inputs: _SkillRegistryInputs | None = None,
+    ) -> bool:
         tool_name = str(tool_name or "").strip()
-        tool = self._tool(tool_name)
+        tool = self._tool(tool_name, inputs)
         if tool:
             return self._ports.tool_visible(tool.name, config)
-        handler = self._write_handler(tool_name)
+        handler = self._write_handler(tool_name, inputs)
         if handler:
             return self._ports.write_handler_visible(handler.name, config)
         return False
@@ -690,9 +720,11 @@ class AgentSkillRegistryService:
         if any(skill.get("name") == skill_id for skill in skills):
             raise AgentGatewayError(f"User skill already exists: {skill_id}", status_code=409)
 
-    def _decorate_skill_validation(self, skill: dict[str, Any], config: AgentGatewayConfig) -> dict[str, Any]:
+    def _decorate_skill_validation(
+        self, skill: dict[str, Any], config: AgentGatewayConfig, inputs: _SkillRegistryInputs | None = None,
+    ) -> dict[str, Any]:
         next_skill = dict(skill)
-        validation = self._validate_skill(next_skill, config)
+        validation = self._validate_skill(next_skill, config, inputs)
         next_skill["validation"] = validation
         next_skill["availabilityReasons"] = ensure_string_list(validation.get("reasons"))
         if validation.get("status") == "error":
@@ -703,13 +735,16 @@ class AgentSkillRegistryService:
         with self.write_lock:
             return self._validate_skill(skill, config)
 
-    def _validate_skill(self, skill: dict[str, Any], config: AgentGatewayConfig) -> dict[str, Any]:
+    def _validate_skill(
+        self, skill: dict[str, Any], config: AgentGatewayConfig, inputs: _SkillRegistryInputs | None = None,
+    ) -> dict[str, Any]:
         status = "ok"
         reasons: list[str] = []
         if skill.get("loadError"):
             return {"status": "error", "reasons": [str(skill.get("loadError"))]}
+        inputs = inputs if inputs is not None else self._registry_inputs()
         skill_name = normalize_skill_id(str(skill.get("name") or ""))
-        if str(skill.get("source") or "") == "user" and skill_name in self._reserved_skill_ids():
+        if str(skill.get("source") or "") == "user" and skill_name in self._reserved_skill_ids(inputs):
             status = "error"
             reasons.append(f"skill name conflicts with a builtin skill: {skill_name}")
         if not skill.get("enabled", True):
@@ -717,9 +752,7 @@ class AgentSkillRegistryService:
                 status = "warning"
             reasons.append("skill disabled")
 
-        known_tools = {tool.name for tool in self._ports.list_tools()} | {
-            handler.name for handler in self._ports.list_write_handlers()
-        }
+        known_tools = inputs.known_tools
         allowed_tools = ensure_string_list(skill.get("allowedTools") or skill.get("tools"))
         disallowed_tools = ensure_string_list(skill.get("disallowedTools"))
         unknown_allowed = [item for item in allowed_tools if item and item not in known_tools]
@@ -742,7 +775,7 @@ class AgentSkillRegistryService:
             elif allowed_tools and entrypoint not in allowed_tools:
                 status = "error"
                 reasons.append(f"entrypoint tool is not in allowed tools: {entrypoint}")
-            elif not self._skill_dependency_visible(entrypoint, config) and status == "ok":
+            elif not self._skill_dependency_visible(entrypoint, config, inputs) and status == "ok":
                 status = "warning"
                 reasons.append(f"entrypoint tool is unavailable: {entrypoint}")
 
@@ -1037,10 +1070,11 @@ class AgentSkillRegistryService:
     ) -> dict[str, Any]:
         exposure_layer = normalize_exposure_layer(exposure_layer)
         config = config or self._ports.ensure_config()
-        builtin_skills = self._builtin_skill_definitions(config)
+        inputs = self._registry_inputs()
+        builtin_skills = self._builtin_skill_definitions(config, inputs)
         user_skills = self._load_user_skills()
         skills = [*builtin_skills, *user_skills]
-        skills = [self._decorate_skill_validation(skill, config) for skill in skills]
+        skills = [self._decorate_skill_validation(skill, config, inputs) for skill in skills]
         if exposure_layer == EXPOSURE_LAYER_PLANNING:
             skills = [skill for skill in skills if not bool(skill.get("write"))]
         available_count = sum(1 for skill in skills if skill.get("available") and skill.get("enabled", True))
