@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import pytest
 
 from agent_gateway import AgentGateway
 from agent_mcp_2026 import Mcp2026Router, PROTOCOL_VERSION
@@ -79,6 +80,42 @@ def test_registry_persists_immutable_revisions_and_never_synthesizes_unknown_rea
         assert "explicitly" in str(exc)
     else:  # pragma: no cover - fail-closed invariant
         raise AssertionError("unknown resources/read must fail")
+
+
+def test_validate_reference_requires_exact_revision_and_resource_type(tmp_path) -> None:
+    registry = McpResourceRegistry(tmp_path / "resources")
+    resource = registry.publish(
+        base_uri="vrcforge://session/current/identity",
+        name="Identity",
+        resource_type="session_identity_lock",
+        data={"status": "bound"},
+        identity={"projectId": "p1"},
+        source_mode="test",
+        refresh_rule="Replace explicitly.",
+    )
+
+    assert registry.validate_reference(
+        resource["uri"], expected_type="session_identity_lock"
+    )["revision"] == 1
+    stale = registry.publish(
+        base_uri="vrcforge://session/stale/identity",
+        name="Stale", resource_type="session_identity_lock", data={},
+        identity={"projectId": "p1"}, source_mode="test", refresh_rule="Replace.", stale=True,
+        stale_reason="superseded",
+    )
+    with pytest.raises(McpResourceError, match="stale"):
+        registry.validate_reference(stale["uri"], expected_type="session_identity_lock")
+    for uri, expected in (
+        (resource["uri"].replace("revision=1", "revision=9"), "session_identity_lock"),
+        (resource["uri"], "operation_receipt"),
+        ("vrcforge://session/current/identity", "session_identity_lock"),
+    ):
+        try:
+            registry.validate_reference(uri, expected_type=expected)
+        except McpResourceError:
+            pass
+        else:  # pragma: no cover - fail-closed invariant
+            raise AssertionError("invalid Resource reference must fail")
 
 
 def test_standard_mcp_projects_native_resources_and_change_notification(tmp_path) -> None:

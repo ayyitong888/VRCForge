@@ -17,6 +17,8 @@ PROMPT_CONTEXT_SCHEMA = "vrcforge.prompt_context.v1"
 
 SkillSource = Callable[[], Mapping[str, Any]]
 ToolSource = Callable[[str], Sequence[Mapping[str, Any]]]
+ResourceValidator = Callable[[str, str, Mapping[str, Any] | None], Mapping[str, Any]]
+SupportFilesLoader = Callable[[Mapping[str, Any]], Sequence[Mapping[str, Any]]]
 
 
 class McpPromptError(ValueError):
@@ -60,10 +62,40 @@ def _parse_json_object(value: Any, field: str) -> dict[str, Any]:
     raise McpPromptError(f"Prompt argument {field} must be a JSON object")
 
 
+def _uri_argument(value: Any, field: str) -> str:
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise McpPromptError(f"Prompt argument {field} must be a string")
+    return value.strip()
+
+
+def _array_argument(value: Any, field: str) -> list[str]:
+    if value is None or value == "":
+        return []
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise McpPromptError(f"Prompt argument {field} must be a JSON string array") from exc
+    if not isinstance(value, list) or any(not isinstance(item, str) or not item.strip() for item in value):
+        raise McpPromptError(f"Prompt argument {field} must be a JSON string array")
+    return value
+
+
 class McpPromptRegistry:
-    def __init__(self, skill_source: SkillSource, tool_source: ToolSource) -> None:
+    def __init__(
+        self,
+        skill_source: SkillSource,
+        tool_source: ToolSource,
+        *,
+        resource_validate: ResourceValidator | None = None,
+        support_files_loader: SupportFilesLoader | None = None,
+    ) -> None:
         self._skill_source = skill_source
         self._tool_source = tool_source
+        self._resource_validate = resource_validate
+        self._support_files_loader = support_files_loader
 
     def _skills(self) -> list[dict[str, Any]]:
         registry = self._skill_source()
@@ -112,6 +144,12 @@ class McpPromptRegistry:
             "allowedTools": self._skill_tools(skill),
             "source": skill.get("source"),
             "packageId": skill.get("packageId"),
+            "supportFiles": _string_list(skill.get("supportFiles")),
+            "guidance": {key: skill.get(key) for key in (
+                "whenToUse", "whenNotToUse", "problemBreakdown", "pitfalls", "acceptance",
+                "requiredResources", "pausePoints", "gmCases", "gameOnlyAcceptance",
+                "permissionMode", "riskLevel", "backupRestore", "toolBlocks",
+            )},
         }
         content_hash = _hash(material)
         version, version_source = self._version(skill, content_hash)
@@ -135,6 +173,9 @@ class McpPromptRegistry:
                 "version": version,
                 "versionSource": version_source,
                 "contentHash": content_hash,
+                "hashScope": "prompt-and-support-declarations",
+                "supportFilePaths": material["supportFiles"],
+                "supportContentSource": "Call prompts/get for support content and supportContentHash before invoking a Tool with this provenance.",
                 "source": str(skill.get("source") or "builtin"),
                 "packageId": str(skill.get("packageId") or ""),
                 "permissionMode": str(skill.get("permissionMode") or "instruction_only"),
@@ -184,8 +225,8 @@ class McpPromptRegistry:
             "userAdjustedStates": [],
             **_parse_json_object(args.get("protectedState"), "protectedState"),
         }
-        identity_lock_uri = str(args.get("identityLockUri") or "").strip()
-        session_context_uri = str(args.get("sessionContextUri") or "").strip()
+        identity_lock_uri = _uri_argument(args.get("identityLockUri"), "identityLockUri")
+        session_context_uri = _uri_argument(args.get("sessionContextUri"), "sessionContextUri")
         required_resources = _string_list(skill.get("requiredResources")) or [
             "identityLockUri",
             "sessionContextUri",
@@ -195,6 +236,24 @@ class McpPromptRegistry:
             "sessionContextUri": session_context_uri,
         }
         missing = [field for field in required_resources if not supplied.get(field)]
+        identity_resource = None
+        context_resource = None
+        if identity_lock_uri and self._resource_validate:
+            identity_resource = self._resource_validate(identity_lock_uri, "session_identity_lock", None)
+            identity = identity_resource.get("identity") if isinstance(identity_resource, Mapping) else None
+            if not isinstance(identity, Mapping) or not any(identity.get(key) for key in ("projectId", "namespace", "projectRoot", "coreInstanceId")):
+                raise McpPromptError("Identity Lock Resource is unbound")
+        elif identity_lock_uri:
+            missing.append("identityLockUri")
+        if session_context_uri and self._resource_validate:
+            expected = dict(identity_resource.get("identity") or {}) if identity_resource else {}
+            context_resource = self._resource_validate(session_context_uri, "", expected or None)
+            if context_resource.get("resourceType") not in {
+                "operation_receipt", "unity_snapshot", "control_graph", "gm_runtime", "checkpoint_diff"
+            }:
+                raise McpPromptError("Session context must be captured operation or Unity state, not catalog metadata")
+        elif session_context_uri:
+            missing.append("sessionContextUri")
         all_tools = {str(item.get("name") or ""): item for item in self._tool_source("execution")}
         planning_names = {str(item.get("name") or "") for item in self._tool_source("planning")}
         skill_tools = self._skill_tools(skill)
@@ -218,8 +277,8 @@ class McpPromptRegistry:
             "protectedState": protected_state,
             "userIntent": str(args.get("userIntent") or ""),
             "modelSemantics": str(args.get("modelSemantics") or ""),
-            "referenceSources": _string_list(args.get("referenceSources")),
-            "acceptanceCriteria": _string_list(args.get("acceptanceCriteria")) or _string_list(skill.get("acceptance")),
+            "referenceSources": _array_argument(args.get("referenceSources"), "referenceSources"),
+            "acceptanceCriteria": _array_argument(args.get("acceptanceCriteria"), "acceptanceCriteria") or _string_list(skill.get("acceptance")),
             "requiredResources": required_resources,
             "missingRequiredResources": missing,
             "pausePoints": _string_list(skill.get("pausePoints")) or [
@@ -246,7 +305,9 @@ class McpPromptRegistry:
             "awaitingUserHardStop": True,
             "status": "awaiting_resources" if missing else "ready_for_planning",
         }
+        support_files = self._load_support_files(skill)
         descriptor = self._descriptor(skill)
+        descriptor["_meta"]["supportContentHash"] = self._support_hash(support_files)
         prompt_payload = {
             "schema": PROMPT_SCHEMA,
             "skill": {
@@ -259,6 +320,7 @@ class McpPromptRegistry:
                 "problemBreakdown": _json_clone(skill.get("problemBreakdown") or []),
                 "steps": _json_clone(skill.get("steps") or []),
                 "pitfalls": _json_clone(skill.get("pitfalls") or []),
+                "supportFiles": support_files,
             },
             "context": prompt_context,
             "provenance": descriptor["_meta"],
@@ -284,6 +346,27 @@ class McpPromptRegistry:
             "_meta": descriptor["_meta"],
         }
 
+    def _load_support_files(self, skill: Mapping[str, Any]) -> list[dict[str, str]]:
+        declared = _string_list(skill.get("supportFiles"))
+        if not declared:
+            return []
+        if self._support_files_loader is None:
+            raise McpPromptError("Declared Skill support content is unavailable; its loader is not configured")
+        loaded = self._support_files_loader(skill)
+        files: dict[str, dict[str, str]] = {}
+        for item in loaded:
+            path, value = item.get("path"), item.get("content")
+            if path not in declared or path in files or not isinstance(value, str):
+                raise McpPromptError("Support loader must return each exact declared UTF-8 file once")
+            files[path] = {"path": path, "content": value, "sha256": hashlib.sha256(value.encode("utf-8")).hexdigest()}
+        if len(files) != len(declared):
+            raise McpPromptError("Declared Skill support files are missing")
+        return [files[path] for path in declared]
+
+    @staticmethod
+    def _support_hash(files: Sequence[Mapping[str, Any]]) -> str:
+        return _hash([(item["path"], item["sha256"]) for item in files])
+
     def validate_provenance(
         self,
         value: Mapping[str, Any] | None,
@@ -302,6 +385,11 @@ class McpPromptRegistry:
         if skill is None:
             raise McpPromptError("Prompt/Skill provenance refers to an unavailable Skill")
         descriptor = self._descriptor(skill)
+        if _string_list(skill.get("supportFiles")):
+            support_hash = self._support_hash(self._load_support_files(skill))
+            if value.get("supportContentHash") != support_hash:
+                raise McpPromptError("Prompt/Skill supportContentHash is stale or missing; retrieve prompts/get again")
+            descriptor["_meta"]["supportContentHash"] = support_hash
         current = descriptor["_meta"]
         for field in ("skillId", "version", "contentHash"):
             if str(value.get(field) or "") != str(current.get(field) or ""):
@@ -315,6 +403,8 @@ class McpPromptRegistry:
             "status": "verified",
             "schema": PROMPT_SCHEMA,
             **{key: current[key] for key in ("skillId", "version", "versionSource", "contentHash", "source", "packageId")},
+            "hashScope": current["hashScope"],
+            **({"supportContentHash": current["supportContentHash"]} if "supportContentHash" in current else {}),
         }
 
 

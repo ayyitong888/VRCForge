@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import pytest
 
 from agent_mcp_2026 import Mcp2026Router, PROTOCOL_VERSION
 from agent_mcp_standard import LATEST_PROTOCOL_VERSION, McpStandardRouter
 from mcp_prompt_registry import McpPromptError, McpPromptRegistry, PROMPT_CONTEXT_SCHEMA
+from mcp_resource_registry import McpResourceRegistry
 
 
 def _skills(count: int = 9) -> dict:
@@ -49,8 +51,13 @@ def _tools(layer: str) -> list[dict]:
     return tools
 
 
-def _registry() -> McpPromptRegistry:
-    return McpPromptRegistry(lambda: _skills(), _tools)
+def _registry(*, resource_validate=None, support_files_loader=None) -> McpPromptRegistry:
+    return McpPromptRegistry(
+        lambda: _skills(),
+        _tools,
+        resource_validate=resource_validate,
+        support_files_loader=support_files_loader,
+    )
 
 
 def _v2_request(method: str, params: dict | None = None, request_id: int = 1) -> dict:
@@ -109,9 +116,111 @@ def test_prompt_get_requires_resources_without_guessing_and_separates_tool_visib
             "protectedState": json.dumps({"userAdjustedStates": ["object:1"]}),
         },
     )["structuredContent"]["context"]
-    assert ready["status"] == "ready_for_planning"
+    assert ready["status"] == "awaiting_resources"
     assert ready["scope"]["doNotTouch"] == ["avatar:2"]
     assert ready["protectedState"]["userAdjustedStates"] == ["object:1"]
+
+
+def test_prompt_get_without_resource_validator_fails_closed() -> None:
+    context = _registry().get(
+        "avatar-workflow-1",
+        {
+            "identityLockUri": "vrcforge://session/current/identity?revision=2",
+            "sessionContextUri": "vrcforge://operation/read-1/receipt?revision=1",
+        },
+    )["structuredContent"]["context"]
+    assert context["status"] == "awaiting_resources"
+    assert context["missingRequiredResources"] == ["identityLockUri", "sessionContextUri"]
+
+
+def test_prompt_get_accepts_only_matching_live_resources_from_real_registry(tmp_path) -> None:
+    resources = McpResourceRegistry(tmp_path / "resources")
+    identity = resources.publish(
+        base_uri="vrcforge://session/current/identity",
+        name="Identity", resource_type="session_identity_lock",
+        data={"status": "bound"}, identity={"projectId": "p1", "namespace": "n1"},
+        source_mode="test", refresh_rule="Replace explicitly.",
+    )
+    receipt = resources.publish(
+        base_uri="vrcforge://operation/read-1/receipt",
+        name="Receipt", resource_type="operation_receipt",
+        data={"ok": True}, identity={"projectId": "p1", "namespace": "n1"},
+        source_mode="test", refresh_rule="Invoke again.",
+    )
+    cross = resources.publish(
+        base_uri="vrcforge://operation/cross/receipt",
+        name="Cross", resource_type="operation_receipt",
+        data={"ok": True}, identity={"projectId": "p2", "namespace": "n2"},
+        source_mode="test", refresh_rule="Invoke again.",
+    )
+    unbound = resources.publish(
+        base_uri="vrcforge://session/unbound/identity",
+        name="Unbound", resource_type="session_identity_lock",
+        data={"status": "unbound"}, identity={},
+        source_mode="test", refresh_rule="Replace explicitly.",
+    )
+    def validate(uri: str, expected_type: str, expected_identity=None) -> dict:
+        return resources.validate_reference(
+            uri, expected_type=expected_type or None, expected_identity=expected_identity
+        )
+
+    registry = _registry(resource_validate=validate)
+    ready = registry.get("avatar-workflow-1", {"identityLockUri": identity["uri"], "sessionContextUri": receipt["uri"]})
+    assert ready["structuredContent"]["context"]["status"] == "ready_for_planning"
+    for bad_identity in (
+        identity["uri"].replace("revision=1", "revision=2"),
+        "vrcforge://session/current/identity",
+    ):
+        with pytest.raises(Exception):
+            registry.get("avatar-workflow-1", {"identityLockUri": bad_identity, "sessionContextUri": receipt["uri"]})
+    with pytest.raises(Exception):
+        registry.get("avatar-workflow-1", {"identityLockUri": unbound["uri"], "sessionContextUri": receipt["uri"]})
+    with pytest.raises(Exception):
+        registry.get("avatar-workflow-1", {"identityLockUri": identity["uri"], "sessionContextUri": cross["uri"]})
+
+
+def test_prompt_get_rejects_unverified_resource_references() -> None:
+    def validate(uri: str, expected_type: str, _expected_identity=None) -> dict:
+        if uri != "vrcforge://session/current/identity?revision=2":
+            raise McpPromptError("Resource reference is stale or unavailable")
+        if expected_type != "session_identity_lock":
+            raise McpPromptError("Resource type mismatch")
+        return {"resourceType": expected_type, "identity": {"projectId": "p1"}}
+
+    registry = McpPromptRegistry(lambda: _skills(), _tools, resource_validate=validate)
+    try:
+        registry.get(
+            "avatar-workflow-1",
+            {
+                "identityLockUri": "vrcforge://session/other/identity?revision=1",
+                "sessionContextUri": "vrcforge://operation/read-1/receipt?revision=1",
+            },
+        )
+    except McpPromptError:
+        pass
+    else:  # pragma: no cover - fail-closed invariant
+        raise AssertionError("unverified Resource references must fail")
+
+
+def test_prompt_provenance_changes_when_support_file_declaration_changes() -> None:
+    skills = _skills(1)
+    skills["skills"][0]["supportFiles"] = ["workflows/one.json"]
+    registry = McpPromptRegistry(lambda: skills, _tools)
+    first = registry.list()["prompts"][0]["_meta"]["contentHash"]
+    skills["skills"][0]["supportFiles"] = ["workflows/two.json"]
+    second = registry.list()["prompts"][0]["_meta"]["contentHash"]
+    assert first != second
+
+
+def test_prompt_provenance_can_bind_support_file_content_hash() -> None:
+    skills = _skills(1)
+    skills["skills"][0]["supportFiles"] = ["workflows/one.json"]
+    content = {"workflows/one.json": "v1"}
+    registry = McpPromptRegistry(lambda: skills, _tools, support_files_loader=lambda _skill: [{"path": "workflows/one.json", "content": content["workflows/one.json"]}])
+    first = registry.get("avatar-workflow-1")["_meta"]["supportContentHash"]
+    content["workflows/one.json"] = "v2"
+    second = registry.get("avatar-workflow-1")["_meta"]["supportContentHash"]
+    assert first != second
 
 
 def test_prompt_get_rejects_unknown_id_and_invalid_context() -> None:
@@ -207,4 +316,4 @@ def test_vrcforge_2026_lists_and_gets_same_native_prompts() -> None:
         )
     )
     assert status == 200
-    assert prompt["result"]["structuredContent"]["context"]["status"] == "ready_for_planning"
+    assert prompt["result"]["structuredContent"]["context"]["status"] == "awaiting_resources"

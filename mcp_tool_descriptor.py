@@ -214,6 +214,8 @@ def standardize_tool_descriptor(
             "skillId": {"type": "string"},
             "version": {"type": "string"},
             "contentHash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "supportContentHash": {"type": "string", "pattern": "^[0-9a-f]{64}$", "description": "Exact support-content digest returned by prompts/get; required when the Skill declares support files."},
+            "hashScope": {"type": "string", "description": "contentHash binds Prompt guidance and support declarations; supportContentHash separately binds retrieved UTF-8 contents."},
             "source": {"type": "string"},
             "packageId": {"type": "string"},
         },

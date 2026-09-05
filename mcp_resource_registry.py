@@ -139,6 +139,7 @@ class McpResourceRegistry:
         description: str = "",
         stale: bool = False,
         stale_reason: str = "",
+        only_if_absent: bool = False,
     ) -> dict[str, Any]:
         if not base_uri.startswith("vrcforge://") or "?revision=" in base_uri:
             raise McpResourceError("base_uri must be a revision-free vrcforge:// URI")
@@ -151,6 +152,8 @@ class McpResourceRegistry:
         with self._lock:
             latest_uri = self._latest.get(base_uri)
             latest = self._records.get(latest_uri or "")
+            if latest and only_if_absent:
+                return _json_clone(latest)
             if latest and latest.get("contentHash") == payload_hash and bool(latest.get("stale")) == stale:
                 return _json_clone(latest)
             revision = int(latest.get("revision", 0) if latest else 0) + 1
@@ -240,6 +243,40 @@ class McpResourceRegistry:
             ],
             "structuredContent": envelope,
         }
+
+    def validate_reference(
+        self,
+        uri: str,
+        *,
+        expected_type: str | None = None,
+        expected_identity: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Validate an exact, immutable Resource reference for a Prompt context."""
+        if not isinstance(uri, str) or not uri.startswith("vrcforge://"):
+            raise McpResourceError("Resource reference must be a vrcforge:// URI")
+        parts = urlsplit(uri)
+        query = parse_qs(parts.query, keep_blank_values=True)
+        revisions = query.get("revision") or []
+        if len(revisions) != 1 or not revisions[0].isdigit() or int(revisions[0]) < 1:
+            raise McpResourceError("Resource reference must include one positive revision")
+        with self._lock:
+            envelope = self._records.get(uri)
+            if envelope is None:
+                raise McpResourceError("Resource reference is unknown or stale")
+            selected = _json_clone(envelope)
+            if expected_type == "session_identity_lock" and self._latest.get(_base_uri(uri)) != uri:
+                raise McpResourceError("Session Identity Lock revision is no longer current")
+        if expected_type and selected.get("resourceType") != expected_type:
+            raise McpResourceError("Resource reference has the wrong resource type")
+        if selected.get("stale"):
+            raise McpResourceError("Resource reference is stale")
+        if expected_identity:
+            actual = selected.get("identity")
+            if not isinstance(actual, Mapping) or any(
+                actual.get(key) != value for key, value in expected_identity.items()
+            ):
+                raise McpResourceError("Resource reference does not match the expected identity")
+        return selected
 
     def _index_path(self) -> Path:
         return self.store_dir / "registry.json"

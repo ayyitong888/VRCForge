@@ -199,11 +199,17 @@ def standard_acceptance(executable: Path, unity_project: Path, timeout: float) -
             {"name": "vrcforge-avatar-audit", "arguments": {}},
         )
         require(awaiting.get("structuredContent", {}).get("context", {}).get("status") == "awaiting_resources", "Prompt guessed missing Resources")
+        binding = client.request(
+            "tools/call",
+            {"name": "vrcforge_bind_execution_target", "arguments": {"projectPath": str(unity_project), "scope": "project"}},
+        ).get("structuredContent", {})
+        binding_resources = binding.get("resources", {})
+        require(bool(binding_resources.get("identityLockUri")), "Live identity binding did not publish an identity Resource")
         ready = client.request(
             "prompts/get",
             {
                 "name": "vrcforge-avatar-audit",
-                "arguments": {"identityLockUri": identity_uri, "sessionContextUri": catalog_uri},
+                "arguments": {"identityLockUri": binding_resources["identityLockUri"], "sessionContextUri": binding_resources["operationReceiptUri"]},
             },
         )
         context = ready.get("structuredContent", {}).get("context", {})
@@ -212,7 +218,7 @@ def standard_acceptance(executable: Path, unity_project: Path, timeout: float) -
         prompt_meta = ready.get("_meta") or {}
         prompt_provenance = {
             key: prompt_meta.get(key)
-            for key in ("skillId", "version", "contentHash", "source", "packageId")
+            for key in ("skillId", "version", "contentHash", "supportContentHash", "hashScope", "source", "packageId")
         }
 
         loaded = client.request(

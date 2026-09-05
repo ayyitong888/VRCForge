@@ -118,6 +118,7 @@ from execution_target import (
     ExecutionTargetBindingRegistry,
     ExecutionTargetError,
     execution_target_digest,
+    validate_execution_target,
     validate_runtime_execution_target,
 )
 from mcp_tool_descriptor import (
@@ -126,7 +127,7 @@ from mcp_tool_descriptor import (
     identity_scope,
     standardize_tool_descriptor,
 )
-from mcp_resource_registry import McpResourceRegistry
+from mcp_resource_registry import McpResourceError, McpResourceRegistry
 from mcp_prompt_registry import McpPromptRegistry
 from operation_context import bind_operation_context
 
@@ -2510,6 +2511,8 @@ class AgentGateway:
                 EXPOSURE_LAYER_EXECUTION,
             ),
             lambda layer: self.build_external_mcp_tools(layer, ["*"]),
+            resource_validate=self._validate_mcp_prompt_resource,
+            support_files_loader=lambda skill: self._skills.load_runtime_skill_support_files(dict(skill)),
         )
         self._desktop = DesktopComputerUseService(
             audit_dir,
@@ -3253,7 +3256,25 @@ class AgentGateway:
             },
             source_mode="gateway_session",
             refresh_rule="Updated after explicit identity-bound Tool activity.",
+            only_if_absent=True,
         )
+
+    def _validate_mcp_prompt_resource(self, uri, expected_type, expected_identity=None):
+        resource = self._mcp_resources.validate_reference(
+            uri, expected_type=expected_type or None, expected_identity=expected_identity,
+        )
+        if expected_type == "session_identity_lock":
+            if resource["canonicalUri"] != "vrcforge://session/current/identity":
+                raise McpResourceError("Prompt requires this Gateway's current identity lock")
+            data = resource["data"]
+            if data.get("status") != "bound":
+                raise McpResourceError("Current Gateway identity is unbound; explicitly bind an ExecutionTarget")
+            target = validate_execution_target(data.get("exactExecutionTarget"))
+            if resource["identity"] != self._mcp_resource_identity(target):
+                raise McpResourceError("Identity Resource anchors do not match its ExecutionTarget")
+            if data.get("executionTargetDigest") != execution_target_digest(target):
+                raise McpResourceError("Identity Resource ExecutionTarget digest is invalid")
+        return resource
 
     def list_mcp_resources(self, params: Mapping[str, Any] | None = None) -> dict[str, Any]:
         self._sync_mcp_resource_catalogue()
@@ -3286,12 +3307,13 @@ class AgentGateway:
         *,
         source_mode: str,
     ) -> dict[str, Any]:
-        target = (
-            result.get("executionTarget")
-            if isinstance(result.get("executionTarget"), Mapping)
-            else arguments.get("executionTarget")
-        )
+        nested = result.get("result") if isinstance(result.get("result"), Mapping) else {}
+        target = result.get("executionTarget") or nested.get("executionTarget")
         target = target if isinstance(target, Mapping) else None
+        if normalize_agent_tool_result(
+            result, fallback_summary="Tool Resource identity capture", write=tool_name in self._write_handlers,
+        )["status"] == "failed" or ensure_dict(result.get("outcome")).get("status") == "failed":
+            target = None
         identity = self._mcp_resource_identity(target)
         operation_id = str(
             result.get("operationId")
@@ -4232,12 +4254,15 @@ class AgentGateway:
             tool = self._tools.get(name)
             if tool is None or not self._external_mcp_read_tool_visible(tool, config):
                 raise AgentGatewayError(f"Unknown or unavailable MCP tool: {name}", status_code=404)
-            self._validate_external_mcp_execution_target(name, arguments)
+            verified_target = self._validate_external_mcp_execution_target(name, arguments)
             result = self._call_external_mcp_read_tool(
                 tool,
                 arguments,
                 agent_name=agent_name,
             )
+            if verified_target is not None:
+                result["executionTarget"] = verified_target
+                result["executionTargetDigest"] = execution_target_digest(verified_target)
             result["canonicalToolName"] = canonical_tool_name(name)
             result["legacyAliasUsed"] = requested_name != name
             if prompt_skill_provenance is not None:
