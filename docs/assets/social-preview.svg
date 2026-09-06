@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" role="img" aria-labelledby="title desc">
   <title id="title">VRCForge</title>
-  <desc id="desc">VRCForge — Local AI Workbench for VRChat Avatar Editing, target version 1.5.1.</desc>
+  <desc id="desc">VRCForge — AI Agent and MCP tools for supervised VRChat Avatar editing.</desc>
   <defs>
     <linearGradient id="background" x1="80" y1="0" x2="1200" y2="640" gradientUnits="userSpaceOnUse">
       <stop stop-color="#0B1020"/>
@@ -46,13 +46,13 @@
 
   <g font-family="Segoe UI, Inter, Arial, sans-serif">
     <text x="510" y="268" fill="#F8FAFC" font-size="94" font-weight="750" letter-spacing="-3">VRCForge</text>
-    <text x="515" y="333" fill="#CBD5E1" font-size="30" font-weight="400">Local AI Workbench for VRChat Avatar Editing</text>
+    <text x="515" y="333" fill="#CBD5E1" font-size="30" font-weight="400">AI Agent + MCP for VRChat Avatar Editing</text>
     <g transform="translate(515 382)">
       <rect width="138" height="46" rx="23" fill="#312E81" stroke="#818CF8"/>
       <circle cx="25" cy="23" r="7" fill="#67E8F9"/>
-      <text x="45" y="31" fill="#E0E7FF" font-size="22" font-weight="650">v1.5.1</text>
+      <text x="45" y="31" fill="#E0E7FF" font-size="22" font-weight="650">Local</text>
     </g>
-    <text x="515" y="474" fill="#94A3B8" font-size="23">Local-first · Supervised writes · Checkpoint &amp; restore</text>
+    <text x="515" y="474" fill="#94A3B8" font-size="23">Supervised Unity edits · Checkpoint · Validate · Restore</text>
   </g>
 
   <rect x="20" y="20" width="1240" height="600" rx="22" fill="none" stroke="#FFFFFF" stroke-opacity="0.08"/>

@@ -12,7 +12,7 @@ following values.
 ### Description
 
 ```text
-Local AI workbench for supervised VRChat avatar editing with a Tauri desktop app, FastAPI runtime, Unity tools, approvals, checkpoints, and restore.
+Local AI Agent + MCP workbench for supervised VRChat (VRC) Avatar editing / 本地 VRChat 改模工作台，集成 Unity 工具、审批、检查点、验证与恢复。
 ```
 
 ### Website
@@ -39,16 +39,20 @@ Copy these topics individually:
 
 ```text
 vrchat
-unity
+vrc
 vrchat-avatar
 avatar-editing
+avatar-tools
+ai-agent
+mcp
+model-context-protocol
 ai-workbench
 local-first
-model-context-protocol
+unity
+unity-editor
 tauri
 fastapi
 windows
-unity-editor
 ```
 
 Also enable **Releases** in the About panel. Enable **Packages** or
@@ -79,7 +83,7 @@ paths, project names, avatars, paid assets, API keys, or other private data.
 ## Final public-page review
 
 - [ ] Description and website render without truncating essential meaning.
-- [ ] All 11 topics appear and link to the expected GitHub topic pages.
+- [ ] All recommended topics appear and link to the expected GitHub topic pages.
 - [ ] The social preview is sharp at both wide and small-card sizes.
 - [ ] README badges and internal documentation links resolve on the default
       branch.
