@@ -1124,6 +1124,20 @@ class AgentCheckpointRecoveryService:
         git_root = Path(str(checkpoint["gitRoot"]))
         ref = str(checkpoint["checkpointRef"])
         pathspecs = ensure_string_list(checkpoint.get("pathspecs"))
+        archive_files = ensure_string_list(checkpoint.get("archiveFiles"))
+        if archive_files and any(
+            not name.startswith("Assets/")
+            or "\\" in name
+            or ".." in PurePosixPath(name).parts
+            or str(PurePosixPath(name)) != name
+            for name in archive_files
+        ):
+            return self._checkpoint_unavailable(
+                checkpoint,
+                error="Checkpoint archive file scope metadata is unsafe.",
+                reason_code="checkpoint_scope_metadata_invalid",
+                next_action="Create a new checkpoint before attempting this restore.",
+            )
         diff = self._ports.run_git(git_root, ["diff", "--name-status", ref, "--", *pathspecs])
         status = self._ports.run_git(git_root, ["status", "--porcelain", "--", *pathspecs])
         payload = {
@@ -1379,8 +1393,35 @@ class AgentCheckpointRecoveryService:
         archive_dir = self._ports.checkpoint_store_dir() / project_key
         archive_path = archive_dir / f"{checkpoint_id}.zip"
         temp_path = archive_path.with_suffix(".zip.tmp")
+        requested_files = ensure_string_list(record.get("archiveFiles"))
+        archive_files: list[str] = []
+        if requested_files:
+            expected_files: list[str] = []
+            for name in requested_files:
+                normalized = str(PurePosixPath(name.replace("\\", "/")))
+                target = (project_root / Path(*PurePosixPath(normalized).parts)).resolve()
+                if (not normalized.startswith("Assets/") or normalized != name.replace("\\", "/")
+                        or ".." in PurePosixPath(normalized).parts or not is_path_within(target, project_root)):
+                    archive_files = []
+                    break
+                meta = Path(str(target) + ".meta")
+                if not target.is_file() or not meta.is_file():
+                    archive_files = []
+                    break
+                expected_files.extend((normalized, normalized + ".meta"))
+                archive_files.extend((normalized, normalized + ".meta"))
+            archive_files = list(dict.fromkeys(archive_files))
+            if set(archive_files) != set(expected_files):
+                archive_files = []
+        if requested_files and not archive_files:
+            record.pop("archiveFiles", None)
+            record["archiveScopeFallbackReason"] = "target_or_metadata_unavailable"
         pathspecs = [name for name in ("Assets", "Packages", "ProjectSettings") if (project_root / name).is_dir()]
-        checkpoint_scope = {"kind": "unity_project_top_level", "pathspecs": pathspecs}
+        checkpoint_scope = {
+            "kind": "unity_project_files" if archive_files else "unity_project_top_level",
+            "pathspecs": pathspecs,
+            **({"archiveFiles": archive_files} if archive_files else {}),
+        }
         archive_started_at = utc_now_iso()
         archive_started_clock = time.perf_counter()
         file_count = 0
@@ -1390,15 +1431,18 @@ class AgentCheckpointRecoveryService:
             if temp_path.exists():
                 temp_path.unlink()
             with zipfile.ZipFile(temp_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=1, strict_timestamps=False) as archive:
-                for name in pathspecs:
-                    root = project_root / name
-                    for source in sorted(root.rglob("*")):
-                        if not source.is_file():
-                            continue
-                        relative = source.relative_to(project_root).as_posix()
-                        archive.write(source, relative)
-                        file_count += 1
-                        total_bytes += source.stat().st_size
+                sources = (
+                    [(project_root / Path(*PurePosixPath(name).parts), name) for name in archive_files]
+                    if archive_files else
+                    [(source, source.relative_to(project_root).as_posix())
+                     for name in pathspecs
+                     for source in sorted((project_root / name).rglob("*"))
+                     if source.is_file()]
+                )
+                for source, relative in sources:
+                    archive.write(source, relative)
+                    file_count += 1
+                    total_bytes += source.stat().st_size
             fsync_file_path(temp_path)
             os.replace(temp_path, archive_path)
             fsync_directory_best_effort(archive_path.parent)
@@ -1416,6 +1460,7 @@ class AgentCheckpointRecoveryService:
                     "strategy": "archive",
                     "archivePath": str(archive_path),
                     "pathspecs": pathspecs,
+                    **({"archiveFiles": archive_files} if archive_files else {}),
                     "checkpointScope": checkpoint_scope,
                     "archiveStartedAt": archive_started_at,
                     "archiveFinishedAt": utc_now_iso(),
@@ -1434,6 +1479,7 @@ class AgentCheckpointRecoveryService:
                 "strategy": "archive",
                 "archivePath": str(archive_path),
                 "pathspecs": pathspecs,
+                **({"archiveFiles": archive_files} if archive_files else {}),
                 "checkpointScope": checkpoint_scope,
                 "fileCount": file_count,
                 "uncompressedBytes": total_bytes,
@@ -1706,19 +1752,23 @@ class AgentCheckpointRecoveryService:
                         raise ValueError(f"Duplicate archive member: {name}")
                     archived[name] = (info.file_size, info.CRC)
             current: dict[str, tuple[int, int]] = {}
-            for name in pathspecs:
-                root = project_root / name
-                if not root.is_dir():
+            archive_files = ensure_string_list(checkpoint.get("archiveFiles"))
+            sources = (
+                [(project_root / Path(*PurePosixPath(name).parts), name) for name in archive_files]
+                if archive_files else
+                [(source, source.relative_to(project_root).as_posix())
+                 for name in pathspecs
+                 for source in sorted((project_root / name).rglob("*"))
+                 if source.is_file()]
+            )
+            for source, relative in sources:
+                if not source.is_file():
                     continue
-                for source in root.rglob("*"):
-                    if not source.is_file():
-                        continue
-                    relative = source.relative_to(project_root).as_posix()
-                    crc = 0
-                    with source.open("rb") as handle:
-                        while chunk := handle.read(1024 * 1024):
-                            crc = zlib.crc32(chunk, crc)
-                    current[relative] = (source.stat().st_size, crc & 0xFFFFFFFF)
+                crc = 0
+                with source.open("rb") as handle:
+                    while chunk := handle.read(1024 * 1024):
+                        crc = zlib.crc32(chunk, crc)
+                current[relative] = (source.stat().st_size, crc & 0xFFFFFFFF)
             changed = [f"M\t{name}" for name in sorted(archived.keys() & current.keys()) if archived[name] != current[name]]
             changed.extend(f"D\t{name}" for name in sorted(archived.keys() - current.keys()))
             changed.extend(f"A\t{name}" for name in sorted(current.keys() - archived.keys()))
@@ -1782,14 +1832,23 @@ class AgentCheckpointRecoveryService:
                         raise ValueError(f"Duplicate archive member: {name}")
                     archived[name] = info
                 current: dict[str, Path] = {}
-                for name in pathspecs:
-                    target = (project_root / name).resolve()
-                    if target.parent != project_root or target.name not in allowed:
-                        raise ValueError(f"Unsafe restore target: {target}")
-                    target.mkdir(parents=True, exist_ok=True)
-                    for source in target.rglob("*"):
-                        if source.is_file():
-                            current[source.relative_to(project_root).as_posix()] = source
+                archive_files = ensure_string_list(checkpoint.get("archiveFiles"))
+                if archive_files:
+                    for name in archive_files:
+                        target = (project_root / Path(*PurePosixPath(name).parts)).resolve()
+                        if not name.startswith("Assets/") or not is_path_within(target, project_root):
+                            raise ValueError(f"Unsafe restore target: {target}")
+                        if target.is_file():
+                            current[name] = target
+                else:
+                    for name in pathspecs:
+                        target = (project_root / name).resolve()
+                        if target.parent != project_root or target.name not in allowed:
+                            raise ValueError(f"Unsafe restore target: {target}")
+                        target.mkdir(parents=True, exist_ok=True)
+                        for source in target.rglob("*"):
+                            if source.is_file():
+                                current[source.relative_to(project_root).as_posix()] = source
 
                 deleted: list[str] = []
                 for relative in sorted(current.keys() - archived.keys()):
@@ -1818,13 +1877,14 @@ class AgentCheckpointRecoveryService:
                     os.replace(temp_target, target)
                     restored.append(relative)
 
-                for name in pathspecs:
-                    root = project_root / name
-                    for directory in sorted((path for path in root.rglob("*") if path.is_dir()), reverse=True):
-                        try:
-                            directory.rmdir()
-                        except OSError:
-                            pass
+                if not archive_files:
+                    for name in pathspecs:
+                        root = project_root / name
+                        for directory in sorted((path for path in root.rglob("*") if path.is_dir()), reverse=True):
+                            try:
+                                directory.rmdir()
+                            except OSError:
+                                pass
             return {
                 "ok": True,
                 "checkpoint": checkpoint,
@@ -2306,6 +2366,11 @@ class AgentCheckpointRecoveryService:
         touches_assets = self._checkpoint_touches_top_level(checkpoint, "Assets")
         touches_packages = self._checkpoint_touches_top_level(checkpoint, "Packages")
         touches_project_settings = self._checkpoint_touches_top_level(checkpoint, "ProjectSettings")
+        archive_files = ensure_string_list(checkpoint.get("archiveFiles"))
+        scoped_asset_checkpoint = bool(archive_files)
+        if scoped_asset_checkpoint:
+            touches_packages = False
+            touches_project_settings = False
         project_root = Path(str(checkpoint.get("projectRoot") or "")).resolve() if checkpoint.get("projectRoot") else None
         stored_framework_snapshot = self._stored_checkpoint_framework_package_snapshot(checkpoint)
         framework_snapshot = (
@@ -2329,12 +2394,15 @@ class AgentCheckpointRecoveryService:
             "covered" if touches_assets else "missing",
             {
                 "pathspec": "Assets",
+                **({"coverageScope": "exact_files", "archiveFiles": archive_files} if scoped_asset_checkpoint else {}),
                 "covers": [
-                    "scene files",
-                    "prefabs",
-                    "serialized Unity components",
-                    "Modular Avatar and VRCFury components saved under Assets",
-                    "NDMF plugin component settings saved under Assets",
+                    *(archive_files if scoped_asset_checkpoint else [
+                        "scene files",
+                        "prefabs",
+                        "serialized Unity components",
+                        "Modular Avatar and VRCFury components saved under Assets",
+                        "NDMF plugin component settings saved under Assets",
+                    ]),
                 ],
             },
         )
@@ -2344,16 +2412,19 @@ class AgentCheckpointRecoveryService:
             "covered" if touches_assets else "missing",
             {
                 "pathspec": "Assets",
+                **({"coverageScope": "exact_files", "archiveFiles": archive_files} if scoped_asset_checkpoint else {}),
                 "covers": [
-                    "VRCForge generated assets under Assets",
-                    "optimizer, wardrobe, shader, and import artifacts saved as project assets",
+                    *(archive_files if scoped_asset_checkpoint else [
+                        "VRCForge generated assets under Assets",
+                        "optimizer, wardrobe, shader, and import artifacts saved as project assets",
+                    ]),
                 ],
             },
         )
         add_check(
             "packages_manifest",
             "Packages manifest and lock state",
-            "covered" if touches_packages else "missing",
+            "covered" if touches_packages else ("not_applicable" if scoped_asset_checkpoint else "missing"),
             {
                 "pathspec": "Packages",
                 "covers": [
@@ -2367,7 +2438,7 @@ class AgentCheckpointRecoveryService:
         add_check(
             "project_settings",
             "Project settings",
-            "covered" if touches_project_settings else "missing",
+            "covered" if touches_project_settings else ("not_applicable" if scoped_asset_checkpoint else "missing"),
             {
                 "pathspec": "ProjectSettings",
                 "covers": ["Unity project settings that can affect import, build, and validation behavior"],
@@ -2844,6 +2915,9 @@ class AgentCheckpointRecoveryService:
         return self._checkpoint_touches_top_level(checkpoint, "Packages")
 
     def _checkpoint_touches_top_level(self, checkpoint: dict[str, Any], top_level: str) -> bool:
+        archive_files = ensure_string_list(checkpoint.get("archiveFiles"))
+        if checkpoint.get("strategy") == "archive" and archive_files:
+            return any(PurePosixPath(name).parts[0] == top_level for name in archive_files)
         for pathspec in ensure_string_list(checkpoint.get("pathspecs")):
             parts = Path(str(pathspec).replace("\\", "/")).parts
             if top_level in parts:
@@ -2911,6 +2985,20 @@ class AgentCheckpointRecoveryService:
         if strategy not in {"archive", "local_state_archive", "project_chat_archive"}:
             return {"ok": True}
         pathspecs = ensure_string_list(checkpoint.get("pathspecs"))
+        archive_files = ensure_string_list(checkpoint.get("archiveFiles"))
+        if archive_files and any(
+            not name.startswith("Assets/")
+            or "\\" in name
+            or ".." in PurePosixPath(name).parts
+            or str(PurePosixPath(name)) != name
+            for name in archive_files
+        ):
+            return self._checkpoint_unavailable(
+                checkpoint,
+                error="Checkpoint archive file scope metadata is unsafe.",
+                reason_code="checkpoint_scope_metadata_invalid",
+                next_action="Create a new checkpoint before attempting this restore.",
+            )
         if strategy == "project_chat_archive":
             valid_pathspecs = pathspecs == [PROJECT_CHAT_CHECKPOINT_MEMBER]
         elif strategy == "local_state_archive":

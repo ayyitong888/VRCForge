@@ -90,6 +90,43 @@ PATCH_SET_SCHEMA = "vrcforge.modular_patch_set.v1"
 _UNITY_SERIALIZED_SUFFIXES = frozenset({".unity", ".prefab", ".asset", ".mat", ".controller", ".overridecontroller", ".anim", ".playable", ".mask"})
 
 
+def _checkpoint_archive_files_for_write(target_tool: str, arguments: Mapping[str, Any]) -> list[str]:
+    """Return exact existing Unity assets needed by bounded batch writes."""
+    paths: set[str] = set()
+    if target_tool == "vrcforge_write_animation_curve":
+        rows = arguments.get("clips")
+        if not isinstance(rows, list) or not rows:
+            return []
+        for row in rows:
+            if not isinstance(row, Mapping) or not isinstance(row.get("clipPath"), str):
+                return []
+            paths.add(row["clipPath"])
+    elif target_tool == "vrcforge_manage_fx_animator":
+        edits = arguments.get("edits")
+        controller = arguments.get("controllerPath")
+        if not isinstance(edits, list) or not edits or not isinstance(controller, str):
+            return []
+        paths.add(controller)
+        for row in edits:
+            if not isinstance(row, Mapping):
+                return []
+            motion = row.get("motionClipPath")
+            if motion is not None and not isinstance(motion, str):
+                return []
+            if isinstance(motion, str) and motion:
+                paths.add(motion)
+    if not paths:
+        return []
+    valid = [
+        path for path in paths
+        if path.startswith("Assets/")
+        and "\\" not in path
+        and ".." not in Path(path).parts
+        and Path(path).as_posix() == path
+    ]
+    return sorted(valid) if len(valid) == len(paths) else []
+
+
 def _explicit_write_preconditions(arguments: Mapping[str, Any]) -> dict[str, str]:
     """Snapshot caller locks before preparers can normalize or mutate envelopes."""
     locks: dict[str, str] = {}
@@ -2405,6 +2442,14 @@ class AgentApprovalTransactionService:
             return record
         project_root = project_root.resolve()
         record = {**base_record, "projectRoot": str(project_root)}
+        archive_files = _checkpoint_archive_files_for_write(target_tool, arguments)
+        if archive_files and all(
+            is_path_within((project_root / Path(path)).resolve(), project_root)
+            and (project_root / Path(path)).is_file()
+            and (project_root / Path(path + ".meta")).is_file()
+            for path in archive_files
+        ):
+            record["archiveFiles"] = archive_files
         if not self._ports.is_unity_project_root(project_root):
             record.update(
                 {
