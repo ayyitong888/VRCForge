@@ -44,6 +44,7 @@ foreach ($module in $excludeModules) {
     --noconfirm `
     --clean `
     --onedir `
+    --debug noarchive `
     --name vrcforge_backend `
     --hidden-import agent_approval_transactions `
     --hidden-import agent_checkpoint_recovery `
@@ -74,6 +75,20 @@ $requiredWinPtyFiles = @(
 foreach ($relativePath in $requiredWinPtyFiles) {
     if (-not (Test-Path -LiteralPath (Join-Path $sourceOutputDir $relativePath))) {
         throw "PyInstaller did not collect required PTY runtime file: $relativePath"
+    }
+}
+
+# Keep runtime modules inspectable as ordinary onedir files. PyInstaller's
+# noarchive mode does not enable verbose imports or the debug bootloader.
+$requiredRuntimeModules = @(
+    'agent_approval_transactions', 'agent_checkpoint_recovery',
+    'unity_read_input_schemas', 'unity_shared_input_schemas',
+    'unity_write_input_schemas', 'runtime_observation'
+)
+foreach ($module in $requiredRuntimeModules) {
+    $relativePath = "_internal\$module.pyc"
+    if (-not (Test-Path -LiteralPath (Join-Path $sourceOutputDir $relativePath))) {
+        throw "PyInstaller did not collect required runtime module: $relativePath"
     }
 }
 
