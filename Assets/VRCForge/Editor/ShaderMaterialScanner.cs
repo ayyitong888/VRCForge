@@ -147,6 +147,7 @@ namespace VRCForge.Editor
                         var materialName = material.name ?? "";
                         var adapter = ShaderAdapterRegistry.GetAdapter(material);
                         var shaderFamily = adapter != null ? adapter.ShaderFamily : "Unsupported";
+                        var dissolveReadiness = GetDissolveReadiness(material, shaderFamily, shaderName);
                         var category = DetectMaterialCategory(rendererPath, renderer.name, meshName, materialName);
                         var materialId = MaterialInventoryIdentity.CreateMaterialId(
                             rendererPath,
@@ -180,6 +181,11 @@ namespace VRCForge.Editor
                             material_asset_guid = AssetDatabase.AssetPathToGUID(AssetDatabase.GetAssetPath(material) ?? ""),
                             shader_name = shaderName,
                             shader_family = shaderFamily,
+                            dissolve_properties_present = dissolveReadiness.propertiesPresent,
+                            dissolve_rendering_mode = dissolveReadiness.renderingMode,
+                            dissolve_feature_status = dissolveReadiness.featureStatus,
+                            dissolve_readiness = dissolveReadiness.readiness,
+                            dissolve_preparation = dissolveReadiness.preparation,
                             category = category,
                             shared_material_key = $"{materialName}|{shaderName}",
                             textures = includeTextures
@@ -448,6 +454,51 @@ namespace VRCForge.Editor
             return filter != null && filter.sharedMesh != null ? filter.sharedMesh.name : "";
         }
 
+        private static DissolveReadiness GetDissolveReadiness(Material material, string shaderFamily, string shaderName)
+        {
+            var propertiesPresent = material != null
+                && material.HasProperty("_DissolveParams")
+                && material.HasProperty("_DissolvePos");
+            var multiMode = material != null && material.HasProperty("_TransparentMode")
+                ? Mathf.RoundToInt(material.GetFloat("_TransparentMode")) : -1;
+            return ClassifyDissolveReadiness(propertiesPresent, shaderFamily, shaderName, multiMode);
+        }
+
+        internal static DissolveReadiness ClassifyDissolveReadiness(bool propertiesPresent, string shaderFamily, string shaderName, int multiMode)
+        {
+            if (!string.Equals(shaderFamily, "lilToon", StringComparison.Ordinal))
+                return new DissolveReadiness(propertiesPresent, "unsupported", "unverified", "unsupported", "Use a supported lilToon Cutout/Transparent variant, then preview and visually verify.");
+
+            // Ordinary variants compile their mode into the selected shader. The
+            // common _TransparentMode property is authoritative only for Multi.
+            var name = shaderName ?? string.Empty;
+            var isMulti = name == "_lil/lilToonMulti" || name == "Hidden/lilToonMultiOutline"
+                || name == "Hidden/lilToonMultiRefraction" || name == "Hidden/lilToonMultiFur" || name == "Hidden/lilToonMultiGem";
+            if (name.IndexOf("Gem", StringComparison.OrdinalIgnoreCase) >= 0
+                || name.IndexOf("Fur", StringComparison.OrdinalIgnoreCase) >= 0
+                || (isMulti && (multiMode == 4 || multiMode == 5 || multiMode == 6)))
+                return new DissolveReadiness(propertiesPresent, "GemOrFur", "unverified", "needs_preparation", "Gem/Fur variants are not covered; prepare a supported clothing variant before preview.");
+
+            var mode = "Unknown";
+            if (isMulti)
+                mode = multiMode == 0 ? "Opaque" : multiMode == 1 ? "Cutout" : multiMode == 2 ? "Transparent" : "Unknown";
+            else if (name == "lilToon")
+                mode = "Opaque";
+            else if (name.StartsWith("Hidden/lilToon", StringComparison.Ordinal))
+            {
+                var variant = name.Substring("Hidden/lilToon".Length);
+                if (variant.StartsWith("Tessellation", StringComparison.Ordinal)) variant = variant.Substring("Tessellation".Length);
+                else if (variant.StartsWith("Lite", StringComparison.Ordinal)) variant = variant.Substring("Lite".Length);
+                if (variant.EndsWith("Outline", StringComparison.Ordinal)) variant = variant.Substring(0, variant.Length - "Outline".Length);
+                if (variant == "" ) mode = "Opaque";
+                else if (variant == "Cutout") mode = "Cutout";
+                else if (variant == "Transparent" || variant == "OnePassTransparent" || variant == "TwoPassTransparent") mode = "Transparent";
+            }
+            if (!propertiesPresent || (mode != "Cutout" && mode != "Transparent"))
+                return new DissolveReadiness(propertiesPresent, mode, "unverified", "needs_preparation", "Prepare a lilToon Cutout or Transparent clothing variant with dissolve feature enabled.");
+            return new DissolveReadiness(true, mode, "unverified", "needs_feature_verification", "Preview the generated semantic changes, then write and perform visual verification; shader feature status is not proven by HasProperty.");
+        }
+
         private static string DetectMaterialCategory(params string[] values)
         {
             var text = string.Join(" ", values.Where(value => !string.IsNullOrWhiteSpace(value))).ToLowerInvariant();
@@ -571,10 +622,33 @@ namespace VRCForge.Editor
         public string material_asset_guid;
         public string shader_name;
         public string shader_family;
+        public bool dissolve_properties_present;
+        public string dissolve_rendering_mode;
+        public string dissolve_feature_status;
+        public string dissolve_readiness;
+        public string dissolve_preparation;
         public string category;
         public string shared_material_key;
         public List<MaterialTextureDependency> textures;
         public Dictionary<string, MaterialPropertyValue> supported_properties;
+    }
+
+    public sealed class DissolveReadiness
+    {
+        public bool propertiesPresent;
+        public string renderingMode;
+        public string featureStatus;
+        public string readiness;
+        public string preparation;
+
+        public DissolveReadiness(bool propertiesPresent, string renderingMode, string featureStatus, string readiness, string preparation)
+        {
+            this.propertiesPresent = propertiesPresent;
+            this.renderingMode = renderingMode;
+            this.featureStatus = featureStatus;
+            this.readiness = readiness;
+            this.preparation = preparation;
+        }
     }
 
     [Serializable]

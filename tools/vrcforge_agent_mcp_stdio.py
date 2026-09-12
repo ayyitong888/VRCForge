@@ -20,6 +20,7 @@ if str(ROOT_DIR) not in sys.path:
 from agent_mcp_2026 import PROTOCOL_VERSION, Mcp2026Router, run_stdio_loop
 from agent_mcp_standard import McpStandardRouter, run_negotiated_stdio_loop, run_standard_stdio_loop
 from mcp_tool_descriptor import standardize_tool_descriptor
+from external_mcp_result_projection import project_tool
 from external_tool_result_contract import build_external_tool_error
 from agent_tool_result_contract import normalize_agent_tool_result
 from internal_tool_blocks import (
@@ -35,6 +36,11 @@ from internal_tool_blocks import (
 DEFAULT_BASE_URL = "http://127.0.0.1:8757"
 DEFAULT_SERVER_NAME = "VRCForge Agent Bridge"
 DEFAULT_TOOL_CALL_TIMEOUT_SECONDS = 360.0
+DEFAULT_DISCOVERY_TOOLS = frozenset({
+    "vrcforge_bridge_preflight", "vrcforge_list_tool_blocks", "vrcforge_load_tool_block",
+    "vrcforge_unload_tool_block", "vrcforge_invoke_loaded_read_tool", "vrcforge_invoke_loaded_write_tool",
+    "vrcforge_list_execution_targets", "vrcforge_bind_execution_target",
+})
 HIDDEN_EXTERNAL_TOOLS = {
     "vrcforge_agent_message",
     "vrcforge_apply_approved",
@@ -252,6 +258,8 @@ class VRCForgeBridge:
         self.timeout_seconds = timeout_seconds
         self.tool_call_timeout_seconds = tool_call_timeout_seconds
         self.start_runtime = start_runtime
+        # Notification revisions only; never used for authorization or identity.
+        self._response_list_revisions: dict[str, Any] | None = None
 
     def preflight(self) -> dict[str, Any]:
         config_path = self.resolve_config_path()
@@ -431,6 +439,40 @@ class VRCForgeBridge:
                 toolName=tool_name,
             )
         except Exception as exc:  # noqa: BLE001 - preserve upstream structured rejection facts.
+            if isinstance(exc, ExternalHttpBridgeError):
+                response_error = (
+                    exc.raw_result.get("error")
+                    if isinstance(exc.raw_result, Mapping)
+                    and isinstance(exc.raw_result.get("error"), Mapping)
+                    else {}
+                )
+                upstream_data = (
+                    response_error.get("data")
+                    if isinstance(response_error.get("data"), Mapping)
+                    else {}
+                )
+                if (
+                    upstream_data.get("errorCode") == "prompt_skill_provenance_mismatch"
+                    and upstream_data.get("toolRoutingStarted") is False
+                    and upstream_data.get("mutationStarted") is False
+                    and upstream_data.get("committed") is False
+                    and upstream_data.get("commitState") == "not_started"
+                    and upstream_data.get("commitStateKnown") is True
+                ):
+                    return external_rejection(
+                        status="gateway_http_rejection",
+                        error=str(upstream_data.get("error") or exc),
+                        error_code="prompt_skill_provenance_mismatch",
+                        failure_layer=str(upstream_data.get("failureLayer") or "gateway_validation"),
+                        failure_phase=str(upstream_data.get("failurePhase") or "prompt_skill_provenance_validation"),
+                        operation_kind="tool",
+                        tool=tool_name,
+                        tool_routing_started=False,
+                        mutation_started=False,
+                        committed=False,
+                        retryable=False,
+                        details={"httpStatus": exc.status_code, "path": "/mcp"},
+                    )
             raw_result = getattr(exc, "raw_result", None)
             return external_rejection(
                 status="bridge_error",
@@ -477,6 +519,7 @@ class VRCForgeBridge:
         self,
         exposure_layer: str = "planning",
         tool_blocks: list[str] | tuple[str, ...] | None = None,
+        tool_names: list[str] | tuple[str, ...] | None = None,
     ) -> dict[str, Any]:
         if exposure_layer not in {"planning", "execution"}:
             raise ValueError("exposure_layer must be planning or execution")
@@ -484,6 +527,8 @@ class VRCForgeBridge:
         params: dict[str, Any] = {"exposureLayer": exposure_layer}
         if tool_blocks is not None:
             params["toolBlocks"] = list(tool_blocks)
+        if tool_names is not None:
+            params["_meta"] = {"io.vrcforge/toolNames": list(tool_names)}
         return self._mcp_request(
             "tools/list",
             params,
@@ -504,6 +549,8 @@ class VRCForgeBridge:
         return self._mcp_request("resources/read", {"uri": uri}, token=self.require_token())
 
     def resource_generation(self) -> int:
+        if self._response_list_revisions is not None:
+            return self._response_list_revisions["resources"]
         return int(self.resources(page_size=1).get("resourceGeneration") or 0)
 
     def prompts(self, *, cursor: str = "", page_size: int = 100) -> dict[str, Any]:
@@ -521,6 +568,8 @@ class VRCForgeBridge:
         )
 
     def prompt_generation(self) -> str:
+        if self._response_list_revisions is not None:
+            return self._response_list_revisions["prompts"]
         return str(self.prompts(page_size=1).get("promptGeneration") or "")
 
     def _mcp_request(
@@ -539,11 +588,22 @@ class VRCForgeBridge:
                 "version": "1.8.0",
             },
         }
+        if method in {"tools/call", "tools/list", "prompts/get"}:
+            # This is an internal hop; only the outer MCP router chooses presentation.
+            meta["io.vrcforge/resultMode"] = "full"
+        if method == "tools/call":
+            meta["io.vrcforge/includeListRevisions"] = True
+            # A failed or older response must fall back to fresh revision reads.
+            self._response_list_revisions = None
+        request_params = dict(params)
+        selection_meta = request_params.pop("_meta", {})
+        if not isinstance(selection_meta, Mapping):
+            raise ValueError("MCP metadata must be an object")
         payload = {
             "jsonrpc": "2.0",
             "id": request_id,
             "method": method,
-            "params": {"_meta": meta, **params},
+            "params": {"_meta": {**selection_meta, **meta}, **request_params},
         }
         extra_headers = {
             "Accept": "application/json, text/event-stream",
@@ -576,6 +636,14 @@ class VRCForgeBridge:
         result = response.get("result")
         if not isinstance(result, dict):
             raise RuntimeError("VRCForge MCP response did not contain a result object.")
+        if method == "tools/call":
+            result_meta = result.get("_meta")
+            revisions = result_meta.get("io.vrcforge/listRevisions") if isinstance(result_meta, Mapping) else None
+            if (isinstance(revisions, Mapping)
+                and type(revisions.get("resources")) is int
+                and revisions["resources"] >= 0
+                and isinstance(revisions.get("prompts"), str)):
+                self._response_list_revisions = dict(revisions)
         return dict(result)
 
     def require_token(self) -> str:
@@ -710,8 +778,14 @@ def run_stdio_server(
         raise ValueError("exposure_layer must be planning or execution")
 
     loaded_blocks = {"core"}
+    # None shows a whole leaf; sets are additive display selections, never permission grants.
+    displayed_tools: dict[str, set[str] | None] = {}
     tool_list_revision = 0
     requested_layer = {"value": exposure_layer}
+    # A failed fresh catalogue lookup makes the backend state unknown for this
+    # stdio session.  Local discovery controls may still run, but revision
+    # callbacks must not turn that local result into another remote request.
+    catalogue_backend_unavailable = False
     # Opaque handles are scoped to this stdio server process, inherit the
     # authenticated transport, and expire when any covered block unloads.
     activation_handles: dict[str, dict[str, Any]] = {}
@@ -760,7 +834,7 @@ def run_stdio_server(
             {
                 "name": "vrcforge_load_tool_block",
                 "description": (
-                    "When to use: Load one needed block.\n"
+                    "When to use: Load one needed leaf, optionally choosing exact toolNames from its index. Selected full schemas are returned for hosts that do not refresh tools/list.\n"
                     "When NOT to use: Load unrelated blocks or approve writes.\n"
                     "Negative example: Loading optimization to read compile errors."
                 ),
@@ -768,7 +842,12 @@ def run_stdio_server(
                     "type": "object",
                     "additionalProperties": False,
                     "required": ["block"],
-                    "properties": {"block": {"type": "string", "enum": block_enum}},
+                    "properties": {
+                        "block": {"type": "string", "enum": block_enum},
+                        "toolNames": {"type": "array", "minItems": 1, "maxItems": 32, "uniqueItems": True,
+                                      "items": {"type": "string", "minLength": 1},
+                                      "description": "Exact names from this leaf's index. Adds displayed tools; omit to display the whole leaf. Unload first to narrow an already loaded selection. This does not change call permissions."},
+                    },
                 },
             },
             {
@@ -883,10 +962,13 @@ def run_stdio_server(
 
         def routing_fields(block_id: str) -> dict[str, Any]:
             routing = canonical_block_routing(block_id)
+            def entries(key: str) -> list[str]:
+                value = routing.get(key, ())
+                return [value] if isinstance(value, str) else list(value)
             return {
-                "whenToUse": list(routing.get("useWhen", ())),
-                "doNotUse": list(routing.get("doNotUse", ())),
-                "provides": list(routing.get("provides", ())),
+                "whenToUse": entries("useWhen"),
+                "doNotUse": entries("doNotUse"),
+                "provides": entries("provides"),
                 "planningExposure": routing.get("planningExposure", ""),
                 "executionExposure": routing.get("executionExposure", ""),
             }
@@ -946,12 +1028,13 @@ def run_stdio_server(
             "catalogGeneration": tool_list_revision,
             "selectedBlock": selected_block,
             "selectionHint": (
-                "Select one of the six capability categories. Load only the matching leaf; the host should re-list after the tools/list_changed notification. If it does not, invoke the exact loaded Tool through the activationHandle fallback. Full schemas appear after loading."
+                "Default tools/list shows startup controls and displayed leaf tools. Select a matching leaf: tree.tools[].name gives exact names for load_tool_block toolNames. Omit toolNames to display the whole leaf. Selected full schemas and activationHandle support hosts without tools/list refresh. Existing direct calls retain their original permissions. tools/list _meta io.vrcforge/toolNames or resultMode=full also remain available."
             ),
             "tree": tree,
         }
 
     def list_tools(params: Mapping[str, Any]) -> list[dict[str, Any]]:
+        nonlocal catalogue_backend_unavailable
         requested_exposure = str(params.get("exposureLayer") or exposure_layer)
         if requested_exposure not in {"planning", "execution"}:
             raise ValueError("exposureLayer must be planning or execution")
@@ -970,12 +1053,31 @@ def run_stdio_server(
         ]
         tools.extend(block_controls())
         tools.extend(activation_tools(requested_exposure))
-        if not bridge.preflight().get("runtimeOnline"):
-            return tools
         try:
-            manifest = bridge.manifest(requested_exposure, ["*"])
+            # This authenticated, fresh manifest already checks availability.
+            # Full preflight remains an explicit tool, not two extra catalog reads.
+            lookup_names = params.get("_lookupToolNames")
+            manifest = bridge.manifest(requested_exposure, ["*"], lookup_names if isinstance(lookup_names, list) else None)
         except Exception:
+            catalogue_backend_unavailable = True
+            # A per-call catalogue lookup is an authorization precondition:
+            # preserve backend availability failures so the standard router
+            # cannot misreport them as a missing/excluded Tool.  Plain
+            # tools/list remains usable offline and continues to expose only
+            # local discovery controls.
+            local_tool_names = {
+                str(item.get("name") or "")
+                for item in tools
+                if isinstance(item, Mapping)
+            }
+            if (
+                isinstance(lookup_names, list)
+                and lookup_names
+                and any(str(name) not in local_tool_names for name in lookup_names)
+            ):
+                raise
             return tools
+        catalogue_backend_unavailable = False
         manifest_tools = manifest.get("tools") if isinstance(manifest, dict) else []
         for item in manifest_tools:
             if not isinstance(item, dict):
@@ -992,9 +1094,15 @@ def run_stdio_server(
                 )
             ):
                 continue
+            metadata = dict(item.get("_meta") or {})
+            selection = displayed_tools.get(block)
+            visible = name in DEFAULT_DISCOVERY_TOOLS or (block in loaded_blocks and (selection is None or name in selection))
+            if not visible:
+                metadata["io.vrcforge/defaultVisible"] = False
             tools.append(standardize_tool_descriptor(
                 {
                     **item,
+                    "_meta": metadata,
                     "name": name,
                     "description": str(item.get("description") or name),
                     "inputSchema": item.get("inputSchema")
@@ -1062,7 +1170,7 @@ def run_stdio_server(
                 catalogGeneration=tool_list_revision,
                 loadedBlocks=sorted(loaded_blocks),
             )
-        manifest = bridge.manifest("execution" if write else requested_layer["value"], ["*"])
+        manifest = bridge.manifest("execution" if write else requested_layer["value"], ["*"], [delegated_name])
         manifest_tools = manifest.get("tools") if isinstance(manifest, Mapping) else []
         descriptor = next(
             (
@@ -1157,12 +1265,37 @@ def run_stdio_server(
                     loadedBlocks=sorted(loaded_blocks),
                 )
             targets = (block,)
+            selected_names = None
+            if tool_name == "vrcforge_load_tool_block" and "toolNames" in arguments:
+                selected_names = arguments["toolNames"]
+                valid = (
+                    isinstance(selected_names, list) and 1 <= len(selected_names) <= 32
+                    and all(isinstance(name, str) and name and name == name.strip() for name in selected_names)
+                    and len(set(selected_names)) == len(selected_names)
+                )
+                if valid:
+                    manifest = bridge.manifest(requested_layer["value"], ["*"], selected_names)
+                    available = {str(item.get("name") or "") for item in manifest.get("tools", [])
+                                 if isinstance(item, Mapping) and item_owner(item) == block
+                                 and str(item.get("name") or "") not in HIDDEN_EXTERNAL_TOOLS}
+                    valid = set(selected_names).issubset(available)
+                if not valid:
+                    return external_rejection(
+                        status="invalid_tool_selection", error="toolNames must contain 1..32 unique exact names available in this leaf and exposure layer.",
+                        error_code="external_tool_selection_invalid", failure_layer="external_tool_discovery",
+                        failure_phase="block_selection", operation_kind="discovery", loadedBlocks=sorted(loaded_blocks),
+                    )
             if tool_name == "vrcforge_load_tool_block":
-                changed = any(target not in loaded_blocks for target in targets)
+                was_loaded = block in loaded_blocks
+                previous = displayed_tools.get(block)
+                selection = (set(selected_names) if not was_loaded else None if previous is None else previous | set(selected_names)) if selected_names is not None else None
+                changed = not was_loaded or selection != previous
                 loaded_blocks.update(targets)
+                displayed_tools[block] = selection
             else:
                 changed = any(target in loaded_blocks for target in targets)
                 loaded_blocks.difference_update(targets)
+                displayed_tools.pop(block, None)
                 for handle, activation in list(activation_handles.items()):
                     if set(activation.get("blocks") or ()).intersection(targets):
                         activation_handles.pop(handle, None)
@@ -1196,6 +1329,8 @@ def run_stdio_server(
                     "exposureLayer": requested_layer["value"],
                     "expiresWhen": "covered_block_unloaded_or_stdio_server_exits",
                 }
+                if selected_names is not None:
+                    response["selectedTools"] = [project_tool(item, mode="compact") for item in list_tools({"exposureLayer": requested_layer["value"]}) if item["name"] in selected_names]
             return response
         return bridge.call_tool(tool_name, arguments, agent_name="external-stdio-agent")
 
@@ -1218,7 +1353,9 @@ def run_stdio_server(
             raise ValueError("Resource registry is unavailable")
         return callback(uri)
 
-    def resource_generation() -> int:
+    def resource_generation() -> int | None:
+        if catalogue_backend_unavailable:
+            return None
         callback = getattr(bridge, "resource_generation", None)
         return int(callback()) if callable(callback) else 0
 
@@ -1237,7 +1374,9 @@ def run_stdio_server(
             raise ValueError("Prompt registry is unavailable")
         return callback(name, arguments)
 
-    def prompt_generation() -> str:
+    def prompt_generation() -> str | None:
+        if catalogue_backend_unavailable:
+            return None
         callback = getattr(bridge, "prompt_generation", None)
         return str(callback()) if callable(callback) else ""
 
@@ -1248,6 +1387,10 @@ def run_stdio_server(
         server_version="1.8.0",
         tool_list_revision=lambda: tool_list_revision,
         tool_call_catalogue=lambda: list_tools({"exposureLayer": requested_layer["value"]}),
+        tool_call_catalogue_for_call=lambda name, params: list_tools({
+            "exposureLayer": requested_layer["value"],
+            "_lookupToolNames": [name],
+        }),
         resource_list=list_resources,
         resource_templates=list_resource_templates,
         resource_read=read_resource,
@@ -1266,7 +1409,7 @@ def run_stdio_server(
         server_name=DEFAULT_SERVER_NAME,
         server_version="1.8.0",
         tool_list_revision=lambda: tool_list_revision,
-        tool_call_catalogue=lambda _params: list_tools({"exposureLayer": requested_layer["value"]}),
+        tool_call_catalogue=lambda params: list_tools({"exposureLayer": requested_layer["value"], "_lookupToolNames": [str(params.get("name") or "")]}) if isinstance(params, Mapping) and params.get("name") else list_tools({"exposureLayer": requested_layer["value"]}),
         resource_list=list_resources,
         resource_templates=list_resource_templates,
         resource_read=read_resource,

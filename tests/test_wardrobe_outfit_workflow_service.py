@@ -280,6 +280,16 @@ def test_inspection_and_plan_normalize_existing_aliases_and_selected_project() -
     }
 
 
+def test_plan_forwards_selected_only_dependency_mode() -> None:
+    calls: list[tuple[Any, ...]] = []
+    service = _service(calls)
+    service.plan_outfit_import(
+        {"packagePath": "E:/outfit.unitypackage", "dependencyMode": "selected_only"}
+    )
+    assert calls[-1][0] == "plan"
+    assert calls[-1][1]["dependency_mode"] == "selected_only"
+
+
 def test_missing_package_path_fails_before_any_port_call() -> None:
     calls: list[tuple[Any, ...]] = []
     service = _service(calls)

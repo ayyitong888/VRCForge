@@ -1,0 +1,19 @@
+{
+  "schema": "vrcforge.runtime_observation.v1",
+  "jobId": "fixture-job-357",
+  "status": "pending",
+  "avatarPath": "Root/Avatar",
+  "parameterName": "Parameter",
+  "requestedValue": 3.0,
+  "durationSeconds": 8.0,
+  "width": 128,
+  "height": 128,
+  "requestedFrameCount": 4,
+  "mutationStarted": true,
+  "verified": false,
+  "commitState": "pending",
+  "coreIdentity": "project|instance|process|start",
+  "avatarInstanceId": 38458,
+  "animatorInstanceId": -56512,
+  "frames": []
+}

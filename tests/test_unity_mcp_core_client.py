@@ -875,12 +875,13 @@ def test_tools_list_rejects_permission_or_schema_drift(core_files, field: str):
         server.close()
 
 
-def test_oversized_modern_line_fails_closed(core_files):
+def test_oversized_modern_line_fails_closed(core_files, monkeypatch):
     project, descriptor_path, descriptor = core_files
+    monkeypatch.setattr("unity_mcp_core_client.MAX_RESPONSE_FRAME_BYTES", 1024)
 
     def oversized_handler(connection, _seen):
         _read_line(connection)
-        connection.sendall(b"x" * (MAX_FRAME_BYTES + 1))
+        connection.sendall(b"x" * 1025)
 
     server = FakeCore(oversized_handler)
     _write_descriptor(descriptor_path, descriptor, server.port)

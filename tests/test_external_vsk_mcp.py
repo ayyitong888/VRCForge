@@ -244,7 +244,7 @@ def test_external_vsk_roundtrip_crosses_stdio_and_reads_back_an_isolated_import(
         def preflight(self) -> dict[str, object]:
             return {"runtimeOnline": True}
 
-        def manifest(self, layer: str, tool_blocks: list[str]) -> dict[str, object]:
+        def manifest(self, layer: str, tool_blocks: list[str], tool_names: list[str] | None = None) -> dict[str, object]:
             return {
                 "tools": gateway.build_external_mcp_tools(
                     layer,

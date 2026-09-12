@@ -1,5 +1,6 @@
 using System;
 using System.Globalization;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Security.Cryptography;
@@ -14,15 +15,16 @@ namespace VRCForge.Editor
 {
     [VRCForgeCommand(
         toolId: "vrc_duplicate_project_asset",
-        Summary = "Create-new copy one supported Unity authoring asset into Assets/VRCForge/Generated without overwriting the source or destination. Supports preview."
+        Summary = "Create-new copy one supported Unity authoring asset into Assets/VRCForgeGenerated or a classified subfolder without overwriting the source or destination. Supports preview."
     )]
     public static class DuplicateProjectAssetTool
     {
         internal const string ToolName = "vrc_duplicate_project_asset";
         internal const string ResultSchema = "vrcforge.project_asset_copy.v2";
         internal const string Operation = "duplicate_project_asset";
-        internal const string GeneratedRoot = "Assets/VRCForge/Generated";
-        private const string AnchorRoot = "Assets/VRCForge";
+        internal const string GeneratedRoot = "Assets/VRCForgeGenerated";
+        private const string AnchorRoot = "Assets";
+        private const string LegacyGeneratedRoot = "Assets/VRCForge/Generated";
         private const string PreviewDigestSchema = "vrcforge.project_asset_copy_preview.v2";
         private const int StableReadAttempts = 3;
         private const int StableReadRetryDelayMilliseconds = 75;
@@ -38,8 +40,10 @@ namespace VRCForge.Editor
 
         public class Parameters
         {
-            [VRCForgeInput("Existing source asset path below Assets.", IsRequired = true)] public string sourceAssetPath { get; set; } = "";
-            [VRCForgeInput("Create-new destination directly below Assets/VRCForge/Generated.", IsRequired = true)] public string destinationAssetPath { get; set; } = "";
+            [VRCForgeInput("Optional 1..128 create-new copies; sourceAssetPath/destinationAssetPath per row, all parents existing. Mutually exclusive with single fields. Maximum 512 KiB sealed payload.", IsRequired = false)] public object[] copies { get; set; }
+            [VRCForgeInput("Exact full batch preview rows bound by expectedPreviewDigest.", IsRequired = false)] public object[] expectedCopies { get; set; }
+            [VRCForgeInput("Existing source asset path below Assets; required for a single copy, mutually exclusive with copies.", IsRequired = false)] public string sourceAssetPath { get; set; } = "";
+            [VRCForgeInput("Exact create-new path below Assets/VRCForgeGenerated. Missing parent folders are previewed and created atomically with the copy.", IsRequired = false)] public string destinationAssetPath { get; set; } = "";
             [VRCForgeInput("Return a non-mutating copy preview.", IsRequired = false)] public bool? preview { get; set; } = false;
             [VRCForgeInput("Must remain false; overwrite is unsupported.", IsRequired = false)] public bool? overwrite { get; set; } = false;
             [VRCForgeInput("Expected active Unity project root from preview.", IsRequired = false)] public string expectedProjectPath { get; set; } = "";
@@ -55,12 +59,15 @@ namespace VRCForge.Editor
             [VRCForgeInput("Expected generated-root identity when it existed during preview.", IsRequired = false)] public string expectedGeneratedRootIdentity { get; set; } = "";
             [VRCForgeInput("Expected stable anchor-folder GUID.", IsRequired = false)] public string expectedAnchorFolderGuid { get; set; } = "";
             [VRCForgeInput("Expected stable anchor-folder identity.", IsRequired = false)] public string expectedAnchorFolderIdentity { get; set; } = "";
+            [VRCForgeInput("Expected destination-parent GUID from preview; empty only for a root created by this copy.", IsRequired = false)] public string expectedDestinationParentFolderGuid { get; set; } = "";
+            [VRCForgeInput("Expected destination-parent identity from preview; empty only for a root created by this copy.", IsRequired = false)] public string expectedDestinationParentFolderIdentity { get; set; } = "";
             [VRCForgeInput("Expected destination-absent assertion from preview.", IsRequired = false)] public bool? expectedDestinationAbsent { get; set; }
             [VRCForgeInput("Expected preview digest.", IsRequired = false)] public string expectedPreviewDigest { get; set; } = "";
         }
 
         public static object HandleCommand(JObject @params)
         {
+            if (@params?["copies"] != null) return UnityProjectAssetCopyBatch.HandleCommand(@params);
             try
             {
                 var parameters = @params ?? new JObject();
@@ -90,7 +97,7 @@ namespace VRCForge.Editor
             }
         }
 
-        private static ProjectAssetCopySnapshot BuildSnapshot(string rawSourcePath, string rawDestinationPath)
+        internal static ProjectAssetCopySnapshot BuildSnapshot(string rawSourcePath, string rawDestinationPath)
         {
             var sourcePath = NormalizeSourcePath(rawSourcePath);
             var destinationPath = NormalizeDestinationPath(rawDestinationPath);
@@ -116,6 +123,7 @@ namespace VRCForge.Editor
             {
                 throw new ProjectAssetCopyException("The source Unity authoring asset is unavailable.");
             }
+            ValidateGeneratedSourceType(sourcePath, sourceType.FullName ?? sourceType.Name);
             var source = SceneObjectCopyCore.ReadStableAssetEvidence(sourcePath, "project asset copy source");
             if (source.File.LinkCount != 1 || source.Meta.LinkCount != 1)
             {
@@ -137,6 +145,23 @@ namespace VRCForge.Editor
                 throw new ProjectAssetCopyException("The generated asset root path is occupied by an incomplete asset.");
             }
 
+            var parentFolderPath = destinationPath.Substring(0, destinationPath.LastIndexOf('/'));
+            var missingFolders = new List<string>();
+            var ancestorPath = parentFolderPath;
+            while (!AssetDatabase.IsValidFolder(ancestorPath))
+            {
+                if (!ancestorPath.StartsWith(GeneratedRoot + "/", StringComparison.Ordinal) && ancestorPath != GeneratedRoot)
+                    throw new ProjectAssetCopyException("The destination folder chain escaped the generated root.");
+                if (SceneObjectCopyCore.AssetOrMetaExists(ancestorPath))
+                    throw new ProjectAssetCopyException("A destination folder path or metadata is already occupied.");
+                missingFolders.Insert(0, ancestorPath);
+                ancestorPath = ancestorPath.Substring(0, ancestorPath.LastIndexOf('/'));
+            }
+            var ancestorGuid = SceneObjectCopyCore.ReadAssetGuid(ancestorPath, "destination existing ancestor");
+            var ancestorIdentity = SceneObjectCopyCore.ReadDirectoryIdentity(ancestorPath, "destination existing ancestor");
+            var parentFolderGuid = missingFolders.Count == 0 ? ancestorGuid : string.Empty;
+            var parentFolderIdentity = missingFolders.Count == 0 ? ancestorIdentity : string.Empty;
+
             var snapshot = new ProjectAssetCopySnapshot
             {
                 SourcePath = sourcePath,
@@ -149,6 +174,13 @@ namespace VRCForge.Editor
                 GeneratedRootIdentity = generatedRootIdentity,
                 AnchorFolderGuid = anchorGuid,
                 AnchorFolderIdentity = anchorIdentity,
+                ParentFolderPath = parentFolderPath,
+                ParentFolderGuid = parentFolderGuid,
+                ParentFolderIdentity = parentFolderIdentity,
+                MissingFolders = missingFolders.ToArray(),
+                ExistingAncestorPath = ancestorPath,
+                ExistingAncestorGuid = ancestorGuid,
+                ExistingAncestorIdentity = ancestorIdentity,
             };
             snapshot.PreviewDigest = ComputePreviewDigest(snapshot);
             return snapshot;
@@ -159,42 +191,57 @@ namespace VRCForge.Editor
             var mutationStarted = false;
             var generatedRootCreated = false;
             StableAssetEvidence createdEvidence = null;
-            StagingFolderLease generatedRootLease = null;
+            var createdFolders = new List<CreatedFolder>();
+            var unverifiedFolderCreation = false;
+            var attemptedFolder = string.Empty;
             var failurePhase = "preflight";
             try
             {
                 VerifySnapshotCurrent(snapshot);
-                if (!snapshot.GeneratedRootExists)
+                foreach (var folderPath in snapshot.MissingFolders)
                 {
-                    failurePhase = "generated_root_creation";
-                    var createdGuid = AssetDatabase.CreateFolder(AnchorRoot, "Generated");
+                    failurePhase = "destination_folder_creation";
+                    SceneObjectCopyCore.VerifyFolderIdentity(snapshot.ExistingAncestorPath,
+                        snapshot.ExistingAncestorGuid, snapshot.ExistingAncestorIdentity, "destination existing ancestor");
+                    foreach (var owned in createdFolders) VerifyCreatedFolder(owned);
+                    if (SceneObjectCopyCore.AssetOrMetaExists(folderPath))
+                        throw new ProjectAssetCopyException("A planned destination folder changed before creation.");
+                    var parent = folderPath.Substring(0, folderPath.LastIndexOf('/'));
                     mutationStarted = true;
-                    generatedRootCreated = true;
-                    var normalizedGuid = NormalizeHex(createdGuid, 32, "created generated-root GUID");
+                    unverifiedFolderCreation = true;
+                    attemptedFolder = folderPath;
+                    var createdGuid = AssetDatabase.CreateFolder(parent, Path.GetFileName(folderPath));
+                    var normalizedGuid = NormalizeHex(createdGuid, 32, "created destination-folder GUID");
                     var actualPath = (AssetDatabase.GUIDToAssetPath(normalizedGuid) ?? string.Empty).Replace('\\', '/');
-                    if (!string.Equals(actualPath, GeneratedRoot, StringComparison.Ordinal))
-                    {
-                        throw new ProjectAssetCopyException("The generated asset root was not created exactly.");
-                    }
-                    generatedRootLease = new StagingFolderLease
-                    {
-                        RootPath = AnchorRoot,
-                        FolderPath = GeneratedRoot,
-                        FolderGuid = normalizedGuid,
-                        FolderIdentity = SceneObjectCopyCore.ReadDirectoryIdentity(GeneratedRoot, "created generated asset root"),
+                    if (!string.Equals(actualPath, folderPath, StringComparison.Ordinal))
+                        throw new ProjectAssetCopyException("The destination folder was not created exactly.");
+                    var lease = new StagingFolderLease {
+                        RootPath = parent, FolderPath = folderPath, FolderGuid = normalizedGuid,
+                        FolderIdentity = SceneObjectCopyCore.ReadDirectoryIdentity(folderPath, "created destination folder")
                     };
+                    createdFolders.Add(new CreatedFolder { Lease = lease, MetaDigest = ReadFolderMetaDigest(folderPath) });
+                    unverifiedFolderCreation = false;
+                    if (folderPath == GeneratedRoot) generatedRootCreated = true;
                 }
 
+                if (!string.IsNullOrEmpty(snapshot.ParentFolderGuid))
+                {
+                    SceneObjectCopyCore.VerifyFolderIdentity(
+                        snapshot.ParentFolderPath, snapshot.ParentFolderGuid, snapshot.ParentFolderIdentity,
+                        "project asset copy destination parent");
+                }
                 if (SceneObjectCopyCore.AssetOrMetaExists(snapshot.DestinationPath))
                 {
                     throw new ProjectAssetCopyException("The destination changed before the copy started.");
                 }
+                foreach (var owned in createdFolders) VerifyCreatedFolder(owned);
                 failurePhase = "asset_copy";
                 if (!AssetDatabase.CopyAsset(snapshot.SourcePath, snapshot.DestinationPath))
                 {
                     throw new ProjectAssetCopyException("Unity AssetDatabase refused the create-new asset copy.");
                 }
                 mutationStarted = true;
+                createdEvidence = ReadCreatedEvidenceWithRetry(snapshot.DestinationPath);
                 AssetDatabase.SaveAssets();
                 AssetDatabase.ImportAsset(
                     snapshot.DestinationPath,
@@ -219,6 +266,7 @@ namespace VRCForge.Editor
                 }
                 failurePhase = "source_unchanged_readback";
                 VerifySourceUnchanged(snapshot);
+                foreach (var owned in createdFolders) VerifyCreatedFolder(owned);
 
                 var beforePayload = new
                 {
@@ -242,12 +290,11 @@ namespace VRCForge.Editor
                     bytesIdenticalToSource = createdEvidence.File.Digest == snapshot.SourceEvidence.File.Digest,
                     generatedRootPath = GeneratedRoot,
                     generatedRootCreated,
+                    createdFolders = createdFolders.Select(item => item.Lease.FolderPath).ToArray(),
                     createNew = true,
                     readbackVerified = true,
                 };
-                var affectedItems = generatedRootCreated
-                    ? new[] { snapshot.DestinationPath, GeneratedRoot }
-                    : new[] { snapshot.DestinationPath };
+                var affectedItems = new[] { snapshot.DestinationPath }.Concat(createdFolders.Select(item => item.Lease.FolderPath)).ToArray();
 
                 return VRCForgeToolResult.Completed(
                     "Created and verified one independent Unity authoring asset copy.",
@@ -260,7 +307,7 @@ namespace VRCForge.Editor
                         verified = true,
                         changed = true,
                         saved = true,
-                        mutationCount = generatedRootCreated ? 2 : 1,
+                        mutationCount = 1 + createdFolders.Count,
                         source = SourcePayload(snapshot),
                         target = afterPayload,
                         before = beforePayload,
@@ -284,13 +331,13 @@ namespace VRCForge.Editor
                 var restored = CleanupFailedApply(
                     snapshot,
                     createdEvidence,
-                    generatedRootCreated,
-                    generatedRootLease);
+                    createdFolders,
+                    unverifiedFolderCreation && SceneObjectCopyCore.AssetOrMetaExists(attemptedFolder));
                 return Failure(exception, true, !restored, failurePhase);
             }
         }
 
-        private static StableAssetEvidence ReadCreatedEvidenceWithRetry(string assetPath)
+        internal static StableAssetEvidence ReadCreatedEvidenceWithRetry(string assetPath)
         {
             Exception lastError = null;
             for (var attempt = 1; attempt <= StableReadAttempts; attempt++)
@@ -320,8 +367,8 @@ namespace VRCForge.Editor
         private static bool CleanupFailedApply(
             ProjectAssetCopySnapshot snapshot,
             StableAssetEvidence createdEvidence,
-            bool generatedRootCreated,
-            StagingFolderLease generatedRootLease)
+            List<CreatedFolder> createdFolders,
+            bool unverifiedFolderCreation)
         {
             var assetClean = !SceneObjectCopyCore.AssetOrMetaExists(snapshot.DestinationPath);
             if (!assetClean && createdEvidence != null)
@@ -332,11 +379,35 @@ namespace VRCForge.Editor
             {
                 return false;
             }
-            if (generatedRootCreated)
+            if (unverifiedFolderCreation) return false;
+            for (var index = createdFolders.Count - 1; index >= 0; index--)
             {
-                return SceneObjectCopyCore.DeleteOwnedStagingFolder(generatedRootLease);
+                try { VerifyCreatedFolder(createdFolders[index]); }
+                catch { return false; }
+                if (!SceneObjectCopyCore.DeleteOwnedStagingFolder(createdFolders[index].Lease)) return false;
             }
             return true;
+        }
+
+        private sealed class CreatedFolder
+        {
+            internal StagingFolderLease Lease;
+            internal string MetaDigest;
+        }
+
+        private static string ReadFolderMetaDigest(string folderPath)
+        {
+            var absolutePath = SceneObjectCopyCore.ToAbsoluteAssetPath(folderPath + ".meta");
+            using (var stream = new FileStream(absolutePath, FileMode.Open, FileAccess.Read, FileShare.Read))
+            using (var sha = SHA256.Create())
+                return string.Concat(sha.ComputeHash(stream).Select(item => item.ToString("x2", CultureInfo.InvariantCulture)));
+        }
+
+        private static void VerifyCreatedFolder(CreatedFolder folder)
+        {
+            SceneObjectCopyCore.VerifyOwnedStagingFolder(folder.Lease);
+            if (ReadFolderMetaDigest(folder.Lease.FolderPath) != folder.MetaDigest)
+                throw new ProjectAssetCopyException("Created destination folder metadata changed; preserve it.");
         }
 
         private static void VerifyExpected(JObject parameters, ProjectAssetCopySnapshot snapshot)
@@ -354,6 +425,8 @@ namespace VRCForge.Editor
                 || Required(parameters, "expectedGeneratedRootIdentity") != snapshot.GeneratedRootIdentity
                 || Required(parameters, "expectedAnchorFolderGuid") != snapshot.AnchorFolderGuid
                 || Required(parameters, "expectedAnchorFolderIdentity") != snapshot.AnchorFolderIdentity
+                || Required(parameters, "expectedDestinationParentFolderGuid") != snapshot.ParentFolderGuid
+                || Required(parameters, "expectedDestinationParentFolderIdentity") != snapshot.ParentFolderIdentity
                 || !RequiredBool(parameters, "expectedDestinationAbsent")
                 || Required(parameters, "expectedPreviewDigest") != snapshot.PreviewDigest)
             {
@@ -361,7 +434,7 @@ namespace VRCForge.Editor
             }
         }
 
-        private static void VerifySnapshotCurrent(ProjectAssetCopySnapshot snapshot)
+        internal static void VerifySnapshotCurrent(ProjectAssetCopySnapshot snapshot)
         {
             var current = BuildSnapshot(snapshot.SourcePath, snapshot.DestinationPath);
             if (current.PreviewDigest != snapshot.PreviewDigest)
@@ -370,7 +443,7 @@ namespace VRCForge.Editor
             }
         }
 
-        private static void VerifySourceUnchanged(ProjectAssetCopySnapshot snapshot)
+        internal static void VerifySourceUnchanged(ProjectAssetCopySnapshot snapshot)
         {
             var current = SceneObjectCopyCore.ReadStableAssetEvidence(
                 snapshot.SourcePath,
@@ -384,7 +457,7 @@ namespace VRCForge.Editor
             }
         }
 
-        private static object SourcePayload(ProjectAssetCopySnapshot snapshot)
+        internal static object SourcePayload(ProjectAssetCopySnapshot snapshot)
         {
             return new
             {
@@ -400,32 +473,55 @@ namespace VRCForge.Editor
             };
         }
 
-        private static string NormalizeSourcePath(string value)
+        internal static string NormalizeSourcePath(string value)
         {
             var path = NormalizeAssetPath(value, "sourceAssetPath");
             if (!path.StartsWith("Assets/", StringComparison.Ordinal))
             {
-                throw new ProjectAssetCopyException("The source must be an existing non-generated Assets authoring asset.");
+                throw new ProjectAssetCopyException("The source must be an existing Assets authoring asset.");
             }
             ValidateExtension(path);
-            var generatedPrefix = GeneratedRoot + "/";
-            if (path.StartsWith(generatedPrefix, StringComparison.Ordinal)
-                && (!string.Equals(Path.GetExtension(path), ".mat", StringComparison.OrdinalIgnoreCase)
-                    || path.Substring(generatedPrefix.Length).Contains("/")))
+            var legacyPrefix = LegacyGeneratedRoot + "/";
+            var legacyGenerated = path.StartsWith(legacyPrefix, StringComparison.Ordinal);
+            if (legacyGenerated)
             {
-                throw new ProjectAssetCopyException("Only an existing generated material may be copied from the generated root.");
+                if (!string.Equals(Path.GetExtension(path), ".mat", StringComparison.OrdinalIgnoreCase)
+                    || path.Substring(legacyPrefix.Length).Contains("/"))
+                    throw new ProjectAssetCopyException("Only an existing root-level legacy generated material may be copied.");
             }
+            if (path.StartsWith(GeneratedRoot + "/", StringComparison.OrdinalIgnoreCase)
+                && GeneratedSourceType(path) == null)
+                throw new ProjectAssetCopyException("Only native material, animation, controller, and override-controller generated assets may be copied.");
             return path;
         }
 
-        private static string NormalizeDestinationPath(string value)
+        private static string GeneratedSourceType(string path)
+        {
+            switch (Path.GetExtension(path).ToLowerInvariant())
+            {
+                case ".mat": return "UnityEngine.Material";
+                case ".anim": return "UnityEngine.AnimationClip";
+                case ".controller": return "UnityEditor.Animations.AnimatorController";
+                case ".overridecontroller": return "UnityEngine.AnimatorOverrideController";
+                default: return null;
+            }
+        }
+
+        private static void ValidateGeneratedSourceType(string path, string typeName)
+        {
+            if (path.StartsWith(GeneratedRoot + "/", StringComparison.OrdinalIgnoreCase)
+                && !string.Equals(GeneratedSourceType(path), typeName, StringComparison.Ordinal))
+                throw new ProjectAssetCopyException("Generated source asset type does not match its supported native extension.");
+        }
+
+        internal static string NormalizeDestinationPath(string value)
         {
             var path = NormalizeAssetPath(value, "destinationAssetPath");
             var expectedPrefix = GeneratedRoot + "/";
             if (!path.StartsWith(expectedPrefix, StringComparison.Ordinal)
-                || path.Substring(expectedPrefix.Length).Contains("/"))
+                || path.Substring(expectedPrefix.Length).Split('/').Any(segment => segment.StartsWith(".", StringComparison.Ordinal)))
             {
-                throw new ProjectAssetCopyException("The destination must be a direct child of Assets/VRCForge/Generated.");
+                throw new ProjectAssetCopyException("The destination must be below Assets/VRCForgeGenerated.");
             }
             ValidateExtension(path);
             var fileName = Path.GetFileName(path);
@@ -487,6 +583,9 @@ namespace VRCForge.Editor
                 AnchorRoot,
                 snapshot.AnchorFolderGuid,
                 snapshot.AnchorFolderIdentity,
+                snapshot.ParentFolderPath,
+                snapshot.ParentFolderGuid,
+                snapshot.ParentFolderIdentity,
                 "destination_absent",
             })
             {
@@ -494,6 +593,15 @@ namespace VRCForge.Editor
                 value.Append(text.Length.ToString(CultureInfo.InvariantCulture));
                 value.Append(':');
                 value.Append(text);
+            }
+            if (snapshot.HasClassifiedFolderCreation)
+            {
+                foreach (var field in new[] { "folder_creation", snapshot.ExistingAncestorPath, snapshot.ExistingAncestorGuid, snapshot.ExistingAncestorIdentity }.Concat(snapshot.MissingFolders))
+                {
+                    value.Append(field.Length.ToString(CultureInfo.InvariantCulture));
+                    value.Append(':');
+                    value.Append(field);
+                }
             }
             using (var sha = SHA256.Create())
             {
@@ -532,10 +640,10 @@ namespace VRCForge.Editor
             return normalized;
         }
 
-        private static string ComputeObjectLayoutDigest(string assetPath)
+        internal static string ComputeObjectLayoutDigest(string assetPath)
         {
             var entries = AssetDatabase.LoadAllAssetsAtPath(assetPath)
-                .Where(item => item != null)
+                .Where(IsCopyLayoutObject)
                 .Select(item => string.Join("\n", new[]
                 {
                     item.GetType().AssemblyQualifiedName ?? item.GetType().FullName ?? item.GetType().Name,
@@ -560,6 +668,14 @@ namespace VRCForge.Editor
                 return string.Concat(sha.ComputeHash(Encoding.UTF8.GetBytes(value.ToString()))
                     .Select(item => item.ToString("x2", CultureInfo.InvariantCulture)));
             }
+        }
+
+        internal static bool IsCopyLayoutObject(UnityEngine.Object item)
+        {
+            // Unity ImportLog is the sealed container for importer-generated diagnostics,
+            // not an authored subasset. Keep every other type, including hidden editor objects.
+            // https://docs.unity3d.com/2022.3/Documentation/ScriptReference/AssetImporters.ImportLog.html
+            return item != null && !(item is UnityEditor.AssetImporters.ImportLog);
         }
 
         private static object Failure(
@@ -588,7 +704,7 @@ namespace VRCForge.Editor
                 });
         }
 
-        private sealed class ProjectAssetCopySnapshot
+        internal sealed class ProjectAssetCopySnapshot
         {
             internal string SourcePath = string.Empty;
             internal string DestinationPath = string.Empty;
@@ -600,6 +716,18 @@ namespace VRCForge.Editor
             internal string GeneratedRootIdentity = string.Empty;
             internal string AnchorFolderGuid = string.Empty;
             internal string AnchorFolderIdentity = string.Empty;
+            internal string ParentFolderPath = string.Empty;
+            internal string ParentFolderGuid = string.Empty;
+            internal string ParentFolderIdentity = string.Empty;
+            internal string[] MissingFolders = Array.Empty<string>();
+            internal string ExistingAncestorPath = string.Empty;
+            internal string ExistingAncestorGuid = string.Empty;
+            internal string ExistingAncestorIdentity = string.Empty;
+            internal bool HasClassifiedFolderCreation => MissingFolders.Length > 0 && ParentFolderPath != GeneratedRoot;
+            internal object FolderCreationPayload => HasClassifiedFolderCreation ? new {
+                ancestorPath = ExistingAncestorPath, ancestorGuid = ExistingAncestorGuid,
+                ancestorIdentity = ExistingAncestorIdentity, paths = MissingFolders
+            } : (object)null;
             internal string PreviewDigest = string.Empty;
 
             internal object ToPreviewPayload()
@@ -625,6 +753,10 @@ namespace VRCForge.Editor
                         anchorFolderPath = AnchorRoot,
                         anchorFolderGuid = AnchorFolderGuid,
                         anchorFolderIdentity = AnchorFolderIdentity,
+                        parentFolderPath = ParentFolderPath,
+                        parentFolderGuid = ParentFolderGuid,
+                        parentFolderIdentity = ParentFolderIdentity,
+                        folderCreation = FolderCreationPayload,
                         assetExists = false,
                         metaExists = false,
                         createNew = true,

@@ -1,14 +1,39 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 from typing import Any
 
 from package_install_workflow_service import (
+    PackageDetectionPorts,
+    PackageDetectionService,
     PackageInstallApprovedWriteHandler,
     PackageInstallWorkflowPorts,
     PackageInstallWorkflowService,
 )
+
+
+def test_assets_package_json_is_detected_with_matching_package_identity(tmp_path: Path) -> None:
+    project = tmp_path / "Project"
+    (project / "Assets" / "lilToon").mkdir(parents=True)
+    (project / "Packages").mkdir()
+    package_json = project / "Assets" / "lilToon" / "package.json"
+    package_json.write_text(
+        json.dumps({"name": "jp.lilxyzw.liltoon", "version": "1.4.1"}),
+        encoding="utf-8",
+    )
+    detector = PackageDetectionService(
+        PackageDetectionPorts(
+            path_exists=lambda path: path.exists(),
+            read_utf8_sig_text=lambda path: path.read_text(encoding="utf-8"),
+        )
+    )
+    result = detector.detect(project, ["other.package", "jp.lilxyzw.liltoon"])
+    assert result["installed"] is True
+    assert result["packageId"] == "jp.lilxyzw.liltoon"
+    assert result["version"] == "1.4.1"
+    assert result["source"] == "assets"
 
 
 def _service(
@@ -77,6 +102,69 @@ def _service(
             create_apply_request=create_apply_request,
         )
     )
+
+
+def test_package_plan_exposes_explicit_upgrade_and_target_version(tmp_path: Path) -> None:
+    calls: list[tuple[Any, ...]] = []
+    project = tmp_path / "avatar"
+    project.mkdir()
+    service = _service(
+        calls,
+        {
+            "canExecuteCommandInstall": True,
+            "projectPath": str(project),
+            "packageId": "com.example.package",
+            "packageState": {
+                "installed": True,
+                "packageId": "com.example.package",
+                "version": "1.2.3",
+                "source": "vpm",
+            },
+        },
+    )
+    plan = service.plan_install(
+        {"packageId": "com.example.package", "packageVersion": "1.3.0", "upgrade": True}
+    )
+
+    assert plan["packageVersion"] == "1.3.0"
+    assert plan["installedVersion"] == "1.2.3"
+    assert plan["upgradeRequested"] is True
+    assert plan["compatibilityAction"] == "upgrade"
+    assert plan["canPrepareUpgradeRequest"] is True
+
+
+def test_assets_package_upgrade_is_fail_closed_until_migration_is_planned(
+    tmp_path: Path,
+) -> None:
+    calls: list[tuple[Any, ...]] = []
+    project = tmp_path / "avatar"
+    project.mkdir()
+    service = _service(
+        calls,
+        {
+            "canExecuteCommandInstall": True,
+            "projectPath": str(project),
+            "packageId": "jp.lilxyzw.liltoon",
+            "packageState": {
+                "installed": True,
+                "packageId": "jp.lilxyzw.liltoon",
+                "version": "1.4.1",
+                "source": "assets",
+            },
+        },
+    )
+
+    plan = service.plan_install(
+        {"packageId": "jp.lilxyzw.liltoon", "packageVersion": "2.3.4", "upgrade": True}
+    )
+    assert plan["compatibilityAction"] == "migration_required"
+    assert plan["canPrepareUpgradeRequest"] is False
+    result = service.request_install(
+        {"packageId": "jp.lilxyzw.liltoon", "packageVersion": "2.3.4", "upgrade": True}
+    )
+    assert result["status"] == "blocked"
+    assert result["migrationRequired"] is True
+    assert not any(call[0] == "approval" for call in calls)
 
 
 def test_plan_failure_and_missing_cli_never_create_an_approval() -> None:
@@ -304,3 +392,36 @@ def test_status_diagnostics_and_prepared_execution_are_separate_ports() -> None:
     )
     assert handlers.execute(params)["arguments"] == params
     assert [call[0] for call in calls][-2:] == ["prepare", "execute"]
+
+def test_legacy_upgrade_plan_reports_exact_preserved_differences(monkeypatch, tmp_path: Path) -> None:
+    import package_install_workflow_service as module
+    root = tmp_path / 'Assets' / 'lilToon'
+    root.mkdir(parents=True)
+    service = _service([], {'projectPath': str(tmp_path), 'canExecuteCommandInstall': True,
+        'packageState': {'installed': True, 'source': 'assets', 'version': '1.4.1', 'path': str(root / 'package.json')}})
+    evidence = {'ok': False, 'treeDigest': 'actual', 'baselineDigest': 'official',
+        'missing': [], 'modified': ['Shader/custom.shader'], 'unknown': ['user.txt']}
+    monkeypatch.setattr(module, 'verify_legacy_baseline', lambda *_args: evidence)
+    result = service.plan_install({'packageId': 'jp.lilxyzw.liltoon', 'packageVersion': '2.3.4',
+        'upgrade': True, 'legacyBaselineArchive': str(tmp_path / 'official.unitypackage'),
+        'legacyBaselineAssetsRoot': str(root)})
+    assert result['legacyBaselineVerification'] == evidence
+    assert result['compatibilityAction'] == 'migration_required'
+    assert result['canPrepareUpgradeRequest'] is False
+
+
+def test_legacy_upgrade_opt_in_preserves_differences(monkeypatch, tmp_path):
+    import package_install_workflow_service as module
+    project=tmp_path/'avatar'; project.mkdir()
+    root=project/'Assets'/'legacy'
+    service=_service([], {'projectPath':str(project),'canExecuteCommandInstall':True,
+        'packageState':{'installed':True,'source':'assets','version':'1.0.0','path':str(root/'package.json')}})
+    report={'ok':False,'treeDigest':'frozen','baselineDigest':'official','unknown':['keep.txt'],'modified':[],'missing':[]}
+    monkeypatch.setattr(module,'verify_legacy_baseline',lambda *_: report)
+    args={'packageId':'com.example.package','packageVersion':'2.0.0','upgrade':True,
+          'legacyBaselineArchive':str(tmp_path/'old.unitypackage'),'legacyBaselineAssetsRoot':str(root)}
+    assert not service.plan_install(args)['canPrepareUpgradeRequest']
+    result=service.plan_install({**args,'preserveLegacyFiles':True})
+    assert result['canPrepareUpgradeRequest']
+    assert result['legacyPreservationRequired']
+    assert result['legacyBaselineVerification']['unknown']==['keep.txt']

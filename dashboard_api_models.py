@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field, SecretStr, model_validator
 
 from chat_attachment_vault import ARCHIVE_MAX_BYTES
 from dashboard_foundation import runtime_settings_path
+from unity_shared_input_schemas import ShaderMaterialCategory
 
 
 class DashboardRequest(BaseModel):
@@ -146,7 +147,14 @@ class AvatarSceneScanRequest(ConnectionRequest):
 
 
 class AvatarBlendshapeListRequest(DashboardRequest):
-    pass
+    renderer_paths: list[str] | None = Field(default=None, alias="rendererPaths", min_length=1, max_length=32)
+
+    @model_validator(mode="after")
+    def validate_renderer_paths(self) -> "AvatarBlendshapeListRequest":
+        paths = self.renderer_paths
+        if paths is not None and (any(not path.strip() for path in paths) or len(set(paths)) != len(paths)):
+            raise ValueError("rendererPaths must contain unique non-empty exact hierarchy paths.")
+        return self
 
 
 class ManualBlendshapeItem(BaseModel):
@@ -202,13 +210,17 @@ class AvatarScopedConnectionRequest(ConnectionRequest):
 
 
 class ShaderMaterialScanRequest(AvatarScopedConnectionRequest):
-    category_overrides: dict[str, str] = Field(default_factory=dict)
+    material_ids: list[str] = Field(default_factory=list, alias="materialIds")
+    include_textures: bool = Field(default=True, alias="includeTextures")
+    category_overrides: dict[str, ShaderMaterialCategory] = Field(default_factory=dict, alias="categoryOverrides")
+
+    model_config = {"populate_by_name": True}
 
 
 class ShaderMaterialPlanRequest(DashboardRequest):
     avatar_path: str | None = Field(default=None, alias="avatarPath")
     inventory: dict[str, Any] | None = None
-    category_overrides: dict[str, str] = Field(default_factory=dict)
+    category_overrides: dict[str, ShaderMaterialCategory] = Field(default_factory=dict, alias="categoryOverrides")
     locked_materials: list[str] = Field(default_factory=list)
     locked_properties: list[str] = Field(default_factory=list)
 
@@ -843,6 +855,7 @@ class ChatAttachmentImportRequest(BaseModel):
     project_path: str = Field(default="", alias="projectPath")
     target_folder: str = Field(default="", alias="targetFolder")
     selected_unitypackage: str = Field(default="", alias="selectedUnityPackage")
+    dependency_mode: Literal["auto", "selected_only"] = Field(default="auto", alias="dependencyMode")
     selected_prefab: str = Field(default="", alias="selectedPrefab")
     base_avatar_name: str = Field(default="", alias="baseAvatarName")
     max_entries: int = Field(default=5000, alias="maxEntries", ge=1, le=50000)
@@ -1072,6 +1085,7 @@ class OutfitImportPlanRequest(BaseModel):
     project_path: str = Field(default="", alias="projectPath")
     target_folder: str = Field(default="", alias="targetFolder")
     selected_unitypackage: str = Field(default="", alias="selectedUnityPackage")
+    dependency_mode: Literal["auto", "selected_only"] = Field(default="auto", alias="dependencyMode")
     selected_prefab: str = Field(default="", alias="selectedPrefab")
     base_avatar_name: str = Field(default="", alias="baseAvatarName")
     max_entries: int = Field(default=5000, alias="maxEntries", ge=1, le=50000)
@@ -1098,6 +1112,10 @@ class PackageInstallPlanRequest(BaseModel):
     allow_agent_managed_download: bool = Field(default=False, alias="allowAgentManagedDownload")
     include_prerelease: bool = Field(default=False, alias="includePrerelease")
     package_version: str = Field(default="", alias="packageVersion")
+    upgrade: bool = Field(default=False, alias="upgrade")
+    legacy_baseline_archive: str = Field(default="", alias="legacyBaselineArchive")
+    legacy_baseline_assets_root: str = Field(default="", alias="legacyBaselineAssetsRoot")
+    preserve_legacy_files: bool = Field(default=False, alias="preserveLegacyFiles")
 
     model_config = {"populate_by_name": True}
 

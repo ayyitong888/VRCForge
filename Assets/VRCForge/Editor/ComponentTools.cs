@@ -275,8 +275,22 @@ namespace VRCForge.Editor
                 exit_time = transition.exitTime,
                 duration = transition.duration,
                 can_transition_to_self = transition.canTransitionToSelf,
+                interruption_source = FormatInterruptionSource(transition.interruptionSource),
+                ordered_interruption = transition.orderedInterruption,
                 conditions = conditions
             };
+        }
+
+        private static string FormatInterruptionSource(TransitionInterruptionSource value)
+        {
+            switch (value)
+            {
+                case TransitionInterruptionSource.Source: return "Source";
+                case TransitionInterruptionSource.Destination: return "Destination";
+                case TransitionInterruptionSource.SourceThenDestination: return "SourceThenDestination";
+                case TransitionInterruptionSource.DestinationThenSource: return "DestinationThenSource";
+                default: return "None";
+            }
         }
 
         private static List<AnimationClip> ReadMotionClips(Motion motion)
@@ -627,6 +641,8 @@ namespace VRCForge.Editor
             public float exit_time;
             public float duration;
             public bool can_transition_to_self;
+            public string interruption_source;
+            public bool ordered_interruption;
             public List<ConditionItem> conditions;
         }
 

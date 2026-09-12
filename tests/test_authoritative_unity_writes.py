@@ -12,9 +12,11 @@ from component_feature_write import TOOL_NAME as COMPONENT_FEATURE_TOOL
 from constraint_source_write import TOOL_NAME as CONSTRAINT_TOOL
 from material_shader_assignment import TOOL_NAME as MATERIAL_TOOL
 from material_texture_assignment import TOOL_NAME as MATERIAL_TEXTURE_TOOL
+from material_variant_flatten import TOOL_NAME as MATERIAL_VARIANT_FLATTEN_TOOL
 from renderer_material_slot_assignment import TOOL_NAME as RENDERER_MATERIAL_SLOT_TOOL
 from parameter_bit_packing import TOOL_NAME as PARAMETER_BIT_PACKING_TOOL
 from project_asset_copy import TOOL_NAME as PROJECT_ASSET_COPY_TOOL
+from generated_asset_relocation import TOOL_NAME as GENERATED_ASSET_RELOCATION_TOOL
 from scene_asset_duplicate import TOOL_NAME as SCENE_ASSET_DUPLICATE_TOOL
 from scene_asset_save import TOOL_NAME as SAVE_NEW_SCENE_TOOL
 from scene_asset_save_current import TOOL_NAME as SAVE_CURRENT_SCENE_TOOL
@@ -32,6 +34,7 @@ def test_registry_contains_only_the_guarded_write_protocols() -> None:
     assert writes.AUTHORITATIVE_UNITY_WRITE_TOOLS == {
         MATERIAL_TOOL,
         MATERIAL_TEXTURE_TOOL,
+        MATERIAL_VARIANT_FLATTEN_TOOL,
         RENDERER_MATERIAL_SLOT_TOOL,
         DUPLICATE_TOOL_NAME,
         PREFAB_TOOL_NAME,
@@ -43,6 +46,7 @@ def test_registry_contains_only_the_guarded_write_protocols() -> None:
         SAVE_NEW_SCENE_TOOL,
         SAVE_CURRENT_SCENE_TOOL,
         PROJECT_ASSET_COPY_TOOL,
+        GENERATED_ASSET_RELOCATION_TOOL,
         SCENE_ASSET_DUPLICATE_TOOL,
         SCENE_SAVE_TOOL,
         SCENE_TRANSITION_TOOL,

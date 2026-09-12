@@ -18,7 +18,7 @@ using VRCForge.Editor;
 
 public static class ParameterBitPackingFixtureProbe
 {
-    private const string ProbeFolder = "Assets/VRCForge/Generated/ParameterBitPackingProbe";
+    private const string ProbeFolder = "Assets/VRCForgeGenerated/ParameterBitPackingProbe";
     private const string ScenePath = ProbeFolder + "/ParameterFixture.unity";
     private const string ParamsPath = ProbeFolder + "/Parameters.asset";
     private const string MenuRootPath = ProbeFolder + "/MenuRoot.asset";
@@ -31,7 +31,7 @@ public static class ParameterBitPackingFixtureProbe
     private const string OutputCloneName = "Packed Clone";
     private const string OutputSceneName = "VRCForge Parameter Build - Packed Clone";
     private const string TemporaryOutputRoot = GeneratedBuildRoot + "/" + OutputCloneName;
-    private const string DurableOutputRoot = "Assets/VRCForge/Generated/ParameterBitPacking/" + OutputCloneName;
+    private const string DurableOutputRoot = "Assets/VRCForgeGenerated/ParameterBitPacking/" + OutputCloneName;
     private const string OutputPrefabPath = DurableOutputRoot + "/" + OutputCloneName + ".prefab";
     private const int SafeToggleCount = 260;
 

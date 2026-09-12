@@ -9,6 +9,7 @@ EXTERNAL_MCP_TOOL_BLOCK_BRANCHES: dict[str, tuple[str, ...]] = {
         "integrations/modular-avatar",
         "integrations/vrcfury",
         "integrations/gesture-manager",
+        "behavior/interaction_generated_systems",
     ),
     "skills": ("skills/installed", "skills/vsk"),
 }
@@ -37,6 +38,7 @@ EXTERNAL_MCP_TOOL_BLOCKS = frozenset(
         "integrations/modular-avatar",
         "integrations/vrcfury",
         "integrations/gesture-manager",
+        "behavior/interaction_generated_systems",
         "skills/installed",
         "skills/vsk",
         "optimization",
@@ -125,6 +127,7 @@ EXTERNAL_MCP_READ_TOOL_BLOCKS: dict[str, frozenset[str]] = {
     ),
     "materials": frozenset(
         {
+            "vrcforge_preview_material_variant_flatten",
             "vrcforge_plan_shader_tuning",
             "vrcforge_preview_material_shader_assignment",
             "vrcforge_preview_material_texture_assignment",
@@ -153,6 +156,7 @@ EXTERNAL_MCP_READ_TOOL_BLOCKS: dict[str, frozenset[str]] = {
             "vrcforge_gesture_manager_status",
         }
     ),
+    "behavior/interaction_generated_systems": frozenset({"vrcforge_get_runtime_observation"}),
     "skills/installed": frozenset(
         {"vrcforge_list_installed_skills", "vrcforge_read_installed_skill"}
     ),
@@ -301,12 +305,14 @@ EXTERNAL_MCP_WRITE_TOOL_BLOCKS: dict[str, frozenset[str]] = {
             "vrcforge_instantiate_prefab",
             "vrcforge_unpack_prefab",
             "vrcforge_duplicate_project_asset",
+            "vrcforge_relocate_generated_assets",
             "vrcforge_duplicate_scene_asset",
             "vrcforge_save_scene_object_as_prefab",
         }
     ),
     "materials": frozenset(
         {
+            "vrcforge_flatten_material_variant",
             "vrcforge_apply_shader_tuning",
             "vrcforge_apply_shader_tuning_preset",
             "vrcforge_reapply_shader_tuning_history",
@@ -331,6 +337,7 @@ EXTERNAL_MCP_WRITE_TOOL_BLOCKS: dict[str, frozenset[str]] = {
             "vrcforge_gesture_manager_set_parameter",
         }
     ),
+    "behavior/interaction_generated_systems": frozenset({"vrcforge_start_runtime_observation"}),
     "skills/installed": frozenset({"vrcforge_create_installed_skill"}),
     "skills/vsk": frozenset(
         {

@@ -35,6 +35,7 @@ namespace VRCForge.Editor
         private const string ExecutionTargetDigestMetaKey = "io.vrcforge/executionTargetDigest";
         private const string ExecutionTargetVerifiedKey = "_vrcforgeExecutionTargetTransportVerified";
         private const int MaxFrameBytes = 1024 * 1024;
+        private const int MaxResponseFrameBytes = 8 * 1024 * 1024;
         private const int MaxClients = 4;
         private const int SocketTimeoutMilliseconds = 15000;
         private const int ThreadJoinMilliseconds = 2000;
@@ -54,10 +55,12 @@ namespace VRCForge.Editor
         private static readonly HashSet<string> PreviewTools = new HashSet<string>(StringComparer.Ordinal)
         {
             "vrc_set_material_shader",
+            "vrc_flatten_material_variant",
             "vrc_set_material_texture",
             "vrc_set_renderer_material_slot",
             "vrc_duplicate_scene_object",
             "vrc_duplicate_project_asset",
+            "vrc_relocate_generated_assets",
             "vrc_duplicate_scene_asset",
             "vrc_save_scene_object_as_prefab",
             "vrc_save_current_scene",
@@ -1125,7 +1128,9 @@ namespace VRCForge.Editor
             }
             if (string.Equals(toolName, "vrc_scan_avatar_materials", StringComparison.Ordinal))
             {
-                var basicRead = HasExactKeys(arguments, "avatarPath", "outputPath", "refreshAssets");
+                var basicRead = HasExactKeys(arguments, "avatarPath", "outputPath", "refreshAssets")
+                    || (HasExactKeys(arguments, "avatarPath", "outputPath", "refreshAssets", "includeTextures")
+                        && HasBoolean(arguments, "includeTextures"));
                 var boundedRead = HasExactKeys(
                     arguments,
                     "avatarPath",
@@ -1154,7 +1159,15 @@ namespace VRCForge.Editor
             }
             if (string.Equals(toolName, "vrc_scan_animation_bindings", StringComparison.Ordinal))
             {
-                return HasExactKeys(arguments, "avatarPath", "outputPath", "controllerPath", "clipPaths", "includeAllProjectClips", "includeBindingDetails", "maxClips", "refreshAssets")
+                if (VRCForge.Editor.AnimationBindingReadSelection.Requested(arguments))
+                {
+                    if (!VRCForge.Editor.AnimationBindingReadSelection.ValidReadArguments(arguments)) return false;
+                    arguments = (JObject)arguments.DeepClone();
+                    foreach (var field in VRCForge.Editor.AnimationBindingReadSelection.Fields) arguments.Remove(field);
+                }
+                return (HasExactKeys(arguments, "avatarPath", "outputPath", "controllerPath", "clipPaths", "includeAllProjectClips", "includeBindingDetails", "maxClips", "refreshAssets")
+                    || (HasExactKeys(arguments, "avatarPath", "outputPath", "controllerPath", "clipPaths", "includeAllProjectClips", "includeBindingDetails", "maxClips", "maxKeysPerBinding", "refreshAssets")
+                        && HasBoundedInteger(arguments, "maxKeysPerBinding", 1, 2000)))
                     && HasString(arguments, "avatarPath") && HasEmptyOutputPath(arguments)
                     && HasString(arguments, "controllerPath") && HasStringArray(arguments, "clipPaths")
                     && HasBoolean(arguments, "includeAllProjectClips")
@@ -1697,6 +1710,16 @@ namespace VRCForge.Editor
                 var approvalId = externalMcp
                     ? null
                     : RequiredBoundedString(context, "approvalId", 256);
+                var checkpointRequired = true;
+                if (!externalMcp && context["checkpointRequired"] != null)
+                {
+                    if (context["checkpointRequired"].Type != JTokenType.Boolean)
+                    {
+                        failureCode = "checkpoint_required_invalid";
+                        return false;
+                    }
+                    checkpointRequired = context["checkpointRequired"].Value<bool>();
+                }
                 var checkpointId = externalMcp
                     ? null
                     : RequiredBoundedString(context, "checkpointId", 256);
@@ -1711,7 +1734,7 @@ namespace VRCForge.Editor
                 if (string.IsNullOrEmpty(executionId)
                     || (externalMcp && string.IsNullOrEmpty(operationId))
                     || (!externalMcp && string.IsNullOrEmpty(approvalId))
-                    || (!externalMcp && string.IsNullOrEmpty(checkpointId)))
+                    || (!externalMcp && checkpointRequired && string.IsNullOrEmpty(checkpointId)))
                 {
                     failureCode = "identity_invalid";
                     return false;
@@ -1871,7 +1894,7 @@ namespace VRCForge.Editor
                     }
                 }
                 if (validateUnityObjectIdentities
-                    && (scope == "avatar" || scope == "object" || scope == "component"))
+                    && (scope == "avatar" || (scope == "object" || scope == "component") && target["avatar"] != null))
                 {
                     avatarObject = ResolveExecutionTargetGameObject(target["avatar"] as JObject);
                     if (avatarObject == null || !string.Equals(avatarObject.scene.path.Replace('\\', '/'), (string)scene["assetPath"], StringComparison.Ordinal))
@@ -1884,8 +1907,9 @@ namespace VRCForge.Editor
                     && (scope == "object" || scope == "component"))
                 {
                     targetObject = ResolveExecutionTargetGameObject(target["object"] as JObject);
-                    if (targetObject == null || avatarObject == null
-                        || (targetObject != avatarObject && !targetObject.transform.IsChildOf(avatarObject.transform)))
+                    if (targetObject == null
+                        || !string.Equals(targetObject.scene.path.Replace('\\', '/'), (string)scene["assetPath"], StringComparison.Ordinal)
+                        || (avatarObject != null && targetObject != avatarObject && !targetObject.transform.IsChildOf(avatarObject.transform)))
                     {
                         failureCode = "execution_target_object_drifted";
                         return false;
@@ -2354,7 +2378,9 @@ namespace VRCForge.Editor
                 {
                     ["name"] = descriptor.Name,
                     ["description"] = description,
-                    ["inputSchema"] = descriptor.CreateInputSchema(),
+                    ["inputSchema"] = descriptor.Name == GetPropertyTool.ToolName
+                        ? UnityComponentPropertyBatch.CreateInputSchema(descriptor.CreateInputSchema())
+                        : descriptor.CreateInputSchema(),
                     ["annotations"] = annotations,
                     ["_meta"] = metadata
                 });
@@ -2408,14 +2434,24 @@ namespace VRCForge.Editor
 
         private static void WriteEnvelope(NetworkStream stream, JObject message)
         {
-            var payload = Encoding.UTF8.GetBytes(new JObject
+            var envelope = new JObject
             {
                 ["schema"] = TransportSchema,
                 ["message"] = message
-            }.ToString(Formatting.None));
-            if (payload.Length > MaxFrameBytes)
+            };
+            var payload = Encoding.UTF8.GetBytes(envelope.ToString(Formatting.None));
+            if (payload.Length > MaxResponseFrameBytes)
             {
-                throw new VRCForgeMcpProtocolException();
+                envelope["message"] = Error(message["id"], -32000,
+                    "VRCForge Core response exceeds the bounded transport limit.",
+                    new JObject
+                    {
+                        ["errorCode"] = "unity_core_response_too_large",
+                        ["maxResponseBytes"] = MaxResponseFrameBytes,
+                        ["actualResponseBytes"] = payload.Length,
+                        ["retryable"] = false,
+                    });
+                payload = Encoding.UTF8.GetBytes(envelope.ToString(Formatting.None));
             }
             stream.Write(payload, 0, payload.Length);
             stream.WriteByte((byte)'\n');

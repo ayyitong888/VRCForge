@@ -3,11 +3,14 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+from pathlib import Path
+import time
 
 import httpx
 import pytest
 
 from agent_mcp_2026 import PROTOCOL_VERSION, Mcp2026Router, create_asgi_app, run_stdio_loop
+from agent_gateway import AgentGatewayError
 
 
 def _meta(**extra):
@@ -242,6 +245,74 @@ def test_http_transport_enforces_headers_origin_bearer_and_body(router):
     asyncio.run(exercise())
 
 
+def test_http_concurrent_calls_offload_catalogue_without_bypassing_exposure():
+    def slow_catalogue(_params):
+        time.sleep(0.20)
+        return [{"name": "echo", "inputSchema": {"type": "object"}}]
+
+    async def call_tool(name, arguments):
+        return {"ok": True, "name": name, "value": arguments.get("value")}
+
+    router = Mcp2026Router(
+        slow_catalogue,
+        call_tool,
+        tool_call_catalogue=slow_catalogue,
+        server_name="VRCForge",
+        server_version="1.8.0",
+    )
+
+    async def exercise():
+        app = create_asgi_app(router, bearer_validator=lambda token: token == "good")
+        transport = httpx.ASGITransport(app=app)
+        base_headers = {
+            "accept": "application/json, text/event-stream",
+            "mcp-protocol-version": PROTOCOL_VERSION,
+            "mcp-method": "tools/call",
+            "mcp-name": "echo",
+            "authorization": "Bearer good",
+            "origin": "http://127.0.0.1:1234",
+            "content-type": "application/json",
+        }
+        loop_progress = asyncio.Event()
+        probe_delay = None
+        launch_at = None
+
+        async def probe_loop():
+            nonlocal probe_delay
+            await asyncio.sleep(0.03)
+            probe_delay = time.perf_counter() - launch_at
+            loop_progress.set()
+
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            first = client.post(
+                "/",
+                json=_request("tools/call", {"name": "echo", "arguments": {"value": 1}}, request_id=1),
+                headers=base_headers,
+            )
+            second = client.post(
+                "/",
+                json=_request("tools/call", {"name": "echo", "arguments": {"value": 2}}, request_id=2),
+                headers=base_headers,
+            )
+            launch_at = time.perf_counter()
+            responses = await asyncio.gather(first, second, probe_loop())
+            assert loop_progress.is_set()
+            assert probe_delay is not None and probe_delay < 0.15
+            assert [response.status_code for response in responses[:2]] == [200, 200]
+            assert [response.json()["result"]["structuredContent"]["value"] for response in responses[:2]] == [1, 2]
+
+            hidden_headers = {**base_headers, "mcp-name": "hidden"}
+            hidden = await client.post(
+                "/",
+                json=_request("tools/call", {"name": "hidden", "arguments": {}}, request_id=3),
+                headers=hidden_headers,
+            )
+            assert hidden.status_code == 400
+            assert hidden.json()["error"]["code"] == -32602
+
+    asyncio.run(exercise())
+
+
 def test_stdio_is_newline_json_without_length_prefix(router):
     source = io.StringIO(json.dumps(_request("tools/list")) + "\n" + "not-json\n")
     sink = io.StringIO()
@@ -272,6 +343,146 @@ def test_tool_result_must_be_strict_json(bad_value):
     assert status == 500
     assert response["error"]["code"] == -32603
     assert response["error"]["message"] == "Internal MCP server error"
+
+
+def test_prompt_provenance_rejection_is_a_pre_routing_validation_error():
+    def reject(_name, _arguments):
+        raise AgentGatewayError(
+            "Prompt/Skill provenance rejected this Tool call: declared Tool set mismatch",
+            status_code=409,
+            cause_code="prompt_skill_provenance_mismatch",
+        )
+
+    router = Mcp2026Router(
+        lambda _params: [{"name": "vrcforge_get_asset_info"}],
+        reject,
+    )
+    response, status = router.handle(
+        _request(
+            "tools/call",
+            {
+                "name": "vrcforge_get_asset_info",
+                "arguments": {"promptSkillProvenance": {"contentHash": "stale"}},
+            },
+        )
+    )
+
+    assert status == 409
+    assert response["error"]["code"] == -32602
+    data = response["error"]["data"]
+    assert data["errorCode"] == "prompt_skill_provenance_mismatch"
+    assert data["failurePhase"] == "prompt_skill_provenance_validation"
+    assert data["toolRoutingStarted"] is False
+    assert data["mutationStarted"] is False
+    assert data["committed"] is False
+    assert data["commitState"] == "not_started"
+    assert data["commitStateKnown"] is True
+    assert data["recovery"]["required"] is False
+    assert "http_500" not in json.dumps(data)
+
+
+def test_actual_820_preparation_rejection_repairs_outer_no_write_state():
+    fixture = Path(__file__).parent / "fixtures" / "actual820_preparation_rejection.json"
+    recorded = json.loads(fixture.read_text(encoding="utf-8"))
+    callback_result = recorded
+
+    router = Mcp2026Router(
+        lambda _params: [{"name": "vrcforge_start_runtime_observation", "inputSchema": {"type": "object"}, "_meta": {"permission": "Write"}}],
+        lambda _name, _arguments: callback_result,
+    )
+    response, status = router.handle(
+        _request(
+            "tools/call",
+            {
+                "name": "vrcforge_start_runtime_observation",
+                "arguments": {"width": 576},
+            },
+        )
+    )
+
+    assert status == 200
+    structured = response["result"]["structuredContent"]
+    assert structured["errorDetails"]["errorCode"] == "external_write_preparation_rejected"
+    assert structured["errorDetails"]["failurePhase"] == "before_write_handler"
+    assert structured["mutationStarted"] is False
+    assert structured["committed"] is False
+    assert structured["commitState"] == "not_started"
+    assert structured["persistenceState"] == "not_applicable"
+    assert structured["outcome"]["mutationStarted"] is False
+    assert structured["outcome"]["commitState"] == "not_started"
+
+
+def test_routed_unknown_callback_result_keeps_unknown_outer_state():
+    callback_result = {
+        "ok": False,
+        "status": "failed",
+        "tool": "vrcforge_start_runtime_observation",
+        "error": "The routed operation timed out.",
+        "operationStatus": "failed",
+        "toolRoutingStarted": True,
+        "mutationStarted": None,
+        "committed": None,
+        "commitState": "unknown",
+        "persistenceState": "unknown",
+        "outcome": {
+            "schema": "vrcforge.tool_result.v1",
+            "success": False,
+            "status": "failed",
+            "summary": "The routed operation timed out.",
+            "errorCode": "external_timeout",
+            "failureLayer": "unity_core",
+            "failurePhase": "after_route",
+            "toolRoutingStarted": True,
+            "mutationStarted": None,
+            "committed": None,
+            "commitState": "unknown",
+            "commitStateKnown": False,
+        },
+    }
+    router = Mcp2026Router(
+        lambda _params: [{"name": "vrcforge_start_runtime_observation", "inputSchema": {"type": "object"}, "_meta": {"permission": "Write"}}],
+        lambda _name, _arguments: callback_result,
+    )
+    response, status = router.handle(
+        _request("tools/call", {"name": "vrcforge_start_runtime_observation", "arguments": {}})
+    )
+
+    assert status == 200
+    structured = response["result"]["structuredContent"]
+    assert structured["toolRoutingStarted"] is True
+    assert structured["mutationStarted"] is None
+    assert structured["commitState"] == "unknown"
+    assert structured["persistenceState"] == "unknown"
+
+
+def test_routed_gateway_error_keeps_unknown_commit_state():
+    def routed_failure(_name, _arguments):
+        raise AgentGatewayError(
+            "Prompt provenance failure reported after routing",
+            status_code=500,
+            cause_code="prompt_skill_provenance_mismatch",
+            failure_layer="unity_core",
+            failure_phase="after_route",
+            tool_routing_started=True,
+            mutation_started=True,
+            committed=None,
+            commit_state="unknown",
+        )
+
+    router = Mcp2026Router(
+        lambda _params: [{"name": "vrcforge_read_avatar"}],
+        routed_failure,
+    )
+    response, status = router.handle(
+        _request("tools/call", {"name": "vrcforge_read_avatar", "arguments": {}})
+    )
+
+    assert status == 500
+    data = response["error"]["data"]
+    assert data["errorCode"] == "prompt_skill_provenance_mismatch"
+    assert data["toolRoutingStarted"] is True
+    assert data["commitState"] == "unknown"
+    assert data["commitStateKnown"] is False
 
 
 def test_tool_result_cycle_is_shaped_and_stdio_survives():

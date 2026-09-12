@@ -40,6 +40,7 @@ APP_UNITYPACKAGE_IMPORT_POLL_LANE = "app_unitypackage_import_poll"
 APP_BUILD_TEST_POLL_LANE = "app_build_test_poll"
 SUPPORTED_PROTOCOL_VERSIONS = (MODERN_PROTOCOL_VERSION,)
 MAX_FRAME_BYTES = 1024 * 1024
+MAX_RESPONSE_FRAME_BYTES = 8 * 1024 * 1024
 DEFAULT_TIMEOUT_SECONDS = 5.0
 PROJECT_CORE_MAX_CONCURRENT = 3
 PROJECT_CORE_BUSY_WAIT_SECONDS = 0.25
@@ -252,7 +253,7 @@ def _probe_core_request(
         raise UnityMcpCoreError("Unity MCP Core diagnostics request is too large.")
     connection.sendall(encoded + b"\n")
     data = bytearray()
-    while len(data) <= MAX_FRAME_BYTES:
+    while len(data) <= MAX_RESPONSE_FRAME_BYTES:
         value = connection.recv(1)
         if not value:
             raise UnityMcpCoreConnectionError("Unity MCP Core diagnostics connection closed unexpectedly.")
@@ -708,7 +709,7 @@ class UnityMcpCoreClient:
     @staticmethod
     def _read_line(connection: socket.socket) -> dict[str, Any]:
         data = bytearray()
-        while len(data) <= MAX_FRAME_BYTES:
+        while len(data) <= MAX_RESPONSE_FRAME_BYTES:
             byte = connection.recv(1)
             if not byte:
                 raise UnityMcpCoreConnectionError("Unity MCP Core connection closed unexpectedly.")

@@ -211,6 +211,24 @@ namespace VRCForge.Editor
             return member is FieldInfo field ? field.GetValue(source) : ((PropertyInfo)member).GetValue(source);
         }
 
+        internal static object GetReadOnlyMemberValue(object source, MemberInfo member)
+        {
+            // These standard Unity getters instantiate resources even during a read.
+            // Check the declaring type so unrelated fields/custom properties keep
+            // their existing behavior; write-transaction reads use GetMemberValue.
+            var property = member as PropertyInfo;
+            var sharedName = property != null && property.DeclaringType == typeof(Renderer)
+                && (property.Name == "material" || property.Name == "materials")
+                ? (property.Name == "material" ? "sharedMaterial" : "sharedMaterials")
+                : property != null && property.DeclaringType == typeof(MeshFilter) && property.Name == "mesh"
+                ? "sharedMesh"
+                : property != null && property.DeclaringType == typeof(Collider) && property.Name == "material"
+                ? "sharedMaterial" : null;
+            if (sharedName != null)
+                throw new InvalidOperationException($"{property.DeclaringType.Name}.{property.Name} instantiates a resource and is not read-only; read {sharedName} instead.");
+            return GetMemberValue(source, member);
+        }
+
         internal static void SetMemberValue(object target, MemberInfo member, object value)
         {
             if (member is FieldInfo field)
@@ -440,6 +458,45 @@ namespace VRCForge.Editor
             return typeof(object);
         }
 
+        private static object DescribeUnityObject(UnityEngine.Object value)
+        {
+            if (value == null)
+            {
+                return null;
+            }
+
+            var assetPath = string.Empty;
+            var assetGuid = string.Empty;
+            long localFileId = 0;
+            if (AssetDatabase.Contains(value))
+            {
+                assetPath = (AssetDatabase.GetAssetPath(value) ?? string.Empty).Replace('\\', '/');
+                AssetDatabase.TryGetGUIDAndLocalFileIdentifier(value, out assetGuid, out localFileId);
+            }
+
+            var component = value as Component;
+            var gameObject = value as GameObject ?? component?.gameObject;
+            var globalObjectId = string.Empty;
+            var hierarchyPath = string.Empty;
+            if (gameObject != null && gameObject.scene.IsValid())
+            {
+                globalObjectId = GlobalObjectId.GetGlobalObjectIdSlow(value).ToString();
+                hierarchyPath = GetHierarchyPath(gameObject.transform);
+            }
+
+            return new
+            {
+                name = value.name,
+                type = value.GetType().FullName,
+                instanceId = value.GetInstanceID(),
+                assetPath,
+                assetGuid,
+                localFileId,
+                globalObjectId,
+                hierarchyPath
+            };
+        }
+
         internal static object DescribeValue(object value)
         {
             switch (value)
@@ -462,13 +519,21 @@ namespace VRCForge.Editor
                     return new { x = q.x, y = q.y, z = q.z, w = q.w };
                 case Color c:
                     return new { r = c.r, g = c.g, b = c.b, a = c.a };
-                case UnityEngine.Object uo:
+                // Geometry values use numeric fields, like Vector3, rather than
+                // Unity's rounded display strings. Bounds stores center/extents;
+                // matrix names mRC identify row R and column C explicitly.
+                case Bounds bounds:
+                    return new { center = DescribeValue(bounds.center), extents = DescribeValue(bounds.extents) };
+                case Matrix4x4 matrix:
                     return new
                     {
-                        name = uo == null ? null : uo.name,
-                        type = uo == null ? null : uo.GetType().FullName,
-                        instanceId = uo == null ? 0 : uo.GetInstanceID()
+                        m00 = matrix.m00, m01 = matrix.m01, m02 = matrix.m02, m03 = matrix.m03,
+                        m10 = matrix.m10, m11 = matrix.m11, m12 = matrix.m12, m13 = matrix.m13,
+                        m20 = matrix.m20, m21 = matrix.m21, m22 = matrix.m22, m23 = matrix.m23,
+                        m30 = matrix.m30, m31 = matrix.m31, m32 = matrix.m32, m33 = matrix.m33
                     };
+                case UnityEngine.Object uo:
+                    return DescribeUnityObject(uo);
             }
 
             if (value is IEnumerable enumerable && !(value is string))
@@ -886,7 +951,7 @@ namespace VRCForge.Editor
 
     [VRCForgeCommand(
         toolId: "vrc_get_property",
-        Summary = "Read a single serialized field/property value from a component on a scene GameObject (read-only).",
+        Summary = "Read a component field/property, or a bounded batch of exact component identities and simple properties with per-item errors (read-only).",
         Access = VRCForgeCommandAccess.ReadOnly
     )]
     public static class GetPropertyTool
@@ -895,6 +960,9 @@ namespace VRCForge.Editor
 
         public class GetPropertyParameters
         {
+            [VRCForgeInput("Optional mutually exclusive batch: exact bound component identities and propertyNames; 1–128 rows, at most 512 simple properties. Scalar fields below are required only when queries is absent.", IsRequired = false)]
+            public JArray queries { get; set; }
+
             [VRCForgeInput("Full hierarchy path (e.g. 'Avatar/Body') or unique name of the GameObject.", IsRequired = true)]
             public string gameObjectPath { get; set; } = "";
 
@@ -913,6 +981,8 @@ namespace VRCForge.Editor
 
         public static object HandleCommand(JObject @params)
         {
+            if (@params != null && @params.ContainsKey("queries"))
+                return UnityComponentPropertyBatch.Handle(@params);
             var p = (@params ?? new JObject()).ToObject<GetPropertyParameters>() ?? new GetPropertyParameters();
             try
             {
@@ -920,7 +990,7 @@ namespace VRCForge.Editor
                 var type = ComponentCrudCore.ResolveComponentType(p.componentType);
                 var component = ComponentCrudCore.ResolveComponent(go, type, p.componentIndex ?? 0);
                 var member = ComponentCrudCore.ResolveMember(component.GetType(), p.propertyPath);
-                var value = ComponentCrudCore.GetMemberValue(component, member);
+                var value = ComponentCrudCore.GetReadOnlyMemberValue(component, member);
                 var maxItems = p.maxItems ?? 50;
                 if (maxItems < 1 || maxItems > 2000)
                 {

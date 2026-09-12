@@ -18,8 +18,6 @@ namespace VRCForge.Editor
     )]
     public static class ClothingFxAuthor
     {
-        private const string AssetDir = "Assets/VRCForge/Generated/FX";
-
         public class Parameters
         {
             [VRCForgeInput("Optional avatar root hierarchy path; empty is allowed only when selection is unambiguous.", IsRequired = false)]
@@ -31,6 +29,7 @@ namespace VRCForge.Editor
         public static object HandleCommand(JObject @params)
         {
             var receipts = new List<TransactionReceipt>();
+            var assetDir = "";
             try
             {
                 var avatarPath = (@params?["avatarPath"]?.ToString() ?? string.Empty).Trim();
@@ -41,6 +40,7 @@ namespace VRCForge.Editor
                 }
 
                 var descriptor = ResolveAvatarDescriptor(avatarPath);
+                assetDir = GeneratedAssetPaths.ResolveDirectory("", descriptor.name, GeneratedAssetPaths.Animations, "FX");
                 var fxController = descriptor.baseAnimationLayers
                     .FirstOrDefault(layer => layer.type == VRCAvatarDescriptor.AnimLayerType.FX)
                     .animatorController as AnimatorController;
@@ -70,7 +70,6 @@ namespace VRCForge.Editor
                 receipts.Add(parametersReceipt);
                 receipts.Add(menuReceipt);
 
-                EnsureAssetFolder(AssetDir);
                 var created = new List<object>();
                 var skipped = new List<object>();
                 foreach (var item in items.OfType<JObject>())
@@ -97,8 +96,10 @@ namespace VRCForge.Editor
                         continue;
                     }
 
-                    var clipOnPath = $"{AssetDir}/{clipName}_ON.anim";
-                    var clipOffPath = $"{AssetDir}/{clipName}_OFF.anim";
+                    var clipOnPath = ExistingStateClipPath(fxController, paramName, displayName + "_ON")
+                        ?? GeneratedAssetPaths.ValidateNewAssetPath($"{assetDir}/{clipName}_ON.anim");
+                    var clipOffPath = ExistingStateClipPath(fxController, paramName, displayName + "_OFF")
+                        ?? GeneratedAssetPaths.ValidateNewAssetPath($"{assetDir}/{clipName}_OFF.anim");
                     var clipOnReceipt = new TransactionReceipt { Asset = clipOnPath, Before = DescribeAsset(AssetDatabase.LoadAssetAtPath<AnimationClip>(clipOnPath)) };
                     var clipOffReceipt = new TransactionReceipt { Asset = clipOffPath, Before = DescribeAsset(AssetDatabase.LoadAssetAtPath<AnimationClip>(clipOffPath)) };
                     receipts.Add(clipOnReceipt);
@@ -143,8 +144,8 @@ namespace VRCForge.Editor
                         skippedCount = skipped.Count,
                         created,
                         skipped,
-                        assetDir = AssetDir,
-                        transaction = BuildTransaction(receipts)
+                        assetDir,
+                        transaction = BuildTransaction(receipts, assetDir)
                     });
             }
             catch (Exception ex)
@@ -157,7 +158,7 @@ namespace VRCForge.Editor
                 }
                 return VRCForgeToolResult.Failed(
                     $"Clothing FX authoring failed: {ex.Message}\n{ex.StackTrace}",
-                    new { transaction = BuildTransaction(receipts) });
+                    new { transaction = BuildTransaction(receipts, assetDir) });
             }
         }
 
@@ -173,7 +174,7 @@ namespace VRCForge.Editor
                 };
         }
 
-        private static object BuildTransaction(List<TransactionReceipt> receipts)
+        private static object BuildTransaction(List<TransactionReceipt> receipts, string assetDir)
         {
             var transactionItems = receipts
                 .Where(item => item.Status != "not_attempted")
@@ -191,7 +192,7 @@ namespace VRCForge.Editor
             {
                 assets_touched = transactionItems.Count,
                 items = transactionItems.Take(20).ToArray(),
-                handle = AssetDir
+                handle = assetDir
             };
         }
 
@@ -210,6 +211,8 @@ namespace VRCForge.Editor
             var clip = AssetDatabase.LoadAssetAtPath<AnimationClip>(path);
             if (clip == null)
             {
+                path = GeneratedAssetPaths.ValidateNewAssetPath(path);
+                EnsureAssetFolder(Path.GetDirectoryName(path)?.Replace("\\", "/") ?? "");
                 clip = new AnimationClip { name = clipName };
                 AssetDatabase.CreateAsset(clip, path);
             }
@@ -221,9 +224,19 @@ namespace VRCForge.Editor
             return clip;
         }
 
+        private static string ExistingStateClipPath(AnimatorController controller, string layerName, string stateName)
+        {
+            var layer = controller.layers.FirstOrDefault(item => item.name == layerName);
+            if (layer?.stateMachine == null) return null;
+            var state = layer.stateMachine.states.FirstOrDefault(item => item.state != null && item.state.name == stateName).state;
+            var clip = state?.motion as AnimationClip;
+            var path = clip != null ? AssetDatabase.GetAssetPath(clip) : "";
+            return string.IsNullOrWhiteSpace(path) ? null : path;
+        }
+
         private static void EnsureAssetFolder(string assetPath)
         {
-            var normalized = assetPath.Replace("\\", "/").Trim('/');
+            var normalized = GeneratedAssetPaths.ValidateNewAssetPath(assetPath);
             var parts = normalized.Split('/');
             if (parts.Length == 0 || parts[0] != "Assets")
             {

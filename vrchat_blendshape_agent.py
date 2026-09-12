@@ -2090,9 +2090,12 @@ def gemini_model_thinking_mode(model: str) -> str:
 
 
 def build_openai_compatible_request_payload(settings: Settings, user_content: Any) -> dict[str, Any]:
-    """Chat-completions payload with reasoning/temperature policy applied."""
+    """Planner chat-completions payload with bounded JSON output."""
 
-    payload: dict[str, Any] = {"model": settings.llm_model}
+    payload: dict[str, Any] = {
+        "model": settings.llm_model,
+        "response_format": {"type": "json_object"},
+    }
     level = normalize_reasoning_effort(settings.gemini_thinking_level)
     supported = reasoning_effort_variants(settings.llm_provider, settings.llm_model)
     active_level = level if level in supported else ""

@@ -394,6 +394,7 @@ def test_core_upgrade_status_distinguishes_reload_wait_from_compile_failure(
                         "errorCount": error_count,
                         "warningCount": 0,
                         "capturedAt": "2026-08-22T00:00:02+00:00",
+                        "source": "compilation_pipeline",
                         "errors": [{"message": "error CS0165"}] if error_count else [],
                         "warnings": [],
                     }

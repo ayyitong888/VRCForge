@@ -42,6 +42,48 @@ def test_prepare_and_execute_create_new_manifest_with_meta(tmp_path: Path) -> No
     assert (project / "Assets/VRCForge/Imported/nested/Texture.png").read_bytes() == b"png"
 
 
+def test_completed_copy_keeps_commit_facts_when_later_console_validation_fails(tmp_path: Path) -> None:
+    from external_tool_result_contract import build_external_tool_error
+
+    project, source = _project(tmp_path), _source(tmp_path)
+    result = execute_loose_outfit_import(prepare_loose_outfit_import(
+        source_root=source, project_root=project, target_folder="Assets/Imported",
+    ))
+    assert (project / "Assets/Imported/Dress.prefab").read_bytes() == b"prefab"
+    error = build_external_tool_error(
+        error="Unity reported new compile warnings after the write.",
+        error_code="unity_console_regression", operation_kind="write",
+        tool="vrcforge_import_outfit_package", raw_result=result,
+    )
+    for receipt in (result, error):
+        assert receipt["mutationStarted"] is True
+        assert receipt["committed"] is True
+        assert receipt["commitState"] == "complete"
+        assert receipt["commitStateKnown"] is True
+    assert error["errorCode"] == "unity_console_regression"
+
+
+def test_prepare_and_execute_copies_asmdef_and_companion_meta_with_readback(tmp_path: Path) -> None:
+    project = _project(tmp_path)
+    source = tmp_path / "EditorSource"
+    source.mkdir()
+    asmdef = source / "Wardrobe.Editor.asmdef"
+    asmdef.write_text('{"name":"Wardrobe.Editor","includePlatforms":["Editor"]}\n', encoding="utf-8")
+    (source / "Wardrobe.Editor.asmdef.meta").write_text("fileFormatVersion: 2\nguid: abc\n", encoding="utf-8")
+
+    plan = prepare_loose_outfit_import(source_root=source, project_root=project, target_folder="Assets/VRCForge/Imported")
+    result = execute_loose_outfit_import(plan)
+
+    target = project / "Assets/VRCForge/Imported/Wardrobe.Editor.asmdef"
+    assert result["copiedFileCount"] == 2
+    assert target.read_text(encoding="utf-8") == asmdef.read_text(encoding="utf-8")
+    assert (target.with_name(target.name + ".meta")).read_bytes() == (asmdef.with_name(asmdef.name + ".meta")).read_bytes()
+    assert set(result["copiedFiles"]) == {
+        "Assets/VRCForge/Imported/Wardrobe.Editor.asmdef",
+        "Assets/VRCForge/Imported/Wardrobe.Editor.asmdef.meta",
+    }
+
+
 def test_source_content_or_manifest_drift_blocks_before_output(tmp_path: Path) -> None:
     project, source = _project(tmp_path), _source(tmp_path)
     plan = prepare_loose_outfit_import(source_root=source, project_root=project, target_folder="Assets/VRCForge/Imported")

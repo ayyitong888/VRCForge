@@ -115,7 +115,7 @@ def test_apply_clothing_fx_returns_bounded_multi_asset_transaction() -> None:
     assert save_index < controller_readback
     assert "assets_touched = transactionItems.Count" in source
     assert "items = transactionItems.Take(20).ToArray()" in source
-    assert "handle = AssetDir" in source
+    assert "handle = assetDir" in source
     assert 'Status = "succeeded"' in source
     assert 'Status = "failed"' in source
     assert "RolledBack = false" in source

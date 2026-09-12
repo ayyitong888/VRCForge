@@ -27,6 +27,8 @@ namespace VRCForge.Editor
             [VRCForgeInput("Exact object GlobalObjectId, when already known.", IsRequired = false)] public string objectGlobalObjectId { get; set; }
             [VRCForgeInput("Exact component GlobalObjectId, when already known.", IsRequired = false)] public string componentGlobalObjectId { get; set; }
             [VRCForgeInput("Expected fully qualified component type, when already known.", IsRequired = false)] public string componentType { get; set; }
+            [VRCForgeInput("Zero-based component candidate offset for bounded Avatar discovery.", IsRequired = false, DefaultLiteral = "0")] public int? offset { get; set; } = 0;
+            [VRCForgeInput("Maximum component candidates returned for bounded Avatar discovery.", IsRequired = false, DefaultLiteral = "50")] public int? maxItems { get; set; } = 50;
         }
 
         public static object HandleCommand(JObject @params)
@@ -42,8 +44,34 @@ namespace VRCForge.Editor
                 var scene = BuildScene(SceneManager.GetActiveScene());
                 if (scene == null) return VRCForgeToolResult.FailedWithCode("execution_target_scene_unavailable", "The current Unity scene has no saved scene identity.", BuildDiscovery(project, editor, scope, null));
                 if (scope == "scene") return VRCForgeToolResult.Completed("Execution target discovered.", BuildTarget(scope, project, editor, scene, null, null, null));
+                if (scope == "component"
+                    && string.IsNullOrWhiteSpace(parameters.objectGlobalObjectId)
+                    && string.IsNullOrWhiteSpace(parameters.avatarGlobalObjectId))
+                    return VRCForgeToolResult.FailedWithCode("execution_target_avatar_required", "An exact Avatar GlobalObjectId is required for Avatar-scoped component discovery.", BuildDiscovery(project, editor, scope, null));
+                if (parameters.offset.HasValue && parameters.offset.Value < 0)
+                    return VRCForgeToolResult.FailedWithCode("execution_target_paging_invalid", "offset must be greater than or equal to 0.", BuildDiscovery(project, editor, scope, null));
+                if (parameters.maxItems.HasValue && (parameters.maxItems.Value < 1 || parameters.maxItems.Value > 128))
+                    return VRCForgeToolResult.FailedWithCode("execution_target_paging_invalid", "maxItems must be between 1 and 128.", BuildDiscovery(project, editor, scope, null));
                 var avatars = DiscoverAvatars(scene.Value<string>("assetPath"));
                 var avatar = ResolveAvatar(avatars, parameters.avatarGlobalObjectId, parameters.objectGlobalObjectId, parameters.componentGlobalObjectId);
+                if ((scope == "object" || scope == "component")
+                    && !string.IsNullOrWhiteSpace(parameters.objectGlobalObjectId)
+                    && !string.IsNullOrWhiteSpace(parameters.avatarGlobalObjectId)
+                    && (avatar == null || ResolveObject(parameters.objectGlobalObjectId, avatar) == null))
+                    return VRCForgeToolResult.FailedWithCode("execution_target_avatar_unavailable", "The exact object is not under the explicitly requested Avatar.", BuildDiscovery(project, editor, scope, null));
+                if ((avatar == null || ResolveObject(parameters.objectGlobalObjectId, avatar) == null)
+                    && (scope == "object" || scope == "component")
+                    && !string.IsNullOrWhiteSpace(parameters.objectGlobalObjectId))
+                {
+                    var standaloneObject = ResolveGameObject(parameters.objectGlobalObjectId);
+                    if (standaloneObject == null || standaloneObject.scene != SceneManager.GetActiveScene())
+                        return VRCForgeToolResult.FailedWithCode("execution_target_object_unavailable", "The exact scene GameObject GlobalObjectId is not present in the active scene.", BuildDiscovery(project, editor, scope, null));
+                    if (scope == "object") return VRCForgeToolResult.Completed("Execution target discovered.", BuildTarget(scope, project, editor, scene, null, DescribeGameObject(standaloneObject), null));
+                    var standaloneComponent = ResolveComponent(parameters.componentGlobalObjectId, parameters.componentType, standaloneObject);
+                    if (standaloneComponent == null)
+                        return VRCForgeToolResult.FailedWithCode("execution_target_component_unavailable", "An exact component GlobalObjectId on the object is required.", BuildDiscovery(project, editor, scope, null));
+                    return VRCForgeToolResult.Completed("Execution target discovered.", BuildTarget(scope, project, editor, scene, null, DescribeGameObject(standaloneObject), DescribeComponent(standaloneComponent)));
+                }
                 if (avatar == null)
                 {
                     if (!string.IsNullOrWhiteSpace(parameters.avatarGlobalObjectId))
@@ -51,6 +79,34 @@ namespace VRCForge.Editor
                     return VRCForgeToolResult.Completed("Avatar candidates discovered.", BuildDiscovery(project, editor, scope, avatars.Select(item => BuildTarget(scope, project, editor, scene, item, null, null)).ToList()));
                 }
                 if (scope == "avatar") return VRCForgeToolResult.Completed("Execution target discovered.", BuildTarget(scope, project, editor, scene, avatar, null, null));
+                if (scope == "component" && string.IsNullOrWhiteSpace(parameters.objectGlobalObjectId))
+                {
+                    if (string.IsNullOrWhiteSpace(parameters.componentType))
+                        return VRCForgeToolResult.FailedWithCode("execution_target_component_type_required", "componentType is required for Avatar-scoped component discovery.", BuildDiscovery(project, editor, scope, null));
+                    var componentType = FindType(parameters.componentType);
+                    if (componentType == null)
+                        return VRCForgeToolResult.FailedWithCode("execution_target_component_type_unavailable", "The requested component type is unavailable in the running Unity domain.", BuildDiscovery(project, editor, scope, null));
+                    var allComponents = DiscoverComponents(avatar, componentType, parameters.componentType);
+                    var offset = Math.Max(0, parameters.offset ?? 0);
+                    var maxItems = Math.Max(1, Math.Min(parameters.maxItems ?? 50, 128));
+                    var page = allComponents.Skip(offset).Take(maxItems).ToList();
+                    var targets = page.Select(component => BuildTarget(scope, project, editor, scene, avatar, DescribeGameObject(component.gameObject), DescribeComponent(component))).ToList();
+                    var discovery = BuildDiscovery(project, editor, scope, targets);
+                    discovery["scene"] = scene;
+                    discovery["avatar"] = avatar;
+                    discovery["componentType"] = parameters.componentType;
+                    discovery["offset"] = offset;
+                    discovery["limit"] = maxItems;
+                    discovery["totalCandidateCount"] = allComponents.Count;
+                    discovery["returnedCount"] = targets.Count;
+                    discovery["hasMore"] = offset + targets.Count < allComponents.Count;
+                    discovery["complete"] = offset + targets.Count >= allComponents.Count;
+                    discovery["candidateSetHash"] = ComputeCandidateSetHash(allComponents);
+                    discovery["nextOffset"] = offset + targets.Count < allComponents.Count
+                        ? new JValue(offset + targets.Count)
+                        : JValue.CreateNull();
+                    return VRCForgeToolResult.Completed("Avatar component targets discovered.", discovery);
+                }
                 var targetObject = ResolveObject(parameters.objectGlobalObjectId, avatar);
                 if (targetObject == null) return VRCForgeToolResult.FailedWithCode("execution_target_object_unavailable", "An exact object GlobalObjectId under the Avatar is required.", BuildDiscovery(project, editor, scope, null));
                 if (scope == "object") return VRCForgeToolResult.Completed("Execution target discovered.", BuildTarget(scope, project, editor, scene, avatar, DescribeGameObject(targetObject), null));
@@ -64,6 +120,31 @@ namespace VRCForge.Editor
         private static JObject BuildDiscovery(JObject project, JObject editor, string scope, IList<JObject> candidates)
         {
             return new JObject { ["schema"] = Schema, ["scope"] = scope, ["project"] = project, ["editor"] = editor, ["ambiguous"] = candidates != null && candidates.Count != 1, ["resolutionCandidateCount"] = candidates == null ? 0 : candidates.Count, ["targets"] = candidates == null ? new JArray() : new JArray(candidates) };
+        }
+
+        private static List<Component> DiscoverComponents(JObject avatar, Type componentType, string expectedType)
+        {
+            var root = ResolveGameObject(avatar.Value<string>("globalObjectId"));
+            if (root == null) return new List<Component>();
+            return root.GetComponentsInChildren(componentType, true)
+                .OfType<Component>()
+                .Where(component => component != null
+                    && component.gameObject != null
+                    && component.gameObject.scene == SceneManager.GetActiveScene()
+                    && string.Equals(component.GetType().FullName, expectedType, StringComparison.Ordinal))
+                .OrderBy(component => HierarchyPath(component.transform), StringComparer.Ordinal)
+                .ThenBy(component => component.GetType().FullName, StringComparer.Ordinal)
+                .ThenBy(component => GlobalObjectId.GetGlobalObjectIdSlow(component).ToString(), StringComparer.Ordinal)
+                .ToList();
+        }
+
+        private static string ComputeCandidateSetHash(IEnumerable<Component> components)
+        {
+            using (var sha = SHA256.Create())
+            {
+                var value = string.Join("\n", components.Select(component => GlobalObjectId.GetGlobalObjectIdSlow(component).ToString()));
+                return Hex(sha.ComputeHash(Encoding.UTF8.GetBytes(value)));
+            }
         }
 
         private static JObject BuildTarget(string scope, JObject project, JObject editor, JObject scene, JObject avatar, JObject targetObject, JObject component)

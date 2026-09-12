@@ -40,8 +40,35 @@ namespace VRCForge.Editor
             [VRCForgeInput("Maximum number of clips to scan.", IsRequired = false)]
             public int? maxClips { get; set; } = 300;
 
+            [VRCForgeInput("Maximum keyframes returned per binding. Values above this limit are explicitly marked as truncated.", IsRequired = false)]
+            public int? maxKeysPerBinding { get; set; } = 256;
+
             [VRCForgeInput("Include full binding arrays and warning details. Defaults to true for direct Unity callers; external wrappers may request compact summaries.", IsRequired = false)]
             public bool? includeBindingDetails { get; set; } = true;
+
+            [VRCForgeInput("Optional summary/index/details read mode; omit for legacy output.", IsRequired = false)]
+            public string bindingView { get; set; }
+
+            [VRCForgeInput("At most 32 exact path/propertyName/componentType selectors, OR between rows.", IsRequired = false)]
+            public JArray bindingSelectors { get; set; }
+
+            [VRCForgeInput("Global binding offset within the selected clip page.", IsRequired = false)]
+            public int? bindingOffset { get; set; }
+
+            [VRCForgeInput("Binding page size 1..256; selected reads default 16.", IsRequired = false)]
+            public int? bindingLimit { get; set; }
+
+            [VRCForgeInput("Sorted discovered clip offset.", IsRequired = false)]
+            public int? clipOffset { get; set; }
+
+            [VRCForgeInput("Key offset for exact binding continuation.", IsRequired = false)]
+            public int? keyOffset { get; set; }
+
+            [VRCForgeInput("Selected-read total key budget 1..4096, default 4096.", IsRequired = false)]
+            public int? maxTotalKeys { get; set; }
+
+            [VRCForgeInput("SHA256 from the preceding selected read; rejects stale continuation.", IsRequired = false)]
+            public string expectedSnapshotDigest { get; set; }
 
             [VRCForgeInput("Asset-relative or absolute output path. Leave empty to skip writing JSON.", IsRequired = false)]
             public string outputPath { get; set; } = DefaultOutputPath;
@@ -53,7 +80,7 @@ namespace VRCForge.Editor
         [MenuItem("VRCForge/Scan Animation Bindings")]
         public static void ScanAnimationBindingsFromMenu()
         {
-            var payload = BuildAnimationBindingsPayload("", "", new List<string>(), false, 300, true);
+            var payload = BuildAnimationBindingsPayload("", "", new List<string>(), false, 300, 256, true);
             var absolutePath = WriteJson(DefaultOutputPath, payload, true, out _, out _);
             Debug.Log($"[{ScanAnimationBindingsToolName}] Animation binding scan complete: {absolutePath}");
         }
@@ -65,13 +92,22 @@ namespace VRCForge.Editor
 
             try
             {
+                if (AnimationBindingReadSelection.Requested(@params))
+                {
+                    var selected = AnimationBindingReadSelection.Build(@params, () => ResolveClips(
+                        parameters.avatarPath ?? "", parameters.controllerPath ?? "",
+                        parameters.clipPaths ?? new List<string>(), parameters.includeAllProjectClips ?? false));
+                    return VRCForgeToolResult.Completed("Animation binding selection: " + selected["selection"]["matchStatus"], selected);
+                }
                 var maxClips = Mathf.Clamp(parameters.maxClips ?? 300, 1, 2000);
+                var maxKeysPerBinding = Mathf.Clamp(parameters.maxKeysPerBinding ?? 256, 1, 2000);
                 var payload = BuildAnimationBindingsPayload(
                     parameters.avatarPath ?? "",
                     parameters.controllerPath ?? "",
                     parameters.clipPaths ?? new List<string>(),
                     parameters.includeAllProjectClips ?? false,
                     maxClips,
+                    maxKeysPerBinding,
                     parameters.includeBindingDetails ?? true);
                 var requestedPath = parameters.outputPath ?? "";
                 if (!string.IsNullOrWhiteSpace(requestedPath))
@@ -110,6 +146,7 @@ namespace VRCForge.Editor
             List<string> clipPaths,
             bool includeAllProjectClips,
             int maxClips,
+            int maxKeysPerBinding,
             bool includeBindingDetails)
         {
             var clips = ResolveClips(avatarPath, controllerPath, clipPaths, includeAllProjectClips)
@@ -119,7 +156,7 @@ namespace VRCForge.Editor
                 .OrderBy(clip => AssetDatabase.GetAssetPath(clip), StringComparer.OrdinalIgnoreCase)
                 .Take(maxClips)
                 .ToList();
-            var clipItems = clips.Select(clip => ScanClip(clip, includeBindingDetails)).ToList();
+            var clipItems = clips.Select(clip => ScanClip(clip, maxKeysPerBinding, includeBindingDetails)).ToList();
             var warnings = includeBindingDetails ? clipItems
                 .SelectMany(clip => clip.warnings.Select(warning => new WarningItem
                 {
@@ -141,6 +178,7 @@ namespace VRCForge.Editor
                 requested_avatar_path = NormalizePath(avatarPath),
                 requested_controller_path = NormalizeAssetPath(controllerPath),
                 include_all_project_clips = includeAllProjectClips,
+                max_keys_per_binding = maxKeysPerBinding,
                 include_binding_details = includeBindingDetails,
                 clips = clipItems,
                 warnings = warnings,
@@ -173,6 +211,13 @@ namespace VRCForge.Editor
                 }
 
                 result.Add(clip);
+            }
+
+            // An explicit clip list is an exact selector. Do not silently widen it
+            // with controller/avatar discovery or the all-project fallback.
+            if (result.Count > 0)
+            {
+                return result;
             }
 
             if (!string.IsNullOrWhiteSpace(controllerPath))
@@ -208,19 +253,21 @@ namespace VRCForge.Editor
             return result;
         }
 
-        private static ClipBindingItem ScanClip(AnimationClip clip, bool includeBindingDetails)
+        private static ClipBindingItem ScanClip(AnimationClip clip, int maxKeysPerBinding, bool includeBindingDetails)
         {
             var bindings = new List<BindingItem>();
             var warnings = new List<BindingWarningItem>();
             foreach (var binding in AnimationUtility.GetCurveBindings(clip))
             {
-                AddBinding(bindings, warnings, binding, "float_curve");
+                AddBinding(bindings, warnings, clip, binding, "float_curve", maxKeysPerBinding, includeBindingDetails);
             }
 
             foreach (var binding in AnimationUtility.GetObjectReferenceCurveBindings(clip))
             {
-                AddBinding(bindings, warnings, binding, "object_reference_curve");
+                AddBinding(bindings, warnings, clip, binding, "object_reference_curve", maxKeysPerBinding, includeBindingDetails);
             }
+
+            var settings = AnimationUtility.GetAnimationClipSettings(clip);
 
             return new ClipBindingItem
             {
@@ -228,6 +275,8 @@ namespace VRCForge.Editor
                 asset_path = AssetDatabase.GetAssetPath(clip),
                 length = clip.length,
                 frame_rate = clip.frameRate,
+                loop_time = settings.loopTime,
+                loop_blend = settings.loopBlend,
                 binding_count = bindings.Count,
                 material_binding_count = bindings.Count(binding => binding.binding_category == "material_property" || binding.binding_category == "material_reference"),
                 object_toggle_binding_count = bindings.Count(binding => binding.binding_category == "object_active_toggle"),
@@ -244,8 +293,11 @@ namespace VRCForge.Editor
         private static void AddBinding(
             List<BindingItem> bindings,
             List<BindingWarningItem> warnings,
+            AnimationClip clip,
             EditorCurveBinding binding,
-            string bindingKind)
+            string bindingKind,
+            int maxKeysPerBinding,
+            bool includeBindingDetails)
         {
             var category = ClassifyBinding(binding, bindingKind);
             var item = new BindingItem
@@ -257,6 +309,7 @@ namespace VRCForge.Editor
                 binding_category = category,
                 safe_for_phase2_authoring = IsSafeForPhase2Authoring(category)
             };
+            PopulateCurveData(item, clip, binding, bindingKind, maxKeysPerBinding, includeBindingDetails);
             bindings.Add(item);
 
             var warning = BuildWarning(item);
@@ -264,6 +317,58 @@ namespace VRCForge.Editor
             {
                 warnings.Add(warning);
             }
+        }
+
+        private static void PopulateCurveData(
+            BindingItem item,
+            AnimationClip clip,
+            EditorCurveBinding binding,
+            string bindingKind,
+            int maxKeysPerBinding,
+            bool includeBindingDetails)
+        {
+            if (bindingKind == "float_curve")
+            {
+                var curve = AnimationUtility.GetEditorCurve(clip, binding);
+                var keys = curve != null ? curve.keys : Array.Empty<Keyframe>();
+                item.keyframe_count = keys.Length;
+                item.keys_truncated = keys.Length > maxKeysPerBinding;
+                if (!includeBindingDetails)
+                {
+                    return;
+                }
+
+                item.curve_pre_wrap_mode = curve != null ? curve.preWrapMode.ToString() : null;
+                item.curve_post_wrap_mode = curve != null ? curve.postWrapMode.ToString() : null;
+                item.keys = keys.Take(maxKeysPerBinding).Select(key => new CurveKeyItem
+                {
+                    time = key.time,
+                    value = key.value,
+                    inTangent = key.inTangent,
+                    outTangent = key.outTangent,
+                    inWeight = key.inWeight,
+                    outWeight = key.outWeight,
+                    weightedMode = key.weightedMode.ToString()
+                }).ToList();
+                return;
+            }
+
+            var references = AnimationUtility.GetObjectReferenceCurve(clip, binding)
+                ?? Array.Empty<ObjectReferenceKeyframe>();
+            item.object_reference_key_count = references.Length;
+            item.object_reference_keys_truncated = references.Length > maxKeysPerBinding;
+            if (!includeBindingDetails)
+            {
+                return;
+            }
+
+            item.object_reference_keys = references.Take(maxKeysPerBinding).Select(key => new ObjectReferenceKeyItem
+            {
+                time = key.time,
+                asset_path = key.value != null ? AssetDatabase.GetAssetPath(key.value) : "",
+                name = key.value != null ? key.value.name : "",
+                type_name = key.value != null ? key.value.GetType().Name : ""
+            }).ToList();
         }
 
         private static string ClassifyBinding(EditorCurveBinding binding, string bindingKind)
@@ -619,6 +724,7 @@ namespace VRCForge.Editor
             public string requested_controller_path;
             public bool include_all_project_clips;
             public bool include_binding_details;
+            public int max_keys_per_binding;
             public List<ClipBindingItem> clips;
             public List<WarningItem> warnings;
             public AnimationBindingsSummary summary;
@@ -647,6 +753,8 @@ namespace VRCForge.Editor
             public string asset_path;
             public float length;
             public float frame_rate;
+            public bool loop_time;
+            public bool loop_blend;
             public int binding_count;
             public int material_binding_count;
             public int object_toggle_binding_count;
@@ -665,6 +773,35 @@ namespace VRCForge.Editor
             public string binding_kind;
             public string binding_category;
             public bool safe_for_phase2_authoring;
+            public int keyframe_count;
+            public bool keys_truncated;
+            public string curve_pre_wrap_mode;
+            public string curve_post_wrap_mode;
+            public List<CurveKeyItem> keys;
+            public int object_reference_key_count;
+            public bool object_reference_keys_truncated;
+            public List<ObjectReferenceKeyItem> object_reference_keys;
+        }
+
+        [Serializable]
+        private class CurveKeyItem
+        {
+            public float time;
+            public float value;
+            public float inTangent;
+            public float outTangent;
+            public float inWeight;
+            public float outWeight;
+            public string weightedMode;
+        }
+
+        [Serializable]
+        private class ObjectReferenceKeyItem
+        {
+            public float time;
+            public string asset_path;
+            public string name;
+            public string type_name;
         }
 
         [Serializable]

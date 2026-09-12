@@ -232,7 +232,30 @@ class WardrobeArtifactReadService:
 
     def scan_wardrobe(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         normalized = params or {}
-        return self._ports.scan_wardrobe(normalized)
+        payload = self._ports.scan_wardrobe(normalized)
+        if payload.get("ok") is False or not isinstance(payload.get("wardrobes"), list):
+            return payload
+        # The Core scanner proves one pattern; its misses do not classify other topologies.
+        result = dict(payload)
+        result.setdefault("recognitionCoverage", {
+            "automaticPattern": "int_menu_any_state_equals_object_activation",
+            "generalTopologyComplete": False,
+            "missingMatchProvesAbsence": False,
+            "analysisRequired": True,
+            "candidateEnumerationComplete": False,
+            "candidateParameters": list(dict.fromkeys(
+                item["parameterName"]
+                for group in ("wardrobes", "wardrobeCandidates", "looseControls")
+                for item in (payload.get(group) or [])
+                if isinstance(item, dict) and isinstance(item.get("parameterName"), str)
+                and item["parameterName"]
+            )),
+            "nextReadTools": ["vrcforge_read_avatar_descriptor", "vrcforge_scan_avatar_controls",
+                              "vrcforge_scan_parameters", "vrcforge_scan_fx_animator",
+                              "vrcforge_scan_animation_bindings"],
+            "nextAction": "Use the wardrobe Prompt recognition loop: inspect each actual controller/layer/state-machine scope, correlate menu conditions and clip effects, record confirmed/rejected/undetermined evidence, leave that scope, then inspect the next. Preserve identity, resource freshness, pagination and the task budget; a local miss is not global absence.",
+        })
+        return result
 
 
 @dataclass(frozen=True, slots=True)
@@ -816,7 +839,7 @@ def _build_create_wardrobe_core_calls_from_request(
 ) -> list[tuple[str, dict[str, Any]]]:
     avatar_path = request["avatarPath"]
     parameter_name = request["parameterName"]
-    asset_dir = request.get("assetDir", "Assets/VRCForge/Generated/Wardrobe")
+    asset_dir = str(request.get("assetDir") or "").strip()
     menu_name = (
         str(request.get("menuName") or request.get("subMenuName") or "Wardrobe").strip()
         or "Wardrobe"
@@ -827,7 +850,9 @@ def _build_create_wardrobe_core_calls_from_request(
     layer_name = (
         str(request.get("layerName") or parameter_name).strip() or parameter_name
     )
-    common = {"avatarPath": avatar_path, "assetDir": asset_dir}
+    common = {"avatarPath": avatar_path}
+    if asset_dir:
+        common["assetDir"] = asset_dir
     return [
         (
             "vrc_ensure_expression_parameter",
@@ -1538,6 +1563,7 @@ class BuildOutfitImportPlanPort(Protocol):
         project_path: str | None = None,
         target_folder: str | None = None,
         selected_unitypackage: str | None = None,
+        dependency_mode: str = "auto",
         selected_prefab: str | None = None,
         base_avatar_name: str | None = None,
         max_entries: int = 5000,
@@ -1653,7 +1679,7 @@ class WardrobeOutfitWorkflowService:
         project_path = self._text(normalized, "projectPath", "project_path")
         if not project_path:
             project_path = str(self._ports.selected_project_path() or "").strip()
-        return self._ports.build_import_plan(
+        build_kwargs = dict(
             package_path=package_path,
             project_path=project_path or None,
             target_folder=self._text(normalized, "targetFolder", "target_folder") or None,
@@ -1666,6 +1692,12 @@ class WardrobeOutfitWorkflowService:
             selected_prefab=self._text(normalized, "selectedPrefab", "selected_prefab") or None,
             base_avatar_name=self._text(normalized, "baseAvatarName", "base_avatar_name") or None,
             max_entries=int(normalized.get("maxEntries") or normalized.get("max_entries") or 5000),
+        )
+        dependency_mode = self._text(normalized, "dependencyMode", "dependency_mode")
+        if dependency_mode:
+            build_kwargs["dependency_mode"] = dependency_mode
+        return self._ports.build_import_plan(
+            **build_kwargs,
         )
 
     def request_outfit_import(

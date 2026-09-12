@@ -1811,8 +1811,9 @@ class DashboardServerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             project_root = Path(tmp) / "UnityProject"
             project_root.mkdir()
-            with TestClient(dashboard_server.app) as client:
-                response = client.get("/api/app/workspace/diff", params={"root": str(project_root), "includePatch": "true"})
+            with patch.dict(os.environ, {"GIT_CEILING_DIRECTORIES": str(Path(tmp))}):
+                with TestClient(dashboard_server.app) as client:
+                    response = client.get("/api/app/workspace/diff", params={"root": str(project_root), "includePatch": "true"})
 
         self.assertEqual(response.status_code, 200)
         payload = response.json()
@@ -1830,11 +1831,12 @@ class DashboardServerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             project_root = Path(tmp) / "ProjectA"
             project_root.mkdir()
-            with TestClient(dashboard_server.app) as client:
-                response = client.get(
-                    "/api/app/runtime/snapshot",
-                    params={"sessionId": "session-a", "projectRoot": str(project_root), "globalOnly": "false"},
-                )
+            with patch.dict(os.environ, {"GIT_CEILING_DIRECTORIES": str(Path(tmp))}):
+                with TestClient(dashboard_server.app) as client:
+                    response = client.get(
+                        "/api/app/runtime/snapshot",
+                        params={"sessionId": "session-a", "projectRoot": str(project_root), "globalOnly": "false"},
+                    )
 
         self.assertEqual(response.status_code, 200)
         payload = response.json()
@@ -12193,7 +12195,7 @@ class DashboardServerTests(unittest.TestCase):
             unity_mcp_retries=3,
             unity_mcp_retry_backoff_seconds=2,
         )
-        previous = SimpleNamespace(process_id=77, project_hash="project-hash", instance_id="old")
+        previous = SimpleNamespace(process_id=77, project_id="project-id", instance_id="old")
         ready = {
             "ok": True,
             "projectPath": str(project),
@@ -12281,7 +12283,7 @@ class DashboardServerTests(unittest.TestCase):
             unity_mcp_timeout_seconds=30,
             unity_mcp_retries=3,
         )
-        previous = SimpleNamespace(process_id=77, project_hash="project-hash", instance_id="same")
+        previous = SimpleNamespace(process_id=77, project_id="project-id", instance_id="same")
         reload_result = dashboard_server.McpResult(
             exit_code=0,
             stdout="",
@@ -12318,7 +12320,7 @@ class DashboardServerTests(unittest.TestCase):
             unity_mcp_retries=3,
             unity_mcp_retry_backoff_seconds=2,
         )
-        previous = SimpleNamespace(process_id=77, project_hash="project-hash", instance_id="old")
+        previous = SimpleNamespace(process_id=77, project_id="project-id", instance_id="old")
         not_ready = {"ok": False, "error": "Core readiness timed out."}
         connection_closed = dashboard_server.UnityMcpError("reload transport failed")
         connection_closed.__cause__ = dashboard_server.UnityMcpCoreError(
@@ -12345,7 +12347,7 @@ class DashboardServerTests(unittest.TestCase):
             unity_mcp_retries=3,
             unity_mcp_retry_backoff_seconds=2,
         )
-        previous = SimpleNamespace(process_id=77, project_hash="project-hash", instance_id="old")
+        previous = SimpleNamespace(process_id=77, project_id="project-id", instance_id="old")
         protocol_failure = dashboard_server.UnityMcpError("reload transport failed")
         protocol_failure.__cause__ = dashboard_server.UnityMcpCoreError(
             "Unity MCP Core returned an invalid transport response."
@@ -12365,9 +12367,9 @@ class DashboardServerTests(unittest.TestCase):
 
     def test_checkpoint_reload_readiness_requires_same_process_new_instance_and_core_version(self) -> None:
         project = Path("C:/Unity/ReloadProject")
-        previous = SimpleNamespace(process_id=77, project_hash="project-hash", instance_id="old")
-        unchanged = SimpleNamespace(process_id=77, project_hash="project-hash", instance_id="old")
-        replaced = SimpleNamespace(process_id=77, project_hash="project-hash", instance_id="new")
+        previous = SimpleNamespace(process_id=77, project_id="project-id", instance_id="old")
+        unchanged = SimpleNamespace(process_id=77, project_id="project-id", instance_id="old")
+        replaced = SimpleNamespace(process_id=77, project_id="project-id", instance_id="new")
         core_client = Mock()
         core_client.core_info.return_value = {
             "coreIdentity": "vrcforge.unity-core",
@@ -12400,9 +12402,9 @@ class DashboardServerTests(unittest.TestCase):
 
     def test_checkpoint_reload_readiness_rejects_wrong_process_and_core_version_failure(self) -> None:
         project = Path("C:/Unity/ReloadProject")
-        previous = SimpleNamespace(process_id=77, project_hash="project-hash", instance_id="old")
-        wrong_process = SimpleNamespace(process_id=88, project_hash="project-hash", instance_id="new-a")
-        incomplete = SimpleNamespace(process_id=77, project_hash="project-hash", instance_id="new-b")
+        previous = SimpleNamespace(process_id=77, project_id="project-id", instance_id="old")
+        wrong_process = SimpleNamespace(process_id=88, project_id="project-id", instance_id="new-a")
+        incomplete = SimpleNamespace(process_id=77, project_id="project-id", instance_id="new-b")
         core_client = Mock()
         core_client.core_info.side_effect = dashboard_server.UnityMcpCoreError(
             "Unity MCP Core version does not match this VRCForge App."
@@ -12535,7 +12537,17 @@ class DashboardServerTests(unittest.TestCase):
         gm_enter_policy = targets["vrcforge_gesture_manager_enter_play_mode"]["rollbackPolicy"]
         self.assertEqual(gm_enter_policy["kind"], "ephemeral_editor_state_inverse")
         self.assertEqual(gm_enter_policy["restoreTool"], "vrcforge_set_play_mode")
-        self.assertFalse(gm_enter_policy["preWriteCheckpointRequired"])
+        self.assertTrue(gm_enter_policy["preWriteCheckpointRequired"])
+
+        gm_runtime_policy = targets["vrcforge_gesture_manager_set_parameter"]["rollbackPolicy"]
+        self.assertFalse(gm_runtime_policy["preWriteCheckpointRequired"])
+        play_exit_policy = targets["vrcforge_set_play_mode"]["rollbackPolicy"]
+        # The published rollback summary is conservative for this conditional
+        # policy because it is evaluated without the requested isPlaying value.
+        self.assertTrue(play_exit_policy["preWriteCheckpointRequired"])
+        play_policy = dashboard_server.AGENT_GATEWAY._write_handlers["vrcforge_set_play_mode"].pre_write_checkpoint_required
+        self.assertTrue(callable(play_policy))
+        self.assertFalse(play_policy({"isPlaying": False}))
 
         restore_policy = targets["vrcforge_restore_checkpoint"]["rollbackPolicy"]
         self.assertEqual(restore_policy["kind"], "checkpoint_restore")
@@ -14155,7 +14167,7 @@ class DashboardServerTests(unittest.TestCase):
         )
 
         result = dashboard_server.get_unitypackage_import_status_sync(
-            {"jobId": "A" * 32}
+            {"projectPath": r"C:\Project", "jobId": "A" * 32}
         )
 
         self.assertTrue(result["ok"])
@@ -14163,6 +14175,10 @@ class DashboardServerTests(unittest.TestCase):
         _settings, tool_name, arguments = mock_invoke.call_args.args
         self.assertEqual(tool_name, "vrc_import_unitypackage")
         self.assertEqual(arguments, {"jobId": "a" * 32})
+        self.assertEqual(
+            mock_invoke.call_args.kwargs["execution_context"],
+            {"lane": dashboard_server.APP_UNITYPACKAGE_IMPORT_POLL_LANE},
+        )
 
     @patch("dashboard_server.invoke_unity_mcp")
     def test_unitypackage_import_status_rejects_invalid_job_before_core(
@@ -14348,6 +14364,35 @@ class DashboardServerTests(unittest.TestCase):
         self.assertTrue(params["preview"])
         self.assertEqual(params["assetPath"], "Assets/Outfits/Dress.prefab")
         self.assertEqual(params["parentPath"], "Avatar")
+        self.assertEqual(result["status"], "preview")
+        self.assertFalse(result["mutationStarted"])
+        self.assertFalse(result["committed"])
+        self.assertEqual(result["commitState"], "not_started")
+
+    @patch("dashboard_server.invoke_unity_mcp")
+    @patch("dashboard_server.load_dashboard_settings")
+    def test_instantiate_prefab_forwards_approval_identity_and_continuation_fields(self, mock_load_settings, mock_invoke) -> None:
+        mock_load_settings.return_value = SimpleNamespace()
+        mock_invoke.return_value = dashboard_server.McpResult(
+            exit_code=0, stdout="ok", stderr="", payload={"data": {"preview": True}}
+        )
+        dashboard_server.instantiate_prefab_sync({
+            "asset_path": "Packages/vrchat.blackstartx.gesture-manager/GestureManager.prefab",
+            "expectedPrefabGuid": "a" * 32,
+            "expectedAssetDependencyHash": "b" * 32,
+            "expectedScenePath": "Assets/2.unity",
+            "expectedParentGlobalObjectId": "",
+            "expectedResultPath": "GestureManager",
+            "approvedObjectReceiptNonce": "c" * 64,
+            "approvedContinuationTools": ["vrc_setup_outfit", "vrc_add_wardrobe_outfit"],
+            "preview": True,
+        })
+        params = mock_invoke.call_args.args[2]
+        assert params["expectedPrefabGuid"] == "a" * 32
+        assert params["expectedScenePath"] == "Assets/2.unity"
+        assert params["expectedResultPath"] == "GestureManager"
+        assert params["approvedObjectReceiptNonce"] == "c" * 64
+        assert params["approvedContinuationTools"] == ["vrc_setup_outfit", "vrc_add_wardrobe_outfit"]
 
     def test_unpack_prefab_requires_path(self) -> None:
         result = dashboard_server.unpack_prefab_sync({})
@@ -14774,7 +14819,7 @@ class DashboardServerTests(unittest.TestCase):
         ).read_text(encoding="utf-8-sig")
         contract_names = set(re.findall(r'\{\s*"(vrc_[a-z0-9_]+)"\s*,\s*"VRCForge\.', contract_text))
         self.assertEqual(contract_names, set(dashboard_server.VRCFORGE_UNITY_TOOL_REGISTRY))
-        self.assertEqual(len(contract_names), 91)
+        self.assertEqual(len(contract_names), 92)
         legacy_hits = [
             path for path in (repo_root / "Assets" / "VRCForge").rglob("*.cs")
             if "McpForUnityTool" in path.read_text(encoding="utf-8-sig")

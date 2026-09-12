@@ -7,6 +7,7 @@ from agent_gateway import AgentGateway
 from agent_mcp_2026 import Mcp2026Router, PROTOCOL_VERSION
 from agent_mcp_standard import LATEST_PROTOCOL_VERSION, McpStandardRouter
 from mcp_resource_registry import McpResourceError, McpResourceRegistry, RESOURCE_TEMPLATES
+from operation_context import ensure_operation_result
 
 
 def _standard_initialize(router: McpStandardRouter) -> dict:
@@ -209,3 +210,38 @@ def test_gateway_internal_and_external_agents_share_one_resource_registry(tmp_pa
     assert gateway.read_mcp_resource(internal["uri"])["structuredContent"]["sourceMode"] == "internal_agent"
     assert gateway.read_mcp_resource(external["uri"])["structuredContent"]["sourceMode"] == "external_agent"
     assert internal_result["resources"]["operationReceiptUri"] == internal["uri"]
+
+
+@pytest.mark.parametrize("source_mode", ["internal_agent", "external_agent"])
+@pytest.mark.parametrize("succeeded", [True, False])
+def test_operation_resource_resolves_to_persisted_receipt_without_inventing_state(
+    tmp_path, source_mode, succeeded,
+) -> None:
+    config_path = tmp_path / "config" / "gateway.json"
+    audit_path = tmp_path / "audit"
+    gateway = AgentGateway(config_path, audit_path)
+    response = ensure_operation_result(
+        {
+            "operationId": "property-operation",
+            "ok": succeeded,
+            "status": "success" if succeeded else "failed",
+        },
+        write=True,
+    )
+    receipt = gateway.publish_mcp_tool_result_resource(
+        "vrcforge_set_property", {"value": "requested-only"}, response,
+        source_mode=source_mode,
+    )
+
+    assert response["operationResource"] == receipt["uri"]
+    assert response["operationResource"] == response["resources"]["operationReceiptUri"]
+    assert response["resources"]["operationReceiptHandle"]["contentHash"] == receipt["contentHash"]
+    for key in ("beforeResource", "afterResource", "diffResource"):
+        assert response[key] is None
+
+    reopened = AgentGateway(config_path, audit_path)
+    captured = reopened.read_mcp_resource(response["operationResource"])["structuredContent"]
+    assert captured["resourceType"] == "operation_receipt"
+    assert captured["sourceMode"] == source_mode
+    assert captured["data"]["operationId"] == "property-operation"
+    assert captured["data"]["result"]["ok"] is succeeded

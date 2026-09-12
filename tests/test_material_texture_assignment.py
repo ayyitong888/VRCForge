@@ -196,14 +196,12 @@ def test_material_texture_tool_is_shared_supervised_and_execution_only() -> None
     assert gateway.external_mcp_tool_block_for_name(name, write=True) == "materials"
     schema = canonical_unity_write_tool_input_schema(name)
     assert schema["additionalProperties"] is False
-    assert schema["required"] == [
-        "projectPath",
-        "materialAssetPath",
-        "propertyName",
-        "textureAssetPath",
-        "executionTarget",
-    ]
-    assert "_MainTex" in schema["properties"]["propertyName"]["enum"]
+    assert schema["required"] == ["projectPath", "executionTarget"]
+    assert schema["oneOf"][0]["required"] == ["materialAssetPath", "propertyName", "textureAssetPath"]
+    assert schema["oneOf"][1]["required"] == ["assignments"]
+    assert schema["properties"]["assignments"]["maxItems"] == 128
+    assert "enum" not in schema["properties"]["propertyName"]
+    assert schema["properties"]["propertyName"]["minLength"] == 1
     assert canonical_unity_read_tool_input_schema(
         "vrcforge_preview_material_texture_assignment"
     ) == schema
@@ -215,15 +213,15 @@ def test_material_texture_tool_is_shared_supervised_and_execution_only() -> None
     assert tool.block == "unity/materials"
     assert "vrcforge_preview_material_texture_assignment" in gateway._tools
     assert "vrc_set_material_texture" in dashboard_server.REQUIRED_VRCFORGE_UNITY_TOOLS
-    assert unity_mcp_tool_contract.TOOL_CONTRACT_VERSION == "89"
-    assert unity_mcp_tool_contract.EXPECTED_TOOL_COUNT == 91
+    assert unity_mcp_tool_contract.TOOL_CONTRACT_VERSION == "92"
+    assert unity_mcp_tool_contract.EXPECTED_TOOL_COUNT == 92
 
 
 def test_csharp_texture_tool_guards_property_and_rolls_back_failed_mutations() -> None:
     source = Path("Assets/VRCForge/Editor/MaterialShaderTool.cs").read_text(encoding="utf-8")
 
     assert 'toolId: "vrc_set_material_texture"' in source
-    assert '"_MainTex"' in source
+    assert "AllowedTextureProperties" not in source
     assert "material.HasProperty(propertyName)" in source
     assert "material.GetTexturePropertyNames()" in source
     assert "AssetDatabase.LoadAssetAtPath<Texture2D>(textureAssetPath)" in source
@@ -232,3 +230,20 @@ def test_csharp_texture_tool_guards_property_and_rolls_back_failed_mutations() -
     assert "persisted.GetTexture(propertyName)" in source
     assert "RestoreTexturePreState" in source
     assert 'commitState = restored ? "rolled_back" : "unknown"' in source
+
+
+@pytest.mark.parametrize("property_name", ["_DissolveMask", "_CustomInstalledShaderTexture"])
+def test_installed_shader_texture_names_preserve_strict_receipt_binding(property_name):
+    wrapper, preview = _wrapper(), _preview()
+    wrapper["arguments"]["propertyName"] = property_name
+    preview["propertyName"] = property_name
+    bound, _ = bind_authoritative_preview(wrapper, preview)
+    applied = _apply()
+    applied["propertyName"] = property_name
+    assert validate_apply_result(bound["arguments"], applied)["verified"] is True
+
+
+def test_texture_schema_accepts_installed_shader_property_without_fixed_enum():
+    import jsonschema
+    from unity_shared_input_schemas import MATERIAL_TEXTURE_ASSIGNMENT_PUBLIC_INPUT_SCHEMA
+    jsonschema.validate({"projectPath": str(Path.cwd()), "materialAssetPath": "Assets/Avatar/Face.mat", "propertyName": "_DissolveMask", "textureAssetPath": "Assets/Avatar/Noise.png"}, MATERIAL_TEXTURE_ASSIGNMENT_PUBLIC_INPUT_SCHEMA)

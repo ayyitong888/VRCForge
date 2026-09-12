@@ -11,7 +11,7 @@ using VRCForge.Editor;
 
 public static class SceneObjectCopyFixtureProbe
 {
-    private const string SceneFolder = "Assets/VRCForge/Generated/SceneObjectCopyProbe";
+    private const string SceneFolder = "Assets/VRCForgeGenerated/Prefabs/SceneObjectCopyProbe";
     private const string ScenePath = SceneFolder + "/SceneObjectCopyProbe.unity";
     private const string PrefabPath = SceneFolder + "/AccessoryProbe.prefab";
 
@@ -486,15 +486,19 @@ public static class SceneObjectCopyFixtureProbe
 
     private static void PrepareFolder()
     {
-        if (!AssetDatabase.IsValidFolder("Assets/VRCForge/Generated"))
+        if (!AssetDatabase.IsValidFolder("Assets/VRCForgeGenerated"))
         {
-            AssetDatabase.CreateFolder("Assets/VRCForge", "Generated");
+            AssetDatabase.CreateFolder("Assets", "VRCForgeGenerated");
+        }
+        if (!AssetDatabase.IsValidFolder("Assets/VRCForgeGenerated/Prefabs"))
+        {
+            AssetDatabase.CreateFolder("Assets/VRCForgeGenerated", "Prefabs");
         }
         if (AssetDatabase.IsValidFolder(SceneFolder))
         {
             AssetDatabase.DeleteAsset(SceneFolder);
         }
-        foreach (var childFolder in AssetDatabase.GetSubFolders("Assets/VRCForge/Generated"))
+        foreach (var childFolder in AssetDatabase.GetSubFolders("Assets/VRCForgeGenerated/Prefabs"))
         {
             var folderName = childFolder.Substring(childFolder.LastIndexOf('/') + 1);
             if (folderName.StartsWith("stage-", StringComparison.Ordinal))
@@ -502,7 +506,7 @@ public static class SceneObjectCopyFixtureProbe
                 AssetDatabase.DeleteAsset(childFolder);
             }
         }
-        AssetDatabase.CreateFolder("Assets/VRCForge/Generated", "SceneObjectCopyProbe");
+        AssetDatabase.CreateFolder("Assets/VRCForgeGenerated/Prefabs", "SceneObjectCopyProbe");
         AssetDatabase.SaveAssets();
     }
 

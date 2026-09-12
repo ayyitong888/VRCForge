@@ -338,7 +338,14 @@ def _validate_context(value: Any) -> dict[str, Any]:
     context = _json_copy(dict(value))
     lane = context.get("lane")
     if lane == "approved_write":
-        required_strings = ("approvalId", "checkpointId", "targetTool", "projectRoot")
+        checkpoint_required = context.get("checkpointRequired", True)
+        if not isinstance(checkpoint_required, bool):
+            raise ValueError("approved Unity execution context is invalid.")
+        # Runtime-only editor operations explicitly carry false; all other
+        # approved writes retain the checkpoint binding requirement.
+        required_strings = ("approvalId", "targetTool", "projectRoot") + (
+            ("checkpointId",) if checkpoint_required else ()
+        )
     elif lane == "external_mcp_write":
         required_strings = (
             "operationId",

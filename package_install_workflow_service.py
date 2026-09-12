@@ -5,6 +5,7 @@ import json
 import os
 import re
 import subprocess
+import tarfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol
@@ -23,6 +24,8 @@ from prepared_unity_execution import (
     prepared_call,
     prepared_evidence,
 )
+from package_legacy_baseline import verify_legacy_baseline, create_legacy_preservation_snapshot
+from uuid import uuid4
 
 
 VPM_PACKAGE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{1,100}$")
@@ -295,6 +298,44 @@ class PackageDetectionService:
                     }
                 )
                 return info
+        # Some VPM packages (notably shader packages) are imported under Assets
+        # while retaining a package.json identity. Inspect only direct children
+        # to keep detection bounded and avoid treating arbitrary project JSON as
+        # package state.
+        assets_dir = project_path / "Assets"
+        try:
+            asset_candidates = assets_dir.iterdir() if assets_dir.is_dir() else ()
+            for candidate in asset_candidates:
+                package_json = candidate / "package.json"
+                if not self._ports.path_exists(package_json):
+                    continue
+                try:
+                    data = json.loads(self._ports.read_utf8_sig_text(package_json))
+                except (OSError, json.JSONDecodeError):
+                    continue
+                matched_id = next(
+                    (
+                        package_id
+                        for package_id in package_ids
+                        if str(data.get("name") or "").strip().lower()
+                        == str(package_id).strip().lower()
+                    ),
+                    None,
+                )
+                if matched_id is None:
+                    continue
+                info.update(
+                    {
+                        "installed": True,
+                        "packageId": matched_id,
+                        "version": str(data.get("version") or ""),
+                        "source": "assets",
+                        "path": str(package_json).replace("\\", "/"),
+                    }
+                )
+                return info
+        except OSError:
+            pass
         for manifest_name, source in (
             ("vpm-manifest.json", "vpm"),
             ("manifest.json", "upm"),
@@ -574,6 +615,45 @@ class PackageInstallWorkflowService:
         installed = bool(
             isinstance(package_state, dict) and package_state.get("installed")
         )
+        installed_version = str((package_state or {}).get("version") or "")
+        requested_version = str(
+            normalized.get("packageVersion")
+            or normalized.get("package_version")
+            or ""
+        ).strip()
+        upgrade_requested = bool(
+            normalized.get("upgrade") or normalized.get("upgradePackage")
+            or normalized.get("upgrade_package")
+        )
+        installed_key = _semver_precedence(installed_version)
+        requested_key = _semver_precedence(requested_version)
+        upgrade_available = bool(
+            installed and upgrade_requested and requested_key
+            and (not installed_key or requested_key > installed_key)
+        )
+        assets_migration_required = bool(
+            upgrade_available and str((package_state or {}).get("source") or "") == "assets"
+        )
+        baseline_ok = False
+        baseline_report: dict[str, Any] | None = None
+        if assets_migration_required:
+            archive = str(normalized.get("legacyBaselineArchive") or normalized.get("legacy_baseline_archive") or "").strip()
+            root = str(normalized.get("legacyBaselineAssetsRoot") or normalized.get("legacy_baseline_assets_root") or "").strip()
+            detected_root = str(Path(str((package_state or {}).get("path") or "")).parent)
+            if archive and root and detected_root and Path(root).expanduser().resolve() == Path(detected_root).expanduser().resolve():
+                try:
+                    baseline = verify_legacy_baseline(archive, root)
+                    baseline_ok = bool(baseline.get("ok"))
+                    baseline_report = {
+                        key: baseline[key]
+                        for key in ("ok", "treeDigest", "baselineDigest", "missing", "unknown", "modified")
+                    }
+                except (OSError, tarfile.TarError, ValueError) as exc:
+                    baseline_ok = False
+                    baseline_report = {"ok": False, "error": str(exc)}
+        preserve_legacy = normalized.get("preserveLegacyFiles") is True
+        preservation_ready = bool(preserve_legacy and baseline_report and "treeDigest" in baseline_report)
+        assets_migration_required = assets_migration_required and not (baseline_ok or preservation_ready)
         return {
             "ok": True,
             **strategy,
@@ -581,11 +661,16 @@ class PackageInstallWorkflowService:
             "planOnly": True,
             "projectPath": project_value,
             "packageState": package_state,
-            "compatibilityAction": "use_installed" if installed else "install_missing",
+            "packageVersion": requested_version,
+            "installedVersion": installed_version,
+            "upgradeRequested": upgrade_requested,
+            "legacyBaselineVerification": baseline_report,
+            "legacyPreservationRequired": preservation_ready,
+            "compatibilityAction": "migration_required" if assets_migration_required else "upgrade" if upgrade_available else "use_installed" if installed else "install_missing",
             "canExecuteCommandInstall": bool(strategy.get("commandInstaller"))
             and bool(project_value),
-            "canCreateInstallRequest": bool(project_value) and not installed,
-            "canPrepareUpgradeRequest": False,
+            "canCreateInstallRequest": bool(project_value) and (not installed or upgrade_available) and not assets_migration_required,
+            "canPrepareUpgradeRequest": upgrade_available and not assets_migration_required,
         }
 
     def diagnose_install(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -750,7 +835,11 @@ class PackageInstallWorkflowService:
             else {}
         )
         installed = bool(package_state.get("installed"))
-        if installed:
+        upgrade_requested = bool(
+            normalized.get("upgrade") or normalized.get("upgradePackage")
+            or normalized.get("upgrade_package")
+        )
+        if installed and not upgrade_requested:
             return {
                 "ok": True,
                 "status": "use_installed",
@@ -762,6 +851,19 @@ class PackageInstallWorkflowService:
                     "version fails, preserve that runtime error and check newer "
                     "versions through the supervised package manager flow."
                 ),
+                "installPlan": plan,
+            }
+        if installed and not plan.get("canPrepareUpgradeRequest"):
+            return {
+                "ok": False,
+                "status": "blocked",
+                "error": (
+                    "Assets-imported package upgrade requires an explicit migration plan; "
+                    "the sealed CLI upgrade lane is fail-closed."
+                    if str(package_state.get("source") or "") == "assets"
+                    else "Upgrade requires upgrade=true and a newer valid packageVersion."
+                ),
+                "migrationRequired": str(package_state.get("source") or "") == "assets",
                 "installPlan": plan,
             }
         if not plan.get("canExecuteCommandInstall"):
@@ -820,6 +922,14 @@ class PackageInstallWorkflowService:
                 or ""
             ).strip(),
         }
+        if upgrade_requested:
+            approval_arguments["upgrade"] = True
+            if normalized.get("preserveLegacyFiles") is True:
+                approval_arguments["preserveLegacyFiles"] = True
+            if normalized.get("legacyBaselineArchive") or normalized.get("legacy_baseline_archive"):
+                approval_arguments["legacyBaselineArchive"] = str(normalized.get("legacyBaselineArchive") or normalized.get("legacy_baseline_archive") or "").strip()
+            if normalized.get("legacyBaselineAssetsRoot") or normalized.get("legacy_baseline_assets_root"):
+                approval_arguments["legacyBaselineAssetsRoot"] = str(normalized.get("legacyBaselineAssetsRoot") or normalized.get("legacy_baseline_assets_root") or "").strip()
         return self._ports.create_apply_request(
             {
                 "target_tool": "vrcforge_install_vpm_package",
@@ -1216,13 +1326,45 @@ class VpmPackageInstallPreparer:
             self._ports.detect_package,
         )
         package_state = _ensure_dict(state.get("packageState"))
+        baseline = None
         installed = bool(package_state.get("installed"))
-        if installed:
+        upgrade_requested = bool(
+            arguments.get("upgrade") or arguments.get("upgradePackage")
+            or arguments.get("upgrade_package")
+        )
+        requested_version = str(
+            arguments.get("packageVersion")
+            or arguments.get("package_version")
+            or ""
+        ).strip()
+        if installed and not upgrade_requested:
             raise AgentGatewayError(
                 "The installed package version must be tried first; this install "
                 "lane does not accept caller-supplied upgrade evidence.",
                 status_code=409,
             )
+        if installed and upgrade_requested:
+            if str(package_state.get("source") or "") == "assets":
+                baseline_archive = str(arguments.get("legacyBaselineArchive") or arguments.get("legacy_baseline_archive") or "").strip()
+                baseline_root = str(arguments.get("legacyBaselineAssetsRoot") or arguments.get("legacy_baseline_assets_root") or "").strip()
+                if not baseline_archive or not baseline_root:
+                    raise AgentGatewayError("Assets-imported package upgrade requires legacyBaselineArchive and legacyBaselineAssetsRoot.", status_code=409)
+                expected_assets_root = str(Path(str(package_state.get("path") or "")).parent)
+                if not expected_assets_root or Path(baseline_root).expanduser().resolve() != Path(expected_assets_root).expanduser().resolve():
+                    raise AgentGatewayError("legacyBaselineAssetsRoot must match the detected package Assets root.", status_code=409)
+                try:
+                    baseline = verify_legacy_baseline(baseline_archive, baseline_root)
+                except (OSError, tarfile.TarError, ValueError) as exc:
+                    raise AgentGatewayError(f"Legacy baseline verification failed: {exc}", status_code=409) from exc
+                if not baseline.get("ok") and arguments.get("preserveLegacyFiles") is not True:
+                    raise AgentGatewayError(f"Legacy baseline mismatch: {json.dumps({k: baseline[k] for k in ('missing','unknown','modified')}, ensure_ascii=False)}", status_code=409)
+            installed_key = _semver_precedence(str(package_state.get("version") or ""))
+            requested_key = _semver_precedence(requested_version)
+            if requested_key is None or (installed_key and requested_key <= installed_key):
+                raise AgentGatewayError(
+                    "Upgrade packageVersion must be a newer valid semantic version.",
+                    status_code=409,
+                )
         managers = self._ports.locate_managers()
         strategy = self._ports.select_strategy(arguments, managers)
         cli = (
@@ -1274,9 +1416,13 @@ class VpmPackageInstallPreparer:
             "project": state,
             "packageId": package_id,
             "packageVersion": selected_version,
+            "upgrade": upgrade_requested,
             "includePrerelease": prerelease,
             "repository": "",
         }
+        if baseline is not None:
+            prepared_evidence_payload["legacyBaseline"] = baseline
+            prepared_evidence_payload["preserveLegacyFiles"] = arguments.get("preserveLegacyFiles") is True
         prepared = install_prepared_calls(
             approval_arguments,
             [
@@ -1297,7 +1443,7 @@ class VpmPackageInstallPreparer:
             "projectPath": str(state["project"]["path"]),
             "packageId": package_id,
             "packageVersion": selected_version,
-            "compatibilityAction": "install_missing",
+            "compatibilityAction": "upgrade" if upgrade_requested else "install_missing",
             "command": argv,
             "processPolicy": {
                 "scope": "one synchronous child owned by this approved request",
@@ -1319,6 +1465,7 @@ class VpmPackageInstallExecutor:
 
     def execute(self, params: dict[str, Any]) -> dict[str, Any]:
         process_started = False
+        preservation = None
         try:
             evidence = prepared_evidence(params)
             if not isinstance(evidence, dict):
@@ -1381,6 +1528,27 @@ class VpmPackageInstallExecutor:
                 raise RuntimeError(
                     "Prepared VPM project manifest state drifted after approval."
                 )
+            legacy_baseline = evidence.get("legacyBaseline")
+            if isinstance(legacy_baseline, dict):
+                archive_evidence = _ensure_dict(legacy_baseline.get("archive"))
+                archive_path = str(_ensure_dict(archive_evidence.get("identity")).get("path") or "")
+                archive_now = verify_legacy_baseline(archive_path, str(legacy_baseline.get("assetsRoot") or ""))
+                if archive_now.get("archive", {}).get("sha256") != archive_evidence.get("sha256") or archive_now.get("archive", {}).get("identity") != archive_evidence.get("identity"):
+                    raise RuntimeError("Legacy baseline archive drifted after approval.")
+                preserve = evidence.get("preserveLegacyFiles") is True
+                if (not archive_now.get("ok") and not preserve) or archive_now.get("treeDigest") != legacy_baseline.get("treeDigest") or archive_now.get("baselineDigest") != legacy_baseline.get("baselineDigest"):
+                    raise RuntimeError("Legacy Assets baseline drifted after approval.")
+                if preserve:
+                    backup_dir = project_path / ".vrcforge" / "package-backups"
+                    for parent in (backup_dir.parent, backup_dir):
+                        if parent.is_symlink() or (parent.exists() and not parent.is_dir()):
+                            raise RuntimeError("Legacy backup directory must not be a link or file.")
+                    backup_dir.mkdir(parents=True, exist_ok=True)
+                    preservation = create_legacy_preservation_snapshot(
+                        legacy_baseline["assetsRoot"], backup_dir / f"{uuid4().hex}.zip"
+                    )
+                    if not preservation.get("ok") or preservation.get("treeDigest") != legacy_baseline.get("treeDigest"):
+                        raise RuntimeError("Legacy preservation snapshot differs from the approved tree.")
             process_started = True
             proc = _run_vpm_process(
                 self._ports.run_install_process,
@@ -1401,6 +1569,7 @@ class VpmPackageInstallExecutor:
                 "packageId": package_id,
                 "packageVersion": package_version,
                 "command": argv,
+                "legacyPreservation": preservation,
                 "unityRefreshRequired": True,
                 "recovery": {
                     "checkpointMustBeRestoredOnlyIfUserChooses": proc.returncode != 0,
@@ -1417,7 +1586,16 @@ class VpmPackageInstallExecutor:
                 package_id,
                 package_version,
             )
-            return {**result, "vpmManifestReadback": readback}
+            return {
+                **result,
+                "schema": "vrcforge.vpm_package_install.v1",
+                "mutationStarted": True,
+                "mutationApplied": True,
+                "committed": True,
+                "verified": True,
+                "readback": {"verified": True, "scope": "package_manager_files", **readback},
+                "vpmManifestReadback": readback,
+            }
         except (
             RuntimeError,
             OSError,
@@ -1428,6 +1606,11 @@ class VpmPackageInstallExecutor:
             return {
                 "ok": False,
                 "error": str(exc),
+                "legacyPreservation": preservation,
+                "mutationStarted": process_started,
+                "mutationApplied": None if process_started else False,
+                "committed": process_started,
+                "commitState": "unknown" if process_started else "not_started",
                 "unityRefreshRequired": True,
                 "recovery": {
                     "checkpointMustBeRestoredOnlyIfUserChooses": process_started,

@@ -24,8 +24,8 @@ def read(path):
 def test_raw_core_tool_is_in_exact_contract_and_preview_lane():
     contract = read(CONTRACT)
     server = read(SERVER)
-    assert 'ToolCount = 91' in contract
-    assert 'ToolContractVersion = "89"' in contract
+    assert 'ToolCount = 92' in contract
+    assert 'ToolContractVersion = "92"' in contract
     assert '{ "vrc_set_renderer_material_slot", "VRCForge.Editor.RendererMaterialSlotTool" }' in contract
     assert '"vrc_set_renderer_material_slot"' in server
 

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import secrets
+import tarfile
 import time
 import zipfile
 from pathlib import Path
@@ -33,6 +35,7 @@ from prepared_outfit_import_workflow_service import (
     PreparedOutfitImportPreparerPorts,
     classify_prepared_outfit_import_risk,
     prepared_outfit_import_manual_confirmation_reason,
+    verify_unitypackage_asset_content,
 )
 from prepared_unity_execution import PREPARED_UNITY_EXECUTION_ARGUMENT_KEY, build_prepared_execution_plan
 
@@ -47,6 +50,9 @@ def _pending_import(arguments: dict, job_id: str = JOB_ID) -> dashboard_server.M
         "status": "pending",
         "jobId": job_id,
         "mutationStarted": True,
+        "committed": False,
+        "commitState": "unknown",
+        "commitStateKnown": False,
         "projectPath": arguments["projectPath"],
         "unityPackagePath": arguments["unityPackagePath"],
         "expectedSha256": arguments["expectedSha256"],
@@ -65,8 +71,8 @@ def _pending_import(arguments: dict, job_id: str = JOB_ID) -> dashboard_server.M
     })
 
 
-def _completed_import(arguments: dict, job_id: str = JOB_ID) -> dashboard_server.McpResult:
-    return dashboard_server.McpResult(0, "", "", {
+def _completed_import(arguments: dict, job_id: str = JOB_ID, overrides: dict | None = None) -> dashboard_server.McpResult:
+    payload = {
         "ok": True,
         "pending": False,
         "status": "completed",
@@ -84,7 +90,9 @@ def _completed_import(arguments: dict, job_id: str = JOB_ID) -> dashboard_server
             {"assetPath": path, "guid": "a" * 32, "assetType": "UnityEngine.GameObject"}
             for path in arguments["expectedAssetPaths"]
         ],
-    })
+    }
+    payload.update(overrides or {})
+    return dashboard_server.McpResult(0, "", "", payload)
 
 
 def _project(tmp_path: Path) -> Path:
@@ -166,7 +174,8 @@ def test_preparer_reports_blocking_dependency_reason(tmp_path: Path) -> None:
 
 
 def _approved(
-    *, timeout_seconds: float = 180.0, poll_seconds: float = 0.5
+    *, timeout_seconds: float = 180.0, poll_seconds: float = 0.5,
+    verify_imported_asset_content=None,
 ) -> PreparedOutfitImportApprovedWriteService:
     return PreparedOutfitImportApprovedWriteService(
         PreparedOutfitImportApprovedWritePorts(
@@ -217,8 +226,127 @@ def _approved(
             log=dashboard_server.emit_log,
             map_error=lambda exc: dashboard_server.to_http_exception(exc),
             handled_errors=(RuntimeError, dashboard_server.UnityMcpError, ValueError),
+            verify_imported_asset_content=verify_imported_asset_content,
         )
     )
+
+
+def test_execute_uses_target_index_and_real_content_callback_after_import(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = _project(tmp_path)
+    package = tmp_path / "candidate.unitypackage"
+    folder = project / "Assets" / "Outfits" / "Folder"
+    target = project / "Assets" / "Outfits" / "Dress.prefab"
+    target.parent.mkdir(parents=True)
+    folder.mkdir()
+    content = b"persisted prefab bytes"
+    target.write_bytes(content)
+    with tarfile.open(package, "w") as archive:
+        entries = (
+            ("folder/pathname", b"Assets/Outfits/Folder"),
+            ("folder/asset.meta", b"fileFormatVersion: 2\nfolderAsset: yes\n"),
+            ("file/pathname", b"Assets/Outfits/Dress.prefab"),
+            ("file/asset", content),
+        )
+        for name, data in entries:
+            member = tarfile.TarInfo(name)
+            member.size = len(data)
+            archive.addfile(member, io.BytesIO(data))
+    plan = _plan(project, package)
+    plan["plan"]["expectedAssetPaths"] = ["Assets/Outfits/Folder", "Assets/Outfits/Dress.prefab"]
+    prepared, _ = _prepare(tmp_path, plan, {"packagePath": str(package), "projectPath": str(project)})
+    monkeypatch.setattr(dashboard_server, "load_dashboard_settings", lambda _request: SimpleNamespace(unity_mcp_timeout_seconds=30))
+    start_arguments: dict = {}
+
+    def invoke(_settings, tool, arguments, **_kwargs):
+        if tool == "vrc_import_unitypackage" and "expectedSha256" in arguments:
+            start_arguments.update(arguments)
+            return _pending_import(arguments)
+        if tool == "vrc_import_unitypackage":
+            return _completed_import(start_arguments)
+        return dashboard_server.McpResult(0, "", "", {"ok": True})
+
+    monkeypatch.setattr(dashboard_server, "invoke_unity_mcp", invoke)
+    result = _approved(
+        verify_imported_asset_content=lambda package_path, project_path, asset_paths: verify_unitypackage_asset_content(
+            package_path, project_path, asset_paths,
+            lambda path, label: capture_regular_file(path, label=label),
+            lambda path, label: capture_directory(path, label=label),
+        )
+    ).execute(prepared)
+    assert result["ok"] is True
+    assert result["mutationStarted"] is True
+    assert result["committed"] is True
+    assert result["commitState"] == "complete"
+    assert result["commitStateKnown"] is True
+    assert result["contentReadback"]["verified"] is True
+    assert result["contentReadback"]["checked"] == 2
+    public = dashboard_server.AGENT_GATEWAY._external_mcp_write_result(  # noqa: SLF001 - public projection regression.
+        "vrcforge_import_outfit_package", result
+    )
+    assert public["commitState"] == "complete"
+    assert public["outcome"]["commitState"] == "complete"
+
+
+def test_job_receipt_rejects_explicit_conflicting_commit_facts() -> None:
+    arguments = {
+        "projectPath": r"D:\\Unity\\Project",
+        "unityPackagePath": r"D:\\Packages\\Dress.unitypackage",
+        "expectedSha256": "a" * 64,
+        "expectedSize": 7,
+        "expectedAssetPaths": ["Assets/Outfits/Dress.prefab"],
+    }
+    payload = _completed_import(
+        arguments,
+        overrides={"committed": False, "commitState": "unknown"},
+    ).payload
+    with pytest.raises(RuntimeError, match="commit facts"):
+        PreparedOutfitImportApprovedWriteService._job_receipt(
+            payload,
+            {"projectPath": arguments["projectPath"]},
+            {"path": arguments["unityPackagePath"], "sha256": arguments["expectedSha256"], "size": 7},
+            arguments["expectedAssetPaths"],
+        )
+
+
+def test_execute_rejects_file_entry_without_asset_payload_after_import(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = _project(tmp_path)
+    package = tmp_path / "missing-file-payload.unitypackage"
+    target = project / "Assets" / "Outfits" / "Dress.prefab"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"persisted prefab bytes")
+    with tarfile.open(package, "w") as archive:
+        data = b"Assets/Outfits/Dress.prefab"
+        member = tarfile.TarInfo("file/pathname")
+        member.size = len(data)
+        archive.addfile(member, io.BytesIO(data))
+    prepared, _ = _prepare(tmp_path, _plan(project, package), {"packagePath": str(package), "projectPath": str(project)})
+    monkeypatch.setattr(dashboard_server, "load_dashboard_settings", lambda _request: SimpleNamespace(unity_mcp_timeout_seconds=30))
+    start_arguments: dict = {}
+
+    def invoke(_settings, tool, arguments, **_kwargs):
+        if tool == "vrc_import_unitypackage" and "expectedSha256" in arguments:
+            start_arguments.update(arguments)
+            return _pending_import(arguments)
+        if tool == "vrc_import_unitypackage":
+            return _completed_import(start_arguments)
+        return dashboard_server.McpResult(0, "", "", {"ok": True})
+
+    monkeypatch.setattr(dashboard_server, "invoke_unity_mcp", invoke)
+    result = _approved(
+        verify_imported_asset_content=lambda package_path, project_path, asset_paths: verify_unitypackage_asset_content(
+            package_path, project_path, asset_paths,
+            lambda path, label: capture_regular_file(path, label=label),
+        )
+    ).execute(prepared)
+    assert result["ok"] is False
+    assert result["committed"] is True
+    assert result["commitState"] == "partial"
+    assert result["checkpointRecoveryRequired"] is True
+    assert "asset payload is missing for file" in result["error"]
 
 
 def test_preparer_seals_direct_unitypackage_and_refresh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -872,6 +1000,7 @@ def test_nested_zip_and_loose_branches_are_prepared_and_execute_exactly(tmp_path
     result = _approved().execute(prepared)
     assert result["ok"] is True
     assert result["importedPrefabCandidates"] == ["Assets/VRCForge/ImportedOutfits/Dress.prefab"]
+    assert result["nextTool"] == "vrcforge_add_outfit"
     assert (project / "Assets" / "VRCForge" / "ImportedOutfits" / "Dress.prefab").read_bytes() == b"prefab"
 
 

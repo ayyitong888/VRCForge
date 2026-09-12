@@ -34,8 +34,6 @@ namespace VRCForge.Editor
     public static class WardrobeOutfitWriter
     {
         public const string ToolName = "vrc_add_wardrobe_outfit";
-        private const string DefaultClipDir = "Assets/VRCForge/Generated/Wardrobe";
-
         public class Parameters
         {
             [VRCForgeInput("Avatar root path; empty is allowed only when the descriptor selection is unambiguous.", IsRequired = false)]
@@ -59,7 +57,7 @@ namespace VRCForge.Editor
             [VRCForgeInput("Submenu name used for overflow controls.", IsRequired = false)]
             public string subMenuName { get; set; } = "Wardrobe";
             [VRCForgeInput("Assets-relative directory for the generated animation clip.", IsRequired = false)]
-            public string clipOutputDir { get; set; } = DefaultClipDir;
+            public string clipOutputDir { get; set; } = "";
             [VRCForgeInput("Optional fingerprint from the approved wardrobe scan; rejects drift when supplied.", IsRequired = false)]
             public string expectedWardrobeFingerprint { get; set; } = "";
             [VRCForgeInput("Optional approved object receipt nonce required by the continuation lane.", IsRequired = false)]
@@ -92,7 +90,6 @@ namespace VRCForge.Editor
                 var setObjectsDefaultOff = @params["setObjectsDefaultOff"] == null || @params["setObjectsDefaultOff"].ToObject<bool>();
                 var subMenuOverflow = @params["subMenuOverflow"] == null || @params["subMenuOverflow"].ToObject<bool>();
                 var subMenuName = (@params["subMenuName"]?.ToString() ?? "Wardrobe").Trim();
-                var clipDir = NormalizeAssetDir((@params["clipOutputDir"]?.ToString() ?? DefaultClipDir).Trim());
                 var expectedWardrobeFingerprint = (@params["expectedWardrobeFingerprint"]?.ToString() ?? string.Empty).Trim();
                 var approvedObjectReceiptNonce = (@params["approvedObjectReceiptNonce"]?.ToString() ?? string.Empty).Trim();
 
@@ -113,6 +110,8 @@ namespace VRCForge.Editor
                 var explicitOffInputs = ReadStringArray(@params, "offObjectPaths");
 
                 var descriptor = ResolveAvatarDescriptor(avatarPath);
+                var clipDir = GeneratedAssetPaths.ResolveDirectory(@params["clipOutputDir"]?.ToString(), descriptor.name, GeneratedAssetPaths.Animations, "Wardrobe");
+                var menuAssetDir = GeneratedAssetPaths.ResolveDirectory("", descriptor.name, GeneratedAssetPaths.Menus, "Wardrobe");
                 var avatarRoot = descriptor.transform;
                 var avatarRootPath = GetTransformPath(avatarRoot);
                 recoveryAvatarPath = avatarRootPath;
@@ -269,11 +268,13 @@ namespace VRCForge.Editor
 
                 var stateName = MakeUniqueStateName(stateByName, Sanitize(outfitName, "Outfit"));
                 var clipFileName = $"{Sanitize(descriptor.name, "Avatar")}_{Sanitize(parameterName, "Wardrobe")}_{stateName}.anim";
-                var clipPath = $"{clipDir}/{clipFileName}";
+                var clipPath = GeneratedAssetPaths.UniqueAssetPath($"{clipDir}/{clipFileName}");
                 recoveryClipPath = clipPath;
 
                 // Plan menu placement (read-only resolution).
                 var menuPlan = PlanMenuPlacement(descriptor.expressionsMenu, parameterName, menuToggles, subMenuOverflow, subMenuName);
+                var menuAssetPath = addMenuToggle && menuPlan.createsSubMenu
+                    ? GeneratedAssetPaths.UniqueAssetPath($"{menuAssetDir}/{Sanitize(subMenuName, "Wardrobe")}_SubMenu.asset") : "";
 
                 var warnings = new List<string>();
                 if (!writeDefaultsConsistent)
@@ -310,6 +311,8 @@ namespace VRCForge.Editor
                     setObjectsDefaultOff,
                     addMenuToggle = addMenuToggle && menuPlan.menu != null,
                     menuPath = menuPlan.menuPathDisplay,
+                    menuAssetDir,
+                    menuAssetPath,
                     menuOverflowToSubMenu = menuPlan.createsSubMenu,
                     existingOutfitCount = existingValues.Count,
                     warnings
@@ -380,7 +383,7 @@ namespace VRCForge.Editor
                     continuationConsumed = true;
                 }
                 mutationStarted = true;
-                Directory.CreateDirectory(clipDir);
+                AvatarAuthoringCrudCore.EnsureAssetFolder(clipDir);
                 var undoGroup = Undo.GetCurrentGroup();
                 Undo.SetCurrentGroupName($"Add wardrobe outfit '{outfitName}'");
 
@@ -421,7 +424,7 @@ namespace VRCForge.Editor
                         new EditorCurveBinding { path = path, type = typeof(GameObject), propertyName = "m_IsActive" },
                         AnimationCurve.Constant(0f, 0f, 0f));
                 }
-                AssetDatabase.CreateAsset(clip, AssetDatabase.GenerateUniqueAssetPath(clipPath));
+                AssetDatabase.CreateAsset(clip, clipPath);
                 var createdClipPath = AssetDatabase.GetAssetPath(clip);
                 clipReceipt.Asset = createdClipPath;
                 clipReceipt.After = DescribeAsset(clip);
@@ -451,7 +454,7 @@ namespace VRCForge.Editor
                 if (addMenuToggle)
                 {
                     var target = ResolveOrCreateMenuTarget(
-                        descriptor.expressionsMenu, parameterName, menuToggles, subMenuOverflow, subMenuName, clipDir, out appliedMenuPath);
+                        descriptor.expressionsMenu, parameterName, menuToggles, subMenuOverflow, subMenuName, menuAssetDir, menuAssetPath, out appliedMenuPath);
                     if (target != null)
                     {
                         Undo.RegisterCompleteObjectUndo(target, "Add wardrobe menu toggle");
@@ -820,6 +823,7 @@ namespace VRCForge.Editor
             bool subMenuOverflow,
             string subMenuName,
             string assetDir,
+            string plannedSubMenuPath,
             out string appliedMenuPath)
         {
             appliedMenuPath = "";
@@ -840,7 +844,7 @@ namespace VRCForge.Editor
                 {
                     return null;
                 }
-                return CreateOverflowSubMenu(existingHome.menu, parameterName, subMenuName, assetDir, true, out appliedMenuPath);
+                return CreateOverflowSubMenu(existingHome.menu, parameterName, subMenuName, assetDir, plannedSubMenuPath, true, out appliedMenuPath);
             }
             if ((rootMenu.controls?.Count ?? 0) < VRCExpressionsMenu.MAX_CONTROLS)
             {
@@ -852,7 +856,7 @@ namespace VRCForge.Editor
                 return null;
             }
 
-            return CreateOverflowSubMenu(rootMenu, parameterName, subMenuName, assetDir, true, out appliedMenuPath);
+            return CreateOverflowSubMenu(rootMenu, parameterName, subMenuName, assetDir, plannedSubMenuPath, true, out appliedMenuPath);
         }
 
         private static MenuToggleRef FindBestMenuRef(List<MenuToggleRef> menuToggles, bool requireCapacity)
@@ -881,6 +885,7 @@ namespace VRCForge.Editor
             string parameterName,
             string subMenuName,
             string assetDir,
+            string plannedSubMenuPath,
             bool splitFullOwner,
             out string appliedMenuPath)
         {
@@ -890,10 +895,10 @@ namespace VRCForge.Editor
                 return null;
             }
 
-            Directory.CreateDirectory(assetDir);
+            AvatarAuthoringCrudCore.EnsureAssetFolder(assetDir);
             var subMenu = ScriptableObject.CreateInstance<VRCExpressionsMenu>();
             subMenu.controls = new List<VRCExpressionsMenu.Control>();
-            var subPath = AssetDatabase.GenerateUniqueAssetPath($"{assetDir}/{Sanitize(subMenuName, "Wardrobe")}_SubMenu.asset");
+            var subPath = GeneratedAssetPaths.ValidateNewAssetPath(plannedSubMenuPath);
             AssetDatabase.CreateAsset(subMenu, subPath);
 
             Undo.RegisterCompleteObjectUndo(owner, "Add wardrobe submenu");
@@ -1057,12 +1062,6 @@ namespace VRCForge.Editor
         {
             var cleaned = new string((value ?? string.Empty).Select(c => char.IsLetterOrDigit(c) || c == '_' ? c : '_').ToArray()).Trim('_');
             return string.IsNullOrWhiteSpace(cleaned) ? fallback : cleaned;
-        }
-
-        private static string NormalizeAssetDir(string dir)
-        {
-            var normalized = NormalizePath(dir);
-            return string.IsNullOrEmpty(normalized) ? DefaultClipDir : normalized;
         }
 
         private static VRCAvatarDescriptor ResolveAvatarDescriptor(string avatarPath)

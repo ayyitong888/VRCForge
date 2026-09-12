@@ -1,0 +1,9 @@
+{
+  "ok": true,
+  "isPlayMode": false,
+  "moduleConnected": false,
+  "enterPlayModePending": true,
+  "mutationStarted": true,
+  "committed": true,
+  "commitState": "enter_play_mode_requested"
+}

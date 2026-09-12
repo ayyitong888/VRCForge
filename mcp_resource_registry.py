@@ -10,11 +10,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import secrets
 import threading
+import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
+from backend_owner_lease import BackendOwnerLease
 
 
 RESOURCE_SCHEMA = "vrcforge.resource.v1"
@@ -108,18 +113,25 @@ class McpResourceError(ValueError):
 
 
 class McpResourceRegistry:
-    """Process-owned, lock-protected Resource store with immutable revisions."""
+    """Shared on-disk Resource store with transaction-locked immutable revisions."""
 
     def __init__(self, store_dir: Path, *, lock: threading.RLock | None = None) -> None:
         self.store_dir = Path(store_dir)
         self._lock = lock or threading.RLock()
         self._records: dict[str, dict[str, Any]] = {}
         self._latest: dict[str, str] = {}
+        # Immutable revision bytes belong to this registry lifetime and lock.
+        # They cache serialization only, never authorization or target freshness.
+        self._encoded_records: dict[str, bytes] = {}
         self._generation = 0
-        self._load()
+        self._disk_stamp = None
+        self._disk_lease = BackendOwnerLease(self.store_dir / "registry.lock")
+        # Public reads and publishes load under the existing disk guard.
+        # Large historical indexes must not delay Gateway startup.
 
     @property
     def generation(self) -> int:
+        self._load()
         with self._lock:
             return self._generation
 
@@ -127,6 +139,53 @@ class McpResourceRegistry:
         return _json_clone(RESOURCE_TEMPLATES)
 
     def publish(
+        self,
+        *,
+        base_uri: str,
+        name: str,
+        resource_type: str,
+        data: Any,
+        identity: Mapping[str, Any] | None = None,
+        source_mode: str,
+        refresh_rule: str,
+        description: str = "",
+        stale: bool = False,
+        stale_reason: str = "",
+        only_if_absent: bool = False,
+    ) -> dict[str, Any]:
+        return self.publish_many([{
+            "base_uri": base_uri, "name": name, "resource_type": resource_type,
+            "data": data, "identity": identity, "source_mode": source_mode,
+            "refresh_rule": refresh_rule, "description": description, "stale": stale,
+            "stale_reason": stale_reason, "only_if_absent": only_if_absent,
+        }])[0]
+
+    def publish_many(self, entries: Sequence[Mapping[str, Any]], *, validate_records=None) -> list[dict[str, Any]]:
+        """Publish a finite resource batch with one atomic index replacement.
+
+        Instance and OS file locks cover reload, staging, persistence and commit;
+        failure restores the previous in-memory view, while atomic replacement
+        preserves the prior disk index. Existing concurrent records are retained.
+        """
+        prepared = _json_clone(list(entries))
+        if not prepared:
+            return []
+        with self._lock, self._disk_guard():
+            self._load_locked()
+            before = self._records, self._latest, self._generation
+            self._records, self._latest = dict(self._records), dict(self._latest)
+            try:
+                records = [self._publish_staged(**entry) for entry in prepared]
+                if validate_records is not None:
+                    validate_records(records)
+                if self._generation != before[2]:
+                    self._persist_locked()
+                return records
+            except Exception:
+                self._records, self._latest, self._generation = before
+                raise
+
+    def _publish_staged(
         self,
         *,
         base_uri: str,
@@ -179,7 +238,6 @@ class McpResourceRegistry:
             self._records[uri] = envelope
             self._latest[base_uri] = uri
             self._generation += 1
-            self._persist_locked()
             return _json_clone(envelope)
 
     def list(self, *, cursor: str = "", page_size: int = 100) -> dict[str, Any]:
@@ -191,6 +249,7 @@ class McpResourceRegistry:
             raise McpResourceError("cursor must be a non-negative integer") from exc
         if offset < 0:
             raise McpResourceError("cursor must be a non-negative integer")
+        self._load()
         with self._lock:
             records = sorted(
                 (self._records[uri] for uri in self._latest.values()),
@@ -203,7 +262,7 @@ class McpResourceRegistry:
                     "uri": item["uri"],
                     "name": item["name"],
                     "description": item["description"],
-                    "mimeType": RESOURCE_MIME_TYPE,
+                    "mimeType": "image/png" if item["resourceType"] in {"runtime_observation_frame", "texture_asset_preview"} else RESOURCE_MIME_TYPE,
                     "_meta": {
                         "resourceType": item["resourceType"],
                         "revision": item["revision"],
@@ -223,6 +282,7 @@ class McpResourceRegistry:
     def read(self, uri: str) -> dict[str, Any]:
         if not isinstance(uri, str) or not uri.startswith("vrcforge://"):
             raise McpResourceError("resources/read requires a vrcforge:// URI")
+        self._load()
         with self._lock:
             selected_uri = uri
             if "revision=" not in urlsplit(uri).query:
@@ -233,6 +293,15 @@ class McpResourceRegistry:
                     "Resource was not previously captured; use a read Tool to capture it explicitly before resources/read"
                 )
             envelope = _json_clone(record)
+        if envelope["resourceType"] == "runtime_observation_frame":
+            from runtime_frame_resources import read_published_frame
+            return read_published_frame(envelope)
+        if envelope["resourceType"] == "texture_asset_preview":
+            from texture_preview_resources import read_texture_preview
+            return read_texture_preview(envelope)
+        if envelope["resourceType"] == "runtime_observation_state_page":
+            from runtime_state_resources import read_state_page
+            return read_state_page(envelope)
         return {
             "contents": [
                 {
@@ -259,6 +328,7 @@ class McpResourceRegistry:
         revisions = query.get("revision") or []
         if len(revisions) != 1 or not revisions[0].isdigit() or int(revisions[0]) < 1:
             raise McpResourceError("Resource reference must include one positive revision")
+        self._load()
         with self._lock:
             envelope = self._records.get(uri)
             if envelope is None:
@@ -282,37 +352,104 @@ class McpResourceRegistry:
         return self.store_dir / "registry.json"
 
     def _load(self) -> None:
+        with self._lock, self._disk_guard():
+            self._load_locked()
+
+    @contextmanager
+    def _disk_guard(self):
+        # The existing OS lease owns one local registry.lock handle only for
+        # this <=5s acquisition/transaction; release/close is guaranteed. No
+        # network interface or new auth boundary: Gateway authorizes callers.
+        deadline = time.monotonic() + 5.0
+        while not self._disk_lease.acquire():
+            if time.monotonic() >= deadline:
+                raise McpResourceError("Resource registry is busy or unavailable; no publication was committed.")
+            time.sleep(0.02)
+        try:
+            yield
+        finally:
+            self._disk_lease.release()
+
+    def _index_stamp(self):
+        try:
+            stat = self._index_path().stat()
+            return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns
+        except FileNotFoundError:
+            return None
+
+    def _load_locked(self) -> None:
+        stamp = self._index_stamp()
+        if stamp == self._disk_stamp:
+            return
         path = self._index_path()
-        if not path.is_file():
+        if stamp is None:
+            self._records, self._latest, self._encoded_records = {}, {}, {}
+            self._generation, self._disk_stamp = 0, None
             return
         try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload = json.loads(path.read_bytes().decode("utf-8"))
             records = payload.get("records") if isinstance(payload, Mapping) else None
             latest = payload.get("latest") if isinstance(payload, Mapping) else None
             if isinstance(records, Mapping) and isinstance(latest, Mapping):
-                self._records = {str(key): dict(value) for key, value in records.items() if isinstance(value, Mapping)}
+                loaded = {str(key): dict(value) for key, value in records.items() if isinstance(value, Mapping)}
+                self._encoded_records = {uri: value for uri, value in self._encoded_records.items() if self._records.get(uri) == loaded.get(uri)}
+                self._records = loaded
                 self._latest = {str(key): str(value) for key, value in latest.items()}
                 self._generation = int(payload.get("generation", len(self._records)))
-        except (OSError, ValueError, TypeError):
-            self._records = {}
-            self._latest = {}
-            self._generation = 0
+                self._disk_stamp = stamp
+            else:
+                raise ValueError("Missing resource index records or latest mapping")
+        except (OSError, ValueError, TypeError) as exc:
+            raise McpResourceError("Resource registry could not be loaded; existing index was not replaced.") from exc
 
     def _persist_locked(self) -> None:
         self.store_dir.mkdir(parents=True, exist_ok=True)
         path = self._index_path()
-        temporary = path.with_suffix(".tmp")
-        payload = {
-            "schema": "vrcforge.resource_registry.v1",
+        temporary = path.with_name(f".registry.{os.getpid()}.{secrets.token_hex(8)}.tmp")
+        header = {
             "generation": self._generation,
             "latest": self._latest,
-            "records": self._records,
         }
-        temporary.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True, allow_nan=False),
-            encoding="utf-8",
-        )
-        temporary.replace(path)
+        encoded = {}
+        for uri, record in self._records.items():
+            cached = self._encoded_records.get(uri)
+            if cached is None:
+                cached = json.dumps(
+                    {uri: record}, ensure_ascii=False, sort_keys=True,
+                    separators=(",", ":"), allow_nan=False,
+                )[1:-1].encode("utf-8")
+            encoded[uri] = cached
+        # Stream the same JSON index; avoid reencoding or joining all historical
+        # image/state payloads whenever a small new operation receipt is added.
+        try:
+            with temporary.open("xb") as stream:
+                stream.write(json.dumps(
+                    header, ensure_ascii=False, sort_keys=True,
+                    separators=(",", ":"), allow_nan=False,
+                )[:-1].encode("utf-8") + b',"records":{')
+                for index, uri in enumerate(sorted(encoded)):
+                    if index:
+                        stream.write(b",")
+                    stream.write(encoded[uri])
+                stream.write(b'},"schema":"vrcforge.resource_registry.v1"}')
+                stream.flush()
+                os.fsync(stream.fileno())
+            for attempt in range(5):
+                try:
+                    temporary.replace(path)
+                    break
+                except PermissionError as exc:
+                    # Bounded replacement-only retry for transient Windows
+                    # sharing/access denial; never re-run a tool or mutation.
+                    if getattr(exc, "winerror", None) not in {5, 32, 33} or attempt == 4:
+                        raise
+                    time.sleep(0.05)
+        finally:
+            temporary.unlink(missing_ok=True)
+        # A failed write/replace must not cache a revision that the enclosing
+        # publish_many rolls back and may later reuse for a different value.
+        self._encoded_records = encoded
+        self._disk_stamp = self._index_stamp()
 
 
 __all__ = [

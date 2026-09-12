@@ -21,10 +21,13 @@ namespace VRCForge.Editor
 
         public class Parameters
         {
-            [VRCForgeInput("Exact loaded-scene renderer hierarchy path; display/navigation only.", IsRequired = true)] public string rendererPath { get; set; } = "";
+            [VRCForgeInput("Optional 1..256 exact slot assignments in one saved scene; mutually exclusive with single-slot fields.", IsRequired = false)] public object[] assignments { get; set; }
+            [VRCForgeInput("Exact batch evidence returned by preview.", IsRequired = false)] public object expectedBatchPlan { get; set; }
+
+            [VRCForgeInput("Exact loaded-scene renderer hierarchy path; required when assignments is absent.", IsRequired = false)] public string rendererPath { get; set; } = "";
             [VRCForgeInput("Required stable RendererComponentIdentity id.", IsRequired = false)] public string rendererComponentId { get; set; } = "";
-            [VRCForgeInput("One zero-based sharedMaterials slot.", IsRequired = true)] public int? slotIndex { get; set; }
-            [VRCForgeInput("One persistent writable Assets/*.mat main asset.", IsRequired = true)] public string newMaterialAssetPath { get; set; } = "";
+            [VRCForgeInput("One zero-based sharedMaterials slot; required when assignments is absent.", IsRequired = false)] public int? slotIndex { get; set; }
+            [VRCForgeInput("One persistent writable Assets/*.mat main asset; required when assignments is absent.", IsRequired = false)] public string newMaterialAssetPath { get; set; } = "";
             [VRCForgeInput("Exact active Unity project root.", IsRequired = true)] public string expectedProjectPath { get; set; } = "";
             [VRCForgeInput("Return all validated preconditions without mutation.", IsRequired = false)] public bool? preview { get; set; } = false;
             [VRCForgeInput("Preview scene path.", IsRequired = false)] public string expectedScenePath { get; set; } = "";
@@ -42,7 +45,7 @@ namespace VRCForge.Editor
             [VRCForgeInput("Preview new material file digest.", IsRequired = false)] public string expectedNewMaterialFileDigest { get; set; } = "";
         }
 
-        private sealed class Target
+        internal sealed class Target
         {
             internal SavedSceneSnapshot Scene;
             internal Renderer Renderer;
@@ -51,6 +54,7 @@ namespace VRCForge.Editor
 
         public static object HandleCommand(JObject parameters)
         {
+            if (parameters?["assignments"] != null) return UnityRendererMaterialSlotsBatch.HandleCommand(parameters);
             var mutationStarted = false;
             var undoGroup = -1;
             var beforeSlots = new string[0];
@@ -147,7 +151,7 @@ namespace VRCForge.Editor
             };
         }
 
-        private static object MaterialPayload(MaterialEvidence evidence)
+        internal static object MaterialPayload(MaterialEvidence evidence)
         {
             if (evidence == null) return null;
             var material = evidence.Material;
@@ -161,9 +165,9 @@ namespace VRCForge.Editor
         private static string Required(JObject p, string key) { var v = p?[key]?.ToString()?.Trim(); if (string.IsNullOrEmpty(v)) throw new InvalidOperationException(key + " is required."); return v; }
         private static int RequiredInt(JObject p, string key) { if (p?[key]?.Type != JTokenType.Integer) throw new InvalidOperationException(key + " is required."); return p[key].Value<int>(); }
         private static string LowerHex(JObject p, string key, int length, bool required) { var v = p?[key]?.ToString()?.Trim() ?? ""; if (required && (v.Length != length || v.Any(c => !Uri.IsHexDigit(c)))) throw new InvalidOperationException(key + " must be a lowercase hexadecimal identity."); return v.ToLowerInvariant(); }
-        private static void RequireProject(JObject p) { var expected = Required(p, "expectedProjectPath"); var actual = Path.GetFullPath(Directory.GetParent(Application.dataPath).FullName).TrimEnd('\\', '/'); if (!string.Equals(actual, Path.GetFullPath(expected).TrimEnd('\\', '/'), StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("The Unity project no longer matches the verified preview."); }
-        private static string NormalizeMaterialPath(string raw) { var p = raw.Replace('\\', '/'); if (!p.StartsWith("Assets/", StringComparison.Ordinal) || !p.EndsWith(".mat", StringComparison.Ordinal) || p.Contains("..") || p.StartsWith("Packages/", StringComparison.Ordinal)) throw new InvalidOperationException("newMaterialAssetPath must be one main persistent Assets/*.mat asset."); return p; }
-        private static SavedSceneSnapshot ResolveTarget(string rendererPath, string componentId, out Target output)
+        internal static void RequireProject(JObject p) { var expected = Required(p, "expectedProjectPath"); var actual = Path.GetFullPath(Directory.GetParent(Application.dataPath).FullName).TrimEnd('\\', '/'); if (!string.Equals(actual, Path.GetFullPath(expected).TrimEnd('\\', '/'), StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("The Unity project no longer matches the verified preview."); }
+        internal static string NormalizeMaterialPath(string raw) { var p = raw.Replace('\\', '/'); if (!p.StartsWith("Assets/", StringComparison.Ordinal) || !p.EndsWith(".mat", StringComparison.Ordinal) || p.Contains("..") || p.StartsWith("Packages/", StringComparison.Ordinal)) throw new InvalidOperationException("newMaterialAssetPath must be one main persistent Assets/*.mat asset."); return p; }
+        internal static SavedSceneSnapshot ResolveTarget(string rendererPath, string componentId, out Target output)
         {
             var scene = SceneObjectCopyCore.ResolveSavedScene(FindScenePath(rendererPath), "renderer scene");
             var gameObject = SceneObjectCopyCore.ResolveUniqueGameObject(scene.Scene, rendererPath, "renderer path");
@@ -185,14 +189,14 @@ namespace VRCForge.Editor
             if (candidate == null || matches.Count(s => SceneManager.GetSceneByPath(s).GetRootGameObjects().Any(g => g.name == root)) != 1) throw new InvalidOperationException("rendererPath does not select exactly one loaded scene hierarchy.");
             return candidate;
         }
-        private static MaterialEvidence ReadMaterial(string path, string label)
+        internal static MaterialEvidence ReadMaterial(string path, string label)
         {
             var material = AssetDatabase.LoadAssetAtPath<Material>(path); if (material == null || !AssetDatabase.IsMainAsset(material) || !EditorUtility.IsPersistent(material)) throw new InvalidOperationException(label + " is not a persistent main material asset.");
             var full = Path.GetFullPath(Path.Combine(Directory.GetParent(Application.dataPath).FullName, path)); RejectReparse(full); if ((File.GetAttributes(full) & FileAttributes.ReadOnly) != 0) throw new InvalidOperationException(label + " is not writable.");
             return new MaterialEvidence { Material = material, Path = path, Guid = AssetDatabase.AssetPathToGUID(path), Digest = Sha256(File.ReadAllBytes(full)) };
         }
-        private static MaterialEvidence ReadMaterialAsset(Material m, string label) { var p = NormalizeMaterialPath(AssetDatabase.GetAssetPath(m)); return ReadMaterial(p, label); }
-        private static string MaterialIdentity(Material m) { if (m == null) return "null"; var p = AssetDatabase.GetAssetPath(m); return p + "|" + AssetDatabase.AssetPathToGUID(p); }
+        internal static MaterialEvidence ReadMaterialAsset(Material m, string label) { var p = NormalizeMaterialPath(AssetDatabase.GetAssetPath(m)); return ReadMaterial(p, label); }
+        internal static string MaterialIdentity(Material m) { if (m == null) return "null"; var p = AssetDatabase.GetAssetPath(m); return p + "|" + AssetDatabase.AssetPathToGUID(p); }
         private static string Sha256(byte[] bytes) { using (var sha = SHA256.Create()) return BitConverter.ToString(sha.ComputeHash(bytes)).Replace("-", "").ToLowerInvariant(); }
         private static void RejectReparse(string path) { var current = Directory.GetParent(Application.dataPath).FullName; foreach (var part in path.Substring(current.Length).TrimStart('\\', '/').Split('\\', '/')) { current = Path.Combine(current, part); if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0) throw new InvalidOperationException("A material path contains a reparse point."); } }
         private static void RequireEqual(string actual, JObject p, string key) { if (!string.Equals(actual, Required(p, key), StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("The verified scene or material state drifted."); }
@@ -204,6 +208,6 @@ namespace VRCForge.Editor
         {
             var after = r.sharedMaterials; if (after.Length != before.Length || MaterialIdentity(after[slot]) != next.Path + "|" + next.Guid || Enumerable.Range(0, before.Length).Any(i => i != slot && MaterialIdentity(after[i]) != before[i])) throw new InvalidOperationException("Renderer material slots did not persist exactly.");
         }
-        private sealed class MaterialEvidence { internal Material Material; internal string Path; internal string Guid; internal string Digest; }
+        internal sealed class MaterialEvidence { internal Material Material; internal string Path; internal string Guid; internal string Digest; }
     }
 }

@@ -193,11 +193,13 @@ def _legacy_create_wardrobe_calls(
     request = _legacy_create_wardrobe_request(params, preview)
     avatar = request["avatarPath"]
     parameter = request["parameterName"]
-    asset_dir = request.get("assetDir", "Assets/VRCForge/Generated/Wardrobe")
+    asset_dir = request.get("assetDir")
     menu = str(request.get("menuName") or "Wardrobe").strip() or "Wardrobe"
     control = str(request.get("defaultControlName") or "Default").strip() or "Default"
     layer = str(request.get("layerName") or parameter).strip() or str(parameter)
-    common = {"avatarPath": avatar, "assetDir": asset_dir}
+    common = {"avatarPath": avatar}
+    if asset_dir:
+        common["assetDir"] = asset_dir
     return [
         (
             "vrc_ensure_expression_parameter",

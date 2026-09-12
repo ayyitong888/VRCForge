@@ -606,6 +606,65 @@ class DiagnosticLogManager:
                 entries[0:0] = parsed
         return entries[-bounded:]
 
+    def read_history(self, file_name: str, limit: int = 200, offset: int | None = None) -> dict[str, Any]:
+        """Read one explicitly selected retained log file inside ``log_dir``."""
+
+        name = str(file_name or "").strip()
+        if not name or Path(name).name != name or not _LOG_NAME_RE.fullmatch(name):
+            raise ValueError("Diagnostic history file must be one retained VRCForge log filename.")
+        bounded = max(1, min(int(limit), 500))
+        root = self.log_dir.resolve(strict=False)
+        candidate = (self.log_dir / name).resolve(strict=False)
+        try:
+            candidate.relative_to(root)
+        except ValueError as exc:
+            raise ValueError("Diagnostic history file is outside the configured log directory.") from exc
+        if candidate.parent != root:
+            raise ValueError("Diagnostic history file must be directly inside the configured log directory.")
+        if not candidate.is_file():
+            raise FileNotFoundError(f"Diagnostic history file was not found: {name}")
+
+        with candidate.open("rb") as stream:
+            payload = stream.read(self.max_file_bytes + 1)
+        byte_limited = len(payload) > self.max_file_bytes
+        payload = payload[: self.max_file_bytes]
+        lines = payload.splitlines()
+        entries: list[dict[str, Any]] = []
+        for raw_line in lines:
+            parsed = parse_log_line(raw_line.decode("utf-8", errors="replace"))
+            if parsed is not None:
+                entries.append(self.privacy.redact(parsed))
+        available = len(entries)
+        actual_offset = max(0, available - bounded) if offset is None else offset
+        if actual_offset < 0 or actual_offset > available:
+            raise ValueError("Diagnostic history offset is outside the available entries.")
+        page = entries[actual_offset : actual_offset + bounded]
+        next_offset = actual_offset + bounded if actual_offset + bounded < available else None
+        return {
+            "source": "disk",
+            "file": name,
+            "logs": page,
+            "offset": actual_offset,
+            "nextOffset": next_offset,
+            "availableEntryCount": available,
+            "truncated": byte_limited or next_offset is not None or (offset is None and actual_offset > 0),
+            "bytesRead": len(payload),
+        }
+
+    def history_file_names(self) -> list[str]:
+        """List only retained log filenames directly under the configured directory."""
+
+        with self.lock:
+            root = self.log_dir.resolve(strict=False)
+            names: list[str] = []
+            for path in self._log_files_locked():
+                try:
+                    if path.resolve(strict=False).parent == root:
+                        names.append(path.name)
+                except OSError:
+                    continue
+            return names
+
     def tail_lines(self, limit: int = 200) -> list[str]:
         lines: list[str] = []
         for entry in self.tail_entries(limit):

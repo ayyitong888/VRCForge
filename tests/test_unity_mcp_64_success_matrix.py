@@ -203,10 +203,15 @@ def test_avatar_primitive_crud_commands_expose_nonempty_schemas_covering_catalog
         concrete = {key for key in case["arguments"] if not key.startswith("${")}
         assert concrete <= fields, f"{case['tool']} catalog keys missing from schema: {sorted(concrete - fields)}"
 
-    for tool in ("vrc_manage_expression_parameters", "vrc_manage_expression_menu", "vrc_manage_fx_animator"):
+    for tool in ("vrc_manage_expression_parameters", "vrc_manage_expression_menu"):
         assert re.search(r"VRCForgeInput\([^\n]+IsRequired = true\)\] public string action", schemas[tool][1])
+    assert re.search(r"IsRequired = false\)\] public string action", schemas["vrc_manage_fx_animator"][1])
+    assert "public object[] edits" in schemas["vrc_manage_fx_animator"][1]
     assert re.search(r"IsRequired = true\)\] public string clipPath", schemas["vrc_write_animation_curve"][1])
-    assert re.search(r"IsRequired = true\)\] public string propertyName", schemas["vrc_write_animation_curve"][1])
+    # propertyName remains required for the single mode; curves is the mutually exclusive batch mode.
+    assert re.search(r"IsRequired = false\)\] public string propertyName", schemas["vrc_write_animation_curve"][1])
+    assert "public object[] curves" in schemas["vrc_write_animation_curve"][1]
+    assert 'if (string.IsNullOrWhiteSpace(propertyName))' in AVATAR_PRIMITIVE_CRUD
 
 
 def test_animation_curve_atom_supports_lossless_guarded_binding_retarget() -> None:

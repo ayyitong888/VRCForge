@@ -23,6 +23,7 @@ from agent_mcp_2026 import (
 from external_tool_result_contract import build_external_tool_error
 from agent_tool_result_contract import normalize_agent_tool_result
 from operation_context import ensure_operation_result
+from external_mcp_result_projection import RESOURCE_SELECTION, TOOL_SELECTION, project_prompt, project_resource, project_result, project_tool, resource_selection, result_mode, select_tools, tool_names
 
 
 LATEST_PROTOCOL_VERSION = "2025-11-25"
@@ -41,6 +42,7 @@ ToolCallCallback = Callable[[str, Mapping[str, Any]], Any | Awaitable[Any]]
 ToolListRevisionCallback = Callable[[], Any]
 ToolNameResolver = Callable[[str], str]
 ToolCallCatalogueCallback = Callable[[], Sequence[Mapping[str, Any]] | Awaitable[Sequence[Mapping[str, Any]]]]
+ToolCallCatalogueForCallCallback = Callable[[str, Mapping[str, Any]], Sequence[Mapping[str, Any]] | Awaitable[Sequence[Mapping[str, Any]]]]
 ResourceListCallback = Callable[[Mapping[str, Any]], Mapping[str, Any] | Awaitable[Mapping[str, Any]]]
 ResourceTemplatesCallback = Callable[[Mapping[str, Any]], Mapping[str, Any] | Awaitable[Mapping[str, Any]]]
 ResourceReadCallback = Callable[[str], Mapping[str, Any] | Awaitable[Mapping[str, Any]]]
@@ -118,6 +120,7 @@ class McpStandardRouter:
         tool_list_revision: ToolListRevisionCallback | None = None,
         tool_name_resolver: ToolNameResolver | None = None,
         tool_call_catalogue: ToolCallCatalogueCallback | None = None,
+        tool_call_catalogue_for_call: ToolCallCatalogueForCallCallback | None = None,
         resource_list: ResourceListCallback | None = None,
         resource_templates: ResourceTemplatesCallback | None = None,
         resource_read: ResourceReadCallback | None = None,
@@ -135,6 +138,7 @@ class McpStandardRouter:
         self._tool_list_revision = tool_list_revision
         self._tool_name_resolver = tool_name_resolver
         self._tool_call_catalogue = tool_call_catalogue
+        self._tool_call_catalogue_for_call = tool_call_catalogue_for_call
         self._resource_list = resource_list
         self._resource_templates = resource_templates
         self._resource_read = resource_read
@@ -169,6 +173,12 @@ class McpStandardRouter:
         request_id = message.get("id") if isinstance(message, Mapping) else None
         try:
             request_id, method, params, notification = self._request(message)
+            try:
+                presentation_mode = result_mode(params)
+                selected_names = tool_names(params, method)
+                selected_resource = resource_selection(params, method)
+            except ValueError as exc:
+                raise McpStandardError(-32602, str(exc)) from exc
             if method == "initialize":
                 if notification:
                     raise McpStandardError(-32600, "initialize must be a request")
@@ -247,6 +257,10 @@ class McpStandardRouter:
                     raise McpStandardError(-32002, str(exc)) from exc
                 if not isinstance(supplied, Mapping) or not isinstance(supplied.get("contents"), Sequence):
                     raise McpStandardError(-32603, "Resource registry returned invalid contents")
+                try:
+                    supplied = project_resource(supplied, selected_resource)
+                except ValueError as exc:
+                    raise McpStandardError(-32602, str(exc)) from exc
                 return _success(request_id, _strict_json_clone(supplied))
             if method == "prompts/list" and self._prompt_list is not None:
                 if notification:
@@ -268,20 +282,25 @@ class McpStandardRouter:
                     raise McpStandardError(-32602, str(exc)) from exc
                 if not isinstance(supplied, Mapping) or not isinstance(supplied.get("messages"), Sequence):
                     raise McpStandardError(-32603, "Prompt registry returned invalid messages")
-                return _success(request_id, _strict_json_clone(supplied))
+                supplied = project_prompt(_strict_json_clone(supplied), mode=presentation_mode)
+                return _success(request_id, supplied)
             if method == "tools/list":
                 if notification:
                     return None
                 supplied = await _resolve(self._tool_list())
                 if not isinstance(supplied, Sequence) or isinstance(supplied, (str, bytes, bytearray)):
                     raise McpStandardError(-32603, "Tool catalogue must return a sequence")
-                tools = [_normalise_tool(tool) for tool in supplied if isinstance(tool, Mapping)]
+                tools = [project_tool(_normalise_tool(tool), mode=presentation_mode) for tool in supplied if isinstance(tool, Mapping)]
                 if len(tools) != len(supplied):
                     raise McpStandardError(-32603, "Tool catalogue must contain only objects")
                 tools.sort(key=lambda item: item["name"])
                 if len({item["name"] for item in tools}) != len(tools):
                     raise McpStandardError(-32603, "Tool catalogue contains duplicate names")
-                result_payload: dict[str, Any] = {"tools": tools}
+                try:
+                    tools = select_tools(tools, selected_names, mode=presentation_mode)
+                except ValueError as exc:
+                    raise McpStandardError(-32602, str(exc)) from exc
+                result_payload: dict[str, Any] = {"tools": tools, "_meta": {"io.vrcforge/toolSelection": TOOL_SELECTION, "io.vrcforge/resourceSelection": RESOURCE_SELECTION}}
                 if self._tool_list_revision is not None:
                     result_payload["catalogGeneration"] = self._tool_list_revision()
                 return _success(request_id, result_payload)
@@ -292,8 +311,29 @@ class McpStandardRouter:
                 arguments = params.get("arguments", {})
                 if not _is_nonempty_string(name) or not isinstance(arguments, Mapping):
                     raise McpStandardError(-32602, "tools/call requires a non-empty name and object arguments")
-                catalogue_callback = self._tool_call_catalogue or self._tool_list
-                supplied = await _resolve(catalogue_callback())
+                catalogue_callback = self._tool_call_catalogue_for_call
+                try:
+                    if catalogue_callback is not None:
+                        supplied = await _resolve(catalogue_callback(str(name), arguments))
+                    else:
+                        catalogue_callback = self._tool_call_catalogue or self._tool_list
+                        supplied = await _resolve(catalogue_callback())
+                except McpStandardError:
+                    raise
+                except Exception as exc:
+                    # The handler has not been selected or called. Preserve
+                    # the lookup cause without suggesting an uncertain write.
+                    return _error(
+                        request_id,
+                        -32603,
+                        "Tool catalogue is unavailable",
+                        {"tool": str(name)},
+                        failure_phase="tool_catalogue_lookup",
+                        tool_routing_started=False,
+                        mutation_started=False,
+                        committed=False,
+                        exception=exc,
+                    )
                 catalogue = {
                     str(tool.get("name")): tool
                     for tool in supplied
@@ -365,6 +405,7 @@ class McpStandardRouter:
                     write=is_write,
                 )
                 structured["outcome"] = outcome
+                structured = project_result(structured, mode=presentation_mode, resource_readable=self._resource_read is not None)
                 return _success(
                     request_id,
                     {

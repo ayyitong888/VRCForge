@@ -172,7 +172,7 @@ namespace VRCForge.Editor
                     skipped.Add(new RestoreSkippedItem
                     {
                         project_relative_path = relativePath,
-                        reason = "Current file differs from the backup source hash. Re-run with allowOverwriteChanged=true after review."
+                        reason = "Current file differs from the backup source hash. Preview skips this file. After review, use the separately approved restore write with allowOverwriteChanged=true only if overwrite is intended."
                     });
                     continue;
                 }

@@ -13,6 +13,7 @@ from typing import Any
 
 from external_tool_result_contract import (
     canonical_result_facts,
+    is_gesture_manager_entry_pending,
     prioritize_result_sources,
 )
 
@@ -403,15 +404,20 @@ def normalize_agent_tool_result(
     views = _views(value)
     causal_views = prioritize_result_sources(views)
     verification, verification_needs_action = _verification(views, write=write)
+    gm_entry_pending = any(
+        is_gesture_manager_entry_pending(str(view.get("tool") or ""), view)
+        for view in views
+    )
 
     failed_view: Mapping[str, Any] | None = None
     top_level_execution_status = _status(
         views[0].get("toolExecutionStatus") if views else None
     )
-    needs_action = verification_needs_action or bool(
+    needs_action = (verification_needs_action and not gm_entry_pending) or bool(
         views
         and top_level_execution_status not in _SUCCESSFUL_EXECUTION_STATUSES
         and _status(views[0].get("status")) in _TOP_LEVEL_PENDING_STATUSES
+        and not gm_entry_pending
     )
     for view in views:
         if view.get("isError") is True:
@@ -469,6 +475,10 @@ def normalize_agent_tool_result(
             ),
             **_structured_error_route_fields(projected_error),
         }
+    elif gm_entry_pending:
+        status = "pending"
+        summary = "Gesture Manager Play Mode entry was requested and is pending."
+        error = None
     elif needs_action:
         status = "needs_user_action"
         projected_error = _structured_error(causal_views)

@@ -8,7 +8,7 @@ from typing import Any
 
 RUNTIME_TURN_EVENT_SCHEMA = "vrcforge.runtime_turn_event.v1"
 RUNTIME_CONTINUATION_SOURCES = frozenset(
-    {"approval_finished", "shell_process_finished", "sub_agent_finished"}
+    {"approval_finished", "shell_process_finished", "sub_agent_finished", "question_answered"}
 )
 
 

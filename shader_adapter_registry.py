@@ -11,8 +11,28 @@ _SHADER_ADAPTER_DEFINITIONS: dict[str, dict[str, Any]] = {
     "liltoon": {
         "label": "lilToon",
         "knownPackageIds": ["jp.lilxyzw.liltoon"],
-        "safeSemanticProperties": ["main_color", "main_saturation", "shade_color", "shadow_border", "smoothness", "emission_strength", "rendering_mode"],
-        "blockedProperties": ["raw_property_name", "unknown_texture_slot", "render_queue_without_adapter"],
+        "safeSemanticProperties": [
+            "main_color", "main_saturation", "shade_color", "shadow_border", "smoothness",
+            "emission_strength", "rendering_mode", "dissolve_mode", "dissolve_shape",
+            "dissolve_border", "dissolve_blur", "dissolve_direction_x",
+            "dissolve_direction_y", "dissolve_direction_z"
+        ],
+        "safeSemanticPropertyMetadata": {
+            "dissolve_mode": {"type": "enum", "range": [0, 3], "default": 0, "description": "0 disabled, 1 texture mask, 2 UV distance, 3 object-space position"},
+            "dissolve_shape": {"type": "enum", "range": [0, 1], "default": 0, "description": "0 radial/distance, 1 directional axis"},
+            "dissolve_border": {"type": "float", "range": ["float_min", "float_max"], "default": 0.5, "description": "Dissolve threshold; directional dot distance can be negative and UV/object-space distance can exceed 1"},
+            "dissolve_blur": {"type": "float", "range": [0.0001, "float_max"], "default": 0.1, "description": "Positive dissolve edge width; zero is rejected to avoid shader division by zero"},
+            "dissolve_direction_x": {"type": "float", "range": [-1.0, 1.0], "default": 0.0, "description": "Object-space dissolve position/direction X component"},
+            "dissolve_direction_y": {"type": "float", "range": [-1.0, 1.0], "default": 0.0, "description": "Object-space dissolve position/direction Y component"},
+            "dissolve_direction_z": {"type": "float", "range": [-1.0, 1.0], "default": 0.0, "description": "Object-space dissolve position/direction Z component"},
+        },
+        "dissolveRequirements": {
+            "requiredShaderFeature": "LIL_FEATURE_DISSOLVE",
+            "supportedRenderingModes": ["Cutout", "Transparent"],
+            "opaqueBehavior": "dissolve_is_bypassed",
+            "directionNote": "direction components are meaningful only with mode=3 and shape=1; position-space use is shader-defined",
+        },
+        "blockedProperties": ["raw_property_name", "unknown_texture_slot", "render_queue_without_adapter", "dissolve_raw_property", "dissolve_unsupported_shader"],
         "semanticTuning": True,
         "restoreEncryption": True,
         "proofStatus": "first_class_preview",

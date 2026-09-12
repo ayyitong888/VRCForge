@@ -80,6 +80,16 @@ def test_identity_metadata_declares_no_hierarchy_fallback():
     assert "object.globalObjectId" in metadata["required"]
 
 
+def test_standalone_object_target_has_no_fabricated_avatar_requirement(tmp_path: Path):
+    target = _target(tmp_path, scope="object")
+    target.pop("avatar")
+    target["object"]["exactHierarchyPath"] = "GestureManager"
+    target["namespace"] = canonical_namespace(target)
+    validated = validate_execution_target(target, project_root=str(tmp_path), required_scope="object")
+    assert "avatar" not in validated
+    assert "/objects/object-global-id" in validated["namespace"]
+
+
 def _live_runtime_target(tmp_path: Path) -> dict:
     assets = tmp_path / "Assets"
     assets.mkdir()

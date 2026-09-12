@@ -23,6 +23,36 @@ _GENERIC_ERROR_CODES = frozenset(
 )
 
 
+def is_gesture_manager_entry_pending(tool_name: str, value: Any) -> bool:
+    """Recognize the exact Core receipt for an asynchronous GM Play entry."""
+
+    if str(tool_name or "").strip() != "vrcforge_gesture_manager_enter_play_mode":
+        return False
+    pending: list[tuple[Mapping[str, Any], int]] = []
+    if isinstance(value, Mapping):
+        pending.append((value, 0))
+    seen: set[int] = set()
+    while pending:
+        candidate, depth = pending.pop(0)
+        if id(candidate) in seen:
+            continue
+        seen.add(id(candidate))
+        if (
+            candidate.get("enterPlayModePending") is True
+            and candidate.get("isPlayMode") is False
+            and candidate.get("moduleConnected") is False
+            and candidate.get("commitState") == "enter_play_mode_requested"
+        ):
+            return True
+        if depth >= 2:
+            continue
+        for key in ("structuredContent", "result", "payload", "data"):
+            nested = candidate.get(key)
+            if isinstance(nested, Mapping):
+                pending.append((nested, depth + 1))
+    return False
+
+
 def _source_error_code(source: Mapping[str, Any]) -> str:
     return str(
         source.get("errorCode")
@@ -204,7 +234,11 @@ def canonical_result_facts(
             key in cause_only_keys and not cause_relevant
         ):
             continue
-        value = first(*names)
+        # Keep a structured recovery explanation ahead of a boolean alias
+        # carried by an earlier wrapper projection.
+        value = first("recovery") if key == "recovery" else first(*names)
+        if key == "recovery" and value is None:
+            value = first(*names)
         if value not in (None, "", [], {}) and value != "unknown":
             facts[key] = value
     if cause and "failureCause" not in facts:
@@ -240,6 +274,7 @@ def canonical_result_facts(
 
     for key in (
         "retryable",
+        "recoveryRequired",
         "checkpointRecoveryRequired",
         "temporaryCleanupRequired",
     ):
@@ -263,6 +298,27 @@ def canonical_result_facts(
         else:
             commit_state = "unknown"
         facts["commitState"] = commit_state
+    if (
+        commit_state == "not_started"
+        and facts.get("mutationStarted") is False
+        and facts.get("committed") is False
+    ):
+        # A wrapper may carry a stale recovery projection from an unknown
+        # commit-state path. Explicit no-write facts are authoritative.
+        recovery = facts.get("recovery")
+        explicit_recovery = (
+            facts.get("recoveryRequired") is True
+            or facts.get("checkpointRecoveryRequired") is True
+            or facts.get("temporaryCleanupRequired") is True
+        )
+        if not explicit_recovery and (
+            not isinstance(recovery, Mapping)
+            or recovery.get("required") is True
+        ):
+            facts["recovery"] = {
+                "required": False,
+                "reason": "No mutation started.",
+            }
     raw_commit_known = _first_present(expanded_sources, "commitStateKnown")
     if isinstance(raw_commit_known, bool):
         facts["commitStateKnown"] = raw_commit_known
@@ -484,6 +540,56 @@ def build_external_tool_error(
         if isinstance(nested_result, Mapping)
         else None
     )
+    # A failed Core call can be wrapped once by MCP and once by the gateway.
+    # Only accept the bounded domain data from those two known shapes; never
+    # search arbitrary data recursively or infer state from an error message.
+    nested_core_data: list[Mapping[str, Any]] = []
+    for transport, structured in (
+        (raw, nested_structured),
+        (nested_result, nested_result_structured),
+    ):
+        if not isinstance(transport, Mapping) or not isinstance(structured, Mapping):
+            continue
+        data = structured.get("data")
+        if (
+            transport.get("isError") is not True
+            or structured.get("success") is not False
+            or not isinstance(data, Mapping)
+            or str(data.get("schema") or "").casefold().startswith("vrcforge.") is False
+            or data.get("ok") is not False
+            or type(data.get("mutationStarted")) is not bool
+            or type(data.get("committed")) is not bool
+            or str(data.get("commitState") or "").casefold() not in _KNOWN_COMMIT_STATES
+        ):
+            continue
+        operation_ids = [
+            str(value).strip()
+            for value in (
+                raw.get("operationId"),
+                transport.get("operationId"),
+                structured.get("operationId"),
+                data.get("operationId"),
+            )
+            if value not in (None, "")
+        ]
+        if len(set(operation_ids)) > 1:
+            continue
+        if (
+            raw.get("commitState") not in (None, "", "unknown")
+            and str(raw.get("commitState")).casefold() != str(data.get("commitState")).casefold()
+        ):
+            continue
+        if (
+            type(raw.get("mutationStarted")) is bool
+            and raw.get("mutationStarted") is not data.get("mutationStarted")
+        ):
+            continue
+        if (
+            type(raw.get("committed")) is bool
+            and raw.get("committed") is not data.get("committed")
+        ):
+            continue
+        nested_core_data.append(data)
     sources = [
         source
         for source in (
@@ -497,6 +603,7 @@ def build_external_tool_error(
             nested_raw_result if isinstance(nested_raw_result, Mapping) else None,
             nested_result_details if isinstance(nested_result_details, Mapping) else None,
             nested_result_structured if isinstance(nested_result_structured, Mapping) else None,
+            *nested_core_data,
         )
         if isinstance(source, Mapping)
     ]

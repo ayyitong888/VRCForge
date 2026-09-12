@@ -102,7 +102,7 @@ GENERATED_ROOT = "Packages/com.vrcfury.temp/Builds"
 STAGING_ROOT = GENERATED_ROOT + "/VRCForge Input"
 AUXILIARY_PACKAGE_ROOT = "Packages/nadena.dev.ndmf"
 AUXILIARY_GENERATED_ROOT = AUXILIARY_PACKAGE_ROOT + "/__Generated"
-OUTPUT_ROOT = "Assets/VRCForge/Generated"
+OUTPUT_ROOT = "Assets/VRCForgeGenerated"
 OUTPUT_KIND_ROOT = OUTPUT_ROOT + "/ParameterBitPacking"
 EMPTY_GENERATED_TREE_DIGEST = hashlib.sha256(
     b"vrcforge.generated_tree.v1\n"

@@ -3,6 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import dashboard_server
+from agent_approval_transactions import _gesture_manager_entry_is_pending
 
 
 def test_gesture_manager_status_forwards_bounded_parameter_selection(monkeypatch) -> None:
@@ -123,6 +124,46 @@ def test_gesture_manager_enter_play_mode_routes_one_exact_core_atom(monkeypatch)
     ]
 
 
+def test_gesture_manager_pending_core_receipt_is_not_executed() -> None:
+    result = {
+        "ok": True,
+        "isPlayMode": False,
+        "moduleConnected": False,
+        "enterPlayModePending": True,
+        "commitState": "enter_play_mode_requested",
+    }
+
+    assert _gesture_manager_entry_is_pending(
+        "vrcforge_gesture_manager_enter_play_mode", {"result": result}
+    ) is True
+    assert _gesture_manager_entry_is_pending("other_tool", {"result": result}) is False
+    assert _gesture_manager_entry_is_pending(
+        "vrcforge_gesture_manager_enter_play_mode",
+        {"result": {**result, "moduleConnected": True, "isPlayMode": True}},
+    ) is False
+
+
+def test_gesture_manager_pending_real_mcp_envelope_keeps_scheduled_commit_state() -> None:
+    envelope = {
+        "structuredContent": {
+            "ok": True,
+            "status": "executed",
+            "result": {
+                "isPlayMode": False,
+                "moduleConnected": False,
+                "enterPlayModePending": True,
+                "mutationStarted": True,
+                "committed": True,
+                "commitState": "enter_play_mode_requested",
+            },
+        }
+    }
+
+    assert _gesture_manager_entry_is_pending(
+        "vrcforge_gesture_manager_enter_play_mode", envelope
+    ) is True
+
+
 def test_gesture_manager_enter_play_mode_finalizer_returns_only_connection_identity(monkeypatch) -> None:
     monkeypatch.setattr(
         dashboard_server,
@@ -152,7 +193,7 @@ def test_gesture_manager_enter_play_mode_finalizer_returns_only_connection_ident
         {"ok": True, "avatarPath": "Scene/FinalAvatar"},
     )
 
-    assert result == {
+    expected = {
         "ok": True,
         "isPlayMode": True,
         "packageDetected": True,
@@ -168,6 +209,10 @@ def test_gesture_manager_enter_play_mode_finalizer_returns_only_connection_ident
         "committed": True,
         "commitState": "runtime_connected",
     }
+    assert result == {**expected, "schema": "vrcforge.editor_state_completion.v1", "verified": True,
+                      "transitionScheduled": False, "verificationRequired": False,
+                      "identityVerification": {"verified": False, "status": "not_bound"},
+                      "readback": {key: value for key, value in expected.items() if key not in {"persistent", "sceneDirty", "mutationStarted", "committed", "commitState"}}}
     assert "menuTree" not in result
     assert "runtimeParameters" not in result
     assert "task_continuation" not in result

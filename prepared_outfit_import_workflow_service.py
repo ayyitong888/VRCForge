@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import os
+import tarfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable
@@ -15,6 +17,75 @@ from prepared_unity_execution import (
 
 
 PreparedImportCall = tuple[str, dict[str, Any]]
+
+
+def verify_unitypackage_asset_content(
+    package_path: str | Path,
+    project_path: str | Path,
+    expected_asset_paths: list[str],
+    capture_regular_file: Callable[[Path, str], tuple[dict[str, Any], str]],
+    capture_directory: Callable[[Path, str], dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Compare package files or folder identities with exact persisted targets."""
+    expected = {str(path).replace("\\", "/").strip(): None for path in expected_asset_paths}
+    if not expected:
+        return {"verified": True, "checked": 0, "assets": []}
+    package_assets: dict[str, tuple[str, str | None]] = {}
+    with tarfile.open(Path(package_path), mode="r:*") as archive:
+        for member in archive.getmembers():
+            if not member.isfile() or not member.name.replace("\\", "/").endswith("/pathname"):
+                continue
+            pathname_file = archive.extractfile(member)
+            if pathname_file is None:
+                continue
+            asset_path = pathname_file.read(32768).decode("utf-8", errors="replace").strip().replace("\\", "/")
+            if asset_path not in expected:
+                continue
+            asset_member_name = member.name.rsplit("/", 1)[0] + "/asset"
+            try:
+                asset_meta = archive.extractfile(archive.getmember(member.name.rsplit("/", 1)[0] + "/asset.meta"))
+                meta_text = asset_meta.read(32768).decode("utf-8", errors="replace") if asset_meta is not None else ""
+            except KeyError:
+                meta_text = ""
+            try:
+                asset_member = archive.getmember(asset_member_name)
+            except KeyError as exc:
+                if "folderAsset: yes" in meta_text:
+                    package_assets[asset_path] = ("folder", None)
+                    continue
+                raise RuntimeError(f"UnityPackage asset payload is missing for file {asset_path}.") from exc
+            asset_file = archive.extractfile(asset_member)
+            if asset_file is None:
+                raise RuntimeError(f"UnityPackage asset payload is missing for {asset_path}.")
+            digest = hashlib.sha256()
+            while chunk := asset_file.read(1024 * 1024):
+                digest.update(chunk)
+            package_assets[asset_path] = ("file", digest.hexdigest())
+    missing = sorted(set(expected) - set(package_assets))
+    if missing:
+        raise RuntimeError(f"UnityPackage content readback is incomplete for: {missing}")
+    project_root = Path(project_path).expanduser().resolve()
+    checked: list[dict[str, Any]] = []
+    for asset_path, (asset_kind, package_sha256) in package_assets.items():
+        target = (project_root / Path(*PurePosixPath(asset_path).parts)).resolve()
+        try:
+            target.relative_to(project_root / "Assets")
+        except ValueError as exc:
+            raise RuntimeError(f"UnityPackage content readback target escaped Assets/: {asset_path}") from exc
+        if asset_kind == "folder":
+            if capture_directory is None:
+                raise RuntimeError(f"Folder readback helper is unavailable for {asset_path}.")
+            capture_directory(target, f"Imported folder readback {asset_path}")
+            checked.append({"assetPath": asset_path, "kind": "folder"})
+            continue
+        _, target_sha256 = capture_regular_file(target, f"Imported asset readback {asset_path}")
+        if target_sha256 != package_sha256:
+            raise RuntimeError(
+                f"Imported asset content readback mismatch for {asset_path}: "
+                f"package={package_sha256}, target={target_sha256}"
+            )
+        checked.append({"assetPath": asset_path, "kind": "file", "packageSha256": package_sha256, "targetSha256": target_sha256})
+    return {"verified": True, "checked": len(checked), "assets": checked}
 
 
 def classify_prepared_outfit_import_risk(arguments: dict[str, Any]) -> str:
@@ -438,6 +509,7 @@ class PreparedOutfitImportApprovedWritePorts:
     log: Callable[[str, str, str, dict[str, Any]], None]
     map_error: Callable[[Exception], Exception]
     handled_errors: tuple[type[BaseException], ...]
+    verify_imported_asset_content: Callable[[str | Path, str | Path, list[str]], dict[str, Any]] | None = None
 
 
 class PreparedOutfitImportApprovedWriteService:
@@ -494,6 +566,18 @@ class PreparedOutfitImportApprovedWriteService:
             character not in "0123456789abcdef" for character in job_id
         ):
             raise RuntimeError("Unity Core import job receipt is invalid.")
+        terminal_receipt = payload.get("pending") is False or str(
+            payload.get("status") or ""
+        ).strip().casefold() in {"completed", "done"}
+        if terminal_receipt:
+            receipt_committed = payload.get("committed")
+            receipt_commit_state = str(payload.get("commitState") or "").strip().casefold()
+            if receipt_committed is not None and receipt_committed is not True:
+                raise RuntimeError("Unity Core import receipt has conflicting commit facts.")
+            if receipt_commit_state and receipt_commit_state not in {"complete", "committed"}:
+                raise RuntimeError("Unity Core import receipt has conflicting commit facts.")
+            if receipt_committed is True and receipt_commit_state not in {"complete", "committed"}:
+                raise RuntimeError("Unity Core import receipt has incomplete commit facts.")
         try:
             received_size = int(payload.get("expectedSize", -1))
             expected_size = int(identity["size"])
@@ -537,6 +621,7 @@ class PreparedOutfitImportApprovedWriteService:
                 "readbackFailureCode",
                 "readbackFailureReason",
                 "readbackAttemptedUtc",
+                "selectedItemsEvidence",
             )
             if payload.get(key) is not None
         }
@@ -634,6 +719,7 @@ class PreparedOutfitImportApprovedWriteService:
                 ),
             }
         return payload
+
 
     def execute(self, arguments: dict[str, Any]) -> dict[str, Any]:
         imports: list[dict[str, Any]] = []
@@ -743,7 +829,10 @@ class PreparedOutfitImportApprovedWriteService:
                     **loose_copied,
                     "importedPrefabCandidates": prefab_assets,
                     "assetDatabaseRefresh": refresh,
-                    "nextTool": "vrcforge_add_outfit",
+                    # An assembly-definition-only dependency import has no
+                    # outfit to bind; keep the next step a readback instead
+                    # of sending the agent into avatar authoring.
+                    "nextTool": "vrcforge_add_outfit" if prefab_assets else "vrcforge_get_asset_info",
                 }
             queue = evidence.get("queue")
             if (
@@ -1005,6 +1094,50 @@ class PreparedOutfitImportApprovedWriteService:
             write_started = False
             failure_layer = "project_identity_verification"
             self._ports.verify_project_identity(project_identity)
+            content_readback = None
+            if self._ports.verify_imported_asset_content is not None:
+                target_index = evidence.get("targetIndex")
+                if not isinstance(target_index, int) or not 0 <= target_index < len(queue):
+                    raise RuntimeError("Prepared outfit target index evidence is invalid.")
+                target_item = queue[target_index]
+                target_identity = target_item.get("identity") if isinstance(target_item, dict) else None
+                if not isinstance(target_identity, dict):
+                    raise RuntimeError("Prepared outfit target package identity is invalid.")
+                content_readback = self._ports.verify_imported_asset_content(
+                    str(target_identity.get("path") or ""),
+                    str(project_identity.get("projectPath") or ""),
+                    [str(path) for path in evidence.get("expectedAssetPaths") or []],
+                )
+            nested_receipts_complete = bool(imports) and all(
+                isinstance(item.get("unityImport"), dict)
+                and item["unityImport"].get("committed") is True
+                and str(item["unityImport"].get("commitState") or "").strip().casefold()
+                in {"complete", "committed"}
+                for item in imports
+            )
+            content_receipt_verified = (
+                content_readback is None
+                or (
+                    isinstance(content_readback, dict)
+                    and content_readback.get("verified") is True
+                )
+            )
+            if not nested_receipts_complete or not content_receipt_verified:
+                cleanup_error = cleanup_materializations()
+                return {
+                    "ok": False,
+                    "failureLayer": "unity_core_receipt_validation",
+                    "mutationStarted": True,
+                    "committed": True,
+                    "commitState": "unknown",
+                    "checkpointRecoveryRequired": True,
+                    "kind": kind,
+                    "unityImports": imports,
+                    "assetDatabaseRefresh": refresh,
+                    "contentReadback": content_readback,
+                    "temporaryCleanupError": cleanup_error or None,
+                    "error": "Unity Core import completion facts were missing or contradictory.",
+                }
             failure_layer = "temporary_cleanup"
             cleanup_error = cleanup_materializations()
             if cleanup_error:
@@ -1023,6 +1156,14 @@ class PreparedOutfitImportApprovedWriteService:
                 }
             return {
                 "ok": True,
+                # Every entry in ``imports`` has passed _job_receipt and the
+                # optional content callback has verified the persisted bytes.
+                # Keep the refresh transaction's own unknown commit facts
+                # nested below; they must not erase the completed import receipt.
+                "mutationStarted": True,
+                "committed": True,
+                "commitState": "complete",
+                "commitStateKnown": True,
                 "kind": kind,
                 "unityImports": imports,
                 "assetDatabaseRefresh": refresh,
@@ -1032,6 +1173,7 @@ class PreparedOutfitImportApprovedWriteService:
                     if str(path).lower().endswith(".prefab")
                 ],
                 "nextTool": "vrcforge_add_outfit",
+                **({"contentReadback": content_readback} if content_readback is not None else {}),
             }
         except self._ports.handled_errors as exc:
             cleanup_error = cleanup_materializations()

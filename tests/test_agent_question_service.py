@@ -3,6 +3,8 @@ from __future__ import annotations
 import threading
 from pathlib import Path
 
+import pytest
+
 from agent_question_service import (
     AgentQuestionPersistence,
     AgentQuestionPersistencePorts,
@@ -92,3 +94,18 @@ def test_question_service_preserves_scope_and_answer_exactly_once(tmp_path: Path
     assert len(records) == 1
     assert first.list(session_id="session-a", project_root="D:/ProjectA")["count"] == 0
     assert first.list(session_id="session-a", project_root="D:/ProjectA", include_answered=True)["count"] == 1
+
+
+def test_question_service_allows_free_text_and_rejects_single_option_or_empty_answer(tmp_path: Path) -> None:
+    service = _service(tmp_path, threading.RLock(), [])
+    created = service.create({"question": "Describe the proof", "sessionId": "s"})
+    question_id = str(created["question"]["questionId"])
+    answered = service.answer(question_id, {"sessionId": "s", "answer": "A bounded answer"})
+    assert answered["question"]["answer"] == "A bounded answer"
+
+    with pytest.raises(AgentQuestionServiceError, match="at least two"):
+        service.create({"question": "Pick one", "options": ["Only one"]})
+
+    second = service.create({"question": "Answer required", "sessionId": "s"})
+    with pytest.raises(AgentQuestionServiceError, match="answer is required"):
+        service.answer(str(second["question"]["questionId"]), {"sessionId": "s"})

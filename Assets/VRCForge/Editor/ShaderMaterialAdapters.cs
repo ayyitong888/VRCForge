@@ -60,7 +60,14 @@ namespace VRCForge.Editor
             "matcap_strength",
             "outline_color",
             "outline_width",
-            "normal_strength"
+            "normal_strength",
+            "dissolve_mode",
+            "dissolve_shape",
+            "dissolve_border",
+            "dissolve_blur",
+            "dissolve_direction_x",
+            "dissolve_direction_y",
+            "dissolve_direction_z"
         };
 
         private readonly Dictionary<string, SemanticPropertyMapping> mappings;
@@ -262,6 +269,11 @@ namespace VRCForge.Editor
                 return false;
             }
 
+            if (mapping.integer && !Mathf.Approximately(number, Mathf.Round(number)))
+            {
+                return false;
+            }
+
             normalized = Mathf.Clamp(number, mapping.min, mapping.max);
             return true;
         }
@@ -292,7 +304,18 @@ namespace VRCForge.Editor
                 ["matcap_strength"] = SemanticPropertyMapping.Float(0f, 1f, "_MatCapBlend", "_MatCapEnableLighting"),
                 ["outline_color"] = SemanticPropertyMapping.Color("_OutlineColor"),
                 ["outline_width"] = SemanticPropertyMapping.Float(0f, 0.25f, "_OutlineWidth"),
-                ["normal_strength"] = SemanticPropertyMapping.Float(0f, 2f, "_BumpScale")
+                ["normal_strength"] = SemanticPropertyMapping.Float(0f, 2f, "_BumpScale"),
+                // lilToon: _DissolveParams = (mode, shape, border, blur).
+                ["dissolve_mode"] = SemanticPropertyMapping.EnumVectorComponent(0f, 3f, 0, "_DissolveParams"),
+                ["dissolve_shape"] = SemanticPropertyMapping.EnumVectorComponent(0f, 1f, 1, "_DissolveParams"),
+                // Threshold is not clamped by lilToon: UV/object-space distance can exceed 1.
+                ["dissolve_border"] = SemanticPropertyMapping.VectorComponent(float.MinValue, float.MaxValue, 2, "_DissolveParams"),
+                // Zero would divide by zero in the shader; keep a small positive edge width.
+                ["dissolve_blur"] = SemanticPropertyMapping.VectorComponent(0.0001f, float.MaxValue, 3, "_DissolveParams"),
+                // _DissolvePos.xyz is the position or direction axis for position mode.
+                ["dissolve_direction_x"] = SemanticPropertyMapping.VectorComponent(-1f, 1f, 0, "_DissolvePos"),
+                ["dissolve_direction_y"] = SemanticPropertyMapping.VectorComponent(-1f, 1f, 1, "_DissolvePos"),
+                ["dissolve_direction_z"] = SemanticPropertyMapping.VectorComponent(-1f, 1f, 2, "_DissolvePos")
             })
         {
         }
@@ -388,6 +411,7 @@ namespace VRCForge.Editor
         public float max;
         public string[] aliases;
         public int vectorComponent;
+        public bool integer;
 
         public static SemanticPropertyMapping Float(float min, float max, params string[] aliases)
         {
@@ -420,6 +444,19 @@ namespace VRCForge.Editor
                 max = max,
                 aliases = aliases,
                 vectorComponent = component
+            };
+        }
+
+        public static SemanticPropertyMapping EnumVectorComponent(float min, float max, int component, params string[] aliases)
+        {
+            return new SemanticPropertyMapping
+            {
+                kind = SemanticPropertyKind.VectorComponent,
+                min = min,
+                max = max,
+                aliases = aliases,
+                vectorComponent = component,
+                integer = true
             };
         }
     }

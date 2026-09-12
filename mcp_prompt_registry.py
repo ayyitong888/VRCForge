@@ -254,6 +254,8 @@ class McpPromptRegistry:
                 raise McpPromptError("Session context must be captured operation or Unity state, not catalog metadata")
         elif session_context_uri:
             missing.append("sessionContextUri")
+        support_files = self._load_support_files(skill)
+        checkpoint_policy = self._checkpoint_policy(skill, support_files)
         all_tools = {str(item.get("name") or ""): item for item in self._tool_source("execution")}
         planning_names = {str(item.get("name") or "") for item in self._tool_source("planning")}
         skill_tools = self._skill_tools(skill)
@@ -301,11 +303,10 @@ class McpPromptRegistry:
             "planningTools": planning_tools,
             "executionWriteTools": write_tools,
             "writeToolBlocksToLoad": write_blocks,
-            "checkpointPolicy": str(skill.get("backupRestore") or "Checkpoint before the first approved write and before destructive transitions."),
+            "checkpointPolicy": checkpoint_policy,
             "awaitingUserHardStop": True,
             "status": "awaiting_resources" if missing else "ready_for_planning",
         }
-        support_files = self._load_support_files(skill)
         descriptor = self._descriptor(skill)
         descriptor["_meta"]["supportContentHash"] = self._support_hash(support_files)
         prompt_payload = {
@@ -366,6 +367,27 @@ class McpPromptRegistry:
     @staticmethod
     def _support_hash(files: Sequence[Mapping[str, Any]]) -> str:
         return _hash([(item["path"], item["sha256"]) for item in files])
+
+    @staticmethod
+    def _checkpoint_policy(skill: Mapping[str, Any], support_files: Sequence[Mapping[str, Any]]) -> str:
+        """Project a required checkpoint from the signed workflow contract."""
+        for item in support_files:
+            path = str(item.get("path") or "")
+            if not path.startswith("workflows/") or not path.lower().endswith(".json"):
+                continue
+            try:
+                workflow = json.loads(str(item.get("content") or ""))
+            except (TypeError, ValueError):
+                continue
+            checkpoint = workflow.get("checkpoint") if isinstance(workflow, Mapping) else None
+            if not isinstance(checkpoint, Mapping) or checkpoint.get("required") is not True:
+                continue
+            boundaries = _string_list(checkpoint.get("boundaries"))
+            policy = "Checkpoint required before approved writes."
+            if boundaries:
+                policy += " Boundaries: " + ", ".join(boundaries) + "."
+            return policy
+        return str(skill.get("backupRestore") or "Checkpoint before the first approved write and before destructive transitions.")
 
     def validate_provenance(
         self,

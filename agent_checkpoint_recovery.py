@@ -8,6 +8,7 @@ import re
 import secrets
 import shutil
 import stat
+import time
 import zipfile
 import zlib
 from contextlib import AbstractContextManager
@@ -825,8 +826,16 @@ class AgentCheckpointRecoveryService:
         if not recovery:
             return {"ok": False, "schema": APPLY_RECOVERY_SCHEMA, "error": "interrupted apply recovery was not found."}
         checkpoint_id = str(recovery.get("checkpointId") or recovery.get("checkpoint_id") or "").strip()
+        checkpoint_params = {
+            "checkpointId": checkpoint_id,
+            **{
+                key: params[key]
+                for key in ("projectPath", "projectRoot", "executionTarget")
+                if key in params
+            },
+        }
         checkpoint_preview = (
-            self.preview_restore_checkpoint({"checkpointId": checkpoint_id})
+            self.preview_restore_checkpoint(checkpoint_params)
             if checkpoint_id
             else {"ok": False, "error": "recovery has no checkpointId."}
         )
@@ -1371,13 +1380,16 @@ class AgentCheckpointRecoveryService:
         archive_path = archive_dir / f"{checkpoint_id}.zip"
         temp_path = archive_path.with_suffix(".zip.tmp")
         pathspecs = [name for name in ("Assets", "Packages", "ProjectSettings") if (project_root / name).is_dir()]
+        checkpoint_scope = {"kind": "unity_project_top_level", "pathspecs": pathspecs}
+        archive_started_at = utc_now_iso()
+        archive_started_clock = time.perf_counter()
         file_count = 0
         total_bytes = 0
         try:
             archive_dir.mkdir(parents=True, exist_ok=True)
             if temp_path.exists():
                 temp_path.unlink()
-            with zipfile.ZipFile(temp_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=1) as archive:
+            with zipfile.ZipFile(temp_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=1, strict_timestamps=False) as archive:
                 for name in pathspecs:
                     root = project_root / name
                     for source in sorted(root.rglob("*")):
@@ -1404,6 +1416,11 @@ class AgentCheckpointRecoveryService:
                     "strategy": "archive",
                     "archivePath": str(archive_path),
                     "pathspecs": pathspecs,
+                    "checkpointScope": checkpoint_scope,
+                    "archiveStartedAt": archive_started_at,
+                    "archiveFinishedAt": utc_now_iso(),
+                    "archiveElapsedMs": round((time.perf_counter() - archive_started_clock) * 1000, 3),
+                    "archiveBytes": temp_path.stat().st_size if temp_path.exists() else 0,
                     "error": f"Archive checkpoint failed: {exc}",
                 }
             )
@@ -1417,8 +1434,13 @@ class AgentCheckpointRecoveryService:
                 "strategy": "archive",
                 "archivePath": str(archive_path),
                 "pathspecs": pathspecs,
+                "checkpointScope": checkpoint_scope,
                 "fileCount": file_count,
                 "uncompressedBytes": total_bytes,
+                "archiveBytes": archive_path.stat().st_size,
+                "archiveStartedAt": archive_started_at,
+                "archiveFinishedAt": utc_now_iso(),
+                "archiveElapsedMs": round((time.perf_counter() - archive_started_clock) * 1000, 3),
             }
         )
         record["rollbackCoverageAudit"] = self._build_checkpoint_rollback_coverage_audit(record, phase="checkpoint")
@@ -1444,7 +1466,7 @@ class AgentCheckpointRecoveryService:
             archive_dir.mkdir(parents=True, exist_ok=True)
             if temp_path.exists():
                 temp_path.unlink()
-            with zipfile.ZipFile(temp_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=1) as archive:
+            with zipfile.ZipFile(temp_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=1, strict_timestamps=False) as archive:
                 for scope, root in roots.items():
                     if os.path.lexists(root) and (_path_is_link_like(root) or not root.is_dir()):
                         raise ValueError(f"Local state root is not a regular directory: {root}")

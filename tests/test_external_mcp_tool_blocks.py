@@ -28,7 +28,24 @@ def test_tool_blocks_keep_one_definition_and_existing_exports() -> None:
     assert definitions.keys() == BASELINE_AST_SHA256.keys()
     for name, expected in BASELINE_AST_SHA256.items():
         assert getattr(agent_gateway, name) is getattr(external_mcp_tool_blocks, name)
-        assert hashlib.sha256(ast.dump(definitions[name], include_attributes=False).encode()).hexdigest() == expected
+        node = definitions[name]
+        if name == "EXTERNAL_MCP_WRITE_TOOL_BLOCKS":
+            # The relocation leaf is an explicitly authorized additive entry;
+            # compare the remainder against the immutable pre-relocation AST.
+            class _RemoveAuthorizedRelocation(ast.NodeTransformer):
+                def visit_Set(self, current):
+                    current = self.generic_visit(current)
+                    current.elts = [
+                        item for item in current.elts
+                        if not (
+                            isinstance(item, ast.Constant)
+                            and item.value == "vrcforge_relocate_generated_assets"
+                        )
+                    ]
+                    return current
+
+            node = _RemoveAuthorizedRelocation().visit(node)
+        assert hashlib.sha256(ast.dump(node, include_attributes=False).encode()).hexdigest() == expected
     assert not any(isinstance(node, (ast.FunctionDef, ast.ClassDef, ast.Import)) for node in ast.walk(tree))
     assert {node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)} == {"__future__"}
     assert len(Path(external_mcp_tool_blocks.__file__).read_bytes()) < 16_000

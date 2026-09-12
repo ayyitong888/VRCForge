@@ -45,8 +45,26 @@ def canonical_mcp_tool_name(name: str) -> str:
     return LEGACY_TOOL_ALIASES.get(normalized, normalized)
 
 
-def identity_scope(name: str, *, write: bool = False) -> str:
+def identity_scope(name: str, *, write: bool = False, arguments: Mapping[str, Any] | None = None) -> str:
     normalized = str(name or "").casefold()
+    # Prepared calls execute their nested arguments; idle outer fields cannot choose scope.
+    values = arguments or {}
+    for key in ("arguments", "params"):
+        if isinstance(values.get(key), Mapping):
+            values = values[key]
+            break
+    if "material_texture" in normalized or "texture_import_settings" in normalized:
+        return "project"
+    if "flatten_material_variant" in normalized or "preview_material_variant_flatten" in normalized:
+        return "project"
+    if normalized.endswith(("apply_shader_tuning", "restore_shader_tuning", "reapply_shader_tuning_history", "apply_shader_tuning_preset")):
+        return "avatar"
+    if "renderer_material_slot" in normalized and "assignments" in values:
+        return "scene"
+    if (normalized.endswith("set_material_shader") or normalized.endswith("preview_material_shader_assignment")) and ("assignments" in values or values.get("materialAssetPath")) and not any(key in values for key in ("rendererPath", "rendererComponentId", "slotIndex")):
+        return "project"
+    if "runtime_observation" in normalized:
+        return "avatar"
     if "texture_patch" in normalized:
         # This operation binds a project asset by exact path and source digest;
         # an unrelated live Avatar/component identity would be misleading.
@@ -154,6 +172,19 @@ def standardize_tool_descriptor(
         "freshReadback": {"required": bool(write), "mustUseExactTarget": True},
         "errorModel": "vrcforge.tool_result.v1 with fail-closed identity errors",
     })
+    conditional_identity = None
+    if "renderer_material_slot" in name:
+        conditional_identity = {"if": {"required": ["assignments"]}, "then": {"properties": {"executionTarget": {"properties": {"scope": {"enum": ["scene", "avatar"]}}}}}, "else": {"properties": {"executionTarget": {"properties": {"scope": {"const": "component"}}}}}}
+    elif name.endswith("set_material_shader") or name.endswith("preview_material_shader_assignment"):
+        conditional_identity = {"if": {"anyOf": [{"required": ["assignments"]}, {"required": ["materialAssetPath"], "not": {"anyOf": [{"required": [key]} for key in ("rendererPath", "rendererComponentId", "slotIndex")]}}]}, "then": {"if": {"required": ["assignments"]}, "then": {"properties": {"executionTarget": {"properties": {"scope": {"enum": ["project", "scene", "avatar", "object", "component"]}}}}}, "else": {"properties": {"executionTarget": {"properties": {"scope": {"const": "project"}}}}}}, "else": {"properties": {"executionTarget": {"properties": {"scope": {"const": "component"}}}}}}
+    if "material_texture" in name or "texture_import_settings" in name:
+        conditional_identity = {"properties": {"executionTarget": {"properties": {"scope": {"enum": ["project", "scene", "avatar", "object", "component"]}}}}}
+    elif "flatten_material_variant" in name or "preview_material_variant_flatten" in name:
+        conditional_identity = {"properties": {"executionTarget": {"properties": {"scope": {"const": "project"}}}}}
+    elif name.endswith(("apply_shader_tuning", "restore_shader_tuning", "reapply_shader_tuning_history", "apply_shader_tuning_preset")):
+        conditional_identity = {"properties": {"executionTarget": {"properties": {"scope": {"enum": ["avatar", "object", "component"]}}}}}
+    if conditional_identity:
+        result["requiredIdentity"]["parameterScope"] = conditional_identity
     metadata.update({
         "canonicalName": canonical,
         "mcpName": name,
@@ -201,6 +232,8 @@ def standardize_tool_descriptor(
     else:
         schema = deepcopy(dict(result.get("inputSchema") or {}))
         properties = dict(schema.get("properties") or {})
+    if conditional_identity:
+        schema.setdefault("allOf", []).append(conditional_identity)
     properties["promptSkillProvenance"] = {
         "type": "object",
         "description": "Optional exact provenance returned by prompts/get; Gateway rejects stale or mismatched Skill identity.",

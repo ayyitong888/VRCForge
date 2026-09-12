@@ -77,13 +77,31 @@ def ensure_operation_result(
     }
     if canonical_status not in allowed_statuses:
         canonical_status = "unknown"
+    error_details = result.get("errorDetails")
+    if (
+        canonical_status == "unknown"
+        and result.get("ok") is False
+        and isinstance(error_details, Mapping)
+        and error_details.get("status") == "failed"
+        and error_details.get("toolRoutingStarted") is False
+        and error_details.get("mutationStarted") is False
+        and error_details.get("committed") is False
+        and error_details.get("commitState") == "not_started"
+        and result.get("toolRoutingStarted", False) is False
+        and result.get("mutationStarted", False) is False
+        and result.get("committed", False) is False
+        and result.get("commitState", "not_started") == "not_started"
+    ):
+        # Explicit rejection before routing is a known failure, not an unknown write.
+        canonical_status = "failed"
     result["operationStatus"] = canonical_status
     if not raw_status:
         result["status"] = canonical_status
 
     mutation_started = result.get("mutationStarted")
     if not isinstance(mutation_started, bool):
-        mutation_started = False if not write or canonical_status in {"failed", "preview", "user_confirmation_required"} else None
+        # A failed response can follow a committed write; failure alone is not no-write evidence.
+        mutation_started = False if not write or canonical_status in {"preview", "user_confirmation_required"} else None
         result["mutationStarted"] = mutation_started
     mutation_applied = result.get("mutationApplied")
     if not isinstance(mutation_applied, bool):

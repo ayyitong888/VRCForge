@@ -57,6 +57,21 @@ def test_typed_ports_expose_only_fixed_import_capabilities() -> None:
     assert "invoke_unity_mcp" not in source
 
 
+def test_unity_job_state_preserves_selected_items_evidence_without_calling_it_written() -> None:
+    service = PreparedOutfitImportApprovedWriteService.__new__(
+        PreparedOutfitImportApprovedWriteService
+    )
+    evidence = {
+        "observed": True,
+        "items": ["Assets/Exact Name.mat"],
+        "meaning": "selected_items_not_written_assets",
+        "attribution": "active_started_job_without_callback_identity",
+    }
+    state = service._unity_job_state({"jobId": "job", "selectedItemsEvidence": evidence})
+    assert state["selectedItemsEvidence"] == evidence
+    assert "written" not in state["selectedItemsEvidence"]
+
+
 def test_reserved_key_is_rejected_before_any_read_or_temp_creation(
     tmp_path: Path,
 ) -> None:

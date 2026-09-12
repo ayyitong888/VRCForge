@@ -127,3 +127,15 @@ def test_loose_prefab_texture_folder_reports_candidates_without_file_contents(tm
     assert "SECRET_PNG_BYTES_SHOULD_NOT_APPEAR" not in rendered
     assert "SECRET_MAT_TEXT_SHOULD_NOT_APPEAR" not in rendered
     assert "SECRET_FBX_BYTES_SHOULD_NOT_APPEAR" not in rendered
+
+
+def test_loose_outfit_inspection_exposes_editor_asmdef_as_copyable_dependency(tmp_path: Path) -> None:
+    folder = tmp_path / "LooseOutfit"
+    folder.mkdir()
+    (folder / "Dress.prefab").write_text("prefab", encoding="utf-8")
+    (folder / "Editor.asmdef").write_text('{"name":"Editor"}', encoding="utf-8")
+
+    result = inspect_outfit_package(folder)
+
+    assert result["summary"]["assemblyDefinitionCount"] == 1
+    assert result["assemblyDefinitions"][0]["path"] == "Editor.asmdef"

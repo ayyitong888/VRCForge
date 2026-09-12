@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import json
 import os
 import socket
 import subprocess
@@ -145,6 +146,69 @@ def test_preflight_http_rejection_preserves_gateway_layer_and_raw_result(monkeyp
     assert report["errorDetails"]["commitState"] == "not_started"
 
 
+def test_call_tool_preserves_structured_pre_routing_provenance_rejection_across_http_bridge(monkeypatch, tmp_path: Path) -> None:
+    module = importlib.import_module("tools.vrcforge_agent_mcp_stdio")
+    config = tmp_path / "agent_gateway.json"
+    config.write_text('{"token":"test-token","enabled":true,"allow_write_requests":true}', encoding="utf-8")
+    bridge = module.VRCForgeBridge(
+        base_url="http://127.0.0.1:8757",
+        config_path=config,
+        timeout_seconds=0.1,
+        start_runtime=False,
+    )
+    message = "Prompt/Skill provenance rejected this Tool call: declared Tool set mismatch"
+    upstream = {
+        "schema": "vrcforge.external_tool_error.v1",
+        "success": False,
+        "tool": "vrcforge_get_asset_info",
+        "operationKind": "tool",
+        "errorCode": "prompt_skill_provenance_mismatch",
+        "error": message,
+        "failureLayer": "gateway_validation",
+        "failurePhase": "prompt_skill_provenance_validation",
+        "toolRoutingStarted": False,
+        "mutationStarted": False,
+        "committed": False,
+        "commitState": "not_started",
+        "commitStateKnown": True,
+        "checkpointRecoveryRequired": False,
+        "temporaryCleanupRequired": False,
+        "recovery": {"required": False, "reason": "No mutation started."},
+        "safeToRetry": False,
+    }
+    body = json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "id": 733,
+            "error": {"code": -32602, "message": message, "data": upstream},
+        }
+    )
+
+    monkeypatch.setattr(
+        bridge,
+        "_mcp_request",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            module.ExternalHttpBridgeError(status_code=409, path="/mcp", body=body)
+        ),
+    )
+
+    result = bridge.call_tool("vrcforge_get_asset_info", {})
+
+    assert result["status"] == "gateway_http_rejection"
+    assert result["errorCode"] == "prompt_skill_provenance_mismatch"
+    assert result["failureLayer"] == "gateway_validation"
+    assert result["errorDetails"]["failurePhase"] == "prompt_skill_provenance_validation"
+    assert result["errorDetails"]["toolRoutingStarted"] is False
+    assert result["errorDetails"]["mutationStarted"] is False
+    assert result["errorDetails"]["committed"] is False
+    assert result["errorDetails"]["commitState"] == "not_started"
+    assert result["errorDetails"]["recovery"]["required"] is False
+    serialized = json.dumps(result, ensure_ascii=False)
+    assert "http_409" not in serialized
+    assert "rawResult" not in result["errorDetails"]
+    assert "rawResult" not in result["outcome"]["diagnostics"]["sourceError"]
+
+
 def test_runtime_launch_rejections_use_canonical_external_error(monkeypatch, tmp_path: Path) -> None:
     module = importlib.import_module("tools.vrcforge_agent_mcp_stdio")
     monkeypatch.setattr(module, "find_vrcforge_executable", lambda: None)
@@ -197,7 +261,7 @@ def test_stdio_bridge_exposes_writes_only_in_execution_layer(monkeypatch) -> Non
         def preflight(self):
             return {"runtimeOnline": True}
 
-        def manifest(self, exposure_layer="planning", tool_blocks=None):
+        def manifest(self, exposure_layer="planning", tool_blocks=None, tool_names=None):
             del tool_blocks
             read_tool = {
                 "name": "vrcforge_read_status",
@@ -326,7 +390,7 @@ def test_stdio_bridge_loads_external_unity_tool_blocks_on_demand(monkeypatch) ->
         def preflight(self):
             return {"runtimeOnline": True}
 
-        def manifest(self, exposure_layer="planning", tool_blocks=None):
+        def manifest(self, exposure_layer="planning", tool_blocks=None, tool_names=None):
             del tool_blocks
             tools = [
                 {
@@ -433,7 +497,12 @@ def test_stdio_bridge_loads_external_unity_tool_blocks_on_demand(monkeypatch) ->
     )
     before_names = {tool["name"] for tool in before["result"]["tools"]}
     assert before_status == 200
-    assert "vrcforge_get_compile_errors" in before_names
+    # Compact startup discovery is intentionally smaller; full discovery retains the old catalogue.
+    assert "vrcforge_get_compile_errors" not in before_names
+    full, _ = router.handle(
+        {"jsonrpc": "2.0", "id": 101, "method": "tools/list", "params": {"_meta": {**meta, "io.vrcforge/resultMode": "full"}}}
+    )
+    assert "vrcforge_get_compile_errors" in {tool["name"] for tool in full["result"]["tools"]}
     assert "vrcforge_scan_blendshapes" not in before_names
     assert "vrcforge_apply_blendshapes" not in before_names
     assert {
@@ -465,6 +534,11 @@ def test_stdio_bridge_loads_external_unity_tool_blocks_on_demand(monkeypatch) ->
         "diagnostics_build", "research",
     ]
     assert all({"whenToUse", "doNotUse", "provides"} <= set(node) for node in root_tree["children"])
+    for node in root_tree["children"]:
+        routing = module.canonical_block_routing(node["name"])
+        for field, source in (("whenToUse", "useWhen"), ("doNotUse", "doNotUse"), ("provides", "provides")):
+            expected = routing.get(source, ())
+            assert node[field] == ([expected] if isinstance(expected, str) else list(expected))
     appearance = next(node for node in root_tree["children"] if node["name"] == "appearance")
     behavior = next(node for node in root_tree["children"] if node["name"] == "behavior")
     assert "expression triggers" in " ".join(appearance["whenToUse"])
@@ -785,7 +859,7 @@ def test_load_notifies_and_activation_fallback_survives_host_without_relist(monk
     class Bridge:
         calls = []
         def preflight(self): return {"runtimeOnline": True}
-        def manifest(self, exposure_layer="planning", tool_blocks=None):
+        def manifest(self, exposure_layer="planning", tool_blocks=None, tool_names=None):
             names = [{"name": "vrcforge_scan_materials", "description": "Scan materials", "inputSchema": {"type": "object"}, "_meta": {"toolBlock": "materials"}}] if tool_blocks and ("materials" in tool_blocks or "*" in tool_blocks) else []
             return {"tools": names}
         def call_tool(self, name, arguments, **_kwargs):
@@ -806,3 +880,32 @@ def test_load_notifies_and_activation_fallback_survives_host_without_relist(monk
     handle = loaded["result"]["structuredContent"]["activationHandle"]
     fallback, _ = router.handle({"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"_meta": meta, "name": "vrcforge_invoke_loaded_read_tool", "arguments": {"activationHandle": handle, "toolName": "vrcforge_scan_materials", "arguments": {}}}})
     assert fallback["result"]["structuredContent"]["delegatedToolName"] == "vrcforge_scan_materials"
+
+
+def test_prompt_internal_http_hop_preserves_full_body_for_outer_presentation(monkeypatch, tmp_path):
+    from copy import deepcopy
+    from agent_mcp_2026 import Mcp2026Router
+    from external_mcp_result_projection import project_prompt
+    module = importlib.import_module("tools.vrcforge_agent_mcp_stdio")
+    body = {"schema": "vrcforge.skill_prompt.v1", "skill": {"id": "fixture", "instructions": "Keep all instructions", "supportFiles": [{"path": "workflow.json", "content": "Keep complete support"}]}, "context": {"status": "awaiting_resources"}, "provenance": {"contentHash": "fixture"}}
+    raw = {"messages": [{"role": "user", "content": {"type": "text", "text": json.dumps(body)}}], "structuredContent": body}
+    backend = Mcp2026Router(lambda *_: [], lambda *_: {}, prompt_get=lambda *_: deepcopy(raw))
+    bridge = module.VRCForgeBridge(base_url="http://127.0.0.1:8757", config_path=tmp_path / "unused.json", timeout_seconds=0.1, start_runtime=False)
+    monkeypatch.setattr(bridge, "require_token", lambda: "fixture-token")
+    def request_json(*args, **kwargs):
+        return backend.handle(kwargs["payload"])[0]
+    monkeypatch.setattr(bridge, "request_json", request_json)
+    result = bridge.get_prompt("fixture")
+    assert result["structuredContent"] == body
+    assert project_prompt(result, mode="full")["structuredContent"] == body
+    assert project_prompt(result, mode="compact")["messages"] == raw["messages"]
+
+
+def test_manifest_selected_preserves_exact_tool_name_meta(monkeypatch, tmp_path):
+    module = importlib.import_module("tools.vrcforge_agent_mcp_stdio")
+    bridge = module.VRCForgeBridge(base_url="http://127.0.0.1:8757", config_path=tmp_path / "unused.json", timeout_seconds=0.1, start_runtime=False)
+    monkeypatch.setattr(bridge, "require_token", lambda: "fixture-token")
+    seen = []
+    monkeypatch.setattr(bridge, "_mcp_request", lambda method, params, token: seen.append((method, params, token)) or {"tools": []})
+    bridge.manifest("execution", ["*"], ["fixture"])
+    assert seen == [("tools/list", {"exposureLayer": "execution", "toolBlocks": ["*"], "_meta": {"io.vrcforge/toolNames": ["fixture"]}}, "fixture-token")]

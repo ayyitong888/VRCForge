@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 using VRCForge.Core.MCP;
@@ -15,8 +15,8 @@ namespace VRCForge.Editor
         internal const string CoreIdentity = "vrcforge.unity-core";
         internal const string HandshakeProtocol = "vrcforge.core-handshake.v1";
         internal const string ProductVersion = "1.8.0";
-        internal const string ToolContractVersion = "89";
-        internal const int ToolCount = 91;
+        internal const string ToolContractVersion = "108";
+        internal const int ToolCount = 95;
 
         private static readonly Dictionary<string, string> ExpectedTypes =
             new Dictionary<string, string>(StringComparer.Ordinal)
@@ -43,6 +43,7 @@ namespace VRCForge.Editor
                 { "vrc_delete_gameobject", "VRCForge.Editor.DeleteGameObjectTool" },
                 { "vrc_duplicate_scene_object", "VRCForge.Editor.DuplicateSceneObjectTool" },
                 { "vrc_duplicate_project_asset", "VRCForge.Editor.DuplicateProjectAssetTool" },
+                { "vrc_relocate_generated_assets", "VRCForge.Editor.RelocateGeneratedAssetsTool" },
                 { "vrc_duplicate_scene_asset", "VRCForge.Editor.SceneAssetDuplicateTool" },
                 { "vrc_ensure_animator_state", "VRCForge.Editor.EnsureAnimatorStateTool" },
                 { "vrc_ensure_expression_menu_control", "VRCForge.Editor.EnsureExpressionMenuControlTool" },
@@ -56,6 +57,8 @@ namespace VRCForge.Editor
                 { "vrc_get_gameobject", "VRCForge.Editor.GetGameObjectTool" },
                 { "vrc_get_property", "VRCForge.Editor.GetPropertyTool" },
                 { "vrc_gesture_manager_enter_play_mode", "VRCForge.Editor.GestureManagerEnterPlayModeTool" },
+                { "vrc_start_runtime_observation", "VRCForge.Editor.RuntimeObservationStartTool" },
+                { "vrc_get_runtime_observation", "VRCForge.Editor.RuntimeObservationStatusTool" },
                 { "vrc_gesture_manager_set_parameter", "VRCForge.Editor.GestureManagerRuntimeParameterTool" },
                 { "vrc_import_unitypackage", "VRCForge.Editor.UnityPackageImporterTool" },
                 { "vrc_inspect_skinned_mesh_bone_usage", "VRCForge.Editor.InspectSkinnedMeshBoneUsageTool" },
@@ -66,6 +69,7 @@ namespace VRCForge.Editor
                 { "vrc_manage_expression_menu", "VRCForge.Editor.ManageExpressionMenuTool" },
                 { "vrc_manage_expression_parameters", "VRCForge.Editor.ManageExpressionParametersTool" },
                 { "vrc_manage_fx_animator", "VRCForge.Editor.ManageFxAnimatorTool" },
+                { "vrc_flatten_material_variant", "VRCForge.Editor.UnityMaterialVariantFlattenTool" },
                 { "vrc_manage_wardrobe", "VRCForge.Editor.WardrobeManagerWriter" },
                 { "vrc_prepare_checkpoint", "VRCForge.Editor.CheckpointPrepareTool" },
                 { "vrc_poll_job", "VRCForge.Editor.AsyncJobPollTool" },
@@ -127,6 +131,7 @@ namespace VRCForge.Editor
                 "vrc_inspect_skinned_mesh_deformation",
                 "vrc_inspect_modular_avatar_component",
                 "vrc_inspect_primitive_basis_fixture",
+                "vrc_get_runtime_observation",
                 "vrc_poll_job",
                 "vrc_read_avatar_descriptor",
                 "vrc_read_vrchat_sdk_builder_alerts",

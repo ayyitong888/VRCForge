@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import os
 import shutil
 import threading
 import asyncio
@@ -25,13 +26,24 @@ from agent_mcp_2026 import PROTOCOL_VERSION
 from approved_unity_execution import current_approved_unity_execution
 from runtime_planner_service import PlannerCatalogSnapshot, RuntimePlannerService
 from vrchat_blendshape_agent import UnityMcpError
+from external_mcp_tool_blocks import EXTERNAL_MCP_TOOL_BLOCK_BRANCHES
+from external_mcp_result_projection import project_result
+from execution_target import canonical_namespace, process_start_time, project_identity
 
 
 def _gateway(tmp_path: Path) -> AgentGateway:
     return AgentGateway(tmp_path / "config" / "agent_gateway.json", tmp_path / "audit")
 
 
-def _external_mcp_call(app, method: str, params: dict, *, bearer: str, request_id: int = 1) -> dict:
+def _external_mcp_call(
+    app,
+    method: str,
+    params: dict,
+    *,
+    bearer: str,
+    request_id: int = 1,
+    result_mode: str | None = None,
+) -> dict:
     async def run() -> dict:
         effective_params = dict(params)
         if method == "tools/list":
@@ -46,16 +58,19 @@ def _external_mcp_call(app, method: str, params: dict, *, bearer: str, request_i
         }
         if method == "tools/call":
             headers["Mcp-Name"] = str(params.get("name") or "")
+        meta = {
+            "io.modelcontextprotocol/protocolVersion": PROTOCOL_VERSION,
+            "io.modelcontextprotocol/clientCapabilities": {},
+            "io.modelcontextprotocol/clientInfo": {"name": "external-test", "version": "1"},
+        }
+        if result_mode is not None:
+            meta["io.vrcforge/resultMode"] = result_mode
         message = {
             "jsonrpc": "2.0",
             "id": request_id,
             "method": method,
             "params": {
-                "_meta": {
-                    "io.modelcontextprotocol/protocolVersion": PROTOCOL_VERSION,
-                    "io.modelcontextprotocol/clientCapabilities": {},
-                    "io.modelcontextprotocol/clientInfo": {"name": "external-test", "version": "1"},
-                },
+                "_meta": meta,
                 **effective_params,
             },
         }
@@ -73,6 +88,46 @@ def _external_gateway(tmp_path: Path) -> AgentGateway:
     config.allow_write_requests = True
     gateway.save_config(config)
     return gateway
+
+
+def test_history_log_discovery_read_and_receipt_use_registered_handler(tmp_path: Path, monkeypatch) -> None:
+    import dashboard_server
+    from diagnostic_logging import DiagnosticLogManager
+    from diagnostic_privacy import DiagnosticPrivacy
+
+    name = "vrcforge_read_recent_logs"
+    registered = dashboard_server.AGENT_GATEWAY._tools[name]
+    gateway = _external_gateway(tmp_path)
+    privacy = DiagnosticPrivacy(tmp_path / "privacy")
+    manager = DiagnosticLogManager(tmp_path / "logs", tmp_path / "diagnostics.json", privacy)
+    monkeypatch.setattr(dashboard_server, "DIAGNOSTIC_LOGGER", manager)
+    monkeypatch.setattr(dashboard_server, "AGENT_GATEWAY", gateway)
+    gateway.register_tool(name, registered.description, registered.category, registered.handler)
+    log = tmp_path / "logs" / "vrcforge_2026-09-12_01-02-03_1.log"
+    log.parent.mkdir(parents=True)
+    log.write_text('2026-09-12 01:02:03.000+00:00 [INFO] [runtime] historical startup | data={"token":"fixture-secret-token"}\n', encoding="utf-8")
+    app = create_agent_mcp_app(gateway)
+    bearer = gateway.ensure_config().token
+    catalog = _external_mcp_call(app, "tools/list", {}, bearer=bearer)
+    descriptor = next(row for row in catalog["result"]["tools"] if row["name"] == name)
+    assert descriptor["inputSchema"]["properties"]["source"]["enum"] == ["memory", "disk"]
+    assert "When NOT to use" in descriptor["description"]
+
+    def call(arguments):
+        reply = _external_mcp_call(app, "tools/call", {"name": name, "arguments": arguments}, bearer=bearer)
+        return reply["result"]["structuredContent"]
+
+    memory = call({})
+    assert memory["ok"] and memory["result"]["source"] == "memory" and memory["result"]["logs"] == []
+    listing = call({"source": "disk"})
+    assert listing["ok"] and listing["result"]["files"] == [log.name]
+    history = call({"source": "disk", "file": listing["result"]["files"][0]})
+    assert history["ok"] and history["result"]["logs"][0]["message"] == "historical startup"
+    assert "fixture-secret-token" not in json.dumps(history)
+    receipt = _external_mcp_call(app, "resources/read", {"uri": history["operationResource"]}, bearer=bearer)
+    document = json.loads(receipt["result"]["contents"][0]["text"])
+    assert document["data"]["result"]["result"]["logs"] == history["result"]["logs"]
+    assert "fixture-secret-token" not in json.dumps(document)
 
 
 def test_gesture_manager_and_editor_state_atoms_are_lazy_blocked_with_exact_schemas() -> None:
@@ -183,6 +238,23 @@ def test_external_block_expansion_lists_names_without_loading_definitions(tmp_pa
         },
     ]
     assert "inputSchema" not in json.dumps(index)
+
+
+def test_external_block_branch_children_have_public_descriptions(tmp_path: Path) -> None:
+    gateway = _external_gateway(tmp_path)
+    index = gateway.external_mcp_tool_block_index()
+    indexed = {
+        child["block"]: child["description"]
+        for branch in index["children"]
+        for child in branch.get("children", [])
+    }
+    expected = {
+        child
+        for children in EXTERNAL_MCP_TOOL_BLOCK_BRANCHES.values()
+        for child in children
+    }
+    assert expected <= indexed.keys()
+    assert all(indexed[child].strip() for child in expected)
 
 
 def test_external_mcp_activity_reports_only_authenticated_requests(tmp_path: Path) -> None:
@@ -325,6 +397,46 @@ def test_external_read_returns_exact_failure_result_and_reason(tmp_path: Path) -
     assert result["outcome"]["cause"]["code"] == "fixture_read_failed"
 
 
+@pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.parametrize("routed", [False, True])
+def test_read_rejection_preserves_core_routing_in_internal_and_external_receipts(
+    tmp_path: Path, nested: bool, routed: bool,
+) -> None:
+    gateway = _external_gateway(tmp_path)
+    # Reduced from an actual preview rejection before Core tool routing.
+    core = {
+        "ok": False,
+        "errorCode": "managed_peer_ineligible" if not routed else "fixture_tool_rejected",
+        "error": "The authenticated backend peer was rejected." if not routed else "Tool rejected.",
+        "failureLayer": "unity_core_pre_route" if not routed else "unity_tool",
+        "failurePhase": "before_tool_routing" if not routed else "tool_returned_rejection",
+        "toolRoutingStarted": routed,
+        "mutationStarted": False,
+        "committed": False,
+        "commitState": "not_started",
+        "checkpointRecoveryRequired": False,
+    }
+    raw = {"ok": False, "result": core} if nested else core
+    name = "vrcforge_external_routing_fixture"
+    gateway.register_tool(name, "Return a recorded routing rejection.", "unity", lambda _args: raw)
+    gateway.register_external_mcp_unity_tool(name, "diagnostics")
+    external = _external_mcp_call(
+        create_agent_mcp_app(gateway), "tools/call",
+        {"name": name, "arguments": {}},
+        result_mode="full", bearer=gateway.ensure_config().token,
+    )["result"]["structuredContent"]
+    internal = gateway.call_tool(name, {}, agent_name="internal-runtime")
+    for receipt in (external, internal):
+        assert receipt["ok"] is False
+        assert receipt["result"] == raw
+        for projected in (receipt["errorDetails"], receipt["outcome"]):
+            assert projected["toolRoutingStarted"] is routed
+            assert projected["failureLayer"] == core["failureLayer"]
+            assert projected["failurePhase"] == core["failurePhase"]
+            assert projected["mutationStarted"] is False
+            assert projected["commitState"] == "not_started"
+
+
 def test_internal_read_failure_projects_the_same_canonical_envelope_as_external(
     tmp_path: Path,
 ) -> None:
@@ -453,7 +565,11 @@ def test_external_read_exception_preserves_raw_core_result_and_cause_chain(tmp_p
     result = _external_mcp_call(
         create_agent_mcp_app(gateway),
         "tools/call",
-        {"name": "vrcforge_external_exception_read", "arguments": {}},
+        {
+            "name": "vrcforge_external_exception_read",
+            "arguments": {},
+        },
+        result_mode="full",
         bearer=gateway.ensure_config().token,
     )["result"]["structuredContent"]
 
@@ -470,6 +586,7 @@ def test_external_read_exception_preserves_raw_core_result_and_cause_chain(tmp_p
     assert result["errorDetails"]["exception"]["coreTool"] == "vrc_fixture_read"
     assert result["errorDetails"]["exception"]["causes"] == []
     assert result["errorDetails"]["rawResult"] == raw_core_result
+    assert "rawResult" not in result["errorDetails"]["exception"]
     assert result["outcome"]["cause"]["code"] == "core_fixture_rejected"
     assert {
         "kind": "wrapper",
@@ -609,6 +726,7 @@ def test_unity_read_schemas_are_precise_for_both_external_and_internal_agents(tm
         "avatarPath",
         "controllerPath",
         "promptSkillProvenance",
+        "executionTarget",
     }
     bone_schema = external["vrcforge_inspect_skinned_mesh_bone_usage"]["inputSchema"]
     assert bone_schema["required"] == ["gameObjectPath"]
@@ -704,6 +822,247 @@ def test_external_mcp_write_contract_is_real_target_and_two_phase(tmp_path: Path
     )["result"]["structuredContent"]
     assert mismatched["status"] != "executed"
     assert executed == []
+
+
+def test_public_mcp_gesture_manager_pending_receipt_projects_pending_operation(tmp_path: Path) -> None:
+    gateway = _external_gateway(tmp_path)
+    for marker in ("Assets", "Packages", "ProjectSettings"):
+        (tmp_path / marker).mkdir(parents=True, exist_ok=True)
+    fixture = Path(__file__).parent / "fixtures" / "gesture_manager_pending_receipt.json"
+    recorded = json.loads(fixture.read_text(encoding="utf-8"))
+
+    def find_pending(value):
+        if isinstance(value, dict):
+            if (
+                value.get("enterPlayModePending") is True
+                and value.get("isPlayMode") is False
+                and value.get("moduleConnected") is False
+                and value.get("commitState") == "enter_play_mode_requested"
+            ):
+                return {
+                    key: value[key]
+                    for key in (
+                        "isPlayMode",
+                        "moduleConnected",
+                        "enterPlayModePending",
+                        "mutationStarted",
+                        "committed",
+                        "commitState",
+                    )
+                    if key in value
+                }
+            for child in value.values():
+                found = find_pending(child)
+                if found is not None:
+                    return found
+        elif isinstance(value, list):
+            for child in value:
+                found = find_pending(child)
+                if found is not None:
+                    return found
+        return None
+
+    pending_receipt = find_pending(recorded)
+    assert pending_receipt is not None
+    finalized = False
+
+    def finalize(_arguments, _baseline, _result):
+        nonlocal finalized
+        finalized = True
+        return {
+            "ok": True,
+            "isPlayMode": True,
+            "moduleConnected": True,
+            "commitState": "runtime_connected",
+            "verified": True,
+            "readback": {"isPlayMode": True, "moduleConnected": True},
+        }
+
+    gateway.approval_transactions.register_write_handler(
+        "vrcforge_gesture_manager_enter_play_mode",
+        "Enter Gesture Manager Play Mode.",
+        "low",
+        lambda _arguments: {"ok": True, **pending_receipt},
+        verification_prepare_handler=lambda _arguments: {},
+        verification_finalize_handler=finalize,
+        verification_profile="gesture_manager",
+        external_mcp_capability="gesture_manager",
+    )
+    gateway.register_external_mcp_unity_tool(
+        "vrcforge_gesture_manager_enter_play_mode", "integrations/gesture-manager"
+    )
+
+    scene_path = tmp_path / "Assets" / "Main.unity"
+    scene_bytes = b"%YAML 1.1\n--- !u!1 &1\n"
+    scene_path.write_bytes(scene_bytes)
+    scene_path.with_suffix(".unity.meta").write_text(
+        "fileFormatVersion: 2\nguid: 0123456789abcdef0123456789abcdef\n",
+        encoding="utf-8",
+    )
+    execution_target = {
+        "schema": "vrcforge.execution_target.v1",
+        "namespace": "vrcforge://projects/project-test/scenes/scene-test/avatars/avatar-test",
+        "scope": "avatar",
+        "project": {"root": str(tmp_path.resolve()), "projectId": project_identity(str(tmp_path.resolve()))},
+        "editor": {"unityPid": os.getpid(), "processStartTime": process_start_time(os.getpid()), "coreInstanceId": "core-test"},
+        "scene": {"assetPath": "Assets/Main.unity", "absolutePath": str(scene_path.resolve()), "guid": "0123456789abcdef0123456789abcdef", "revision": str(621355968000000000 + scene_path.stat().st_mtime_ns // 100), "digest": hashlib.sha256(scene_bytes).hexdigest()},
+        "avatar": {"globalObjectId": "avatar-test", "exactHierarchyPath": "Avatar"},
+    }
+    execution_target["namespace"] = canonical_namespace(execution_target)
+    (tmp_path / "Library" / "VRCForge").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "Library" / "VRCForge" / "mcp-core.json").write_text(
+        json.dumps({
+            "projectPath": str(tmp_path.resolve()),
+            "projectId": project_identity(str(tmp_path.resolve())),
+            "processId": os.getpid(),
+            "processStartTime": process_start_time(os.getpid()),
+            "instanceId": "core-test",
+        }),
+        encoding="utf-8",
+    )
+    structured = _external_mcp_call(
+        create_agent_mcp_app(gateway),
+        "tools/call",
+        {
+            "name": "vrcforge_gesture_manager_enter_play_mode",
+            "arguments": {"projectPath": str(tmp_path), "avatarPath": "Avatar", "executionTarget": execution_target},
+        },
+        bearer=gateway.ensure_config().token,
+    )["result"]["structuredContent"]
+
+    assert finalized is False
+    assert structured["status"] == "pending"
+    assert structured["operationStatus"] == "pending"
+    assert structured["result"]["enterPlayModePending"] is True
+    assert structured["result"]["commitState"] == "enter_play_mode_requested"
+    assert structured["persistenceState"] == "pending"
+    assert structured["readbackState"] == "pending"
+    assert structured["outcome"]["status"] != "needs_user_action"
+    assert structured["persistenceState"] != "verified"
+    assert structured["readbackState"] != "verified"
+    assert structured["recovery"]["status"] == "applying"
+    assert structured["recovery"]["blockingWrites"] is True
+
+    status_payload = {
+        "ok": False,
+        "errorCode": "gesture_manager_runtime_status_unavailable",
+        "error": "Cached status must not reconcile a pending write.",
+        "isPlayMode": True,
+        "managers": [{"avatarPath": "Avatar", "moduleConnected": True}],
+    }
+    connected_status = {
+        "ok": True,
+        "isPlayMode": True,
+        "managers": [
+            {
+                "avatarPath": "Avatar",
+                "moduleConnected": True,
+            }
+        ],
+    }
+    gateway.register_tool(
+        "vrcforge_gesture_manager_status",
+        "Read Gesture Manager status.",
+        "read/debug",
+        lambda _arguments: status_payload,
+    )
+    gateway.register_external_mcp_unity_tool(
+        "vrcforge_gesture_manager_status", "integrations/gesture-manager"
+    )
+    wrong_avatar_status = _external_mcp_call(
+        create_agent_mcp_app(gateway),
+        "tools/call",
+        {
+            "name": "vrcforge_gesture_manager_status",
+            "arguments": {"projectPath": str(tmp_path), "avatarPath": "OtherAvatar", "executionTarget": execution_target},
+        },
+        bearer=gateway.ensure_config().token,
+    )
+    assert wrong_avatar_status["result"]["structuredContent"]["result"]["isPlayMode"] is True
+    assert gateway.checkpoint_recovery._active_apply_recoveries()[0]["status"] == "applying"
+    failed_status = _external_mcp_call(
+        create_agent_mcp_app(gateway),
+        "tools/call",
+        {
+            "name": "vrcforge_gesture_manager_status",
+            "arguments": {"projectPath": str(tmp_path), "avatarPath": "Avatar", "executionTarget": execution_target},
+        },
+        bearer=gateway.ensure_config().token,
+    )
+    assert failed_status["result"]["structuredContent"]["status"] == "failed"
+    assert gateway.checkpoint_recovery._active_apply_recoveries()[0]["status"] == "applying"
+    assert gateway.approval_transactions.reconcile_gesture_manager_pending_recovery(
+        {"projectPath": str(tmp_path), "avatarPath": "Avatar"}, connected_status
+    ) == []
+    old_core_target = {**execution_target, "editor": {**execution_target["editor"], "coreInstanceId": "old-core"}}
+    assert gateway.approval_transactions.reconcile_gesture_manager_pending_recovery(
+        {"projectPath": str(tmp_path), "avatarPath": "Avatar", "executionTarget": old_core_target},
+        connected_status,
+    ) == []
+    active_recovery = gateway.checkpoint_recovery._active_apply_recoveries()[0]
+    pending_summary = active_recovery["resultSummary"]
+    gateway.approval_transactions._finish_apply_recovery(
+        active_recovery,
+        status="needs_recovery",
+        resolution="write_failed_after_checkpoint",
+    )
+    assert gateway.approval_transactions.reconcile_gesture_manager_pending_recovery(
+        {"projectPath": str(tmp_path), "avatarPath": "Avatar", "executionTarget": execution_target},
+        connected_status,
+    ) == []
+    gateway.approval_transactions._finish_apply_recovery(
+        active_recovery,
+        status="applying",
+        resolution="write_pending",
+        result_summary=pending_summary,
+    )
+    status_payload.clear()
+    status_payload.update(connected_status)
+    status_call = _external_mcp_call(
+        create_agent_mcp_app(gateway),
+        "tools/call",
+        {
+            "name": "vrcforge_gesture_manager_status",
+            "arguments": {"projectPath": str(tmp_path), "avatarPath": "Avatar", "executionTarget": execution_target},
+        },
+        bearer=gateway.ensure_config().token,
+    )
+    status_result = status_call["result"]["structuredContent"]
+    assert status_result["result"]["isPlayMode"] is True
+    assert status_result["result"]["managers"][0]["moduleConnected"] is True
+    assert gateway.checkpoint_recovery._active_apply_recoveries() == []
+
+    gateway.approval_transactions.register_write_handler(
+        "vrcforge_gesture_manager_set_parameter",
+        "Set Gesture Manager parameter.",
+        "low",
+        lambda _arguments: {
+            "ok": True,
+            "status": "executed",
+            "commitState": "committed",
+            "verified": True,
+            "readback": {"parameterName": "VelocityX", "value": 1.0},
+        },
+    )
+    gateway.register_external_mcp_unity_tool(
+        "vrcforge_gesture_manager_set_parameter", "integrations/gesture-manager"
+    )
+    next_write = _external_mcp_call(
+        create_agent_mcp_app(gateway),
+        "tools/call",
+        {
+            "name": "vrcforge_gesture_manager_set_parameter",
+            "arguments": {
+                "projectPath": str(tmp_path),
+                "avatarPath": "Avatar",
+                "executionTarget": execution_target,
+                "parameterName": "VelocityX",
+                "value": 1.0,
+            },
+        },
+        bearer=gateway.ensure_config().token,
+    )["result"]["structuredContent"]
+    assert next_write["status"] == "executed"
 
 
 @pytest.mark.parametrize("execution_mode", ["approval", "auto", "roslyn_full_auto"])
@@ -821,6 +1180,177 @@ def test_external_unity_write_creates_checkpoint_before_handler(monkeypatch, tmp
     assert observed[0]["approval"]["targetTool"] == "vrcforge_external_unity_checkpoint"
 
 
+def test_direct_external_vpm_write_context_false_checkpoints_before_bounded_handler(
+    monkeypatch, tmp_path: Path
+) -> None:
+    gateway = _external_gateway(tmp_path)
+    project = tmp_path / "UnityProject"
+    for marker in ("Assets", "Packages", "ProjectSettings"):
+        (project / marker).mkdir(parents=True, exist_ok=True)
+    service = gateway.approval_transactions
+    events: list[str] = []
+    service.register_write_handler(
+        "vrcforge_install_vpm_package",
+        "Direct sealed VPM write.",
+        "medium",
+        lambda _args: events.append("handler") or {
+            "ok": True, "committed": True, "schema": "vrcforge.vpm_package_install.v1",
+            "verified": True, "readback": {"verified": True, "scope": "package_manager_files"},
+        },
+        request_preparer=lambda args, _preview: ({**args, "sealed": True}, {"ok": True}),
+        external_mcp_capability="sealed_vrc_get_install_v1",
+    )
+    prepared = service.prepare_external_mcp_write(
+        "vrcforge_install_vpm_package",
+        {"projectRoot": str(project), "projectPath": str(project), "packageId": "com.example.pkg"},
+    )
+    monkeypatch.setattr(
+        type(service),
+        "_create_pre_write_checkpoint",
+        lambda _self, _approval, _arguments: events.append("checkpoint")
+        or {"ok": True, "status": "ready", "id": "ckpt_vpm", "projectRoot": str(project)},
+    )
+    result = service.execute_prepared_external_mcp_write(prepared)
+    assert result["ok"] is True
+    assert events == ["checkpoint", "handler"], result
+
+
+def test_direct_external_vpm_write_checkpoint_failure_blocks_handler(
+    monkeypatch, tmp_path: Path
+) -> None:
+    gateway = _external_gateway(tmp_path)
+    project = tmp_path / "UnityProject"
+    for marker in ("Assets", "Packages", "ProjectSettings"):
+        (project / marker).mkdir(parents=True, exist_ok=True)
+    service = gateway.approval_transactions
+    events: list[str] = []
+    service.register_write_handler(
+        "vrcforge_install_vpm_package",
+        "Direct sealed VPM write.",
+        "medium",
+        lambda _args: events.append("handler") or {"ok": True},
+        request_preparer=lambda args, _preview: ({**args, "sealed": True}, {"ok": True}),
+        external_mcp_capability="sealed_vrc_get_install_v1",
+    )
+    prepared = service.prepare_external_mcp_write(
+        "vrcforge_install_vpm_package",
+        {"projectRoot": str(project), "projectPath": str(project), "packageId": "com.example.pkg"},
+    )
+    monkeypatch.setattr(type(service), "_create_pre_write_checkpoint", lambda *_args: {"ok": False, "error": "checkpoint failed"})
+    result = service.execute_prepared_external_mcp_write(prepared)
+    assert result["ok"] is False
+    assert events == []
+
+
+def test_external_write_receipt_projects_bounded_checkpoint_and_recovery() -> None:
+    applied = {
+        "ok": True,
+        "status": "applied",
+        "operationId": "mcpwrite_fixture",
+        "commitState": "unknown",
+        "mutationStarted": True,
+        "checkpoint": {
+            "schema": "vrcforge.checkpoint.v1",
+            "id": "ckpt_fixture",
+            "operationId": "mcpwrite_fixture",
+            "targetTool": "vrcforge_set_material_shader",
+            "status": "ready",
+            "createdAt": "2026-09-09T11:29:01Z",
+            "projectRoot": "D:/project",
+            "transaction": {"unbounded": "must stay in checkpoint history"},
+        },
+        "recovery": {
+            "id": "recovery_fixture",
+            "status": "applied",
+            "resolution": "write_completed",
+            "operationId": "mcpwrite_fixture",
+            "targetTool": "vrcforge_set_material_shader",
+            "checkpointId": "ckpt_fixture",
+            "checkpoint": {"full": "must stay in recovery history"},
+        },
+    }
+
+    result = AgentGateway._external_mcp_write_result(
+        AgentGateway.__new__(AgentGateway),
+        "vrcforge_set_material_shader",
+        applied,
+    )
+
+    assert result["checkpointId"] == "ckpt_fixture"
+    assert result["checkpoint"] == {
+        "schema": "vrcforge.checkpoint.v1",
+        "id": "ckpt_fixture",
+        "operationId": "mcpwrite_fixture",
+        "targetTool": "vrcforge_set_material_shader",
+        "status": "ready",
+        "createdAt": "2026-09-09T11:29:01Z",
+        "projectRoot": "D:/project",
+    }
+    assert result["recoveryId"] == "recovery_fixture"
+    assert result["recovery"] == {
+        "id": "recovery_fixture",
+        "status": "applied",
+        "resolution": "write_completed",
+        "operationId": "mcpwrite_fixture",
+        "targetTool": "vrcforge_set_material_shader",
+        "checkpointId": "ckpt_fixture",
+    }
+    assert result["commitState"] == "unknown"
+    assert "transaction" not in result["checkpoint"]
+    assert "checkpoint" not in result["recovery"]
+
+
+def test_external_write_checkpoint_survives_compact_presentation_without_full_record() -> None:
+    applied = {
+        "ok": True,
+        "status": "applied",
+        "operationId": "mcpwrite_presentation_fixture",
+        "commitState": "unknown",
+        "mutationStarted": True,
+        "operationResource": "vrcforge://operation/mcpwrite_presentation_fixture/receipt?revision=1",
+        "result": {"largeCorePayload": "x" * 13_000},
+        "checkpoint": {
+            "schema": "vrcforge.checkpoint.v1",
+            "id": "ckpt_presentation",
+            "operationId": "mcpwrite_presentation_fixture",
+            "targetTool": "vrcforge_set_material_shader",
+            "status": "ready",
+            "transaction": {"full": "resource-only"},
+        },
+        "recovery": {
+            "id": "recovery_presentation",
+            "status": "applied",
+            "operationId": "mcpwrite_presentation_fixture",
+            "checkpointId": "ckpt_presentation",
+            "checkpoint": {"full": "resource-only"},
+        },
+    }
+    receipt = AgentGateway._external_mcp_write_result(
+        AgentGateway.__new__(AgentGateway),
+        "vrcforge_set_material_shader",
+        applied,
+    )
+    # The Gateway resource publisher adds this URI immediately before the MCP
+    # adapter invokes the final compact presentation formatter.
+    receipt["operationResource"] = applied["operationResource"]
+    compact = project_result(receipt, mode="compact", resource_readable=True)
+    compact_bytes = len(json.dumps(compact, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+
+    assert compact["checkpointId"] == "ckpt_presentation"
+    assert compact["recoveryId"] == "recovery_presentation"
+    assert compact["checkpoint"]["id"] == "ckpt_presentation"
+    assert compact["recovery"]["checkpointId"] == "ckpt_presentation"
+    assert "transaction" not in compact["checkpoint"]
+    assert "checkpoint" not in compact["recovery"]
+    assert compact["resultPresentation"]["mode"] == "compact"
+    baseline = dict(receipt)
+    for key in ("checkpoint", "checkpointId", "recovery", "recoveryId"):
+        baseline.pop(key, None)
+    baseline_compact = project_result(baseline, mode="compact", resource_readable=True)
+    baseline_bytes = len(json.dumps(baseline_compact, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+    assert 0 < compact_bytes - baseline_bytes <= 1024
+
+
 def test_external_write_returns_raw_handler_result_and_adjacent_console_facts(
     tmp_path: Path,
 ) -> None:
@@ -919,6 +1449,7 @@ def test_external_write_exception_preserves_raw_core_result_and_exact_reason(
             "name": "vrcforge_external_exception_write",
             "arguments": {"projectRoot": str(project)},
         },
+        result_mode="full",
         bearer=gateway.ensure_config().token,
     )["result"]["structuredContent"]
 
@@ -929,6 +1460,7 @@ def test_external_write_exception_preserves_raw_core_result_and_exact_reason(
     assert result["errorDetails"]["error"] == "The Core rejected the exact write before routing."
     assert result["errorDetails"]["exception"]["message"] == "Exact managed write transport reason."
     assert result["errorDetails"]["rawResult"] == raw_core_result
+    assert "rawResult" not in result["errorDetails"]["exception"]
     assert result["outcome"]["status"] == "failed"
     assert result["outcome"]["cause"]["code"] == "exact_write_rejection"
     assert result["errorDetails"]["exception"]["errorCode"] == "unity_core_tool_rejected"
@@ -1677,7 +2209,11 @@ def test_external_mcp_exposes_only_the_typed_vpm_wrapper_write(tmp_path: Path) -
         "vrcforge_install_vpm_package",
         "Install one sealed VPM package.",
         "medium",
-        lambda args: executed.append(args) or {"ok": True, "installed": True},
+        lambda args: executed.append(args) or {
+            "ok": True, "installed": True,
+            "schema": "vrcforge.vpm_package_install.v1",
+            "verified": True, "readback": {"verified": True, "scope": "package_manager_files"},
+        },
         request_preparer=lambda args, _preview: (
             {**args, "sealed": True},
             {"packageId": args.get("packageId"), "sealed": True},
@@ -1905,7 +2441,7 @@ def test_checkpoint_storage_repair_rejects_quarantine_collision_before_rewrite(t
 def test_jsonl_append_survives_crash_truncated_tail(tmp_path: Path) -> None:
     gateway = _gateway(tmp_path)
     path = gateway.agent_progress_log_path
-    path.parent.mkdir(parents=True)
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(b'{"schema":"broken"')
 
     gateway._append_jsonl(path, "vrcforge.agent_progress.v1", {"event": "progress_created"})
@@ -1920,7 +2456,7 @@ def test_jsonl_append_survives_crash_truncated_tail(tmp_path: Path) -> None:
 def test_runtime_run_append_survives_crash_truncated_tail(tmp_path: Path) -> None:
     gateway = _gateway(tmp_path)
     path = gateway.runtime_runs.log_path
-    path.parent.mkdir(parents=True)
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(b'{"schema":"broken"')
 
     gateway.runtime_runs.append({"event": "runtime_started"})
@@ -1954,7 +2490,7 @@ def test_checkpoint_append_and_repair_preserve_event_after_truncated_tail(tmp_pa
 def test_jsonl_reader_skips_only_invalid_utf8_line(tmp_path: Path) -> None:
     gateway = _gateway(tmp_path)
     path = gateway.agent_progress_log_path
-    path.parent.mkdir(parents=True)
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(b'{"id":"first"}\n\xff\xfe\n{"id":"last"}\n')
 
     events = gateway._read_jsonl(path, limit=0)

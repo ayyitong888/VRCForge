@@ -9,6 +9,7 @@ from typing import Any
 
 INSPECTION_SCHEMA = "vrcforge.outfit_package_inspection.v1"
 LOOSE_PREFAB_EXTENSIONS = {".prefab"}
+ASSEMBLY_DEFINITION_EXTENSIONS = {".asmdef"}
 TEXTURE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".tga", ".psd", ".exr"}
 MATERIAL_EXTENSIONS = {".mat"}
 MODEL_EXTENSIONS = {".fbx", ".blend", ".obj"}
@@ -191,6 +192,7 @@ def build_container_result(
 ) -> dict[str, Any]:
     unity_packages = [entry for entry in entries if entry["category"] == "unitypackage"]
     prefabs = [entry for entry in entries if entry["category"] == "prefab"]
+    assembly_definitions = [entry for entry in entries if entry["category"] == "assembly_definition"]
     textures = [entry for entry in entries if entry["category"] == "texture"]
     materials = [entry for entry in entries if entry["category"] == "material"]
     models = [entry for entry in entries if entry["category"] == "model"]
@@ -199,14 +201,14 @@ def build_container_result(
         warnings.append("Loose prefab workflow requires explicit user confirmation before copying assets into the Unity project.")
     if textures and not prefabs and not unity_packages:
         warnings.append("Texture-only input cannot be installed as an outfit without user-selected target materials.")
-    if not unity_packages and not prefabs and not textures and not materials and not models:
+    if not unity_packages and not prefabs and not textures and not materials and not models and not assembly_definitions:
         warnings.append("No UnityPackage or loose outfit assets were detected.")
     if unsafe_entry_count:
         warnings.append(f"Skipped {unsafe_entry_count} unsafe archive entr{'y' if unsafe_entry_count == 1 else 'ies'}.")
     if duplicate_entry_count:
         warnings.append(f"Skipped {duplicate_entry_count} duplicate archive entr{'y' if duplicate_entry_count == 1 else 'ies'}.")
     warnings.extend(warning for warning in (extra_warnings or []) if warning)
-    import_plan_kind = "unitypackage_import" if unity_packages else "loose_prefab_assets" if prefabs else "manual_review"
+    import_plan_kind = "unitypackage_import" if unity_packages else "loose_prefab_assets" if (prefabs or assembly_definitions) else "manual_review"
     return {
         "ok": True,
         "schema": INSPECTION_SCHEMA,
@@ -217,6 +219,7 @@ def build_container_result(
             "textureCount": len(textures),
             "materialCount": len(materials),
             "modelCount": len(models),
+            "assemblyDefinitionCount": len(assembly_definitions),
             "entryCount": len(entries),
             "truncated": truncated,
             "importPlanKind": import_plan_kind,
@@ -229,6 +232,7 @@ def build_container_result(
         "textures": textures[:200],
         "materials": materials[:200],
         "models": models[:200],
+        "assemblyDefinitions": assembly_definitions[:200],
         "warnings": warnings,
     }
 
@@ -250,6 +254,8 @@ def classify_asset_name(name: str) -> str:
         return "unitypackage"
     if suffix in LOOSE_PREFAB_EXTENSIONS:
         return "prefab"
+    if suffix in ASSEMBLY_DEFINITION_EXTENSIONS:
+        return "assembly_definition"
     if suffix in TEXTURE_EXTENSIONS:
         return "texture"
     if suffix in MATERIAL_EXTENSIONS:

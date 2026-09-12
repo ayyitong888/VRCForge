@@ -341,6 +341,45 @@
       "requiredFixtures": ["saved clean avatar Scene", "exact Avatar GlobalObjectId", "exact child target GlobalObjectId"],
       "successFields": ["schema", "operation", "preview", "verified", "projectPath", "previewDigest", "applyBinding", "target", "effect", "readback", "commitState"],
       "cleanup": "None; preview must not create a proxy or handoff state file."
+    },
+    {
+      "tool": "vrc_relocate_generated_assets",
+      "mode": "approved_write",
+      "minimalArguments": {
+        "projectPath": "${PROJECT_PATH}",
+        "entries": [
+          {
+            "sourceAssetPath": "Assets/VRCForge/Generated/MatrixGenerated.asset",
+            "destinationAssetPath": "Assets/VRCForgeGenerated/MatrixGenerated.asset",
+            "expectedGuid": "0123456789abcdef0123456789abcdef",
+            "expectedAssetSha256": "0123456789012345678901234567890123456789012345678901234567890123",
+            "expectedMetaSha256": "abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd"
+          }
+        ],
+        "expectedProjectPath": "${PROJECT_PATH}",
+        "preview": false
+      },
+      "requiredFixtures": [
+        "one generated asset with exact source GUID and SHA-256",
+        "destination path absent under Assets/VRCForgeGenerated",
+        "saved Unity project with writable generated roots"
+      ],
+      "successFields": [
+        "schema",
+        "operation",
+        "verified",
+        "expectedProjectPath",
+        "entries",
+        "mutationCount",
+        "changed",
+        "committed",
+        "commitState",
+        "persistenceState",
+        "readbackState",
+        "cleanupState",
+        "checkpointRecoveryRequired"
+      ],
+      "cleanup": "restore relocation checkpoint and remove managed destination asset"
     }
   ]
 }

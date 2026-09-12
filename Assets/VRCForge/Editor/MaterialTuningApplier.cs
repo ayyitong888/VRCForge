@@ -26,113 +26,146 @@ namespace VRCForge.Editor
             public bool? saveAssets { get; set; } = true;
         }
 
+        private sealed class PreparedChange
+        {
+            internal MaterialTarget target;
+            internal IShaderMaterialAdapter adapter;
+            internal string materialId, semanticProperty, assetPath, assetGuid;
+            internal object requested, before, after;
+        }
+
         public static object HandleCommand(JObject @params)
         {
+            var recovery = new WriteAnimationCurveTool.AssetEditRecovery();
+            var previews = new Dictionary<string, Material>(StringComparer.Ordinal);
+            var mutationStarted = false;
+            var phase = "preflight";
             try
             {
                 var avatarPath = (@params?["avatarPath"]?.ToString() ?? string.Empty).Trim();
                 var saveAssets = @params?["saveAssets"]?.Value<bool?>() ?? true;
                 var changes = @params?["changes"] as JArray;
                 if (changes == null || changes.Count == 0)
+                    throw new InvalidOperationException("Missing required parameter: changes");
+                var index = BuildMaterialIndex(avatarPath);
+                var planned = new List<PreparedChange>();
+                var bindings = new HashSet<string>(StringComparer.Ordinal);
+                // Temporary materials belong only to this call and are destroyed in finally.
+                // Validate every row before modifying any persistent asset.
+                foreach (var value in changes)
                 {
-                    return VRCForgeToolResult.Failed("Missing required parameter: changes");
+                    var token = value as JObject ?? throw new InvalidOperationException("Each change must be an object.");
+                    var materialId = (token["material_id"]?.ToString() ?? token["materialId"]?.ToString() ?? "").Trim();
+                    var semantic = (token["semantic_property"]?.ToString() ?? token["semanticProperty"]?.ToString() ?? "").Trim();
+                    var requested = token["after"] ?? token["target"] ?? token["value"];
+                    if (string.IsNullOrEmpty(materialId) || string.IsNullOrEmpty(semantic) || requested == null
+                        || !index.TryGetValue(materialId, out var target))
+                        throw new InvalidOperationException("Every change requires a current material id, semantic property, and value.");
+                    var path = AssetDatabase.GetAssetPath(target.material);
+                    if (string.IsNullOrEmpty(path) || !path.StartsWith("Assets/", StringComparison.Ordinal)
+                        || !AssetDatabase.IsMainAsset(target.material))
+                        throw new InvalidOperationException("Material tuning requires a persistent main material asset.");
+                    if (EditorUtility.IsDirty(target.material))
+                        throw new InvalidOperationException("Save or discard existing material edits before tuning: " + path);
+                    if (!bindings.Add(path + "\n" + semantic))
+                        throw new InvalidOperationException("Duplicate semantic change to the same material asset.");
+                    var adapter = ShaderAdapterRegistry.GetAdapter(target.material)
+                        ?? throw new InvalidOperationException("Unsupported shader family.");
+                    if (!previews.TryGetValue(path, out var preview))
+                    {
+                        recovery.Capture(path);
+                        preview = new Material(target.material) { hideFlags = HideFlags.HideAndDontSave };
+                        previews.Add(path, preview);
+                    }
+                    var input = ExtractValue(requested);
+                    if (!adapter.TryApplyChange(preview, semantic, input, out var before, out var after, out var warning))
+                        throw new InvalidOperationException(warning);
+                    if (!StoredValuesEqual(after, input))
+                        throw new InvalidOperationException("Requested material value would be normalized or clamped; submit the exact supported value.");
+                    if (token["before"] != null && !StoredValuesEqual(before, ExtractValue(token["before"])))
+                        throw new InvalidOperationException("Material before-value changed since approval.");
+                    planned.Add(new PreparedChange { target = target, adapter = adapter, materialId = materialId,
+                        semanticProperty = semantic, assetPath = path, assetGuid = AssetDatabase.AssetPathToGUID(path),
+                        requested = input, before = before, after = after });
                 }
-
-                var materialIndex = BuildMaterialIndex(avatarPath);
+                // Check the final staged material, including alias interactions, before mutation.
+                foreach (var item in planned)
+                    RequireValue(item.adapter, previews[item.assetPath], item.semanticProperty, item.after);
+                recovery.Begin();
+                phase = "apply";
+                foreach (var item in planned)
+                {
+                    Undo.RecordObject(item.target.material, "Apply VRCForge material tuning");
+                    mutationStarted = true;
+                    if (!item.adapter.TryApplyChange(item.target.material, item.semanticProperty, item.requested,
+                        out var before, out var after, out var warning)
+                        || !StoredValuesEqual(before, item.before) || !StoredValuesEqual(after, item.after))
+                        throw new InvalidOperationException("Material apply diverged from validated plan: " + warning);
+                    EditorUtility.SetDirty(item.target.material);
+                }
+                phase = "persisted_readback";
+                if (saveAssets)
+                {
+                    foreach (var group in planned.GroupBy(item => item.assetPath))
+                    {
+                        AssetDatabase.SaveAssetIfDirty(group.First().target.material);
+                        AssetDatabase.ImportAsset(group.Key, ImportAssetOptions.ForceSynchronousImport | ImportAssetOptions.ForceUpdate);
+                    }
+                }
                 var applied = new List<object>();
-                var skipped = new List<object>();
-                var beforeValues = new List<object>();
-                var afterValues = new List<object>();
-
-                foreach (var token in changes.OfType<JObject>())
+                var readback = new List<object>();
+                foreach (var item in planned)
                 {
-                    var materialId = (token["material_id"]?.ToString() ?? token["materialId"]?.ToString() ?? string.Empty).Trim();
-                    var semanticProperty = (token["semantic_property"]?.ToString() ?? token["semanticProperty"]?.ToString() ?? string.Empty).Trim();
-                    var valueToken = token["after"] ?? token["target"] ?? token["value"];
-                    if (string.IsNullOrWhiteSpace(materialId) || string.IsNullOrWhiteSpace(semanticProperty) || valueToken == null)
-                    {
-                        skipped.Add(new { materialId, semanticProperty, warning = "Each change requires material_id, semantic_property, and after." });
-                        continue;
-                    }
-
-                    if (!materialIndex.TryGetValue(materialId, out var target))
-                    {
-                        skipped.Add(new { materialId, semanticProperty, warning = "Material id was not found in the current scene." });
-                        continue;
-                    }
-
-                    var adapter = ShaderAdapterRegistry.GetAdapter(target.material);
-                    if (adapter == null)
-                    {
-                        skipped.Add(new { materialId, semanticProperty, warning = "Unsupported shader family." });
-                        continue;
-                    }
-
-                    Undo.RecordObject(target.material, "Apply VRCForge material tuning");
-                    if (!adapter.TryApplyChange(target.material, semanticProperty, ExtractValue(valueToken), out var previousValue, out var appliedValue, out var warning))
-                    {
-                        skipped.Add(new { materialId, semanticProperty, warning });
-                        continue;
-                    }
-
-                    var memoryProperties = adapter.ReadSupportedProperties(target.material);
-                    if (!memoryProperties.TryGetValue(semanticProperty, out var memoryValue))
-                    {
-                        throw new InvalidOperationException($"Material memory readback failed for semantic property: {semanticProperty}");
-                    }
-                    var currentValue = memoryValue.value;
-                    EditorUtility.SetDirty(target.material);
-                    beforeValues.Add(new
-                    {
-                        material_id = materialId,
-                        semantic_property = semanticProperty,
-                        value = previousValue
-                    });
-                    afterValues.Add(new
-                    {
-                        material_id = materialId,
-                        semantic_property = semanticProperty,
-                        value = currentValue
-                    });
-                    applied.Add(new
-                    {
-                        material_id = materialId,
-                        material_name = target.material.name,
-                        renderer_path = target.rendererPath,
-                        slot_index = target.slotIndex,
-                        shader_family = adapter.ShaderFamily,
-                        semantic_property = semanticProperty,
-                        before = previousValue,
-                        after = currentValue
-                    });
+                    var material = saveAssets ? AssetDatabase.LoadAssetAtPath<Material>(item.assetPath) : item.target.material;
+                    if (material == null || AssetDatabase.AssetPathToGUID(item.assetPath) != item.assetGuid
+                        || (saveAssets && EditorUtility.IsDirty(material)))
+                        throw new InvalidOperationException("Material persisted identity or clean-state readback failed.");
+                    var adapter = ShaderAdapterRegistry.GetAdapter(material)
+                        ?? throw new InvalidOperationException("Saved material shader adapter is unavailable.");
+                    var actual = RequireValue(adapter, material, item.semanticProperty, item.after);
+                    var row = new { material_id = item.materialId, material_name = material.name,
+                        renderer_path = item.target.rendererPath, slot_index = item.target.slotIndex,
+                        shader_family = adapter.ShaderFamily, semantic_property = item.semanticProperty,
+                        before = item.before, after = actual };
+                    applied.Add(row);
+                    if (saveAssets) readback.Add(new { material_id = item.materialId, semantic_property = item.semanticProperty,
+                        assetPath = item.assetPath, assetGuid = item.assetGuid, before = item.before, after = actual });
                 }
-
-                if (saveAssets && applied.Count > 0)
+                recovery.Complete();
+                return VRCForgeToolResult.Completed($"Applied {applied.Count} material tuning change(s).", new
                 {
-                    AssetDatabase.SaveAssets();
-                    AssetDatabase.Refresh();
-                }
-
-                return VRCForgeToolResult.Completed(
-                    $"Applied {applied.Count} material tuning change(s); skipped {skipped.Count}.",
-                    new
-                    {
-                        avatarPath,
-                        appliedCount = applied.Count,
-                        skippedCount = skipped.Count,
-                        applied,
-                        skipped,
-                        saved = saveAssets,
-                        before = beforeValues,
-                        after = afterValues,
-                        pending = !saveAssets,
-                        note = saveAssets ? "已修改并落盘" : "已修改，尚未落盘"
-                    });
+                    schema = "vrcforge.material_tuning_write.v1", ok = true, avatarPath,
+                    appliedCount = applied.Count, skippedCount = 0, applied, skipped = new object[0],
+                    saved = saveAssets, pending = !saveAssets, verified = saveAssets, persistedReadback = saveAssets,
+                    readback, committed = saveAssets, commitState = saveAssets ? "committed" : "pending", commitStateKnown = true,
+                    before = planned.Select(item => new { material_id = item.materialId, semantic_property = item.semanticProperty, value = item.before }),
+                    after = planned.Select(item => new { material_id = item.materialId, semantic_property = item.semanticProperty, value = item.after }),
+                    note = saveAssets ? "已修改并落盘回读验证" : "已修改，尚未落盘"
+                });
             }
             catch (Exception ex)
             {
-                return VRCForgeToolResult.Failed($"Material tuning apply failed: {ex.Message}\n{ex.StackTrace}");
+                return WriteAnimationCurveTool.EditFailure("material_tuning_failed", ex, mutationStarted, phase, recovery);
             }
+            finally
+            {
+                foreach (var material in previews.Values) UnityEngine.Object.DestroyImmediate(material);
+            }
+        }
+
+        private static bool StoredValuesEqual(object actual, object expected)
+        {
+            if (actual is float number)
+                return !float.IsNaN(number) && !float.IsInfinity(number) && expected is float target && number.Equals(target);
+            return actual is string text && expected is string expectedText && string.Equals(text, expectedText, StringComparison.Ordinal);
+        }
+
+        private static object RequireValue(IShaderMaterialAdapter adapter, Material material, string semantic, object expected)
+        {
+            var properties = adapter.ReadSupportedProperties(material);
+            if (!properties.TryGetValue(semantic, out var property) || !StoredValuesEqual(property.value, expected))
+                throw new InvalidOperationException("Material readback value mismatch: " + semantic);
+            return property.value;
         }
 
         private static Dictionary<string, MaterialTarget> BuildMaterialIndex(string avatarPath)

@@ -5,7 +5,10 @@ from types import SimpleNamespace
 import pytest
 
 import dashboard_server
+from test_shader_persisted_receipt import receipt
 from prepared_unity_execution import PREPARED_UNITY_EXECUTION_ARGUMENT_KEY, build_prepared_execution_plan
+from operation_context import bind_operation_context
+from prepared_shader_tuning_writes import require_avatar_material_scope, require_shader_receipt_avatar
 
 
 def _state(*, after: float = 0.8, locked: list[str] | None = None) -> dict:
@@ -39,7 +42,7 @@ def _arguments() -> dict:
 
 def _core_applied_result(*, before: float = 0.2, after: float = 0.8) -> dict:
     """Match the Core's per-change identity and before/after readback."""
-    return {
+    result = {
         "appliedCount": 1,
         "applied": [
             {
@@ -51,6 +54,44 @@ def _core_applied_result(*, before: float = 0.2, after: float = 0.8) -> dict:
         ],
         "skipped": [],
     }
+
+    return receipt(result["applied"])
+
+
+def test_external_dispatch_strip_uses_request_local_operation_target() -> None:
+    """Mirror external dispatch: pop executionTarget, then bind its context."""
+    target = {
+        "scope": "avatar",
+        "avatar": {"exactHierarchyPath": "Scene/A"},
+        "scene": {"assetPath": "Assets/Scene.unity", "guid": "scene-guid"},
+    }
+    arguments = {"avatar_path": "Scene/A"}
+    inventory = {"materials": [{
+        "material_id": "mat_skin",
+        "item_path": "Scene/A/Body",
+        "renderer_scene_path": "Assets/Scene.unity",
+        "renderer_scene_guid": "scene-guid",
+        "renderer_component_id": "component-id",
+    }]}
+    with bind_operation_context("op-1", target):
+        facts = require_avatar_material_scope(arguments, "Scene/A", inventory, [{"material_id": "mat_skin"}])
+        require_shader_receipt_avatar({"avatar_path": "Scene/A"}, "Scene/A", {"avatarPath": "Scene/A"})
+    assert facts == [{
+        "material_id": "mat_skin",
+        "item_path": "Scene/A/Body",
+        "renderer_scene_path": "Assets/Scene.unity",
+        "renderer_scene_guid": "scene-guid",
+        "renderer_component_id": "component-id",
+    }]
+
+
+def test_operation_context_target_conflict_is_rejected() -> None:
+    with bind_operation_context("op-2", {"scope": "avatar", "avatar": {"exactHierarchyPath": "Scene/A"}}):
+        with pytest.raises(RuntimeError, match="conflicts"):
+            require_avatar_material_scope(
+                {"executionTarget": {"scope": "avatar", "avatar": {"exactHierarchyPath": "Scene/B"}}},
+                "Scene/A",
+            )
 
 
 def test_apply_preparer_seals_real_validated_core_call(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -168,8 +209,14 @@ def test_apply_rejects_live_validation_drift_before_core(monkeypatch: pytest.Mon
     monkeypatch.setattr(dashboard_server, "apply_shader_material_tuning_direct", lambda *_args: (_ for _ in ()).throw(AssertionError("Core must not run")))
     dashboard_server.DASHBOARD_RUNTIME.shader_undo_stack.clear()
 
-    with pytest.raises(Exception, match="drifted"):
+    with pytest.raises(dashboard_server.HTTPException, match="drifted") as exc_info:
         dashboard_server.apply_shader_material_plan_approved_sync(prepared)
+    external = exc_info.value.external_error
+    assert external["mutationStarted"] is False
+    assert external["committed"] is False
+    assert external["commitState"] == "not_started"
+    assert external["checkpointRecoveryRequired"] is False
+    assert external["toolRoutingStarted"] is False
     assert dashboard_server.DASHBOARD_RUNTIME.shader_undo_stack == {}
 
 
@@ -186,6 +233,8 @@ def test_apply_uses_sealed_call_and_pushes_undo_only_after_success(monkeypatch: 
     dashboard_server.DASHBOARD_RUNTIME.shader_undo_stack.clear()
 
     result = dashboard_server.apply_shader_material_plan_approved_sync(prepared)
+    assert result["verified"] is True and result["persistedReadback"] is True
+    assert result["commitState"] == "committed" and result["readback"]
     assert calls == [("Scene/A", state["coreArguments"]["changes"])]
     assert result["undoDepth"] == 1
     assert dashboard_server.DASHBOARD_RUNTIME.shader_undo_stack["Scene/A"][0][0]["after"] == 0.2
@@ -238,6 +287,8 @@ def test_apply_post_core_history_failure_is_committed_warning(monkeypatch: pytes
     monkeypatch.setattr(dashboard_server, "mark_shader_tuning_history_applied", lambda _value: (_ for _ in ()).throw(OSError("disk full")))
 
     result = dashboard_server.apply_shader_material_plan_approved_sync(prepared)
+    assert result["verified"] is True and result["persistedReadback"] is True
+    assert result["commitState"] == "committed" and result["readback"]
     assert result["committed"] is True
     assert result["committedWithWarning"] is True
     assert "disk full" in result["warning"]
@@ -262,6 +313,8 @@ def test_restore_holds_top_on_failure_and_consumes_only_exact_peek(monkeypatch: 
         lambda _settings, _avatar, changes: calls.append(changes) or _core_applied_result(before=0.2, after=0.2),
     )
     result = dashboard_server.restore_shader_material_plan_approved_sync(prepared)
+    assert result["verified"] is True and result["persistedReadback"] is True
+    assert result["commitState"] == "committed" and result["readback"]
     assert calls == [top]
     assert result["undoDepth"] == 0
     assert dashboard_server.DASHBOARD_RUNTIME.shader_undo_stack[avatar] == []

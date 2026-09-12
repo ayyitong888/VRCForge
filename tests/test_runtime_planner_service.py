@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+import agent_gateway
 from runtime_planner_service import (
     EXPOSURE_LAYER_EXECUTION,
     EXPOSURE_LAYER_PLANNING,
@@ -876,6 +877,18 @@ def test_bounded_schema_preserves_all_callable_properties_and_constraints() -> N
     assert bounded["properties"][long_property]["const"] == "y" * 200
 
 
+def test_real_get_asset_info_conditional_schema_survives_projection() -> None:
+    canonical = agent_gateway.canonical_unity_read_tool_input_schema(
+        "vrcforge_get_asset_info"
+    )
+    bounded = bounded_planner_tool_schema(canonical)
+    assert bounded["allOf"] == canonical["allOf"]
+    conditional = bounded["allOf"][0]
+    assert conditional["if"]["required"] == ["includePreview"]
+    assert conditional["then"]["required"] == ["projectPath"]
+    prompt = planner_tool_schema_prompt(bounded)
+    assert '"allOf"' in prompt
+    assert '"projectPath"' in prompt
 
 
 def test_llm_tool_schema_failure_returns_a_correctable_non_execution_plan() -> None:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from types import SimpleNamespace
+from agent_tool_result_contract import normalize_agent_tool_result
 
 import dashboard_server
 from agent_gateway import (
@@ -14,10 +15,57 @@ from profiled_tool_registry import CapabilityProfile, ToolSet
 from internal_tool_blocks import (
     CANONICAL_TOOL_BLOCKS,
     CANONICAL_TOOL_LEAVES,
+    INTERNAL_LOADABLE_TOOL_BLOCKS,
     build_internal_tool_block_tree,
     internal_tool_block_for_name,
+    normalize_internal_tool_blocks,
     resolve_internal_tool_block_selector,
 )
+
+
+def test_canonical_parent_blocks_are_routing_only_and_never_loadable() -> None:
+    for parent in CANONICAL_TOOL_BLOCKS:
+        assert parent not in INTERNAL_LOADABLE_TOOL_BLOCKS
+        assert resolve_internal_tool_block_selector(parent) == ""
+        assert parent not in normalize_internal_tool_blocks([parent])
+
+
+def test_canonical_leaf_core_and_legacy_aliases_remain_loadable() -> None:
+    for leaf in CANONICAL_TOOL_LEAVES:
+        assert leaf in INTERNAL_LOADABLE_TOOL_BLOCKS
+        assert resolve_internal_tool_block_selector(leaf) == leaf
+        assert leaf in normalize_internal_tool_blocks([leaf])
+    assert resolve_internal_tool_block_selector("core") == "core"
+    assert resolve_internal_tool_block_selector("avatar") == "avatar_structure/hierarchy_components"
+    assert resolve_internal_tool_block_selector("materials") == "appearance/materials_shaders"
+
+
+def test_dashboard_parent_load_rejects_without_touching_session_state(monkeypatch) -> None:
+    calls = []
+
+    def sentinel(*args, **kwargs):
+        calls.append((args, kwargs))
+        raise AssertionError("routing-only parent reached runtime session state")
+
+    monkeypatch.setattr(
+        type(dashboard_server.AGENT_GATEWAY.runtime_sessions),
+        "load_internal_tool_block",
+        sentinel,
+    )
+    for parent in CANONICAL_TOOL_BLOCKS:
+        result = dashboard_server.load_internal_tool_block(
+            {"sessionId": "internal-block-regression", "block": parent}
+        )
+        assert result["ok"] is False
+        assert result["status"] == "failed"
+        assert result["errorCode"] == "internal_tool_block_selector_invalid"
+        assert result["toolRoutingStarted"] is False
+        normalized = normalize_agent_tool_result(
+            result, fallback_summary="load_internal_tool_block", write=False
+        )
+        assert normalized["status"] == "failed"
+        assert "avatar_structure/hierarchy_components" in " ".join(result["nextActions"])
+    assert calls == []
 
 
 def test_internal_index_tree_is_independent_and_unity_is_nested() -> None:

@@ -100,6 +100,7 @@ def test_sealed_vpm_cli_identity_is_a_read_source_not_an_outside_project_write(
             "projectRoot": str(project),
             "projectPath": str(project),
             "packageId": "nadena.dev.modular-avatar",
+            "legacyBaselineArchive": str(tmp_path / "official.unitypackage"),
         },
         [
             (
@@ -117,6 +118,7 @@ def test_sealed_vpm_cli_identity_is_a_read_source_not_an_outside_project_write(
                 "sha256": "fixed-test-digest",
             },
             "project": {"path": str(project)},
+            "legacyBaseline": {"archive": {"identity": {"path": str(tmp_path / "official.unitypackage")}}},
         },
     )
 

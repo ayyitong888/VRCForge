@@ -81,11 +81,11 @@ def _prefab_payload() -> dict:
         "mutationCount": 0,
         "source": _source(),
         "target": {
-            "assetPath": "Assets/VRCForge/Generated/Accessories/AccessoryCopy.prefab",
-            "parentFolderPath": "Assets/VRCForge/Generated/Accessories",
+            "assetPath": "Assets/VRCForgeGenerated/Prefabs/Accessories/AccessoryCopy.prefab",
+            "parentFolderPath": "Assets/VRCForgeGenerated/Prefabs/Accessories",
             "parentFolderGuid": "1" * 32,
             "parentFolderIdentity": "2" * 64,
-            "stagingRootPath": "Assets/VRCForge/Generated",
+            "stagingRootPath": "Assets/VRCForgeGenerated/Prefabs",
             "stagingRootGuid": "3" * 32,
             "stagingRootIdentity": "4" * 64,
             "stagingPolicy": "random_create_new_folder_v1",
@@ -119,7 +119,7 @@ def _prefab_wrapper() -> dict:
             "projectPath": "D:/DisposableUnityProject",
             "sourceScenePath": "Assets/Scenes/AccessoryCopy.unity",
             "sourceObjectPath": "AvatarA/Accessory",
-            "prefabAssetPath": "Assets/VRCForge/Generated/Accessories/AccessoryCopy.prefab",
+            "prefabAssetPath": "Assets/VRCForgeGenerated/Prefabs/Accessories/AccessoryCopy.prefab",
         },
         PREFAB_TOOL_NAME,
     )
@@ -248,6 +248,26 @@ def test_invalid_unity_scene_handles_fail_closed(handle: int) -> None:
         bind_authoritative_preview(_duplicate_wrapper(), payload)
 
 
+def test_prefab_classified_output_uses_independent_root_and_keeps_staging_bound() -> None:
+    payload = _prefab_payload()
+    request = _prefab_wrapper()
+    destination = "Assets/VRCForgeGenerated/Prefabs/Accessories/AccessoryCopy.prefab"
+    payload["target"].update(
+        assetPath=destination,
+        parentFolderPath=destination.rsplit("/", 1)[0],
+        stagingRootPath="Assets/VRCForgeGenerated/Prefabs",
+    )
+    payload["previewDigest"] = compute_preview_digest(payload)
+    request["arguments"]["prefabAssetPath"] = destination
+
+    canonical, approval = bind_authoritative_preview(request, payload)
+
+    assert canonical["arguments"]["prefabAssetPath"] == destination
+    assert canonical["arguments"]["expectedPrefabParentFolderIdentity"] == "2" * 64
+    assert canonical["arguments"]["expectedStagingRootIdentity"] == "4" * 64
+    assert approval["target"]["stagingRootPath"] == "Assets/VRCForgeGenerated/Prefabs"
+
+
 def test_prefab_preview_binds_create_new_destination_and_source() -> None:
     canonical, approval = bind_authoritative_preview(
         _prefab_wrapper(),
@@ -326,12 +346,14 @@ def test_duplicate_preview_cannot_substitute_requested_selector(change: dict) ->
     [
         "Assets/Accessory.prefab",
         "Assets/VRCForge/Other/Accessory.prefab",
-        "Assets/VRCForge/Generated.prefab",
-        "Assets/VRCForge/Generated/../Accessory.prefab",
+        "Assets/VRCForge/Generated/Accessory.prefab",
+        "Assets/VRCForgeGenerated/Materials/Accessory.prefab",
+        "Assets/VRCForgeGenerated/Prefabs.prefab",
+        "Assets/VRCForgeGenerated/Prefabs/../Accessory.prefab",
         "Assets\\VRCForge\\Generated\\Accessory.prefab",
-        "/Assets/VRCForge/Generated/Accessory.prefab",
+        "/Assets/VRCForgeGenerated/Prefabs/Accessory.prefab",
         "Packages/VRCForge/Generated/Accessory.prefab",
-        "Assets/VRCForge/Generated/Accessory.asset",
+        "Assets/VRCForgeGenerated/Prefabs/Accessory.asset",
     ],
 )
 def test_prefab_destination_is_restricted_to_generated_create_new_path(unsafe_path: str) -> None:
@@ -412,7 +434,7 @@ def test_csharp_domain_declares_both_static_tools_and_hard_fail_closed_guards() 
         "ComputeHierarchyDigest",
         "expectedPreviewDigest",
         "targetParent.transform.IsChildOf(source.transform)",
-        'Assets/VRCForge/Generated/',
+        'Assets/VRCForgeGenerated/Prefabs',
         "PrefabUtility.SaveAsPrefabAsset",
         "AssetDatabase.MoveAsset",
             "AssetDatabase.DeleteAsset",

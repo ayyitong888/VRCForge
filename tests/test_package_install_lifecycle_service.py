@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+import io
 from pathlib import Path
 import subprocess
+import tarfile
+import zipfile
 from typing import Any
 
 import pytest
@@ -65,6 +68,39 @@ def _set_installed_package(project: Path, package_id: str, version: str) -> None
         json.dumps({"dependencies": {package_id: version}}),
         encoding="utf-8",
     )
+
+
+def _set_assets_package(
+    project: Path, package_id: str, version: str, *, archive: Path | None = None
+) -> Path:
+    package_root = project / "Assets" / package_id
+    package_root.mkdir(parents=True)
+    (package_root / "package.json").write_text(
+        json.dumps({"name": package_id, "version": version}),
+        encoding="utf-8",
+    )
+    (package_root / "package.json.meta").write_text(
+        "fileFormatVersion: 2\n", encoding="utf-8"
+    )
+    if archive is not None:
+        relative = "Editor/Legacy.cs"
+        (package_root / relative).parent.mkdir(parents=True)
+        (package_root / relative).write_bytes(b"legacy")
+        with tarfile.open(archive, "w:gz") as bundle:
+            package_json = (package_root / "package.json").read_bytes()
+            entries = (
+                ("package-json/pathname", f"Assets/{package_id}/package.json".encode()),
+                ("package-json/asset", package_json),
+                ("package-json/asset.meta", b"fileFormatVersion: 2\n"),
+                ("package/pathname", f"Assets/{package_id}/{relative}".encode()),
+                ("package/asset", b"legacy"),
+                ("package/asset.meta", b"fileFormatVersion: 2\n"),
+            )
+            for name, data in entries:
+                member = tarfile.TarInfo(name)
+                member.size = len(data)
+                bundle.addfile(member, io.BytesIO(data))
+    return package_root
 
 
 def _detection() -> PackageDetectionService:
@@ -372,6 +408,201 @@ def test_installed_package_rejects_caller_supplied_upgrade_evidence(
 
     assert captured.value.status_code == 409
     assert "caller-supplied upgrade evidence" in str(captured.value)
+
+
+def test_vpm_installed_package_explicit_upgrade_does_not_require_legacy_baseline(
+    tmp_path: Path,
+) -> None:
+    """A package already managed by VPM must use the ordinary upgrade lane."""
+    project = _project(tmp_path)
+    package_id = "com.example.package"
+    _set_installed_package(project, package_id, "1.2.3")
+    cli = tmp_path / "vrc-get.exe"
+    cli.write_bytes(b"fixed-cli")
+    preparer = _preparer(
+        project,
+        cli,
+        _detection(),
+        [],
+        versions=[{"version": "1.2.3"}, {"version": "1.3.0"}],
+    )
+
+    prepared, preview = preparer.prepare(
+        {
+            "projectPath": str(project),
+            "packageId": package_id,
+            "packageVersion": "1.3.0",
+            "upgrade": True,
+        },
+        None,
+    )
+
+    evidence = prepared_evidence(prepared)
+    assert preview["compatibilityAction"] == "upgrade"
+    assert prepared["packageVersion"] == "1.3.0"
+    assert evidence["upgrade"] is True
+    assert "legacyBaseline" not in evidence
+
+
+def test_assets_upgrade_mismatch_requires_explicit_preservation_opt_in(
+    tmp_path: Path,
+) -> None:
+    project = _project(tmp_path)
+    package_id = "com.example.package"
+    archive = tmp_path / "legacy.unitypackage"
+    package_root = _set_assets_package(project, package_id, "1.2.3", archive=archive)
+    (package_root / "untracked-custom.hlsl").write_text("keep", encoding="utf-8")
+    cli = tmp_path / "vrc-get.exe"
+    cli.write_bytes(b"fixed-cli")
+    detection = _detection()
+
+    without_opt_in = _preparer(project, cli, detection, [], versions=[{"version": "1.3.0"}])
+    with pytest.raises(AgentGatewayError, match="Legacy baseline mismatch"):
+        without_opt_in.prepare(
+            {
+                "projectPath": str(project),
+                "packageId": package_id,
+                "packageVersion": "1.3.0",
+                "upgrade": True,
+                "legacyBaselineArchive": str(archive),
+                "legacyBaselineAssetsRoot": str(package_root),
+            },
+            None,
+        )
+
+    with_opt_in = _preparer(project, cli, detection, [], versions=[{"version": "1.3.0"}])
+    prepared, _preview = with_opt_in.prepare(
+        {
+            "projectPath": str(project),
+            "packageId": package_id,
+            "packageVersion": "1.3.0",
+            "upgrade": True,
+            "preserveLegacyFiles": True,
+            "legacyBaselineArchive": str(archive),
+            "legacyBaselineAssetsRoot": str(package_root),
+        },
+        None,
+    )
+    evidence = prepared_evidence(prepared)
+    assert evidence["preserveLegacyFiles"] is True
+    assert evidence["legacyBaseline"]["unknown"] == ["untracked-custom.hlsl"]
+
+
+def test_preserved_assets_upgrade_aborts_when_source_drifts_before_cli(
+    tmp_path: Path,
+) -> None:
+    project = _project(tmp_path)
+    package_id = "com.example.package"
+    archive = tmp_path / "legacy.unitypackage"
+    package_root = _set_assets_package(project, package_id, "1.2.3", archive=archive)
+    (package_root / "untracked-custom.hlsl").write_text("keep", encoding="utf-8")
+    cli = tmp_path / "vrc-get.exe"
+    cli.write_bytes(b"fixed-cli")
+    detection = _detection()
+    preparer = _preparer(project, cli, detection, [], versions=[{"version": "1.3.0"}])
+    prepared, _preview = preparer.prepare(
+        {
+            "projectPath": str(project),
+            "packageId": package_id,
+            "packageVersion": "1.3.0",
+            "upgrade": True,
+            "preserveLegacyFiles": True,
+            "legacyBaselineArchive": str(archive),
+            "legacyBaselineAssetsRoot": str(package_root),
+        },
+        None,
+    )
+    (package_root / "untracked-custom.hlsl").write_text("changed", encoding="utf-8")
+    child_calls: list[list[str]] = []
+
+    def forbidden_process(argv: list[str], **_kwargs: Any) -> BoundedProcessResult:
+        child_calls.append(argv)
+        raise AssertionError("install child must not start after source drift")
+
+    executor = VpmPackageInstallExecutor(
+        VpmPackageInstallExecutionPorts(
+            detect_package=detection.detect,
+            process_environment=dict,
+            run_install_process=forbidden_process,
+        )
+    )
+    result = executor.execute(prepared)
+
+    assert result["ok"] is False
+    assert "drifted" in result["error"]
+    assert child_calls == []
+    assert result["mutationStarted"] is False
+    assert result["committed"] is False
+    assert result["commitState"] == "not_started"
+    assert result["recovery"] == {
+        "checkpointMustBeRestoredOnlyIfUserChooses": False,
+        "committed": False,
+        "commitState": "not_started",
+    }
+
+
+def test_preserved_assets_upgrade_creates_verified_backup_before_cli(
+    tmp_path: Path,
+) -> None:
+    """Preservation is durable and complete before the package manager runs."""
+    project = _project(tmp_path)
+    package_id = "com.example.package"
+    archive = tmp_path / "legacy.unitypackage"
+    package_root = _set_assets_package(project, package_id, "1.2.3", archive=archive)
+    unknown = package_root / "untracked-custom.hlsl"
+    unknown.write_bytes(b"custom bytes that must survive")
+    cli = tmp_path / "vrc-get.exe"
+    cli.write_bytes(b"fixed-cli")
+    detection = _detection()
+    preparer = _preparer(project, cli, detection, [], versions=[{"version": "1.3.0"}])
+    prepared, _preview = preparer.prepare(
+        {
+            "projectPath": str(project),
+            "packageId": package_id,
+            "packageVersion": "1.3.0",
+            "upgrade": True,
+            "preserveLegacyFiles": True,
+            "legacyBaselineArchive": str(archive),
+            "legacyBaselineAssetsRoot": str(package_root),
+        },
+        None,
+    )
+    observed: dict[str, Any] = {}
+
+    def run_install(argv: list[str], **_kwargs: Any) -> BoundedProcessResult:
+        backups = list((project / ".vrcforge" / "package-backups").glob("*.zip"))
+        assert len(backups) == 1
+        with zipfile.ZipFile(backups[0]) as bundle:
+            observed["payload"] = bundle.read(
+                f"tree/{package_root.name}/untracked-custom.hlsl"
+            )
+        observed["source"] = unknown.read_bytes()
+        (project / "Packages" / "vpm-manifest.json").write_text(
+            json.dumps(
+                {
+                    "dependencies": {package_id: "1.3.0"},
+                    "locked": {package_id: {"version": "1.3.0"}},
+                }
+            ),
+            encoding="utf-8",
+        )
+        return _process_result(stdout="upgraded")
+
+    executor = VpmPackageInstallExecutor(
+        VpmPackageInstallExecutionPorts(
+            detect_package=detection.detect,
+            process_environment=dict,
+            run_install_process=run_install,
+        )
+    )
+    result = executor.execute(prepared)
+
+    assert result["ok"] is True
+    assert observed == {
+        "payload": b"custom bytes that must survive",
+        "source": b"custom bytes that must survive",
+    }
+    assert result["legacyPreservation"]["ok"] is True
 
 
 def test_approved_executor_owns_one_child_and_requires_exact_readback(

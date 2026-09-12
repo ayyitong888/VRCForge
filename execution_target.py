@@ -169,20 +169,37 @@ def validate_execution_target(
         _required_string(scene.get("revision"), "scene.revision")
         _required_string(scene.get("digest"), "scene.digest")
         if core_identity is not None:
+            # Checkpoint saving can change the file mtime without changing any
+            # approved bytes. Keep the frozen target/digest intact; only a full
+            # matching SHA256 for the same scene GUID can supersede its mtime.
+            scene_digest = str(scene.get("digest"))
+            same_scene_content = (
+                scene.get("guid") == core_identity.get("sceneGuid")
+                and len(scene_digest) == 64
+                and all(char in "0123456789abcdef" for char in scene_digest)
+                and scene_digest == core_identity.get("sceneDigest")
+            )
             for target_key, core_key in (("guid", "sceneGuid"), ("revision", "sceneRevision"), ("digest", "sceneDigest")):
+                if target_key == "revision" and same_scene_content:
+                    continue
                 expected_scene_value = str(core_identity.get(core_key) or "").strip()
                 if expected_scene_value and str(scene.get(target_key)) != expected_scene_value:
                     raise ExecutionTargetError("scene_identity_mismatch", f"ExecutionTarget scene {target_key} changed.")
         scene["absolutePath"] = scene_path
         target["scene"] = scene
-    if scope in {"avatar", "object", "component"}:
+    if scope == "avatar":
         avatar = dict(_mapping(target.get("avatar"), "avatar"))
         _required_string(avatar.get("globalObjectId"), "avatar.globalObjectId")
         _required_string(avatar.get("exactHierarchyPath"), "avatar.exactHierarchyPath")
         target["avatar"] = avatar
-        if core_identity is not None and core_identity.get("avatarGlobalObjectId"):
-            if avatar.get("globalObjectId") != core_identity.get("avatarGlobalObjectId"):
-                raise ExecutionTargetError("avatar_identity_mismatch", "The bound Avatar was replaced or changed.")
+    elif scope in {"object", "component"} and target.get("avatar") is not None:
+        avatar = dict(_mapping(target.get("avatar"), "avatar"))
+        _required_string(avatar.get("globalObjectId"), "avatar.globalObjectId")
+        _required_string(avatar.get("exactHierarchyPath"), "avatar.exactHierarchyPath")
+        target["avatar"] = avatar
+    if core_identity is not None and core_identity.get("avatarGlobalObjectId") and target.get("avatar") is not None:
+        if target["avatar"].get("globalObjectId") != core_identity.get("avatarGlobalObjectId"):
+            raise ExecutionTargetError("avatar_identity_mismatch", "The bound Avatar was replaced or changed.")
     if scope in {"object", "component"}:
         obj = dict(_mapping(target.get("object"), "object"))
         _required_string(obj.get("globalObjectId"), "object.globalObjectId")
@@ -414,7 +431,7 @@ def standard_identity_metadata(*, scope: str, write: bool) -> dict[str, Any]:
     required = ["project.root", "project.projectId", "editor.unityPid", "editor.processStartTime", "editor.coreInstanceId"]
     if scope in {"scene", "avatar", "object", "component"}:
         required.extend(["scene.absolutePath", "scene.guid", "scene.revision", "scene.digest"])
-    if scope in {"avatar", "object", "component"}:
+    if scope == "avatar":
         required.extend(["avatar.globalObjectId", "avatar.exactHierarchyPath"])
     if scope in {"object", "component"}:
         required.extend(["object.globalObjectId", "object.exactHierarchyPath"])

@@ -5,6 +5,7 @@ from external_tool_result_contract import (
     canonical_result_facts,
     external_write_failure_view,
 )
+from agent_tool_result_contract import normalize_agent_tool_result
 
 
 class StructuredWrapperError(RuntimeError):
@@ -96,6 +97,74 @@ def test_canonical_facts_preserve_dispatch_retry_and_exact_recovery_flags() -> N
     assert facts["safeToRetry"] is False
     assert facts["checkpointRecoveryRequired"] is True
     assert facts["temporaryCleanupRequired"] is False
+
+
+def test_no_write_commit_facts_clear_stale_unknown_recovery_projection() -> None:
+    raw = {
+        "ok": False,
+        "status": "failed",
+        "mutationStarted": False,
+        "committed": False,
+        "commitState": "not_started",
+        "recovery": {
+            "required": True,
+            "reason": "Commit state is unknown; preserve the current state.",
+        },
+    }
+
+    facts = canonical_result_facts([raw], success=False, status="failed")
+
+    assert facts["mutationStarted"] is False
+    assert facts["committed"] is False
+    assert facts["commitState"] == "not_started"
+    assert facts["recovery"] == {"required": False, "reason": "No mutation started."}
+
+    error = build_external_tool_error(raw_result=raw, operation_kind="write")
+    assert error["recovery"] == facts["recovery"]
+    assert external_write_failure_view(error)["recovery"] == facts["recovery"]
+    normalized = normalize_agent_tool_result(
+        {**raw, "errorDetails": error},
+        fallback_summary="Write failed.",
+        write=True,
+    )
+    assert normalized["recovery"] == facts["recovery"]
+
+
+def test_no_write_commit_facts_preserve_explicit_checkpoint_recovery() -> None:
+    raw = {
+        "ok": False,
+        "status": "failed",
+        "mutationStarted": False,
+        "committed": False,
+        "commitState": "not_started",
+        "checkpointRecoveryRequired": True,
+        "recovery": {"required": True, "reason": "Explicit recovery requirement."},
+    }
+
+    facts = canonical_result_facts([raw], success=False, status="failed")
+
+    assert facts["commitState"] == "not_started"
+    assert facts["checkpointRecoveryRequired"] is True
+    assert facts["recovery"] == raw["recovery"]
+
+
+def test_unknown_commit_facts_remain_conservative() -> None:
+    facts = canonical_result_facts(
+        [
+            {
+                "ok": False,
+                "status": "failed",
+                "mutationStarted": None,
+                "committed": None,
+                "commitState": "unknown",
+            }
+        ],
+        success=False,
+        status="failed",
+    )
+
+    assert facts["commitState"] == "unknown"
+    assert facts["recovery"]["required"] is True
 
 
 def test_write_failure_view_only_exposes_known_retryability() -> None:

@@ -7,6 +7,7 @@ from agent_mcp_2026 import Mcp2026Router, PROTOCOL_VERSION
 from agent_mcp_standard import LATEST_PROTOCOL_VERSION, McpStandardRouter
 from mcp_prompt_registry import McpPromptError, McpPromptRegistry, PROMPT_CONTEXT_SCHEMA
 from mcp_resource_registry import McpResourceRegistry
+from external_mcp_result_projection import project_prompt
 
 
 def _skills(count: int = 9) -> dict:
@@ -89,6 +90,39 @@ def test_prompt_registry_lists_all_nine_skills_with_stable_provenance() -> None:
         assert prompt["_meta"]["source"] == "user"
         assert prompt["_meta"]["versionSource"] == "content-addressed"
         assert prompt["_meta"]["writeToolsCallableInPlanning"] is False
+
+
+def test_prompt_descriptor_exposes_acceptance_criteria_consumed_by_get() -> None:
+    registry = _registry()
+    descriptor = registry.list()["prompts"][0]
+    argument_names = {item["name"] for item in descriptor["arguments"]}
+    assert "acceptanceCriteria" in argument_names
+
+    context = registry.get(
+        "avatar-workflow-1",
+        {"acceptanceCriteria": ["Saved readback must prove the exact requested state."]},
+    )["structuredContent"]["context"]
+    assert context["acceptanceCriteria"] == ["Saved readback must prove the exact requested state."]
+
+
+def test_prompt_checkpoint_policy_projects_required_workflow_support_contract() -> None:
+    skills = _skills(1)
+    skills["skills"][0]["backupRestore"] = "not required"
+    skills["skills"][0]["supportFiles"] = ["workflows/wardrobe.json"]
+    workflow = json.dumps(
+        {
+            "schema": "vrcforge.skill-package.workflow.v1",
+            "checkpoint": {"required": True, "boundaries": ["before_each_write"]},
+        }
+    )
+    registry = McpPromptRegistry(
+        lambda: skills,
+        _tools,
+        support_files_loader=lambda _skill: [{"path": "workflows/wardrobe.json", "content": workflow}],
+    )
+    context = registry.get("avatar-workflow-1")["structuredContent"]["context"]
+    assert "required" in context["checkpointPolicy"].lower()
+    assert "before_each_write" in context["checkpointPolicy"]
 
 
 def test_prompt_get_requires_resources_without_guessing_and_separates_tool_visibility() -> None:
@@ -317,3 +351,25 @@ def test_vrcforge_2026_lists_and_gets_same_native_prompts() -> None:
     )
     assert status == 200
     assert prompt["result"]["structuredContent"]["context"]["status"] == "awaiting_resources"
+
+
+def test_compact_prompt_keeps_full_messages_once_and_projects_structured_state() -> None:
+    structured = {
+        "schema": "vrcforge.skill_prompt.v1",
+        "skill": {
+            "id": "wardrobe", "title": "Wardrobe", "description": "desc",
+            "instructions": "full body", "steps": ["full step"],
+            "supportFiles": [{"path": "workflow.json", "content": "full support"}],
+        },
+        "context": {"status": "awaiting_resources", "requiredResources": ["r1"]},
+        "provenance": {"skillId": "wardrobe", "contentHash": "a" * 64},
+        "rules": ["rule"],
+    }
+    value = {"messages": [{"role": "user", "content": {"type": "text", "text": json.dumps(structured)}}], "structuredContent": structured}
+    compact = project_prompt(value, mode="compact")
+    assert json.loads(compact["messages"][0]["content"]["text"]) == structured
+    assert compact["structuredContent"]["context"] == structured["context"]
+    assert compact["structuredContent"]["provenance"] == structured["provenance"]
+    assert "instructions" not in compact["structuredContent"]["skill"]
+    assert "content" not in compact["structuredContent"]["skill"]["supportFiles"][0]
+    assert project_prompt(value, mode="full") == value

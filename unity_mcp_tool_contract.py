@@ -5,16 +5,17 @@ from __future__ import annotations
 CORE_IDENTITY = "vrcforge.unity-core"
 HANDSHAKE_PROTOCOL = "vrcforge.core-handshake.v1"
 PRODUCT_VERSION = "1.8.0"
-TOOL_CONTRACT_VERSION = "89"
+TOOL_CONTRACT_VERSION = "97"
 PREVIOUS_CORE_TOOL_CONTRACT_VERSION = "87"
 
 EXPECTED_TOOL_NAMES = frozenset(
     {
+        "vrc_start_runtime_observation", "vrc_get_runtime_observation",
         "vrc_add_component", "vrc_add_modular_avatar_component", "vrc_add_outfit_part", "vrc_add_wardrobe_outfit",
         "vrc_apply_blendshapes", "vrc_apply_clothing_fx", "vrc_apply_material_tuning", "vrc_apply_parameter_optimization",
         "vrc_atomic_reference_rename", "vrc_avatar_upload_readiness", "vrc_build_and_upload_avatar", "vrc_build_parameter_bit_packed_clone", "vrc_build_test_avatar", "vrc_capture_scene_view",
         "vrc_configure_aao_merge_physbone", "vrc_convert_unity_constraint", "vrc_create_component_feature", "vrc_create_gameobject", "vrc_create_safe_backup", "vrc_delete_gameobject",
-        "vrc_duplicate_scene_object", "vrc_duplicate_project_asset", "vrc_duplicate_scene_asset", "vrc_ensure_animator_state", "vrc_ensure_expression_menu_control",
+        "vrc_duplicate_scene_object", "vrc_duplicate_project_asset", "vrc_relocate_generated_assets", "vrc_duplicate_scene_asset", "vrc_ensure_animator_state", "vrc_ensure_expression_menu_control",
         "vrc_ensure_expression_parameter", "vrc_export_blendshapes", "vrc_export_vrm", "vrc_find_assets",
         "vrc_get_asset_info", "vrc_get_compile_errors", "vrc_get_execution_targets", "vrc_get_gameobject", "vrc_get_property", "vrc_gesture_manager_enter_play_mode", "vrc_gesture_manager_set_parameter", "vrc_import_unitypackage",
         "vrc_inspect_modular_avatar_component", "vrc_inspect_primitive_basis_fixture", "vrc_inspect_skinned_mesh_bone_usage", "vrc_inspect_skinned_mesh_deformation", "vrc_remap_skinned_mesh_bone", "vrc_instantiate_prefab",
@@ -25,18 +26,19 @@ EXPECTED_TOOL_NAMES = frozenset(
         "vrc_save_scene_object_as_prefab", "vrc_save_current_scene", "vrc_save_new_scene", "vrc_scene_save", "vrc_scene_transition", "vrc_select_scene_object", "vrc_scan_animation_bindings", "vrc_scan_avatar_controls", "vrc_scan_avatar_items",
         "vrc_scan_avatar_materials", "vrc_scan_avatar_parameters", "vrc_scan_avatar_performance", "vrc_scan_fx_animator",
         "vrc_scan_inbound_reference_closure", "vrc_scan_thry_avatar_performance", "vrc_scan_wardrobe", "vrc_set_constraint_sources", "vrc_set_gameobject_active",
-        "vrc_set_material_shader", "vrc_set_material_texture", "vrc_set_renderer_material_slot", "vrc_set_play_mode", "vrc_set_property", "vrc_set_texture_import_settings", "vrc_setup_outfit", "vrc_texture_patch",
+        "vrc_set_material_shader", "vrc_set_material_texture", "vrc_set_renderer_material_slot", "vrc_flatten_material_variant", "vrc_set_play_mode", "vrc_set_property", "vrc_set_texture_import_settings", "vrc_setup_outfit", "vrc_texture_patch",
         "vrc_toggle_scene_object", "vrc_unpack_prefab", "vrc_user_adjustment_handoff", "vrc_write_animation_curve", "vrc_write_avatar_descriptor",
     }
 )
-EXPECTED_TOOL_COUNT = 91
+EXPECTED_TOOL_COUNT = 95
 
 # Contract revisions describe the discovered tool surface; protocol-range
 # negotiation decides whether the App and Core can communicate. Revision 88
 # adds the read-only Unity ExecutionTarget identity discovery tool; revision 89
-# adds renderer-slot assignment. Neither existed in the revision-87 surface.
+# adds renderer-slot assignment; revision 90 adds generated-asset relocation.
+# These tools did not exist in the revision-87 surface.
 PREVIOUS_CORE_UPGRADE_MISSING_TOOLS = frozenset(
-    {"vrc_get_execution_targets", "vrc_set_renderer_material_slot"}
+    {"vrc_get_execution_targets", "vrc_set_renderer_material_slot", "vrc_relocate_generated_assets", "vrc_start_runtime_observation", "vrc_get_runtime_observation", "vrc_flatten_material_variant"}
 )
 PREVIOUS_CORE_TOOL_NAMES = EXPECTED_TOOL_NAMES - PREVIOUS_CORE_UPGRADE_MISSING_TOOLS
 PREVIOUS_CORE_TOOL_COUNT = len(PREVIOUS_CORE_TOOL_NAMES)
@@ -46,6 +48,7 @@ PREVIOUS_CORE_TOOL_COUNT = len(PREVIOUS_CORE_TOOL_NAMES)
 # even when its name sounds observational.
 READ_ONLY_TOOL_NAMES = frozenset(
     {
+        "vrc_get_runtime_observation",
         "vrc_find_assets",
         "vrc_get_asset_info",
         "vrc_get_compile_errors",

@@ -63,6 +63,127 @@ def make_manager(
     return privacy, manager
 
 
+def test_read_history_selected_file_returns_redacted_entries_and_truncation(tmp_path: Path) -> None:
+    _, manager = make_manager(tmp_path)
+    path = tmp_path / "logs" / "vrcforge_2026-09-12_01-02-03_1.log"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        "2026-09-12 01:02:03.000+00:00 [INFO] [runtime] first | data={\"token\":\"secret-token\"}\n"
+        "2026-09-12 01:02:04.000+00:00 [INFO] [runtime] second | data={}\n",
+        encoding="utf-8",
+    )
+
+    result = manager.read_history(path.name, limit=1)
+    full = manager.read_history(path.name, limit=2)
+
+    assert result["source"] == "disk"
+    assert result["file"] == path.name
+    assert result["truncated"] is True
+    assert [entry["message"] for entry in result["logs"]] == ["second"]
+    assert full["logs"][0]["data"]["token"] != "secret-token"
+
+
+def test_read_history_bounds_an_unterminated_oversized_line(tmp_path: Path) -> None:
+    _, manager = make_manager(tmp_path, max_file_bytes=32)
+    path = tmp_path / "logs" / "vrcforge_2026-09-12_01-02-03_1.log"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"x" * 100)
+
+    result = manager.read_history(path.name)
+
+    assert result["logs"] == []
+    assert result["bytesRead"] == 32
+    assert result["truncated"] is True
+
+
+def test_read_recent_logs_handler_explicit_offset_pages_past_the_tail(tmp_path: Path) -> None:
+    _, manager = make_manager(tmp_path)
+    path = tmp_path / "logs" / "vrcforge_2026-09-12_01-02-03_1.log"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        "".join(
+            f"2026-09-12 01:02:03.000+00:00 [INFO] [runtime] event-{index} | data={{}}\n"
+            for index in range(601)
+        ),
+        encoding="utf-8",
+    )
+
+    with patch.object(dashboard_server, "DIAGNOSTIC_LOGGER", manager):
+        first = dashboard_server.read_recent_logs_tool({"source": "disk", "file": path.name, "limit": 500, "offset": 0})
+        second = dashboard_server.read_recent_logs_tool({"source": "disk", "file": path.name, "limit": 500, "offset": first["nextOffset"]})
+
+    assert first["offset"] == 0
+    assert first["nextOffset"] == 500
+    assert first["availableEntryCount"] == 601
+    assert first["logs"][0]["message"] == "event-0"
+    assert second["offset"] == 500
+    assert second["nextOffset"] is None
+    assert second["availableEntryCount"] == 601
+    assert second["truncated"] is False
+
+
+def test_read_history_rejects_missing_path_traversal_and_symlink_outside(tmp_path: Path) -> None:
+    _, manager = make_manager(tmp_path)
+    with pytest.raises(FileNotFoundError):
+        manager.read_history("vrcforge_2026-09-12_01-02-03_1.log")
+    with pytest.raises(ValueError):
+        manager.read_history("..\\outside.log")
+    outside = tmp_path.parent / "outside-vrcforge.log"
+    outside.write_text("not a log", encoding="utf-8")
+    link = tmp_path / "logs" / "vrcforge_2026-09-12_01-02-03_1.log"
+    link.parent.mkdir(parents=True)
+    try:
+        link.symlink_to(outside)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation unavailable")
+    with pytest.raises(ValueError):
+        manager.read_history(link.name)
+
+
+def test_read_recent_logs_schema_declares_explicit_disk_source() -> None:
+    from unity_read_input_schemas import UNITY_READ_TOOL_INPUT_SCHEMAS
+
+    schema = UNITY_READ_TOOL_INPUT_SCHEMAS["vrcforge_read_recent_logs"]
+    assert schema["additionalProperties"] is False
+    assert schema["properties"]["source"]["enum"] == ["memory", "disk"]
+    assert schema["properties"]["file"]["maxLength"] == 255
+
+
+def test_read_recent_logs_handler_keeps_empty_memory_default_and_reads_selected_disk(tmp_path: Path) -> None:
+    _, manager = make_manager(tmp_path)
+    path = tmp_path / "logs" / "vrcforge_2026-09-12_01-02-03_1.log"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        "2026-09-12 01:02:03.000+00:00 [INFO] [runtime] historical | data={}\n",
+        encoding="utf-8",
+    )
+    with (
+        patch.object(dashboard_server, "DIAGNOSTIC_LOGGER", manager),
+        patch.object(dashboard_server, "recent_log_snapshot", return_value=[]),
+        patch.object(type(dashboard_server.AGENT_GATEWAY.approval_transactions), "recent_audit_logs", return_value=[]),
+    ):
+        memory = dashboard_server.read_recent_logs_tool({})
+        disk = dashboard_server.read_recent_logs_tool({"source": "disk", "file": path.name})
+        listing = dashboard_server.read_recent_logs_tool({"source": "disk"})
+
+    assert memory == {"ok": True, "source": "memory", "logs": [], "agentLogs": [], "truncated": False}
+    assert disk["source"] == "disk"
+    assert disk["logs"][0]["message"] == "historical"
+    assert listing["files"] == [path.name]
+
+
+def test_read_recent_logs_handler_marks_memory_truncation_and_rejects_mixed_or_invalid_source() -> None:
+    entries = [{"message": "one"}, {"message": "two"}]
+    with patch.object(dashboard_server, "recent_log_snapshot", return_value=entries):
+        result = dashboard_server.read_recent_logs_tool({"limit": 1})
+    assert result["logs"] == entries[-1:]
+    assert result["truncated"] is True
+    with pytest.raises(ValueError):
+        dashboard_server.read_recent_logs_tool({"file": "vrcforge_2026-09-12_01-02-03_1.log"})
+    with pytest.raises(ValueError):
+        dashboard_server.read_recent_logs_tool({"source": None})
+
+
 def test_internal_runtime_shutdown_requires_exact_ipc_proof_and_runs_after_response() -> None:
     token = "shutdown-test-session-token"
     server = SimpleNamespace(should_exit=False)

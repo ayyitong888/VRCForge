@@ -144,10 +144,14 @@ def test_external_verified_success_closes_recovery_and_preserves_execution_targe
     assert result["recovery"]["status"] == "applied"
     assert result["recovery"]["operationId"] == operation_id
     assert service._ports.checkpoint.active_apply_recoveries() == []
-    target = {"schema": "vrcforge.execution_target.v1", "scope": "avatar"}
+    target = {
+        "schema": "vrcforge.execution_target.v1",
+        "scope": "avatar",
+        "projectPath": str(project),
+    }
     saved = service._start_apply_recovery(
-        {"id": "target-op", "operationId": "target-op", "targetTool": name, "executionTarget": target},
-        {"projectRoot": str(project)},
+        {"id": "target-op", "operationId": "target-op", "targetTool": name},
+        {"projectRoot": str(project), "executionTarget": target},
         {"ok": True, "id": "target-checkpoint", "projectRoot": str(project)},
     )
     assert saved["operationId"] == "target-op"

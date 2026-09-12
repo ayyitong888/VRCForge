@@ -7,7 +7,7 @@ import tempfile
 from pathlib import Path
 
 from agent_approval_transactions import AgentApprovalTransactionService, ApprovalGoalPorts
-from agent_gateway import AgentGateway
+from agent_gateway import AgentGateway, stable_hash
 
 
 REPO_ROOT = Path(__file__).parents[1]
@@ -86,6 +86,99 @@ def test_new_pending_approval_has_no_timeout() -> None:
         assert requested["status"] == "pending"
         assert requested["approval"]["status"] == "pending"
         assert "expiresAt" not in requested["approval"]
+
+
+def test_gesture_manager_entry_pending_receipt_is_not_marked_executed(monkeypatch) -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        gateway = _gateway(Path(temp_dir))
+        service = gateway.approval_transactions
+        service.register_write_handler(
+            "vrcforge_gesture_manager_enter_play_mode",
+            "Enter Gesture Manager Play Mode.",
+            "low",
+            lambda _arguments: {"ok": True},
+        )
+        monkeypatch.setattr(
+            type(service),
+            "create_apply_request",
+            lambda *_args, **_kwargs: {
+                "ok": True,
+                "result": {
+                    "ok": True,
+                    "isPlayMode": False,
+                    "moduleConnected": False,
+                    "enterPlayModePending": True,
+                    "mutationStarted": True,
+                    "committed": True,
+                    "commitState": "enter_play_mode_requested",
+                },
+            },
+        )
+
+        result = service._execute_write_request(
+            "vrcforge_gesture_manager_enter_play_mode",
+            {"projectPath": "D:/Project"},
+            "test-agent",
+        )
+
+        assert result["status"] == "pending"
+        assert result["result"]["enterPlayModePending"] is True
+
+
+def test_external_gesture_manager_pending_receipt_skips_connection_finalizer() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        root = Path(temp_dir)
+        gateway = _gateway(root)
+        finalized = False
+
+        def finalize(_arguments, _baseline, _result):
+            nonlocal finalized
+            finalized = True
+            return {
+                "ok": True,
+                "isPlayMode": True,
+                "moduleConnected": True,
+                "commitState": "runtime_connected",
+                "verified": True,
+            }
+
+        gateway.approval_transactions.register_write_handler(
+            "vrcforge_gesture_manager_enter_play_mode",
+            "Enter Gesture Manager Play Mode.",
+            "low",
+            lambda _arguments: {
+                "ok": True,
+                "isPlayMode": False,
+                "moduleConnected": False,
+                "enterPlayModePending": True,
+                "mutationStarted": True,
+                "committed": True,
+                "commitState": "enter_play_mode_requested",
+            },
+            verification_prepare_handler=lambda _arguments: {},
+            verification_finalize_handler=finalize,
+            verification_profile="gesture_manager",
+        )
+        arguments = {"projectPath": str(root / "Project"), "avatarPath": "Avatar"}
+        prepared = {
+            "targetTool": "vrcforge_gesture_manager_enter_play_mode",
+            "arguments": arguments,
+            "argumentsDigest": stable_hash(
+                json.dumps(arguments, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+            ),
+        }
+
+        result = gateway.approval_transactions.execute_prepared_external_mcp_write(prepared)
+
+        assert finalized is False
+        assert result["status"] == "pending"
+        assert result["result"]["enterPlayModePending"] is True
+        assert result["result"]["commitState"] == "enter_play_mode_requested"
+        assert result["commitState"] == "enter_play_mode_requested"
+        assert result["persistenceState"] == "pending"
+        assert result["readbackState"] == "pending"
+        assert result["outcome"]["status"] == "pending"
+        assert "completionVerification" not in result
 
 
 def test_pending_approval_survives_gateway_restart_until_user_decides() -> None:

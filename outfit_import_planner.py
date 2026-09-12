@@ -190,10 +190,14 @@ def build_outfit_import_plan(
     project_path: str | Path | None = None,
     target_folder: str | None = None,
     selected_unitypackage: str | None = None,
+    dependency_mode: str = "auto",
     selected_prefab: str | None = None,
     base_avatar_name: str | None = None,
     max_entries: int = 5000,
 ) -> dict[str, Any]:
+    dependency_mode = str(dependency_mode or "auto").strip().casefold()
+    if dependency_mode not in {"auto", "selected_only"}:
+        raise ValueError("dependency_mode must be 'auto' or 'selected_only'.")
     inspection = inspect_outfit_package(package_path, max_entries=max_entries)
     if not inspection.get("ok"):
         return {
@@ -212,9 +216,19 @@ def build_outfit_import_plan(
     warnings = list(inspection.get("warnings") or [])
     explicit_selected_package = bool((selected_unitypackage or "").strip())
     explicit_selected_prefab = bool((selected_prefab or "").strip())
-    selected_package = select_entry(inspection.get("unityPackages"), selected_unitypackage)
-    selected_prefab_entry = select_entry(inspection.get("prefabCandidates"), selected_prefab)
     source_type = str(source.get("type") or "")
+    dependency_mode_packages = [
+        entry for entry in inspection.get("unityPackages") or [] if isinstance(entry, dict)
+    ]
+    if dependency_mode == "selected_only" and source_type in {"folder", "zip"} and not explicit_selected_package:
+        selected_package = dependency_mode_packages[0] if len(dependency_mode_packages) == 1 else None
+        resolved_single_package = len(dependency_mode_packages) == 1
+    else:
+        selected_package = select_entry(inspection.get("unityPackages"), selected_unitypackage)
+        resolved_single_package = False
+    selected_prefab_entry = select_entry(inspection.get("prefabCandidates"), selected_prefab)
+    selected_loose_entry = selected_prefab_entry or select_entry(inspection.get("assemblyDefinitions"), None)
+    selected_package_for_queue = explicit_selected_package or resolved_single_package
     selected_package_path = (
         resolve_selected_unitypackage_path(source_path, source_type, str(selected_package.get("path") or ""))
         if selected_package
@@ -228,7 +242,8 @@ def build_outfit_import_plan(
         selected_package_path=selected_package_path,
         project_root=project_root,
         base_avatar_name=effective_base_avatar_name,
-        explicit_selected_package=explicit_selected_package,
+        explicit_selected_package=selected_package_for_queue,
+        dependency_mode=dependency_mode,
     )
     compatibility_preflight = build_avatar_compatibility_preflight(
         inspection=inspection,
@@ -250,7 +265,17 @@ def build_outfit_import_plan(
     )
     warnings.extend(dependency_preflight.get("warnings") or [])
 
-    if selected_package:
+    if dependency_mode == "selected_only" and source_type in {"folder", "zip"} and not selected_package:
+        warnings.append("selected_only requires exactly one resolvable UnityPackage or an explicit selectedUnityPackage; choose one package before applying.")
+        plan = build_manual_review_plan(
+            source_path=source_path,
+            project_root=project_root,
+            target_root=target_root,
+            inspection=inspection,
+            warnings=warnings,
+            dependency_preflight=dependency_preflight,
+        )
+    elif selected_package:
         plan = build_unitypackage_plan(
             source_path=source_path,
             source_type=source_type,
@@ -263,10 +288,10 @@ def build_outfit_import_plan(
             dependency_preflight=dependency_preflight,
             selected_prefab_path=str((selected_prefab_entry or {}).get("path") or ""),
         )
-    elif selected_prefab_entry:
+    elif selected_loose_entry:
         plan = build_loose_prefab_plan(
             source_path=source_path,
-            selected_prefab=selected_prefab_entry,
+            selected_prefab=selected_loose_entry,
             project_root=project_root,
             target_root=target_root,
             base_avatar_name=effective_base_avatar_name,
@@ -725,7 +750,7 @@ def dependency_scan_paths(inspection: dict[str, Any]) -> list[str]:
                     nested = str(item.get("path") or "").replace("\\", "/").strip("/")
                     if nested:
                         paths.append(nested)
-    for key in ("prefabCandidates", "textures", "materials", "models"):
+    for key in ("prefabCandidates", "textures", "materials", "models", "assemblyDefinitions"):
         for item in inspection.get(key) or []:
             if isinstance(item, dict):
                 path = str(item.get("path") or "").replace("\\", "/").strip("/")
@@ -742,6 +767,7 @@ def build_package_order_preflight(
     project_root: Path | None = None,
     base_avatar_name: str | None = None,
     explicit_selected_package: bool = False,
+    dependency_mode: str = "auto",
 ) -> dict[str, Any]:
     source = inspection.get("source") if isinstance(inspection.get("source"), dict) else {}
     source_type = str(source.get("type") or "")
@@ -749,8 +775,10 @@ def build_package_order_preflight(
     import_queue: list[dict[str, Any]] = []
     warnings: list[str] = []
 
+    selected_only = dependency_mode == "selected_only"
     if source_type == "unitypackage":
-        import_queue.extend(companion_support_queue(source_path))
+        if not selected_only:
+            import_queue.extend(companion_support_queue(source_path))
         import_queue.append(import_queue_item(source_path.name, "direct", "target", "Selected UnityPackage.", actual_path=source_path, selected=True))
     elif source_type == "folder":
         for entry in inspection.get("unityPackages") or []:
@@ -764,9 +792,10 @@ def build_package_order_preflight(
             actual_path = (source_path / rel_path).resolve()
             import_queue.append(import_queue_item(rel_path, "folder", role, package_role_reason(role), actual_path=actual_path, selected=selected))
         if explicit_selected_package and selected_rel:
-            import_queue = [item for item in import_queue if item.get("selected") or item.get("role") == "support"]
+            import_queue = [item for item in import_queue if item.get("selected") or (item.get("role") == "support" and not selected_only)]
     elif source_type == "zip":
-        import_queue.extend(companion_support_queue(source_path))
+        if not selected_only:
+            import_queue.extend(companion_support_queue(source_path))
         for entry in inspection.get("unityPackages") or []:
             if not isinstance(entry, dict):
                 continue
@@ -786,7 +815,7 @@ def build_package_order_preflight(
                 )
             )
         if explicit_selected_package and selected_rel:
-            import_queue = [item for item in import_queue if item.get("selected") or item.get("role") == "support"]
+            import_queue = [item for item in import_queue if item.get("selected") or (item.get("role") == "support" and not selected_only)]
     elif selected_package_path is not None:
         import_queue.append(import_queue_item(selected_package_path.name, "direct", "target", "Selected UnityPackage.", actual_path=selected_package_path, selected=True))
 
@@ -808,6 +837,7 @@ def build_package_order_preflight(
         "schema": "vrcforge.outfit_package_order_preflight.v1",
         "sourceType": source_type,
         "selectedUnityPackage": selected_rel,
+        "dependencyMode": dependency_mode,
         "importQueue": ordered,
         "skippedPackages": avatar_skipped,
         "skippedInstalledSupportPackages": dependency_skipped,
@@ -1284,7 +1314,7 @@ def package_pathname_evidence(package: dict[str, Any]) -> list[Any]:
 
 def loose_asset_paths_from_inspection(inspection: dict[str, Any]) -> list[str]:
     paths: list[str] = []
-    for key in ("prefabCandidates", "textures", "materials", "models"):
+    for key in ("prefabCandidates", "textures", "materials", "models", "assemblyDefinitions"):
         for item in inspection.get(key) or []:
             if isinstance(item, dict):
                 path = str(item.get("path") or "").replace("\\", "/").strip("/")

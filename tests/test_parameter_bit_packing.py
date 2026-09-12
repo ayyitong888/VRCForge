@@ -695,6 +695,15 @@ def apply_payload(
     return result
 
 
+def test_parameter_bit_packing_output_uses_independent_dedicated_clone_domain() -> None:
+    assert bitpack.OUTPUT_ROOT == "Assets/VRCForgeGenerated"
+    assert bitpack.OUTPUT_KIND_ROOT == "Assets/VRCForgeGenerated/ParameterBitPacking"
+    canonical, _approval = bind_authoritative_preview(wrapper(), preview_payload())
+    result = apply_payload(canonical["arguments"])
+    assert result["managedOutput"]["targetRoot"] == "Assets/VRCForgeGenerated/ParameterBitPacking/Packed Clone"
+    assert validate_apply_result(canonical["arguments"], result) == result
+
+
 def test_preview_arguments_allow_only_fixed_schema_and_force_zero_write() -> None:
     raw = request_arguments()
     raw.update(
@@ -1989,5 +1998,5 @@ def test_disposable_fixture_keeps_dangerous_parameters_unsynced_and_checks_clean
     assert "VerifyDurableOutputAfterApprovedApply" in source
     assert "guidPreservingWholeTreeMove" in source
     assert "VRCAvatarParameterDriver" in source
-    assert "Assets/VRCForge/Generated/ParameterBitPacking/" in source
+    assert "Assets/VRCForgeGenerated/ParameterBitPacking/" in source
     assert "VRCFORGE_PARAMETER_BIT_PACKING_PROBE_OK" in source

@@ -74,6 +74,9 @@ class UnityConsoleCompletionVerifier:
             "diagnostics": snapshot["diagnostics"],
             "diagnosticIds": snapshot["diagnosticIds"],
             "capturedAt": snapshot["capturedAt"],
+            "source": snapshot["source"],
+            "captureComplete": snapshot["captureComplete"],
+            "comparisonAvailable": _complete_pipeline_snapshot(snapshot),
         }
 
     def finalize(
@@ -166,6 +169,35 @@ class UnityConsoleCompletionVerifier:
                 code="unity_process_changed",
                 summary="The Unity process changed before completion verification finished.",
             )
+        if not _complete_pipeline_snapshot(baseline) or not _complete_pipeline_snapshot(stable_snapshot):
+            # A readable Console fallback is not the previous compilation's full
+            # diagnostic set. Never subtract it from a later pipeline snapshot.
+            observed_errors = [item for item in stable_snapshot["diagnostics"] if item["severity"] == "error"]
+            observed_warnings = [item for item in stable_snapshot["diagnostics"] if item["severity"] == "warning"]
+            current_clean = _complete_pipeline_snapshot(stable_snapshot) and not observed_errors and not observed_warnings
+            attached = _attach_console_verification(
+                result,
+                profile,
+                passed=current_clean,
+                code="" if current_clean else "unity_console_baseline_unavailable",
+                summary=(
+                    "Unity compilation is stable with no current errors or warnings; the prior diagnostic baseline is unavailable."
+                    if current_clean
+                    else "Unity compile diagnostics cannot be compared with a complete prior baseline; observed diagnostics are not classified as new."
+                ),
+            )
+            attached["consoleVerification"].update({
+                "comparisonAvailable": False,
+                "newErrorCount": None,
+                "newWarningCount": None,
+                "observedErrorCount": len(observed_errors),
+                "observedWarningCount": len(observed_warnings),
+                "observedErrors": observed_errors[:20],
+                "observedWarnings": observed_warnings[:20],
+                "baselineSource": str(baseline.get("source") or ""),
+                "observedSource": stable_snapshot["source"],
+            })
+            return attached
         new_diagnostics = [
             item
             for item in stable_snapshot["diagnostics"]
@@ -227,6 +259,7 @@ class UnityConsoleCompletionVerifier:
             "captureComplete": bool(payload.get("captureComplete")),
             "truncated": bool(payload.get("truncated")),
             "capturedAt": str(payload.get("capturedAt") or "")[:80],
+            "source": str(payload.get("source") or "")[:80],
             "projectPathDigest": str(payload.get("projectPathDigest") or "")[:160],
             "unityProcessId": (
                 int(payload.get("unityProcessId"))
@@ -287,6 +320,7 @@ def _normalize_diagnostics(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
 def _stable_snapshot_digest(snapshot: Mapping[str, Any]) -> str:
     payload = {
         "capturedAt": snapshot.get("capturedAt"),
+        "source": snapshot.get("source"),
         "diagnosticIds": snapshot.get("diagnosticIds"),
         "projectPathDigest": snapshot.get("projectPathDigest"),
         "unityProcessId": snapshot.get("unityProcessId"),
@@ -306,6 +340,14 @@ def _identity_complete(snapshot: Mapping[str, Any]) -> bool:
         and process_id > 0
         and str(snapshot.get("unityProcessStartedAtUtc") or "").strip()
         and _is_sha256(snapshot.get("unityExecutableDigest"))
+    )
+
+
+def _complete_pipeline_snapshot(snapshot: Mapping[str, Any]) -> bool:
+    return bool(
+        snapshot.get("source") == "compilation_pipeline"
+        and snapshot.get("captureComplete") is True
+        and str(snapshot.get("capturedAt") or "").strip()
     )
 
 
@@ -358,6 +400,7 @@ def _unreadable_snapshot(failure: Mapping[str, Any] | None = None) -> dict[str, 
         "captureComplete": False,
         "truncated": False,
         "capturedAt": "",
+        "source": "",
         "projectPathDigest": "",
         "unityProcessId": 0,
         "unityProcessStartedAtUtc": "",

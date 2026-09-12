@@ -86,6 +86,7 @@ namespace VRCForge.Editor
             var normalizedAvatarPath = NormalizePath(avatarPath);
             var avatars = ResolveAvatarRoots(normalizedAvatarPath);
             var items = new List<AvatarItem>();
+            var totalItemCount = 0;
             var sceneNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
             foreach (var avatarRoot in avatars.OrderBy(GetTransformPath))
@@ -95,10 +96,10 @@ namespace VRCForge.Editor
                 var transforms = avatarRoot.GetComponentsInChildren<Transform>(true)
                     .Where(item => item != null)
                     .OrderBy(item => GetTransformPath(item))
-                    .Take(maxItems)
                     .ToList();
+                totalItemCount += transforms.Count;
 
-                foreach (var transform in transforms)
+                foreach (var transform in transforms.Take(maxItems))
                 {
                     var renderers = transform.GetComponentsInChildren<Renderer>(true)
                         .Where(IsSceneObject)
@@ -192,7 +193,7 @@ namespace VRCForge.Editor
                     itemCount = limited.Count,
                     rendererBackedItemCount = limited.Count(item => item.renderer_count > 0),
                     wardrobeCandidateCount = limited.Count(item => item.wardrobe_related),
-                    truncated = items.Count > limited.Count
+                    truncated = totalItemCount > limited.Count
                 }
             };
         }

@@ -185,7 +185,6 @@ def canonical_tool_owner(block: str, name: str) -> str:
 
 INTERNAL_LOADABLE_TOOL_BLOCKS = frozenset(
     {f"{root}/{leaf}" for root, spec in CANONICAL_TOOL_BLOCKS.items() for leaf in spec["children"]}
-    | set(CANONICAL_TOOL_BLOCKS)
     | {INTERNAL_DEFAULT_TOOL_BLOCK}
 )
 

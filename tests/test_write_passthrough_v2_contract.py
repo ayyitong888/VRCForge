@@ -64,7 +64,7 @@ def test_add_modular_avatar_component_reports_memory_state_without_adding_saveas
     assert 'note = sceneSaved ? "已修改并落盘" : "已修改，尚未落盘"' in source
 
 
-def test_instantiate_prefab_reports_fresh_scene_memory_state_without_saving() -> None:
+def test_instantiate_prefab_saves_and_verifies_persisted_scene_state() -> None:
     source = (
         ROOT / "Assets/VRCForge/Editor/Generic/UnityAssetPrefabCrud.cs"
     ).read_text(encoding="utf-8")
@@ -75,11 +75,28 @@ def test_instantiate_prefab_reports_fresh_scene_memory_state_without_saving() ->
     write_index = block.index("PrefabUtility.InstantiatePrefab")
     readback_index = block.index("var readbackInstance = ComponentCrudCore.ResolveGameObject(goPath);", write_index)
     assert write_index < readback_index
-    assert "AssetDatabase.SaveAssets();" not in block
+    assert "ComponentCrudCore.SaveAndResolveScene(beforeScene)" in block
+    assert "ResolveUniqueGameObject" in block
     assert "before = new" in block
     assert "after = new" in block
-    assert "pending = true" in block
-    assert 'note = "已修改，尚未落盘"' in block
+    assert "sceneSaved = true" in block
+    assert "persistedReadback = true" in block
+    assert "readbackVerified = true" in block
+    assert "verified = true" in block
+    assert "readback = new { persisted = true, data = after }" in block
+    assert 'schema = "vrcforge.instantiate_prefab_receipt.v1"' in block
+    assert "pending = false" in block
+    assert 'note = "已修改并落盘"' in block
+    assert 'commitState = "committed"' in block
+
+
+def test_instantiate_prefab_preview_is_explicitly_non_mutating() -> None:
+    source = (ROOT / "Assets/VRCForge/Editor/Generic/UnityAssetPrefabCrud.cs").read_text(encoding="utf-8")
+    block = source[source.index("public static class InstantiatePrefabTool") : source.index("public static class UnpackPrefabTool")]
+    preview = block[block.index("if (p.preview") : block.index("var instance = PrefabUtility.InstantiatePrefab")]
+    assert 'mutationStarted = false' in preview
+    assert 'committed = false' in preview
+    assert 'commitState = "not_started"' in preview
 
 
 def test_unpack_prefab_reports_fresh_scene_memory_state_without_saving() -> None:

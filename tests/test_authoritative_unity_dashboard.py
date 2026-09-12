@@ -103,11 +103,11 @@ def _prefab_payload() -> dict:
         "mutationCount": 0,
         "source": _scene_source(),
         "target": {
-            "assetPath": "Assets/VRCForge/Generated/Accessory.prefab",
-            "parentFolderPath": "Assets/VRCForge/Generated",
+            "assetPath": "Assets/VRCForgeGenerated/Prefabs/Accessory.prefab",
+            "parentFolderPath": "Assets/VRCForgeGenerated/Prefabs",
             "parentFolderGuid": "2" * 32,
             "parentFolderIdentity": "3" * 64,
-            "stagingRootPath": "Assets/VRCForge/Generated",
+            "stagingRootPath": "Assets/VRCForgeGenerated/Prefabs",
             "stagingRootGuid": "2" * 32,
             "stagingRootIdentity": "3" * 64,
             "stagingPolicy": "random_create_new_folder_v1",
@@ -312,7 +312,7 @@ def _component_feature_payload(project: Path) -> dict:
             {
                 "sourceScenePath": "Assets/Scenes/Fixture.unity",
                 "sourceObjectPath": "Avatar/Accessory",
-                "prefabAssetPath": "Assets/VRCForge/Generated/Accessory.prefab",
+                "prefabAssetPath": "Assets/VRCForgeGenerated/Prefabs/Accessory.prefab",
             },
             _prefab_payload,
             lambda values: dashboard_server.preview_scene_object_copy_sync(values, PREFAB_TOOL_NAME),

@@ -5,8 +5,24 @@ from copy import deepcopy
 from typing import Any, Mapping
 
 import runtime_planner_service as planner_policy
+from mcp_tool_descriptor import identity_scope
 from unity_read_input_schemas import UNITY_READ_TOOL_INPUT_SCHEMAS
 from unity_write_input_schemas import EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS
+
+
+_READ_RUNTIME_IDENTITY_SCOPES = {"scene", "avatar", "object", "component"}
+
+
+def _read_uses_runtime_identity(name: str) -> bool:
+    """Mirror descriptor metadata for read Tools without wrapping bootstrap calls."""
+
+    if name in {
+        "vrcforge_list_execution_targets",
+        "vrcforge_bind_execution_target",
+        "vrcforge_refresh_execution_target",
+    }:
+        return False
+    return identity_scope(name, write=False) in _READ_RUNTIME_IDENTITY_SCOPES
 
 
 def _with_execution_target_schema(schema: Mapping[str, Any], *, required: bool) -> dict[str, Any]:
@@ -41,6 +57,8 @@ def canonical_unity_read_tool_input_schema(tool_name: str) -> dict[str, Any]:
         return (
             _with_execution_target_schema(registered, required=True)
             if name in {"vrcforge_get_property"} or name.startswith("vrcforge_preview_")
+            else _with_execution_target_schema(registered, required=False)
+            if _read_uses_runtime_identity(name)
             else deepcopy(dict(registered))
         )
     if name.startswith("vrcforge_preview_"):
@@ -53,6 +71,8 @@ def canonical_unity_read_tool_input_schema(tool_name: str) -> dict[str, Any]:
         return (
             _with_execution_target_schema(hinted, required=True)
             if name in {"vrcforge_get_property"}
+            else _with_execution_target_schema(hinted, required=False)
+            if _read_uses_runtime_identity(name)
             else deepcopy(dict(hinted))
         )
     return {

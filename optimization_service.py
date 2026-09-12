@@ -890,6 +890,25 @@ def build_optimization_tool_result(
         result = build_performance_tools_report(dependency_doctor, validation)
     else:
         raise ValueError(f"Unknown optimization tool: {tool_name}")
+    if external_name in {"optimization.material-slot-audit", "optimization.shader.adapter-registry"}:
+        source_failure = _required_material_source_failure(_validation_sources(validation))
+        if source_failure:
+            return {
+                "ok": False,
+                "status": "failed",
+                "schema": OPTIMIZATION_SCHEMA,
+                "versionStage": OPTIMIZATION_VERSION_STAGE,
+                "generatedAt": now_iso(),
+                "tool": external_name,
+                "gatewayTool": definition["gatewayName"],
+                "level": "read-only",
+                "readOnly": True,
+                "planOnly": False,
+                "noProjectWrites": True,
+                "directApplyExposed": False,
+                "result": result,
+                "error": source_failure,
+            }
     return {
         "ok": True,
         "schema": OPTIMIZATION_SCHEMA,
@@ -986,8 +1005,38 @@ def build_texture_vram_audit(validation: dict[str, Any]) -> dict[str, Any]:
 
 
 def build_material_slot_audit(validation: dict[str, Any]) -> dict[str, Any]:
-    materials = _source_payload(_validation_sources(validation), "materials")
+    sources = _validation_sources(validation)
+    source_failure = _required_material_source_failure(sources)
+    if source_failure:
+        return {
+            "ok": False,
+            "status": "failed",
+            "readOnly": True,
+            "available": False,
+            "failure": source_failure,
+            "summary": {"rendererCount": None, "knownMaterialSlotCount": None},
+            "renderers": [],
+            "atlasGroupHints": [],
+            "notes": ["Material slot audit requires a successful materials inventory; no zero-count conclusion is made."],
+        }
+    materials = _source_payload(sources, "materials")
     renderers = []
+    direct_rows: dict[str, list[dict[str, Any]]] = {}
+    for row in _shader_material_rows(materials):
+        renderer = str(row.get("rendererPath") or row.get("renderer") or "").strip()
+        if renderer and (row.get("materialName") or row.get("materialPath")):
+            direct_rows.setdefault(renderer, []).append(row)
+    for renderer, rows in direct_rows.items():
+        labels = [_safe_asset_label(str(row.get("materialName") or row.get("materialPath") or "")) for row in rows]
+        labels = [label for label in labels if label]
+        renderers.append(
+            {
+                "renderer": _safe_asset_label(renderer),
+                "slotCount": len(labels),
+                "materials": labels[:32],
+                "flags": material_flags(" ".join(labels)),
+            }
+        )
     for entry in _walk_dicts(materials):
         renderer = _first_text(entry, ("rendererPath", "gameObjectPath", "objectPath", "path"))
         material_list = _coerce_list(entry.get("materials") or entry.get("materialNames") or entry.get("slots"))
@@ -1989,16 +2038,110 @@ def build_performance_tools_report(dependency_doctor: dict[str, Any], validation
     }
 
 
+def _shader_registry_inventory_rows(materials: dict[str, Any]) -> list[dict[str, Any]]:
+    """Read only material-list records, never recursively classify texture/property dictionaries."""
+    containers = []
+    if isinstance(materials.get("materials"), list):
+        containers.append((materials, materials["materials"]))
+    elif isinstance(materials.get("inventory"), dict) and isinstance(materials["inventory"].get("materials"), list):
+        containers.append((materials["inventory"], materials["inventory"]["materials"]))
+    else:
+        # Keep the existing renderer/materials inventory shape supported.
+        for renderer in materials.get("renderers", []):
+            if isinstance(renderer, dict) and isinstance(renderer.get("materials"), list):
+                containers.append((renderer, renderer["materials"]))
+    rows = []
+    seen = set()
+    for parent, entries in containers:
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            material = _direct_text(entry, ("materialName",)) or _direct_text(entry, ("name",)) or ""
+            shader = _direct_text(entry, ("shaderName", "shader")) or ""
+            path = _direct_text(entry, ("materialAssetPath", "materialPath")) or _direct_text(entry, ("assetPath",)) or ""
+            guid = _direct_text(entry, ("materialAssetGuid",)) or ""
+            identifier = _direct_text(entry, ("materialId",)) or guid
+            if (path and not path.lower().endswith(".mat") and not (identifier and shader)) or not (identifier or path or (material and shader)):
+                continue
+            renderer_path = _direct_text(entry, ("rendererPath",)) or _direct_text(parent, ("rendererPath", "gameObjectPath")) or ""
+            slot = _direct_numeric(entry, ("slotIndex",))
+            component_index = _direct_numeric(entry, ("rendererComponentIndex",))
+            row = {
+                "renderer": _safe_asset_label(renderer_path), "rendererPath": _safe_asset_label(renderer_path),
+                "materialName": _safe_asset_label(material), "materialPath": _safe_asset_label(path),
+                "materialId": identifier, "materialAssetGuid": guid,
+                "slotIndex": slot, "rendererComponentIndex": component_index,
+                "rendererComponentId": _direct_text(entry, ("rendererComponentId",)) or "",
+                "rendererComponentType": _direct_text(entry, ("rendererComponentType",)) or "",
+                "sceneGuid": _direct_text(entry, ("rendererSceneGuid",)) or _direct_text(entry, ("sceneGuid",)) or "",
+                "shaderName": shader[:220],
+                "dissolveRenderingMode": _direct_text(entry, ("dissolveRenderingMode",)) or "unknown",
+                "dissolveFeatureStatus": _direct_text(entry, ("dissolveFeatureStatus",)) or "unknown",
+                "dissolveReadiness": _direct_text(entry, ("dissolveReadiness",)) or "unknown",
+                "dissolvePreparation": _direct_text(entry, ("dissolvePreparation",)) or "",
+                "pathsAreDisplayOnly": True,
+                "identitySource": "materials_inventory",
+            }
+            # Include the exact source path in the internal key, never conflate
+            # same-named materials merely because display labels are shortened.
+            key = (row["sceneGuid"], renderer_path, row["rendererComponentId"], slot, identifier, path, material, shader)
+            if key not in seen:
+                seen.add(key)
+                rows.append(row)
+    return rows
+
+
 def build_shader_adapter_registry(dependency_doctor: dict[str, Any], validation: dict[str, Any]) -> dict[str, Any]:
     del dependency_doctor
+    source_failure = _required_material_source_failure(_validation_sources(validation))
+    if source_failure:
+        blocked = _optimization_gate_row(
+            "source.materials",
+            "Materials inventory available",
+            False,
+            source_failure["message"],
+            evidence={"failure": source_failure},
+        )
+        return {
+            "ok": False,
+            "status": "failed",
+            "readOnly": True,
+            "available": False,
+            "schema": "vrcforge.shader_adapter_registry.v1",
+            "registryVersion": "0.9.x-rc",
+            "rawPropertyMutationBlocked": True,
+            "summary": {
+                "materialCount": None,
+                "detectedAdapters": [],
+                "unsupportedMaterialCount": None,
+                "scannerCoverage": "unavailable",
+            },
+            "adapters": [],
+            "materialCoverage": [],
+            "hardGate": _optimization_hard_gate([blocked]),
+            "failure": source_failure,
+            "notes": ["Shader adapter registry cannot infer coverage from a missing or failed materials inventory."],
+        }
     materials = _source_payload(_validation_sources(validation), "materials")
-    rows = _shader_material_rows(materials)
+    rows = _shader_registry_inventory_rows(materials)
     material_coverage = []
     detected_adapters: set[str] = set()
     for row in rows:
-        adapter = _classify_shader_adapter(row.get("materialName") or "", row.get("shaderName") or "")
+        adapter = _classify_shader_adapter("", row.get("shaderName") or "")
         detected_adapters.add(adapter["adapter"])
-        material_coverage.append({**row, **adapter})
+        family_properties = list(adapter["safeSemanticProperties"])
+        dissolve_verified = (
+            row["dissolveReadiness"] == "ready"
+            and row["dissolveFeatureStatus"] == "verified"
+            and row["dissolveRenderingMode"] in {"Cutout", "Transparent"}
+        )
+        material_coverage.append({**row, **adapter,
+            "familySafeSemanticProperties": family_properties,
+            "familyAdapterProofStatus": adapter["proofStatus"],
+            "safeSemanticProperties": [name for name in family_properties if not name.startswith("dissolve_") or dissolve_verified],
+            "proofStatus": "inventory_metadata_only",
+            "dissolveVerified": dissolve_verified,
+        })
     adapters = [shader_adapter_definition(adapter_id, detected_adapters) for adapter_id in SHADER_ADAPTER_IDS]
     unsupported_count = sum(1 for item in material_coverage if item.get("adapter") == "unsupported")
     return {
@@ -2022,7 +2165,7 @@ def build_shader_adapter_registry(dependency_doctor: dict[str, Any], validation:
             ]
         ),
         "rollbackRequirements": _optimization_rollback_requirements("Shader adapter apply"),
-        "notes": ["This registry detects adapter coverage only; it does not mutate material properties."],
+        "notes": ["Family adapter definitions describe preview capability, not verified per-material features. Material dissolve availability requires the inventory readiness and feature evidence; unknown remains unknown.", "renderer/rendererPath/materialPath are display-only labels and may be redacted; use the material inventory read tool for exact write-target paths. This registry does not authorize writes."],
     }
 
 
@@ -2149,21 +2292,64 @@ def _optimization_rollback_requirements(subject: str) -> dict[str, Any]:
     }
 
 
-def _shader_material_rows(materials: dict[str, Any]) -> list[dict[str, str]]:
-    rows: list[dict[str, str]] = []
+def _shader_material_rows(materials: dict[str, Any]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
     for entry in _walk_dicts(materials):
         renderer = _direct_text(entry, ("rendererPath", "renderer", "gameObjectPath", "objectPath", "path")) or ""
         shader = _direct_text(entry, ("shaderName", "shader", "shaderPath")) or ""
-        material = _direct_text(entry, ("materialName", "material", "name", "assetPath")) or ""
+        material = _direct_text(entry, ("materialName", "material", "name", "assetPath", "materialAssetPath")) or ""
+        material_path = _direct_text(entry, ("materialPath", "materialAssetPath", "assetPath")) or ""
+        material_id = _direct_text(entry, ("materialId", "materialAssetGuid", "guid", "globalObjectId")) or ""
+        slot_index = _direct_numeric(entry, ("slotIndex", "rendererComponentIndex", "index"))
+        renderer_component_id = _direct_text(entry, ("rendererComponentId",)) or ""
+        renderer_component_type = _direct_text(entry, ("rendererComponentType",)) or ""
+        scene_guid = _direct_text(entry, ("sceneGuid",)) or ""
         if material or shader:
-            rows.append({"renderer": _safe_asset_label(renderer), "materialName": _safe_asset_label(material), "shaderName": shader[:220]})
+            rows.append({
+                "renderer": _safe_asset_label(renderer),
+                "rendererPath": _safe_asset_label(renderer),
+                "materialName": _safe_asset_label(material),
+                "materialPath": _safe_asset_label(material_path),
+                "materialId": material_id,
+                "slotIndex": slot_index,
+                "rendererComponentId": renderer_component_id,
+                "rendererComponentType": renderer_component_type,
+                "sceneGuid": scene_guid,
+                "shaderName": shader[:220],
+            })
         raw_materials = entry.get("materials")
-        if isinstance(raw_materials, list):
+        if isinstance(raw_materials, list) and not (material or shader or material_path or material_id):
             for item in raw_materials:
-                text = str(item or "").strip()
-                if text:
-                    rows.append({"renderer": _safe_asset_label(renderer), "materialName": _safe_asset_label(text), "shaderName": shader[:220]})
-    return _unique_by(rows, "materialName")
+                if isinstance(item, dict):
+                    # Dict rows are visited directly by _walk_dicts; handling
+                    # them here too would duplicate every scanner record.
+                    continue
+                text, path, identifier, index = str(item or "").strip(), "", "", None
+                if text or path:
+                    rows.append({
+                        "renderer": _safe_asset_label(renderer),
+                        "rendererPath": _safe_asset_label(renderer),
+                        "materialName": _safe_asset_label(text),
+                        "materialPath": _safe_asset_label(path),
+                        "materialId": identifier,
+                        "slotIndex": index,
+                        "rendererComponentId": renderer_component_id,
+                        "rendererComponentType": renderer_component_type,
+                        "sceneGuid": scene_guid,
+                        "shaderName": shader[:220],
+                    })
+    unique: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in rows:
+        identity = "|".join(str(row.get(key) or "") for key in (
+            "sceneGuid", "rendererPath", "rendererComponentId", "slotIndex",
+            "materialId", "materialPath", "materialName", "shaderName",
+        ))
+        if identity in seen:
+            continue
+        seen.add(identity)
+        unique.append(row)
+    return unique
 
 
 def _classify_shader_adapter(material_name: str, shader_name: str) -> dict[str, Any]:
@@ -3000,6 +3186,36 @@ def _source_payload(sources: dict[str, Any], name: str) -> dict[str, Any]:
         if isinstance(summary, dict):
             return summary
     return {}
+
+
+def _required_material_source_failure(sources: dict[str, Any]) -> dict[str, Any] | None:
+    source = sources.get("materials")
+    if not isinstance(source, dict):
+        return {"code": "materials_source_missing", "message": "Materials inventory source is missing."}
+
+    def failure_from(value: Any, location: str) -> dict[str, Any] | None:
+        if not isinstance(value, dict):
+            return None
+        failed = value.get("ok") is False or value.get("success") is False or str(value.get("status") or "").lower() in {"failed", "error"}
+        if not failed:
+            return None
+        code = value.get("code") or value.get("errorCode") or value.get("error_type") or "materials_source_failed"
+        message = value.get("error") or value.get("message") or value.get("summary") or f"Materials inventory source failed at {location}."
+        return {"code": str(code), "message": str(message), "location": location}
+
+    direct = failure_from(source, "materials")
+    if direct:
+        return direct
+    payload = source.get("payload")
+    nested = failure_from(payload, "materials.payload")
+    if nested:
+        return nested
+    if isinstance(payload, dict):
+        for key in ("inventory", "materialInventory", "data"):
+            nested = failure_from(payload.get(key), f"materials.payload.{key}")
+            if nested:
+                return nested
+    return None
 
 
 def _merged_parameter_usage(parameters: dict[str, Any]) -> dict[str, Any]:

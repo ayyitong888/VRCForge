@@ -22,7 +22,7 @@ _TOOL_OPERATIONS = {
 _DIGEST_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _GUID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
 _WINDOWS_ABSOLUTE_PATTERN = re.compile(r"^[A-Za-z]:[/\\]")
-_GENERATED_ROOT = "Assets/VRCForge/Generated"
+_GENERATED_ROOT = "Assets/VRCForgeGenerated/Prefabs"
 _COMMON_REQUEST_KEYS = (
     "sourceScenePath",
     "sourceObjectPath",

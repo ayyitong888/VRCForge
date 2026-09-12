@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hmac
+import math
 import json
 import secrets
 import threading
@@ -19,6 +20,7 @@ from external_tool_result_contract import (
     external_exception_details,
     external_exception_raw_result,
     external_write_failure_view,
+    is_gesture_manager_entry_pending,
 )
 from prepared_unity_execution import (
     PREPARED_EVIDENCE_KEY,
@@ -52,6 +54,7 @@ from agent_gateway import (
     WRAPPER_ONLY_WRITE_TARGETS,
     WRITE_PATH_KEY_MARKERS,
     WriteRequestPreparer,
+    PreWriteCheckpointPolicy,
     atomic_write_json,
     bind_approved_unity_execution,
     capture_unity_mcp_core_call_audits,
@@ -85,6 +88,55 @@ from mcp_tool_descriptor import identity_scope
 
 PATCH_SET_SCHEMA = "vrcforge.modular_patch_set.v1"
 _UNITY_SERIALIZED_SUFFIXES = frozenset({".unity", ".prefab", ".asset", ".mat", ".controller", ".overridecontroller", ".anim", ".playable", ".mask"})
+
+
+def _explicit_write_preconditions(arguments: Mapping[str, Any]) -> dict[str, str]:
+    """Snapshot caller locks before preparers can normalize or mutate envelopes."""
+    locks: dict[str, str] = {}
+    envelopes = [arguments]
+    for key in ("arguments", "params"):
+        nested = arguments.get(key)
+        if isinstance(nested, Mapping):
+            envelopes.append(nested)
+    for envelope in envelopes:
+        for key, value in envelope.items():
+            if not isinstance(key, str) or not key.startswith("expected"):
+                continue
+            encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+            if key in locks and locks[key] != encoded:
+                raise AgentGatewayError(f"Conflicting explicit write precondition: {key}.", status_code=409)
+            locks[key] = encoded
+    return locks
+
+
+def _verify_prepared_write_preconditions(locks: Mapping[str, str], prepared: Mapping[str, Any]) -> None:
+    if not locks:
+        return
+    # If preparation creates an execution envelope, locks must survive in
+    # that actual payload, not merely as ignored outer wrapper metadata.
+    canonical = prepared.get("arguments")
+    if not isinstance(canonical, Mapping):
+        canonical = prepared.get("params")
+    if not isinstance(canonical, Mapping):
+        canonical = prepared
+    actual = _explicit_write_preconditions(canonical)
+    for key, value in locks.items():
+        if actual.get(key) != value:
+            raise AgentGatewayError(
+                f"Explicit write precondition {key} no longer matches the authoritative preview; inspect and approve a fresh preview.",
+                status_code=409,
+            )
+
+
+def _requires_pre_write_checkpoint(handler: AgentWriteHandler, arguments: Mapping[str, Any]) -> bool:
+    policy = handler.pre_write_checkpoint_required
+    if callable(policy):
+        try:
+            value = policy(arguments)
+        except Exception:  # fail closed when a dynamic policy cannot be evaluated
+            return True
+        return value if isinstance(value, bool) else True
+    return bool(policy)
 
 
 def validate_modular_patch_set(value: Any) -> dict[str, Any]:
@@ -141,12 +193,96 @@ def _domain_write_receipt(value: Any) -> Mapping[str, Any] | Any:
         return value
     pending: list[tuple[Mapping[str, Any], int]] = [(value, 0)]
     seen: set[int] = set()
+
     while pending:
         current, depth = pending.pop(0)
         marker = id(current)
         if marker in seen:
             continue
         seen.add(marker)
+        verified_changes = current.get("verifiedChanges")
+        applied_adjustments = current.get("appliedAdjustments")
+        transport_result = current.get("result")
+        transport_payload = transport_result.get("payload") if isinstance(transport_result, Mapping) else None
+        core_structured = transport_payload.get("structuredContent") if isinstance(transport_payload, Mapping) else None
+        core_data = core_structured.get("data") if isinstance(core_structured, Mapping) else None
+        core_applied = core_data.get("applied") if isinstance(core_data, Mapping) else None
+
+        def _target(item: Mapping[str, Any]) -> tuple[Any, Any]:
+            return (item.get("rendererPath"), item.get("blendshapeName"))
+
+        adjustment_targets = [_target(item) for item in applied_adjustments] if isinstance(applied_adjustments, list) and all(isinstance(item, Mapping) for item in applied_adjustments) else []
+        core_targets = [_target(item) for item in core_applied] if isinstance(core_applied, list) and all(isinstance(item, Mapping) for item in core_applied) else []
+        verified_targets = [_target(item) for item in verified_changes] if isinstance(verified_changes, list) and all(isinstance(item, Mapping) for item in verified_changes) else []
+
+        def _weights_match(a: Any, c: Any, v: Any) -> bool:
+            try:
+                tolerance = float(v.get("verificationTolerance", 0.25))
+                return (
+                    math.isfinite(tolerance) and tolerance >= 0
+                    and math.isfinite(float(c.get("currentWeight")))
+                    and math.isfinite(float(v.get("actualWeight")))
+                    and math.isfinite(float(c.get("targetWeight")))
+                    and math.isfinite(float(a.get("targetWeight")))
+                    and abs(float(c["currentWeight"]) - float(v["actualWeight"])) <= tolerance
+                    and abs(float(c["targetWeight"]) - float(a["targetWeight"])) <= tolerance
+                    and abs(float(v["actualWeight"]) - float(a["targetWeight"])) <= tolerance
+                )
+            except (TypeError, ValueError):
+                return False
+
+        if (
+            current.get("ok") is True
+            and current.get("executionMode") == "live-unity"
+            and isinstance(transport_result, Mapping)
+            and transport_result.get("exitCode") == 0
+            and isinstance(transport_payload, Mapping)
+            and transport_payload.get("isError") is False
+            and isinstance(core_structured, Mapping)
+            and core_structured.get("success") is True
+            and isinstance(applied_adjustments, list)
+            and bool(applied_adjustments)
+            and isinstance(verified_changes, list)
+            and verified_changes
+            and all(isinstance(part, str) and part.strip() for target in adjustment_targets for part in target)
+            and len(set(adjustment_targets)) == len(adjustment_targets)
+            and adjustment_targets == core_targets == verified_targets
+            and isinstance(core_data, Mapping)
+            and core_data.get("appliedCount") == len(applied_adjustments)
+            and core_data.get("saved") is True
+            and core_data.get("pending") is False
+            and all(
+                isinstance(item, Mapping) and item.get("verified") is True
+                for item in verified_changes
+            )
+            and all(
+                isinstance(item, Mapping)
+                and isinstance(item.get("rendererPath"), str) and bool(item.get("rendererPath").strip())
+                and isinstance(item.get("blendshapeName"), str) and bool(item.get("blendshapeName").strip())
+                and item.get("targetWeight") == next(
+                    a.get("targetWeight") for a in applied_adjustments
+                    if _target(a) == _target(item)
+                )
+                for item in core_applied
+            )
+            and all(
+                isinstance(a, Mapping) and isinstance(c, Mapping) and isinstance(v, Mapping)
+                and _weights_match(a, c, v)
+                for a, c, v in zip(applied_adjustments, core_applied, verified_changes)
+            )
+        ):
+            # Blendshape Core receipts are nested in the external MCP transport
+            # wrapper. Promote only the narrow, explicit per-target verification
+            # shape; generic ok=true remains insufficient.
+            receipt = dict(current)
+            receipt.setdefault("schema", "vrcforge.blendshape.write.receipt.v1")
+            receipt["verified"] = True
+            receipt["mutationStarted"] = True
+            receipt["mutationApplied"] = True
+            receipt["committed"] = True
+            receipt["commitState"] = "committed"
+            receipt["readback"] = {"verifiedChanges": [dict(item) for item in verified_changes]}
+            return receipt
         if (
             isinstance(current.get("schema"), str)
             and str(current.get("schema") or "").startswith("vrcforge.")
@@ -205,6 +341,11 @@ def _domain_write_receipt(value: Any) -> Mapping[str, Any] | Any:
             if isinstance(nested, Mapping):
                 pending.append((nested, depth + 1))
     return value
+
+
+def _gesture_manager_entry_is_pending(tool_name: str, outcome: Mapping[str, Any]) -> bool:
+    """Recognize Core's asynchronous GM entry receipt before transport status mapping."""
+    return is_gesture_manager_entry_pending(tool_name, outcome)
 
 
 PENDING_APPROVAL_SNAPSHOT_SCHEMA = "vrcforge.pending-approvals.v1"
@@ -282,6 +423,26 @@ def _confirmed_no_write_failure(facts: Mapping[str, Any]) -> bool:
         and facts.get("commitState") == "not_started"
         and facts.get("checkpointRecoveryRequired") is False
     )
+
+
+def _confirmed_atomic_rollback_failure(result: Any, facts: Mapping[str, Any] | None = None) -> bool:
+    """Accept only explicit, consistent domain restoration facts; never execute recovery."""
+    if not isinstance(result, Mapping):
+        return False
+    proven = bool(
+        result.get("commitState") == "rolled_back"
+        and result.get("restored") is True
+        and result.get("commitStateKnown") is True
+        and result.get("committed") is False
+        and result.get("cleanupRequired") is False
+        and result.get("checkpointRecoveryRequired") is False
+        and result.get("requestMayHaveCommitted") is not True
+    )
+    return proven and (facts is None or (
+        facts.get("commitState") == "rolled_back"
+        and facts.get("committed") is False
+        and facts.get("checkpointRecoveryRequired") is False
+    ))
 
 
 def _temporary_cleanup_only_failure(facts: Mapping[str, Any]) -> bool:
@@ -647,7 +808,7 @@ class AgentApprovalTransactionService:
         approval_category: str = "",
         allow_future_category: bool = False,
         external_mcp_capability: str = "",
-        pre_write_checkpoint_required: bool = True,
+        pre_write_checkpoint_required: PreWriteCheckpointPolicy = True,
     ) -> None:
         bounded_verification_profile = str(verification_profile or "").strip()[:80]
         if bounded_verification_profile and (
@@ -673,7 +834,7 @@ class AgentApprovalTransactionService:
             approval_category=str(approval_category or "").strip(),
             allow_future_category=bool(allow_future_category),
             external_mcp_capability=str(external_mcp_capability or "").strip(),
-            pre_write_checkpoint_required=bool(pre_write_checkpoint_required),
+            pre_write_checkpoint_required=pre_write_checkpoint_required,
         )
 
     def registered_write_target_names(self) -> set[str]:
@@ -848,6 +1009,8 @@ class AgentApprovalTransactionService:
         approval_status = str(approval_record.get("status") or "").strip().casefold()
         if approval and approval_status in {"pending", "approved", "applying"}:
             status = "approval_pending"
+        elif _gesture_manager_entry_is_pending(tool_name, outcome):
+            status = "pending"
         elif outcome.get("ok"):
             status = "executed"
         else:
@@ -914,6 +1077,7 @@ class AgentApprovalTransactionService:
         arguments = self._inject_user_constraints_for_apply(arguments, user_constraints)
         preview = params.get("preview")
         if write_handler.request_preparer is not None:
+            explicit_preconditions = _explicit_write_preconditions(arguments)
             try:
                 prepared_arguments, prepared_preview = write_handler.request_preparer(
                     dict(arguments),
@@ -931,6 +1095,7 @@ class AgentApprovalTransactionService:
                     f"Write request preparation returned invalid arguments for {target_tool}.",
                     status_code=500,
                 )
+            _verify_prepared_write_preconditions(explicit_preconditions, prepared_arguments)
             arguments = prepared_arguments
             preview = prepared_preview
         mandatory_manual_approval_reason = ""
@@ -1496,7 +1661,7 @@ class AgentApprovalTransactionService:
                 )
             failure_layer = "checkpoint"
             classification = ensure_dict(arguments.get("classification_snapshot"))
-            requires_checkpoint = write_handler.pre_write_checkpoint_required and not (
+            requires_checkpoint = _requires_pre_write_checkpoint(write_handler, arguments) and not (
                 target_tool == "vrcforge_shell_execute" and classification.get("readOnly") is True
             )
             if requires_checkpoint and target_tool == PROJECT_CHAT_CHECKPOINT_TARGET:
@@ -1667,6 +1832,11 @@ class AgentApprovalTransactionService:
                     or f"{target_tool} returned ok=false."
                 )
                 raise AgentGatewayError(str(message))
+            observation_pending = (
+                target_tool == "vrcforge_start_runtime_observation"
+                and isinstance(result, Mapping)
+                and str(result.get("status") or "").casefold() == "pending"
+            )
             domain_receipt = _domain_write_receipt(result)
             completion_outcome = ensure_dict(
                 redact_sensitive(
@@ -1684,6 +1854,14 @@ class AgentApprovalTransactionService:
             )
             if task_completion is not None:
                 completion_outcome = ensure_dict(task_completion.get("outcome"))
+            if observation_pending:
+                completion_outcome.update({
+                    "mutationStarted": True,
+                    "mutationApplied": True,
+                    "commitState": "pending",
+                    "persistenceState": "pending",
+                    "readbackState": "pending",
+                })
             completion_status = str(completion_outcome["status"])
             if completion_status == "failed":
                 failure_layer = "result_verification"
@@ -1748,11 +1926,25 @@ class AgentApprovalTransactionService:
                 )
             payload = {
                 "ok": True,
-                "status": "needs_user_action" if completion_status == "needs_user_action" else "applied",
+                "status": (
+                    "pending"
+                    if target_tool == "vrcforge_start_runtime_observation"
+                    and isinstance(result, Mapping)
+                    and str(result.get("status") or "").casefold() == "pending"
+                    else "needs_user_action" if completion_status == "needs_user_action" else "applied"
+                ),
                 "approval": approval,
                 "result": result,
                 "outcome": completion_outcome,
             }
+            if observation_pending:
+                payload.update({
+                    "mutationStarted": True,
+                    "mutationApplied": True,
+                    "commitState": "pending",
+                    "persistenceState": "pending",
+                    "readbackState": "pending",
+                })
             if task_completion is not None:
                 payload["taskCompletion"] = task_completion
             if request_trace is not None:
@@ -1866,12 +2058,15 @@ class AgentApprovalTransactionService:
                 )
             if recovery:
                 confirmed_no_write = _confirmed_no_write_failure(write_failure)
+                confirmed_rollback = _confirmed_atomic_rollback_failure(failure_result, write_failure)
                 cleanup_only = _temporary_cleanup_only_failure(write_failure)
                 self._finish_apply_recovery(
                     recovery,
                     status=(
                         "not_applied"
                         if confirmed_no_write
+                        else "restored"
+                        if confirmed_rollback
                         else "applied"
                         if cleanup_only
                         else "needs_recovery"
@@ -1881,6 +2076,8 @@ class AgentApprovalTransactionService:
                         if confirmed_no_write and no_write_conflict
                         else "confirmed_no_write"
                         if confirmed_no_write
+                        else "confirmed_atomic_rollback"
+                        if confirmed_rollback
                         else "write_completed_cleanup_pending"
                         if cleanup_only
                         else "write_failed_after_checkpoint"
@@ -2060,20 +2257,32 @@ class AgentApprovalTransactionService:
         handler_arguments.pop("_vrcforge_approved_execution", None)
         if not write_handler.requires_approved_execution_context:
             result = write_handler.handler(handler_arguments)
-            if write_handler.verification_finalize_handler is not None:
+            observation_pending = (
+                target_tool == "vrcforge_start_runtime_observation"
+                and isinstance(result, Mapping)
+                and str(result.get("status") or "").casefold() == "pending"
+            )
+            gm_entry_pending = is_gesture_manager_entry_pending(target_tool, result)
+            operation_pending = observation_pending or gm_entry_pending
+            if write_handler.verification_finalize_handler is not None and not operation_pending:
                 result = write_handler.verification_finalize_handler(
                     dict(handler_arguments),
                     dict(verification_baseline),
                     result,
                 )
             return result
+        checkpoint_required = _requires_pre_write_checkpoint(write_handler, handler_arguments)
         checkpoint_id = str(ensure_dict(checkpoint).get("id") or "").strip()
-        if not checkpoint or checkpoint.get("ok") is not True or not checkpoint_id:
+        if checkpoint_required and (not checkpoint or checkpoint.get("ok") is not True or not checkpoint_id):
             raise AgentGatewayError(
                 "The Unity write cannot start without a successful bound checkpoint.",
                 status_code=409,
             )
-        project_root = str(ensure_dict(checkpoint).get("projectRoot") or "").strip()
+        project_root = (
+            str(ensure_dict(checkpoint).get("projectRoot") or "").strip()
+            if checkpoint_required
+            else str(extract_project_root(handler_arguments) or "").strip()
+        )
         if not project_root:
             raise AgentGatewayError(
                 "The Unity write checkpoint is missing its exact project binding.",
@@ -2105,6 +2314,7 @@ class AgentApprovalTransactionService:
             "lane": "approved_write",
             "approvalId": str(approval_id),
             "checkpointId": checkpoint_id,
+            "checkpointRequired": checkpoint_required,
             "targetTool": str(target_tool),
             "projectRoot": project_root,
             "handlerArgumentsSha256": str(handler_arguments_digest),
@@ -2135,7 +2345,12 @@ class AgentApprovalTransactionService:
                 "The approved Unity execution plan was not consumed exactly.",
                 status_code=409,
             )
-        if write_handler.verification_finalize_handler is not None:
+        observation_pending = (
+            target_tool == "vrcforge_start_runtime_observation"
+            and isinstance(result, Mapping)
+            and str(result.get("status") or "").casefold() == "pending"
+        )
+        if write_handler.verification_finalize_handler is not None and not observation_pending:
             result = write_handler.verification_finalize_handler(
                 dict(handler_arguments),
                 dict(verification_baseline),
@@ -2162,7 +2377,7 @@ class AgentApprovalTransactionService:
             "createdAt": utc_now_iso(),
             "approvalId": str(approval.get("id") or ""),
             "operationId": str(approval.get("operationId") or approval.get("id") or ""),
-            "executionTarget": ensure_dict(approval.get("executionTarget")),
+            "executionTarget": ensure_dict(arguments.get("executionTarget")),
             "targetTool": target_tool,
             "status": "unavailable",
         }
@@ -2439,7 +2654,7 @@ class AgentApprovalTransactionService:
             "createdAt": utc_now_iso(),
             "approvalId": str(approval.get("id") or ""),
             "operationId": str(approval.get("operationId") or approval.get("id") or ""),
-            "executionTarget": ensure_dict(approval.get("executionTarget")),
+            "executionTarget": ensure_dict(arguments.get("executionTarget")),
             "targetTool": target_tool,
             "riskLevel": str(approval.get("riskLevel") or ""),
             "projectRoot": str(checkpoint.get("projectRoot") or arguments.get("projectRoot") or arguments.get("project_root") or ""),
@@ -2526,6 +2741,70 @@ class AgentApprovalTransactionService:
                     status="restored",
                     resolution=resolution,
                     result_summary=summarize_params(restore_payload or {}),
+                )
+            )
+        return resolved
+
+    def reconcile_gesture_manager_pending_recovery(
+        self,
+        arguments: Mapping[str, Any],
+        status: Mapping[str, Any],
+    ) -> list[dict[str, Any]]:
+        """Close a scheduled GM entry recovery after an exact connected readback."""
+
+        if (
+            status.get("ok") is not True
+            or status.get("error")
+            or status.get("errorCode")
+            or status.get("isPlayMode") is not True
+            or not isinstance(status.get("managers"), list)
+        ):
+            return []
+        project_root = extract_project_root(arguments)
+        execution_target = arguments.get("executionTarget")
+        project_key = self._project_lock_key(project_root)
+        avatar_path = str(
+            arguments.get("avatar_path") or arguments.get("avatarPath") or ""
+        ).strip().strip("/")
+        if not project_root or not avatar_path or not isinstance(execution_target, Mapping):
+            return []
+        if not any(
+            isinstance(manager, Mapping)
+            and str(manager.get("avatarPath") or "").strip().strip("/") == avatar_path
+            and manager.get("moduleConnected") is True
+            for manager in status["managers"]
+        ):
+            return []
+        target_digest = execution_target_digest(execution_target)
+        resolved: list[dict[str, Any]] = []
+        for recovery in self._ports.checkpoint.active_apply_recoveries():
+            if str(recovery.get("targetTool") or "") != "vrcforge_gesture_manager_enter_play_mode":
+                continue
+            if str(recovery.get("status") or "") != "applying" or str(recovery.get("resolution") or "") != "write_pending":
+                continue
+            if self._entry_project_key(recovery) != project_key:
+                continue
+            recovery_avatar = str(recovery.get("avatarPath") or "").strip().strip("/")
+            if not recovery_avatar or recovery_avatar != avatar_path:
+                continue
+            if not isinstance(recovery.get("executionTarget"), Mapping):
+                continue
+            if execution_target_digest(recovery["executionTarget"]) != target_digest:
+                continue
+            pending_summary = recovery.get("resultSummary")
+            if not isinstance(pending_summary, Mapping) or not (
+                pending_summary.get("enterPlayModePending") is True
+                and pending_summary.get("isPlayMode") is False
+                and pending_summary.get("moduleConnected") is False
+                and pending_summary.get("commitState") == "enter_play_mode_requested"
+            ):
+                continue
+            resolved.append(
+                self._finish_apply_recovery(
+                    recovery,
+                    status="applied",
+                    resolution="write_completed_readback",
+                    result_summary=summarize_params(dict(status)),
                 )
             )
         return resolved
@@ -2628,29 +2907,34 @@ class AgentApprovalTransactionService:
         if handler.name in {
             "vrcforge_gesture_manager_enter_play_mode",
             "vrcforge_gesture_manager_set_parameter",
+            "vrcforge_start_runtime_observation",
             "vrcforge_select_scene_object",
             "vrcforge_set_play_mode",
         }:
             restore_tool = (
                 "vrcforge_set_play_mode"
                 if handler.name == "vrcforge_gesture_manager_enter_play_mode"
+                else "vrcforge_gesture_manager_set_parameter"
+                if handler.name == "vrcforge_start_runtime_observation"
                 else handler.name
             )
+            checkpoint_required = _requires_pre_write_checkpoint(handler, {})
             return {
                 "schema": ROLLBACK_POLICY_SCHEMA,
                 "required": True,
                 "kind": "ephemeral_editor_state_inverse",
                 "approvalRequired": True,
-                "preWriteCheckpointRequired": False,
-                "checkpointScope": [],
+                "preWriteCheckpointRequired": checkpoint_required,
+                "checkpointScope": [*UNITY_PROJECT_CHECKPOINT_SCOPE] if checkpoint_required else [],
                 "restoreTool": restore_tool,
                 "coverageAudit": "vrcforge.ephemeral_editor_state_result.v1",
                 "postRestoreValidationRequired": True,
                 "note": (
-                    "This operation changes only transient Unity Editor or Play Mode state. "
-                    "Its result reports the observed state, and the declared atomic restore tool can explicitly "
-                    "restore the prior value, selection, or Play Mode state; no project checkpoint or automatic "
-                    "rollback is claimed."
+                    "This operation changes transient Unity Editor or Play Mode state. "
+                    "Entering Play retains a project snapshot before mutation; runtime parameter changes and "
+                    "Play Mode exit use their explicit inverse/readback path without claiming a scene checkpoint. "
+                    "Runtime observation additionally creates bounded managed artifacts with create-new semantics; "
+                    "the parameter is never automatically restored and partial artifacts are retained as evidence."
                 ),
             }
         if handler.name == "vrcforge_confirm_unity_reload_dialog":
@@ -2813,7 +3097,16 @@ class AgentApprovalTransactionService:
                 ).lower()
                 # The fixed CLI executable is a hash-bound read source created
                 # by the trusted VPM preparer. It is not a project write target.
-                return key_lower == sealed_cli_identity_path
+                sealed_baseline_identity_path = (
+                    f"{PREPARED_UNITY_EXECUTION_ARGUMENT_KEY}."
+                    f"{PREPARED_EVIDENCE_KEY}.legacyBaseline.archive.identity.path"
+                ).lower()
+                return key_lower in {
+                    sealed_cli_identity_path,
+                    sealed_baseline_identity_path,
+                    "legacybaselinearchive",
+                    "legacy_baseline_archive",
+                }
             return False
 
         if target_lower == "vrcforge_export_vrm":
@@ -2998,6 +3291,7 @@ class AgentApprovalTransactionService:
         arguments = self._inject_user_constraints_for_apply(arguments, user_constraints)
         preview: Any = None
         if write_handler.request_preparer is not None:
+            explicit_preconditions = _explicit_write_preconditions(arguments)
             try:
                 prepared_arguments, preview = write_handler.request_preparer(dict(arguments), None)
             except AgentGatewayError:
@@ -3014,6 +3308,7 @@ class AgentApprovalTransactionService:
                     f"Write request preparation returned invalid arguments for {normalized_target}.",
                     status_code=500,
                 )
+            _verify_prepared_write_preconditions(explicit_preconditions, prepared_arguments)
             arguments = prepared_arguments
 
         authoritative_preview_only = bool(
@@ -3457,8 +3752,8 @@ class AgentApprovalTransactionService:
                     expected_execution_target_digest,
                 )
             if (
-                write_handler.requires_approved_execution_context
-                and write_handler.pre_write_checkpoint_required
+                (write_handler.requires_approved_execution_context or bool(write_handler.external_mcp_capability))
+                and _requires_pre_write_checkpoint(write_handler, arguments)
                 and arguments.get("preview") is not True
                 and (extract_project_root(arguments) is not None)
                 and extract_project_root(arguments).is_dir()
@@ -3528,7 +3823,18 @@ class AgentApprovalTransactionService:
                     frozen_execution_plan,
                 )
             source_tool_result = result
-            if write_handler.verification_finalize_handler is not None:
+            # Runtime observation owns a finite Unity sampling job.  Its start
+            # call has already verified the target and trigger readback; keep
+            # the explicit project lock only for this short start transaction
+            # and let the read-only status tool verify the eventual artifacts.
+            observation_pending = (
+                target_tool == "vrcforge_start_runtime_observation"
+                and isinstance(result, Mapping)
+                and str(result.get("status") or "").casefold() == "pending"
+            )
+            gm_entry_pending = is_gesture_manager_entry_pending(target_tool, result)
+            operation_pending = observation_pending or gm_entry_pending
+            if write_handler.verification_finalize_handler is not None and not operation_pending:
                 failure_layer = "completion_verification_finalize"
                 verification_arguments = dict(arguments)
                 verification_arguments.pop("_vrcforge_approved_execution", None)
@@ -3567,6 +3873,31 @@ class AgentApprovalTransactionService:
                 failure_layer = "result_verification"
                 raise AgentGatewayError(str(completion_outcome.get("summary") or "Write failed."))
 
+            if gm_entry_pending:
+                # Core has only scheduled entry into Play Mode.  The status
+                # query owns the eventual connection/readback, so never run
+                # the completion finalizer or claim a connected runtime here.
+                completion_outcome["status"] = "pending"
+                completion_outcome["summary"] = (
+                    "Gesture Manager Play Mode entry was requested and is pending."
+                )
+                if isinstance(result, Mapping):
+                    for key in (
+                        "isPlayMode",
+                        "moduleConnected",
+                        "enterPlayModePending",
+                        "commitState",
+                    ):
+                        if key in result:
+                            completion_outcome[key] = result[key]
+                if recovery is not None:
+                    recovery = self._finish_apply_recovery(
+                        recovery,
+                        status="applying",
+                        resolution="write_pending",
+                        result_summary=summarize_params(completion_outcome),
+                    )
+
             receipt = dict(domain_receipt) if isinstance(domain_receipt, Mapping) else {}
             receipt_verified = receipt.get("verified") is True
             receipt_readback = receipt.get("readback")
@@ -3604,6 +3935,9 @@ class AgentApprovalTransactionService:
                 or "unknown"
             )
             persistence_state = (
+                "pending"
+                if operation_pending
+                else
                 "persisted"
                 if receipt_verified and commit_state in {"committed", "no_change"}
                 else "verified"
@@ -3611,6 +3945,9 @@ class AgentApprovalTransactionService:
                 else "handler_reported"
             )
             readback_state = (
+                "pending"
+                if operation_pending
+                else
                 "verified"
                 if receipt_verified and isinstance(receipt_readback, Mapping)
                 else "verified"
@@ -3633,21 +3970,38 @@ class AgentApprovalTransactionService:
                     and str(result["consoleVerification"].get("status") or "").casefold()
                     in {"passed", "verified"}
                 )
-                if not receipt_verified and not finalize_verification:
+                if not gm_entry_pending and not receipt_verified and not finalize_verification:
+                    console_verification = (
+                        result.get("consoleVerification") if isinstance(result, Mapping) else None
+                    )
+                    if (
+                        isinstance(console_verification, Mapping)
+                        and str(console_verification.get("status") or "").casefold() == "failed"
+                    ):
+                        raise AgentGatewayError(
+                            str(console_verification.get("summary") or "Unity completion verification failed."),
+                            status_code=409,
+                            cause_code=str(console_verification.get("code") or "unity_completion_verification_failed"),
+                        )
                     raise AgentGatewayError(
                         "The external Unity write returned success without explicit verification.",
                         status_code=409,
                     )
-                recovery = self._finish_apply_recovery(
-                    recovery,
-                    status="applied",
-                    resolution="write_completed",
-                    result_summary=summarize_params(completion_outcome),
-                )
+                if not gm_entry_pending:
+                    recovery = self._finish_apply_recovery(
+                        recovery,
+                        status="applied",
+                        resolution="write_completed",
+                        result_summary=summarize_params(completion_outcome),
+                    )
             payload: dict[str, Any] = {
                 "ok": True,
                 "operationId": operation_id,
+                "tool": target_tool,
                 "status": (
+                    "pending"
+                    if operation_pending
+                    else
                     "needs_user_action"
                     if completion_outcome.get("status") == "needs_user_action"
                     else "applied"
@@ -3670,6 +4024,16 @@ class AgentApprovalTransactionService:
             }
             if isinstance(arguments.get("executionTarget"), Mapping):
                 payload["executionTargetDigest"] = execution_target_digest(arguments["executionTarget"])
+            if (
+                write_handler.verification_finalize_handler is not None
+                and receipt.get("schema") == "vrcforge.editor_state_completion.v1"
+                and receipt_verified
+                and isinstance(receipt_readback, Mapping)
+                and not gm_entry_pending
+            ):
+                # Preserve the Core scheduling result and expose the independently
+                # observed completion alongside it, including in operation resources.
+                payload["completionVerification"] = redact_sensitive(result)
             if isinstance(result, Mapping) and isinstance(
                 result.get("consoleVerification"), Mapping
             ):
@@ -3819,6 +4183,15 @@ class AgentApprovalTransactionService:
                         result_summary=summarize_params(failure_result),
                         write_failure=write_failure,
                     )
+                elif _confirmed_atomic_rollback_failure(failure_result, write_failure):
+                    recovery = self._finish_apply_recovery(
+                        recovery,
+                        status="restored",
+                        resolution="confirmed_atomic_rollback",
+                        error=exception_text,
+                        result_summary=summarize_params(failure_result),
+                        write_failure=write_failure,
+                    )
                 elif _temporary_cleanup_only_failure(write_failure):
                     recovery = self._finish_apply_recovery(
                         recovery,
@@ -3866,7 +4239,7 @@ class AgentApprovalTransactionService:
                 "commitState": completion_outcome.get("commitState") or ("unknown" if handler_started else "not_started"),
                 "persistenceState": "unknown" if handler_started else "not_started",
                 "readbackState": "failed" if handler_started else "not_started",
-                "cleanupState": "unknown" if handler_started else "not_applicable",
+                "cleanupState": "complete" if _confirmed_atomic_rollback_failure(failure_result, write_failure) else "unknown" if handler_started else "not_applicable",
                 "retryable": False,
                 "nextAction": None,
             }
@@ -3920,7 +4293,7 @@ class AgentApprovalTransactionService:
             verified = validate_runtime_execution_target(
                 execution_target,
                 project_root=str(project_root),
-                required_scope=identity_scope(target_tool, write=True),
+                required_scope=identity_scope(target_tool, write=True, arguments=arguments),
             )
         except ExecutionTargetError as exc:
             raise AgentGatewayError(

@@ -21,6 +21,7 @@ from urllib.parse import urlsplit
 from external_tool_result_contract import build_external_tool_error
 from agent_tool_result_contract import normalize_agent_tool_result
 from operation_context import ensure_operation_result
+from external_mcp_result_projection import RESOURCE_SELECTION, TOOL_SELECTION, project_prompt, project_resource, project_result, project_tool, resource_selection, result_mode, select_tools, tool_names
 
 
 PROTOCOL_VERSION = "2026-07-28"
@@ -94,6 +95,50 @@ def _error(
     return body
 
 
+def _pre_routing_gateway_rejection(
+    exception: BaseException,
+    *,
+    tool: str,
+) -> dict[str, Any] | None:
+    """Project the one gateway validation refusal that never entered routing.
+
+    AgentGatewayError is intentionally not imported here: this transport is
+    also used by lightweight callers.  The exact cause code plus the absence
+    of any started route/mutation is the boundary contract.  Other gateway
+    failures retain the generic internal-error path so an actually routed
+    operation cannot be reported as ``not_started``.
+    """
+
+    if getattr(exception, "cause_code", "") != "prompt_skill_provenance_mismatch":
+        return None
+    source = getattr(exception, "external_error", None)
+    if isinstance(source, Mapping):
+        if source.get("toolRoutingStarted") is True or source.get("mutationStarted") is True:
+            return None
+        if source.get("committed") is True or str(source.get("commitState") or "").casefold() in {
+            "complete",
+            "committed",
+            "applied",
+        }:
+            return None
+    return build_external_tool_error(
+        error=str(exception),
+        error_code="prompt_skill_provenance_mismatch",
+        failure_layer="gateway_validation",
+        failure_phase="prompt_skill_provenance_validation",
+        operation_kind="tool",
+        tool=tool,
+        tool_routing_started=False,
+        mutation_started=False,
+        committed=False,
+        commit_state="not_started",
+        retryable=False,
+        checkpoint_recovery_required=False,
+        temporary_cleanup_required=False,
+        details={"rejection": "validation", "routing": "not_started", "mutation": "not_started"},
+    )
+
+
 def _server_info(name: str, version: str) -> JsonObject:
     return {"name": name, "version": version}
 
@@ -154,6 +199,42 @@ def _tool_result_content_text(structured: Mapping[str, Any]) -> str:
         }
         return json.dumps(compact, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
     return json.dumps(structured, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+
+
+def _project_explicit_no_write_state(
+    structured: dict[str, Any],
+    outcome: Mapping[str, Any],
+) -> None:
+    """Repair an outer write envelope only from an explicit no-write outcome.
+
+    Some gateway preparation failures already carry a precise nested outcome,
+    while the outer projection still contains the generic unknown state.  The
+    state is safe to copy only when the normalized outcome proves a failed
+    before-handler rejection and explicitly reports no route, mutation, or
+    commit.  Routed failures and timeouts remain unknown.
+    """
+
+    if str(outcome.get("status") or "").strip().casefold() != "failed":
+        return
+    if outcome.get("failurePhase") != "before_write_handler":
+        return
+    if outcome.get("toolRoutingStarted") is not False:
+        return
+    if outcome.get("mutationStarted") is not False:
+        return
+    if outcome.get("committed") is not False:
+        return
+    if outcome.get("commitState") != "not_started" or outcome.get("commitStateKnown") is not True:
+        return
+    for key in ("toolRoutingStarted", "mutationStarted", "committed"):
+        if structured.get(key) in (None, "", "unknown"):
+            structured[key] = False
+    if structured.get("commitState") in (None, "", "unknown"):
+        structured["commitState"] = "not_started"
+    if structured.get("persistenceState") in (None, "", "unknown"):
+        structured["persistenceState"] = "not_applicable"
+    if structured.get("cleanupState") in (None, "", "unknown"):
+        structured["cleanupState"] = "not_applicable"
 
 
 def _normalise_tool(tool: Mapping[str, Any]) -> JsonObject:
@@ -365,6 +446,12 @@ class Mcp2026Router:
         request_id = message.get("id") if isinstance(message, Mapping) else None
         try:
             request_id, method, params = _validate_request(message)
+            try:
+                presentation_mode = result_mode(params)
+                selected_names = tool_names(params, method)
+                selected_resource = resource_selection(params, method)
+            except ValueError as exc:
+                raise Mcp2026Error(-32602, str(exc)) from exc
             if method == "server/discover":
                 return _success(
                     request_id,
@@ -426,6 +513,10 @@ class Mcp2026Router:
                     raise Mcp2026Error(-32002, str(exc), 404) from exc
                 if not isinstance(supplied, Mapping) or not isinstance(supplied.get("contents"), Sequence):
                     raise Mcp2026Error(-32603, "Resource registry returned invalid contents", 500)
+                try:
+                    supplied = project_resource(supplied, selected_resource)
+                except ValueError as exc:
+                    raise Mcp2026Error(-32602, str(exc)) from exc
                 return _success(
                     request_id,
                     _strict_json_clone(supplied),
@@ -453,6 +544,7 @@ class Mcp2026Router:
                     raise Mcp2026Error(-32602, str(exc)) from exc
                 if not isinstance(supplied, Mapping) or not isinstance(supplied.get("messages"), Sequence):
                     raise Mcp2026Error(-32603, "Prompt registry returned invalid messages", 500)
+                supplied = project_prompt(_strict_json_clone(supplied), mode=presentation_mode)
                 return _success(
                     request_id,
                     _strict_json_clone(supplied),
@@ -460,16 +552,25 @@ class Mcp2026Router:
                     server_version=self.server_version,
                 ), 200
             if method == "tools/list":
-                supplied_tools = await _resolve(self._tool_list(params))
+                # Catalogue construction is synchronous in the current Gateway
+                # composition and can serialize a multi-megabyte descriptor
+                # set. Keep it off the ASGI event loop just like tool calls.
+                supplied_tools = await _resolve(
+                    await asyncio.to_thread(self._tool_list, params)
+                )
                 if not isinstance(supplied_tools, Sequence) or isinstance(supplied_tools, (str, bytes, bytearray)):
                     raise Mcp2026Error(-32603, "Tool catalogue must return a sequence", 500)
-                tools = [_normalise_tool(tool) for tool in supplied_tools if isinstance(tool, Mapping)]
+                tools = [project_tool(_normalise_tool(tool), mode=presentation_mode) for tool in supplied_tools if isinstance(tool, Mapping)]
                 if len(tools) != len(supplied_tools):
                     raise Mcp2026Error(-32603, "Tool catalogue must contain only objects", 500)
                 tools.sort(key=lambda item: item["name"])
                 if len({item["name"] for item in tools}) != len(tools):
                     raise Mcp2026Error(-32603, "Tool catalogue contains duplicate names", 500)
-                result_payload: dict[str, Any] = {"tools": tools}
+                try:
+                    tools = select_tools(tools, selected_names, mode=presentation_mode)
+                except ValueError as exc:
+                    raise Mcp2026Error(-32602, str(exc)) from exc
+                result_payload: dict[str, Any] = {"tools": tools, "_meta": {"io.vrcforge/toolSelection": TOOL_SELECTION, "io.vrcforge/resourceSelection": RESOURCE_SELECTION}}
                 if self._tool_list_revision is not None:
                     result_payload["catalogGeneration"] = self._tool_list_revision()
                 return _success(
@@ -495,7 +596,38 @@ class Mcp2026Router:
                 # tool may call it without replaying tools/list block hints.
                 catalogue_params.setdefault("toolBlocks", ["*"])
                 catalogue_callback = self._tool_call_catalogue or self._tool_list
-                supplied_tools = await _resolve(catalogue_callback(catalogue_params))
+                # The external Gateway callback builds the complete execution
+                # catalogue synchronously. Running it inline here blocks every
+                # concurrent HTTP request before its own tool handler can be
+                # dispatched. The callback remains authoritative per request;
+                # only its CPU/serialization work moves to the existing
+                # asyncio-managed worker pool.
+                try:
+                    supplied_tools = await _resolve(
+                        await asyncio.to_thread(catalogue_callback, catalogue_params)
+                    )
+                except Mcp2026Error:
+                    raise
+                except Exception as exc:
+                    validation_error = _pre_routing_gateway_rejection(exc, tool=str(tool_name))
+                    if validation_error is not None:
+                        return (
+                            _error(
+                                request_id, -32602, str(exc), validation_error,
+                                failure_phase="prompt_skill_provenance_validation",
+                                tool_routing_started=False, mutation_started=False, committed=False,
+                            ),
+                            int(getattr(exc, "status_code", 409) or 409),
+                        )
+                    return (
+                        _error(
+                            request_id, -32603, "Tool catalogue is unavailable", {"tool": str(tool_name)},
+                            failure_phase="tool_catalogue_lookup",
+                            tool_routing_started=False, mutation_started=False, committed=False,
+                            exception=exc,
+                        ),
+                        500,
+                    )
                 if not isinstance(supplied_tools, Sequence) or isinstance(supplied_tools, (str, bytes, bytearray)):
                     raise Mcp2026Error(-32603, "Tool catalogue must return a sequence", 500)
                 catalogue = {
@@ -572,7 +704,9 @@ class Mcp2026Router:
                     write=is_write,
                 )
                 raw_structured.setdefault("outcome", outcome)
+                _project_explicit_no_write_state(raw_structured, outcome)
                 structured = _strict_json_clone(raw_structured)
+                structured = project_result(structured, mode=presentation_mode, resource_readable=self._resource_read is not None)
                 result = {
                     "content": [
                         {
@@ -583,11 +717,34 @@ class Mcp2026Router:
                     "structuredContent": structured,
                     "isError": structured.get("outcome", {}).get("status") == "failed",
                 }
+                if isinstance(params.get("_meta"), Mapping) and params["_meta"].get("io.vrcforge/includeListRevisions") is True:
+                    result["_meta"] = {"io.vrcforge/listRevisions": {
+                        "resources": resource_revision_after,
+                        "prompts": prompt_revision_after,
+                    }}
                 return _success(request_id, result, server_name=self.server_name, server_version=self.server_version), 200
             raise Mcp2026Error(-32601, "MCP method not found", 404)
         except Mcp2026Error as exc:
             return _error(request_id, exc.code, exc.message, exc.data), exc.http_status
         except Exception as exc:
+            tool_name = ""
+            if isinstance(params, Mapping):
+                tool_name = str(params.get("name") or "").strip()
+            validation_error = _pre_routing_gateway_rejection(exc, tool=tool_name)
+            if validation_error is not None:
+                return (
+                    _error(
+                        request_id,
+                        -32602,
+                        str(exc),
+                        validation_error,
+                        failure_phase="prompt_skill_provenance_validation",
+                        tool_routing_started=False,
+                        mutation_started=False,
+                        committed=False,
+                    ),
+                    int(getattr(exc, "status_code", 409) or 409),
+                )
             # Preserve a bounded exact cause chain; raw secrets remain redacted.
             return _error(
                 request_id,

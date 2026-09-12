@@ -14,7 +14,7 @@ namespace VRCForge.Editor
 {
     [VRCForgeCommand(
         toolId: "vrc_set_material_shader",
-        Summary = "Preview or assign one persistent project material to a named shader. When to use: one exact verified material and shader pair. When NOT to use: batch replacement or a material without persistent Assets identity."
+        Summary = "Preview or assign persistent project materials to named shaders, preserving authored render queue and override tags. When to use: one exact material selector, bounded pure asset assignments, keywordChanges, or declared scalar propertyChanges on one saved independent material. When NOT to use: renderer batches, mixed edit modes, or a material without persistent Assets identity."
     )]
     public static class MaterialShaderTool
     {
@@ -22,9 +22,57 @@ namespace VRCForge.Editor
         private const int MaxDependencyCandidates = 4096;
         private const int MaxImpactItems = 128;
 
+        // Unity's shader setter resets authored render state. Copy only these
+        // native serialized fields; raw -1 must continue to mean shader default.
+        internal static JObject CaptureMaterialRenderState(Material material)
+        {
+            if (material == null) throw new InvalidOperationException("Material render state requires a resolved material.");
+            var serialized = JObject.Parse(EditorJsonUtility.ToJson(material));
+            var nativeMaterial = serialized["Material"] as JObject;
+            var queue = nativeMaterial?["m_CustomRenderQueue"];
+            var tags = nativeMaterial?["stringTagMap"];
+            if (queue == null || queue.Type != JTokenType.Integer || tags == null
+                || (tags.Type != JTokenType.Object && tags.Type != JTokenType.Array))
+            {
+                var shape = new JObject {
+                    ["topLevelPropertyNames"] = new JArray(serialized.Properties().Take(64).Select(p => p.Name)),
+                    ["topLevelPropertyCount"] = serialized.Count,
+                    ["propertyNamesTruncated"] = serialized.Count > 64,
+                    ["MaterialType"] = serialized["Material"] == null ? "Missing" : serialized["Material"].Type.ToString(),
+                    ["materialPropertyNames"] = nativeMaterial == null ? new JArray() : new JArray(nativeMaterial.Properties().Take(64).Select(p => p.Name)),
+                    ["m_CustomRenderQueueType"] = queue == null ? "Missing" : queue.Type.ToString(),
+                    ["stringTagMapType"] = tags == null ? "Missing" : tags.Type.ToString()
+                };
+                throw new InvalidOperationException("Authored material render queue and override tags cannot be inspected. Native JSON shape: "
+                    + shape.ToString(Newtonsoft.Json.Formatting.None));
+            }
+            return new JObject { ["m_CustomRenderQueue"] = queue.DeepClone(), ["stringTagMap"] = tags.DeepClone() };
+        }
+
+        internal static void RestoreMaterialRenderState(Material material, JObject expected)
+        {
+            var nativeSerialized = new JObject { ["Material"] = expected.DeepClone() };
+            EditorJsonUtility.FromJsonOverwrite(nativeSerialized.ToString(Newtonsoft.Json.Formatting.None), material);
+            VerifyMaterialRenderState(material, expected);
+        }
+
+        internal static void VerifyMaterialRenderState(Material material, JObject expected)
+        {
+            if (!JToken.DeepEquals(CaptureMaterialRenderState(material), expected))
+                throw new InvalidOperationException("Material shader assignment changed the authored render queue or override tags.");
+        }
+
         public class Parameters
         {
-            [VRCForgeInput("Target shader name.", IsRequired = true)] public string shaderName { get; set; } = "";
+            [VRCForgeInput("1..32 declared Int/Float/Range property edits on one independent material; exclusive with shader, keyword, batch, and renderer selectors.", IsRequired = false)] public object[] propertyChanges { get; set; }
+            [VRCForgeInput("Optional explicit render queue -1 (shader default) or 0..5000, only with propertyChanges.", IsRequired = false)] public int? renderQueue { get; set; }
+            [VRCForgeInput("Sealed scalar preview material, shader, state and shared-impact evidence.", IsRequired = false)] public object expectedPropertyEvidence { get; set; }
+            [VRCForgeInput("Keyword-only edits for one independent material, exclusive with shader assignment and renderer selectors.", IsRequired = false)] public object[] keywordChanges { get; set; }
+            [VRCForgeInput("Sealed keyword preview identity and effective state.", IsRequired = false)] public object expectedKeywordEvidence { get; set; }
+            [VRCForgeInput("Optional 1..128 pure asset shader assignments; mutually exclusive with single fields. Maximum sealed payload 512 KiB.", IsRequired = false)] public object[] assignments { get; set; }
+            [VRCForgeInput("Full batch preview evidence.", IsRequired = false)] public object[] expectedAssignments { get; set; }
+            [VRCForgeInput("Digest of the ordered batch preview.", IsRequired = false)] public string expectedPreviewDigest { get; set; } = "";
+            [VRCForgeInput("Target shader name; required for single assignment.", IsRequired = false)] public string shaderName { get; set; } = "";
             [VRCForgeInput("Optional exact shader asset path.", IsRequired = false)] public string shaderAssetPath { get; set; } = "";
             [VRCForgeInput("Either renderer hierarchy path or persistent material path is required.", IsRequired = false)] public string rendererPath { get; set; } = "";
             [VRCForgeInput("Optional renderer component identity.", IsRequired = false)] public string rendererComponentId { get; set; } = "";
@@ -51,6 +99,14 @@ namespace VRCForge.Editor
         }
 
         public static object HandleCommand(JObject @params)
+        {
+            if (@params?["propertyChanges"] != null || @params?["renderQueue"] != null) return MaterialScalarPropertyEdit.HandleCommand(@params);
+            if (@params?["keywordChanges"] != null) return UnityMaterialKeywordEdit.HandleCommand(@params);
+            if (@params?["assignments"] != null) return UnityMaterialShaderBatch.HandleCommand(@params);
+            return HandleSingleCommand(@params, null);
+        }
+
+        internal static object HandleSingleCommand(JObject @params, BatchSharedMaterialImpact context)
         {
             Material mutatedMaterial = null;
             Shader beforeShaderForRestore = null;
@@ -154,6 +210,12 @@ namespace VRCForge.Editor
                 }
 
                 var materialEvidence = InspectWritableMaterialAsset(target.material);
+                var beforeRenderState = CaptureMaterialRenderState(target.material);
+                var capabilityFailure = PreflightShaderAssignment(target.material, shader);
+                if (capabilityFailure != null)
+                    return VRCForgeToolResult.RejectedBeforeMutation("material_shader_assignment_not_supported",
+                        "The material cannot independently accept the requested shader.", "unity_core_tool", "shader_capability_preflight", false,
+                        new { failureDetails = capabilityFailure });
                 var persistentMaterialPath = materialEvidence.assetPath;
                 var beforeShaderObject = target.material.shader;
                 var beforeShader = beforeShaderObject != null ? beforeShaderObject.name : string.Empty;
@@ -189,7 +251,7 @@ namespace VRCForge.Editor
                     return RejectBeforeMutation("The renderer component no longer matches the verified preview.");
                 }
 
-                var sharedImpactResult = BuildSharedMaterialImpact(target.material, persistentMaterialPath);
+                var sharedImpactResult = ResolveSharedMaterialImpact(target.material, materialEvidence, context);
                 var sharedImpact = sharedImpactResult.impact;
                 var sharedImpactDigest = sharedImpactResult.digest;
                 var sharedImpactDisplayDigest = sharedImpactResult.displayDigest;
@@ -219,6 +281,7 @@ namespace VRCForge.Editor
                     failurePhase = "unity_mutation";
                     target.material.shader = shader;
                     mutationApplied = true;
+                    RestoreMaterialRenderState(target.material, beforeRenderState);
                     EditorUtility.SetDirty(target.material);
                     failurePhase = "asset_save";
                     AssetDatabase.SaveAssetIfDirty(target.material);
@@ -250,6 +313,7 @@ namespace VRCForge.Editor
                 {
                     throw new InvalidOperationException("Material shader readback did not match the requested shader.");
                 }
+                VerifyMaterialRenderState(readback, beforeRenderState);
                 if (mutationStarted)
                 {
                     Undo.CollapseUndoOperations(undoGroup);
@@ -267,14 +331,16 @@ namespace VRCForge.Editor
                     shader = beforeShader,
                     shaderAssetPath = beforeShaderAssetPath,
                     shaderAssetGuid = beforeShaderAssetGuid,
-                    materialFileDigest = materialEvidence.fileDigest
+                    materialFileDigest = materialEvidence.fileDigest,
+                    renderState = beforeRenderState
                 };
                 var afterPayload = new
                 {
                     shader = readbackShader,
                     shaderAssetPath = readbackShaderAssetPath,
                     shaderAssetGuid = readbackShaderAssetGuid,
-                    materialFileDigest = materialFileDigestAfter
+                    materialFileDigest = materialFileDigestAfter,
+                    renderState = CaptureMaterialRenderState(readback)
                 };
 
                 return VRCForgeToolResult.Completed(
@@ -370,6 +436,47 @@ namespace VRCForge.Editor
             }
         }
 
+        internal static JObject PreflightShaderAssignment(Material material, Shader requested, IReadOnlyDictionary<Material, Shader> assignments = null)
+        {
+            if (material == null || requested == null) throw new InvalidOperationException("Shader capability preflight requires resolved material and shader.");
+            var parent = material.parent;
+            string reason = null;
+            if (material.isVariant && parent == null) reason = "material_variant_parent_missing";
+            else if (material.isVariant && material.shader != requested) reason = "material_variant_inherits_shader";
+            if (reason == null && material.isVariant && assignments != null)
+            {
+                var visited = new HashSet<Material>();
+                for (var ancestor = parent; ancestor != null; ancestor = ancestor.parent)
+                {
+                    if (!visited.Add(ancestor) || visited.Count > 128) { reason = "material_parent_chain_unresolved"; break; }
+                    if (assignments.TryGetValue(ancestor, out var planned) && planned != requested)
+                    { reason = "batch_ancestor_shader_conflict"; break; }
+                }
+            }
+            if (reason == null && material.shader == requested) return null;
+            if (reason == null)
+            {
+                // Invocation-owned transient object; never persisted or attached to a renderer.
+                Material probe = null;
+                try
+                {
+                    probe = new Material(material) { hideFlags = HideFlags.HideAndDontSave };
+                    probe.shader = requested;
+                    if (probe.shader != requested) reason = "shader_setter_did_not_apply";
+                }
+                catch (Exception) { reason = "shader_setter_preflight_failed"; }
+                finally { if (probe != null) UnityEngine.Object.DestroyImmediate(probe); }
+            }
+            if (reason == null) return null;
+            var parentPath = parent == null ? "" : AssetDatabase.GetAssetPath(parent);
+            return new JObject { ["reason"] = reason, ["materialAssetPath"] = AssetDatabase.GetAssetPath(material),
+                ["materialAssetGuid"] = AssetDatabase.AssetPathToGUID(AssetDatabase.GetAssetPath(material)),
+                ["requestedShader"] = requested.name, ["currentShader"] = material.shader == null ? null : material.shader.name,
+                ["isVariant"] = material.isVariant, ["parentMaterialAssetPath"] = parentPath,
+                ["parentMaterialAssetGuid"] = string.IsNullOrEmpty(parentPath) ? "" : AssetDatabase.AssetPathToGUID(parentPath),
+                ["options"] = new JArray("Keep the inherited shader.", "Explicitly flatten an independent copy in a separately approved operation, then preview again.", "Review the parent's shared impact before any separately approved parent change.") };
+        }
+
         private static object RejectBeforeMutation(string message)
         {
             return VRCForgeToolResult.RejectedBeforeMutation(
@@ -435,7 +542,7 @@ namespace VRCForge.Editor
             }
         }
 
-        private static Shader ResolveShader(string shaderName, string shaderAssetPath)
+        internal static Shader ResolveShader(string shaderName, string shaderAssetPath)
         {
             if (!string.IsNullOrWhiteSpace(shaderAssetPath))
             {
@@ -665,20 +772,63 @@ namespace VRCForge.Editor
             }
         }
 
+        internal sealed class BatchSharedMaterialImpact
+        {
+            internal readonly Dictionary<string, Material> Materials = new Dictionary<string, Material>(StringComparer.OrdinalIgnoreCase);
+            internal readonly Dictionary<string, MaterialAssetEvidence> Evidence = new Dictionary<string, MaterialAssetEvidence>(StringComparer.OrdinalIgnoreCase);
+            internal Dictionary<string, SharedMaterialImpactResult> Impacts;
+        }
+
+        internal static BatchSharedMaterialImpact BuildBatchSharedMaterialImpact(JArray rows)
+        {
+            var context = new BatchSharedMaterialImpact();
+            var guids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var row in rows)
+            {
+                var path = NormalizeOptionalAssetPath(row["materialAssetPath"].Value<string>(), false);
+                var material = AssetDatabase.LoadAssetAtPath<Material>(path);
+                if (material == null) throw new InvalidOperationException("Batch impact target material is missing.");
+                var evidence = InspectWritableMaterialAsset(material);
+                if (context.Materials.ContainsKey(evidence.assetPath) || !guids.Add(evidence.assetGuid))
+                    throw new InvalidOperationException("Batch impact requires distinct persistent material identities.");
+                context.Materials.Add(evidence.assetPath, material);
+                context.Evidence.Add(evidence.assetPath, evidence);
+            }
+            context.Impacts = CollectSharedMaterialImpacts(context.Materials);
+            return context;
+        }
+
+        internal static SharedMaterialImpactResult ResolveSharedMaterialImpact(Material material, MaterialAssetEvidence evidence, BatchSharedMaterialImpact context)
+        {
+            if (context == null) return BuildSharedMaterialImpact(material, evidence.assetPath);
+            if (!context.Materials.TryGetValue(evidence.assetPath, out var expectedMaterial)
+                || expectedMaterial != material
+                || !context.Evidence.TryGetValue(evidence.assetPath, out var expected)
+                || !string.Equals(expected.assetGuid, evidence.assetGuid, StringComparison.OrdinalIgnoreCase)
+                || !string.Equals(expected.fileDigest, evidence.fileDigest, StringComparison.Ordinal))
+                throw new InvalidOperationException("Batch material identity changed during shared-impact inspection.");
+            return context.Impacts[evidence.assetPath];
+        }
+
         private static SharedMaterialImpactResult BuildSharedMaterialImpact(Material material, string materialAssetPath)
         {
-            var loadedRendererSlots = new List<RendererSlotImpact>();
+            return CollectSharedMaterialImpacts(new Dictionary<string, Material>(StringComparer.OrdinalIgnoreCase)
+                { [materialAssetPath] = material })[materialAssetPath];
+        }
+
+        private static Dictionary<string, SharedMaterialImpactResult> CollectSharedMaterialImpacts(IReadOnlyDictionary<string, Material> targets)
+        {
+            var slots = targets.Keys.ToDictionary(path => path, path => new List<RendererSlotImpact>(), StringComparer.OrdinalIgnoreCase);
+            var assets = targets.Keys.ToDictionary(path => path, path => new List<string>(), StringComparer.OrdinalIgnoreCase);
+            var materialPaths = targets.ToDictionary(pair => pair.Value, pair => pair.Key);
             foreach (var renderer in Resources.FindObjectsOfTypeAll<Renderer>().Where(IsSceneObject))
             {
                 var rendererIdentity = RendererComponentIdentity.Create(renderer);
                 var materials = renderer.sharedMaterials ?? Array.Empty<Material>();
                 for (var index = 0; index < materials.Length; index++)
                 {
-                    if (materials[index] != material)
-                    {
-                        continue;
-                    }
-
+                    if (materials[index] == null || !materialPaths.TryGetValue(materials[index], out var path)) continue;
+                    var loadedRendererSlots = slots[path];
                     loadedRendererSlots.Add(new RendererSlotImpact
                     {
                         scenePath = rendererIdentity.scenePath,
@@ -691,12 +841,32 @@ namespace VRCForge.Editor
                         slotIndex = index
                     });
                     if (loadedRendererSlots.Count > MaxDependencyCandidates)
-                    {
                         throw new InvalidOperationException("Shared material impact scan exceeded its bounded loaded-renderer limit.");
-                    }
                 }
             }
+            var dependencyCandidates = AssetDatabase.FindAssets("t:Prefab", new[] { "Assets" })
+                .Concat(AssetDatabase.FindAssets("t:Scene", new[] { "Assets" }))
+                .Select(AssetDatabase.GUIDToAssetPath)
+                .Where(path => !string.IsNullOrWhiteSpace(path))
+                .Distinct(StringComparer.Ordinal)
+                .OrderBy(path => path, StringComparer.Ordinal)
+                .ToArray();
+            if (dependencyCandidates.Length > MaxDependencyCandidates)
+                throw new InvalidOperationException("Shared material impact scan exceeded its bounded project-asset limit.");
+            foreach (var candidatePath in dependencyCandidates)
+            {
+                var dependencies = AssetDatabase.GetDependencies(candidatePath, true);
+                foreach (var path in dependencies.Distinct(StringComparer.OrdinalIgnoreCase))
+                {
+                    if (path != null && assets.TryGetValue(path, out var dependentAssets)) dependentAssets.Add(candidatePath);
+                }
+            }
+            return targets.Keys.ToDictionary(path => path,
+                path => FinalizeSharedMaterialImpact(slots[path], assets[path], dependencyCandidates.Length), StringComparer.OrdinalIgnoreCase);
+        }
 
+        private static SharedMaterialImpactResult FinalizeSharedMaterialImpact(List<RendererSlotImpact> loadedRendererSlots, List<string> dependentAssets, int candidateCount)
+        {
             loadedRendererSlots = loadedRendererSlots
                 .OrderBy(item => item.scenePath, StringComparer.Ordinal)
                 .ThenBy(item => item.sceneHandle)
@@ -707,33 +877,12 @@ namespace VRCForge.Editor
                 .ThenBy(item => item.slotIndex)
                 .ToList();
 
-            var dependencyCandidates = AssetDatabase.FindAssets("t:Prefab", new[] { "Assets" })
-                .Concat(AssetDatabase.FindAssets("t:Scene", new[] { "Assets" }))
-                .Select(AssetDatabase.GUIDToAssetPath)
-                .Where(path => !string.IsNullOrWhiteSpace(path))
-                .Distinct(StringComparer.Ordinal)
-                .OrderBy(path => path, StringComparer.Ordinal)
-                .ToArray();
-            if (dependencyCandidates.Length > MaxDependencyCandidates)
-            {
-                throw new InvalidOperationException("Shared material impact scan exceeded its bounded project-asset limit.");
-            }
-
-            var dependentAssets = new List<string>();
-            foreach (var candidatePath in dependencyCandidates)
-            {
-                var dependencies = AssetDatabase.GetDependencies(candidatePath, true);
-                if (dependencies.Any(path => string.Equals(path, materialAssetPath, StringComparison.OrdinalIgnoreCase)))
-                {
-                    dependentAssets.Add(candidatePath);
-                }
-            }
-
             var listsTruncated = loadedRendererSlots.Count > MaxImpactItems || dependentAssets.Count > MaxImpactItems;
             var impact = new SharedMaterialImpact
             {
                 scope = "loaded_scene_renderers_and_project_scene_prefab_dependencies",
-                dependencyCandidateCount = dependencyCandidates.Length,
+                dependencyCandidateCount = candidateCount,
+                dependencyQueryCount = candidateCount,
                 loadedRendererSlotCount = loadedRendererSlots.Count,
                 loadedRendererSlots = loadedRendererSlots.Take(MaxImpactItems).ToArray(),
                 dependentAssetCount = dependentAssets.Count,
@@ -885,7 +1034,7 @@ namespace VRCForge.Editor
             return normalized;
         }
 
-        private static string NormalizeResolvedShaderAssetPath(string value)
+        internal static string NormalizeResolvedShaderAssetPath(string value)
         {
             var normalized = (value ?? string.Empty).Replace("\\", "/").Trim();
             if (string.IsNullOrWhiteSpace(normalized)
@@ -965,7 +1114,7 @@ namespace VRCForge.Editor
             public string fileDigest = string.Empty;
         }
 
-        private sealed class RendererSlotImpact
+        internal sealed class RendererSlotImpact
         {
             public string scenePath = string.Empty;
             public string sceneGuid = string.Empty;
@@ -977,10 +1126,11 @@ namespace VRCForge.Editor
             public int slotIndex;
         }
 
-        private sealed class SharedMaterialImpact
+        internal sealed class SharedMaterialImpact
         {
             public string scope = string.Empty;
             public int dependencyCandidateCount;
+            public int dependencyQueryCount;
             public int loadedRendererSlotCount;
             public RendererSlotImpact[] loadedRendererSlots = Array.Empty<RendererSlotImpact>();
             public int dependentAssetCount;
@@ -988,7 +1138,7 @@ namespace VRCForge.Editor
             public bool listsTruncated;
         }
 
-        private sealed class SharedMaterialImpactResult
+        internal sealed class SharedMaterialImpactResult
         {
             public SharedMaterialImpact impact = new SharedMaterialImpact();
             public string digest = string.Empty;
@@ -999,28 +1149,25 @@ namespace VRCForge.Editor
 
     [VRCForgeCommand(
         toolId: "vrc_set_material_texture",
-        Summary = "Preview or assign one existing project Texture2D to one exact persistent Material texture property. When to use: one verified existing Assets material, whitelisted texture slot, and existing Assets Texture2D. When NOT to use: do not edit texture pixels, batch materials, create assets, or change a shader."
+        Summary = "Preview or assign an existing project Texture2D, optionally its textureScale/textureOffset, to exact persistent Material texture properties. When to use: verified Assets materials and shader texture properties, with optional finite x/y UV transforms. When NOT to use: do not edit pixels, shader vectors, mix batch and single selectors, create assets, or change a shader. Batches support 1..128 assignments with one checkpoint; single transforms use the same one-row batch receipt."
     )]
     public static class MaterialTextureTool
     {
         private const string ResultSchema = "vrcforge.material_texture_assignment.v1";
-        private static readonly HashSet<string> AllowedTextureProperties =
-            new HashSet<string>(StringComparer.Ordinal)
-            {
-                "_MainTex",
-                "_Main2ndTex",
-                "_Main3rdTex",
-                "_ShadowColorTex"
-            };
-
         public sealed class Parameters
         {
-            [VRCForgeInput("Exact persistent Assets/... .mat material asset.", IsRequired = true)]
+            [VRCForgeInput("Optional 1..128 asset texture assignments, exclusive with single fields; maximum sealed payload 512 KiB.", IsRequired = false)] public object[] assignments { get; set; }
+            [VRCForgeInput("Full sealed batch preview plan.", IsRequired = false)] public object expectedBatchPlan { get; set; }
+            [VRCForgeInput("Exact persistent Assets/... .mat material asset.", IsRequired = false)]
             public string materialAssetPath { get; set; } = string.Empty;
-            [VRCForgeInput("Whitelisted material texture property such as _MainTex.", IsRequired = true)]
+            [VRCForgeInput("Exact Texture property exposed by the installed shader on this material.", IsRequired = false)]
             public string propertyName { get; set; } = string.Empty;
-            [VRCForgeInput("Exact existing Assets/... Texture2D source asset.", IsRequired = true)]
+            [VRCForgeInput("Exact existing Assets/... Texture2D source asset.", IsRequired = false)]
             public string textureAssetPath { get; set; } = string.Empty;
+            [VRCForgeInput("Optional texture tiling object with exactly finite float32 x/y. Omitted preserves scale. Single transform requests use a one-row batch receipt and expectedBatchPlan.", IsRequired = false)]
+            public object textureScale { get; set; }
+            [VRCForgeInput("Optional texture offset object with exactly finite float32 x/y. Omitted preserves offset. Single transform requests use a one-row batch receipt and expectedBatchPlan.", IsRequired = false)]
+            public object textureOffset { get; set; }
             [VRCForgeInput("Exact active Unity project root.", IsRequired = false)]
             public string expectedProjectPath { get; set; } = string.Empty;
             [VRCForgeInput("Return a strictly non-mutating assignment preview.", IsRequired = false)]
@@ -1043,6 +1190,7 @@ namespace VRCForge.Editor
 
         public static object HandleCommand(JObject @params)
         {
+            if (@params != null && (@params["assignments"] != null || @params.Property("textureScale") != null || @params.Property("textureOffset") != null)) return UnityMaterialTextureBatch.HandleCommand(@params);
             Material material = null;
             MaterialShaderTool.MaterialAssetEvidence evidence = null;
             Texture beforeTexture = null;
@@ -1065,9 +1213,9 @@ namespace VRCForge.Editor
                 {
                     throw new InvalidOperationException("The selected Unity project does not match the active Editor.");
                 }
-                if (!AllowedTextureProperties.Contains(propertyName))
+                if (string.IsNullOrWhiteSpace(propertyName))
                 {
-                    throw new InvalidOperationException("The requested material texture property is not allowed.");
+                    throw new InvalidOperationException("An exact material texture property name is required.");
                 }
                 if (string.IsNullOrEmpty(materialAssetPath) || string.IsNullOrEmpty(textureAssetPath))
                 {

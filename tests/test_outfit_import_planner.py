@@ -373,6 +373,101 @@ def test_sibling_material_package_is_queued_before_direct_outfit(tmp_path: Path)
     assert [Path(item.get("actualPackagePath", "")).name for item in queue] == ["Dress_Materials.unitypackage", "Dress_Milltina.unitypackage"]
 
 
+def test_selected_only_direct_package_excludes_filename_heuristic_sibling(tmp_path: Path) -> None:
+    project = tmp_path / "milltina"
+    make_project(project)
+    package = tmp_path / "Dress_Milltina.unitypackage"
+    support = tmp_path / "Dress_Materials.unitypackage"
+    make_unitypackage(package)
+    make_unitypackage(support)
+
+    result = build_outfit_import_plan(
+        package,
+        project_path=project,
+        base_avatar_name="Milltina",
+        dependency_mode="selected_only",
+    )
+
+    queue = result["plan"]["source"]["importQueue"]
+    assert [Path(item["actualPackagePath"]).name for item in queue] == ["Dress_Milltina.unitypackage"]
+    assert result["dependencyPreflight"]["packageOrder"]["supportPackageCount"] == 0
+
+
+def test_selected_only_folder_requires_explicit_or_unique_package(tmp_path: Path) -> None:
+    project = tmp_path / "milltina"
+    make_project(project)
+    folder = tmp_path / "Bundle"
+    folder.mkdir()
+    make_unitypackage(folder / "Dress_Milltina.unitypackage")
+    make_unitypackage(folder / "Dress_Materials.unitypackage")
+
+    result = build_outfit_import_plan(
+        folder,
+        project_path=project,
+        base_avatar_name="Milltina",
+        dependency_mode="selected_only",
+    )
+
+    assert result["plan"]["writeTarget"] == ""
+    assert any("selected_only" in warning for warning in result["plan"]["warnings"])
+
+
+def test_selected_only_folder_accepts_one_unique_package(tmp_path: Path) -> None:
+    project = tmp_path / "milltina"
+    make_project(project)
+    folder = tmp_path / "Bundle"
+    folder.mkdir()
+    make_unitypackage(folder / "Dress_Milltina.unitypackage")
+
+    result = build_outfit_import_plan(
+        folder,
+        project_path=project,
+        base_avatar_name="Milltina",
+        dependency_mode="selected_only",
+    )
+
+    assert result["plan"]["writeTarget"] == "vrcforge_import_outfit_package"
+    assert [item["path"] for item in result["plan"]["source"]["importQueue"]] == ["Dress_Milltina.unitypackage"]
+
+
+def test_selected_only_zip_explicit_package_excludes_companion_scan(tmp_path: Path) -> None:
+    project = tmp_path / "milltina"
+    make_project(project)
+    package = tmp_path / "Bundle.zip"
+    with zipfile.ZipFile(package, mode="w") as archive:
+        archive.writestr("Dress_Materials.unitypackage", b"SUPPORT")
+        archive.writestr("Dress_Milltina.unitypackage", b"TARGET")
+
+    result = build_outfit_import_plan(
+        package,
+        project_path=project,
+        base_avatar_name="Milltina",
+        selected_unitypackage="Dress_Milltina.unitypackage",
+        dependency_mode="selected_only",
+    )
+
+    queue = result["plan"]["source"]["importQueue"]
+    assert [item["path"] for item in queue] == ["Dress_Milltina.unitypackage"]
+
+
+def test_selected_only_loose_folder_without_package_requires_clarification(tmp_path: Path) -> None:
+    project = tmp_path / "milltina"
+    make_project(project)
+    folder = tmp_path / "LooseOutfit"
+    folder.mkdir()
+    (folder / "Dress.prefab").write_text("prefab", encoding="utf-8")
+
+    result = build_outfit_import_plan(
+        folder,
+        project_path=project,
+        base_avatar_name="Milltina",
+        dependency_mode="selected_only",
+    )
+
+    assert result["plan"]["writeTarget"] == ""
+    assert any("selected_only" in warning for warning in result["plan"]["warnings"])
+
+
 def test_avatar_compatibility_mismatch_blocks_import_request(tmp_path: Path) -> None:
     project = tmp_path / "milltina"
     make_project(project)
@@ -436,6 +531,17 @@ def test_loose_prefab_plan_targets_assets_folder_without_file_contents(tmp_path:
     assert "Assets/VRCForge/ImportedOutfits/Dress/Dress.prefab" in plan["expectedAssetPaths"]
     assert "SECRET_PREFAB_TEXT" not in rendered
     assert "SECRET_TEXTURE_BYTES" not in rendered
+
+
+def test_loose_prefab_plan_includes_asmdef_dependency(tmp_path: Path) -> None:
+    folder = tmp_path / "LooseOutfit"
+    folder.mkdir()
+    (folder / "Dress.prefab").write_text("prefab", encoding="utf-8")
+    (folder / "Editor.asmdef").write_text('{"name":"Editor"}', encoding="utf-8")
+
+    plan = build_outfit_import_plan(folder, target_folder="Assets/VRCForge/ImportedOutfits/Dress")["plan"]
+
+    assert "Assets/VRCForge/ImportedOutfits/Dress/Editor.asmdef" in plan["expectedAssetPaths"]
 
 
 # --- Fix #2: post-import magenta / missing-shader validation -----------------

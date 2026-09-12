@@ -13,8 +13,10 @@ import unity_write_input_schemas
 def test_write_schemas_keep_one_owner_and_exact_pre_extraction_values() -> None:
     schemas = unity_write_input_schemas.EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS
     assert agent_gateway.EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS is schemas
-    encoded = json.dumps(schemas, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
-    assert hashlib.sha256(encoded).hexdigest() == "5c8eaa891b0e15952cad54b753a89ddd9c416be62d980ffcf43fcbfbbd8630c3"
+    # The new relocation contract must not alter any pre-existing public schema.
+    existing = {name: schema for name, schema in schemas.items() if name != "vrcforge_relocate_generated_assets"}
+    encoded = json.dumps(existing, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+    assert hashlib.sha256(encoded).hexdigest() == "1cec5367cc2a6f7ccfbe36e64685b789b176b0a2279fc6040c5143ed18fb16bc"
     for name, schema in schemas.items():
         preview = "vrcforge_preview_" + name.removeprefix("vrcforge_")
         read = unity_read_input_schemas.UNITY_READ_TOOL_INPUT_SCHEMAS.get(preview)

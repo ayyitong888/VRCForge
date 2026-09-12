@@ -57,6 +57,8 @@ from types import SimpleNamespace
 from typing import Any, Callable, Literal, Mapping
 from urllib.parse import urlsplit
 
+AGENT_MCP_STDIO_MODE = "--agent-mcp-stdio" in sys.argv
+
 import uvicorn
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -155,6 +157,7 @@ from authoritative_unity_writes import (
     authoritative_unity_write_has_strict_result,
     prepare_authoritative_unity_write,
     validate_authoritative_unity_write_result,
+    validated_unity_write_receipt_fields,
 )
 from constraint_source_write import (
     TOOL_NAME as CONSTRAINT_SOURCE_TOOL,
@@ -163,6 +166,11 @@ from constraint_source_write import (
 from component_feature_write import (
     TOOL_NAME as COMPONENT_FEATURE_TOOL,
     build_wrapper_arguments as build_component_feature_wrapper_arguments,
+)
+from generated_asset_relocation import (
+    TOOL_NAME as GENERATED_ASSET_RELOCATION_TOOL,
+    build_wrapper_arguments as build_generated_asset_relocation_wrapper_arguments,
+    build_execution_plan as build_generated_asset_relocation_execution_plan,
 )
 from backend_owner_lease import BackendOwnerLease
 from backend_listener_adoption import (
@@ -199,6 +207,10 @@ from material_shader_assignment import (
 from material_texture_assignment import (
     TOOL_NAME as MATERIAL_TEXTURE_ASSIGNMENT_TOOL,
     build_wrapper_arguments as build_material_texture_wrapper_arguments,
+)
+from material_variant_flatten import (
+    TOOL_NAME as MATERIAL_VARIANT_FLATTEN_TOOL,
+    build_wrapper_arguments as build_material_variant_flatten_wrapper_arguments,
 )
 from renderer_material_slot_assignment import (
     TOOL_NAME as RENDERER_MATERIAL_SLOT_TOOL,
@@ -317,6 +329,10 @@ from prepared_blendshape_writes import (
     require_exact_evidence as require_exact_blendshape_evidence,
 )
 from prepared_shader_tuning_writes import (
+    require_avatar_material_scope,
+    require_shader_receipt_avatar,
+    shader_scope_scan_arguments,
+    canonical_storage_value as shader_storage_value,
     SHADER_UNDO_LOCK,
     canonical_sha256 as shader_evidence_sha256,
     require_exact_evidence as require_exact_shader_evidence,
@@ -463,6 +479,7 @@ from prepared_outfit_import_workflow_service import (
     PreparedOutfitImportPreparerPorts,
     classify_prepared_outfit_import_risk,
     prepared_outfit_import_manual_confirmation_reason,
+    verify_unitypackage_asset_content,
 )
 import outfit_import_planner as outfit_import_planner_domain
 from outfit_import_planner import build_post_import_outfit_validation, detect_magenta_materials
@@ -562,6 +579,7 @@ from runtime_planner_service import (
     PlannerTurnMetadata,
     RuntimePlannerService,
     planner_tool_input_contract,
+    validate_planner_tool_arguments,
 )
 from shader_vision_protection_service import (
     ProtectionWorkflowPorts,
@@ -569,6 +587,7 @@ from shader_vision_protection_service import (
     ShaderWorkflowPorts,
     VisionAuditWorkflowPorts,
 )
+from shader_material_inventory import project_selected_material_summary, require_material_inventory
 from sub_agent_delegate import build_sub_agent_role_handlers, build_sub_agent_roles
 from sub_agent_collaboration_service import SubAgentCollaborationPorts, SubAgentCollaborationService
 from vrchat_blendshape_agent import (
@@ -617,6 +636,7 @@ from vrchat_blendshape_agent import (
     resolve_avatar_selection,
 )
 from unity_mcp_core_client import (
+    APP_UNITYPACKAGE_IMPORT_POLL_LANE,
     UnityMcpCoreClient,
     UnityMcpCoreError,
     load_unity_mcp_core_connection,
@@ -701,6 +721,7 @@ VRCFORGE_UNITY_TOOL_REGISTRY = (
     "vrc_delete_gameobject",
     "vrc_duplicate_scene_object",
     "vrc_duplicate_project_asset",
+    "vrc_relocate_generated_assets",
     "vrc_duplicate_scene_asset",
     "vrc_ensure_animator_state",
     "vrc_ensure_expression_menu_control",
@@ -758,6 +779,7 @@ VRCFORGE_UNITY_TOOL_REGISTRY = (
     "vrc_set_constraint_sources",
     "vrc_set_gameobject_active",
     "vrc_set_material_shader",
+    "vrc_flatten_material_variant",
     "vrc_set_renderer_material_slot",
     "vrc_set_material_texture",
     "vrc_texture_patch",
@@ -811,6 +833,7 @@ VRCFORGE_UNITY_MCP_BACKED_WRITE_TARGETS = frozenset(
         "vrcforge_gesture_manager_enter_play_mode",
         "vrcforge_select_scene_object",
         "vrcforge_set_play_mode",
+        "vrcforge_start_runtime_observation",
         "vrcforge_create_gameobject",
         "vrcforge_rename_gameobject",
         "vrcforge_reparent_gameobject",
@@ -819,6 +842,7 @@ VRCFORGE_UNITY_MCP_BACKED_WRITE_TARGETS = frozenset(
         "vrcforge_instantiate_prefab",
         "vrcforge_duplicate_scene_object",
         "vrcforge_duplicate_project_asset",
+        "vrcforge_relocate_generated_assets",
         "vrcforge_duplicate_scene_asset",
         "vrcforge_set_material_shader",
         "vrcforge_set_renderer_material_slot",
@@ -856,10 +880,12 @@ VRCFORGE_UNITY_MCP_WRITE_ALLOWLIST = frozenset(
         "vrc_build_test_avatar",
         "vrc_rollback_avatar_parameters",
         "vrc_set_material_shader",
+        "vrc_flatten_material_variant",
         "vrc_set_renderer_material_slot",
         MATERIAL_TEXTURE_ASSIGNMENT_TOOL,
         "vrc_duplicate_scene_object",
         PROJECT_ASSET_COPY_TOOL,
+        GENERATED_ASSET_RELOCATION_TOOL,
         SCENE_ASSET_DUPLICATE_TOOL,
         "vrc_save_scene_object_as_prefab",
         "vrc_set_texture_import_settings",
@@ -930,6 +956,13 @@ MATERIAL_SEMANTIC_PROPERTIES = {
     "outline_color",
     "outline_width",
     "normal_strength",
+    "dissolve_mode",
+    "dissolve_shape",
+    "dissolve_border",
+    "dissolve_blur",
+    "dissolve_direction_x",
+    "dissolve_direction_y",
+    "dissolve_direction_z",
 }
 
 MATERIAL_COLOR_PROPERTIES = {
@@ -944,6 +977,13 @@ MATERIAL_NUMERIC_RANGES = {
     "outline_width": (0.0, 0.25),
     "normal_strength": (0.0, 2.0),
     "emission_strength": (0.0, 2.0),
+    "dissolve_mode": (0.0, 3.0),
+    "dissolve_shape": (0.0, 1.0),
+    "dissolve_border": (-3.4028234663852886e38, 3.4028234663852886e38),
+    "dissolve_blur": (0.0001, 3.4028234663852886e38),
+    "dissolve_direction_x": (-1.0, 1.0),
+    "dissolve_direction_y": (-1.0, 1.0),
+    "dissolve_direction_z": (-1.0, 1.0),
 }
 
 AVATAR_ENCRYPTION_SCHEMA = "vrcforge.avatar_encryption.v1"
@@ -1585,6 +1625,7 @@ AGENT_GATEWAY = AgentGateway(
     runtime_turn_completed=broadcast_runtime_turn_completed,
     runtime_status_changed=broadcast_runtime_status,
     runtime_timeline_changed=broadcast_runtime_status,
+    load_mcp_resources=not AGENT_MCP_STDIO_MODE,
 )
 RUNTIME_QUEUE_PORT = runtime_queue_ports.CallbackRuntimeQueueAdapter(
     runtime_queue_ports.RuntimeQueueCallbacks(
@@ -2024,6 +2065,10 @@ async def replay_sub_agent_parent_continuations() -> int:
             "Shell task continuation reconciliation had a warning.",
             {"error": str(exc)},
         )
+    try:
+        await asyncio.to_thread(AGENT_GATEWAY.questions.reconcile_runtime_continuations)
+    except Exception as exc:  # noqa: BLE001 - saved answers remain available after recovery failure.
+        emit_log("warn", "agent", "Question task continuation reconciliation failed.", {"error": str(exc)})
     try:
         recovered += await asyncio.to_thread(
             SUB_AGENT_COLLABORATION.replay_parent_continuations
@@ -10015,7 +10060,9 @@ def core_upgrade_status_sync(params: dict[str, Any]) -> dict[str, Any]:
         max_errors=int((params or {}).get("maxErrors") or 30),
     )
     core_info = diagnostics.get("coreInfo") if isinstance(diagnostics.get("coreInfo"), dict) else None
-    compile_snapshot = _compile_snapshot_payload(diagnostics.get("compileResult"))
+    compile_snapshot = (core_info or {}).get("compileSnapshot")
+    if not isinstance(compile_snapshot, dict):
+        compile_snapshot = _compile_snapshot_payload(diagnostics.get("compileResult"))
     identity_matches = bool(
         core_info
         and core_info.get("coreIdentity") == expected["coreIdentity"]
@@ -10025,9 +10072,11 @@ def core_upgrade_status_sync(params: dict[str, Any]) -> dict[str, Any]:
         and core_info.get("versionSource") == "compiled_constant"
     )
     error_count = int((compile_snapshot or {}).get("errorCount") or 0)
-    is_compiling = bool((compile_snapshot or {}).get("isCompiling", False))
-    capture_complete = bool((compile_snapshot or {}).get("captureComplete", False))
+    is_compiling = (compile_snapshot or {}).get("isCompiling") is True
+    capture_complete = (compile_snapshot or {}).get("captureComplete") is True
     installed_at_value = str((params or {}).get("installedAt") or "").strip()
+    from core_upgrade_readiness import compile_snapshot_is_fresh
+    snapshot_fresh = compile_snapshot_is_fresh(compile_snapshot, installed_at_value)
     captured_at_value = str((compile_snapshot or {}).get("capturedAt") or "").strip()
     errors_are_post_install = bool(error_count)
     if error_count and installed_at_value and captured_at_value:
@@ -10035,7 +10084,7 @@ def core_upgrade_status_sync(params: dict[str, Any]) -> dict[str, Any]:
             installed_at = datetime.fromisoformat(installed_at_value.replace("Z", "+00:00"))
             captured_at = datetime.fromisoformat(captured_at_value.replace("Z", "+00:00"))
             errors_are_post_install = captured_at >= installed_at
-        except ValueError:
+        except (ValueError, TypeError):
             errors_are_post_install = True
     if errors_are_post_install:
         status = "compile_failed_old_assembly_retained" if not identity_matches else "compile_failed"
@@ -10045,6 +10094,8 @@ def core_upgrade_status_sync(params: dict[str, Any]) -> dict[str, Any]:
         status = "waiting_for_domain_reload" if not diagnostics.get("transportError") else "core_unreachable"
     elif not capture_complete:
         status = "waiting_for_console_snapshot"
+    elif not snapshot_fresh:
+        status = "waiting_for_post_install_compile" if installed_at_value else "waiting_for_console_snapshot"
     else:
         status = "ready"
     return {
@@ -10059,6 +10110,7 @@ def core_upgrade_status_sync(params: dict[str, Any]) -> dict[str, Any]:
         "console": compile_snapshot,
         "consoleErrorCount": error_count,
         "consoleCaptureComplete": capture_complete,
+        "compileSnapshotFresh": snapshot_fresh,
         "installedAt": installed_at_value,
         "diagnostics": diagnostics,
     }
@@ -10772,6 +10824,21 @@ def _scan_scene_avatars_tuning_adapter(request: AvatarSceneScanRequest) -> dict[
         raise to_http_exception(exc) from exc
 
 
+def _blendshape_selection_summary(payload: dict[str, Any]) -> dict[str, int]:
+    """Count only the avatars/renderers/shapes present in the returned selection."""
+    avatars = payload.get("avatars") or []
+    renderers = [
+        renderer
+        for avatar in avatars
+        for renderer in (avatar.get("renderers") or [])
+    ]
+    return {
+        "avatarCount": len(avatars),
+        "rendererCount": len(renderers),
+        "blendshapeCount": sum(len(renderer.get("blendshapes") or []) for renderer in renderers),
+    }
+
+
 def _read_avatar_blendshapes_tuning_adapter(request: AvatarBlendshapeListRequest) -> dict[str, Any]:
     try:
         settings = load_dashboard_settings(request)
@@ -10779,7 +10846,40 @@ def _read_avatar_blendshapes_tuning_adapter(request: AvatarBlendshapeListRequest
         selected_avatar = resolve_avatar_selection(export_payload, request.avatar)
         remember_loaded_avatar(selected_avatar.avatar_name, selected_avatar.avatar_path)
         filter_scope = resolve_blendshape_filter_scope(request)
-        blendshapes = serialize_blendshape_details(export_payload, selected_avatar, filter_scope)
+        scoped_export = export_payload
+        if request.renderer_paths is not None:
+            avatar_payload = next(avatar for avatar in export_payload.get("avatars") or [] if avatar.get("avatarPath") == selected_avatar.avatar_path)
+            renderers = avatar_payload.get("renderers") or []
+            known_paths = {renderer.get("rendererPath") for renderer in renderers}
+            missing = [path for path in request.renderer_paths if path not in known_paths]
+            if missing:
+                raise RuntimeError(f"Unknown rendererPaths in selected avatar: {missing}")
+            selected_paths = set(request.renderer_paths)
+            scoped_export = {**export_payload, "avatars": [{**avatar_payload, "renderers": [
+                renderer for renderer in renderers if renderer.get("rendererPath") in selected_paths
+            ]}]}
+        blendshapes = serialize_blendshape_details(scoped_export, selected_avatar, filter_scope)
+        source_summary = export_payload.get("summary", {})
+        selection_summary = (
+            _blendshape_selection_summary(scoped_export)
+            if request.renderer_paths is not None
+            else source_summary
+        )
+        selected_avatar_payload = serialize_selected_avatar(selected_avatar)
+        source_selected_avatar = None
+        summary_scope = "source_inventory"
+        if request.renderer_paths is not None:
+            source_selected_avatar = {
+                **selected_avatar_payload,
+                "scope": "avatar_inventory",
+            }
+            selected_avatar_payload = {
+                **selected_avatar_payload,
+                "rendererCount": selection_summary["rendererCount"],
+                "blendshapeCount": selection_summary["blendshapeCount"],
+                "scope": "renderer_selection_inventory",
+            }
+            summary_scope = "selection_inventory"
         emit_log(
             "info",
             "blendshape",
@@ -10791,11 +10891,15 @@ def _read_avatar_blendshapes_tuning_adapter(request: AvatarBlendshapeListRequest
             "exportSource": export_source,
             "executionMode": "mock" if using_mock_execute else "live-unity",
             "generatedAtUtc": export_payload.get("generatedAtUtc"),
-            "summary": export_payload.get("summary", {}),
-            "avatars": export_payload.get("avatars", []),
-            "selectedAvatar": serialize_selected_avatar(selected_avatar),
+            "summary": selection_summary,
+            **({"sourceSummary": source_summary} if request.renderer_paths is not None else {}),
+            "avatars": scoped_export.get("avatars", []),
+            "selectedAvatar": selected_avatar_payload,
+            **({"sourceSelectedAvatar": source_selected_avatar} if source_selected_avatar is not None else {}),
             "blendshapes": blendshapes,
             "filterScope": filter_scope,
+            "summaryScope": summary_scope,
+            **({"rendererPaths": request.renderer_paths} if request.renderer_paths is not None else {}),
             "filterNote": (
                 "Only face-related blendshapes are shown for the face editor."
                 if filter_scope == "face"
@@ -11540,7 +11644,12 @@ def scan_shader_materials_sync(request: ShaderMaterialScanRequest) -> dict[str, 
     try:
         settings = load_dashboard_settings(request)
         avatar_path = request.avatar_path or DASHBOARD_RUNTIME.current_avatar_path
-        inventory = scan_shader_materials_direct(settings, avatar_path)
+        inventory = scan_shader_materials_direct(
+            settings,
+            avatar_path,
+            material_ids=list(request.material_ids or []) or None,
+            include_textures=request.include_textures,
+        )
         materials = ensure_list_payload(inventory.get("materials") or [], "shader material inventory")
         overrides = dict(request.category_overrides or {})
         if overrides:
@@ -11562,12 +11671,27 @@ def scan_shader_materials_sync(request: ShaderMaterialScanRequest) -> dict[str, 
             "Shader material inventory scanned.",
             {"avatarPath": avatar_path, "materialCount": len(materials), "jsonPath": inventory.get("jsonPath")},
         )
+        summary = inventory.get("summary") or {}
+        source_summary = None
+        projected_inventory = inventory
+        if request.material_ids is not None:
+            summary, source_summary = project_selected_material_summary(inventory, materials)
+            projected_inventory = {
+                **inventory,
+                "summary": summary,
+                "sourceSummary": source_summary,
+                "sourceSummaryScope": "unity_reported_mixed",
+                "summaryScope": "material_selection",
+            }
         return {
             "ok": True,
             "avatarPath": avatar_path,
-            "inventory": inventory,
+            "inventory": projected_inventory,
             "materials": materials,
-            "summary": inventory.get("summary") or {},
+            "summary": summary,
+            **({"summaryScope": "material_selection"} if source_summary is not None else {}),
+            **({"sourceSummaryScope": "unity_reported_mixed"} if source_summary is not None else {}),
+            **({"sourceSummary": source_summary} if source_summary is not None else {}),
             "jsonPath": inventory.get("jsonPath") or inventory.get("absoluteOutputPath"),
         }
     except (RuntimeError, UnityMcpError) as exc:
@@ -12437,6 +12561,7 @@ def generate_shader_material_plan_sync(request: ShaderMaterialPlanRequest) -> di
         settings = load_dashboard_settings(request)
         avatar_path = request.avatar_path or request.avatar or DASHBOARD_RUNTIME.current_avatar_path
         inventory = copy.deepcopy(request.inventory) if request.inventory else scan_shader_materials_direct(settings, avatar_path)
+        require_material_inventory(inventory)
         inventory = apply_shader_category_overrides(inventory, request.category_overrides)
         reference_context = build_reference_image_context(request)
         reference_image_paths = [image["imagePath"] for image in (reference_context or {}).get("images", [])]
@@ -12556,6 +12681,7 @@ def _prepare_shader_tuning_apply_state(
     core_arguments = {"avatarPath": avatar_path, "changes": changes, "saveAssets": True}
     return {
         "settings": settings,
+        "scopeInventory": inventory,
         "avatarPath": avatar_path,
         "scanArguments": scan_arguments,
         "coreArguments": core_arguments,
@@ -12576,8 +12702,10 @@ def prepare_shader_material_apply_request(
         raise RuntimeError("Caller may not provide the reserved prepared Unity execution key.")
     request = ShaderMaterialApplyRequest(**arguments)
     state = _prepare_shader_tuning_apply_state(request)
+    scope_facts = require_avatar_material_scope(arguments, state["avatarPath"], state.get("scopeInventory"), state["validatedChanges"])
     evidence = {
         "avatarPath": state["avatarPath"],
+        "scopeFacts": scope_facts,
         "coreArgumentsSha256": shader_evidence_sha256(state["coreArguments"]),
         "effectiveLocks": state["effectiveLocks"],
         "historyId": request.history_id or "",
@@ -12602,12 +12730,14 @@ def prepare_shader_material_apply_request(
 
 def apply_shader_material_plan_approved_sync(arguments: dict[str, Any]) -> dict[str, Any]:
     """Execute only the approval-sealed shader call after a fresh fact scan."""
+    core_write_started = False
     try:
         request = ShaderMaterialApplyRequest(**arguments)
         evidence = prepared_evidence(arguments)
         if not isinstance(evidence, dict):
             raise RuntimeError("Prepared shader evidence is invalid.")
         state = _prepare_shader_tuning_apply_state(request)
+        scope_facts = require_avatar_material_scope(arguments, state["avatarPath"], state.get("scopeInventory"), state["validatedChanges"])
         if evidence.get("avatarPath") != state["avatarPath"]:
             raise RuntimeError("Prepared shader avatar selection drifted after approval.")
         require_exact_shader_evidence(evidence.get("effectiveLocks"), state["effectiveLocks"], "locks")
@@ -12615,13 +12745,16 @@ def apply_shader_material_plan_approved_sync(arguments: dict[str, Any]) -> dict[
             raise RuntimeError("Prepared shader validated Core arguments drifted after approval.")
         if evidence.get("historyId") != (request.history_id or ""):
             raise RuntimeError("Prepared shader history target drifted after approval.")
+        require_exact_shader_evidence(evidence.get("scopeFacts"), scope_facts, "selected material scope")
         tool_name, tool_arguments = prepared_call(arguments, 1)
         if tool_name != "vrc_apply_material_tuning":
             raise RuntimeError("Prepared shader Core call is invalid.")
         require_exact_shader_evidence(tool_arguments, state["coreArguments"], "Core arguments")
+        core_write_started = True
         result = apply_shader_material_tuning_direct(state["settings"], state["avatarPath"], tool_arguments["changes"])
         if result.get("ok") is False:
             raise RuntimeError(result.get("error") or "Shader material apply was rejected by Unity Core.")
+        require_shader_receipt_avatar(arguments, state["avatarPath"], result)
         applied = require_shader_apply_readback(result, tool_arguments["changes"])
         skipped = [*state["skippedChanges"], *list(result.get("skipped") or [])]
         backup_changes = build_shader_restore_changes(applied)
@@ -12639,6 +12772,7 @@ def apply_shader_material_plan_approved_sync(arguments: dict[str, Any]) -> dict[
             except Exception as exc:  # Core already committed; do not make retry appear safe.
                 committed_warning = f"Unity changes committed, but history metadata was not updated: {exc}"
         response = {
+            **shader_verified_receipt_fields(result),
             "ok": True,
             "avatarPath": state["avatarPath"],
             "result": result,
@@ -12652,6 +12786,19 @@ def apply_shader_material_plan_approved_sync(arguments: dict[str, Any]) -> dict[
         return response
     except (RuntimeError, UnityMcpError, ValueError) as exc:
         emit_log("error", "shader", "Failed to apply shader material tuning.", {"error": str(exc)})
+        if not core_write_started:
+            exc = AgentGatewayError(
+                str(exc),
+                cause_code="prepared_shader_prewrite_rejected",
+                failure_layer="external_mcp_write_execution",
+                failure_phase="before_unity_core_call",
+                operation_kind="write",
+                tool="vrcforge_apply_shader_tuning",
+                tool_routing_started=False,
+                mutation_started=False,
+                committed=False,
+                commit_state="not_started",
+            )
         raise to_http_exception(exc) from exc
 
 
@@ -12674,8 +12821,17 @@ def prepare_shader_material_restore_request(
             "undoDepth": len(stack),
             "undoSha256": shader_evidence_sha256(restore_changes),
         }
+    require_avatar_material_scope(arguments, avatar_path)
+    scan_arguments = shader_scope_scan_arguments(avatar_path, restore_changes)
+    scope_facts = None
+    if arguments.get("executionTarget") is not None:
+        inventory = scan_shader_materials_direct(load_dashboard_settings(request), avatar_path,
+            material_ids=scan_arguments["materialIds"], include_textures=False)
+        scope_facts = require_avatar_material_scope(arguments, avatar_path, inventory, restore_changes)
+    evidence["scopeFacts"] = scope_facts
     prepared = install_prepared_calls(
         arguments,
+        ([("vrc_scan_avatar_materials", scan_arguments)] if scope_facts is not None else []) +
         [("vrc_apply_material_tuning", {"avatarPath": avatar_path, "changes": restore_changes, "saveAssets": True})],
         evidence,
     )
@@ -12700,7 +12856,19 @@ def restore_shader_material_plan_approved_sync(arguments: dict[str, Any]) -> dic
                 raise RuntimeError("Prepared shader restore stack depth drifted after approval.")
             if evidence.get("undoSha256") != shader_evidence_sha256(restore_changes):
                 raise RuntimeError("Prepared shader restore stack drifted after approval.")
-            tool_name, tool_arguments = prepared_call(arguments)
+            require_avatar_material_scope(arguments, avatar_path)
+            scope_facts = None
+            if arguments.get("executionTarget") is not None:
+                scan_arguments = shader_scope_scan_arguments(avatar_path, restore_changes)
+                scan_tool, sealed_scan = prepared_call(arguments, 0)
+                if scan_tool != "vrc_scan_avatar_materials":
+                    raise RuntimeError("Prepared shader restore scope scan is invalid.")
+                require_exact_shader_evidence(sealed_scan, scan_arguments, "restore scope scan")
+                inventory = scan_shader_materials_direct(load_dashboard_settings(request), avatar_path,
+                    material_ids=scan_arguments["materialIds"], include_textures=False)
+                scope_facts = require_avatar_material_scope(arguments, avatar_path, inventory, restore_changes)
+            require_exact_shader_evidence(evidence.get("scopeFacts"), scope_facts, "restore selected material scope")
+            tool_name, tool_arguments = prepared_call(arguments, 1 if scope_facts is not None else 0)
             expected = {"avatarPath": avatar_path, "changes": restore_changes, "saveAssets": True}
             if tool_name != "vrc_apply_material_tuning":
                 raise RuntimeError("Prepared shader restore Core call is invalid.")
@@ -12709,12 +12877,13 @@ def restore_shader_material_plan_approved_sync(arguments: dict[str, Any]) -> dic
             result = apply_shader_material_tuning_direct(settings, avatar_path, restore_changes)
             if result.get("ok") is False:
                 raise RuntimeError(result.get("error") or "Shader material restore was rejected by Unity Core.")
+            require_shader_receipt_avatar(arguments, avatar_path, result)
             applied = require_shader_apply_readback(result, restore_changes)
             skipped = list(result.get("skipped") or [])
             # A failed Core call leaves the undo point intact.  Only success consumes it.
             stack.pop()
             undo_depth = len(stack)
-        return {"ok": True, "avatarPath": avatar_path, "result": result, "restoredChanges": applied, "skippedChanges": skipped, "undoDepth": undo_depth}
+        return {**shader_verified_receipt_fields(result), "ok": True, "avatarPath": avatar_path, "result": result, "restoredChanges": applied, "skippedChanges": skipped, "undoDepth": undo_depth}
     except (RuntimeError, UnityMcpError, ValueError) as exc:
         emit_log("error", "shader", "Failed to restore shader material tuning.", {"error": str(exc)})
         raise to_http_exception(exc) from exc
@@ -12761,17 +12930,50 @@ def require_shader_apply_readback(
         expected_identity = {
             "material_id": expected.get("material_id", expected.get("materialId")),
             "semantic_property": expected.get("semantic_property", expected.get("semanticProperty")),
-            "after": expected.get("after", expected.get("target", expected.get("value"))),
+            "after": shader_storage_value(expected.get("after", expected.get("target", expected.get("value")))),
         }
         actual_identity = {
             "material_id": actual.get("material_id", actual.get("materialId")),
             "semantic_property": actual.get("semantic_property", actual.get("semanticProperty")),
-            "after": actual.get("after", actual.get("target", actual.get("value"))),
+            "after": shader_storage_value(actual.get("after", actual.get("target", actual.get("value")))),
         }
         require_exact_shader_evidence(expected_identity, actual_identity, f"Core readback row {index}")
         if "before" in expected:
-            require_exact_shader_evidence(expected.get("before"), actual.get("before"), f"Core before-value row {index}")
+            require_exact_shader_evidence(
+                shader_storage_value(expected.get("before")),
+                shader_storage_value(actual.get("before")),
+                f"Core before-value row {index}",
+            )
+    required_flags = {"ok": True, "verified": True, "persistedReadback": True, "saved": True,
+                      "pending": False, "committed": True, "commitStateKnown": True}
+    if (result.get("schema") != "vrcforge.material_tuning_write.v1"
+            or result.get("commitState") != "committed"
+            or any(result.get(key) is not value for key, value in required_flags.items())
+            or result.get("appliedCount") != len(applied)
+            or result.get("skippedCount") != 0 or result.get("skipped") != []):
+        raise RuntimeError("Unity Core did not provide a complete persisted shader receipt; checkpoint recovery may be required.")
+    readback = result.get("readback")
+    if not isinstance(readback, list) or len(readback) != len(applied):
+        raise RuntimeError("Unity Core persisted shader readback is incomplete.")
+    for index, (actual, persisted) in enumerate(zip(applied, readback, strict=True)):
+        if (not isinstance(persisted, dict)
+                or not str(persisted.get("assetPath") or "").startswith("Assets/")
+                or re.fullmatch(r"[0-9a-fA-F]{32}", str(persisted.get("assetGuid") or "")) is None):
+            raise RuntimeError("Unity Core persisted material identity is invalid.")
+        require_exact_shader_evidence(
+            {key: shader_storage_value(actual.get(key)) if key in {"before", "after"} else actual.get(key)
+             for key in ("material_id", "semantic_property", "before", "after")},
+            {key: shader_storage_value(persisted.get(key)) if key in {"before", "after"} else persisted.get(key)
+             for key in ("material_id", "semantic_property", "before", "after")},
+            f"persisted shader row {index}",
+        )
     return applied
+
+
+def shader_verified_receipt_fields(result: dict[str, Any]) -> dict[str, Any]:
+    """Forward only after require_shader_apply_readback validated the complete receipt."""
+    return {key: result[key] for key in ("schema", "verified", "persistedReadback", "readback", "saved",
+                                       "committed", "commitState", "commitStateKnown")}
 
 
 def save_shader_tuning_history_record(
@@ -12892,6 +13094,7 @@ def _prepare_saved_shader_tuning_state(
     core_arguments = {"avatarPath": avatar_path, "changes": validated_changes, "saveAssets": True}
     return {
         "settings": settings,
+        "scopeInventory": inventory,
         "avatarPath": avatar_path,
         "coreArguments": core_arguments,
         "validatedChanges": validated_changes,
@@ -12913,6 +13116,7 @@ def _prepare_saved_shader_tuning_request(
     request = ShaderMaterialPlanRequest(**arguments)
     source_id, saved_payload = _saved_shader_source_from_arguments(arguments, source_type)
     state = _prepare_saved_shader_tuning_state(request, saved_payload, source_type)
+    scope_facts = require_avatar_material_scope(arguments, state["avatarPath"], state.get("scopeInventory"), state["validatedChanges"])
     linked_history_id = str(saved_payload.get("source_history_id") or "") if source_type == "preset" else source_id
     linked_history_digest = ""
     if linked_history_id:
@@ -12925,6 +13129,7 @@ def _prepare_saved_shader_tuning_request(
         "linkedHistoryId": linked_history_id,
         "linkedHistorySha256": linked_history_digest,
         "avatarPath": state["avatarPath"],
+        "scopeFacts": scope_facts,
         "effectiveLocks": state["effectiveLocks"],
         "coreArgumentsSha256": shader_evidence_sha256(state["coreArguments"]),
         "restoreSnapshot": state["restoreSnapshot"],
@@ -12979,6 +13184,7 @@ def _apply_saved_shader_tuning_approved_sync(arguments: dict[str, Any], source_t
             if shader_evidence_sha256(live_history) != evidence.get("linkedHistorySha256"):
                 raise RuntimeError("Prepared saved shader history record drifted after approval.")
         state = _prepare_saved_shader_tuning_state(request, saved_payload, source_type)
+        scope_facts = require_avatar_material_scope(arguments, state["avatarPath"], state.get("scopeInventory"), state["validatedChanges"])
         if state["avatarPath"] != evidence.get("avatarPath"):
             raise RuntimeError("Prepared saved shader avatar selection drifted after approval.")
         require_exact_shader_evidence(evidence.get("effectiveLocks"), state["effectiveLocks"], "saved replay locks")
@@ -12986,6 +13192,7 @@ def _apply_saved_shader_tuning_approved_sync(arguments: dict[str, Any], source_t
             raise RuntimeError("Prepared saved shader validated Core arguments drifted after approval.")
         if evidence.get("restoreSnapshot") != state["restoreSnapshot"]:
             raise RuntimeError("Prepared saved shader restore snapshot drifted after approval.")
+        require_exact_shader_evidence(evidence.get("scopeFacts"), scope_facts, "selected material scope")
         tool_name, tool_arguments = prepared_call(arguments)
         if tool_name != "vrc_apply_material_tuning":
             raise RuntimeError("Prepared saved shader Core call is invalid.")
@@ -12993,6 +13200,7 @@ def _apply_saved_shader_tuning_approved_sync(arguments: dict[str, Any], source_t
         result = apply_shader_material_tuning_direct(state["settings"], state["avatarPath"], tool_arguments["changes"])
         if result.get("ok") is False:
             raise RuntimeError(result.get("error") or "Saved shader replay was rejected by Unity Core.")
+        require_shader_receipt_avatar(arguments, state["avatarPath"], result)
         applied = require_shader_apply_readback(result, tool_arguments["changes"])
         restore_changes = build_shader_restore_changes(applied)
         if restore_changes:
@@ -13004,6 +13212,7 @@ def _apply_saved_shader_tuning_approved_sync(arguments: dict[str, Any], source_t
                 undo_depth = len(DASHBOARD_RUNTIME.shader_undo_stack.get(state["avatarPath"], []))
         metadata_warning = _mark_saved_shader_metadata(source_type, source_id, linked_history_id)
         response = {
+            **shader_verified_receipt_fields(result),
             "ok": True,
             "sourceType": source_type,
             "avatarPath": state["avatarPath"],
@@ -13207,6 +13416,7 @@ def validate_shader_material_tuning_plan(
     locked_materials: set[str] | None = None,
     locked_properties: set[str] | None = None,
 ) -> dict[str, Any]:
+    require_material_inventory(inventory)
     material_index = build_shader_material_index(inventory)
     ambiguous_material_ids = find_ambiguous_shader_material_ids(inventory)
     locked_materials = locked_materials or set()
@@ -13243,6 +13453,11 @@ def validate_shader_material_tuning_plan(
             shader_family = str(material.get("shader_family") or "")
             if shader_family not in {"lilToon", "Poiyomi", "Generic"}:
                 skip_reason = f"Unsupported shader family: {shader_family or 'Unknown'}"
+            elif semantic.startswith("dissolve_"):
+                if shader_family != "lilToon":
+                    skip_reason = "Dissolve tuning requires a supported lilToon material."
+                elif material.get("dissolve_readiness") in {"needs_preparation", "unsupported"}:
+                    skip_reason = str(material.get("dissolve_preparation") or "Prepare a supported dissolve material variant before tuning.")
 
         supported_properties = material.get("supported_properties") or {}
         if not skip_reason and semantic not in supported_properties:
@@ -13306,6 +13521,10 @@ def normalize_shader_material_value(semantic: str, value: Any) -> tuple[Any, str
         return None, f"Invalid numeric value for {semantic}: {value}"
 
     min_value, max_value = MATERIAL_NUMERIC_RANGES.get(semantic, (0.0, 1.0))
+    if semantic in {"dissolve_mode", "dissolve_shape"} and not number.is_integer():
+        return None, f"{semantic} must be an integer."
+    if semantic.startswith("dissolve_") and not min_value <= number <= max_value:
+        return None, f"{semantic} must be between {min_value} and {max_value}."
     return min(max(number, min_value), max_value), ""
 
 
@@ -13815,6 +14034,17 @@ def apply_parameter_optimization_sync(request: ParameterApplyOptimizationRequest
         )
 
         payload = apply_parameter_optimization_direct(settings, avatar_path, suggestions)
+        nested_result = payload.get("result")
+        if payload.get("ok") is False or (isinstance(nested_result, dict) and nested_result.get("ok") is False):
+            error = payload.get("error") or (nested_result.get("error") if isinstance(nested_result, dict) else None)
+            raise UnityMcpError(error or "Parameter optimization was rejected by Unity Core.")
+        applied_count = payload.get("appliedCount")
+        if not isinstance(applied_count, int) or isinstance(applied_count, bool) or applied_count < 0:
+            raise UnityMcpError("Parameter optimization response omitted a valid appliedCount.")
+        if applied_count != len(suggestions):
+            raise UnityMcpError(
+                f"Parameter optimization appliedCount mismatch: requested {len(suggestions)}, Core reported {applied_count}."
+            )
         emit_log("success", "parameter", "Parameter optimization applied in Unity.", {"avatarPath": avatar_path, "count": len(suggestions)})
         return {
             "ok": True,
@@ -13822,7 +14052,7 @@ def apply_parameter_optimization_sync(request: ParameterApplyOptimizationRequest
             "dryRun": False,
             "applyPayload": apply_payload,
             "diff": diff,
-            "appliedCount": len(suggestions),
+            "appliedCount": applied_count,
             "snapshotPath": snapshot_info["snapshotPath"],
             "snapshotUrl": snapshot_info["snapshotUrl"],
             "result": payload,
@@ -15347,7 +15577,7 @@ def load_internal_tool_block(params: dict[str, Any]) -> dict[str, Any]:
         reason = f"Unknown or branch-only internal tool block: {selector or 'missing'}"
         return {
             "ok": False,
-            "status": "blocked",
+            "status": "failed",
             "error": reason,
             "errorCode": "internal_tool_block_selector_invalid",
             "reason": reason,
@@ -15357,7 +15587,11 @@ def load_internal_tool_block(params: dict[str, Any]) -> dict[str, Any]:
             "mutationStarted": False,
             "committed": False,
             "commitState": "not_started",
-            "nextActions": ["List the tree and load one leaf index such as 2 or 8.3."],
+            "nextActions": [
+                "Call list_internal_tool_blocks and copy an exact leaf name from its children, "
+                "then call load_internal_tool_block with that name as block; "
+                "for example avatar_structure/hierarchy_components. Parent categories cannot be loaded."
+            ],
         }
     loaded = AGENT_GATEWAY.runtime_sessions.load_internal_tool_block(session_id, block)
     return {
@@ -15968,10 +16202,10 @@ def scan_shader_materials_direct(
     if output_path.exists():
         payload = json.loads(output_path.read_text(encoding="utf-8-sig"))
         payload.setdefault("jsonPath", str(output_path))
-        return ensure_dict_payload(payload, "shader material scan")
+        return require_material_inventory(payload)
 
     payload = extract_tool_result_payload(result)
-    payload = ensure_dict_payload(payload, "shader material scan")
+    payload = require_material_inventory(payload)
     write_dashboard_json_artifact(output_path, payload)
     return payload
 
@@ -16889,6 +17123,40 @@ def record_log_entry(entry: dict[str, Any]) -> None:
 
 def recent_log_snapshot() -> list[dict[str, Any]]:
     return DIAGNOSTIC_LOGGER.recent_snapshot()
+
+
+def read_recent_logs_tool(params: dict[str, Any] | None = None) -> dict[str, Any]:
+    values = params if isinstance(params, dict) else {}
+    raw_source = values.get("source", "memory")
+    if not isinstance(raw_source, str) or not raw_source.strip():
+        raise ValueError("Log source must be memory or disk.")
+    source = raw_source.strip().casefold()
+    limit = max(1, min(int(values.get("limit", 80)), 500))
+    if source == "memory":
+        if "file" in values or "offset" in values:
+            raise ValueError("The file and offset fields are valid only when source is disk.")
+        snapshot = recent_log_snapshot()
+        return {
+            "ok": True,
+            "source": "memory",
+            "logs": snapshot[-limit:],
+            "agentLogs": AGENT_GATEWAY.approval_transactions.recent_audit_logs(limit=limit),
+            "truncated": len(snapshot) > limit,
+        }
+    if source != "disk":
+        raise ValueError("Log source must be memory or disk.")
+    file_name = values.get("file")
+    if file_name is None:
+        if "offset" in values:
+            raise ValueError("The offset field requires an explicit disk filename.")
+        return {"ok": True, "source": "disk", "files": DIAGNOSTIC_LOGGER.history_file_names(), "truncated": False}
+    if not isinstance(file_name, str) or not file_name.strip():
+        raise ValueError("A log filename is required when source is disk.")
+    offset = values.get("offset")
+    if offset is not None and (type(offset) is not int or offset < 0):
+        raise ValueError("Log offset must be an integer greater than or equal to 0.")
+    result = DIAGNOSTIC_LOGGER.read_history(file_name, limit=limit, offset=offset)
+    return {"ok": True, **result}
 
 
 def prune_recent_logs() -> None:
@@ -18721,6 +18989,7 @@ def get_unitypackage_import_status_sync(params: dict[str, Any]) -> dict[str, Any
                 settings,
                 "vrc_import_unitypackage",
                 {"jobId": job_id},
+                execution_context={"lane": APP_UNITYPACKAGE_IMPORT_POLL_LANE},
             )
         ),
         "UnityPackage import status",
@@ -19172,7 +19441,7 @@ def _wait_for_checkpoint_reload_ready(
             current = load_unity_mcp_core_connection(project_root)
             same_process = previous_connection is None or (
                 current.process_id == previous_connection.process_id
-                and current.project_hash == previous_connection.project_hash
+                and current.project_id == previous_connection.project_id
             )
             domain_reload_observed = bool(
                 previous_connection is not None
@@ -19429,6 +19698,10 @@ def unity_mcp_write_sync(params: dict[str, Any]) -> dict[str, Any]:
         arguments = {}
     strict_result = authoritative_unity_write_has_strict_result(params)
     settings = load_dashboard_settings(build_agent_connection_request(params))
+    if tool_name == "vrc_set_material_shader" and "propertyChanges" in arguments:
+        # Scalar writes inspect shared impact before mutation and after persisted readback.
+        settings = copy.copy(settings)
+        settings.unity_mcp_timeout_seconds = max(int(settings.unity_mcp_timeout_seconds or 30), 120)
     result = invoke_unity_mcp(
         settings,
         tool_name,
@@ -19449,7 +19722,10 @@ def unity_mcp_write_sync(params: dict[str, Any]) -> dict[str, Any]:
                 or "The authoritative Unity write failed."
             ).strip()
             commit_state = str(payload.get("commitState") or "unknown").strip()
-            if commit_state not in {"not_started", "not_committed", "committed", "unknown"}:
+            rollback_claimed = commit_state == "rolled_back"
+            from agent_approval_transactions import _confirmed_atomic_rollback_failure
+            rollback_proven = _confirmed_atomic_rollback_failure(payload)
+            if commit_state not in {"not_started", "not_committed", "committed", "unknown"} and not rollback_proven:
                 commit_state = "unknown"
             failure: dict[str, Any] = {
                 "ok": False,
@@ -19495,6 +19771,16 @@ def unity_mcp_write_sync(params: dict[str, Any]) -> dict[str, Any]:
                     },
                 }
             )
+            # Retain the exact structured Core evidence, not raw transport output.
+            if rollback_claimed or any(key in payload for key in ("restored", "commitStateKnown", "attemptedPaths")):
+                failure["coreFailureEvidence"] = copy.deepcopy(payload)
+                for key in ("restored", "commitStateKnown", "saved", "verified", "attemptedPaths", "failureContext", "failureDetails"):
+                    if key in payload:
+                        failure[key] = copy.deepcopy(payload[key])
+            if rollback_claimed and not rollback_proven:
+                failure["commitStateKnown"] = False
+                failure["checkpointRecoveryRequired"] = True
+                failure["requestMayHaveCommitted"] = True
             return failure
         return {
             "ok": False,
@@ -19519,6 +19805,7 @@ def unity_mcp_write_sync(params: dict[str, Any]) -> dict[str, Any]:
             return {"ok": False, "toolName": tool_name, "error": str(exc)}
         if strict_result:
             return {
+                **validated_unity_write_receipt_fields(validated_payload),
                 "ok": True,
                 "toolName": tool_name,
                 "result": {
@@ -19722,6 +20009,15 @@ def prepare_material_shader_assignment_request(
         build_material_shader_wrapper_arguments(params or {}),
         caller_preview,
     )
+
+
+def preview_material_variant_flatten_sync(params: dict[str, Any]) -> dict[str, Any]:
+    _arguments, preview = prepare_unity_mcp_write_request(build_material_variant_flatten_wrapper_arguments(params or {}), None)
+    return {"ok": True, "preview": preview}
+
+
+def prepare_material_variant_flatten_request(params: dict[str, Any], caller_preview: Any) -> tuple[dict[str, Any], Any]:
+    return prepare_unity_mcp_write_request(build_material_variant_flatten_wrapper_arguments(params or {}), caller_preview)
 
 
 def preview_material_texture_assignment_sync(params: dict[str, Any]) -> dict[str, Any]:
@@ -20169,6 +20465,7 @@ def run_unity_artifact_scan_sync(
     prefix: str,
     unity_params: dict[str, Any],
     label: str,
+    payload_transform: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     settings = load_dashboard_settings(build_agent_connection_request(params))
     avatar_path = str(
@@ -20191,10 +20488,37 @@ def run_unity_artifact_scan_sync(
     else:
         payload = extract_tool_result_payload(result)
     payload = ensure_dict_payload(payload, label)
+    if payload_transform is not None:
+        payload = payload_transform(payload)
     if not output_path.exists():
         write_dashboard_json_artifact(output_path, payload)
     payload.setdefault("ok", True)
     return payload
+
+
+def _sanitize_animation_binding_continuations(payload: dict[str, Any]) -> dict[str, Any]:
+    """Keep Core-generated paging requests inside the public read schema."""
+    continuation_keys = {"nextRequest", "nextKeyRequest"}
+
+    def visit(value: Any) -> Any:
+        if isinstance(value, list):
+            for index, item in enumerate(value):
+                value[index] = visit(item)
+            return value
+        if not isinstance(value, dict):
+            return value
+        for key, child in list(value.items()):
+            if key in continuation_keys and isinstance(child, dict):
+                value[key] = {
+                    child_key: visit(child_value)
+                    for child_key, child_value in child.items()
+                    if child_key not in {"outputPath", "refreshAssets"}
+                }
+            else:
+                value[key] = visit(child)
+        return value
+
+    return visit(payload)
 
 
 def scan_fx_animator_sync(params: dict[str, Any]) -> dict[str, Any]:
@@ -20213,6 +20537,35 @@ def scan_fx_animator_sync(params: dict[str, Any]) -> dict[str, Any]:
 
 def scan_animation_bindings_sync(params: dict[str, Any]) -> dict[str, Any]:
     params = params or {}
+    selection_fields = (
+        "bindingView", "bindingSelectors", "bindingOffset", "bindingLimit",
+        "clipOffset", "keyOffset", "maxTotalKeys", "expectedSnapshotDigest",
+    )
+    selection = {
+        name: params[name] for name in selection_fields if name in params
+    }
+    if selection:
+        validation = validate_planner_tool_arguments(
+            UNITY_READ_TOOL_INPUT_SCHEMAS["vrcforge_scan_animation_bindings"],
+            selection,
+        )
+        if validation.get("ok") is not True:
+            return {
+                "ok": False,
+                **build_external_tool_error(
+                    error=str(validation.get("summary") or "Animation binding selection is invalid."),
+                    error_code="animation_binding_selection_invalid",
+                    failure_layer="external_tool_arguments",
+                    failure_phase="tool_input_validation",
+                    operation_kind="read",
+                    tool="vrcforge_scan_animation_bindings",
+                    tool_routing_started=False,
+                    mutation_started=False,
+                    committed=False,
+                    commit_state="not_started",
+                    details={"issues": validation.get("issues", [])},
+                ),
+            }
     clip_paths = params.get("clip_paths") or params.get("clipPaths") or []
     # External MCP callers receive bounded per-clip summaries by default. Full
     # binding arrays remain available for an explicit, narrow clipPaths request.
@@ -20230,9 +20583,15 @@ def scan_animation_bindings_sync(params: dict[str, Any]) -> dict[str, Any]:
             "includeAllProjectClips": bool(params.get("include_all_project_clips") or params.get("includeAllProjectClips") or False),
             "maxClips": int(params.get("max_clips") or params.get("maxClips") or 300),
             "includeBindingDetails": include_binding_details,
+            "maxKeysPerBinding": int(params.get("max_keys_per_binding", params.get("maxKeysPerBinding", 256))),
             "refreshAssets": False,
+            **{name: params[name] for name in (
+                "bindingView", "bindingSelectors", "bindingOffset", "bindingLimit", "clipOffset",
+                "keyOffset", "maxTotalKeys", "expectedSnapshotDigest",
+            ) if name in params},
         },
         "animation binding scan",
+        payload_transform=_sanitize_animation_binding_continuations,
     )
 
 
@@ -20548,6 +20907,7 @@ def _avatar_primitive_request(params: dict[str, Any], preview: bool | None = Non
     request: dict[str, Any] = {}
     for key in (
         "action",
+        "edits",
         "avatarPath",
         "clipPath",
         "bindingPath",
@@ -20561,6 +20921,7 @@ def _avatar_primitive_request(params: dict[str, Any], preview: bool | None = Non
         "overwriteExisting",
         "constantFloat",
         "keys",
+        "curves", "clips",
         "parameterName",
         "newName",
         "orderNames",
@@ -20584,6 +20945,7 @@ def _avatar_primitive_request(params: dict[str, Any], preview: bool | None = Non
         "layerName",
         "stateName",
         "destinationStateName",
+        "sourceStateName",
         "transitionIndex",
         "hasExitTime",
         "exitTime",
@@ -20641,6 +21003,7 @@ def _avatar_primitive_request(params: dict[str, Any], preview: bool | None = Non
         "layerName": ("layer_name",),
         "stateName": ("state_name",),
         "destinationStateName": ("destination_state_name",),
+        "sourceStateName": ("source_state_name",),
         "transitionIndex": ("transition_index",),
         "hasExitTime": ("has_exit_time",),
         "exitTime": ("exit_time",),
@@ -20701,13 +21064,15 @@ def write_avatar_descriptor_sync(params: dict[str, Any], preview: bool = False) 
 
 
 def write_animation_curve_sync(params: dict[str, Any], preview: bool = False) -> dict[str, Any]:
-    params = params or {}
+    from animation_curve_input import expand_animation_curve_sets
+
+    params = expand_animation_curve_sets(params or {})
     request = _avatar_primitive_request(params, preview=preview)
-    if not request.get("clipPath"):
+    if "clips" not in request and not request.get("clipPath"):
         return {"ok": False, "error": "clipPath is required."}
-    if not request.get("propertyName"):
+    if "clips" not in request and "curves" not in request and not request.get("propertyName"):
         return {"ok": False, "error": "propertyName is required."}
-    if request.get("action") in {"retarget_curve", "retarget", "move_binding", "copy_curve"} and not request.get("sourcePropertyName"):
+    if "clips" not in request and "curves" not in request and request.get("action") in {"retarget_curve", "retarget", "move_binding", "copy_curve"} and not request.get("sourcePropertyName"):
         return {"ok": False, "error": "sourcePropertyName is required for retarget_curve."}
     settings = load_dashboard_settings(build_agent_connection_request(params))
     payload = ensure_dict_payload(
@@ -20770,7 +21135,7 @@ def manage_expression_menu_sync(params: dict[str, Any], preview: bool = False) -
 def manage_fx_animator_sync(params: dict[str, Any], preview: bool = False) -> dict[str, Any]:
     params = params or {}
     request = _avatar_primitive_request(params, preview=preview)
-    if not request.get("action"):
+    if "edits" not in request and not request.get("action"):
         return {"ok": False, "error": "action is required."}
     settings = load_dashboard_settings(build_agent_connection_request(params))
     payload = ensure_dict_payload(
@@ -20805,6 +21170,7 @@ def create_safe_backup_sync(params: dict[str, Any]) -> dict[str, Any]:
         extract_tool_result_payload(invoke_unity_mcp(settings, "vrc_create_safe_backup", request)),
         "safe backup",
     )
+    _project_safe_backup_verification(payload)
     payload.setdefault("ok", True)
     emit_log("info", "backup", "Safe backup snapshot created.", {"backupPath": payload.get("backup_path")})
     return payload
@@ -20879,6 +21245,7 @@ def restore_safe_backup_sync(params: dict[str, Any]) -> dict[str, Any]:
         ),
         "safe backup restore",
     )
+    _project_safe_backup_restore_verification(payload)
     payload.setdefault("ok", True)
     emit_log("info", "backup", "Safe backup restore executed.", {"backupId": params.get("backupId") or params.get("backup_id")})
     return payload
@@ -22201,6 +22568,14 @@ def build_component_target(params: dict[str, Any]) -> tuple[str, str]:
 
 def read_component_property_sync(params: dict[str, Any]) -> dict[str, Any]:
     params = params or {}
+    if "queries" in params:
+        from component_property_batch import prepare_component_property_batch
+        request = prepare_component_property_batch(params)
+        settings = load_dashboard_settings(build_agent_connection_request(params))
+        return ensure_dict_payload(
+            extract_tool_result_payload(invoke_unity_mcp(settings, "vrc_get_property", request)),
+            "get component property batch",
+        )
     go_path, comp_type = build_component_target(params)
     if not go_path:
         return {"ok": False, "error": "gameObjectPath is required."}
@@ -22236,6 +22611,9 @@ def list_execution_targets_sync(params: dict[str, Any]) -> dict[str, Any]:
     project_path = str(raw.get("projectPath") or "").strip()
     if not project_path:
         raise RuntimeError("projectPath is required to enumerate ExecutionTargets.")
+    scope = str(raw.get("scope") or "avatar").strip().casefold()
+    if scope not in {"project", "scene", "avatar", "object", "component"}:
+        raise RuntimeError("scope must be project, scene, avatar, object, or component.")
     request = {
         key: raw[key]
         for key in (
@@ -22248,6 +22626,16 @@ def list_execution_targets_sync(params: dict[str, Any]) -> dict[str, Any]:
         if key in raw and raw[key] not in (None, "")
     }
     request.setdefault("scope", "avatar")
+    if "offset" in raw:
+        offset = raw["offset"]
+        if type(offset) is not int or offset < 0:
+            raise RuntimeError("offset must be an integer greater than or equal to 0.")
+        request["offset"] = offset
+    if "maxItems" in raw:
+        max_items = raw["maxItems"]
+        if type(max_items) is not int or not 1 <= max_items <= 128:
+            raise RuntimeError("maxItems must be an integer between 1 and 128.")
+        request["maxItems"] = max_items
     settings = load_dashboard_settings(build_agent_connection_request(raw))
     payload = ensure_dict_payload(
         extract_tool_result_payload(invoke_unity_mcp(settings, "vrc_get_execution_targets", request)),
@@ -22415,6 +22803,105 @@ def gesture_manager_status_sync(params: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, **status}
 
 
+def prepare_runtime_observation_request(arguments, _preview):
+    from runtime_observation import prepare_request
+    request = prepare_request(arguments, DASHBOARD_ARTIFACTS_DIR / "latest")
+    prepared = {**arguments, **request}
+    return prepared, {"ok": True, "request": request, "persistent": False}
+
+
+def runtime_observation_start_sync(arguments):
+    from runtime_observation import PUBLIC_KEYS, OPTIONAL_KEYS, validate_start_result
+    request = {key: arguments[key] for key in (*PUBLIC_KEYS, *OPTIONAL_KEYS, "jobId", "outputDirectory") if key in arguments}
+    settings = load_dashboard_settings(build_agent_connection_request(arguments))
+    result = ensure_dict_payload(extract_tool_result_payload(invoke_unity_mcp(settings, "vrc_start_runtime_observation", request, preserve_tool_error=True)), "runtime observation")
+    result = validate_start_result(result, request)
+    if str(result.get("status") or "").casefold() == "pending":
+        # The Core start call has verified the initial parameter readback and
+        # registered the job; sampling completion belongs to the read-only
+        # status path and must not be folded into this write transaction.
+        result.update({"ok": True, "verified": False, "mutationStarted": True,
+                       "commitState": "pending", "readbackState": "pending",
+                       "retryable": False})
+    return result
+
+
+def runtime_observation_status_sync(arguments):
+    from runtime_observation import state_detail, state_selection
+    from runtime_state_resources import project_receipt
+    detail = state_detail(arguments)
+    selection = state_selection(arguments)
+    result = runtime_observation_status_raw(arguments)
+    # Preserve a terminal Core read error before projection.  A selector cannot
+    # be applied when the Editor no longer has the observation job's frames;
+    # otherwise it masks the actionable Core error with state_selection_no_frames.
+    # Partial/failed receipts that still contain frame evidence continue through
+    # the existing projection path.
+    frames = result.get("frames")
+    if result.get("ok") is False and (not isinstance(frames, list) or not frames):
+        return result
+    return project_receipt(AGENT_GATEWAY._mcp_resources, result, arguments.get("executionTarget"), state_detail=detail, state_selection=selection)
+
+
+def runtime_observation_status_raw(arguments):
+    settings = load_dashboard_settings(build_agent_connection_request(arguments))
+    with bound_editor_readback(arguments):
+        result = ensure_dict_payload(extract_tool_result_payload(invoke_unity_mcp(settings, "vrc_get_runtime_observation", {"jobId": arguments["jobId"], "avatarPath": arguments["avatarPath"]}, preserve_tool_error=True)), "runtime observation status")
+    if result.get("status") == "completed":
+        from runtime_observation import validate_result
+        result = validate_result(result, {"jobId": arguments["jobId"], "avatarPath": arguments["avatarPath"],
+            "frameCount": result.get("requestedFrameCount"), "width": result.get("width"), "height": result.get("height"),
+            "outputDirectory": str(DASHBOARD_ARTIFACTS_DIR / "latest" / "runtime-observations" / arguments["jobId"]),
+            "parameterSteps": result.get("parameterSteps", []), "rendererProbes": result.get("rendererProbes", [])})
+    if result.get("ok") is True and result.get("verified") is True and result.get("status") == "completed":
+        from runtime_frame_resources import publish_verified_frames
+        result["frames"] = publish_verified_frames(AGENT_GATEWAY._mcp_resources, result,
+            DASHBOARD_ARTIFACTS_DIR / "latest" / "runtime-observations", arguments.get("executionTarget"))
+    elif str(result.get("status") or "").casefold() in {"partial", "failed"}:
+        # A terminal Core failure/partial receipt is evidence of an incomplete
+        # observation, never a successful read-only status response.
+        result["ok"] = False
+        result["verified"] = False
+        result.setdefault("mutationStarted", True)
+        result.setdefault("commitState", "partial" if result.get("status") == "partial" else "failed")
+        result.setdefault("readbackState", "failed")
+    for frame in result.get("frames", []):
+        if isinstance(frame, dict) and frame.get("imagePath"):
+            frame["imageUrl"] = to_artifact_url(frame["imagePath"])
+    result.setdefault("ok", True)
+    return result
+
+
+def runtime_observation_finalize(arguments, _baseline, result):
+    from runtime_observation import validate_result
+    if result.get("ok") is False:
+        return result
+    deadline = time.monotonic() + float(arguments["durationSeconds"]) + 10
+    while time.monotonic() <= deadline:
+        status = runtime_observation_status_raw(arguments)
+        if status.get("status") != "pending":
+            completed = validate_result(status, arguments)
+            from runtime_observation import state_detail, state_selection
+            from runtime_state_resources import project_receipt
+            detail = state_detail(arguments)
+            selection = state_selection(arguments)
+            # Validate the complete raw receipt before exposing either projection.
+            projected = project_receipt(AGENT_GATEWAY._mcp_resources, completed, arguments.get("executionTarget"), state_detail=detail, state_selection=selection)
+            initial = project_receipt(AGENT_GATEWAY._mcp_resources, result, arguments.get("executionTarget"), state_detail=detail, state_selection=selection)
+            result.clear()
+            result.update(initial)
+            result["completionVerification"] = projected
+            return projected
+        time.sleep(.1)
+    from runtime_observation import state_detail, state_selection
+    from runtime_state_resources import project_receipt
+    initial = project_receipt(AGENT_GATEWAY._mcp_resources, result, arguments.get("executionTarget"), state_detail=state_detail(arguments), state_selection=state_selection(arguments))
+    result.clear()
+    result.update(initial)
+    return {"ok": False, "schema": "vrcforge.runtime_observation.v1", "jobId": arguments["jobId"], "status": "pending", "verified": False,
+            "mutationStarted": True, "commitState": "unknown", "error": "Observation is not terminal; query the existing job with the same identity, do not repeat start.", "retryable": False}
+
+
 def gesture_manager_set_parameter_sync(params: dict[str, Any]) -> dict[str, Any]:
     params = params or {}
     parameter_name = str(params.get("parameter_name") or params.get("parameterName") or "").strip()
@@ -22455,6 +22942,9 @@ def gesture_manager_set_parameter_sync(params: dict[str, Any]) -> dict[str, Any]
     )
     payload.setdefault("ok", True)
     return payload
+
+
+from editor_state_completion import bound_editor_readback, verified_editor_receipt
 
 
 GESTURE_MANAGER_ENTER_PLAY_MODE_TIMEOUT_SECONDS = 45.0
@@ -22503,13 +22993,10 @@ def gesture_manager_enter_play_mode_finalize(
     last_exception: UnityMcpError | None = None
     while time.monotonic() <= deadline:
         try:
-            status = gesture_manager_status_sync(
-                {
-                    "projectPath": arguments.get("projectPath"),
-                    "avatarPath": avatar_path,
-                    "includeParameters": False,
-                }
-            )
+            with bound_editor_readback(arguments) as identity_verification:
+                status = gesture_manager_status_sync(
+                    {**arguments, "avatarPath": avatar_path, "includeParameters": False}
+                )
             last_status = dict(status) if isinstance(status, dict) else {}
             last_exception = None
         except UnityMcpError as exc:
@@ -22518,7 +23005,7 @@ def gesture_manager_enter_play_mode_finalize(
         else:
             entry_error_code = str(last_status.get("enterPlayModeErrorCode") or "").strip()
             if entry_error_code:
-                return build_external_tool_error(
+                return dict(ok=False, **build_external_tool_error(
                     error=str(last_status.get("enterPlayModeError") or "Gesture Manager module connection failed."),
                     error_code=entry_error_code,
                     failure_layer="unity_core_gesture_manager",
@@ -22533,7 +23020,7 @@ def gesture_manager_enter_play_mode_finalize(
                     checkpoint_recovery_required=False,
                     temporary_cleanup_required=False,
                     raw_result=last_status,
-                )
+                ))
 
             managers = last_status.get("managers")
             managers = managers if isinstance(managers, list) else []
@@ -22546,9 +23033,9 @@ def gesture_manager_enter_play_mode_finalize(
                     or str(item.get("avatarPath") or "").strip().strip("/") == avatar_path
                 )
             ]
-            if last_status.get("isPlayMode") is True and len(connected) == 1:
+            if last_status.get("ok") is not False and last_status.get("isPlayMode") is True and len(connected) == 1:
                 manager = connected[0]
-                return {
+                return verified_editor_receipt({
                     "ok": True,
                     "isPlayMode": True,
                     "packageDetected": bool(last_status.get("packageDetected")),
@@ -22558,16 +23045,11 @@ def gesture_manager_enter_play_mode_finalize(
                     "avatarPath": str(manager.get("avatarPath") or ""),
                     "moduleConnected": True,
                     "moduleType": str(manager.get("moduleType") or ""),
-                    "persistent": False,
-                    "sceneDirty": False,
-                    "mutationStarted": True,
-                    "committed": True,
-                    "commitState": "runtime_connected",
-                }
+                }, initial, identity_verification)
 
         time.sleep(GESTURE_MANAGER_ENTER_PLAY_MODE_POLL_SECONDS)
 
-    return build_external_tool_error(
+    return dict(ok=False, **build_external_tool_error(
         error="Gesture Manager did not report one connected target avatar before the bounded wait expired.",
         error_code="gesture_manager_connection_readback_timeout",
         failure_layer="unity_core_gesture_manager",
@@ -22576,14 +23058,43 @@ def gesture_manager_enter_play_mode_finalize(
         tool="vrcforge_gesture_manager_enter_play_mode",
         tool_routing_started=True,
         mutation_started=True,
-        committed=False,
-        commit_state="partial",
-        retryable=True,
+        committed=None,
+        commit_state="unknown",
+        retryable=False,
         checkpoint_recovery_required=False,
         temporary_cleanup_required=False,
         raw_result=last_status or None,
         exception=last_exception,
-    )
+    ))
+
+
+def set_play_mode_finalize(arguments: dict[str, Any], _baseline: dict[str, Any], result: Any) -> dict[str, Any]:
+    initial = dict(result) if isinstance(result, dict) else {"ok": False, "error": str(result)}
+    if initial.get("ok") is False:
+        return initial
+    requested = arguments.get("isPlaying", arguments.get("is_playing"))
+    if not isinstance(requested, bool):
+        raise ValueError("isPlaying must be boolean for independent readback.")
+    deadline = time.monotonic() + GESTURE_MANAGER_ENTER_PLAY_MODE_TIMEOUT_SECONDS
+    last_status = {}
+    while time.monotonic() <= deadline:
+        try:
+            with bound_editor_readback(arguments) as identity_verification:
+                settings = load_dashboard_settings(build_agent_connection_request(arguments))
+                last_status = capture_scene_view_status_direct(settings, require_play_mode=False)
+        except UnityMcpError:
+            last_status = {}
+        if last_status.get("ok") is not False and last_status.get("isPlayMode") is requested:
+            return verified_editor_receipt({"isPlayMode": last_status["isPlayMode"], "requested": requested}, initial, identity_verification)
+        time.sleep(GESTURE_MANAGER_ENTER_PLAY_MODE_POLL_SECONDS)
+    return dict(ok=False, **build_external_tool_error(
+        error="The requested Editor state was not independently observed before the bounded wait expired.",
+        error_code="editor_state_readback_timeout", failure_layer="unity_editor_state",
+        failure_phase="state_readback", operation_kind="write", tool="vrcforge_set_play_mode",
+        tool_routing_started=True, mutation_started=True, committed=None, commit_state="unknown",
+        retryable=False, checkpoint_recovery_required=False, temporary_cleanup_required=False,
+        raw_result=last_status,
+    ))
 
 
 def select_scene_object_sync(params: dict[str, Any]) -> dict[str, Any]:
@@ -22617,6 +23128,11 @@ def select_scene_object_sync(params: dict[str, Any]) -> dict[str, Any]:
     )
     payload.setdefault("ok", True)
     return payload
+
+
+def _play_mode_checkpoint_required(arguments: Mapping[str, Any]) -> bool:
+    value = arguments.get("isPlaying") if "isPlaying" in arguments else arguments.get("is_playing")
+    return value if isinstance(value, bool) else True
 
 
 def set_play_mode_sync(params: dict[str, Any]) -> dict[str, Any]:
@@ -23148,13 +23664,178 @@ def get_asset_info_sync(params: dict[str, Any]) -> dict[str, Any]:
     if not asset_path and not guid:
         return {"ok": False, "error": "assetPath or guid is required."}
     request = {"assetPath": asset_path, "guid": guid}
+    for key in ("includeObjects", "objectOffset", "objectLimit", "includeRendererMaterials", "rendererOffset", "rendererLimit", "localFileId", "importedTextSearch"):
+        if key in params:
+            request[key] = params[key]
     settings = load_dashboard_settings(build_agent_connection_request(params))
     payload = ensure_dict_payload(
         extract_tool_result_payload(invoke_unity_mcp(settings, "vrc_get_asset_info", request)),
         "get asset info",
     )
     payload.setdefault("ok", True)
+    # Preserve the Core's exact failed/not-found evidence. Derived reads such
+    # as includeText require a successful Core identity (GUID) and must never
+    # replace that primary failure with their own validation error.
+    result_summary = payload.get("resultSummary")
+    result_summary_status = (
+        result_summary.get("status")
+        if isinstance(result_summary, Mapping)
+        else result_summary
+    )
+    if (
+        payload.get("ok") is False
+        or str(payload.get("status") or "").casefold() in {"failed", "error"}
+        or str(result_summary_status or "").casefold() in {"failed", "error"}
+    ):
+        return payload
+    if params.get("includeText") is True or params.get("textSearch") is not None:
+        from asset_text_resources import publish_asset_text
+        payload["text"] = publish_asset_text(AGENT_GATEWAY._mcp_resources, params, payload)
+    elif params.get("includeMetaText") is True:
+        from asset_text_resources import publish_asset_meta
+        payload["metaText"] = publish_asset_meta(AGENT_GATEWAY._mcp_resources, params, payload)
+    if params.get("includePreview") is True:
+        from texture_preview_resources import publish_texture_preview
+        payload["preview"] = publish_texture_preview(AGENT_GATEWAY._mcp_resources, params, payload)
     return payload
+
+
+def _project_safe_backup_verification(payload: dict[str, Any]) -> None:
+    """Expose Core's copied-file hash readback as the standard write receipt.
+
+    ConsoleTools computes the source and backup hashes after every copy.  The
+    external approval lane consumes the common ``verified``/``readback``
+    receipt fields, so preserve the domain payload while projecting those
+    already-observed facts.  A receipt is only projected when every returned
+    file has a successful, matching readback.
+    """
+    if str(payload.get("type") or "").strip() != "vrcforge_safe_backup":
+        return
+    files = payload.get("files")
+    if not isinstance(files, list) or not files:
+        return
+    verified_files: list[dict[str, Any]] = []
+    for item in files:
+        if not isinstance(item, dict):
+            return
+        source_sha = str(item.get("sha256") or "").strip().casefold()
+        after_sha = str(item.get("after_sha256") or "").strip().casefold()
+        if (
+            str(item.get("status") or "").strip().casefold() != "succeeded"
+            or item.get("after_exists") is not True
+            or not source_sha
+            or source_sha != after_sha
+        ):
+            return
+        verified_files.append(
+            {
+                "projectRelativePath": str(item.get("project_relative_path") or "")[:512],
+                "backupRelativePath": str(item.get("backup_relative_path") or "")[:512],
+                "sha256": source_sha,
+                "byteCount": item.get("byte_count"),
+            }
+        )
+    payload.update(
+        {
+            "schema": "vrcforge.safe_backup_receipt.v1",
+            "verified": True,
+            "readback": {
+                "backupPath": str(payload.get("backup_path") or "")[:1024],
+                "files": verified_files,
+                "fileCount": len(verified_files),
+            },
+            "verification": {
+                "state": "passed",
+                "checks": [
+                    {
+                        "kind": "safe_backup_file_hash_readback",
+                        "state": "passed",
+                        "fileCount": len(verified_files),
+                    }
+                ],
+            },
+            "mutationStarted": True,
+            "mutationApplied": True,
+            "commitState": "committed",
+        }
+    )
+
+
+def _project_safe_backup_restore_verification(payload: dict[str, Any]) -> None:
+    """Project Core restore file readbacks as an explicit verified receipt."""
+    if str(payload.get("type") or "").strip() != "vrcforge_safe_backup_restore":
+        return
+    if payload.get("confirmed") is not True or payload.get("ok") is not True:
+        return
+    planned = payload.get("planned")
+    restored = payload.get("restored")
+    skipped = payload.get("skipped")
+    warnings = payload.get("warnings")
+    if (
+        not isinstance(planned, list)
+        or not planned
+        or not isinstance(restored, list)
+        or len(planned) != len(restored)
+        or not isinstance(skipped, list)
+        or skipped
+        or not isinstance(warnings, list)
+        or warnings
+        or str(payload.get("error") or "").strip()
+    ):
+        return
+
+    def readback_rows(items: list[Any]) -> list[dict[str, Any]] | None:
+        rows: list[dict[str, Any]] = []
+        for item in items:
+            if not isinstance(item, dict):
+                return None
+            backup_sha = str(item.get("backup_sha256") or "").strip().casefold()
+            after_sha = str(item.get("after_sha256") or "").strip().casefold()
+            if (
+                str(item.get("status") or "").strip().casefold() != "succeeded"
+                or str(item.get("error") or "").strip()
+                or item.get("after_exists") is not True
+                or not backup_sha
+                or backup_sha != after_sha
+            ):
+                return None
+            rows.append(
+                {
+                    "projectRelativePath": str(item.get("project_relative_path") or "")[:512],
+                    "backupRelativePath": str(item.get("backup_relative_path") or "")[:512],
+                    "sha256": after_sha,
+                }
+            )
+        return rows
+
+    planned_rows = readback_rows(planned)
+    restored_rows = readback_rows(restored)
+    if planned_rows is None or restored_rows is None or planned_rows != restored_rows:
+        return
+    payload.update(
+        {
+            "schema": "vrcforge.safe_backup_restore_receipt.v1",
+            "verified": True,
+            "readback": {
+                "backupPath": str(payload.get("backup_path") or "")[:1024],
+                "files": restored_rows,
+                "fileCount": len(restored_rows),
+            },
+            "verification": {
+                "state": "passed",
+                "checks": [
+                    {
+                        "kind": "safe_backup_restore_file_hash_readback",
+                        "state": "passed",
+                        "fileCount": len(restored_rows),
+                    }
+                ],
+            },
+            "mutationStarted": True,
+            "mutationApplied": True,
+            "commitState": "committed",
+        }
+    )
 
 
 def instantiate_prefab_sync(params: dict[str, Any]) -> dict[str, Any]:
@@ -23180,12 +23861,31 @@ def instantiate_prefab_sync(params: dict[str, Any]) -> dict[str, Any]:
         "worldPositionStays": world_position_stays,
         "preview": preview,
     }
+    for key in (
+        "expectedPrefabGuid",
+        "expectedAssetDependencyHash",
+        "expectedScenePath",
+        "expectedParentGlobalObjectId",
+        "expectedResultPath",
+        "approvedObjectReceiptNonce",
+        "approvedContinuationTools",
+    ):
+        if key in params:
+            request[key] = params[key]
     settings = load_dashboard_settings(build_agent_connection_request(params))
     payload = ensure_dict_payload(
         extract_tool_result_payload(invoke_unity_mcp(settings, "vrc_instantiate_prefab", request)),
         "instantiate prefab",
     )
     payload.setdefault("ok", True)
+    if preview:
+        payload.setdefault("status", "preview")
+        payload.setdefault("mutationStarted", False)
+        payload.setdefault("mutationApplied", False)
+        payload.setdefault("committed", False)
+        payload.setdefault("commitState", "not_started")
+        payload.setdefault("persistenceState", "not_applicable")
+        payload.setdefault("readbackState", "not_required")
     if not preview:
         emit_log("info", "prefab", "Prefab instantiated.", {"assetPath": asset_path or guid, "parentPath": parent_path})
     return payload
@@ -23217,6 +23917,7 @@ def unpack_prefab_sync(params: dict[str, Any]) -> dict[str, Any]:
 
 OUTFIT_IMPORT_ALLOWED_SUFFIXES = {
     ".prefab",
+    ".asmdef",
     ".mat",
     ".png",
     ".jpg",
@@ -23408,12 +24109,16 @@ def build_refresh_asset_database_execution_plan(
                     request.get("resolvePackages") or request.get("resolve_packages")
                 ),
                 "packageResolveTimeoutSeconds": package_resolve_timeout,
+                **({"reimportAssets": request["reimportAssets"]} if "reimportAssets" in request else {}),
             },
         )
     ]
 
 
 UNITY_ASYNC_JOB_POLL_SECONDS = 0.25
+ASYNC_JOB_POLL_RETRYABLE_CORE_CODES = frozenset(
+    {"unity_core_starting", "unity_core_unavailable"}
+)
 
 
 def poll_unity_async_job_sync(
@@ -23443,17 +24148,26 @@ def poll_unity_async_job_sync(
     deadline = time.monotonic() + max(0.0, float(timeout_seconds))
     last = current
     while time.monotonic() <= deadline:
-        polled = ensure_dict_payload(
-            extract_tool_result_payload(
-                invoke_unity_mcp(
-                    settings,
-                    "vrc_poll_job",
-                    {"job_id": job_id},
-                    preserve_tool_error=True,
-                )
-            ),
-            f"{label} async job poll",
-        )
+        try:
+            polled = ensure_dict_payload(
+                extract_tool_result_payload(
+                    invoke_unity_mcp(
+                        settings,
+                        "vrc_poll_job",
+                        {"job_id": job_id},
+                        preserve_tool_error=True,
+                    )
+                ),
+                f"{label} async job poll",
+            )
+        except UnityMcpError as exc:
+            cause_code = str(getattr(exc, "cause_code", "") or "").strip()
+            if cause_code not in ASYNC_JOB_POLL_RETRYABLE_CORE_CODES:
+                raise
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(UNITY_ASYNC_JOB_POLL_SECONDS)
+            continue
         last = {**current, **polled}
         status = str(last.get("status") or "").strip().lower()
         if status not in {"queued", "running"}:
@@ -23473,6 +24187,120 @@ def poll_unity_async_job_sync(
     }
 
 
+def normalize_refresh_asset_database_outcome(result: dict[str, Any]) -> dict[str, Any]:
+    """Project the refresh job and its post-refresh compile snapshot into a truthful outcome."""
+    normalized = dict(result or {})
+    raw_status = str(normalized.get("status") or "").strip().lower()
+    after = normalized.get("after") if isinstance(normalized.get("after"), dict) else {}
+    compile_snapshot = after.get("compile") if isinstance(after.get("compile"), dict) else None
+    # Core refresh may SaveAssets. Job/compile completion is not a persistence
+    # receipt, so missing write facts remain unknown; preserve explicit facts.
+    normalized.setdefault("mutationStarted", None)
+    normalized.setdefault("committed", None)
+    normalized.setdefault("commitState", "unknown")
+    normalized.setdefault("commitStateKnown", normalized["commitState"] != "unknown")
+
+    if raw_status in {"queued", "running", "pending", "scheduled"}:
+        normalized.update(
+            {
+                "ok": False,
+                "status": "pending",
+                "operationStatus": "pending",
+                "readbackState": "pending",
+                "completionKnown": False,
+                "verification": {"state": "pending", "tool": "vrc_get_compile_errors"},
+            }
+        )
+        return normalized
+
+    if raw_status == "done":
+        error_count = None
+        if compile_snapshot is not None:
+            for key in ("errorCount", "error_count", "errors"):
+                value = compile_snapshot.get(key)
+                if isinstance(value, bool):
+                    continue
+                if isinstance(value, (int, float)):
+                    error_count = int(value)
+                    break
+                if isinstance(value, list):
+                    error_count = len(value)
+                    break
+        if error_count is None:
+            normalized.update(
+                {
+                    "ok": False,
+                    "status": "pending",
+                    "operationStatus": "pending",
+                    "readbackState": "pending",
+                    "completionKnown": False,
+                    "verification": {"state": "pending", "tool": "vrc_get_compile_errors"},
+                    "verificationWarning": "Refresh completed, but no post-refresh compile snapshot was returned.",
+                }
+            )
+            return normalized
+        compiling = compile_snapshot.get("isCompiling") is True
+        capture_complete = compile_snapshot.get("captureComplete")
+        stale = compile_snapshot.get("isStale") is True or compile_snapshot.get("stale") is True
+        staleness = str(compile_snapshot.get("staleness") or "").strip().casefold()
+        if compiling or capture_complete is not True or stale or staleness in {"stale", "unknown", "pending"}:
+            normalized.update(
+                {
+                    "ok": False,
+                    "status": "pending",
+                    "operationStatus": "pending",
+                    "readbackState": "pending",
+                    "completionKnown": False,
+                    "verification": {"state": "pending", "tool": "vrc_get_compile_errors", "compile": compile_snapshot},
+                }
+            )
+            return normalized
+        if error_count > 0:
+            normalized.update(
+                {
+                    "ok": False,
+                    "status": "failed",
+                    "operationStatus": "failed",
+                    "readbackState": "failed",
+                    "completionKnown": True,
+                    "verification": {"state": "failed", "tool": "vrc_get_compile_errors", "errorCount": error_count, "compile": compile_snapshot},
+                    "error": {"code": "unity_compile_failed", "message": f"Unity refresh completed but reported {error_count} compile error(s).", "errorCount": error_count},
+                }
+            )
+            return normalized
+        normalized.update(
+            {
+                "ok": True,
+                "status": "done",
+                "operationStatus": "success",
+                "readbackState": "complete",
+                "completionKnown": True,
+                "verification": {"state": "passed", "tool": "vrc_get_compile_errors", "errorCount": 0, "compile": compile_snapshot},
+            }
+        )
+        return normalized
+
+    if raw_status in {"failed", "expired", "error"}:
+        normalized["ok"] = False
+        normalized["status"] = "failed"
+        normalized["operationStatus"] = "failed"
+        normalized["readbackState"] = "failed"
+        normalized.setdefault("verification", {"state": "failed", "tool": "vrc_get_compile_errors"})
+        return normalized
+
+    normalized.update(
+        {
+            "ok": False,
+            "status": "failed",
+            "operationStatus": "failed",
+            "readbackState": "failed",
+            "verification": {"state": "unknown", "tool": "vrc_get_compile_errors"},
+            "error": {"code": "refresh_status_unknown", "message": f"Refresh returned unknown status: {raw_status or '<empty>'}."},
+        }
+    )
+    return normalized
+
+
 def refresh_asset_database_sync(params: dict[str, Any]) -> dict[str, Any]:
     tool_name, arguments = build_refresh_asset_database_execution_plan(params)[0]
     package_resolve_timeout = int(arguments["packageResolveTimeoutSeconds"])
@@ -23488,8 +24316,30 @@ def refresh_asset_database_sync(params: dict[str, Any]) -> dict[str, Any]:
         label="refresh asset database",
         timeout_seconds=300.0,
     )
-    result.setdefault("ok", True)
-    return result
+    # AssetDatabase refreshes do not necessarily trigger a C# compilation pass
+    # (for example, a shader include import).  The Core job snapshot therefore
+    # may be terminal while its compilation-pipeline capture is incomplete.
+    # Reuse the existing read-only compile tool, whose console fallback covers
+    # that case, and keep the normalizer as the single strict success gate.
+    if str(result.get("status") or "").strip().lower() == "done":
+        after = result.get("after") if isinstance(result.get("after"), dict) else {}
+        compile_snapshot = after.get("compile") if isinstance(after.get("compile"), dict) else None
+        if not isinstance(compile_snapshot, dict) or compile_snapshot.get("captureComplete") is not True:
+            compile_result = ensure_dict_payload(
+                extract_tool_result_payload(
+                    invoke_unity_mcp(
+                        settings,
+                        "vrc_get_compile_errors",
+                        {"includeConsoleFallback": True, "maxErrors": 200},
+                        preserve_tool_error=True,
+                    )
+                ),
+                "refresh compile verification",
+            )
+            refreshed_after = dict(after)
+            refreshed_after["compile"] = compile_result
+            result = {**result, "after": refreshed_after}
+    return normalize_refresh_asset_database_outcome(result)
 
 
 def _resolve_unity_project_root_for_import(params: dict[str, Any], plan_payload: dict[str, Any]) -> Path:
@@ -23997,7 +24847,12 @@ def register_agent_gateway_tools() -> None:
             params or {},
         ),
     )
-    AGENT_GATEWAY.register_tool("vrcforge_ask_user", "Ask the user a short question with selectable options while the agent task continues.", "plan/preview", lambda params: AGENT_GATEWAY.questions.create(params or {}))
+    AGENT_GATEWAY.register_tool(
+        "vrcforge_ask_user",
+        "when-to-use: ask the user for a missing decision during the active Agent task; options may be omitted for a free text answer. when-NOT-to-use: do not use for ordinary conversation, hypothetical examples, or when the required decision is already known.",
+        "plan/preview",
+        AGENT_GATEWAY.create_runtime_question,
+    )
     AGENT_GATEWAY.register_tool(
         "vrcforge_delegate_subagent",
         "When to use: delegate one bounded read-only review or inspection task to a named VRCForge sub-agent role when parallel specialist work materially helps the current task. When NOT to use: do not delegate a trivial one-step read, any direct Unity write, or work whose result is not needed by the current task.",
@@ -24099,7 +24954,7 @@ def register_agent_gateway_tools() -> None:
         ).get("tools", {}),
     )
     AGENT_GATEWAY.register_tool("vrcforge_list_avatars", "List avatars from the current Unity project.", "read/debug", lambda params: AVATAR_TUNING_WORKFLOWS.read_avatars(build_agent_dashboard_request(params)))
-    AGENT_GATEWAY.register_tool("vrcforge_scan_blendshapes", "Scan face-related Blendshapes for an avatar.", "read/debug", lambda params: AVATAR_TUNING_WORKFLOWS.read_avatar_blendshapes(AvatarBlendshapeListRequest(**build_agent_dashboard_request(params).model_dump())))
+    AGENT_GATEWAY.register_tool("vrcforge_scan_blendshapes", "Read avatar blendshape names, current weights and renderer identity. when-to-use: inspect facial shapes by default, or use scope=all and optional exact rendererPaths for body/clothing/accessories. when-NOT-to-use: do not use to change weights or inspect material properties; for example, 'set the dress blendshape to 100' requires a separate approved write.", "read/debug", lambda params: AVATAR_TUNING_WORKFLOWS.read_avatar_blendshapes(AvatarBlendshapeListRequest(**{**build_agent_dashboard_request(params).model_dump(), "rendererPaths": params.get("rendererPaths")})))
     AGENT_GATEWAY.register_tool("vrcforge_scan_materials", "Scan shader/material inventory for an avatar.", "read/debug", lambda params: SHADER_VISION_PROTECTION.scan_shader_materials(ShaderMaterialScanRequest(**params)))
     AGENT_GATEWAY.register_tool("vrcforge_scan_modular_avatar", "Detect the Modular Avatar package and scan avatars for Modular Avatar components.", "read/debug", lambda params: scan_addon_framework_sync("modular_avatar", params or {}))
     AGENT_GATEWAY.register_tool("vrcforge_inspect_modular_avatar_component", "Read the exact presence, count, type, scene dirty state, and AvatarObjectReference paths for one Modular Avatar component without writing.", "read/debug", inspect_modular_avatar_component_sync)
@@ -24218,10 +25073,10 @@ def register_agent_gateway_tools() -> None:
     AGENT_GATEWAY.register_tool("vrcforge_preview_ensure_animator_state", "Preview creating or updating an FX animator layer/state/transition without writing.", "plan/preview", lambda params: ensure_animator_state_sync(params, preview=True))
     AGENT_GATEWAY.register_tool("vrcforge_read_avatar_descriptor", "Read VRCAvatarDescriptor viewpoint, lip sync, visemes, expression assets, playable layers, and eye-look summary.", "read/debug", read_avatar_descriptor_sync)
     AGENT_GATEWAY.register_tool("vrcforge_preview_write_avatar_descriptor", "Preview changing selected VRCAvatarDescriptor fields without writing.", "plan/preview", lambda params: write_avatar_descriptor_sync(params, preview=True))
-    AGENT_GATEWAY.register_tool("vrcforge_preview_write_animation_curve", "Preview creating, replacing, or deleting one AnimationClip curve binding without writing.", "plan/preview", lambda params: write_animation_curve_sync(params, preview=True))
+    AGENT_GATEWAY.register_tool("vrcforge_preview_write_animation_curve", "Preview one AnimationClip binding edit or an atomic curves batch without writing.", "plan/preview", lambda params: write_animation_curve_sync(params, preview=True))
     AGENT_GATEWAY.register_tool("vrcforge_preview_manage_expression_parameters", "Preview deleting, renaming, reordering, or updating existing expression parameters without writing.", "plan/preview", lambda params: manage_expression_parameters_sync(params, preview=True))
     AGENT_GATEWAY.register_tool("vrcforge_preview_manage_expression_menu", "Preview expression menu control create/update/delete/reorder without writing.", "plan/preview", lambda params: manage_expression_menu_sync(params, preview=True))
-    AGENT_GATEWAY.register_tool("vrcforge_preview_manage_fx_animator", "Preview FX AnimatorController layer/state/transition create/update/delete without writing.", "plan/preview", lambda params: manage_fx_animator_sync(params, preview=True))
+    AGENT_GATEWAY.register_tool("vrcforge_preview_manage_fx_animator", "Preview one FX AnimatorController edit or ordered edits batch without writing.", "plan/preview", lambda params: manage_fx_animator_sync(params, preview=True))
     AGENT_GATEWAY.register_tool("vrcforge_preview_restore_backup", "Preview which files a safe backup restore would overwrite, without writing.", "plan/preview", preview_safe_backup_restore_sync)
     AGENT_GATEWAY.register_tool("vrcforge_scan_avatar_performance", "Calculate VRChat SDK performance statistics and rank for an avatar.", "read/debug", scan_avatar_performance_sync)
     AGENT_GATEWAY.register_tool("vrcforge_package_manager_status", "Detect vrc-get/ALCOM/vpm CLIs and addon package install state.", "read/debug", PACKAGE_INSTALL_WORKFLOWS.package_manager_status)
@@ -24249,8 +25104,8 @@ def register_agent_gateway_tools() -> None:
         "read/debug",
         PROJECT_CATALOG_REGISTRATIONS.status,
     )
-    AGENT_GATEWAY.register_tool("vrcforge_package_install_plan", "Plan a VPM package install using an optional ALCOM/VCC UI handoff, the sealed vrc-get CLI adapter, or a backend-neutral fallback without writing.", "plan/preview", PACKAGE_INSTALL_WORKFLOWS.plan_install)
-    AGENT_GATEWAY.register_tool("vrcforge_package_install_request", "Request supervised VPM package installation through the selected package manager; creates an approval request only.", "supervised-write", lambda params: PACKAGE_INSTALL_WORKFLOWS.request_install(params or {}, agent_name=str((params or {}).get("agent_name") or (params or {}).get("agentName") or "external-agent")), write=True)
+    AGENT_GATEWAY.register_tool("vrcforge_package_install_plan", "when-to-use: plan a VPM package install or an explicitly requested upgrade using an optional ALCOM/VCC UI handoff, the sealed vrc-get CLI adapter, or a backend-neutral fallback without writing. when-NOT-to-use: do not use it to edit manifests, import arbitrary UnityPackages, or infer an upgrade without upgrade=true and a target packageVersion. Negative example: do not call it merely because a package name appears in an error.", "plan/preview", PACKAGE_INSTALL_WORKFLOWS.plan_install)
+    AGENT_GATEWAY.register_tool("vrcforge_package_install_request", "when-to-use: request supervised VPM package installation or an explicitly requested package upgrade through the selected package manager; creates an approval request only. when-NOT-to-use: do not use it for direct manifest edits, arbitrary UnityPackages, or an upgrade without a newer packageVersion and upgrade=true. Negative example: do not call it to bypass the installed-package-first safety gate.", "supervised-write", lambda params: PACKAGE_INSTALL_WORKFLOWS.request_install(params or {}, agent_name=str((params or {}).get("agent_name") or (params or {}).get("agentName") or "external-agent")), write=True)
     AGENT_GATEWAY.register_tool("vrcforge_diagnose_package_install_errors", "Read package-manager output and Unity compile errors to explain plugin/package install failures without repairing automatically.", "read/debug", PACKAGE_INSTALL_WORKFLOWS.diagnose_install)
     AGENT_GATEWAY.register_tool("vrcforge_preview_setup_outfit", "Check Modular Avatar Setup Outfit readiness for an outfit object, without writing.", "plan/preview", WARDROBE_OUTFIT_WORKFLOWS.preview_setup_outfit)
     AGENT_GATEWAY.register_tool("vrcforge_preview_add_wardrobe_outfit", "Preview adding one outfit to an existing int-exclusive wardrobe (assigned int value, FX state, on/off objects, menu placement), without writing.", "plan/preview", WARDROBE_OUTFIT_WORKFLOWS.preview_add_wardrobe_outfit)
@@ -24289,7 +25144,12 @@ def register_agent_gateway_tools() -> None:
         audit_managed_avatar_multi_screenshot_for_agent,
     )
     AGENT_GATEWAY.register_tool("vrcforge_scan_thry_avatar_performance", "Call VRC Avatar Performance Tools / Thry read-only VRAM and mesh memory calculator for an avatar.", "read/debug", scan_thry_avatar_performance_sync)
-    AGENT_GATEWAY.register_tool("vrcforge_read_recent_logs", "Read recent VRCForge dashboard logs.", "read/debug", lambda params: {"ok": True, "logs": recent_log_snapshot()[-int(params.get("limit", 80)):], "agentLogs": AGENT_GATEWAY.approval_transactions.recent_audit_logs(limit=int(params.get("limit", 80)))})
+    AGENT_GATEWAY.register_tool(
+        "vrcforge_read_recent_logs",
+        "Read recent VRCForge dashboard logs. When to use: use the default memory source for current in-process entries, or explicitly select disk and a filename from its retained-log listing for historical entries. When NOT to use: do not provide arbitrary host paths, silently fall back between sources, or use this for raw stdout/stderr. Negative example: do not guess a log filename; select one from the disk listing first.",
+        "read/debug",
+        read_recent_logs_tool,
+    )
     AGENT_GATEWAY.register_tool(
         "vrcforge_get_compile_errors",
         "When to use: read the stable Unity C# compile error and warning snapshot before or after a change. When NOT to use: do not use it to change scripts, clear Console rows, or claim compilation passed while Unity is still compiling. Negative example: do not call this tool merely because the user mentioned C# without asking to inspect the current project.",
@@ -24338,7 +25198,7 @@ def register_agent_gateway_tools() -> None:
         "plan/preview",
         preview_unity_constraint_conversion_sync,
     )
-    AGENT_GATEWAY.register_tool("vrcforge_get_property", "Read a single field/property value from a component on a scene GameObject.", "read/debug", read_component_property_sync)
+    AGENT_GATEWAY.register_tool("vrcforge_get_property", "When to use: Read one component field/property, or queries for up to 128 exact bound components and 512 simple properties in one synchronous sample. Batch results include per-property success/failure and precise identity. When NOT to use: Do not write, use nested paths or collections in queries, mix scalar/batch arguments, or read across bound namespaces. Negative example: 'set every renderer enabled' requires an approved write.", "read/debug", read_component_property_sync)
     AGENT_GATEWAY.register_tool(
         "vrcforge_scan_inbound_reference_closure",
         "When to use: prove which serialized object references, animation binding paths, framework paths, and PhysBone/Contact parameter consumers still point into exact scene roots or components before cleanup. "
@@ -24370,19 +25230,24 @@ def register_agent_gateway_tools() -> None:
     AGENT_GATEWAY.register_tool("vrcforge_preview_shader_apply", "Preview shader/material apply payload without writing to Unity.", "plan/preview", SHADER_VISION_PROTECTION.preview_shader_apply)
     AGENT_GATEWAY.register_tool(
         "vrcforge_preview_material_shader_assignment",
-        "Preview one persistent material shader assignment and its shared impact without writing project files.",
+        "When to use: preview one persistent material selector or up to 128 pure asset shader assignments and their shared impact without writing; or preview keywordChanges or propertyChanges with optional renderQueue on one saved independent material without changing its shader. When NOT to use: do not mix these modes, edit undeclared/non-scalar properties through propertyChanges, batch renderer selectors, or treat preview as a write. Negative example: do not change every shader to fix one missing texture.",
         "plan/preview",
         SHADER_VISION_PROTECTION.preview_material_shader_assignment,
     )
     AGENT_GATEWAY.register_tool(
+        "vrcforge_preview_material_variant_flatten",
+        "When to use: preview flattening one exact persistent Material Variant while preserving effective values. When NOT to use: do not use for shader assignment, reparenting, creation, or batches. Negative example: do not flatten every material in an avatar.",
+        "plan/preview", preview_material_variant_flatten_sync,
+    )
+    AGENT_GATEWAY.register_tool(
         "vrcforge_preview_material_texture_assignment",
-        "When to use: inspect one existing project Material, one whitelisted texture slot, and one existing Texture2D without writing. When NOT to use: do not edit pixels, create textures, change shader parameters, or treat a preview as an applied texture assignment. Negative example: do not call it to repaint a face texture.",
+        "When to use: inspect one existing project Material texture assignment or 1..128 assignments, each binding an exact persistent Material, an installed shader Texture property, and an existing Texture2D, without writing. When NOT to use: do not mix assignments with single-target fields, edit pixels, create textures, change shader parameters, or treat a preview as an applied assignment. Negative example: do not call it to repaint a face texture.",
         "plan/preview",
         preview_material_texture_assignment_sync,
     )
     AGENT_GATEWAY.register_tool(
         "vrcforge_preview_renderer_material_slot",
-        "When to use: inspect one exact renderer slot and bind its stable component, scene digest, current material, and replacement material before approval. When NOT to use: do not mutate, batch slots, target by a hierarchy path alone, or use it to tune shader properties. Negative example: do not replace every face material because one expression overlay is opaque.",
+        "When to use: preview one exact renderer slot or up to 256 assignments in one saved scene, binding stable renderer identities, scene digest and material evidence before approval. When NOT to use: do not mutate, mix scenes, target by hierarchy alone, or tune shader properties. Negative example: do not replace every face material because one expression overlay is opaque.",
         "plan/preview",
         preview_renderer_material_slot_sync,
     )
@@ -24400,7 +25265,7 @@ def register_agent_gateway_tools() -> None:
     )
     AGENT_GATEWAY.register_tool(
         "vrcforge_preview_project_asset_duplicate",
-        "When to use: preview one create-new copy of a material (.mat), controller, ScriptableObject asset, animation, or override controller into Assets/VRCForge/Generated before deriving final Avatar assets. "
+        "When to use: preview one create-new copy, or a bounded copies array with existing parents, of materials (.mat), controllers, ScriptableObject assets, animations, or override controllers in Assets/VRCForgeGenerated before deriving final Avatar assets. Choose an existing folder classified by Avatar and asset type; never place project output in Assets/VRCForge. "
         "When NOT to use: do not overwrite or modify the source material, move, merge, import, or copy scripts, DLLs, prefabs, textures, or arbitrary files. "
         "Negative example: do not call this tool to replace an existing FX controller in place.",
         "plan/preview",
@@ -24559,12 +25424,26 @@ def register_agent_gateway_tools() -> None:
         approval_category="visual-capture",
         allow_future_category=True,
     )
+    AGENT_GATEWAY.register_tool(
+        "vrcforge_get_runtime_observation",
+        "When to use: query one existing finite observation job on its exact Avatar and Editor, including partial status and actual frame cadence. When NOT to use: do not start or repeat a parameter change. Negative example: do not query a job against another Avatar.",
+        "runtime/observation", runtime_observation_status_sync,
+    )
+    register_write_handler(
+        "vrcforge_start_runtime_observation",
+        "When to use: trigger one existing GM parameter once and observe actual parameter, playable state and frame artifacts over 0.1–10 seconds on the exact connected Avatar. When NOT to use: do not change assets, enter Play Mode, assume exact frame rate or retry a pending job. Negative example: do not use this as a general script executor.",
+        "medium", runtime_observation_start_sync,
+        request_preparer=prepare_runtime_observation_request,
+        requires_approved_execution_context=True,
+        approved_execution_plan_builder=lambda args: [("vrc_start_runtime_observation", {key: args[key] for key in ("avatarPath", "parameterName", "value", "durationSeconds", "frameCount", "width", "height", "cameraPosition", "targetPosition", "upVector", "fieldOfView", "parameterSteps", "rendererProbes", "jobId", "outputDirectory") if key in args})],
+        verification_finalize_handler=runtime_observation_finalize,
+        pre_write_checkpoint_required=False,
+    )
     register_write_handler(
         "vrcforge_gesture_manager_enter_play_mode",
         "When to use: with exactly one active Gesture Manager, enter Play Mode through Gesture Manager 3.9.9's public editor/runtime path and return the connected manager/avatar identity. When NOT to use: do not use generic Play Mode as a substitute, do not create another manager, and do not use this to change runtime parameters. Negative example: do not call it when two active Gesture Managers are present and guess which one should control the avatar.",
         "low",
         gesture_manager_enter_play_mode_sync,
-        pre_write_checkpoint_required=False,
         verification_finalize_handler=gesture_manager_enter_play_mode_finalize,
     )
     register_write_handler(
@@ -24579,14 +25458,14 @@ def register_agent_gateway_tools() -> None:
         "When to use: select and ping one exact loaded-scene GameObject so the Unity Inspector shows that object. When NOT to use: do not use selection as proof that an object exists or to mutate scene data. Negative example: do not select an Avatar merely to claim its descriptor is valid.",
         "low",
         select_scene_object_sync,
-        pre_write_checkpoint_required=False,
     )
     register_write_handler(
         "vrcforge_set_play_mode",
         "When to use: request one explicit Unity Play Mode state, then poll capture/status until the requested state is observed. When NOT to use: do not treat transition_scheduled as final verification and do not use it while Unity is compiling or updating. Negative example: do not repeatedly toggle Play Mode when one pending transition has not completed.",
         "low",
         set_play_mode_sync,
-        pre_write_checkpoint_required=False,
+        verification_finalize_handler=set_play_mode_finalize,
+        pre_write_checkpoint_required=_play_mode_checkpoint_required,
     )
     register_write_handler(
         "vrcforge_confirm_unity_reload_dialog",
@@ -24626,7 +25505,7 @@ def register_agent_gateway_tools() -> None:
     )
     register_write_handler(
         "vrcforge_set_material_shader",
-        "When to use: assign one exact installed shader to one preview-bound persistent material slot after inspecting shared renderer and asset impact. When NOT to use: do not tune shader properties, batch materials, replace a material asset, or guess a shader name. Negative example: do not call it to make every material use lilToon.",
+        "When to use: assign an exact installed shader to one preview-bound persistent material slot or up to 128 pure material asset assignments with one checkpoint after inspecting shared renderer and asset impact; or edit declared keywordChanges or scalar propertyChanges with optional renderQueue on one saved independent material while retaining its shader and untouched values. When NOT to use: do not mix modes, infer rendering settings, edit undeclared/non-scalar properties, batch renderer selectors, replace a material asset, or guess a shader name. Negative example: do not call it to make every material use lilToon.",
         "medium",
         unity_mcp_write_sync,
         request_preparer=prepare_material_shader_assignment_request,
@@ -24634,8 +25513,16 @@ def register_agent_gateway_tools() -> None:
         approved_execution_plan_builder=build_unity_mcp_write_execution_plan,
     )
     register_write_handler(
+        "vrcforge_flatten_material_variant",
+        "When to use: flatten one preview-bound exact persistent Material Variant after reviewing inherited-value evidence. When NOT to use: do not use for shader assignment, reparenting, creation, or batches. Negative example: do not flatten an unreviewed material family.",
+        "medium", unity_mcp_write_sync,
+        request_preparer=prepare_material_variant_flatten_request,
+        requires_approved_execution_context=True,
+        approved_execution_plan_builder=build_unity_mcp_write_execution_plan,
+    )
+    register_write_handler(
         "vrcforge_set_material_texture",
-        "When to use: assign one existing Assets Texture2D to one whitelisted texture slot on one exact preview-bound persistent Material, then verify the saved asset. When NOT to use: do not edit pixels, create or batch assets, change the shader, or bypass the checkpoint. Negative example: do not rewrite every material merely because one face texture needs a localized repair.",
+        "When to use: apply one preview-bound persistent Material texture assignment or 1..128 assignments under one checkpoint, then save and read back every affected material. Each assignment binds an existing Assets Texture2D and a Texture property exposed by the installed shader. When NOT to use: do not mix assignments with single-target fields, edit pixels, create assets, change shaders, or bypass the checkpoint. Negative example: do not rewrite every material merely because one face texture needs a localized repair.",
         "medium",
         unity_mcp_write_sync,
         request_preparer=prepare_material_texture_assignment_request,
@@ -24644,7 +25531,7 @@ def register_agent_gateway_tools() -> None:
     )
     register_write_handler(
         "vrcforge_set_renderer_material_slot",
-        "When to use: replace exactly one preview-bound Renderer.sharedMaterials slot with one existing persistent material, then save and freshly read back the scene. When NOT to use: do not batch renderers, target by hierarchy path alone, change material properties, or replace an already-correct slot. Negative example: do not swap every face slot merely because one expression overlay renders opaque.",
+        "When to use: replace one preview-bound Renderer.sharedMaterials slot or up to 256 assignments in one saved scene under one checkpoint, then save once and read back every affected renderer array. When NOT to use: do not mix scenes, target by hierarchy alone, change material properties, or replace an already-correct slot. Negative example: do not swap every face slot merely because one expression overlay renders opaque.",
         "medium",
         unity_mcp_write_sync,
         request_preparer=prepare_renderer_material_slot_request,
@@ -24670,7 +25557,7 @@ def register_agent_gateway_tools() -> None:
     )
     register_write_handler(
         "vrcforge_save_scene_object_as_prefab",
-        "When to use: save one exact scene object as one new prefab below Assets/VRCForge/Generated after a create-new preview proves the destination is absent. When NOT to use: do not overwrite an existing prefab, unpack or replace the source object, save outside the generated root, or batch objects. Negative example: do not call it to update an existing outfit prefab in place.",
+        "When to use: save one exact scene object as one new prefab in an existing classified folder below Assets/VRCForgeGenerated/Prefabs after a create-new preview proves the destination is absent. When NOT to use: do not overwrite an existing prefab, unpack or replace the source object, save outside the generated root, or batch objects. Negative example: do not put an Avatar prefab in the Assets/VRCForge plugin folder or update an existing outfit prefab in place.",
         "medium",
         unity_mcp_write_sync,
         request_preparer=prepare_scene_object_prefab_request,
@@ -24901,7 +25788,7 @@ def register_agent_gateway_tools() -> None:
     )
     register_write_handler(
         "vrcforge_write_animation_curve",
-        "Create, replace, delete, or losslessly retarget one AnimationClip curve binding. When to use: an exact curve edit or binding-name migration. When NOT to use: bulk workflow planning or silent overwrite.",
+        "Create, replace, delete, or retarget one AnimationClip binding, or atomically set up to 256 curves on one clip or 32 existing clips (4096 keys/512 KiB total). When to use: exact single or batch curve authoring. When NOT to use: unbounded/new multi-clip creation, general workflow planning, or silent overwrite.",
         "medium",
         lambda params: write_animation_curve_sync(params, preview=False),
     )
@@ -24919,7 +25806,7 @@ def register_agent_gateway_tools() -> None:
     )
     register_write_handler(
         "vrcforge_manage_fx_animator",
-        "Create, update, or delete FX AnimatorController layers, states, and Any-State transitions through VRCForge.",
+        "Create, update, or delete FX AnimatorController layers, states and transitions, or atomically apply ordered edits to one existing controller.",
         "high",
         lambda params: manage_fx_animator_sync(params, preview=False),
     )
@@ -25057,7 +25944,7 @@ def register_agent_gateway_tools() -> None:
     )
     register_write_handler(
         "vrcforge_duplicate_project_asset",
-        "When to use: create one independent, create-new Unity authoring asset below Assets/VRCForge/Generated after an exact verified preview, so a final Avatar can be edited without mutating imported shared source assets. "
+        "When to use: create one independent, create-new Unity authoring asset, or a bounded copies array with existing parents and one checkpoint, below Assets/VRCForgeGenerated after an exact verified preview, so a final Avatar can be edited without mutating imported shared source assets. Choose an existing folder classified by Avatar and asset type; never place project output in Assets/VRCForge. "
         "When NOT to use: do not overwrite, move, merge, delete, import, or copy scripts, DLLs, prefabs, textures, or arbitrary files. "
         "Negative example: do not call this tool with an existing destination or use it to clone a whole package.",
         "medium",
@@ -25101,6 +25988,13 @@ def register_agent_gateway_tools() -> None:
         "low",
         refresh_asset_database_sync,
         approved_execution_plan_builder=build_refresh_asset_database_execution_plan,
+        verification_profile="unity_asset_write_console",
+        verification_prepare_handler=lambda arguments: UNITY_CONSOLE_COMPLETION_VERIFIER.capture_baseline(
+            "unity_asset_write_console", arguments,
+        ),
+        verification_finalize_handler=lambda arguments, baseline, result: UNITY_CONSOLE_COMPLETION_VERIFIER.finalize(
+            "unity_asset_write_console", arguments, baseline, result,
+        ),
     )
     register_write_handler(
         "vrcforge_configure_optimizer_component",
@@ -25185,6 +26079,20 @@ def register_agent_gateway_tools() -> None:
         checkpoint_prepare_handler=prepare_authoritative_unity_checkpoint_sync,
         requires_approved_execution_context=True,
         approved_execution_plan_builder=build_unity_mcp_write_execution_plan,
+    )
+    register_write_handler(
+        GENERATED_ASSET_RELOCATION_TOOL.replace("vrc_", "vrcforge_", 1),
+        "Relocate exact generated Unity assets out of the VRCForge plugin directory while preserving GUIDs.",
+        "high",
+        unity_mcp_write_sync,
+        request_preparer=lambda params, caller_preview: prepare_unity_mcp_write_request(
+            build_generated_asset_relocation_wrapper_arguments(params or {}),
+            caller_preview,
+        ),
+        manual_approval_resolver=unity_mcp_manual_approval_reason,
+        checkpoint_prepare_handler=prepare_authoritative_unity_checkpoint_sync,
+        requires_approved_execution_context=True,
+        approved_execution_plan_builder=build_generated_asset_relocation_execution_plan,
     )
     register_write_handler(
         "vrcforge_export_vrm",
@@ -25663,11 +26571,17 @@ PREPARED_OUTFIT_IMPORT_APPROVED_WRITE = PreparedOutfitImportApprovedWriteService
             "prepared unitypackage import job",
         ),
         refresh_assets=lambda settings, arguments: ensure_dict_payload(
-            extract_tool_result_payload(
-                invoke_unity_mcp(
+            normalize_refresh_asset_database_outcome(
+                poll_unity_async_job_sync(
                     settings,
-                    "vrc_refresh_asset_database",
-                    arguments,
+                    ensure_dict_payload(
+                        extract_tool_result_payload(
+                            invoke_unity_mcp(settings, "vrc_refresh_asset_database", arguments)
+                        ),
+                        "prepared outfit import refresh",
+                    ),
+                    label="refresh asset database",
+                    timeout_seconds=180.0,
                 )
             ),
             "prepared outfit import refresh",
@@ -25679,6 +26593,11 @@ PREPARED_OUTFIT_IMPORT_APPROVED_WRITE = PreparedOutfitImportApprovedWriteService
         log=emit_log,
         map_error=lambda exc: to_http_exception(exc),
         handled_errors=(RuntimeError, UnityMcpError, ValueError),
+        verify_imported_asset_content=lambda package_path, project_path, asset_paths: verify_unitypackage_asset_content(
+            package_path, project_path, asset_paths,
+            lambda path, label: capture_regular_file(path, label=label),
+            lambda path, label: capture_directory(path, label=label),
+        ),
     )
 )
 WARDROBE_OUTFIT_APPROVED_WRITES = WardrobeOutfitApprovedWriteHandlers(
@@ -26312,7 +27231,13 @@ def to_http_exception(exc: Exception) -> HTTPException:
     lowered = detail.lower()
     retryable = bool(getattr(exc, "retryable", False))
     status_code = 503 if retryable or "unity mcp server is not ready yet" in lowered or "cannot connect to unity mcp server" in lowered else 400
-    return HTTPException(status_code=status_code, detail=detail)
+    result = HTTPException(status_code=status_code, detail=detail)
+    # Preserve the established rejection object through HTTP/tool adapters.
+    for field in ("external_error", "raw_result"):
+        value = getattr(exc, field, None)
+        if isinstance(value, dict):
+            setattr(result, field, value)
+    return result
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:

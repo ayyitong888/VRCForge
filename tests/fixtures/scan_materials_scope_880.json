@@ -1,0 +1,28 @@
+{
+  "summary": {
+    "avatarCount": 1,
+    "rendererCount": 207,
+    "materialCount": 51,
+    "lilToonCount": 51,
+    "poiyomiCount": 0,
+    "genericCount": 0,
+    "unsupportedCount": 0
+  },
+  "materials": [
+    {
+      "material_id": "mat-shirt",
+      "renderer_path": "CyberCritter/Body/Shirt",
+      "shader_family": "lilToon"
+    },
+    {
+      "material_id": "mat-skirt",
+      "renderer_path": "CyberCritter/Body/Skirt",
+      "shader_family": "lilToon"
+    },
+    {
+      "material_id": "mat-shirt-alt",
+      "renderer_path": "CyberCritter/Body/Shirt",
+      "shader_family": "lilToon"
+    }
+  ]
+}

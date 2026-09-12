@@ -23,8 +23,6 @@ namespace VRCForge.Editor
 
     internal static class AvatarAuthoringCrudCore
     {
-        internal const string DefaultAssetDir = "Assets/VRCForge/Generated/AvatarAuthoring";
-
         internal static VRCAvatarDescriptor ResolveAvatarDescriptor(string avatarPath)
         {
             var descriptors = Resources.FindObjectsOfTypeAll<VRCAvatarDescriptor>()
@@ -91,10 +89,9 @@ namespace VRCForge.Editor
             return (value ?? string.Empty).Replace("\\", "/").Trim().Trim('/');
         }
 
-        internal static string NormalizeAssetDir(string value)
+        internal static string NormalizeAssetDir(string value, string avatarName, string category)
         {
-            var normalized = NormalizePath(value);
-            return string.IsNullOrEmpty(normalized) ? DefaultAssetDir : normalized;
+            return GeneratedAssetPaths.ResolveDirectory(value, avatarName, category, categorizeExplicit: true);
         }
 
         internal static string Sanitize(string value, string fallback)
@@ -105,7 +102,7 @@ namespace VRCForge.Editor
 
         internal static void EnsureAssetFolder(string assetPath)
         {
-            var normalized = NormalizePath(assetPath);
+            var normalized = GeneratedAssetPaths.ValidateNewAssetPath(assetPath);
             var parts = normalized.Split('/');
             if (parts.Length == 0 || parts[0] != "Assets")
             {
@@ -124,7 +121,7 @@ namespace VRCForge.Editor
             }
         }
 
-        internal static VRCExpressionParameters EnsureExpressionParametersAsset(VRCAvatarDescriptor descriptor, string assetDir)
+        internal static VRCExpressionParameters EnsureExpressionParametersAsset(VRCAvatarDescriptor descriptor, string assetDir, string plannedPath = null)
         {
             if (descriptor.expressionParameters != null)
             {
@@ -134,7 +131,7 @@ namespace VRCForge.Editor
             EnsureAssetFolder(assetDir);
             var asset = ScriptableObject.CreateInstance<VRCExpressionParameters>();
             asset.parameters = Array.Empty<VRCExpressionParameters.Parameter>();
-            var path = AssetDatabase.GenerateUniqueAssetPath($"{assetDir}/{Sanitize(descriptor.name, "Avatar")}_ExpressionParameters.asset");
+            var path = string.IsNullOrWhiteSpace(plannedPath) ? GeneratedAssetPaths.UniqueAssetPath($"{assetDir}/{Sanitize(descriptor.name, "Avatar")}_ExpressionParameters.asset") : GeneratedAssetPaths.ValidateNewAssetPath(plannedPath);
             AssetDatabase.CreateAsset(asset, path);
             Undo.RegisterCreatedObjectUndo(asset, "Create expression parameters asset");
             descriptor.expressionParameters = asset;
@@ -142,7 +139,7 @@ namespace VRCForge.Editor
             return asset;
         }
 
-        internal static VRCExpressionsMenu EnsureRootMenuAsset(VRCAvatarDescriptor descriptor, string assetDir)
+        internal static VRCExpressionsMenu EnsureRootMenuAsset(VRCAvatarDescriptor descriptor, string assetDir, string plannedPath = null)
         {
             if (descriptor.expressionsMenu != null)
             {
@@ -152,7 +149,7 @@ namespace VRCForge.Editor
             EnsureAssetFolder(assetDir);
             var asset = ScriptableObject.CreateInstance<VRCExpressionsMenu>();
             asset.controls = new List<VRCExpressionsMenu.Control>();
-            var path = AssetDatabase.GenerateUniqueAssetPath($"{assetDir}/{Sanitize(descriptor.name, "Avatar")}_ExpressionsMenu.asset");
+            var path = string.IsNullOrWhiteSpace(plannedPath) ? GeneratedAssetPaths.UniqueAssetPath($"{assetDir}/{Sanitize(descriptor.name, "Avatar")}_ExpressionsMenu.asset") : GeneratedAssetPaths.ValidateNewAssetPath(plannedPath);
             AssetDatabase.CreateAsset(asset, path);
             Undo.RegisterCreatedObjectUndo(asset, "Create expressions menu asset");
             descriptor.expressionsMenu = asset;
@@ -160,7 +157,7 @@ namespace VRCForge.Editor
             return asset;
         }
 
-        internal static AnimatorController EnsureFxController(VRCAvatarDescriptor descriptor, string assetDir)
+        internal static AnimatorController EnsureFxController(VRCAvatarDescriptor descriptor, string assetDir, string plannedPath = null)
         {
             var existing = GetFxController(descriptor);
             if (existing != null)
@@ -169,7 +166,7 @@ namespace VRCForge.Editor
             }
 
             EnsureAssetFolder(assetDir);
-            var path = AssetDatabase.GenerateUniqueAssetPath($"{assetDir}/{Sanitize(descriptor.name, "Avatar")}_FX.controller");
+            var path = string.IsNullOrWhiteSpace(plannedPath) ? GeneratedAssetPaths.UniqueAssetPath($"{assetDir}/{Sanitize(descriptor.name, "Avatar")}_FX.controller") : GeneratedAssetPaths.ValidateNewAssetPath(plannedPath);
             var controller = AnimatorController.CreateAnimatorControllerAtPath(path);
             Undo.RegisterCreatedObjectUndo(controller, "Create FX animator controller");
             var layers = descriptor.baseAnimationLayers?.ToList() ?? new List<VRCAvatarDescriptor.CustomAnimLayer>();
@@ -253,14 +250,16 @@ namespace VRCForge.Editor
                 var saved = @params["saved"]?.Value<bool?>() ?? true;
                 var networkSynced = @params["networkSynced"]?.Value<bool?>() ?? true;
                 var preview = @params["preview"]?.Value<bool?>() ?? false;
-                var assetDir = AvatarAuthoringCrudCore.NormalizeAssetDir(@params["assetDir"]?.ToString() ?? "");
                 if (string.IsNullOrWhiteSpace(parameterName))
                 {
                     return VRCForgeToolResult.Failed("parameterName is required.");
                 }
 
                 var descriptor = AvatarAuthoringCrudCore.ResolveAvatarDescriptor(avatarPath);
+                var assetDir = AvatarAuthoringCrudCore.NormalizeAssetDir(@params["assetDir"]?.ToString(), descriptor.name, GeneratedAssetPaths.Parameters);
                 var asset = descriptor.expressionParameters;
+                var assetPath = asset != null ? AssetDatabase.GetAssetPath(asset)
+                    : GeneratedAssetPaths.UniqueAssetPath($"{assetDir}/{AvatarAuthoringCrudCore.Sanitize(descriptor.name, "Avatar")}_ExpressionParameters.asset");
                 var existing = asset?.parameters?.FirstOrDefault(parameter => parameter != null && parameter.name == parameterName);
                 var plan = new
                 {
@@ -275,7 +274,8 @@ namespace VRCForge.Editor
                     willCreateAsset = asset == null,
                     willCreateParameter = existing == null,
                     existingValueType = existing != null ? existing.valueType.ToString() : null,
-                    assetDir
+                    assetDir,
+                    assetPath
                 };
                 if (preview)
                 {
@@ -299,8 +299,8 @@ namespace VRCForge.Editor
                     };
                     receipts.Add(descriptorReceipt);
                 }
-                asset = AvatarAuthoringCrudCore.EnsureExpressionParametersAsset(descriptor, assetDir);
-                var assetPath = AssetDatabase.GetAssetPath(asset);
+                asset = AvatarAuthoringCrudCore.EnsureExpressionParametersAsset(descriptor, assetDir, assetPath);
+                assetPath = AssetDatabase.GetAssetPath(asset);
                 transactionHandle = assetPath;
                 assetReceipt.Asset = assetPath;
                 if (descriptorReceipt != null)
@@ -447,16 +447,19 @@ namespace VRCForge.Editor
                 var parameterName = (@params["parameterName"]?.ToString() ?? "").Trim();
                 var controlValue = @params["controlValue"]?.Value<float?>() ?? 0f;
                 var preview = @params["preview"]?.Value<bool?>() ?? false;
-                var assetDir = AvatarAuthoringCrudCore.NormalizeAssetDir(@params["assetDir"]?.ToString() ?? "");
                 if (string.IsNullOrWhiteSpace(controlName))
                 {
                     return VRCForgeToolResult.Failed("controlName is required.");
                 }
 
                 var descriptor = AvatarAuthoringCrudCore.ResolveAvatarDescriptor(avatarPath);
+                var assetDir = AvatarAuthoringCrudCore.NormalizeAssetDir(@params["assetDir"]?.ToString(), descriptor.name, GeneratedAssetPaths.Menus);
                 var root = descriptor.expressionsMenu;
+                var rootMenuAssetPath = root != null ? AssetDatabase.GetAssetPath(root)
+                    : GeneratedAssetPaths.UniqueAssetPath($"{assetDir}/{AvatarAuthoringCrudCore.Sanitize(descriptor.name, "Avatar")}_ExpressionsMenu.asset");
                 var type = ParseMenuControlType(controlTypeText);
                 var exists = MenuContainsControl(root, menuPath, controlName, parameterName, Mathf.RoundToInt(controlValue), new HashSet<int>(), 0);
+                var newMenuAssetPaths = PlanMenuAssetPaths(root, menuPath, assetDir, rootMenuAssetPath, controlName, type, exists);
                 var plan = new
                 {
                     action = "ensure_expression_menu_control",
@@ -469,7 +472,9 @@ namespace VRCForge.Editor
                     controlValue,
                     willCreateRootMenu = root == null,
                     willCreateControl = !exists,
-                    assetDir
+                    assetDir,
+                    rootMenuAssetPath,
+                    newMenuAssetPaths
                 };
                 if (preview)
                 {
@@ -478,15 +483,16 @@ namespace VRCForge.Editor
 
                 rootWasMissing = root == null;
                 beforeGraph = CaptureMenuGraph(root);
-                root = AvatarAuthoringCrudCore.EnsureRootMenuAsset(descriptor, assetDir);
+                root = AvatarAuthoringCrudCore.EnsureRootMenuAsset(descriptor, assetDir, rootMenuAssetPath);
                 trackedRoot = root;
                 transactionHandle = AssetDatabase.GetAssetPath(root);
-                var target = EnsureMenuPath(root, menuPath, assetDir);
+                var plannedMenuPaths = new Queue<string>(newMenuAssetPaths);
+                var target = EnsureMenuPath(root, menuPath, assetDir, plannedMenuPaths);
                 Undo.RegisterCompleteObjectUndo(target, "Ensure expression menu control");
                 var created = false;
                 if (!MenuContainsControl(root, menuPath, controlName, parameterName, Mathf.RoundToInt(controlValue), new HashSet<int>(), 0))
                 {
-                    target = EnsureMenuHasRoom(target, assetDir);
+                    target = EnsureMenuHasRoom(target, assetDir, plannedMenuPaths);
                     Undo.RegisterCompleteObjectUndo(target, "Ensure expression menu control");
                     var control = new VRCExpressionsMenu.Control
                     {
@@ -502,7 +508,7 @@ namespace VRCForge.Editor
                     {
                         var subMenu = ScriptableObject.CreateInstance<VRCExpressionsMenu>();
                         subMenu.controls = new List<VRCExpressionsMenu.Control>();
-                        var subPath = AssetDatabase.GenerateUniqueAssetPath($"{assetDir}/{AvatarAuthoringCrudCore.Sanitize(controlName, "Menu")}_SubMenu.asset");
+                        var subPath = plannedMenuPaths.Dequeue();
                         AvatarAuthoringCrudCore.EnsureAssetFolder(assetDir);
                         AssetDatabase.CreateAsset(subMenu, subPath);
                         Undo.RegisterCreatedObjectUndo(subMenu, "Create submenu asset");
@@ -640,7 +646,51 @@ namespace VRCForge.Editor
             return VRCExpressionsMenu.Control.ControlType.Toggle;
         }
 
-        private static VRCExpressionsMenu EnsureMenuPath(VRCExpressionsMenu root, string menuPath, string assetDir)
+        private static List<string> PlanMenuAssetPaths(VRCExpressionsMenu root, string menuPath, string assetDir,
+            string rootMenuAssetPath, string controlName, VRCExpressionsMenu.Control.ControlType type, bool controlExists)
+        {
+            var reserved = new List<string> { rootMenuAssetPath };
+            var current = root;
+            foreach (var rawPart in menuPath.Split(new[] { '/' }, StringSplitOptions.RemoveEmptyEntries))
+            {
+                var part = rawPart.Trim();
+                if (string.IsNullOrWhiteSpace(part)) continue;
+                var existing = current?.controls?.FirstOrDefault(control => control != null
+                    && control.type == VRCExpressionsMenu.Control.ControlType.SubMenu
+                    && control.name == part && control.subMenu != null);
+                if (existing != null)
+                {
+                    current = existing.subMenu;
+                    continue;
+                }
+                PlanMenuRoom(current, assetDir, reserved);
+                GeneratedAssetPaths.ReserveAssetPath($"{assetDir}/{AvatarAuthoringCrudCore.Sanitize(part, "Menu")}_SubMenu.asset", reserved, GeneratedAssetPaths.UniqueAssetPath);
+                current = null;
+            }
+            if (!controlExists)
+            {
+                PlanMenuRoom(current, assetDir, reserved);
+                if (type == VRCExpressionsMenu.Control.ControlType.SubMenu)
+                    GeneratedAssetPaths.ReserveAssetPath($"{assetDir}/{AvatarAuthoringCrudCore.Sanitize(controlName, "Menu")}_SubMenu.asset", reserved, GeneratedAssetPaths.UniqueAssetPath);
+            }
+            return reserved.Skip(1).ToList();
+        }
+
+        private static void PlanMenuRoom(VRCExpressionsMenu menu, string assetDir, List<string> reserved, HashSet<int> visited = null)
+        {
+            if ((menu?.controls?.Count ?? 0) < VRCExpressionsMenu.MAX_CONTROLS) return;
+            visited = visited ?? new HashSet<int>();
+            if (!visited.Add(menu.GetInstanceID())) throw new InvalidOperationException("Expression menu overflow contains a cycle.");
+            var overflow = menu.controls.FirstOrDefault(control => control != null
+                && control.type == VRCExpressionsMenu.Control.ControlType.SubMenu
+                && control.subMenu != null && control.name == "More");
+            if (overflow != null)
+                PlanMenuRoom(overflow.subMenu, assetDir, reserved, visited);
+            else
+                GeneratedAssetPaths.ReserveAssetPath($"{assetDir}/Overflow_SubMenu.asset", reserved, GeneratedAssetPaths.UniqueAssetPath);
+        }
+
+        private static VRCExpressionsMenu EnsureMenuPath(VRCExpressionsMenu root, string menuPath, string assetDir, Queue<string> plannedMenuPaths)
         {
             if (root.controls == null)
             {
@@ -666,11 +716,11 @@ namespace VRCForge.Editor
                     continue;
                 }
 
-                current = EnsureMenuHasRoom(current, assetDir);
+                current = EnsureMenuHasRoom(current, assetDir, plannedMenuPaths);
                 var subMenu = ScriptableObject.CreateInstance<VRCExpressionsMenu>();
                 subMenu.controls = new List<VRCExpressionsMenu.Control>();
                 AvatarAuthoringCrudCore.EnsureAssetFolder(assetDir);
-                var subPath = AssetDatabase.GenerateUniqueAssetPath($"{assetDir}/{AvatarAuthoringCrudCore.Sanitize(part, "Menu")}_SubMenu.asset");
+                var subPath = plannedMenuPaths.Dequeue();
                 AssetDatabase.CreateAsset(subMenu, subPath);
                 Undo.RegisterCreatedObjectUndo(subMenu, "Create submenu asset");
                 current.controls.Add(new VRCExpressionsMenu.Control
@@ -685,7 +735,7 @@ namespace VRCForge.Editor
             return current;
         }
 
-        private static VRCExpressionsMenu EnsureMenuHasRoom(VRCExpressionsMenu menu, string assetDir)
+        private static VRCExpressionsMenu EnsureMenuHasRoom(VRCExpressionsMenu menu, string assetDir, Queue<string> plannedMenuPaths)
         {
             if (menu.controls == null)
             {
@@ -706,12 +756,12 @@ namespace VRCForge.Editor
                 {
                     existingOverflow.subMenu.controls = new List<VRCExpressionsMenu.Control>();
                 }
-                return EnsureMenuHasRoom(existingOverflow.subMenu, assetDir);
+                return EnsureMenuHasRoom(existingOverflow.subMenu, assetDir, plannedMenuPaths);
             }
             AvatarAuthoringCrudCore.EnsureAssetFolder(assetDir);
             var overflow = ScriptableObject.CreateInstance<VRCExpressionsMenu>();
             overflow.controls = new List<VRCExpressionsMenu.Control>();
-            var overflowPath = AssetDatabase.GenerateUniqueAssetPath($"{assetDir}/Overflow_SubMenu.asset");
+            var overflowPath = plannedMenuPaths.Dequeue();
             AssetDatabase.CreateAsset(overflow, overflowPath);
             Undo.RegisterCreatedObjectUndo(overflow, "Create overflow submenu");
             var moved = menu.controls[menu.controls.Count - 1];
@@ -813,15 +863,21 @@ namespace VRCForge.Editor
                 var threshold = @params["threshold"]?.Value<float?>() ?? 0f;
                 var writeDefaults = @params["writeDefaults"]?.Value<bool?>() ?? true;
                 var preview = @params["preview"]?.Value<bool?>() ?? false;
-                var assetDir = AvatarAuthoringCrudCore.NormalizeAssetDir(@params["assetDir"]?.ToString() ?? "");
                 if (string.IsNullOrWhiteSpace(layerName)) return VRCForgeToolResult.Failed("layerName is required.");
                 if (string.IsNullOrWhiteSpace(stateName)) return VRCForgeToolResult.Failed("stateName is required.");
                 if (string.IsNullOrWhiteSpace(parameterName)) return VRCForgeToolResult.Failed("parameterName is required.");
 
                 var descriptor = AvatarAuthoringCrudCore.ResolveAvatarDescriptor(avatarPath);
+                var assetDir = AvatarAuthoringCrudCore.NormalizeAssetDir(@params["assetDir"]?.ToString(), descriptor.name, GeneratedAssetPaths.Controllers);
+                var animationAssetDir = AvatarAuthoringCrudCore.NormalizeAssetDir(@params["assetDir"]?.ToString(), descriptor.name, GeneratedAssetPaths.Animations);
                 var controller = AvatarAuthoringCrudCore.GetFxController(descriptor);
                 var layerExists = controller != null && controller.layers.Any(layer => string.Equals(layer.name, layerName, StringComparison.Ordinal));
-                var stateExists = layerExists && FindState(controller.layers.First(layer => layer.name == layerName).stateMachine, stateName) != null;
+                var existingState = layerExists ? FindState(controller.layers.First(layer => layer.name == layerName).stateMachine, stateName) : null;
+                var stateExists = existingState != null;
+                var plannedControllerPath = controller != null ? AssetDatabase.GetAssetPath(controller)
+                    : GeneratedAssetPaths.UniqueAssetPath($"{assetDir}/{AvatarAuthoringCrudCore.Sanitize(descriptor.name, "Avatar")}_FX.controller");
+                var clipPath = existingState?.motion != null ? AssetDatabase.GetAssetPath(existingState.motion)
+                    : GeneratedAssetPaths.UniqueAssetPath($"{animationAssetDir}/{AvatarAuthoringCrudCore.Sanitize(descriptor.name, "Avatar")}_{AvatarAuthoringCrudCore.Sanitize(layerName, "Layer")}_{AvatarAuthoringCrudCore.Sanitize(stateName, "State")}.anim");
                 var plan = new
                 {
                     action = "ensure_animator_state",
@@ -837,7 +893,10 @@ namespace VRCForge.Editor
                     willCreateFxController = controller == null,
                     willCreateLayer = !layerExists,
                     willCreateState = !stateExists,
-                    assetDir
+                    assetDir,
+                    animationAssetDir,
+                    controllerPath = plannedControllerPath,
+                    clipPath
                 };
                 if (preview)
                 {
@@ -861,7 +920,7 @@ namespace VRCForge.Editor
                     };
                     receipts.Add(descriptorReceipt);
                 }
-                controller = AvatarAuthoringCrudCore.EnsureFxController(descriptor, assetDir);
+                controller = AvatarAuthoringCrudCore.EnsureFxController(descriptor, assetDir, plannedControllerPath);
                 var controllerPath = AssetDatabase.GetAssetPath(controller);
                 transactionHandle = controllerPath;
                 controllerReceipt.Asset = controllerPath;
@@ -890,7 +949,7 @@ namespace VRCForge.Editor
                         Before = new { exists = false }
                     };
                     receipts.Add(clipReceipt);
-                    var clip = CreateEmptyClip(assetDir, descriptor.name, layerName, stateName);
+                    var clip = CreateEmptyClip(animationAssetDir, clipPath);
                     state.motion = clip;
                     clipReceipt.Asset = AssetDatabase.GetAssetPath(clip);
                 }
@@ -1082,11 +1141,9 @@ namespace VRCForge.Editor
             return true;
         }
 
-        private static AnimationClip CreateEmptyClip(string assetDir, string avatarName, string layerName, string stateName)
+        private static AnimationClip CreateEmptyClip(string assetDir, string path)
         {
             AvatarAuthoringCrudCore.EnsureAssetFolder(assetDir);
-            var path = AssetDatabase.GenerateUniqueAssetPath(
-                $"{assetDir}/{AvatarAuthoringCrudCore.Sanitize(avatarName, "Avatar")}_{AvatarAuthoringCrudCore.Sanitize(layerName, "Layer")}_{AvatarAuthoringCrudCore.Sanitize(stateName, "State")}.anim");
             var clip = new AnimationClip { name = Path.GetFileNameWithoutExtension(path) };
             AssetDatabase.CreateAsset(clip, path);
             Undo.RegisterCreatedObjectUndo(clip, "Create animator state clip");

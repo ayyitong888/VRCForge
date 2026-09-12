@@ -56,6 +56,9 @@ def preview_payload(*, generated_root_exists: bool = True) -> dict:
             "anchorFolderPath": ANCHOR_ROOT,
             "anchorFolderGuid": "8" * 32,
             "anchorFolderIdentity": "9" * 64,
+            "parentFolderPath": GENERATED_ROOT,
+            "parentFolderGuid": "6" * 32 if generated_root_exists else "",
+            "parentFolderIdentity": "7" * 64 if generated_root_exists else "",
             "assetExists": False,
             "metaExists": False,
             "createNew": True,
@@ -162,6 +165,8 @@ def test_preview_binds_exact_source_destination_and_absence_evidence() -> None:
     [
         "Assets/Avatar/Face.mat",
         f"{GENERATED_ROOT}/FinalAvatar_Face_SkinQuality_M3.mat",
+        f"{GENERATED_ROOT}/FinalAvatar/Materials/FinalAvatar_Face_SkinQuality_M3.mat",
+        "Assets/VRCForge/Generated/FinalAvatar_Face_SkinQuality_M3.mat",
     ],
 )
 def test_material_copy_preserves_create_new_identity_and_rollback(source_path: str) -> None:
@@ -273,9 +278,9 @@ def test_core_and_external_registry_include_only_the_atomic_copy_surface() -> No
     assert "AssetDatabase.CopyAsset" in tool
     assert "AssetDatabase.MoveAsset" not in tool
     assert "overwrite is not supported" in tool
-    assert "Assets/VRCForge/Generated" in tool
+    assert 'internal const string GeneratedRoot = "Assets/VRCForgeGenerated";' in tool
     assert '".mat",' in tool
-    assert 'string.Equals(Path.GetExtension(path), ".mat", StringComparison.OrdinalIgnoreCase)' in tool
+    assert "ValidateGeneratedSourceType(sourcePath, sourceType.FullName ?? sourceType.Name)" in tool
 
 
 def test_external_copy_handler_binds_the_exact_core_execution_plan() -> None:
@@ -289,6 +294,31 @@ def test_external_copy_handler_binds_the_exact_core_execution_plan() -> None:
     assert handler.approved_execution_plan_builder(canonical) == [
         (TOOL_NAME, canonical["arguments"]),
     ]
+
+
+def test_validated_copy_receipt_reaches_external_transaction_verification() -> None:
+    from agent_approval_transactions import _domain_write_receipt
+
+    canonical, _approval = bind_authoritative_preview(wrapper(), preview_payload())
+    payload = apply_payload(canonical)
+    payload["after"] = dict(payload["target"])
+    transport = dashboard_server.McpResult(
+        exit_code=0, stdout="", stderr="", payload={"data": payload}
+    )
+    with (
+        patch("dashboard_server.load_dashboard_settings"),
+        patch("dashboard_server.invoke_unity_mcp", return_value=transport),
+    ):
+        result = dashboard_server.unity_mcp_write_sync(canonical)
+
+    assert result["ok"] is True
+    receipt = _domain_write_receipt(result)
+    assert receipt.get("verified") is True
+    assert receipt.get("commitState") == "committed"
+    assert receipt.get("mutationApplied") is True
+    assert receipt.get("readback", {}).get("persisted") is True
+    assert receipt["readback"]["data"] == payload
+    assert result["result"]["payload"]["data"] == payload
 
 
 def test_strict_project_asset_copy_preserves_structured_core_failure() -> None:
@@ -369,3 +399,195 @@ def test_core_copy_retries_only_the_stable_readback_and_reports_failure_phase() 
     assert "Thread.Sleep(StableReadRetryDelayMilliseconds)" in tool
     assert 'failurePhase = "created_asset_readback"' in tool
     assert "failurePhase," in tool
+
+
+def test_generated_copy_root_is_independent_and_anchor_is_assets() -> None:
+    assert GENERATED_ROOT == "Assets/VRCForgeGenerated"
+    assert ANCHOR_ROOT == "Assets"
+
+
+def test_classified_destination_binds_parent_identity_without_renaming() -> None:
+    payload = preview_payload()
+    destination = "Assets/VRCForgeGenerated/FinalAvatar/Controllers/FinalAvatar_FT.controller"
+    parent = destination.rsplit("/", 1)[0]
+    payload["target"].update(
+        assetPath=destination,
+        generatedRootPath="Assets/VRCForgeGenerated",
+        anchorFolderPath="Assets",
+        parentFolderPath=parent,
+        parentFolderGuid="a" * 32,
+        parentFolderIdentity="b" * 64,
+    )
+    payload["previewDigest"] = compute_preview_digest(payload)
+    request = wrapper()
+    request["arguments"]["destinationAssetPath"] = destination
+
+    canonical, approval = bind_authoritative_preview(request, payload)
+
+    assert canonical["arguments"]["destinationAssetPath"] == destination
+    assert canonical["arguments"]["expectedDestinationParentFolderGuid"] == "a" * 32
+    assert canonical["arguments"]["expectedDestinationParentFolderIdentity"] == "b" * 64
+    assert approval["target"]["parentFolderPath"] == parent
+    assert approval["mutationCount"] == 1
+    assert approval["rollbackRequired"] is True
+    assert validate_apply_result(canonical["arguments"], apply_payload(canonical))["target"]["assetPath"] == destination
+
+
+@pytest.mark.parametrize("field,value", [
+    ("parentFolderPath", "Assets/VRCForgeGenerated/Other"),
+    ("parentFolderGuid", ""),
+    ("parentFolderIdentity", ""),
+])
+def test_generated_copy_preview_rejects_unbound_destination_parent(field: str, value: str) -> None:
+    payload = preview_payload()
+    payload["target"][field] = value
+    payload["previewDigest"] = compute_preview_digest(payload)
+
+    with pytest.raises(ProjectAssetCopyError):
+        bind_authoritative_preview(wrapper(), payload)
+
+
+def test_absent_root_cannot_claim_an_existing_classified_parent() -> None:
+    payload = preview_payload(generated_root_exists=False)
+    destination = f"{GENERATED_ROOT}/Avatar/Controllers/Copy.controller"
+    payload["target"].update(
+        assetPath=destination,
+        parentFolderPath=destination.rsplit("/", 1)[0],
+        parentFolderGuid="a" * 32,
+        parentFolderIdentity="b" * 64,
+    )
+    payload["previewDigest"] = compute_preview_digest(payload)
+    request = wrapper()
+    request["arguments"]["destinationAssetPath"] = destination
+
+    with pytest.raises(ProjectAssetCopyError, match="classified destination parent"):
+        bind_authoritative_preview(request, payload)
+
+
+def test_disposable_copy_fixture_exercises_root_lifecycle_and_parent_replacement() -> None:
+    fixture = Path("tests/fixtures/primitive_basis/project_asset_copy/ProjectAssetCopyFixtureProbe.cs").read_text(encoding="utf-8")
+    for fragment in (
+        'ReadAssetGuid("Assets", "anchor")',
+        'ReadDirectoryIdentity("Assets", "anchor")',
+        "first apply did not create the root",
+        "root or meta remained after cleanup",
+        "cleanup removed a nonempty generated root",
+        "replaced classified parent was accepted",
+        "cleanup removed a replacement root",
+        "source bytes, metadata, GUID or file identity changed",
+        "VRCFORGE_PROJECT_ASSET_COPY_PROBE_OK",
+    ):
+        assert fragment in fixture
+
+
+@pytest.mark.parametrize("extension,type_name", [
+    (".anim", "UnityEngine.AnimationClip"),
+    (".controller", "UnityEditor.Animations.AnimatorController"),
+    (".overridecontroller", "UnityEngine.AnimatorOverrideController"),
+])
+def test_generated_animation_copy_binds_and_verifies_exact_identity(extension, type_name):
+    source = f"{GENERATED_ROOT}/FinalAvatar/Shared/Controllers/Original{extension}"
+    destination = f"{GENERATED_ROOT}/Copy{extension}"
+    request = wrapper()
+    request["arguments"].update(sourceAssetPath=source, destinationAssetPath=destination)
+    payload = preview_payload()
+    payload["source"].update(assetPath=source, mainAssetType=type_name)
+    payload["target"]["assetPath"] = destination
+    payload["previewDigest"] = compute_preview_digest(payload)
+    canonical, approval = bind_authoritative_preview(request, payload)
+    assert canonical["arguments"]["expectedSourceMainAssetType"] == type_name
+    assert canonical["arguments"]["expectedSourceFileDigest"] == payload["source"]["fileDigest"]
+    assert canonical["arguments"]["expectedSourceObjectLayoutDigest"] == payload["source"]["objectLayoutDigest"]
+    assert canonical["arguments"]["expectedDestinationAbsent"] is True
+    assert canonical["arguments"]["overwrite"] is False
+    assert approval["rollbackRequired"] is True
+    result = apply_payload(canonical)
+    assert validate_apply_result(canonical["arguments"], result) == result
+    result["source"]["fileDigest"] = "f" * 64
+    with pytest.raises(ProjectAssetCopyError):
+        validate_apply_result(canonical["arguments"], result)
+
+
+@pytest.mark.parametrize("path", [
+    f"{GENERATED_ROOT}/Unknown.asset", f"{GENERATED_ROOT}/Script.cs",
+    "Assets/VRCForge/Generated/Legacy.anim", f"{GENERATED_ROOT}/../A.anim",
+    f"{GENERATED_ROOT}/Folder/", "Packages/Other/A.anim",
+])
+def test_source_policy_rejects_unsupported_generated_assets(path):
+    from project_asset_copy import _source_path
+    with pytest.raises(ProjectAssetCopyError):
+        _source_path(path)
+
+
+def test_generated_source_type_cannot_be_spoofed_by_extension():
+    payload = preview_payload()
+    payload["source"].update(assetPath=f"{GENERATED_ROOT}/Avatar/Fake.anim", mainAssetType="Untrusted.ScriptableAsset")
+    payload["previewDigest"] = compute_preview_digest(payload)
+    request = wrapper()
+    request["arguments"]["sourceAssetPath"] = payload["source"]["assetPath"]
+    with pytest.raises(ProjectAssetCopyError, match="type does not match"):
+        bind_authoritative_preview(request, payload)
+
+
+@pytest.mark.parametrize("path", [
+    "Assets/VRCForge/Editor/Existing.controller", "Assets/Plugins/Other/Existing.anim",
+])
+def test_existing_non_generated_authoring_source_policy_is_preserved(path):
+    from project_asset_copy import _source_path
+    assert _source_path(path) == path
+
+
+def missing_folder_preview():
+    payload = preview_payload()
+    target = payload["target"]
+    target.update(assetPath=GENERATED_ROOT + "/Avatar/Materials/Copy.controller", parentFolderPath=GENERATED_ROOT + "/Avatar/Materials", parentFolderGuid="", parentFolderIdentity="", folderCreation={"ancestorPath": GENERATED_ROOT, "ancestorGuid": target["generatedRootGuid"], "ancestorIdentity": target["generatedRootIdentity"], "paths": [GENERATED_ROOT + "/Avatar", GENERATED_ROOT + "/Avatar/Materials"]})
+    payload["previewDigest"] = compute_preview_digest(payload)
+    return payload
+
+
+def test_missing_classified_parents_are_bound_and_visible_before_copy():
+    payload = missing_folder_preview()
+    request = wrapper()
+    request["arguments"]["destinationAssetPath"] = payload["target"]["assetPath"]
+    canonical, approval = bind_authoritative_preview(request, payload)
+    assert canonical["arguments"]["expectedCreatedFolders"] == payload["target"]["folderCreation"]["paths"]
+    assert approval["target"]["folderCreation"] == payload["target"]["folderCreation"]
+    assert approval["mutationCount"] == 3
+
+
+def test_missing_parent_plan_participates_in_preview_digest():
+    payload = missing_folder_preview()
+    digest = compute_preview_digest(payload)
+    payload["target"]["folderCreation"]["ancestorIdentity"] = "a" * 64
+    assert compute_preview_digest(payload) != digest
+
+
+@pytest.mark.parametrize("mutate", [
+    lambda t: t["folderCreation"].update(paths=[GENERATED_ROOT + "/Avatar/Materials"]),
+    lambda t: t["folderCreation"].update(paths=[GENERATED_ROOT + "/Elsewhere", GENERATED_ROOT + "/Avatar/Materials"]),
+    lambda t: t["folderCreation"].update(ancestorPath="Assets/Other"),
+    lambda t: t["folderCreation"].update(ancestorGuid="a" * 32),
+    lambda t: t.update(parentFolderGuid="a" * 32),
+    lambda t: t.update(assetExists=True),
+    lambda t: t.update(metaExists=True),
+])
+def test_classified_folder_plan_rejects_unbound_or_occupied_targets(mutate):
+    payload = missing_folder_preview()
+    request = wrapper()
+    request["arguments"]["destinationAssetPath"] = payload["target"]["assetPath"]
+    mutate(payload["target"])
+    payload["previewDigest"] = compute_preview_digest(payload)
+    with pytest.raises(ProjectAssetCopyError): bind_authoritative_preview(request, payload)
+
+
+def test_classified_folder_apply_verifies_exact_created_chain():
+    payload = missing_folder_preview()
+    request = wrapper()
+    request["arguments"]["destinationAssetPath"] = payload["target"]["assetPath"]
+    canonical, _ = bind_authoritative_preview(request, payload)
+    result = apply_payload(canonical)
+    result["mutationCount"] = 3
+    result["target"]["createdFolders"] = payload["target"]["folderCreation"]["paths"]
+    assert validate_apply_result(canonical["arguments"], result)["verified"] is True
+    result["target"]["createdFolders"] = []
+    with pytest.raises(ProjectAssetCopyError): validate_apply_result(canonical["arguments"], result)

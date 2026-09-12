@@ -265,6 +265,16 @@ class ProviderStreamingTests(unittest.TestCase):
         self.assertEqual(chunks, [])
         self.assertEqual([call.get("stream", False) for call in FakeOpenAI.instances[0].chat.completions.calls], [True, False])
 
+    def test_openai_compatible_planner_requests_json_mode(self) -> None:
+        from vrchat_blendshape_agent import build_openai_compatible_request_payload
+
+        payload = build_openai_compatible_request_payload(
+            make_llm_settings("custom", model="step-3.5-flash"),
+            "planner prompt",
+        )
+
+        self.assertEqual(payload["response_format"], {"type": "json_object"})
+
     def test_openai_compatible_streams_text_chunks(self) -> None:
         class FakeCompletions:
             def __init__(self) -> None:

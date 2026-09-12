@@ -7,6 +7,7 @@ dashboard handlers.  The gateway freezes the returned calls at approval time.
 from __future__ import annotations
 
 from typing import Any
+from animation_curve_input import expand_animation_curve_sets
 
 
 SCENE_EXECUTION_PLAN_TARGETS = frozenset(
@@ -71,9 +72,13 @@ def _gameobject_target(params: dict[str, Any]) -> str:
 
 
 _AVATAR_KEYS = (
-    "action", "avatarPath", "clipPath", "bindingPath", "objectPath", "componentType", "propertyName", "sourceBindingPath", "sourceComponentType", "sourcePropertyName", "deleteSource", "overwriteExisting", "constantFloat", "keys", "parameterName", "newName", "orderNames", "valueType", "defaultValue", "saved", "networkSynced", "menuPath", "controlName", "controlIndex", "controlType", "controlFloat", "value", "iconAssetPath", "subMenuAssetPath", "createSubMenu", "subParameters", "assetDir", "controllerPath", "fxControllerPath", "layerName", "stateName", "destinationStateName", "transitionIndex", "hasExitTime", "exitTime", "duration", "canTransitionToSelf", "conditions", "parameterType", "conditionMode", "threshold", "writeDefaults", "motionClipPath", "speed", "viewPosition", "lipSync", "visemeSkinnedMeshPath", "visemeBlendShapes", "expressionParametersPath", "expressionsMenuPath", "baseAnimationLayers", "specialAnimationLayers", "eyeLookSettingsSourceAvatarPath", "eyeLookEnabled",
+    "edits",
+    "curves", "clips",
+    "sourceStateName",
+    "action", "avatarPath", "clipPath", "bindingPath", "objectPath", "componentType", "propertyName", "sourceBindingPath", "sourceComponentType", "sourcePropertyName", "deleteSource", "overwriteExisting", "constantFloat", "keys", "parameterName", "newName", "orderNames", "valueType", "defaultValue", "saved", "networkSynced", "menuPath", "controlName", "controlIndex", "controlType", "controlFloat", "value", "iconAssetPath", "subMenuAssetPath", "createSubMenu", "subParameters", "assetDir", "controllerPath", "fxControllerPath", "layerName", "stateName", "destinationStateName", "transitionIndex", "hasExitTime", "exitTime", "duration", "canTransitionToSelf", "interruptionSource", "conditions", "parameterType", "conditionMode", "threshold", "writeDefaults", "motionClipPath", "speed", "viewPosition", "lipSync", "visemeSkinnedMeshPath", "visemeBlendShapes", "expressionParametersPath", "expressionsMenuPath", "baseAnimationLayers", "specialAnimationLayers", "eyeLookSettingsSourceAvatarPath", "eyeLookEnabled",
 )
 _AVATAR_ALIASES = {
+    "sourceStateName": ("source_state_name",),
     "avatarPath": ("avatar_path",), "clipPath": ("clip_path",), "bindingPath": ("binding_path",), "componentType": ("component_type",), "propertyName": ("property_name",), "sourceBindingPath": ("source_binding_path",), "sourceComponentType": ("source_component_type",), "sourcePropertyName": ("source_property_name",), "deleteSource": ("delete_source",), "overwriteExisting": ("overwrite_existing",), "constantFloat": ("constant_float",), "parameterName": ("parameter_name",), "newName": ("new_name",), "orderNames": ("order_names",), "valueType": ("value_type",), "defaultValue": ("default_value",), "networkSynced": ("network_synced",), "menuPath": ("menu_path",), "controlName": ("control_name",), "controlIndex": ("control_index",), "controlType": ("control_type",), "controlFloat": ("control_float", "control_value"), "iconAssetPath": ("icon_asset_path",), "subMenuAssetPath": ("sub_menu_asset_path",), "createSubMenu": ("create_sub_menu",), "subParameters": ("sub_parameters",), "assetDir": ("asset_dir",), "controllerPath": ("controller_path",), "fxControllerPath": ("fx_controller_path",), "layerName": ("layer_name",), "stateName": ("state_name",), "destinationStateName": ("destination_state_name",), "transitionIndex": ("transition_index",), "hasExitTime": ("has_exit_time",), "exitTime": ("exit_time",), "canTransitionToSelf": ("can_transition_to_self",), "parameterType": ("parameter_type",), "conditionMode": ("condition_mode",), "writeDefaults": ("write_defaults",), "motionClipPath": ("motion_clip_path",), "viewPosition": ("view_position",), "visemeSkinnedMeshPath": ("viseme_skinned_mesh_path",), "visemeBlendShapes": ("viseme_blend_shapes",), "expressionParametersPath": ("expression_parameters_path",), "expressionsMenuPath": ("expressions_menu_path",), "baseAnimationLayers": ("base_animation_layers",), "specialAnimationLayers": ("special_animation_layers",), "eyeLookSettingsSourceAvatarPath": ("eye_look_settings_source_avatar_path",), "eyeLookEnabled": ("eye_look_enabled",),
 }
 
@@ -197,5 +202,7 @@ def build_scene_execution_plan(target_name: str, arguments: dict[str, Any]) -> l
 
     primitive_tools = {"vrcforge_write_avatar_descriptor": "vrc_write_avatar_descriptor", "vrcforge_write_animation_curve": "vrc_write_animation_curve", "vrcforge_manage_expression_parameters": "vrc_manage_expression_parameters", "vrcforge_manage_expression_menu": "vrc_manage_expression_menu", "vrcforge_manage_fx_animator": "vrc_manage_fx_animator"}
     if target_name in primitive_tools:
+        if target_name == "vrcforge_write_animation_curve":
+            params = expand_animation_curve_sets(params)
         return [(primitive_tools[target_name], _avatar_primitive(params))]
     raise ValueError(f"Unsupported scene execution-plan target: {target_name}")

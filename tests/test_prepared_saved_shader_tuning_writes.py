@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 import dashboard_server
+from test_shader_persisted_receipt import receipt
 from prepared_unity_execution import PREPARED_UNITY_EXECUTION_ARGUMENT_KEY, build_prepared_execution_plan
 
 
@@ -32,7 +33,7 @@ def _state() -> dict:
 
 def _core_applied_result() -> dict:
     """Match the Core's per-change identity and before/after readback."""
-    return {
+    result = {
         "appliedCount": 1,
         "applied": [
             {
@@ -44,6 +45,8 @@ def _core_applied_result() -> dict:
         ],
         "skipped": [],
     }
+
+    return receipt(result["applied"])
 
 
 def _install_history(monkeypatch: pytest.MonkeyPatch, record: dict | None = None) -> dict:
@@ -107,6 +110,8 @@ def test_preset_success_marks_linked_history_and_preset_after_core(monkeypatch: 
     monkeypatch.setattr(dashboard_server, "mark_shader_tuning_preset_applied", lambda value: metadata.append(("preset", value)))
     dashboard_server.DASHBOARD_RUNTIME.shader_undo_stack.clear()
     result = dashboard_server.apply_shader_tuning_preset_approved_sync(prepared)
+    assert result["verified"] is True and result["persistedReadback"] is True
+    assert result["commitState"] == "committed" and result["readback"]
     assert calls == ["core"]
     assert metadata == [("history", "hist"), ("preset", "preset")]
     assert result["undoDepth"] == 1
@@ -131,6 +136,8 @@ def test_metadata_failure_returns_committed_warning(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(dashboard_server, "apply_shader_material_tuning_direct", lambda *_args: _core_applied_result())
     monkeypatch.setattr(dashboard_server, "mark_shader_tuning_history_applied", lambda _value: (_ for _ in ()).throw(OSError("disk full")))
     result = dashboard_server.reapply_shader_tuning_history_approved_sync(prepared)
+    assert result["verified"] is True and result["persistedReadback"] is True
+    assert result["commitState"] == "committed" and result["readback"]
     assert result["committed"] is True
     assert result["committedWithWarning"] is True
 

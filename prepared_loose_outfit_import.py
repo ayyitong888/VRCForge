@@ -22,7 +22,7 @@ from prepared_file_imports import (
 
 
 DEFAULT_ALLOWED_SUFFIXES = frozenset({
-    ".prefab", ".mat", ".png", ".jpg", ".jpeg", ".tga", ".psd", ".exr",
+    ".prefab", ".asmdef", ".mat", ".png", ".jpg", ".jpeg", ".tga", ".psd", ".exr",
     ".fbx", ".blend", ".obj", ".asset", ".controller", ".anim",
 })
 DEFAULT_MAX_FILES = 5_000
@@ -175,7 +175,12 @@ def execute_loose_outfit_import(plan: dict[str, Any]) -> dict[str, Any]:
                 owned_parent_relatives.add(relative_directory)
                 owned_parent_identities[relative_directory] = directory_identity
             copied.append(str(item.get("target", {}).get("targetRelativePath") or ""))
-        return {"ok": True, "copiedFiles": copied, "copiedFileCount": len(copied)}
+        # Later Unity validation can fail without undoing these completed copies.
+        return {
+            "ok": True, "copiedFiles": copied, "copiedFileCount": len(copied),
+            "mutationStarted": True, "mutationApplied": True, "committed": True,
+            "commitState": "complete", "commitStateKnown": True,
+        }
     except Exception as exc:
         cleanup_errors: list[str] = []
         for target, ownership in reversed(created):

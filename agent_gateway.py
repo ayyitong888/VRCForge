@@ -65,6 +65,7 @@ from agent_question_service import (
     AgentQuestionScopePorts,
     AgentQuestionService,
     GoalQuestionResolutionPort,
+    RuntimeQuestionResolutionPort,
 )
 from desktop_computer_use_service import DesktopComputerUsePorts, DesktopComputerUseService
 from desktop_worker import DesktopActionBrokerError
@@ -149,6 +150,7 @@ ApprovedUnityExecutionPlanBuilder = Callable[
     [dict[str, Any]],
     Sequence[tuple[str, dict[str, Any]]],
 ]
+PreWriteCheckpointPolicy = bool | Callable[[Mapping[str, Any]], bool]
 
 RUNTIME_SKILL_SUPPORT_MAX_FILES = 16
 RUNTIME_SKILL_SUPPORT_MAX_FILE_BYTES = 64 * 1024
@@ -379,7 +381,7 @@ class AgentWriteHandler:
     # transaction outside an existing Unity project (for example, creation of
     # a brand-new project at an absent path). Existing project writes keep the
     # default checkpoint requirement.
-    pre_write_checkpoint_required: bool = True
+    pre_write_checkpoint_required: PreWriteCheckpointPolicy = True
 
 
 @dataclass
@@ -2021,6 +2023,7 @@ class AgentGateway:
         runtime_turn_completed: Callable[[dict[str, Any]], None] | None = None,
         runtime_status_changed: Callable[[dict[str, Any]], None] | None = None,
         runtime_timeline_changed: Callable[[dict[str, Any]], None] | None = None,
+        load_mcp_resources: bool = True,
     ) -> None:
         self.config_path = config_path
         self.audit_dir = audit_dir
@@ -2054,15 +2057,21 @@ class AgentGateway:
         # One process-owned registry backs the internal Agent and both MCP
         # protocol projections. Files live under the existing local audit
         # authority; access remains gated by the Gateway bearer boundary.
-        self._mcp_resources = McpResourceRegistry(
-            self.audit_dir / "mcp-resources",
-            lock=self._lock,
-        )
+        # STDIO bridge processes proxy the already-running HTTP Gateway and do
+        # not serve Resource endpoints themselves, so they must not load the
+        # potentially large on-disk registry during bridge startup.
+        self._mcp_resources: McpResourceRegistry | None = None
+        if load_mcp_resources:
+            self._mcp_resources = McpResourceRegistry(
+                self.audit_dir / "mcp-resources",
+                lock=self._lock,
+            )
         self._runtime_shell_completion_ids: set[str] = set()
         self._runtime_shell_completion_order: list[str] = []
         self._runtime_continuation_accepting = True
         self._runtime_continuations_inflight: set[str] = set()
         self._runtime_continuation_condition = threading.Condition(self._lock)
+        self._question_continuations_inflight: set[str] = set()
         self._tool_agent_context: contextvars.ContextVar[str] = contextvars.ContextVar(
             "vrcforge_tool_agent",
             default="",
@@ -2139,6 +2148,16 @@ class AgentGateway:
                     question_id,
                     continuation_prompt=continuation_prompt,
                 )
+            ),
+            RuntimeQuestionResolutionPort(
+                resolve=lambda question_id, task_seed, continuation_prompt: self._resume_runtime_task_after_question(
+                    question_id,
+                    task_seed,
+                    continuation_prompt,
+                ),
+                interrupt=lambda question_id, seed, summary: self.record_interrupted_runtime_task(
+                    task_seed=dict(seed), continuation_source="question_answered", owned_id=question_id, summary=summary,
+                ),
             ),
         )
         # In-progress approved writes, keyed by approval id. This is a global,
@@ -2557,6 +2576,7 @@ class AgentGateway:
             if tool.name in {
                 "vrcforge_delegate_subagent",
                 "vrcforge_vision_audit_multi",
+                "vrcforge_ask_user",
             }:
                 tool_params = dict(tool_params)
                 tool_params["_runtimeTaskLinkAuthority"] = _RUNTIME_TASK_LINK_AUTHORITY
@@ -2711,6 +2731,133 @@ class AgentGateway:
     def questions(self) -> AgentQuestionService:
         return self._questions
 
+    def create_runtime_question(self, params: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        """Create a Question with a task seed supplied only by the runtime loop."""
+        values = dict(params or {})
+        # Reserved continuation fields are never accepted from callers,
+        # including when the authority marker is absent or forged.
+        seed, runtime_session_id = self.consume_runtime_task_link(values)
+        for key in ("_runtimeTaskSeed", "_runtimeTaskId", "_runtimeSessionId", "_runtimeClientTurnId"):
+            values.pop(key, None)
+        if isinstance(seed, Mapping) and seed:
+            # The runtime snapshot is the sole source of continuation scope;
+            # model or external params cannot relabel the owning session,
+            # project, client turn, or task.
+            values["sessionId"] = str(seed.get("sessionId") or runtime_session_id or "").strip()
+            values["projectRoot"] = str(seed.get("projectRoot") or values.get("projectRoot") or "").strip()
+            values["_runtimeTaskSeed"] = dict(seed)
+            values["_runtimeSessionId"] = runtime_session_id
+            values["_runtimeClientTurnId"] = str(seed.get("clientTurnId") or "")
+        return self.questions.create(values)
+
+    def _resume_runtime_task_after_question(
+        self,
+        question_id: str,
+        task_seed: Mapping[str, Any],
+        continuation_prompt: str,
+    ) -> Mapping[str, Any] | None:
+        """Queue one scope-bound continuation; app shutdown owns and drains it.
+
+        The authenticated App answer is the authority. This finite worker uses
+        the original task's provider budget and existing supervised tools only.
+        It opens no listener and never borrows a later turn's scope.
+        """
+        stable_id = str(question_id or "").strip()
+        with self._lock:
+            if not self._runtime_continuation_accepting or stable_id in self._question_continuations_inflight:
+                return {"ok": False, "status": "deferred", "questionId": stable_id}
+            self._question_continuations_inflight.add(stable_id)
+        def run() -> None:
+            try:
+                if not self.questions.claim_runtime_continuation(stable_id):
+                    return
+                if self._runtime_session_state.cancel_requested(
+                    session_id=str(task_seed.get("sessionId") or ""),
+                    turn_id=str(task_seed.get("turnId") or ""),
+                    client_turn_id=str(task_seed.get("clientTurnId") or ""),
+                ):
+                    raise AgentGatewayError("The original task was stopped; the answer was saved.", status_code=409)
+                result = self._dispatch_runtime_task_after_question(stable_id, task_seed, continuation_prompt)
+                if result is None:
+                    raise AgentGatewayError("The Question has no resumable task context.", status_code=409)
+                self.questions.record_runtime_continuation(stable_id, "delivered")
+                try:
+                    self._runtime_turn_completed(result)
+                except Exception:  # noqa: BLE001 - the durable turn is replayed on reconnect.
+                    pass
+            except Exception as exc:  # noqa: BLE001 - durable failure marker for bounded recovery.
+                self.questions.record_runtime_continuation(stable_id, "interrupted", error=summarize_text(str(exc), 500))
+                self.record_interrupted_runtime_task(
+                    task_seed=dict(task_seed), continuation_source="question_answered", owned_id=stable_id,
+                    summary="Your answer was saved, but the task continuation stopped. " + summarize_text(str(exc), 500),
+                )
+            finally:
+                with self._lock:
+                    self._question_continuations_inflight.discard(stable_id)
+                    self._runtime_continuation_condition.notify_all()
+        try:
+            threading.Thread(target=run, name="vrcforge-question-continuation", daemon=True).start()
+        except Exception:
+            with self._lock:
+                self._question_continuations_inflight.discard(stable_id)
+                self._runtime_continuation_condition.notify_all()
+            raise
+        return {"ok": True, "status": "queued", "questionId": stable_id}
+
+    def _dispatch_runtime_task_after_question(
+        self,
+        question_id: str,
+        task_seed: Mapping[str, Any],
+        continuation_prompt: str,
+    ) -> Mapping[str, Any] | None:
+        """Resume one foreground task through the existing planner continuation path."""
+        seed = dict(task_seed or {})
+        task_context = approval_task_context(seed, tool="vrcforge_ask_user", arguments=ensure_dict(seed.get("requestedArguments")))
+        if task_context is None:
+            return None
+        task_context["continueAfterApproval"] = True
+        completion = {
+            "actionId": seed.get("requestedActionId") or "",
+            "kind": seed.get("requestedKind") or "skill",
+            "tool": seed.get("requestedTool") or "vrcforge_ask_user",
+            "status": "completed",
+            "outcome": {
+                "status": "completed",
+                "summary": "The user answered the pending Question.",
+                "questionId": question_id,
+            },
+        }
+        prepared = prepare_approval_task_continuation(
+            {"id": question_id, "taskContext": task_context, "agentName": seed.get("agentName")},
+            {"status": "applied", "taskCompletion": completion, "result": {"questionId": question_id}},
+        )
+        if prepared is None:
+            return None
+        params = ensure_dict(prepared.get("params"))
+        params["clientTurnId"] = (str(seed.get("clientTurnId") or "") + ":question:" + question_id)[:240]
+        params["message"] = str(seed.get("objective") or "") + "\n" + continuation_prompt
+        continuation = ensure_dict(prepared.get("taskContinuation"))
+        continuation["source"] = "question_answered"
+        continuation["plannerObservation"] = {
+            "tool": "vrcforge_ask_user", "kind": "skill", "status": "completed",
+            "result": {"questionId": question_id, "answer": continuation_prompt},
+        }
+        self._signal_background_activity("question_task_continuation")
+        agent_name = str(prepared.get("agentName") or "desktop-agent")
+        try:
+            with self.runtime_planner.bind_turn(params) as metadata:
+                params["_contextCompactionLimit"] = metadata.verified_context_limit
+                params["_plannerAttemptLabel"] = metadata.planner_label
+                with self._desktop.runtime_turn_context(params):
+                    return self._runtime_message_impl(
+                        params,
+                        agent_name=agent_name,
+                        task_continuation=continuation,
+                        continuation_shutdown_guard=True,
+                    )
+        except DesktopActionBrokerError as exc:
+            raise AgentGatewayError(str(exc), status_code=exc.status_code) from exc
+
     @property
     def runtime_sessions(self) -> AgentRuntimeSessionState:
         return self._runtime_session_state
@@ -2799,7 +2946,7 @@ class AgentGateway:
         """Open continuation admission for one app-owned backend lifecycle."""
 
         with self._lock:
-            if self._runtime_continuations_inflight:
+            if self._runtime_continuations_inflight or self._question_continuations_inflight:
                 raise RuntimeError("Cannot restart runtime continuations while work is active.")
             self._runtime_continuation_accepting = True
 
@@ -2815,12 +2962,12 @@ class AgentGateway:
         deadline = time.monotonic() + min(timeout, 30.0)
         with self._lock:
             self._runtime_continuation_accepting = False
-            while self._runtime_continuations_inflight:
+            while self._runtime_continuations_inflight or self._question_continuations_inflight:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     break
                 self._runtime_continuation_condition.wait(remaining)
-            timed_out = sorted(self._runtime_continuations_inflight)
+            timed_out = sorted(self._runtime_continuations_inflight | self._question_continuations_inflight)
         return {
             "ok": not timed_out,
             "shutdown": True,
@@ -3323,92 +3470,94 @@ class AgentGateway:
         ).strip()
         if not operation_id:
             operation_id = f"resource_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')}_{secrets.token_hex(4)}"
-        receipt = self._mcp_resources.publish(
-            base_uri=f"vrcforge://operation/{operation_id}/receipt",
-            name=f"{tool_name} operation receipt",
-            description="Immutable result captured from the shared Gateway Tool execution path.",
-            resource_type="operation_receipt",
-            data={
+        entries = [{
+            "base_uri": f"vrcforge://operation/{operation_id}/receipt",
+            "name": f"{tool_name} operation receipt",
+            "description": "Immutable result captured from the shared Gateway Tool execution path.",
+            "resource_type": "operation_receipt",
+            "data": {
                 "tool": tool_name,
                 "operationId": operation_id,
                 "executionTargetDigest": result.get("executionTargetDigest"),
                 "result": self._external_mcp_visible_value(result),
             },
-            identity=identity,
-            source_mode=source_mode,
-            refresh_rule="Immutable; invoke the Tool again to capture a new operation revision.",
-        )
+            "identity": identity, "source_mode": source_mode,
+            "refresh_rule": "Immutable; invoke the Tool again to capture a new operation revision.",
+            "stale": target is None,
+            "stale_reason": "execution_target_missing" if target is None else "",
+        }]
         lowered_name = tool_name.casefold()
         if target is not None:
             snapshot_scope = str(target.get("scope") or "project")
             snapshot_id = stable_hash(
                 f"{target.get('namespace') or execution_target_digest(target)}:{tool_name}"
             )
-            self._mcp_resources.publish(
-                base_uri=f"vrcforge://snapshot/{snapshot_scope}/{snapshot_id}",
-                name=f"{tool_name} Unity snapshot",
-                description="Identity-bound Tool result captured without any implicit Resource read scan.",
-                resource_type="unity_snapshot",
-                data={
+            entries.append({
+                "base_uri": f"vrcforge://snapshot/{snapshot_scope}/{snapshot_id}",
+                "name": f"{tool_name} Unity snapshot",
+                "description": "Identity-bound Tool result captured without any implicit Resource read scan.",
+                "resource_type": "unity_snapshot",
+                "data": {
                     "tool": tool_name,
                     "sourceOperationId": operation_id,
                     "result": self._external_mcp_visible_value(result),
                 },
-                identity=identity,
-                source_mode=source_mode,
-                refresh_rule="Invoke the corresponding read Tool with a fresh ExecutionTarget.",
-            )
+                "identity": identity, "source_mode": source_mode,
+                "refresh_rule": "Invoke the corresponding read Tool with a fresh ExecutionTarget.",
+                "stale": target is None,
+                "stale_reason": "execution_target_missing" if target is None else "",
+            })
         if "checkpoint" in lowered_name or "diff" in lowered_name or "restore" in lowered_name:
-            self._mcp_resources.publish(
-                base_uri=f"vrcforge://checkpoint/{operation_id}/diff",
-                name=f"{tool_name} checkpoint evidence",
-                description="Checkpoint or diff evidence captured by the explicit Tool call.",
-                resource_type="checkpoint_diff",
-                data={"tool": tool_name, "sourceOperationId": operation_id, "result": self._external_mcp_visible_value(result)},
-                identity=identity,
-                source_mode=source_mode,
-                refresh_rule="Invoke an explicit checkpoint or diff Tool; resources/read never restores state.",
-            )
+            entries.append({"base_uri": f"vrcforge://checkpoint/{operation_id}/diff",
+                "name": f"{tool_name} checkpoint evidence",
+                "description": "Checkpoint or diff evidence captured by the explicit Tool call.",
+                "resource_type": "checkpoint_diff",
+                "data": {"tool": tool_name, "sourceOperationId": operation_id, "result": self._external_mcp_visible_value(result)},
+                "identity": identity, "source_mode": source_mode,
+                "refresh_rule": "Invoke an explicit checkpoint or diff Tool; resources/read never restores state.",
+                "stale": target is None,
+                "stale_reason": "execution_target_missing" if target is None else ""})
         if any(marker in lowered_name for marker in ("menu", "parameter", "animator", "controller", "control_graph")):
-            self._mcp_resources.publish(
-                base_uri=f"vrcforge://control-graph/{operation_id}",
-                name=f"{tool_name} control graph",
-                description="Menu, parameter or animation graph evidence captured by the explicit Tool call.",
-                resource_type="control_graph",
-                data={"tool": tool_name, "sourceOperationId": operation_id, "result": self._external_mcp_visible_value(result)},
-                identity=identity,
-                source_mode=source_mode,
-                refresh_rule="Invoke the corresponding control-graph read Tool.",
-            )
+            entries.append({"base_uri": f"vrcforge://control-graph/{operation_id}",
+                "name": f"{tool_name} control graph",
+                "description": "Menu, parameter or animation graph evidence captured by the explicit Tool call.",
+                "resource_type": "control_graph",
+                "data": {"tool": tool_name, "sourceOperationId": operation_id, "result": self._external_mcp_visible_value(result)},
+                "identity": identity, "source_mode": source_mode,
+                "refresh_rule": "Invoke the corresponding control-graph read Tool.",
+                "stale": target is None,
+                "stale_reason": "execution_target_missing" if target is None else ""})
         if "gesture_manager" in lowered_name:
-            self._mcp_resources.publish(
-                base_uri=f"vrcforge://gesture-manager/{operation_id}/runtime",
-                name=f"{tool_name} Gesture Manager runtime",
-                description="Gesture Manager runtime evidence captured by the explicit Tool call.",
-                resource_type="gm_runtime",
-                data={"tool": tool_name, "sourceOperationId": operation_id, "result": self._external_mcp_visible_value(result)},
-                identity=identity,
-                source_mode=source_mode,
-                refresh_rule="Invoke an explicit Gesture Manager status or test Tool.",
-            )
+            entries.append({"base_uri": f"vrcforge://gesture-manager/{operation_id}/runtime",
+                "name": f"{tool_name} Gesture Manager runtime",
+                "description": "Gesture Manager runtime evidence captured by the explicit Tool call.",
+                "resource_type": "gm_runtime",
+                "data": {"tool": tool_name, "sourceOperationId": operation_id, "result": self._external_mcp_visible_value(result)},
+                "identity": identity, "source_mode": source_mode,
+                "refresh_rule": "Invoke an explicit Gesture Manager status or test Tool.",
+                "stale": target is None,
+                "stale_reason": "execution_target_missing" if target is None else ""})
         identity_resource = None
         if target is not None:
-            identity_resource = self._mcp_resources.publish(
-                base_uri="vrcforge://session/current/identity",
-                name="Current MCP session identity lock",
-                description="Exact ExecutionTarget last verified by the shared Gateway Tool path.",
-                resource_type="session_identity_lock",
-                data={
+            identity_entry_index = len(entries)
+            entries.append({"base_uri": "vrcforge://session/current/identity",
+                "name": "Current MCP session identity lock",
+                "description": "Exact ExecutionTarget last verified by the shared Gateway Tool path.",
+                "resource_type": "session_identity_lock",
+                "data": {
                     "status": "bound",
                     "exactExecutionTarget": dict(target),
                     "executionTargetDigest": execution_target_digest(target),
                     "sourceOperationId": operation_id,
                 },
-                identity=identity,
-                source_mode=source_mode,
-                refresh_rule="Replaced only by a later explicit identity-bound Tool operation.",
-            )
+                "identity": identity, "source_mode": source_mode,
+                "refresh_rule": "Replaced only by a later explicit identity-bound Tool operation."})
+        records = self._mcp_resources.publish_many(entries)
+        receipt = records[0]
+        if target is not None:
+            identity_resource = records[identity_entry_index]
         if isinstance(result, dict):
+            result["operationResource"] = receipt["uri"]
             result["resources"] = {
                 "status": "available",
                 "operationReceiptUri": receipt["uri"],
@@ -3534,6 +3683,7 @@ class AgentGateway:
             "integrations/modular-avatar": "Modular Avatar inspection, Setup Outfit, and atomic component authoring.",
             "integrations/vrcfury": "VRCFury inspection and public-API-backed Toggle or Armature Link authoring.",
             "integrations/gesture-manager": "Gesture Manager Play Mode status, menu identity, and atomic runtime parameters.",
+            "behavior/interaction_generated_systems": "Generated interaction systems runtime observation and state.",
             "skills": "Installed user Skills and package operations; expand this branch before loading one family.",
             "skills/installed": "Discover, read, and safely create enabled user Skills in the shared registry.",
             "skills/vsk": "Skill capture previews, approved source/package creation, and .vsk import/export.",
@@ -3970,6 +4120,11 @@ class AgentGateway:
                 fallback_summary=tool.description,
                 write=False,
             )
+            if tool.name == "vrcforge_gesture_manager_status" and isinstance(raw_result, Mapping):
+                self.approval_transactions.reconcile_gesture_manager_pending_recovery(
+                    params,
+                    raw_result,
+                )
             if isinstance(params.get("executionTarget"), Mapping):
                 outcome["executionTargetDigest"] = execution_target_digest(params["executionTarget"])
             outcome_status = str(outcome.get("status") or "failed")
@@ -4025,7 +4180,7 @@ class AgentGateway:
                     failure_phase="tool_returned_rejection",
                     operation_kind="read",
                     tool=tool.name,
-                    tool_routing_started=True,
+                    tool_routing_started=outcome.get("toolRoutingStarted", True),
                     mutation_started=False,
                     committed=False,
                     retryable=False,
@@ -4119,9 +4274,11 @@ class AgentGateway:
             and arguments.get("preview") is not True
         )
         required = required or tool_name in {"vrcforge_get_property"}
-        if not required:
-            return None
         target = arguments.get("executionTarget")
+        # Optional read targets need verification for Resource provenance.
+        # Writes keep their existing domain-owned approval/preparation path.
+        if not required and (target is None or write_handler is not None):
+            return None
         project_root = arguments.get("projectPath") or arguments.get("projectRoot")
         if not isinstance(target, Mapping):
             raise AgentGatewayError(
@@ -4133,7 +4290,11 @@ class AgentGateway:
             return validate_runtime_execution_target(
                 target,
                 project_root=str(project_root or ""),
-                required_scope=identity_scope(tool_name, write=bool(write_handler)),
+                required_scope=(
+                    identity_scope(tool_name, write=bool(write_handler), arguments=arguments)
+                    if required
+                    else str(target.get("scope") or "project")
+                ),
             )
         except ExecutionTargetError as exc:
             raise AgentGatewayError(
@@ -4796,6 +4957,7 @@ class AgentGateway:
             "operationId",
             "executionTargetDigest",
             "commitState",
+            "committed",
             "mutationStarted",
             "mutationApplied",
             "persistenceState",
@@ -4810,9 +4972,31 @@ class AgentGateway:
             "message",
             "errorDetails",
             "consoleVerification",
+            "completionVerification",
         ):
             if key in applied:
-                payload[key] = self._external_mcp_visible_value(applied[key])
+                value = applied[key]
+                # Preserve explicit outer facts, but repair an absent/unknown projection
+                # from the validated normalized Core outcome.
+                if key in {"commitState", "mutationStarted", "committed"}:
+                    outcome_value = outcome.get(key)
+                    if outcome_value in (None, "", "unknown") and isinstance(outcome.get("data"), Mapping):
+                        outcome_value = outcome["data"].get(key)
+                    if value in (None, "", "unknown") and outcome_value not in (None, "", "unknown"):
+                        value = outcome_value
+                payload[key] = self._external_mcp_visible_value(value)
+        # The transaction owner persists the full checkpoint and recovery
+        # records, but the external receipt needs only bounded identifiers and
+        # lifecycle facts.  The complete records remain available through the
+        # existing checkpoint/recovery read tools.
+        checkpoint = self._external_mcp_checkpoint_projection(applied.get("checkpoint"))
+        if checkpoint is not None:
+            payload["checkpoint"] = checkpoint
+            payload["checkpointId"] = checkpoint.get("id", "")
+        recovery = self._external_mcp_recovery_projection(applied.get("recovery"))
+        if recovery is not None:
+            payload["recovery"] = recovery
+            payload["recoveryId"] = recovery.get("id", "")
         if outcome_status == "failed" and "errorDetails" not in payload:
             error_object = build_external_tool_error(
                 error=payload.get("error") or "External MCP write was rejected.",
@@ -4858,6 +5042,29 @@ class AgentGateway:
                 outcome_projection["executionTargetDigest"] = payload["executionTargetDigest"]
             payload["outcome"] = outcome_projection
         return redact_sensitive(payload)
+
+    @staticmethod
+    def _external_mcp_checkpoint_projection(value: Any) -> dict[str, Any] | None:
+        if not isinstance(value, Mapping):
+            return None
+        allowed = (
+            "schema", "id", "createdAt", "operationId", "targetTool", "status",
+            "projectRoot", "restoreTool", "resolveTool", "blockingWrites",
+        )
+        projected = {key: value[key] for key in allowed if key in value}
+        return projected if projected.get("id") else None
+
+    @staticmethod
+    def _external_mcp_recovery_projection(value: Any) -> dict[str, Any] | None:
+        if not isinstance(value, Mapping):
+            return None
+        allowed = (
+            "schema", "id", "status", "resolution", "createdAt", "resolvedAt",
+            "operationId", "targetTool", "projectRoot", "checkpointId",
+            "restoreTool", "resolveTool", "blockingWrites",
+        )
+        projected = {key: value[key] for key in allowed if key in value}
+        return projected if projected.get("id") else None
 
     def call_tool(
         self,
@@ -4949,7 +5156,7 @@ class AgentGateway:
                         failure_phase="tool_returned_rejection",
                         operation_kind="write" if tool.write else "read",
                         tool=name,
-                        tool_routing_started=True,
+                        tool_routing_started=outcome.get("toolRoutingStarted", True),
                         mutation_started=(None if tool.write else False),
                         committed=(None if tool.write else False),
                         raw_result=result,
@@ -5246,14 +5453,14 @@ class AgentGateway:
 
         seed = task_seed if isinstance(task_seed, dict) else {}
         source = str(continuation_source or "").strip()
-        if source not in {"shell_process_finished", "sub_agent_finished"}:
+        if source not in {"shell_process_finished", "sub_agent_finished", "question_answered"}:
             return None
         session_id = str(seed.get("sessionId") or "").strip()[:180]
         stable_id = str(owned_id or "").strip()[:100]
         if not session_id or not stable_id:
             return None
         original_client_turn_id = str(seed.get("clientTurnId") or "").strip()
-        suffix = "shell" if source == "shell_process_finished" else "subagent"
+        suffix = {"shell_process_finished": "shell", "sub_agent_finished": "subagent", "question_answered": "question"}[source]
         client_turn_id = (
             f"{original_client_turn_id}:{suffix}:{stable_id}"
             if original_client_turn_id
@@ -6801,6 +7008,24 @@ class AgentGateway:
                         provider_request_count=prior_provider_request_count + int(context_usage.get("requestCount") or 0),
                         continue_after_approval=bool(plan.get("continueLoop")),
                     )
+                if step_tool == "vrcforge_ask_user":
+                    for key in ("_runtimeTaskLinkAuthority", "_taskSeed", "_runtimeTaskSeed", "_runtimeTaskId", "_runtimeSessionId", "_runtimeClientTurnId"):
+                        step_params.pop(key, None)
+                    step_params["sessionId"] = session_id
+                    step_params["projectRoot"] = project_root
+                    step_params["goalDeliveryId"] = goal_delivery_id
+                if step_tool == "vrcforge_ask_user" and not goal_delivery_id:
+                    step_params["_runtimeSessionId"] = session_id
+                    step_params["_runtimeClientTurnId"] = client_turn_id
+                    step_params["_taskSeed"] = task_loop.approval_seed(
+                        tool_calls_used=tool_calls_used,
+                        exposure_layer=runtime_exposure_layer,
+                        requested_kind="skill",
+                        requested_tool=step_tool,
+                        requested_arguments=action_arguments,
+                        provider_request_count=prior_provider_request_count + int(context_usage.get("requestCount") or 0),
+                        continue_after_approval=bool(plan.get("continueLoop")),
+                    )
                 if (
                     step_tool == "vrcforge_agent_desktop_action"
                     or step_tool.startswith("vrcforge_progress_")
@@ -7577,6 +7802,7 @@ class AgentGateway:
             turn_id=turn_id,
             client_turn_id=client_turn_id,
         )
+        self.questions.cancel_runtime_questions(session_id=session_id, turn_id=turn_id, client_turn_id=client_turn_id)
         event = {
             "event": "runtime_turn_cancel_requested",
             "status": "cancel_requested",

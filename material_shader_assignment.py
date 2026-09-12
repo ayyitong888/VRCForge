@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import material_keyword_edit
+import material_property_edit
 import hashlib
+import json
 import re
 from copy import deepcopy
 from pathlib import PurePosixPath
@@ -14,6 +17,10 @@ TOOL_NAME = "vrc_set_material_shader"
 MAX_IMPACT_ITEMS = 128
 MAX_DEPENDENCY_CANDIDATES = 4096
 REQUEST_ARGUMENT_KEYS = (
+    "propertyChanges",
+    "renderQueue",
+    "keywordChanges",
+    "assignments",
     "rendererPath",
     "rendererComponentId",
     "materialAssetPath",
@@ -30,15 +37,32 @@ class MaterialShaderAssignmentError(ValueError):
     pass
 
 
+def _keyword_call(fn, *args):
+    try:
+        return fn(*args)
+    except ValueError as exc:
+        raise MaterialShaderAssignmentError(str(exc)) from exc
+
+
 def build_wrapper_arguments(params: dict[str, Any]) -> dict[str, Any]:
     wrapper = deepcopy(params or {})
+    if "assignments" in wrapper:
+        _batch_rows(wrapper)
     nested = wrapper.get("arguments")
     if not isinstance(nested, dict):
         nested = wrapper.get("params")
     if "targetShader" in wrapper or (isinstance(nested, dict) and "targetShader" in nested):
         raise MaterialShaderAssignmentError("targetShader is unsupported; use shaderName.")
+    if isinstance(nested, dict) and any(key in wrapper for key in ("propertyChanges", "renderQueue")):
+        _keyword_call(material_property_edit.request, {**{key: wrapper[key] for key in REQUEST_ARGUMENT_KEYS if key in wrapper}, **nested})
+        if any(key in wrapper and nested.get(key) != wrapper[key] for key in ("propertyChanges", "renderQueue")):
+            raise MaterialShaderAssignmentError("Outer property edits differ from nested arguments.")
     if not isinstance(nested, dict):
         nested = {key: wrapper[key] for key in REQUEST_ARGUMENT_KEYS if key in wrapper}
+    if "propertyChanges" in nested or "renderQueue" in nested:
+        _keyword_call(material_property_edit.request, nested)
+    if "keywordChanges" in nested:
+        _keyword_call(material_keyword_edit.request, nested)
     for key in REQUEST_ARGUMENT_KEYS:
         wrapper.pop(key, None)
     wrapper.pop("params", None)
@@ -49,9 +73,15 @@ def build_wrapper_arguments(params: dict[str, Any]) -> dict[str, Any]:
 
 
 def build_preview_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
+    if isinstance(arguments, dict) and ("propertyChanges" in arguments or "renderQueue" in arguments):
+        return _keyword_call(material_property_edit.preview, arguments)
+    if isinstance(arguments, dict) and "keywordChanges" in arguments:
+        return _keyword_call(material_keyword_edit.preview, arguments)
     request = arguments if isinstance(arguments, dict) else {}
     if "targetShader" in request:
         raise MaterialShaderAssignmentError("targetShader is unsupported; use shaderName.")
+    if "assignments" in request:
+        _batch_rows(request)
     preview_arguments = {
         key: deepcopy(request[key])
         for key in REQUEST_ARGUMENT_KEYS
@@ -71,6 +101,13 @@ def bind_authoritative_preview(
         nested = wrapper_arguments.get("params")
     if not isinstance(nested, dict):
         raise MaterialShaderAssignmentError("Material shader arguments are required.")
+
+    if "propertyChanges" in nested or "renderQueue" in nested:
+        return _keyword_call(material_property_edit.bind, wrapper_arguments, payload)
+    if "keywordChanges" in nested:
+        return _keyword_call(material_keyword_edit.bind, wrapper_arguments, payload)
+    if "assignments" in nested:
+        return _bind_batch(wrapper_arguments, nested, payload)
 
     requested_shader = _bounded_text(
         nested.get("shaderName"),
@@ -673,3 +710,97 @@ def _safe_asset_path(
     if suffixes and not any(lowered.endswith(item.lower()) for item in suffixes):
         raise MaterialShaderAssignmentError(f"{label} has an unsupported file type.")
     return path
+
+
+def _batch_size(value: Any) -> None:
+    if len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) > 512 * 1024:
+        raise MaterialShaderAssignmentError("Sealed shader batch exceeds 512 KiB.")
+
+
+def _batch_rows(arguments: dict[str, Any]) -> list[dict[str, str]]:
+    if any(key in arguments for key in REQUEST_ARGUMENT_KEYS if key != "assignments") or arguments.get("saveAssets") is False:
+        raise MaterialShaderAssignmentError("Batch assignments cannot include single fields or disable saving.")
+    rows = arguments.get("assignments")
+    if not isinstance(rows, list) or not 1 <= len(rows) <= 128:
+        raise MaterialShaderAssignmentError("assignments requires 1..128 rows.")
+    paths = set()
+    for row in rows:
+        if not isinstance(row, dict) or set(row) - {"materialAssetPath", "shaderName", "shaderAssetPath"}:
+            raise MaterialShaderAssignmentError("Shader batch accepts only pure asset selectors.")
+        path = _safe_asset_path(row.get("materialAssetPath"), label="materialAssetPath", roots=("Assets",), suffix=".mat")
+        _bounded_text(row.get("shaderName"), label="shaderName", max_length=512)
+        if "shaderAssetPath" in row: _optional_asset_path(row["shaderAssetPath"], label="shaderAssetPath", roots=("Assets", "Packages"))
+        if path.casefold() in paths: raise MaterialShaderAssignmentError("Duplicate shader batch material.")
+        paths.add(path.casefold())
+    _batch_size(arguments)
+    return deepcopy(rows)
+
+
+def _batch_digest(previews: list[dict[str, Any]]) -> str:
+    fields = ("materialAssetPath", "materialAssetGuid", "materialFileDigestBefore", "beforeShader", "beforeShaderAssetPath", "beforeShaderAssetGuid", "requestedShader", "shaderAssetPath", "shaderAssetGuid", "sharedImpactDigest")
+    text = "vrcforge.material_shader_batch.v1:"
+    for row in previews:
+        for key in fields:
+            value = str(row.get(key) or "")
+            text += str(len(value.encode("utf-8"))) + ":" + value
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _bind_batch(wrapper: dict[str, Any], nested: dict[str, Any], payload: Any) -> tuple[dict[str, Any], dict[str, Any]]:
+    rows = _batch_rows(nested)
+    result = _require_dict(payload, "shader batch preview")
+    if result.get("schema") != ASSIGNMENT_SCHEMA or any(result.get(k) is not v for k,v in {"batch":True,"ok":True,"preview":True,"verified":True,"saved":False,"changed":False}.items()):
+        raise MaterialShaderAssignmentError("Shader batch preview lacks verification.")
+    previews = result.get("assignments")
+    if not isinstance(previews, list) or len(previews) != len(rows): raise MaterialShaderAssignmentError("Shader preview count differs.")
+    for row, preview in zip(rows, previews):
+        bind_authoritative_preview({"toolName":TOOL_NAME,"arguments":row},preview)
+    digest = _batch_digest(previews)
+    if digest != result.get("previewDigest"): raise MaterialShaderAssignmentError("Shader batch digest differs.")
+    arguments = {"assignments": rows,"preview":False,"saveAssets":True,"expectedProjectPath":nested.get("expectedProjectPath") or wrapper.get("projectPath"),"expectedPreviewDigest":digest,"expectedAssignments":deepcopy(previews)}
+    for envelope in (wrapper,nested):
+        for key,value in envelope.items():
+            if key.startswith("expected") and (key not in arguments or json.dumps(value,sort_keys=True)!=json.dumps(arguments[key],sort_keys=True)):
+                raise MaterialShaderAssignmentError("Explicit shader batch precondition differs: "+key)
+    _batch_size(arguments);_batch_size(result)
+    canonical=deepcopy(wrapper);canonical["arguments"]=arguments
+    return canonical,{"schema":APPROVAL_PREVIEW_SCHEMA,"toolName":TOOL_NAME,"batch":True,"assignments":deepcopy(previews),"previewDigest":digest,"rollbackRequired":True}
+
+
+def validate_apply_result(arguments: dict[str, Any], payload: Any) -> dict[str, Any]:
+    if "propertyChanges" in arguments or "renderQueue" in arguments:
+        return _keyword_call(material_property_edit.validate, arguments, payload)
+    if "keywordChanges" in arguments:
+        return _keyword_call(material_keyword_edit.validate, arguments, payload)
+    # Legacy single receipts retain their existing behavior; this validator adds
+    # complete array verification only for the new branch.
+    if "assignments" not in arguments:
+        return payload
+    rows=_batch_rows(arguments);result=_require_dict(payload,"shader batch result")
+    expected=arguments.get("expectedAssignments")
+    if not isinstance(expected,list) or len(expected)!=len(rows) or _batch_digest(expected)!=arguments.get("expectedPreviewDigest"):
+        raise MaterialShaderAssignmentError("Shader batch lost its sealed evidence.")
+    if result.get("schema")!=ASSIGNMENT_SCHEMA or result.get("previewDigest")!=arguments["expectedPreviewDigest"] or any(result.get(k) is not v for k,v in {"batch":True,"ok":True,"preview":False,"verified":True,"saved":True,"persistedReadback":True,"committed":True}.items()):
+        raise MaterialShaderAssignmentError("Shader batch lacks a persisted receipt.")
+    actual=result.get("assignments")
+    if not isinstance(actual,list) or len(actual)!=len(rows):raise MaterialShaderAssignmentError("Shader batch readback count differs.")
+    for row,before,after in zip(rows,expected,actual):
+        bind_authoritative_preview({"toolName":TOOL_NAME,"arguments":row},before)
+        read=after.get("readback")
+        changed=before["wouldChange"]
+        if after.get("preview") is not False or after.get("changed") is not changed or after.get("saved") is not changed or after.get("persistedReadback") is not True or after.get("verified") is not True:
+            raise MaterialShaderAssignmentError("Shader row lacks persisted verification.")
+        retained=deepcopy(after)
+        for key in ("readback","persistedReadback"):retained.pop(key,None)
+        for key in ("after", "mutationStarted", "committed", "commitState"):
+            if key in before: retained[key] = before[key]
+            else: retained.pop(key, None)
+        for key in ("preview","changed","saved","materialFileDigestAfter","afterShader"):retained[key]=before[key]
+        if retained!=before:raise MaterialShaderAssignmentError("Shader batch row differs from sealed target/impact.")
+        digest=_lower_hex(after.get("materialFileDigestAfter"),label="after digest",pattern=_DIGEST_PATTERN)
+        if changed == (digest==before["materialFileDigestBefore"]):raise MaterialShaderAssignmentError("Shader saved digest contradicts mutation.")
+        if read!={"materialAssetPath":before["materialAssetPath"],"materialAssetGuid":before["materialAssetGuid"],"materialFileDigest":digest,"shaderName":before["requestedShader"],"shaderAssetPath":before["shaderAssetPath"],"shaderAssetGuid":before["shaderAssetGuid"]} or after.get("afterShader")!=before["requestedShader"]:
+            raise MaterialShaderAssignmentError("Shader persisted target differs from approval.")
+    if result.get("changed") is not any(p["wouldChange"] for p in expected) or result.get("commitState")!="committed":raise MaterialShaderAssignmentError("Shader batch commit state differs.")
+    _batch_size(result)
+    return deepcopy(result)

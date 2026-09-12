@@ -265,6 +265,7 @@ namespace VRCForge.Editor
                             roll: roll,
                             bounds: playBounds,
                             baseRotation: playBaseRotation,
+                            avatarPath: playResolvedAvatarPath,
                             out playTargetCenter,
                             out playCameraPosition,
                             out playOrthographicSize);
@@ -366,6 +367,7 @@ namespace VRCForge.Editor
                         roll: roll,
                         bounds: bounds,
                         baseRotation: baseRotation,
+                        avatarPath: resolvedAvatarPath,
                         out targetCenter,
                         out cameraPosition,
                         out orthographicSize);
@@ -925,6 +927,7 @@ namespace VRCForge.Editor
             float roll,
             Bounds bounds,
             Quaternion baseRotation,
+            string avatarPath,
             out Vector3 targetCenter,
             out Vector3 cameraPosition,
             out float orthographicSize)
@@ -947,6 +950,7 @@ namespace VRCForge.Editor
             try
             {
                 captureCamera.CopyFrom(sceneCamera);
+                var targetVisibility = IncludeTargetRendererLayers(captureCamera, avatarPath);
                 captureCamera.transform.position = cameraPosition;
                 captureCamera.transform.rotation = rotation;
                 captureCamera.aspect = width / (float)height;
@@ -974,7 +978,16 @@ namespace VRCForge.Editor
                     GpuProjection = gpuProjection,
                     ViewProjection = gpuProjection * captureCamera.worldToCameraMatrix,
                     Basis = new { right = ToObject(captureCamera.transform.right), up = ToObject(captureCamera.transform.up), forward = ToObject(captureCamera.transform.forward) },
-                    Up = captureCamera.transform.up
+                    Up = captureCamera.transform.up,
+                    CullingMask = captureCamera.cullingMask,
+                    TargetSceneValid = targetVisibility.SceneValid,
+                    TargetSceneName = targetVisibility.SceneName,
+                    TargetPath = targetVisibility.Path,
+                    TargetRendererCount = targetVisibility.RendererCount,
+                    TargetVisibleRendererCount = targetVisibility.VisibleRendererCount,
+                    TargetRendererLayerMask = targetVisibility.RendererLayerMask,
+                    TargetRendererLayersIncluded = targetVisibility.RendererCount > 0
+                        && (captureCamera.cullingMask & targetVisibility.RendererLayerMask) == targetVisibility.RendererLayerMask
                 };
             }
             finally

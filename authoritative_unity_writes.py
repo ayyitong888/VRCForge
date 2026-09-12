@@ -10,6 +10,7 @@ from material_shader_assignment import (
     TOOL_NAME as MATERIAL_SHADER_ASSIGNMENT_TOOL,
     bind_authoritative_preview as bind_material_shader_preview,
     build_preview_arguments as build_material_shader_preview_arguments,
+    validate_apply_result as validate_material_shader_apply_result,
 )
 from material_texture_assignment import (
     TOOL_NAME as MATERIAL_TEXTURE_ASSIGNMENT_TOOL,
@@ -17,6 +18,13 @@ from material_texture_assignment import (
     bind_authoritative_preview as bind_material_texture_preview,
     build_preview_arguments as build_material_texture_preview_arguments,
     validate_apply_result as validate_material_texture_apply_result,
+)
+from material_variant_flatten import (
+    TOOL_NAME as MATERIAL_VARIANT_FLATTEN_TOOL,
+    MaterialVariantFlattenError,
+    bind_authoritative_preview as bind_material_variant_flatten_preview,
+    build_preview_arguments as build_material_variant_flatten_preview_arguments,
+    validate_apply_result as validate_material_variant_flatten_apply_result,
 )
 from renderer_material_slot_assignment import (
     TOOL_NAME as RENDERER_MATERIAL_SLOT_TOOL,
@@ -85,6 +93,13 @@ from project_asset_copy import (
     build_preview_arguments as build_project_asset_copy_preview_arguments,
     validate_apply_result as validate_project_asset_copy_apply_result,
 )
+from generated_asset_relocation import (
+    TOOL_NAME as GENERATED_ASSET_RELOCATION_TOOL,
+    GeneratedAssetRelocationError,
+    bind_authoritative_preview as bind_generated_asset_relocation_preview,
+    build_preview_arguments as build_generated_asset_relocation_preview_arguments,
+    validate_apply_result as validate_generated_asset_relocation_apply_result,
+)
 from scene_asset_duplicate import (
     TOOL_NAME as SCENE_ASSET_DUPLICATE_TOOL,
     SceneAssetDuplicateError,
@@ -152,6 +167,7 @@ _SPECS = {
         domain_error=MaterialShaderAssignmentError,
         build_preview=build_material_shader_preview_arguments,
         bind_preview=bind_material_shader_preview,
+        validate_apply=validate_material_shader_apply_result,
         include_project_path_in_preview=True,
     ),
     MATERIAL_TEXTURE_ASSIGNMENT_TOOL: AuthoritativeUnityWriteSpec(
@@ -165,6 +181,18 @@ _SPECS = {
         include_project_path_in_preview=True,
         validate_apply=validate_material_texture_apply_result,
         result_error="Material texture apply returned an invalid persisted verification receipt.",
+    ),
+    MATERIAL_VARIANT_FLATTEN_TOOL: AuthoritativeUnityWriteSpec(
+        tool_name=MATERIAL_VARIANT_FLATTEN_TOOL,
+        request_error="Material Variant flatten arguments are required.",
+        bridge_error="Material Variant flatten preview could not be verified against the current project.",
+        receipt_error="Material Variant flatten preview returned an invalid verification receipt.",
+        domain_error=MaterialVariantFlattenError,
+        build_preview=build_material_variant_flatten_preview_arguments,
+        bind_preview=bind_material_variant_flatten_preview,
+        include_project_path_in_preview=True,
+        validate_apply=validate_material_variant_flatten_apply_result,
+        result_error="Material Variant flatten apply returned an invalid persisted verification receipt.",
     ),
     RENDERER_MATERIAL_SLOT_TOOL: AuthoritativeUnityWriteSpec(
         tool_name=RENDERER_MATERIAL_SLOT_TOOL,
@@ -285,6 +313,18 @@ _SPECS = {
         include_project_path_in_preview=True,
         validate_apply=validate_project_asset_copy_apply_result,
         result_error="Project asset copy apply returned an invalid verification receipt.",
+    ),
+    GENERATED_ASSET_RELOCATION_TOOL: AuthoritativeUnityWriteSpec(
+        tool_name=GENERATED_ASSET_RELOCATION_TOOL,
+        request_error="Generated asset relocation arguments are required.",
+        bridge_error="Generated asset relocation preview could not be verified against the current project.",
+        receipt_error="Generated asset relocation preview returned an invalid verification receipt.",
+        domain_error=GeneratedAssetRelocationError,
+        build_preview=build_generated_asset_relocation_preview_arguments,
+        bind_preview=bind_generated_asset_relocation_preview,
+        include_project_path_in_preview=True,
+        validate_apply=validate_generated_asset_relocation_apply_result,
+        result_error="Generated asset relocation apply returned an invalid verification receipt.",
     ),
     SCENE_ASSET_DUPLICATE_TOOL: AuthoritativeUnityWriteSpec(
         tool_name=SCENE_ASSET_DUPLICATE_TOOL,
@@ -459,8 +499,43 @@ def validate_authoritative_unity_write_result(
 def authoritative_unity_write_has_strict_result(params: dict[str, Any]) -> bool:
     request = params or {}
     tool_name = str(request.get("tool_name") or request.get("toolName") or "").strip()
+    arguments = request.get("arguments") if isinstance(request.get("arguments"), dict) else request.get("params")
+    if tool_name == MATERIAL_SHADER_ASSIGNMENT_TOOL and (not isinstance(arguments, dict) or "assignments" not in arguments):
+        return False  # Existing single Shader assignment retains its prior receipt route.
     spec = _SPECS.get(tool_name)
     return spec is not None and spec.validate_apply is not None
+
+
+def validated_unity_write_receipt_fields(payload: Any) -> dict[str, Any]:
+    """Project legacy saved/verified facts only after the domain validator passed.
+
+    Existing explicit transaction receipts remain authoritative. The original
+    validated payload stays intact in both readback evidence and transport data.
+    """
+    if not isinstance(payload, dict) or not str(payload.get("schema") or "").startswith("vrcforge."):
+        return {}
+    if any(key in payload for key in ("commitState", "committed", "mutationStarted", "persistedReadback", "readback")):
+        return {}
+    if (
+        payload.get("ok") is not True
+        or payload.get("verified") is not True
+        or payload.get("saved") is not True
+        or payload.get("preview") is not False
+        or not isinstance(payload.get("changed"), bool)
+    ):
+        return {}
+    return {
+        "schema": payload["schema"],
+        "verified": payload["verified"],
+        "saved": payload["saved"],
+        "mutationStarted": payload["changed"],
+        "mutationApplied": payload["changed"],
+        "committed": True,
+        "commitState": "committed" if payload["changed"] else "no_change",
+        "commitStateKnown": True,
+        "persistedReadback": True,
+        "readback": {"persisted": True, "data": deepcopy(payload)},
+    }
 
 
 def _canonical_unity_project(value: Any) -> Path:

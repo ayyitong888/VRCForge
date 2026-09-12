@@ -29,8 +29,6 @@ namespace VRCForge.Editor
     )]
     public static class WardrobeManagerWriter
     {
-        private const string DefaultAssetDir = "Assets/VRCForge/Generated/Wardrobe";
-
         public class Parameters
         {
             [VRCForgeInput("Operation: remove_outfit, rename_outfit, reorder_outfits, set_default, or delete_wardrobe.", IsRequired = true)]
@@ -57,8 +55,8 @@ namespace VRCForge.Editor
             public bool? deleteGeneratedAssets { get; set; } = false;
             [VRCForgeInput("Required acknowledgement for delete_wardrobe.", IsRequired = false)]
             public bool? confirmDeleteWardrobe { get; set; } = false;
-            [VRCForgeInput("Assets-relative generated-clip directory used for cleanup.", IsRequired = false)]
-            public string assetDir { get; set; } = DefaultAssetDir;
+            [VRCForgeInput("Assets-relative output root for newly generated wardrobe menus; defaults to the avatar's generated Wardrobe directory.", IsRequired = false)]
+            public string assetDir { get; set; } = "";
         }
 
         public static object HandleCommand(JObject @params)
@@ -80,7 +78,6 @@ namespace VRCForge.Editor
                 var deactivateObjects = @params["deactivateObjects"]?.Value<bool?>() ?? action == "remove_outfit";
                 var deleteGeneratedAssets = @params["deleteGeneratedAssets"]?.Value<bool?>() ?? false;
                 var confirmDeleteWardrobe = @params["confirmDeleteWardrobe"]?.Value<bool?>() ?? false;
-                var assetDir = NormalizeAssetDir(@params["assetDir"]?.ToString() ?? @params["clipOutputDir"]?.ToString() ?? "");
 
                 if (string.IsNullOrWhiteSpace(action))
                 {
@@ -100,6 +97,8 @@ namespace VRCForge.Editor
                 }
 
                 var descriptor = ResolveAvatarDescriptor(avatarPath);
+                var assetDir = GeneratedAssetPaths.ResolveDirectory(@params["assetDir"]?.ToString() ?? @params["clipOutputDir"]?.ToString(),
+                    descriptor.name, GeneratedAssetPaths.Menus, "Wardrobe", categorizeExplicit: true);
                 var context = BuildContext(descriptor, parameterName);
 
                 List<int> targetValues;
@@ -125,6 +124,9 @@ namespace VRCForge.Editor
                 }
 
                 var plan = BuildPlan(action, descriptor, context, targetValues, newName, deleteObjects, deactivateObjects, deleteGeneratedAssets);
+                plan.menuAssetDir = assetDir;
+                plan.newMenuAssetPaths = action == "reorder_outfits"
+                    ? PlanReorderMenuPaths(context, targetValues, assetDir) : new List<string>();
                 if (preview)
                 {
                     return VRCForgeToolResult.Completed($"Preview: would {action} for wardrobe '{parameterName}'.", new
@@ -137,7 +139,7 @@ namespace VRCForge.Editor
 
                 var undoGroup = Undo.GetCurrentGroup();
                 Undo.SetCurrentGroupName($"Manage wardrobe '{parameterName}'");
-                ApplyAction(action, descriptor, context, targetValues, newName, deleteObjects, deactivateObjects, deleteGeneratedAssets, assetDir, @params);
+                ApplyAction(action, descriptor, context, targetValues, newName, deleteObjects, deactivateObjects, deleteGeneratedAssets, assetDir, new Queue<string>(plan.newMenuAssetPaths), @params);
                 AssetDatabase.SaveAssets();
                 AssetDatabase.Refresh();
                 Undo.CollapseUndoOperations(undoGroup);
@@ -177,6 +179,7 @@ namespace VRCForge.Editor
             bool deactivateObjects,
             bool deleteGeneratedAssets,
             string assetDir,
+            Queue<string> plannedMenuPaths,
             JObject @params)
         {
             switch (action)
@@ -188,7 +191,7 @@ namespace VRCForge.Editor
                     RenameOutfit(context, targetValues, newName);
                     break;
                 case "reorder_outfits":
-                    ReorderOutfits(context, targetValues, assetDir);
+                    ReorderOutfits(context, targetValues, assetDir, plannedMenuPaths);
                     break;
                 case "set_default":
                     SetDefaultValue(context, targetValues[0]);
@@ -305,7 +308,31 @@ namespace VRCForge.Editor
             }
         }
 
-        private static void ReorderOutfits(WardrobeContext context, List<int> orderValues, string assetDir)
+        private static List<string> PlanReorderMenuPaths(WardrobeContext context, List<int> orderValues, string assetDir)
+        {
+            var target = context.menuControls.OrderBy(item => item.depth).Select(item => item.menu)
+                .FirstOrDefault(item => item != null) ?? context.rootMenu;
+            if (target == null) throw new InvalidOperationException("Avatar has no expressions menu to reorder.");
+            var initialCount = target.controls?.Count ?? 0;
+            var remainingCount = initialCount - context.menuControls.Where(item => item.menu == target)
+                .Select(item => item.index).Where(index => index >= 0 && index < initialCount).Distinct().Count();
+            var itemCount = orderValues.Sum(value => context.menuControls.Count(item => item.value == value))
+                + context.menuControls.Count(item => !orderValues.Contains(item.value));
+            var paths = new List<string>();
+            for (var index = 0; index < itemCount; index++)
+            {
+                if (remainingCount >= VRCExpressionsMenu.MAX_CONTROLS)
+                {
+                    var suffix = paths.Count == 0 ? "" : "_" + (paths.Count + 1);
+                    paths.Add(GeneratedAssetPaths.UniqueAssetPath($"{assetDir}/{Sanitize(context.parameterName, "Wardrobe")}_Reordered{suffix}_SubMenu.asset"));
+                    remainingCount -= VRCExpressionsMenu.MAX_CONTROLS - 1;
+                }
+                remainingCount++;
+            }
+            return paths;
+        }
+
+        private static void ReorderOutfits(WardrobeContext context, List<int> orderValues, string assetDir, Queue<string> plannedMenuPaths)
         {
             var existingByValue = context.menuControls
                 .GroupBy(item => item.value)
@@ -358,7 +385,7 @@ namespace VRCForge.Editor
             var current = targetMenu;
             foreach (var item in ordered)
             {
-                current = EnsureMenuHasRoom(current, assetDir, context.parameterName);
+                current = EnsureMenuHasRoom(current, assetDir, plannedMenuPaths);
                 Undo.RegisterCompleteObjectUndo(current, "Reorder wardrobe menu controls");
                 if (current.controls == null)
                 {
@@ -840,7 +867,7 @@ namespace VRCForge.Editor
             return machine.stateMachines.Any(child => LayerHasAnyAnyStateTransition(child.stateMachine));
         }
 
-        private static VRCExpressionsMenu EnsureMenuHasRoom(VRCExpressionsMenu menu, string assetDir, string parameterName)
+        private static VRCExpressionsMenu EnsureMenuHasRoom(VRCExpressionsMenu menu, string assetDir, Queue<string> plannedMenuPaths)
         {
             if (menu.controls == null)
             {
@@ -851,10 +878,11 @@ namespace VRCForge.Editor
                 return menu;
             }
 
-            Directory.CreateDirectory(assetDir);
+            if (plannedMenuPaths.Count == 0) throw new InvalidOperationException("Wardrobe menu creation differs from the preview plan.");
+            AvatarAuthoringCrudCore.EnsureAssetFolder(assetDir);
             var subMenu = ScriptableObject.CreateInstance<VRCExpressionsMenu>();
             subMenu.controls = new List<VRCExpressionsMenu.Control>();
-            var subPath = AssetDatabase.GenerateUniqueAssetPath($"{assetDir}/{Sanitize(parameterName, "Wardrobe")}_Reordered_SubMenu.asset");
+            var subPath = GeneratedAssetPaths.ValidateNewAssetPath(plannedMenuPaths.Dequeue());
             AssetDatabase.CreateAsset(subMenu, subPath);
             Undo.RegisterCreatedObjectUndo(subMenu, "Create wardrobe reorder submenu");
             Undo.RegisterCompleteObjectUndo(menu, "Create wardrobe reorder submenu");
@@ -1001,12 +1029,6 @@ namespace VRCForge.Editor
             return (value ?? "").Replace("\\", "/").Trim().Trim('/');
         }
 
-        private static string NormalizeAssetDir(string value)
-        {
-            var normalized = NormalizePath(value);
-            return string.IsNullOrWhiteSpace(normalized) ? DefaultAssetDir : normalized;
-        }
-
         private static string Sanitize(string value, string fallback)
         {
             var cleaned = new string((value ?? "").Select(c => char.IsLetterOrDigit(c) || c == '_' ? c : '_').ToArray()).Trim('_');
@@ -1092,6 +1114,8 @@ namespace VRCForge.Editor
             public bool deleteObjects;
             public bool deactivateObjects;
             public bool deleteGeneratedAssets;
+            public string menuAssetDir;
+            public List<string> newMenuAssetPaths;
             public List<MenuControlPlan> affectedMenuControls;
             public List<string> affectedFxStates;
             public List<string> affectedObjects;

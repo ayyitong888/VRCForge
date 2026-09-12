@@ -42,19 +42,26 @@ namespace VRCForge.Editor
                     return VRCForgeToolResult.Failed("Avatar has no VRCExpressionParameters asset.");
                 }
 
-                var requestedNames = suggestions
+                var parameters = parametersAsset.parameters;
+                var requestedNames = ValidateRequestedParameterNames(
+                    suggestions
                     .OfType<JObject>()
                     .Select(item => (item["name"]?.ToString() ?? string.Empty).Trim())
-                    .Where(name => !string.IsNullOrWhiteSpace(name))
-                    .ToHashSet(StringComparer.OrdinalIgnoreCase);
-                var parameters = parametersAsset.parameters;
+                    .ToList(),
+                    parameters
+                        .Where(parameter => parameter != null)
+                        .Select(parameter => parameter.name));
+                if (requestedNames.Count != suggestions.Count)
+                {
+                    throw new InvalidOperationException("Every optimization suggestion must be an object with an exact parameter name.");
+                }
                 var applied = new List<object>();
                 var before = new List<object>();
 
                 for (var i = 0; i < parameters.Length; i++)
                 {
                     var parameter = parameters[i];
-                    if (parameter == null || !requestedNames.Contains(parameter.name))
+                    if (parameter == null || !requestedNames.Contains(parameter.name, StringComparer.Ordinal))
                     {
                         continue;
                     }
@@ -85,7 +92,7 @@ namespace VRCForge.Editor
                     throw new InvalidOperationException("Parameter optimization asset readback failed.");
                 }
                 var after = readbackAsset.parameters
-                    .Where(parameter => parameter != null && requestedNames.Contains(parameter.name))
+                    .Where(parameter => parameter != null && requestedNames.Contains(parameter.name, StringComparer.Ordinal))
                     .Select(DescribeParameter)
                     .ToList();
 
@@ -123,6 +130,35 @@ namespace VRCForge.Editor
                 parameter.saved,
                 parameter.networkSynced
             };
+        }
+
+        internal static List<string> ValidateRequestedParameterNames(
+            IEnumerable<string> requestedNames,
+            IEnumerable<string> parameterNames)
+        {
+            var requested = requestedNames?.ToList() ?? new List<string>();
+            var available = parameterNames?.Where(name => name != null).ToList() ?? new List<string>();
+            if (requested.Any(string.IsNullOrWhiteSpace))
+            {
+                throw new InvalidOperationException("Every optimization suggestion requires an exact parameter name.");
+            }
+            if (requested.Count != requested.Distinct(StringComparer.Ordinal).Count())
+            {
+                throw new InvalidOperationException("Optimization suggestions contain a duplicate parameter identity.");
+            }
+            foreach (var requestedName in requested)
+            {
+                var exactMatches = available.Count(name => name == requestedName);
+                if (exactMatches == 1)
+                {
+                    continue;
+                }
+                var caseInsensitiveMatches = available.Count(name => string.Equals(name, requestedName, StringComparison.OrdinalIgnoreCase));
+                throw new InvalidOperationException(exactMatches > 1 || caseInsensitiveMatches > 1
+                    ? $"Parameter identity is ambiguous: {requestedName}"
+                    : $"Exact parameter not found: {requestedName}");
+            }
+            return requested;
         }
 
         private static VRCAvatarDescriptor ResolveAvatarDescriptor(string avatarPath)

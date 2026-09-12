@@ -30,6 +30,7 @@ def _payload(
                 "captureComplete": complete,
                 "truncated": False,
                 "capturedAt": "2026-08-10T00:00:00Z",
+                "source": "compilation_pipeline",
                 "projectPathDigest": project_digest,
                 "unityProcessId": process_id,
                 "unityProcessStartedAtUtc": process_started_at,

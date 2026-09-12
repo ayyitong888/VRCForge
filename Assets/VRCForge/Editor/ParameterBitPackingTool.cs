@@ -162,7 +162,7 @@ namespace VRCForge.Editor
         private const string AuxiliaryPackageRoot = "Packages/nadena.dev.ndmf";
         private const string AuxiliaryPackageManifest = AuxiliaryPackageRoot + "/package.json";
         private const string AuxiliaryGeneratedRoot = AuxiliaryPackageRoot + "/__Generated";
-        private const string OutputRoot = "Assets/VRCForge/Generated";
+        private const string OutputRoot = "Assets/VRCForgeGenerated";
         private const string OutputKindRoot = OutputRoot + "/ParameterBitPacking";
         private const string TempPackageManifest = "Packages/com.vrcfury.temp/package.json";
         private const string PackageAssetManifest = "Packages/com.vrcfury.vrcfury/package.json";

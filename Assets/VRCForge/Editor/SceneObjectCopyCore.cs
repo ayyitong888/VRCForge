@@ -21,8 +21,8 @@ namespace VRCForge.Editor
         internal const string ApprovalSchema = "vrcforge.scene_object_copy_approval.v1";
         internal const string DuplicateOperation = "duplicate_scene_object";
         internal const string PrefabOperation = "save_scene_object_as_prefab";
-        internal const string GeneratedRoot = "Assets/VRCForge/Generated";
-        internal const string GeneratedPrefix = "Assets/VRCForge/Generated/";
+        internal const string GeneratedRoot = "Assets/VRCForgeGenerated/Prefabs";
+        internal const string GeneratedPrefix = GeneratedRoot + "/";
         internal const string RandomStagingPolicy = "random_create_new_folder_v1";
 
         private const uint FileShareRead = 0x00000001;
@@ -549,7 +549,8 @@ namespace VRCForge.Editor
             var comparison = Application.platform == RuntimePlatform.WindowsEditor
                 ? StringComparison.OrdinalIgnoreCase
                 : StringComparison.Ordinal;
-            if (!absolute.StartsWith(assetsRoot + Path.DirectorySeparatorChar, comparison))
+            if (!absolute.StartsWith(assetsRoot + Path.DirectorySeparatorChar, comparison)
+                && !(normalized == "Assets" && string.Equals(absolute, assetsRoot, comparison)))
             {
                 throw new SceneObjectCopyException("The asset path escaped the project Assets root.");
             }

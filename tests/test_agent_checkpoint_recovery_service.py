@@ -118,6 +118,62 @@ def _restore_workspaces(roots: dict[str, Path]) -> list[Path]:
     )
 
 
+def test_interrupted_recovery_preview_forwards_bound_execution_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gateway = _gateway(Path(tempfile.mkdtemp()))
+    service = gateway.checkpoint_recovery
+    recovery = {
+        "id": "recovery-preview-target",
+        "checkpointId": "checkpoint-preview-target",
+        "projectRoot": "D:/Projects/Bound",
+        "status": "needs_recovery",
+    }
+    target = {
+        "schema": "vrcforge.execution_target.v1",
+        "scope": "project",
+        "project": {"root": recovery["projectRoot"], "projectId": "project-id"},
+        "editor": {
+            "unityPid": 123,
+            "processStartTime": "start",
+            "coreInstanceId": "core-id",
+        },
+    }
+    captured: list[dict[str, object]] = []
+
+    monkeypatch.setattr(
+        AgentCheckpointRecoveryService,
+        "_select_apply_recovery",
+        lambda _self, _params, include_resolved=False: recovery,
+    )
+
+    def preview_restore(params: dict[str, object]) -> dict[str, object]:
+        captured.append(params)
+        return {"ok": True, "currentStateDigest": "a" * 64, "changedFiles": []}
+
+    monkeypatch.setattr(
+        AgentCheckpointRecoveryService,
+        "preview_restore_checkpoint",
+        lambda _self, params: preview_restore(params),
+    )
+    preview = service.preview_interrupted_apply_recovery(
+        {
+            "recoveryId": recovery["id"],
+            "projectPath": recovery["projectRoot"],
+            "executionTarget": target,
+        }
+    )
+
+    assert preview["ok"] is True
+    assert captured == [
+        {
+            "checkpointId": recovery["checkpointId"],
+            "projectPath": recovery["projectRoot"],
+            "executionTarget": target,
+        }
+    ]
+
+
 class _TrackingLock:
     def __init__(self, name: str, events: list[str]) -> None:
         self._lock = threading.RLock()
