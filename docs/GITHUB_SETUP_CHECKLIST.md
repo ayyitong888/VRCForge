@@ -12,7 +12,7 @@ following values.
 ### Description
 
 ```text
-Local AI workbench for supervised VRChat avatar editing with a Tauri desktop app, FastAPI runtime, Unity tools, approvals, checkpoints, and restore.
+AI-assisted VRChat avatar editor, Unity MCP server and local AI agent. Tools for avatar customization, outfits, wardrobes, BlendShapes, lilToon materials and optimization checks, with approval, checkpoints and restore. VRChat 改模工具：捏脸、换装、衣柜、材质与优化诊断。VRChat アバター改変・着せ替え・表情調整支援。
 ```
 
 ### Website
@@ -39,20 +39,49 @@ Copy these topics individually:
 
 ```text
 vrchat
-unity
+vrc
 vrchat-avatar
 avatar-editing
+avatar-tools
+ai-agent
+mcp
+model-context-protocol
 ai-workbench
 local-first
-model-context-protocol
+unity
+unity-editor
 tauri
 fastapi
 windows
-unity-editor
+avatar-editor
+avatar-customization
+vrchat-avatars
+vrchat-tool
+unity-mcp
 ```
 
 Also enable **Releases** in the About panel. Enable **Packages** or
 **Deployments** only if the repository actually publishes those resources.
+
+## Check repository search discovery
+
+GitHub's default repository search matches the name, description, and topics.
+README content is included only when a query uses `in:readme`. Keep the About
+description readable and specific about supported tasks; use relevant category
+topics rather than unrelated keywords or other projects' names. GitHub allows
+up to 20 topics, so the list above preserves the existing topics and adds five
+avatar and Unity MCP categories.
+
+After applying the settings, test unqualified searches such as
+`vrchat avatar editor`, `vrchat avatar tools`, `unity mcp`, `vrchat 改模`,
+`vrchat 换装`, and `vrchat アバター改変`. Record the date, result limit, and
+whether the repository appears. An exact-name or `repo:` search proves only
+that the repository is indexed; it does not prove discovery from a task term.
+Search ranking can change, and a saved About field does not itself prove
+that the search index has refreshed.
+
+References: [Searching for repositories](https://docs.github.com/en/search-github/searching-on-github/searching-for-repositories)
+and [Classifying your repository with topics](https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/classifying-your-repository-with-topics).
 
 ## Social preview
 
@@ -79,7 +108,7 @@ paths, project names, avatars, paid assets, API keys, or other private data.
 ## Final public-page review
 
 - [ ] Description and website render without truncating essential meaning.
-- [ ] All 11 topics appear and link to the expected GitHub topic pages.
+- [ ] All recommended topics appear and link to the expected GitHub topic pages.
 - [ ] The social preview is sharp at both wide and small-card sizes.
 - [ ] README badges and internal documentation links resolve on the default
       branch.
