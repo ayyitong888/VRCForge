@@ -12,8 +12,8 @@ CORE_SERVER = (ROOT / "Assets" / "VRCForge" / "Editor" / "MCP" / "VRCForgeMcpCor
 
 
 def test_execution_target_tool_is_fixed_read_only_core_contract() -> None:
-    assert contract.TOOL_CONTRACT_VERSION == "91"
-    assert contract.EXPECTED_TOOL_COUNT == 92
+    assert contract.TOOL_CONTRACT_VERSION == "97"
+    assert contract.EXPECTED_TOOL_COUNT == 95
     assert "vrc_get_execution_targets" in contract.EXPECTED_TOOL_NAMES
     assert "vrc_get_execution_targets" in contract.READ_ONLY_TOOL_NAMES
     assert "vrc_get_execution_targets" not in contract.PREVIOUS_CORE_TOOL_NAMES

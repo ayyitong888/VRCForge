@@ -22,7 +22,7 @@ def test_wardrobe_dissolve_read_inputs_are_real_and_bounded() -> None:
     _assert_valid(UNITY_READ_TOOL_INPUT_SCHEMAS["vrcforge_scan_materials"], {
         "projectPath": "C:/Unity/Avatar", "avatarPath": "Avatar", "outputPath": "Assets/scan.json",
         "refreshAssets": False, "materialIds": ["mat-guid"], "includeTextures": False,
-        "categoryOverrides": {"liltoon": "liltoon"},
+        "categoryOverrides": {"liltoon": "clothes"},
     })
     _assert_valid(UNITY_READ_TOOL_INPUT_SCHEMAS["vrcforge_scan_wardrobe"], {"avatarPath": "Avatar", "outputPath": ""})
     _assert_valid(UNITY_READ_TOOL_INPUT_SCHEMAS["vrcforge_scan_avatar_items"], {

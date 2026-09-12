@@ -34,9 +34,14 @@ def run_actual_validators(output: Path) -> subprocess.CompletedProcess:
         declarations.append(next(line.strip() for line in source.splitlines() if "const string " + name + " =" in line).replace("internal ", "private "))
     start = source.index("private static readonly string[] AllowedExtensions")
     declarations.append(source[start:source.index(";", start)+1])
-    methods = [extract(source, "private static " + signature) for signature in (
-        "string NormalizeSourcePath", "string NormalizeAssetPath", "void ValidateExtension",
-        "string GeneratedSourceType", "void ValidateGeneratedSourceType")]
+    methods = [extract(source, visibility + " static " + signature) for visibility, signature in (
+        ("internal", "string NormalizeSourcePath"),
+        ("internal", "string NormalizeDestinationPath"),
+        ("private", "string NormalizeAssetPath"),
+        ("private", "void ValidateExtension"),
+        ("private", "string GeneratedSourceType"),
+        ("private", "void ValidateGeneratedSourceType"),
+    )]
     runner = r'''
     static int failures;
     static void Expect(string path, bool allowed) {

@@ -89,7 +89,7 @@ def test_refresh_keeps_response_release_order_and_completes_from_fresh_readback(
     assert runner.index("UnityAsyncJobRegistry.MarkRunning(requestId);") < runner.index(
         "AssetDatabase.Refresh();"
     )
-    assert "UnityAsyncJobRegistry.Complete(jobId, ReadSnapshot);" in refresh
+    assert "UnityAsyncJobRegistry.Complete(jobId, () => ReadSnapshot(reimportAssets));" in refresh
     assert "AssetDatabase.GetAllAssetPaths()" in refresh
     assert "asset_path_digest" in refresh
 

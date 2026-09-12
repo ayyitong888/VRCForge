@@ -736,6 +736,8 @@ VRCFORGE_UNITY_TOOL_REGISTRY = (
     "vrc_get_property",
     "vrc_gesture_manager_set_parameter",
     "vrc_gesture_manager_enter_play_mode",
+    "vrc_start_runtime_observation",
+    "vrc_get_runtime_observation",
     "vrc_select_scene_object",
     "vrc_set_play_mode",
     "vrc_import_unitypackage",

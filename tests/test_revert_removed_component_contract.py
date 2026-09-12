@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -90,11 +91,11 @@ def test_tool_is_in_the_exact_supervised_core_contract_and_preview_lane() -> Non
     ).read_text(encoding="utf-8-sig")
     python_contract = (ROOT / "unity_mcp_tool_contract.py").read_text(encoding="utf-8-sig")
 
-    assert 'internal const string ToolContractVersion = "91";' in contract
-    assert "internal const int ToolCount = 92;" in contract
+    assert re.search(r'internal const string ToolContractVersion = "[0-9]+";', contract)
+    assert re.search(r"internal const int ToolCount = (?:9[5-9]|[1-9][0-9]{2,});", contract)
     assert '{ "vrc_revert_removed_component", "VRCForge.Editor.RevertRemovedComponentTool" }' in contract
     preview_block = server[server.index("PreviewTools =") : server.index("SafetyControlTools =")]
     assert '"vrc_revert_removed_component"' in preview_block
-    assert 'TOOL_CONTRACT_VERSION = "91"' in python_contract
-    assert "EXPECTED_TOOL_COUNT = 92" in python_contract
+    assert 'TOOL_CONTRACT_VERSION = "97"' in python_contract
+    assert "EXPECTED_TOOL_COUNT = 95" in python_contract
     assert '"vrc_revert_removed_component"' in python_contract

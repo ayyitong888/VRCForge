@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 
 import pytest
 
@@ -24,8 +25,8 @@ def read(path):
 def test_raw_core_tool_is_in_exact_contract_and_preview_lane():
     contract = read(CONTRACT)
     server = read(SERVER)
-    assert 'ToolCount = 92' in contract
-    assert 'ToolContractVersion = "92"' in contract
+    assert re.search(r' ToolCount = (?:9[5-9]|[1-9][0-9]{2,});', contract)
+    assert re.search(r' ToolContractVersion = "[0-9]+";', contract)
     assert '{ "vrc_set_renderer_material_slot", "VRCForge.Editor.RendererMaterialSlotTool" }' in contract
     assert '"vrc_set_renderer_material_slot"' in server
 

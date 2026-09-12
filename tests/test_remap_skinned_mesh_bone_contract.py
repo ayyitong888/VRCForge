@@ -19,8 +19,8 @@ def test_remap_schema_is_shared_and_exposed_in_avatar_block() -> None:
     assert schema["properties"]["executionTarget"]["description"].startswith("Exact vrcforge.execution_target.v1")
     assert "vrcforge_remap_skinned_mesh_bone" in agent_gateway.EXTERNAL_MCP_WRITE_TOOL_BLOCKS["avatar"]
     assert "vrcforge_remap_skinned_mesh_bone" in dashboard_server.AGENT_GATEWAY.approval_transactions.registered_write_target_names()
-    assert unity_mcp_tool_contract.TOOL_CONTRACT_VERSION == "91"
-    assert unity_mcp_tool_contract.EXPECTED_TOOL_COUNT == 92
+    assert unity_mcp_tool_contract.TOOL_CONTRACT_VERSION == "97"
+    assert unity_mcp_tool_contract.EXPECTED_TOOL_COUNT == 95
     assert unity_mcp_tool_contract.PREVIOUS_CORE_TOOL_CONTRACT_VERSION == "87"
     assert len(unity_mcp_tool_contract.PREVIOUS_CORE_TOOL_NAMES) == 89
     assert "vrc_inspect_skinned_mesh_deformation" in unity_mcp_tool_contract.PREVIOUS_CORE_TOOL_NAMES

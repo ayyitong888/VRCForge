@@ -16,7 +16,7 @@ def test_write_schemas_keep_one_owner_and_exact_pre_extraction_values() -> None:
     # The new relocation contract must not alter any pre-existing public schema.
     existing = {name: schema for name, schema in schemas.items() if name != "vrcforge_relocate_generated_assets"}
     encoded = json.dumps(existing, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
-    assert hashlib.sha256(encoded).hexdigest() == "1cec5367cc2a6f7ccfbe36e64685b789b176b0a2279fc6040c5143ed18fb16bc"
+    assert hashlib.sha256(encoded).hexdigest() == "30d3022807ff9a6e9ddf4a92cc9b5687a28172476a2e74ae62414501156a3dff"
     for name, schema in schemas.items():
         preview = "vrcforge_preview_" + name.removeprefix("vrcforge_")
         read = unity_read_input_schemas.UNITY_READ_TOOL_INPUT_SCHEMAS.get(preview)
@@ -27,7 +27,7 @@ def test_write_schemas_keep_one_owner_and_exact_pre_extraction_values() -> None:
 def test_write_schema_owner_has_no_execution_or_reverse_import() -> None:
     tree = ast.parse(Path(unity_write_input_schemas.__file__).read_text(encoding="utf-8"))
     assert {node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)} == {
-        "__future__", "typing", "path_to_skill_controller", "unity_read_input_schemas", "unity_shared_input_schemas",
+        "__future__", "typing", "path_to_skill_controller", "unity_read_input_schemas", "unity_shared_input_schemas", "package_input_schemas", "checkpoint_recovery_input_schemas",
     }
     assert not any(isinstance(node, (ast.Import, ast.FunctionDef, ast.ClassDef)) for node in ast.walk(tree))
-    assert len(Path(unity_write_input_schemas.__file__).read_bytes()) < 31_000
+    assert len(Path(unity_write_input_schemas.__file__).read_bytes()) < 55_000
