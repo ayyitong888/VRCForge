@@ -66,11 +66,17 @@ def test_avatar_domain_skills_are_agentic_bounded_and_use_real_tools(
         "asset_author_instructions",
         "official_documentation",
     ]
-    assert workflow["uncertaintyPolicy"]["onInsufficientEvidence"] == {
+    expected_uncertainty = {
         "capabilityGap": True,
         "ready": False,
         "action": "stop_and_report",
     }
+    if slug == "vrcforge-avatar-wardrobe":
+        expected_uncertainty.update(
+            action="stop_and_report_before_writes",
+            after="allowed_read_paths_or_actual_capability_or_task_budget_exhausted",
+        )
+    assert workflow["uncertaintyPolicy"]["onInsufficientEvidence"] == expected_uncertainty
     assert all(
         tool in skill["allowedTools"]
         for step in workflow["steps"]
@@ -122,6 +128,7 @@ def test_wardrobe_skill_contains_complete_menu_parameter_fx_animation_loop() -> 
         "vrcforge_ensure_expression_menu_control",
     } <= set(skill["allowedTools"])
     contract = workflow["communityWardrobeContract"]
+    assert manifest["version"] == "1.1.7"
     assert contract["selector"]["type"] == "Int"
     assert contract["selector"] == {
         "name": "衣柜",
@@ -133,18 +140,39 @@ def test_wardrobe_skill_contains_complete_menu_parameter_fx_animation_loop() -> 
         "automaticMaxPlusOneForbidden": True,
         "preserveApprovedValuesAndAliases": True,
     }
-    assert contract["fx"]["outfitSelectionTransitionSource"] == "AnyState"
-    assert contract["fx"]["outfitSelectionCondition"] == "衣柜 == selected_value"
-    assert contract["fx"]["hasExitTime"] is False
-    assert contract["fx"]["durationSeconds"] == 0
-    assert contract["fx"]["preserveVerifiedWorkingExistingTopology"] is True
-    assert contract["fx"]["verifiedUnconditionalAnyStateBaselineMayBePreserved"] is True
+    assert contract["fx"]["modeSelection"] == {
+        "existingVerified": "preserve_exact_readback",
+        "newBasic": "instant_default",
+        "userAnimated": "preserve_sequence_and_reverse",
+    }
+    assert contract["fx"]["existingVerifiedMustPreserve"] is True
+    assert contract["fx"]["newBasicInstantDefaultsOnly"] is True
+    assert contract["fx"]["userAnimatedSequenceMayUseCurrentProgressAndReverse"] is True
+    assert contract["fx"]["readbackRequiredFields"] == ["source", "destination", "conditions", "durationSeconds", "hasExitTime", "exitTime", "canTransitionToSelf", "writeDefaults"]
+    assert contract["fx"]["newBasicDefaults"]["durationSeconds"] == 0
+    assert contract["fx"]["newBasicDefaults"]["writeDefaults"] is True
     assert contract["fx"]["mustNotNormalizeWorkingTopologyToIdleOrBase"] is True
     assert contract["fx"]["newTopologyMustMatchUserConfirmedReference"] is True
     assert contract["fx"]["removeOnlyTransitionsStatesOrLayersWithProvenConflict"] is True
-    assert contract["animation"]["keyframeTimeSeconds"] == 0
+    assert contract["animation"]["keyframePolicy"] == {
+        "newBasicDefaultTimeSeconds": 0,
+        "existingOrUserAnimated": "preserve_source_timeline",
+        "reverseSequence": "optional_when_user_confirmed",
+    }
     assert contract["animation"]["fullMutualExclusionMatrixRequired"] is True
-    assert contract["animation"]["rewriteEveryApprovedExistingValue"] is True
+    assert "完整重写所有已批准动画矩阵" not in (root / "references/workflow.md").read_text(encoding="utf-8")
+    assert contract["animation"]["verifyEveryApprovedStableValue"] is True
+    assert contract["animation"]["repairStableValueOnlyWhenEvidenceDiffers"] is True
+    assert "rewriteEveryApprovedStableValue" not in contract["animation"]
+    assert "rewriteEveryApprovedExistingValue" not in contract["animation"]
+    assert contract["animation"]["transitionClipPolicy"] == {
+        "preserveSourceTimeline": True,
+        "allowOldAndNewOverlap": True,
+        "reverseFromCurrentProgress": True,
+        "stableStateMutualExclusionOnly": True,
+    }
+    assert not any(step["name"].startswith("rewrite_full_matrix_for_every_approved") for step in workflow["steps"])
+    assert any(step["name"] == "verify_approved_clips_and_repair_only_evidence_differences_then_author_conditional_fx" for step in workflow["steps"])
     assert contract["animation"]["writeDefaultsMustNotSubstituteForMatrix"] is True
     assert set(contract["animation"]["morphInventoryScope"]) == {
         "current_avatar_body_renderers",
@@ -176,6 +204,15 @@ def test_wardrobe_skill_contains_complete_menu_parameter_fx_animation_loop() -> 
         "outfit_no_penetration",
         "heel_and_pose_alignment_correct",
     ]
+    assert contract["animation"]["rendererPropertyBlock"] == {
+        "scope": "renderer_wide",
+        "identityFields": ["rendererPath", "rendererComponentIndex", "materialIndex", "sharedMaterial.assetGuid"],
+        "oneCurvePerRendererProperty": True,
+        "mustNotDuplicateCurvesPerMaterialSlot": True,
+    }
+    assert contract["runtimeEvidence"]["completeFramesRequired"] is True
+    assert contract["runtimeEvidence"]["stateResourcePageChainRequired"] is True
+    assert contract["runtimeEvidence"]["selectionMustReportCountsAndIdentity"] is True
     assert contract["protectedSystems"]["preserveAllUserConfiguredPhysics"] is True
     assert "Marshmallow PB 2.x" in contract["protectedSystems"]["targetProjectExamples"]
     assert contract["headObjects"]["refitOnlyWhen"] == [
@@ -216,16 +253,22 @@ def test_wardrobe_skill_contains_complete_menu_parameter_fx_animation_loop() -> 
         "vrcforge_set_gameobject_active",
         "vrcforge_delete_gameobject",
     } <= set(skill["allowedTools"])
+    assert "vrcforge_get_runtime_observation" in skill["allowedTools"]
     instructions = (root / "SKILL.md").read_text(encoding="utf-8")
     assert "max+1" in instructions
     assert "完整互斥矩阵" in instructions
+    assert "稳定态必须具备并验证完整互斥矩阵" in instructions
+    assert "只对有明确证据差异的 binding 做 preview/write 修补" in instructions
+    assert "不能套用新建基础衣柜的 `time=0` 互斥写入" in instructions
     assert "来源 FT2 中已验证可工作的无条件 AnyState 基线不是缺陷" in instructions
+    assert "新建基础衣柜才使用 AnyState" in instructions
     assert "不得为了理论规范化改成 Idle/Base" in instructions
     assert "先检查每套衣服现有/候选动画是否已经带形态键" in instructions
     assert "成对写入必要的 body/clothing `reset/apply` 曲线" in instructions
     assert "不硬编码 100 或固定名称" in instructions
     assert "Sapphy Head 仅是当前目标示例" in instructions
     assert "正常完整模型和已正确适配的衣服保留原配置" in instructions
+    assert "同一 Renderer 的属性只写一条" in instructions
     assert workflow["requiresOtherSkills"] == []
 
 
@@ -243,6 +286,7 @@ def test_avatar_domain_skills_export_as_signed_agentic_packages(
     assert preview.signer_fingerprint == signer.fingerprint
     assert preview.manifest["id"] == package_id
     assert preview.manifest["name"] == title
+    assert preview.manifest["version"] == _json(root / "manifest.json")["version"]
     assert preview.manifest["execution"] == "agentic"
     assert ("write_project_files" in preview.manifest["permissions"]) is not read_only
 
