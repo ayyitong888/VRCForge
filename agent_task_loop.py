@@ -1339,6 +1339,8 @@ class AgentTaskLoop:
                 "result": {"summary": item["outcome"].get("summary", "")},
                 "outcome": dict(item["outcome"]),
                 "actionId": item["actionId"],
+                **({"supersededBy": item["supersededBy"]}
+                   if item["status"] == "superseded" and item.get("supersededBy") else {}),
             }
             for item in self._actions.values()
             ]

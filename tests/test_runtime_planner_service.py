@@ -373,6 +373,27 @@ def test_internal_tool_block_observation_keeps_compact_indices_without_schemas()
     assert len(observation) <= 8_000
 
 
+def test_canonical_nested_tool_directory_reaches_the_actual_model_observation() -> None:
+    from internal_tool_blocks import build_internal_tool_block_tree
+
+    leaves = [
+        {"name": "unity_get_gameobject", "block": "avatar_structure/hierarchy_components", "mode": "read"},
+        {"name": "unity_gesture_manager_status", "block": "behavior/interaction_generated_systems", "mode": "read"},
+        {"name": "skill_packages", "block": "project_environment/files", "mode": "read"},
+    ]
+    result = build_internal_tool_block_tree(loaded_blocks={"core"}, leaves=leaves)
+    observation = service()._llm_loop_step_observation({
+        "tool": "vrcforge_list_internal_tool_blocks", "status": "executed", "result": result,
+    })
+
+    for leaf in leaves:
+        assert f"{leaf['block']}[{leaf['name']}]" in observation
+    assert "None:" not in observation
+    assert "skill_tool=load_internal_tool_block" in observation
+    assert "inputSchema" not in observation
+    assert len(observation) <= 8_000
+
+
 def test_model_observation_keeps_bounded_know_yourself_guidance() -> None:
     observation = service()._llm_loop_step_observation(
         {
@@ -475,11 +496,15 @@ def test_failed_tool_feedback_invokes_model_correction_once() -> None:
         loop_state=[
             {
                 "tool": "vrcforge_scan_materials",
-                "status": "failed",
-                "outcome": {
+                "actionId": "scan-materials-failed",
                     "status": "failed",
-                    "summary": "Avatar path is missing.",
-                    "error": {"code": "missing_avatar_path"},
+                    "errorCode": "internal_tool_block_selector_invalid",
+                    "outcome": {
+                        "status": "failed",
+                        "errorCode": "internal_tool_block_selector_invalid",
+                        "summary": "Avatar path is missing.",
+                        "error": {"code": "missing_avatar_path"},
+                        "nextAction": ["Retry with avatar_structure/hierarchy_components."],
                 },
             }
         ],
@@ -487,8 +512,71 @@ def test_failed_tool_feedback_invokes_model_correction_once() -> None:
 
     assert len(model.prompts) == 1
     assert "outcomeStatus=failed" in model.prompts[0]
+    assert "Retry with avatar_structure/hierarchy_components." in model.prompts[0]
+    assert "failedActionCorrection=retry_with_corrected_arguments;correction_for_action_id=scan-materials-failed" in model.prompts[0]
     assert plan["skillTool"] == "vrcforge_health"
     assert plan["correctionForActionId"] == "scan-materials-failed"
+
+
+@pytest.mark.parametrize("replacement_status", ["ok", "failed"])
+def test_resumed_planner_preserves_superseded_failure_and_replacement_outcome(
+    replacement_status: str,
+) -> None:
+    from agent_task_loop import AgentTaskLoop
+
+    loop = AgentTaskLoop("load diagnostics then continue")
+    failure = {
+        "status": "failed",
+        "errorCode": "internal_tool_block_selector_invalid",
+        "summary": "The selected parent cannot be loaded.",
+    }
+    original = loop.record_action(
+        kind="skill", tool="vrcforge_load_internal_tool_block",
+        arguments={"block": "diagnostics_build"}, raw_result={"ok": False},
+        outcome=failure,
+    )
+    replacement = loop.record_action(
+        kind="skill", tool="vrcforge_load_internal_tool_block",
+        arguments={"block": "diagnostics_build/compile_logs"},
+        raw_result={"ok": replacement_status == "ok"},
+        outcome={"status": "ok"} if replacement_status == "ok" else failure,
+        correction_for_action_id=original["actionId"],
+    )
+    seed = loop.approval_seed()
+    resumed = AgentTaskLoop.from_approval_context(
+        {"objective": seed["objective"], "priorActions": seed["actions"]}, {},
+    )
+    observations = resumed.planner_observations()
+    assert observations[0]["status"] == "superseded"
+    assert observations[0]["outcome"]["status"] == "failed"
+    prompt = service()._build_llm_plan_prompt(
+        "Continue reading the logs.", [], loop_state=observations,
+    )
+    assert "supersededBy=" + replacement["actionId"] in prompt
+    assert "correction_for_action_id=" + original["actionId"] not in prompt
+    replacement_hint = "correction_for_action_id=" + replacement["actionId"]
+    assert (replacement_hint in prompt) == (replacement_status == "failed")
+    assert observations[1]["outcome"]["status"] == replacement_status
+
+
+def test_unrelated_failed_tool_does_not_get_internal_selector_retry_hint() -> None:
+    observation = service()._llm_loop_step_observation(
+        {
+            "tool": "vrcforge_apply_material",
+            "actionId": "mutation-failed",
+            "status": "failed",
+            "outcome": {
+                "status": "failed",
+                "errorCode": "permission_denied",
+                "failureLayer": "approval",
+                "mutationStarted": True,
+                "committed": False,
+            },
+        }
+    )
+
+    assert "failedActionCorrection=" not in observation
+    assert "permission_denied" in observation
 
 
 def test_failed_tool_feedback_without_model_does_not_replay() -> None:
@@ -786,6 +874,8 @@ def test_bounded_schema_preserves_all_callable_properties_and_constraints() -> N
     assert "description" in bounded["properties"]
     assert long_property in bounded["properties"]
     assert bounded["properties"][long_property]["const"] == "y" * 200
+
+
 
 
 def test_llm_tool_schema_failure_returns_a_correctable_non_execution_plan() -> None:
