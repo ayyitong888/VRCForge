@@ -1116,6 +1116,7 @@ export type AppBootstrap = {
     version: string;
     portableMode: boolean;
     components: Record<string, HealthComponent>;
+    deferredDiagnostics?: boolean;
     projectRoot?: string;
     projects?: ProjectSnapshot;
     state?: ProjectSelectionState;

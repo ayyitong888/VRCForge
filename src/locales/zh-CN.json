@@ -1521,7 +1521,9 @@
     "somethingElse": "其他回答",
     "recommended": "推荐",
     "customPlaceholder": "输入其他回答...",
+    "clear": "清空",
     "answer": "回答",
+    "retry": "重试",
     "skip": "跳过",
     "skipAnswer": "已跳过"
   },

@@ -1521,7 +1521,9 @@
     "somethingElse": "別の回答",
     "recommended": "推奨",
     "customPlaceholder": "別の回答を入力...",
+    "clear": "クリア",
     "answer": "回答",
+    "retry": "再試行",
     "skip": "スキップ",
     "skipAnswer": "スキップしました"
   },

@@ -195,7 +195,7 @@ export function ChatWorkspace({
   const pendingAgentQuestions = useMemo(
     () =>
       agentQuestions.filter(
-        (question) => (question.status || "pending").toLowerCase() === "pending" && (question.options || []).filter((option) => option.label).length >= 2,
+        (question) => (question.status || "pending").toLowerCase() === "pending",
       ),
     [agentQuestions],
   );
@@ -342,11 +342,6 @@ export function ChatWorkspace({
                 />
               </div>
             ) : null}
-            {pendingAgentQuestions.length ? (
-              <div className="mb-3">
-                <AgentQuestionCard questions={pendingAgentQuestions} onAnswerQuestion={onAnswerQuestion} />
-              </div>
-            ) : null}
             <div className="mb-3">
               <BackgroundGoalCatchUpCard
                 deliveries={backgroundGoalDeliveries}
@@ -356,16 +351,21 @@ export function ChatWorkspace({
                 onDismiss={onBackgroundGoalCatchUpDismiss}
               />
             </div>
-            {queueControls}
-            <CompactionStatus state={compaction} onCancel={onCancelCompaction} />
-            {!approvalComposer ? <>{activeGoalBar}{composer(false)}</> : null}
           </div>
         </div>
-        {approvalComposer ? (
-          <div className="shrink-0 bg-workspace/95 px-4 pb-4 pt-2 md:px-6 md:pb-5 md:pt-2" data-chat-composer-dock>
-            <div className="mx-auto max-w-3xl">{activeGoalBar}{approvalComposer}</div>
+        <div className="shrink-0 bg-workspace/95 px-4 pb-4 pt-2 md:px-6 md:pb-5 md:pt-2" data-chat-composer-dock>
+          <div className="mx-auto max-w-3xl">
+            {pendingAgentQuestions.length ? (
+              <div className="mb-3">
+                <AgentQuestionCard questions={pendingAgentQuestions} onAnswerQuestion={onAnswerQuestion} />
+              </div>
+            ) : null}
+            {queueControls}
+            <CompactionStatus state={compaction} onCancel={onCancelCompaction} />
+            {activeGoalBar}
+            {approvalComposer || composer(false)}
           </div>
-        ) : null}
+        </div>
       </div>
     );
   }

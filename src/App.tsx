@@ -150,6 +150,7 @@ import { isAwaitingMergeReview, subAgentProposedNextAction } from "./lib/subagen
 import { pickSubAgentName, reconcileSelectedSubAgent, updateSubAgentList } from "./lib/subagent-state";
 import {
   AgentApproval,
+  AgentQuestion,
   AgentRuntimeResponse,
   AgentReasoningTrace,
   SubAgentTask,
@@ -988,6 +989,7 @@ export default function App() {
     prependDesktopAction,
     cancelDesktopAction,
     upsertAgentGoal,
+    upsertAgentQuestion,
     upsertAgentMemory,
   } = useRuntimeWorkspace({
     endpoint,
@@ -1709,15 +1711,17 @@ export default function App() {
   const answerRuntimeQuestion = async (questionId: string, optionId: string, value: string) => {
     setActiveView("chat");
     try {
-      await answerAgentQuestion(endpoint, questionId, {
+      const payload = await answerAgentQuestion(endpoint, questionId, {
         answer: value,
         selectedOptionId: optionId,
         sessionId,
         projectRoot: activeRuntimeProjectPath || undefined,
       });
+      upsertAgentQuestion(payload.question);
       void refreshRuntimeRuns(false);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
+      throw cause;
     }
   };
   const projectPromptTitle = activeProjectPath && activeProjectName ? t("chat.promptTitle", { name: activeProjectName }) : t("chat.promptTitleDefault");
@@ -2016,6 +2020,11 @@ export default function App() {
       if (eventType === "agentRuntimeTurn") {
         deliverRuntimeTurnContinuation(event.payload?.payload);
       }
+      if (eventType === "agentQuestions") {
+        const payload = event.payload as { question?: AgentQuestion; questions?: AgentQuestion[] } | undefined;
+        const questions = Array.isArray(payload?.questions) ? payload.questions : payload?.question ? [payload.question] : [];
+        questions.forEach((question) => upsertAgentQuestion(question));
+      }
       if (bootstrapEvents.has(eventType)) {
         scheduleBootstrapRefresh();
       }
@@ -2071,14 +2080,14 @@ export default function App() {
   }, [runtimeConnected, endpoint, sessionId, activeRuntimeProjectPath, activeProjectPath, workspaceDiffReviewOpen, deliverRuntimeTurnContinuation]);
 
   useEffect(() => {
-    if (!runtimeConnected) {
+    if (!runtimeConnected || bootstrap?.health.deferredDiagnostics !== true) {
       return;
     }
     const timer = window.setTimeout(() => {
       void refreshFullHealth(endpoint);
     }, STARTUP_BACKGROUND_REFRESH_DELAY_MS);
     return () => window.clearTimeout(timer);
-  }, [runtimeConnected, endpoint, activeProjectPath]);
+  }, [runtimeConnected, endpoint, activeProjectPath, bootstrap?.health.deferredDiagnostics]);
 
   useEffect(() => {
     return () => {

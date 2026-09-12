@@ -1,4 +1,4 @@
-import { ChevronLeft, ChevronRight, Pencil } from "lucide-react";
+import { ChevronLeft, ChevronRight } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { AgentQuestion } from "../../lib/api";
@@ -17,15 +17,13 @@ export function AgentQuestionCard({
     [questions],
   );
   const [index, setIndex] = useState(0);
-  const [customOpen, setCustomOpen] = useState(false);
-  const [customValue, setCustomValue] = useState("");
+  const [customValues, setCustomValues] = useState<Record<string, string>>({});
   const [busyChoice, setBusyChoice] = useState("");
+  const [questionErrors, setQuestionErrors] = useState<Record<string, string>>({});
+  const [retryAnswers, setRetryAnswers] = useState<Record<string, { optionId: string; value: string }>>({});
 
   useEffect(() => {
     setIndex((current) => Math.min(current, Math.max(0, pendingQuestions.length - 1)));
-    setCustomOpen(false);
-    setCustomValue("");
-    setBusyChoice("");
   }, [pendingQuestions.length]);
 
   const question = pendingQuestions[index];
@@ -34,15 +32,20 @@ export function AgentQuestionCard({
   }
 
   const options = question.options || [];
+  const customValue = customValues[question.questionId] || "";
   const answer = async (optionId: string, value: string) => {
     if (!value.trim() && optionId !== "skip") {
       return;
     }
     setBusyChoice(optionId);
+    setQuestionErrors((current) => ({ ...current, [question.questionId]: "" }));
+    setRetryAnswers((current) => ({ ...current, [question.questionId]: { optionId, value } }));
     try {
       await onAnswerQuestion(question.questionId, optionId, value);
-      setCustomValue("");
-      setCustomOpen(false);
+      setCustomValues((current) => ({ ...current, [question.questionId]: "" }));
+      setRetryAnswers((current) => { const next = { ...current }; delete next[question.questionId]; return next; });
+    } catch (cause) {
+      setQuestionErrors((current) => ({ ...current, [question.questionId]: cause instanceof Error ? cause.message : String(cause) }));
     } finally {
       setBusyChoice("");
     }
@@ -81,6 +84,15 @@ export function AgentQuestionCard({
         {question.question || question.questionId}
       </div>
 
+      {questionErrors[question.questionId] ? (
+        <div className="mb-3 flex items-center gap-2 rounded-lg border border-destructive/40 bg-destructive/10 px-2.5 py-2 text-xs text-destructive" role="alert">
+          <span className="min-w-0 flex-1 break-words">{questionErrors[question.questionId]}</span>
+          <button type="button" className="shrink-0 rounded-md border border-destructive/40 px-2 py-1 font-medium hover:bg-destructive/10 disabled:opacity-60" onClick={() => { const retry = retryAnswers[question.questionId]; if (retry) void answer(retry.optionId, retry.value); }} disabled={Boolean(busyChoice)}>
+            {t("questionCard.retry")}
+          </button>
+        </div>
+      ) : null}
+
       <div className="grid gap-1.5">
         <div className="app-scrollbar grid max-h-64 gap-1.5 overflow-y-auto pr-1">
         {options.map((option, optionIndex) => {
@@ -114,7 +126,6 @@ export function AgentQuestionCard({
         })}
         </div>
 
-        {customOpen ? (
           <form
             className="grid gap-2 rounded-xl border border-border bg-background p-2"
             onSubmit={(event) => {
@@ -124,9 +135,11 @@ export function AgentQuestionCard({
           >
             <input
               value={customValue}
-              onChange={(event) => setCustomValue(event.target.value)}
+              onChange={(event) => setCustomValues((current) => ({ ...current, [question.questionId]: event.target.value.slice(0, 2000) }))}
+              maxLength={2000}
               className="min-w-0 bg-transparent text-sm outline-none placeholder:text-muted-foreground"
               placeholder={t("questionCard.customPlaceholder")}
+              aria-label={t("questionCard.customPlaceholder")}
               disabled={Boolean(busyChoice)}
               autoFocus
             />
@@ -135,12 +148,11 @@ export function AgentQuestionCard({
                 type="button"
                 className="rounded-md px-2 py-1 text-xs text-muted-foreground hover:bg-muted"
                 onClick={() => {
-                  setCustomOpen(false);
-                  setCustomValue("");
+                  setCustomValues((current) => ({ ...current, [question.questionId]: "" }));
                 }}
                 disabled={Boolean(busyChoice)}
               >
-                {t("common.cancel")}
+                {t("questionCard.clear")}
               </button>
               <button
                 type="submit"
@@ -151,19 +163,6 @@ export function AgentQuestionCard({
               </button>
             </div>
           </form>
-        ) : (
-          <button
-            type="button"
-            className="grid min-w-0 grid-cols-[32px_minmax(0,1fr)] items-center gap-2 rounded-xl px-2.5 py-2 text-left text-muted-foreground transition-colors hover:bg-muted"
-            onClick={() => setCustomOpen(true)}
-            disabled={Boolean(busyChoice)}
-          >
-            <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-muted">
-              <Pencil className="h-3.5 w-3.5" />
-            </span>
-            <span className="truncate text-sm">{t("questionCard.somethingElse")}</span>
-          </button>
-        )}
       </div>
 
       <div className="mt-3 flex justify-end">

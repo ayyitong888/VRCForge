@@ -1521,7 +1521,9 @@
     "somethingElse": "Something else",
     "recommended": "Recommended",
     "customPlaceholder": "Type another answer...",
+    "clear": "Clear",
     "answer": "Answer",
+    "retry": "Retry",
     "skip": "Skip",
     "skipAnswer": "Skipped"
   },

@@ -20,6 +20,7 @@ import {
 } from "../lib/api";
 import { isTauriRuntime } from "../lib/app-runtime";
 import { isProjectWorkbenchSmokeMode, markdownSmokeGoals, markdownSmokeMemories, markdownSmokeProgress, markdownSmokeRuns } from "../lib/markdown-smoke";
+import { normalizeProjectPathKey } from "../lib/project-path";
 
 type UseRuntimeWorkspaceParams = {
   endpoint: string;
@@ -370,6 +371,18 @@ export function useRuntimeWorkspace({
   }
 
   function upsertAgentQuestion(question: AgentQuestion) {
+    const scope = runtimeScopeRef.current;
+    const scopedSessionId = scope.sessionId.trim();
+    const questionSessionId = String(question.sessionId || "").trim();
+    if ((scopedSessionId && questionSessionId !== scopedSessionId) || (!scopedSessionId && questionSessionId)) {
+      return;
+    }
+    const normalizeScopedRoot = (value?: string) => normalizeProjectPathKey(value).replace(/[\\]+$/, "");
+    const scopedProjectRoot = normalizeScopedRoot(scope.projectRoot);
+    const questionProjectRoot = normalizeScopedRoot(question.projectRoot);
+    if ((scopedProjectRoot && questionProjectRoot !== scopedProjectRoot) || (!scopedProjectRoot && questionProjectRoot)) {
+      return;
+    }
     setAgentQuestions((items) => [question, ...items.filter((item) => item.questionId !== question.questionId)].slice(0, 8));
   }
 

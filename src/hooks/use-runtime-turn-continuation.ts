@@ -3,7 +3,7 @@ import type { AgentRuntimeResponse } from "../lib/api";
 import type { ChatThread, ConversationItem } from "../lib/chat-types";
 
 const RUNTIME_TURN_EVENT_SCHEMA = "vrcforge.runtime_turn_event.v1";
-const RUNTIME_CONTINUATION_SOURCES = new Set(["shell_process_finished", "sub_agent_finished"]);
+const RUNTIME_CONTINUATION_SOURCES = new Set(["shell_process_finished", "sub_agent_finished", "question_answered"]);
 const MAX_PENDING_CONTINUATIONS = 32;
 const MAX_DELIVERED_CONTINUATIONS = 512;
 

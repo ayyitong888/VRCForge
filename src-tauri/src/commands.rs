@@ -477,6 +477,7 @@ pub(crate) struct DesktopAgentListRequest {
     chat_id: Option<String>,
     scope: Option<String>,
     include_events: Option<bool>,
+    include_answered: Option<bool>,
     global_only: Option<bool>,
     active_only: Option<bool>,
     timeout_ms: Option<u64>,
@@ -1053,7 +1054,9 @@ pub fn request_approval_revision(
 }
 
 #[tauri::command]
-pub async fn fetch_checkpoints(request: DesktopCheckpointsRequest) -> Result<serde_json::Value, String> {
+pub async fn fetch_checkpoints(
+    request: DesktopCheckpointsRequest,
+) -> Result<serde_json::Value, String> {
     let mut query = Vec::new();
     if let Some(value) = request
         .project_root
@@ -1071,24 +1074,33 @@ pub async fn fetch_checkpoints(request: DesktopCheckpointsRequest) -> Result<ser
         format!("?{}", query.join("&"))
     };
     let timeout_ms = request.timeout_ms;
-    blocking_backend_json_request(move || backend_json_request(
-        "GET", format!("/api/app/checkpoints{suffix}"), None, timeout_ms,
-    )).await
+    blocking_backend_json_request(move || {
+        backend_json_request(
+            "GET",
+            format!("/api/app/checkpoints{suffix}"),
+            None,
+            timeout_ms,
+        )
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn preview_restore_checkpoint(
     request: DesktopCheckpointIdRequest,
 ) -> Result<serde_json::Value, String> {
-    blocking_backend_json_request(move || backend_json_request(
-        "POST",
-        format!(
-            "/api/app/checkpoints/{}/preview",
-            percent_encode_query_component(&request.checkpoint_id)
-        ),
-        None,
-        request.timeout_ms,
-    )).await
+    blocking_backend_json_request(move || {
+        backend_json_request(
+            "POST",
+            format!(
+                "/api/app/checkpoints/{}/preview",
+                percent_encode_query_component(&request.checkpoint_id)
+            ),
+            None,
+            request.timeout_ms,
+        )
+    })
+    .await
 }
 
 #[tauri::command]
@@ -1130,24 +1142,33 @@ pub async fn fetch_interrupted_apply_recoveries(
         format!("?{}", query.join("&"))
     };
     let timeout_ms = request.timeout_ms;
-    blocking_backend_json_request(move || backend_json_request(
-        "GET", format!("/api/app/recoveries{suffix}"), None, timeout_ms,
-    )).await
+    blocking_backend_json_request(move || {
+        backend_json_request(
+            "GET",
+            format!("/api/app/recoveries{suffix}"),
+            None,
+            timeout_ms,
+        )
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn preview_interrupted_apply_recovery(
     request: DesktopRecoveryIdRequest,
 ) -> Result<serde_json::Value, String> {
-    blocking_backend_json_request(move || backend_json_request(
-        "POST",
-        format!(
-            "/api/app/recoveries/{}/preview",
-            percent_encode_query_component(&request.recovery_id)
-        ),
-        None,
-        request.timeout_ms,
-    )).await
+    blocking_backend_json_request(move || {
+        backend_json_request(
+            "POST",
+            format!(
+                "/api/app/recoveries/{}/preview",
+                percent_encode_query_component(&request.recovery_id)
+            ),
+            None,
+            request.timeout_ms,
+        )
+    })
+    .await
 }
 
 #[tauri::command]
@@ -1688,12 +1709,16 @@ pub async fn fetch_adjustment_checkpoints(
     } else {
         format!("?{}", query.join("&"))
     };
-    blocking_backend_json_request(move || backend_json_request(
-        "GET",
-        format!("/api/app/adjustment-checkpoints{suffix}"),
-        None,
-        request.timeout_ms.or(Some(30_000)),
-    ).map(sanitize_webview_response)).await
+    blocking_backend_json_request(move || {
+        backend_json_request(
+            "GET",
+            format!("/api/app/adjustment-checkpoints{suffix}"),
+            None,
+            request.timeout_ms.or(Some(30_000)),
+        )
+        .map(sanitize_webview_response)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -1798,15 +1823,19 @@ pub fn apply_adjustment_checkpoint(
 pub async fn preview_adjustment_checkpoint(
     request: DesktopAdjustmentCheckpointIdRequest,
 ) -> Result<serde_json::Value, String> {
-    blocking_backend_json_request(move || backend_json_request(
-        "POST",
-        format!(
-            "/api/app/adjustment-checkpoints/{}/preview",
-            percent_encode_query_component(&request.checkpoint_id)
-        ),
-        None,
-        request.timeout_ms.or(Some(60_000)),
-    ).map(sanitize_webview_response)).await
+    blocking_backend_json_request(move || {
+        backend_json_request(
+            "POST",
+            format!(
+                "/api/app/adjustment-checkpoints/{}/preview",
+                percent_encode_query_component(&request.checkpoint_id)
+            ),
+            None,
+            request.timeout_ms.or(Some(60_000)),
+        )
+        .map(sanitize_webview_response)
+    })
+    .await
 }
 
 pub(crate) fn post_json_body_command(
@@ -1851,6 +1880,9 @@ pub(crate) fn agent_list_query(request: &DesktopAgentListRequest) -> String {
     if request.include_events.unwrap_or(false) {
         query.push("includeEvents=true".to_string());
     }
+    if request.include_answered.unwrap_or(false) {
+        query.push("includeAnswered=true".to_string());
+    }
     if request.global_only.unwrap_or(false) {
         query.push("globalOnly=1".to_string());
     }
@@ -1867,6 +1899,23 @@ pub(crate) fn agent_list_query(request: &DesktopAgentListRequest) -> String {
 #[cfg(test)]
 mod agent_list_transport_tests {
     use super::{agent_list_query, DesktopAgentListRequest};
+
+    #[test]
+    fn answered_questions_flag_reaches_the_backend_without_changing_default() {
+        for (value, expected) in [
+            (true, "?sessionId=question-session&includeAnswered=true"),
+            (false, "?sessionId=question-session"),
+        ] {
+            let request: DesktopAgentListRequest = serde_json::from_value(serde_json::json!({
+                "sessionId": "question-session", "includeAnswered": value
+            }))
+            .unwrap();
+            assert_eq!(agent_list_query(&request), expected);
+        }
+        let request: DesktopAgentListRequest =
+            serde_json::from_value(serde_json::json!({"sessionId": "question-session"})).unwrap();
+        assert_eq!(agent_list_query(&request), "?sessionId=question-session");
+    }
 
     #[test]
     fn active_only_deserializes_and_reaches_the_backend_query() {
@@ -2003,7 +2052,11 @@ pub async fn export_official_skill_signing_key(
     request: DesktopJsonBodyRequest,
 ) -> Result<serde_json::Value, String> {
     blocking_backend_json_request(move || {
-        post_json_body_command("/api/app/skill-packages/official-key/export", request, 60_000)
+        post_json_body_command(
+            "/api/app/skill-packages/official-key/export",
+            request,
+            60_000,
+        )
     })
     .await
 }
@@ -2013,7 +2066,11 @@ pub async fn import_official_skill_signing_key(
     request: DesktopJsonBodyRequest,
 ) -> Result<serde_json::Value, String> {
     blocking_backend_json_request(move || {
-        post_json_body_command("/api/app/skill-packages/official-key/import", request, 60_000)
+        post_json_body_command(
+            "/api/app/skill-packages/official-key/import",
+            request,
+            60_000,
+        )
     })
     .await
 }
@@ -3160,40 +3217,54 @@ pub async fn fetch_external_agent_connectors(
     } else {
         format!("?{}", query.join("&"))
     };
-    blocking_backend_json_request(move || backend_json_request(
-        "GET",
-        format!("/api/app/external-agent/connectors{suffix}"),
-        None,
-        request.timeout_ms.or(Some(30_000)),
-    ).map(sanitize_webview_response)).await
+    blocking_backend_json_request(move || {
+        backend_json_request(
+            "GET",
+            format!("/api/app/external-agent/connectors{suffix}"),
+            None,
+            request.timeout_ms.or(Some(30_000)),
+        )
+        .map(sanitize_webview_response)
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn update_external_agent_gateway(
     request: DesktopExternalAgentGatewayRequest,
 ) -> Result<serde_json::Value, String> {
-    blocking_backend_json_request(move || backend_json_request(
-        "POST",
-        "/api/app/external-agent/gateway".to_string(),
-        Some(serde_json::json!({
-            "enabled": request.enabled,
-            "allowWriteRequests": request.allow_write_requests,
-            "revokeToken": request.revoke_token.unwrap_or(false),
-            "checkpointArchiveMaxSizeMb": request.checkpoint_archive_max_size_mb,
-            "deleteCheckpointArchiveIds": request.delete_checkpoint_archive_ids,
-            "checkpointArchiveDirectory": request.checkpoint_archive_directory,
-        })),
-        request.timeout_ms.or(Some(60_000)),
-    ).map(sanitize_webview_response)).await
+    blocking_backend_json_request(move || {
+        backend_json_request(
+            "POST",
+            "/api/app/external-agent/gateway".to_string(),
+            Some(serde_json::json!({
+                "enabled": request.enabled,
+                "allowWriteRequests": request.allow_write_requests,
+                "revokeToken": request.revoke_token.unwrap_or(false),
+                "checkpointArchiveMaxSizeMb": request.checkpoint_archive_max_size_mb,
+                "deleteCheckpointArchiveIds": request.delete_checkpoint_archive_ids,
+                "checkpointArchiveDirectory": request.checkpoint_archive_directory,
+            })),
+            request.timeout_ms.or(Some(60_000)),
+        )
+        .map(sanitize_webview_response)
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn fetch_checkpoint_archive_usage() -> Result<serde_json::Value, String> {
     // Read-only, session-authenticated loopback request. Owned by this IPC call;
     // blocking HTTP runs off the UI thread and expires after five seconds.
-    blocking_backend_json_request(move || backend_json_request(
-        "GET", "/api/app/checkpoint-archive-usage".to_string(), None, Some(5_000),
-    )).await
+    blocking_backend_json_request(move || {
+        backend_json_request(
+            "GET",
+            "/api/app/checkpoint-archive-usage".to_string(),
+            None,
+            Some(5_000),
+        )
+    })
+    .await
 }
 
 #[tauri::command]

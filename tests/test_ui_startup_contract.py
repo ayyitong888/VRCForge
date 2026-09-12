@@ -353,6 +353,22 @@ def test_app_bootstrap_defers_heavy_catalog_and_hydrates_skills_asynchronously()
     assert "!options.allowDuringStartup" in project_refresh
 
 
+def test_deferred_bootstrap_rearms_full_health_without_a_completed_health_loop() -> None:
+    """The production effect re-arms only when bootstrap health is deferred."""
+    app = _read("src/App.tsx")
+    effect_start = app.index("useEffect(() => {\n    if (!runtimeConnected || bootstrap?.health.deferredDiagnostics !== true) {")
+    effect_end = app.index("  useEffect(() => {", effect_start + 1)
+    health_effect = app[effect_start:effect_end]
+    assert "void refreshFullHealth(endpoint);" in health_effect
+    assert "bootstrap?.health.deferredDiagnostics !== true" in health_effect
+    assert "}, [runtimeConnected, endpoint, activeProjectPath, bootstrap?.health.deferredDiagnostics]);" in health_effect
+
+    types = _read("src/lib/api/types.ts")
+    health_type_start = types.index("export type AppBootstrap = {")
+    health_type_end = types.index("export type AppHealth", health_type_start)
+    assert "deferredDiagnostics?: boolean;" in types[health_type_start:health_type_end]
+
+
 def test_native_setup_starts_the_owned_backend_before_webview_hydration() -> None:
     main_rs = (ROOT / "src-tauri" / "src" / "main.rs").read_text(encoding="utf-8")
     backend_rs = (ROOT / "src-tauri" / "src" / "backend.rs").read_text(encoding="utf-8")
