@@ -614,7 +614,17 @@ pub fn start_backend(
 
 #[cfg(test)]
 mod backend_start_result_tests {
-    use super::ready_backend_start_result;
+    use super::{
+        backend_start_failure_payload, ready_backend_start_result, wait_for_backend_or_child_exit,
+        BackendSessionProbe, BackendStartupWait, BackendState,
+    };
+    use std::{
+        path::Path,
+        process::{Command, Stdio},
+        time::{Duration, Instant},
+    };
+    #[cfg(windows)]
+    use std::os::windows::process::CommandExt;
 
     #[test]
     fn verified_early_backend_is_returned_without_starting_a_second_worker() {
@@ -626,6 +636,102 @@ mod backend_start_result_tests {
         assert_eq!(result.mode, "ready");
         assert!(result.already_running);
         assert!(!result.started);
+    }
+
+    #[test]
+    fn managed_child_exit_is_reported_before_port_timeout() {
+        let payload = backend_start_failure_payload(
+            Path::new(r"C:\logs"),
+            false,
+            BackendSessionProbe::Unavailable,
+            Some(Some(137)),
+        );
+        assert_eq!(payload["status"], "error");
+        assert_eq!(payload["ok"], false);
+        assert_eq!(payload["exitCode"], 137);
+        assert!(payload["error"].as_str().unwrap().contains("exit code 137"));
+        assert_eq!(payload["logDir"], r"C:\logs");
+    }
+
+    #[test]
+    fn session_rejection_is_not_projected_as_port_timeout() {
+        let payload = backend_start_failure_payload(
+            Path::new(r"C:\logs"),
+            true,
+            BackendSessionProbe::Rejected,
+            None,
+        );
+        assert_eq!(payload["status"], "error");
+        assert!(payload["error"]
+            .as_str()
+            .unwrap()
+            .contains("session verification failed"));
+    }
+
+    #[test]
+    fn live_port_timeout_keeps_timeout_status_without_process_exit() {
+        let payload = backend_start_failure_payload(
+            Path::new(r"C:\logs"),
+            false,
+            BackendSessionProbe::Unavailable,
+            None,
+        );
+        assert_eq!(payload["status"], "timeout");
+        assert_eq!(payload["ok"], false);
+        assert!(payload.get("error").is_none());
+    }
+
+    #[test]
+    fn exited_managed_child_is_seen_before_startup_deadline() {
+        let mut command = if cfg!(windows) {
+            let mut command = Command::new("cmd.exe");
+            command.args(["/C", "exit 23"]);
+            command
+        } else {
+            let mut command = Command::new("sh");
+            command.args(["-c", "exit 23"]);
+            command
+        };
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        #[cfg(windows)]
+        command.creation_flags(super::CREATE_NO_WINDOW);
+        let mut child = command.spawn().expect("test child should start");
+        let _ = child.wait();
+        let state = BackendState::new();
+        *state.child.lock().expect("child lock") = Some(child);
+        let started = Instant::now();
+        let outcome = wait_for_backend_or_child_exit(&state, Duration::from_secs(2))
+            .expect("child observation should succeed");
+        assert_eq!(outcome, BackendStartupWait::ChildExited(Some(23)));
+        assert!(started.elapsed() < Duration::from_millis(500));
+    }
+
+    #[test]
+    fn legacy_port_only_wait_replay_times_out_for_the_same_exited_child() {
+        let mut command = if cfg!(windows) {
+            let mut command = Command::new("cmd.exe");
+            command.args(["/C", "exit 23"]);
+            command
+        } else {
+            let mut command = Command::new("sh");
+            command.args(["-c", "exit 23"]);
+            command
+        };
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        #[cfg(windows)]
+        command.creation_flags(super::CREATE_NO_WINDOW);
+        let mut child = command.spawn().expect("test child should start");
+        let _ = child.wait();
+        let state = BackendState::new();
+        *state.child.lock().expect("child lock") = Some(child);
+        let outcome = super::wait_for_backend(Duration::from_millis(25));
+        assert!(!outcome);
     }
 }
 
@@ -659,6 +765,84 @@ pub(crate) fn run_backend_start_worker(app_handle: tauri::AppHandle) {
     };
     let _ = app_handle.emit("vrcforge-backend-start-status", payload);
     clear_backend_start_in_progress(&app_handle);
+}
+
+pub(crate) fn managed_backend_exit_code(state: &BackendState) -> Result<Option<Option<i32>>, String> {
+    let mut guard = state
+        .child
+        .lock()
+        .map_err(|_| "backend state lock poisoned".to_string())?;
+    let Some(child) = guard.as_mut() else {
+        return Ok(None);
+    };
+    child
+        .try_wait()
+        .map(|status| status.map(|exit| exit.code()))
+        .map_err(|error| format!("unable to inspect managed runtime process: {error}"))
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum BackendStartupWait {
+    Ready,
+    TimedOut,
+    ChildExited(Option<i32>),
+}
+
+pub(crate) fn wait_for_backend_or_child_exit(
+    state: &BackendState,
+    timeout: Duration,
+) -> Result<BackendStartupWait, String> {
+    let start = Instant::now();
+    loop {
+        if let Some(exit_code) = managed_backend_exit_code(state)? {
+            return Ok(BackendStartupWait::ChildExited(exit_code));
+        }
+        if backend_port_open() {
+            return Ok(BackendStartupWait::Ready);
+        }
+        if start.elapsed() >= timeout {
+            return Ok(BackendStartupWait::TimedOut);
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+}
+
+pub(crate) fn backend_start_failure_payload(
+    log_dir: &Path,
+    port_ready: bool,
+    session_probe: BackendSessionProbe,
+    child_exit_code: Option<Option<i32>>,
+) -> serde_json::Value {
+    if let Some(exit_code) = child_exit_code {
+        let detail = exit_code
+            .map(|code| format!("exit code {code}"))
+            .unwrap_or_else(|| "no exit code".to_string());
+        return serde_json::json!({
+            "ok": false,
+            "status": "error",
+            "error": format!("VRCForge runtime process exited before readiness ({detail})."),
+            "exitCode": exit_code,
+            "logDir": log_dir.display().to_string()
+        });
+    }
+    if port_ready {
+        let error = match session_probe {
+            BackendSessionProbe::Rejected => runtime_session_verification_error(),
+            BackendSessionProbe::Unavailable => runtime_session_busy_error(),
+            BackendSessionProbe::Accepted => "VRCForge runtime session probe failed.".to_string(),
+        };
+        return serde_json::json!({
+            "ok": false,
+            "status": "error",
+            "error": error,
+            "logDir": log_dir.display().to_string()
+        });
+    }
+    serde_json::json!({
+        "ok": false,
+        "status": "timeout",
+        "logDir": log_dir.display().to_string()
+    })
 }
 
 pub(crate) fn start_backend_in_background(
@@ -797,9 +981,32 @@ pub(crate) fn start_backend_in_background(
     }
 
     start_backend_event_bridge_once(app_handle.clone(), &state, app_session_token.clone())?;
-    let ready = wait_for_backend(Duration::from_secs(BACKEND_START_BACKGROUND_WAIT_SECONDS));
+    let startup_wait = wait_for_backend_or_child_exit(
+        &state,
+        Duration::from_secs(BACKEND_START_BACKGROUND_WAIT_SECONDS),
+    )?;
+    match startup_wait {
+        BackendStartupWait::ChildExited(exit_code) => {
+            return Ok(backend_start_failure_payload(
+                &log_dir,
+                false,
+                BackendSessionProbe::Unavailable,
+                Some(exit_code),
+            ));
+        }
+        BackendStartupWait::TimedOut => {
+            return Ok(backend_start_failure_payload(
+                &log_dir,
+                false,
+                BackendSessionProbe::Unavailable,
+                None,
+            ));
+        }
+        BackendStartupWait::Ready => {}
+    }
 
-    if ready && wait_for_backend_session(&app_session_token, BACKEND_SESSION_VERIFY_WAIT) {
+    let session_probe = wait_for_backend_session_probe(&app_session_token, BACKEND_SESSION_VERIFY_WAIT);
+    if session_probe == BackendSessionProbe::Accepted {
         mark_backend_session_verified();
         return Ok(serde_json::json!({
             "ok": true,
@@ -807,11 +1014,13 @@ pub(crate) fn start_backend_in_background(
             "mode": "managed"
         }));
     }
-    Ok(serde_json::json!({
-        "ok": false,
-        "status": "timeout",
-        "logDir": log_dir.display().to_string()
-    }))
+    let child_exit_code = managed_backend_exit_code(&state)?;
+    Ok(backend_start_failure_payload(
+        &log_dir,
+        true,
+        session_probe,
+        child_exit_code,
+    ))
 }
 
 pub(crate) fn read_primitive_live_bootstrap_from_stdin() -> Result<Option<Vec<u8>>, String> {
