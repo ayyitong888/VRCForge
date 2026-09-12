@@ -380,6 +380,44 @@
         "checkpointRecoveryRequired"
       ],
       "cleanup": "restore relocation checkpoint and remove managed destination asset"
+    },
+    {
+      "tool": "vrc_flatten_material_variant",
+      "mode": "preview",
+      "minimalArguments": { "projectPath": "${PROJECT_PATH}", "assetPath": "${MATERIAL_VARIANT_PATH}", "preview": true },
+      "requiredFixtures": ["persistent Material Variant with resolvable parent", "saved project and stable material identity"],
+      "successFields": ["schema", "assetPath", "guid", "dependencyHash", "fileDigest", "state", "preview", "before", "after", "commitState", "verified"],
+      "cleanup": "none; preview must not flatten or mutate the Material Variant"
+    },
+    {
+      "tool": "vrc_get_runtime_observation",
+      "mode": "read_only",
+      "minimalArguments": { "projectPath": "${PROJECT_PATH}", "avatarPath": "${AVATAR}", "jobId": "00000000000000000000000000000001", "stateDetail": "resource" },
+      "requiredFixtures": ["existing finite runtime observation job owned by the bound Avatar", "job artifact resources remain readable"],
+      "successFields": ["schema", "jobId", "status", "parameter", "frames", "frameCount", "resourceUris"],
+      "cleanup": "none; read-only status/resource read"
+    },
+    {
+      "tool": "vrc_start_runtime_observation",
+      "mode": "approved_write",
+      "minimalArguments": {
+        "projectPath": "${PROJECT_PATH}",
+        "avatarPath": "${AVATAR}",
+        "parameterName": "${EXISTING_PARAMETER}",
+        "value": 0,
+        "durationSeconds": 0.1,
+        "frameCount": 2,
+        "width": 128,
+        "height": 128,
+        "cameraPosition": { "x": 0, "y": 1, "z": 2 },
+        "targetPosition": { "x": 0, "y": 1, "z": 0 },
+        "upVector": { "x": 0, "y": 1, "z": 0 },
+        "fieldOfView": 60
+      },
+      "runtimeInjectedArguments": ["jobId", "outputDirectory"],
+      "requiredFixtures": ["approved exact Avatar and existing finite GM parameter", "clean connected Editor", "App-owned job id and artifact directory injected by the runtime"],
+      "successFields": ["status", "jobId", "pending", "mutationStarted", "commitState", "readbackState", "resourceUris"],
+      "cleanup": "poll existing observation job to terminal; restore approved Play state if required"
     }
   ]
 }

@@ -207,7 +207,9 @@ def test_avatar_primitive_crud_commands_expose_nonempty_schemas_covering_catalog
         assert re.search(r"VRCForgeInput\([^\n]+IsRequired = true\)\] public string action", schemas[tool][1])
     assert re.search(r"IsRequired = false\)\] public string action", schemas["vrc_manage_fx_animator"][1])
     assert "public object[] edits" in schemas["vrc_manage_fx_animator"][1]
-    assert re.search(r"IsRequired = true\)\] public string clipPath", schemas["vrc_write_animation_curve"][1])
+    # clipPath is optional because the same tool exposes the atomic clips batch;
+    # the runtime handler still requires it for the single-clip path.
+    assert re.search(r"IsRequired = false\)\] public string clipPath", schemas["vrc_write_animation_curve"][1])
     # propertyName remains required for the single mode; curves is the mutually exclusive batch mode.
     assert re.search(r"IsRequired = false\)\] public string propertyName", schemas["vrc_write_animation_curve"][1])
     assert "public object[] curves" in schemas["vrc_write_animation_curve"][1]

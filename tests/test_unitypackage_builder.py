@@ -80,12 +80,23 @@ DOCUMENTATION_PATHS = {
 }
 
 EXCLUDED_PACKAGE_ROOTS = (
-    "Assets/VRCForge/Runtime",
     "Assets/VRCForge/Runtime/AvatarEncryption",
     "Assets/VRCForge/Generated",
 )
 
-GUID_MANIFEST_SHA256 = "9a5d03727761f8b5a9b25b2b8fe724866a51b143f079fe9550ff91bd81d7d0c4"
+ADDED_SOURCE_GUIDS = {
+    "Assets/VRCForge/Editor/AnimationBindingReadSelection.cs": "5c3dc2fe6efd4c999d79125d2970123c",
+    "Assets/VRCForge/Editor/Generic/UnityAnimationCurveBatch.cs": "c650e8c90d2e47378857a3c4816d71d6",
+    "Assets/VRCForge/Editor/Generic/UnityComponentPropertyBatch.cs": "ea10d3ae0b8e45d9bf4c84778a32c0eb",
+    "Assets/VRCForge/Editor/Generic/UnityFxAnimatorBatch.cs": "72cd35b655ac43babdbc0754c7591f5e",
+    "Assets/VRCForge/Editor/Generic/UnityMaterialShaderBatch.cs": "09361dd9206b4a8b84bba28ee493b413",
+    "Assets/VRCForge/Editor/Generic/UnityProjectAssetCopyBatch.cs": "88cbeaf35c0942cdb2fb39fb7c6bcc53",
+    "Assets/VRCForge/Editor/Generic/UnityRendererMaterialSlotsBatch.cs": "fcafb30f4c644431b8f826ba121fc32b",
+    "Assets/VRCForge/Editor/MaterialScalarPropertyEdit.cs": "723a7e1c985f4a60958ef2bdde3858c9",
+    "Assets/VRCForge/Editor/RuntimeObservationTool.cs": "23a0e6670f584f808cba8dde56ade34d",
+    "Assets/VRCForge/Runtime": "5300c6a571304751ac6d0129dcff220e",
+    "Assets/VRCForge/Runtime/RuntimeObservationFramePump.cs": "fadcc474b86e4d93a630da954846b45b",
+}
 
 
 def test_non_editor_csharp_cannot_leak_unityeditor_references() -> None:
@@ -123,16 +134,22 @@ def test_non_editor_csharp_cannot_leak_unityeditor_references() -> None:
 def test_public_guid_manifest_pins_the_published_1_3_6_common_paths() -> None:
     manifest_path = Path(__file__).resolve().parents[1] / "packaging" / "unitypackage_guid_manifest.json"
     manifest_bytes = manifest_path.read_bytes()
-    assert hashlib.sha256(manifest_bytes).hexdigest() == GUID_MANIFEST_SHA256
     manifest = json.loads(manifest_bytes.decode("utf-8"))
 
     assert manifest["schema"] == "vrcforge.unitypackage-guid-manifest.v1"
     entries = manifest["entries"]
     entry_map = {entry["path"]: entry["guid"] for entry in entries}
-    assert len(entries) == 92
+    assert len(entry_map) == len(entries)
     assert {path: entry_map[path] for path in PUBLISHED_1_3_6_COMMON_GUIDS} == PUBLISHED_1_3_6_COMMON_GUIDS
     assert {path: entry_map[path] for path in FROZEN_SOURCE_META_GUIDS} == FROZEN_SOURCE_META_GUIDS
     assert {path: entry_map[path] for path in RELEASE_PAIRING_ASSET_GUIDS} == RELEASE_PAIRING_ASSET_GUIDS
+    assert {path: entry_map[path] for path in ADDED_SOURCE_GUIDS} == ADDED_SOURCE_GUIDS
+    source_root = Path(__file__).resolve().parents[1] / "Assets" / "VRCForge"
+    source_paths = {
+        path.relative_to(source_root.parents[1]).as_posix()
+        for path in source_root.rglob("*.cs")
+    }
+    assert source_paths <= entry_map.keys()
     assert not any(
         path == excluded or path.startswith(f"{excluded}/")
         for path in entry_map
@@ -218,7 +235,7 @@ def test_unitypackage_builder_does_not_write_asset_for_folders(tmp_path: Path) -
     assert "Assets/VRCForge/Editor" in pathnames
     assert "Assets/VRCForge/Editor/Generic" in pathnames
     assert "Assets/VRCForge/Editor/Generic/UnityGameObjectCrud.cs" in pathnames
-    assert "Assets/VRCForge/Runtime" not in pathnames
+    assert "Assets/VRCForge/Runtime" in pathnames
     assert "Assets/VRCForge/Runtime/EmptyPrivate" not in pathnames
     assert "Assets/VRCForge/Generated" not in pathnames
     assert all("release-staging" not in pathname for pathname in pathnames)
@@ -478,9 +495,9 @@ def test_real_unitypackage_bundles_first_party_core_and_all_product_sources(tmp_
     manifest = json.loads((repo_root / "packaging" / "unitypackage_guid_manifest.json").read_text(encoding="utf-8"))
     manifest_guids = {entry["path"]: entry["guid"] for entry in manifest["entries"]}
     assert packaged_guids == manifest_guids
-    assert len(packaged_paths) == 92
-    assert len(file_paths) == 85
-    assert len(directory_paths) == 7
+    assert len(packaged_paths) == 106
+    assert len(file_paths) == 98
+    assert len(directory_paths) == 8
     assert not any(
         path == excluded or path.startswith(f"{excluded}/")
         for path in packaged_paths

@@ -32,6 +32,7 @@
     { "path": "Assets/VRCForge/Editor/AtomicReferenceRenameTool.cs", "guid": "e05b9a05a894199df15d72397b7ff524" },
     { "path": "Assets/VRCForge/Editor/AvatarControlScanner.cs", "guid": "714baa66aa8444c7a2d85c06df8cb0d1" },
     { "path": "Assets/VRCForge/Editor/AvatarParameterScanner.cs", "guid": "4a578085f27d47f786fa2ea72a0ce5d1" },
+    { "path": "Assets/VRCForge/Editor/AnimationBindingReadSelection.cs", "guid": "5c3dc2fe6efd4c999d79125d2970123c" },
     { "path": "Assets/VRCForge/Editor/AvatarParameterWriter.cs", "guid": "99f00b6651cc4ed5a0aef8fa5bac687c" },
     { "path": "Assets/VRCForge/Editor/AvatarPerformanceTool.cs", "guid": "9205a9bfbfee4e3e851eeb66c4375d9c" },
     { "path": "Assets/VRCForge/Editor/BlendshapeApplier.cs", "guid": "5a231b6ae5e1486aa849c75b64a56561" },
@@ -55,6 +56,12 @@
     { "path": "Assets/VRCForge/Editor/Generic/UnityAssetPrefabCrud.cs", "guid": "9ddec2d706af4784bd9236c89c4ad263" },
     { "path": "Assets/VRCForge/Editor/Generic/UnityAvatarAuthoringCrud.cs", "guid": "5962232c1c484a5a8e2be7466450fcec" },
     { "path": "Assets/VRCForge/Editor/Generic/UnityAvatarPrimitiveCrud.cs", "guid": "43c1a4b531504acd9961e50e46ae3472" },
+    { "path": "Assets/VRCForge/Editor/Generic/UnityAnimationCurveBatch.cs", "guid": "c650e8c90d2e47378857a3c4816d71d6" },
+    { "path": "Assets/VRCForge/Editor/Generic/UnityComponentPropertyBatch.cs", "guid": "ea10d3ae0b8e45d9bf4c84778a32c0eb" },
+    { "path": "Assets/VRCForge/Editor/Generic/UnityFxAnimatorBatch.cs", "guid": "72cd35b655ac43babdbc0754c7591f5e" },
+    { "path": "Assets/VRCForge/Editor/Generic/UnityMaterialShaderBatch.cs", "guid": "09361dd9206b4a8b84bba28ee493b413" },
+    { "path": "Assets/VRCForge/Editor/Generic/UnityProjectAssetCopyBatch.cs", "guid": "88cbeaf35c0942cdb2fb39fb7c6bcc53" },
+    { "path": "Assets/VRCForge/Editor/Generic/UnityRendererMaterialSlotsBatch.cs", "guid": "fcafb30f4c644431b8f826ba121fc32b" },
     { "path": "Assets/VRCForge/Editor/Generic/UnityComponentCrud.cs", "guid": "4606369cb045466a89a544b1a2b8a272" },
     { "path": "Assets/VRCForge/Editor/Generic/UnityGameObjectCrud.cs", "guid": "9840237206a64e8bb7360a086df0aaec" },
     { "path": "Assets/VRCForge/Editor/MAComponentWriter.cs", "guid": "ad341c384a27432196bced52fe633371" },
@@ -66,6 +73,7 @@
     { "path": "Assets/VRCForge/Editor/MCP/VRCForgeMcpTrustedRelease.cs", "guid": "3e93945bf8684c27886af32aacb460ea" },
     { "path": "Assets/VRCForge/Editor/MCP/VRCForgeMcpTrustedRelease.json", "guid": "2b1fe687d6f68a50dab7b4a3bd4e2c25" },
     { "path": "Assets/VRCForge/Editor/MaterialShaderTool.cs", "guid": "d3a7994c864100402964384d1e5fc6b8" },
+    { "path": "Assets/VRCForge/Editor/MaterialScalarPropertyEdit.cs", "guid": "723a7e1c985f4a60958ef2bdde3858c9" },
     { "path": "Assets/VRCForge/Editor/MaterialTuningApplier.cs", "guid": "7cf23143450547e49085e10ec70d0d90" },
     { "path": "Assets/VRCForge/Editor/McpBridgeBootstrap.cs", "guid": "a9954f97ccf74dfbb14eb1adf88df02d" },
     { "path": "Assets/VRCForge/Editor/NdmfParameterUsageBridge.cs", "guid": "7c2ab81c9f4d4206a96402cc4ddf7487" },
@@ -95,6 +103,9 @@
     { "path": "Assets/VRCForge/Editor/WardrobeManagerWriter.cs", "guid": "2e2239f7cb1d429289ba79708c1cf506" },
     { "path": "Assets/VRCForge/Editor/WardrobeOutfitPartWriter.cs", "guid": "d738fda955854c42875af52632b4c823" },
     { "path": "Assets/VRCForge/Editor/WardrobeOutfitWriter.cs", "guid": "2f9bc0a8cac747498ca8ca6d9026c180" },
-    { "path": "Assets/VRCForge/Editor/WardrobeScanner.cs", "guid": "d40e2e47dca649189684b81c11ce248a" }
+    { "path": "Assets/VRCForge/Editor/WardrobeScanner.cs", "guid": "d40e2e47dca649189684b81c11ce248a" },
+    { "path": "Assets/VRCForge/Editor/RuntimeObservationTool.cs", "guid": "23a0e6670f584f808cba8dde56ade34d" },
+    { "path": "Assets/VRCForge/Runtime", "guid": "5300c6a571304751ac6d0129dcff220e" },
+    { "path": "Assets/VRCForge/Runtime/RuntimeObservationFramePump.cs", "guid": "fadcc474b86e4d93a630da954846b45b" }
   ]
 }
