@@ -267,8 +267,12 @@ namespace VRCForge.Editor
                     edit.ExpectedJson = EditorJsonUtility.ToJson(edit.Material);
                     EditorUtility.SetDirty(edit.Material);
                 }
+                foreach (var edit in edits.Where(e => e.Mutated))
+                {
+                    activeRow = edit.RowIndex; activePath = edit.Path; failurePhase = "save_asset";
+                    AssetDatabase.SaveAssetIfDirty(edit.Material);
+                }
                 activeRow = -1; activePath = ""; failurePhase = "save_assets";
-                AssetDatabase.SaveAssets();
                 Exception savedValidationException = null;
                 JObject savedValidationFailure = null;
                 foreach (var edit in edits.Where(e => e.Mutated))
@@ -301,7 +305,7 @@ namespace VRCForge.Editor
                     }
                     catch (Exception exception)
                     {
-                        // A shared save already touched later rows. Verify them too so
+                        // A prior row may already have been saved. Verify every row so
                         // recovery can own valid rows without claiming the failed row.
                         if (savedValidationException == null)
                         {

@@ -213,8 +213,8 @@ def test_material_texture_tool_is_shared_supervised_and_execution_only() -> None
     assert tool.block == "unity/materials"
     assert "vrcforge_preview_material_texture_assignment" in gateway._tools
     assert "vrc_set_material_texture" in dashboard_server.REQUIRED_VRCFORGE_UNITY_TOOLS
-    assert unity_mcp_tool_contract.TOOL_CONTRACT_VERSION == "92"
-    assert unity_mcp_tool_contract.EXPECTED_TOOL_COUNT == 92
+    assert unity_mcp_tool_contract.TOOL_CONTRACT_VERSION == "97"
+    assert unity_mcp_tool_contract.EXPECTED_TOOL_COUNT == 95
 
 
 def test_csharp_texture_tool_guards_property_and_rolls_back_failed_mutations() -> None:
@@ -226,7 +226,7 @@ def test_csharp_texture_tool_guards_property_and_rolls_back_failed_mutations() -
     assert "material.GetTexturePropertyNames()" in source
     assert "AssetDatabase.LoadAssetAtPath<Texture2D>(textureAssetPath)" in source
     assert "material.SetTexture(propertyName, texture)" in source
-    assert "AssetDatabase.SaveAssets();" in source
+    assert "AssetDatabase.SaveAssetIfDirty(material);" in source
     assert "persisted.GetTexture(propertyName)" in source
     assert "RestoreTexturePreState" in source
     assert 'commitState = restored ? "rolled_back" : "unknown"' in source

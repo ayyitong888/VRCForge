@@ -4,11 +4,16 @@ from pathlib import Path
 import pytest
 from test_curve_fx_authoring_runtime_contract import method
 ROOT=Path(__file__).resolve().parents[1]
+def dotnet8_runtime():
+    base=Path(os.environ.get('DOTNET_ROOT') or (Path.home()/'AppData'/'Local'/'Microsoft'/'dotnet'))
+    exe=base/'dotnet.exe'
+    return (exe if exe.is_file() else None),base
 
 def test_batch_impact_dependency_reads_once(tmp_path):
-    base=Path(os.environ.get('DOTNET_ROOT',str(Path.home()/'AppData/Local/Microsoft/dotnet')))
-    sdk=sorted((base/'sdk').glob('8.*/Roslyn/bincore/csc.dll'))[-1]
-    refs=sorted((base/'packs/Microsoft.NETCore.App.Ref').glob('8.*/ref/net8.0'))[-1]
+    dotnet,base=dotnet8_runtime(); pytest.skip('user .NET 8 runtime is unavailable') if dotnet is None else None
+    sdks=sorted((base/'sdk').glob('8.*/Roslyn/bincore/csc.dll')); refs_list=sorted((base/'packs/Microsoft.NETCore.App.Ref').glob('8.*/ref/net8.0'))
+    pytest.skip('user .NET 8 SDK/reference pack is unavailable') if not sdks or not refs_list else None
+    sdk=sdks[-1]; refs=refs_list[-1]
     dll_json=sdk.parents[2]/'Newtonsoft.Json.dll'
     src=(ROOT/'Assets/VRCForge/Editor/MaterialShaderTool.cs').read_text(encoding='utf-8')
     batch=(ROOT/'Assets/VRCForge/Editor/Generic/UnityMaterialShaderBatch.cs').read_text(encoding='utf-8')
@@ -33,7 +38,7 @@ namespace UnityEngine {
 namespace UnityEditor {
  using UnityEngine;
  [Flags]public enum ImportAssetOptions{ForceUpdate=1,ForceSynchronousImport=2}
- public static class EditorJsonUtility {public static string ToJson(Material m)=>m.Path;}
+ public static class EditorJsonUtility {public static string ToJson(Material m)=>m.Path;public static void FromJsonOverwrite(string json,Material m){}}
  public static class EditorUtility {public static bool IsDirty(Material m)=>false;public static void SetDirty(Material m){}}
  public static class AssetDatabase {
   public static Dictionary<string,Material> Mats=new Dictionary<string,Material>();public static Renderer[] Renderers;
@@ -46,6 +51,7 @@ namespace UnityEditor {
   public static string GetAssetPath(Shader s)=>"";public static string GetAssetPath(Material m)=>m==null?"":m.Path;
   public static void ImportAsset(string p,ImportAssetOptions o){throw new Exception("preview imported");}
   public static void SaveAssets(){throw new Exception("preview saved");}
+  public static void SaveAssetIfDirty(Material m){}
  }
 }
 namespace VRCForge.Core.MCP {
@@ -62,6 +68,9 @@ namespace VRCForge.Editor {
  public static class MaterialShaderTool {
   private const int MaxDependencyCandidates=4096,MaxImpactItems=128;
   internal class MaterialAssetEvidence {public string assetPath,assetGuid,fileDigest="file";}
+  internal static JObject CaptureMaterialRenderState(Material m)=>new JObject();
+  internal static void RestoreMaterialRenderState(Material m,JObject e){}
+  internal static void VerifyMaterialRenderState(Material m,JObject e){}
   internal static string NormalizeOptionalAssetPath(string p,bool b)=>p;
   internal static string NormalizeResolvedShaderAssetPath(string p)=>p;
   internal static bool MatchesCurrentProject(string p)=>p=="project";
@@ -115,7 +124,7 @@ namespace VRCForge.Editor {
         seam=seam.replace('// OPTIONAL_CONTEXT_SINGLE','internal static object HandleSingleCommand(JObject q,BatchSharedMaterialImpact context){var m=AssetDatabase.LoadAssetAtPath<Material>(q["materialAssetPath"].Value<string>());return Payload(q,m,ResolveSharedMaterialImpact(m,InspectWritableMaterialAsset(m),context));}')
     seam=seam.replace('// ACTUAL_IMPACT_METHODS','\n'.join(selected))
     program='using System;using System.IO;using System.Linq;using System.Text;using System.Security.Cryptography;using System.Collections.Generic;using System.Globalization;using Newtonsoft.Json;using Newtonsoft.Json.Linq;using UnityEditor;using UnityEngine;using VRCForge.Core.MCP;\n'+seam+'\n'+batch.replace('using System;','',1).replace('using System.Collections.Generic;','',1).replace('using System.IO;','',1).replace('using System.Linq;','',1).replace('using System.Security.Cryptography;','',1).replace('using System.Text;','',1).replace('using Newtonsoft.Json;','',1).replace('using Newtonsoft.Json.Linq;','',1).replace('using UnityEditor;','',1).replace('using UnityEngine;','',1).replace('using VRCForge.Core.MCP;','',1)
-    cs=tmp_path/'Probe.cs';cs.write_text(program,encoding='utf-8');dll=tmp_path/'Probe.dll';dotnet=shutil.which('dotnet')
+    cs=tmp_path/'Probe.cs';cs.write_text(program,encoding='utf-8');dll=tmp_path/'Probe.dll'
     built=subprocess.run([dotnet,str(sdk),'-nologo','-target:exe','-nostdlib+','-langversion:8.0',f'-out:{dll}',*[f'-r:{p}' for p in refs.glob('*.dll')],f'-r:{dll_json}',str(cs)],capture_output=True,text=True,timeout=60)
     assert built.returncode==0,built.stdout+built.stderr
     shutil.copyfile(dll_json,tmp_path/'Newtonsoft.Json.dll');(tmp_path/'Probe.runtimeconfig.json').write_text(json.dumps({'runtimeOptions':{'tfm':'net8.0','framework':{'name':'Microsoft.NETCore.App','version':'8.0.0'}}}))

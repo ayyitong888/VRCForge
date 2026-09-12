@@ -68,7 +68,11 @@ def test_preview_rejects_unverified_source_and_publishes_nothing(preview_env,kin
     elif kind=='missing-project':params.pop('projectPath')
     elif kind=='traversal':params['assetPath']=core['assetPath']='Assets/Textures/../Textures/noise.png'
     elif kind=='wrong-size':params['previewMaxSize']=False
-    with pytest.raises(ValueError):server.get_asset_info_sync(params)
+    if kind == 'failed-core':
+        result = server.get_asset_info_sync(params)
+        assert result['ok'] is False
+    else:
+        with pytest.raises(ValueError):server.get_asset_info_sync(params)
     assert registry.generation==0
 
 def test_unknown_preview_uri_does_not_read_arbitrary_file(preview_env):

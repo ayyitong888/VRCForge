@@ -285,7 +285,6 @@ namespace VRCForge.Editor
                     EditorUtility.SetDirty(target.material);
                     failurePhase = "asset_save";
                     AssetDatabase.SaveAssetIfDirty(target.material);
-                    AssetDatabase.SaveAssets();
                     if (EditorUtility.IsDirty(target.material))
                     {
                         throw new InvalidOperationException("Material asset remained dirty after save.");
@@ -1301,7 +1300,7 @@ namespace VRCForge.Editor
                     material.SetTexture(propertyName, texture);
                     EditorUtility.SetDirty(material);
                     failurePhase = "save_material_asset";
-                    AssetDatabase.SaveAssets();
+                    AssetDatabase.SaveAssetIfDirty(material);
                     AssetDatabase.ImportAsset(
                         materialAssetPath,
                         ImportAssetOptions.ForceSynchronousImport | ImportAssetOptions.ForceUpdate);
