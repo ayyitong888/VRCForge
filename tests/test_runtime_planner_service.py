@@ -579,7 +579,8 @@ def test_model_prompt_includes_bounded_input_contract_for_high_confusion_tool() 
     prompt = service(catalog=catalog)._build_llm_plan_prompt("inspect materials", [])
 
     tool_line = next(line for line in prompt.splitlines() if "vrcforge_scan_materials" in line)
-    assert "inputs={projectPath?:string, avatarPath?:string}" in tool_line
+    assert '"projectPath":{"type":"string"}' in tool_line
+    assert '"avatarPath":{"type":"string"}' in tool_line
 
 
 def test_model_prompt_requires_evidence_grounded_final_reply_without_hiding_safe_updates() -> None:
@@ -728,8 +729,8 @@ def test_bounded_schema_preserves_array_items_and_discriminated_required_branche
         {"operationKind": "game_object", "sources": []},
     )["ok"] is False
     prompt = planner_tool_schema_prompt(bounded)
-    assert "sources:array<{sourcePath:string,weight:number}>" in prompt
-    assert "operationKind=game_object=>targetObjectPath+newName" in prompt
+    assert '"sourcePath":{"type":"string"}' in prompt
+    assert '"operationKind":{"const":"game_object"}' in prompt
 
 
 def test_shallow_schema_allows_unknown_fields_unless_explicitly_closed() -> None:
@@ -743,6 +744,48 @@ def test_shallow_schema_allows_unknown_fields_unless_explicitly_closed() -> None
     assert validate_planner_tool_arguments(
         schema, {"name": "Probe", "acceptedByHandler": True}
     )["ok"] is True
+
+
+def test_bounded_schema_preserves_all_callable_properties_and_constraints() -> None:
+    properties = {
+        f"field{index:02d}": {"type": "string"}
+        for index in range(26)
+    }
+    properties["executionTarget"] = {
+        "type": "object",
+        "required": ["schema"],
+        "properties": {"schema": {"type": "string"}},
+        "additionalProperties": True,
+    }
+    properties["enumField"] = {
+        "type": "string",
+        "enum": [f"value{index:02d}-{'x' * 180}" for index in range(20)],
+        "pattern": "^value[0-9]{2}$",
+    }
+    properties["description"] = {
+        "type": "string",
+        "description": "A real callable parameter, not a schema annotation.",
+    }
+    long_property = "property_" + ("x" * 180)
+    properties[long_property] = {"type": "string", "const": "y" * 200}
+    schema = {
+        "type": "object",
+        "properties": properties,
+        "required": ["field00", "executionTarget", "enumField"],
+        "additionalProperties": False,
+    }
+
+    bounded = bounded_planner_tool_schema(schema)
+    assert set(bounded["properties"]) == set(properties)
+    assert bounded["required"] == schema["required"]
+    assert bounded["properties"]["enumField"]["enum"] == properties["enumField"]["enum"]
+    assert bounded["properties"]["enumField"]["pattern"] == "^value[0-9]{2}$"
+    assert bounded["properties"]["executionTarget"]["properties"] == {
+        "schema": {"type": "string"}
+    }
+    assert "description" in bounded["properties"]
+    assert long_property in bounded["properties"]
+    assert bounded["properties"][long_property]["const"] == "y" * 200
 
 
 def test_llm_tool_schema_failure_returns_a_correctable_non_execution_plan() -> None:
@@ -791,8 +834,8 @@ def test_llm_tool_schema_failure_returns_a_correctable_non_execution_plan() -> N
     assert plan["skillNeeded"] is False
     assert plan["argumentValidation"]["code"] == "planner_invalid_response"
     assert plan["argumentValidation"]["issues"][0]["code"] == "enum"
-    assert "mode:string[enum=safe|force]" in model.prompts[0]
-    assert "additionalProperties=false" in model.prompts[0]
+    assert '"mode":{"enum":["safe","force"],"type":"string"}' in model.prompts[0]
+    assert '"additionalProperties":false' in model.prompts[0]
 
 
 def test_internal_planner_prompt_only_expands_loaded_tool_blocks() -> None:
@@ -2117,3 +2160,25 @@ def test_owner_surface_has_no_dynamic_host_or_execution_authority() -> None:
         "_compactor",
         "_turn",
     }
+
+
+def test_schema_projection_preserves_literal_data_and_named_definitions():
+    from runtime_planner_service import bounded_planner_tool_schema
+    schema = {
+        "type": "object", "properties": {
+            "value": {"const": {"description": "literal", "title": "literal title"}},
+            "choice": {"enum": [{"examples": ["literal"]}]},
+        },
+        "$defs": {"description": {"type": "string", "description": "annotation"}},
+        "description": "annotation",
+    }
+    projected = bounded_planner_tool_schema(schema)
+    assert projected["properties"] == schema["properties"]
+    assert projected["$defs"] == {"description": {"type": "string"}}
+    assert "description" not in projected
+
+
+def test_schema_projection_keeps_absent_or_invalid_schema_compatibility():
+    from runtime_planner_service import bounded_planner_tool_schema
+    for value in (None, [], "text", False):
+        assert bounded_planner_tool_schema(value) == {}

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import AbstractContextManager, nullcontext
+from copy import deepcopy
 from dataclasses import dataclass, field
 import hashlib
 import json
@@ -62,13 +63,8 @@ RECURSIVE_SENSITIVE_FIELDS = frozenset(
     }
 )
 _PLANNER_TOOL_SCHEMA_MAX_PROPERTIES = 24
-_PLANNER_TOOL_SCHEMA_MAX_ENUM_ITEMS = 16
-_PLANNER_TOOL_SCHEMA_MAX_BRANCHES = 8
-_PLANNER_TOOL_SCHEMA_MAX_DEPTH = 3
 _PLANNER_TOOL_SCHEMA_MAX_ISSUES = 8
-_PLANNER_TOOL_SCHEMA_TYPES = frozenset(
-    {"string", "integer", "number", "boolean", "object", "array"}
-)
+_PLANNER_SCHEMA_ANNOTATION_KEYS = frozenset({"description", "title", "examples"})
 
 _HIGH_CONFUSION_TOOL_INPUT_CONTRACTS: dict[str, tuple[str, ...]] = {
     "vrcforge_list_internal_tool_blocks": ("block?:string",),
@@ -152,107 +148,52 @@ def _contract_shallow_schema(input_contract: tuple[str, ...]) -> dict[str, objec
     }
 
 
-def _bounded_planner_schema_node(value: object, *, depth: int) -> dict[str, object]:
-    if not isinstance(value, Mapping) or depth > _PLANNER_TOOL_SCHEMA_MAX_DEPTH:
-        return {}
-    raw_type = str(value.get("type") or "").strip().casefold()
-    if not raw_type and any(key in value for key in ("properties", "required", "additionalProperties")):
-        raw_type = "object"
-    if not raw_type and "const" in value:
-        constant = value.get("const")
-        raw_type = (
-            "boolean" if isinstance(constant, bool)
-            else "integer" if isinstance(constant, int)
-            else "number" if isinstance(constant, float)
-            else "string" if isinstance(constant, str)
-            else ""
-        )
-    if raw_type not in _PLANNER_TOOL_SCHEMA_TYPES:
-        return {}
-    result: dict[str, object] = {"type": raw_type}
+def _project_planner_schema(value: object) -> object:
+    """Keep JSON Schema semantics while dropping prose-only annotations."""
 
-    raw_enum = value.get("enum")
-    if isinstance(raw_enum, (list, tuple)):
-        enum_values: list[object] = []
-        for item in raw_enum[:_PLANNER_TOOL_SCHEMA_MAX_ENUM_ITEMS]:
-            if item is None or isinstance(item, (bool, int, float, str)):
-                bounded = item[:160] if isinstance(item, str) else item
-                if bounded not in enum_values:
-                    enum_values.append(bounded)
-        if enum_values:
-            result["enum"] = enum_values
-    if "const" in value and (
-        value.get("const") is None or isinstance(value.get("const"), (bool, int, float, str))
-    ):
-        constant = value.get("const")
-        result["const"] = constant[:160] if isinstance(constant, str) else constant
-    for keyword in ("minimum", "maximum", "minItems", "maxItems", "minLength", "maxLength"):
-        bound = value.get(keyword)
-        if isinstance(bound, (int, float)) and not isinstance(bound, bool) and math.isfinite(float(bound)):
-            result[keyword] = bound
-    raw_pattern = value.get("pattern")
-    if isinstance(raw_pattern, str) and 0 < len(raw_pattern) <= 256:
-        try:
-            re.compile(raw_pattern)
-        except re.error:
-            pass
-        else:
-            result["pattern"] = raw_pattern
-
-    if raw_type == "object":
-        raw_properties = value.get("properties")
-        properties: dict[str, dict[str, object]] = {}
-        if isinstance(raw_properties, Mapping):
-            for raw_name, raw_spec in list(raw_properties.items())[:_PLANNER_TOOL_SCHEMA_MAX_PROPERTIES]:
-                name = str(raw_name or "").strip()[:120]
-                spec = _bounded_planner_schema_node(raw_spec, depth=depth + 1)
-                if name and spec:
-                    properties[name] = spec
-        if isinstance(raw_properties, Mapping):
-            # Preserve an explicitly open object schema even when it has no
-            # named properties. Internal and external Agent projections must
-            # not silently diverge merely because one side serializes the
-            # canonical open-object fallback.
-            result["properties"] = properties
-        raw_required = value.get("required")
-        required: list[str] = []
-        if isinstance(raw_required, (list, tuple)):
-            for item in raw_required[:_PLANNER_TOOL_SCHEMA_MAX_PROPERTIES]:
-                name = str(item or "").strip()[:120]
-                if name and name not in required:
-                    required.append(name)
-        if required:
-            result["required"] = required
-        else:
-            result["required"] = []
-        result["additionalProperties"] = value.get("additionalProperties") is not False
-    elif raw_type == "array":
-        items = _bounded_planner_schema_node(value.get("items"), depth=depth + 1)
-        if items:
-            result["items"] = items
-
-    if depth < _PLANNER_TOOL_SCHEMA_MAX_DEPTH:
-        for branch_keyword in ("oneOf", "anyOf"):
-            raw_branches = value.get(branch_keyword)
-            if not isinstance(raw_branches, (list, tuple)):
+    if isinstance(value, Mapping):
+        projected: dict[str, object] = {}
+        for raw_key, raw_value in value.items():
+            key = str(raw_key)
+            if key in _PLANNER_SCHEMA_ANNOTATION_KEYS:
                 continue
-            branches = [
-                branch
-                for raw_branch in raw_branches[:_PLANNER_TOOL_SCHEMA_MAX_BRANCHES]
-                if (branch := _bounded_planner_schema_node(raw_branch, depth=depth + 1))
-            ]
-            if branches:
-                result[branch_keyword] = branches
-    return result
+            if key in {"properties", "patternProperties", "$defs", "definitions", "dependentSchemas"} and isinstance(raw_value, Mapping):
+                projected[key] = {
+                    str(property_name): _project_planner_schema(property_schema)
+                    for property_name, property_schema in raw_value.items()
+                }
+            elif key == "dependencies" and isinstance(raw_value, Mapping):
+                projected[key] = {
+                    str(name): _project_planner_schema(dependency)
+                    if isinstance(dependency, Mapping) else deepcopy(dependency)
+                    for name, dependency in raw_value.items()
+                }
+            elif key in {"allOf", "anyOf", "oneOf", "prefixItems"} and isinstance(raw_value, list):
+                projected[key] = [_project_planner_schema(item) for item in raw_value]
+            elif key == "items" and isinstance(raw_value, list):
+                projected[key] = [_project_planner_schema(item) for item in raw_value]
+            elif key in {
+                "additionalProperties", "additionalItems", "items", "contains",
+                "not", "if", "then", "else", "propertyNames",
+                "unevaluatedProperties", "unevaluatedItems", "contentSchema",
+            }:
+                projected[key] = _project_planner_schema(raw_value)
+            else:
+                # Literal data (including const/enum/default) is not a schema.
+                projected[key] = deepcopy(raw_value)
+        return projected
+    return deepcopy(value)
 
 
 def bounded_planner_tool_schema(value: object) -> dict[str, object]:
-    """Project a bounded semantic JSON-schema subset for model-facing tools."""
+    """Project a callable schema without dropping execution constraints."""
 
-    result = _bounded_planner_schema_node(value, depth=0)
+    if not isinstance(value, Mapping):
+        return {}
+    result = _project_planner_schema(value)
     if result.get("type") != "object" or not isinstance(result.get("properties"), Mapping):
         return {}
-    return result
+    return dict(result)
 
 
 def planner_tool_input_schema(name: str) -> dict[str, object]:
@@ -330,7 +271,14 @@ def _validate_planner_schema_node(
     if len(issues) >= _PLANNER_TOOL_SCHEMA_MAX_ISSUES:
         return
     value_type = str(schema.get("type") or "")
-    if not _matches_planner_schema_type(value, value_type):
+    if not value_type and any(
+        key in schema for key in ("properties", "required", "additionalProperties")
+    ):
+        # JSON Schema branches commonly omit type when their object keywords
+        # already constrain the branch; retain the old planner behavior for
+        # oneOf/anyOf validation without mutating the projected schema.
+        value_type = "object"
+    if value_type and not _matches_planner_schema_type(value, value_type):
         _append_planner_schema_issue(issues, path, "wrong_type", value_type)
         return
     if isinstance(schema.get("enum"), list) and value not in schema["enum"]:
@@ -442,53 +390,16 @@ def planner_tool_schema_prompt(schema: object) -> str:
     properties = bounded_schema.get("properties")
     if not isinstance(properties, Mapping):
         return ""
-    required = set(bounded_schema.get("required") or [])
-    declarations: list[str] = []
-    for name, raw_spec in properties.items():
-        if not isinstance(raw_spec, Mapping):
-            continue
-        value_type = str(raw_spec.get("type") or "")
-        declaration = f"{name}{'' if name in required else '?'}:{value_type}"
-        enum_values = raw_spec.get("enum")
-        if isinstance(enum_values, list) and enum_values:
-            declaration += "[enum=" + "|".join(str(item) for item in enum_values) + "]"
-        item_schema = raw_spec.get("items")
-        item_properties = item_schema.get("properties") if isinstance(item_schema, Mapping) else None
-        if value_type == "array" and isinstance(item_properties, Mapping):
-            item_required = set(item_schema.get("required") or [])
-            item_fields = [
-                f"{item_name}{'' if item_name in item_required else '?'}:{item_spec.get('type')}"
-                for item_name, item_spec in list(item_properties.items())[:8]
-                if isinstance(item_spec, Mapping)
-            ]
-            if item_fields:
-                declaration += "<{" + ",".join(item_fields) + "}>"
-        declarations.append(declaration)
-    suffix = " additionalProperties=false" if bounded_schema.get("additionalProperties") is False else ""
-    branch_hints: list[str] = []
-    for branch_keyword in ("oneOf", "anyOf"):
-        branches = bounded_schema.get(branch_keyword)
-        if not isinstance(branches, list):
-            continue
-        for branch in branches:
-            if not isinstance(branch, Mapping):
-                continue
-            branch_properties = branch.get("properties")
-            constants = []
-            if isinstance(branch_properties, Mapping):
-                constants = [
-                    f"{key}={spec.get('const')}"
-                    for key, spec in branch_properties.items()
-                    if isinstance(spec, Mapping) and "const" in spec
-                ]
-            branch_required = [str(item) for item in branch.get("required") or []]
-            branch_hints.append(
-                ("&".join(constants) + "=>" if constants else "") + "+".join(branch_required)
-            )
-        if branch_hints:
-            suffix += f" {branch_keyword}=" + "|".join(branch_hints)
-            break
-    return (" inputs={" + ", ".join(declarations) + "}" + suffix) if declarations else ""
+    # Emit the semantic projection once. Descriptions and examples were
+    # removed by bounded_planner_tool_schema; repeating a readable field index
+    # would spend prompt budget while carrying no additional contract data.
+    semantic_schema = json.dumps(
+        bounded_schema,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return " schema=" + semantic_schema
 
 
 @dataclass(frozen=True, slots=True)
