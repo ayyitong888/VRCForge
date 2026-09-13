@@ -551,6 +551,24 @@ class DashboardServerTests(unittest.TestCase):
         config.computer_use_ever_enabled = True
         dashboard_server.AGENT_GATEWAY.save_config(config)
         dashboard_server.AGENT_GATEWAY.desktop._desktop_bridges.clear()  # noqa: SLF001
+        # Keep the suite independent from the developer's saved Provider
+        # profile and fail closed if a test accidentally reaches the SDK.
+        self.provider_config_patcher = patch.object(
+            dashboard_server.PROVIDER_CONFIGURATION,
+            "current_api_config",
+            return_value=ProviderApiConfig(
+                provider="deepseek",
+                api_key="",
+                base_url="https://api.deepseek.com",
+                model="deepseek-v4-flash",
+            ),
+        )
+        self.provider_config_patcher.start()
+        self.provider_network_guard = patch(
+            "dashboard_server.request_llm_plan_with_metadata",
+            side_effect=AssertionError("test attempted an external Provider request"),
+        )
+        self.provider_network_guard.start()
         self.status_snapshot_patcher = patch(
             "unity_status_service.UnityStatusService.build_unity_status_snapshot",
             return_value={
@@ -568,6 +586,8 @@ class DashboardServerTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.status_snapshot_patcher.stop()
+        self.provider_network_guard.stop()
+        self.provider_config_patcher.stop()
         (
             dashboard_server.TUNING_HISTORY_PATH,
             dashboard_server.TUNING_PRESETS_PATH,
@@ -12666,7 +12686,10 @@ class DashboardServerTests(unittest.TestCase):
         self.assertIn("completionKnown = false", handler)
         self.assertIn('verificationTool = "vrc_get_compile_errors"', handler)
         self.assertIn("AssetDatabase.Refresh();", scheduled)
-        self.assertNotIn("ForceSynchronousImport", scheduled)
+        # Explicit reimport requests may use ForceSynchronousImport after the
+        # response has been released; the ordinary refresh path remains
+        # scheduled below the handler.
+        self.assertIn("ForceSynchronousImport", scheduled)
 
     @patch("dashboard_server.invoke_unity_mcp")
     @patch("dashboard_server.load_dashboard_settings")
@@ -14094,8 +14117,10 @@ class DashboardServerTests(unittest.TestCase):
         self.assertIn("Undo.RegisterCreatedObjectUndo", source)
         self.assertIn("PrefabUtility.InstantiatePrefab", source)
         self.assertIn("PrefabUtility.UnpackPrefabInstance", source)
-        # payload must avoid auto-unwrap keys (data/result/payload/value).
-        self.assertNotIn("value =", source)
+        # Payload objects must not expose a top-level legacy auto-unwrap key.
+        # Local LINQ variable names such as ``value`` are unrelated to that
+        # wire contract.
+        self.assertNotIn("new { value =", source)
 
     def test_asset_prefab_tools_registered_in_gateway(self) -> None:
         config = dashboard_server.AGENT_GATEWAY.ensure_config()
