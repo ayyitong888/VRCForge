@@ -1,6 +1,8 @@
 """Shared MCP Resource registry for internal and external VRCForge Agents.
 
-The registry owns JSON snapshots under the Gateway audit directory.  It never
+The registry owns SQLite snapshots under the Gateway audit directory.
+Storage v2 is a breaking update: legacy registry.json is preserved but never read;
+old immutable handles must be captured again. Each database owns a URI epoch.  It never
 scans Unity or resolves a hierarchy path: producers must explicitly publish a
 captured value, and readers can only retrieve an already-published immutable
 revision.  Authentication remains owned by the loopback Gateway MCP boundary.
@@ -10,8 +12,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import secrets
+import sqlite3
 import threading
 import time
 from contextlib import contextmanager
@@ -28,49 +30,49 @@ RESOURCE_MIME_TYPE = "application/vnd.vrcforge.resource+json"
 
 RESOURCE_TEMPLATES: tuple[dict[str, Any], ...] = (
     {
-        "uriTemplate": "vrcforge://session/{sessionId}/identity?revision={revision}",
+        "uriTemplate": "vrcforge://session/{sessionId}/identity?revision={revision}&store={store}",
         "name": "Session Identity Lock",
         "description": "Exact project, Unity process, Core, Scene, Avatar, object and component identity captured for one session; unavailable fields are explicit and hierarchy paths are display-only.",
         "mimeType": RESOURCE_MIME_TYPE,
         "resourceType": "session_identity_lock",
     },
     {
-        "uriTemplate": "vrcforge://snapshot/{scope}/{stableId}?revision={revision}",
+        "uriTemplate": "vrcforge://snapshot/{scope}/{stableId}?revision={revision}&store={store}",
         "name": "Unity Snapshot",
         "description": "Previously captured Scene, object, component or asset snapshot. Reading never performs an implicit Unity scan.",
         "mimeType": RESOURCE_MIME_TYPE,
         "resourceType": "unity_snapshot",
     },
     {
-        "uriTemplate": "vrcforge://operation/{operationId}/receipt?revision={revision}",
+        "uriTemplate": "vrcforge://operation/{operationId}/receipt?revision={revision}&store={store}",
         "name": "Operation Receipt",
         "description": "Immutable read or supervised-write result, including operationId, ExecutionTarget digest, commit and readback state.",
         "mimeType": RESOURCE_MIME_TYPE,
         "resourceType": "operation_receipt",
     },
     {
-        "uriTemplate": "vrcforge://checkpoint/{checkpointId}/diff?revision={revision}",
+        "uriTemplate": "vrcforge://checkpoint/{checkpointId}/diff?revision={revision}&store={store}",
         "name": "Checkpoint Diff",
         "description": "Previously captured checkpoint or diff evidence; reading cannot create, restore or mutate a checkpoint.",
         "mimeType": RESOURCE_MIME_TYPE,
         "resourceType": "checkpoint_diff",
     },
     {
-        "uriTemplate": "vrcforge://catalog/tools/{catalogGeneration}?revision={revision}",
+        "uriTemplate": "vrcforge://catalog/tools/{catalogGeneration}?revision={revision}&store={store}",
         "name": "Tool Catalog Snapshot",
         "description": "Immutable projection of the shared internal/external Tool registry for one catalog generation.",
         "mimeType": RESOURCE_MIME_TYPE,
         "resourceType": "tool_catalog",
     },
     {
-        "uriTemplate": "vrcforge://control-graph/{graphId}?revision={revision}",
+        "uriTemplate": "vrcforge://control-graph/{graphId}?revision={revision}&store={store}",
         "name": "Control Graph",
         "description": "Previously captured avatar control-graph evidence such as parameters, menus and animation links.",
         "mimeType": RESOURCE_MIME_TYPE,
         "resourceType": "control_graph",
     },
     {
-        "uriTemplate": "vrcforge://gesture-manager/{sessionId}/runtime?revision={revision}",
+        "uriTemplate": "vrcforge://gesture-manager/{sessionId}/runtime?revision={revision}&store={store}",
         "name": "Gesture Manager Runtime",
         "description": "Previously captured Gesture Manager runtime state and test evidence; reading does not enter Play Mode.",
         "mimeType": RESOURCE_MIME_TYPE,
@@ -94,10 +96,11 @@ def _content_hash(value: Any) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _revision_uri(base_uri: str, revision: int) -> str:
+def _revision_uri(base_uri: str, revision: int, epoch: str) -> str:
     parts = urlsplit(base_uri)
     query = parse_qs(parts.query, keep_blank_values=True)
     query["revision"] = [str(revision)]
+    query["store"] = [epoch]
     return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query, doseq=True), parts.fragment))
 
 
@@ -105,6 +108,7 @@ def _base_uri(uri: str) -> str:
     parts = urlsplit(uri)
     query = parse_qs(parts.query, keep_blank_values=True)
     query.pop("revision", None)
+    query.pop("store", None)
     return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query, doseq=True), parts.fragment))
 
 
@@ -118,22 +122,20 @@ class McpResourceRegistry:
     def __init__(self, store_dir: Path, *, lock: threading.RLock | None = None) -> None:
         self.store_dir = Path(store_dir)
         self._lock = lock or threading.RLock()
-        self._records: dict[str, dict[str, Any]] = {}
-        self._latest: dict[str, str] = {}
-        # Immutable revision bytes belong to this registry lifetime and lock.
-        # They cache serialization only, never authorization or target freshness.
-        self._encoded_records: dict[str, bytes] = {}
-        self._generation = 0
-        self._disk_stamp = None
         self._disk_lease = BackendOwnerLease(self.store_dir / "registry.lock")
-        # Public reads and publishes load under the existing disk guard.
-        # Large historical indexes must not delay Gateway startup.
+        self._connection = None
+        # Construction does not open a database or inspect legacy history.
 
     @property
     def generation(self) -> int:
-        self._load()
-        with self._lock:
-            return self._generation
+        with self._transaction() as connection:
+            return int(connection.execute("SELECT generation FROM metadata").fetchone()[0])
+
+    def revision_uri(self, base_uri: str, revision: int) -> str:
+        """Build an immutable handle in this database's persistent namespace."""
+        with self._transaction() as connection:
+            epoch = connection.execute("SELECT epoch FROM metadata").fetchone()[0]
+            return _revision_uri(base_uri, revision, epoch)
 
     def templates(self) -> list[dict[str, Any]]:
         return _json_clone(RESOURCE_TEMPLATES)
@@ -161,29 +163,22 @@ class McpResourceRegistry:
         }])[0]
 
     def publish_many(self, entries: Sequence[Mapping[str, Any]], *, validate_records=None) -> list[dict[str, Any]]:
-        """Publish a finite resource batch with one atomic index replacement.
+        """Publish a validated finite batch in one SQLite transaction.
 
-        Instance and OS file locks cover reload, staging, persistence and commit;
-        failure restores the previous in-memory view, while atomic replacement
-        preserves the prior disk index. Existing concurrent records are retained.
+        Only affected revisions are read or written. A failure, including domain
+        validation or commit, rolls back the entire batch and revision counters.
         """
         prepared = _json_clone(list(entries))
         if not prepared:
             return []
-        with self._lock, self._disk_guard():
-            self._load_locked()
-            before = self._records, self._latest, self._generation
-            self._records, self._latest = dict(self._records), dict(self._latest)
-            try:
-                records = [self._publish_staged(**entry) for entry in prepared]
-                if validate_records is not None:
-                    validate_records(records)
-                if self._generation != before[2]:
-                    self._persist_locked()
-                return records
-            except Exception:
-                self._records, self._latest, self._generation = before
-                raise
+        with self._transaction(write=True) as connection:
+            before = connection.total_changes
+            records = [self._publish_staged(**entry) for entry in prepared]
+            if validate_records is not None:
+                validate_records(records)
+            if connection.total_changes != before:
+                self._persist_locked()
+            return records
 
     def _publish_staged(
         self,
@@ -200,7 +195,7 @@ class McpResourceRegistry:
         stale_reason: str = "",
         only_if_absent: bool = False,
     ) -> dict[str, Any]:
-        if not base_uri.startswith("vrcforge://") or "?revision=" in base_uri:
+        if not base_uri.startswith("vrcforge://") or {"revision", "store"}.intersection(parse_qs(urlsplit(base_uri).query, keep_blank_values=True)):
             raise McpResourceError("base_uri must be a revision-free vrcforge:// URI")
         if not name.strip() or not resource_type.strip():
             raise McpResourceError("name and resource_type are required")
@@ -208,37 +203,38 @@ class McpResourceRegistry:
         cloned_identity = _json_clone(identity or {})
         captured_at = datetime.now(timezone.utc).isoformat()
         payload_hash = _content_hash({"identity": cloned_identity, "data": cloned_data})
-        with self._lock:
-            latest_uri = self._latest.get(base_uri)
-            latest = self._records.get(latest_uri or "")
-            if latest and only_if_absent:
-                return _json_clone(latest)
-            if latest and latest.get("contentHash") == payload_hash and bool(latest.get("stale")) == stale:
-                return _json_clone(latest)
-            revision = int(latest.get("revision", 0) if latest else 0) + 1
-            uri = _revision_uri(base_uri, revision)
-            envelope = {
-                "schema": RESOURCE_SCHEMA,
-                "uri": uri,
-                "canonicalUri": base_uri,
-                "name": name,
-                "description": description or name,
-                "resourceType": resource_type,
-                "schemaVersion": 1,
-                "identity": cloned_identity,
-                "revision": revision,
-                "contentHash": payload_hash,
-                "capturedAt": captured_at,
-                "sourceMode": source_mode,
-                "stale": bool(stale),
-                "staleReason": stale_reason if stale else "",
-                "refreshRule": refresh_rule,
-                "data": cloned_data,
-            }
-            self._records[uri] = envelope
-            self._latest[base_uri] = uri
-            self._generation += 1
-            return _json_clone(envelope)
+        connection = self._connection
+        row = connection.execute("SELECT r.payload FROM latest l JOIN records r ON r.uri=l.uri WHERE l.base_uri=?", (base_uri,)).fetchone()
+        latest = json.loads(row[0]) if row else None
+        if latest and only_if_absent:
+            return latest
+        if latest and latest.get("contentHash") == payload_hash and bool(latest.get("stale")) == stale:
+            return latest
+        revision = int(latest.get("revision", 0) if latest else 0) + 1
+        epoch = connection.execute("SELECT epoch FROM metadata").fetchone()[0]
+        uri = _revision_uri(base_uri, revision, epoch)
+        envelope = {
+            "schema": RESOURCE_SCHEMA,
+            "uri": uri,
+            "canonicalUri": base_uri,
+            "name": name,
+            "description": description or name,
+            "resourceType": resource_type,
+            "schemaVersion": 1,
+            "identity": cloned_identity,
+            "revision": revision,
+            "contentHash": payload_hash,
+            "capturedAt": captured_at,
+            "sourceMode": source_mode,
+            "stale": bool(stale),
+            "staleReason": stale_reason if stale else "",
+            "refreshRule": refresh_rule,
+            "data": cloned_data,
+        }
+        connection.execute("INSERT INTO records(uri,payload) VALUES (?,?)", (uri, json.dumps(envelope, ensure_ascii=False, separators=(",", ":"), allow_nan=False)))
+        connection.execute("INSERT INTO latest(base_uri,uri) VALUES (?,?) ON CONFLICT(base_uri) DO UPDATE SET uri=excluded.uri", (base_uri, uri))
+        connection.execute("UPDATE metadata SET generation=generation+1")
+        return _json_clone(envelope)
 
     def list(self, *, cursor: str = "", page_size: int = 100) -> dict[str, Any]:
         if page_size < 1 or page_size > 500:
@@ -249,13 +245,9 @@ class McpResourceRegistry:
             raise McpResourceError("cursor must be a non-negative integer") from exc
         if offset < 0:
             raise McpResourceError("cursor must be a non-negative integer")
-        self._load()
-        with self._lock:
-            records = sorted(
-                (self._records[uri] for uri in self._latest.values()),
-                key=lambda item: str(item["uri"]),
-            )
-            page = records[offset : offset + page_size]
+        with self._transaction() as connection:
+            rows = connection.execute("SELECT r.payload FROM latest l JOIN records r ON r.uri=l.uri ORDER BY l.uri LIMIT ? OFFSET ?", (page_size + 1, offset)).fetchall()
+            page = [json.loads(row[0]) for row in rows[:page_size]]
             next_offset = offset + len(page)
             resources = [
                 {
@@ -275,24 +267,25 @@ class McpResourceRegistry:
             ]
             return {
                 "resources": resources,
-                "resourceGeneration": self._generation,
-                **({"nextCursor": str(next_offset)} if next_offset < len(records) else {}),
+                "resourceGeneration": int(connection.execute("SELECT generation FROM metadata").fetchone()[0]),
+                **({"nextCursor": str(next_offset)} if len(rows) > page_size else {}),
             }
 
     def read(self, uri: str) -> dict[str, Any]:
         if not isinstance(uri, str) or not uri.startswith("vrcforge://"):
             raise McpResourceError("resources/read requires a vrcforge:// URI")
-        self._load()
-        with self._lock:
-            selected_uri = uri
-            if "revision=" not in urlsplit(uri).query:
-                selected_uri = self._latest.get(_base_uri(uri), "")
-            record = self._records.get(selected_uri)
-            if record is None:
-                raise McpResourceError(
-                    "Resource was not previously captured; use a read Tool to capture it explicitly before resources/read"
-                )
-            envelope = _json_clone(record)
+        with self._transaction() as connection:
+            query = parse_qs(urlsplit(uri).query, keep_blank_values=True)
+            stores = query.get("store")
+            if stores is not None and stores != [connection.execute("SELECT epoch FROM metadata").fetchone()[0]]:
+                raise McpResourceError("Resource store is retired or unknown; explicitly recapture with a read Tool")
+            if "revision" not in query:
+                row = connection.execute("SELECT r.payload FROM latest l JOIN records r ON r.uri=l.uri WHERE l.base_uri=?", (_base_uri(uri),)).fetchone()
+            else:
+                row = connection.execute("SELECT payload FROM records WHERE uri=?", (uri,)).fetchone()
+            if row is None:
+                raise McpResourceError("Resource was not previously captured in this store; legacy or retired handles must explicitly recapture with a read Tool")
+            envelope = json.loads(row[0])
         if envelope["resourceType"] == "runtime_observation_frame":
             from runtime_frame_resources import read_published_frame
             return read_published_frame(envelope)
@@ -328,14 +321,15 @@ class McpResourceRegistry:
         revisions = query.get("revision") or []
         if len(revisions) != 1 or not revisions[0].isdigit() or int(revisions[0]) < 1:
             raise McpResourceError("Resource reference must include one positive revision")
-        self._load()
-        with self._lock:
-            envelope = self._records.get(uri)
-            if envelope is None:
-                raise McpResourceError("Resource reference is unknown or stale")
-            selected = _json_clone(envelope)
-            if expected_type == "session_identity_lock" and self._latest.get(_base_uri(uri)) != uri:
-                raise McpResourceError("Session Identity Lock revision is no longer current")
+        with self._transaction() as connection:
+            row = connection.execute("SELECT payload FROM records WHERE uri=?", (uri,)).fetchone()
+            if row is None:
+                raise McpResourceError("Resource reference is unknown or stale; legacy or retired handles require explicit recapture")
+            selected = json.loads(row[0])
+            if expected_type == "session_identity_lock":
+                latest = connection.execute("SELECT uri FROM latest WHERE base_uri=?", (_base_uri(uri),)).fetchone()
+                if latest is None or latest[0] != uri:
+                    raise McpResourceError("Session Identity Lock revision is no longer current")
         if expected_type and selected.get("resourceType") != expected_type:
             raise McpResourceError("Resource reference has the wrong resource type")
         if selected.get("stale"):
@@ -349,11 +343,43 @@ class McpResourceRegistry:
         return selected
 
     def _index_path(self) -> Path:
-        return self.store_dir / "registry.json"
+        return self.store_dir / "registry-v2.sqlite3"
 
-    def _load(self) -> None:
+    @contextmanager
+    def _transaction(self, *, write=False):
+        # One current-user local file connection per operation; the caller's
+        # Gateway session remains the authorization boundary. The connection,
+        # journal handles and OS lease always close before returning.
         with self._lock, self._disk_guard():
-            self._load_locked()
+            self.store_dir.mkdir(parents=True, exist_ok=True)
+            connection = sqlite3.connect(self._index_path(), timeout=5, isolation_level=None)
+            try:
+                connection.execute("PRAGMA synchronous=FULL")
+                version = connection.execute("PRAGMA user_version").fetchone()[0]
+                if version == 0:
+                    connection.execute("BEGIN IMMEDIATE")
+                    connection.execute("CREATE TABLE metadata (id INTEGER PRIMARY KEY CHECK(id=1), epoch TEXT NOT NULL, generation INTEGER NOT NULL)")
+                    connection.execute("CREATE TABLE records (uri TEXT PRIMARY KEY, payload TEXT NOT NULL)")
+                    connection.execute("CREATE TABLE latest (base_uri TEXT PRIMARY KEY, uri TEXT NOT NULL)")
+                    connection.execute("CREATE INDEX latest_uri ON latest(uri)")
+                    connection.execute("INSERT INTO metadata VALUES (1, ?, 0)", (secrets.token_hex(16),))
+                    connection.execute("PRAGMA user_version=2")
+                    connection.commit()
+                elif version != 2:
+                    raise McpResourceError("Unsupported Resource database version; existing store was not changed")
+                connection.execute("BEGIN IMMEDIATE" if write else "BEGIN")
+                self._connection = connection
+                yield connection
+                if connection.in_transaction:
+                    connection.rollback()
+            except sqlite3.Error as exc:
+                raise McpResourceError("Resource registry could not be loaded or committed; no publication was committed.") from exc
+            finally:
+                self._connection = None
+                connection.close()
+
+    def _persist_locked(self) -> None:
+        self._connection.commit()
 
     @contextmanager
     def _disk_guard(self):
@@ -370,86 +396,6 @@ class McpResourceRegistry:
         finally:
             self._disk_lease.release()
 
-    def _index_stamp(self):
-        try:
-            stat = self._index_path().stat()
-            return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns
-        except FileNotFoundError:
-            return None
-
-    def _load_locked(self) -> None:
-        stamp = self._index_stamp()
-        if stamp == self._disk_stamp:
-            return
-        path = self._index_path()
-        if stamp is None:
-            self._records, self._latest, self._encoded_records = {}, {}, {}
-            self._generation, self._disk_stamp = 0, None
-            return
-        try:
-            payload = json.loads(path.read_bytes().decode("utf-8"))
-            records = payload.get("records") if isinstance(payload, Mapping) else None
-            latest = payload.get("latest") if isinstance(payload, Mapping) else None
-            if isinstance(records, Mapping) and isinstance(latest, Mapping):
-                loaded = {str(key): dict(value) for key, value in records.items() if isinstance(value, Mapping)}
-                self._encoded_records = {uri: value for uri, value in self._encoded_records.items() if self._records.get(uri) == loaded.get(uri)}
-                self._records = loaded
-                self._latest = {str(key): str(value) for key, value in latest.items()}
-                self._generation = int(payload.get("generation", len(self._records)))
-                self._disk_stamp = stamp
-            else:
-                raise ValueError("Missing resource index records or latest mapping")
-        except (OSError, ValueError, TypeError) as exc:
-            raise McpResourceError("Resource registry could not be loaded; existing index was not replaced.") from exc
-
-    def _persist_locked(self) -> None:
-        self.store_dir.mkdir(parents=True, exist_ok=True)
-        path = self._index_path()
-        temporary = path.with_name(f".registry.{os.getpid()}.{secrets.token_hex(8)}.tmp")
-        header = {
-            "generation": self._generation,
-            "latest": self._latest,
-        }
-        encoded = {}
-        for uri, record in self._records.items():
-            cached = self._encoded_records.get(uri)
-            if cached is None:
-                cached = json.dumps(
-                    {uri: record}, ensure_ascii=False, sort_keys=True,
-                    separators=(",", ":"), allow_nan=False,
-                )[1:-1].encode("utf-8")
-            encoded[uri] = cached
-        # Stream the same JSON index; avoid reencoding or joining all historical
-        # image/state payloads whenever a small new operation receipt is added.
-        try:
-            with temporary.open("xb") as stream:
-                stream.write(json.dumps(
-                    header, ensure_ascii=False, sort_keys=True,
-                    separators=(",", ":"), allow_nan=False,
-                )[:-1].encode("utf-8") + b',"records":{')
-                for index, uri in enumerate(sorted(encoded)):
-                    if index:
-                        stream.write(b",")
-                    stream.write(encoded[uri])
-                stream.write(b'},"schema":"vrcforge.resource_registry.v1"}')
-                stream.flush()
-                os.fsync(stream.fileno())
-            for attempt in range(5):
-                try:
-                    temporary.replace(path)
-                    break
-                except PermissionError as exc:
-                    # Bounded replacement-only retry for transient Windows
-                    # sharing/access denial; never re-run a tool or mutation.
-                    if getattr(exc, "winerror", None) not in {5, 32, 33} or attempt == 4:
-                        raise
-                    time.sleep(0.05)
-        finally:
-            temporary.unlink(missing_ok=True)
-        # A failed write/replace must not cache a revision that the enclosing
-        # publish_many rolls back and may later reuse for a different value.
-        self._encoded_records = encoded
-        self._disk_stamp = self._index_stamp()
 
 
 __all__ = [

@@ -19,7 +19,7 @@ def _writer(store, value, ready, start, results):
         ready.put(value)
         assert start.wait(5)
         row=publish(registry,'shared',value)
-        results.put(('ok',row['revision']))
+        results.put(('ok',row['revision'],row['uri']))
     except Exception as exc:
         results.put(('error',repr(exc)))
 
@@ -40,9 +40,9 @@ def test_real_spawned_writers_retain_both_immutable_revisions(tmp_path):
         assert {ready.get(timeout=5),ready.get(timeout=5)}=={'a','b'}
         start.set()
         output=[results.get(timeout=8),results.get(timeout=8)]
-        assert sorted(output)==[('ok',1),('ok',2)]
+        assert sorted((item[0],item[1]) for item in output)==[('ok',1),('ok',2)]
         loaded=McpResourceRegistry(tmp_path)
-        assert {loaded.read('vrcforge://test/shared?revision='+str(i))['structuredContent']['data']['value'] for i in (1,2)}=={'a','b'}
+        assert {loaded.read(item[2])['structuredContent']['data']['value'] for item in output}=={'a','b'}
     finally:
         for child in children:
             child.join(2)
@@ -50,53 +50,50 @@ def test_real_spawned_writers_retain_both_immutable_revisions(tmp_path):
         ready.close();results.close();ready.join_thread();results.join_thread()
 
 
-@pytest.mark.skipif(os.name!='nt',reason='Windows open file replacement semantics')
-def test_reader_open_handle_cannot_race_atomic_replace(tmp_path,monkeypatch):
+def test_reader_transaction_blocks_writer_without_losing_records(tmp_path):
     registry=McpResourceRegistry(tmp_path);old=publish(registry,'old',1)
-    entered=threading.Event();errors=[];original=Path.read_bytes
-    def held_read(path,*args,**kwargs):
-        if path==tmp_path/'registry.json' and threading.current_thread().name=='registry-reader':
-            with path.open('rb') as handle:
-                entered.set();time.sleep(.2)
-                return handle.read()
-        return original(path,*args,**kwargs)
-    monkeypatch.setattr(Path,'read_bytes',held_read)
+    entered=threading.Event();release=threading.Event();errors=[]
     def reader():
-        try:McpResourceRegistry(tmp_path).read(old['uri'])
+        try:
+            with McpResourceRegistry(tmp_path)._transaction() as connection:
+                assert connection.execute("SELECT COUNT(*) FROM records").fetchone()[0] == 1
+                entered.set();assert release.wait(5)
         except Exception as exc:errors.append(exc)
     thread=threading.Thread(target=reader,name='registry-reader');thread.start()
-    try:
-        assert entered.wait(2)
-        new=publish(registry,'new',2)
-    finally:thread.join(3)
-    assert not thread.is_alive() and not errors
+    assert entered.wait(2)
+    results=[]
+    def writer():
+        try:results.append(publish(registry,'new',2))
+        except Exception as exc:errors.append(exc)
+    writing=threading.Thread(target=writer);writing.start()
+    release.set();thread.join(5);writing.join(5)
+    assert not thread.is_alive() and not writing.is_alive() and not errors
     disk=McpResourceRegistry(tmp_path)
-    assert disk.read(old['uri']) and disk.read(new['uri'])
+    assert disk.read(old['uri']) and disk.read(results[0]['uri'])
 
 
-def test_transient_windows_replace_denial_preserves_one_commit(tmp_path,monkeypatch):
+def test_sqlite_commit_failure_rolls_back_and_closes_connection(tmp_path,monkeypatch):
+    import sqlite3
+    import mcp_resource_registry as module
     registry=McpResourceRegistry(tmp_path);old=publish(registry,'shared',1)
-    original=Path.replace;attempts=[]
-    def denied_once(path,target):
-        if Path(target)==tmp_path/'registry.json':
-            attempts.append(path)
-            if len(attempts)==1:
-                exc=PermissionError(13,'synthetic WinError5');exc.winerror=5;raise exc
-        return original(path,target)
-    monkeypatch.setattr(Path,'replace',denied_once)
-    new=publish(registry,'shared',2)
-    assert new['revision']==2 and len(attempts)==2
+    original=sqlite3.connect;connections=[]
+    class FailingCommit(sqlite3.Connection):
+        closed=False
+        def commit(self):
+            # Schema preparation is committed before record inserts.
+            if self.total_changes:
+                raise sqlite3.OperationalError("synthetic disk full")
+            return super().commit()
+        def close(self):
+            self.closed=True
+            return super().close()
+    def connect(*args,**kwargs):
+        value=original(*args,**kwargs,factory=FailingCommit);connections.append(value);return value
+    with monkeypatch.context() as patch:
+        patch.setattr(module.sqlite3,'connect',connect)
+        with pytest.raises(module.McpResourceError,match='no publication was committed'):
+            publish(registry,'shared',2)
+    assert connections and all(item.closed for item in connections)
+    assert registry.generation==1
     assert registry.read(old['uri'])['structuredContent']['data']=={'value':1}
-    assert not list(tmp_path.glob('*.tmp'))
-
-
-def test_permanent_replace_failure_rolls_back_and_cleans_owned_temporary(tmp_path,monkeypatch):
-    registry=McpResourceRegistry(tmp_path);old=publish(registry,'shared',1)
-    before=(tmp_path/'registry.json').read_bytes()
-    def denied(path,target):
-        exc=PermissionError(13,'synthetic persistent WinError5');exc.winerror=5;raise exc
-    monkeypatch.setattr(Path,'replace',denied)
-    with pytest.raises(PermissionError):publish(registry,'shared',2)
-    assert (tmp_path/'registry.json').read_bytes()==before
-    assert registry.read(old['uri'])['structuredContent']['data']=={'value':1}
-    assert registry.generation==1 and not list(tmp_path.glob('*.tmp'))
+    assert publish(registry,'shared',3)['revision']==2

@@ -1,6 +1,7 @@
 import copy
 import json
 import os
+import sqlite3
 from pathlib import Path
 import pytest
 from mcp_resource_registry import McpResourceRegistry
@@ -69,7 +70,11 @@ def test_byte_bound_offsets_unknown_drift_and_restart(tmp_path):
     with pytest.raises(ValueError):loaded.read(uri.replace("a"*32,"b"*32))
     changed=copy.deepcopy(raw);changed["frames"][0]["states"][0]["clips"]="changed"
     with pytest.raises(ValueError,match="changed"):project_receipt(loaded,changed,{})
-    loaded._records[uri]["data"]["states"][0]["clips"]="tampered"
+    with sqlite3.connect(loaded._index_path()) as connection:
+        row = json.loads(connection.execute("SELECT payload FROM records WHERE uri=?", (uri,)).fetchone()[0])
+        row["data"]["states"][0]["clips"] = "tampered"
+        connection.execute("UPDATE records SET payload=? WHERE uri=?", (json.dumps(row), uri))
+    connection.close()
     with pytest.raises(ValueError,match="changed"):loaded.read(uri)
 
 
@@ -92,7 +97,9 @@ def test_historical_resource_does_not_replace_or_promote_pending(tmp_path):
     assert domain.project_receipt(registry,raw,{})==first and registry.read(uri)==captured
     assert registry.generation==generation
     assert "expiresAt" not in json.loads(captured["contents"][0]["text"])["data"]
-    registry._records.pop(uri)
+    with sqlite3.connect(registry._index_path()) as connection:
+        connection.execute("DELETE FROM records WHERE uri=?", (uri,))
+    connection.close()
     with pytest.raises(ValueError):registry.read(uri)
 
 

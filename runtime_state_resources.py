@@ -5,6 +5,7 @@ import copy
 import hashlib
 import json
 import re
+from urllib.parse import parse_qs, urlsplit
 
 RESOURCE_TYPE = "runtime_observation_state_page"
 PAGE_LIMIT = 16
@@ -38,8 +39,13 @@ def read_state_page(envelope):
     data = envelope["data"]
     if envelope.get("contentHash") != _hash({"identity": envelope["identity"], "data": data}):
         raise ValueError("Captured state resource content or identity changed.")
-    expected = _uri(data["jobId"], data["frameIndex"], data["offset"]) + "&revision=1"
-    if envelope["uri"] != expected or envelope["identity"].get("jobId") != data["jobId"]:
+    from mcp_resource_registry import _base_uri
+    base = _uri(data["jobId"], data["frameIndex"], data["offset"])
+    query = parse_qs(urlsplit(envelope["uri"]).query, keep_blank_values=True)
+    stores = query.get("store", [])
+    if (_base_uri(envelope["uri"]) != base or query.get("revision") != ["1"]
+            or len(stores) != 1 or not re.fullmatch(r"[0-9a-f]{32}", stores[0])
+            or envelope["identity"].get("jobId") != data["jobId"]):
         raise ValueError("Captured state resource URI identity differs.")
     if data["actualCount"] != len(data["states"]) or not 0 < data["actualCount"] <= PAGE_LIMIT:
         raise ValueError("Captured state page count differs.")
@@ -137,7 +143,7 @@ def project_receipt(registry, receipt, execution_target, *, state_detail="resour
         if not isinstance(states, list) or not 1 <= len(states) <= 256 or any(not isinstance(row, dict) for row in states):
             raise ValueError("Captured state rows missing or outside observation bound.")
         state_hash = _hash(states)
-        first_uri = _uri(job, index, 0) + "&revision=1"
+        first_uri = registry.revision_uri(_uri(job, index, 0), 1)
         # Re-reading a job must not replace its original historical capture.
         from mcp_resource_registry import McpResourceError
         try:
@@ -169,7 +175,7 @@ def project_receipt(registry, receipt, execution_target, *, state_detail="resour
                             "unityFrame": frame["unityFrame"], "actualElapsedSeconds": frame["actualElapsedSeconds"],
                             "offset": offset, "limit": PAGE_LIMIT, "actualCount": count, "totalCount": len(states),
                             "stateSetHash": state_hash, "states": states[offset:next_offset],
-                            "nextUri": _uri(job, index, next_offset) + "&revision=1" if next_offset < len(states) else None}
+                            "nextUri": registry.revision_uri(_uri(job, index, next_offset), 1) if next_offset < len(states) else None}
                     # Reserve envelope overhead; enforce the exact final size on read.
                     if len(_encoded({"identity": identity, "data": data})) <= MAX_RESOURCE_BYTES - 4096:
                         break

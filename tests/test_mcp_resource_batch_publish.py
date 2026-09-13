@@ -26,20 +26,15 @@ def test_real_registry_many_saves_once_and_old_publish_is_compatible(tmp_path,mo
     assert loaded.read(next_record["uri"])["structuredContent"]["data"]=={"index":99}
 
 
-def test_batch_preflight_and_replace_failure_leave_original_index(tmp_path,monkeypatch):
+def test_batch_preflight_and_commit_failure_leave_original_index(tmp_path,monkeypatch):
     registry=McpResourceRegistry(tmp_path)
-    first=registry.publish(**spec(0));before=(tmp_path/"registry.json").read_bytes();generation=registry.generation
+    first=registry.publish(**spec(0));before=(tmp_path/"registry-v2.sqlite3").read_bytes();generation=registry.generation
     with pytest.raises(ValueError):registry.publish_many([spec(1),{**spec(2),"base_uri":"file://forbidden"}])
-    assert registry.generation==generation and (tmp_path/"registry.json").read_bytes()==before
-    original=Path.replace
-    attempts=[]
-    def fail(path,target):
-        attempts.append(path)
-        if Path(target)==tmp_path/"registry.json" and len(attempts)==1:raise OSError("replace fault")
-        return original(path,target)
-    monkeypatch.setattr(Path,"replace",fail)
-    with pytest.raises(OSError,match="replace fault"):registry.publish_many([spec(1),spec(2)])
-    assert registry.generation==generation and (tmp_path/"registry.json").read_bytes()==before
+    assert registry.generation==generation and (tmp_path/"registry-v2.sqlite3").read_bytes()==before
+    def fail():raise OSError("commit fault")
+    monkeypatch.setattr(registry,"_persist_locked",fail)
+    with pytest.raises(OSError,match="commit fault"):registry.publish_many([spec(1),spec(2)])
+    assert registry.generation==generation and (tmp_path/"registry-v2.sqlite3").read_bytes()==before
     assert registry.list()["resources"][0]["uri"]==first["uri"] and len(registry.list()["resources"])==1
 
 
@@ -63,13 +58,13 @@ def test_batch_lock_preserves_concurrent_single_publish(tmp_path,monkeypatch):
 
 def test_domain_validator_failure_discards_entire_staged_batch(tmp_path):
     registry=McpResourceRegistry(tmp_path)
-    registry.publish(**spec(0));before=(tmp_path/"registry.json").read_bytes();generation=registry.generation
+    registry.publish(**spec(0));before=(tmp_path/"registry-v2.sqlite3").read_bytes();generation=registry.generation
     def reject(records):
         assert len(records)==2
         raise ValueError("domain identity changed")
     with pytest.raises(ValueError,match="identity changed"):
         registry.publish_many([spec(1),spec(2)],validate_records=reject)
-    assert registry.generation==generation and (tmp_path/"registry.json").read_bytes()==before
+    assert registry.generation==generation and (tmp_path/"registry-v2.sqlite3").read_bytes()==before
     assert len(registry.list()["resources"])==1
 
 

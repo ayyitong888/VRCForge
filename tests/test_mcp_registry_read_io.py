@@ -1,4 +1,4 @@
-"""Historical JSON index compatibility; pytest owns all temporary local files."""
+"""SQLite immutable record integrity; pytest owns all temporary local files."""
 import json
 import pytest
 
@@ -30,7 +30,7 @@ def test_deep_existing_index_remains_readable(tmp_path):
 
 @pytest.mark.parametrize('invalid', [b'{"records":', b'{} trailing', b'{"records":{},"latest":[]}', b'\xff'])
 def test_invalid_index_never_publishes_partial_data(tmp_path,invalid):
-    index = tmp_path/'registry.json'
+    index = tmp_path/'registry-v2.sqlite3'
     index.write_bytes(invalid)
     with pytest.raises(candidate.McpResourceError,match='could not be loaded'):
         publish(candidate.McpResourceRegistry(tmp_path),'new',{'value':1})

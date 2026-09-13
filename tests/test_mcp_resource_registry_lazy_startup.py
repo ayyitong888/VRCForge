@@ -27,15 +27,9 @@ def _seed(tmp_path: Path) -> tuple[Path, dict]:
 
 def test_constructor_does_not_parse_existing_index(tmp_path, monkeypatch) -> None:
     store, _ = _seed(tmp_path)
-    index = store / "registry.json"
-    original = Path.open
-
-    def fail_if_read(self: Path, *args, **kwargs):
-        if self == index:
-            raise AssertionError("constructor eagerly read registry.json")
-        return original(self, *args, **kwargs)
-
-    monkeypatch.setattr(Path, "open", fail_if_read)
+    def fail_connect(*args, **kwargs):
+        raise AssertionError("constructor eagerly opened database")
+    monkeypatch.setattr("mcp_resource_registry.sqlite3.connect", fail_connect)
     registry = McpResourceRegistry(store)
     assert registry.templates()
 
