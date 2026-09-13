@@ -6593,6 +6593,10 @@ class AgentGateway:
                         "outcome": {
                             "status": "needs_correction",
                             "summary": correction_summary,
+                            "nextAction": {
+                                "kind": "correct_completion_claim",
+                                "requiredEvidenceActionIds": completed_action_ids,
+                            },
                             "verification": {
                                 "state": "not_required",
                                 "checks": [],

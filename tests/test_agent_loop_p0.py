@@ -1756,6 +1756,9 @@ class AgentLoopP0Tests(unittest.TestCase):
                 for item in (loop_state or [])
                 if str(item.get("actionId") or "")
             ]
+            observation = gateway.runtime_planner._llm_loop_step_observation(loop_state[-1])
+            for action_id in completed:
+                self.assertIn(action_id, observation)
             return {
                 "planner": "llm",
                 "summary": "The project inspection is complete.",
