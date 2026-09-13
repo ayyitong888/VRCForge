@@ -505,9 +505,10 @@ def test_connection_help_prompt_requires_know_yourself_before_generic_tools() ->
         project_context_active=False,
     )
 
-    assert "VRCForge, Unity, MCP, bridge, editor plugin, or Provider connection problem" in prompt
-    assert "choose know_yourself before filesystem, Shell, or repair tools" in prompt
-    assert "ordinary Internet, GitHub, or unrelated network troubleshooting" in prompt
+    assert "诊断 VRCForge 自身启动、连接或历史日志时" in prompt
+    assert "know_yourself" in prompt
+    assert "先发现并加载相应的只读诊断工具块" in prompt
+    assert "不可直接调用未列出的工具，也不要用普通 Shell 代替这条诊断路径" in prompt
 
 
 def test_no_project_planner_rejects_unity_tool_while_project_turn_keeps_it() -> None:

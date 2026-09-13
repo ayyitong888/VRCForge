@@ -40,13 +40,14 @@ def test_material_tuning_reports_adapter_memory_readback_without_changing_save_b
         encoding="utf-8"
     )
     apply_index = source.index("adapter.TryApplyChange")
-    readback_index = source.index("adapter.ReadSupportedProperties(target.material)", apply_index)
+    readback_index = source.index("var material = saveAssets ? AssetDatabase.LoadAssetAtPath<Material>", apply_index)
     assert apply_index < readback_index
-    assert source.count("AssetDatabase.SaveAssets();") == 1
-    assert "before = beforeValues" in source
-    assert "after = afterValues" in source
+    assert source.count("AssetDatabase.SaveAssets();") == 0
+    assert "AssetDatabase.SaveAssetIfDirty" in source
+    assert "before = item.before" in source
+    assert "after = actual" in source
     assert "pending = !saveAssets" in source
-    assert 'note = saveAssets ? "已修改并落盘" : "已修改，尚未落盘"' in source
+    assert 'note = saveAssets ? "已修改并落盘回读验证" : "已修改，尚未落盘"' in source
 
 
 def test_add_modular_avatar_component_reports_memory_state_without_adding_saveassets() -> None:

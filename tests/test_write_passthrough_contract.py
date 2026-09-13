@@ -33,7 +33,7 @@ def test_duplicate_project_asset_returns_fresh_readback_and_bounded_affected() -
     block = _tool_block(source, "DuplicateProjectAssetTool")
 
     save_index = block.index("AssetDatabase.SaveAssets();")
-    readback_index = block.index("createdEvidence = ReadCreatedEvidenceWithRetry")
+    readback_index = block.index("createdEvidence = ReadCreatedEvidenceWithRetry", save_index)
     assert save_index < readback_index
     assert "before = beforePayload" in block
     assert "after = afterPayload" in block
@@ -48,7 +48,7 @@ def test_material_shader_returns_disk_readback_and_renderer_impact() -> None:
     )
     block = _tool_block(source, "MaterialShaderTool", "public static class MaterialTextureTool")
 
-    save_index = block.index("AssetDatabase.SaveAssets();")
+    save_index = block.index("AssetDatabase.SaveAssetIfDirty(target.material)")
     readback_index = block.index("AssetDatabase.LoadAssetAtPath<Material>")
     assert save_index < readback_index
     assert "before = beforePayload" in block

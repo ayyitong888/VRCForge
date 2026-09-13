@@ -66,7 +66,11 @@ def test_installed_skill_stdio_branch_loads_only_when_requested(
             return {"runtimeOnline": True}
 
         @staticmethod
-        def manifest(layer: str, tool_blocks: list[str]) -> dict[str, object]:
+        def manifest(
+            layer: str,
+            tool_blocks: list[str],
+            _tool_names: list[str] | None = None,
+        ) -> dict[str, object]:
             return {
                 "tools": gateway.build_external_mcp_tools(layer, tool_blocks=tool_blocks)
             }

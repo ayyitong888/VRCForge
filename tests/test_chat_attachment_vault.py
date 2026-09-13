@@ -623,7 +623,23 @@ class ChatAttachmentEndpointTests(unittest.TestCase):
                         ],
                     },
                 )
-            return dashboard_server.McpResult(0, "", "", {"ok": True})
+            return dashboard_server.McpResult(
+                0,
+                "",
+                "",
+                {
+                    "ok": True,
+                    "status": "done",
+                    "after": {
+                        "compile": {
+                            "errorCount": 0,
+                            "isCompiling": False,
+                            "captureComplete": True,
+                            "isStale": False,
+                        }
+                    },
+                },
+            )
 
         with (
             patch(

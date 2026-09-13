@@ -39,7 +39,7 @@ def test_optional_project_read_schemas_are_known_and_project_bindable() -> None:
         if "projectPath" in (schema.get("properties") or {})
         and "projectPath" not in (schema.get("required") or [])
     ]
-    assert len(optional) == 11
+    assert len(optional) == 19
     for name in optional:
         bound = bind_runtime_unity_project(
             canonical_unity_read_tool_input_schema(name), {}, r"D:\Projects\A"
