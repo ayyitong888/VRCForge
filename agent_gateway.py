@@ -7400,6 +7400,10 @@ class AgentGateway:
                         "unavailableReason": "prior_provider_usage_missing",
                     }
                 context_usage.update(merged_provider_usage)
+                for token_key in ("inputTokens", "outputTokens", "totalTokens"):
+                    context_usage["cumulative" + token_key[0].upper() + token_key[1:]] = (
+                        merged_provider_usage.get(token_key)
+                    )
                 context_usage["scope"] = "task_total_context_usage"
                 context_usage["taskTotalAvailable"] = (
                     merged_provider_usage.get("exact") is True

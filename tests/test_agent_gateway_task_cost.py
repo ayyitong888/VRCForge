@@ -51,6 +51,9 @@ def test_three_provider_responses_across_two_questions_are_counted_once(tmp_path
         assert usage["inputTokens"] == 60
         assert usage["outputTokens"] == 6
         assert usage["totalTokens"] == 66
+        assert usage["cumulativeInputTokens"] == 60
+        assert usage["cumulativeOutputTokens"] == 6
+        assert usage["cumulativeTotalTokens"] == 66
         assert usage["exact"] is True
         assert usage["taskTotalAvailable"] is True
         assert usage["scope"] == "task_total_context_usage"
