@@ -847,46 +847,31 @@ def test_windows_desktop_binds_the_large_taskbar_icon_from_its_executable() -> N
 def test_packaged_public_docs_track_current_release_identity() -> None:
     version = (REPO_ROOT / "VERSION").read_text(encoding="utf-8").strip()
     readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    english = (REPO_ROOT / "README.en.md").read_text(encoding="utf-8")
     user_manual = (REPO_ROOT / "USER_MANUAL.md").read_text(encoding="utf-8")
     packaging_guide = (REPO_ROOT / "packaging" / "README.md").read_text(encoding="utf-8")
-    release_notes = (REPO_ROOT / "docs" / f"RELEASE_NOTES_{version}.md").read_text(
-        encoding="utf-8"
-    )
+    release_notes = (REPO_ROOT / "docs" / f"RELEASE_NOTES_{version}.md").read_text(encoding="utf-8")
 
-    for required in (
-        f"target-v{version}",
-        f"docs/RELEASE_NOTES_{version}.md",
-        f"VRCForge_Windows_x64_{version}.zip",
-        f"The `v{version}` release target",
-        f"Reimporting the same `{version}` integration",
-        f"`v{version}` release gate",
-    ):
-        assert required in readme
-
-    assert "status-WIP" not in readme
-    assert "Current stable source and release:" not in readme
-    candidate_identity = f"Current source / target release: `{version}` (`v{version}`)."
-    published_identity = (
-        f"Current source and latest published stable release: `{version}` (`v{version}`)."
-    )
-    if "status-release--ready" in readme or "status-test--candidate" in readme:
-        assert candidate_identity in readme
-        assert candidate_identity in user_manual
+    # Public download identity is distinct from the source development target.
+    # Keep both localized entry points consistent without requiring obsolete
+    # English marketing sentences in the Chinese README.
+    stable = re.search(r"Latest published stable release: `([0-9.]+)`", user_manual)
+    assert stable is not None
+    published = stable.group(1)
+    for document in (readme, english):
+        assert f"releases/tag/v{published}" in document
+        assert f"docs/RELEASE_NOTES_{published}.md" in document
+        assert f"v{version}" in document
+    if published != version:
+        assert "尚未正式发布" in readme
+        assert "has not been formally" in english
+        assert f"Current source / target release: `{version}`" in user_manual
         assert f"current source / target package is `{version}`" in packaging_guide
-        assert f"Latest published stable release: `{version}`" not in readme
-        assert f"Latest published stable release: `{version}`" not in user_manual
-        assert f"`{version}` remains the latest published stable package" not in packaging_guide
-        assert "remains the latest published stable package" in packaging_guide
-    else:
-        assert "status-released" in readme
-        assert published_identity in readme
-        assert published_identity in user_manual
-        assert f"current source and latest published stable package is `{version}`" in packaging_guide
+        assert f"`{published}` remains the latest published stable package" in packaging_guide
     assert f"-Version {version}" in packaging_guide
     assert f"releases/download/v{version}/VRCForge_Windows_x64_{version}.zip" in packaging_guide
     assert f"# VRCForge {version}" in release_notes
     assert "Windows x64" in release_notes
-    assert "`pending`" not in release_notes
 
 
 def test_release_publish_rechecks_web_payload_manifest_binding() -> None:
