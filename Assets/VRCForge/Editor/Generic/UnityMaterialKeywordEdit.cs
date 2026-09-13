@@ -35,7 +35,7 @@ namespace VRCForge.Editor
                 if (target == null || AssetDatabase.GetAssetPath(target) != path) throw new InvalidOperationException("Persistent material target was not found.");
                 var visited = new HashSet<Material>();
                 for (var chain = target; chain != null; chain = chain.parent)
-                    if (!visited.Add(chain) || EditorUtility.IsDirty(chain) || (chain.isVariant && chain.parent == null))
+                    if (!visited.Add(chain) || HasUnsavedChanges(chain) || (chain.isVariant && chain.parent == null))
                         throw new InvalidOperationException("Material or ancestor is dirty or has an unresolved Variant chain.");
                 if (target.isVariant || target.parent != null) throw new InvalidOperationException("Flatten the Material Variant before editing keywords.");
                 if (target.shader == null) throw new InvalidOperationException("Material has no shader.");
@@ -75,7 +75,7 @@ namespace VRCForge.Editor
                     EditorUtility.SetDirty(target);
                     AssetDatabase.SaveAssetIfDirty(target);
                     owned = SceneObjectCopyCore.ReadStableAssetEvidence(path, "saved keyword ownership");
-                    if (EditorUtility.IsDirty(target)) throw new InvalidOperationException("Material remained dirty after saving.");
+                    RequirePersistedMaterial(target);
                 }
                 AssetDatabase.ImportAsset(path, ImportAssetOptions.ForceSynchronousImport);
                 var readback = Evidence(path, AssetDatabase.LoadAssetAtPath<Material>(path));
@@ -113,6 +113,42 @@ namespace VRCForge.Editor
             }
         }
 
+        // Unity may retain a material dirty flag after a successful targeted save.
+        // Compare an independent disk deserialization; never clear dirty flags or
+        // accept an unsaved value merely because the save API returned.
+        internal static bool HasUnsavedChanges(Material material)
+        {
+            if (!EditorUtility.IsDirty(material)) return false;
+            try { RequirePersistedMaterial(material); return false; }
+            catch { return true; }
+        }
+
+        internal static void RequirePersistedMaterial(Material material)
+        {
+            var path = AssetDatabase.GetAssetPath(material);
+            if (string.IsNullOrEmpty(path) || !AssetDatabase.IsMainAsset(material))
+                throw new InvalidOperationException("Persistent main material required for disk readback.");
+            // These deserialized objects belong only to this call. No file writes,
+            // listener or shared cache; destroy only nonpersistent readback objects.
+            var objects = UnityEditorInternal.InternalEditorUtility.LoadSerializedFileAndForget(path);
+            try
+            {
+                if (objects == null || objects.Length != 1 || !(objects[0] is Material disk)
+                    || EditorUtility.IsPersistent(disk))
+                    throw new InvalidOperationException("Independent material disk readback is unavailable.");
+                if (!JToken.DeepEquals(JObject.Parse(EditorJsonUtility.ToJson(material)),
+                    JObject.Parse(EditorJsonUtility.ToJson(disk))))
+                    throw new InvalidOperationException("Material disk contents differ from memory after saving.");
+            }
+            finally
+            {
+                if (objects != null)
+                    foreach (var obj in objects)
+                        if (obj != null && !EditorUtility.IsPersistent(obj))
+                            UnityEngine.Object.DestroyImmediate(obj);
+            }
+        }
+
         private static JObject Identity(UnityEngine.Object obj, bool shader = false)
         {
             if (obj == null) return null;
@@ -126,7 +162,7 @@ namespace VRCForge.Editor
 
         internal static JObject Evidence(string path, Material material)
         {
-            if (material == null || material.shader == null || EditorUtility.IsDirty(material)) throw new InvalidOperationException("Material readback is unavailable or dirty.");
+            if (material == null || material.shader == null || HasUnsavedChanges(material)) throw new InvalidOperationException("Material readback is unavailable or dirty.");
             var evidence = SceneObjectCopyCore.ReadStableAssetEvidence(path, "material keyword evidence");
             var state = new JObject { ["shader"] = Identity(material.shader, true), ["isVariant"] = material.isVariant,
                 ["parent"] = material.parent == null ? "" : AssetDatabase.GetAssetPath(material.parent), ["renderQueue"] = material.renderQueue,

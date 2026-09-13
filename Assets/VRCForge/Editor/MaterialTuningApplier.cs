@@ -65,7 +65,7 @@ namespace VRCForge.Editor
                     if (string.IsNullOrEmpty(path) || !path.StartsWith("Assets/", StringComparison.Ordinal)
                         || !AssetDatabase.IsMainAsset(target.material))
                         throw new InvalidOperationException("Material tuning requires a persistent main material asset.");
-                    if (EditorUtility.IsDirty(target.material))
+                    if (UnityMaterialKeywordEdit.HasUnsavedChanges(target.material))
                         throw new InvalidOperationException("Save or discard existing material edits before tuning: " + path);
                     if (!bindings.Add(path + "\n" + semantic))
                         throw new InvalidOperationException("Duplicate semantic change to the same material asset.");
@@ -109,6 +109,7 @@ namespace VRCForge.Editor
                     foreach (var group in planned.GroupBy(item => item.assetPath))
                     {
                         AssetDatabase.SaveAssetIfDirty(group.First().target.material);
+                        UnityMaterialKeywordEdit.RequirePersistedMaterial(group.First().target.material);
                         AssetDatabase.ImportAsset(group.Key, ImportAssetOptions.ForceSynchronousImport | ImportAssetOptions.ForceUpdate);
                     }
                 }
@@ -117,9 +118,12 @@ namespace VRCForge.Editor
                 foreach (var item in planned)
                 {
                     var material = saveAssets ? AssetDatabase.LoadAssetAtPath<Material>(item.assetPath) : item.target.material;
-                    if (material == null || AssetDatabase.AssetPathToGUID(item.assetPath) != item.assetGuid
-                        || (saveAssets && EditorUtility.IsDirty(material)))
-                        throw new InvalidOperationException("Material persisted identity or clean-state readback failed.");
+                    if (material == null)
+                        throw new InvalidOperationException("Material persisted readback failed: readback_asset_null.");
+                    if (AssetDatabase.AssetPathToGUID(item.assetPath) != item.assetGuid)
+                        throw new InvalidOperationException("Material persisted readback failed: asset_guid_changed.");
+                    if (saveAssets && UnityMaterialKeywordEdit.HasUnsavedChanges(material))
+                        throw new InvalidOperationException("Material persisted readback failed: readback_asset_dirty.");
                     var adapter = ShaderAdapterRegistry.GetAdapter(material)
                         ?? throw new InvalidOperationException("Saved material shader adapter is unavailable.");
                     var actual = RequireValue(adapter, material, item.semanticProperty, item.after);

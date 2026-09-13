@@ -27,6 +27,15 @@ STUBS = STUBS.replace('Imports++;Target.parent=System.IO.File.ReadAllText(p)=="v
 STUBS = STUBS.replace('namespace VRCForge.Editor {', 'namespace VRCForge.Editor { public static class MaterialShaderTool { public static bool MatchesCurrentProject(string p)=>p=="Project"; }')
 STUBS = STUBS.replace('Rendering.ShaderPropertyType GetPropertyType(int i)=>Rendering.ShaderPropertyType.Float;', 'Rendering.ShaderPropertyType GetPropertyType(int i)=>i==0?Rendering.ShaderPropertyType.Float:i==1?Rendering.ShaderPropertyType.Int:Rendering.ShaderPropertyType.Texture;')
 STUBS = STUBS.replace('public Texture GetTexture(string n)=>null;', 'public Texture GetTexture(string n)=>new Texture{name="Texture"};').replace('o==Shader?"Assets/Generic.shader":"";', 'o==Shader?"Assets/Generic.shader":o is Texture?"Assets/Texture.png":"";')
+# Material flags can remain dirty despite matching persisted contents.
+STUBS = STUBS.replace('public string name;public bool Dirty;', 'public string name;public bool Persistent;public bool Dirty;public static void DestroyImmediate(Object o){}')
+STUBS = STUBS.replace('public static bool IsDirty(Object o)=>o.Dirty;', 'public static bool IsPersistent(Object o)=>o.Persistent;public static bool IsDirty(Object o)=>o.Dirty;')
+STUBS = STUBS.replace('public static class AssetDatabase {', 'public static class AssetDatabase { public static bool IsMainAsset(Object o)=>o==Target;')
+STUBS = STUBS.replace('System.IO.File.WriteAllText(TargetPath,string.Join(",",Target.shaderKeywords));o.Dirty=false;', 'if(Fault!="save_noop")System.IO.File.WriteAllText(TargetPath,string.Join(",",Target.shaderKeywords));o.Dirty=Fault=="sticky_dirty" || Fault=="save_noop";')
+STUBS += r'''
+namespace UnityEditor { public static class EditorJsonUtility {public static string ToJson(UnityEngine.Material m)=>new JObject{["keywords"]=new JArray(m.shaderKeywords),["value"]=m.Value,["queue"]=m.renderQueue}.ToString();} }
+namespace UnityEditorInternal { public static class InternalEditorUtility { public static UnityEngine.Object[] LoadSerializedFileAndForget(string path)=>new UnityEngine.Object[]{new UnityEngine.Material {shader=UnityEditor.AssetDatabase.Shader,shaderKeywords=System.IO.File.ReadAllText(path).Split((char)44)}}; } }
+'''
 STUBS += r'''public static class Probe {
  public static int Main(string[] argv){
   System.IO.Directory.CreateDirectory("Assets");
@@ -41,7 +50,7 @@ STUBS += r'''public static class Probe {
   UnityEditor.AssetDatabase.Fault=argv[0];
   if(argv[0]=="stale"){args["expectedKeywordEvidence"]["fileDigest"]="stale";args["keywordChanges"][0]["keyword"]="ACTIVE";}
   if(argv[0]=="invalid")args["keywordChanges"][0]["keyword"]="UNDECLARED";
-  if(argv[0]=="dirty")UnityEditor.AssetDatabase.Target.Dirty=true;
+  if(argv[0]=="dirty"){UnityEditor.AssetDatabase.Target.Dirty=true;UnityEditor.AssetDatabase.Target.Value=.75f;}
   if(argv[0]=="variant")UnityEditor.AssetDatabase.Target.parent=UnityEditor.AssetDatabase.Parent;
   if(argv[0]=="shaderstale")System.IO.File.WriteAllText("Assets/Generic.shader","different");
   var r=(VRCForge.Core.MCP.VRCForgeToolResult)VRCForge.Editor.UnityMaterialKeywordEdit.HandleCommand(args);
@@ -87,21 +96,21 @@ def run_command(compiled_keyword, tmp_path, case):
     assert result.returncode == 0, result.stdout + result.stderr
     return json.loads(result.stdout)
 
-@pytest.mark.parametrize('case', ['success', 'nochange', 'stale', 'invalid', 'dirty', 'variant', 'shaderstale', 'effective', 'guid', 'meta', 'save'])
+@pytest.mark.parametrize('case', ['success', 'sticky_dirty', 'save_noop', 'nochange', 'stale', 'invalid', 'dirty', 'variant', 'shaderstale', 'effective', 'guid', 'meta', 'save'])
 def test_actual_csharp_command(compiled_keyword, tmp_path, case):
     result = run_command(compiled_keyword, tmp_path, case)
     p = result['payload']
     assert result['globalSaves'] == 0 and result['unrelatedDirty'] is True
     assert result['tempCount'] == 0
-    if case in ('success', 'nochange'):
+    if case in ('success', 'sticky_dirty', 'nochange'):
         assert result['ok'] is True, result
         assert p['persistedReadback'] is True and p['committed'] is True
-        assert result['targetSaves'] == (case == 'success')
-        assert p['readback']['state']['keywords'] == (['ACTIVE', 'NEW'] if case == 'success' else ['ACTIVE'])
+        assert result['targetSaves'] == (case in ('success', 'sticky_dirty'))
+        assert p['readback']['state']['keywords'] == (['ACTIVE', 'NEW'] if case in ('success', 'sticky_dirty') else ['ACTIVE'])
     elif case in ('guid', 'meta', 'save'):
         assert result['ok'] is False and p['commitState'] == 'unknown'
         assert p['checkpointRecoveryRequired'] is True
-    elif case == 'effective':
+    elif case in ('effective', 'save_noop'):
         assert result['ok'] is False and p['commitState'] == 'rolled_back', result
         assert result['file'] == 'ACTIVE'
     else:
