@@ -876,6 +876,56 @@ def run_stdio_server(
             for item in controls
         ]
 
+    def prompt_controls() -> list[dict[str, Any]]:
+        """Expose the native prompt registry through bounded read controls."""
+        return [
+            standardize_tool_descriptor(
+                {
+                    "name": "vrcforge_list_prompts",
+                    "description": (
+                        "When to use: List the available VRCForge native .vsk prompts with bounded pagination.\n"
+                        "When NOT to use: Execute a prompt, inspect Unity, or change project files.\n"
+                        "Negative example: Guessing a prompt name instead of listing the prompt registry."
+                    ),
+                    "inputSchema": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "cursor": {"type": "string", "maxLength": 512},
+                            "pageSize": {"type": "integer", "minimum": 1, "maximum": 100},
+                        },
+                    },
+                },
+                write=False,
+                block="core",
+                exposure_layer=requested_layer["value"],
+                catalog_generation=tool_list_revision,
+            ),
+            standardize_tool_descriptor(
+                {
+                    "name": "vrcforge_get_prompt",
+                    "description": (
+                        "When to use: Read one exact native .vsk prompt by name and supply its declared arguments.\n"
+                        "When NOT to use: Use arbitrary methods, bypass prompt validation, or mutate Unity.\n"
+                        "Negative example: Treating a prompt read as approval to execute its project writes."
+                    ),
+                    "inputSchema": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": ["name"],
+                        "properties": {
+                            "name": {"type": "string", "minLength": 1, "maxLength": 240},
+                            "arguments": {"type": "object", "additionalProperties": True},
+                        },
+                    },
+                },
+                write=False,
+                block="core",
+                exposure_layer=requested_layer["value"],
+                catalog_generation=tool_list_revision,
+            ),
+        ]
+
     def activation_tools(requested_exposure: str) -> list[dict[str, Any]]:
         common_schema = {
             "type": "object",
@@ -1052,6 +1102,7 @@ def run_stdio_server(
             }, write=False, block="core", exposure_layer=requested_exposure, catalog_generation=tool_list_revision)
         ]
         tools.extend(block_controls())
+        tools.extend(prompt_controls())
         tools.extend(activation_tools(requested_exposure))
         try:
             # This authenticated, fresh manifest already checks availability.
@@ -1223,6 +1274,22 @@ def run_stdio_server(
         nonlocal tool_list_revision
         if tool_name == "vrcforge_bridge_preflight":
             return bridge.preflight()
+        if tool_name == "vrcforge_list_prompts":
+            cursor = arguments.get("cursor", "")
+            page_size = arguments.get("pageSize", 100)
+            if not isinstance(cursor, str) or len(cursor) > 512:
+                raise ValueError("cursor must be a string no longer than 512 characters")
+            if isinstance(page_size, bool) or not isinstance(page_size, int) or not 1 <= page_size <= 100:
+                raise ValueError("pageSize must be an integer between 1 and 100")
+            return list_prompts({"cursor": cursor, "pageSize": page_size})
+        if tool_name == "vrcforge_get_prompt":
+            name = arguments.get("name")
+            prompt_arguments = arguments.get("arguments", {})
+            if not isinstance(name, str) or not name.strip() or len(name) > 240:
+                raise ValueError("name must be a non-empty string no longer than 240 characters")
+            if not isinstance(prompt_arguments, Mapping):
+                raise ValueError("arguments must be an object")
+            return get_prompt(name.strip(), prompt_arguments)
         if tool_name == "vrcforge_list_tool_blocks":
             return block_inventory(arguments.get("block"))
         if tool_name == "vrcforge_invoke_loaded_read_tool":
@@ -1372,7 +1439,23 @@ def run_stdio_server(
         callback = getattr(bridge, "get_prompt", None)
         if not callable(callback):
             raise ValueError("Prompt registry is unavailable")
-        return callback(name, arguments)
+        result = callback(name, arguments)
+        if not isinstance(result, Mapping):
+            raise ValueError("Prompt registry returned an invalid response")
+        projected = dict(result)
+        structured = projected.get("structuredContent")
+        native_meta = projected.get("_meta")
+        provenance = dict(native_meta) if isinstance(native_meta, Mapping) else {}
+        if not provenance and isinstance(structured, Mapping) and isinstance(structured.get("provenance"), Mapping):
+            provenance = dict(structured["provenance"])
+        if provenance:
+            provenance["status"] = "available"
+            projected["promptSkillProvenance"] = provenance
+            if isinstance(structured, Mapping):
+                structured_copy = dict(structured)
+                structured_copy["promptSkillProvenance"] = dict(provenance)
+                projected["structuredContent"] = structured_copy
+        return projected
 
     def prompt_generation() -> str | None:
         if catalogue_backend_unavailable:

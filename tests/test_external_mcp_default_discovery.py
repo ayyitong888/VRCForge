@@ -3,7 +3,7 @@ from copy import deepcopy
 import pytest
 from test_external_mcp_tool_selection import archived_tools,stdio_requester,LEAF,NAMES
 from agent_mcp_2026 import PROTOCOL_VERSION
-SEED={'vrcforge_bridge_preflight','vrcforge_list_tool_blocks','vrcforge_load_tool_block','vrcforge_unload_tool_block','vrcforge_invoke_loaded_read_tool','vrcforge_invoke_loaded_write_tool','vrcforge_list_execution_targets','vrcforge_bind_execution_target'}
+SEED={'vrcforge_bridge_preflight','vrcforge_list_tool_blocks','vrcforge_load_tool_block','vrcforge_unload_tool_block','vrcforge_invoke_loaded_read_tool','vrcforge_invoke_loaded_write_tool','vrcforge_list_execution_targets','vrcforge_bind_execution_target','vrcforge_list_prompts','vrcforge_get_prompt'}
 
 def full_meta():return {'io.modelcontextprotocol/protocolVersion':PROTOCOL_VERSION,'io.modelcontextprotocol/clientCapabilities':{},'io.vrcforge/resultMode':'full'}
 
@@ -12,7 +12,7 @@ def test_default_seed_and_hidden_legacy_direct_calls_remain_available(monkeypatc
     request,bridge=stdio_requester(monkeypatch,transport,'execution',archived_tools)
     seed=request()['result']['tools'];full=request(_meta=full_meta())['result']['tools']
     assert {t['name'] for t in seed}==SEED
-    assert len(full)==18
+    assert len(full)==20
     hidden=[t for t in full if t['name'] not in SEED]
     assert len(hidden)==10
     for tool in hidden:
@@ -24,6 +24,36 @@ def test_default_seed_and_hidden_legacy_direct_calls_remain_available(monkeypatc
         # Existing explicit-name selection must still find formerly-default descriptors.
         selected=request(selection=[name])['result']['tools'][0]
         assert selected['inputSchema']==tool['inputSchema'] and selected['outputSchema']==tool['outputSchema']
+
+@pytest.mark.parametrize('transport',['2026','standard'])
+def test_prompt_startup_controls_delegate_native_paths_with_bounded_arguments(monkeypatch,transport):
+    request,bridge=stdio_requester(monkeypatch,transport,'planning',[])
+    listed=request()['result']['tools']
+    assert {'vrcforge_list_prompts','vrcforge_get_prompt'} <= {tool['name'] for tool in listed}
+
+    # The fixture bridge records calls to the existing native prompt paths.
+    bridge.prompt_rows = {'prompts': [{'name': 'fixture.vsk'}], 'nextCursor': 'next'}
+    bridge.prompt_calls = []
+    bridge.prompt_get = {
+        'messages': [{'role': 'user', 'content': {'type': 'text', 'text': 'fixture'}}],
+        'structuredContent': {'provenance': {'skillId': 'fixture', 'version': '1.2.3', 'contentHash': 'a' * 64, 'supportContentHash': 'b' * 64}},
+        '_meta': {'schema': 'vrcforge.prompt_skill_provenance.v1', 'skillId': 'fixture', 'version': '1.2.3', 'contentHash': 'a' * 64, 'supportContentHash': 'b' * 64},
+    }
+    bridge.prompts = lambda **kwargs: bridge.prompt_calls.append(('list', kwargs)) or bridge.prompt_rows | {'called': kwargs}
+    bridge.get_prompt = lambda name, arguments: bridge.prompt_calls.append(('get', name, arguments)) or bridge.prompt_get | {'called': (name, arguments)}
+
+    listed_result=request('tools/call',name='vrcforge_list_prompts',arguments={'cursor':'c','pageSize':2})['result']['structuredContent']
+    assert listed_result['called'] == {'cursor':'c','page_size':2}
+    got_result=request('tools/call',name='vrcforge_get_prompt',arguments={'name':'fixture.vsk','arguments':{'projectPath':'x'}})['result']['structuredContent']
+    assert got_result['called'] == ['fixture.vsk', {'projectPath':'x'}]
+    assert got_result['promptSkillProvenance']['status'] == 'available'
+    assert got_result['promptSkillProvenance']['contentHash'] == 'a' * 64
+    assert got_result['promptSkillProvenance']['supportContentHash'] == 'b' * 64
+
+    call_count = len(bridge.prompt_calls)
+    assert request('tools/call',name='vrcforge_list_prompts',arguments={'pageSize':0})['error']['code']==-32603
+    assert request('tools/call',name='vrcforge_get_prompt',arguments={'name':'','arguments':{}})['error']['code']==-32603
+    assert len(bridge.prompt_calls) == call_count
 
 @pytest.mark.parametrize('transport',['2026','standard'])
 @pytest.mark.parametrize('layer',['planning','execution'])
