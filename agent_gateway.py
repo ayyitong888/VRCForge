@@ -7162,10 +7162,15 @@ class AgentGateway:
                     else ""
                 ) or step_tool
                 if action_kind == "skill" and not completion_requirement:
+                    requirement_arguments = (
+                        planned_arguments
+                        if task_record_tool == step_tool
+                        else action_arguments
+                    )
                     task_loop.require_action(
                         kind=action_kind,
                         tool=task_record_tool,
-                        arguments=action_arguments,
+                        arguments=requirement_arguments,
                     )
                 task_action = task_loop.record_action(
                     kind=action_kind,
