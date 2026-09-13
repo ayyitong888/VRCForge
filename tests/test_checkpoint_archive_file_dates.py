@@ -112,6 +112,71 @@ def test_batch_checkpoint_scope_requires_complete_valid_batch_shape():
     ) == []
 
 
+def test_material_checkpoint_scope_requires_canonical_asset_paths():
+    assert _checkpoint_archive_files_for_write(
+        "vrcforge_set_material_shader",
+        {"materialAssetPath": "Assets/Avatar/Body.mat", "rendererPath": "Avatar/Body"},
+    ) == ["Assets/Avatar/Body.mat"]
+    assert _checkpoint_archive_files_for_write(
+        "vrcforge_set_material_shader",
+        {"assignments": [{"materialAssetPath": "Assets/Avatar/Body.mat", "shaderName": "Native"}]},
+    ) == ["Assets/Avatar/Body.mat"]
+    assert _checkpoint_archive_files_for_write(
+        "vrcforge_set_material_texture",
+        {"arguments": {"assignments": [{"materialAssetPath": "Assets/Avatar/Body.mat", "textureAssetPath": "Assets/Body.png"}]}},
+    ) == ["Assets/Avatar/Body.mat"]
+    assert _checkpoint_archive_files_for_write(
+        "vrcforge_flatten_material_variant",
+        {"params": {"assetPath": "Assets/Avatar/Body.mat"}},
+    ) == ["Assets/Avatar/Body.mat"]
+    assert _checkpoint_archive_files_for_write(
+        "vrcforge_set_material_shader", {"rendererPath": "Avatar/Body"}
+    ) == []
+    assert _checkpoint_archive_files_for_write(
+        "vrcforge_apply_shader_tuning",
+        {"changes": [{"material_id": "mat-body", "semantic_property": "smoothness"}]},
+    ) == []
+
+
+@pytest.mark.parametrize(
+    ("target_tool", "arguments", "relative"),
+    [
+        ("vrcforge_set_material_shader", {"materialAssetPath": "Assets/Body.mat"}, "Assets/Body.mat"),
+        ("vrcforge_set_material_texture", {"materialAssetPath": "Assets/Body.mat"}, "Assets/Body.mat"),
+        ("vrcforge_flatten_material_variant", {"assetPath": "Assets/Body.mat"}, "Assets/Body.mat"),
+    ],
+)
+def test_material_checkpoint_restores_exact_asset_and_preserves_unrelated_dirty_file(
+    tmp_path, target_tool, arguments, relative
+):
+    gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
+    project = tmp_path / "Project"
+    target = project / relative
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"target-before")
+    target.with_name(target.name + ".meta").write_text("guid: target\n", encoding="utf-8")
+    unrelated = project / "Assets" / "unrelated.mat"
+    unrelated.write_bytes(b"unrelated-before")
+    unrelated.with_name(unrelated.name + ".meta").write_text("guid: unrelated\n", encoding="utf-8")
+    checkpoint = gateway.checkpoint_recovery._create_archive_checkpoint(
+        project,
+        {
+            "id": "ckpt_material_exact",
+            "projectRoot": str(project),
+            "status": "unavailable",
+            "targetTool": target_tool,
+            "archiveFiles": [relative],
+        },
+    )
+    assert checkpoint["checkpointScope"]["kind"] == "unity_project_files"
+    target.write_bytes(b"target-after")
+    unrelated.write_bytes(b"unrelated-after")
+    restored = gateway.checkpoint_recovery._restore_archive_checkpoint(checkpoint)
+    assert restored["ok"] is True
+    assert target.read_bytes() == b"target-before"
+    assert unrelated.read_bytes() == b"unrelated-after"
+
+
 def test_missing_batch_target_falls_back_to_full_project_archive(tmp_path):
     gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
     project = tmp_path / "Project"

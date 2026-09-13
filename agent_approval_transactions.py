@@ -92,9 +92,14 @@ _UNITY_SERIALIZED_SUFFIXES = frozenset({".unity", ".prefab", ".asset", ".mat", "
 
 def _checkpoint_archive_files_for_write(target_tool: str, arguments: Mapping[str, Any]) -> list[str]:
     """Return exact existing Unity assets needed by bounded batch writes."""
+    nested = arguments.get("arguments")
+    if not isinstance(nested, Mapping):
+        nested = arguments.get("params")
+    if not isinstance(nested, Mapping):
+        nested = arguments
     paths: set[str] = set()
     if target_tool == "vrcforge_write_animation_curve":
-        rows = arguments.get("clips")
+        rows = nested.get("clips")
         if not isinstance(rows, list) or not rows:
             return []
         for row in rows:
@@ -102,8 +107,8 @@ def _checkpoint_archive_files_for_write(target_tool: str, arguments: Mapping[str
                 return []
             paths.add(row["clipPath"])
     elif target_tool == "vrcforge_manage_fx_animator":
-        edits = arguments.get("edits")
-        controller = arguments.get("controllerPath")
+        edits = nested.get("edits")
+        controller = nested.get("controllerPath")
         if not isinstance(edits, list) or not edits or not isinstance(controller, str):
             return []
         paths.add(controller)
@@ -115,6 +120,26 @@ def _checkpoint_archive_files_for_write(target_tool: str, arguments: Mapping[str
                 return []
             if isinstance(motion, str) and motion:
                 paths.add(motion)
+    elif target_tool in {"vrcforge_set_material_shader", "vrcforge_set_material_texture"}:
+        rows = nested.get("assignments")
+        if rows is not None:
+            if not isinstance(rows, list) or not rows:
+                return []
+            for row in rows:
+                if not isinstance(row, Mapping) or not isinstance(row.get("materialAssetPath"), str):
+                    return []
+                paths.add(row["materialAssetPath"])
+        else:
+            material_path = nested.get("materialAssetPath")
+            if not isinstance(material_path, str) or not material_path:
+                # Renderer selectors do not identify the material asset safely.
+                return []
+            paths.add(material_path)
+    elif target_tool == "vrcforge_flatten_material_variant":
+        asset_path = nested.get("assetPath")
+        if not isinstance(asset_path, str) or not asset_path:
+            return []
+        paths.add(asset_path)
     if not paths:
         return []
     valid = [
