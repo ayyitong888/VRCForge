@@ -1260,7 +1260,38 @@ def run_stdio_server(
                 catalogGeneration=tool_list_revision,
                 loadedBlocks=sorted(loaded_blocks),
             )
-        result = bridge.call_tool(delegated_name, dict(delegated_arguments), agent_name="external-stdio-agent")
+        # Hosts may attach prompt/skill provenance beside the nested delegated
+        # arguments. Preserve the older nested form, while refusing to choose
+        # silently when both locations disagree.
+        forwarded_arguments = dict(delegated_arguments)
+        outer_has_provenance = "promptSkillProvenance" in arguments
+        nested_has_provenance = "promptSkillProvenance" in delegated_arguments
+        outer_provenance = arguments.get("promptSkillProvenance")
+        nested_provenance = delegated_arguments.get("promptSkillProvenance")
+        if outer_has_provenance and not isinstance(outer_provenance, Mapping):
+            return external_rejection(
+                status="invalid_activated_tool_provenance",
+                error="promptSkillProvenance must be an object when supplied at the activated dispatcher level.",
+                error_code="external_tool_provenance_invalid",
+                failure_layer="external_tool_provenance",
+                failure_phase="activated_tool_invocation",
+                operation_kind="discovery",
+                tool=delegated_name,
+            )
+        if outer_has_provenance and nested_has_provenance and outer_provenance != nested_provenance:
+            return external_rejection(
+                status="activated_tool_provenance_conflict",
+                error="promptSkillProvenance was supplied in both dispatcher and delegated arguments with conflicting values.",
+                error_code="external_tool_provenance_conflict",
+                failure_layer="external_tool_provenance",
+                failure_phase="activated_tool_invocation",
+                operation_kind="discovery",
+                tool=delegated_name,
+                details={"sources": ["dispatcher", "delegatedArguments"]},
+            )
+        if outer_has_provenance and not nested_has_provenance:
+            forwarded_arguments["promptSkillProvenance"] = outer_provenance
+        result = bridge.call_tool(delegated_name, forwarded_arguments, agent_name="external-stdio-agent")
         if not isinstance(result, Mapping):
             return {"ok": True, "value": result, "delegatedToolName": delegated_name}
         return {

@@ -878,8 +878,65 @@ def test_load_notifies_and_activation_fallback_survives_host_without_relist(monk
     assert loaded["result"]["structuredContent"]["catalogGeneration"] == 1
     assert after["result"]["tools"][0]["_meta"]["catalogGeneration"] == 1
     handle = loaded["result"]["structuredContent"]["activationHandle"]
-    fallback, _ = router.handle({"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"_meta": meta, "name": "vrcforge_invoke_loaded_read_tool", "arguments": {"activationHandle": handle, "toolName": "vrcforge_scan_materials", "arguments": {}}}})
+    nested_provenance = {"contentHash": "nested"}
+    fallback, _ = router.handle({"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"_meta": meta, "name": "vrcforge_invoke_loaded_read_tool", "arguments": {"activationHandle": handle, "toolName": "vrcforge_scan_materials", "arguments": {"promptSkillProvenance": nested_provenance}}}})
     assert fallback["result"]["structuredContent"]["delegatedToolName"] == "vrcforge_scan_materials"
+    assert Bridge.calls == [("vrcforge_scan_materials", {"promptSkillProvenance": nested_provenance})]
+
+
+def test_activated_dispatch_forwards_top_level_prompt_skill_provenance(monkeypatch) -> None:
+    module = importlib.import_module("tools.vrcforge_agent_mcp_stdio")
+
+    class Bridge:
+        def preflight(self): return {"runtimeOnline": True}
+        def manifest(self, exposure_layer="planning", tool_blocks=None, tool_names=None):
+            return {"tools": [{"name": "vrcforge_scan_materials", "description": "Scan materials", "inputSchema": {"type": "object"}, "_meta": {"toolBlock": "materials"}}]} if tool_blocks else {"tools": []}
+        def call_tool(self, name, arguments, **_kwargs):
+            self.called = (name, arguments)
+            return {"ok": True, "tool": name}
+
+    captured = {}
+    bridge = Bridge()
+    monkeypatch.setattr(module, "run_stdio_loop", lambda router: captured.setdefault("router", router))
+    module.run_stdio_server(bridge, protocol_profile="vrcforge-2026")
+    router = captured["router"]
+    meta = {"io.modelcontextprotocol/protocolVersion": PROTOCOL_VERSION, "io.modelcontextprotocol/clientCapabilities": {}, "io.modelcontextprotocol/clientInfo": {"name": "blackbox", "version": "1"}}
+    loaded, _ = router.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"_meta": meta, "name": "vrcforge_load_tool_block", "arguments": {"block": "materials"}}})
+    handle = loaded["result"]["structuredContent"]["activationHandle"]
+    provenance = {"contentHash": "a" * 64, "supportContentHash": "b" * 64}
+    dispatched, _ = router.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"_meta": meta, "name": "vrcforge_invoke_loaded_read_tool", "arguments": {"activationHandle": handle, "toolName": "vrcforge_scan_materials", "arguments": {}, "promptSkillProvenance": provenance}}})
+    assert dispatched["result"]["structuredContent"]["delegatedToolName"] == "vrcforge_scan_materials"
+    assert bridge.called == ("vrcforge_scan_materials", {"promptSkillProvenance": provenance})
+    equal, _ = router.handle({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"_meta": meta, "name": "vrcforge_invoke_loaded_read_tool", "arguments": {"activationHandle": handle, "toolName": "vrcforge_scan_materials", "arguments": {"promptSkillProvenance": provenance}, "promptSkillProvenance": provenance}}})
+    assert equal["result"]["structuredContent"]["delegatedToolName"] == "vrcforge_scan_materials"
+    assert bridge.called == ("vrcforge_scan_materials", {"promptSkillProvenance": provenance})
+
+
+def test_activated_dispatch_rejects_conflicting_prompt_skill_provenance(monkeypatch) -> None:
+    module = importlib.import_module("tools.vrcforge_agent_mcp_stdio")
+
+    class Bridge:
+        calls = []
+        def preflight(self): return {"runtimeOnline": True}
+        def manifest(self, exposure_layer="planning", tool_blocks=None, tool_names=None):
+            return {"tools": [{"name": "vrcforge_scan_materials", "description": "Scan materials", "inputSchema": {"type": "object"}, "_meta": {"toolBlock": "materials"}}]} if tool_blocks else {"tools": []}
+        def call_tool(self, name, arguments, **_kwargs):
+            self.calls.append((name, arguments))
+            return {"ok": True, "tool": name}
+
+    captured = {}
+    bridge = Bridge()
+    monkeypatch.setattr(module, "run_stdio_loop", lambda router: captured.setdefault("router", router))
+    module.run_stdio_server(bridge, protocol_profile="vrcforge-2026")
+    router = captured["router"]
+    meta = {"io.modelcontextprotocol/protocolVersion": PROTOCOL_VERSION, "io.modelcontextprotocol/clientCapabilities": {}, "io.modelcontextprotocol/clientInfo": {"name": "blackbox", "version": "1"}}
+    loaded, _ = router.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"_meta": meta, "name": "vrcforge_load_tool_block", "arguments": {"block": "materials"}}})
+    handle = loaded["result"]["structuredContent"]["activationHandle"]
+    dispatched, _ = router.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"_meta": meta, "name": "vrcforge_invoke_loaded_read_tool", "arguments": {"activationHandle": handle, "toolName": "vrcforge_scan_materials", "arguments": {"promptSkillProvenance": {"contentHash": "nested"}}, "promptSkillProvenance": {"contentHash": "outer"}}}})
+    result = dispatched["result"]["structuredContent"]
+    assert result["status"] == "activated_tool_provenance_conflict"
+    assert result["errorDetails"]["mutationStarted"] is False
+    assert bridge.calls == []
 
 
 def test_prompt_internal_http_hop_preserves_full_body_for_outer_presentation(monkeypatch, tmp_path):
