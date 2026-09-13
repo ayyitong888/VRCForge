@@ -403,6 +403,61 @@ def planner_tool_schema_prompt(schema: object) -> str:
     return " schema=" + semantic_schema
 
 
+def _shared_planner_schema_defs(
+    schemas: list[dict[str, object]],
+) -> dict[str, object]:
+    """Find the repeated, byte-equivalent provenance definition safe to show once.
+
+    The planner currently adds one known shared definition to every standard
+    tool. Keep this deliberately narrow: conflicts or unreferenced definitions
+    remain local, and unrelated schema definitions are never deduplicated.
+    """
+
+    name = "vrcforge.prompt_skill_provenance.v1"
+    occurrences: list[tuple[str, object]] = []
+    for schema in schemas:
+        defs = schema.get("$defs")
+        if not isinstance(defs, Mapping) or name not in defs:
+            continue
+        encoded = json.dumps(schema, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        if f'"$ref":"#/$defs/{name}"' in encoded:
+            definition = defs[name]
+            occurrences.append(
+                (
+                    json.dumps(definition, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+                    deepcopy(definition),
+                )
+            )
+    if len(occurrences) < 2 or not all(key == occurrences[0][0] for key, _ in occurrences[1:]):
+        return {}
+    return {name: occurrences[0][1]}
+
+
+def _planner_schema_without_shared_defs(
+    schema: dict[str, object],
+    shared_defs: Mapping[str, object],
+) -> dict[str, object]:
+    """Remove only definitions already emitted in the shared prompt section."""
+
+    if not shared_defs or not isinstance(schema.get("$defs"), Mapping):
+        return schema
+    projected = deepcopy(schema)
+    local_defs = dict(projected.get("$defs") or {})
+    encoded_schema = json.dumps(schema, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    for name in shared_defs:
+        if name in local_defs and json.dumps(
+            local_defs[name], ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ) == json.dumps(
+            shared_defs[name], ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ) and f'"$ref":"#/$defs/{name}"' in encoded_schema:
+            del local_defs[name]
+    if local_defs:
+        projected["$defs"] = local_defs
+    else:
+        projected.pop("$defs", None)
+    return projected
+
+
 @dataclass(frozen=True, slots=True)
 class PlannerTool:
     name: str
@@ -2784,18 +2839,38 @@ class RuntimePlannerService:
                     if str(item or "").strip()
                 }
                 selected_blocks.add("core")
+            selected_tools: list[PlannerTool] = []
             for tool in catalog.visible_tools:
                 if selected_blocks is not None and tool.block not in selected_blocks:
                     continue
                 if tool.requires_user_activation and not catalog.computer_use_model_invocable:
                     continue
+                selected_tools.append(tool)
+            projected_schemas = [bounded_planner_tool_schema(tool.input_schema) for tool in selected_tools]
+            shared_schema_defs = _shared_planner_schema_defs(projected_schemas)
+            shared_schema_block = ""
+            if shared_schema_defs:
+                shared_schema_block = (
+                    "Shared non-tool schema definitions (not callable; local tool definitions take precedence):\n"
+                    "Resolve matching local #/$defs references from this shared block only when the tool schema omits that definition:\n"
+                    "shared_schema_definitions="
+                    + json.dumps(
+                        {"$defs": shared_schema_defs},
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                )
+            for tool, projected_schema in zip(selected_tools, projected_schemas):
                 flags = []
                 if tool.write:
                     flags.append("write")
                 if tool.advanced:
                     flags.append("advanced")
                 suffix = f"（{','.join(flags)}）" if flags else ""
-                input_contract = planner_tool_schema_prompt(tool.input_schema)
+                input_contract = planner_tool_schema_prompt(
+                    _planner_schema_without_shared_defs(projected_schema, shared_schema_defs)
+                )
                 tool_lines.append(
                     f"- {tool.name}{suffix}{input_contract}: "
                     f"{planner_tool_usage_description(tool.name, tool.description, write=tool.write)}"
@@ -2866,7 +2941,8 @@ class RuntimePlannerService:
                 '2. 执行普通 Shell 命令（用户明确要求的主机命令、工程外脚本或 git）：{"action": "shell", "shell_command": "<命令>", "shell_params": {"cwd": "<可选目录>"}, "summary": "<一句话说明>", "reply": "<对用户说的话>"}。普通 Shell 不得把已注册 Unity 工程作为 cwd，也不得直接引用其路径；Unity Project Mode 中需要操作当前工程时，改用 write 动作调用 unity_shell。background/pty/yieldMs/timeout/env 只在确实需要主机后台或交互进程时按需添加。\n'
                 '3. 直接回答（闲聊、解释、当前信息已足够、或要收尾）：未执行工具时用 {"action": "reply", "reply": "<回答>"}；执行过工具后必须用 {"action": "reply", "reply": "<回答>", "completion_claim":{"satisfied":true,"evidence_action_ids":["<每个已完成步骤的精确 actionId>"]}}\n'
                 '4. 进入执行模式（仅当用户明确要求项目写入或控制已启动的主机进程）：{"action": "enter_execution", "summary": "<为什么需要执行>"}\n'
-                "规则：只返回一个 JSON 对象，不要 Markdown 代码块外的文字；action 只能是 skill、shell、reply 或 enter_execution，绝不能把工具名写进 action；工具名必须严格来自下面的列表并写进 skill_tool；"
+                '5. 在 execution 层发起受监督项目写入：{"action": "write", "write_tool": "<工具名>", "write_params": {…}}；planning 层不能直接使用 write，先进入 execution。\n'
+                "规则：只返回一个 JSON 对象，不要 Markdown 代码块外的文字；action 只能是 skill、shell、reply、enter_execution 或 write；planning 层禁止 write，execution 层才允许 write；绝不能把工具名写进 action；工具名必须严格来自下面的列表并写进 skill_tool 或 write_tool；"
                 f"当前工具曝光层是 {exposure_layer}；planning 层只能使用读/检查工具，执行类工具必须先进入 execution 层；Unity 项目写入按当前权限模式走审批或全权限自动执行；"
                 "如果『已执行步骤』里某个工具刚刚已经给出了你需要的结果，不要重复调用同一个工具——改为基于结果继续下一步或 reply 收尾；"
                 "诊断 VRCForge 自身启动、连接或历史日志时，先发现并加载相应的只读诊断工具块，再按可见工具的实际说明读取证据。"
@@ -2881,6 +2957,7 @@ class RuntimePlannerService:
                 "拿不准时选 reply 并说明你需要什么信息。\n"
                 "reply 字段是直接展示给用户的对话内容：用第一人称，回复语言必须跟随用户实际使用的语言——用户用哪种语言提问就用哪种语言回复，用户中途换语言也跟着换；"
                 "自然地说明你理解了什么、打算怎么做（例如「好的，我去看一下 D 盘根目录有什么」，该示例仅演示语气，实际回复语言以用户为准），不要复述 JSON 或工具名。\n\n"
+                f"{shared_schema_block + chr(10) + chr(10) if shared_schema_block else ''}"
                 f"可用工具列表：\n{chr(10).join(tool_lines)}\n\n"
                 f"最近对话：\n{history_block}\n\n"
                 f"本轮已执行步骤+结果：\n{steps_block}\n\n"

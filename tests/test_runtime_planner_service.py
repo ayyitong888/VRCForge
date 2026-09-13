@@ -716,6 +716,99 @@ def test_model_prompt_includes_bounded_input_contract_for_high_confusion_tool() 
     assert '"avatarPath":{"type":"string"}' in tool_line
 
 
+def test_model_prompt_shares_repeated_prompt_provenance_definition_once() -> None:
+    provenance = {
+        "type": "object",
+        "required": ["skillId", "version", "contentHash"],
+        "properties": {"skillId": {"type": "string"}},
+    }
+    schema = {
+        "type": "object",
+        "properties": {
+            "promptSkillProvenance": {
+                "$ref": "#/$defs/vrcforge.prompt_skill_provenance.v1",
+                "type": "object",
+            }
+        },
+        "$defs": {"vrcforge.prompt_skill_provenance.v1": provenance},
+    }
+    catalog = FakeCatalog(
+        planning=PlannerCatalogSnapshot(
+            visible_tools=(
+                PlannerTool("one", "One", "read", input_schema=schema),
+                PlannerTool("two", "Two", "read", input_schema=schema),
+            )
+        )
+    )
+
+    prompt = service(catalog=catalog)._build_llm_plan_prompt("inspect", [])
+
+    assert prompt.count('"vrcforge.prompt_skill_provenance.v1"') == 1
+    assert prompt.count('"$ref":"#/$defs/vrcforge.prompt_skill_provenance.v1"') == 2
+    assert "shared_schema_definitions" in prompt
+    shared_line = next(line for line in prompt.splitlines() if line.startswith("shared_schema_definitions="))
+    shared = json.loads(shared_line.split("=", 1)[1])["$defs"]
+    for tool_name in ("one", "two"):
+        line = next(line for line in prompt.splitlines() if line.startswith(f"- {tool_name} "))
+        actual = json.loads(line.split(" schema=", 1)[1].split(": When to use:", 1)[0])
+        actual["$defs"] = shared
+        assert actual == bounded_planner_tool_schema(schema)
+
+
+def test_model_prompt_keeps_conflicting_prompt_provenance_definitions_local() -> None:
+    def schema(skill_type: str) -> dict[str, object]:
+        return {
+            "type": "object",
+            "properties": {
+                "promptSkillProvenance": {
+                    "$ref": "#/$defs/vrcforge.prompt_skill_provenance.v1",
+                    "type": "object",
+                }
+            },
+            "$defs": {
+                "vrcforge.prompt_skill_provenance.v1": {
+                    "type": "object",
+                    "properties": {"skillId": {"type": skill_type}},
+                }
+            },
+        }
+
+    catalog = FakeCatalog(
+        planning=PlannerCatalogSnapshot(
+            visible_tools=(
+                PlannerTool("one", "One", "read", input_schema=schema("string")),
+                PlannerTool("two", "Two", "read", input_schema=schema("integer")),
+            )
+        )
+    )
+
+    prompt = service(catalog=catalog)._build_llm_plan_prompt("inspect", [])
+
+    assert "shared_schema_definitions" not in prompt
+    assert prompt.count('"vrcforge.prompt_skill_provenance.v1"') == 2
+
+
+def test_model_prompt_keeps_unreferenced_matching_definition_local() -> None:
+    schema = {
+        "type": "object",
+        "properties": {"value": {"type": "string"}},
+        "$defs": {"vrcforge.prompt_skill_provenance.v1": {"type": "object"}},
+    }
+    catalog = FakeCatalog(
+        planning=PlannerCatalogSnapshot(
+            visible_tools=(
+                PlannerTool("one", "One", "read", input_schema=schema),
+                PlannerTool("two", "Two", "read", input_schema=schema),
+            )
+        )
+    )
+
+    prompt = service(catalog=catalog)._build_llm_plan_prompt("inspect", [])
+
+    assert "shared_schema_definitions" not in prompt
+    assert prompt.count('"vrcforge.prompt_skill_provenance.v1"') == 2
+
+
 def test_model_prompt_requires_evidence_grounded_final_reply_without_hiding_safe_updates() -> None:
     prompt = service()._build_llm_plan_prompt("inspect the project", [])
 
@@ -1025,7 +1118,8 @@ def test_internal_planner_prompt_only_expands_loaded_tool_blocks() -> None:
     assert "loaded internal tool blocks: core, files" in prompt
     assert "call it with action=skill" in prompt
     assert "never in action" in prompt
-    assert "action 只能是 skill、shell、reply 或 enter_execution" in prompt
+    assert "action 只能是 skill、shell、reply、enter_execution 或 write" in prompt
+    assert 'planning 层禁止 write，execution 层才允许 write' in prompt
 
 
 
@@ -1051,6 +1145,12 @@ def test_llm_execution_layer_has_a_first_class_supervised_write_action() -> None
             )
         )
     )
+
+    execution_prompt = service(catalog=catalog)._build_llm_plan_prompt(
+        "create Probe", [], exposure_layer=EXPOSURE_LAYER_EXECUTION,
+    )
+    assert "action 只能是 skill、shell、reply、enter_execution 或 write" in execution_prompt
+    assert "planning 层禁止 write，execution 层才允许 write" in execution_prompt
 
     plan = service(catalog=catalog, model=model)._llm_plan_agent_turn(
         "create Probe",
