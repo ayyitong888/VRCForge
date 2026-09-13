@@ -589,6 +589,8 @@ def _evaluate_runtime_journey(
         "toolExecutions": tool_executions,
         "providerRequestCount": provider_requests,
         "resultRefeedCount": result_refeeds,
+        "agenticCost": dict(authenticated["agenticCost"])
+        if isinstance(authenticated.get("agenticCost"), Mapping) else None,
         "nextStep": next_step,
         "taskStatus": task_status,
         "taskId": task_id,

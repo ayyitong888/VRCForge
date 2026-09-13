@@ -195,7 +195,14 @@ def _runtime_journey() -> dict:
                 "evidenceActionIds": [read_action, write_action, capture_action, visual_action],
             },
         },
-        "contextUsage": {"requestCount": 5},
+        "contextUsage": {
+            "requestCount": 5,
+            "exact": True,
+            "inputTokens": 1_200,
+            "outputTokens": 340,
+            "totalTokens": 1_540,
+            "cacheReadTokens": 400,
+        },
     }
 
 
@@ -252,6 +259,21 @@ class RuntimeJourneyProjectionTests(unittest.TestCase):
         self.assertEqual(projected["toolExecutions"], 4)
         self.assertEqual(projected["providerRequestCount"], 5)
         self.assertEqual(projected["resultRefeedCount"], 4)
+        self.assertEqual(projected["agenticCost"]["providerRequestCount"], 5)
+        self.assertEqual(projected["agenticCost"]["toolExecutionCount"], 4)
+        self.assertEqual(
+            projected["agenticCost"]["providerUsage"],
+            {
+                "exact": True,
+                "scope": "current_response_context_usage",
+                "taskTotalAvailable": False,
+                "inputTokens": 1200,
+                "outputTokens": 340,
+                "totalTokens": 1540,
+                "cacheReadTokens": 400,
+            },
+        )
+        self.assertEqual(projected["agenticCost"]["costUnavailableReason"], "pricing_not_configured")
         self.assertEqual(projected["managedVisualEvidenceCount"], 1)
         self.assertEqual(projected["taskStatus"], "completed")
         self.assertEqual(projected["nextStep"], "done")
@@ -291,6 +313,39 @@ class RuntimeJourneyProjectionTests(unittest.TestCase):
             projected["completedActions"][2]["writeTransaction"]["approvalId"],
             "approval_capture",
         )
+
+    def test_agentic_cost_keeps_missing_provider_usage_unavailable(self) -> None:
+        response = _runtime_journey()
+        response["contextUsage"] = {"requestCount": 5}
+
+        projected = project_runtime_journey(response)
+
+        self.assertEqual(projected["agenticCost"]["providerRequestCount"], 5)
+        self.assertEqual(projected["agenticCost"]["toolExecutionCount"], 4)
+        self.assertEqual(
+            projected["agenticCost"]["providerUsage"],
+            {
+                "exact": False,
+                "scope": "current_response_context_usage",
+                "taskTotalAvailable": False,
+                "unavailableReason": "provider_usage_missing",
+            },
+        )
+
+    def test_agentic_cost_rejects_exact_without_valid_token_evidence(self) -> None:
+        response = _runtime_journey()
+        response["contextUsage"] = {
+            "requestCount": 5,
+            "exact": True,
+            "inputTokens": "1200",
+            "outputTokens": -1,
+        }
+
+        projected = project_runtime_journey(response)
+
+        usage = projected["agenticCost"]["providerUsage"]
+        self.assertFalse(usage["exact"])
+        self.assertEqual(usage["unavailableReason"], "provider_usage_missing")
 
     def test_rejects_missing_mismatched_or_reused_write_transaction_identity(self) -> None:
         cases: list[dict] = []

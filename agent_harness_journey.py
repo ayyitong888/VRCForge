@@ -99,6 +99,40 @@ def _strict_count(value: Any, field: str) -> int:
     return value
 
 
+def _project_agentic_cost(
+    context_usage: Mapping[str, Any],
+    *,
+    provider_request_count: int,
+    tool_execution_count: int,
+) -> dict[str, Any]:
+    """Project one bounded, evidence-only per-turn cost summary."""
+
+    requested_exact = context_usage.get("exact") is True
+    usage: dict[str, Any] = {
+        "scope": "current_response_context_usage",
+        "taskTotalAvailable": False,
+    }
+    if requested_exact:
+        for key in ("inputTokens", "outputTokens", "totalTokens", "cacheReadTokens"):
+            value = context_usage.get(key)
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                usage[key] = value
+    has_token_evidence = any(
+        key in usage for key in ("inputTokens", "outputTokens", "totalTokens")
+    )
+    usage["exact"] = requested_exact and has_token_evidence
+    if not usage["exact"]:
+        usage["unavailableReason"] = str(
+            context_usage.get("unavailableReason") or "provider_usage_missing"
+        )[:160]
+    return {
+        "providerRequestCount": provider_request_count,
+        "toolExecutionCount": tool_execution_count,
+        "providerUsage": usage,
+        "costUnavailableReason": "pricing_not_configured",
+    }
+
+
 def _declared_verifications(
     action: Mapping[str, Any],
     requirements: list[Any],
@@ -511,6 +545,11 @@ def project_runtime_journey(runtime_message: Mapping[str, Any]) -> dict[str, Any
         "providerRequestCount": provider_request_count,
         "preProviderBootstrapCount": pre_provider_bootstrap_count,
         "resultRefeedCount": actual_tool_execution_count,
+        "agenticCost": _project_agentic_cost(
+            context_usage,
+            provider_request_count=provider_request_count,
+            tool_execution_count=actual_tool_execution_count,
+        ),
         "managedVisualEvidenceCount": len(verified_visual_refs),
         "completed": True,
         "taskStatus": "completed",
