@@ -466,14 +466,44 @@ def _confirmed_atomic_rollback_failure(result: Any, facts: Mapping[str, Any] | N
     """Accept only explicit, consistent domain restoration facts; never execute recovery."""
     if not isinstance(result, Mapping):
         return False
+    # The external MCP adapter may retain the Core domain result in one of
+    # these known envelope locations.  Inspect only these single-hop paths;
+    # never recursively search arbitrary payloads for a restoration flag.
+    rollback_facts: dict[str, Any] = {}
+    nested_sources: list[Mapping[str, Any]] = []
+    outcome = result.get("outcome")
+    if isinstance(outcome, Mapping) and isinstance(outcome.get("data"), Mapping):
+        nested_sources.append(outcome["data"])
+    error_details = result.get("errorDetails")
+    if isinstance(error_details, Mapping):
+        nested_sources.append(error_details)
+    envelope = result.get("result")
+    if isinstance(envelope, Mapping):
+        structured = envelope.get("structuredContent")
+        if isinstance(structured, Mapping) and isinstance(structured.get("data"), Mapping):
+            nested_sources.append(structured["data"])
+    for source in [result, *nested_sources]:
+        for key in (
+            "commitState", "restored", "commitStateKnown", "committed",
+            "cleanupRequired", "checkpointRecoveryRequired", "requestMayHaveCommitted",
+        ):
+            value = source.get(key)
+            if value is None:
+                continue
+            if key in rollback_facts and rollback_facts[key] != value:
+                return False
+            rollback_facts[key] = value
     proven = bool(
-        result.get("commitState") == "rolled_back"
-        and result.get("restored") is True
-        and result.get("commitStateKnown") is True
-        and result.get("committed") is False
-        and result.get("cleanupRequired") is False
-        and result.get("checkpointRecoveryRequired") is False
-        and result.get("requestMayHaveCommitted") is not True
+        rollback_facts.get("commitState") == "rolled_back"
+        and rollback_facts.get("restored") is True
+        and rollback_facts.get("commitStateKnown") is True
+        and rollback_facts.get("committed") is False
+        # Core's atomic rollback envelope omits cleanupRequired; an explicit
+        # true remains a conflict, while omission is covered by restored and
+        # checkpointRecoveryRequired=false.
+        and rollback_facts.get("cleanupRequired") is not True
+        and rollback_facts.get("checkpointRecoveryRequired") is False
+        and rollback_facts.get("requestMayHaveCommitted") is not True
     )
     return proven and (facts is None or (
         facts.get("commitState") == "rolled_back"

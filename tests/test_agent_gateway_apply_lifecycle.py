@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from agent_gateway import AgentGateway, AgentGatewayError
+from agent_approval_transactions import _confirmed_atomic_rollback_failure
 from approved_unity_execution import current_approved_unity_execution
 from unity_mcp_core_client import UnityMcpCoreClient
 
@@ -254,6 +255,99 @@ def test_atomic_cleanup_reports_rolled_back_as_known_commit_state(tmp_path: Path
     assert result["writeFailure"]["commitState"] == "rolled_back"
     assert result["writeFailure"]["commitStateKnown"] is True
     assert result["writeFailure"]["checkpointRecoveryRequired"] is False
+
+
+def test_nested_mcp_atomic_rollback_facts_are_confirmed() -> None:
+    facts = {
+        "commitState": "rolled_back",
+        "committed": False,
+        "checkpointRecoveryRequired": False,
+        "commitStateKnown": True,
+    }
+    envelope = {
+        "commitState": "rolled_back",
+        "committed": False,
+        "errorDetails": {"commitStateKnown": True},
+        "outcome": {"data": {**facts, "restored": True}},
+        "result": {"structuredContent": {"data": {**facts, "restored": True}}},
+    }
+
+    assert _confirmed_atomic_rollback_failure(envelope, facts) is True
+
+
+def test_nested_mcp_atomic_rollback_conflict_is_not_confirmed() -> None:
+    envelope = {
+        "commitState": "rolled_back",
+        "committed": False,
+        "commitStateKnown": True,
+        "checkpointRecoveryRequired": False,
+        "outcome": {
+            "data": {
+                "commitState": "rolled_back",
+                "restored": False,
+                "committed": False,
+                "checkpointRecoveryRequired": False,
+            }
+        },
+    }
+
+    assert _confirmed_atomic_rollback_failure(envelope) is False
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("checkpointRecoveryRequired", True),
+        ("cleanupRequired", True),
+        ("requestMayHaveCommitted", True),
+    ],
+)
+def test_nested_mcp_atomic_rollback_safety_flags_block_confirmation(
+    field: str, value: bool,
+) -> None:
+    envelope = {
+        "outcome": {
+            "data": {
+                "commitState": "rolled_back",
+                "restored": True,
+                "commitStateKnown": True,
+                "committed": False,
+                "checkpointRecoveryRequired": False,
+                field: value,
+            }
+        }
+    }
+
+    assert _confirmed_atomic_rollback_failure(envelope) is False
+
+
+def test_nested_mcp_atomic_rollback_outer_restored_conflict_blocks_confirmation() -> None:
+    envelope = {
+        "restored": False,
+        "outcome": {
+            "data": {
+                "commitState": "rolled_back",
+                "restored": True,
+                "commitStateKnown": True,
+                "committed": False,
+                "checkpointRecoveryRequired": False,
+            }
+        },
+    }
+
+    assert _confirmed_atomic_rollback_failure(envelope) is False
+
+
+def test_unrecognized_payload_restored_flag_does_not_confirm_rollback() -> None:
+    envelope = {
+        "commitState": "rolled_back",
+        "committed": False,
+        "commitStateKnown": True,
+        "checkpointRecoveryRequired": False,
+        "diagnostics": {"restored": True},
+    }
+
+    assert _confirmed_atomic_rollback_failure(envelope) is False
 
 
 def test_completed_write_with_temporary_cleanup_failure_never_requests_project_rollback(
