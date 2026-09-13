@@ -6,27 +6,30 @@ from test_curve_fx_authoring_runtime_contract import method
 ROOT=Path(__file__).resolve().parents[1]
 
 def test_actual_schedule_and_cleanup_faults(tmp_path):
-    base=Path(os.environ.get("ProgramFiles","C:/Program Files"))/"dotnet"
-    compilers=sorted((base/"sdk").glob("*/Roslyn/bincore/csc.dll"));refs=sorted((base/"packs/Microsoft.NETCore.App.Ref").glob("*/ref/netcoreapp3.1"));dotnet=shutil.which("dotnet")
+    base=Path(os.environ.get("DOTNET_ROOT") or (Path.home()/"AppData/Local/Programs/dotnet8"))
+    compilers=sorted((base/"sdk").glob("8.*/Roslyn/bincore/csc.dll"));refs=sorted((base/"packs/Microsoft.NETCore.App.Ref").glob("8.*/ref/net8.0"));dotnet=str(base/"dotnet.exe") if (base/"dotnet.exe").exists() else shutil.which("dotnet")
     if not dotnet or not compilers or not refs:pytest.skip("SDK/reference pack required")
     compiler=compilers[-1];newtonsoft=compiler.parents[2]/"Newtonsoft.Json.dll"
     source=(ROOT/"Assets/VRCForge/Editor/RuntimeObservationTool.cs").read_text(encoding="utf-8")
     top="\n".join(method(source,s) for s in ("internal static void ValidateLimits", "internal static int DueIndex", "internal static string Digest"))
-    actual="\n".join(method(source,s) for s in ("internal void Tick", "internal void Cleanup", "internal void Finish"))
+    actual="\n".join(method(source,s) for s in ("internal void RecordWatch", "internal void Tick", "internal void Cleanup", "internal void Finish", "internal JObject Result"))
     seams=r'''using System;using System.IO;using System.Linq;using System.Collections.Generic;using System.Security.Cryptography;using Newtonsoft.Json.Linq;
 namespace UnityEngine {class Object {public static int Destroyed; public static void DestroyImmediate(object o){Destroyed++;}}}
-class Obj {public static implicit operator bool(Obj o)=>o!=null;}
+    class Obj {public static implicit operator bool(Obj o)=>o!=null;public int GetInstanceID()=>0;}
 class Texture2D:Obj {public bool Fail;public byte[] EncodeToPNG(){if(Fail)throw new IOException("encode fault");return new byte[]{1,2,3};}}
 class Camera:Obj {public object targetTexture;}
 class Target:Obj {public void Release(){}}
 class Pump:Obj {public Action Tick,Lost;}
-static class EditorApplication {public static double timeSinceStartup;}
+static class EditorApplication {public static double timeSinceStartup;public static bool isPlaying=true,isPaused=false;}
+static class Application {public static bool isFocused=true;}
 static class Time {public static int frameCount;}
 '''
     body=r'''internal const int MaxFrames=32;static Job active;
     class ParameterStep {internal double TimeSeconds;internal string Name,Type;internal float Value;internal object Parameter;}
     static class GestureManagerRuntimeBridge {internal static object Param=new object();internal static bool Mismatch;internal static bool TryReadParameter(object m,string n,out object p,out float v,out string t){p=Param;v=Mismatch?2:0;t="Float";return true;} internal static void SetParameter(object m,object p,float v){} }
-    class Job {internal bool Done,Started=true,FailIdentity;internal string Error="",Output;internal double Deadline,StartTime,Duration=.5;internal int LastFrame=-1,Count=6,Next,Captures;internal object Manager;internal List<ParameterStep> Steps=new List<ParameterStep>();internal int NextStep;internal JArray StepReceipts=new JArray();
+    class ManagerStub {internal string AvatarPath="avatar",ManagerPath="manager";}
+    class RendererProbe {internal JObject Request=new JObject();}
+    class Job {internal bool Done,Started=true,FailIdentity;internal string Id="job",Error="",Output,ParameterName="param",Identity="identity";internal double Deadline,StartTime,Duration=.5;internal double LastWatchTime,LastTickTime,LastCaptureStartTime,LastCaptureEndTime,DeadlineElapsed,LastProbeElapsedMs,LastRenderElapsedMs,LastReadPixelsElapsedMs;internal int LastWatchFrame=-1,LastTickFrame=-1,LastCaptureStartFrame=-1,LastCaptureEndFrame=-1;internal string LastPhase="created",LastCapturePhase="none";internal bool DiagnosticFrozen,DiagnosticIsPlaying,DiagnosticIsPaused,DiagnosticIsFocused;internal int DiagnosticFrame=-1;internal int LastFrame=-1,Count=6,Next,Captures,Width=128,Height=128;internal float Requested;internal object Before=0f;internal Obj Avatar=new Obj(),Animator=new Obj();internal ManagerStub Manager=new ManagerStub();internal List<RendererProbe> Probes=new List<RendererProbe>();internal List<ParameterStep> Steps=new List<ParameterStep>();internal int NextStep;internal JArray StepReceipts=new JArray();
 internal Pump Pump=new Pump();internal Camera Camera=new Camera();internal Target Target=new Target();internal Obj CameraObject=new Obj();
 internal List<Texture2D> Pixels=new List<Texture2D>();internal JArray Frames=new JArray();
 internal void AssertIdentity(){if(FailIdentity)throw new Exception("identity changed");}
@@ -46,6 +49,8 @@ j=Make();Directory.CreateDirectory(j.Output);var user=Path.Combine(j.Output,"use
     j=Make();j.FailIdentity=true;active=j;Time.frameCount=3;j.Tick();Check(j.Done&&j.Captures==0&&j.Error=="identity changed","identity drift aborts before sample");
     j=Make();j.Steps.Add(new ParameterStep{TimeSeconds=.1,Name="A",Value=1,Type="Float",Parameter=GestureManagerRuntimeBridge.Param});j.FailIdentity=true;active=j;Time.frameCount=4;j.Tick();Check(j.StepReceipts.Count==1&&(string)j.StepReceipts[0]["status"]=="not_applied","identity failure records remaining steps");
     j=Make();j.Steps.Add(new ParameterStep{TimeSeconds=.1,Name="A",Value=1,Type="Float",Parameter=GestureManagerRuntimeBridge.Param});GestureManagerRuntimeBridge.Mismatch=true;active=j;Time.frameCount=5;EditorApplication.timeSinceStartup=.1;j.Tick();Check(j.StepReceipts.Count==1&&(string)j.StepReceipts[0]["status"]=="failed"&&(float)j.StepReceipts[0]["afterValue"]==2,"readback mismatch preserves observed after value");
+    j=Make();j.StartTime=1;j.Deadline=2;active=j;Time.frameCount=9;EditorApplication.timeSinceStartup=2.1;j.RecordWatch();var diagnostics=(JObject)j.Result()["diagnostics"];Check(j.Done&&j.Error=="sampling_deadline_expired"&&(double)diagnostics["deadlineElapsed"]==1.1&&(int)diagnostics["lastWatchFrame"]==9&&(bool)diagnostics["isPlaying"]&&!((bool)diagnostics["isPaused"]),"deadline captures watch timing and editor state");
+    EditorApplication.isPaused=true;EditorApplication.isPlaying=false;Application.isFocused=false;Time.frameCount=22;diagnostics=(JObject)j.Result()["diagnostics"];Check((int)diagnostics["frameCount"]==9&&(bool)diagnostics["isPlaying"]&&!((bool)diagnostics["isPaused"])&&(bool)diagnostics["isFocused"],"terminal diagnostics stay frozen across later editor changes");
     return 0;}
 '''
     program=seams+"class Probe {"+top+body+actual+"}"+runner+"}"
@@ -54,7 +59,7 @@ j=Make();Directory.CreateDirectory(j.Output);var user=Path.Combine(j.Output,"use
     compiled=subprocess.run(cmd,capture_output=True,text=True,timeout=60)
     assert compiled.returncode==0,compiled.stdout+compiled.stderr
     shutil.copy2(newtonsoft,tmp_path/"Newtonsoft.Json.dll")
-    (tmp_path/"Probe.runtimeconfig.json").write_text(json.dumps({"runtimeOptions":{"tfm":"netcoreapp3.1","framework":{"name":"Microsoft.NETCore.App","version":"3.1.0"}}}),encoding="utf-8")
+    (tmp_path/"Probe.runtimeconfig.json").write_text(json.dumps({"runtimeOptions":{"tfm":"net8.0","framework":{"name":"Microsoft.NETCore.App","version":"8.0.0"}}}),encoding="utf-8")
     result=subprocess.run([dotnet,str(dll)],capture_output=True,text=True,timeout=30)
     assert result.returncode==0,result.stdout+result.stderr
-    assert result.stdout.count("PASS ")==10
+    assert result.stdout.count("PASS ")==12

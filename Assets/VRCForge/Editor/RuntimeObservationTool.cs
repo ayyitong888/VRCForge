@@ -27,7 +27,10 @@ namespace VRCForge.Editor
         }
         private static void Watch()
         {
-            if (active != null && EditorApplication.timeSinceStartup > active.Deadline) active.Finish("sampling_deadline_expired");
+            if (active != null)
+            {
+                active.RecordWatch();
+            }
         }
         internal static object PublicMember(object value, string name)
         {
@@ -404,7 +407,14 @@ namespace VRCForge.Editor
             internal int NextStep;
             internal readonly JArray StepReceipts = new JArray();
             internal double Duration, StartTime, Deadline;
+            internal double LastWatchTime, LastTickTime, LastCaptureStartTime, LastCaptureEndTime, DeadlineElapsed;
+            internal double LastProbeElapsedMs, LastRenderElapsedMs, LastReadPixelsElapsedMs;
             internal int Count, Width, Height, Next, LastFrame = -1;
+            internal int LastWatchFrame = -1, LastTickFrame = -1, LastCaptureStartFrame = -1, LastCaptureEndFrame = -1;
+            internal string LastPhase = "created";
+            internal string LastCapturePhase = "none";
+            internal bool DiagnosticFrozen, DiagnosticIsPlaying, DiagnosticIsPaused, DiagnosticIsFocused;
+            internal int DiagnosticFrame = -1;
             internal bool Started, Done;
             internal Camera Camera;
             internal RenderTexture Target;
@@ -453,19 +463,40 @@ namespace VRCForge.Editor
                 var current = RuntimeObservation.Controllers(Animator);
                 if (!current.SequenceEqual(Controllers)) throw new InvalidOperationException("The target playable graph changed.");
             }
+            internal void RecordWatch()
+            {
+                LastWatchTime = EditorApplication.timeSinceStartup;
+                LastWatchFrame = Time.frameCount;
+                if (EditorApplication.timeSinceStartup > Deadline)
+                {
+                    DeadlineElapsed = EditorApplication.timeSinceStartup - StartTime;
+                    Finish("sampling_deadline_expired");
+                }
+            }
             internal void Capture(int index, double elapsed)
             {
+                LastCapturePhase = "identity";
                 AssertIdentity();
                 if (!GestureManagerRuntimeBridge.TryReadParameter(Manager, ParameterName, out _, out var value, out var type)) throw new InvalidOperationException("GM parameter disappeared.");
+                LastCapturePhase = "states";
                 var states = ReadStates();
+                LastCapturePhase = "probes";
+                var probeStarted = EditorApplication.timeSinceStartup;
                 var probes = Probes.Count == 0 ? null : new JArray(Probes.Select(probe => ReadRendererProbe(probe, Avatar)));
+                LastProbeElapsedMs = (EditorApplication.timeSinceStartup - probeStarted) * 1000.0;
                 var previous = RenderTexture.active;
                 Texture2D texture = null;
                 try
                 {
+                    LastCapturePhase = "render";
+                    var renderStarted = EditorApplication.timeSinceStartup;
                     Camera.Render(); RenderTexture.active = Target;
+                    LastRenderElapsedMs = (EditorApplication.timeSinceStartup - renderStarted) * 1000.0;
+                    LastCapturePhase = "read_pixels";
                     texture = new Texture2D(Width, Height, TextureFormat.RGB24, false);
+                    var readStarted = EditorApplication.timeSinceStartup;
                     texture.ReadPixels(new Rect(0, 0, Width, Height), 0, 0); texture.Apply();
+                    LastReadPixelsElapsedMs = (EditorApplication.timeSinceStartup - readStarted) * 1000.0;
                     Pixels.Add(texture); texture = null;
                     Frames.Add(new JObject { ["sampleIndex"] = index, ["requestedElapsedSeconds"] = index < 0 ? -1 : index * Duration / (Count - 1),
                         ["actualElapsedSeconds"] = elapsed, ["unityFrame"] = Time.frameCount, ["parameterValue"] = JToken.FromObject(value),
@@ -479,6 +510,9 @@ namespace VRCForge.Editor
                 if (Done || !Started || LastFrame == Time.frameCount) return;
                 try
                 {
+                    LastTickTime = EditorApplication.timeSinceStartup;
+                    LastTickFrame = Time.frameCount;
+                    LastPhase = "tick";
                     AssertIdentity(); LastFrame = Time.frameCount;
                     var elapsed = EditorApplication.timeSinceStartup - StartTime;
                     while (NextStep < Steps.Count && elapsed >= Steps[NextStep].TimeSeconds)
@@ -516,7 +550,17 @@ namespace VRCForge.Editor
                     }
                     var due = DueIndex(elapsed, Duration, Count);
                     if (due < Next) return;
-                    Capture(due, elapsed); Next = due + 1;
+                    LastCaptureStartTime = EditorApplication.timeSinceStartup;
+                    LastCaptureStartFrame = Time.frameCount;
+                    LastPhase = "capture_start";
+                    try { Capture(due, elapsed); LastCapturePhase = "complete"; }
+                    finally
+                    {
+                        LastCaptureEndTime = EditorApplication.timeSinceStartup;
+                        LastCaptureEndFrame = Time.frameCount;
+                        LastPhase = "capture_end";
+                    }
+                    Next = due + 1;
                     if (elapsed >= Duration || Next >= Count) Finish("");
                 }
                 catch (Exception exception) { Finish(exception.Message); }
@@ -529,6 +573,14 @@ namespace VRCForge.Editor
             internal void Finish(string error)
             {
                 if (Done) return;
+                if (!DiagnosticFrozen)
+                {
+                    DiagnosticFrozen = true;
+                    DiagnosticIsPlaying = EditorApplication.isPlaying;
+                    DiagnosticIsPaused = EditorApplication.isPaused;
+                    DiagnosticIsFocused = Application.isFocused;
+                    DiagnosticFrame = Time.frameCount;
+                }
                 for (var remaining = NextStep; remaining < Steps.Count; remaining++)
                     StepReceipts.Add(new JObject { ["timeSeconds"] = Steps[remaining].TimeSeconds, ["parameterName"] = Steps[remaining].Name,
                         ["requestedValue"] = Steps[remaining].Value, ["status"] = "not_applied" });
@@ -585,6 +637,19 @@ namespace VRCForge.Editor
                     ["stepReceipts"] = StepReceipts.DeepClone(),
                     ["mutationStarted"] = Started, ["committed"] = Done ? (JToken)complete : JValue.CreateNull(),
                     ["verified"] = complete, ["persistent"] = false, ["commitState"] = !Started ? "not_started" : !Done ? "pending" : complete ? "runtime_observed" : "partial" };
+                result["diagnostics"] = new JObject {
+                    ["lastPhase"] = LastPhase, ["lastWatchTime"] = LastWatchTime, ["lastWatchFrame"] = LastWatchFrame,
+                    ["lastTickTime"] = LastTickTime, ["lastTickFrame"] = LastTickFrame,
+                    ["lastCaptureStartTime"] = LastCaptureStartTime, ["lastCaptureStartFrame"] = LastCaptureStartFrame,
+                    ["lastCaptureEndTime"] = LastCaptureEndTime, ["lastCaptureEndFrame"] = LastCaptureEndFrame,
+                    ["lastCapturePhase"] = LastCapturePhase, ["deadlineElapsed"] = DeadlineElapsed,
+                    ["lastProbeElapsedMs"] = LastProbeElapsedMs, ["lastRenderElapsedMs"] = LastRenderElapsedMs,
+                    ["lastReadPixelsElapsedMs"] = LastReadPixelsElapsedMs,
+                    ["isPlaying"] = Done ? DiagnosticIsPlaying : EditorApplication.isPlaying,
+                    ["isPaused"] = Done ? DiagnosticIsPaused : EditorApplication.isPaused,
+                    ["isFocused"] = Done ? DiagnosticIsFocused : Application.isFocused,
+                    ["frameCount"] = Done ? DiagnosticFrame : Time.frameCount
+                };
                 if (Probes.Count > 0) result["rendererProbes"] = new JArray(Probes.Select(probe => probe.Request.DeepClone()));
                 return result;
             }
