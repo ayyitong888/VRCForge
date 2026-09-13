@@ -6570,8 +6570,7 @@ class AgentGateway:
                     + json.dumps(plan.get("skillParams"), ensure_ascii=False, sort_keys=True, default=str),
                 )
             elif (
-                not project_context_active
-                and not completion_claim_correction_attempted
+                not completion_claim_correction_attempted
                 and str(plan.get("planner") or "").strip().casefold() == "llm"
                 and task_loop.completed_action_ids()
                 and ensure_dict(

@@ -1725,6 +1725,123 @@ class AgentLoopP0Tests(unittest.TestCase):
             "completion_claim_unbound",
         )
 
+    def test_project_completion_claim_gets_one_bounded_correction(self) -> None:
+        gateway = self.gateway
+        project = self._unity_project()
+        planner_calls = 0
+
+        def plan_next(_message, _params, _observe, _history=None, *, loop_state=None, **_kwargs):
+            nonlocal planner_calls
+            planner_calls += 1
+            if planner_calls == 1:
+                return {
+                    "planner": "llm",
+                    "summary": "Inspect the project directory.",
+                    "shellNeeded": True,
+                    "shellCommand": "Get-ChildItem -LiteralPath Assets",
+                    "shellParams": {"cwd": str(project)},
+                    "continueLoop": True,
+                    "nextStep": "call_shell",
+                }
+            if planner_calls == 2:
+                return {
+                    "planner": "llm",
+                    "summary": "The project was inspected.",
+                    "reply": "The project was inspected.",
+                    "continueLoop": False,
+                    "nextStep": "done",
+                }
+            completed = [
+                str(item.get("actionId") or "")
+                for item in (loop_state or [])
+                if str(item.get("actionId") or "")
+            ]
+            return {
+                "planner": "llm",
+                "summary": "The project inspection is complete.",
+                "reply": "The project inspection is complete.",
+                "continueLoop": False,
+                "nextStep": "done",
+                "completionClaim": {"satisfied": True, "evidenceActionIds": completed},
+            }
+
+        with patch.object(gateway.runtime_planner, "plan_agent_turn", side_effect=plan_next), patch.object(
+            gateway.shell,
+            "execute",
+            return_value={
+                "ok": True,
+                "status": "executed",
+                "sessionId": "project-completion-shell",
+                "session": {"sessionId": "project-completion-shell", "status": "finished"},
+                "classification": {"risk": "low", "protectionScope": "unity_project"},
+                "result": {"ok": True, "exitCode": 0, "stdout": "Assets"},
+            },
+        ):
+            result = gateway.runtime_message(
+                {
+                    "message": "Inspect this project.",
+                    "projectRoot": str(project),
+                    "session_id": "project-completion-correction-session",
+                    "_projectContextActive": True,
+                }
+            )
+
+        self.assertEqual(planner_calls, 3, result)
+        self.assertEqual(result["plan"]["nextStep"], "done")
+        self.assertEqual(result["plan"]["taskCompletion"]["status"], "completed")
+
+    def test_project_completion_claim_correction_still_fails_closed(self) -> None:
+        gateway = self.gateway
+        project = self._unity_project()
+        planner_calls = 0
+
+        def plan_next(_message, _params, _observe, _history=None, *, loop_state=None, **_kwargs):
+            nonlocal planner_calls
+            planner_calls += 1
+            if planner_calls == 1:
+                return {
+                    "planner": "llm",
+                    "summary": "Inspect the project directory.",
+                    "shellNeeded": True,
+                    "shellCommand": "Get-ChildItem -LiteralPath Assets",
+                    "shellParams": {"cwd": str(project)},
+                    "continueLoop": True,
+                    "nextStep": "call_shell",
+                }
+            if planner_calls >= 2:
+                return {
+                    "planner": "llm",
+                    "summary": "The project was inspected.",
+                    "reply": "The project was inspected.",
+                    "continueLoop": False,
+                    "nextStep": "done",
+                }
+
+        with patch.object(gateway.runtime_planner, "plan_agent_turn", side_effect=plan_next), patch.object(
+            gateway.shell,
+            "execute",
+            return_value={
+                "ok": True,
+                "status": "executed",
+                "sessionId": "project-completion-shell",
+                "session": {"sessionId": "project-completion-shell", "status": "finished"},
+                "classification": {"risk": "low", "protectionScope": "unity_project"},
+                "result": {"ok": True, "exitCode": 0, "stdout": "Assets"},
+            },
+        ):
+            result = gateway.runtime_message(
+                {
+                    "message": "Inspect this project.",
+                    "projectRoot": str(project),
+                    "session_id": "project-completion-correction-session",
+                    "_projectContextActive": True,
+                }
+            )
+
+        self.assertEqual(planner_calls, 3, result)
+        self.assertEqual(result["plan"]["nextStep"], "completion_unverified")
+        self.assertEqual(result["plan"]["completionGate"]["reason"], "completion_claim_unbound")
+
     def test_projectless_general_agent_suppresses_equivalent_directory_replays_and_pivots(self) -> None:
         gateway = self.gateway
         planner_calls = 0

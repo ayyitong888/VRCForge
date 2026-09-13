@@ -3,6 +3,7 @@ import json
 import threading
 
 from agent_gateway import AgentGateway
+from agent_task_loop import canonical_action_id
 from tests.test_dashboard_server import bind_test_runtime_planner
 
 
@@ -28,7 +29,10 @@ def test_three_provider_responses_across_two_questions_are_counted_once(tmp_path
         turn = len(requests)
         plan = (
             {"action": "skill", "skill_tool": "vrcforge_ask_user", "skill_params": {"question": f"Required choice {turn}?"}, "summary": "wait for required input"}
-            if turn < 3 else {"action": "reply", "reply": "finished"}
+            if turn < 3 else {"action": "reply", "reply": "finished", "completion_claim": {
+                "satisfied": True,
+                "evidence_action_ids": [canonical_action_id("skill", "vrcforge_ask_user", {"question": f"Required choice {i}?"}) for i in (1, 2)],
+            }}
         )
         return {"text": json.dumps(plan), "usage": {"exact": True, "inputTokens": 10 * turn, "outputTokens": turn, "totalTokens": 11 * turn}}
 
@@ -45,6 +49,7 @@ def test_three_provider_responses_across_two_questions_are_counted_once(tmp_path
             assert results[-1]["task"]["taskId"] == first["task"]["taskId"]
             if turn == 0:
                 assert results[-1]["contextUsage"]["totalTokens"] == 33
+        assert results[-1]["plan"]["nextStep"] == "done"
         assert len(requests) == 3
         usage = results[-1]["contextUsage"]
         assert usage["requestCount"] == 3
