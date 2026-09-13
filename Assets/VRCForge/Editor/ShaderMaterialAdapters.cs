@@ -197,7 +197,13 @@ namespace VRCForge.Editor
                 appliedValue = number;
             }
 
-            return true;
+            ApplySemanticSideEffects(material, semanticProperty, appliedValue, out warning);
+            return string.IsNullOrEmpty(warning);
+        }
+
+        protected virtual void ApplySemanticSideEffects(Material material, string semanticProperty, object appliedValue, out string warning)
+        {
+            warning = "";
         }
 
         private static bool TryResolveProperty(Material material, SemanticPropertyMapping mapping, out string propertyName)
@@ -324,6 +330,34 @@ namespace VRCForge.Editor
         {
             var shaderName = material != null && material.shader != null ? material.shader.name.ToLowerInvariant() : "";
             return shaderName.Contains("liltoon") || shaderName.Contains("lil/toon");
+        }
+
+        protected override void ApplySemanticSideEffects(Material material, string semanticProperty, object appliedValue, out string warning)
+        {
+            warning = "";
+            if (!string.Equals(semanticProperty, "dissolve_mode", StringComparison.Ordinal)
+                || material == null || material.shader == null)
+                return;
+
+            var shaderName = material.shader.name == null ? "" : material.shader.name.ToLowerInvariant();
+            if (!shaderName.Contains("liltoonmulti") && !shaderName.Contains("lil/toonmulti"))
+                return;
+
+            const string keyword = "GEOM_TYPE_BRANCH_DETAIL";
+            var localKeyword = material.shader.keywordSpace.FindKeyword(keyword);
+            if (!localKeyword.isValid)
+            {
+                warning = "lilToon Multi shader does not declare " + keyword + ".";
+                return;
+            }
+
+            if (!(appliedValue is float mode))
+            {
+                warning = "lilToon Multi dissolve mode must be a finite float.";
+                return;
+            }
+            if (Mathf.Approximately(mode, 0f)) material.DisableKeyword(keyword);
+            else material.EnableKeyword(keyword);
         }
     }
 
