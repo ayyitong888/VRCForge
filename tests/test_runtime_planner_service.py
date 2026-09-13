@@ -263,6 +263,50 @@ def test_model_observation_includes_bounded_canonical_tool_outcome() -> None:
     assert "privateDump" not in observation
 
 
+def test_model_observation_preserves_compile_snapshot_from_structured_wrapper() -> None:
+    compile_data = {
+        "isCompiling": False,
+        "captureComplete": True,
+        "errorCount": 0,
+        "warningCount": 3,
+        "hasErrors": False,
+        "hasWarnings": True,
+        "capturedAt": "2026-09-13T09:47:23Z",
+    }
+    observation = service()._llm_loop_step_observation(
+        {
+            "tool": "vrcforge_get_compile_errors",
+            "status": "executed",
+            "result": {
+                "ok": True,
+                "result": {
+                    "payload": {"structuredContent": {"success": True, "data": compile_data}},
+                    "stdout": "raw output must not enter model context",
+                },
+            },
+        }
+    )
+    assert 'compileSnapshot={"isCompiling":false,"captureComplete":true,"errorCount":0,"warningCount":3,"hasErrors":false,"hasWarnings":true,"capturedAt":"2026-09-13T09:47:23Z"}' in observation
+    assert "raw output must not enter model context" not in observation
+
+
+@pytest.mark.parametrize("compiling,complete,count", [(True, False, 0), (False, True, 2)])
+def test_compile_observation_keeps_incomplete_and_error_facts(compiling, complete, count):
+    observation = service()._llm_loop_step_observation({
+        "tool": "vrcforge_get_compile_errors", "status": "executed",
+        "result": {"structuredContent": {"success": True, "data": {
+            "isCompiling": compiling, "captureComplete": complete,
+            "errorCount": count, "warningCount": -1,
+            "hasErrors": count > 0, "hasWarnings": "not a boolean",
+        }}},
+    })
+    assert f'"isCompiling":{str(compiling).lower()}' in observation
+    assert f'"captureComplete":{str(complete).lower()}' in observation
+    assert f'"errorCount":{count}' in observation
+    assert "warningCount" not in observation
+    assert "hasWarnings" not in observation
+
+
 def test_model_observation_includes_precise_internal_failure_facts_without_raw_dump() -> None:
     observation = service()._llm_loop_step_observation(
         {

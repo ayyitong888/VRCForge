@@ -17,6 +17,7 @@ from project_instruction_context import (
     load_project_instructions,
     project_instruction_prompt_block,
 )
+from agent_tool_result_contract import _views
 
 CONTEXT_USAGE_SCHEMA = "vrcforge.context_usage.v1"
 RUNTIME_CONTEXT_COMPACTION_SCHEMA = "vrcforge.runtime_context_compaction.v1"
@@ -1140,6 +1141,55 @@ def planner_safe_tool_result_fields(result: dict[str, object]) -> dict[str, obje
         if len(projected) >= RUNTIME_PLANNER_TOOL_OBSERVATION_MAX_FIELDS:
             break
     return projected
+
+
+_PLANNER_COMPILE_FACT_KEYS = (
+    "isCompiling",
+    "captureComplete",
+    "errorCount",
+    "warningCount",
+    "hasErrors",
+    "hasWarnings",
+    "capturedAt",
+)
+
+
+def _planner_compile_facts(result: object) -> dict[str, object]:
+    """Expose only the compile tool's bounded structured snapshot.
+
+    The MCP wrapper nests this under result. Raw stdout and arbitrary payloads
+    remain excluded; completion semantics continue to be enforced downstream.
+    """
+    if not isinstance(result, dict):
+        return {}
+    views = _views(result)
+    # The internal-agent envelope places the MCP response under one explicit
+    # payload wrapper, which is intentionally excluded from generic projection.
+    payload_views = [
+        payload for item in views
+        if isinstance((payload := item.get("payload")), Mapping)
+    ]
+    for view in [*views, *payload_views]:
+        structured = view.get("structuredContent")
+        if not isinstance(structured, Mapping):
+            continue
+        data = structured.get("data")
+        if not isinstance(data, Mapping):
+            continue
+        facts: dict[str, object] = {}
+        for key in _PLANNER_COMPILE_FACT_KEYS:
+            value = data.get(key)
+            if key in ("errorCount", "warningCount"):
+                if type(value) is int and value >= 0:
+                    facts[key] = value
+            elif key == "capturedAt":
+                if isinstance(value, str):
+                    facts[key] = value[:80]
+            elif isinstance(value, bool):
+                facts[key] = value
+        if facts:
+            return facts
+    return {}
 
 def format_planner_tool_observation(value: object, limit: int = 130) -> str:
     if isinstance(value, (dict, list)):
@@ -2682,6 +2732,13 @@ class RuntimePlannerService:
                         fields.append(f"{key}={sanitize_planner_observation_text(value, 180)}")
                 for key, value in planner_safe_tool_result_fields(result).items():
                     fields.append(f"{key}={format_planner_tool_observation(value, 130)}")
+                if tool_name == "vrcforge_get_compile_errors":
+                    compile_facts = _planner_compile_facts(result)
+                    if compile_facts:
+                        fields.append(
+                            "compileSnapshot="
+                            + format_planner_tool_observation(compile_facts, 360)
+                        )
             elif result is not None:
                 fields.append("result=available")
             observation_limit = (
