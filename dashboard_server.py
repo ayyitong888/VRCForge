@@ -19915,6 +19915,32 @@ def prepare_authoritative_unity_checkpoint_sync(
     arguments: dict[str, Any],
 ) -> dict[str, Any]:
     nested_tool = str(arguments.get("toolName") or arguments.get("tool_name") or "").strip()
+    if not nested_tool and PREPARED_UNITY_EXECUTION_ARGUMENT_KEY in arguments:
+        # Shader tuning wrappers seal the real Core calls instead of exposing a
+        # top-level toolName. Validate the sealed material call so the
+        # checkpoint does not silently fall back to a whole-project save.
+        try:
+            prepared_calls = build_prepared_execution_plan(arguments)
+        except (RuntimeError, ValueError, TypeError):
+            return {"ok": False, "error": "The prepared Unity execution plan is invalid."}
+        material_calls = [
+            (name, call_arguments)
+            for name, call_arguments in prepared_calls
+            if name == "vrc_apply_material_tuning"
+        ]
+        if material_calls:
+            if len(material_calls) != 1 or any(
+                name not in {"vrc_scan_avatar_materials", "vrc_apply_material_tuning"}
+                for name, _ in prepared_calls
+            ) or Path(str(arguments.get("projectPath") or "")).resolve() != project_root.resolve():
+                return {"ok": False, "error": "The prepared material execution scope is invalid."}
+            # This verifies the seal, not live Unity state. The approved shader
+            # handler still checks live scope/evidence before invoking Core.
+            return {
+                "ok": True, "projectPath": str(project_root),
+                "toolName": "vrc_apply_material_tuning",
+                "mode": "sealed_plan_checkpoint", "preparedPlanValidated": True,
+            }
     if nested_tool not in {
         PARAMETER_BIT_PACKING_TOOL,
         ATOMIC_REFERENCE_RENAME_TOOL,
@@ -19929,6 +19955,9 @@ def prepare_authoritative_unity_checkpoint_sync(
         TEXTURE_PATCH_TOOL,
         USER_ADJUSTMENT_HANDOFF_TOOL,
         RENDERER_MATERIAL_SLOT_TOOL,
+        MATERIAL_SHADER_ASSIGNMENT_TOOL,
+        MATERIAL_TEXTURE_ASSIGNMENT_TOOL,
+        MATERIAL_VARIANT_FLATTEN_TOOL,
     }:
         return prepare_unity_checkpoint_sync(project_root)
     approved_write_arguments = copy.deepcopy(arguments)

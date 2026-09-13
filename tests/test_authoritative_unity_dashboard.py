@@ -10,6 +10,9 @@ import dashboard_server
 from agent_gateway import AgentGateway
 from atomic_reference_rename import TOOL_NAME as ATOMIC_REFERENCE_RENAME_TOOL_NAME
 from parameter_bit_packing import TOOL_NAME as PARAMETER_BIT_PACKING_TOOL_NAME
+from material_shader_assignment import TOOL_NAME as MATERIAL_SHADER_ASSIGNMENT_TOOL_NAME
+from material_texture_assignment import TOOL_NAME as MATERIAL_TEXTURE_ASSIGNMENT_TOOL_NAME
+from material_variant_flatten import TOOL_NAME as MATERIAL_VARIANT_FLATTEN_TOOL_NAME
 from renderer_material_slot_assignment import TOOL_NAME as RENDERER_MATERIAL_SLOT_TOOL_NAME
 from component_feature_write import (
     COMPATIBILITY_DIGEST_SCHEMA,
@@ -837,6 +840,9 @@ def test_strict_apply_transport_failure_does_not_expose_raw_output() -> None:
         DUPLICATE_TOOL_NAME,
         PREFAB_TOOL_NAME,
         RENDERER_MATERIAL_SLOT_TOOL_NAME,
+        MATERIAL_SHADER_ASSIGNMENT_TOOL_NAME,
+        MATERIAL_TEXTURE_ASSIGNMENT_TOOL_NAME,
+        MATERIAL_VARIANT_FLATTEN_TOOL_NAME,
     ],
 )
 def test_strict_checkpoint_revalidates_canonical_state_without_saving(
