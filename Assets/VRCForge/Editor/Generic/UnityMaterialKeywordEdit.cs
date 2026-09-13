@@ -136,9 +136,12 @@ namespace VRCForge.Editor
                 if (objects == null || objects.Length != 1 || !(objects[0] is Material disk)
                     || EditorUtility.IsPersistent(disk))
                     throw new InvalidOperationException("Independent material disk readback is unavailable.");
-                if (!JToken.DeepEquals(JObject.Parse(EditorJsonUtility.ToJson(material)),
-                    JObject.Parse(EditorJsonUtility.ToJson(disk))))
-                    throw new InvalidOperationException("Material disk contents differ from memory after saving.");
+                var memory = JObject.Parse(EditorJsonUtility.ToJson(material));
+                var persisted = JObject.Parse(EditorJsonUtility.ToJson(disk));
+                if (!JToken.DeepEquals(memory, persisted))
+                    throw new InvalidOperationException(
+                        "Material disk contents differ from memory after saving: "
+                        + DescribeDifferences(memory, persisted));
             }
             finally
             {
@@ -147,6 +150,55 @@ namespace VRCForge.Editor
                         if (obj != null && !EditorUtility.IsPersistent(obj))
                             UnityEngine.Object.DestroyImmediate(obj);
             }
+        }
+
+        private static string DescribeDifferences(JToken memory, JToken persisted)
+        {
+            var differences = new List<string>();
+            CollectDifferences(memory, persisted, "$", differences);
+            return string.Join("; ", differences.Take(8));
+        }
+
+        private static void CollectDifferences(JToken memory, JToken persisted, string path, List<string> output)
+        {
+            if (output.Count >= 8) return;
+            if (memory == null || persisted == null || memory.Type != persisted.Type)
+            {
+                output.Add(path + " memory=" + BoundedToken(memory) + " disk=" + BoundedToken(persisted));
+                return;
+            }
+            var memoryObject = memory as JObject;
+            var persistedObject = persisted as JObject;
+            if (memoryObject != null && persistedObject != null)
+            {
+                foreach (var property in memoryObject.Properties().Select(item => item.Name)
+                    .Union(persistedObject.Properties().Select(item => item.Name), StringComparer.Ordinal)
+                    .OrderBy(item => item, StringComparer.Ordinal))
+                {
+                    CollectDifferences(memoryObject[property], persistedObject[property], path + "." + property, output);
+                    if (output.Count >= 8) return;
+                }
+                return;
+            }
+            var memoryArray = memory as JArray;
+            var persistedArray = persisted as JArray;
+            if (memoryArray != null && persistedArray != null)
+            {
+                var count = Math.Max(memoryArray.Count, persistedArray.Count);
+                for (var i = 0; i < count && output.Count < 8; i++)
+                    CollectDifferences(i < memoryArray.Count ? memoryArray[i] : null,
+                        i < persistedArray.Count ? persistedArray[i] : null, path + "[" + i + "]", output);
+                return;
+            }
+            if (!JToken.DeepEquals(memory, persisted))
+                output.Add(path + " memory=" + BoundedToken(memory) + " disk=" + BoundedToken(persisted));
+        }
+
+        private static string BoundedToken(JToken value)
+        {
+            if (value == null) return "<missing>";
+            var text = value.ToString(Newtonsoft.Json.Formatting.None);
+            return text.Length <= 256 ? text : text.Substring(0, 256) + "…";
         }
 
         private static JObject Identity(UnityEngine.Object obj, bool shader = false)

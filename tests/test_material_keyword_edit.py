@@ -113,6 +113,10 @@ def test_actual_csharp_command(compiled_keyword, tmp_path, case):
     elif case in ('effective', 'save_noop'):
         assert result['ok'] is False and p['commitState'] == 'rolled_back', result
         assert result['file'] == 'ACTIVE'
+        if case == 'save_noop':
+            diagnostic = result['message']
+            assert 'keywords' in diagnostic and 'memory=' in diagnostic and 'disk=' in diagnostic
+            assert len(diagnostic) < 4096
     else:
         assert result['ok'] is False and p['mutationStarted'] is False
         assert result['targetSaves'] == 0
