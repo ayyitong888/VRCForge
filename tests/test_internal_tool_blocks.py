@@ -64,7 +64,19 @@ def test_dashboard_parent_load_rejects_without_touching_session_state(monkeypatc
             result, fallback_summary="load_internal_tool_block", write=False
         )
         assert normalized["status"] == "failed"
-        assert "avatar_structure/hierarchy_components" in " ".join(result["nextActions"])
+        expected_children = [f"{parent}/{leaf}" for leaf in CANONICAL_TOOL_BLOCKS[parent]["children"]]
+        assert [child["name"] for child in result["availableChildren"]] == expected_children
+        assert all(
+            child["loadCall"] == {
+                "skill_tool": "load_internal_tool_block",
+                "skill_params": {"block": child["name"]},
+            }
+            for child in result["availableChildren"]
+        )
+        assert all(
+            f"block={child['name']}" in " ".join(result["nextActions"])
+            for child in result["availableChildren"]
+        )
     assert calls == []
 
 

@@ -97,6 +97,7 @@ from external_tool_result_contract import build_external_tool_error
 from agent_unity_path_guard import UNITY_PROJECT_ACCESS, UnityPathGuard, path_is_within
 from profiled_tool_registry import CapabilityProfile, ProfiledToolRegistry, ToolSet
 from internal_tool_blocks import (
+    CANONICAL_TOOL_BLOCKS,
     INTERNAL_GENERAL_TOOL_NAMES,
     build_internal_tool_block_tree,
     internal_tool_block_for_name,
@@ -15577,7 +15578,19 @@ def load_internal_tool_block(params: dict[str, Any]) -> dict[str, Any]:
     block = resolve_internal_tool_block_selector(selector)
     if not block:
         reason = f"Unknown or branch-only internal tool block: {selector or 'missing'}"
-        return {
+        branch = str(selector or "").strip().casefold()
+        branch_spec = CANONICAL_TOOL_BLOCKS.get(branch)
+        available_children = [
+            {
+                "name": f"{branch}/{leaf}",
+                "loadCall": {
+                    "skill_tool": "load_internal_tool_block",
+                    "skill_params": {"block": f"{branch}/{leaf}"},
+                },
+            }
+            for leaf in (branch_spec or {}).get("children", ())
+        ]
+        response = {
             "ok": False,
             "status": "failed",
             "error": reason,
@@ -15589,12 +15602,23 @@ def load_internal_tool_block(params: dict[str, Any]) -> dict[str, Any]:
             "mutationStarted": False,
             "committed": False,
             "commitState": "not_started",
-            "nextActions": [
+        }
+        if available_children:
+            response["availableChildren"] = available_children
+            response["nextActions"] = [
+                "Parent categories cannot be loaded; choose one exact child loadCall from availableChildren."
+            ]
+            response["nextActions"].extend(
+                f"Call load_internal_tool_block with block={child['name']}"
+                for child in available_children
+            )
+        else:
+            response["nextActions"] = [
                 "Call list_internal_tool_blocks and copy an exact leaf name from its children, "
                 "then call load_internal_tool_block with that name as block; "
-                "for example avatar_structure/hierarchy_components. Parent categories cannot be loaded."
-            ],
-        }
+                "parent categories cannot be loaded."
+            ]
+        return response
     loaded = AGENT_GATEWAY.runtime_sessions.load_internal_tool_block(session_id, block)
     return {
         "ok": True,

@@ -393,13 +393,13 @@ def test_internal_tool_block_observation_keeps_compact_indices_without_schemas()
                 "tree": {
                     "children": [
                         {"index": "1", "name": "core", "loaded": True},
-                        {"index": "8", "name": "unity", "expandable": True},
+                        {"index": "5", "name": "diagnostics_build", "expandable": True},
                     ]
                 },
                 "blocks": [
                     {
-                        "index": "8.9",
-                        "name": "unity/diagnostics",
+                        "index": "5.1",
+                        "name": "diagnostics_build/compile_logs",
                         "toolNames": ["vrcforge_get_compile_errors", "vrcforge_unity_status"],
                     }
                 ],
@@ -410,8 +410,8 @@ def test_internal_tool_block_observation_keeps_compact_indices_without_schemas()
     )
 
     assert "loadedBlocks=core" in observation
-    assert "toolBlockTree=1:core(loaded) | 8:unity(expand)" in observation
-    assert "8.9:unity/diagnostics[vrcforge_get_compile_errors,vrcforge_unity_status]" in observation
+    assert "toolBlockTree=1:core(loaded) | 5:diagnostics_build(expand)" in observation
+    assert "5.1:diagnostics_build/compile_logs[vrcforge_get_compile_errors,vrcforge_unity_status]" in observation
     assert "skill_tool=load_internal_tool_block" in observation
     assert "skill_params={\"block\":\"<exact block name>\"}" in observation
     assert "privateSchema" not in observation
@@ -436,6 +436,29 @@ def test_canonical_nested_tool_directory_reaches_the_actual_model_observation() 
     assert "None:" not in observation
     assert "skill_tool=load_internal_tool_block" in observation
     assert "inputSchema" not in observation
+    assert len(observation) <= 8_000
+
+
+def test_parent_tool_block_failure_observation_preserves_exact_leaf_load_actions() -> None:
+    import dashboard_server
+    from agent_tool_result_contract import normalize_agent_tool_result
+
+    result = dashboard_server.load_internal_tool_block(
+        {"sessionId": "planner-parent-block-regression", "block": "diagnostics_build"}
+    )
+    outcome = normalize_agent_tool_result(
+        result, fallback_summary="load_internal_tool_block", write=False
+    )
+    observation = service()._llm_loop_step_observation(
+        {"tool": "vrcforge_load_internal_tool_block", "outcome": outcome}
+    )
+    for leaf in (
+        "diagnostics_build/compile_logs",
+        "diagnostics_build/validation_performance",
+        "diagnostics_build/checkpoints_history",
+        "diagnostics_build/build_runtime",
+    ):
+        assert f"block={leaf}" in observation
     assert len(observation) <= 8_000
 
 
