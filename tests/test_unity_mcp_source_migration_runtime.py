@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import textwrap
@@ -300,13 +301,15 @@ internal static class Program {
 
 
 @pytest.fixture(scope="module")
-def migration_harness(tmp_path_factory: pytest.TempPathFactory) -> Path:
+def migration_harness(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, str]:
     work = tmp_path_factory.mktemp("mcp-source-migration-runtime")
     (work / "Harness.cs").write_text(textwrap.dedent(HARNESS), encoding="utf-8")
-    dotnet = shutil.which("dotnet")
+    base = Path(os.environ.get("DOTNET_ROOT", str(Path.home() / "AppData/Local/Microsoft/dotnet")))
+    local_host = base / ("dotnet.exe" if os.name == "nt" else "dotnet")
+    dotnet = str(local_host) if local_host.is_file() else shutil.which("dotnet")
     if dotnet:
         sdk_probe = subprocess.run([dotnet, "--list-sdks"], text=True, capture_output=True, timeout=15)
-        if sdk_probe.returncode == 0 and sdk_probe.stdout.strip():
+        if sdk_probe.returncode == 0 and any(line.startswith("8.") for line in sdk_probe.stdout.splitlines()):
             (work / "Harness.csproj").write_text(
                 textwrap.dedent(
                     f"""
@@ -329,7 +332,7 @@ def migration_harness(tmp_path_factory: pytest.TempPathFactory) -> Path:
                 [dotnet, "build", "--nologo", "-c", "Release"], cwd=work, text=True, encoding="utf-8", errors="replace", capture_output=True, timeout=90
             )
             assert build.returncode == 0, build.stdout + build.stderr
-            return work / "bin" / "Release" / "net8.0" / "Harness.dll"
+            return work / "bin" / "Release" / "net8.0" / "Harness.dll", dotnet
 
     compiler_candidates = [
         (
@@ -368,28 +371,29 @@ def migration_harness(tmp_path_factory: pytest.TempPathFactory) -> Path:
         timeout=90,
     )
     assert build.returncode == 0, build.stdout + build.stderr
-    return output
+    return output, str(mono)
 
 
-def _run_harness(harness: Path, root: Path, *args: str) -> subprocess.CompletedProcess[str]:
-    command = [str(harness)] if harness.suffix.lower() == ".exe" else ["dotnet", str(harness)]
+def _run_harness(harness: tuple[Path, str], root: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    binary, host = harness
+    command = [host, str(binary)]
     return subprocess.run(
         [*command, str(root), *args], text=True, encoding="utf-8", errors="replace", capture_output=True, timeout=30
     )
 
 
-def test_migration_preserves_hash_mismatch_renamed_same_bytes_and_modified_content(migration_harness: Path, tmp_path: Path) -> None:
+def test_migration_preserves_hash_mismatch_renamed_same_bytes_and_modified_content(migration_harness: tuple[Path, str], tmp_path: Path) -> None:
     result = _run_harness(migration_harness, tmp_path / "project")
     assert result.returncode == 0, result.stdout + result.stderr
     assert "OK" in result.stdout
 
 
-def test_migration_isolates_per_item_failure_warns_and_always_stops_asset_editing(migration_harness: Path, tmp_path: Path) -> None:
+def test_migration_isolates_per_item_failure_warns_and_always_stops_asset_editing(migration_harness: tuple[Path, str], tmp_path: Path) -> None:
     result = _run_harness(migration_harness, tmp_path / "project")
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-def test_migration_reparse_path_preserves_external_sentinel_or_skips_when_unavailable(migration_harness: Path, tmp_path: Path) -> None:
+def test_migration_reparse_path_preserves_external_sentinel_or_skips_when_unavailable(migration_harness: tuple[Path, str], tmp_path: Path) -> None:
     result = _run_harness(migration_harness, tmp_path / "project", "reparse")
     if "REPARSE_UNAVAILABLE:" in result.stdout:
         error_code = int(result.stdout.split("REPARSE_UNAVAILABLE:", 1)[1].splitlines()[0])

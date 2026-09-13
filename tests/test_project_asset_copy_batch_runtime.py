@@ -14,8 +14,9 @@ def test_actual_copy_batch_handler_faults(tmp_path):
     base=Path(os.environ.get("DOTNET_ROOT", str(Path.home()/"AppData/Local/Microsoft/dotnet")))
     compilers=sorted((base/"sdk").glob("8.*/Roslyn/bincore/csc.dll"))
     refs=sorted((base/"packs/Microsoft.NETCore.App.Ref").glob("8.*/ref/net8.0"))
-    dotnet=shutil.which("dotnet")
-    if not dotnet or not compilers or not refs: pytest.skip("Local .NET SDK/reference pack required")
+    dotnet=base / ("dotnet.exe" if os.name == "nt" else "dotnet")
+    if not dotnet.is_file(): dotnet=Path(shutil.which("dotnet") or "")
+    if not dotnet.is_file() or not compilers or not refs: pytest.skip("Local .NET SDK/reference pack required")
     compiler=compilers[-1]; newtonsoft=compiler.parents[2]/"Newtonsoft.Json.dll"
     source=(ROOT/"Assets/VRCForge/Editor/Generic/UnityProjectAssetCopyBatch.cs").read_text(encoding="utf-8")
     seam=r'''
