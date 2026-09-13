@@ -54,6 +54,25 @@ from agent_gateway import (
 )
 
 
+# Unity projects commonly contain payloads that are already compressed. Storing
+# those bytes avoids spending checkpoint time trying to compress them again;
+# all other files retain the existing level-1 DEFLATED policy.
+_CHECKPOINT_STORED_SUFFIXES = frozenset(
+    {
+        ".gz",
+        ".jpeg",
+        ".jpg",
+        ".mp3",
+        ".mp4",
+        ".ogg",
+        ".png",
+        ".unitypackage",
+        ".webm",
+        ".zip",
+    }
+)
+
+
 class _LocalStateRestoreRecoveryError(RuntimeError):
     """Report a failed rollback without losing the only recovery copy."""
 
@@ -1440,7 +1459,16 @@ class AgentCheckpointRecoveryService:
                      if source.is_file()]
                 )
                 for source, relative in sources:
-                    archive.write(source, relative)
+                    archive.write(
+                        source,
+                        relative,
+                        compress_type=(
+                            zipfile.ZIP_STORED
+                            if source.suffix.casefold() in _CHECKPOINT_STORED_SUFFIXES
+                            else zipfile.ZIP_DEFLATED
+                        ),
+                        compresslevel=1,
+                    )
                     file_count += 1
                     total_bytes += source.stat().st_size
             fsync_file_path(temp_path)
