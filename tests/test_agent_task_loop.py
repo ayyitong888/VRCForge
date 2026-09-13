@@ -6,6 +6,7 @@ from agent_task_loop import (
     approval_completion,
     approval_task_context,
     canonical_action_id,
+    merge_provider_usage,
     prepare_approval_task_continuation,
     prepare_sub_agent_task_continuation,
     rejected_approval_completion,
@@ -1059,6 +1060,88 @@ def test_provider_request_count_survives_an_async_task_boundary() -> None:
 
     assert resumed.provider_request_count == 2
     assert resumed.approval_seed()["providerRequestCount"] == 2
+
+
+def test_provider_usage_survives_an_async_task_boundary_without_readding() -> None:
+    loop = AgentTaskLoop(
+        "continue after approval",
+        session_id="session-usage",
+        provider_usage={
+            "exact": True,
+            "inputTokens": 11,
+            "outputTokens": 5,
+            "totalTokens": 16,
+            "cacheReadTokens": 3,
+        },
+    )
+    seed = loop.approval_seed(
+        requested_tool="vrcforge_capture_multi_screenshot",
+        requested_arguments={"angles": ["front"]},
+        provider_request_count=2,
+    )
+    assert seed["providerUsage"]["totalTokens"] == 16
+    assert merge_provider_usage(
+        seed["providerUsage"],
+        {"exact": True, "inputTokens": 7, "outputTokens": 2, "totalTokens": 9, "cacheReadTokens": 1},
+    ) == {
+        "exact": True,
+        "inputTokens": 18,
+        "outputTokens": 7,
+        "totalTokens": 25,
+        "cacheReadTokens": 4,
+    }
+    assert merge_provider_usage(
+        merge_provider_usage(
+            seed["providerUsage"],
+            {"exact": True, "inputTokens": 7, "outputTokens": 2, "totalTokens": 9, "cacheReadTokens": 1},
+        ),
+        {"exact": True, "inputTokens": 3, "outputTokens": 1, "totalTokens": 4, "cacheReadTokens": 0},
+    )["totalTokens"] == 29
+    context = approval_task_context(
+        seed,
+        tool="vrcforge_capture_multi_screenshot",
+        arguments={"angles": ["front"]},
+    )
+    assert context is not None
+    completion = approval_completion(
+        context,
+        raw_result={"ok": True},
+        outcome=ok_outcome("captured"),
+    )
+    assert completion is not None
+    resumed = AgentTaskLoop.from_approval_context(context, completion)
+    assert resumed.provider_usage["totalTokens"] == 16
+
+
+def test_provider_usage_becomes_inexact_when_resumed_response_has_no_usage() -> None:
+    assert merge_provider_usage(
+        {"exact": True, "inputTokens": 11, "outputTokens": 5, "totalTokens": 16},
+        {},
+    ) == {
+        "exact": False,
+        "inputTokens": 11,
+        "outputTokens": 5,
+        "totalTokens": 16,
+        "unavailableReason": "provider_usage_missing",
+    }
+
+
+def test_provider_usage_with_one_missing_primary_field_is_inexact() -> None:
+    merged = merge_provider_usage(
+        {"exact": True, "inputTokens": 11, "outputTokens": 5, "totalTokens": 16},
+        {"exact": True, "inputTokens": 7, "outputTokens": 2},
+    )
+    assert merged["exact"] is False
+    assert merged["unavailableReason"] == "provider_usage_incomplete"
+
+
+def test_cache_usage_is_omitted_when_only_one_response_reports_it() -> None:
+    merged = merge_provider_usage(
+        {"exact": True, "inputTokens": 11, "outputTokens": 5, "totalTokens": 16, "cacheReadTokens": 3},
+        {"exact": True, "inputTokens": 7, "outputTokens": 2, "totalTokens": 9},
+    )
+    assert merged["exact"] is True
+    assert "cacheReadTokens" not in merged
 
 
 def test_tool_call_count_survives_an_async_task_boundary_beyond_three() -> None:

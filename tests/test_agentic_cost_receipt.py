@@ -22,3 +22,28 @@ def test_tampered_cost_is_not_reported_as_authenticated_usage():
     report = _evaluate_runtime_journey(receipt, verify_runtime_journey=authority.verify)
     assert report["accepted"] is False
     assert report["agenticCost"] is None
+
+
+def test_authenticated_task_total_usage_is_preserved_in_journey_report():
+    authority = RuntimeJourneyReceiptAuthority()
+    runtime = _runtime_journey()
+    runtime["contextUsage"] = {
+        "requestCount": 6,
+        "exact": True,
+        "inputTokens": 31,
+        "outputTokens": 11,
+        "totalTokens": 42,
+        "scope": "task_total_context_usage",
+        "taskTotalAvailable": True,
+    }
+    receipt = authority.issue(runtime)
+    report = _evaluate_runtime_journey(receipt, verify_runtime_journey=authority.verify)
+    assert report["accepted"] is True
+    assert report["agenticCost"]["providerUsage"] == {
+        "scope": "task_total_context_usage",
+        "taskTotalAvailable": True,
+        "exact": True,
+        "inputTokens": 31,
+        "outputTokens": 11,
+        "totalTokens": 42,
+    }

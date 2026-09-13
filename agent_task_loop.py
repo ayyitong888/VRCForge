@@ -91,6 +91,60 @@ def _bounded_history(value: Any) -> list[dict[str, str]]:
     return bounded
 
 
+def _bounded_provider_usage(value: Any) -> dict[str, Any]:
+    """Keep only authenticated, non-negative provider token measurements."""
+    if not isinstance(value, Mapping):
+        return {}
+    result: dict[str, Any] = {}
+    if value.get("exact") is True:
+        result["exact"] = True
+    for key in ("inputTokens", "outputTokens", "totalTokens", "cacheReadTokens"):
+        item = value.get(key)
+        if isinstance(item, int) and not isinstance(item, bool) and item >= 0:
+            result[key] = item
+    if not any(key in result for key in ("inputTokens", "outputTokens", "totalTokens")):
+        return {}
+    if result.get("exact") is not True:
+        result["exact"] = False
+    return result
+
+
+def merge_provider_usage(
+    prior: Mapping[str, Any] | None,
+    current: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Merge two adjacent authenticated responses without re-adding either."""
+    previous = _bounded_provider_usage(prior)
+    latest = _bounded_provider_usage(current)
+    if not previous:
+        return latest
+    if not latest:
+        return {
+            **{key: previous[key] for key in ("inputTokens", "outputTokens", "totalTokens", "cacheReadTokens") if key in previous},
+            "exact": False,
+            "unavailableReason": "provider_usage_missing",
+        }
+    primary_keys = ("inputTokens", "outputTokens", "totalTokens")
+    complete = all(key in previous and key in latest for key in primary_keys)
+    merged: dict[str, Any] = {
+        "exact": (
+            complete
+            and previous.get("exact") is True
+            and latest.get("exact") is True
+        ),
+    }
+    for key in ("inputTokens", "outputTokens", "totalTokens", "cacheReadTokens"):
+        if key in previous and key in latest:
+            merged[key] = previous[key] + latest[key]
+        elif key in previous and key != "cacheReadTokens":
+            merged[key] = previous[key]
+        elif key in latest and key != "cacheReadTokens":
+            merged[key] = latest[key]
+    if not merged["exact"]:
+        merged["unavailableReason"] = "provider_usage_incomplete"
+    return merged
+
+
 def _canonical_json(value: Any) -> str:
     return json.dumps(
         value,
@@ -625,6 +679,7 @@ def approval_task_context(
             0,
             min(int(seed.get("providerRequestCount") or 0), 100),
         ),
+        "providerUsage": _bounded_provider_usage(seed.get("providerUsage")),
         "modelTurnsUsed": max(0, min(int(seed.get("modelTurnsUsed") or 0), 4096)),
         "budgetPolicy": {
             "maxModelTurns": freeze_agent_budget_policy(seed.get("budgetPolicy")).max_model_turns,
@@ -1129,6 +1184,10 @@ class AgentTaskLoop:
     context_limit: int | None = None
     tool_calls_used: int = 0
     provider_request_count: int = 0
+    # Authenticated provider usage accumulated before an async continuation.
+    # Kept separately from request_count so a resumed turn can merge the
+    # current response exactly once at its completion boundary.
+    provider_usage: dict[str, Any] = field(default_factory=dict)
     model_turns_used: int = 0
     budget_policy: AgentBudgetPolicy = field(default_factory=AgentBudgetPolicy)
     exposure_layer: str = "planning"
@@ -1152,6 +1211,7 @@ class AgentTaskLoop:
             0,
             min(int(self.provider_request_count or 0), 100),
         )
+        self.provider_usage = _bounded_provider_usage(self.provider_usage)
         self.model_turns_used = max(0, min(int(self.model_turns_used or 0), 4096))
         self.exposure_layer = (
             "execution" if _status(self.exposure_layer) == "execution" else "planning"
@@ -1186,6 +1246,7 @@ class AgentTaskLoop:
                 0,
                 min(int(context.get("providerRequestCount") or 0), 100),
             ),
+            provider_usage=_bounded_provider_usage(context.get("providerUsage")),
             model_turns_used=max(0, min(int(context.get("modelTurnsUsed") or 0), 4096)),
             budget_policy=freeze_agent_budget_policy(context.get("budgetPolicy")),
             exposure_layer=str(context.get("exposureLayer") or "execution"),
@@ -1262,6 +1323,7 @@ class AgentTaskLoop:
         requested_arguments: Mapping[str, Any] | None = None,
         continue_after_approval: bool = True,
         provider_request_count: int | None = None,
+        provider_usage: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         effective_kind = _bounded_text(requested_kind, 32) or "write"
         effective_tool = _bounded_text(requested_tool, 160)
@@ -1292,6 +1354,9 @@ class AgentTaskLoop:
                     ),
                     100,
                 ),
+            ),
+            "providerUsage": _bounded_provider_usage(
+                self.provider_usage if provider_usage is None else provider_usage
             ),
             "modelTurnsUsed": max(0, min(int(self.model_turns_used or 0), 4096)),
             "budgetPolicy": {

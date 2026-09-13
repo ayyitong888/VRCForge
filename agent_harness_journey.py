@@ -108,9 +108,17 @@ def _project_agentic_cost(
     """Project one bounded, evidence-only per-turn cost summary."""
 
     requested_exact = context_usage.get("exact") is True
+    task_total_available = (
+        context_usage.get("scope") == "task_total_context_usage"
+        and context_usage.get("taskTotalAvailable") is True
+    )
     usage: dict[str, Any] = {
-        "scope": "current_response_context_usage",
-        "taskTotalAvailable": False,
+        "scope": (
+            "task_total_context_usage"
+            if context_usage.get("scope") == "task_total_context_usage"
+            else "current_response_context_usage"
+        ),
+        "taskTotalAvailable": task_total_available,
     }
     if requested_exact:
         for key in ("inputTokens", "outputTokens", "totalTokens", "cacheReadTokens"):
@@ -121,6 +129,7 @@ def _project_agentic_cost(
         key in usage for key in ("inputTokens", "outputTokens", "totalTokens")
     )
     usage["exact"] = requested_exact and has_token_evidence
+    usage["taskTotalAvailable"] = task_total_available and usage["exact"]
     if not usage["exact"]:
         usage["unavailableReason"] = str(
             context_usage.get("unavailableReason") or "provider_usage_missing"

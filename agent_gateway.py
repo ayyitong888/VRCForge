@@ -84,6 +84,7 @@ from agent_task_loop import (
     AgentTaskLoop,
     approval_task_context,
     canonical_action_id,
+    merge_provider_usage,
     prepare_approval_task_continuation,
     prepare_shell_task_continuation,
     prepare_sub_agent_task_continuation,
@@ -5855,6 +5856,20 @@ class AgentGateway:
         prior_provider_request_count = (
             task_loop.provider_request_count if continuation_context else 0
         )
+        prior_provider_usage = (
+            dict(task_loop.provider_usage) if continuation_context else {}
+        )
+
+        def task_seed_provider_usage() -> dict[str, Any]:
+            merged = merge_provider_usage(prior_provider_usage, context_usage)
+            if continuation_context and prior_provider_request_count and not prior_provider_usage and merged:
+                merged = {
+                    **merged,
+                    "exact": False,
+                    "unavailableReason": "prior_provider_usage_missing",
+                }
+            return merged
+
         context_usage: dict[str, Any] = {}
         self._runtime_session_state.set_stream_context(
             {
@@ -6894,6 +6909,7 @@ class AgentGateway:
                         requested_tool=step_tool,
                         requested_arguments={"command": command, **shell_step_params},
                         provider_request_count=prior_provider_request_count + int(context_usage.get("requestCount") or 0),
+                        provider_usage=task_seed_provider_usage(),
                         continue_after_approval=bool(plan.get("continueLoop")),
                     ),
                     unity_project_access=step_tool == "unity_shell",
@@ -6955,6 +6971,7 @@ class AgentGateway:
                         requested_tool=step_tool,
                         requested_arguments=action_arguments,
                         provider_request_count=prior_provider_request_count + int(context_usage.get("requestCount") or 0),
+                        provider_usage=task_seed_provider_usage(),
                         continue_after_approval=bool(plan.get("continueLoop")),
                     ),
                 )
@@ -6995,6 +7012,7 @@ class AgentGateway:
                         requested_tool=step_tool,
                         requested_arguments=action_arguments,
                         provider_request_count=prior_provider_request_count + int(context_usage.get("requestCount") or 0),
+                        provider_usage=task_seed_provider_usage(),
                         continue_after_approval=bool(plan.get("continueLoop")),
                     )
                 if step_tool == "vrcforge_vision_audit_multi":
@@ -7006,6 +7024,7 @@ class AgentGateway:
                         requested_tool=step_tool,
                         requested_arguments=action_arguments,
                         provider_request_count=prior_provider_request_count + int(context_usage.get("requestCount") or 0),
+                        provider_usage=task_seed_provider_usage(),
                         continue_after_approval=bool(plan.get("continueLoop")),
                     )
                 if step_tool == "vrcforge_ask_user":
@@ -7024,6 +7043,7 @@ class AgentGateway:
                         requested_tool=step_tool,
                         requested_arguments=action_arguments,
                         provider_request_count=prior_provider_request_count + int(context_usage.get("requestCount") or 0),
+                        provider_usage=task_seed_provider_usage(),
                         continue_after_approval=bool(plan.get("continueLoop")),
                     )
                 if (
@@ -7367,6 +7387,23 @@ class AgentGateway:
                 prior_provider_request_count
                 + int(context_usage.get("requestCount") or 0)
             )
+        if continuation_context:
+            merged_provider_usage = merge_provider_usage(
+                prior_provider_usage,
+                context_usage,
+            )
+            if merged_provider_usage:
+                if prior_provider_request_count and not prior_provider_usage:
+                    merged_provider_usage = {
+                        **merged_provider_usage,
+                        "exact": False,
+                        "unavailableReason": "prior_provider_usage_missing",
+                    }
+                context_usage.update(merged_provider_usage)
+                context_usage["scope"] = "task_total_context_usage"
+                context_usage["taskTotalAvailable"] = (
+                    merged_provider_usage.get("exact") is True
+                )
         first_plan = first_plan or last_plan or {}
         # 单步（含纯回复/未连接）保持与历史一致的顶层 plan 形状；多步才综合成 loop 计划。
         terminal_override = str(last_plan.get("nextStep") or "") in {
