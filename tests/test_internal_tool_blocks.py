@@ -110,6 +110,17 @@ def test_visual_artifact_routing_does_not_misclassify_expression_trigger_as_beha
     assert "solid red" in " ".join(materials["useWhen"])
 
 
+def test_root_routing_strings_are_serialized_as_single_entries() -> None:
+    from internal_tool_blocks import canonical_tool_block_description
+
+    for block_id, spec in CANONICAL_TOOL_BLOCKS.items():
+        routing = spec["routing"]
+        assert isinstance(routing["doNotUse"], tuple)
+        assert len(routing["doNotUse"]) == 1
+        description = canonical_tool_block_description(block_id)
+        assert "m / a / t / e / r" not in description
+
+
 def test_internal_blocks_classify_general_tools_without_exposing_them_externally() -> None:
     assert internal_tool_block_for_name("vrcforge_read_text_file", "general") == "project_environment/files"
     assert internal_tool_block_for_name("vrcforge_web_search", "general") == "research/web_research"
