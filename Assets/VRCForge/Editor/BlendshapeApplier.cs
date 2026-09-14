@@ -23,7 +23,7 @@ namespace VRCForge.Editor
             public string avatarPath { get; set; } = "";
             [VRCForgeInput("One or more objects containing rendererPath, blendshapeName, and targetWeight.", IsRequired = true)]
             public JArray adjustments { get; set; } = new JArray();
-            [VRCForgeInput("Save assets and open scenes after applying weights.", IsRequired = false, DefaultLiteral = "true")]
+            [VRCForgeInput("Save only affected scenes after applying weights.", IsRequired = false, DefaultLiteral = "true")]
             public bool? saveAssets { get; set; } = true;
         }
 
@@ -40,6 +40,7 @@ namespace VRCForge.Editor
                 }
 
                 var applied = new List<BlendshapeChangeReceipt>();
+                var touchedScenes = new HashSet<UnityEngine.SceneManagement.Scene>();
                 foreach (var token in adjustments.OfType<JObject>())
                 {
                     var rendererPath = (token["rendererPath"]?.ToString() ?? string.Empty).Trim();
@@ -63,6 +64,11 @@ namespace VRCForge.Editor
                         return VRCForgeToolResult.Failed($"Blendshape '{blendshapeName}' was not found on renderer '{rendererPath}'.");
                     }
 
+                    var scene = renderer.gameObject.scene;
+                    if (saveAssets && (string.IsNullOrWhiteSpace(scene.path)
+                        || !scene.path.StartsWith("Assets/", StringComparison.Ordinal)))
+                        throw new InvalidOperationException("Blendshape persistence requires a saved project scene.");
+                    touchedScenes.Add(scene);
                     var previousWeight = renderer.GetBlendShapeWeight(blendshapeIndex);
                     var clampedWeight = Mathf.Clamp(targetWeight, 0f, 100f);
                     Undo.RecordObject(renderer, "Apply VRCForge blendshape weight");
@@ -83,8 +89,14 @@ namespace VRCForge.Editor
 
                 if (saveAssets)
                 {
-                    AssetDatabase.SaveAssets();
-                    EditorSceneManager.SaveOpenScenes();
+                    // RecordObject finalizes at the end of an editor action. Flush
+                    // before same-frame saving so it cannot dirty the scene again.
+                    Undo.FlushUndoRecordObjects();
+                    foreach (var scene in touchedScenes)
+                    {
+                        if (!EditorSceneManager.SaveScene(scene) || scene.isDirty)
+                            throw new InvalidOperationException($"The blendshape target scene could not be saved cleanly: {scene.path}");
+                    }
                 }
 
                 return VRCForgeToolResult.Completed(
