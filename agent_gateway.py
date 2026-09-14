@@ -5670,6 +5670,9 @@ class AgentGateway:
         continuation_shutdown_guard: bool = False,
     ) -> dict[str, Any]:
         owned_params = params if isinstance(params, dict) else {}
+        owned_params.pop("_runtimeTurnStarted", None)
+        owned_params.pop("_runtimeFailureProgress", None)
+        owned_params.pop("_runtimeTurnRecorded", None)
         response_payload: dict[str, Any] | None = None
         try:
             response_payload = self._runtime_message_impl_body(
@@ -5679,7 +5682,49 @@ class AgentGateway:
                 continuation_shutdown_guard=continuation_shutdown_guard,
             )
             return response_payload
+        except Exception as exc:
+            # Once a turn has started, a transport/tool exception must not leave
+            # only a running ledger entry and an empty session transcript.
+            if owned_params.get("_runtimeTurnStarted") and not owned_params.get("_runtimeTurnRecorded"):
+                now = utc_now_iso()
+                progress = ensure_dict(owned_params.get("_runtimeFailureProgress"))
+                failure = redact_sensitive({
+                    "type": type(exc).__name__,
+                    "message": str(exc)[:2000],
+                    "statusCode": getattr(exc, "status_code", None),
+                })
+                failed_turn = redact_sensitive({
+                    "id": str(owned_params.get("_resolvedRuntimeTurnId") or ""),
+                    "clientTurnId": str(owned_params.get("_resolvedRuntimeClientTurnId") or ""),
+                    "createdAt": now, "status": "failed", "error": failure,
+                    "message": str(owned_params.get("message") or ""),
+                    "plan": {"reply": failure["message"], "nextStep": "failed", "continueLoop": False},
+                    "steps": list(progress.get("steps") or []),
+                    "timeline": list(progress.get("timeline") or []),
+                    **({"contextUsage": progress["contextUsage"]} if progress.get("contextUsage") else {}),
+                })
+                session_id = str(owned_params.get("_resolvedRuntimeSessionId") or "")
+                try:
+                    self._runtime_session_state.append_turn(session_id, now=now, updated_at=now, turn=failed_turn)
+                except Exception:  # Recording failure must preserve the original HTTP error.
+                    pass
+                try:
+                    self._runtime_run_ledger.append({
+                        "event": "runtime_turn_completed", "status": "failed", "agent": agent_name,
+                        "sessionId": session_id, "turnId": failed_turn["id"],
+                        "clientTurnId": failed_turn["clientTurnId"], "error": failure,
+                        "messageSummary": summarize_text(str(owned_params.get("message") or "")),
+                        "steps": failed_turn["steps"], "timeline": failed_turn["timeline"],
+                        **({"contextUsage": failed_turn["contextUsage"]} if "contextUsage" in failed_turn else {}),
+                        **{key: owned_params[key] for key in ("provider", "providerLabel", "model", "projectPath") if owned_params.get(key)},
+                    })
+                except Exception:  # Best effort if the ledger storage itself is unavailable.
+                    pass
+            raise
         finally:
+            owned_params.pop("_runtimeFailureProgress", None)
+            owned_params.pop("_runtimeTurnStarted", None)
+            owned_params.pop("_runtimeTurnRecorded", None)
             resolved_session_id = str(owned_params.get("_resolvedRuntimeSessionId") or "")
             resolved_client_turn_id = str(owned_params.get("_resolvedRuntimeClientTurnId") or "")
             late_steers = self._runtime_session_state.finish_turn(
@@ -5908,6 +5953,7 @@ class AgentGateway:
             }
         )
 
+        params["_runtimeTurnStarted"] = True
         # --- Bounded agentic loop ------------------------------------------------
         # 真正的多步循环：每步规划一个动作 → 执行 → 把结果回灌 loop_state → 再规划，
         # 直到拿到终止答复 / 发起写入审批 / 命中步数上限。读类技能直接执行；写类意图
@@ -5926,6 +5972,7 @@ class AgentGateway:
             task_loop.historical_steps() if continuation_context else []
         )
         timeline: list[dict[str, Any]] = []
+        params["_runtimeFailureProgress"] = {"steps": steps, "timeline": timeline, "contextUsage": context_usage}
 
         def append_timeline_event(
             kind: str,
@@ -7554,6 +7601,7 @@ class AgentGateway:
             updated_at=utc_now_iso(),
             turn=turn,
         )
+        params["_runtimeTurnRecorded"] = True
 
         self.append_audit(
             {
