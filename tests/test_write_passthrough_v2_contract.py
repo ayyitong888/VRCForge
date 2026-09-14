@@ -100,7 +100,7 @@ def test_instantiate_prefab_preview_is_explicitly_non_mutating() -> None:
     assert 'commitState = "not_started"' in preview
 
 
-def test_unpack_prefab_reports_fresh_scene_memory_state_without_saving() -> None:
+def test_unpack_prefab_saves_and_verifies_its_own_scene_state() -> None:
     source = (
         ROOT / "Assets/VRCForge/Editor/Generic/UnityAssetPrefabCrud.cs"
     ).read_text(encoding="utf-8")
@@ -111,5 +111,8 @@ def test_unpack_prefab_reports_fresh_scene_memory_state_without_saving() -> None
     assert "AssetDatabase.SaveAssets();" not in block
     assert "before = new" in block
     assert "after = new" in block
-    assert "pending = true" in block
-    assert 'note = "已修改，尚未落盘"' in block
+    assert "pending = false" in block
+    assert "ComponentCrudCore.SaveAndResolveScene(beforeScene)" in block
+    assert "SceneObjectCopyCore.ResolveUniqueGameObject" in block
+    assert "persistedReadback = true" in block
+    assert 'note = "Unpacked and saved to disk"' in block

@@ -1108,6 +1108,7 @@ namespace VRCForge.Editor
                         previewPayload);
                 }
 
+                var beforeScene = ComponentCrudCore.ResolveSavedSceneFor(go);
                 var continuationConsumed = false;
                 if (!string.IsNullOrWhiteSpace(p.approvedObjectReceiptNonce))
                 {
@@ -1126,8 +1127,11 @@ namespace VRCForge.Editor
                     prefabGuid,
                     isPartOfAnyPrefab = PrefabUtility.IsPartOfAnyPrefab(go)
                 };
-                PrefabUtility.UnpackPrefabInstance(go, unpackMode, InteractionMode.UserAction);
+                Undo.IncrementCurrentGroup();
+                var undoGroup = Undo.GetCurrentGroup();
+                Undo.SetCurrentGroupName($"Unpack {go.name}");
                 mutationStarted = true;
+                PrefabUtility.UnpackPrefabInstance(go, unpackMode, InteractionMode.UserAction);
                 EditorUtility.SetDirty(go);
                 var readbackObject = ComponentCrudCore.ResolveGameObject(goPath);
                 var readbackGlobalObjectId = GlobalObjectId.GetGlobalObjectIdSlow(readbackObject).ToString();
@@ -1138,12 +1142,23 @@ namespace VRCForge.Editor
                 {
                     return CommittedFailure("Prefab unpack readback still reports a prefab instance.", mutatedPath, mutatedGlobalObjectId);
                 }
+                var afterScene = ComponentCrudCore.SaveAndResolveScene(beforeScene);
+                var persistedObject = SceneObjectCopyCore.ResolveUniqueGameObject(
+                    afterScene.Scene, goPath, "unpacked prefab persisted readback");
+                var persistedPath = ComponentCrudCore.GetHierarchyPath(persistedObject.transform);
+                var persistedGlobalObjectId = GlobalObjectId.GetGlobalObjectIdSlow(persistedObject).ToString();
+                var persistedPrefabPath = PrefabUtility.GetPrefabAssetPathOfNearestInstanceRoot(persistedObject);
+                var persistedIsPartOfAnyPrefab = PrefabUtility.IsPartOfAnyPrefab(persistedObject);
+                if (!IsPersistedUnpackMatch(goPath, readbackGlobalObjectId, persistedPath,
+                    persistedGlobalObjectId, persistedPrefabPath, persistedIsPartOfAnyPrefab))
+                    return CommittedFailure("Saved unpacked prefab readback differs from the committed target.", mutatedPath, mutatedGlobalObjectId);
+                Undo.CollapseUndoOperations(undoGroup);
                 var after = new
                 {
-                    gameObjectPath = ComponentCrudCore.GetHierarchyPath(readbackObject.transform),
-                    globalObjectId = readbackGlobalObjectId,
-                    prefabPath = readbackPrefabPath,
-                    isPartOfAnyPrefab = readbackIsPartOfAnyPrefab,
+                    gameObjectPath = persistedPath,
+                    globalObjectId = persistedGlobalObjectId,
+                    prefabPath = persistedPrefabPath,
+                    isPartOfAnyPrefab = persistedIsPartOfAnyPrefab,
                     unpacked
                 };
 
@@ -1162,8 +1177,21 @@ namespace VRCForge.Editor
                     , continuationConsumed
                     , before
                     , after
-                    , pending = true
-                    , note = "已修改，尚未落盘"
+                    , readback = new { persisted = true, data = after }
+                    , sceneSaved = true
+                    , persistedReadback = true
+                    , readbackVerified = true
+                    , verified = true
+                    , saved = true
+                    , changed = true
+                    , verification = new { state = "passed", checks = new[] { "scene_saved", "persisted_readback", "unpacked_identity" } }
+                    , mutationStarted = true
+                    , committed = true
+                    , commitState = "committed"
+                    , persistenceState = "persisted"
+                    , readbackState = "verified"
+                    , pending = false
+                    , note = "Unpacked and saved to disk"
                 };
                 return VRCForgeToolResult.Completed($"Unpacked prefab instance '{goPath}' ({modeLabel}).", payload);
             }
@@ -1177,12 +1205,21 @@ namespace VRCForge.Editor
             }
         }
 
+        private static bool IsPersistedUnpackMatch(string expectedPath, string expectedId,
+            string actualPath, string actualId, string prefabPath, bool isPartOfAnyPrefab)
+        {
+            return string.Equals(expectedPath, actualPath, StringComparison.Ordinal)
+                && string.Equals(expectedId, actualId, StringComparison.Ordinal)
+                && string.IsNullOrEmpty(prefabPath) && !isPartOfAnyPrefab;
+        }
+
         private static VRCForgeToolResult CommittedFailure(string message, string gameObjectPath, string globalObjectId)
         {
             return VRCForgeToolResult.Failed(message, new
             {
                 ok = false,
-                committed = true,
+                mutationStarted = true,
+                committed = (bool?)null,
                 commitState = "unknown",
                 checkpointRecoveryRequired = true,
                 gameObjectPath = gameObjectPath ?? "",
