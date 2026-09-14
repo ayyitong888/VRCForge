@@ -77,6 +77,16 @@ def identity_scope(name: str, *, write: bool = False, arguments: Mapping[str, An
     if "user_adjustment_handoff" in normalized:
         # The handoff binds both the Avatar and the exact target GameObject.
         return "object"
+    if normalized in {
+        "vrcforge_add_component",
+        "vrcforge_add_modular_avatar_component",
+        "vrcforge_preview_add_modular_avatar_component",
+        "vrcforge_create_component_feature",
+        "vrcforge_preview_component_feature",
+    }:
+        # Creation binds the existing host, not a component that does not exist yet.
+        # Existing-component edits and removal retain the component scope below.
+        return "object"
     if any(token in normalized for token in ("property", "component", "renderer", "constraint", "material", "texture", "shader")):
         return "component"
     if any(token in normalized for token in ("gameobject", "scene_object", "avatar_object", "hierarchy")):
