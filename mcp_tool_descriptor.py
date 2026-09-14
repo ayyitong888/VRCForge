@@ -53,6 +53,11 @@ def identity_scope(name: str, *, write: bool = False, arguments: Mapping[str, An
         if isinstance(values.get(key), Mapping):
             values = values[key]
             break
+    # Opening an existing scene addresses a project asset; it does not require
+    # the currently loaded scene to have a saved identity.  Keep every other
+    # transition action scene-scoped until its identity requirements differ.
+    if normalized.endswith("scene_transition") and str(values.get("action") or "").casefold() == "open_single":
+        return "project"
     if "material_texture" in normalized or "texture_import_settings" in normalized:
         return "project"
     if "flatten_material_variant" in normalized or "preview_material_variant_flatten" in normalized:
@@ -179,6 +184,12 @@ def standardize_tool_descriptor(
         conditional_identity = {"if": {"anyOf": [{"required": ["assignments"]}, {"required": ["materialAssetPath"], "not": {"anyOf": [{"required": [key]} for key in ("rendererPath", "rendererComponentId", "slotIndex")]}}]}, "then": {"if": {"required": ["assignments"]}, "then": {"properties": {"executionTarget": {"properties": {"scope": {"enum": ["project", "scene", "avatar", "object", "component"]}}}}}, "else": {"properties": {"executionTarget": {"properties": {"scope": {"const": "project"}}}}}}, "else": {"properties": {"executionTarget": {"properties": {"scope": {"const": "component"}}}}}}
     if "material_texture" in name or "texture_import_settings" in name:
         conditional_identity = {"properties": {"executionTarget": {"properties": {"scope": {"enum": ["project", "scene", "avatar", "object", "component"]}}}}}
+    elif name.endswith("scene_transition"):
+        result["requiredIdentity"]["actionAwareScope"] = {
+            "when": {"action": "open_single"},
+            "minimumScope": "project",
+            "otherwise": "scene",
+        }
     elif "flatten_material_variant" in name or "preview_material_variant_flatten" in name:
         conditional_identity = {"properties": {"executionTarget": {"properties": {"scope": {"const": "project"}}}}}
     elif name.endswith(("apply_shader_tuning", "restore_shader_tuning", "reapply_shader_tuning_history", "apply_shader_tuning_preset")):
