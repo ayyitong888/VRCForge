@@ -12,6 +12,16 @@ from unity_write_input_schemas import EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS
 
 _READ_RUNTIME_IDENTITY_SCOPES = {"scene", "avatar", "object", "component"}
 
+# Application-owned project operations have always used their own preparation
+# and receipts, with requires_approved_execution_context=False. Adding their
+# discoverable projectPath must not introduce an Editor identity prerequisite.
+_PROJECT_APPLICATION_WRITE_TOOLS = {
+    "vrcforge_create_project", "vrcforge_register_project",
+    "vrcforge_register_project_catalog", "vrcforge_restore_unity_core",
+    "vrcforge_rollback_project_catalog_registration",
+    "vrcforge_rollback_project_lifecycle", "vrcforge_select_project",
+}
+
 
 def _read_uses_runtime_identity(name: str) -> bool:
     """Mirror descriptor metadata for read Tools without wrapping bootstrap calls."""
@@ -107,4 +117,6 @@ def canonical_unity_write_tool_input_schema(tool_name: str) -> dict[str, Any]:
     # This is part of the canonical write schema, not an external-MCP-only
     # decoration. Internal and external Agents must reason over the exact same
     # namespace lock contract even though their visible Tool projections differ.
-    return _with_execution_target_schema(schema, required=True)
+    return _with_execution_target_schema(
+        schema, required=name not in _PROJECT_APPLICATION_WRITE_TOOLS,
+    )

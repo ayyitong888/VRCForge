@@ -909,3 +909,83 @@ for _face_alias, _face_name in {"project_path": "projectPath", "avatar_path": "a
         **FACE_TUNING_PUBLIC_INPUT_SCHEMA["properties"][_face_name], "description": "Existing alias of " + _face_name + ".",
     }
 UNITY_READ_TOOL_INPUT_SCHEMAS["vrcforge_plan_face_tuning"] = FACE_TUNING_PUBLIC_INPUT_SCHEMA
+
+# Project/environment reads describe existing coercion and aliases without
+# exposing connection credentials or changing handler validation.
+_PROJECT_CONTEXT_PROPERTIES = {
+    'projectPath': {'type': ['string', 'null'], 'description': 'Optional absolute Unity project root; defaults to the selected/configured project.'},
+    'project_path': {'type': ['string', 'null'], 'description': 'Existing alias of projectPath.'},
+}
+PROJECT_CREATE_PUBLIC_INPUT_SCHEMA = {
+    'type': 'object', 'additionalProperties': True,
+    'properties': {
+        'projectPath': {'type': 'string', 'description': 'Exact absolute new project directory. Must be absent and its parent must exist.'},
+        'projectRoot': {'type': 'string', 'description': 'Existing alias of projectPath.'},
+        'projectName': {'type': ['string', 'null'], 'description': 'Defaults to the final project directory name; if provided must match it case-insensitively.'},
+        'template': {'type': ['string', 'null'], 'default': 'Avatar', 'description': 'Installed local Unity template name, used when templatePath is absent.'},
+        'templatePath': {'type': ['string', 'null'], 'description': 'Explicit absolute existing Unity template directory; overrides template.'},
+        'template_path': {'type': ['string', 'null'], 'description': 'Existing alias of templatePath.'},
+    },
+    'anyOf': [{'required': ['projectPath']}, {'required': ['projectRoot']}],
+}
+UNITY_READ_TOOL_INPUT_SCHEMAS['vrcforge_project_create_plan'] = PROJECT_CREATE_PUBLIC_INPUT_SCHEMA
+for _environment_tool in ('package_manager_status', 'unity_status', 'unity_tools'):
+    UNITY_READ_TOOL_INPUT_SCHEMAS['vrcforge_' + _environment_tool] = {
+        'type': 'object', 'additionalProperties': True, 'properties': dict(_PROJECT_CONTEXT_PROPERTIES),
+    }
+UNITY_READ_TOOL_INPUT_SCHEMAS['vrcforge_diagnose_package_install_errors'] = {
+    'type': 'object', 'additionalProperties': True,
+    'properties': {
+        **_PROJECT_CONTEXT_PROPERTIES,
+        'packageId': {'description': 'Optional package id, converted to text and lowercase; defaults to empty (all packages).'},
+        'package_id': {'description': 'Existing alias of packageId.'},
+        'maxCompileErrors': {'type': ['number', 'string', 'boolean', 'null'], 'default': 30, 'description': 'Compile-error limit; existing int(value or 30) conversion accepts numeric strings and truncates numbers. Zero/null use 30.'},
+        'max_compile_errors': {'type': ['number', 'string', 'boolean', 'null'], 'description': 'Existing alias of maxCompileErrors.'},
+        **{key: {'description': 'Optional diagnostic text; existing values are converted to text, combined, sanitized and capped at 5000 characters.'} for key in ('stdoutSummary', 'stdout_summary', 'stderrSummary', 'stderr_summary', 'logText', 'log_text')},
+    },
+}
+UNITY_READ_TOOL_INPUT_SCHEMAS['vrcforge_list_checkpoints'] = {
+    'type': 'object', 'additionalProperties': True,
+    'properties': {
+        'projectRoot': {'type': ['string', 'null'], 'description': 'Optional project filter applied before the limit; omission lists checkpoints across projects.'},
+        'project_root': {'type': ['string', 'null'], 'description': 'Existing alias of projectRoot; takes precedence when both are supplied.'},
+        'limit': {'type': ['number', 'string', 'boolean', 'null'], 'default': 50, 'description': 'Existing int(value or 50) conversion, clamped to 1..500. Zero/null use 50; numeric strings remain accepted.'},
+    },
+}
+UNITY_READ_TOOL_INPUT_SCHEMAS['vrcforge_export_interrupted_apply_incident_bundle'] = {
+    'type': 'object', 'additionalProperties': True,
+    'properties': {
+        **{key: {'type': ['string', 'null'], 'description': 'Optional recovery id. Existing selector precedence: recovery_id, recoveryId, id, checkpoint_id, checkpointId, latest recovery record.'} for key in ('recoveryId', 'recovery_id', 'id')},
+        **{key: {'type': ['string', 'null'], 'description': 'Optional checkpoint id used when no recovery id is supplied.'} for key in ('checkpointId', 'checkpoint_id')},
+    },
+}
+for _addon_tool in ('scan_modular_avatar', 'scan_vrcfury'):
+    UNITY_READ_TOOL_INPUT_SCHEMAS['vrcforge_' + _addon_tool] = {
+        'type': 'object', 'additionalProperties': True,
+        'properties': {
+            **_PROJECT_CONTEXT_PROPERTIES,
+            **{key: {'type': ['string', 'null'], 'description': 'Optional avatar hierarchy path. Existing precedence: source_avatar_path, sourceAvatarPath, avatar_path, avatarPath; omission uses the scanner default.'} for key in ('sourceAvatarPath', 'source_avatar_path', 'avatarPath', 'avatar_path')},
+            'skipUnity': {'default': False, 'description': 'Only literal boolean true skips Unity inspection; other existing values do not. Package inspection still runs.'},
+            'skip_unity': {'description': 'Existing alias; either skipUnity or skip_unity being literal true skips Unity inspection.'},
+        },
+    }
+UNITY_READ_TOOL_INPUT_SCHEMAS['vrcforge_core_upgrade_status'] = {
+    'type': 'object', 'additionalProperties': True, 'required': ['projectPath'],
+    'properties': {
+        'projectPath': {'type': 'string', 'description': 'Exact Unity project root to inspect.'},
+        'installedAt': {'type': ['string', 'null'], 'default': '', 'description': 'Optional installation timestamp included in the status comparison.'},
+    },
+}
+UNITY_READ_TOOL_INPUT_SCHEMAS['vrcforge_project_catalog_registration_status'] = {
+    'type': 'object', 'additionalProperties': True,
+    'properties': {key: {'type': ['string', 'null'], 'description': 'Optional existing Unity project root; omit to list catalog registration status. projectRoot is the existing alias of projectPath.'} for key in ('projectPath', 'projectRoot')},
+}
+UNITY_READ_TOOL_INPUT_SCHEMAS['vrcforge_scan_project_index'] = {
+    'type': 'object', 'additionalProperties': True,
+    'properties': {
+        **_PROJECT_CONTEXT_PROPERTIES,
+        'maxFiles': {'type': ['number', 'string', 'boolean', 'null'], 'default': 100000, 'description': 'Maximum files scanned, using int(value or 100000). Zero/null use 100000; numeric strings remain accepted. Partial scans retain unscanned index entries.'},
+        'max_files': {'type': ['number', 'string', 'boolean', 'null'], 'description': 'Existing alias of maxFiles.'},
+    },
+    'anyOf': [{'required': ['projectPath']}, {'required': ['project_path']}],
+}

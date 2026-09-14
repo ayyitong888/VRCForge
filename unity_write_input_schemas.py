@@ -1140,3 +1140,41 @@ EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS["vrcforge_save_new_scene"] = {
     "properties": {"projectPath": _PROJECT_PATH_PROPERTY, **_NEW_SCENE_LEAF_SCHEMA["properties"], "arguments": _NEW_SCENE_LEAF_SCHEMA, "params": _NEW_SCENE_LEAF_SCHEMA},
     "anyOf": [{"required": ["scenePath"]}, {"required": ["arguments"]}, {"required": ["params"]}],
 }
+
+# These application-owned writes do not require a Unity Editor namespace lock.
+# The canonical projection preserves that existing registered-handler policy.
+EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS['vrcforge_create_project'] = UNITY_READ_TOOL_INPUT_SCHEMAS['vrcforge_project_create_plan']
+EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS['vrcforge_register_project'] = {
+    'type': 'object', 'additionalProperties': True,
+    'properties': {key: {'type': 'string', 'description': 'Exact existing Unity project root. projectRoot is the existing alias of projectPath.'} for key in ('projectPath', 'projectRoot')},
+    'anyOf': [{'required': ['projectPath']}, {'required': ['projectRoot']}],
+}
+EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS['vrcforge_register_project_catalog'] = {
+    **EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS['vrcforge_register_project'],
+    'required': ['catalog'],
+    'properties': {
+        **EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS['vrcforge_register_project']['properties'],
+        'catalog': {'type': 'string', 'description': 'Target catalog: vcc, alcom, or unityHub. Existing case-insensitive aliases unityhub, unity_hub and hub are accepted.'},
+    },
+}
+for _rollback_tool in ('rollback_project_catalog_registration', 'rollback_project_lifecycle'):
+    EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS['vrcforge_' + _rollback_tool] = {
+        'type': 'object', 'additionalProperties': True,
+        'properties': {key: {'type': 'string', 'description': 'Exact retained receipt id returned by the corresponding project/catalog operation; receipt_id is the existing alias.'} for key in ('receiptId', 'receipt_id')},
+        'anyOf': [{'required': ['receiptId']}, {'required': ['receipt_id']}],
+    }
+EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS['vrcforge_restore_unity_core'] = {
+    'type': 'object', 'additionalProperties': True,
+    'required': ['projectPath', 'backupPath', 'backupSha256', 'installedSha256'],
+    'properties': {
+        'projectPath': {'type': 'string', 'description': 'Exact existing Unity project root from the Core installation receipt.'},
+        'backupPath': {'type': 'string', 'description': 'Retained prior Core backup path from the installation receipt.'},
+        'backupSha256': {'type': 'string', 'description': 'Exact backup SHA256 from the same receipt.'},
+        'installedSha256': {'type': 'string', 'description': 'Expected currently installed Core SHA256 from the same receipt. Do not guess either hash.'},
+    },
+}
+EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS['vrcforge_select_project'] = {
+    'type': 'object', 'additionalProperties': True,
+    'properties': {key: {'type': 'string', 'description': 'Exact existing Unity project root to select. Existing precedence: projectPath, project_path, projectRoot, project_root.'} for key in ('projectPath', 'project_path', 'projectRoot', 'project_root')},
+    'anyOf': [{'required': [key]} for key in ('projectPath', 'project_path', 'projectRoot', 'project_root')],
+}
