@@ -29,11 +29,12 @@ namespace UnityEngine {
 }
 namespace UnityEditor.SceneManagement {public static class EditorSceneManager {
  public static void MarkSceneDirty(UnityEngine.Scene s){} public static bool SaveScene(UnityEngine.Scene s)=>true;
- public static UnityEngine.Scene OpenPreviewScene(string s)=>new UnityEngine.Scene(); public static void ClosePreviewScene(UnityEngine.Scene s){}
+ 
 }}
 class VRCAvatarDescriptor {public UnityEngine.GameObject gameObject;public UnityEngine.Transform transform;public VRCExpressionsMenu expressionsMenu;public UnityEngine.Object expressionParameters;}
 class VRCExpressionsMenu:UnityEngine.Object {public List<Control> controls=new List<Control>();public class Control{public VRCExpressionsMenu subMenu;}}
 static class AvatarAuthoringCrudCore {public static string GetTransformPath(UnityEngine.Transform t)=>t.path;}
+class GlobalObjectId {public ulong targetObjectId=1;public static GlobalObjectId GetGlobalObjectIdSlow(object o)=>new GlobalObjectId();}
 static class Undo {public static void FlushUndoRecordObjects(){}}
 [Flags] enum ImportAssetOptions{ForceSynchronousImport=1,ForceUpdate=2}
 static class EditorUtility {public static void SetDirty(UnityEngine.Object a){a.dirty=true;}public static bool IsDirty(UnityEngine.Object a)=>a.dirty;}
@@ -42,6 +43,7 @@ static class AssetDatabase {
  public static Dictionary<string,UnityEngine.Object> live=new Dictionary<string,UnityEngine.Object>();
  public static Dictionary<string,string> disk=new Dictionary<string,string>();
  public static List<string> saved=new List<string>();public static string corruptPath=null;public static string wrongGuidPath=null;
+ public static bool TryGetGUIDAndLocalFileIdentifier(UnityEngine.Object o,out string guid,out long id){guid="guid:"+o.path;id=11400000;return true;}
  public static string GetAssetPath(UnityEngine.Object a)=>a?.path??"";
  public static string AssetPathToGUID(string p)=>"guid:"+p;
  public static T LoadAssetAtPath<T>(string p) where T:UnityEngine.Object=>live.TryGetValue(p,out var a)?a as T:null;
@@ -50,7 +52,7 @@ static class AssetDatabase {
 }
 static class SceneObjectCopyCore {
  public class FileInfo {public string Digest="digest";}public class Evidence {public string Guid;public FileInfo File=new FileInfo();}
- public static Evidence ReadStableAssetEvidence(string p,string label)=>new Evidence{Guid=p==AssetDatabase.wrongGuidPath?"wrong":"guid:"+p};
+ public static Evidence ReadStableAssetEvidence(string p,string label,Action<string,string> probe=null)=>new Evidence{Guid=p==AssetDatabase.wrongGuidPath?"wrong":"guid:"+p};
 }
 '''
     runner=r'''
@@ -78,11 +80,19 @@ class Probe {
   var d=new VRCAvatarDescriptor{gameObject=new UnityEngine.GameObject{scene=new UnityEngine.Scene{isDirty=true}}};
   Check(Reject(()=>ExpressionWritePersistence.RequireCleanSceneForNewReference(d,true)),"new reference rejects dirty scene before mutation");
   ExpressionWritePersistence.RequireCleanSceneForNewReference(d,false);Check(true,"existing asset edit need not save dirty scene");
+  var guid=new string('a',32);
+  var yaml="%YAML 1.1\n--- !u!114 &42\nMonoBehaviour:\n  expressionsMenu: {fileID: 11400000, guid: "+guid+",\n    type: 2}\n  expressionParameters: {fileID: 0}\n--- !u!114 &43\nMonoBehaviour:\n  expressionsMenu: {fileID: 0}\n";
+  var reference=ExpressionWritePersistence.ReadDescriptorReference(yaml,42,"expressionsMenu");
+  Check((long)reference["fileID"]==11400000&&(string)reference["guid"]==guid,"serialized exact fileID and multiline asset reference read");
+  Check((long)ExpressionWritePersistence.ReadDescriptorReference(yaml,43,"expressionsMenu")["fileID"]==0,"other descriptor independently selected, no reference fallback");
+  Check(Reject(()=>ExpressionWritePersistence.ReadDescriptorReference(yaml,44,"expressionsMenu")),"missing exact descriptor rejects");
+  Check(Reject(()=>ExpressionWritePersistence.ReadDescriptorReference(yaml+yaml,42,"expressionsMenu")),"duplicate exact descriptor rejects");
+  Check(Reject(()=>ExpressionWritePersistence.ReadDescriptorReference(yaml.Replace("&42\n","&42 stripped\n"),42,"expressionsMenu")),"prefab stripped descriptor rejects before unsupported reference write");
   return failures==0?0:1;
  }
 }
 '''
-    program="using System;using System.Linq;using System.Collections.Generic;using Newtonsoft.Json.Linq;"+stubs+helper+runner
+    program="using System;using System.IO;using System.Linq;using System.Collections.Generic;using Newtonsoft.Json.Linq;"+stubs+helper+runner
     cs=tmp_path/"Probe.cs";cs.write_text(program,encoding="utf-8");dll=tmp_path/"Probe.dll"
     command=[dotnet,str(compiler),"-nologo","-target:exe","-nostdlib+","-langversion:8.0",f"-out:{dll}"]+[f"-r:{p}" for p in refs[-1].glob("*.dll")]+[f"-r:{newtonsoft}",str(cs)]
     compiled=subprocess.run(command,capture_output=True,text=True,timeout=60)
@@ -91,4 +101,4 @@ class Probe {
     (tmp_path/"Probe.runtimeconfig.json").write_text(json.dumps({"runtimeOptions":{"tfm":"netcoreapp3.1","framework":{"name":"Microsoft.NETCore.App","version":"3.1.0"}}}),encoding="utf-8")
     result=subprocess.run([dotnet,str(dll)],capture_output=True,text=True,timeout=30)
     assert result.returncode==0,result.stdout+result.stderr
-    assert result.stdout.count("PASS ")==8
+    assert result.stdout.count("PASS ")==13

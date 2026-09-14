@@ -48,6 +48,31 @@ namespace VRCForge.Editor
             var scene = descriptor.gameObject.scene;
             if (!scene.IsValid() || !scene.isLoaded || string.IsNullOrWhiteSpace(scene.path) || scene.isDirty)
                 throw new InvalidOperationException("A new expression reference requires a saved, clean scene before mutation.");
+            var descriptorId = GlobalObjectId.GetGlobalObjectIdSlow(descriptor).targetObjectId;
+            SceneObjectCopyCore.ReadStableAssetEvidence(scene.path, "expression descriptor preflight",
+                (path, meta) => ReadDescriptorReference(File.ReadAllText(path), descriptorId, "expressionsMenu"));
+        }
+
+        internal static JObject ReadDescriptorReference(string sceneText, ulong descriptorId, string field)
+        {
+            // Read exactly one native descriptor block, not another avatar's reference or
+            // an inherited prefab value. Unsupported serialization fails before assignment.
+            var blocks = System.Text.RegularExpressions.Regex.Matches(sceneText,
+                @"(?m)^--- !u!114 &" + descriptorId.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                + @"\r?\n(?<body>[\s\S]*?)(?=^--- !u!|\z)");
+            if (descriptorId == 0 || blocks.Count != 1)
+                throw new InvalidOperationException("New expression references require an exact serialized scene descriptor block; prefab/inherited or non-text descriptors are not supported.");
+            var references = System.Text.RegularExpressions.Regex.Matches(blocks[0].Groups["body"].Value,
+                @"(?m)^  " + System.Text.RegularExpressions.Regex.Escape(field) + @": \{(?<reference>[^}]+)\}");
+            if (references.Count != 1) throw new InvalidOperationException("Serialized expression reference is missing or ambiguous.");
+            var reference = references[0].Groups["reference"].Value;
+            var ids = System.Text.RegularExpressions.Regex.Matches(reference, @"\bfileID:\s*(-?[0-9]+)");
+            var guids = System.Text.RegularExpressions.Regex.Matches(reference, @"\bguid:\s*([a-fA-F0-9]{32})\b");
+            if (ids.Count != 1 || guids.Count > 1 || !long.TryParse(ids[0].Groups[1].Value,
+                    System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var fileId)
+                || (fileId != 0 && guids.Count != 1))
+                throw new InvalidOperationException("Serialized expression asset reference is invalid.");
+            return new JObject { ["fileID"] = fileId, ["guid"] = guids.Count == 1 ? guids[0].Groups[1].Value : "" };
         }
 
         internal static object SaveAndVerify(Dictionary<string, JToken> before, UnityEngine.Object root,
@@ -83,26 +108,25 @@ namespace VRCForge.Editor
             {
                 var scene = descriptor.gameObject.scene;
                 var sceneGuid = AssetDatabase.AssetPathToGUID(scene.path);
-                var avatarPath = AvatarAuthoringCrudCore.GetTransformPath(descriptor.transform);
+                var descriptorId = GlobalObjectId.GetGlobalObjectIdSlow(descriptor).targetObjectId;
+                if (!AssetDatabase.TryGetGUIDAndLocalFileIdentifier(root, out string referenceGuid, out long referenceFileId))
+                    throw new InvalidOperationException("Expression asset has no stable serialized reference.");
                 var rootGuid = AssetDatabase.AssetPathToGUID(AssetDatabase.GetAssetPath(root));
                 Undo.FlushUndoRecordObjects();
                 UnityEditor.SceneManagement.EditorSceneManager.MarkSceneDirty(scene);
                 if (!UnityEditor.SceneManagement.EditorSceneManager.SaveScene(scene))
                     throw new InvalidOperationException("Expression descriptor scene save failed.");
-                var preview = UnityEditor.SceneManagement.EditorSceneManager.OpenPreviewScene(scene.path);
-                try
-                {
-                    var matches = preview.GetRootGameObjects().SelectMany(item => item.GetComponentsInChildren<VRCAvatarDescriptor>(true))
-                        .Where(item => AvatarAuthoringCrudCore.GetTransformPath(item.transform) == avatarPath).ToArray();
-                    if (matches.Length != 1) throw new InvalidOperationException("Persisted expression descriptor is missing or ambiguous.");
-                    UnityEngine.Object reference = isMenu ? (UnityEngine.Object)matches[0].expressionsMenu : matches[0].expressionParameters;
-                    if (reference == null || AssetDatabase.AssetPathToGUID(AssetDatabase.GetAssetPath(reference)) != rootGuid)
-                        throw new InvalidOperationException("Persisted expression descriptor reference differs.");
-                }
-                finally { UnityEditor.SceneManagement.EditorSceneManager.ClosePreviewScene(preview); }
-                var evidence = SceneObjectCopyCore.ReadStableAssetEvidence(scene.path, "expression descriptor readback");
+                var field = isMenu ? "expressionsMenu" : "expressionParameters";
+                var evidence = SceneObjectCopyCore.ReadStableAssetEvidence(scene.path, "expression descriptor readback",
+                    (path, meta) =>
+                    {
+                        var reference = ReadDescriptorReference(File.ReadAllText(path), descriptorId, field);
+                        if (!string.Equals((string)reference["guid"], referenceGuid, StringComparison.OrdinalIgnoreCase)
+                            || (long)reference["fileID"] != referenceFileId)
+                            throw new InvalidOperationException("Persisted expression descriptor reference differs.");
+                    });
                 if (evidence.Guid != sceneGuid) throw new InvalidOperationException("Expression scene GUID changed.");
-                sceneReadback = new { path = scene.path, assetGuid = evidence.Guid, fileDigest = evidence.File.Digest, referenceGuid = rootGuid };
+                sceneReadback = new { path = scene.path, assetGuid = evidence.Guid, fileDigest = evidence.File.Digest, referenceGuid = rootGuid, referenceFileId, descriptorFileId = descriptorId };
             }
             var affectedPaths = changed.Concat(assignedReference ? new[] { descriptor.gameObject.scene.path } : Array.Empty<string>()).ToArray();
             return new { persisted = true, assets = readback.ToArray(), scene = sceneReadback, changedAssetCount = changed.Length,
