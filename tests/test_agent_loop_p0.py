@@ -1964,6 +1964,112 @@ class AgentLoopP0Tests(unittest.TestCase):
         self.assertEqual(result["plan"]["nextStep"], "done", result)
         self.assertEqual(result["task"]["status"], "completed", result)
 
+    def test_project_agent_suppresses_exact_successful_read_replay_and_pivots(self) -> None:
+        gateway = self.gateway
+        project = self._unity_project()
+        planner_calls = 0
+        planner_states: list[list[dict]] = []
+
+        def plan_next(_message, _params, _observe, _history=None, *, loop_state=None, **_kwargs):
+            nonlocal planner_calls
+            planner_calls += 1
+            state = [dict(item) for item in (loop_state or [])]
+            planner_states.append(state)
+            if planner_calls <= 2:
+                return {
+                    "planner": "llm",
+                    "summary": "Read the project evidence.",
+                    "skillNeeded": True,
+                    "skillTool": "vrcforge_list_directory",
+                    "skillParams": {"path": "Assets"},
+                    "continueLoop": True,
+                    "nextStep": "call_skill",
+                }
+            completed_action_ids = [
+                str(item.get("actionId") or "")
+                for item in state
+                if str(item.get("actionId") or "") and str(item.get("status") or "") == "executed"
+            ]
+            return {
+                "planner": "llm",
+                "summary": "The existing evidence is sufficient.",
+                "reply": "已读取项目证据，当前信息足够说明结果。",
+                "continueLoop": False,
+                "nextStep": "done",
+                "completionClaim": {"satisfied": True, "evidenceActionIds": completed_action_ids},
+            }
+
+        def execute_skill(_owner, tool_name, _params, _agent_name=None, **_kwargs):
+            self.assertEqual(tool_name, "vrcforge_list_directory")
+            return {
+                "ok": True,
+                "tool": tool_name,
+                "status": "executed",
+                "result": {"entries": ["Assets"]},
+                "outcome": {
+                    "status": "ok",
+                    "summary": "Assets directory read.",
+                    "verification": {"state": "not_required", "checks": []},
+                },
+            }
+
+        with patch.object(gateway.runtime_planner, "plan_agent_turn", side_effect=plan_next), patch.object(
+            type(gateway.runtime_skills), "execute", autospec=True, side_effect=execute_skill
+        ) as execute:
+            result = gateway.runtime_message(
+                {
+                    "message": "Inspect this project.",
+                    "projectRoot": str(project),
+                    "session_id": "project-no-progress-session",
+                    "client_turn_id": "project-no-progress-turn",
+                    "_projectContextActive": True,
+                }
+            )
+
+        self.assertEqual(execute.call_count, 1, result)
+        self.assertEqual(planner_calls, 3, result)
+        self.assertEqual(planner_states[2][-1]["tool"], "runtime_no_progress")
+        self.assertEqual(result["plan"]["nextStep"], "done", result)
+
+    def test_project_agent_stops_after_three_exact_read_replays(self) -> None:
+        gateway = self.gateway
+        project = self._unity_project()
+        calls = 0
+
+        def plan_next(*_args, **_kwargs):
+            nonlocal calls
+            calls += 1
+            return {
+                "planner": "llm",
+                "summary": "Repeat project read.",
+                "skillNeeded": True,
+                "skillTool": "vrcforge_list_directory",
+                "skillParams": {"path": "Assets"},
+                "continueLoop": True,
+                "nextStep": "call_skill",
+            }
+
+        def execute_skill(_owner, tool_name, _params, _agent_name=None, **_kwargs):
+            return {
+                "ok": True, "tool": tool_name, "status": "executed", "result": {"entries": ["Assets"]},
+                "outcome": {"status": "ok", "summary": "Assets directory read.", "verification": {"state": "not_required", "checks": []}},
+            }
+
+        with patch.object(gateway.runtime_planner, "plan_agent_turn", side_effect=plan_next), patch.object(
+            type(gateway.runtime_skills), "execute", autospec=True, side_effect=execute_skill
+        ):
+            result = gateway.runtime_message({
+                "message": "Inspect this project repeatedly.",
+                "projectRoot": str(project),
+                "session_id": "project-replay-limit-session",
+                "client_turn_id": "project-replay-limit-turn",
+                "_projectContextActive": True,
+            })
+
+        self.assertEqual(calls, 4, result)
+        self.assertEqual(result["plan"]["nextStep"], "planner_failed", result)
+        self.assertEqual(result["plan"]["plannerFailure"]["code"], "planner_no_progress")
+
     def test_nonzero_shell_exit_without_error_text_never_gets_success_summary(self) -> None:
         gateway = self.gateway
         plans = iter(

@@ -6767,8 +6767,7 @@ class AgentGateway:
                 general_read_key and general_read_key == last_general_read_key
             )
             consecutive_general_replay = bool(
-                not project_context_active
-                and planned_action_id == last_successful_action_id
+                planned_action_id == last_successful_action_id
             )
             if semantic_general_replay or consecutive_general_replay:
                 general_no_progress_attempts += 1
@@ -6813,9 +6812,6 @@ class AgentGateway:
                     }
                     break
                 continue
-            if planned_action_id == last_successful_action_id:
-                break
-
             # Delegation remains an ordinary Runtime tool call. Its separate
             # created/started/completed/failed lifecycle is projected only by
             # the durable Sub Agent registry, so no synthetic lifecycle event
