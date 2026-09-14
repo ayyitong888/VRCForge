@@ -882,3 +882,30 @@ UNITY_READ_TOOL_INPUT_SCHEMAS["vrcforge_preview_restore_checkpoint"] = {
     },
     "anyOf": [{"required": ["checkpointId"]}, {"required": ["checkpoint_id"]}],
 }
+
+
+FACE_TUNING_PUBLIC_INPUT_SCHEMA = {
+    "type": "object", "additionalProperties": True, "required": [],
+    "properties": {
+        "projectPath": {**_PROJECT_PATH_PROPERTY, "type": ["string", "null"], "description": "Optional project root. Alias: project_path."},
+        "avatar": {"type": ["string", "null"], "description": "Target avatar path/name. Aliases avatar_path and avatarPath must agree when supplied together."},
+        "instruction": {"type": ["string", "null"], "description": "Requested face adjustment; an existing plan_json may supply a plan instead."},
+        "source_mode": {"type": "string", "default": "unity_live_export", "description": "Existing input modes: unity_live_export, configured_export, custom_export, mvp_sample. This does not change the execution approval policy."},
+        "mock_execute": {"type": "boolean", "default": False, "description": "Mock planning only; an approved run rejects mock execution."},
+        "min_confidence": {"type": ["number", "null"], "description": "Optional planning confidence threshold."},
+        "allow_low_confidence": {"type": "boolean", "default": False},
+        "save_artifacts": {"type": "boolean", "default": True},
+        "export_json": {"type": ["string", "null"], "description": "Existing export JSON for the selected input mode."},
+        "plan_json": {"type": ["string", "null"], "description": "Optional existing plan JSON."},
+        "reference_image_path": {"type": ["string", "null"], "description": "Optional reference image path or artifact URL."},
+        "reference_image_data_url": {"type": ["string", "null"], "description": "Optional uploaded reference image data URL."},
+        **{name: {"type": "array", "items": {"type": "string"}, "default": [], "description": "User-supplied source/target reference images for planning."} for name in ("source_reference_image_paths", "source_reference_image_data_urls", "target_reference_image_paths", "target_reference_image_data_urls")},
+        "scope": {"type": ["string", "null"], "description": "Optional Blendshape scan scope."},
+        "filterScope": {"type": ["string", "null"], "description": "Optional scan filter; alias filter_scope."},
+    },
+}
+for _face_alias, _face_name in {"project_path": "projectPath", "avatar_path": "avatar", "avatarPath": "avatar", "filter_scope": "filterScope"}.items():
+    FACE_TUNING_PUBLIC_INPUT_SCHEMA["properties"][_face_alias] = {
+        **FACE_TUNING_PUBLIC_INPUT_SCHEMA["properties"][_face_name], "description": "Existing alias of " + _face_name + ".",
+    }
+UNITY_READ_TOOL_INPUT_SCHEMAS["vrcforge_plan_face_tuning"] = FACE_TUNING_PUBLIC_INPUT_SCHEMA

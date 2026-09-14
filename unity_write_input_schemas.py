@@ -5,7 +5,7 @@ from typing import Any
 
 from path_to_skill_controller import PATH_TO_SKILL_WRITE_INPUT_SCHEMA
 from checkpoint_recovery_input_schemas import INTERRUPTED_APPLY_RESOLVE_INPUT_SCHEMA
-from unity_read_input_schemas import UNITY_READ_TOOL_INPUT_SCHEMAS
+from unity_read_input_schemas import FACE_TUNING_PUBLIC_INPUT_SCHEMA, UNITY_READ_TOOL_INPUT_SCHEMAS
 from unity_shared_input_schemas import (
     ANIMATION_CURVE_WRITE_PUBLIC_INPUT_SCHEMA,
     AVATAR_DESCRIPTOR_WRITE_PUBLIC_INPUT_SCHEMA,
@@ -1037,3 +1037,106 @@ for _wardrobe_tool, _wardrobe_properties in _WARDROBE_PUBLIC_PROPERTIES.items():
             for canonical in _WARDROBE_REQUIRED_PUBLIC_FIELDS[_wardrobe_tool]
         ]
     EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS["vrcforge_" + _wardrobe_tool] = _wardrobe_schema
+
+
+# Saved tuning requests identify an existing record; sealed execution evidence is
+# supplied by the registered preparer, never by the public caller.
+for _saved_tool, _saved_id, _saved_alias in (
+    ("vrcforge_apply_tuning_preset", "presetId", "preset_id"),
+    ("vrcforge_reapply_tuning_history", "historyId", "history_id"),
+):
+    EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS[_saved_tool] = {
+        "type": "object", "additionalProperties": True,
+        "anyOf": [{"required": [_saved_id]}, {"required": [_saved_alias]}],
+        "properties": {
+            _saved_id: {"type": "string", "description": "Required saved tuning record id."},
+            _saved_alias: {"type": "string", "description": "Existing alias of " + _saved_id + "."},
+            "projectPath": _PROJECT_PATH_PROPERTY,
+            "avatar": {"type": ["string", "null"], "description": "Optional target override; omission uses the saved avatar path/name."},
+            "avatar_path": {"type": ["string", "null"], "description": "Existing context field; it is not a replacement for the saved-record avatar override."},
+        },
+    }
+EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS["vrcforge_run_face_tuning"] = FACE_TUNING_PUBLIC_INPUT_SCHEMA
+EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS["vrcforge_undo_blendshapes"] = {
+    "type": "object", "additionalProperties": True, "required": ["avatar_path"],
+    "properties": {
+        "projectPath": _PROJECT_PATH_PROPERTY,
+        "avatar_path": {"type": "string", "minLength": 1, "description": "Exact avatar path for stored Blendshape undo. This handler requires this snake_case spelling."},
+    },
+}
+EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS["vrcforge_rollback_parameters"] = {
+    "type": "object", "additionalProperties": True, "required": [],
+    "properties": {
+        "projectPath": {**_PROJECT_PATH_PROPERTY, "type": ["string", "null"], "description": "Optional project root; alias project_path."},
+        "avatarPath": {**_AVATAR_PATH_PROPERTY, "type": ["string", "null"], "description": "Optional avatar; alias avatar_path. Otherwise the snapshot/current avatar is used."},
+        "snapshot_path": {"type": ["string", "null"], "description": "Retained parameter snapshot JSON. Omit for the latest runtime snapshot or latest saved snapshot; fails if none exists."},
+    },
+}
+_COMPONENT_FEATURE_PROPERTIES = {
+    "scenePath": {"type": "string", "description": "Exact saved scene asset path."},
+    "gameObjectPath": {"type": "string", "description": "Exact component carrier hierarchy path."},
+    "featureKind": {"type": "string", "enum": ["toggle", "armature_link"]},
+    "menuPath": {"type": "string", "description": "Toggle menu path; key required for toggle."},
+    "targetObjectPaths": {"type": "array", "minItems": 1, "maxItems": 32, "items": {"type": "string"}, "description": "Unique scene targets for the toggle."},
+    "slider": {"type": "boolean"}, "defaultOn": {"type": "boolean"}, "saved": {"type": "boolean"},
+    "globalParameter": {"type": "string", "description": "Toggle parameter override; key required, empty string allowed."},
+    "linkFromPath": {"type": "string", "description": "Armature link source path."},
+    "linkTargets": {"type": "array", "minItems": 1, "maxItems": 8, "items": {
+        "type": "object", "required": ["targetKind", "target", "offset"], "additionalProperties": True,
+        "properties": {
+            "targetKind": {"type": "string", "enum": ["humanoid_bone", "game_object", "relative_path"]},
+            "target": {"type": "string", "description": "Bone name, GameObject path, or relative path selected by targetKind."},
+            "offset": {"type": "string", "description": "Target offset; relative_path requires an empty string."},
+        },
+    }},
+    "recursive": {"type": "boolean"}, "align": {"type": "boolean"},
+}
+_COMPONENT_FEATURE_LEAF_SCHEMA = {
+    "type": "object", "additionalProperties": True,
+    "properties": _COMPONENT_FEATURE_PROPERTIES,
+    "required": ["scenePath", "gameObjectPath", "featureKind"],
+    "anyOf": [
+        {"properties": {"featureKind": {"const": "toggle"}}, "required": ["menuPath", "targetObjectPaths", "slider", "defaultOn", "saved", "globalParameter"]},
+        {"properties": {"featureKind": {"const": "armature_link"}}, "required": ["linkFromPath", "linkTargets", "recursive", "align"]},
+    ],
+}
+EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS["vrcforge_create_component_feature"] = {
+    "type": "object", "additionalProperties": True,
+    "properties": {"projectPath": _PROJECT_PATH_PROPERTY, **_COMPONENT_FEATURE_PROPERTIES,
+                   "arguments": _COMPONENT_FEATURE_LEAF_SCHEMA, "params": _COMPONENT_FEATURE_LEAF_SCHEMA},
+    "anyOf": [_COMPONENT_FEATURE_LEAF_SCHEMA, {"required": ["arguments"]}, {"required": ["params"]}],
+}
+# Preserve the already supported nested wrapper shapes when this write schema is
+# reused by preview_constraint_sources; the project remains a wrapper field.
+_CONSTRAINT_FLAT_SCHEMA = EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS["vrcforge_set_constraint_sources"]
+_CONSTRAINT_LEAF_SCHEMA = {
+    "type": "object", "additionalProperties": True,
+    "properties": {k: v for k, v in _CONSTRAINT_FLAT_SCHEMA["properties"].items() if k != "projectPath"},
+    "required": [k for k in _CONSTRAINT_FLAT_SCHEMA["required"] if k != "projectPath"],
+}
+EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS["vrcforge_set_constraint_sources"] = {
+    **_CONSTRAINT_FLAT_SCHEMA, "additionalProperties": True, "required": ["projectPath"],
+    "properties": {**_CONSTRAINT_FLAT_SCHEMA["properties"], "arguments": _CONSTRAINT_LEAF_SCHEMA, "params": _CONSTRAINT_LEAF_SCHEMA},
+    "anyOf": [{"required": _CONSTRAINT_LEAF_SCHEMA["required"]}, {"required": ["arguments"]}, {"required": ["params"]}],
+}
+EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS["vrcforge_export_vrm"] = {
+    "type": "object", "additionalProperties": True, "required": ["author", "confirmRights"],
+    "properties": {
+        "projectPath": _PROJECT_PATH_PROPERTY, "avatarPath": _AVATAR_PATH_PROPERTY,
+        "author": {"type": "string", "description": "Required VRM author/creator name; nonempty, at most256 characters."},
+        "confirmRights": {"type": "boolean", "const": True, "description": "Confirm rights to export and distribute this avatar; ordinary approval remains required."},
+        "title": {"type": "string", "description": "Defaults to the resolved avatar name."},
+        "version": {"type": "string", "default": "1.0"},
+        "outputPath": {"type": "string", "default": "Assets/VRCForge/Exports/avatar.vrm", "description": "Managed .vrm output path; existing files require overwrite=true."},
+        "overwrite": {"type": "boolean", "default": False}, "refreshAssets": {"type": "boolean", "default": True},
+    },
+}
+_NEW_SCENE_LEAF_SCHEMA = {
+    "type": "object", "additionalProperties": True, "required": ["scenePath"],
+    "properties": {"scenePath": {"type": "string", "description": "Exact new Assets/... .unity path; scene and metadata must both be absent."}},
+}
+EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS["vrcforge_save_new_scene"] = {
+    "type": "object", "additionalProperties": True, "required": ["projectPath"],
+    "properties": {"projectPath": _PROJECT_PATH_PROPERTY, **_NEW_SCENE_LEAF_SCHEMA["properties"], "arguments": _NEW_SCENE_LEAF_SCHEMA, "params": _NEW_SCENE_LEAF_SCHEMA},
+    "anyOf": [{"required": ["scenePath"]}, {"required": ["arguments"]}, {"required": ["params"]}],
+}

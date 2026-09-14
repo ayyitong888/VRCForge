@@ -63,9 +63,11 @@ def canonical_unity_read_tool_input_schema(tool_name: str) -> dict[str, Any]:
         )
     if name.startswith("vrcforge_preview_"):
         write_name = (
-            "vrcforge_save_scene_object_as_prefab"
-            if name == "vrcforge_preview_scene_object_prefab"
-            else "vrcforge_" + name.removeprefix("vrcforge_preview_")
+            {
+                "vrcforge_preview_scene_object_prefab": "vrcforge_save_scene_object_as_prefab",
+                "vrcforge_preview_component_feature": "vrcforge_create_component_feature",
+                "vrcforge_preview_constraint_sources": "vrcforge_set_constraint_sources",
+            }.get(name, "vrcforge_" + name.removeprefix("vrcforge_preview_"))
         )
         paired = EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS.get(write_name)
         if isinstance(paired, Mapping):
