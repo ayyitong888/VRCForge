@@ -1021,31 +1021,42 @@ def build_material_slot_audit(validation: dict[str, Any]) -> dict[str, Any]:
         }
     materials = _source_payload(sources, "materials")
     renderers = []
-    direct_rows: dict[str, list[dict[str, Any]]] = {}
+    direct_rows: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+    direct_paths: set[str] = set()
     for row in _shader_material_rows(materials):
-        renderer = str(row.get("rendererPath") or row.get("renderer") or "").strip()
+        renderer = _material_renderer_path(row)
         if renderer and (row.get("materialName") or row.get("materialPath")):
-            direct_rows.setdefault(renderer, []).append(row)
-    for renderer, rows in direct_rows.items():
+            key = (renderer, str(row.get("sceneGuid") or ""), str(row.get("rendererComponentId") or ""))
+            direct_rows.setdefault(key, []).append(row)
+            direct_paths.add(renderer)
+    for (renderer, scene_guid, component_id), rows in direct_rows.items():
         labels = [_safe_asset_label(str(row.get("materialName") or row.get("materialPath") or "")) for row in rows]
         labels = [label for label in labels if label]
         renderers.append(
             {
                 "renderer": _safe_asset_label(renderer),
+                "rendererPath": renderer,
+                "sceneGuid": scene_guid,
+                "rendererComponentId": component_id,
                 "slotCount": len(labels),
                 "materials": labels[:32],
                 "flags": material_flags(" ".join(labels)),
             }
         )
     for entry in _walk_dicts(materials):
-        renderer = _first_text(entry, ("rendererPath", "gameObjectPath", "objectPath", "path"))
+        # A parent inventory may contain every avatar material. Never borrow
+        # a child path recursively or treat an avatar GameObject as a renderer.
+        renderer = _material_renderer_path(entry)
         material_list = _coerce_list(entry.get("materials") or entry.get("materialNames") or entry.get("slots"))
-        if not renderer or not material_list:
+        if not renderer or renderer in direct_paths or not material_list:
             continue
         labels = [_safe_asset_label(str(item.get("name") if isinstance(item, dict) else item)) for item in material_list]
         renderers.append(
             {
                 "renderer": _safe_asset_label(renderer),
+                "rendererPath": renderer,
+                "sceneGuid": _direct_text(entry, ("sceneGuid",)) or "",
+                "rendererComponentId": _direct_text(entry, ("rendererComponentId",)) or "",
                 "slotCount": len(labels),
                 "materials": labels[:32],
                 "flags": material_flags(" ".join(labels)),
@@ -1062,7 +1073,7 @@ def build_material_slot_audit(validation: dict[str, Any]) -> dict[str, Any]:
         },
         "renderers": renderers[:200],
         "atlasGroupHints": [
-            {"renderer": item["renderer"], "slotCount": item["slotCount"], "flags": item["flags"]}
+            {key: item[key] for key in ("renderer", "rendererPath", "sceneGuid", "rendererComponentId", "slotCount", "flags")}
             for item in renderers
             if int(item.get("slotCount") or 0) > 1
         ][:80],
@@ -1732,6 +1743,9 @@ def build_ttt_atlas_plan(dependency_doctor: dict[str, Any], material_audit: dict
         groups.append(
             {
                 "renderer": hint.get("renderer"),
+                "rendererPath": hint.get("rendererPath"),
+                "sceneGuid": hint.get("sceneGuid"),
+                "rendererComponentId": hint.get("rendererComponentId"),
                 "slotCount": hint.get("slotCount"),
                 "risk": "high" if hint.get("flags") else "medium",
                 "reason": "Special shader/material flags need manual confirmation." if hint.get("flags") else "Multiple material slots may benefit from atlas planning.",
@@ -2293,10 +2307,18 @@ def _optimization_rollback_requirements(subject: str) -> dict[str, Any]:
     }
 
 
+def _material_renderer_path(entry: dict[str, Any]) -> str:
+    # Renderer identities are hierarchy paths, never machine filesystem paths.
+    path = (_direct_text(entry, ("rendererPath", "renderer")) or "").strip()
+    if path.startswith(("/", "\\")) or re.match(r"^[A-Za-z]:", path):
+        return ""
+    return path
+
+
 def _shader_material_rows(materials: dict[str, Any]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for entry in _walk_dicts(materials):
-        renderer = _direct_text(entry, ("rendererPath", "renderer", "gameObjectPath", "objectPath", "path")) or ""
+        renderer = _direct_text(entry, ("rendererPath", "renderer")) or ""
         shader = _direct_text(entry, ("shaderName", "shader", "shaderPath")) or ""
         material = _direct_text(entry, ("materialName", "material", "name", "assetPath", "materialAssetPath")) or ""
         material_path = _direct_text(entry, ("materialPath", "materialAssetPath", "assetPath")) or ""
@@ -2307,8 +2329,8 @@ def _shader_material_rows(materials: dict[str, Any]) -> list[dict[str, Any]]:
         scene_guid = _direct_text(entry, ("sceneGuid",)) or ""
         if material or shader:
             rows.append({
-                "renderer": _safe_asset_label(renderer),
-                "rendererPath": _safe_asset_label(renderer),
+                "renderer": renderer,
+                "rendererPath": renderer,
                 "materialName": _safe_asset_label(material),
                 "materialPath": _safe_asset_label(material_path),
                 "materialId": material_id,
@@ -2328,8 +2350,8 @@ def _shader_material_rows(materials: dict[str, Any]) -> list[dict[str, Any]]:
                 text, path, identifier, index = str(item or "").strip(), "", "", None
                 if text or path:
                     rows.append({
-                        "renderer": _safe_asset_label(renderer),
-                        "rendererPath": _safe_asset_label(renderer),
+                        "renderer": renderer,
+                        "rendererPath": renderer,
                         "materialName": _safe_asset_label(text),
                         "materialPath": _safe_asset_label(path),
                         "materialId": identifier,
