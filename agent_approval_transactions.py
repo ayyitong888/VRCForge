@@ -1939,7 +1939,12 @@ class AgentApprovalTransactionService:
                 and isinstance(result, Mapping)
                 and str(result.get("status") or "").casefold() == "pending"
             )
+            gm_entry_pending = is_gesture_manager_entry_pending(target_tool, result)
             domain_receipt = _domain_write_receipt(result)
+            if gm_entry_pending and isinstance(domain_receipt, Mapping):
+                # Core's domain payload does not carry the tool name required
+                # by the shared pending recognizer. Bind the actual handler.
+                domain_receipt = {**domain_receipt, "tool": target_tool}
             completion_outcome = ensure_dict(
                 redact_sensitive(
                     normalize_agent_tool_result(
@@ -1961,6 +1966,15 @@ class AgentApprovalTransactionService:
                     "mutationStarted": True,
                     "mutationApplied": True,
                     "commitState": "pending",
+                    "persistenceState": "pending",
+                    "readbackState": "pending",
+                })
+            if gm_entry_pending:
+                completion_outcome.update({
+                    "isPlayMode": False,
+                    "moduleConnected": False,
+                    "enterPlayModePending": True,
+                    "commitState": "enter_play_mode_requested",
                     "persistenceState": "pending",
                     "readbackState": "pending",
                 })
@@ -2002,6 +2016,9 @@ class AgentApprovalTransactionService:
                     {
                         "event": "approval_applied",
                         "status": (
+                            "pending"
+                            if gm_entry_pending
+                            else
                             "needs_user_action"
                             if completion_status == "needs_user_action"
                             else "applied"
@@ -2022,17 +2039,15 @@ class AgentApprovalTransactionService:
             if recovery:
                 self._finish_apply_recovery(
                     recovery,
-                    status="applied",
-                    resolution="write_completed",
+                    status="applying" if gm_entry_pending else "applied",
+                    resolution="write_pending" if gm_entry_pending else "write_completed",
                     result_summary=summarize_params(result if isinstance(result, dict) else {"result": result}),
                 )
             payload = {
                 "ok": True,
                 "status": (
                     "pending"
-                    if target_tool == "vrcforge_start_runtime_observation"
-                    and isinstance(result, Mapping)
-                    and str(result.get("status") or "").casefold() == "pending"
+                    if observation_pending or gm_entry_pending
                     else "needs_user_action" if completion_status == "needs_user_action" else "applied"
                 ),
                 "approval": approval,
@@ -2046,6 +2061,11 @@ class AgentApprovalTransactionService:
                     "commitState": "pending",
                     "persistenceState": "pending",
                     "readbackState": "pending",
+                })
+            if gm_entry_pending:
+                payload.update({
+                    key: completion_outcome[key]
+                    for key in ("commitState", "persistenceState", "readbackState")
                 })
             if task_completion is not None:
                 payload["taskCompletion"] = task_completion
