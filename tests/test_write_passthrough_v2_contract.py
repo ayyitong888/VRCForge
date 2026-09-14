@@ -4,7 +4,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_apply_blendshapes_reports_memory_readback_without_changing_save_behavior() -> None:
+def test_apply_blendshapes_reports_readback_and_saves_only_touched_scenes() -> None:
     source = (ROOT / "Assets/VRCForge/Editor/BlendshapeApplier.cs").read_text(
         encoding="utf-8"
     )
@@ -12,7 +12,13 @@ def test_apply_blendshapes_reports_memory_readback_without_changing_save_behavio
     write_index = source.index("renderer.SetBlendShapeWeight")
     readback_index = source.index("var currentWeight = renderer.GetBlendShapeWeight", write_index)
     assert write_index < readback_index
-    assert source.count("AssetDatabase.SaveAssets();") == 1
+    assert "AssetDatabase.SaveAssets" not in source
+    assert "EditorSceneManager.SaveOpenScenes" not in source
+    flush_index = source.index("Undo.FlushUndoRecordObjects();", readback_index)
+    scoped_loop_index = source.index("foreach (var scene in touchedScenes)", flush_index)
+    save_index = source.index("EditorSceneManager.SaveScene(scene)", scoped_loop_index)
+    assert readback_index < flush_index < scoped_loop_index < save_index
+    assert "if (!EditorSceneManager.SaveScene(scene) || scene.isDirty)" in source
     assert "before = applied.Select" in source
     assert "after = applied.Select" in source
     assert "pending = !saveAssets" in source
