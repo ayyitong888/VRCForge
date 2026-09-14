@@ -1982,7 +1982,23 @@ namespace VRCForge.Editor
 
         private static void ValidateEdit(AnimatorController controller, string action, JObject arguments)
         {
-            Required(arguments, "layerName");
+            var layerName = Required(arguments, "layerName");
+            var matchingLayers = controller?.layers.Where(item => item.name == layerName).ToArray()
+                ?? Array.Empty<AnimatorControllerLayer>();
+            if (matchingLayers.Length > 1)
+                throw new InvalidOperationException($"Layer name '{layerName}' is ambiguous within the FX controller.");
+            var layer = matchingLayers.FirstOrDefault();
+            if (layer != null)
+            {
+                if (action == "ensure_state" || action == "update_state" || action == "delete_state")
+                    ValidateStateNameIdentity(layer.stateMachine, Required(arguments, "stateName"));
+                if (action == "ensure_transition" || action == "delete_transition")
+                {
+                    ValidateStateNameIdentity(layer.stateMachine, (arguments["sourceStateName"]?.ToString() ?? "").Trim());
+                    ValidateStateNameIdentity(layer.stateMachine,
+                        (arguments["destinationStateName"]?.ToString() ?? arguments["stateName"]?.ToString() ?? "").Trim());
+                }
+            }
             if (action == "ensure_transition" || action == "delete_transition")
             {
                 ValidateTransitionPreview(controller, arguments);
@@ -2008,9 +2024,26 @@ namespace VRCForge.Editor
             if (action == "delete_layer" || action == "delete_state")
             {
                 if (controller == null) throw new InvalidOperationException("AnimatorController not found.");
-                var layer = FindLayer(controller, Required(arguments, "layerName"));
-                if (action == "delete_state" && AvatarPrimitiveCrudCore.FindState(layer.stateMachine, Required(arguments, "stateName")) == null)
+                var deletionLayer = FindLayer(controller, layerName);
+                if (action == "delete_state" && AvatarPrimitiveCrudCore.FindState(deletionLayer.stateMachine, Required(arguments, "stateName")) == null)
                     throw new InvalidOperationException("State not found.");
+            }
+        }
+
+        private static void ValidateStateNameIdentity(AnimatorStateMachine root, string stateName)
+        {
+            if (root == null || string.IsNullOrWhiteSpace(stateName)) return;
+            var pending = new Stack<AnimatorStateMachine>();
+            pending.Push(root);
+            var matches = 0;
+            while (pending.Count > 0)
+            {
+                var machine = pending.Pop();
+                foreach (var child in machine.states)
+                    if (child.state != null && string.Equals(child.state.name, stateName, StringComparison.Ordinal) && ++matches > 1)
+                        throw new InvalidOperationException($"State name '{stateName}' is ambiguous within the FX layer.");
+                foreach (var child in machine.stateMachines)
+                    if (child.stateMachine != null) pending.Push(child.stateMachine);
             }
         }
 
