@@ -53,6 +53,13 @@ _BLENDSHAPE_PREVIEW_ITEM: dict[str, Any] = {
 
 
 UNITY_READ_TOOL_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
+    "vrcforge_inspect_project_chat_store": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["projectPath"],
+        "properties": {"projectPath": {"type": "string", "minLength": 1}},
+        "description": "when-to-use: inspect one selected project's chat-store integrity before a repair request. when-NOT-to-use: do not read chat content, inspect app-global data, or perform repair. Negative example: do not guess a project path.",
+    },
     "vrcforge_read_recent_logs": {
         "type": "object",
         "additionalProperties": False,

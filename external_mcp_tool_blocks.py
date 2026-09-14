@@ -120,6 +120,7 @@ EXTERNAL_MCP_READ_TOOL_BLOCKS: dict[str, frozenset[str]] = {
             "vrcforge_scan_wardrobe",
             "vrcforge_find_assets",
             "vrcforge_get_asset_info",
+            "vrcforge_inspect_project_chat_store",
             "vrcforge_preview_scene_object_prefab",
             "vrcforge_preview_project_asset_duplicate",
             "vrcforge_preview_scene_asset_duplicate",

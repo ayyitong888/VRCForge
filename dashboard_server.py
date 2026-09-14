@@ -515,6 +515,7 @@ from session_store_integrity import (
     scan_session_store,
     scan_session_stores,
 )
+from project_chat_store_read_service import inspect_project_chat_store
 from shader_adapter_registry import (
     PRIMARY_AVATAR_ENCRYPTION_ADAPTER_IDS,
     normalize_shader_family_id,
@@ -25208,6 +25209,16 @@ def register_agent_gateway_tools() -> None:
         "when-to-use: discover the compact external MCP tool-block tree before loading one relevant block with tools/list. when-NOT-to-use: do not call it repeatedly after the needed block name is already known, and do not treat it as a Unity or project mutation tool. Negative example: do not load every block merely because one avatar property must be read.",
         "read/debug",
         AGENT_GATEWAY.external_mcp_tool_block_index,
+    )
+    AGENT_GATEWAY.register_tool(
+        "vrcforge_inspect_project_chat_store",
+        "when-to-use: inspect one selected project's chat-store integrity before requesting a repair. when-NOT-to-use: do not use to read chat content or mutate the store. Negative example: do not inspect an unselected or guessed project path.",
+        "read/debug",
+        lambda params: inspect_project_chat_store(
+            params,
+            resolve_project_root=resolve_chat_project_root,
+            target_factory=lambda root: chat_store_target(root / ".vrcforge" / "chat-transcripts.json", scope="project", project_path=str(root)),
+        ),
     )
     AGENT_GATEWAY.register_tool(
         "vrcforge_project_lifecycle_status",
