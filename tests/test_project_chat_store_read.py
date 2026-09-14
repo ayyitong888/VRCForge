@@ -9,11 +9,7 @@ from project_chat_store_read_service import inspect_project_chat_store
 
 
 def _target(root: Path):
-    return dashboard_server.chat_store_target(
-        root / ".vrcforge" / "chat-transcripts.json",
-        scope="project",
-        project_path=str(root),
-    )
+    return dashboard_server.project_chat_repair_target(root)
 
 
 def _project(parent: Path) -> Path:
@@ -71,3 +67,18 @@ def test_inspection_rejects_unknown_project_and_is_planning_discoverable() -> No
     assert descriptor["write"] is False
     assert descriptor["inputSchema"]["required"] == ["projectPath"]
     assert "chat" not in str(descriptor.get("outputSchema") or {}).lower()
+
+
+def test_public_inspection_hint_is_accepted_by_real_repair_handler(tmp_path):
+    root = _project(tmp_path)
+    store = root / ".vrcforge" / "chat-transcripts.json"
+    store.write_bytes(b'{"version":1,"chats":[broken')
+    handler = dashboard_server.AGENT_GATEWAY._tools["vrcforge_inspect_project_chat_store"]
+    inspected = handler.handler({"projectPath": str(root)})
+    hint = dict(inspected["repairHint"])
+    hint.pop("tool")
+    hint.pop("requiresApproval")
+    repaired = dashboard_server.repair_project_chat_store_sync(hint)
+    assert repaired["ok"] is True, repaired
+    assert repaired["verified"] is True
+    assert repaired["readback"]["state"] == "passed"

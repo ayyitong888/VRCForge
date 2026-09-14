@@ -8762,6 +8762,26 @@ def _repair_session_storage_doctor(context: dict[str, Any], _mode: str, phases: 
     return {"status": "repaired" if changed else "healthy", "changed": changed}
 
 
+def project_chat_repair_target(project_root: Path) -> SessionStoreTarget:
+    """One store identity shared by repair diagnosis and approved execution."""
+    path = project_root / ".vrcforge" / "chat-transcripts.json"
+    project_key = normalize_chat_project_key(str(project_root))
+    suffix = hashlib.sha256(project_key.encode("utf-8", errors="replace")).hexdigest()[:16]
+    return SessionStoreTarget(
+        f"session.chat.project.{suffix}",
+        path,
+        "project_owned",
+        "json",
+        required_list_field="chats",
+        required_list_item_kind="chat",
+        document_version_field="version",
+        known_document_versions=(1,),
+        guard_root=project_root,
+        max_bytes=CHAT_TRANSCRIPTS_MAX_BYTES,
+        max_list_items=CHAT_TRANSCRIPTS_MAX_CHATS,
+    )
+
+
 def repair_project_chat_store_sync(params: dict[str, Any]) -> dict[str, Any]:
     """Execute one approved, digest-bound project chat recovery."""
 
@@ -8775,21 +8795,7 @@ def repair_project_chat_store_sync(params: dict[str, Any]) -> dict[str, Any]:
     path = project_chat_transcripts_path(str(project_root))
     if path is None:
         return {"ok": False, "status": "conflict", "reason": "invalid_project_root", "changed": False}
-    project_key = normalize_chat_project_key(str(project_root))
-    suffix = hashlib.sha256(project_key.encode("utf-8", errors="replace")).hexdigest()[:16]
-    target = SessionStoreTarget(
-        f"session.chat.project.{suffix}",
-        path,
-        "project_owned",
-        "json",
-        required_list_field="chats",
-        required_list_item_kind="chat",
-        document_version_field="version",
-        known_document_versions=(1,),
-        guard_root=project_root,
-        max_bytes=CHAT_TRANSCRIPTS_MAX_BYTES,
-        max_list_items=CHAT_TRANSCRIPTS_MAX_CHATS,
-    )
+    target = project_chat_repair_target(project_root)
     if str(params.get("storeId") or "").strip() != target.store_id:
         return {"ok": False, "status": "conflict", "reason": "store_binding_changed", "changed": False}
     expected_digest = str(params.get("expectedDigest") or params.get("expected_digest") or "").strip().lower()
@@ -25217,7 +25223,7 @@ def register_agent_gateway_tools() -> None:
         lambda params: inspect_project_chat_store(
             params,
             resolve_project_root=resolve_chat_project_root,
-            target_factory=lambda root: chat_store_target(root / ".vrcforge" / "chat-transcripts.json", scope="project", project_path=str(root)),
+            target_factory=project_chat_repair_target,
         ),
     )
     AGENT_GATEWAY.register_tool(
