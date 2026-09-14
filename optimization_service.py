@@ -1300,7 +1300,7 @@ def build_upload_gate_fix_plan(upload_gate: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def build_parameter_inventory(validation: dict[str, Any]) -> dict[str, Any]:
+def build_parameter_inventory(validation: dict[str, Any], *, complete_evidence: bool = False) -> dict[str, Any]:
     parameters = _source_payload(_validation_sources(validation), "parameters")
     merged_usage = _merged_parameter_usage(parameters)
     effective_parameters = merged_usage or parameters
@@ -1358,7 +1358,7 @@ def build_parameter_inventory(validation: dict[str, Any]) -> dict[str, Any]:
                 else "unknown"
             ),
         },
-        "parameters": entries[:500],
+        "parameters": entries if complete_evidence else entries[:500],
         "inspectionStage": inspection_stage,
         "mergedUsageAvailable": merged_available,
         "sourceDescriptorUsage": source_descriptor_usage,
@@ -1374,7 +1374,7 @@ def build_parameter_inventory(validation: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def build_parameter_menu_map(validation: dict[str, Any]) -> dict[str, Any]:
+def build_parameter_menu_map(validation: dict[str, Any], *, complete_evidence: bool = False) -> dict[str, Any]:
     menu = _source_payload(_validation_sources(validation), "menu")
     controls = []
     for item in _dict_list(menu, ("items", "controls", "menuItems")):
@@ -1420,17 +1420,17 @@ def build_parameter_menu_map(validation: dict[str, Any]) -> dict[str, Any]:
             "mappedParameterCount": len(parameter_map),
             "scannerCoverage": "metadata" if controls else "unknown",
         },
-        "controls": controls[:500],
-        "parameterMap": sorted(parameter_map, key=lambda item: item["parameterName"].lower())[:300],
+        "controls": controls if complete_evidence else controls[:500],
+        "parameterMap": sorted(parameter_map, key=lambda item: item["parameterName"].lower())[:None if complete_evidence else 300],
     }
 
 
-def build_parameter_animator_usage(validation: dict[str, Any]) -> dict[str, Any]:
+def build_parameter_animator_usage(validation: dict[str, Any], *, complete_evidence: bool = False) -> dict[str, Any]:
     sources = _validation_sources(validation)
     fx = _source_payload(sources, "fx")
     bindings = _source_payload(sources, "animation_bindings")
-    inventory = build_parameter_inventory(validation)
-    menu_map = build_parameter_menu_map(validation)
+    inventory = build_parameter_inventory(validation, complete_evidence=True)
+    menu_map = build_parameter_menu_map(validation, complete_evidence=True)
     usage: dict[str, dict[str, Any]] = {}
 
     for parameter in inventory.get("parameters") or []:
@@ -1483,15 +1483,16 @@ def build_parameter_animator_usage(validation: dict[str, Any]) -> dict[str, Any]
             "bindingCount": binding_summary.get("bindingCount"),
             "scannerCoverage": "metadata" if rows else "unknown",
         },
-        "parameters": sorted(rows, key=lambda item: item["parameterName"].lower())[:500],
+        "parameters": sorted(rows, key=lambda item: item["parameterName"].lower())[:None if complete_evidence else 500],
         "notes": ["Animator usage is read-only evidence; it is not a behavior-regression proof by itself."],
     }
 
 
 def build_parameter_compressibility_plan(validation: dict[str, Any]) -> dict[str, Any]:
-    inventory = build_parameter_inventory(validation)
-    menu_map = build_parameter_menu_map(validation)
-    animator_usage = build_parameter_animator_usage(validation)
+    # Display limits must not discard evidence used to classify safety.
+    inventory = build_parameter_inventory(validation, complete_evidence=True)
+    menu_map = build_parameter_menu_map(validation, complete_evidence=True)
+    animator_usage = build_parameter_animator_usage(validation, complete_evidence=True)
     menu_counts = {item["parameterName"]: int(item.get("controlCount") or 0) for item in menu_map.get("parameterMap") or []}
     usage_map = {item["parameterName"]: item for item in animator_usage.get("parameters") or []}
     duplicate_names = _duplicate_parameter_keys(inventory.get("parameters") or [])
