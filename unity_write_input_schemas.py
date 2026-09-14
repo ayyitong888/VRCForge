@@ -23,6 +23,7 @@ from unity_shared_input_schemas import (
     TEXTURE_IMPORT_SETTINGS_PUBLIC_INPUT_SCHEMA,
     outfit_import_input_schema,
     _PROJECT_PATH_PROPERTY,
+    _AVATAR_PATH_PROPERTY,
 )
 from package_input_schemas import PACKAGE_INSTALL_INPUT_SCHEMA
 
@@ -831,3 +832,22 @@ _SAFE_BACKUP_RESTORE_SCHEMA = {
 }
 
 EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS["vrcforge_restore_safe_backup"] = _SAFE_BACKUP_RESTORE_SCHEMA
+
+
+EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS["vrcforge_apply_parameter_optimization"] = {
+    "type": "object", "additionalProperties": True, "required": ["suggestions"],
+    "properties": {
+        "projectPath": {**_PROJECT_PATH_PROPERTY, "type": ["string", "null"], "description": "Unity project root. Alias: project_path."},
+        "avatarPath": {**_AVATAR_PATH_PROPERTY, "type": ["string", "null"], "description": "Avatar containing the existing expression-parameters asset. Alias: avatar_path."},
+        "suggestions": {
+            "type": "array", "minItems": 1,
+            "description": "Selected parameter optimization suggestions. Mutation requires each existing exact parameter name; dry-run previews the payload.",
+            "items": {"type": "object", "additionalProperties": True, "properties": {
+                "name": {"type": "string", "description": "Exact existing parameter name; required when applying in Unity."},
+                "currentType": {"type": "string", "default": "Int", "description": "Reported original type for the preview diff."},
+                "suggestedType": {"type": "string", "default": "Bool", "description": "Reported target type for the preview diff; the predefined apply operation converts to Bool."},
+            }},
+        },
+        "dry_run": {"type": "boolean", "default": True, "description": "Return the proposed payload without applying. Set false only for the approved parameter optimization write."},
+    },
+}

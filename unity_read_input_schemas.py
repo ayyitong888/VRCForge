@@ -709,3 +709,165 @@ UNITY_READ_TOOL_INPUT_SCHEMAS["vrcforge_get_runtime_observation"] = {
     "type": "object", "properties": {"stateDetail": {"type": "string", "enum": ["resource", "inline"], "default": "resource", "description": "Resource returns state counts and bounded resources/read page URIs; inline preserves full states arrays."}, "stateSelection": {"type": "object", "additionalProperties": False, "required": ["layerName"], "properties": {"layerName": {"type": "string", "minLength": 1, "maxLength": 128}}, "description": "Optional Gateway-only inline projection; raw observation validation still covers every state row."}, "projectPath": {"type": "string"}, "avatarPath": {"type": "string", "minLength": 1}, "jobId": {"type": "string", "pattern": "^[0-9a-f]{32}$"}},
     "required": ["projectPath", "avatarPath", "jobId"],
 }
+
+
+# Diagnostic reads preserve existing optional arguments and snake_case aliases.
+# Unknown fields remain accepted, as in the previous canonical projection.
+_DIAGNOSTIC_TARGET_PROPERTIES = {
+    "projectPath": {**_PROJECT_PATH_PROPERTY, "type": ["string", "null"], "description": "Unity project root; omit for the selected project. Alias: project_path."},
+    "avatarPath": {**_AVATAR_PATH_PROPERTY, "type": ["string", "null"], "description": "Avatar hierarchy path; omit for the handler's current selection/default. Alias: avatar_path."},
+}
+_OPTIMIZATION_CONTEXT_PROPERTIES = {
+    **_DIAGNOSTIC_TARGET_PROPERTIES,
+    "includeQuest": {"type": "boolean", "default": True, "description": "Include Quest performance evidence. Alias: include_quest."},
+    "maxErrors": {"type": "integer", "default": 50, "description": "Compile-error detail budget; the validation reader clamps to 1..200. Alias: max_errors."},
+}
+_OPTIMIZATION_PROFILE_PROPERTIES = {
+    "targetProfile": {"type": "string", "default": "pc_conservative", "description": "pc_conservative, pc_medium, quest_medium, event_light, or custom. Other nonempty labels select custom. Aliases: target_profile, target."},
+    "customProfile": {"type": "object", "additionalProperties": True, "description": "Custom profile options. Alias: custom_profile.", "properties": {
+        "label": {"type": "string", "description": "Display label; output is shortened to 80 characters."},
+        "weights": {"type": "object", "additionalProperties": True, "properties": {
+            key: {"type": "number", "description": "Relative weight, clamped by the handler to 0..1."}
+            for key in ("visualFidelity", "vram", "materials", "animator", "triangles")
+        }},
+    }},
+}
+_VALIDATION_SNAPSHOT_PROPERTIES = {
+    name: {"type": "object", "additionalProperties": True, "description": description}
+    for name, description in {
+        "beforeValidation": "Before vrcforge.validation.v1 report. Aliases: before_validation, before.",
+        "afterValidation": "After vrcforge.validation.v1 report. Aliases: after_validation, after.",
+        "rollbackValidation": "Post-restore vrcforge.validation.v1 report. Aliases: rollback_validation, rollback. Supplied evidence is not independent restore verification.",
+    }.items()
+}
+for _diagnostic_tool_name in ('vrcforge_optimization_aao_hidden_body_cut_plan',
+ 'vrcforge_optimization_aao_trace_plan',
+ 'vrcforge_optimization_baseline_scan',
+ 'vrcforge_optimization_lac_profile_plan',
+ 'vrcforge_optimization_ma2bt_convertibility_plan',
+ 'vrcforge_optimization_ma2bt_skipped_reasons',
+ 'vrcforge_optimization_ma_responsive_layer_audit',
+ 'vrcforge_optimization_material_slot_audit',
+ 'vrcforge_optimization_mesh_triangle_audit',
+ 'vrcforge_optimization_meshia_simplify_plan',
+ 'vrcforge_optimization_parameter_animator_usage',
+ 'vrcforge_optimization_parameter_behavior_regression',
+ 'vrcforge_optimization_parameter_budget_audit',
+ 'vrcforge_optimization_parameter_compressibility_plan',
+ 'vrcforge_optimization_parameter_inventory',
+ 'vrcforge_optimization_parameter_menu_map',
+ 'vrcforge_optimization_parameter_path_to_skill',
+ 'vrcforge_optimization_parameter_vrcfury_compressor_plan',
+ 'vrcforge_optimization_performance_tools_report',
+ 'vrcforge_optimization_physbone_audit',
+ 'vrcforge_optimization_physbone_reduce_plan',
+ 'vrcforge_optimization_plan',
+ 'vrcforge_optimization_profile_diff',
+ 'vrcforge_optimization_rollback_verify',
+ 'vrcforge_optimization_shader_adapter_registry',
+ 'vrcforge_optimization_texture_vram_audit',
+ 'vrcforge_optimization_ttt_atlas_plan',
+ 'vrcforge_optimization_upload_gate_audit',
+ 'vrcforge_optimization_upload_gate_fix_plan',
+ 'vrcforge_optimization_visual_regression_plan',
+ 'vrcforge_optimization_vrcfury_compatibility_report'):
+    UNITY_READ_TOOL_INPUT_SCHEMAS[_diagnostic_tool_name] = {
+        "type": "object", "additionalProperties": True, "required": [],
+        "properties": {**_OPTIMIZATION_CONTEXT_PROPERTIES},
+    }
+for _diagnostic_tool_name in ("vrcforge_optimization_plan", "vrcforge_optimization_lac_profile_plan"):
+    UNITY_READ_TOOL_INPUT_SCHEMAS[_diagnostic_tool_name]["properties"].update(_OPTIMIZATION_PROFILE_PROPERTIES)
+UNITY_READ_TOOL_INPUT_SCHEMAS["vrcforge_optimization_profile_diff"]["properties"].update(_VALIDATION_SNAPSHOT_PROPERTIES)
+UNITY_READ_TOOL_INPUT_SCHEMAS.update({
+    "vrcforge_optimization_target_profile": {
+        "type": "object", "additionalProperties": True, "required": [],
+        "properties": _OPTIMIZATION_PROFILE_PROPERTIES,
+    },
+    "vrcforge_optimization_dependency_doctor": {
+        "type": "object", "additionalProperties": True, "required": [],
+        "properties": {"projectPath": _DIAGNOSTIC_TARGET_PROPERTIES["projectPath"]},
+    },
+    "vrcforge_optimization_validation_delta": {
+        "type": "object", "additionalProperties": True, "required": [],
+        "properties": {
+            **_VALIDATION_SNAPSHOT_PROPERTIES,
+            "optimizerTool": {"type": "string", "description": "Optimizer identifier recorded with the comparison. Alias: optimizer_tool."},
+            "approvalId": {"type": "string", "description": "Related approval identifier. Alias: approval_id."},
+            "checkpointId": {"type": "string", "description": "Related checkpoint identifier. Alias: checkpoint_id."},
+        },
+    },
+    "vrcforge_run_validation_report": {
+        "type": "object", "additionalProperties": True, "required": [],
+        "properties": {
+            **_OPTIMIZATION_CONTEXT_PROPERTIES,
+            "includeSources": {"type": "boolean", "default": False, "description": "Include source payloads. Alias: include_sources."},
+            "includeReadiness": {"type": "boolean", "default": True, "description": "Include dependency/environment readiness evidence. Alias: include_readiness."},
+            "gateBuild": {"type": "boolean", "default": True, "description": "Evaluate build-gate findings; does not start a build. Alias: gate_build."},
+        },
+    },
+    "vrcforge_inspect_primitive_basis_fixture": {
+        "type": "object", "additionalProperties": True, "required": [],
+        "anyOf": [{"required": ["expectedRunIdDigest"]}, {"required": ["expected_run_id_digest"]}],
+        "properties": {
+            "projectPath": _DIAGNOSTIC_TARGET_PROPERTIES["projectPath"],
+            "expectedRunIdDigest": {"type": "string", "pattern": "^[0-9a-f]{64}$", "description": "Required expected fixture run identity, lowercase SHA-256."},
+            "expected_run_id_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$", "description": "Existing alias of expectedRunIdDigest."},
+        },
+    },
+})
+_AVATAR_ENCRYPTION_SCAN_PROPERTIES = {
+    **_DIAGNOSTIC_TARGET_PROPERTIES,
+    "inventory": {"type": ["object", "null"], "additionalProperties": True, "description": "Optional previously captured shader-material inventory; omit to scan the selected avatar."},
+    "includeCompatibility": {"type": "boolean", "default": True, "description": "Include compatibility evidence. Alias: include_compatibility."},
+}
+_AVATAR_ENCRYPTION_PLAN_PROPERTIES = {
+    **_AVATAR_ENCRYPTION_SCAN_PROPERTIES,
+    "targetShaderFamilies": {"type": "array", "items": {"type": "string"}, "default": ["liltoon", "poiyomi"], "description": "Shader families to consider. Alias: target_shader_families."},
+    "materialIds": {"type": "array", "items": {"type": "string"}, "default": [], "description": "Selected material identities. Alias: material_ids."},
+    "rendererPaths": {"type": "array", "items": {"type": "string"}, "default": [], "description": "Selected renderer paths. Alias: renderer_paths."},
+    "targets": {"type": "array", "items": {"type": "object", "additionalProperties": True}, "default": [], "description": "Explicit targets from the compatibility scan."},
+    "profile": {"type": "string", "default": "standard", "description": "Protection profile name."},
+    "protectionProfile": {"type": ["string", "null"], "description": "Optional profile override. Alias: protection_profile."},
+    "platform": {"type": "string", "default": "pc", "description": "Target platform."},
+    "targetPlatform": {"type": ["string", "null"], "description": "Optional platform override. Alias: target_platform."},
+    "confirmCreatorOwnedAssets": {"type": "boolean", "default": False, "description": "Record that the selected assets are creator-owned; this does not authorize writes. Alias: confirm_creator_owned_assets."},
+}
+UNITY_READ_TOOL_INPUT_SCHEMAS.update({
+    "vrcforge_avatar_encryption_research_report": {
+        "type": "object", "additionalProperties": True, "required": [],
+        "properties": {"includeExternalReferences": {"type": "boolean", "default": True, "description": "Include reference links in the report. Alias: include_external_references."}},
+    },
+    "vrcforge_avatar_encryption_scan": {
+        "type": "object", "additionalProperties": True, "required": [],
+        "properties": _AVATAR_ENCRYPTION_SCAN_PROPERTIES,
+    },
+    "vrcforge_avatar_encryption_plan": {
+        "type": "object", "additionalProperties": True, "required": [],
+        "properties": _AVATAR_ENCRYPTION_PLAN_PROPERTIES,
+    },
+    "vrcforge_avatar_encryption_preview": {
+        "type": "object", "additionalProperties": True, "required": [],
+        "properties": {**_AVATAR_ENCRYPTION_PLAN_PROPERTIES, "plan": {"type": ["object", "null"], "additionalProperties": True, "description": "Optional existing protection plan to preview; no write occurs."}},
+    },
+})
+_PARAMETER_BIT_PACKING_IDENTITY_PROPERTIES = {
+    "projectPath": _PROJECT_PATH_PROPERTY,
+    "sourceScenePath": {"type": "string", "description": "Exact source .unity scene asset path."},
+    "sourceAvatarPath": {"type": "string", "description": "Exact source avatar hierarchy path in sourceScenePath."},
+    "outputCloneName": {"type": "string", "description": "Proposed clone name; preview creates no clone."},
+}
+UNITY_READ_TOOL_INPUT_SCHEMAS["vrcforge_preview_parameter_bit_packing"] = {
+    "type": "object", "additionalProperties": True, "required": [],
+    "properties": {
+        **_PARAMETER_BIT_PACKING_IDENTITY_PROPERTIES,
+        **{key: {"type": "object", "additionalProperties": True, "properties": _PARAMETER_BIT_PACKING_IDENTITY_PROPERTIES, "description": "Existing alternate wrapper for source identity fields; projectPath may remain at top level."} for key in ("arguments", "params")},
+    },
+    "anyOf": [
+        {"required": list(_PARAMETER_BIT_PACKING_IDENTITY_PROPERTIES)},
+        *[{
+            "required": [key],
+            "properties": {key: {"required": ["sourceScenePath", "sourceAvatarPath", "outputCloneName"]}},
+            "anyOf": [{"required": ["projectPath"]}, {"properties": {key: {"required": ["projectPath"]}}}],
+        } for key in ("arguments", "params")],
+    ],
+}
