@@ -79,8 +79,7 @@ def ensure_operation_result(
         canonical_status = "unknown"
     error_details = result.get("errorDetails")
     if (
-        canonical_status == "unknown"
-        and result.get("ok") is False
+        result.get("ok") is False
         and isinstance(error_details, Mapping)
         and error_details.get("status") == "failed"
         and error_details.get("toolRoutingStarted") is False
@@ -89,11 +88,18 @@ def ensure_operation_result(
         and error_details.get("commitState") == "not_started"
         and result.get("toolRoutingStarted", False) is False
         and result.get("mutationStarted", False) is False
+        and result.get("mutationApplied", False) is False
         and result.get("committed", False) is False
         and result.get("commitState", "not_started") == "not_started"
     ):
-        # Explicit rejection before routing is a known failure, not an unknown write.
-        canonical_status = "failed"
+        # A Gateway rejection may carry definitive facts only in errorDetails.
+        # Promote them only when no outer routing/commit fact contradicts them.
+        if canonical_status == "unknown":
+            canonical_status = "failed"
+        result.setdefault("mutationStarted", False)
+        result.setdefault("commitState", "not_started")
+        if error_details.get("temporaryCleanupRequired") is False:
+            result.setdefault("cleanupState", "not_applicable")
     result["operationStatus"] = canonical_status
     if not raw_status:
         result["status"] = canonical_status
