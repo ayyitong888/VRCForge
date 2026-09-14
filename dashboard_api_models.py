@@ -210,9 +210,12 @@ class AvatarScopedConnectionRequest(ConnectionRequest):
 
 
 class ShaderMaterialScanRequest(AvatarScopedConnectionRequest):
-    material_ids: list[str] = Field(default_factory=list, alias="materialIds")
+    material_ids: list[str] = Field(default_factory=list, alias="materialIds", description="Exact IDs discovered through indexOnly pages; omit to scan all materials.")
     include_textures: bool = Field(default=True, alias="includeTextures")
     category_overrides: dict[str, ShaderMaterialCategory] = Field(default_factory=dict, alias="categoryOverrides")
+    offset: int = Field(default=0, ge=0, description="Zero-based result offset; follow paging.nextOffset while keeping the avatar and filters unchanged.")
+    limit: int | None = Field(default=None, ge=1, le=100, description="Optional page size. Omit with offset 0 and indexOnly false for the existing full result; explicit paging otherwise defaults to 25 rows.")
+    index_only: bool = Field(default=False, alias="indexOnly", description="Discover exact material IDs, names, renderer paths and shaders in bounded index pages, then read selected details using materialIds. Follow paging.nextOffset until null.")
 
     model_config = {"populate_by_name": True}
 

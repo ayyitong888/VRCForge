@@ -11711,6 +11711,48 @@ def scan_shader_materials_sync(request: ShaderMaterialScanRequest) -> dict[str, 
                 "sourceSummaryScope": "unity_reported_mixed",
                 "summaryScope": "material_selection",
             }
+        if request.index_only or request.limit is not None or request.offset > 0:
+            limit = request.limit or 25
+            rows = materials[request.offset:request.offset + limit]
+            byte_limited = False
+            if request.index_only:
+                index = []
+                for material in rows:
+                    row = {key: material[key] for key in (
+                        "material_id", "material_name", "renderer_path", "shader_name",
+                        "material_id_ambiguous", "renderer_id_ambiguous",
+                    ) if key in material}
+                    # Keep the actual index inside the existing compact-result inline budget.
+                    if len(json.dumps(index + [row], ensure_ascii=False).encode("utf-8")) > 8000:
+                        if not index:
+                            return {
+                                "ok": False,
+                                "errorCode": "material_index_row_too_large",
+                                "error": "A material index row exceeds the inline byte budget; this page cannot be returned. Narrow the scan using known materialIds or a more specific avatarPath.",
+                                "paging": {"total": len(materials), "offset": request.offset, "returned": 0, "nextOffset": None, "hasMore": bool(rows)},
+                            }
+                        byte_limited = True
+                        break
+                    index.append(row)
+                rows = index
+            next_offset = request.offset + len(rows)
+            return {
+                "ok": True,
+                "avatarPath": avatar_path,
+                "index" if request.index_only else "materials": rows,
+                "summary": summary,
+                "summaryScope": "material_selection",
+                "paging": {
+                    "total": len(materials), "offset": request.offset, "limit": limit,
+                    "returned": len(rows), "byteLimited": byte_limited,
+                    "nextOffset": next_offset if next_offset < len(materials) else None,
+                    "hasMore": next_offset < len(materials),
+                },
+                "readHints": {
+                    "discovery": "Use indexOnly=true and follow paging.nextOffset until null; keep avatar and filters unchanged. Each call performs a fresh scan.",
+                    "details": "Pass exact material_id values from the index as materialIds for full details. Use a smaller selection if the host truncates a large detail response.",
+                },
+            }
         return {
             "ok": True,
             "avatarPath": avatar_path,
