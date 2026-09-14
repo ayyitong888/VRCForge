@@ -677,3 +677,41 @@ def test_free_capture_rejects_camera_readback_drift(tmp_path, monkeypatch) -> No
     monkeypatch.setattr(dashboard_server, "invoke_unity_mcp", invoke)
     with pytest.raises(RuntimeError, match="position outside"):
         dashboard_server.capture_avatar_screenshot_approved_sync(prepared)
+
+
+def test_free_capture_accepts_look_rotation_up_for_pitched_camera() -> None:
+    expected = {
+        "cameraMode": "free",
+        "cameraPosition": {"x": 0.0, "y": 1.0, "z": 2.0},
+        "targetPosition": {"x": 0.0, "y": 2.0, "z": 0.0},
+        "upVector": {"x": 0.0, "y": 1.0, "z": 0.0},
+        "projection": "perspective",
+        "fieldOfView": 40.0,
+        "width": 800,
+        "height": 400,
+    }
+    evidence = _free_camera_evidence(expected)
+    evidence["target"] = expected["targetPosition"]
+    evidence["basis"] = {
+        "right": {"x": -1.0, "y": 0.0, "z": 0.0},
+        "up": {"x": 0.0, "y": 0.8944271909999159, "z": 0.4472135954999579},
+        "forward": {"x": 0.0, "y": 0.4472135954999579, "z": -0.8944271909999159},
+    }
+    assert dashboard_server._require_camera_evidence({"cameraEvidence": evidence}, expected)
+
+
+def test_free_capture_rejects_wrong_roll_for_pitched_camera() -> None:
+    expected = {
+        "cameraMode": "free",
+        "cameraPosition": {"x": 0.0, "y": 1.0, "z": 2.0},
+        "targetPosition": {"x": 0.0, "y": 2.0, "z": 0.0},
+        "upVector": {"x": 0.0, "y": 1.0, "z": 0.0},
+        "projection": "perspective",
+        "fieldOfView": 40.0,
+        "width": 800,
+        "height": 400,
+    }
+    evidence = _free_camera_evidence(expected)
+    evidence["target"] = expected["targetPosition"]
+    with pytest.raises(RuntimeError, match="camera up vector outside"):
+        dashboard_server._require_camera_evidence({"cameraEvidence": evidence}, expected)

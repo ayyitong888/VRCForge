@@ -13702,6 +13702,40 @@ def _camera_values_close(observed: list[float], expected: Mapping[str, Any], lab
         raise RuntimeError(f"Unity returned {label} outside the approved free-camera plan.")
 
 
+def _free_camera_look_rotation_up(expected: Mapping[str, Any]) -> dict[str, float]:
+    """Return Unity LookRotation's orthonormalized up basis for a free camera."""
+    position = expected["cameraPosition"]
+    target = expected["targetPosition"]
+    requested_up = expected["upVector"]
+    forward = [
+        float(target[field]) - float(position[field])
+        for field in ("x", "y", "z")
+    ]
+    forward_length = math.sqrt(sum(value * value for value in forward))
+    right = [
+        float(requested_up["y"]) * forward[2] - float(requested_up["z"]) * forward[1],
+        float(requested_up["z"]) * forward[0] - float(requested_up["x"]) * forward[2],
+        float(requested_up["x"]) * forward[1] - float(requested_up["y"]) * forward[0],
+    ]
+    right_length = math.sqrt(sum(value * value for value in right))
+    if forward_length <= 1e-8 or right_length <= 1e-8:
+        raise RuntimeError("Unity returned camera up vector outside the approved free-camera plan.")
+    forward = [value / forward_length for value in forward]
+    right = [value / right_length for value in right]
+    return {
+        field: value
+        for field, value in zip(
+            ("x", "y", "z"),
+            (
+                forward[1] * right[2] - forward[2] * right[1],
+                forward[2] * right[0] - forward[0] * right[2],
+                forward[0] * right[1] - forward[1] * right[0],
+            ),
+            strict=True,
+        )
+    }
+
+
 def _require_camera_evidence(payload: Mapping[str, Any], expected: Mapping[str, Any]) -> dict[str, Any] | None:
     """Require the Core's post-capture camera snapshot for free-camera calls.
 
@@ -13748,7 +13782,11 @@ def _require_camera_evidence(payload: Mapping[str, Any], expected: Mapping[str, 
     if expected.get("cameraMode") == "free":
         _camera_values_close(_camera_vector(evidence, "position"), expected["cameraPosition"], "camera position")
         _camera_values_close(_camera_vector(evidence, "target"), expected["targetPosition"], "camera target")
-        _camera_values_close(_camera_vector(basis, "up"), expected["upVector"], "camera up vector")
+        _camera_values_close(
+            _camera_vector(basis, "up"),
+            _free_camera_look_rotation_up(expected),
+            "camera up vector",
+        )
         if projection != expected.get("projection"):
             raise RuntimeError("Unity returned camera projection outside the approved free-camera plan.")
         optics_name = "orthographicSize" if projection == "orthographic" else "fieldOfView"
