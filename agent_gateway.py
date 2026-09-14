@@ -4918,6 +4918,16 @@ class AgentGateway:
             "errorDetails": error_object,
             "writeFailure": external_write_failure_view(error_object),
         }
+        if error_object.get("errorCode") == "blocked_by_interrupted_apply_recovery":
+            # The rejected operation did not mutate; these belong to the earlier
+            # operation that blocks it, not a newly created recovery record.
+            guidance = ensure_dict(error_object.get("details"))
+            for key in ("blockingRecoveries", "recoveryDiscovery", "nextAction"):
+                if key in guidance:
+                    payload[key] = guidance[key]
+            if guidance.get("nextAction"):
+                error_object["nextAction"] = guidance["nextAction"]
+                payload["writeFailure"] = external_write_failure_view(error_object)
         payload["outcome"] = normalize_agent_tool_result(
             payload,
             fallback_summary="External write preparation failed.",

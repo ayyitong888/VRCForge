@@ -3827,6 +3827,26 @@ class AgentApprovalTransactionService:
                 raise AgentGatewayError(
                     "A previous write did not finish cleanly. Restore or resolve the interrupted apply recovery before running another write.",
                     status_code=409,
+                    cause_code="blocked_by_interrupted_apply_recovery",
+                    failure_layer="transaction_start",
+                    failure_phase="before_write_handler",
+                    operation_kind="write", tool=target_tool,
+                    tool_routing_started=False, mutation_started=False,
+                    committed=False, commit_state="not_started",
+                    details={
+                        "blockingRecoveries": [
+                            {"recoveryId": str(item.get("id") or ""),
+                             "checkpointId": str(item.get("checkpointId") or ""),
+                             "targetTool": str(item.get("targetTool") or ""),
+                             "status": str(item.get("status") or "")}
+                            for item in active_recoveries
+                        ],
+                        "recoveryDiscovery": {
+                            "tool": "vrcforge_list_interrupted_apply_recoveries",
+                            "arguments": {"projectRoot": str(project_root or ""), "includeResolved": False},
+                        },
+                        "nextAction": "Inspect blockingRecoveries with vrcforge_preview_interrupted_apply_recovery using recoveryId; use vrcforge_list_interrupted_apply_recoveries to refresh their status. Restore or resolve only after inspecting the prior operation; do not retry this write yet.",
+                    },
                 )
             if self._project_has_in_flight_write(project_root):
                 raise AgentGatewayError(
