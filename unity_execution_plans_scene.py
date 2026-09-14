@@ -75,6 +75,7 @@ _AVATAR_KEYS = (
     "edits",
     "curves", "clips",
     "sourceStateName",
+    "orderedInterruption",
     "action", "avatarPath", "clipPath", "bindingPath", "objectPath", "componentType", "propertyName", "sourceBindingPath", "sourceComponentType", "sourcePropertyName", "deleteSource", "overwriteExisting", "constantFloat", "keys", "parameterName", "newName", "orderNames", "valueType", "defaultValue", "saved", "networkSynced", "menuPath", "controlName", "controlIndex", "controlType", "controlFloat", "value", "iconAssetPath", "subMenuAssetPath", "createSubMenu", "subParameters", "assetDir", "controllerPath", "fxControllerPath", "layerName", "stateName", "destinationStateName", "transitionIndex", "hasExitTime", "exitTime", "duration", "canTransitionToSelf", "interruptionSource", "conditions", "parameterType", "conditionMode", "threshold", "writeDefaults", "motionClipPath", "speed", "viewPosition", "lipSync", "visemeSkinnedMeshPath", "visemeBlendShapes", "expressionParametersPath", "expressionsMenuPath", "baseAnimationLayers", "specialAnimationLayers", "eyeLookSettingsSourceAvatarPath", "eyeLookEnabled",
 )
 _AVATAR_ALIASES = {

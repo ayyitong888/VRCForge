@@ -21088,6 +21088,8 @@ def _avatar_primitive_request(params: dict[str, Any], preview: bool | None = Non
         "exitTime",
         "duration",
         "canTransitionToSelf",
+        "interruptionSource",
+        "orderedInterruption",
         "conditions",
         "parameterType",
         "conditionMode",
