@@ -1036,8 +1036,8 @@ def build_material_slot_audit(validation: dict[str, Any]) -> dict[str, Any]:
             {
                 "renderer": _safe_asset_label(renderer),
                 "rendererPath": renderer,
-                "sceneGuid": scene_guid,
-                "rendererComponentId": component_id,
+                "sceneGuid": scene_guid or None,
+                "rendererComponentId": component_id or None,
                 "slotCount": len(labels),
                 "materials": labels[:32],
                 "flags": material_flags(" ".join(labels)),
@@ -1055,8 +1055,8 @@ def build_material_slot_audit(validation: dict[str, Any]) -> dict[str, Any]:
             {
                 "renderer": _safe_asset_label(renderer),
                 "rendererPath": renderer,
-                "sceneGuid": _direct_text(entry, ("sceneGuid",)) or "",
-                "rendererComponentId": _direct_text(entry, ("rendererComponentId",)) or "",
+                "sceneGuid": _direct_text(entry, ("sceneGuid",)) or None,
+                "rendererComponentId": _direct_text(entry, ("rendererComponentId",)) or None,
                 "slotCount": len(labels),
                 "materials": labels[:32],
                 "flags": material_flags(" ".join(labels)),
@@ -1744,8 +1744,12 @@ def build_ttt_atlas_plan(dependency_doctor: dict[str, Any], material_audit: dict
             {
                 "renderer": hint.get("renderer"),
                 "rendererPath": hint.get("rendererPath"),
-                "sceneGuid": hint.get("sceneGuid"),
-                "rendererComponentId": hint.get("rendererComponentId"),
+                "sceneGuid": hint.get("sceneGuid") or None,
+                "rendererComponentId": hint.get("rendererComponentId") or None,
+                "identityNote": (
+                    None if hint.get("sceneGuid") and hint.get("rendererComponentId")
+                    else "Scanner identity fields are unavailable; use bind/list_component_targets with rendererPath before editing."
+                ),
                 "slotCount": hint.get("slotCount"),
                 "risk": "high" if hint.get("flags") else "medium",
                 "reason": "Special shader/material flags need manual confirmation." if hint.get("flags") else "Multiple material slots may benefit from atlas planning.",

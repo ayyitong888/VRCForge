@@ -182,3 +182,27 @@ def _validation_source_summary(payload: Any, *, redact_detail: Callable[[Any], A
     if isinstance(nested_summary, dict):
         summary["summary"] = {key: nested_summary.get(key) for key in list(nested_summary.keys())[:12]}
     return redact_detail(summary)
+
+
+def material_source_payload(payload: dict[str, Any], *, redact_detail: Callable[[Any], Any]) -> dict[str, Any]:
+    """Keep scanner hierarchy identities usable without exposing filesystem roots."""
+    projected = redact_detail(payload)
+
+    def preserve_identity(raw: Any, safe: Any) -> None:
+        if isinstance(raw, dict) and isinstance(safe, dict):
+            for key, value in raw.items():
+                if str(key).replace("_", "").lower() in {"rendererpath", "renderer"} and isinstance(value, str):
+                    path = value.strip()
+                    if (path and not path.startswith(("/", "\\")) and ":" not in path
+                            and not any(part in {".", "..", "..."} for part in path.replace("\\", "/").split("/"))):
+                        safe[key] = path
+                    else:
+                        safe[key] = None
+                elif key in safe:
+                    preserve_identity(value, safe[key])
+        elif isinstance(raw, list) and isinstance(safe, list):
+            for value, safe_value in zip(raw, safe):
+                preserve_identity(value, safe_value)
+
+    preserve_identity(payload, projected)
+    return projected

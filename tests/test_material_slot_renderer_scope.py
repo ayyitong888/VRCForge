@@ -46,3 +46,37 @@ def test_machine_absolute_paths_are_not_emitted_as_renderer_identity():
         {"rendererPath": "C:/Users/private/Mesh", "materials": ["A", "B"]}
     ]}}}})
     assert audit["atlasGroupHints"] == []
+
+
+def test_registered_atlas_keeps_renderer_identity_through_validation_projection(monkeypatch, tmp_path):
+    import dashboard_server as dashboard
+    exact = "Workspace/FinalAvatar/Accessories/Meshes/Body"
+    payload = {"projectPath": "C:/Users/private/project", "materials": [
+        {"renderer_path": exact, "material_name": f"Mat{i}", "slot_index": i,
+         "rendererComponentId": "component-id", "material_path": "C:/Users/private/project/Assets/Mat.mat"}
+        for i in range(2)
+    ]}
+    monkeypatch.setattr(dashboard, "_run_validation_source", lambda name, runner: {"ok": True, "payload": payload if name == "materials" else {}})
+    tool = dashboard.AGENT_GATEWAY._tools["vrcforge_optimization_ttt_atlas_plan"]
+    result = tool.handler({"projectPath": str(tmp_path), "avatarPath": "Workspace/FinalAvatar"})["result"]
+    group = result["candidateGroups"][0]
+    assert group["rendererPath"] == exact
+    assert group["sceneGuid"] is None
+    assert group["rendererComponentId"] == "component-id"
+    assert "bind" in group["identityNote"]
+    report = dashboard.build_validation_report_sync({"includeSources": True, "includeReadiness": False, "includeQuest": False})
+    projected = report["sources"]["materials"]["payload"]
+    assert "private" not in str(projected)
+    assert dashboard._redact_doctor_detail({"rendererPath": exact})["rendererPath"] != exact
+
+
+def test_material_projection_only_preserves_legal_renderer_hierarchy_paths():
+    import dashboard_server as dashboard
+    from validation_report_summary import material_source_payload
+    raw = {"materials": [{"rendererPath": value} for value in
+           ["C:/Users/private/Mesh", "//host/share/Mesh", "/Users/private/Mesh", ".../Mesh", "../Mesh", "Assets/Avatar/Mesh"]],
+           "projectPath": "C:/Users/private/project"}
+    safe = material_source_payload(raw, redact_detail=dashboard._redact_doctor_detail)
+    assert [r["rendererPath"] for r in safe["materials"]] == [None] * 5 + ["Assets/Avatar/Mesh"]
+    assert "private" not in str(safe)
+    assert raw["materials"][0]["rendererPath"].startswith("C:/")

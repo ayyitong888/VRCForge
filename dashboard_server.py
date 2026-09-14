@@ -22261,7 +22261,10 @@ def build_validation_report_sync(params: dict[str, Any]) -> dict[str, Any]:
     if include_sources:
         for name, result in sources.items():
             if result.get("ok") and isinstance(result.get("payload"), dict):
-                source_summaries[name]["payload"] = _redact_doctor_detail(result["payload"])
+                source_summaries[name]["payload"] = (
+                    validation_report_summary.material_source_payload(result["payload"], redact_detail=_redact_doctor_detail)
+                    if name == "materials" else _redact_doctor_detail(result["payload"])
+                )
 
     dependency_payload = (
         sources.get("dependencies", {}).get("payload", {})
