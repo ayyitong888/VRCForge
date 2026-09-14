@@ -21,6 +21,95 @@ namespace VRCForge.Editor
     // gateway auto-unwrap trap (data/result/payload/value at top level).
     // ------------------------------------------------------------------
 
+    internal static class ExpressionWritePersistence
+    {
+        internal static Dictionary<string, JToken> Capture(UnityEngine.Object asset)
+        {
+            var result = new Dictionary<string, JToken>(StringComparer.OrdinalIgnoreCase);
+            var pending = new Stack<UnityEngine.Object>();
+            if (asset != null) pending.Push(asset);
+            while (pending.Count > 0)
+            {
+                var current = pending.Pop();
+                var path = AssetDatabase.GetAssetPath(current);
+                if (string.IsNullOrWhiteSpace(path)) throw new InvalidOperationException("Expression asset has no persistent path.");
+                if (result.ContainsKey(path)) continue;
+                result[path] = JToken.Parse(EditorJsonUtility.ToJson(current));
+                if (current is VRCExpressionsMenu menu)
+                    foreach (var control in menu.controls ?? new List<VRCExpressionsMenu.Control>())
+                        if (control?.subMenu != null) pending.Push(control.subMenu);
+            }
+            return result;
+        }
+
+        internal static void RequireCleanSceneForNewReference(VRCAvatarDescriptor descriptor, bool willAssign)
+        {
+            if (!willAssign) return;
+            var scene = descriptor.gameObject.scene;
+            if (!scene.IsValid() || !scene.isLoaded || string.IsNullOrWhiteSpace(scene.path) || scene.isDirty)
+                throw new InvalidOperationException("A new expression reference requires a saved, clean scene before mutation.");
+        }
+
+        internal static object SaveAndVerify(Dictionary<string, JToken> before, UnityEngine.Object root,
+            VRCAvatarDescriptor descriptor, bool assignedReference, bool isMenu, UnityEngine.Object target = null)
+        {
+            var expected = Capture(root);
+            var changed = expected.Keys.Where(path => !before.TryGetValue(path, out var old)
+                || !JToken.DeepEquals(old, expected[path])).Concat(new[] { AssetDatabase.GetAssetPath(target ?? root) })
+                .Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(path => path, StringComparer.Ordinal).ToArray();
+            var guids = changed.ToDictionary(path => path, path => AssetDatabase.AssetPathToGUID(path));
+            foreach (var path in changed)
+            {
+                var asset = AssetDatabase.LoadAssetAtPath<UnityEngine.Object>(path)
+                    ?? throw new InvalidOperationException("Expression asset disappeared before save: " + path);
+                EditorUtility.SetDirty(asset);
+                AssetDatabase.SaveAssetIfDirty(asset);
+                if (EditorUtility.IsDirty(asset)) throw new InvalidOperationException("Expression asset remained dirty: " + path);
+            }
+            var readback = new List<object>();
+            foreach (var path in changed)
+            {
+                AssetDatabase.ImportAsset(path, ImportAssetOptions.ForceSynchronousImport | ImportAssetOptions.ForceUpdate);
+                var actual = AssetDatabase.LoadAssetAtPath<UnityEngine.Object>(path)
+                    ?? throw new InvalidOperationException("Expression persisted asset missing: " + path);
+                if (!JToken.DeepEquals(expected[path], JToken.Parse(EditorJsonUtility.ToJson(actual))))
+                    throw new InvalidOperationException("Expression persisted state differs from expected: " + path);
+                var evidence = SceneObjectCopyCore.ReadStableAssetEvidence(path, "expression persisted readback");
+                if (evidence.Guid != guids[path]) throw new InvalidOperationException("Expression asset GUID changed: " + path);
+                readback.Add(new { path, assetGuid = evidence.Guid, fileDigest = evidence.File.Digest, state = expected[path] });
+            }
+            object sceneReadback = null;
+            if (assignedReference)
+            {
+                var scene = descriptor.gameObject.scene;
+                var sceneGuid = AssetDatabase.AssetPathToGUID(scene.path);
+                var avatarPath = AvatarAuthoringCrudCore.GetTransformPath(descriptor.transform);
+                var rootGuid = AssetDatabase.AssetPathToGUID(AssetDatabase.GetAssetPath(root));
+                Undo.FlushUndoRecordObjects();
+                UnityEditor.SceneManagement.EditorSceneManager.MarkSceneDirty(scene);
+                if (!UnityEditor.SceneManagement.EditorSceneManager.SaveScene(scene))
+                    throw new InvalidOperationException("Expression descriptor scene save failed.");
+                var preview = UnityEditor.SceneManagement.EditorSceneManager.OpenPreviewScene(scene.path);
+                try
+                {
+                    var matches = preview.GetRootGameObjects().SelectMany(item => item.GetComponentsInChildren<VRCAvatarDescriptor>(true))
+                        .Where(item => AvatarAuthoringCrudCore.GetTransformPath(item.transform) == avatarPath).ToArray();
+                    if (matches.Length != 1) throw new InvalidOperationException("Persisted expression descriptor is missing or ambiguous.");
+                    UnityEngine.Object reference = isMenu ? (UnityEngine.Object)matches[0].expressionsMenu : matches[0].expressionParameters;
+                    if (reference == null || AssetDatabase.AssetPathToGUID(AssetDatabase.GetAssetPath(reference)) != rootGuid)
+                        throw new InvalidOperationException("Persisted expression descriptor reference differs.");
+                }
+                finally { UnityEditor.SceneManagement.EditorSceneManager.ClosePreviewScene(preview); }
+                var evidence = SceneObjectCopyCore.ReadStableAssetEvidence(scene.path, "expression descriptor readback");
+                if (evidence.Guid != sceneGuid) throw new InvalidOperationException("Expression scene GUID changed.");
+                sceneReadback = new { path = scene.path, assetGuid = evidence.Guid, fileDigest = evidence.File.Digest, referenceGuid = rootGuid };
+            }
+            var affectedPaths = changed.Concat(assignedReference ? new[] { descriptor.gameObject.scene.path } : Array.Empty<string>()).ToArray();
+            return new { persisted = true, assets = readback.ToArray(), scene = sceneReadback, changedAssetCount = changed.Length,
+                affected = new { count = affectedPaths.Length, items = affectedPaths.Take(20).ToArray(), handle = AssetDatabase.AssetPathToGUID(AssetDatabase.GetAssetPath(root)) } };
+        }
+    }
+
     internal static class AvatarAuthoringCrudCore
     {
         internal static VRCAvatarDescriptor ResolveAvatarDescriptor(string avatarPath)
@@ -238,6 +327,7 @@ namespace VRCForge.Editor
 
         public static object HandleCommand(JObject @params)
         {
+            var mutationStarted = false;
             var receipts = new List<TransactionReceipt>();
             var transactionHandle = "";
             try
@@ -283,6 +373,8 @@ namespace VRCForge.Editor
                 }
 
                 var assetWasMissing = asset == null;
+                ExpressionWritePersistence.RequireCleanSceneForNewReference(descriptor, assetWasMissing);
+                var persistenceBefore = ExpressionWritePersistence.Capture(asset);
                 var assetReceipt = new TransactionReceipt
                 {
                     Asset = asset != null ? AssetDatabase.GetAssetPath(asset) : "expression_parameters",
@@ -299,6 +391,7 @@ namespace VRCForge.Editor
                     };
                     receipts.Add(descriptorReceipt);
                 }
+                mutationStarted = true;
                 asset = AvatarAuthoringCrudCore.EnsureExpressionParametersAsset(descriptor, assetDir, assetPath);
                 assetPath = AssetDatabase.GetAssetPath(asset);
                 transactionHandle = assetPath;
@@ -329,8 +422,7 @@ namespace VRCForge.Editor
                 }
                 asset.parameters = parameters.ToArray();
                 EditorUtility.SetDirty(asset);
-                AssetDatabase.SaveAssets();
-                AssetDatabase.Refresh();
+                var persistedReadback = ExpressionWritePersistence.SaveAndVerify(persistenceBefore, asset, descriptor, assetWasMissing, false);
                 var readbackAsset = AssetDatabase.LoadAssetAtPath<VRCExpressionParameters>(assetPath);
                 if (readbackAsset == null)
                 {
@@ -343,6 +435,10 @@ namespace VRCForge.Editor
                 {
                     ok = true,
                     preview = false,
+                    schema = "vrcforge.expression_write.v1", verified = true, persistedReadback = true,
+                    committed = true, commitState = "committed", mutationStarted = true, mutationApplied = true,
+                    readback = persistedReadback,
+                    affected = JObject.FromObject(persistedReadback)["affected"],
                     action = "ensure_expression_parameter",
                     parameterName,
                     valueType = type.ToString(),
@@ -361,7 +457,12 @@ namespace VRCForge.Editor
                 }
                 return VRCForgeToolResult.Failed(
                     $"Ensure expression parameter failed: {ex.Message}\n{ex.StackTrace}",
-                    new { transaction = BuildTransaction(receipts, transactionHandle) });
+                    new
+                    {
+                        schema = "vrcforge.expression_write.v1", verified = false, mutationStarted,
+                        commitState = mutationStarted ? "unknown" : "not_started", checkpointRecoveryRequired = mutationStarted,
+                        transaction = BuildTransaction(receipts, transactionHandle)
+                    });
             }
         }
 
@@ -433,6 +534,7 @@ namespace VRCForge.Editor
 
         public static object HandleCommand(JObject @params)
         {
+            var mutationStarted = false;
             var beforeGraph = new Dictionary<string, JToken>(StringComparer.OrdinalIgnoreCase);
             VRCExpressionsMenu trackedRoot = null;
             var rootWasMissing = false;
@@ -482,7 +584,10 @@ namespace VRCForge.Editor
                 }
 
                 rootWasMissing = root == null;
+                ExpressionWritePersistence.RequireCleanSceneForNewReference(descriptor, rootWasMissing);
+                var persistenceBefore = ExpressionWritePersistence.Capture(root);
                 beforeGraph = CaptureMenuGraph(root);
+                mutationStarted = true;
                 root = AvatarAuthoringCrudCore.EnsureRootMenuAsset(descriptor, assetDir, rootMenuAssetPath);
                 trackedRoot = root;
                 transactionHandle = AssetDatabase.GetAssetPath(root);
@@ -519,8 +624,7 @@ namespace VRCForge.Editor
                 }
                 EditorUtility.SetDirty(root);
                 EditorUtility.SetDirty(target);
-                AssetDatabase.SaveAssets();
-                AssetDatabase.Refresh();
+                var persistedReadback = ExpressionWritePersistence.SaveAndVerify(persistenceBefore, root, descriptor, rootWasMissing, true, target);
                 var readbackRoot = AssetDatabase.LoadAssetAtPath<VRCExpressionsMenu>(transactionHandle);
                 if (readbackRoot == null)
                 {
@@ -536,6 +640,10 @@ namespace VRCForge.Editor
                 {
                     ok = true,
                     preview = false,
+                    schema = "vrcforge.expression_write.v1", verified = true, persistedReadback = true,
+                    committed = true, commitState = "committed", mutationStarted = true, mutationApplied = true,
+                    readback = persistedReadback,
+                    affected = JObject.FromObject(persistedReadback)["affected"],
                     action = "ensure_expression_menu_control",
                     menuPath,
                     controlName,
@@ -553,6 +661,7 @@ namespace VRCForge.Editor
                     $"Ensure expression menu control failed: {ex.Message}\n{ex.StackTrace}",
                     new
                     {
+                        schema = "vrcforge.expression_write.v1", verified = false, mutationStarted, commitState = mutationStarted ? "unknown" : "not_started", checkpointRecoveryRequired = mutationStarted,
                         transaction = BuildMenuTransaction(
                             beforeGraph,
                             CaptureMenuGraph(trackedRoot),

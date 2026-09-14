@@ -1216,6 +1216,7 @@ namespace VRCForge.Editor
 
         public static object HandleCommand(JObject @params)
         {
+            var mutationStarted = false;
             try
             {
                 @params = @params ?? new JObject();
@@ -1229,12 +1230,13 @@ namespace VRCForge.Editor
                     return VRCForgeToolResult.Completed($"Preview: would manage expression parameters ({action}).", new { ok = true, preview = true, plan });
                 }
                 var before = DescribeParameters(asset);
+                var persistenceBefore = ExpressionWritePersistence.Capture(asset);
 
+                mutationStarted = true;
                 Undo.RegisterCompleteObjectUndo(asset, "Manage expression parameters");
                 Apply(action, asset, @params);
                 EditorUtility.SetDirty(asset);
-                AssetDatabase.SaveAssets();
-                AssetDatabase.Refresh();
+                var persistedReadback = ExpressionWritePersistence.SaveAndVerify(persistenceBefore, asset, descriptor, false, false);
                 var assetPath = AssetDatabase.GetAssetPath(asset);
                 AssetDatabase.ImportAsset(
                     assetPath,
@@ -1245,32 +1247,24 @@ namespace VRCForge.Editor
                     throw new InvalidOperationException("Expression parameter asset readback failed.");
                 }
                 var after = DescribeParameters(readbackAsset);
-                var affectedNames = before
-                    .Select(item => item.name)
-                    .Concat(after.Select(item => item.name))
-                    .Distinct(StringComparer.Ordinal)
-                    .OrderBy(name => name, StringComparer.Ordinal)
-                    .ToArray();
                 return VRCForgeToolResult.Completed($"Expression parameter action '{action}' completed.", new
                 {
                     ok = true,
                     preview = false,
+                    schema = "vrcforge.expression_write.v1", verified = true, persistedReadback = true,
+                    committed = true, commitState = "committed", mutationStarted = true, mutationApplied = true,
+                    readback = persistedReadback,
                     action,
                     assetPath,
                     parameterCount = after.Count,
                     before,
                     after,
-                    affected = new
-                    {
-                        count = affectedNames.Length,
-                        items = affectedNames.Take(20).ToArray(),
-                        handle = AssetDatabase.AssetPathToGUID(assetPath)
-                    }
+                    affected = JObject.FromObject(persistedReadback)["affected"]
                 });
             }
             catch (Exception ex)
             {
-                return VRCForgeToolResult.Failed($"Manage expression parameters failed: {ex.Message}\n{ex.StackTrace}");
+                return VRCForgeToolResult.Failed($"Manage expression parameters failed: {ex.Message}\n{ex.StackTrace}", new { schema = "vrcforge.expression_write.v1", verified = false, mutationStarted, commitState = mutationStarted ? "unknown" : "not_started", checkpointRecoveryRequired = mutationStarted });
             }
         }
 
@@ -1413,6 +1407,7 @@ namespace VRCForge.Editor
 
         public static object HandleCommand(JObject @params)
         {
+            var mutationStarted = false;
             try
             {
                 @params = @params ?? new JObject();
@@ -1431,9 +1426,12 @@ namespace VRCForge.Editor
                     return VRCForgeToolResult.Completed($"Preview: would manage expression menu ({action}).", new { ok = true, preview = true, plan });
                 }
 
-                var beforeAssetPaths = CollectMenuAssetPaths(root);
+                var rootWasMissing = root == null;
+                ExpressionWritePersistence.RequireCleanSceneForNewReference(descriptor, rootWasMissing);
+                var persistenceBefore = ExpressionWritePersistence.Capture(root);
                 var before = DescribeMenu(TryResolveMenu(root, normalizedMenuPath));
 
+                mutationStarted = true;
                 if (root == null)
                 {
                     root = AvatarAuthoringCrudCore.EnsureRootMenuAsset(descriptor, assetDir, rootMenuAssetPath);
@@ -1444,8 +1442,7 @@ namespace VRCForge.Editor
                 Apply(action, target, @params, assetDir, plannedMenuPaths);
                 EditorUtility.SetDirty(target);
                 EditorUtility.SetDirty(root);
-                AssetDatabase.SaveAssets();
-                AssetDatabase.Refresh();
+                var persistedReadback = ExpressionWritePersistence.SaveAndVerify(persistenceBefore, root, descriptor, rootWasMissing, true, target);
                 var rootAssetPath = AssetDatabase.GetAssetPath(root);
                 AssetDatabase.ImportAsset(rootAssetPath, ImportAssetOptions.ForceSynchronousImport);
                 var readbackRoot = AssetDatabase.LoadAssetAtPath<VRCExpressionsMenu>(rootAssetPath);
@@ -1455,35 +1452,25 @@ namespace VRCForge.Editor
                 }
                 var readbackTarget = ResolveMenu(readbackRoot, normalizedMenuPath, create: false, assetDir: assetDir, plannedMenuPaths: null);
                 var after = DescribeMenu(readbackTarget);
-                var afterAssetPaths = CollectMenuAssetPaths(readbackRoot);
-                var affectedPaths = afterAssetPaths
-                    .Where(path => !beforeAssetPaths.Contains(path))
-                    .Concat(new[] { AssetDatabase.GetAssetPath(readbackTarget) })
-                    .Where(path => !string.IsNullOrWhiteSpace(path))
-                    .Distinct(StringComparer.OrdinalIgnoreCase)
-                    .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
-                    .ToList();
                 return VRCForgeToolResult.Completed($"Expression menu action '{action}' completed.", new
                 {
                     ok = true,
                     preview = false,
+                    schema = "vrcforge.expression_write.v1", verified = true, persistedReadback = true,
+                    committed = true, commitState = "committed", mutationStarted = true, mutationApplied = true,
+                    readback = persistedReadback,
                     action,
                     rootMenuPath = rootAssetPath,
                     menuPath = @params["menuPath"]?.ToString() ?? "",
                     controlCount = readbackTarget.controls?.Count ?? 0,
                     before,
                     after,
-                    affected = new
-                    {
-                        count = affectedPaths.Count,
-                        items = affectedPaths.Take(20).ToArray(),
-                        handle = AssetDatabase.AssetPathToGUID(rootAssetPath)
-                    }
+                    affected = JObject.FromObject(persistedReadback)["affected"]
                 });
             }
             catch (Exception ex)
             {
-                return VRCForgeToolResult.Failed($"Manage expression menu failed: {ex.Message}\n{ex.StackTrace}");
+                return VRCForgeToolResult.Failed($"Manage expression menu failed: {ex.Message}\n{ex.StackTrace}", new { schema = "vrcforge.expression_write.v1", verified = false, mutationStarted, commitState = mutationStarted ? "unknown" : "not_started", checkpointRecoveryRequired = mutationStarted });
             }
         }
 
@@ -1502,12 +1489,26 @@ namespace VRCForge.Editor
 
         private static object BuildPlan(string action, VRCAvatarDescriptor descriptor, VRCExpressionsMenu root, JObject @params, string assetDir, string rootMenuAssetPath, List<string> newMenuAssetPaths)
         {
+            var requestedPath = AvatarPrimitiveCrudCore.NormalizePath(@params["menuPath"]?.ToString() ?? "");
+            var targetMenu = TryResolveMenu(root, requestedPath);
+            var existingParent = root;
+            var prefix = "";
+            foreach (var part in requestedPath.Split(new[] { '/' }, StringSplitOptions.RemoveEmptyEntries))
+            {
+                prefix = string.IsNullOrEmpty(prefix) ? part : prefix + "/" + part;
+                var resolved = TryResolveMenu(root, prefix);
+                if (resolved == null) break;
+                existingParent = resolved;
+            }
             return new
             {
                 action,
                 avatarPath = AvatarPrimitiveCrudCore.GetTransformPath(descriptor.transform),
                 avatarName = descriptor.name,
                 rootMenuPath = rootMenuAssetPath,
+                targetMenuAssetPath = targetMenu != null ? AssetDatabase.GetAssetPath(targetMenu) : "",
+                targetMenuExists = targetMenu != null,
+                checkpointAssetPaths = existingParent != null ? new[] { AssetDatabase.GetAssetPath(existingParent) } : Array.Empty<string>(),
                 assetDir,
                 newMenuAssetPaths,
                 menuPath = @params["menuPath"]?.ToString() ?? "",
