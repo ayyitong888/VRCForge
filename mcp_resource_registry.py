@@ -246,7 +246,9 @@ class McpResourceRegistry:
         if offset < 0:
             raise McpResourceError("cursor must be a non-negative integer")
         with self._transaction() as connection:
-            rows = connection.execute("SELECT r.payload FROM latest l JOIN records r ON r.uri=l.uri ORDER BY l.uri LIMIT ? OFFSET ?", (page_size + 1, offset)).fetchall()
+            # Newly published immutable receipts come first so list-first hosts
+            # can discover the operation they just invoked without old pages.
+            rows = connection.execute("SELECT r.payload FROM latest l JOIN records r ON r.uri=l.uri ORDER BY r.rowid DESC LIMIT ? OFFSET ?", (page_size + 1, offset)).fetchall()
             page = [json.loads(row[0]) for row in rows[:page_size]]
             next_offset = offset + len(page)
             resources = [

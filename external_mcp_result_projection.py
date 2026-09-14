@@ -212,6 +212,21 @@ def _summary(value: Any) -> Any:
     return summary
 
 
+def result_resource_links(value: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Expose compact receipt expansion as standard MCP content, not only JSON text."""
+    presentation = value.get("resultPresentation")
+    if not isinstance(presentation, Mapping):
+        return []
+    uri = presentation.get("fullResultUri")
+    if not isinstance(uri, str) or not uri.startswith("vrcforge://"):
+        return []
+    return [{
+        "type": "resource_link", "uri": uri,
+        "name": "Complete operation receipt", "mimeType": "application/json",
+        "description": "Read this immutable resource for the omitted result data; do not repeat the tool operation.",
+    }]
+
+
 def project_result(value: Mapping[str, Any], *, mode: str, resource_readable: bool) -> dict[str, Any]:
     result = dict(value)
     uri = result.get("operationResource")

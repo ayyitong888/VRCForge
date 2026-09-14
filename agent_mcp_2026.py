@@ -21,7 +21,7 @@ from urllib.parse import urlsplit
 from external_tool_result_contract import build_external_tool_error
 from agent_tool_result_contract import normalize_agent_tool_result
 from operation_context import ensure_operation_result
-from external_mcp_result_projection import RESOURCE_SELECTION, TOOL_SELECTION, project_prompt, project_resource, project_result, project_tool, resource_selection, result_mode, select_tools, tool_names
+from external_mcp_result_projection import RESOURCE_SELECTION, TOOL_SELECTION, project_prompt, project_resource, project_result, project_tool, resource_selection, result_mode, result_resource_links, select_tools, tool_names
 
 
 PROTOCOL_VERSION = "2026-07-28"
@@ -712,7 +712,8 @@ class Mcp2026Router:
                         {
                             "type": "text",
                             "text": _tool_result_content_text(structured),
-                        }
+                        },
+                        *result_resource_links(structured),
                     ],
                     "structuredContent": structured,
                     "isError": structured.get("outcome", {}).get("status") == "failed",

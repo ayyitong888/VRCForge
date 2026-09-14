@@ -23,7 +23,7 @@ from agent_mcp_2026 import (
 from external_tool_result_contract import build_external_tool_error
 from agent_tool_result_contract import normalize_agent_tool_result
 from operation_context import ensure_operation_result
-from external_mcp_result_projection import RESOURCE_SELECTION, TOOL_SELECTION, project_prompt, project_resource, project_result, project_tool, resource_selection, result_mode, select_tools, tool_names
+from external_mcp_result_projection import RESOURCE_SELECTION, TOOL_SELECTION, project_prompt, project_resource, project_result, project_tool, resource_selection, result_mode, result_resource_links, select_tools, tool_names
 
 
 LATEST_PROTOCOL_VERSION = "2025-11-25"
@@ -148,6 +148,7 @@ class McpStandardRouter:
         self._prompt_list_revision = prompt_list_revision
         self._pending_notifications: list[JsonObject] = []
         self._initialized = False
+        self._resource_links_supported = False
 
     def drain_notifications(self) -> list[JsonObject]:
         notifications = list(self._pending_notifications)
@@ -195,6 +196,7 @@ class McpStandardRouter:
                 if not isinstance(client_info, Mapping) or not _is_nonempty_string(client_info.get("name")) or not _is_nonempty_string(client_info.get("version")):
                     raise McpStandardError(-32602, "initialize clientInfo must contain non-empty name and version")
                 self._initialized = True
+                self._resource_links_supported = protocol_version in {"2025-06-18", "2025-11-25"}
                 return _success(
                     request_id,
                     {
@@ -409,7 +411,8 @@ class McpStandardRouter:
                 return _success(
                     request_id,
                     {
-                        "content": [{"type": "text", "text": _tool_result_content_text(structured)}],
+                        "content": [{"type": "text", "text": _tool_result_content_text(structured)},
+                                    *(result_resource_links(structured) if self._resource_links_supported else [])],
                         "structuredContent": structured,
                         "isError": outcome.get("status") == "failed",
                     },
