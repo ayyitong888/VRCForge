@@ -150,7 +150,7 @@ class AgentCheckpointRecoveryService:
         # replaced archive or edited pathspec can never reuse a stale verdict.
         self._archive_validation_cache: dict[tuple[str, int, int, str], tuple[bool, str]] = {}
         self._checkpoint_entry_cache: dict[
-            tuple[str, int, int], tuple[dict[str, Any], ...]
+            tuple[str, int, int, str], tuple[dict[str, Any], ...]
         ] = {}
         self._project_chat_checkpoint_lock = ports.project_chat_checkpoint_lock
         self._checkpoint_project_root_resolver: Callable[[], str] | None = None
@@ -400,10 +400,10 @@ class AgentCheckpointRecoveryService:
         params = params or {}
         limit = max(1, min(int(params.get("limit") or 50), 500))
         project_filter = str(params.get("project_root") or params.get("projectRoot") or "").strip()
-        entries = self._read_checkpoint_entries(limit=500)
-        if project_filter:
-            normalized = normalize_filesystem_path(project_filter)
-            entries = [entry for entry in entries if normalize_filesystem_path(str(entry.get("projectRoot") or "")) == normalized]
+        entries = (
+            self._read_checkpoint_entries(limit=limit, project_root=project_filter)
+            if project_filter else self._read_checkpoint_entries(limit=limit)
+        )
         entries = entries[:limit]
         projected: list[dict[str, Any]] = []
         for entry in entries:
@@ -3265,14 +3265,16 @@ class AgentCheckpointRecoveryService:
                 break
             current = current.parent
 
-    def _read_checkpoint_entries(self, limit: int = 500) -> list[dict[str, Any]]:
+    def _read_checkpoint_entries(self, limit: int = 500, project_root: str = "") -> list[dict[str, Any]]:
         log_path = self._ports.checkpoint_log_path()
+        normalized_project = normalize_filesystem_path(project_root) if project_root else ""
         try:
             metadata = log_path.stat()
             cache_key = (
                 os.path.normcase(str(log_path.resolve())),
                 int(metadata.st_size),
                 int(metadata.st_mtime_ns),
+                normalized_project,
             )
         except OSError:
             return []
@@ -3290,7 +3292,8 @@ class AgentCheckpointRecoveryService:
                 except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
                     continue
                 if _checkpoint_record_state(payload) == "valid":
-                    parsed.append(payload)
+                    if not normalized_project or normalize_filesystem_path(str(payload.get("projectRoot") or "")) == normalized_project:
+                        parsed.append(payload)
             entries = tuple(parsed[-1000:])
             self._checkpoint_entry_cache[cache_key] = entries
             while len(self._checkpoint_entry_cache) > 4:
