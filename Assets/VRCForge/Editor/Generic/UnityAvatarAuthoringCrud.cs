@@ -619,32 +619,25 @@ namespace VRCForge.Editor
                 var target = EnsureMenuPath(root, menuPath, assetDir, plannedMenuPaths);
                 Undo.RegisterCompleteObjectUndo(target, "Ensure expression menu control");
                 var created = false;
-                if (!MenuContainsControl(root, menuPath, controlName, parameterName, Mathf.RoundToInt(controlValue), new HashSet<int>(), 0))
+                var control = FindControlByName(target, controlName);
+                if (control == null)
                 {
                     target = EnsureMenuHasRoom(target, assetDir, plannedMenuPaths);
                     Undo.RegisterCompleteObjectUndo(target, "Ensure expression menu control");
-                    var control = new VRCExpressionsMenu.Control
-                    {
-                        name = controlName,
-                        type = type,
-                        value = controlValue
-                    };
-                    if (!string.IsNullOrWhiteSpace(parameterName))
-                    {
-                        control.parameter = new VRCExpressionsMenu.Control.Parameter { name = parameterName };
-                    }
-                    if (type == VRCExpressionsMenu.Control.ControlType.SubMenu)
-                    {
-                        var subMenu = ScriptableObject.CreateInstance<VRCExpressionsMenu>();
-                        subMenu.controls = new List<VRCExpressionsMenu.Control>();
-                        var subPath = plannedMenuPaths.Dequeue();
-                        AvatarAuthoringCrudCore.EnsureAssetFolder(assetDir);
-                        AssetDatabase.CreateAsset(subMenu, subPath);
-                        Undo.RegisterCreatedObjectUndo(subMenu, "Create submenu asset");
-                        control.subMenu = subMenu;
-                    }
+                    control = new VRCExpressionsMenu.Control { name = controlName };
                     target.controls.Add(control);
                     created = true;
+                }
+                UpdateControl(control, type, parameterName, controlValue);
+                if (type == VRCExpressionsMenu.Control.ControlType.SubMenu && control.subMenu == null)
+                {
+                    var subMenu = ScriptableObject.CreateInstance<VRCExpressionsMenu>();
+                    subMenu.controls = new List<VRCExpressionsMenu.Control>();
+                    var subPath = plannedMenuPaths.Dequeue();
+                    AvatarAuthoringCrudCore.EnsureAssetFolder(assetDir);
+                    AssetDatabase.CreateAsset(subMenu, subPath);
+                    Undo.RegisterCreatedObjectUndo(subMenu, "Create submenu asset");
+                    control.subMenu = subMenu;
                 }
                 EditorUtility.SetDirty(root);
                 EditorUtility.SetDirty(target);
@@ -800,12 +793,10 @@ namespace VRCForge.Editor
                 GeneratedAssetPaths.ReserveAssetPath($"{assetDir}/{AvatarAuthoringCrudCore.Sanitize(part, "Menu")}_SubMenu.asset", reserved, GeneratedAssetPaths.UniqueAssetPath);
                 current = null;
             }
-            if (!controlExists)
-            {
-                PlanMenuRoom(current, assetDir, reserved);
-                if (type == VRCExpressionsMenu.Control.ControlType.SubMenu)
-                    GeneratedAssetPaths.ReserveAssetPath($"{assetDir}/{AvatarAuthoringCrudCore.Sanitize(controlName, "Menu")}_SubMenu.asset", reserved, GeneratedAssetPaths.UniqueAssetPath);
-            }
+            if (!controlExists) PlanMenuRoom(current, assetDir, reserved);
+            if (type == VRCExpressionsMenu.Control.ControlType.SubMenu
+                && (!controlExists || FindControlByName(current, controlName)?.subMenu == null))
+                GeneratedAssetPaths.ReserveAssetPath($"{assetDir}/{AvatarAuthoringCrudCore.Sanitize(controlName, "Menu")}_SubMenu.asset", reserved, GeneratedAssetPaths.UniqueAssetPath);
             return reserved.Skip(1).ToList();
         }
 
@@ -914,17 +905,24 @@ namespace VRCForge.Editor
         private static bool MenuContainsControl(VRCExpressionsMenu menu, string menuPath, string controlName, string parameterName, int intValue, HashSet<int> visited, int depth)
         {
             var target = FindMenuByPath(menu, menuPath, visited, depth);
-            if (target?.controls == null)
-            {
-                return false;
-            }
-            return target.controls.Any(control =>
-                control != null
-                && string.Equals(control.name, controlName, StringComparison.Ordinal)
-                && (string.IsNullOrWhiteSpace(parameterName)
-                    || (control.parameter != null
-                        && string.Equals(control.parameter.name, parameterName, StringComparison.Ordinal)
-                        && Mathf.RoundToInt(control.value) == intValue)));
+            return FindControlByName(target, controlName) != null;
+        }
+
+        private static VRCExpressionsMenu.Control FindControlByName(VRCExpressionsMenu menu, string controlName)
+        {
+            var matches = (menu?.controls ?? new List<VRCExpressionsMenu.Control>())
+                .Where(control => control != null && string.Equals(control.name, controlName, StringComparison.Ordinal)).ToArray();
+            if (matches.Length > 1) throw new InvalidOperationException("Expression control name is ambiguous in the requested menu: " + controlName);
+            return matches.Length == 1 ? matches[0] : null;
+        }
+
+        private static void UpdateControl(VRCExpressionsMenu.Control control,
+            VRCExpressionsMenu.Control.ControlType type, string parameterName, float value)
+        {
+            control.type = type;
+            control.value = value;
+            control.parameter = string.IsNullOrWhiteSpace(parameterName) ? null
+                : new VRCExpressionsMenu.Control.Parameter { name = parameterName };
         }
 
         private static VRCExpressionsMenu FindMenuByPath(VRCExpressionsMenu menu, string menuPath, HashSet<int> visited, int depth)
