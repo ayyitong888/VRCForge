@@ -7368,6 +7368,7 @@ class AgentGateway:
                         ),
                     }
                 ):
+                    planner_argument_failures = 0
                     unresolved_planner_argument_failure = None
 
             if step_waits_for_approval:

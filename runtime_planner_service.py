@@ -2452,6 +2452,23 @@ class RuntimePlannerService:
             result = step.get("result")
             fields: list[str] = []
             canonical_outcome: dict[str, object] = {}
+            if isinstance(result, Mapping) and result.get("code") == "planner_invalid_response":
+                issues = result.get("issues")
+                if isinstance(issues, list):
+                    issue_text = []
+                    for issue in issues[:8]:
+                        if not isinstance(issue, Mapping):
+                            continue
+                        path = str(issue.get("path") or "").strip()
+                        code = str(issue.get("code") or "").strip()
+                        expected = str(issue.get("expected") or "").strip()
+                        if path and code:
+                            issue_text.append(f"{path}:{code}->{expected}" if expected else f"{path}:{code}")
+                    if issue_text:
+                        fields.append(
+                            "argumentValidationIssues="
+                            + sanitize_planner_observation_text(" | ".join(issue_text), 480)
+                        )
             action_id = str(step.get("actionId") or "").strip()
             if action_id:
                 fields.append("actionId=" + sanitize_planner_observation_text(action_id, 80))

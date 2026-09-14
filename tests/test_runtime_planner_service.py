@@ -499,6 +499,30 @@ def test_parent_tool_block_failure_observation_preserves_exact_leaf_load_actions
     assert len(observation) <= 8_000
 
 
+def test_planner_observation_preserves_bounded_argument_validation_issues() -> None:
+    observation = service()._llm_loop_step_observation({
+        "tool": "unity_get_gameobject",
+        "status": "failed",
+        "result": {
+            "code": "planner_invalid_response",
+            "issues": [
+                {"path": "action", "code": "enum", "expected": "skill"},
+                {"path": "projectPath", "code": "missing_required", "expected": "present"},
+            ],
+        },
+        "outcome": {"status": "failed", "summary": "The planner used a tool name as the action."},
+    })
+    assert "argumentValidationIssues=action:enum->skill | projectPath:missing_required->present" in observation
+
+
+def test_other_tool_issues_are_not_presented_as_planner_corrections() -> None:
+    observation = service()._llm_loop_step_observation({
+        "tool": "inspect_asset", "status": "completed",
+        "result": {"issues": [{"path": "action", "code": "enum", "expected": "skill"}]},
+    })
+    assert "argumentValidationIssues=" not in observation
+
+
 def test_model_observation_keeps_bounded_know_yourself_guidance() -> None:
     observation = service()._llm_loop_step_observation(
         {

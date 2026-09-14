@@ -2771,6 +2771,7 @@ class AgentLoopP0Tests(unittest.TestCase):
         execute_skill.assert_not_called()
         self.assertEqual(len(prompts), 2)
         self.assertIn("planner_invalid_response", prompts[1])
+        self.assertIn("argumentValidationIssues=avatarPath:wrong_type->string", prompts[1])
         self.assertIn("planner_validation_", prompts[1])
         self.assertEqual(result["plan"]["nextStep"], "planner_failed")
         self.assertEqual(
@@ -3710,6 +3711,41 @@ class AgentLoopP0Tests(unittest.TestCase):
             "planner_invalid_response",
         )
         self.assertEqual(len(result["steps"]), 2)
+
+    def test_schema_correction_streak_resets_after_matching_success(self) -> None:
+        gateway = self.gateway
+        project = self._unity_project()
+        valid_a = {"avatarPath": "Avatar", "projectPath": str(project)}
+        valid_b = {"avatarPath": "AvatarB", "projectPath": str(project)}
+        action_a = canonical_action_id("skill", "vrcforge_scan_materials", valid_a)
+        action_b = canonical_action_id("skill", "vrcforge_scan_materials", valid_b)
+        responses = iter([
+            {"action": "skill", "skill_tool": "unity_scan_materials", "skill_params": {"avatarPath": 42}},
+            {"action": "skill", "skill_tool": "unity_scan_materials", "skill_params": valid_a},
+            {"action": "skill", "skill_tool": "unity_scan_materials", "skill_params": {"avatarPath": 43}},
+            {"action": "skill", "skill_tool": "unity_scan_materials", "skill_params": valid_b},
+            {"action": "reply", "reply": "Both scans completed.", "completion_claim": {"satisfied": True, "evidence_action_ids": [action_a, action_b]}},
+        ])
+
+        prompts = []
+
+        def fake_llm(*args, **_kwargs):
+            prompts.append(str(args[1]))
+            return SimpleNamespace(text=json.dumps(next(responses)), usage={}, reasoning={})
+
+        def execute_skill(_owner, tool, params, agent_name=None, owner_id=""):
+            return {"ok": True, "tool": tool, "status": "executed", "result": {}, "outcome": {"status": "ok", "summary": tool + " completed", "verification": {"state": "not_required", "checks": []}}}
+
+        with patch("dashboard_server.request_llm_plan_with_metadata", side_effect=fake_llm), patch.object(
+            type(gateway.runtime_skills), "execute", autospec=True, side_effect=execute_skill
+        ):
+            result = gateway.runtime_message({"message": "scan avatar", "provider": "fixture", "model": "fixture", "projectPath": str(project), "projectRoot": str(project), "session_id": "schema-reset-session", "client_turn_id": "schema-reset-turn"})
+
+        self.assertEqual(result["plan"]["nextStep"], "done", result)
+        self.assertEqual(len(result["task"]["actions"]), 2)
+        self.assertIn("argumentValidationIssues=", prompts[1])
+        self.assertIn("argumentValidationIssues=", prompts[3])
+        self.assertIn("avatarPath", prompts[3])
 
     def test_unrelated_diagnostic_success_does_not_clear_the_original_failure(self) -> None:
         gateway = self.gateway
