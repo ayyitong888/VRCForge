@@ -558,6 +558,36 @@ def test_unrelated_diagnostic_action_cannot_supersede_a_failed_requirement() -> 
     assert gated["nextStep"] == "tool_failed"
 
 
+def test_explicit_failed_completion_reply_survives_earlier_exploration_failure() -> None:
+    loop = AgentTaskLoop("diagnose the runtime from retained logs")
+    failed = loop.record_action(
+        kind="shell",
+        tool="shell",
+        arguments={"command": "inspect logs"},
+        raw_result={"ok": False, "status": "failed", "error": "project path is protected"},
+        outcome={"status": "failed", "summary": "project path is protected"},
+    )
+    loop.record_action(
+        kind="skill",
+        tool="vrcforge_read_recent_logs",
+        arguments={"source": "disk", "file": "startup.log"},
+        raw_result={"ok": True, "status": "executed"},
+        outcome={"status": "ok", "summary": "Logs show backend startup completed."},
+    )
+    gated = loop.gate_terminal(
+        {
+            "planner": "llm",
+            "nextStep": "done",
+            "reply": "已读取日志：后端实际启动成功；原 Shell 路径被保护，不能据此判断产品启动失败。",
+            "completionClaim": {"satisfied": False},
+        }
+    )
+    assert gated["nextStep"] == "tool_failed"
+    assert gated["reply"].startswith("已读取日志")
+    assert gated["completionGate"]["status"] == "failed"
+    assert failed["status"] == "failed"
+
+
 def test_structured_failure_survives_the_task_projection_for_the_next_plan() -> None:
     loop = AgentTaskLoop("inspect materials")
     loop.record_action(
