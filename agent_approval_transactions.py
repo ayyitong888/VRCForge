@@ -2508,13 +2508,6 @@ class AgentApprovalTransactionService:
         project_root = project_root.resolve()
         record = {**base_record, "projectRoot": str(project_root)}
         archive_files = _checkpoint_archive_files_for_write(target_tool, arguments)
-        if archive_files and all(
-            is_path_within((project_root / Path(path)).resolve(), project_root)
-            and (project_root / Path(path)).is_file()
-            and (project_root / Path(path + ".meta")).is_file()
-            for path in archive_files
-        ):
-            record["archiveFiles"] = archive_files
         if not self._ports.is_unity_project_root(project_root):
             record.update(
                 {
@@ -2561,6 +2554,12 @@ class AgentApprovalTransactionService:
                 )
                 self._ports.checkpoint.append_checkpoint(record)
                 return record
+            if target_tool == "vrcforge_manage_expression_menu":
+                # Never accept an archive scope directly from caller arguments.
+                archive_files = prepare_result.get("archiveAssetPaths")
+                record["archiveScopeReason"] = prepare_result.get(
+                    "archiveScopeReason", "full_project_menu_scope_not_proven"
+                )
         elif self._checkpoint_prepare_handler is not None:
             try:
                 prepare_result = ensure_dict(self._checkpoint_prepare_handler(project_root))
@@ -2589,6 +2588,21 @@ class AgentApprovalTransactionService:
                     *ensure_string_list(record.get("warnings")),
                     "Unity prepare checkpoint failed; using file-level checkpoint fallback.",
                 ]
+
+        if isinstance(archive_files, list) and archive_files and all(
+            isinstance(path, str)
+            and path.startswith("Assets/")
+            and "\\" not in path
+            and ".." not in Path(path).parts
+            and Path(path).as_posix() == path
+            and is_path_within((project_root / Path(path)).resolve(), project_root)
+            and (project_root / Path(path)).is_file()
+            and (project_root / Path(path + ".meta")).is_file()
+            for path in archive_files
+        ):
+            record["archiveFiles"] = archive_files
+        elif target_tool == "vrcforge_manage_expression_menu" and archive_files is not None:
+            record["archiveScopeReason"] = "full_project_prepared_asset_scope_invalid"
 
         git_root_result = self._ports.run_git(project_root, ["rev-parse", "--show-toplevel"])
         if not git_root_result["ok"]:

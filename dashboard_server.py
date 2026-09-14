@@ -20036,6 +20036,20 @@ def prepare_authoritative_unity_checkpoint_sync(
                 or [item.get("assetPath") for item in baseline] != paths):
             return {**prepared, "ok": False, "error": "Unity did not capture the exact approved menu asset baseline."}
         prepared["assetBaselineRequired"] = True
+        request = _avatar_primitive_request(arguments, preview=True)
+        if (
+            plan.get("action") in {"update", "delete", "reorder"}
+            and plan.get("targetMenuExists") is True
+            and paths == [plan.get("targetMenuAssetPath")]
+            and plan.get("newMenuAssetPaths") == []
+            and not any(key in request for key in ("createSubMenu", "subMenuAssetPath", "iconAssetPath"))
+        ):
+            # Only the authoritative server preview can offer a smaller scope.
+            # The checkpoint owner still validates the files and adds metadata.
+            prepared["archiveAssetPaths"] = list(paths)
+            prepared["archiveScopeReason"] = "existing_menu_asset_only"
+        else:
+            prepared["archiveScopeReason"] = "full_project_menu_scope_not_proven"
         return prepared
     nested_tool = str(arguments.get("toolName") or arguments.get("tool_name") or "").strip()
     if not nested_tool and PREPARED_UNITY_EXECUTION_ARGUMENT_KEY in arguments:
