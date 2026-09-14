@@ -186,6 +186,15 @@ class AgentRuntimeRunLedger:
             event_count_by_key[key] = event_count_by_key.get(key, 0) + 1
             previous = runs_by_key.get(key, {})
             merged = {**previous, **event}
+            if event.get("event") == "runtime_turn_cancel_requested":
+                # A cancellation request can arrive after execution has finished.
+                # Keep that request in events without reopening the completed run.
+                if previous.get("event") == "runtime_turn_completed":
+                    merged = dict(previous)
+                else:
+                    for identity_key in ("sessionId", "turnId"):
+                        if not event.get(identity_key) and previous.get(identity_key):
+                            merged[identity_key] = previous[identity_key]
             merged["eventCount"] = event_count_by_key[key]
             merged["lastEvent"] = event.get("event") or ""
             runs_by_key[key] = merged
