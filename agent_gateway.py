@@ -6392,10 +6392,22 @@ class AgentGateway:
                 turn_id=turn_id,
                 client_turn_id=client_turn_id,
             )
+            # Keep the caller's observation immutable while exposing only the
+            # runtime-owned explicit model-turn budget to the planner.
+            planner_observe = dict(observe) if isinstance(observe, dict) else {}
+            max_model_turns = task_loop.budget_policy.max_model_turns
+            if max_model_turns is None:
+                planner_observe.pop("modelTurnBudget", None)
+            else:
+                planner_observe["modelTurnBudget"] = {
+                    "maxModelTurns": max_model_turns,
+                    "modelTurnsUsed": task_loop.model_turns_used,
+                    "remainingModelTurns": max(0, max_model_turns - task_loop.model_turns_used),
+                }
             plan = self.runtime_planner.plan_agent_turn(
                 message,
                 params,
-                observe,
+                planner_observe,
                 history,
                 loop_state=loop_state,
                 context_usage=context_usage,

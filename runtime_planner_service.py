@@ -2902,6 +2902,23 @@ class RuntimePlannerService:
                     line += f" -> {observation_text}"
                 step_lines.append(line)
             steps_block = "\n".join(step_lines) if step_lines else "（本轮尚未执行任何工具）"
+            model_turn_budget = observe.get("modelTurnBudget")
+            budget_instruction = ""
+            if isinstance(model_turn_budget, Mapping):
+                remaining = model_turn_budget.get("remainingModelTurns")
+                maximum = model_turn_budget.get("maxModelTurns")
+                used = model_turn_budget.get("modelTurnsUsed")
+                if isinstance(remaining, int) and isinstance(maximum, int) and isinstance(used, int):
+                    budget_instruction = (
+                        f"Runtime-owned model-turn budget: {remaining} remaining "
+                        f"({used} used of {maximum}), including this decision; the configured limit is unchanged.\n"
+                    )
+                    if remaining <= 1:
+                        budget_instruction += (
+                            "If evidence is incomplete before the last decision ends, use an honest reply with "
+                            '"completion_claim":{"satisfied":false}'
+                            " and state what remains unverified.\n"
+                        )
             runtime_scope_instruction = (
                 "A Unity project is explicitly bound to this turn. Use the project tool catalog when it is relevant."
                 if project_context_active
@@ -2923,6 +2940,7 @@ class RuntimePlannerService:
             )
             prompt = (
                 f"{runtime_scope_instruction}\n"
+                + budget_instruction
                 + (
                     "loaded internal tool blocks: "
                     + ", ".join(sorted(selected_blocks))
@@ -2955,6 +2973,7 @@ class RuntimePlannerService:
                 "绝不能在没真正做完时假装已完成（严禁「做了做了」式的虚假收尾）；"
                 "最终 reply 只能把工具结果直接支持的内容写成事实；推断必须明确标注，证据不足且仍有相关只读工具时继续查证，不能把 package name 或 private 标记当作产品用途证据；"
                 "拿不准时选 reply 并说明你需要什么信息。\n"
+                '失败收尾示例：{"action":"reply","reply":"仍有步骤未验证，原因是…","completion_claim":{"satisfied":false}}；这表示如实失败，不是成功完成。\n'
                 "reply 字段是直接展示给用户的对话内容：用第一人称，回复语言必须跟随用户实际使用的语言——用户用哪种语言提问就用哪种语言回复，用户中途换语言也跟着换；"
                 "自然地说明你理解了什么、打算怎么做（例如「好的，我去看一下 D 盘根目录有什么」，该示例仅演示语气，实际回复语言以用户为准），不要复述 JSON 或工具名。\n\n"
                 f"{shared_schema_block + chr(10) + chr(10) if shared_schema_block else ''}"

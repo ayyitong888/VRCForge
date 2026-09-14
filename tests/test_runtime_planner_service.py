@@ -51,6 +51,23 @@ def test_completion_prompt_separates_success_claim_from_honest_failure_reply() -
     assert "Never claim success while an action is running, pending approval, failed, or unverified." in tail
     assert "Only a successful terminal reply may use" in tail
     assert "An honest failure reply must not claim success" in tail
+    assert '"completion_claim":{"satisfied":false}' in prompt
+
+
+def test_prompt_surfaces_only_runtime_owned_remaining_model_turns() -> None:
+    prompt = service()._build_llm_plan_prompt(
+        "继续诊断",
+        [],
+        observe={
+            "modelTurnBudget": {
+                "maxModelTurns": 2,
+                "modelTurnsUsed": 1,
+                "remainingModelTurns": 1,
+            }
+        },
+    )
+    assert "Runtime-owned model-turn budget: 1 remaining (1 used of 2), including this decision" in prompt
+    assert '"completion_claim":{"satisfied":false}' in prompt
 
 
 def test_unrelated_success_does_not_hide_an_unresolved_tool_failure() -> None:

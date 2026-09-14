@@ -7336,6 +7336,66 @@ class DashboardServerTests(unittest.TestCase):
         self.assertTrue(payload["plan"]["stepLimitReached"])
         self.assertIsNot(payload["plan"].get("completionSatisfied"), True)
 
+    def test_planner_observes_runtime_owned_remaining_model_turn_budget(self) -> None:
+        def run(max_turns: int | None) -> list[dict[str, object]]:
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                gateway = AgentGateway(root / "config.json", root / "audit")
+                gateway.register_tool(
+                    "vrcforge_test_budget_visibility",
+                    "Budget visibility fixture.",
+                    "read/debug",
+                    lambda _params: {"ok": True},
+                )
+                planner = bind_test_runtime_planner(gateway, lambda _prompt: {})
+                gateway.runtime_observe = lambda **_kwargs: {
+                    "modelTurnBudget": {"remainingModelTurns": 99},
+                    "callerField": "preserved",
+                }
+                plans = iter(
+                    [
+                        {
+                            "summary": "run one bounded read",
+                            "reply": "checking",
+                            "planner": "test",
+                            "nextStep": "call_skill",
+                            "skillNeeded": True,
+                            "skillTool": "vrcforge_test_budget_visibility",
+                            "skillParams": {},
+                            "continueLoop": True,
+                        },
+                        {
+                            "summary": "report the read",
+                            "reply": "The read completed.",
+                            "planner": "test",
+                            "nextStep": "done",
+                            "continueLoop": False,
+                        },
+                    ]
+                )
+                observed: list[dict[str, object]] = []
+                def capture(message, params, observe, history, **kwargs):
+                    observed.append(dict(observe))
+                    return next(plans)
+
+                planner.plan_agent_turn = capture
+                request = {
+                    "message": "exercise budget visibility",
+                    "sessionId": "budget-visibility-session",
+                    "clientTurnId": "budget-visibility-client-turn",
+                }
+                if max_turns is not None:
+                    request["maxAgenticTurns"] = max_turns
+                gateway.runtime_message(request)
+                return observed
+
+        bounded = run(2)
+        assert [item["modelTurnBudget"]["remainingModelTurns"] for item in bounded] == [2, 1]
+        assert all(item["callerField"] == "preserved" for item in bounded)
+        unlimited = run(None)
+        assert all("modelTurnBudget" not in item for item in unlimited)
+        assert all(item["callerField"] == "preserved" for item in unlimited)
+
     def test_runtime_steer_replans_before_executing_a_stale_model_action(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
