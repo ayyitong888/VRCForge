@@ -125,6 +125,7 @@ from agent_gateway import (
     PROJECTED_SKILL_STATE_MAX_BYTES,
     PROJECTED_SKILL_STATE_NAME,
     PROJECTED_SKILL_STATE_SCHEMA,
+    EXTERNAL_MCP_TYPED_WRAPPER_CAPABILITIES,
     WRAPPER_ONLY_WRITE_TARGETS,
     UNITY_READ_TOOL_INPUT_SCHEMAS,
     create_agent_mcp_app,
@@ -15583,7 +15584,13 @@ def _build_runtime_profiled_tool_registry() -> ProfiledToolRegistry:
             metadata={"source": "tool"},
         )
     for handler in AGENT_GATEWAY._write_handlers.values():
-        if handler.name in AGENT_GATEWAY._tools or handler.name in WRAPPER_ONLY_WRITE_TARGETS:
+        if handler.name in AGENT_GATEWAY._tools:
+            continue
+        if handler.name in WRAPPER_ONLY_WRITE_TARGETS and not (
+            handler.name == "vrcforge_repair_project_chat_store"
+            and handler.external_mcp_capability
+            == EXTERNAL_MCP_TYPED_WRAPPER_CAPABILITIES["vrcforge_repair_project_chat_store"]
+        ):
             continue
         registry.register(
             handler.name,

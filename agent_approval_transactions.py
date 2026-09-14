@@ -1059,6 +1059,15 @@ class AgentApprovalTransactionService:
         params_summary = self._ports.tool_params_audit(tool_name, params)
         try:
             if tool_name in self._ports.state.write_handlers:
+                # The runtime planner may route the explicitly typed chat-store
+                # repair handler through this supervised path.  Keep the
+                # wrapper-only boundary closed for every other handler.
+                internal_wrapper = (
+                    tool_name == PROJECT_CHAT_CHECKPOINT_TARGET
+                    and external_mcp_typed_wrapper_allowed(
+                        self._ports.state.write_handlers[tool_name]
+                    )
+                )
                 outcome = self.create_apply_request(
                     {
                         "target_tool": tool_name,
@@ -1076,6 +1085,7 @@ class AgentApprovalTransactionService:
                             "paramsSummary": params_summary,
                         },
                     },
+                    internal_wrapper=internal_wrapper,
                     task_context=task_context,
                 )
             else:
