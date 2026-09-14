@@ -150,6 +150,20 @@ def test_direct_tool_allowlist_injection_audit_and_failure_shapes() -> None:
     assert failed["error"] == "boom"
     assert failed_events[-1][1]["status"] == "error"
 
+    denied = FakeTool(
+        name="denied",
+        handler=lambda _params: (_ for _ in ()).throw(
+            PermissionError(r"path is outside every authorized root: C:\logs")
+        ),
+    )
+    denied_executor, _denied_events = make_executor(tools={denied.name: denied})
+    denied_result = denied_executor.execute("denied", {}, "agent")
+    assert denied_result["status"] == "failed"
+    assert denied_result["errorCode"] == "permission_denied"
+    assert denied_result["failureClass"] == "permission_denied"
+    assert denied_result["retryable"] is False
+    assert denied_result["error"] == r"path is outside every authorized root: C:\logs"
+
 
 def test_direct_tool_result_contract_rejects_inner_failure_and_unverified_completion() -> None:
     inner_failure = FakeTool(

@@ -214,6 +214,15 @@ class AgentRuntimeSkillExecutor:
                 "summary": tool.description,
                 "paramsSummary": params_summary,
                 "error": str(exc),
+                **(
+                    {
+                        "errorCode": "permission_denied",
+                        "failureClass": "permission_denied",
+                        "retryable": False,
+                    }
+                    if isinstance(exc, PermissionError)
+                    else {}
+                ),
             }
             payload["cause"] = {
                 "layer": "runtime_skill_executor",
@@ -617,4 +626,13 @@ class AgentRuntimeSkillExecutor:
                 "tool": entrypoint,
                 "category": tool.category,
                 "error": str(exc),
+                **(
+                    {
+                        "errorCode": "permission_denied",
+                        "failureClass": "permission_denied",
+                        "retryable": False,
+                    }
+                    if isinstance(exc, PermissionError)
+                    else {}
+                ),
             }

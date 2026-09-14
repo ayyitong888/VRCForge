@@ -640,6 +640,12 @@ def build_external_tool_error(
 
     exception_details = external_exception_details(exception) if exception is not None else None
     if isinstance(exception_details, dict):
+        # Native authorization failures need a stable machine-readable class
+        # at every transport boundary. Preserve an explicitly supplied code
+        # on richer exceptions, but classify a plain PermissionError here.
+        if isinstance(exception, PermissionError):
+            exception_details.setdefault("errorCode", "permission_denied")
+            exception_details.setdefault("retryable", False)
         # rawResult is preserved once at the canonical object root.
         exception_details.pop("rawResult", None)
         # The transport exception is a traceable source, but an exact

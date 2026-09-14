@@ -220,6 +220,48 @@ def test_exception_canonical_raw_result_is_preserved_once() -> None:
     assert "rawResult" not in error["exception"]
 
 
+def test_native_permission_error_has_stable_non_retryable_code() -> None:
+    exc = PermissionError(
+        r"path is outside every authorized root: C:\ungranted\diagnostic-logs"
+    )
+
+    error = build_external_tool_error(
+        exception=exc,
+        operation_kind="read",
+        tool="list_directory",
+        tool_routing_started=True,
+        mutation_started=False,
+        committed=False,
+    )
+    outcome = normalize_agent_tool_result(
+        {
+            "ok": False,
+            "status": "failed",
+            "error": str(exc),
+            "errorDetails": error,
+        },
+        fallback_summary="List the directory.",
+        write=False,
+    )
+
+    assert error["errorCode"] == "permission_denied"
+    assert error["retryable"] is False
+    assert str(error["error"]) == str(exc)
+    assert outcome["error"]["code"] == "permission_denied"
+    assert outcome["error"]["retryable"] is False
+    assert str(outcome["failureCause"]["message"]) == str(exc)
+
+
+def test_permission_error_keeps_an_explicit_error_code() -> None:
+    exc = PermissionError("provider supplied a more specific denial")
+    exc.error_code = "workspace_policy_denied"
+
+    error = build_external_tool_error(exception=exc, operation_kind="read")
+
+    assert error["errorCode"] == "workspace_policy_denied"
+    assert error["retryable"] is False
+
+
 def test_external_error_exposes_shared_cause_facts_without_dropping_raw_result() -> None:
     raw = {
         "ok": False,
