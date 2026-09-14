@@ -1178,3 +1178,75 @@ EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS['vrcforge_select_project'] = {
     'properties': {key: {'type': 'string', 'description': 'Exact existing Unity project root to select. Existing precedence: projectPath, project_path, projectRoot, project_root.'} for key in ('projectPath', 'project_path', 'projectRoot', 'project_root')},
     'anyOf': [{'required': [key]} for key in ('projectPath', 'project_path', 'projectRoot', 'project_root')],
 }
+
+# Setup Outfit operates on an existing scene object; avatar omission preserves
+# the underlying scanner default. Confirmation is supplied by approved execution.
+_SETUP_OUTFIT_PROPERTIES = {
+    'projectPath': {'type': ['string', 'null'], 'description': 'Optional selected/configured project root; execution still uses its exact bound target.'},
+    'project_path': {'type': ['string', 'null'], 'description': 'Existing alias of projectPath.'},
+    'avatarPath': {'type': ['string', 'null'], 'description': 'Optional avatar hierarchy path; omission preserves the setup tool default.'},
+    'avatar_path': {'type': ['string', 'null'], 'description': 'Existing alias of avatarPath, taking precedence when both are supplied.'},
+    'outfitPath': {'type': 'string', 'description': 'Exact existing outfit hierarchy path to set up.'},
+    'outfit_path': {'type': 'string', 'description': 'Existing alias of outfitPath, taking precedence when both are supplied.'},
+    'saveScene': {'default': True, 'description': 'Save the scene after setup. Uses existing Python bool conversion: a nonempty string (including false) is true; null/zero/empty values are false.'},
+    'save_scene': {'description': 'Existing alias of saveScene, taking precedence when present.'},
+}
+for _poll_name, _poll_default, _poll_description in (
+    ('timeout', 180.0, 'Overall pending-job polling timeout, clamped to 0..3600 seconds; zero returns a pending timeout without further polling.'),
+    ('interval', 1.0, 'Pending-job polling interval, clamped to 0..30 seconds.'),
+    ('request_timeout', None, 'Per-poll request timeout, clamped to 1..60 seconds and converted to an integer. Default is min(configured Unity timeout, 8 seconds).'),
+):
+    _snake_poll = 'setup_outfit_poll_' + _poll_name + '_seconds'
+    _camel_poll = 'setupOutfitPoll' + ''.join(part.title() for part in _poll_name.split('_')) + 'Seconds'
+    _poll_property = {'description': _poll_description + ' Existing float conversion accepts numeric strings; invalid/null values fall back to the default. Used only when the write has a pending job.'}
+    if _poll_default is not None:
+        _poll_property['default'] = _poll_default
+    _SETUP_OUTFIT_PROPERTIES[_camel_poll] = _poll_property
+    _SETUP_OUTFIT_PROPERTIES[_snake_poll] = {**_poll_property, 'description': 'Existing alias of ' + _camel_poll + '. ' + _poll_property['description']}
+EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS['vrcforge_setup_outfit'] = {
+    'type': 'object', 'additionalProperties': True, 'properties': _SETUP_OUTFIT_PROPERTIES,
+    'anyOf': [{'required': ['outfitPath']}, {'required': ['outfit_path']}],
+}
+_ADD_OUTFIT_PROPERTIES = {
+    'projectPath': _SETUP_OUTFIT_PROPERTIES['projectPath'],
+    'project_path': _SETUP_OUTFIT_PROPERTIES['project_path'],
+    'avatarPath': {'type': 'string', 'description': 'Exact existing target avatar hierarchy path.'},
+    'assetPath': {'type': ['string', 'null'], 'description': 'Exact prefab asset path. Supply assetPath or guid or an assetQuery/query.'},
+    'guid': {'type': ['string', 'null'], 'description': 'Exact prefab GUID; used with assetPath when both are supplied.'},
+    'assetQuery': {'type': ['string', 'null'], 'description': 'Prefab search query used only when assetPath and guid are absent. The existing resolver selects the first result; prefer an exact asset identity.'},
+    'typeName': {'type': ['string', 'null'], 'default': 'Prefab', 'description': 'Asset-search type filter used only for query resolution.'},
+    'folder': {'type': ['string', 'null'], 'default': '', 'description': 'Optional asset-search folder used only for query resolution.'},
+    'parentPath': {'type': ['string', 'null'], 'description': 'Existing parent hierarchy path; defaults to avatarPath.'},
+    'outfitName': {'type': ['string', 'null'], 'description': 'New single-segment object name; defaults to prefab name, then Outfit. Existing target objects are rejected.'},
+    'parameterName': {'type': ['string', 'null'], 'description': 'Optional wardrobe selector. Omission starts with Clothes and the existing wardrobe-selection policy; an explicit value selects that exact wardrobe.'},
+    'unpackMode': {'type': ['string', 'null'], 'default': 'outermost', 'description': 'Used only when unpackPrefab is enabled: outermost or completely, compared case-insensitively.'},
+    'offObjectPaths': {'description': 'Optional array of paths, or one scalar path, switched off by the wardrobe entry. Existing values are converted to text and de-duplicated; both spellings are combined.'},
+    'subMenuName': {'type': ['string', 'null'], 'default': 'Wardrobe', 'description': 'Menu group used when manageWardrobe is enabled.'},
+    'clipOutputDir': {'type': ['string', 'null'], 'description': 'Optional wardrobe animation output directory; omission preserves the wardrobe tool default.'},
+}
+for _outfit_flag, _outfit_default in (
+    ('manageWardrobe', True), ('setupOutfit', True), ('unpackPrefab', False),
+    ('worldPositionStays', True), ('saveScene', True), ('addMenuToggle', True),
+    ('setObjectsDefaultOff', True), ('subMenuOverflow', True), ('writeDefaults', True),
+):
+    _ADD_OUTFIT_PROPERTIES[_outfit_flag] = {
+        'default': _outfit_default,
+        'description': 'Optional boolean. Existing conversion accepts numbers and strings true/false, 1/0, yes/no, y/n, on/off; null or unrecognized values use the default. ' + ('Omission preserves the wardrobe tool default; only forwarded when explicitly provided.' if _outfit_flag == 'writeDefaults' else ''),
+    }
+for _outfit_alias, _outfit_canonical in {
+    'avatar_path': 'avatarPath', 'asset_path': 'assetPath', 'query': 'assetQuery', 'asset_query': 'assetQuery',
+    'type_name': 'typeName', 'parent_path': 'parentPath', 'outfit_name': 'outfitName', 'name': 'outfitName',
+    'parameter_name': 'parameterName', 'wardrobe_parameter': 'parameterName', 'wardrobeParameter': 'parameterName',
+    'unpack_mode': 'unpackMode', 'off_object_paths': 'offObjectPaths', 'sub_menu_name': 'subMenuName', 'clip_output_dir': 'clipOutputDir',
+    'manage_wardrobe': 'manageWardrobe', 'setup_outfit': 'setupOutfit', 'unpack_prefab': 'unpackPrefab',
+    'world_position_stays': 'worldPositionStays', 'save_scene': 'saveScene', 'add_menu_toggle': 'addMenuToggle',
+    'set_objects_default_off': 'setObjectsDefaultOff', 'sub_menu_overflow': 'subMenuOverflow', 'write_defaults': 'writeDefaults',
+}.items():
+    _ADD_OUTFIT_PROPERTIES[_outfit_alias] = {**_ADD_OUTFIT_PROPERTIES[_outfit_canonical], 'description': 'Existing alias of ' + _outfit_canonical + '. ' + _ADD_OUTFIT_PROPERTIES[_outfit_canonical].get('description', '')}
+EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS['vrcforge_add_outfit'] = {
+    'type': 'object', 'additionalProperties': True, 'properties': _ADD_OUTFIT_PROPERTIES,
+    'allOf': [
+        {'anyOf': [{'required': ['avatarPath']}, {'required': ['avatar_path']}]},
+        {'anyOf': [{'required': [key]} for key in ('assetPath', 'asset_path', 'guid', 'assetQuery', 'asset_query', 'query')]},
+    ],
+}
