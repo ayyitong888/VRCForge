@@ -82,7 +82,6 @@ namespace VRCForge.Editor
                     throw new SceneObjectCopyException("Unity AssetDatabase refused the create-new scene copy.");
                 }
                 mutationStarted = true;
-                AssetDatabase.SaveAssets();
                 AssetDatabase.ImportAsset(
                     snapshot.DestinationPath,
                     ImportAssetOptions.ForceSynchronousImport | ImportAssetOptions.ForceUpdate);

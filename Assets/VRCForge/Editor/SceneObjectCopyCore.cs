@@ -523,7 +523,6 @@ namespace VRCForge.Editor
                 {
                     return false;
                 }
-                AssetDatabase.SaveAssets();
                 AssetDatabase.Refresh(ImportAssetOptions.ForceSynchronousImport);
                 return !AssetOrMetaExists(assetPath);
             }
@@ -773,7 +772,6 @@ namespace VRCForge.Editor
                 {
                     return false;
                 }
-                AssetDatabase.SaveAssets();
                 AssetDatabase.Refresh(ImportAssetOptions.ForceSynchronousImport);
                 var cleanupResult = !Directory.Exists(ToAbsoluteAssetPath(lease.FolderPath))
                     && !SafeSiblingFileExists(lease.FolderPath, ".meta")

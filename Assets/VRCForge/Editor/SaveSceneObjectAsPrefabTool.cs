@@ -118,7 +118,6 @@ namespace VRCForge.Editor
                 {
                     throw new SceneObjectCopyException("The prefab staging write did not complete.");
                 }
-                AssetDatabase.SaveAssets();
                 AssetDatabase.ImportAsset(
                     staging.PrefabPath,
                     ImportAssetOptions.ForceSynchronousImport | ImportAssetOptions.ForceUpdate);
@@ -161,7 +160,6 @@ namespace VRCForge.Editor
                 {
                     throw new SceneObjectCopyException("The prefab CreateNew move was rejected.");
                 }
-                AssetDatabase.SaveAssets();
 
                 var finalAsset = SceneObjectCopyCore.ReadStableAssetEvidence(
                     snapshot.Target.AssetPath,
@@ -303,7 +301,6 @@ namespace VRCForge.Editor
                 {
                     return false;
                 }
-                AssetDatabase.SaveAssets();
                 AssetDatabase.Refresh(ImportAssetOptions.ForceSynchronousImport);
                 if (SceneObjectCopyCore.AssetOrMetaExists(snapshot.Target.AssetPath))
                 {
