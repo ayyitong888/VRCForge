@@ -1385,7 +1385,22 @@ def run_stdio_server(
                     and len(set(selected_names)) == len(selected_names)
                 )
                 if valid:
-                    manifest = bridge.manifest(requested_layer["value"], ["*"], selected_names)
+                    try:
+                        manifest = bridge.manifest(requested_layer["value"], ["*"], selected_names)
+                    except (ExternalMcpBridgeError, ExternalHttpBridgeError) as exc:
+                        if isinstance(exc, ExternalHttpBridgeError) and exc.status_code != 400:
+                            raise
+                        upstream_error = (exc.raw_result or {}).get("error")
+                        if not isinstance(upstream_error, Mapping) or upstream_error.get("code") != -32602:
+                            raise
+                        return external_rejection(
+                            status="invalid_tool_selection",
+                            error=str(upstream_error.get("message") or exc),
+                            error_code="external_tool_selection_invalid",
+                            failure_layer="external_tool_discovery",
+                            failure_phase="block_selection", operation_kind="discovery",
+                            loadedBlocks=sorted(loaded_blocks),
+                        )
                     available = {str(item.get("name") or "") for item in manifest.get("tools", [])
                                  if isinstance(item, Mapping) and item_owner(item) == block
                                  and str(item.get("name") or "") not in HIDDEN_EXTERNAL_TOOLS}
