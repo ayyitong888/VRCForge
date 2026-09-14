@@ -1520,6 +1520,7 @@ namespace VRCForge.Editor
         private static List<string> PlanMenuAssetPaths(string action, VRCExpressionsMenu root, string menuPath,
             JObject @params, string assetDir, string rootMenuAssetPath)
         {
+            if (action == "create" || action == "update") ValidateControlAssets(@params);
             var reserved = new List<string> { rootMenuAssetPath };
             var current = root;
             foreach (var raw in menuPath.Split(new[] { '/' }, StringSplitOptions.RemoveEmptyEntries))
@@ -1713,7 +1714,12 @@ namespace VRCForge.Editor
 
         private static VRCExpressionsMenu.Control BuildControl(JObject @params, string assetDir, VRCExpressionsMenu.Control existing, Queue<string> plannedMenuPaths)
         {
-            var control = existing ?? new VRCExpressionsMenu.Control();
+            // Preserve SDK fields while constructing a replacement. All edits below replace
+            // fields or arrays; none mutate the original control's referenced objects.
+            var control = existing == null ? new VRCExpressionsMenu.Control()
+                : (VRCExpressionsMenu.Control)typeof(object)
+                    .GetMethod("MemberwiseClone", BindingFlags.Instance | BindingFlags.NonPublic)
+                    .Invoke(existing, null);
             var name = @params["newName"]?.ToString() ?? @params["controlName"]?.ToString();
             if (!string.IsNullOrWhiteSpace(name)) control.name = name.Trim();
             if (@params["controlType"] != null)
@@ -1737,6 +1743,10 @@ namespace VRCForge.Editor
             {
                 control.subMenu = LoadAssetOrNull<VRCExpressionsMenu>(@params["subMenuAssetPath"].ToString());
             }
+            if (@params["subParameters"] is JArray subParameters)
+            {
+                SetSubParameters(control, subParameters.Select(item => item.ToString()).ToArray());
+            }
             if (@params["createSubMenu"]?.Value<bool?>() == true && control.subMenu == null)
             {
                 AvatarPrimitiveCrudCore.EnsureAssetFolder(assetDir);
@@ -1748,11 +1758,15 @@ namespace VRCForge.Editor
                 control.subMenu = sub;
                 control.type = VRCExpressionsMenu.Control.ControlType.SubMenu;
             }
-            if (@params["subParameters"] is JArray subParameters)
-            {
-                SetSubParameters(control, subParameters.Select(item => item.ToString()).ToArray());
-            }
             return control;
+        }
+
+        private static void ValidateControlAssets(JObject @params)
+        {
+            if (@params["iconAssetPath"] != null)
+                LoadAssetOrNull<Texture2D>(@params["iconAssetPath"].ToString());
+            if (@params["subMenuAssetPath"] != null)
+                LoadAssetOrNull<VRCExpressionsMenu>(@params["subMenuAssetPath"].ToString());
         }
 
         private static VRCExpressionsMenu.Control.ControlType ParseControlType(string value)
