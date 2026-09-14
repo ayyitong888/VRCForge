@@ -90,21 +90,24 @@ def scan_project_memory(project_path: str | Path, index_root: str | Path, max_fi
         else:
             unchanged.append(rel_path)
 
-    deleted = sorted(path for path in previous_files if path not in current_files)
+    # An omitted file is not a deletion when this scan stopped at its budget.
+    deleted = [] if truncated else sorted(path for path in previous_files if path not in current_files)
+    index_files = {**previous_files, **current_files} if truncated else current_files
     added.sort()
     modified.sort()
     unchanged.sort()
 
     scanner_families = scanner_families_for_changes(added + modified + deleted)
-    package_fingerprints = build_package_fingerprints(current_files)
-    meta_guid_map = {entry["guid"]: path for path, entry in current_files.items() if entry.get("guid")}
+    package_fingerprints = build_package_fingerprints(index_files)
+    meta_guid_map = {entry["guid"]: path for path, entry in index_files.items() if entry.get("guid")}
     next_index = {
         "schema": INDEX_SCHEMA,
         "projectId": stable_project_id(project_root),
         "projectName": project_root.name,
         "projectRoot": str(project_root),
         "scannedAt": scanned_at,
-        "files": current_files,
+        "files": index_files,
+        "truncated": truncated,
         "metaGuidMap": meta_guid_map,
         "packageFingerprints": package_fingerprints,
         "lastSummaries": ensure_dict(previous.get("lastSummaries")),
@@ -123,6 +126,7 @@ def scan_project_memory(project_path: str | Path, index_root: str | Path, max_fi
         "hashesComputed": hashes_computed,
         "hashesReused": hashes_reused,
         "truncated": truncated,
+        "preservedUnscannedFiles": len(index_files) - len(current_files),
         "changed": bool(added or modified or deleted or guid_changes),
         "scannerFamilies": scanner_families,
     }
