@@ -1642,16 +1642,6 @@ class AgentTaskLoop:
             gated["task"] = self.snapshot(next_step)
             return gated
 
-        completion_claim = gated.get("completionClaim")
-        honest_failure_reply = ""
-        if (
-            isinstance(completion_claim, Mapping)
-            and completion_claim.get("satisfied") is False
-            and isinstance(gated.get("reply"), str)
-            and gated["reply"].strip()
-        ):
-            honest_failure_reply = gated["reply"].strip()
-
         for action in self._actions.values():
             status = _status(action.get("status"))
             if status == "superseded":
@@ -1660,12 +1650,6 @@ class AgentTaskLoop:
             if status in {"failed", "needs_user_action"} and isinstance(outcome, Mapping):
                 replacement = completion_gate_plan(gated, outcome)
                 if replacement is not None:
-                    if honest_failure_reply:
-                        replacement["reply"] = honest_failure_reply
-                        replacement["completionGate"] = {
-                            **dict(replacement.get("completionGate") or {}),
-                            "modelFailureReplyPreserved": True,
-                        }
                     replacement["task"] = self.snapshot()
                     return replacement
 

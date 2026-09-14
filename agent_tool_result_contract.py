@@ -587,10 +587,21 @@ def completion_gate_plan(
     summary = str(outcome.get("summary") or default_summary).strip()
     next_step = "tool_failed" if outcome_status == "failed" else "needs_user_action"
     gated = dict(plan)
+    completion_claim = gated.get("completionClaim")
+    if not isinstance(completion_claim, Mapping):
+        completion_claim = gated.get("completion_claim")
+    honest_failure_reply = (
+        gated["reply"].strip()
+        if isinstance(completion_claim, Mapping)
+        and completion_claim.get("satisfied") is False
+        and isinstance(gated.get("reply"), str)
+        and gated["reply"].strip()
+        else ""
+    )
     gated.update(
         {
             "summary": summary,
-            "reply": summary,
+            "reply": honest_failure_reply or summary,
             "continueLoop": False,
             "nextStep": next_step,
             "completionGate": {
@@ -599,4 +610,6 @@ def completion_gate_plan(
             },
         }
     )
+    if honest_failure_reply:
+        gated["completionGate"]["modelFailureReplyPreserved"] = True
     return gated

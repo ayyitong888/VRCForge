@@ -7396,6 +7396,65 @@ class DashboardServerTests(unittest.TestCase):
         assert all("modelTurnBudget" not in item for item in unlimited)
         assert all(item["callerField"] == "preserved" for item in unlimited)
 
+    def test_gateway_preserves_explicit_failure_reply_after_later_read_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            gateway = AgentGateway(root / "config.json", root / "audit")
+
+            def native_failure(_params):
+                raise RuntimeError("native inspection failed")
+
+            gateway.register_tool("vrcforge_test_native_failure", "Native failure fixture.", "read/debug", native_failure)
+            gateway.register_tool(
+                "vrcforge_test_read_evidence",
+                "Read evidence fixture.",
+                "read/debug",
+                lambda _params: {"logs": "backend startup completed"},
+            )
+            planner = bind_test_runtime_planner(gateway, lambda _prompt: {})
+            plans = iter(
+                [
+                    {
+                        "summary": "try native inspection",
+                        "reply": "inspecting",
+                        "planner": "test",
+                        "nextStep": "call_skill",
+                        "skillNeeded": True,
+                        "skillTool": "vrcforge_test_native_failure",
+                        "skillParams": {},
+                        "continueLoop": True,
+                    },
+                    {
+                        "summary": "read retained logs",
+                        "reply": "reading retained logs",
+                        "planner": "test",
+                        "nextStep": "call_skill",
+                        "skillNeeded": True,
+                        "skillTool": "vrcforge_test_read_evidence",
+                        "skillParams": {},
+                        "continueLoop": True,
+                    },
+                    {
+                        "summary": "report evidence honestly",
+                        "reply": "已读取后续日志：后端实际启动成功，但原生检查失败，无法确认整体完成。",
+                        "planner": "test",
+                        "nextStep": "done",
+                        "completionClaim": {"satisfied": False},
+                        "continueLoop": False,
+                    },
+                ]
+            )
+            planner.plan_agent_turn = lambda *args, **kwargs: next(plans)
+            payload = gateway.runtime_message({
+                "message": "diagnose startup",
+                "sessionId": "failure-reply-gateway-session",
+                "clientTurnId": "failure-reply-gateway-client-turn",
+            })
+
+        assert payload["plan"]["nextStep"] == "tool_failed"
+        assert "后续日志" in payload["plan"]["reply"]
+        assert payload["plan"]["completionGate"]["modelFailureReplyPreserved"] is True
+
     def test_runtime_steer_replans_before_executing_a_stale_model_action(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

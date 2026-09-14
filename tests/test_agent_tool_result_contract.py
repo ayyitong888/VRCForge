@@ -216,6 +216,32 @@ def test_unverified_write_requires_user_action_and_blocks_completion_claim() -> 
     assert "完成了" not in str(gated["reply"])
 
 
+def test_completion_gate_preserves_explicit_honest_failure_reply() -> None:
+    gated = completion_gate_plan(
+        {
+            "summary": "done",
+            "reply": "已读取日志，但仍有一步失败，不能确认整体完成。",
+            "nextStep": "done",
+            "completionClaim": {"satisfied": False},
+        },
+        {"status": "failed", "summary": "原始读取动作失败。"},
+    )
+    assert gated is not None
+    assert gated["nextStep"] == "tool_failed"
+    assert gated["reply"].startswith("已读取日志")
+    assert gated["completionGate"]["modelFailureReplyPreserved"] is True
+
+
+def test_completion_gate_does_not_preserve_reply_without_explicit_false_claim() -> None:
+    gated = completion_gate_plan(
+        {"reply": "看起来完成了。", "completionClaim": {"satisfied": True}},
+        {"status": "failed", "summary": "读取失败。"},
+    )
+    assert gated is not None
+    assert gated["reply"] == "读取失败。"
+    assert "modelFailureReplyPreserved" not in gated["completionGate"]
+
+
 def test_verified_or_read_only_results_stay_lightweight() -> None:
     verified = normalize_agent_tool_result(
         {"ok": True, "summary": "Applied and verified.", "readbackVerified": True},
