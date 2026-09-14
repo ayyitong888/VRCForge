@@ -298,27 +298,57 @@ namespace VRCForge.Editor
                     name = layer.name ?? "",
                     defaultStateName = layer.stateMachine.defaultState != null ? layer.stateMachine.defaultState.name : "",
                     states = new List<FxState>(),
-                    anyStateEquals = new List<AnyStateEquals>()
+                    anyStateEquals = new List<AnyStateEquals>(),
+                    stateEquals = new List<AnyStateEquals>()
                 };
 
-                CollectStates(layer.stateMachine, info.states);
-                CollectAnyStateEquals(layer.stateMachine, info.anyStateEquals);
+                CollectStates(layer.stateMachine, info.states, "root");
+                CollectAnyStateEquals(layer.stateMachine, info.anyStateEquals, "root");
+                CollectStateEquals(layer.stateMachine, info.stateEquals, "root");
                 layers.Add(info);
             }
 
             return layers;
         }
 
-        private static void CollectStates(AnimatorStateMachine machine, List<FxState> sink)
+        private static string BuildStatePath(string machinePath, int index, string stateName)
+        {
+            return machinePath + "/state[" + index + "]/" + (stateName ?? "");
+        }
+
+        private static string BuildMachinePath(string parentPath, int index, string machineName)
+        {
+            return parentPath + "/machine[" + index + "]/" + (machineName ?? "");
+        }
+
+        private static string FindStatePath(AnimatorStateMachine machine, string machinePath, AnimatorState target)
+        {
+            if (machine == null || target == null)
+            {
+                return "";
+            }
+            var states = machine.states ?? Array.Empty<ChildAnimatorState>();
+            for (var index = 0; index < states.Length; index++)
+            {
+                if (states[index].state == target)
+                {
+                    return BuildStatePath(machinePath, index, target.name);
+                }
+            }
+            return "";
+        }
+
+        private static void CollectStates(AnimatorStateMachine machine, List<FxState> sink, string machinePath)
         {
             if (machine == null)
             {
                 return;
             }
 
-            foreach (var child in machine.states)
+            var states = machine.states ?? Array.Empty<ChildAnimatorState>();
+            for (var index = 0; index < states.Length; index++)
             {
-                var state = child.state;
+                var state = states[index].state;
                 if (state == null)
                 {
                     continue;
@@ -333,6 +363,7 @@ namespace VRCForge.Editor
                 sink.Add(new FxState
                 {
                     name = state.name ?? "",
+                    statePath = BuildStatePath(machinePath, index, state.name),
                     motionName = state.motion != null ? state.motion.name : "",
                     clipPath = clipPath,
                     writeDefaults = state.writeDefaultValues,
@@ -341,13 +372,23 @@ namespace VRCForge.Editor
                 });
             }
 
-            foreach (var sub in machine.stateMachines)
+            var subMachines = machine.stateMachines ?? Array.Empty<ChildAnimatorStateMachine>();
+            for (var index = 0; index < subMachines.Length; index++)
             {
-                CollectStates(sub.stateMachine, sink);
+                var sub = subMachines[index];
+                CollectStates(sub.stateMachine, sink, BuildMachinePath(machinePath, index, sub.stateMachine != null ? sub.stateMachine.name : ""));
             }
         }
 
-        private static void CollectAnyStateEquals(AnimatorStateMachine machine, List<AnyStateEquals> sink)
+        private static List<string> ConditionParameters(AnimatorCondition[] conditions)
+        {
+            return (conditions ?? Array.Empty<AnimatorCondition>())
+                .Select(condition => condition.parameter ?? "")
+                .Distinct(StringComparer.Ordinal)
+                .ToList();
+        }
+
+        private static void CollectAnyStateEquals(AnimatorStateMachine machine, List<AnyStateEquals> sink, string machinePath)
         {
             if (machine == null)
             {
@@ -361,7 +402,9 @@ namespace VRCForge.Editor
                     continue;
                 }
 
-                foreach (var condition in transition.conditions)
+                var conditions = transition.conditions;
+                var conditionParameters = ConditionParameters(conditions);
+                foreach (var condition in conditions)
                 {
                     if (condition.mode != AnimatorConditionMode.Equals)
                     {
@@ -370,15 +413,77 @@ namespace VRCForge.Editor
                     sink.Add(new AnyStateEquals
                     {
                         stateName = transition.destinationState.name ?? "",
+                        destinationStatePath = FindStatePath(machine, machinePath, transition.destinationState),
                         parameter = condition.parameter ?? "",
-                        value = Mathf.RoundToInt(condition.threshold)
+                        value = Mathf.RoundToInt(condition.threshold),
+                        sourceStateName = "AnyState",
+                        transitionType = "any_state",
+                        conditionCount = conditions.Length,
+                        conditionParameters = conditionParameters
                     });
                 }
             }
 
-            foreach (var sub in machine.stateMachines)
+            var subMachines = machine.stateMachines ?? Array.Empty<ChildAnimatorStateMachine>();
+            for (var index = 0; index < subMachines.Length; index++)
             {
-                CollectAnyStateEquals(sub.stateMachine, sink);
+                var sub = subMachines[index];
+                CollectAnyStateEquals(sub.stateMachine, sink, BuildMachinePath(machinePath, index, sub.stateMachine != null ? sub.stateMachine.name : ""));
+            }
+        }
+
+        private static void CollectStateEquals(AnimatorStateMachine machine, List<AnyStateEquals> sink, string machinePath)
+        {
+            if (machine == null)
+            {
+                return;
+            }
+
+            var states = machine.states ?? Array.Empty<ChildAnimatorState>();
+            for (var index = 0; index < states.Length; index++)
+            {
+                var source = states[index].state;
+                if (source == null)
+                {
+                    continue;
+                }
+
+                foreach (var transition in source.transitions ?? Array.Empty<AnimatorStateTransition>())
+                {
+                    if (transition == null || transition.destinationState == null || transition.conditions == null)
+                    {
+                        continue;
+                    }
+
+                    var conditions = transition.conditions;
+                    var conditionParameters = ConditionParameters(conditions);
+                    foreach (var condition in conditions)
+                    {
+                        if (condition.mode != AnimatorConditionMode.Equals)
+                        {
+                            continue;
+                        }
+                        sink.Add(new AnyStateEquals
+                        {
+                            stateName = transition.destinationState.name ?? "",
+                            destinationStatePath = FindStatePath(machine, machinePath, transition.destinationState),
+                            sourceStatePath = BuildStatePath(machinePath, index, source.name),
+                            parameter = condition.parameter ?? "",
+                            value = Mathf.RoundToInt(condition.threshold),
+                            sourceStateName = source.name ?? "",
+                            transitionType = "state",
+                            conditionCount = conditions.Length,
+                            conditionParameters = conditionParameters
+                        });
+                    }
+                }
+            }
+
+            var subMachines = machine.stateMachines ?? Array.Empty<ChildAnimatorStateMachine>();
+            for (var index = 0; index < subMachines.Length; index++)
+            {
+                var sub = subMachines[index];
+                CollectStateEquals(sub.stateMachine, sink, BuildMachinePath(machinePath, index, sub.stateMachine != null ? sub.stateMachine.name : ""));
             }
         }
 
@@ -432,7 +537,8 @@ namespace VRCForge.Editor
                     .ToList();
 
                 var layer = fxLayers.FirstOrDefault(item =>
-                    item.anyStateEquals.Any(equals => string.Equals(equals.parameter, param.name, StringComparison.Ordinal)));
+                    item.anyStateEquals.Concat(item.stateEquals)
+                        .Any(equals => string.Equals(equals.parameter, param.name, StringComparison.Ordinal)));
 
                 var hasToggles = togglesForParam.Count > 0;
                 var hasFxLayer = layer != null;
@@ -442,11 +548,14 @@ namespace VRCForge.Editor
                 }
 
                 var equalsForParam = layer != null
-                    ? layer.anyStateEquals.Where(equals => string.Equals(equals.parameter, param.name, StringComparison.Ordinal)).ToList()
+                    ? layer.anyStateEquals.Concat(layer.stateEquals)
+                        .Where(equals => string.Equals(equals.parameter, param.name, StringComparison.Ordinal)).ToList()
                     : new List<AnyStateEquals>();
 
-                var stateByName = layer != null
-                    ? layer.states.GroupBy(state => state.name).ToDictionary(group => group.Key, group => group.First())
+                var stateByPath = layer != null
+                    ? layer.states
+                        .Where(state => state != null && !string.IsNullOrWhiteSpace(state.statePath))
+                        .ToDictionary(state => state.statePath, state => state)
                     : new Dictionary<string, FxState>();
 
                 var values = new SortedSet<int>();
@@ -463,12 +572,43 @@ namespace VRCForge.Editor
                 foreach (var value in values)
                 {
                     var toggle = togglesForParam.FirstOrDefault(item => item.value == value);
-                    var equals = equalsForParam.FirstOrDefault(item => item.value == value);
-                    FxState state = null;
-                    if (equals != null && stateByName.ContainsKey(equals.stateName))
+                    var equalsForValue = equalsForParam.Where(item => item.value == value).ToList();
+                    var destinationPaths = equalsForValue
+                        .Select(item => item.destinationStatePath ?? "")
+                        .Distinct(StringComparer.Ordinal)
+                        .ToList();
+                    var resolvedDestinationPaths = destinationPaths
+                        .Where(path => !string.IsNullOrWhiteSpace(path) && stateByPath.ContainsKey(path))
+                        .ToList();
+                    var hasUnresolvedDestination = equalsForValue.Any(item =>
+                        string.IsNullOrWhiteSpace(item.destinationStatePath)
+                        || !stateByPath.ContainsKey(item.destinationStatePath));
+                    var hasAmbiguousDestination = resolvedDestinationPaths.Count > 1 || hasUnresolvedDestination;
+                    var equals = resolvedDestinationPaths.Count == 1 && !hasUnresolvedDestination
+                        ? equalsForValue.FirstOrDefault(item => item.destinationStatePath == resolvedDestinationPaths[0])
+                        : null;
+                    FxState state = equals != null ? stateByPath[equals.destinationStatePath] : null;
+                    var fxCandidates = equalsForValue.Select(item =>
                     {
-                        state = stateByName[equals.stateName];
-                    }
+                        FxState candidateState = null;
+                        if (!string.IsNullOrWhiteSpace(item.destinationStatePath)
+                            && stateByPath.ContainsKey(item.destinationStatePath))
+                        {
+                            candidateState = stateByPath[item.destinationStatePath];
+                        }
+                        return new
+                        {
+                            fxStateName = candidateState?.name ?? item.stateName,
+                            fxStatePath = item.destinationStatePath ?? "",
+                            fxTransitionType = item.transitionType ?? "",
+                            fxSourceStateName = item.sourceStateName ?? "",
+                            clipPath = candidateState?.clipPath ?? "",
+                            inFx = true,
+                            destinationResolved = candidateState != null,
+                            conditionCount = item.conditionCount,
+                            conditionParameters = item.conditionParameters ?? new List<string>()
+                        };
+                    }).ToList();
 
                     var onObjects = state != null ? state.onObjects : new List<string>();
                     var offObjects = state != null ? state.offObjects : new List<string>();
@@ -480,7 +620,11 @@ namespace VRCForge.Editor
                         menuPath = toggle?.menuPath ?? "",
                         inMenu = toggle != null,
                         fxStateName = state?.name ?? (equals?.stateName ?? ""),
-                        inFx = equals != null,
+                        fxStatePath = state?.statePath ?? (equals?.destinationStatePath ?? ""),
+                        fxTransitionType = equals?.transitionType ?? "",
+                        fxSourceStateName = equals?.sourceStateName ?? "",
+                        inFx = equalsForValue.Count > 0,
+                        fxCandidates,
                         clipPath = state?.clipPath ?? "",
                         writeDefaults = state?.writeDefaults ?? false,
                         onObjects,
@@ -490,7 +634,7 @@ namespace VRCForge.Editor
                 }
 
                 var wdStates = (layer?.states ?? new List<FxState>())
-                    .Where(state => equalsForParam.Any(equals => equals.stateName == state.name))
+                    .Where(state => equalsForParam.Any(equals => equals.destinationStatePath == state.statePath))
                     .ToList();
                 var writeDefaultsAllOn = wdStates.Count > 0 && wdStates.All(state => state.writeDefaults);
                 var writeDefaultsConsistent = wdStates.Count == 0 || wdStates.All(state => state.writeDefaults == wdStates[0].writeDefaults);
@@ -521,10 +665,41 @@ namespace VRCForge.Editor
                     confidence += 0.4f;
                     signals.Add("multiple menu toggles share this int with distinct values");
                 }
+                var anyStateEqualsForParam = equalsForParam
+                    .Where(equals => equals.transitionType == "any_state")
+                    .ToList();
+                var ordinaryEqualsForParam = equalsForParam
+                    .Where(equals => equals.transitionType == "state")
+                    .ToList();
+                var hasAdditionalConditions = equalsForParam.Any(equals => equals.conditionCount > 1);
+                var ambiguousDestinationValues = equalsForParam
+                    .GroupBy(equals => equals.value)
+                    .Where(group => group.Select(equals => equals.destinationStatePath ?? "")
+                        .Distinct(StringComparer.Ordinal).Count() > 1
+                        || group.Any(equals => string.IsNullOrWhiteSpace(equals.destinationStatePath)
+                            || !stateByPath.ContainsKey(equals.destinationStatePath)))
+                    .Select(group => group.Key)
+                    .OrderBy(value => value)
+                    .ToList();
+                var hasAmbiguousDestinations = ambiguousDestinationValues.Count > 0;
                 if (equalsForParam.Count >= 2)
                 {
                     confidence += 0.4f;
-                    signals.Add("FX layer has multiple Any-State Equals transitions on this int");
+                    signals.Add(anyStateEqualsForParam.Count > 0
+                        ? "FX layer has multiple Equals transitions on this int"
+                        : "FX layer has multiple ordinary-state Equals transitions on this int");
+                }
+                if (ordinaryEqualsForParam.Count > 0)
+                {
+                    signals.Add("FX includes ordinary state transitions for this int");
+                }
+                if (hasAdditionalConditions)
+                {
+                    signals.Add("some FX transitions have additional AND conditions; exact context requires analysis");
+                }
+                if (hasAmbiguousDestinations)
+                {
+                    signals.Add("same value has multiple or unresolved FX destinations; all candidates require analysis");
                 }
                 if (hasToggles && hasFxLayer)
                 {
@@ -540,6 +715,12 @@ namespace VRCForge.Editor
                 var animatorEvidence = new
                 {
                     fxTransitionCount = equalsForParam.Count,
+                    anyStateTransitionCount = anyStateEqualsForParam.Count,
+                    ordinaryTransitionCount = ordinaryEqualsForParam.Count,
+                    hasAdditionalConditions,
+                    hasAmbiguousDestinations,
+                    analysisRequired = hasAdditionalConditions || hasAmbiguousDestinations,
+                    ambiguousDestinationValues,
                     fxStateCount = wdStates.Count,
                     clipWithOnObjectCount,
                     clipWithOffObjectCount,
@@ -580,9 +761,17 @@ namespace VRCForge.Editor
                 {
                     rejectionReasons.Add("missing menu toggle bound to this int parameter");
                 }
-                if (!hasFxLayer)
+                if (equalsForParam.Count == 0)
                 {
                     rejectionReasons.Add("missing FX Any-State Equals binding for this int parameter");
+                }
+                if (hasAdditionalConditions)
+                {
+                    rejectionReasons.Add("FX Equals transitions include additional AND conditions; strict wardrobe closure is unsafe");
+                }
+                if (hasAmbiguousDestinations)
+                {
+                    rejectionReasons.Add("same value has multiple or unresolved FX destinations; strict wardrobe closure is unsafe");
                 }
                 if (values.Count < 2)
                 {
@@ -601,6 +790,8 @@ namespace VRCForge.Editor
                     && hasFxLayer
                     && values.Count >= 2
                     && hasSelectableOutfitObject
+                    && !hasAdditionalConditions
+                    && !hasAmbiguousDestinations
                     && !allNamedTogglesLookDisableOnly;
                 var isPossibleWardrobeCandidate = hasFxLayer
                     && values.Count >= 2
@@ -792,11 +983,13 @@ namespace VRCForge.Editor
             public string defaultStateName;
             public List<FxState> states;
             public List<AnyStateEquals> anyStateEquals;
+            public List<AnyStateEquals> stateEquals;
         }
 
         private class FxState
         {
             public string name;
+            public string statePath;
             public string motionName;
             public string clipPath;
             public bool writeDefaults;
@@ -807,8 +1000,14 @@ namespace VRCForge.Editor
         private class AnyStateEquals
         {
             public string stateName;
+            public string destinationStatePath;
             public string parameter;
             public int value;
+            public string sourceStateName;
+            public string sourceStatePath;
+            public string transitionType;
+            public int conditionCount;
+            public List<string> conditionParameters;
         }
     }
 }
