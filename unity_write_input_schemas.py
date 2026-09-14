@@ -35,6 +35,43 @@ MANAGE_FX_ANIMATOR_PUBLIC_INPUT_SCHEMA["properties"]["sourceStateName"] = {
 
 
 EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
+    # Preserve existing handler aliases while publishing canonical arguments.
+    # Required argument checks remain in the handlers for both naming styles.
+    "vrcforge_add_component": {
+        "type": "object", "additionalProperties": True,
+        "properties": {
+            "projectPath": _PROJECT_PATH_PROPERTY,
+            "gameObjectPath": {"type": "string", "description": "Exact scene GameObject hierarchy path."},
+            "componentType": {"type": "string", "description": "Exact Unity component type to add."},
+            "preview": {"type": "boolean", "default": False},
+        },
+    },
+    "vrcforge_rename_gameobject": {
+        "type": "object", "additionalProperties": True,
+        "properties": {
+            "projectPath": _PROJECT_PATH_PROPERTY,
+            "gameObjectPath": {"type": "string", "description": "Exact current scene GameObject hierarchy path."},
+            "newName": {"type": "string", "description": "New object name, not a hierarchy path."},
+            "preview": {"type": "boolean", "default": False},
+        },
+    },
+    "vrcforge_toggle_scene_object": {
+        "type": "object", "additionalProperties": True,
+        "properties": {
+            "projectPath": _PROJECT_PATH_PROPERTY,
+            "objectPath": {"type": "string", "description": "Exact scene object hierarchy path."},
+            "active": {"type": "boolean", "description": "Desired active state; send a JSON boolean."},
+        },
+    },
+    "vrcforge_unpack_prefab": {
+        "type": "object", "additionalProperties": True,
+        "properties": {
+            "projectPath": _PROJECT_PATH_PROPERTY,
+            "gameObjectPath": {"type": "string", "description": "Exact prefab instance hierarchy path."},
+            "mode": {"type": "string", "default": "outermost", "description": "Prefab unpack mode accepted by the installed Core."},
+            "preview": {"type": "boolean", "default": False},
+        },
+    },
     "vrcforge_repair_project_chat_store": {
         "type": "object",
         "additionalProperties": False,
