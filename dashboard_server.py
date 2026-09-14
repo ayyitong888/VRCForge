@@ -20187,6 +20187,26 @@ def prepare_authoritative_unity_checkpoint_sync(
             return {**prepared, "ok": False, "error": "Unity did not capture the exact approved material asset baseline."}
         return {**prepared, "assetBaselineRequired": True, "canonicalRevalidated": True,
                 "mode": "read_only_authoritative_revalidation", "toolName": nested_tool}
+    if checkpoint_target == "vrcforge_set_renderer_material_slot" and nested_tool == RENDERER_MATERIAL_SLOT_TOOL:
+        request = ensure_dict(refreshed_arguments.get("arguments"))
+        if "assignments" in request:
+            scene = ensure_dict(ensure_dict(request.get("expectedBatchPlan")).get("scene"))
+            scene_path = scene.get("scenePath")
+        else:
+            scene_path = request.get("expectedScenePath")
+        # The fresh canonical preview above validates one saved scene, its seal,
+        # and the exact renderer changes. This tool only saves that scene.
+        exact_scene = (
+            isinstance(scene_path, str) and scene_path.startswith("Assets/")
+            and scene_path.lower().endswith(".unity") and "\\" not in scene_path
+            and all(part not in {"", ".", ".."} for part in scene_path.split("/"))
+        )
+        return {
+            "ok": True, "projectPath": str(project_root), "toolName": nested_tool,
+            "mode": "read_only_authoritative_revalidation", "canonicalRevalidated": True,
+            **({"archiveAssetPaths": [scene_path]} if exact_scene else {}),
+            "archiveScopeReason": "revalidated_renderer_saved_scene_only" if exact_scene else "full_project_renderer_scene_scope_not_proven",
+        }
     return {
         "ok": True,
         "projectPath": str(project_root),

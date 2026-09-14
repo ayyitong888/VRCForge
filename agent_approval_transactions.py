@@ -2554,11 +2554,11 @@ class AgentApprovalTransactionService:
                 )
                 self._ports.checkpoint.append_checkpoint(record)
                 return record
-            if target_tool == "vrcforge_manage_expression_menu":
+            if target_tool in {"vrcforge_manage_expression_menu", "vrcforge_set_renderer_material_slot"}:
                 # Never accept an archive scope directly from caller arguments.
                 archive_files = prepare_result.get("archiveAssetPaths")
                 record["archiveScopeReason"] = prepare_result.get(
-                    "archiveScopeReason", "full_project_menu_scope_not_proven"
+                    "archiveScopeReason", "full_project_prepared_scope_not_proven"
                 )
         elif self._checkpoint_prepare_handler is not None:
             try:
@@ -2601,7 +2601,7 @@ class AgentApprovalTransactionService:
             for path in archive_files
         ):
             record["archiveFiles"] = archive_files
-        elif target_tool == "vrcforge_manage_expression_menu" and archive_files is not None:
+        elif target_tool in {"vrcforge_manage_expression_menu", "vrcforge_set_renderer_material_slot"} and archive_files is not None:
             record["archiveScopeReason"] = "full_project_prepared_asset_scope_invalid"
 
         git_root_result = self._ports.run_git(project_root, ["rev-parse", "--show-toplevel"])
