@@ -20066,6 +20066,42 @@ def prepare_authoritative_unity_checkpoint_sync(
 ) -> dict[str, Any]:
     arguments = dict(arguments)
     checkpoint_target = arguments.pop("_checkpointTargetTool", "")
+    if checkpoint_target in {"vrcforge_add_component", "vrcforge_remove_component"}:
+        # Only this native component's scene-only mutation is established here.
+        # Arbitrary component callbacks can write assets and retain full archives.
+        calls = build_scene_execution_plan(checkpoint_target, arguments)
+        request = calls[0][1] if len(calls) == 1 else {}
+        target = ensure_dict(arguments.get("executionTarget"))
+        obj = ensure_dict(target.get("object"))
+        component = ensure_dict(target.get("component"))
+        scene_path = ensure_dict(target.get("scene")).get("assetPath")
+        proven = (
+            request.get("componentType") == "UnityEngine.CanvasGroup"
+            and target.get("scope") in {"object", "component"}
+            and obj.get("globalObjectId")
+            and request.get("gameObjectPath") == obj.get("exactHierarchyPath")
+            and Path(str(ensure_dict(target.get("project")).get("root") or "")).resolve() == project_root.resolve()
+            and isinstance(scene_path, str) and scene_path.startswith("Assets/")
+            and scene_path.lower().endswith(".unity") and "\\" not in scene_path
+            and all(part not in {"", ".", ".."} for part in scene_path.split("/"))
+            and (checkpoint_target != "vrcforge_remove_component" or (
+                target.get("scope") == "component" and component.get("globalObjectId")
+                and component.get("type") == "UnityEngine.CanvasGroup"))
+        )
+        if not proven:
+            return prepare_unity_checkpoint_sync(project_root)
+        query = {"projectPath": str(project_root), "scope": target["scope"],
+                 "objectGlobalObjectId": obj["globalObjectId"]}
+        if ensure_dict(target.get("avatar")).get("globalObjectId"):
+            query["avatarGlobalObjectId"] = target["avatar"]["globalObjectId"]
+        if target["scope"] == "component":
+            query["componentGlobalObjectId"] = component.get("globalObjectId")
+        live = list_execution_targets_sync(query)
+        if live.get("ok") is not True or live.get("targets") != [target]:
+            return {"ok": False, "error": "The approved component scene identity changed before checkpointing."}
+        return {"ok": True, "projectPath": str(project_root),
+                "mode": "read_only_authoritative_revalidation", "canonicalRevalidated": True,
+                "archiveAssetPaths": [scene_path], "archiveScopeReason": "revalidated_native_component_scene_only"}
     if checkpoint_target == "vrcforge_manage_expression_menu":
         preview = manage_expression_menu_sync(arguments, preview=True)
         plan = ensure_dict(preview.get("plan"))
