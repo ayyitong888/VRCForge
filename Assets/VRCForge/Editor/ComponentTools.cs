@@ -91,12 +91,23 @@ namespace VRCForge.Editor
             {
                 var layerStates = new List<StateItem>();
                 var layerTransitions = new List<TransitionItem>();
+                var layerStateMachines = new List<StateMachineItem>();
+                var layerEntryTransitions = new List<TransitionItem>();
+                var layerMachineTransitions = new List<TransitionItem>();
+                var statePaths = new Dictionary<AnimatorState, string>();
+                var machinePaths = new Dictionary<AnimatorStateMachine, string>();
+                BuildStatePathIndex(layer.stateMachine, "", statePaths, machinePaths);
                 ScanStateMachine(
                     layer.stateMachine,
                     layer.name,
                     "",
                     layerStates,
                     layerTransitions,
+                    layerStateMachines,
+                    layerEntryTransitions,
+                    layerMachineTransitions,
+                    statePaths,
+                    machinePaths,
                     clipMap,
                     usedParameters);
 
@@ -109,7 +120,10 @@ namespace VRCForge.Editor
                     state_count = layerStates.Count,
                     transition_count = layerTransitions.Count,
                     states = layerStates,
-                    transitions = layerTransitions
+                    transitions = layerTransitions,
+                    state_machines = layerStateMachines,
+                    entry_transitions = layerEntryTransitions,
+                    machine_transitions = layerMachineTransitions
                 });
 
                 allTransitions.AddRange(layerTransitions);
@@ -164,6 +178,11 @@ namespace VRCForge.Editor
             string pathPrefix,
             List<StateItem> states,
             List<TransitionItem> transitions,
+            List<StateMachineItem> stateMachines,
+            List<TransitionItem> entryTransitions,
+            List<TransitionItem> machineTransitions,
+            Dictionary<AnimatorState, string> statePaths,
+            Dictionary<AnimatorStateMachine, string> machinePaths,
             Dictionary<string, ClipItem> clipMap,
             HashSet<string> usedParameters)
         {
@@ -225,13 +244,32 @@ namespace VRCForge.Editor
 
                 foreach (var transition in state.transitions ?? Array.Empty<AnimatorStateTransition>())
                 {
-                    transitions.Add(BuildTransitionItem(layerName, statePath, transition, usedParameters));
+                    transitions.Add(BuildTransitionItem(
+                        layerName, statePath, pathPrefix, transition, "state", statePaths, machinePaths, usedParameters));
                 }
+            }
+
+            var defaultStatePath = stateMachine.defaultState != null && statePaths.ContainsKey(stateMachine.defaultState)
+                ? statePaths[stateMachine.defaultState]
+                : "";
+            stateMachines.Add(new StateMachineItem
+            {
+                name = stateMachine.name,
+                state_machine_path = pathPrefix,
+                default_state = stateMachine.defaultState != null ? stateMachine.defaultState.name : "",
+                default_state_path = defaultStatePath
+            });
+
+            foreach (var transition in stateMachine.entryTransitions ?? Array.Empty<AnimatorTransition>())
+            {
+                entryTransitions.Add(BuildTransitionItem(
+                    layerName, "Entry", pathPrefix, transition, "entry", statePaths, machinePaths, usedParameters));
             }
 
             foreach (var transition in stateMachine.anyStateTransitions ?? Array.Empty<AnimatorStateTransition>())
             {
-                transitions.Add(BuildTransitionItem(layerName, "AnyState", transition, usedParameters));
+                transitions.Add(BuildTransitionItem(
+                    layerName, "AnyState", pathPrefix, transition, "any_state", statePaths, machinePaths, usedParameters));
             }
 
             foreach (var childMachine in stateMachine.stateMachines)
@@ -239,17 +277,77 @@ namespace VRCForge.Editor
                 var childPath = string.IsNullOrWhiteSpace(pathPrefix)
                     ? childMachine.stateMachine.name
                     : $"{pathPrefix}/{childMachine.stateMachine.name}";
-                ScanStateMachine(childMachine.stateMachine, layerName, childPath, states, transitions, clipMap, usedParameters);
+                foreach (var transition in stateMachine.GetStateMachineTransitions(childMachine.stateMachine) ?? Array.Empty<AnimatorTransition>())
+                {
+                    machineTransitions.Add(BuildTransitionItem(
+                        layerName,
+                        childMachine.stateMachine.name,
+                        childPath,
+                        transition,
+                        "state_machine",
+                        statePaths,
+                        machinePaths,
+                        usedParameters));
+                }
+                ScanStateMachine(
+                    childMachine.stateMachine,
+                    layerName,
+                    childPath,
+                    states,
+                    transitions,
+                    stateMachines,
+                    entryTransitions,
+                    machineTransitions,
+                    statePaths,
+                    machinePaths,
+                    clipMap,
+                    usedParameters);
+            }
+        }
+
+        private static void BuildStatePathIndex(
+            AnimatorStateMachine stateMachine,
+            string pathPrefix,
+            Dictionary<AnimatorState, string> statePaths,
+            Dictionary<AnimatorStateMachine, string> machinePaths)
+        {
+            if (stateMachine == null)
+            {
+                return;
+            }
+
+            machinePaths[stateMachine] = pathPrefix;
+            foreach (var childState in stateMachine.states)
+            {
+                if (childState.state == null)
+                {
+                    continue;
+                }
+                statePaths[childState.state] = string.IsNullOrWhiteSpace(pathPrefix)
+                    ? childState.state.name
+                    : $"{pathPrefix}/{childState.state.name}";
+            }
+            foreach (var childMachine in stateMachine.stateMachines)
+            {
+                var childPath = string.IsNullOrWhiteSpace(pathPrefix)
+                    ? childMachine.stateMachine.name
+                    : $"{pathPrefix}/{childMachine.stateMachine.name}";
+                BuildStatePathIndex(childMachine.stateMachine, childPath, statePaths, machinePaths);
             }
         }
 
         private static TransitionItem BuildTransitionItem(
             string layerName,
             string fromState,
-            AnimatorStateTransition transition,
+            string fromMachinePath,
+            AnimatorTransitionBase transition,
+            string transitionKind,
+            Dictionary<AnimatorState, string> statePaths,
+            Dictionary<AnimatorStateMachine, string> machinePaths,
             HashSet<string> usedParameters)
         {
             var conditions = new List<ConditionItem>();
+            var stateTransition = transition as AnimatorStateTransition;
             foreach (var condition in transition.conditions ?? Array.Empty<AnimatorCondition>())
             {
                 if (!string.IsNullOrWhiteSpace(condition.parameter))
@@ -271,12 +369,26 @@ namespace VRCForge.Editor
                 from_state = fromState,
                 to_state = transition.destinationState != null ? transition.destinationState.name : "",
                 to_state_machine = transition.destinationStateMachine != null ? transition.destinationStateMachine.name : "",
-                has_exit_time = transition.hasExitTime,
-                exit_time = transition.exitTime,
-                duration = transition.duration,
-                can_transition_to_self = transition.canTransitionToSelf,
-                interruption_source = FormatInterruptionSource(transition.interruptionSource),
-                ordered_interruption = transition.orderedInterruption,
+                from_state_path = fromState,
+                from_state_machine_path = fromMachinePath,
+                to_state_path = transition.destinationState != null && statePaths.ContainsKey(transition.destinationState)
+                    ? statePaths[transition.destinationState]
+                    : "",
+                to_state_machine_path = transition.destinationStateMachine != null && machinePaths.ContainsKey(transition.destinationStateMachine)
+                    ? machinePaths[transition.destinationStateMachine]
+                    : "",
+                transition_kind = transitionKind,
+                is_exit = transition.isExit,
+                mute = transition.mute,
+                solo = transition.solo,
+                has_exit_time = stateTransition != null && stateTransition.hasExitTime,
+                exit_time = stateTransition != null ? stateTransition.exitTime : 0f,
+                duration = stateTransition != null ? stateTransition.duration : 0f,
+                can_transition_to_self = stateTransition != null && stateTransition.canTransitionToSelf,
+                interruption_source = stateTransition != null
+                    ? FormatInterruptionSource(stateTransition.interruptionSource)
+                    : "None",
+                ordered_interruption = stateTransition != null && stateTransition.orderedInterruption,
                 conditions = conditions
             };
         }
@@ -616,6 +728,18 @@ namespace VRCForge.Editor
             public int transition_count;
             public List<StateItem> states;
             public List<TransitionItem> transitions;
+            public List<StateMachineItem> state_machines;
+            public List<TransitionItem> entry_transitions;
+            public List<TransitionItem> machine_transitions;
+        }
+
+        [Serializable]
+        private class StateMachineItem
+        {
+            public string name;
+            public string state_machine_path;
+            public string default_state;
+            public string default_state_path;
         }
 
         [Serializable]
@@ -637,6 +761,14 @@ namespace VRCForge.Editor
             public string from_state;
             public string to_state;
             public string to_state_machine;
+            public string from_state_path;
+            public string from_state_machine_path;
+            public string to_state_path;
+            public string to_state_machine_path;
+            public string transition_kind;
+            public bool is_exit;
+            public bool mute;
+            public bool solo;
             public bool has_exit_time;
             public float exit_time;
             public float duration;
