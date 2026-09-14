@@ -100,6 +100,7 @@ from internal_tool_blocks import (
     CANONICAL_TOOL_BLOCKS,
     INTERNAL_GENERAL_TOOL_NAMES,
     build_internal_tool_block_tree,
+    canonical_tool_owner,
     internal_tool_block_for_name,
     resolve_internal_tool_block_selector,
 )
@@ -15504,7 +15505,7 @@ def _runtime_planner_tool(tool: Any, projection: Any) -> PlannerTool:
         write=bool(tool.write),
         advanced=bool(tool.advanced),
         requires_user_activation=bool(tool.requires_user_activation),
-        block=(f"unity/{shared_unity_block}" if shared_unity_block else internal_tool_block_for_name(
+        block=(canonical_tool_owner(f"unity/{shared_unity_block}", str(projection.model_name)) if shared_unity_block else internal_tool_block_for_name(
             str(projection.internal_name), str(projection.tool_set.value)
         )),
         input_contract=planner_tool_input_contract(str(tool.name)),
@@ -15531,7 +15532,7 @@ def _runtime_planner_write_tool(handler: Any, projection: Any) -> PlannerTool:
         category="supervised-write",
         write=True,
         advanced=bool(handler.advanced),
-        block=(f"unity/{shared_unity_block}" if shared_unity_block else internal_tool_block_for_name(
+        block=(canonical_tool_owner(f"unity/{shared_unity_block}", str(projection.model_name)) if shared_unity_block else internal_tool_block_for_name(
             str(projection.internal_name), str(projection.tool_set.value)
         )),
         input_contract=planner_tool_input_contract(str(handler.name)),

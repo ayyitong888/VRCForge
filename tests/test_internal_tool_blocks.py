@@ -256,7 +256,7 @@ def test_shared_unity_facades_reuse_external_blocks_and_schemas_inside() -> None
         if not external_block:
             continue
         internal = dashboard_server._runtime_planner_tool(tool, projection(tool.name))
-        assert internal.block == f"unity/{external_block}"
+        assert internal.block == dashboard_server.canonical_tool_owner(f"unity/{external_block}", internal.name)
         canonical = dashboard_server.AGENT_GATEWAY.shared_agent_tool_descriptor(
             tool.name,
             write=False,
@@ -276,7 +276,7 @@ def test_shared_unity_facades_reuse_external_blocks_and_schemas_inside() -> None
             handler,
             projection(handler.name),
         )
-        assert internal.block == f"unity/{external_block}"
+        assert internal.block == dashboard_server.canonical_tool_owner(f"unity/{external_block}", internal.name)
         canonical = dashboard_server.AGENT_GATEWAY.shared_agent_tool_descriptor(
             handler.name,
             write=True,
@@ -348,8 +348,8 @@ def test_all_shared_unity_atoms_keep_internal_external_contract_parity() -> None
         assert projection.handler is tool.handler
         assert internal.name.startswith("unity_")
         assert internal.runtime_name == name
-        assert internal.block == (
-            "unity/" + gateway.external_mcp_tool_block_for_name(name, write=False)
+        assert internal.block == dashboard_server.canonical_tool_owner(
+            "unity/" + gateway.external_mcp_tool_block_for_name(name, write=False), internal.name
         )
         canonical = external_catalog[name]["inputSchema"]
         assert external_catalog[name]["inputSchema"] == canonical
@@ -369,8 +369,8 @@ def test_all_shared_unity_atoms_keep_internal_external_contract_parity() -> None
         assert projection.handler is handler.handler
         assert internal.name.startswith("unity_")
         assert internal.runtime_name == name
-        assert internal.block == (
-            "unity/" + gateway.external_mcp_tool_block_for_name(name, write=True)
+        assert internal.block == dashboard_server.canonical_tool_owner(
+            "unity/" + gateway.external_mcp_tool_block_for_name(name, write=True), internal.name
         )
         canonical = external_catalog[name]["inputSchema"]
         assert external_catalog[name]["inputSchema"] == canonical
@@ -461,3 +461,22 @@ def test_internal_schema_preserves_patterns_and_fx_delete_parameter_branch() -> 
             },
         },
     )["ok"] is True
+
+
+def test_registered_loaded_block_exposes_every_advertised_tool_schema():
+    planner = dashboard_server.AGENT_GATEWAY._runtime_planner
+    catalog = planner._catalog.read("planning", project_context_active=True)
+    leaves = dashboard_server._internal_tool_block_leaves("planning", project_context_active=True)
+    tree = build_internal_tool_block_tree(loaded_blocks=["core"], leaves=leaves)
+    for branch in tree["blocks"]:
+        for leaf in branch["children"]:
+            if not leaf["toolNames"]:
+                continue
+            prompt = planner._build_llm_plan_prompt("Inspect only", [], exposure_layer="planning", project_context_active=True, internal_tool_blocks=[leaf["name"]])
+            for name in leaf["toolNames"]:
+                tool = next(t for t in catalog.visible_tools if t.name == name)
+                if not tool.requires_user_activation:
+                    assert f"- {name}" in prompt, (leaf["name"], name, tool.block)
+    status = next(t for t in catalog.visible_tools if t.name == "unity_status")
+    prompt = planner._build_llm_plan_prompt("Inspect only", [], exposure_layer="planning", project_context_active=True, internal_tool_blocks=[status.block])
+    assert "- unity_status schema=" in prompt
