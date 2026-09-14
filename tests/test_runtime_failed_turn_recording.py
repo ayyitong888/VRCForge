@@ -24,6 +24,10 @@ def test_mid_loop_409_records_failed_turn_and_terminal_without_masking(tmp_path,
     terminal=gateway._runtime_run_ledger.read_events(limit=20)[-1]
     assert terminal["status"]=="failed" and terminal["event"]=="runtime_turn_completed"
     assert terminal["provider"]=="fixture" and terminal["model"]=="fixture-model"
+    audit=gateway.approval_transactions.recent_audit_logs(limit=10)
+    failed=next(row for row in audit if row.get("event")=="agent_runtime_turn")
+    assert failed["status"]=="failed" and failed["error"]["statusCode"]==409
+    assert failed["attemptedTools"]==["vrcforge_load_tool_block"]
     assert gateway.runtime_sessions.begin_turn(session_id="failure-session",turn_id="next",client_turn_id="failure-client")
 
 

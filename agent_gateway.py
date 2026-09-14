@@ -5720,6 +5720,18 @@ class AgentGateway:
                     })
                 except Exception:  # Best effort if the ledger storage itself is unavailable.
                     pass
+                try:
+                    self.append_audit({
+                        "event": "agent_runtime_turn", "status": "failed", "agent": agent_name,
+                        "sessionId": session_id, "turnId": failed_turn["id"],
+                        "clientTurnId": failed_turn["clientTurnId"], "error": failure,
+                        "stepCount": len(failed_turn["steps"]),
+                        "attemptedTools": [step.get("tool") for step in failed_turn["steps"]
+                                           if isinstance(step, dict) and step.get("tool")],
+                        **({"contextUsage": failed_turn["contextUsage"]} if "contextUsage" in failed_turn else {}),
+                    })
+                except Exception:  # Public diagnostics must not mask the original failure either.
+                    pass
             raise
         finally:
             owned_params.pop("_runtimeFailureProgress", None)
