@@ -137,6 +137,22 @@ namespace VRCForge.Editor
                     });
                 }
 
+                if (action == "rename_outfit")
+                {
+                    var evidence = RenameOutfitVerified(context, targetValues, newName);
+                    return VRCForgeToolResult.Completed($"Wardrobe action '{action}' saved and verified for '{parameterName}'.", new
+                    {
+                        ok = true, preview = false, action,
+                        avatarPath = GetTransformPath(descriptor.transform), avatarName = descriptor.name,
+                        parameterName, targetValues, newName, deleteObjects, deactivateObjects, deleteGeneratedAssets,
+                        affectedMenuControls = plan.affectedMenuControls, affectedFxStates = plan.affectedFxStates,
+                        affectedObjects = plan.affectedObjects, warnings = plan.warnings,
+                        mutationStarted = true, committed = true, commitState = "committed",
+                        persistenceState = "verified", verified = true,
+                        verification = new { state = "verified", before = evidence["before"], after = evidence["after"] }
+                    });
+                }
+
                 var undoGroup = Undo.GetCurrentGroup();
                 Undo.SetCurrentGroupName($"Manage wardrobe '{parameterName}'");
                 ApplyAction(action, descriptor, context, targetValues, newName, deleteObjects, deactivateObjects, deleteGeneratedAssets, assetDir, new Queue<string>(plan.newMenuAssetPaths), @params);
@@ -282,6 +298,92 @@ namespace VRCForge.Editor
             RemoveUnsharedStates(context, targetStates);
             HandleObjects(descriptor, objectPaths, deleteObjects, deactivateObjects);
             DeleteStateClipAssets(context, targetStates, deleteGeneratedAssets);
+        }
+
+        private static JObject RenameOutfitVerified(WardrobeContext context, List<int> targetValues, string newName)
+        {
+            var selected = new HashSet<int>(targetValues);
+            var rows = new JArray();
+            foreach (var item in context.menuControls.Where(item => selected.Contains(item.value)))
+            {
+                var row = RenameAssetIdentity(item.menu);
+                row["kind"] = "menu"; row["index"] = item.index;
+                row["controlCount"] = item.menu.controls.Count;
+                row["control"] = RenameControlEvidence(item.control);
+                rows.Add(row);
+            }
+            foreach (var state in context.transitions.Where(item => selected.Contains(item.value))
+                .Select(item => item.state).Where(item => item != null).Distinct())
+            {
+                var row = RenameAssetIdentity(state);
+                row["kind"] = "state"; row["name"] = state.name;
+                rows.Add(row);
+            }
+            if (rows.Count == 0) throw new InvalidOperationException("Rename has no persisted targets.");
+            var expected = (JArray)rows.DeepClone();
+            foreach (JObject row in expected)
+            {
+                if (row["kind"].ToString() == "menu") row["control"]["name"] = newName;
+                else row["name"] = Sanitize(newName, "Outfit");
+            }
+            Undo.IncrementCurrentGroup();
+            var group = Undo.GetCurrentGroup();
+            RenameOutfit(context, targetValues, newName);
+            Undo.FlushUndoRecordObjects();
+            foreach (var path in rows.Select(row => row["path"].ToString()).Distinct())
+            {
+                AssetDatabase.SaveAssetIfDirty(new GUID(AssetDatabase.AssetPathToGUID(path)));
+                AssetDatabase.ImportAsset(path, ImportAssetOptions.ForceSynchronousImport | ImportAssetOptions.ForceUpdate);
+            }
+            var after = new JArray();
+            foreach (JObject row in rows)
+            {
+                var path = row["path"].ToString();
+                var matches = AssetDatabase.LoadAllAssetsAtPath(path).Where(asset => asset != null
+                    && AssetDatabase.TryGetGUIDAndLocalFileIdentifier(asset, out string guid, out long id)
+                    && guid == row["guid"].ToString() && id == row["localId"].Value<long>()).ToList();
+                if (matches.Count != 1 || EditorUtility.IsDirty(matches[0]))
+                    throw new InvalidOperationException("Saved rename target missing, ambiguous or dirty.");
+                var actual = (JObject)row.DeepClone();
+                if (row["kind"].ToString() == "menu")
+                {
+                    var menu = matches[0] as VRCExpressionsMenu;
+                    var index = row["index"].Value<int>();
+                    if (menu == null || menu.controls == null || index < 0 || index >= menu.controls.Count)
+                        throw new InvalidOperationException("Saved rename menu control is missing.");
+                    actual["controlCount"] = menu.controls.Count;
+                    actual["control"] = RenameControlEvidence(menu.controls[index]);
+                }
+                else
+                {
+                    if (!(matches[0] is AnimatorState)) throw new InvalidOperationException("Saved rename state type changed.");
+                    actual["name"] = matches[0].name;
+                }
+                after.Add(actual);
+            }
+            AssertRenameReadback(expected, after);
+            Undo.CollapseUndoOperations(group);
+            return new JObject { ["before"] = rows, ["after"] = after };
+        }
+
+        private static JObject RenameControlEvidence(VRCExpressionsMenu.Control control)
+        {
+            return new JObject { ["name"] = control.name, ["type"] = control.type.ToString(),
+                ["parameter"] = control.parameter?.name, ["value"] = control.value };
+        }
+
+        private static JObject RenameAssetIdentity(UnityEngine.Object asset)
+        {
+            var path = AssetDatabase.GetAssetPath(asset);
+            if (string.IsNullOrEmpty(path) || !AssetDatabase.TryGetGUIDAndLocalFileIdentifier(asset, out string guid, out long id))
+                throw new InvalidOperationException("Rename requires saved asset identities.");
+            return new JObject { ["path"] = path, ["guid"] = guid, ["localId"] = id };
+        }
+
+        private static void AssertRenameReadback(JArray expected, JArray actual)
+        {
+            if (expected.Count == 0 || expected.Count != actual.Count || !JToken.DeepEquals(expected, actual))
+                throw new InvalidOperationException("Saved wardrobe rename differs from the complete approved targets.");
         }
 
         private static void RenameOutfit(WardrobeContext context, List<int> targetValues, string newName)
