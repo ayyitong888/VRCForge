@@ -178,6 +178,7 @@ namespace VRCForge.Editor
                 var name = Convert.ToString(GetMemberValue(control, "name"), CultureInfo.InvariantCulture) ?? "";
                 var type = Convert.ToString(GetMemberValue(control, "type"), CultureInfo.InvariantCulture) ?? "";
                 var parameterName = ReadControlParameterName(control);
+                var controlValue = ToFloat(GetMemberValue(control, "value"));
                 var subParameters = ReadControlSubParameterNames(control);
                 var menuPath = string.IsNullOrWhiteSpace(parentPath) ? name : $"{parentPath}/{name}";
                 var parameter = !string.IsNullOrWhiteSpace(parameterName) && parameterMap.TryGetValue(parameterName, out var info)
@@ -193,11 +194,12 @@ namespace VRCForge.Editor
                         source = "menu_control",
                         menuPath = menuPath,
                         objectPath = "",
-                        active = parameter != null && parameter.defaultValue >= 0.5f,
+                        active = parameter != null && parameter.defaultValue == controlValue,
                         canToggleSceneObject = false,
                         parameterName = parameterName,
                         subParameters = subParameters,
                         controlType = type,
+                        value = controlValue,
                         valueType = parameter?.valueType ?? "",
                         defaultValue = parameter?.defaultValue ?? 0f,
                         saved = parameter?.saved ?? false,
@@ -473,6 +475,7 @@ namespace VRCForge.Editor
             public string parameterName;
             public string[] subParameters = Array.Empty<string>();
             public string controlType;
+            public float value;
             public string valueType;
             public float defaultValue;
             public bool saved;

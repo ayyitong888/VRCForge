@@ -149,13 +149,13 @@ namespace VRCForge.Editor
             int maxKeysPerBinding,
             bool includeBindingDetails)
         {
-            var clips = ResolveClips(avatarPath, controllerPath, clipPaths, includeAllProjectClips)
+            var discoveredClips = ResolveClips(avatarPath, controllerPath, clipPaths, includeAllProjectClips)
                 .GroupBy(clip => AssetDatabase.GetAssetPath(clip), StringComparer.OrdinalIgnoreCase)
                 .Select(group => group.First())
                 .Where(clip => clip != null)
                 .OrderBy(clip => AssetDatabase.GetAssetPath(clip), StringComparer.OrdinalIgnoreCase)
-                .Take(maxClips)
                 .ToList();
+            var clips = discoveredClips.Take(maxClips).ToList();
             var clipItems = clips.Select(clip => ScanClip(clip, maxKeysPerBinding, includeBindingDetails)).ToList();
             var warnings = includeBindingDetails ? clipItems
                 .SelectMany(clip => clip.warnings.Select(warning => new WarningItem
@@ -180,11 +180,14 @@ namespace VRCForge.Editor
                 include_all_project_clips = includeAllProjectClips,
                 max_keys_per_binding = maxKeysPerBinding,
                 include_binding_details = includeBindingDetails,
+                readHints = "If summary.clipsTruncated is true, use bindingView=summary or index with the same clip selectors, then follow paging.nextRequest; use details for selected curve values.",
                 clips = clipItems,
                 warnings = warnings,
                 summary = new AnimationBindingsSummary
                 {
                     clipCount = clipItems.Count,
+                    totalClipCount = discoveredClips.Count,
+                    clipsTruncated = discoveredClips.Count > clipItems.Count,
                     bindingCount = clipItems.Sum(clip => clip.binding_count),
                     materialBindingCount = clipItems.Sum(clip => clip.material_binding_count),
                     objectToggleBindingCount = clipItems.Sum(clip => clip.object_toggle_binding_count),
@@ -724,6 +727,7 @@ namespace VRCForge.Editor
             public string requested_controller_path;
             public bool include_all_project_clips;
             public bool include_binding_details;
+            public string readHints;
             public int max_keys_per_binding;
             public List<ClipBindingItem> clips;
             public List<WarningItem> warnings;
@@ -739,6 +743,8 @@ namespace VRCForge.Editor
         private class AnimationBindingsSummary
         {
             public int clipCount;
+            public int totalClipCount;
+            public bool clipsTruncated;
             public int bindingCount;
             public int materialBindingCount;
             public int objectToggleBindingCount;
