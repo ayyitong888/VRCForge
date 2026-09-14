@@ -30,7 +30,22 @@ def test_zero_disk_diff_needs_exact_asset_reload_receipt(tmp_path, monkeypatch, 
     resolved = []
     monkeypatch.setattr(type(gateway.approval_transactions), "_resolve_apply_recoveries_for_checkpoint",
                         lambda *a, **kw: resolved.append(True) or [])
-    result = service.restore_checkpoint({"checkpointId": "memory", "confirmRestore": True})
+    import dashboard_server as server
+    from agent_approval_transactions import _domain_write_receipt
+    from agent_tool_result_contract import normalize_agent_tool_result
+    registered = server.AGENT_GATEWAY._write_handlers["vrcforge_restore_checkpoint"]
+    monkeypatch.setattr(server, "AGENT_GATEWAY", gateway)
+    result = registered.handler({"checkpointId": "memory", "confirmRestore": True})
+    receipt = _domain_write_receipt({"result": result})
+    outcome = normalize_agent_tool_result({"ok": result["ok"], "result": result}, write=True, fallback_summary="Checkpoint restore")
+    if mode == "verified":
+        assert receipt.get("verified") is True
+        assert receipt.get("commitState") == "committed"
+        assert outcome["commitState"] == "complete"
+        assert outcome.get("recovery") in (None, False)
+    else:
+        assert receipt.get("verified") is not True
+        assert outcome.get("commitState") not in {"committed", "no_change"}
     assert result["ok"] is (mode == "verified")
     assert bool(resolved) is (mode == "verified")
     if mode != "legacy": assert seen[0]["assetBaseline"] == baseline

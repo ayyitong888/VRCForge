@@ -1325,6 +1325,21 @@ class AgentCheckpointRecoveryService:
                 )
             elif payload.get("ok"):
                 payload["status"] = "restored"
+                if baseline_required and exact_asset_readback:
+                    # This commits the restore operation, not the write being undone.
+                    # Both file restoration and exact Core baseline readback passed.
+                    payload.update({
+                        "schema": "vrcforge.checkpoint_restore.v1",
+                        "verified": True, "persistedReadback": True,
+                        "mutationStarted": True, "mutationApplied": True,
+                        "committed": True, "commitState": "committed",
+                        "checkpointRecoveryRequired": False,
+                        "readback": {"persisted": True,
+                            "checkpointId": str(checkpoint.get("id") or ""),
+                            "assetReadback": actual_readback,
+                            "restoredFiles": ensure_string_list(payload.get("restoredFiles")),
+                            "deletedFiles": ensure_string_list(payload.get("deletedFiles"))},
+                    })
             elif not reload_result.get("ok"):
                 payload["status"] = "restore_failed_unity_reopen_failed"
                 payload["checkpointRecoveryRequired"] = True
