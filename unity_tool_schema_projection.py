@@ -62,7 +62,11 @@ def canonical_unity_read_tool_input_schema(tool_name: str) -> dict[str, Any]:
             else deepcopy(dict(registered))
         )
     if name.startswith("vrcforge_preview_"):
-        write_name = "vrcforge_" + name.removeprefix("vrcforge_preview_")
+        write_name = (
+            "vrcforge_save_scene_object_as_prefab"
+            if name == "vrcforge_preview_scene_object_prefab"
+            else "vrcforge_" + name.removeprefix("vrcforge_preview_")
+        )
         paired = EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS.get(write_name)
         if isinstance(paired, Mapping):
             return _with_execution_target_schema(paired, required=True)

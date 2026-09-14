@@ -871,3 +871,14 @@ UNITY_READ_TOOL_INPUT_SCHEMAS["vrcforge_preview_parameter_bit_packing"] = {
         } for key in ("arguments", "params")],
     ],
 }
+
+# Keep checkpoint preview separate from the confirmed restore write schema.
+UNITY_READ_TOOL_INPUT_SCHEMAS["vrcforge_preview_restore_checkpoint"] = {
+    "type": "object",
+    "additionalProperties": True,
+    "properties": {
+        "checkpointId": {"type": "string", "description": "Retained checkpoint id returned by list_checkpoints. The checkpoint determines the project and restore scope."},
+        "checkpoint_id": {"type": "string", "description": "Existing alias of checkpointId."},
+    },
+    "anyOf": [{"required": ["checkpointId"]}, {"required": ["checkpoint_id"]}],
+}

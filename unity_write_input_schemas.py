@@ -851,3 +851,16 @@ EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS["vrcforge_apply_parameter_optimization"] =
         "dry_run": {"type": "boolean", "default": True, "description": "Return the proposed payload without applying. Set false only for the approved parameter optimization write."},
     },
 }
+
+EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS["vrcforge_restore_checkpoint"] = {
+    **UNITY_READ_TOOL_INPUT_SCHEMAS["vrcforge_preview_restore_checkpoint"],
+    "properties": {
+        **UNITY_READ_TOOL_INPUT_SCHEMAS["vrcforge_preview_restore_checkpoint"]["properties"],
+        "confirmRestore": {"type": "boolean", "description": "Must be true, or confirm_restore must be true, to confirm restoring the selected checkpoint. The normal approval flow still applies."},
+        "confirm_restore": {"type": "boolean", "description": "Existing alias of confirmRestore."},
+    },
+    "allOf": [{"anyOf": [
+        {"required": ["confirmRestore"], "properties": {"confirmRestore": {"const": True}}},
+        {"required": ["confirm_restore"], "properties": {"confirm_restore": {"const": True}}},
+    ]}],
+}
