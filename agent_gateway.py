@@ -7452,6 +7452,7 @@ class AgentGateway:
             "cancelled",
             "context_compaction_required",
             "loop_suppressed",
+            "paused",
         }:
             top_plan = {
                 **top_plan,
@@ -7477,6 +7478,7 @@ class AgentGateway:
             "cancelled",
             "context_compaction_required",
             "loop_suppressed",
+            "paused",
         }:
             gated_plan = completion_gate_plan(
                 top_plan,

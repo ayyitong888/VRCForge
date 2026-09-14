@@ -2782,6 +2782,47 @@ class AgentLoopP0Tests(unittest.TestCase):
         self.assertEqual(result["steps"][0]["tool"], "unity_scan_materials")
         self.assertEqual(result["steps"][0]["status"], "failed")
 
+    def test_budget_pause_preserves_planner_argument_failure(self) -> None:
+        gateway = self.gateway
+        project = self._unity_project()
+        responses = iter(
+            [
+                SimpleNamespace(
+                    text=json.dumps({
+                        "action": "skill",
+                        "skill_tool": "unity_scan_materials",
+                        "skill_params": {"avatarPath": 42},
+                    }),
+                    usage={}, reasoning={},
+                ),
+                SimpleNamespace(
+                    text=json.dumps({
+                        "action": "reply",
+                        "reply": "The remaining turn budget is insufficient to correct the tool arguments.",
+                    }),
+                    usage={}, reasoning={},
+                ),
+            ]
+        )
+
+        with patch("dashboard_server.request_llm_plan_with_metadata", side_effect=lambda *_a, **_k: next(responses)):
+            result = gateway.runtime_message({
+                "message": "inspect materials",
+                "projectPath": str(project),
+                "projectRoot": str(project),
+                "session_id": "budget-planner-failure-session",
+                "client_turn_id": "budget-planner-failure-turn",
+                "maxAgenticTurns": 1,
+            })
+
+        self.assertEqual(result["plan"]["nextStep"], "paused", result)
+        self.assertEqual(result["plan"]["reason"], "model_turn_budget_exhausted")
+        self.assertIsNot(result["plan"].get("completionSatisfied"), True)
+        self.assertTrue(any(
+            step.get("kind") == "planner_validation" and step.get("status") == "failed"
+            for step in result["steps"]
+        ), result)
+
     def test_supervised_write_misclassified_as_skill_is_refed_then_requests_approval(self) -> None:
         gateway = self.gateway
         gateway.runtime_sessions.load_internal_tool_block(

@@ -7177,6 +7177,7 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(payload["plan"]["nextStep"], "loop_suppressed")
         self.assertEqual(payload["plan"]["loopSuppression"]["consecutive"], 3)
         self.assertEqual(payload["plan"]["loopSuppression"]["failureClass"], "tool_error")
+        self.assertTrue(all(step["status"] == "failed" for step in payload["steps"]))
         self.assertNotIn("value", payload["plan"]["loopSuppression"])
 
     def test_runtime_loop_does_not_suppress_distinct_failed_arguments(self) -> None:
@@ -7334,6 +7335,41 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(payload["plan"]["nextStep"], "paused")
         self.assertEqual(payload["plan"]["reason"], "model_turn_budget_exhausted")
         self.assertTrue(payload["plan"]["stepLimitReached"])
+        self.assertIsNot(payload["plan"].get("completionSatisfied"), True)
+
+    def test_budget_pause_preserves_budget_terminal_over_unresolved_tool_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            gateway = AgentGateway(root / "config.json", root / "audit")
+            gateway.register_tool(
+                "vrcforge_test_budget_failed_action",
+                "Explicit failed action fixture.",
+                "read/debug",
+                lambda _params: {"ok": False, "status": "failed", "error": "fixture failed"},
+            )
+            bind_test_runtime_planner(
+                gateway,
+                lambda _prompt: {
+                    "summary": "attempt failed action",
+                    "reply": "attempting",
+                    "planner": "test",
+                    "nextStep": "call_skill",
+                    "skillNeeded": True,
+                    "skillTool": "vrcforge_test_budget_failed_action",
+                    "skillParams": {},
+                    "continueLoop": True,
+                },
+            )
+            payload = gateway.runtime_message({
+                "message": "exercise budget pause after a failed action",
+                "sessionId": "budget-failure-session",
+                "clientTurnId": "budget-failure-client-turn",
+                "maxAgenticTurns": 1,
+            })
+
+        self.assertEqual(payload["plan"]["nextStep"], "paused")
+        self.assertEqual(payload["plan"]["reason"], "model_turn_budget_exhausted")
+        self.assertIn("attempting", payload["plan"]["reply"])
         self.assertIsNot(payload["plan"].get("completionSatisfied"), True)
 
     def test_planner_observes_runtime_owned_remaining_model_turn_budget(self) -> None:
