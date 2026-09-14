@@ -1210,6 +1210,111 @@ def validate_add_modular_avatar_component_request(
     return None
 
 
+def finalize_add_modular_avatar_component_verification(
+    arguments: dict[str, Any],
+    result: Any,
+    inspect_component: Callable[[dict[str, Any]], dict[str, Any]],
+    read_property: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Attach an independent component readback to an approved MA write.
+
+    The Core write receipt is intentionally not treated as verification.  The
+    inspector and property reader are independent read paths for the target
+    component, references, scene state, and requested scalar fields.
+    """
+    source = dict(result) if isinstance(result, dict) else {"result": result}
+    fields = arguments.get("fields")
+    if not isinstance(fields, dict):
+        fields = {}
+    request = {
+        key: arguments[key]
+        for key in ("projectPath", "executionTarget", "gameObjectPath", "componentType", "avatarPath")
+        if arguments.get(key) is not None
+    }
+    try:
+        inspected = inspect_component(request)
+    except Exception as exc:  # pragma: no cover - defensive boundary for live Unity
+        return {**source, "ok": False, "error": f"Independent Modular Avatar readback failed: {exc}"}
+    if not isinstance(inspected, dict) or inspected.get("ok") is False:
+        error = inspected.get("error") if isinstance(inspected, dict) else None
+        return {
+            **source,
+            "ok": False,
+            "error": str(error or "Independent Modular Avatar readback failed."),
+        }
+    references = inspected.get("references")
+    if not isinstance(references, list) or any(
+        not isinstance(reference, dict) or reference.get("resolved") is not True
+        for reference in references
+    ):
+        return {**source, "ok": False, "error": "Independent Modular Avatar readback found an unresolved reference."}
+    requested_references = arguments.get("references")
+    inspected_count = int(inspected.get("count") or 0)
+    after = source.get("after")
+    before = source.get("before")
+    expected_component_index = inspected_count - 1 if source.get("addedComponent") is True else 0
+    if isinstance(after, dict) and isinstance(after.get("count"), int) and inspected_count != after["count"]:
+        return {**source, "ok": False, "error": "Independent Modular Avatar readback count differs from the write receipt."}
+    if source.get("addedComponent") is True and isinstance(before, dict) and isinstance(before.get("count"), int) and inspected_count < before["count"] + 1:
+        return {**source, "ok": False, "error": "Independent Modular Avatar readback did not confirm the added component count."}
+    if isinstance(requested_references, dict):
+        by_member = {
+            str(item.get("member")): item
+            for item in references
+            if item.get("componentIndex") == expected_component_index
+        }
+        for member, expected in requested_references.items():
+            observed = by_member.get(str(member))
+            if not isinstance(observed, dict) or not any(
+                _normalize_reference_path(observed.get(key)) == _normalize_reference_path(expected)
+                for key in ("referencePath", "resolvedPath")
+            ):
+                return {**source, "ok": False, "error": f"Independent Modular Avatar readback did not confirm reference '{member}'."}
+    if inspected.get("present") is not True or int(inspected.get("count") or 0) < 1:
+        return {**source, "ok": False, "error": "Independent Modular Avatar readback found no added component."}
+    save_scene = arguments.get("saveScene") is True
+    if save_scene and inspected.get("sceneDirty") is not False:
+        return {**source, "ok": False, "error": "Independent Modular Avatar readback found the scene still dirty after saveScene=true."}
+    field_readback = {}
+    if fields:
+        if read_property is None:
+            return {**source, "ok": False, "error": "Independent Modular Avatar readback cannot verify scalar fields."}
+        for property_path, expected in fields.items():
+            field_result = read_property({
+                **request,
+                "componentType": inspected.get("type") or request.get("componentType"),
+                "propertyPath": str(property_path),
+                "componentIndex": expected_component_index,
+            })
+            if not isinstance(field_result, dict) or field_result.get("ok") is False or "value" not in field_result:
+                return {**source, "ok": False, "error": f"Independent scalar readback failed for field '{property_path}'."}
+            if field_result["value"] != expected:
+                return {**source, "ok": False, "error": f"Independent scalar readback mismatched field '{property_path}'."}
+            field_readback[str(property_path)] = field_result["value"]
+    readback = {
+        "gameObjectPath": inspected.get("gameObjectPath"),
+        "componentType": inspected.get("type"),
+        "present": True,
+        "count": inspected.get("count"),
+        "references": references,
+        "sceneDirty": inspected.get("sceneDirty"),
+        "fields": field_readback,
+    }
+    return {
+        **source,
+        "verified": True,
+        "readback": readback,
+        "mutationStarted": source.get("addedComponent") is True,
+        "mutationApplied": source.get("addedComponent") is True,
+        "changed": source.get("addedComponent") is True,
+        "commitState": "committed" if save_scene else "pending",
+    }
+
+
+def _normalize_reference_path(value: Any) -> str:
+    return str(value or "").replace("\\", "/").strip("/")
+
+
 ManageWardrobeRequestBuilder = Callable[
     [dict[str, Any], bool],
     dict[str, Any],

@@ -463,6 +463,7 @@ from wardrobe_outfit_workflow_service import (
     build_create_wardrobe_core_calls as build_owned_create_wardrobe_core_calls,
     build_create_wardrobe_request as build_owned_create_wardrobe_request,
     build_manage_wardrobe_request as build_owned_manage_wardrobe_request,
+    finalize_add_modular_avatar_component_verification,
     validate_add_modular_avatar_component_request as validate_owned_add_modular_avatar_component_request,
 )
 from prepared_add_outfit_workflow_service import (
@@ -19448,6 +19449,19 @@ def finalize_persisted_scene_console_verification(
     )
 
 
+def finalize_add_modular_avatar_component_verification_sync(
+    arguments: dict[str, Any],
+    _baseline: dict[str, Any],
+    result: Any,
+) -> dict[str, Any]:
+    return finalize_add_modular_avatar_component_verification(
+        arguments,
+        result,
+        inspect_modular_avatar_component_sync,
+        read_component_property_sync,
+    )
+
+
 def prepare_unity_checkpoint_sync(project_root: Path) -> dict[str, Any]:
     live_connection = globals().get("PRIMITIVE_BASIS_LIVE_CONNECTION")
     if isinstance(live_connection, PrimitiveBasisLiveUnityConnection):
@@ -25852,6 +25866,7 @@ def register_agent_gateway_tools() -> None:
         "When to use: add one common Modular Avatar component (MergeArmature, BoneProxy, MenuInstaller, MergeAnimator, or Parameters) to an exact scene object, resolving AvatarObjectReference, asset references, and scalar fields. When NOT to use: do not use it for VRCFury components, arbitrary MonoBehaviours, or bulk avatar conversion. Negative example: do not call it to create a VRCFury Toggle.",
         "medium",
         WARDROBE_OUTFIT_APPROVED_WRITES.add_modular_avatar_component,
+        verification_finalize_handler=finalize_add_modular_avatar_component_verification_sync,
     )
     register_write_handler(
         "vrcforge_create_component_feature",

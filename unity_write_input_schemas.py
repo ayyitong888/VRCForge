@@ -267,6 +267,21 @@ EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
             "destinationScenePath": {"type": "string", "pattern": "^Assets/.*\\.unity$", "description": "Required only for new_saved and must not exist."},
         },
     },
+    "vrcforge_add_modular_avatar_component": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["projectPath", "gameObjectPath", "componentType"],
+        "properties": {
+            "projectPath": _PROJECT_PATH_PROPERTY,
+            "gameObjectPath": {"type": "string", "minLength": 1},
+            "avatarPath": {"type": "string"},
+            "componentType": {"type": "string", "minLength": 1},
+            "references": {"type": "object", "additionalProperties": True},
+            "fields": {"type": "object", "additionalProperties": True},
+            "saveScene": {"type": "boolean", "default": False},
+            "allowDuplicate": {"type": "boolean", "default": False},
+        },
+    },
     "vrcforge_texture_patch": {
         "type": "object",
         "additionalProperties": False,
