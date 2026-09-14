@@ -33,6 +33,26 @@ from runtime_planner_service import (
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_completion_prompt_separates_success_claim_from_honest_failure_reply() -> None:
+    prompt = service()._build_llm_plan_prompt(
+        "继续诊断",
+        [],
+        loop_state=[
+            {
+                "tool": "vrcforge_list_directory",
+                "actionId": "failed-directory",
+                "outcome": {"status": "failed"},
+            }
+        ],
+    )
+    assert "失败收尾不得使用 satisfied=true" in prompt
+    assert "不同工具的成功结果不能清除原失败步骤" in prompt
+    tail = prompt[prompt.index("Completion contract:"):]
+    assert "Never claim success while an action is running, pending approval, failed, or unverified." in tail
+    assert "Only a successful terminal reply may use" in tail
+    assert "An honest failure reply must not claim success" in tail
+
+
 def test_unrelated_success_does_not_hide_an_unresolved_tool_failure() -> None:
     failed = {
         "tool": "vrcforge_scan_materials",

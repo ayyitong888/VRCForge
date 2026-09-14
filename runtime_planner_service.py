@@ -2939,7 +2939,7 @@ class RuntimePlannerService:
                 "可选动作：\n"
                 '1. 调用工具：{"action": "skill", "skill_tool": "<工具名>", "skill_params": {…}, "summary": "<一句话说明>", "reply": "<对用户说的话>"}\n'
                 '2. 执行普通 Shell 命令（用户明确要求的主机命令、工程外脚本或 git）：{"action": "shell", "shell_command": "<命令>", "shell_params": {"cwd": "<可选目录>"}, "summary": "<一句话说明>", "reply": "<对用户说的话>"}。普通 Shell 不得把已注册 Unity 工程作为 cwd，也不得直接引用其路径；Unity Project Mode 中需要操作当前工程时，改用 write 动作调用 unity_shell。background/pty/yieldMs/timeout/env 只在确实需要主机后台或交互进程时按需添加。\n'
-                '3. 直接回答（闲聊、解释、当前信息已足够、或要收尾）：未执行工具时用 {"action": "reply", "reply": "<回答>"}；执行过工具后必须用 {"action": "reply", "reply": "<回答>", "completion_claim":{"satisfied":true,"evidence_action_ids":["<每个已完成步骤的精确 actionId>"]}}\n'
+                '3. 直接回答（闲聊、解释、当前信息已足够、或要收尾）：未执行工具时用 {"action": "reply", "reply": "<回答>"}；只有所有相关步骤都成功完成并有精确证据时，执行过工具后才用 {"action": "reply", "reply": "<回答>", "completion_claim":{"satisfied":true,"evidence_action_ids":["<每个已完成步骤的精确 actionId>"]}}；如果确实无法完成，改用如实失败 reply，失败收尾不得使用 satisfied=true。\n'
                 '4. 进入执行模式（仅当用户明确要求项目写入或控制已启动的主机进程）：{"action": "enter_execution", "summary": "<为什么需要执行>"}\n'
                 '5. 在 execution 层发起受监督项目写入：{"action": "write", "write_tool": "<工具名>", "write_params": {…}}；planning 层不能直接使用 write，先进入 execution。\n'
                 "规则：只返回一个 JSON 对象，不要 Markdown 代码块外的文字；action 只能是 skill、shell、reply、enter_execution 或 write；planning 层禁止 write，execution 层才允许 write；绝不能把工具名写进 action；工具名必须严格来自下面的列表并写进 skill_tool 或 write_tool；"
@@ -2951,7 +2951,7 @@ class RuntimePlannerService:
                 # VRCForge 自纠回环：失败要读错误、修正后重试或换路，绝不假装成功。
                 "如果『已执行步骤』里某一步失败或报错（status 是 failed/error，或结果里带 error/异常/traceback）："
                 "先读懂错误原因；能靠改参数解决就用『不同的参数』重试（不要原样重复同一个调用），"
-                "换个工具或思路能绕过就绕过；确实做不到时用 reply 如实说明卡在哪、需要用户补什么——"
+                "换个工具或思路能绕过就绕过；不同工具的成功结果不能清除原失败步骤；确实做不到时用 reply 如实说明卡在哪、需要用户补什么——"
                 "绝不能在没真正做完时假装已完成（严禁「做了做了」式的虚假收尾）；"
                 "最终 reply 只能把工具结果直接支持的内容写成事实；推断必须明确标注，证据不足且仍有相关只读工具时继续查证，不能把 package name 或 private 标记当作产品用途证据；"
                 "拿不准时选 reply 并说明你需要什么信息。\n"
@@ -2975,9 +2975,10 @@ class RuntimePlannerService:
                 "- A tool call is not task completion. Read its canonical outcome and verification first.\n"
                 "- A superseded action is a historical attempt; assess the supersededBy action's own outcome. "
                 "Its replacement may still be failed, pending, or unverified.\n"
-                "- Never finish while an action is running, pending approval, failed, or unverified.\n"
-                "- After one or more tool actions, a terminal reply must include "
-                '"completion_claim":{"satisfied":true,"evidence_action_ids":["<exact actionId>"]}.\n'
+                "- Never claim success while an action is running, pending approval, failed, or unverified.\n"
+                "- Only a successful terminal reply may use "
+                '"completion_claim":{"satisfied":true,"evidence_action_ids":["<exact actionId>"]}. '
+                "An honest failure reply must not claim success.\n"
                 "- Cite every completed action from this turn exactly once. The runtime, not the model, "
                 "makes the final completion decision.\n"
             )
