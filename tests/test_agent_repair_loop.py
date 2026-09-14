@@ -72,8 +72,12 @@ def test_configured_loop_pending_approval_then_independent_readback(tmp_path: Pa
         "project": {"root": str(project), "projectId": "fixture"},
         "editor": {"unityPid": 1, "processStartTime": "fixture", "coreInstanceId": "fixture"},
     }
+    from tests.test_diagnostic_logging import make_manager
+    _, diagnostic_logger = make_manager(tmp_path / "diagnostics")
+    diagnostic_logger.emit("error", "fixture", "chat-corruption-fixture-needs-inspection")
     first_records: list[dict[str, object]] = []
     first_responses = [
+        {"action": "skill", "skill_tool": "read_recent_logs", "skill_params": {"source": "memory", "limit": 5}, "continueLoop": True},
         {"action": "skill", "skill_tool": "unity_inspect_project_chat_store", "skill_params": {"projectPath": str(project)}, "continueLoop": True},
         {"action": "enter_execution", "summary": "Request supervised repair approval.", "continueLoop": True},
         {"action": "write", "write_tool": "unity_repair_project_chat_store", "write_params": {"projectPath": str(project), "expectedDigest": digest, "storeId": target.store_id, "executionTarget": execution_target}, "continueLoop": True},
@@ -81,8 +85,10 @@ def test_configured_loop_pending_approval_then_independent_readback(tmp_path: Pa
     with _planner_loopback(first_responses, first_records) as base_url:
         configured = _configured_service(tmp_path / "provider-first.json", base_url)
         with _isolated_gateway(tmp_path) as gateway:
-            with patch.object(dashboard_server, "PROVIDER_CONFIGURATION", configured):
+            with patch.object(dashboard_server, "PROVIDER_CONFIGURATION", configured), patch.object(dashboard_server, "DIAGNOSTIC_LOGGER", diagnostic_logger):
                 pending = gateway.runtime_message({"message": "Inspect and repair the corrupt project chat store after my approval.", "provider": "custom", "model": "loop-model", "projectRoot": str(project), "session_id": "repair-pending", "client_turn_id": "repair-pending-turn", "maxAgenticTurns": 5})
+                assert pending["steps"][0]["tool"] == "vrcforge_read_recent_logs"
+                assert any(log["message"] == "chat-corruption-fixture-needs-inspection" for log in pending["steps"][0]["result"]["logs"])
                 step = pending["steps"][-1]
                 assert step["status"] == "approval_pending", pending
                 approval_id = step["result"]["approval"]["id"]
@@ -106,7 +112,7 @@ def test_configured_loop_pending_approval_then_independent_readback(tmp_path: Pa
                 readback = gateway.runtime_message({"message": "Read the repaired project chat store and report its health.", "provider": "custom", "model": "loop-model", "projectRoot": str(project), "session_id": "repair-readback", "client_turn_id": "repair-readback-turn", "maxAgenticTurns": 3})
     assert readback["plan"]["nextStep"] == "done", readback
     assert readback["steps"][0]["result"]["status"] == "missing"
-    assert len(first_records) == 3
+    assert len(first_records) == 4
     assert len(second_records) == 2
 
 
@@ -134,8 +140,12 @@ def test_configured_loop_recovers_interrupted_apply_after_human_confirmation(tmp
         recovery = gateway.approval_transactions._start_apply_recovery(approval, {"projectRoot": str(project)}, checkpoint)
         assert gateway.checkpoint_recovery.list_interrupted_apply_recoveries()["blockingWrites"]
         params = {"recoveryId": recovery["id"], "confirmResolved": True}
+        from tests.test_diagnostic_logging import make_manager
+        _, diagnostic_logger = make_manager(tmp_path / "diagnostics")
+        diagnostic_logger.emit("error", "fixture", "interrupted-apply-fixture-needs-inspection")
         records = []
         responses = [
+            {"action": "skill", "skill_tool": "read_recent_logs", "skill_params": {"source": "memory", "limit": 5}, "continueLoop": True},
             {"action": "skill", "skill_tool": "unity_list_interrupted_apply_recoveries", "skill_params": {}, "continueLoop": True},
             {"action": "skill", "skill_tool": "unity_preview_interrupted_apply_recovery", "skill_params": {"recoveryId": recovery["id"]}, "continueLoop": True},
             {"action": "enter_execution", "summary": "Request confirmation of the inspected recovery.", "continueLoop": True},
@@ -145,8 +155,10 @@ def test_configured_loop_recovers_interrupted_apply_after_human_confirmation(tmp
         ]
         with _planner_loopback(responses, records) as base_url:
             configured = _configured_service(tmp_path / "recovery-provider.json", base_url)
-            with patch.object(dashboard_server, "PROVIDER_CONFIGURATION", configured):
+            with patch.object(dashboard_server, "PROVIDER_CONFIGURATION", configured), patch.object(dashboard_server, "DIAGNOSTIC_LOGGER", diagnostic_logger):
                 pending = gateway.runtime_message({"message": "Inspect the interrupted write and request my confirmation before resolving it.", "provider": "custom", "model": "loop-model", "projectRoot": str(project), "session_id": "recover-pending", "client_turn_id": "recover-pending-turn", "maxAgenticTurns": 6})
+                assert pending["steps"][0]["tool"] == "vrcforge_read_recent_logs"
+                assert any(log["message"] == "interrupted-apply-fixture-needs-inspection" for log in pending["steps"][0]["result"]["logs"])
                 step = pending["steps"][-1]
                 assert step["status"] == "approval_pending", pending
                 assert gateway.checkpoint_recovery.list_interrupted_apply_recoveries()["blockingWrites"]
@@ -158,4 +170,4 @@ def test_configured_loop_recovers_interrupted_apply_after_human_confirmation(tmp
         assert verified["plan"]["nextStep"] == "done", verified
         assert verified["steps"][0]["result"]["blockingWrites"] is False
         assert Path(checkpoint["archivePath"]).exists()
-        assert len(records) == 6
+        assert len(records) == 7
