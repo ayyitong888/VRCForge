@@ -359,6 +359,7 @@ EXTERNAL_MCP_WRITE_TOOL_BLOCKS: dict[str, frozenset[str]] = {
             "vrcforge_restore_checkpoint",
             "vrcforge_restore_safe_backup",
             "vrcforge_resolve_interrupted_apply_recovery",
+            "vrcforge_repair_project_chat_store",
         }
     ),
     "diagnostics": frozenset({"vrcforge_build_test_avatar", "vrcforge_capture_screenshot"}),

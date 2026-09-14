@@ -444,6 +444,7 @@ WRAPPER_ONLY_WRITE_TARGETS = {
 # real tool while every generic/internal wrapper remains hidden.
 EXTERNAL_MCP_TYPED_WRAPPER_CAPABILITIES = {
     "vrcforge_install_vpm_package": "sealed_vrc_get_install_v1",
+    "vrcforge_repair_project_chat_store": "digest_bound_chat_store_repair_v1",
 }
 EXTERNAL_MCP_TYPED_WRAPPER_WRITES = frozenset(EXTERNAL_MCP_TYPED_WRAPPER_CAPABILITIES)
 
@@ -4519,7 +4520,7 @@ class AgentGateway:
                     committed=False,
                 ),
             )
-        if prepared.get("requiresUserConfirmation"):
+        if prepared.get("requiresUserConfirmation") or name == PROJECT_CHAT_CHECKPOINT_TARGET:
             try:
                 proposal = self._propose_external_mcp_write(
                     prepared,

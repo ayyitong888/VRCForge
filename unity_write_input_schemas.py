@@ -35,6 +35,18 @@ MANAGE_FX_ANIMATOR_PUBLIC_INPUT_SCHEMA["properties"]["sourceStateName"] = {
 
 
 EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
+    "vrcforge_repair_project_chat_store": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["projectPath", "expectedDigest", "storeId"],
+        "properties": {
+            "projectPath": {"type": "string", "minLength": 1, "description": "Exact project root containing .vrcforge/chat-transcripts.json."},
+            "projectRoot": {"type": "string", "minLength": 1, "description": "Optional duplicate project root; when supplied it must identify the same project as projectPath."},
+            "expectedDigest": {"type": "string", "pattern": "^[0-9a-fA-F]{64}$", "description": "SHA-256 digest of the observed corrupt transcript store."},
+            "storeId": {"type": "string", "pattern": "^session\\.chat\\.project\\.[0-9a-f]{16}$", "description": "Digest-bound project chat store identifier returned by the diagnostic result."},
+        },
+        "description": "when-to-use: after read-only chat-store diagnosis identifies one corrupt project transcript store. when-NOT-to-use: do not use for healthy stores, app-global chat, or guessed digests/store IDs; the external Agent must obtain explicit user approval before mutation.",
+    },
     "vrcforge_apply_blendshapes": {
         "type": "object",
         "additionalProperties": True,

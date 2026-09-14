@@ -510,6 +510,7 @@ from session_store_integrity import (
     load_strict_json,
     path_has_link_like_segment,
     repair_session_store,
+    verify_session_store_repair,
     scan_session_store,
     scan_session_stores,
 )
@@ -8806,12 +8807,27 @@ def repair_project_chat_store_sync(params: dict[str, Any]) -> dict[str, Any]:
             }
             prior_result = repair_session_store(target, prior_scan, project_write_authorized=True)
             if prior_result.get("status") == "already_repaired":
-                return {**prior_result, "ok": True}
-            return {"ok": False, "status": "conflict", "reason": "snapshot_changed", "changed": False}
-        result = repair_session_store(target, current, project_write_authorized=True)
+                result = prior_result
+            else:
+                return {"ok": False, "status": "conflict", "reason": "snapshot_changed", "changed": False}
+        else:
+            result = repair_session_store(target, current, project_write_authorized=True)
+    verification = verify_session_store_repair(target, expected_digest)
+    verified = verification.get("state") == "passed"
+    result["verification"] = verification
+    result["verified"] = verified
+    result["readback"] = verification
+    if verified:
+        result["commitState"] = "committed" if result.get("changed") else "no_change"
+        result["mutationStarted"] = bool(result.get("changed"))
+        result["mutationApplied"] = bool(result.get("changed"))
+    result["readbackState"] = "complete" if verified else "failed"
+    result["toolExecutionStatus"] = "completed" if verified else "failed"
+    if not verified:
+        result["ok"] = False
     return {
         **result,
-        "ok": result.get("status") in {"repaired", "quarantined", "already_repaired", "no_change"},
+        "ok": verified,
     }
 
 
@@ -25488,6 +25504,7 @@ def register_agent_gateway_tools() -> None:
         "Repair a digest-bound project chat transcript store after explicit approval.",
         "medium",
         repair_project_chat_store_sync,
+        external_mcp_capability="digest_bound_chat_store_repair_v1",
     )
     AGENT_GATEWAY.register_tool("vrcforge_request_apply", "Request user approval for a write operation.", "supervised-write", AGENT_GATEWAY.approval_transactions.create_apply_request, write=True)
     AGENT_GATEWAY.register_tool("vrcforge_apply_approved", "Apply a previously approved write operation.", "supervised-write", AGENT_GATEWAY.approval_transactions.apply_approved, write=True)

@@ -610,6 +610,39 @@ def _already_repaired(target: SessionStoreTarget, expected_exists: bool, expecte
         return False
 
 
+def verify_session_store_repair(target: SessionStoreTarget, expected_digest: str) -> dict[str, Any]:
+    """Independently verify a completed repair, including partial JSON recovery."""
+
+    digest = str(expected_digest or "").strip().lower()
+    try:
+        already_repaired = _already_repaired(target, True, digest)
+    except OSError:
+        already_repaired = False
+    backup = _artifact_path(target.path, "backup", digest) if re.fullmatch(r"[0-9a-f]{64}", digest) else None
+    quarantine = _artifact_path(target.path, "quarantine", digest) if re.fullmatch(r"[0-9a-f]{64}", digest) else None
+    try:
+        backup_ok = bool(backup and backup.is_file() and _file_digest(backup) == digest)
+    except OSError:
+        backup_ok = False
+    checks = [
+        {"name": "repair_artifacts", "passed": already_repaired},
+        {"name": "backup_readback", "passed": backup_ok},
+        {"name": "quarantine_or_repaired_source_readback", "passed": already_repaired},
+    ]
+    passed = already_repaired and all(check["passed"] for check in checks)
+    return {
+        "state": "passed" if passed else "failed",
+        "tool": "session_store_integrity_readback",
+        "checks": checks,
+        "evidence": {
+            "expectedDigest": digest,
+            "backupBasename": backup.name if backup else "",
+            "quarantineBasename": quarantine.name if quarantine else "",
+            "sourceExists": target.path.is_file(),
+        },
+    }
+
+
 def _artifact_path(path: Path, kind: str, digest: str) -> Path:
     return path.with_name(f"{path.name}.vrcforge-{kind}-{digest[:16]}")
 
