@@ -20180,8 +20180,10 @@ def prepare_authoritative_unity_checkpoint_sync(
             execution_context={"lane": "app_safety_control"}, preserve_tool_error=True,
         )
         prepared = normalize_unity_checkpoint_result(result, project_root)
+        if prepared.get("ok") is not True:
+            return prepared
         baseline = prepared.get("assetBaseline")
-        if (prepared.get("ok") is not True or not isinstance(baseline, list)
+        if (not isinstance(baseline, list)
                 or any(not isinstance(item, dict) for item in baseline)
                 or [item.get("assetPath") for item in baseline] != paths):
             return {**prepared, "ok": False, "error": "Unity did not capture the exact approved material asset baseline."}

@@ -1330,21 +1330,41 @@ namespace VRCForge.Editor
             {
                 return false;
             }
+            var materialBaselineOnly = isPrepareCheckpoint && arguments.Property("materialBaselineOnly") != null;
+            if (materialBaselineOnly)
+            {
+                if (!HasTrueBoolean(arguments, "materialBaselineOnly")
+                    || !HasStringArray(arguments, "checkpointAssetPaths")
+                    || ((JArray)arguments["checkpointAssetPaths"]).Count == 0
+                    || ((JArray)arguments["checkpointAssetPaths"]).Any(path =>
+                        !path.Value<string>().EndsWith(".mat", StringComparison.OrdinalIgnoreCase))) return false;
+                arguments = (JObject)arguments.DeepClone();
+                arguments.Remove("materialBaselineOnly");
+            }
             if (isPrepareCheckpoint && arguments.Property("checkpointAssetPaths") != null)
             {
                 if (!HasStringArray(arguments, "checkpointAssetPaths")
-                    || ((JArray)arguments["checkpointAssetPaths"]).Count > 32) return false;
+                    || ((JArray)arguments["checkpointAssetPaths"]).Count > (materialBaselineOnly ? 128 : 32)) return false;
                 arguments = (JObject)arguments.DeepClone();
                 arguments.Remove("checkpointAssetPaths");
             }
             if (!isPrepareCheckpoint && arguments.Property("assetBaseline") != null)
             {
-                if (!(arguments["assetBaseline"] is JArray baseline) || baseline.Count > 32
+                if (!(arguments["assetBaseline"] is JArray baseline) || baseline.Count > 128
                     || arguments["phase"]?.Value<string>() != "reload") return false;
                 foreach (var item in baseline)
                 {
-                    if (!(item is JObject row) || !HasExactKeys(row, "assetPath", "assetGuid", "serializedState")
-                        || !HasNonEmptyString(row, "assetPath") || !HasNonEmptyString(row, "assetGuid")
+                    if (!(item is JObject row)
+                        || !HasNonEmptyString(row, "assetPath") || !HasNonEmptyString(row, "assetGuid")) return false;
+                    if (row["assetPath"].Value<string>().EndsWith(".mat", StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (!HasExactKeys(row, "assetPath", "assetGuid", "materialStateDigest")
+                            || !HasNonEmptyString(row, "materialStateDigest")) return false;
+                        var digest = row["materialStateDigest"].Value<string>();
+                        if (digest.Length != 64 || digest.Any(c => !Uri.IsHexDigit(c))) return false;
+                    }
+                    else if (baseline.Count > 32
+                        || !HasExactKeys(row, "assetPath", "assetGuid", "serializedState")
                         || !(row["serializedState"] is JObject)) return false;
                 }
                 arguments = (JObject)arguments.DeepClone();
