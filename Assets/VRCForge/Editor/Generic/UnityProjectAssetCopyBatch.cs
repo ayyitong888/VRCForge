@@ -120,7 +120,13 @@ namespace VRCForge.Editor
                 }
                 failurePhase = "save_assets";
                 rowIndex = null; sourcePath = null; destinationPath = null;
-                AssetDatabase.SaveAssets();
+                foreach (var snapshot in snapshots)
+                {
+                    rowIndex = snapshots.IndexOf(snapshot); sourcePath = snapshot.SourcePath; destinationPath = snapshot.DestinationPath;
+                    var copiedAsset = AssetDatabase.LoadMainAssetAtPath(snapshot.DestinationPath)
+                        ?? throw new InvalidOperationException("The copied asset is unavailable for targeted saving.");
+                    AssetDatabase.SaveAssetIfDirty(copiedAsset);
+                }
                 var results = new JArray();
                 var guids = new HashSet<string>(snapshots.Select(s => s.SourceEvidence.Guid), StringComparer.Ordinal);
                 foreach (var snapshot in snapshots)

@@ -242,7 +242,9 @@ namespace VRCForge.Editor
                 }
                 mutationStarted = true;
                 createdEvidence = ReadCreatedEvidenceWithRetry(snapshot.DestinationPath);
-                AssetDatabase.SaveAssets();
+                var copiedAsset = AssetDatabase.LoadMainAssetAtPath(snapshot.DestinationPath)
+                    ?? throw new ProjectAssetCopyException("The copied asset is unavailable for targeted saving.");
+                AssetDatabase.SaveAssetIfDirty(copiedAsset);
                 AssetDatabase.ImportAsset(
                     snapshot.DestinationPath,
                     ImportAssetOptions.ForceSynchronousImport | ImportAssetOptions.ForceUpdate);
