@@ -990,10 +990,15 @@ def run_stdio_server(
                 loadedBlocks=sorted(loaded_blocks),
             )
         manifests: dict[str, list[Mapping[str, Any]]] = {"planning": [], "execution": []}
+        unavailable_layers: list[str] = []
         for layer in manifests:
             try:
                 manifest = bridge.manifest(layer, ["*"])
             except Exception:
+                unavailable_layers.append(layer)
+                continue
+            if not isinstance(manifest, Mapping) or not isinstance(manifest.get("tools"), list):
+                unavailable_layers.append(layer)
                 continue
             manifests[layer] = [
                 item
@@ -1004,8 +1009,8 @@ def run_stdio_server(
 
         counts = {
             leaf_id: {
-                "planningToolCount": sum(item_owner(item) == leaf_id for item in manifests["planning"]),
-                "executionToolCount": sum(item_owner(item) == leaf_id for item in manifests["execution"]),
+                "planningToolCount": None if "planning" in unavailable_layers else sum(item_owner(item) == leaf_id for item in manifests["planning"]),
+                "executionToolCount": None if "execution" in unavailable_layers else sum(item_owner(item) == leaf_id for item in manifests["execution"]),
             }
             for leaf_id in CANONICAL_TOOL_LEAVES
         }
@@ -1074,6 +1079,14 @@ def run_stdio_server(
         return {
             "ok": True,
             "schema": "vrcforge.external_tool_blocks.v2",
+            "catalogStatus": "unavailable" if len(unavailable_layers) == 2 else ("partial" if unavailable_layers else "complete"),
+            "manifestComplete": not unavailable_layers,
+            "unavailableLayers": unavailable_layers,
+            "catalogMessage": (
+                "Backend tool inventory is incomplete. Null counts mean unknown, not zero capabilities; "
+                "the tree retains local navigation only. Run vrcforge_bridge_preflight to diagnose the connection."
+                if unavailable_layers else "Both backend exposure inventories were read successfully."
+            ),
             "loadedBlocks": sorted(loaded_blocks),
             "catalogGeneration": tool_list_revision,
             "selectedBlock": selected_block,
