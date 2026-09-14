@@ -864,3 +864,176 @@ EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS["vrcforge_restore_checkpoint"] = {
         {"required": ["confirm_restore"], "properties": {"confirm_restore": {"const": True}}},
     ]}],
 }
+
+
+# These public tools normalize their own payload before the approved Core call.
+# Keep their accepted aliases and scalar list forms visible; previews reuse these
+# exact schemas through canonical_unity_read_tool_input_schema.
+_WARDROBE_TARGET_PROPERTIES = {
+    "projectPath": {**_PROJECT_PATH_PROPERTY, "type": ["string", "null"], "description": "Unity project root; omit to use the configured project."},
+    "avatarPath": {**_AVATAR_PATH_PROPERTY, "type": ["string", "null"], "description": "Containing avatar root; omission follows the existing unambiguous selection/default behavior."},
+}
+_WARDROBE_BOOLEAN_INPUT = {"type": ["boolean", "number", "string", "null"]}
+_WARDROBE_NUMBER_INPUT = {"type": ["number", "string", "null"]}
+_WARDROBE_OBJECT_PATHS = {
+    "type": ["array", "string", "null"], "items": {"type": "string"},
+    "description": "Avatar-relative scene object paths. An array is preferred; the existing single-path string form is also accepted.",
+}
+_WARDROBE_VALUE_LIST = {
+    "type": ["array", "string", "number", "null"], "items": {"type": ["number", "string"]},
+    "description": "Wardrobe Int values. Prefer an array; existing comma/semicolon/space-separated string and single-number forms are accepted.",
+}
+_WARDROBE_PARAMETER_NAME = {"type": ["string", "null"], "description": "Existing Int expression parameter identifying the wardrobe."}
+_WARDROBE_CLIP_DIRECTORY = {"type": ["string", "null"], "description": "Optional Assets-relative generated clip directory; omission uses the existing generated Wardrobe directory."}
+_WARDROBE_WRITE_DEFAULTS = {**_WARDROBE_BOOLEAN_INPUT, "description": "Optional Write Defaults override. Omission preserves the existing wardrobe state convention. Prefer a JSON boolean; legacy scalar coercion is unchanged."}
+_WARDROBE_MENU_TOGGLE = {**_WARDROBE_BOOLEAN_INPUT, "default": True, "description": "Create a matching menu toggle. Prefer a JSON boolean; legacy scalar coercion is unchanged."}
+_WARDROBE_DEFAULT_OFF = {**_WARDROBE_BOOLEAN_INPUT, "default": True, "description": "Set added objects inactive as part of authoring, subject to the part defaultOn setting. Prefer a JSON boolean."}
+_WARDROBE_PUBLIC_PROPERTIES = {
+    "create_wardrobe": {
+        **_WARDROBE_TARGET_PROPERTIES,
+        "parameterName": {**_WARDROBE_PARAMETER_NAME, "default": "Clothes", "description": "New wardrobe Int parameter name; defaults to Clothes."},
+        "menuName": {"type": ["string", "null"], "default": "Wardrobe", "description": "Wardrobe submenu name."},
+        "defaultControlName": {"type": ["string", "null"], "default": "Default", "description": "Default outfit menu control and FX state name."},
+        "layerName": {"type": ["string", "null"], "description": "FX layer name; defaults to the wardrobe parameter name."},
+        "assetDir": {"type": ["string", "null"], "description": "Optional Assets-relative output directory for generated wardrobe assets."},
+        "writeDefaults": {**_WARDROBE_BOOLEAN_INPUT, "default": True, "description": "Write Defaults for the default FX state; prefer a JSON boolean."},
+        "saved": {**_WARDROBE_BOOLEAN_INPUT, "default": True, "description": "Persist the wardrobe expression parameter; prefer a JSON boolean."},
+        "networkSynced": {**_WARDROBE_BOOLEAN_INPUT, "default": True, "description": "Synchronize the wardrobe parameter; prefer a JSON boolean."},
+    },
+    "add_wardrobe_outfit": {
+        **_WARDROBE_TARGET_PROPERTIES,
+        "parameterName": _WARDROBE_PARAMETER_NAME,
+        "outfitName": {"type": ["string", "null"], "description": "Required display name for the new outfit."},
+        "objectPaths": _WARDROBE_OBJECT_PATHS,
+        "offObjectPaths": {**_WARDROBE_OBJECT_PATHS, "description": "Optional paths explicitly turned off by this outfit clip; array or single path."},
+        "addMenuToggle": _WARDROBE_MENU_TOGGLE,
+        "setObjectsDefaultOff": _WARDROBE_DEFAULT_OFF,
+        "subMenuOverflow": {**_WARDROBE_BOOLEAN_INPUT, "default": True, "description": "Permit creating an overflow submenu when capacity is exhausted; prefer a JSON boolean."},
+        "subMenuName": {"type": ["string", "null"], "default": "Wardrobe", "description": "Overflow submenu name."},
+        "clipOutputDir": _WARDROBE_CLIP_DIRECTORY,
+        "value": {**_WARDROBE_NUMBER_INPUT, "description": "Optional unused wardrobe Int value; omission lets the existing planner choose. Numeric strings retain integer conversion."},
+        "writeDefaults": _WARDROBE_WRITE_DEFAULTS,
+    },
+    "add_outfit_part": {
+        **_WARDROBE_TARGET_PROPERTIES,
+        "parameterName": _WARDROBE_PARAMETER_NAME,
+        "partName": {"type": ["string", "null"], "description": "Required display name for the new part toggle."},
+        "objectPaths": _WARDROBE_OBJECT_PATHS,
+        "value": {**_WARDROBE_NUMBER_INPUT, "description": "Required existing wardrobe Int value gating this part. Numeric strings retain integer conversion."},
+        "partParameterName": {"type": ["string", "null"], "description": "Optional Bool parameter name for this part; defaults from partName."},
+        "addMenuToggle": _WARDROBE_MENU_TOGGLE,
+        "setObjectsDefaultOff": _WARDROBE_DEFAULT_OFF,
+        "defaultOn": {**_WARDROBE_BOOLEAN_INPUT, "default": False, "description": "Initial state of the part toggle; prefer a JSON boolean."},
+        "subMenuName": {"type": ["string", "null"], "description": "Optional menu name used to place the part toggle."},
+        "clipOutputDir": _WARDROBE_CLIP_DIRECTORY,
+        "writeDefaults": _WARDROBE_WRITE_DEFAULTS,
+    },
+    "manage_wardrobe": {
+        **_WARDROBE_TARGET_PROPERTIES,
+        "action": {"type": "string", "description": "Required action: remove_outfit, rename_outfit, reorder_outfits, set_default, or delete_wardrobe. Existing aliases remove/delete_outfit, rename, reorder/sort, default, and remove_wardrobe are accepted."},
+        "parameterName": _WARDROBE_PARAMETER_NAME,
+        **{name: {"type": ["string", "null"], "description": "Existing outfit/control/state name used to select the target; may instead select by Int value."} for name in ("outfitName", "targetName", "stateName", "controlName")},
+        **{name: {"type": ["string", "null"], "description": "Replacement outfit name; rename_outfit requires newName or newOutfitName."} for name in ("newName", "newOutfitName")},
+        "assetDir": {"type": ["string", "null"], "description": "Optional output directory for generated wardrobe menu assets."},
+        "clipOutputDir": _WARDROBE_CLIP_DIRECTORY,
+        **{name: {**_WARDROBE_NUMBER_INPUT, "description": "Target wardrobe Int value. The handler checks targetValue, outfitValue, then value and their aliases."} for name in ("targetValue", "outfitValue", "value")},
+        "orderValues": {**_WARDROBE_VALUE_LIST, "description": "Requested Int-value ordering for reorder_outfits; array or delimited string."},
+        "targetValues": {**_WARDROBE_VALUE_LIST, "description": "Selected wardrobe Int values for the requested operation; array or delimited string."},
+        "deleteObjects": {**_WARDROBE_BOOLEAN_INPUT, "default": False, "description": "Also delete associated scene objects; prefer a JSON boolean. Ordinary approval still applies."},
+        "deactivateObjects": {**_WARDROBE_BOOLEAN_INPUT, "description": "Deactivate associated objects. Omission defaults true for remove_outfit and false for other actions."},
+        "deleteGeneratedAssets": {**_WARDROBE_BOOLEAN_INPUT, "default": False, "description": "Also delete generated assets in the approved wardrobe plan; prefer a JSON boolean."},
+        "confirmDeleteWardrobe": {**_WARDROBE_BOOLEAN_INPUT, "default": False, "description": "Must resolve to true for delete_wardrobe; prefer a JSON boolean. Does not bypass approval."},
+    },
+    "ensure_expression_parameter": {
+        **_WARDROBE_TARGET_PROPERTIES,
+        "parameterName": {"type": ["string", "null"], "description": "Required exact expression parameter name to create or update."},
+        "valueType": {"type": ["string", "null"], "default": "Int", "description": "Expression parameter type (Bool, Int, or Float)."},
+        "defaultValue": {**_WARDROBE_NUMBER_INPUT, "default": 0, "description": "Parameter default value; existing numeric-string conversion is preserved."},
+        "saved": {**_WARDROBE_BOOLEAN_INPUT, "default": True, "description": "Persist the parameter value; prefer a JSON boolean."},
+        "networkSynced": {**_WARDROBE_BOOLEAN_INPUT, "default": True, "description": "Synchronize the parameter; prefer a JSON boolean."},
+        "assetDir": {"type": ["string", "null"], "description": "Optional output directory when an expression parameter asset must be created."},
+    },
+    "ensure_expression_menu_control": {
+        **_WARDROBE_TARGET_PROPERTIES,
+        "menuPath": {"type": ["string", "null"], "description": "Optional menu path containing the control."},
+        "controlName": {"type": ["string", "null"], "description": "Required exact menu control name to create or update."},
+        "controlType": {"type": ["string", "null"], "default": "Toggle", "description": "Expression menu control type, validated by the existing Core handler."},
+        "parameterName": {"type": ["string", "null"], "description": "Optional main expression parameter used by the control."},
+        "controlValue": {**_WARDROBE_NUMBER_INPUT, "default": 0, "description": "Value assigned by the control; existing numeric-string conversion is preserved."},
+        "assetDir": {"type": ["string", "null"], "description": "Optional output directory when menu assets must be created."},
+    },
+    "ensure_animator_state": {
+        **_WARDROBE_TARGET_PROPERTIES,
+        **{name: {"type": ["string", "null"], "description": description} for name, description in {
+            "layerName": "Required FX layer name.", "stateName": "Required state name.", "parameterName": "Required Animator condition parameter name.",
+        }.items()},
+        "parameterType": {"type": ["string", "null"], "default": "Int", "description": "Animator parameter type."},
+        "conditionMode": {"type": ["string", "null"], "default": "Equals", "description": "Animator condition mode."},
+        "threshold": {**_WARDROBE_NUMBER_INPUT, "default": 0, "description": "Condition threshold; existing numeric-string conversion is preserved."},
+        "writeDefaults": {**_WARDROBE_BOOLEAN_INPUT, "default": True, "description": "State Write Defaults value; prefer a JSON boolean."},
+        "assetDir": {"type": ["string", "null"], "description": "Optional output directory when Animator assets must be created."},
+    },
+}
+_WARDROBE_COMMON_ALIASES = {"projectPath": ("project_path",), "avatarPath": ("avatar_path",), "parameterName": ("parameter_name",)}
+_WARDROBE_PUBLIC_ALIASES = {
+    "create_wardrobe": {
+        "parameterName": ("parameter_name", "wardrobe_parameter", "wardrobeParameter"),
+        "menuName": ("menu_name", "sub_menu_name", "subMenuName"),
+        "defaultControlName": ("default_control_name",), "layerName": ("layer_name",),
+        "assetDir": ("asset_dir", "clip_output_dir", "clipOutputDir"),
+        "writeDefaults": ("write_defaults",), "networkSynced": ("network_synced",),
+    },
+    "add_wardrobe_outfit": {
+        "outfitName": ("outfit_name", "display_name", "displayName"),
+        "objectPaths": ("object_paths", "on_object_paths", "onObjectPaths"), "offObjectPaths": ("off_object_paths",),
+        "addMenuToggle": ("add_menu_toggle",), "setObjectsDefaultOff": ("set_objects_default_off",),
+        "subMenuOverflow": ("sub_menu_overflow",), "subMenuName": ("sub_menu_name",),
+        "clipOutputDir": ("clip_output_dir",), "writeDefaults": ("write_defaults",),
+    },
+    "add_outfit_part": {
+        "partName": ("part_name", "display_name", "displayName"),
+        "objectPaths": ("object_paths", "on_object_paths", "onObjectPaths"), "value": ("outfit_value", "outfitValue"),
+        "partParameterName": ("part_parameter_name", "bool_parameter_name", "boolParameterName"),
+        "addMenuToggle": ("add_menu_toggle",), "setObjectsDefaultOff": ("set_objects_default_off",),
+        "defaultOn": ("default_on",), "subMenuName": ("sub_menu_name",), "clipOutputDir": ("clip_output_dir",), "writeDefaults": ("write_defaults",),
+    },
+    "manage_wardrobe": {
+        "parameterName": ("parameter_name", "wardrobe_parameter", "wardrobeParameter"),
+        **{camel: (snake,) for camel, snake in (
+            ("outfitName", "outfit_name"), ("targetName", "target_name"), ("stateName", "state_name"), ("controlName", "control_name"),
+            ("newName", "new_name"), ("newOutfitName", "new_outfit_name"), ("assetDir", "asset_dir"), ("clipOutputDir", "clip_output_dir"),
+            ("targetValue", "target_value"), ("outfitValue", "outfit_value"), ("orderValues", "order_values"),
+            ("deleteObjects", "delete_objects"), ("deactivateObjects", "deactivate_objects"), ("deleteGeneratedAssets", "delete_generated_assets"),
+            ("confirmDeleteWardrobe", "confirm_delete_wardrobe"),
+        )},
+        "targetValues": ("target_values", "values"),
+    },
+    "ensure_expression_parameter": {"valueType": ("value_type",), "defaultValue": ("default_value",), "networkSynced": ("network_synced",), "assetDir": ("asset_dir",)},
+    "ensure_expression_menu_control": {"menuPath": ("menu_path",), "controlName": ("control_name",), "controlType": ("control_type",), "controlValue": ("control_value",), "assetDir": ("asset_dir",)},
+    "ensure_animator_state": {"layerName": ("layer_name",), "stateName": ("state_name",), "parameterType": ("parameter_type",), "conditionMode": ("condition_mode",), "writeDefaults": ("write_defaults",), "assetDir": ("asset_dir",)},
+}
+_WARDROBE_REQUIRED_PUBLIC_FIELDS = {
+    "create_wardrobe": (),
+    "add_wardrobe_outfit": ("parameterName", "outfitName", "objectPaths"),
+    "add_outfit_part": ("parameterName", "partName", "objectPaths", "value"),
+    "manage_wardrobe": ("action", "parameterName"),
+    "ensure_expression_parameter": ("parameterName",),
+    "ensure_expression_menu_control": ("controlName",),
+    "ensure_animator_state": ("layerName", "stateName", "parameterName"),
+}
+for _wardrobe_tool, _wardrobe_properties in _WARDROBE_PUBLIC_PROPERTIES.items():
+    _wardrobe_aliases = {**_WARDROBE_COMMON_ALIASES, **_WARDROBE_PUBLIC_ALIASES[_wardrobe_tool]}
+    _wardrobe_schema = {
+        "type": "object", "additionalProperties": True, "required": [],
+        "properties": {
+            **_wardrobe_properties,
+            **{alias: {**_wardrobe_properties[canonical], "description": "Existing alias of " + canonical + ". " + _wardrobe_properties[canonical].get("description", "")}
+               for canonical, aliases in _wardrobe_aliases.items() for alias in aliases},
+        },
+    }
+    if _WARDROBE_REQUIRED_PUBLIC_FIELDS[_wardrobe_tool]:
+        _wardrobe_schema["allOf"] = [
+            {"anyOf": [{"required": [name]} for name in (canonical, *_wardrobe_aliases.get(canonical, ()))]}
+            for canonical in _WARDROBE_REQUIRED_PUBLIC_FIELDS[_wardrobe_tool]
+        ]
+    EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS["vrcforge_" + _wardrobe_tool] = _wardrobe_schema
