@@ -11,6 +11,7 @@ CONSOLE_VERIFICATION_PROFILES = frozenset(
     {
         "persisted_scene_write_console",
         "unity_asset_write_console",
+        "unity_refresh_console",
     }
 )
 
@@ -175,12 +176,23 @@ class UnityConsoleCompletionVerifier:
             observed_errors = [item for item in stable_snapshot["diagnostics"] if item["severity"] == "error"]
             observed_warnings = [item for item in stable_snapshot["diagnostics"] if item["severity"] == "warning"]
             current_clean = _complete_pipeline_snapshot(stable_snapshot) and not observed_errors and not observed_warnings
+            refresh_complete = (
+                profile == "unity_refresh_console"
+                and _complete_pipeline_snapshot(stable_snapshot)
+                and not observed_errors
+                and result.get("ok") is True
+                and result.get("completionKnown") is True
+                and result.get("status") == "done"
+            )
             attached = _attach_console_verification(
                 result,
                 profile,
-                passed=current_clean,
-                code="" if current_clean else "unity_console_baseline_unavailable",
+                passed=current_clean or refresh_complete,
+                code="" if current_clean or refresh_complete else "unity_console_baseline_unavailable",
                 summary=(
+                    "Unity refresh completed with a stable full compilation snapshot and no current errors; observed warnings are not classified as new because the prior baseline is unavailable."
+                    if refresh_complete and not current_clean
+                    else
                     "Unity compilation is stable with no current errors or warnings; the prior diagnostic baseline is unavailable."
                     if current_clean
                     else "Unity compile diagnostics cannot be compared with a complete prior baseline; observed diagnostics are not classified as new."

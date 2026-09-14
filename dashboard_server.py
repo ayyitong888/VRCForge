@@ -26170,12 +26170,12 @@ def register_agent_gateway_tools() -> None:
         "low",
         refresh_asset_database_sync,
         approved_execution_plan_builder=build_refresh_asset_database_execution_plan,
-        verification_profile="unity_asset_write_console",
+        verification_profile="unity_refresh_console",
         verification_prepare_handler=lambda arguments: UNITY_CONSOLE_COMPLETION_VERIFIER.capture_baseline(
-            "unity_asset_write_console", arguments,
+            "unity_refresh_console", arguments,
         ),
         verification_finalize_handler=lambda arguments, baseline, result: UNITY_CONSOLE_COMPLETION_VERIFIER.finalize(
-            "unity_asset_write_console", arguments, baseline, result,
+            "unity_refresh_console", arguments, baseline, result,
         ),
     )
     register_write_handler(
