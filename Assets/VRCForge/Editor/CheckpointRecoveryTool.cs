@@ -22,6 +22,7 @@ namespace VRCForge.Editor
         public class Parameters
         {
             [VRCForgeInput("Optional exact active Unity project root.", IsRequired = false)] public string projectPath { get; set; } = "";
+            [VRCForgeInput("Exact existing assets resolved by the approved write preview.", IsRequired = false)] public string[] checkpointAssetPaths { get; set; }
             [VRCForgeInput("Live-run SHA-256 digest when a bound fixture request is used.", IsRequired = false)] public string expectedRunIdDigest { get; set; } = "";
             [VRCForgeInput("Expected Unity project-root SHA-256 digest.", IsRequired = false)] public string expectedProjectPathDigest { get; set; } = "";
             [VRCForgeInput("Expected Unity process id.", IsRequired = false)] public int? expectedUnityProcessId { get; set; }
@@ -145,6 +146,7 @@ namespace VRCForge.Editor
                     receipt.Status = "succeeded";
                 }
                 AssetDatabase.SaveAssets();
+                var assetBaseline = CaptureAssetBaseline(@params?["checkpointAssetPaths"]);
                 foreach (var receipt in receipts.Where(item => !item.Asset.StartsWith("scene:", StringComparison.Ordinal)))
                 {
                     receipt.After = ReadAssetAfter(receipt.Asset);
@@ -164,6 +166,7 @@ namespace VRCForge.Editor
                         scenes,
                         activeScenePath,
                         ignoredTransientScenes,
+                        assetBaseline,
                         unityProcessId = identity?.ProcessId,
                         unityProcessStartedAtUtc = identity?.StartedAtUtc,
                         unityExecutableDigest = identity?.ExecutableDigest,
@@ -311,6 +314,66 @@ namespace VRCForge.Editor
             }
         }
 
+        internal static JArray CaptureAssetBaseline(JToken paths)
+        {
+            if (paths == null) return null;
+            if (!(paths is JArray array) || array.Count > 32)
+                throw new InvalidOperationException("Invalid checkpoint asset footprint.");
+            var baseline = new JArray();
+            foreach (var entry in array)
+            {
+                var path = entry.Type == JTokenType.String ? entry.Value<string>() : "";
+                ValidateBaselinePath(path);
+                var asset = AssetDatabase.LoadMainAssetAtPath(path);
+                if (!(asset is ScriptableObject))
+                    throw new InvalidOperationException("Checkpoint memory baseline requires a native ScriptableObject asset.");
+                var json = EditorJsonUtility.ToJson(asset);
+                if (json.Length > 262144) throw new InvalidOperationException("Checkpoint asset baseline is too large.");
+                baseline.Add(new JObject { ["assetPath"] = path, ["assetGuid"] = AssetDatabase.AssetPathToGUID(path),
+                    ["serializedState"] = JObject.Parse(json) });
+            }
+            return baseline;
+        }
+
+        internal static void ValidateBaselinePath(string path)
+        {
+            if (string.IsNullOrEmpty(path) || !path.StartsWith("Assets/", StringComparison.Ordinal)
+                || !path.EndsWith(".asset", StringComparison.OrdinalIgnoreCase)
+                || path.Contains("\\") || path.Split('/').Any(part => part == ".." || part == "." || part.Length == 0)
+                || !File.Exists(Path.Combine(ProjectRoot(), path)))
+                throw new InvalidOperationException("Checkpoint asset footprint must name an existing exact Assets .asset path.");
+        }
+
+        internal static JArray RestoreAssetBaseline(JToken token)
+        {
+            if (!(token is JArray baseline) || baseline.Count > 32)
+                throw new InvalidOperationException("Checkpoint asset baseline is unavailable.");
+            // Validate the entire footprint before importing any asset.
+            foreach (var item in baseline)
+            {
+                var path = item["assetPath"]?.Value<string>();
+                ValidateBaselinePath(path);
+                if (!(item["serializedState"] is JObject)
+                    || string.IsNullOrEmpty(item["assetGuid"]?.Value<string>())
+                    || AssetDatabase.AssetPathToGUID(path) != item["assetGuid"].Value<string>())
+                    throw new InvalidOperationException("Checkpoint asset identity or baseline is invalid.");
+            }
+            var verified = new JArray();
+            foreach (var item in baseline)
+            {
+                var path = item["assetPath"].Value<string>();
+                AssetDatabase.ImportAsset(path, ImportAssetOptions.ForceUpdate | ImportAssetOptions.ForceSynchronousImport);
+                var asset = AssetDatabase.LoadMainAssetAtPath(path);
+                if (!(asset is ScriptableObject)
+                    || !JToken.DeepEquals(item["serializedState"], JObject.Parse(EditorJsonUtility.ToJson(asset))))
+                    throw new InvalidOperationException($"Checkpoint live asset readback differs from baseline: {path}");
+                var evidence = SceneObjectCopyCore.ReadStableAssetEvidence(path, "checkpoint asset readback");
+                verified.Add(new JObject { ["assetPath"] = path, ["assetGuid"] = evidence.Guid,
+                    ["fileDigest"] = evidence.File.Digest, ["verified"] = true });
+            }
+            return verified;
+        }
+
         internal static string ProjectRoot()
         {
             return Path.GetFullPath(Path.Combine(Application.dataPath, "..")).Replace("\\", "/");
@@ -353,6 +416,7 @@ namespace VRCForge.Editor
             [VRCForgeInput("Exact project scene paths captured before restore.", IsRequired = false)] public List<string> scenePaths { get; set; } = new List<string>();
             [VRCForgeInput("Exact active project scene path captured before restore.", IsRequired = false)] public string activeScenePath { get; set; } = "";
             [VRCForgeInput("Refresh non-scene assets because checkpoint restore changed them.", IsRequired = false)] public bool refreshAssets { get; set; } = true;
+            [VRCForgeInput("Exact asset state captured by checkpoint preparation.", IsRequired = false)] public JArray assetBaseline { get; set; }
             [VRCForgeInput("Live-run SHA-256 digest when a bound fixture request is used.", IsRequired = false)] public string expectedRunIdDigest { get; set; } = "";
             [VRCForgeInput("Expected Unity project-root SHA-256 digest.", IsRequired = false)] public string expectedProjectPathDigest { get; set; } = "";
             [VRCForgeInput("Expected Unity process id.", IsRequired = false)] public int? expectedUnityProcessId { get; set; }
@@ -731,6 +795,8 @@ namespace VRCForge.Editor
                 {
                     AssetDatabase.Refresh(ImportAssetOptions.ForceSynchronousImport | ImportAssetOptions.ForceUpdate);
                 }
+                var assetReadback = @params?.Property("assetBaseline") != null
+                    ? CheckpointPrepareTool.RestoreAssetBaseline(@params["assetBaseline"]) : null;
                 VRCForgeMcpCoreServer.ScheduleInvocationPumpRegistration();
                 ReadSceneAfter(receipts);
                 return VRCForgeToolResult.Completed(
@@ -742,6 +808,8 @@ namespace VRCForge.Editor
                         projectPath = CheckpointPrepareTool.ProjectRoot(),
                         scenes,
                         refreshAssets,
+                        assetBaselineVerified = assetReadback != null,
+                        assetReadback,
                         unityProcessId = identity?.ProcessId,
                         unityProcessStartedAtUtc = identity?.StartedAtUtc,
                         unityExecutableDigest = identity?.ExecutableDigest,

@@ -1286,12 +1286,33 @@ class AgentCheckpointRecoveryService:
                 "restoredFiles": ensure_string_list(payload.get("restoredFiles")),
                 "deletedFiles": ensure_string_list(payload.get("deletedFiles")),
             }
+            baseline_required = (checkpoint_prepare.get("assetBaselineRequired") is True
+                or checkpoint.get("targetTool") == "vrcforge_manage_expression_menu")
+            if baseline_required and isinstance(checkpoint_prepare.get("assetBaseline"), list):
+                reload_context["assetBaseline"] = checkpoint_prepare["assetBaseline"]
             try:
                 reload_result = ensure_dict(
                     self._checkpoint_restore_handler(project_root, reload_context)
                 )
             except Exception as exc:  # noqa: BLE001
                 reload_result = {"ok": False, "error": str(exc)}
+            expected_baseline = checkpoint_prepare.get("assetBaseline")
+            actual_readback = reload_result.get("assetReadback")
+            exact_asset_readback = (
+                isinstance(expected_baseline, list) and isinstance(actual_readback, list)
+                and len(expected_baseline) == len(actual_readback)
+                and all(isinstance(item, dict) for item in [*expected_baseline, *actual_readback])
+                and [(item.get("assetPath"), item.get("assetGuid")) for item in expected_baseline]
+                    == [(item.get("assetPath"), item.get("assetGuid")) for item in actual_readback]
+                and all(item.get("verified") is True and isinstance(item.get("fileDigest"), str)
+                    and len(item["fileDigest"]) == 64 for item in actual_readback)
+            )
+            if baseline_required and (
+                reload_result.get("assetBaselineVerified") is not True or not exact_asset_readback
+            ):
+                reload_result = {**reload_result, "ok": False,
+                    "error": "Checkpoint asset memory restoration was not independently verified.",
+                    "assetBaselineVerified": False}
             if restore_prepare:
                 payload["unityRestorePrepare"] = restore_prepare
             payload["unityReload"] = reload_result

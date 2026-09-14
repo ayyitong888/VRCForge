@@ -1330,6 +1330,26 @@ namespace VRCForge.Editor
             {
                 return false;
             }
+            if (isPrepareCheckpoint && arguments.Property("checkpointAssetPaths") != null)
+            {
+                if (!HasStringArray(arguments, "checkpointAssetPaths")
+                    || ((JArray)arguments["checkpointAssetPaths"]).Count > 32) return false;
+                arguments = (JObject)arguments.DeepClone();
+                arguments.Remove("checkpointAssetPaths");
+            }
+            if (!isPrepareCheckpoint && arguments.Property("assetBaseline") != null)
+            {
+                if (!(arguments["assetBaseline"] is JArray baseline) || baseline.Count > 32
+                    || arguments["phase"]?.Value<string>() != "reload") return false;
+                foreach (var item in baseline)
+                {
+                    if (!(item is JObject row) || !HasExactKeys(row, "assetPath", "assetGuid", "serializedState")
+                        || !HasNonEmptyString(row, "assetPath") || !HasNonEmptyString(row, "assetGuid")
+                        || !(row["serializedState"] is JObject)) return false;
+                }
+                arguments = (JObject)arguments.DeepClone();
+                arguments.Remove("assetBaseline");
+            }
             if (isPrepareCheckpoint && HasExactKeys(arguments, "projectPath"))
             {
                 return HasNonEmptyString(arguments, "projectPath");

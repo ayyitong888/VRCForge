@@ -19476,16 +19476,16 @@ def finalize_add_modular_avatar_component_verification_sync(
     )
 
 
-def prepare_unity_checkpoint_sync(project_root: Path) -> dict[str, Any]:
+def prepare_unity_checkpoint_sync(project_root: Path, checkpoint_asset_paths: list[str] | None = None) -> dict[str, Any]:
     live_connection = globals().get("PRIMITIVE_BASIS_LIVE_CONNECTION")
     if isinstance(live_connection, PrimitiveBasisLiveUnityConnection):
-        return live_connection.prepare_checkpoint(project_root)
+        return live_connection.prepare_checkpoint(project_root, checkpoint_asset_paths)
     settings = load_dashboard_settings(build_agent_connection_request({}))
     settings.unity_mcp_timeout_seconds = max(int(settings.unity_mcp_timeout_seconds or 30), 180)
     result = invoke_unity_mcp(
         settings,
         "vrc_prepare_checkpoint",
-        {"projectPath": str(project_root)},
+        {"projectPath": str(project_root), **({"checkpointAssetPaths": checkpoint_asset_paths} if checkpoint_asset_paths is not None else {})},
         execution_context={"lane": "app_safety_control"},
         preserve_tool_error=True,
     )
@@ -19642,6 +19642,7 @@ def reload_unity_checkpoint_sync(
                 "scenePaths": prepared_scenes,
                 "activeScenePath": active_scene_path,
                 "refreshAssets": refresh_assets,
+                **({"assetBaseline": ensure_dict(restore_prepare)["assetBaseline"]} if "assetBaseline" in ensure_dict(restore_prepare) else {}),
             },
             execution_context={"lane": "app_safety_control"},
             preserve_tool_error=True,
@@ -20020,6 +20021,22 @@ def prepare_authoritative_unity_checkpoint_sync(
     project_root: Path,
     arguments: dict[str, Any],
 ) -> dict[str, Any]:
+    arguments = dict(arguments)
+    checkpoint_target = arguments.pop("_checkpointTargetTool", "")
+    if checkpoint_target == "vrcforge_manage_expression_menu":
+        preview = manage_expression_menu_sync(arguments, preview=True)
+        plan = ensure_dict(preview.get("plan"))
+        paths = plan.get("checkpointAssetPaths")
+        if preview.get("ok") is not True or not isinstance(paths, list) or any(not isinstance(path, str) for path in paths):
+            return {"ok": False, "error": "The menu preview did not provide its exact checkpoint asset footprint."}
+        prepared = prepare_unity_checkpoint_sync(project_root, paths)
+        baseline = prepared.get("assetBaseline")
+        if (prepared.get("ok") is not True or not isinstance(baseline, list)
+                or any(not isinstance(item, dict) for item in baseline)
+                or [item.get("assetPath") for item in baseline] != paths):
+            return {**prepared, "ok": False, "error": "Unity did not capture the exact approved menu asset baseline."}
+        prepared["assetBaselineRequired"] = True
+        return prepared
     nested_tool = str(arguments.get("toolName") or arguments.get("tool_name") or "").strip()
     if not nested_tool and PREPARED_UNITY_EXECUTION_ARGUMENT_KEY in arguments:
         # Shader tuning wrappers seal the real Core calls instead of exposing a
@@ -27191,8 +27208,9 @@ class PrimitiveBasisLiveUnityConnection:
             "exitCode": result.exit_code,
         }
 
-    def prepare_checkpoint(self, project_root: Path) -> dict[str, Any]:
-        return self._checkpoint_call("vrc_prepare_checkpoint", project_root)
+    def prepare_checkpoint(self, project_root: Path, checkpoint_asset_paths: list[str] | None = None) -> dict[str, Any]:
+        return self._checkpoint_call("vrc_prepare_checkpoint", project_root,
+            {"checkpointAssetPaths": checkpoint_asset_paths} if checkpoint_asset_paths is not None else None)
 
     def prepare_restore_checkpoint(self, project_root: Path) -> dict[str, Any]:
         return self._checkpoint_call(
@@ -27216,6 +27234,7 @@ class PrimitiveBasisLiveUnityConnection:
                     prepared.get("scenes") if isinstance(prepared.get("scenes"), list) else []
                 ),
                 "activeScenePath": str(prepared.get("activeScenePath") or "").strip(),
+                **({"assetBaseline": prepared["assetBaseline"]} if "assetBaseline" in prepared else {}),
                 "refreshAssets": any(
                     not str(path).replace("\\", "/").lower().endswith(".unity")
                     for path in [

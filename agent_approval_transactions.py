@@ -2539,7 +2539,7 @@ class AgentApprovalTransactionService:
         if dedicated_checkpoint_prepare is not None:
             try:
                 prepare_result = ensure_dict(
-                    dedicated_checkpoint_prepare(project_root, dict(arguments))
+                    dedicated_checkpoint_prepare(project_root, {**dict(arguments), "_checkpointTargetTool": target_tool})
                 )
             except Exception:  # noqa: BLE001 - dedicated preflight details stay internal.
                 prepare_result = {
