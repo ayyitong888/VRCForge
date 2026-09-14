@@ -663,6 +663,8 @@ namespace VRCForge.Editor
                 foreach (var path in scenes)
                 {
                     if (!path.StartsWith("Assets/", StringComparison.Ordinal)
+                        || !path.EndsWith(".unity", StringComparison.OrdinalIgnoreCase)
+                        || path.Split('/').Any(part => part == ".." || part == "." || part.Length == 0)
                         || !File.Exists(Path.Combine(CheckpointPrepareTool.ProjectRoot(), path)))
                     {
                         return VRCForgeToolResult.Failed(
@@ -757,6 +759,14 @@ namespace VRCForge.Editor
                 var restoredScenes = new List<Scene>();
                 try
                 {
+                    // File recovery happened outside Unity while these scenes were closed.
+                    // Synchronize every scene asset before reopening any of them, including
+                    // scene-only restores that intentionally skip the broader asset refresh.
+                    foreach (var path in scenes)
+                    {
+                        AssetDatabase.ImportAsset(path,
+                            ImportAssetOptions.ForceUpdate | ImportAssetOptions.ForceSynchronousImport);
+                    }
                     foreach (var path in scenes)
                     {
                         var restored = EditorSceneManager.OpenScene(path, OpenSceneMode.Additive);
