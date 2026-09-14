@@ -20161,6 +20161,32 @@ def prepare_authoritative_unity_checkpoint_sync(
             "ok": False,
             "error": "The approved Unity project changed before checkpointing.",
         }
+    if nested_tool in {MATERIAL_TEXTURE_ASSIGNMENT_TOOL, MATERIAL_SHADER_ASSIGNMENT_TOOL}:
+        request = ensure_dict(refreshed_arguments.get("arguments"))
+        rows = request.get("assignments")
+        rows = rows if isinstance(rows, list) else [request]
+        paths = sorted({str(ensure_dict(row).get("expectedMaterialAssetPath")
+                            or ensure_dict(row).get("materialAssetPath") or "") for row in rows})
+        if not paths or len(paths) > 128 or any(
+            not path.startswith("Assets/") or not path.lower().endswith(".mat")
+            or "\\" in path or any(part in {"", ".", ".."} for part in path.split("/"))
+            for path in paths
+        ):
+            return {"ok": False, "error": "The approved material preview did not resolve exact material asset paths."}
+        settings = load_dashboard_settings(build_agent_connection_request({}))
+        result = invoke_unity_mcp(
+            settings, "vrc_prepare_checkpoint",
+            {"projectPath": str(project_root), "checkpointAssetPaths": paths, "materialBaselineOnly": True},
+            execution_context={"lane": "app_safety_control"}, preserve_tool_error=True,
+        )
+        prepared = normalize_unity_checkpoint_result(result, project_root)
+        baseline = prepared.get("assetBaseline")
+        if (prepared.get("ok") is not True or not isinstance(baseline, list)
+                or any(not isinstance(item, dict) for item in baseline)
+                or [item.get("assetPath") for item in baseline] != paths):
+            return {**prepared, "ok": False, "error": "Unity did not capture the exact approved material asset baseline."}
+        return {**prepared, "assetBaselineRequired": True, "canonicalRevalidated": True,
+                "mode": "read_only_authoritative_revalidation", "toolName": nested_tool}
     return {
         "ok": True,
         "projectPath": str(project_root),

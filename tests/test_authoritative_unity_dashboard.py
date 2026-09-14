@@ -879,6 +879,13 @@ def test_strict_checkpoint_revalidates_canonical_state_without_saving(
             apply_arguments,
         )
 
+    if nested_tool in {MATERIAL_SHADER_ASSIGNMENT_TOOL_NAME, MATERIAL_TEXTURE_ASSIGNMENT_TOOL_NAME}:
+        # This generic synthetic request has no exact material footprint.
+        # Material preparation now rejects it before any save or baseline call.
+        assert result["ok"] is False
+        assert "exact material asset paths" in result["error"]
+        save_prepare.assert_not_called()
+        return
     assert result["ok"] is True
     assert result["mode"] == "read_only_authoritative_revalidation"
     assert result["canonicalRevalidated"] is True

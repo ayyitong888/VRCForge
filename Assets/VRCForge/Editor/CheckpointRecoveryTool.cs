@@ -23,6 +23,7 @@ namespace VRCForge.Editor
         {
             [VRCForgeInput("Optional exact active Unity project root.", IsRequired = false)] public string projectPath { get; set; } = "";
             [VRCForgeInput("Exact existing assets resolved by the approved write preview.", IsRequired = false)] public string[] checkpointAssetPaths { get; set; }
+            [VRCForgeInput("Capture only exact clean material assets without saving scenes or assets.", IsRequired = false)] public bool materialBaselineOnly { get; set; }
             [VRCForgeInput("Live-run SHA-256 digest when a bound fixture request is used.", IsRequired = false)] public string expectedRunIdDigest { get; set; } = "";
             [VRCForgeInput("Expected Unity project-root SHA-256 digest.", IsRequired = false)] public string expectedProjectPathDigest { get; set; } = "";
             [VRCForgeInput("Expected Unity process id.", IsRequired = false)] public int? expectedUnityProcessId { get; set; }
@@ -40,6 +41,15 @@ namespace VRCForge.Editor
                 var identity = PrimitiveBasisLiveGuard.RequireBoundRequest(@params);
                 ValidateProject(@params);
                 EnsureEditorReady();
+                if (@params?["materialBaselineOnly"]?.Value<bool>() == true)
+                {
+                    var baseline = CaptureReadOnlyMaterialBaseline(@params?["checkpointAssetPaths"]);
+                    return VRCForgeToolResult.Completed("Captured material baseline without saving.", new
+                    {
+                        ok = true, projectPath = ProjectRoot(), phase = "prepare",
+                        assetBaseline = baseline, mutationStarted = false, saved = false
+                    });
+                }
 
                 var allLoadedScenes = LoadedScenes();
                 var ignoredTransientScenes = allLoadedScenes
@@ -314,10 +324,28 @@ namespace VRCForge.Editor
             }
         }
 
+        internal static JArray CaptureReadOnlyMaterialBaseline(JToken paths)
+        {
+            if (!(paths is JArray array) || array.Count == 0 || array.Count > 128
+                || array.Any(path => path.Type != JTokenType.String
+                    || !path.Value<string>().EndsWith(".mat", StringComparison.OrdinalIgnoreCase)))
+                throw new InvalidOperationException("Material checkpoint requires 1..128 exact material assets.");
+            return CaptureAssetBaseline(paths);
+        }
+
+        internal static string MaterialStateDigest(UnityEngine.Object asset)
+        {
+            using (var hash = System.Security.Cryptography.SHA256.Create())
+                return BitConverter.ToString(hash.ComputeHash(System.Text.Encoding.UTF8.GetBytes(
+                    EditorJsonUtility.ToJson(asset)))).Replace("-", "").ToLowerInvariant();
+        }
+
         internal static JArray CaptureAssetBaseline(JToken paths)
         {
             if (paths == null) return null;
-            if (!(paths is JArray array) || array.Count > 32)
+            if (!(paths is JArray array) || array.Count > 128
+                || (array.Count > 32 && array.Any(entry => entry.Type != JTokenType.String
+                    || !entry.Value<string>().EndsWith(".mat", StringComparison.OrdinalIgnoreCase))))
                 throw new InvalidOperationException("Invalid checkpoint asset footprint.");
             var baseline = new JArray();
             foreach (var entry in array)
@@ -325,8 +353,17 @@ namespace VRCForge.Editor
                 var path = entry.Type == JTokenType.String ? entry.Value<string>() : "";
                 ValidateBaselinePath(path);
                 var asset = AssetDatabase.LoadMainAssetAtPath(path);
-                if (!(asset is ScriptableObject))
-                    throw new InvalidOperationException("Checkpoint memory baseline requires a native ScriptableObject asset.");
+                if (asset is Material && path.EndsWith(".mat", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (EditorUtility.IsDirty(asset))
+                        throw new InvalidOperationException("Checkpoint material baseline requires a saved, clean material.");
+                    baseline.Add(new JObject { ["assetPath"] = path,
+                        ["assetGuid"] = AssetDatabase.AssetPathToGUID(path),
+                        ["materialStateDigest"] = MaterialStateDigest(asset) });
+                    continue;
+                }
+                if (!(asset is ScriptableObject) || !path.EndsWith(".asset", StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidOperationException("Checkpoint baseline requires a native Material or ScriptableObject asset.");
                 var json = EditorJsonUtility.ToJson(asset);
                 if (json.Length > 262144) throw new InvalidOperationException("Checkpoint asset baseline is too large.");
                 baseline.Add(new JObject { ["assetPath"] = path, ["assetGuid"] = AssetDatabase.AssetPathToGUID(path),
@@ -338,22 +375,26 @@ namespace VRCForge.Editor
         internal static void ValidateBaselinePath(string path)
         {
             if (string.IsNullOrEmpty(path) || !path.StartsWith("Assets/", StringComparison.Ordinal)
-                || !path.EndsWith(".asset", StringComparison.OrdinalIgnoreCase)
+                || !(path.EndsWith(".asset", StringComparison.OrdinalIgnoreCase) || path.EndsWith(".mat", StringComparison.OrdinalIgnoreCase))
                 || path.Contains("\\") || path.Split('/').Any(part => part == ".." || part == "." || part.Length == 0)
                 || !File.Exists(Path.Combine(ProjectRoot(), path)))
-                throw new InvalidOperationException("Checkpoint asset footprint must name an existing exact Assets .asset path.");
+                throw new InvalidOperationException("Checkpoint asset footprint must name an existing exact Assets .asset or .mat path.");
         }
 
         internal static JArray RestoreAssetBaseline(JToken token)
         {
-            if (!(token is JArray baseline) || baseline.Count > 32)
+            if (!(token is JArray baseline) || baseline.Count > 128
+                || (baseline.Count > 32 && baseline.Any(item =>
+                    !(item["assetPath"]?.Value<string>() ?? "").EndsWith(".mat", StringComparison.OrdinalIgnoreCase))))
                 throw new InvalidOperationException("Checkpoint asset baseline is unavailable.");
             // Validate the entire footprint before importing any asset.
             foreach (var item in baseline)
             {
                 var path = item["assetPath"]?.Value<string>();
                 ValidateBaselinePath(path);
-                if (!(item["serializedState"] is JObject)
+                var material = path.EndsWith(".mat", StringComparison.OrdinalIgnoreCase);
+                var digest = item["materialStateDigest"]?.Value<string>() ?? "";
+                if ((material ? digest.Length != 64 || digest.Any(c => !Uri.IsHexDigit(c)) : !(item["serializedState"] is JObject))
                     || string.IsNullOrEmpty(item["assetGuid"]?.Value<string>())
                     || AssetDatabase.AssetPathToGUID(path) != item["assetGuid"].Value<string>())
                     throw new InvalidOperationException("Checkpoint asset identity or baseline is invalid.");
@@ -364,8 +405,10 @@ namespace VRCForge.Editor
                 var path = item["assetPath"].Value<string>();
                 AssetDatabase.ImportAsset(path, ImportAssetOptions.ForceUpdate | ImportAssetOptions.ForceSynchronousImport);
                 var asset = AssetDatabase.LoadMainAssetAtPath(path);
-                if (!(asset is ScriptableObject)
-                    || !JToken.DeepEquals(item["serializedState"], JObject.Parse(EditorJsonUtility.ToJson(asset))))
+                var matches = path.EndsWith(".mat", StringComparison.OrdinalIgnoreCase)
+                    ? asset is Material && MaterialStateDigest(asset) == item["materialStateDigest"]?.Value<string>()
+                    : asset is ScriptableObject && JToken.DeepEquals(item["serializedState"], JObject.Parse(EditorJsonUtility.ToJson(asset)));
+                if (!matches)
                     throw new InvalidOperationException($"Checkpoint live asset readback differs from baseline: {path}");
                 var evidence = SceneObjectCopyCore.ReadStableAssetEvidence(path, "checkpoint asset readback");
                 verified.Add(new JObject { ["assetPath"] = path, ["assetGuid"] = evidence.Guid,
