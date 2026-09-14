@@ -48,12 +48,20 @@ namespace VRCForge.Editor
             var sceneObjects = EnumerateSceneGameObjects().ToList();
 
             // 1) Exact full-hierarchy-path match (handles inactive objects too).
-            foreach (var go in sceneObjects)
+            var exactMatches = sceneObjects.Where(go => string.Equals(
+                GetHierarchyPath(go.transform), normalized, StringComparison.Ordinal)).ToList();
+            if (exactMatches.Count > 1)
             {
-                if (string.Equals(GetHierarchyPath(go.transform), normalized, StringComparison.Ordinal))
-                {
-                    return go;
-                }
+                throw new InvalidOperationException(
+                    $"GameObject path '{normalized}' is ambiguous ({exactMatches.Count} matches in loaded scenes).");
+            }
+            if (exactMatches.Count == 1)
+            {
+                return exactMatches[0];
+            }
+            if (normalized.Contains('/'))
+            {
+                throw new GameObjectNotFoundException($"GameObject not found in loaded scenes: '{pathOrName}'.");
             }
 
             // 2) Leaf-name match as a convenience fallback.
