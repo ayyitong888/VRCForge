@@ -2781,6 +2781,16 @@ class AgentLoopP0Tests(unittest.TestCase):
         self.assertEqual(result["steps"][0]["kind"], "planner_validation")
         self.assertEqual(result["steps"][0]["tool"], "unity_scan_materials")
         self.assertEqual(result["steps"][0]["status"], "failed")
+        expected_issues = [{"path": "avatarPath", "code": "wrong_type", "expected": "string"}]
+        self.assertEqual(result["steps"][0]["issues"], expected_issues)
+        self.assertEqual(result["plan"]["unresolvedArgumentValidation"]["issues"], expected_issues)
+        persisted = gateway.runtime_runs.list_runs(client_turn_id="schema-refeed-turn")["runs"][0]
+        self.assertEqual(persisted["steps"][0]["issues"], expected_issues)
+        events = [json.loads(line) for line in gateway.audit_log_path.read_text(encoding="utf-8").splitlines()]
+        validation_event = next(event for event in events if event.get("event") == "runtime_planner_argument_rejected"
+                                and event.get("clientTurnId") == "schema-refeed-turn")
+        self.assertEqual(validation_event["issues"], expected_issues)
+        self.assertNotIn("arguments", validation_event)
 
     def test_budget_pause_preserves_planner_argument_failure(self) -> None:
         gateway = self.gateway

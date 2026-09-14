@@ -6175,7 +6175,7 @@ class AgentGateway:
         ) -> bool:
             nonlocal planner_argument_failures, unresolved_planner_argument_failure
             planner_argument_failures += 1
-            issues = [
+            issues = redact_sensitive([
                 {
                     "path": summarize_text(str(item.get("path") or ""), 120),
                     "code": summarize_text(str(item.get("code") or ""), 80),
@@ -6183,7 +6183,7 @@ class AgentGateway:
                 }
                 for item in ensure_list(validation.get("issues"))[:8]
                 if isinstance(item, dict)
-            ]
+            ])
             summary = summarize_text(
                 str(
                     validation.get("summary")
@@ -6228,6 +6228,7 @@ class AgentGateway:
                     "index": len(steps),
                     "kind": "planner_validation",
                     "tool": tool_name,
+                    "issues": issues,
                     "summary": summary,
                     "status": "failed",
                 }
@@ -6237,7 +6238,14 @@ class AgentGateway:
                 "tool": tool_name,
                 "actionId": action_id,
                 "summary": summary,
+                "issues": issues,
             }
+            self.append_audit({
+                "event": "runtime_planner_argument_rejected",
+                "sessionId": session_id, "turnId": turn_id,
+                "clientTurnId": client_turn_id,
+                **unresolved_planner_argument_failure,
+            })
             return planner_argument_failures >= RUNTIME_PLANNER_ARGUMENT_MAX_ATTEMPTS
 
         if bool(params.get("_computerUseRequested")) and not self._runtime_session_state.desktop_bootstrap_completed(
