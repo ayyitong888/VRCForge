@@ -337,6 +337,10 @@ namespace VRCForge.Editor
                     {
                         action = "rename_gameobject",
                         preview = true,
+                        mutationStarted = false,
+                        mutationApplied = false,
+                        committed = false,
+                        commitState = "not_started",
                         oldName,
                         newName,
                         gameObjectPath = oldPath
@@ -386,6 +390,11 @@ namespace VRCForge.Editor
                     scenePath = afterScene.Path,
                     sceneSaved = true,
                     persistedReadback = true,
+                    mutationStarted = true,
+                    mutationApplied = true,
+                    committed = true,
+                    commitState = "committed",
+                    checkpointRecoveryRequired = false,
                     sceneFileDigestBefore = beforeScene.FileDigest,
                     sceneFileDigestAfter = afterScene.FileDigest
                 };
@@ -537,6 +546,10 @@ namespace VRCForge.Editor
                     {
                         action = "reparent_gameobject",
                         preview = true,
+                        mutationStarted = false,
+                        mutationApplied = false,
+                        committed = false,
+                        commitState = "not_started",
                         gameObjectPath = oldPath,
                         oldParentPath,
                         newParentPath = resolvedNewParentPath,
@@ -626,6 +639,11 @@ namespace VRCForge.Editor
                     scenePath = afterScene.Path,
                     sceneSaved = true,
                     persistedReadback = true,
+                    mutationStarted = true,
+                    mutationApplied = true,
+                    committed = true,
+                    commitState = "committed",
+                    checkpointRecoveryRequired = false,
                     sceneFileDigestBefore = beforeScene.FileDigest,
                     sceneFileDigestAfter = afterScene.FileDigest
                 };
