@@ -224,6 +224,42 @@ def test_profiled_path_guard_blocks_ordinary_shell_and_scopes_unity_shell(tmp_pa
     )["risk"] == "reject"
 
 
+def test_rejected_unity_cwd_exposes_bounded_planner_recovery_details(tmp_path: Path) -> None:
+    current = tmp_path / "current"
+    for marker in ("Assets", "Packages", "ProjectSettings"):
+        (current / marker).mkdir(parents=True, exist_ok=True)
+    shell, _approvals, _processes, _audits = service(tmp_path)
+    guard = UnityPathGuard([current], current_root=current)
+    shell.bind_project_path_guard(lambda: guard)
+
+    result = shell.execute({"command": "Get-ChildItem", "cwd": str(current)})
+
+    assert result["status"] == "rejected"
+    assert isinstance(result.get("error"), str)
+    details = result["errorDetails"]["error"]
+    assert details["code"] == "unity_project_shell_scope"
+    assert details["likelyCauses"] == ["The effective Shell cwd is inside a registered Unity project."]
+    assert details["nextActions"] == ["Set an explicit host cwd outside registered Unity projects, or choose a project-scoped action."]
+    assert str(current) not in repr(details)
+
+
+def test_rejected_direct_unity_reference_does_not_claim_cwd_scope(tmp_path: Path) -> None:
+    current = tmp_path / "current"
+    outside = tmp_path / "outside"
+    for marker in ("Assets", "Packages", "ProjectSettings"):
+        (current / marker).mkdir(parents=True, exist_ok=True)
+    outside.mkdir()
+    shell, _approvals, _processes, _audits = service(tmp_path)
+    guard = UnityPathGuard([current], current_root=current)
+    shell.bind_project_path_guard(lambda: guard)
+
+    result = shell.execute({"command": f'Get-ChildItem "{current}"', "cwd": str(outside)})
+
+    details = result["errorDetails"]["error"]
+    assert details["likelyCauses"] == ["The Shell command directly references a registered Unity project."]
+    assert "cwd is inside" not in details["likelyCauses"][0]
+
+
 @pytest.mark.parametrize(
     "returned_status",
     ["executed", "running"],

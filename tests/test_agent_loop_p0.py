@@ -3843,6 +3843,56 @@ class AgentLoopP0Tests(unittest.TestCase):
             failed_action_id,
         )
 
+    def test_shell_scope_rejection_reaches_next_planner_observation(self) -> None:
+        gateway = self.gateway
+        project = self._unity_project()
+        planner_calls = 0
+        observations: list[str] = []
+
+        def plan_next(_message, _params, observe, _history=None, *, loop_state=None, **_kwargs):
+            nonlocal planner_calls
+            planner_calls += 1
+            if planner_calls == 1:
+                return {
+                    "planner": "llm",
+                    "action": "shell",
+                    "summary": "List the external runtime logs.",
+                    "shellNeeded": True,
+                    "shellCommand": 'dir "C:/Users/example/AppData/Local/VRCForge/agentic-app/logs" /b',
+                    "shellParams": {},
+                    "continueLoop": True,
+                    "nextStep": "call_shell",
+                }
+            observations.append(
+                gateway.runtime_planner._llm_loop_step_observation(loop_state[-1])
+                if loop_state
+                else str(observe)
+            )
+            return {
+                "planner": "llm",
+                "summary": "The ordinary Shell scope was rejected.",
+                "reply": "I cannot inspect the external logs from the current Shell scope.",
+                "continueLoop": False,
+                "nextStep": "done",
+            }
+
+        with patch.object(gateway.runtime_planner, "plan_agent_turn", side_effect=plan_next):
+            result = gateway.runtime_message(
+                {
+                    "message": "Inspect the external runtime logs.",
+                    "projectRoot": str(project),
+                    "_projectContextActive": True,
+                    "session_id": "shell-scope-observation-session",
+                }
+            )
+
+        self.assertEqual(planner_calls, 2, result)
+        self.assertTrue(observations)
+        self.assertIn("errorCode=unity_project_shell_scope", observations[0])
+        self.assertIn("unity_project_shell_scope", observations[0])
+        self.assertIn("effective Shell cwd is inside a registered Unity project", observations[0])
+        self.assertIn("Set an explicit host cwd outside registered Unity projects", observations[0])
+
     def test_runtime_injected_task_seed_does_not_defeat_repeated_failure_suppression(self) -> None:
         gateway = self.gateway
         plan = {

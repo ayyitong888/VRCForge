@@ -300,13 +300,39 @@ class AgentShellService:
                     [f"Registered Unity project path guard failed: {exc}"],
                 )
             if not allowed:
-                return self._classification(
+                cwd_in_registered_project = any(
+                    is_path_within(cwd, Path(root)) for root in guard.registered_roots
+                )
+                command_references_registered_project = not guard.is_shell_allowed(
+                    command,
+                    cwd="",
+                )
+                if cwd_in_registered_project and not command_references_registered_project:
+                    likely_causes = [
+                        "The effective Shell cwd is inside a registered Unity project."
+                    ]
+                elif command_references_registered_project and not cwd_in_registered_project:
+                    likely_causes = [
+                        "The Shell command directly references a registered Unity project."
+                    ]
+                else:
+                    likely_causes = [
+                        "The Shell request crosses a registered Unity project boundary through its cwd, command, or project selector."
+                    ]
+                classification = self._classification(
                     command,
                     cwd,
                     workspace_root,
                     "reject",
                     ["Ordinary Shell cannot enter or directly reference a registered Unity project."],
                 )
+                classification["recovery"] = {
+                    "likelyCauses": likely_causes,
+                    "nextActions": [
+                        "Set an explicit host cwd outside registered Unity projects, or choose a project-scoped action."
+                    ],
+                }
+                return classification
             protected_project = (
                 Path(str(guard.current_root))
                 if unity_project_access and str(guard.current_root or "").strip()
@@ -391,12 +417,24 @@ class AgentShellService:
                         **self._ports.permission_audit_context(),
                     }
                 )
-                return {
+                response = {
                     "ok": False,
                     "status": "rejected",
                     "classification": classification,
                     "error": "; ".join(classification["reasons"]),
                 }
+                recovery = classification.get("recovery")
+                if isinstance(recovery, dict):
+                    response["errorDetails"] = {
+                        "error": {
+                            "type": "permission",
+                            "code": "unity_project_shell_scope",
+                            "likelyCauses": list(recovery.get("likelyCauses") or [])[:3],
+                            "nextActions": list(recovery.get("nextActions") or [])[:3],
+                            "retryable": False,
+                        }
+                    }
+                return response
             if classification["risk"] == "high":
                 approval = self._create_approval(
                     params,
