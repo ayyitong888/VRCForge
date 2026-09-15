@@ -2292,9 +2292,9 @@ def build_optimizer_profile_diff(params: dict[str, Any], validation: dict[str, A
         },
         "hardGate": _optimization_hard_gate(
             [
-                _optimization_gate_row("profile.before", "Before validation snapshot", before_provided, "Provide beforeValidation or a live validation context."),
-                _optimization_gate_row("profile.after", "After validation snapshot", after_provided, "Provide afterValidation from the applied optimizer state."),
-                _optimization_gate_row("profile.rollback", "Rollback validation snapshot", rollback_provided, "Provide rollbackValidation after restore."),
+                _optimization_gate_row("profile.before", "Before validation snapshot", before_provided and _validation_proof_ready(before_report), "Provide beforeValidation or a live validation context."),
+                _optimization_gate_row("profile.after", "After validation snapshot", after_provided and _validation_proof_ready(after_report), "Provide afterValidation from the applied optimizer state."),
+                _optimization_gate_row("profile.rollback", "Rollback validation snapshot", rollback_provided and _validation_proof_ready(rollback_report), "Provide rollbackValidation after restore."),
             ]
         ),
         "before": before,
@@ -2459,6 +2459,7 @@ def _optimizer_profile_snapshot(report: dict[str, Any]) -> dict[str, Any]:
     quest = _source_payload(sources, "performance_quest")
     parameters = _source_payload(sources, "parameters")
     return {
+        "scannerStatus": _scanner_statuses(report),
         "pc": _optimizer_platform_snapshot(pc),
         "quest": _optimizer_platform_snapshot(quest),
         "parameters": {
@@ -2645,7 +2646,7 @@ def build_rollback_coverage_matrix(
     project_readable = bool(project_path and project_path.exists())
     generated_residue = _first_numeric(residue, ("residueCount", "generatedAssetCount"))
     scanner_statuses = _scanner_statuses(validation)
-    validation_has_sources = bool(scanner_statuses)
+    validation_has_sources = _validation_proof_ready(validation)
     coverage = [
         _rollback_coverage_item(
             "checkpoint.project_root",
@@ -2749,7 +2750,7 @@ def build_rollback_ecosystem_coverage(dependency_doctor: dict[str, Any], validat
     generated_residue = _source_payload(sources, "generated_residue")
     residue_count = _first_numeric(generated_residue, ("residueCount", "generatedAssetCount"))
     scanner_statuses = _scanner_statuses(validation)
-    validation_ready = bool(scanner_statuses)
+    validation_ready = _validation_proof_ready(validation)
     components = [
         _rollback_ecosystem_component(
             dependency_doctor,
@@ -3315,6 +3316,15 @@ def _merged_parameter_usage(parameters: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(merged, dict) or merged.get("available") is not True:
         return {}
     return merged
+
+
+def _validation_proof_ready(validation: dict[str, Any]) -> bool:
+    sources = _validation_sources(validation)
+    return bool(sources) and all(
+        isinstance(source, dict) and source.get("ok") is True
+        and _reported_source_failure(name, source) is None
+        for name, source in sources.items()
+    )
 
 
 def _scanner_statuses(validation: dict[str, Any]) -> list[dict[str, Any]]:
