@@ -1,0 +1,113 @@
+name: Validate 1.8.0 installer upgrade
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_sha256:
+        description: SHA-256 of the reviewed 1.8.0 offline installer
+        required: true
+        type: string
+      previous_sha256:
+        description: SHA-256 of the published 1.7.10 offline installer
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  installer:
+    # GitHub provisions a fresh Windows VM with admin privileges and UAC off.
+    # Production identity exists only for this job; never use a self-hosted runner.
+    runs-on: windows-2022
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      CANDIDATE_SHA256: ${{ inputs.candidate_sha256 }}
+      PREVIOUS_SHA256: ${{ inputs.previous_sha256 }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Download and bind exact repository release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:RUNNER_ENVIRONMENT -ne 'github-hosted') { throw 'Hosted disposable VM required.' }
+          foreach ($digest in @($env:CANDIDATE_SHA256, $env:PREVIOUS_SHA256)) {
+            if ($digest -cnotmatch '^[0-9a-fA-F]{64}$') { throw 'Expected SHA-256 must have exactly 64 hexadecimal characters.' }
+          }
+          $downloadRoot = Join-Path $env:RUNNER_TEMP 'installer-inputs'
+          $evidenceRoot = Join-Path $env:GITHUB_WORKSPACE 'installer-evidence'
+          New-Item -ItemType Directory -Path $downloadRoot, $evidenceRoot | Out-Null
+          $bindings = @()
+          foreach ($releaseInput in @(
+            @{ Tag = 'v1.8.0'; Folder = 'candidate'; Sha = $env:CANDIDATE_SHA256.ToLowerInvariant() },
+            @{ Tag = 'v1.7.10'; Folder = 'previous'; Sha = $env:PREVIOUS_SHA256.ToLowerInvariant() }
+          )) {
+            $tag = $releaseInput.Tag
+            $releaseJson = & gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/$tag"
+            if ($LASTEXITCODE -ne 0) { throw "Cannot read release $tag." }
+            $release = $releaseJson | ConvertFrom-Json
+            if ($release.tag_name -cne $tag) { throw 'Release tag mismatch.' }
+            if ($tag -eq 'v1.7.10' -and ($release.draft -or $release.prerelease)) { throw 'Previous installer must be a published stable release.' }
+            $assetName = 'VRCForge_Offline_Installer_x64.exe'
+            $assets = @($release.assets | Where-Object { $_.name -ceq $assetName })
+            if ($assets.Count -ne 1 -or $assets[0].state -ne 'uploaded') { throw "Expected one complete installer asset for $tag." }
+            $asset = $assets[0]
+            $folder = Join-Path $downloadRoot $releaseInput.Folder
+            New-Item -ItemType Directory -Path $folder | Out-Null
+            & gh release download $tag --repo $env:GITHUB_REPOSITORY --pattern $assetName --dir $folder
+            if ($LASTEXITCODE -ne 0) { throw "Installer download failed for $tag." }
+            $installer = Join-Path $folder $assetName
+            $actualSha = (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actualSha -cne $releaseInput.Sha -or (Get-Item -LiteralPath $installer).Length -ne $asset.size) { throw "Installer identity mismatch for $tag." }
+            $bindings += [ordered]@{ tag = $tag; releaseId = $release.id; assetId = $asset.id; assetName = $assetName; sha256 = $actualSha; size = $asset.size; draft = $release.draft }
+          }
+          [ordered]@{
+            workflowCommit = $env:GITHUB_SHA
+            repository = $env:GITHUB_REPOSITORY
+            runId = $env:GITHUB_RUN_ID
+            runAttempt = $env:GITHUB_RUN_ATTEMPT
+            smokeScriptSha256 = (Get-FileHash scripts/smoke_installer_install_uninstall.py -Algorithm SHA256).Hash.ToLowerInvariant()
+            assets = $bindings
+          } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $evidenceRoot 'input-binding.json') -Encoding utf8
+
+      - name: Run production install, upgrade, preservation and uninstall checks
+        # No repository token is passed to the installers or installed backend.
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $downloadRoot = Join-Path $env:RUNNER_TEMP 'installer-inputs'
+          $evidenceRoot = Join-Path $env:GITHUB_WORKSPACE 'installer-evidence'
+          python scripts/smoke_installer_install_uninstall.py `
+            --scope production-clean `
+            --production-clean-confirmation I-OWN-THIS-DISPOSABLE-WINDOWS-ENVIRONMENT `
+            --installer (Join-Path $downloadRoot 'candidate/VRCForge_Offline_Installer_x64.exe') `
+            --upgrade-installer (Join-Path $downloadRoot 'previous/VRCForge_Offline_Installer_x64.exe') `
+            --artifacts-dir $evidenceRoot --timeout 180 `
+            2>&1 | Tee-Object -FilePath (Join-Path $evidenceRoot 'smoke-output.log')
+          if ($LASTEXITCODE -ne 0) { throw 'Production installer smoke failed; inspect retained evidence.' }
+          $reports = @(Get-ChildItem -LiteralPath $evidenceRoot -Filter 'installer-install-uninstall-*.json')
+          if ($reports.Count -ne 1) { throw 'Expected one installer report.' }
+          $report = Get-Content -LiteralPath $reports[0].FullName -Raw | ConvertFrom-Json
+          $health = @($report.steps | Where-Object { $_.name -eq 'installed_backend.health' })
+          if ($report.ok -ne $true -or $report.summary.status -ne 'passed' -or
+              $report.scope.mode -ne 'production-clean' -or $report.scope.cleanEnvironmentConfirmed -ne $true -or
+              $report.installerSha256 -cne $env:CANDIDATE_SHA256.ToLowerInvariant() -or
+              $report.upgradeInstallerSha256 -cne $env:PREVIOUS_SHA256.ToLowerInvariant() -or
+              $report.summary.phases.upgrade -ne 'passed' -or $health.Count -ne 1 -or $health[0].version -ne '1.8.0') {
+            throw 'Installer report does not prove the requested version and immutable inputs.'
+          }
+
+      - name: Retain bounded validation evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: installer-180-${{ github.run_id }}-${{ github.run_attempt }}
+          path: installer-evidence/
+          if-no-files-found: warn
+          retention-days: 7
