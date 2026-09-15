@@ -28,7 +28,7 @@ the result, and restoring changes.
 You can discuss face shapes and BlendShapes, materials and shaders, wardrobes
 and outfits, avatar composition, and performance optimization in natural
 language. VRCForge turns the Agent's intent into reviewable Unity operations.
-Asset writes show an approval step and use checkpoints, readback validation,
+Asset writes follow the selected permission mode and use checkpoints, readback validation,
 and restore support. Each avatar, dependency set, and Unity environment still
 requires project-specific verification.
 
@@ -41,29 +41,30 @@ Get matching installers and Unity packages from that same Release.
 
 ## What VRCForge can do
 
-| Capability | Status | Purpose |
-| --- | --- | --- |
-| AI Agent-assisted editing | Available | Inspect an Avatar, discuss a plan in natural language, and pass confirmed operations to supervised tools in the desktop workspace. |
-| VRChat Avatar editing | Available | Scan BlendShapes, assist with face tuning, inspect lilToon, Poiyomi, and generic materials, and review Gesture Manager screenshots. |
-| Wardrobe and outfit workflows | Beta | Scan integer-parameter wardrobes, inspect `.unitypackage`, Booth folders, or loose prefabs, and prepare import and binding plans; writes still require approval and project validation. |
-| Avatar composition workflows | Available; verify per project | Built-in Skills orchestrate face-tracked or gesture-only head swaps and part transplants using checkpoints, readback, motion, and multi-view checks. |
-| Optimization and diagnostics | Available / some writes Beta | Audit VRAM, materials, meshes, parameters, and build readiness, then prepare a conservative step-by-step optimization plan. |
-| MCP 2.0 and external Agents | Available | Local MCP clients such as Codex and Claude Code can read, plan, and submit write requests; VRCForge Desktop approves the actual writes. |
-| `.vsk` skill packages | Available | Preflight packages, manage signatures and trust, atomically import and project Skills, capture Path-to-Skill workflows, and scaffold packages with the SDK. |
-| Avatar Encryption / Anti-Rip | Connector preview | The public build provides scan, plan, and preview entry points. Execution is not included in the public repository and is not counted as a completed public feature. |
+From changing a BlendShape to building a wardrobe or editing Animator FX, version 1.8.0 includes tools that apply changes. Tell your Agent what to edit, let it inspect the project, and review the result.
 
-“Available” means that the public product path exists. It does not guarantee
-hands-off success for every Avatar. Project-specific rigs, menus, FX layers,
-shaders, paid dependencies, and visual results need checks before and after a write.
+| Capability | Implemented operations |
+| --- | --- |
+| BlendShapes and expressions | Read and change existing face, body and clothing BlendShape weights, then preview the result. Face reshaping requires the avatar to have suitable shape keys. |
+| Outfits, wardrobes and menus | Bind clothing, create or manage exclusive wardrobes and clothing/accessory toggles, and edit VRChat expression menus and parameters. Outfit integration can use installed Modular Avatar or VRCFury. |
+| Animation and Animator FX | Create, edit and batch animation curves, FX layers, states and transitions. Combine object toggles and material properties to author outfit transitions, crossfades and dissolve animations. |
+| Materials, shaders and textures | Edit colors, numeric and vector properties, textures and material slots; replace shaders. Use the properties actually exposed by each shader, beyond just lilToon and Poiyomi. |
+| Objects, bones and components | Create, copy, move and reparent objects, edit component properties and save prefabs. Configure outfit armature integration, constraints and supported PhysBone components. |
+| Optimization and project checks | Inspect VRAM, meshes, materials, parameters and build readiness. Change texture sizes, formats and compression, and configure optimization components when their dependencies are installed. |
+| Built-in AI and external MCP | Configure a Provider and API key for the built-in Agent, or connect an external MCP Agent. Both can inspect, plan and edit; your permission mode controls confirmation and automatic execution. |
+| Skills and reusable workflows | Use built-in head-swap and part-transplant workflows; import, export and enable .vsk Skills. MCP Tools perform actions, Resources expose state, and Prompts reuse the existing Skills. |
+| Inspect, diagnose and restore | Review Scene View screenshots and Gesture Manager parameters and states, read diagnostics, save checkpoints and inspect changes. Restore a checkpoint through a separate confirmation. |
+
+Capabilities depend on the project: expression, viseme or face-tracking keys are not automatically face-reshaping controls. Shader properties must exist and match the supported types. Modular Avatar, VRCFury and AAO integrations require their packages. Writes follow your permission mode; checkpoint restoration requires separate confirmation.
 
 ## Find a workflow for your avatar
 
 | Task | Starting point |
 | --- | --- |
 | Face and expression customization | Scan BlendShapes, preview a small adjustment, and review the result. |
-| Outfit and wardrobe editing | Inspect clothing and wardrobe parameters, then review import and binding plans; writes are Beta. |
-| lilToon and Poiyomi material editing | Inspect shaders, materials, and textures before reviewing changes. |
-| Avatar optimization checks | Inspect VRAM, meshes, materials, and parameters, then review recommendations one step at a time. |
+| Outfit and wardrobe editing | Bind clothing, edit wardrobes, menus and parameters, then create and inspect outfit animations. |
+| Shader and material editing | Read shader properties, edit materials, textures and slots, then inspect the result. |
+| Avatar optimization | Use diagnostics to adjust texture import settings or configure installed optimization plugins. |
 | Unity MCP and AI agent workflows | [Connect an MCP client](#connect-codex-claude-code-or-another-mcp-agent) to use the same approval and verification flow. |
 
 ## How it works
@@ -71,11 +72,11 @@ shaders, paid dependencies, and visual results need checks before and after a wr
 VRCForge uses this supervised flow for Unity asset writes:
 
 ```text
-Scan → Plan → Preview → Approval → Checkpoint → Apply → Validate → Restore
+Inspect → Plan → Check permissions → Apply → Read back and inspect → Restore if needed
 ```
 
 - Project indexes, chats, memory, checkpoints, and connector settings are stored locally by default.
-- Unity asset writes require explicit approval in the normal permission mode.
+- Choose per-action confirmation, automatic or full permissions. Automatic mode retains confirmation for high-risk operations; checkpoint restoration always requires separate confirmation.
 - Write targets are bound to a specific project and Unity Editor instance, then checked through readback or validation results.
 - Restore is a separate confirmed operation. A checkpoint does not replace a project backup.
 - The content sent to an external model service depends on the Provider, model, and operation you choose.
@@ -114,8 +115,8 @@ See the [User Manual](USER_MANUAL.md) for the complete workflow.
 
 VRCForge supports both its built-in Agent and external MCP clients. External
 clients use the local MCP + REST gateway and the same public tool contracts.
-Planning exposes read and planning capabilities; write requests are handed to
-the desktop approval flow.
+Planning exposes read and planning capabilities; execution can edit Unity under
+your selected permission mode. Operations requiring manual confirmation produce approval requests.
 
 Open **Settings → Connectors → Generic MCP client** in VRCForge:
 
@@ -145,14 +146,15 @@ python tools\vrcforge_cli.py doctor
 python tools\vrcforge_cli.py validation run --project C:\Path\To\UnityProject
 ```
 
-Write commands such as `apply` and `rollback` create approval requests. Actual
-writes still pass through the desktop approval flow.
+`apply` and `rollback` create approval requests by default. Add `--execute` to
+confirm and execute in the terminal through the same backend approval and recovery flow.
 
 ## Scope and current boundaries
 
 - The target environment is Windows x64, Unity 2022.3 LTS, and a VRChat SDK3 Avatar project.
 - Some read-only checks work without a Provider. AI chat, planning, and vision reasoning require a configured compatible Provider.
-- Outfit import, generic Unity CRUD, some optimization writes, and community Skills are Beta paths. Preview them first and validate in a copied or backed-up project.
+- Optimization integrations require compatible installed plugins. Configuring AAO components does not itself perform AAO's build-time optimization. Head-swap and part-transplant workflows cannot replace required mesh seam, weight or UV editing.
+- The Avatar protection connector supports inspection, planning and previews; the public package does not include the private protection executor.
 - Protocol, source-test, or successful tool-call evidence does not establish visual correctness for every avatar. Verify the result on the avatar being edited and preserve its recovery point.
 - Quest/Android support, third-party asset licensing, and paid dependencies depend on the specific Avatar and assets.
 

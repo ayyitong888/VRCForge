@@ -26,8 +26,8 @@ Unity Editor 工具与 MCP Server，辅助捏脸、换装、材质调整和优�
 用于检查模型、制定修改方案、申请执行、验证结果和恢复改动。
 
 你可以用自然语言讨论脸型与 BlendShape、材质和 Shader、衣柜与服装、模型组合、
-性能优化等任务；VRCForge 会把 Agent 的意图转换为可审查的 Unity 操作。涉及资产写入时，
-流程会显示审批，并配合检查点、读回验证和恢复能力。具体 Avatar、依赖和 Unity 环境仍需逐项验证。
+性能优化等任务，并让 Agent 执行具体编辑。资产写入按所选权限模式确认或自动执行，
+配合检查点、读回验证和恢复能力。具体 Avatar、依赖和 Unity 环境仍需逐项验证。
 
 > 使用任何会写入 Unity 资产的功能前，请先备份 Unity / VRChat Avatar 工程。
 
@@ -38,44 +38,46 @@ Unity Editor 工具与 MCP Server，辅助捏脸、换装、材质调整和优�
 
 ## VRCForge 能做什么
 
-| 能力 | 状态 | 用途 |
-| --- | --- | --- |
-| AI Agent 辅助改模 | 可用 | 在桌面工作区中用自然语言检查 Avatar、讨论方案，并把确定的操作交给受监督工具执行。 |
-| VRChat Avatar 编辑 | 可用 | 扫描 BlendShape，辅助脸部调整，检查 lilToon、Poiyomi 和通用材质，并通过 Gesture Manager 截图做视觉复核。 |
-| 衣柜与服装流程 | Beta | 扫描整数参数衣柜，检查 `.unitypackage`、Booth 文件夹或松散 Prefab，生成导入与绑定方案；写入仍需审批和项目验证。 |
-| 模型组合工作流 | 可用，需逐项目验收 | 内置 Skills 可编排有面捕/无面捕换头和部件移植，并复用检查点、读回、动作与多视角验证。 |
-| 优化与诊断 | 可用 / 部分写入 Beta | 提供 VRAM、材质、Mesh、参数和构建就绪检查，先给出保守的分步优化方案。 |
-| MCP 2.0 与外部 Agent | 可用 | Codex、Claude Code 等本地 MCP 客户端可读取、规划并提交写入请求；实际写入由 VRCForge 桌面端审批。 |
-| `.vsk` 技能包 | 可用 | 支持技能包预检、签名与信任管理、原子导入、投影、Path-to-Skill 采集和 SDK 脚手架。 |
-| Avatar Encryption / Anti-Rip | 连接器预览 | 公开版本提供扫描、规划和预览入口；执行能力不包含在公开仓库中，也不计入已完成的公开功能。 |
+从修改一个形态键，到搭建衣柜、编辑 FX 和制作换装动画，1.8.0 已提供实际编辑工具。告诉 Agent 你想改什么，让它读取工程、执行修改并检查结果。
 
-功能“可用”表示对应公开路径已经存在，不代表任意 Avatar 都能无需人工判断地完成。
-项目特有的骨骼、菜单、FX、Shader、付费依赖和视觉效果应在写入前后分别检查。
+| 能力 | 已实现的操作 |
+| --- | --- |
+| 形态键与表情 | 读取并修改脸部、身体和服装的现有 BlendShape 权重，预览调整效果。捏脸需要模型本身具备对应的脸型形态键。 |
+| 衣装、衣柜与菜单 | 绑定衣物，创建或管理互斥衣柜、衣物与配件开关，编辑 VRChat 表达菜单和参数。服装集成可调用已安装的 Modular Avatar / VRCFury。 |
+| 动画与 Animator FX | 创建、修改和批量处理动画曲线，编辑 FX 层、状态与过渡；配合对象开关和材质参数制作换装、交融与溶解动画。 |
+| 材质、Shader 与贴图 | 修改颜色、数值、向量、贴图和材质槽，替换 Shader。按 Shader 实际提供的属性调整外观，不限定 lilToon 或 Poiyomi。 |
+| 对象、骨骼与组件 | 创建、复制、移动和重设对象层级，修改组件属性，保存 Prefab；配置服装骨骼集成、约束和 PhysBone 相关组件。 |
+| 优化与工程检查 | 检查 VRAM、Mesh、材质、参数和构建状态；修改贴图尺寸、格式与压缩设置，并在依赖满足时配置对应优化组件。 |
+| 内置 AI 与外部 MCP | 配置 Provider 和 API Key 使用内置 Agent，或连接外部 MCP Agent。两者都能读取、规划和执行编辑；按所选权限逐项确认或自动执行。 |
+| Skills 与工作流复用 | 内置换头、部件移植等工作流，支持 .vsk 技能包导入、导出与启停。MCP Tools 执行操作、Resources 提供状态，Prompts 复用现有 Skills。 |
+| 看效果、查问题、恢复 | 通过 Scene View 截图和 Gesture Manager 参数/状态观察检查效果，读取诊断信息；保存检查点、查看变化，并按需确认恢复。 |
+
+已有功能也有明确条件：表情、口型或面捕形态键不等于捏脸形态键；Shader 只能使用其暴露且类型匹配的属性；Modular Avatar、VRCFury、AAO 等集成需要相应依赖。写入按所选权限模式执行，恢复检查点仍需单独确认。
 
 ## 按改模任务选择入口
 
 | 你想做什么 | 对应流程 |
 | --- | --- |
 | 捏脸、调整表情（BlendShape editing） | 先扫描形态键，再预览小范围脸部调整并复核效果。 |
-| 换装、整理衣柜（Outfits / avatar wardrobe） | 检查衣物与衣柜参数，审查导入和绑定方案；写入为 Beta。 |
-| 调整材质与着色器（lilToon / Poiyomi materials） | 检查材质、Shader 和贴图，再复核修改结果。 |
-| 检查模型性能（Avatar optimization checks） | 查看 VRAM、Mesh、材质和参数诊断，逐项审查优化建议。 |
+| 换装、整理衣柜（Outfits / avatar wardrobe） | 绑定衣物，编辑衣柜、菜单和参数，再制作和检查换装动画。 |
+| 调整材质与着色器（Shader / material editing） | 读取 Shader 属性，修改材质、贴图与材质槽，再检查效果。 |
+| 优化模型（Avatar optimization） | 根据诊断调整贴图导入设置，或配置已安装的优化插件。 |
 | 用 AI 操作 Unity（Unity MCP / AI agent） | [连接 MCP 客户端](#连接-codexclaude-code-或其他-mcp-agent)，复用同一套审批与验证流程。 |
 
 > 日本語：VRCForge は VRChat アバター改変を支援するオープンソースの Unity ツールです。
 > 表情・BlendShape 調整、衣装・着せ替え、マテリアル確認、最適化診断を AI Agent と MCP で支援します。
-> 導入手順は [English README](README.en.md) を参照してください。
+> 導入手順は [日本語 README](README.ja.md) を参照してください。
 
 ## 工作方式
 
 VRCForge 对 Unity 资产写入采用以下受监督流程：
 
 ```text
-扫描 → 方案 → 预览 → 审批 → 检查点 → 应用 → 验证 → 恢复
+读取 → 规划 → 按权限确认 → 执行修改 → 读回与效果检查 → 按需恢复
 ```
 
 - 默认在本机保存项目索引、聊天、记忆、检查点和连接配置。
-- 普通模式下，Unity 资产写入必须经过明确审批。
+- 支持逐项确认、自动和完全权限模式；自动模式保留高风险操作的确认，恢复检查点始终单独确认。
 - 写入目标绑定到具体项目和 Unity Editor 实例，完成后通过读回或验证结果确认状态。
 - 恢复是独立操作，需要再次确认；检查点不能代替工程备份。
 - 外部模型服务会接收哪些内容，取决于你选择的 Provider、模型和具体操作。
@@ -111,7 +113,7 @@ VRCForge 对 Unity 资产写入采用以下受监督流程：
 ## 连接 Codex、Claude Code 或其他 MCP Agent
 
 VRCForge 同时支持内置 Agent 和外部 MCP 客户端。外部客户端通过本地 MCP + REST
-网关访问同一套公开工具契约：规划阶段只提供读取与规划能力，写入通过请求交给桌面端审批。
+网关访问同一套公开工具契约：规划阶段提供读取与规划能力，执行阶段可修改 Unity，遵循所选权限模式；需要人工确认的操作会显示审批请求。
 
 在 VRCForge 中打开 **设置 → 连接器 → 通用 MCP 客户端**：
 
@@ -138,13 +140,14 @@ python tools\vrcforge_cli.py doctor
 python tools\vrcforge_cli.py validation run --project C:\Path\To\UnityProject
 ```
 
-`apply`、`rollback` 等写入命令只会创建审批请求，实际写入仍经过桌面端审批流程。
+`apply`、`rollback` 默认创建审批请求；添加 `--execute` 可在终端确认并执行，仍经过同一套后端审批与恢复流程。
 
 ## 适用范围与当前边界
 
 - 目标平台是 Windows x64、Unity 2022.3 LTS 和 VRChat SDK3 Avatar 工程。
 - VRCForge 可以在无 Provider 模式下完成部分只读检查；AI 对话、规划和视觉推理需要已配置的兼容 Provider。
-- 衣柜导入、通用 Unity CRUD、部分优化写入和社区技能属于 Beta 路径，应先预览并在副本或有备份的工程中验证。
+- 优化插件集成需要已安装的兼容版本；配置 AAO 等组件不等于已经完成其构建阶段优化。换头与部件移植工作流不能代替必要的网格接缝、权重或 UV 编辑。
+- Avatar 保护连接器提供检查、规划与预览；公开包不包含私有保护执行组件。
 - `v1.8.0` 已发布；协议、源码测试或工具调用成功仍不能替代具体模型的视觉与恢复验收。
 - Quest/Android、第三方资产许可和付费依赖由具体 Avatar 与资源决定。
 
