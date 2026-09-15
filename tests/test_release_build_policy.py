@@ -431,9 +431,31 @@ def test_nsis_message_boxes_have_silent_default_and_keep_error_abort_paths() -> 
 
         assert message_box_indexes
         for index in message_box_indexes:
-            assert lines[index].rstrip().endswith(" /SD IDOK")
-            if "MB_ICONSTOP" in lines[index]:
+            if "MB_RETRYCANCEL" in lines[index]:
+                assert "/SD IDCANCEL IDRETRY " in lines[index]
+                assert lines[index + 1].strip() == "SetErrorLevel 2"
+                assert lines[index + 2].strip() == "Abort"
+            else:
+                assert lines[index].rstrip().endswith(" /SD IDOK")
+            if "MB_ICONSTOP" in lines[index] and "MB_RETRYCANCEL" not in lines[index]:
                 assert lines[index + 1].strip() == "Abort"
+
+
+def test_installer_busy_preflight_and_activation_retry_stay_in_same_installation() -> None:
+    helper = (REPO_ROOT / "installer/VRCForge_WebPayload.ps1").read_text(encoding="utf-8")
+    assert '"CheckNotRunning"' in helper
+    for name in ("VRCForge_Offline_Installer_x64.nsi", "VRCForge_Web_Installer_x64.nsi"):
+        source = (REPO_ROOT / "installer" / name).read_text(encoding="utf-8")
+        section = source[source.index('Section "Install"'):source.index('Section "Uninstall"')]
+        assert section.index("install_retry:") < section.index("-Action CheckNotRunning")
+        assert section.index("-Action CheckNotRunning") < section.index("-Action Extract")
+        assert '"$(CloseRunningAppText)" /SD IDCANCEL IDRETRY install_retry' in section
+        assert '"$(ActivationFailedText)" /SD IDCANCEL IDRETRY install_retry' in section
+        assert section.count("IDRETRY install_retry") == 2
+        if "Web_Installer" in name:
+            # Extract consumes the verified download stage even after failure.
+            # Retry must prepare a fresh stage, never reuse the deleted one.
+            assert section.index("install_retry:") < section.index("-Action Prepare")
 
 
 def test_installers_scope_powershell_module_path_to_both_process_entrypoints() -> None:

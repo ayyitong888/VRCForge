@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet("ValidateDestination", "Prepare", "Extract")]
+    [ValidateSet("ValidateDestination", "CheckNotRunning", "Prepare", "Extract")]
     [string]$Action,
 
     [Parameter(Mandatory = $true)]
@@ -67,7 +67,7 @@ function Assert-Inputs {
     } else {
         Fail "ExpectedInstallLeaf is not a permitted production or smoke identity."
     }
-    if ($Action -eq "ValidateDestination") { return }
+    if ($Action -in @("ValidateDestination", "CheckNotRunning")) { return }
     $expectedUrl = Get-ExpectedUrl
     if (-not [string]::Equals($PayloadUrl, $expectedUrl, [StringComparison]::Ordinal)) {
         Fail "PayloadUrl is not the exact version-bound official release URL."
@@ -768,4 +768,7 @@ function Invoke-Extract {
 
 Assert-Inputs
 Add-Type -AssemblyName System.IO.Compression
-if ($Action -eq "ValidateDestination") { Invoke-ValidateDestination } elseif ($Action -eq "Prepare") { Invoke-Prepare } else { Invoke-Extract }
+if ($Action -eq "ValidateDestination") { Invoke-ValidateDestination }
+elseif ($Action -eq "CheckNotRunning") { Assert-InstallNotRunning $DestinationRoot }
+elseif ($Action -eq "Prepare") { Invoke-Prepare }
+else { Invoke-Extract }

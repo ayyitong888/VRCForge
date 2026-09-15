@@ -138,6 +138,10 @@ LangString ClearingUserDataText ${LANG_SIMPCHINESE} "正在清除 VRCForge 用�
 LangString ClearingUserDataText ${LANG_TRADCHINESE} "正在清除 VRCForge 使用者資料與已知專案的歷史對話..."
 LangString ClearingUserDataText ${LANG_JAPANESE} "VRCForge のユーザーデータと既知プロジェクトのチャット履歴を削除しています..."
 LangString ClearingUserDataText ${LANG_ENGLISH} "Clearing VRCForge user data and known project chat history..."
+LangString CloseRunningAppText ${LANG_SIMPCHINESE} "VRCForge 仍在运行，或程序文件正在被占用。请保存工作并完全退出 VRCForge（包括系统托盘），然后点击「重试」继续安装。点击「取消」停止安装。"
+LangString CloseRunningAppText ${LANG_TRADCHINESE} "VRCForge 仍在執行，或程式檔案正被佔用。請儲存工作並完全結束 VRCForge（包括系統匣），然後按「重試」繼續安裝。按「取消」停止安裝。"
+LangString CloseRunningAppText ${LANG_JAPANESE} "VRCForge が実行中、またはプログラムファイルが使用中です。作業を保存して VRCForge を完全に終了し（タスクトレイを含む）、「再試行」でインストールを続けてください。「キャンセル」で中止します。"
+LangString CloseRunningAppText ${LANG_ENGLISH} "VRCForge is still running, or its program files are in use. Save your work and fully exit VRCForge (including the system tray), then click Retry to continue this installation. Click Cancel to stop."
 LangString ClosingRunningAppText ${LANG_SIMPCHINESE} "正在正常退出已安装的 VRCForge，以便安全更新..."
 LangString ClosingRunningAppText ${LANG_TRADCHINESE} "正在正常結束已安裝的 VRCForge，以便安全更新..."
 LangString ClosingRunningAppText ${LANG_JAPANESE} "安全に更新するため、インストール済みの VRCForge を正常終了しています..."
@@ -311,6 +315,23 @@ Section "Install"
     MessageBox MB_ICONSTOP "The protected Program Files installation boundary could not be verified." /SD IDOK
     Abort
   ${EndIf}
+  ; Retry stays in this installer. No payload work occurs while the app is busy.
+  install_retry:
+  StrCpy $HelperSourcePath "$PLUGINSDIR\VRCForge_WebPayload.ps1"
+  StrCpy $HelperStatePath "$HelperSourcePath"
+  Call PrepareProtectedHelper
+  ${If} $0 == 0
+    nsExec::ExecToLog '"$TrustedPowerShellPath" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File "$HelperPayloadPath\VRCForge_WebPayload.ps1" -Action CheckNotRunning -Version "${VERSION}" -ProgramFilesRoot "$PROGRAMFILES64" -DestinationRoot "$INSTDIR" -ExpectedInstallLeaf "${INSTALL_LEAF}" -StateTag "${STATE_TAG}"'
+    Pop $0
+    Push $0
+    Call CleanupProtectedHelper
+    Pop $0
+  ${EndIf}
+  ${If} $0 != 0
+    MessageBox MB_ICONEXCLAMATION|MB_RETRYCANCEL "$(CloseRunningAppText)" /SD IDCANCEL IDRETRY install_retry
+    SetErrorLevel 2
+    Abort
+  ${EndIf}
   StrCpy $PayloadStatePath "$PLUGINSDIR\payload-stage.txt"
   DetailPrint "$(DownloadingText)"
   StrCpy $HelperSourcePath "$PLUGINSDIR\VRCForge_WebPayload.ps1"
@@ -353,7 +374,8 @@ Section "Install"
     Pop $0
   ${EndIf}
   ${If} $0 != 0
-    MessageBox MB_ICONSTOP "$(ActivationFailedText)" /SD IDOK
+    MessageBox MB_ICONSTOP|MB_RETRYCANCEL "$(ActivationFailedText)" /SD IDCANCEL IDRETRY install_retry
+    SetErrorLevel 2
     Abort
   ${EndIf}
   StrCpy $UserDataRoot "$LOCALAPPDATA\${USER_DATA_RELATIVE}"

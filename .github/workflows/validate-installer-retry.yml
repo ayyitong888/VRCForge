@@ -1,0 +1,88 @@
+name: Validate installer Retry and Cancel
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  retry-cancel:
+    runs-on: windows-2022
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        kind: [offline, web]
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Require hosted admin runner
+        run: |
+          if ($env:RUNNER_ENVIRONMENT -ne 'github-hosted') { throw 'Disposable hosted runner required.' }
+          $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
+          if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { throw 'Administrator runner required.' }
+      - name: Download and bind published inputs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:RUNNER_TEMP 'installer-retry-inputs'
+          New-Item -ItemType Directory -Force $root | Out-Null
+          gh release download v1.8.0 --repo $env:GITHUB_REPOSITORY --pattern VRCForge_Offline_Installer_x64.exe --dir (Join-Path $root 'old')
+          if ($LASTEXITCODE -ne 0) { throw 'Baseline download failed.' }
+          if ((Get-FileHash (Join-Path $root 'old/VRCForge_Offline_Installer_x64.exe')).Hash.ToLowerInvariant() -cne '3d0d0002900787ab8dd147c3fc01cc2e15f05f3b9f8cd275c7eaee65be527d42') { throw 'Baseline installer hash mismatch.' }
+          gh release download v1.8.0 --repo $env:GITHUB_REPOSITORY --pattern VRCForge_Windows_x64_1.8.0.zip --dir (Join-Path $root 'payload')
+          if ($LASTEXITCODE -ne 0) { throw 'Payload download failed.' }
+          $payload = Join-Path $root 'payload/VRCForge_Windows_x64_1.8.0.zip'
+          if ((Get-Item $payload).Length -ne 92921916) { throw 'Published payload length mismatch.' }
+          if ((Get-FileHash $payload -Algorithm SHA256).Hash.ToLowerInvariant() -cne '1c6434d3a571bf4f4cedae906b92a7ae82731457aa4bb90b2590507cffd990d6') { throw 'Published payload hash mismatch.' }
+          Copy-Item installer/VRCForge_WebPayload.ps1 (Join-Path $root 'helper.ps1')
+          $nsis = Join-Path ${env:ProgramFiles(x86)} 'NSIS\makensis.exe'
+          if (-not (Test-Path $nsis)) {
+            choco install nsis --version=3.12 -y --no-progress
+            if ($LASTEXITCODE -ne 0 -or -not (Test-Path $nsis)) { throw 'NSIS compiler installation failed.' }
+          }
+          & $nsis /VERSION
+          if ($LASTEXITCODE -ne 0) { throw 'NSIS compiler unavailable.' }
+          "NSIS_EXE=$nsis" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Compile checked out candidate
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:RUNNER_TEMP 'installer-retry-inputs'
+          $payload = (Resolve-Path (Join-Path $root 'payload/VRCForge_Windows_x64_1.8.0.zip')).Path
+          $helper = (Resolve-Path (Join-Path $root 'helper.ps1')).Path
+          $sha = (Get-FileHash $payload -Algorithm SHA256).Hash.ToLowerInvariant()
+          $helperSha = (Get-FileHash $helper -Algorithm SHA256).Hash.ToLowerInvariant()
+          $out = Join-Path $root 'candidate'
+          New-Item -ItemType Directory -Force $out | Out-Null
+          if ('${{ matrix.kind }}' -eq 'offline') {
+            & $env:NSIS_EXE "/DVERSION=1.8.0" "/DPAYLOAD_ZIP=$payload" "/DPAYLOAD_SHA256=$sha" "/DPAYLOAD_LENGTH=$((Get-Item $payload).Length)" "/DWEB_PAYLOAD_HELPER=$helper" "/DWEB_PAYLOAD_HELPER_SHA256=$helperSha" "/DOUTFILE=$(Join-Path $out 'VRCForge_Offline_Installer_x64.exe')" installer/VRCForge_Offline_Installer_x64.nsi
+          } else {
+            & $env:NSIS_EXE "/DVERSION=1.8.0" "/DDOWNLOAD_URL=https://github.com/ayyitong888/VRCForge/releases/download/v1.8.0/VRCForge_Windows_x64_1.8.0.zip" "/DPAYLOAD_SHA256=$sha" "/DPAYLOAD_LENGTH=$((Get-Item $payload).Length)" "/DWEB_PAYLOAD_HELPER=$helper" "/DWEB_PAYLOAD_HELPER_SHA256=$helperSha" "/DOUTFILE=$(Join-Path $out 'VRCForge_Web_Installer_x64.exe')" installer/VRCForge_Web_Installer_x64.nsi
+          }
+          if ($LASTEXITCODE -ne 0) { throw 'Candidate NSIS compile failed.' }
+      - name: Run real Retry Cancel and silent UI harness
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:RUNNER_TEMP 'installer-retry-inputs'
+          $name = if ('${{ matrix.kind }}' -eq 'offline') { 'VRCForge_Offline_Installer_x64.exe' } else { 'VRCForge_Web_Installer_x64.exe' }
+          $candidate = Join-Path $root "candidate/$name"
+          New-Item -ItemType Directory -Force (Join-Path $env:GITHUB_WORKSPACE 'installer-retry-evidence') | Out-Null
+          $assetName = $name.Replace('.exe', '_Hotfix1.exe')
+          Copy-Item $candidate (Join-Path $env:GITHUB_WORKSPACE "installer-retry-evidence/$assetName")
+          python scripts/test_installer_retry_ui.py --old-installer (Join-Path $root 'old/VRCForge_Offline_Installer_x64.exe') --candidate-installer $candidate --evidence (Join-Path $env:GITHUB_WORKSPACE 'installer-retry-evidence/evidence.json') --timeout 120
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: installer-retry-cancel-${{ matrix.kind }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: installer-retry-evidence/
+          if-no-files-found: warn
+          retention-days: 7
