@@ -102,6 +102,8 @@ namespace VRCForge.Editor
                         new[] { immediate.Constraint },
                         immediate.Avatar,
                         true);
+                    Undo.FlushUndoRecordObjects();
+                    SaveConvertedClips(immediate.Clips);
                     EditorSceneManager.MarkSceneDirty(immediate.Scene.Scene);
                     if (!EditorSceneManager.SaveScene(immediate.Scene.Scene))
                     {
@@ -190,6 +192,8 @@ namespace VRCForge.Editor
 
         private static Snapshot Inspect(JObject raw)
         {
+            if (AnimationMode.InAnimationMode())
+                throw new InvalidOperationException("Stop animation preview before constraint conversion.");
             var scenePath = Required(raw, "scenePath", 1024);
             var avatarPath = Required(raw, "avatarPath", 2048);
             var gameObjectPath = Required(raw, "gameObjectPath", 4096);
@@ -213,6 +217,8 @@ namespace VRCForge.Editor
                 throw new InvalidOperationException("avatarPath does not belong to scenePath.");
             }
             var host = SceneObjectCopyCore.ResolveUniqueGameObject(scene.Scene, gameObjectPath, "constraint host");
+            if (!host.transform.IsChildOf(avatar.transform))
+                throw new InvalidOperationException("The constraint host must belong to the selected avatar.");
             var components = host.GetComponents(componentType);
             if (componentIndex >= components.Length || components[componentIndex] == null)
             {
@@ -240,6 +246,9 @@ namespace VRCForge.Editor
             var componentGlobalId = GlobalObjectId.GetGlobalObjectIdSlow(component).ToString();
             var avatarGlobalId = GlobalObjectId.GetGlobalObjectIdSlow(avatar.gameObject).ToString();
             var vrcType = VrcTypes[componentType];
+            var clips = InspectClips(avatar, host, componentType);
+            if (clips.Count > 0 && (components.Length != 1 || host.GetComponents(vrcType).Length != 0))
+                throw new InvalidOperationException("Animated constraints require one unambiguous source and no existing destination component.");
             var digestMaterial = new JObject
             {
                 ["sceneGuid"] = stable.Guid,
@@ -253,6 +262,7 @@ namespace VRCForge.Editor
                 ["constraintActive"] = constraint.constraintActive,
                 ["locked"] = constraint.locked,
                 ["sources"] = sources,
+                ["animationClips"] = ClipEvidence(clips),
             };
             return new Snapshot
             {
@@ -272,6 +282,7 @@ namespace VRCForge.Editor
                 UnityComponentCountBefore = components.Length,
                 VrcComponentCountBefore = host.GetComponents(vrcType).Length,
                 Constraint = constraint,
+                Clips = clips,
                 Sources = sources,
                 Weight = constraint.weight,
                 ConstraintActive = constraint.constraintActive,
@@ -346,6 +357,7 @@ namespace VRCForge.Editor
                 ["beforeDigest"] = before.BeforeDigest,
                 ["convertReferencedAnimationClips"] = true,
                 ["animationBindingCoverage"] = "vrchat_sdk_converter",
+                ["animationClips"] = ClipEvidence(before.Clips),
                 ["sdkIssuesGenerated"] = issuesGenerated,
                 ["readback"] = readback == null ? JValue.CreateNull() : readback.DeepClone(),
                 ["toolRoutingStarted"] = true,
@@ -359,6 +371,122 @@ namespace VRCForge.Editor
                 ["consoleAfter"] = after,
                 ["consoleDelta"] = VrchatAvatarUploadShared.ConsoleDelta(consoleBefore, after),
             };
+        }
+
+        // Match the SDK's candidate scan, but reject suffix aliases before its first mutation.
+        internal static bool IsExactSdkBinding(string hostPath, string relativePath, string bindingPath)
+        {
+            if (!hostPath.EndsWith(bindingPath)) return false;
+            if (!string.Equals(relativePath, bindingPath, StringComparison.Ordinal))
+                throw new InvalidOperationException("SDK animation binding suffix is ambiguous: " + bindingPath);
+            return true;
+        }
+
+        private sealed class ClipEdit
+        {
+            internal AnimationClip Clip;
+            internal string Path;
+            internal StableAssetEvidence Before;
+            internal string ExpectedCurves;
+            internal string SavedDigest;
+        }
+
+        private static List<ClipEdit> InspectClips(VRCAvatarDescriptor avatar, GameObject host, Type type)
+        {
+            var relativePath = AnimationUtility.CalculateTransformPath(host.transform, avatar.transform);
+            var hostPath = AvatarAuthoringCrudCore.GetTransformPath(host.transform);
+            var clips = new HashSet<AnimationClip>();
+            foreach (var layer in avatar.baseAnimationLayers.Concat(avatar.specialAnimationLayers))
+                if (layer.animatorController != null)
+                    foreach (var clip in layer.animatorController.animationClips)
+                        if (clip != null) clips.Add(clip);
+            var edits = new List<ClipEdit>();
+            foreach (var clip in clips.OrderBy(c => AssetDatabase.GetAssetPath(c), StringComparer.Ordinal))
+            {
+                var bindings = AnimationUtility.GetCurveBindings(clip)
+                    .Concat(AnimationUtility.GetObjectReferenceCurveBindings(clip)).ToArray();
+                var mapped = new Dictionary<EditorCurveBinding, EditorCurveBinding>();
+                foreach (var binding in bindings)
+                {
+                    if (binding.type != type || !IsExactSdkBinding(hostPath, relativePath, binding.path)) continue;
+                    if (!AvatarDynamicsSetup.TryGetSubstituteAnimationBinding(binding.type, binding.propertyName,
+                        out var replacementType, out var replacementProperty, out var isArray))
+                        throw new InvalidOperationException("The SDK cannot map an animated constraint property: " + binding.propertyName);
+                    var replacement = binding;
+                    replacement.type = replacementType;
+                    replacement.propertyName = replacementProperty;
+                    if (bindings.Any(b => b.path == replacement.path && b.type == replacement.type && b.propertyName == replacement.propertyName)
+                        || mapped.Values.Any(b => b.path == replacement.path && b.type == replacement.type && b.propertyName == replacement.propertyName))
+                        throw new InvalidOperationException("Constraint animation destination binding already exists.");
+                    mapped.Add(binding, replacement);
+                }
+                if (mapped.Count == 0) continue;
+                var path = AssetDatabase.GetAssetPath(clip);
+                if (!path.StartsWith("Assets/", StringComparison.Ordinal) || !path.EndsWith(".anim", StringComparison.OrdinalIgnoreCase)
+                    || !AssetDatabase.IsMainAsset(clip) || !AssetDatabase.IsOpenForEdit(clip) || EditorUtility.IsDirty(clip))
+                    throw new InvalidOperationException("Referenced conversion clips must be clean writable standalone Assets/*.anim files: " + path);
+                var evidence = SceneObjectCopyCore.ReadStableAssetEvidence(path, "constraint animation preflight");
+                if (evidence.File.LinkCount != 1 || evidence.Meta.LinkCount != 1)
+                    throw new InvalidOperationException("Constraint animation assets must be uniquely linked.");
+                edits.Add(new ClipEdit { Clip = clip, Path = path, Before = evidence,
+                    ExpectedCurves = CurveState(clip, mapped) });
+            }
+            return edits;
+        }
+
+        private static string CurveState(AnimationClip clip, Dictionary<EditorCurveBinding, EditorCurveBinding> mapped = null)
+        {
+            var rows = new List<JObject>();
+            foreach (var original in AnimationUtility.GetCurveBindings(clip).Concat(AnimationUtility.GetObjectReferenceCurveBindings(clip)))
+            {
+                var binding = mapped != null && mapped.TryGetValue(original, out var replacement) ? replacement : original;
+                var row = new JObject { ["path"] = binding.path, ["type"] = binding.type.FullName,
+                    ["property"] = binding.propertyName, ["objectCurve"] = binding.isPPtrCurve };
+                if (original.isPPtrCurve)
+                    row["keys"] = new JArray(AnimationUtility.GetObjectReferenceCurve(clip, original).Select(k => new JObject {
+                        ["time"] = k.time, ["value"] = k.value == null ? "" : GlobalObjectId.GetGlobalObjectIdSlow(k.value).ToString() }));
+                else
+                {
+                    var curve = AnimationUtility.GetEditorCurve(clip, original);
+                    row["keys"] = JArray.FromObject(curve.keys);
+                    row["preWrap"] = (int)curve.preWrapMode;
+                    row["postWrap"] = (int)curve.postWrapMode;
+                }
+                rows.Add(row);
+            }
+            return new JArray(rows.OrderBy(r => r.ToString(Newtonsoft.Json.Formatting.None), StringComparer.Ordinal))
+                .ToString(Newtonsoft.Json.Formatting.None);
+        }
+
+        private static JArray ClipEvidence(List<ClipEdit> edits)
+        {
+            return new JArray(edits.Select(e => new JObject { ["clipPath"] = e.Path, ["assetGuid"] = e.Before.Guid,
+                ["fileDigestBefore"] = e.Before.File.Digest, ["metaDigest"] = e.Before.Meta.Digest,
+                ["expectedCurvesDigest"] = StableHash(e.ExpectedCurves), ["savedFileDigest"] = e.SavedDigest }));
+        }
+
+        private static void SaveConvertedClips(List<ClipEdit> edits)
+        {
+            foreach (var edit in edits)
+            {
+                if (!SceneObjectCopyCore.StableAssetEvidenceMatches(edit.Before,
+                    SceneObjectCopyCore.ReadStableAssetEvidence(edit.Path, "constraint clip before save"), true)
+                    || CurveState(edit.Clip) != edit.ExpectedCurves)
+                    throw new InvalidOperationException("Constraint animation changed outside the prepared conversion: " + edit.Path);
+                EditorUtility.SetDirty(edit.Clip);
+                AssetDatabase.SaveAssetIfDirty(edit.Clip);
+                var saved = SceneObjectCopyCore.ReadStableAssetEvidence(edit.Path, "saved constraint animation");
+                if (EditorUtility.IsDirty(edit.Clip) || saved.Guid != edit.Before.Guid
+                    || saved.Meta.Digest != edit.Before.Meta.Digest || saved.File.Digest == edit.Before.File.Digest)
+                    throw new InvalidOperationException("Constraint animation save or identity readback failed: " + edit.Path);
+                AssetDatabase.ImportAsset(edit.Path, ImportAssetOptions.ForceSynchronousImport | ImportAssetOptions.ForceUpdate);
+                var persisted = AssetDatabase.LoadAssetAtPath<AnimationClip>(edit.Path);
+                if (persisted == null || EditorUtility.IsDirty(persisted) || CurveState(persisted) != edit.ExpectedCurves
+                    || !SceneObjectCopyCore.StableAssetEvidenceMatches(saved,
+                        SceneObjectCopyCore.ReadStableAssetEvidence(edit.Path, "persisted constraint animation"), true))
+                    throw new InvalidOperationException("Persisted constraint animation differs from the prepared bindings: " + edit.Path);
+                edit.SavedDigest = saved.File.Digest;
+            }
         }
 
         private static string Required(JObject raw, string name, int maximum)
@@ -440,6 +568,7 @@ namespace VRCForge.Editor
             internal int UnityComponentCountBefore;
             internal int VrcComponentCountBefore;
             internal IConstraint Constraint;
+            internal List<ClipEdit> Clips;
             internal JArray Sources = new JArray();
             internal float Weight;
             internal bool ConstraintActive;
