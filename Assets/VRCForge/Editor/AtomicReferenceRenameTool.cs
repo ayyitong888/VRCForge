@@ -1566,6 +1566,7 @@ namespace VRCForge.Editor
                 {
                     reference.Apply();
                 }
+                Undo.FlushUndoRecordObjects();
                 SavePlannedAssets(snapshot);
                 if (sceneWillChange)
                 {
@@ -1605,6 +1606,8 @@ namespace VRCForge.Editor
             }
             catch (Exception exception)
             {
+                try { Undo.FlushUndoRecordObjects(); }
+                catch { /* Exact backup restoration and readback still decide recovery. */ }
                 var restored = RestoreFailedApply(
                     snapshot,
                     backups,
