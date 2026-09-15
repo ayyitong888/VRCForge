@@ -1,14 +1,18 @@
 <div align="center">
 
-![VRCForge — AI Agent + MCP for VRChat Avatar Editing](docs/assets/social-preview.svg)
+![VRCForge — AI Agent + MCP for VRChat Avatar Editing](docs/assets/vrcforge-atelier-banner.png)
 
 [![稳定版](https://img.shields.io/github/v/release/ayyitong888/VRCForge?label=稳定版&style=flat-square)](https://github.com/ayyitong888/VRCForge/releases/latest)
-![当前版本](https://img.shields.io/badge/当前版本-v1.8.0-4f46e5?style=flat-square)
+![当前版本](https://img.shields.io/badge/当前版本-v1.8.0-d9487c?style=flat-square)
 [![许可证 GPL-3.0-only](https://img.shields.io/badge/许可证-GPL--3.0--only-64748b?style=flat-square)](LICENSE)
 ![平台 Windows x64](https://img.shields.io/badge/平台-Windows%20x64-0ea5e9?style=flat-square)
 [![GitHub Stars](https://img.shields.io/github/stars/ayyitong888/VRCForge?style=social)](https://github.com/ayyitong888/VRCForge/stargazers)
 
-**简体中文** · [English](README.en.md)
+**简体中文** · [English](README.en.md) · [日本語](README.ja.md)
+
+🌙 **VRCForge 创作工房** · 把灵感带进 Unity，把每一步改模留在掌控之中 ✨
+
+**[🌸 粉色创作工房官网](https://ayyitong888.github.io/VRCForge/)**
 
 </div>
 
@@ -29,6 +33,8 @@ Unity Editor 工具与 MCP Server，辅助捏脸、换装、材质调整和优�
 
 本页对应已发布的 [v1.8.0 稳定版](https://github.com/ayyitong888/VRCForge/releases/tag/v1.8.0)。
 安装与升级请获取同一 Release 的配套安装器与 Unity 包。
+
+**[下载 VRCForge v1.8.0](https://github.com/ayyitong888/VRCForge/releases/tag/v1.8.0)** · [查看 Release Notes](https://github.com/ayyitong888/VRCForge/releases)
 
 ## VRCForge 能做什么
 

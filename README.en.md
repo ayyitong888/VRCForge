@@ -1,20 +1,24 @@
 <div align="center">
 
-![VRCForge — AI Agent + MCP for VRChat Avatar Editing](docs/assets/social-preview.svg)
+![VRCForge — AI Agent + MCP for VRChat Avatar Editing](docs/assets/vrcforge-atelier-banner.png)
 
 [![Stable](https://img.shields.io/github/v/release/ayyitong888/VRCForge?label=stable&style=flat-square)](https://github.com/ayyitong888/VRCForge/releases/latest)
-![Current version](https://img.shields.io/badge/current-v1.8.0-4f46e5?style=flat-square)
+![Current version](https://img.shields.io/badge/current-v1.8.0-d9487c?style=flat-square)
 [![License GPL-3.0-only](https://img.shields.io/badge/license-GPL--3.0--only-64748b?style=flat-square)](LICENSE)
 ![Platform Windows x64](https://img.shields.io/badge/platform-Windows%20x64-0ea5e9?style=flat-square)
 [![GitHub Stars](https://img.shields.io/github/stars/ayyitong888/VRCForge?style=social)](https://github.com/ayyitong888/VRCForge/stargazers)
 
-[简体中文](README.md) · **English**
+[简体中文](README.md) · **English** · [日本語](README.ja.md)
+
+🌙 **VRCForge Atelier** · Bring the idea into Unity, and keep every edit under your care ✨
+
+**[🌸 Visit the creator atelier](https://ayyitong888.github.io/VRCForge/en/)**
 
 </div>
 
 # VRCForge: AI-assisted VRChat avatar editor and Unity MCP tools
 
-VRCForge is an open-source VRChat avatar editor and Unity MCP server for
+VRCForge is an open-source VRChat avatar editor with a Unity MCP server for
 AI-assisted avatar customization: face and BlendShape editing, outfits,
 materials, and optimization checks. It connects a local desktop AI agent,
 a local FastAPI runtime, and Unity Editor tools in one supervised workflow
@@ -32,6 +36,8 @@ requires project-specific verification.
 
 This page describes the published [v1.8.0 stable release](https://github.com/ayyitong888/VRCForge/releases/tag/v1.8.0).
 Get matching installers and Unity packages from that same Release.
+
+**[Download VRCForge v1.8.0](https://github.com/ayyitong888/VRCForge/releases/tag/v1.8.0)** · [Read the Release Notes](https://github.com/ayyitong888/VRCForge/releases)
 
 ## What VRCForge can do
 
