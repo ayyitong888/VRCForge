@@ -819,7 +819,7 @@ def build_optimization_tool_result(
     external_name = normalize_tool_name(tool_name)
     definition = OPTIMIZATION_TOOL_BY_EXTERNAL[external_name]
     validation = validation_report if isinstance(validation_report, dict) else {}
-    parameter_sources = {
+    required_sources = {
         "optimization.parameter.inventory": ("parameters",),
         "optimization.parameter-budget-audit": ("parameters",),
         "optimization.parameter.menu-map": ("menu",),
@@ -828,8 +828,14 @@ def build_optimization_tool_result(
         "optimization.parameter.vrcfury-compressor-plan": ("parameters", "menu", "fx"),
         "optimization.parameter.behavior-regression": ("parameters", "menu", "fx", "animation_bindings"),
         "optimization.parameter.path-to-skill": ("parameters", "menu", "fx"),
+        "optimization.texture-vram-audit": ("materials",),
+        "optimization.lac.profile-plan": ("materials",),
+        "optimization.mesh.triangle-audit": ("avatar_items", "performance_pc"),
+        "optimization.meshia.simplify-plan": ("avatar_items", "performance_pc"),
+        "optimization.physbone.audit": ("avatar_items", "performance_pc", "performance_quest"),
+        "optimization.physbone.reduce-plan": ("avatar_items", "performance_pc", "performance_quest"),
     }
-    for source_name in parameter_sources.get(external_name, ()):
+    for source_name in required_sources.get(external_name, ()):
         source = _validation_sources(validation).get(source_name)
         if not isinstance(source, dict):
             continue
