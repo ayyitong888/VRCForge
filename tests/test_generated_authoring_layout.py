@@ -175,6 +175,7 @@ internal static class Harness
         "private static void PlanMenuRoom(",
         "private static VRCExpressionsMenu EnsureMenuPath(",
         "private static VRCExpressionsMenu EnsureMenuHasRoom(",
+        "private static VRCExpressionsMenu.Control FindControlByName(",
     ))
     (work / "MenuProduction.cs").write_text(
         MENU_STUBS.replace("SANITIZE_METHOD", _production_method(production, "internal static string Sanitize("))
