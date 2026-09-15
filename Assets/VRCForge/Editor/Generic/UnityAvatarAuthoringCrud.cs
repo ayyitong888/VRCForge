@@ -1004,6 +1004,7 @@ namespace VRCForge.Editor
                 var assetDir = AvatarAuthoringCrudCore.NormalizeAssetDir(@params["assetDir"]?.ToString(), descriptor.name, GeneratedAssetPaths.Controllers);
                 var animationAssetDir = AvatarAuthoringCrudCore.NormalizeAssetDir(@params["assetDir"]?.ToString(), descriptor.name, GeneratedAssetPaths.Animations);
                 var controller = AvatarAuthoringCrudCore.GetFxController(descriptor);
+                ValidateTargetIdentity(controller, layerName, stateName, parameterName, parameterType);
                 var layerExists = controller != null && controller.layers.Any(layer => string.Equals(layer.name, layerName, StringComparison.Ordinal));
                 var existingState = layerExists ? FindState(controller.layers.First(layer => layer.name == layerName).stateMachine, stateName) : null;
                 var stateExists = existingState != null;
@@ -1197,7 +1198,9 @@ namespace VRCForge.Editor
 
         private static bool EnsureControllerParameter(AnimatorController controller, string parameterName, AnimatorControllerParameterType parameterType)
         {
-            var existing = controller.parameters.FirstOrDefault(parameter => parameter.name == parameterName);
+            var matches = controller.parameters.Where(parameter => parameter.name == parameterName).ToArray();
+            if (matches.Length > 1) throw new InvalidOperationException($"Animator parameter '{parameterName}' is ambiguous.");
+            var existing = matches.SingleOrDefault();
             if (existing != null)
             {
                 if (existing.type != parameterType)
@@ -1212,7 +1215,9 @@ namespace VRCForge.Editor
 
         private static AnimatorControllerLayer EnsureLayer(AnimatorController controller, string layerName)
         {
-            var existing = controller.layers.FirstOrDefault(layer => layer.name == layerName);
+            var matches = controller.layers.Where(layer => layer.name == layerName).ToArray();
+            if (matches.Length > 1) throw new InvalidOperationException($"Animator layer '{layerName}' is ambiguous.");
+            var existing = matches.SingleOrDefault();
             if (existing != null)
             {
                 return existing;
@@ -1227,26 +1232,34 @@ namespace VRCForge.Editor
 
         private static AnimatorState FindState(AnimatorStateMachine machine, string stateName)
         {
-            if (machine == null)
+            var matches = new List<AnimatorState>();
+            var pending = new Stack<AnimatorStateMachine>();
+            var visited = new HashSet<AnimatorStateMachine>();
+            if (machine != null) pending.Push(machine);
+            while (pending.Count > 0)
             {
-                return null;
+                var current = pending.Pop();
+                if (!visited.Add(current)) continue;
+                foreach (var child in current.states)
+                    if (child.state != null && string.Equals(child.state.name, stateName, StringComparison.Ordinal))
+                        matches.Add(child.state);
+                foreach (var sub in current.stateMachines)
+                    if (sub.stateMachine != null) pending.Push(sub.stateMachine);
             }
-            foreach (var child in machine.states)
-            {
-                if (child.state != null && string.Equals(child.state.name, stateName, StringComparison.Ordinal))
-                {
-                    return child.state;
-                }
-            }
-            foreach (var sub in machine.stateMachines)
-            {
-                var nested = FindState(sub.stateMachine, stateName);
-                if (nested != null)
-                {
-                    return nested;
-                }
-            }
-            return null;
+            if (matches.Count > 1) throw new InvalidOperationException($"Animator state '{stateName}' is ambiguous in this layer.");
+            return matches.SingleOrDefault();
+        }
+
+        private static void ValidateTargetIdentity(AnimatorController controller, string layerName, string stateName, string parameterName, AnimatorControllerParameterType parameterType)
+        {
+            if (controller == null) return;
+            var parameters = controller.parameters.Where(item => item.name == parameterName).ToArray();
+            if (parameters.Length > 1) throw new InvalidOperationException($"Animator parameter '{parameterName}' is ambiguous.");
+            if (parameters.Length == 1 && parameters[0].type != parameterType)
+                throw new InvalidOperationException($"Animator parameter '{parameterName}' already exists as {parameters[0].type}, not {parameterType}.");
+            var layers = controller.layers.Where(item => item.name == layerName).ToArray();
+            if (layers.Length > 1) throw new InvalidOperationException($"Animator layer '{layerName}' is ambiguous.");
+            if (layers.Length == 1) FindState(layers[0].stateMachine, stateName);
         }
 
         private static bool EnsureAnyStateTransition(AnimatorStateMachine machine, AnimatorState state, string parameterName, AnimatorConditionMode conditionMode, float threshold)
