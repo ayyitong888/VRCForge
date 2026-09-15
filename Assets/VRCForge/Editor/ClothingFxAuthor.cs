@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -60,6 +60,7 @@ namespace VRCForge.Editor
                 {
                     return VRCForgeToolResult.Failed("No VRCExpressionsMenu found on the avatar.");
                 }
+                var resolvedPaths = PreflightItems(descriptor.transform, menuAsset, items);
                 var fxControllerPath = AssetDatabase.GetAssetPath(fxController);
                 var parametersPath = AssetDatabase.GetAssetPath(parametersAsset);
                 var menuPath = AssetDatabase.GetAssetPath(menuAsset);
@@ -106,7 +107,7 @@ namespace VRCForge.Editor
                     receipts.Add(clipOffReceipt);
                     var clipOn = LoadOrCreateClip(clipOnPath, clipName + "_ON");
                     var clipOff = LoadOrCreateClip(clipOffPath, clipName + "_OFF");
-                    var binding = new EditorCurveBinding { path = objectPath, type = typeof(GameObject), propertyName = "m_IsActive" };
+                    var binding = new EditorCurveBinding { path = resolvedPaths[item], type = typeof(GameObject), propertyName = "m_IsActive" };
                     AnimationUtility.SetEditorCurve(clipOn, binding, AnimationCurve.Constant(0f, 0f, 1f));
                     AnimationUtility.SetEditorCurve(clipOff, binding, AnimationCurve.Constant(0f, 0f, 0f));
                     clipOnReceipt.After = DescribeAsset(clipOn);
@@ -204,6 +205,42 @@ namespace VRCForge.Editor
             public string Status = "not_attempted";
             public string Error = "";
             public bool RolledBack = false;
+        }
+
+        private static Dictionary<JObject, string> PreflightItems(Transform avatarRoot, VRCExpressionsMenu menu, JArray items)
+        {
+            if (menu.controls == null)
+                throw new InvalidOperationException("The expressions menu controls are unavailable.");
+            var paths = new Dictionary<JObject, string>();
+            var newParameters = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var item in items.OfType<JObject>())
+            {
+                var objectPath = FirstNonEmpty(item, "sampleObjectPath", "objectPath");
+                if (string.IsNullOrWhiteSpace(objectPath)) { continue; }
+                paths[item] = ResolveRelativeObjectPath(avatarRoot, objectPath);
+                var displayName = FirstNonEmpty(item, "displayName", "name");
+                if (string.IsNullOrWhiteSpace(displayName)) { displayName = "Clothing"; }
+                var parameter = FirstNonEmpty(item, "parameterName");
+                if (string.IsNullOrWhiteSpace(parameter)) { parameter = "Cloth_" + SanitizeName(displayName); }
+                if (!menu.controls.Any(control => control.parameter != null && control.parameter.name == parameter))
+                    newParameters.Add(parameter);
+            }
+            if (menu.controls.Count + newParameters.Count > VRCExpressionsMenu.MAX_CONTROLS)
+                throw new InvalidOperationException("The expressions menu has insufficient space for the requested clothing toggles.");
+            return paths;
+        }
+
+        private static string ResolveRelativeObjectPath(Transform avatarRoot, string rawPath)
+        {
+            var path = NormalizePath(rawPath);
+            var rootPath = NormalizePath(GetTransformPath(avatarRoot));
+            var fullPath = path == rootPath || path.StartsWith(rootPath + "/", StringComparison.Ordinal)
+                ? path : rootPath + "/" + path;
+            var matches = avatarRoot.GetComponentsInChildren<Transform>(true)
+                .Where(item => NormalizePath(GetTransformPath(item)) == fullPath).Distinct().ToList();
+            if (matches.Count != 1)
+                throw new InvalidOperationException($"Clothing object path is missing, outside the Avatar, or ambiguous: '{rawPath}'.");
+            return fullPath == rootPath ? string.Empty : fullPath.Substring(rootPath.Length + 1);
         }
 
         private static AnimationClip LoadOrCreateClip(string path, string clipName)
@@ -339,14 +376,14 @@ namespace VRCForge.Editor
             }
 
             var normalizedAvatarPath = NormalizePath(avatarPath);
-            if (string.IsNullOrEmpty(normalizedAvatarPath))
-            {
-                return descriptors[0];
-            }
-
-            return descriptors.FirstOrDefault(item => NormalizePath(GetTransformPath(item.transform)) == normalizedAvatarPath)
-                ?? descriptors.FirstOrDefault(item => item.name.Equals(avatarPath, StringComparison.OrdinalIgnoreCase))
-                ?? throw new InvalidOperationException($"Avatar descriptor not found: {avatarPath}");
+            var matches = string.IsNullOrEmpty(normalizedAvatarPath)
+                ? descriptors
+                : descriptors.Where(item => NormalizePath(GetTransformPath(item.transform)) == normalizedAvatarPath).ToList();
+            if (matches.Count == 0)
+                matches = descriptors.Where(item => item.name.Equals(avatarPath, StringComparison.OrdinalIgnoreCase)).ToList();
+            if (matches.Count != 1)
+                throw new InvalidOperationException($"Avatar descriptor is missing or ambiguous: {avatarPath}");
+            return matches[0];
         }
 
         private static string FirstNonEmpty(JObject item, params string[] keys)
