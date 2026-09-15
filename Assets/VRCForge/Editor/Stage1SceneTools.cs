@@ -234,7 +234,6 @@ namespace VRCForge.Editor
                 mutationStarted = true;
                 if (!EditorSceneManager.SaveScene(scene, action == "save_as" ? destination : scenePath, action == "save_as" ? false : false))
                     throw new SceneObjectCopyException("Unity did not confirm the scene save.");
-                AssetDatabase.SaveAssets();
                 AssetDatabase.Refresh(ImportAssetOptions.ForceSynchronousImport);
                 var loaded = SceneManager.GetSceneByPath(action == "save_as" ? destination : scenePath);
                 var afterEvidence = SceneObjectCopyCore.ReadStableAssetEvidence(action == "save_as" ? destination : scenePath, "saved scene asset");

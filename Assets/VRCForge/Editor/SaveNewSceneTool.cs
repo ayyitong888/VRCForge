@@ -62,7 +62,6 @@ namespace VRCForge.Editor
                         mutationStarted);
                 }
                 mutationStarted = true;
-                AssetDatabase.SaveAssets();
                 AssetDatabase.ImportAsset(
                     snapshot.ScenePath,
                     ImportAssetOptions.ForceSynchronousImport | ImportAssetOptions.ForceUpdate);
