@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Globalization;
 using System.IO;
 using System.Linq;
@@ -101,6 +101,9 @@ namespace VRCForge.Editor
                 proxy = Resolve(state["proxyGlobalObjectId"]?.ToString(), "owned proxy");
                 if (proxy.name != state["proxyName"]?.ToString() || target.transform.parent != proxy.transform)
                     throw new InvalidOperationException("The owned proxy or target relationship drifted; user state was preserved.");
+                if (proxy.transform.childCount != 1 || proxy.transform.GetChild(0) != target.transform
+                    || proxy.GetComponents<Component>().Any(component => component == null || !(component is Transform)))
+                    throw new InvalidOperationException("The handoff proxy contains additional user content; preserve it before completing the handoff.");
             }
 
             var scenePath = target.scene.path.Replace('\\', '/');
