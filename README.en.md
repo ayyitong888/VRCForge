@@ -18,19 +18,16 @@
 
 # VRCForge: AI-assisted VRChat avatar editor and Unity MCP tools
 
-VRCForge is an open-source VRChat avatar editor with a Unity MCP server for
-AI-assisted avatar customization: face and BlendShape editing, outfits,
-materials, and optimization checks. It connects a local desktop AI agent,
-a local FastAPI runtime, and Unity Editor tools in one supervised workflow
-for inspecting an avatar, planning a change, requesting execution, validating
-the result, and restoring changes.
+VRCForge is an open-source tool for VRChat avatar creators. Describe the face,
+clothing, material, or animation change you want in natural language, and the
+assistant can inspect your project, suggest a change, and apply it.
 
-You can discuss face shapes and BlendShapes, materials and shaders, wardrobes
-and outfits, avatar composition, and performance optimization in natural
-language. VRCForge turns the Agent's intent into reviewable Unity operations.
-Asset writes follow the selected permission mode and use checkpoints, readback validation,
-and restore support. Each avatar, dependency set, and Unity environment still
-requires project-specific verification.
+From avatar checks and outfit changes to material and animation editing, including
+head-swap and part-transplant work, VRCForge shows what it is about to change and
+helps you check the result afterward. Choose confirmation before each change, or
+let eligible changes run automatically; restores always ask for confirmation.
+Support depends on your avatar, installed plugins, and Unity
+project, so verify the result in your own project.
 
 > Back up your Unity / VRChat Avatar project before using any asset-writing feature.
 
@@ -41,21 +38,21 @@ Get matching installers and Unity packages from that same Release.
 
 ## What VRCForge can do
 
-From changing a BlendShape to building a wardrobe or editing Animator FX, version 1.8.0 includes tools that apply changes. Tell your Agent what to edit, let it inspect the project, and review the result.
+From small details to a complete look, let AI handle repetitive steps so you can spend more time creating.
 
-| Capability | Implemented operations |
+| What you want to do | How VRCForge helps |
 | --- | --- |
-| BlendShapes and expressions | Read and change existing face, body and clothing BlendShape weights, then preview the result. Face reshaping requires the avatar to have suitable shape keys. |
-| Outfits, wardrobes and menus | Bind clothing, create or manage exclusive wardrobes and clothing/accessory toggles, and edit VRChat expression menus and parameters. Outfit integration can use installed Modular Avatar or VRCFury. |
-| Animation and Animator FX | Create, edit and batch animation curves, FX layers, states and transitions. Combine object toggles and material properties to author outfit transitions, crossfades and dissolve animations. |
-| Materials, shaders and textures | Edit colors, numeric and vector properties, textures and material slots; replace shaders. Use the properties actually exposed by each shader, beyond just lilToon and Poiyomi. |
-| Objects, bones and components | Create, copy, move and reparent objects, edit component properties and save prefabs. Configure outfit armature integration, constraints and supported PhysBone components. |
-| Optimization and project checks | Inspect VRAM, meshes, materials, parameters and build readiness. Change texture sizes, formats and compression, and configure optimization components when their dependencies are installed. |
-| Built-in AI and external MCP | Configure a Provider and API key for the built-in Agent, or connect an external MCP Agent. Both can inspect, plan and edit; your permission mode controls confirmation and automatic execution. |
-| Skills and reusable workflows | Use built-in head-swap and part-transplant workflows; import, export and enable .vsk Skills. MCP Tools perform actions, Resources expose state, and Prompts reuse the existing Skills. |
-| Inspect, diagnose and restore | Review Scene View screenshots and Gesture Manager parameters and states, read diagnostics, save checkpoints and inspect changes. Restore a checkpoint through a separate confirmation. |
+| Shape and expression | Adjust the face, body and expression controls already included in your avatar, and preview the result as you go. |
+| Clothes and accessories | Fit clothing and accessories to your avatar and organize the outfit menu you use in game. |
+| Outfit animations | Create animated outfit changes with effects such as fades and dissolves. |
+| Colors and materials | Change colors, textures and materials on clothes, hair and accessories to bring your look together. |
+| Combine avatar parts | Follow head-swap and part-transplant workflows to combine avatar parts and check how they fit together. |
+| Lighten your avatar | Find textures and parts using more resources, adjust texture size and compression, and use installed plugins for further optimization. |
+| Use your preferred AI | Enter an API key for the built-in AI, or connect your usual AI assistant through MCP. Choose to confirm steps or allow automatic editing. |
+| Reuse your favorite workflows | Save common operations as Skills to use again, or import and export .vsk Skill packs. |
+| Preview and restore | Check the changed appearance and animations, save checkpoints, and choose a saved checkpoint to restore after confirmation. |
 
-Capabilities depend on the project: expression, viseme or face-tracking keys are not automatically face-reshaping controls. Shader properties must exist and match the supported types. Modular Avatar, VRCFury and AAO integrations require their packages. Writes follow your permission mode; checkpoint restoration requires separate confirmation.
+Available edits depend on your avatar. Face reshaping needs suitable controls in the model, and some outfit and optimization features need additional plugins.
 
 ## Find a workflow for your avatar
 
