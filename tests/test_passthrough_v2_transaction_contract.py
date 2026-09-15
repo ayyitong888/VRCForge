@@ -44,7 +44,8 @@ def test_ensure_expression_parameter_returns_transaction_from_persisted_readback
         source.index("public static class EnsureExpressionParameterTool") :
         source.index("public static class EnsureExpressionMenuControlTool")
     ]
-    save_index = block.index("AssetDatabase.SaveAssets();")
+    assert "AssetDatabase.SaveAssets();" not in block
+    save_index = block.index("ExpressionWritePersistence.SaveAndVerify(persistenceBefore, asset, descriptor, assetWasMissing, false)")
     readback_index = block.index("LoadAssetAtPath<VRCExpressionParameters>", save_index)
     assert save_index < readback_index
     assert "assets_touched = transactionItems.Count" in block
@@ -60,7 +61,8 @@ def test_ensure_animator_state_returns_transaction_from_controller_readback() ->
         ROOT / "Assets/VRCForge/Editor/Generic/UnityAvatarAuthoringCrud.cs"
     ).read_text(encoding="utf-8")
     block = source[source.index("public static class EnsureAnimatorStateTool") :]
-    save_index = block.index("AssetDatabase.SaveAssets();")
+    assert "AssetDatabase.SaveAssets();" not in block
+    save_index = block.index("AssetDatabase.SaveAssetIfDirty(controller);")
     readback_index = block.index("LoadAssetAtPath<AnimatorController>", save_index)
     assert save_index < readback_index
     assert "assets_touched = transactionItems.Count" in block
@@ -79,7 +81,8 @@ def test_ensure_expression_menu_control_returns_changed_asset_transaction() -> N
         source.index("public static class EnsureExpressionMenuControlTool") :
         source.index("public static class EnsureAnimatorStateTool")
     ]
-    save_index = block.index("AssetDatabase.SaveAssets();")
+    assert "AssetDatabase.SaveAssets();" not in block
+    save_index = block.index("ExpressionWritePersistence.SaveAndVerify(persistenceBefore, root, descriptor, rootWasMissing, true, target)")
     readback_index = block.index("LoadAssetAtPath<VRCExpressionsMenu>", save_index)
     assert save_index < readback_index
     assert "CaptureMenuGraph(root)" in block
@@ -93,11 +96,18 @@ def test_add_wardrobe_outfit_returns_bounded_multi_asset_transaction() -> None:
     source = (ROOT / "Assets/VRCForge/Editor/WardrobeOutfitWriter.cs").read_text(
         encoding="utf-8"
     )
-    save_index = source.index("AssetDatabase.SaveAssets();")
+    assert "AssetDatabase.SaveAssets();" not in source
+    save_index = source.index("saveScope.Save(fxController, addMenuToggle ? descriptor.expressionsMenu : null, clip);")
     controller_readback = source.index("LoadAssetAtPath<AnimatorController>", save_index)
     clip_readback = source.index("LoadAssetAtPath<AnimationClip>", save_index)
-    assert save_index < controller_readback
-    assert save_index < clip_readback
+    scene_save = source.index("sceneSaveScope.Save();", save_index)
+    assert save_index < scene_save < controller_readback
+    assert scene_save < clip_readback
+    save_helper = (ROOT / "Assets/VRCForge/Editor/WardrobeManagerWriter.cs").read_text(encoding="utf-8")
+    helper_start = save_helper.index("internal void Save(params UnityEngine.Object[] roots)")
+    helper_end = save_helper.index("private static HashSet<string> Collect", helper_start)
+    assert "paths.UnionWith(Collect(roots));" in save_helper[helper_start:helper_end]
+    assert "AssetDatabase.SaveAssetIfDirty(new GUID(AssetDatabase.AssetPathToGUID(path)))" in save_helper[helper_start:helper_end]
     assert "assets_touched = transactionItems.Count" in source
     assert "items = transactionItems.Take(20).ToArray()" in source
     assert "handle = transactionHandle" in source

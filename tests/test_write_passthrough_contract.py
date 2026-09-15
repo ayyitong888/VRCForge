@@ -10,15 +10,33 @@ def _tool_block(source: str, class_name: str, next_marker: str | None = None) ->
     return source[start:end]
 
 
+def _assert_expression_persistence_save_import_readback() -> None:
+    source = (ROOT / "Assets/VRCForge/Editor/Generic/UnityAvatarAuthoringCrud.cs").read_text(encoding="utf-8")
+    start = source.index("internal static object SaveAndVerify(")
+    save = source.index("AssetDatabase.SaveAssetIfDirty(asset);", start)
+    reimport = source.index("AssetDatabase.ImportAsset(path, ImportAssetOptions.ForceSynchronousImport", save)
+    readback = source.index("var actual = AssetDatabase.LoadAssetAtPath<UnityEngine.Object>(path)", reimport)
+    verify = source.index("JToken.DeepEquals(expected[path]", readback)
+    assert start < save < reimport < readback < verify
+    assert "Expression asset GUID changed" in source[verify:]
+    assert "items = affectedPaths.Take(20).ToArray()" in source[verify:]
+    assert "handle = AssetDatabase.AssetPathToGUID(AssetDatabase.GetAssetPath(root))" in source[verify:]
+
+
 def test_set_property_returns_persisted_before_after_and_bounded_affected() -> None:
     source = (ROOT / "Assets/VRCForge/Editor/Generic/UnityComponentCrud.cs").read_text(
         encoding="utf-8"
     )
     block = _tool_block(source, "SetPropertyTool")
 
-    save_index = block.index("AssetDatabase.SaveAssets();")
+    assert "AssetDatabase.SaveAssets();" not in block
+    save_index = block.index("ComponentCrudCore.SaveAndResolveScene(beforeScene)")
     readback_index = block.index("var readbackValue = ComponentCrudCore.GetMemberValue")
     assert save_index < readback_index
+    helper_start = source.index("internal static SavedSceneSnapshot SaveAndResolveScene(")
+    scene_save = source.index("EditorSceneManager.SaveScene(beforeScene.Scene)", helper_start)
+    scene_readback = source.index("var afterScene = SceneObjectCopyCore.ResolveSavedScene(", scene_save)
+    assert helper_start < scene_save < scene_readback
     assert "before = ComponentCrudCore.DescribeValue(oldValue)" in block
     assert "after = ComponentCrudCore.DescribeValue(readbackValue)" in block
     assert "after = ComponentCrudCore.DescribeValue(unchangedReadbackValue)" in block
@@ -32,7 +50,8 @@ def test_duplicate_project_asset_returns_fresh_readback_and_bounded_affected() -
     ).read_text(encoding="utf-8")
     block = _tool_block(source, "DuplicateProjectAssetTool")
 
-    save_index = block.index("AssetDatabase.SaveAssets();")
+    assert "AssetDatabase.SaveAssets();" not in block
+    save_index = block.index("AssetDatabase.SaveAssetIfDirty(copiedAsset);")
     readback_index = block.index("createdEvidence = ReadCreatedEvidenceWithRetry", save_index)
     assert save_index < readback_index
     assert "before = beforePayload" in block
@@ -69,10 +88,11 @@ def test_parameter_optimization_returns_reimported_before_after() -> None:
         "public static class AvatarParameterRollbackTool",
     )
 
-    save_index = block.index("AssetDatabase.SaveAssets();")
-    import_index = block.index("ImportAssetOptions.ForceSynchronousImport")
+    assert "AssetDatabase.SaveAssets();" not in block
+    save_index = block.index("ExpressionWritePersistence.SaveAndVerify(")
+    _assert_expression_persistence_save_import_readback()
     readback_index = block.index("LoadAssetAtPath<VRCExpressionParameters>")
-    assert save_index < import_index < readback_index
+    assert save_index < readback_index
     assert "before.Add(DescribeParameter(parameter))" in block
     assert "before," in block
     assert "after," in block
@@ -86,10 +106,11 @@ def test_parameter_rollback_returns_reimported_before_after() -> None:
     )
     block = _tool_block(source, "AvatarParameterRollbackTool")
 
-    save_index = block.index("AssetDatabase.SaveAssets();")
-    import_index = block.index("ImportAssetOptions.ForceSynchronousImport")
+    assert "AssetDatabase.SaveAssets();" not in block
+    save_index = block.index("ExpressionWritePersistence.SaveAndVerify(")
+    _assert_expression_persistence_save_import_readback()
     readback_index = block.index("LoadAssetAtPath<VRCExpressionParameters>")
-    assert save_index < import_index < readback_index
+    assert save_index < readback_index
     assert "var before =" in block
     assert "var after = readbackAsset.parameters" in block
     assert "items = affectedNames.Take(20).ToArray()" in block
@@ -106,14 +127,15 @@ def test_manage_expression_parameters_returns_reimported_state() -> None:
         "public static class ManageExpressionMenuTool",
     )
 
-    save_index = block.index("AssetDatabase.SaveAssets();")
+    assert "AssetDatabase.SaveAssets();" not in block
+    save_index = block.index("ExpressionWritePersistence.SaveAndVerify(persistenceBefore, asset, descriptor, false, false)")
     import_index = block.index("ImportAssetOptions.ForceSynchronousImport")
     readback_index = block.index("LoadAssetAtPath<VRCExpressionParameters>")
     assert save_index < import_index < readback_index
     assert "var before = DescribeParameters(asset)" in block
     assert "var after = DescribeParameters(readbackAsset)" in block
-    assert "items = affectedNames.Take(20).ToArray()" in block
-    assert "handle = AssetDatabase.AssetPathToGUID(assetPath)" in block
+    assert 'affected = JObject.FromObject(persistedReadback)["affected"]' in block
+    _assert_expression_persistence_save_import_readback()
 
 
 def test_write_avatar_descriptor_returns_persisted_descriptor_state() -> None:
@@ -188,14 +210,15 @@ def test_manage_expression_menu_returns_reimported_state() -> None:
         "public static class ManageFxAnimatorTool",
     )
 
-    save_index = block.index("AssetDatabase.SaveAssets();")
+    assert "AssetDatabase.SaveAssets();" not in block
+    save_index = block.index("ExpressionWritePersistence.SaveAndVerify(persistenceBefore, root, descriptor, rootWasMissing, true, target)")
     import_index = block.index("ImportAssetOptions.ForceSynchronousImport")
     readback_index = block.index("LoadAssetAtPath<VRCExpressionsMenu>")
     assert save_index < import_index < readback_index
     assert "var before = DescribeMenu" in block
     assert "var after = DescribeMenu" in block
-    assert "items = affectedPaths.Take(20).ToArray()" in block
-    assert "handle = AssetDatabase.AssetPathToGUID(rootAssetPath)" in block
+    assert 'affected = JObject.FromObject(persistedReadback)["affected"]' in block
+    _assert_expression_persistence_save_import_readback()
 
 
 def test_scan_animation_bindings_returns_fresh_file_readback() -> None:
