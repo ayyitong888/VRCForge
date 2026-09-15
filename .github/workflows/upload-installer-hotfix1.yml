@@ -1,0 +1,67 @@
+name: Upload verified 1.8.0 installer Hotfix1
+
+on:
+  workflow_dispatch:
+    inputs:
+      kind:
+        description: Validated installer to upload
+        type: choice
+        options: [offline, web]
+        required: true
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Verify immutable test artifact and upload without replacement
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          HOTFIX_KIND: ${{ inputs.kind }}
+        shell: python
+        run: |
+          import hashlib, json, os, pathlib, subprocess, tempfile
+          # Only these reviewed source/run identities may publish this hotfix.
+          approved = {
+              'offline': ('34996314930', '332fe1214500e34a9b3ea0ab57effd53e8f3ba37', 'Offline'),
+              'web': ('34997563193', '0455473befeb6f6a9cd9d47dd655f175c0a1d12d', 'Web'),
+          }
+          kind = os.environ['HOTFIX_KIND']
+          run_id, commit, label = approved[kind]
+          repo = os.environ['GH_REPO']
+          def gh(*args):
+              return subprocess.check_output(['gh', *args], text=True)
+          run = json.loads(gh('api', f'repos/{repo}/actions/runs/{run_id}'))
+          if run['head_sha'] != commit or run['status'] != 'completed':
+              raise RuntimeError('Approved validation run has not completed at its exact commit')
+          with tempfile.TemporaryDirectory(prefix='verified-hotfix-') as directory:
+              gh('run', 'download', run_id, '--repo', repo, '--name', f'installer-retry-cancel-{kind}-{run_id}-1', '--dir', directory)
+              root = pathlib.Path(directory)
+              report = json.loads((root / 'evidence.json').read_text(encoding='utf-8-sig'))
+              asset_name = f'VRCForge_{label}_Installer_x64_Hotfix1.exe'
+              asset = root / asset_name
+              digest = hashlib.sha256(asset.read_bytes()).hexdigest()
+              if report.get('ok') is not True or report['candidateInstallerSha256'] != digest:
+                  raise RuntimeError('Artifact does not match the passed real installer test')
+              expected = {'cancel': 2, 'retry': 0, 'running-app': 0, 'activation-retry': 0, 'silent': 2}
+              if any(report['cases'][name]['exitCode'] != code for name, code in expected.items()):
+                  raise RuntimeError('Required real installer cases did not all pass')
+              endpoint = f'repos/{repo}/releases/tags/v1.8.0'
+              release = json.loads(gh('api', endpoint))
+              if release['draft'] or release['prerelease']:
+                  raise RuntimeError('Expected the existing stable 1.8.0 release')
+              existing = [item for item in release['assets'] if item['name'] == asset_name]
+              if not existing:
+                  # Never clobber a published asset. A concurrent identical
+                  # upload is accepted only by the exact readback below.
+                  subprocess.run(['gh', 'release', 'upload', 'v1.8.0', str(asset), '--repo', repo], check=False, timeout=180)
+              release = json.loads(gh('api', endpoint))
+              matches = [item for item in release['assets'] if item['name'] == asset_name]
+              if len(matches) != 1 or matches[0]['digest'] != 'sha256:' + digest or matches[0]['size'] != asset.stat().st_size or matches[0]['state'] != 'uploaded':
+                  raise RuntimeError('Published asset does not match the tested bytes')
+              print(json.dumps({'asset': asset_name, 'sha256': digest, 'validationRun': run_id, 'sourceCommit': commit, 'url': matches[0]['browser_download_url']}))
