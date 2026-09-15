@@ -36,7 +36,7 @@ def test_avatar_control_scan_keeps_complete_recursive_menu_contract() -> None:
     assert "return allControls;" in menu_reader
     assert "IsWardrobeCandidate" not in menu_reader
     assert ".Take(" not in menu_reader
-    assert "TraverseMenu(subMenu, menuPath, parameterMap, items, visited, depth + 1);" in traversal
+    assert "TraverseMenu(subMenu, menuPath, parameterMap, items, visited, depth + 1, warnings);" in traversal
     assert 'menuPath = string.IsNullOrWhiteSpace(parentPath) ? name : $"{parentPath}/{name}"' in traversal
 
 

@@ -42,7 +42,8 @@ namespace VRCForge.Editor
                 var descriptor = ResolveAvatarDescriptor(avatarPath);
                 var resolvedAvatarPath = GetTransformPath(descriptor.transform);
                 var parameterMap = ReadExpressionParameters(descriptor);
-                var menuItems = ReadExpressionMenuItems(descriptor, parameterMap);
+                var menuTraversalWarnings = new List<string>();
+                var menuItems = ReadExpressionMenuItems(descriptor, parameterMap, menuTraversalWarnings);
                 var parameterItems = ReadParameterOnlyItems(parameterMap, menuItems);
                 var sceneItems = ReadSceneObjectCandidates(descriptor.transform);
 
@@ -59,6 +60,8 @@ namespace VRCForge.Editor
                 {
                     avatarPath = resolvedAvatarPath,
                     avatarName = descriptor.name,
+                    menuTraversalComplete = menuTraversalWarnings.Count == 0,
+                    menuTraversalWarnings,
                     itemCount = items.Count,
                     items
                 };
@@ -140,11 +143,11 @@ namespace VRCForge.Editor
             return result;
         }
 
-        private static List<ControlItem> ReadExpressionMenuItems(Component descriptor, Dictionary<string, ParameterInfo> parameterMap)
+        private static List<ControlItem> ReadExpressionMenuItems(Component descriptor, Dictionary<string, ParameterInfo> parameterMap, List<string> warnings)
         {
             var allControls = new List<ControlItem>();
             var rootMenu = GetMemberValue(descriptor, "expressionsMenu");
-            TraverseMenu(rootMenu, "", parameterMap, allControls, new HashSet<int>(), 0);
+            TraverseMenu(rootMenu, "", parameterMap, allControls, new HashSet<int>(), 0, warnings);
             return allControls;
         }
 
@@ -154,22 +157,30 @@ namespace VRCForge.Editor
             Dictionary<string, ParameterInfo> parameterMap,
             List<ControlItem> items,
             HashSet<int> visited,
-            int depth)
+            int depth,
+            List<string> warnings = null)
         {
-            if (menu == null || depth > 8)
+            if (menu == null)
             {
+                return;
+            }
+            if (depth > 8)
+            {
+                warnings?.Add($"Menu depth limit reached at '{parentPath}'; descendants were not scanned.");
                 return;
             }
 
             var unityObject = menu as UnityEngine.Object;
             if (unityObject != null && !visited.Add(unityObject.GetInstanceID()))
             {
+                warnings?.Add($"Menu cycle skipped at '{parentPath}'; this menu already occurs on the current path.");
                 return;
             }
 
             var controls = GetMemberValue(menu, "controls") as IEnumerable;
             if (controls == null)
             {
+                if (unityObject != null) visited.Remove(unityObject.GetInstanceID());
                 return;
             }
 
@@ -210,9 +221,10 @@ namespace VRCForge.Editor
                 var subMenu = GetMemberValue(control, "subMenu");
                 if (subMenu != null)
                 {
-                    TraverseMenu(subMenu, menuPath, parameterMap, items, visited, depth + 1);
+                    TraverseMenu(subMenu, menuPath, parameterMap, items, visited, depth + 1, warnings);
                 }
             }
+            if (unityObject != null) visited.Remove(unityObject.GetInstanceID());
         }
 
         private static List<ControlItem> ReadParameterOnlyItems(

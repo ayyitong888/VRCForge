@@ -19,7 +19,7 @@ def scanner_probe(tmp_path_factory):
     source = r'''
 using System; using System.IO; using System.Linq; using System.Collections;
 using System.Collections.Generic; using System.Globalization; using Newtonsoft.Json;
-namespace UnityEngine { public class Object {public int GetInstanceID()=>1;} }
+namespace UnityEngine { public class Object {static int next;readonly int id=++next;public int GetInstanceID()=>id;} }
 public class AnimationClip { public string path; }
 public static class AssetDatabase {public static string GetAssetPath(AnimationClip c)=>c.path;}
 public static class Application {public static string dataPath=>"/Project/Assets";}
@@ -33,14 +33,27 @@ static float ToFloat(object o)=>o==null?0:Convert.ToSingle(o,CultureInfo.Invaria
 static string ReadControlParameterName(object o)=>(string)GetMemberValue(o,"parameterName");
 static string[] ReadControlSubParameterNames(object o)=>Array.Empty<string>();
 static string NormalizePath(string s)=>s; static string NormalizeAssetPath(string s)=>s;
-class Menu {public Control[] controls;}
+class Menu:UnityEngine.Object {public Control[] controls;}
 class Control { public string name,type="Toggle",parameterName="Clothes"; public float value; public object subMenu; }
 class ClipBindingItem {public string asset_path;public int binding_count=1,material_binding_count,object_toggle_binding_count,blendshape_binding_count;public List<WarningItem> warnings=new List<WarningItem>();}
 class WarningItem {public string clip_path,path,property_name,severity,message;}
 static List<AnimationClip> ResolveClips(string a,string b,List<string> paths,bool all)=>paths.Select(p=>new AnimationClip{path=p}).ToList();
 static ClipBindingItem ScanClip(AnimationClip c,int keys,bool details)=>new ClipBindingItem{asset_path=c.path};
 public static void Main(string[] args) {
- if(args[0]=="parameter-case") {
+ if(args[0]=="menu-limits") {
+  var rows=new List<ControlItem>();var warnings=new List<string>();
+  var root=new Menu();root.controls=new[]{new Control{name="Loop",subMenu=root}};
+  TraverseMenu(root,"",new Dictionary<string,ParameterInfo>(),rows,new HashSet<int>(),0,warnings);
+  var leaf=new Menu{controls=new[]{new Control{name="Hidden"}}};
+  TraverseMenu(leaf,"TooDeep",new Dictionary<string,ParameterInfo>(),rows,new HashSet<int>(),9,warnings);
+  Console.WriteLine(JsonConvert.SerializeObject(new{rows,warnings}));
+ } else if(args[0]=="shared-menu") {
+  var leaf=new Menu{controls=new[]{new Control{name="Leaf"}}};
+  var root=new Menu{controls=new[]{new Control{name="Left",subMenu=leaf},new Control{name="Right",subMenu=leaf}}};
+  var rows=new List<ControlItem>();
+  TraverseMenu(root,"",new Dictionary<string,ParameterInfo>(),rows,new HashSet<int>(),0);
+  Console.WriteLine(JsonConvert.SerializeObject(rows));
+ } else if(args[0]=="parameter-case") {
   var descriptor=new Component{expressionParameters=new ParameterAsset{parameters=new[]{
    new ParameterInfo{name="Clothes",valueType="Int",defaultValue=1,saved=true},
    new ParameterInfo{name="clothes",valueType="Bool",defaultValue=0,saved=false}}}};
@@ -96,6 +109,21 @@ def test_control_scan_preserves_case_distinct_parameter_metadata(scanner_probe):
     assert result["menu"][0]["active"] is True
     assert result["menu"][0]["saved"] is True
     assert [item["parameterName"] for item in result["unlinked"]] == ["clothes"]
+
+
+def test_shared_submenu_is_read_under_each_actual_menu_path(scanner_probe):
+    assert [item["menuPath"] for item in run(scanner_probe, "shared-menu")] == [
+        "Left", "Left/Leaf", "Right", "Right/Leaf"
+    ]
+
+
+def test_menu_cycles_and_depth_omissions_are_explicit(scanner_probe):
+    result = run(scanner_probe, "menu-limits")
+    assert [item["menuPath"] for item in result["rows"]] == ["Loop"]
+    assert len(result["warnings"]) == 2
+    assert "cycle" in result["warnings"][0]
+    assert "TooDeep" in result["warnings"][1]
+    assert "not scanned" in result["warnings"][1]
 
 
 def test_legacy_clip_scan_marks_omitted_clips(scanner_probe):
