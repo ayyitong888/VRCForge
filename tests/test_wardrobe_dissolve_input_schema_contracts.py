@@ -20,10 +20,12 @@ def _assert_invalid(schema: dict, value: dict) -> None:
 
 def test_wardrobe_dissolve_read_inputs_are_real_and_bounded() -> None:
     _assert_valid(UNITY_READ_TOOL_INPUT_SCHEMAS["vrcforge_scan_materials"], {
-        "projectPath": "C:/Unity/Avatar", "avatarPath": "Avatar", "outputPath": "Assets/scan.json",
-        "refreshAssets": False, "materialIds": ["mat-guid"], "includeTextures": False,
+        "projectPath": "C:/Unity/Avatar", "avatarPath": "Avatar",
+        "materialIds": ["mat-guid"], "includeTextures": False,
         "categoryOverrides": {"liltoon": "clothes"},
     })
+    for unsupported in ({"outputPath": "Assets/scan.json"}, {"refreshAssets": False}):
+        _assert_invalid(UNITY_READ_TOOL_INPUT_SCHEMAS["vrcforge_scan_materials"], unsupported)
     _assert_valid(UNITY_READ_TOOL_INPUT_SCHEMAS["vrcforge_scan_wardrobe"], {"avatarPath": "Avatar", "outputPath": ""})
     _assert_valid(UNITY_READ_TOOL_INPUT_SCHEMAS["vrcforge_scan_avatar_items"], {
         "avatarPath": "Avatar", "outputPath": "", "maxItems": 2000, "refreshAssets": False,

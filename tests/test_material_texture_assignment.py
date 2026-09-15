@@ -210,10 +210,10 @@ def test_material_texture_tool_is_shared_supervised_and_execution_only() -> None
     execution = dashboard_server._RuntimePlannerCatalog().read("execution")
     assert name not in {tool.runtime_name for tool in planning.visible_tools}
     tool = next(item for item in execution.visible_tools if item.runtime_name == name)
-    assert tool.block == "unity/materials"
+    assert tool.block == "appearance/textures_visual_properties"
     assert "vrcforge_preview_material_texture_assignment" in gateway._tools
     assert "vrc_set_material_texture" in dashboard_server.REQUIRED_VRCFORGE_UNITY_TOOLS
-    assert unity_mcp_tool_contract.TOOL_CONTRACT_VERSION == "97"
+    assert unity_mcp_tool_contract.TOOL_CONTRACT_VERSION == "159"
     assert unity_mcp_tool_contract.EXPECTED_TOOL_COUNT == 95
 
 

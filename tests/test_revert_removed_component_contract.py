@@ -96,6 +96,6 @@ def test_tool_is_in_the_exact_supervised_core_contract_and_preview_lane() -> Non
     assert '{ "vrc_revert_removed_component", "VRCForge.Editor.RevertRemovedComponentTool" }' in contract
     preview_block = server[server.index("PreviewTools =") : server.index("SafetyControlTools =")]
     assert '"vrc_revert_removed_component"' in preview_block
-    assert 'TOOL_CONTRACT_VERSION = "97"' in python_contract
+    assert 'TOOL_CONTRACT_VERSION = "159"' in python_contract
     assert "EXPECTED_TOOL_COUNT = 95" in python_contract
     assert '"vrc_revert_removed_component"' in python_contract
