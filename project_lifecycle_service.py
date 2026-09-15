@@ -372,6 +372,7 @@ class ProjectLifecycleService:
         current_prefs_sha = _sha256_bytes(_canonical_json_bytes(current_prefs))
         if current_prefs_sha != receipt.get("prefsAfterSha256"):
             raise ProjectLifecycleError("Project catalogue changed after this operation; rollback refused.")
+        current_prefs_snapshot = self._read_json(self.prefs_path)
         kind = str(receipt.get("kind") or "")
         recovery_path = ""
         target: Path | None = None
@@ -392,14 +393,31 @@ class ProjectLifecycleService:
             raise ProjectLifecycleError("Project lifecycle receipt kind is unsupported.")
         try:
             self._write_prefs(receipt.get("prefsBefore"))
+            if self._read_json(self.prefs_path) != receipt.get("prefsBefore"):
+                raise ProjectLifecycleError("Project catalogue rollback readback failed.")
+            receipt["status"] = "rolled_back"
+            receipt["rolledBackAt"] = _utc_now()
+            receipt["recoveryPath"] = recovery_path
+            self._atomic_write_json(receipt_path, receipt)
         except Exception as exc:  # noqa: BLE001
+            compensation_errors = []
+            try:
+                self._write_prefs(current_prefs_snapshot)
+                if self._read_json(self.prefs_path) != current_prefs_snapshot:
+                    raise ProjectLifecycleError("Project catalogue compensation readback failed.")
+            except Exception as restore_exc:  # noqa: BLE001
+                compensation_errors.append(f"catalogue: {restore_exc}")
             if target is not None and recovery is not None and recovery.exists() and not target.exists():
-                os.replace(recovery, target)
+                try:
+                    os.replace(recovery, target)
+                except Exception as restore_exc:  # noqa: BLE001
+                    compensation_errors.append(f"project retained at {recovery}: {restore_exc}")
+            if compensation_errors:
+                raise ProjectLifecycleError(
+                    f"Project catalogue rollback failed: {exc}; compensation failed: "
+                    + "; ".join(compensation_errors)
+                ) from exc
             raise ProjectLifecycleError(f"Project catalogue rollback failed: {exc}") from exc
-        receipt["status"] = "rolled_back"
-        receipt["rolledBackAt"] = _utc_now()
-        receipt["recoveryPath"] = recovery_path
-        self._atomic_write_json(receipt_path, receipt)
         return {
             "ok": True,
             "schema": "vrcforge.project_lifecycle_rollback_result.v1",

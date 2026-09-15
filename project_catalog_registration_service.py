@@ -253,12 +253,23 @@ class ProjectCatalogRegistrationService:
             raise ProjectCatalogRegistrationError("Catalogue receipt snapshot is invalid.") from exc
         if _sha256(before) != receipt.get("settingsBeforeSha256"):
             raise ProjectCatalogRegistrationError("Catalogue receipt snapshot digest is invalid.")
-        self._atomic_write_bytes(target, before)
-        if self._read_bytes(target) != before:
-            raise ProjectCatalogRegistrationError("Catalogue rollback readback failed.")
-        receipt["status"] = "rolled_back"
-        receipt["rolledBackAt"] = _utc_now()
-        self._atomic_write_bytes(receipt_path, self._encode_payload(receipt))
+        try:
+            self._atomic_write_bytes(target, before)
+            if self._read_bytes(target) != before:
+                raise ProjectCatalogRegistrationError("Catalogue rollback readback failed.")
+            receipt["status"] = "rolled_back"
+            receipt["rolledBackAt"] = _utc_now()
+            self._atomic_write_bytes(receipt_path, self._encode_payload(receipt))
+        except Exception as exc:  # noqa: BLE001
+            try:
+                self._atomic_write_bytes(target, current)
+                if self._read_bytes(target) != current:
+                    raise ProjectCatalogRegistrationError("Catalogue compensation readback failed.")
+            except Exception as restore_exc:  # noqa: BLE001
+                raise ProjectCatalogRegistrationError(
+                    f"Catalogue rollback failed: {exc}; compensation failed: {restore_exc}"
+                ) from exc
+            raise ProjectCatalogRegistrationError(f"Catalogue rollback failed: {exc}") from exc
         return {
             "ok": True,
             "schema": "vrcforge.project_catalog_registration_rollback_result.v1",
