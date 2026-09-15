@@ -110,7 +110,10 @@ def stop_owned(process: subprocess.Popen) -> None:
     process.terminate(); process.wait(timeout=15)
 
 def lock(path: Path):
-    handle = k.CreateFileW(str(path), 0x80000000, 0, None, 3, 0, None)
+    directory = path.is_dir()
+    # Directory handles allow reads but withhold FILE_SHARE_DELETE so an atomic
+    # directory rename fails without involving Restart Manager's app resources.
+    handle = k.CreateFileW(str(path), 0x80000000, 3 if directory else 0, None, 3, 0x02000000 if directory else 0, None)
     if handle == w.HANDLE(-1).value: raise c.WinError(c.get_last_error())
     return handle
 
@@ -131,16 +134,24 @@ def interactive(installer: Path, dest: Path, case: str, evidence: dict, timeout:
             time.sleep(5)
             if app.poll() is not None: raise RuntimeError('Actual installed App exited before running-app test')
             evidence['appPid'] = app.pid
-        else: held = lock(dest / 'VRCForge.exe')
+        elif case != 'activation-retry': held = lock(dest / 'VRCForge.exe')
         process = subprocess.Popen([str(installer)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
+            # Acquire a real file lock after preflight, while the real payload is
+            # extracting. This tests the activation-failure retry independently
+            # of the early busy-app prompt (Web must download a fresh stage).
+            if case == 'activation-retry' and held is None and any(dest.parent.glob('VRCForge-Stage-*')):
+                held = lock(dest)
+                evidence['lockedAfterPreflight'] = True
             windows = snapshot(process.pid); evidence['lastWindows'] = windows
             found = retry_dialog(windows)
             if found:
                 window, buttons = found
                 body = '\n'.join(x['text'] for x in window['controls'])
-                if 'VRCForge is still running' not in body: raise RuntimeError('Unexpected retry dialog: ' + body)
+                expected_message = 'The running VRCForge could not close normally' if case == 'activation-retry' else 'VRCForge is still running'
+                if expected_message not in body: raise RuntimeError('Unexpected retry dialog: ' + body)
+                if case == 'activation-retry' and not held: raise RuntimeError('Activation fault was not injected')
                 evidence['busyDialog'] = window
                 if app and app.poll() is not None: raise RuntimeError('Installer closed App before asking user')
                 if case != 'cancel':
@@ -158,6 +169,15 @@ def interactive(installer: Path, dest: Path, case: str, evidence: dict, timeout:
             if retry_dialog(windows):
                 # Allow the posted click to drain, but never auto-click a second retry.
                 time.sleep(.3); continue
+            if case == 'cancel':
+                # NSIS Abort leaves an "Installation Aborted" page with Cancel
+                # (not Close); close that page and its standard quit confirmation.
+                for window in windows:
+                    body = '\n'.join(x['text'] for x in window['controls'])
+                    for control in window['controls']:
+                        if control['cls'] != 'Button' or not control['enabled']: continue
+                        if (control['id'] == 2 and 'Installation Aborted' in body) or (control['id'] == 6 and 'quit' in body.lower()):
+                            click(control)
             advance(windows); time.sleep(.3)
         if process.poll() is None: raise TimeoutError('Installer did not finish after selected action')
         evidence['exitCode'] = process.returncode
@@ -187,7 +207,7 @@ def main():
         expected = {name: sha(dest/name) for name in ('VRCForge.exe', 'backend/vrcforge_backend.exe', 'VERSION', 'payload-integrity.json')}
         evidence['expectedInstalledHashes'] = expected
         baseline_uninstaller = sha(dest/'Uninstall.exe')
-        for case in ('cancel', 'retry', 'running-app'):
+        for case in ('cancel', 'retry', 'running-app', 'activation-retry'):
             result = {}; evidence['cases'][case] = result
             interactive(args.candidate_installer.resolve(), dest, case, result, args.timeout)
             actual = {name: sha(dest/name) for name in expected}
