@@ -106,6 +106,8 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $downloadRoot = Join-Path $env:RUNNER_TEMP 'installer-inputs'
           $evidenceRoot = Join-Path $env:GITHUB_WORKSPACE 'installer-evidence'
+          & python scripts/probe_installer_destination.py installer/VRCForge_WebPayload.ps1 (Join-Path $evidenceRoot 'destination-preflight.json')
+          if ($LASTEXITCODE -ne 0) { throw 'Read-only destination diagnostic failed to run.' }
           $smokeArgs = @(
             'scripts/smoke_installer_install_uninstall.py',
             '--scope', 'production-clean',
