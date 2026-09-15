@@ -83,9 +83,9 @@ executable while it is running, so a file-lock check alone is insufficient.
 - [Web run](https://github.com/ayyitong888/VRCForge/actions/runs/34997563193)
   passed at `0455473`, including deletion of the consumed state descriptor before
   a later retry calls `Prepare` again.
-- The published `*_Hotfix1.exe` assets match the tested bytes. Their hashes,
+- The published standard-name installers contain the tested Hotfix1 bytes; superseded installers have been removed. Their hashes,
   source commits and case exit codes are in
-  [installer-hotfix1-manifest.json](https://github.com/ayyitong888/VRCForge/releases/download/v1.8.0/installer-hotfix1-manifest.json).
+  [release-manifest.json](https://github.com/ayyitong888/VRCForge/releases/download/v1.8.0/release-manifest.json).
   App/backend payload, Unity package and original release tag remain unchanged.
 
 The installer and package fixes were reviewed against these exact commits:

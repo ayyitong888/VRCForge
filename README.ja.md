@@ -52,7 +52,7 @@ VRCForge は、Booth などでアバターや衣装を選ぶクリエイター�
 ## Booth のアバターを始める手順
 
 1. [v1.8.0 Release](https://github.com/ayyitong888/VRCForge/releases/tag/v1.8.0) から
-   Hotfix1 の Web Installer または Offline Installer と `VRCForge.unitypackage` を取得します。実行中のアプリを終了した後、「再試行」でインストールを続行できます。
+   修正済みの Web Installer または Offline Installer と `VRCForge.unitypackage` を取得します。実行中のアプリを終了した後、「再試行」でインストールを続行できます。
 2. Unity 2022.3 LTS の VRChat SDK3 Avatar プロジェクトをバックアップし、
    package を Import All します。コンパイル完了後、`[VRCForge MCP] Core Ready` を確認します。
 3. VRCForge を起動し、対象プロジェクトと Avatar を選びます。最初は Doctor、

@@ -85,7 +85,7 @@ Inspect → Plan → Check permissions → Apply → Read back and inspect → R
 Download these files from the
 [latest Release](https://github.com/ayyitong888/VRCForge/releases/latest):
 
-- For 1.8.0, use `VRCForge_Web_Installer_x64_Hotfix1.exe`, or `VRCForge_Offline_Installer_x64_Hotfix1.exe` for an offline install. Hotfix1 restores the running-app prompt and Retry flow.
+- For 1.8.0, use `VRCForge_Web_Installer_x64.exe`, or `VRCForge_Offline_Installer_x64.exe` for an offline install. Hotfix1 restores the running-app prompt and Retry flow.
 - `VRCForge.unitypackage`
 
 Then connect in three steps:
