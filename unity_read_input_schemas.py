@@ -1008,3 +1008,36 @@ UNITY_READ_TOOL_INPUT_SCHEMAS['vrcforge_scan_project_index'] = {
     },
     'anyOf': [{'required': ['projectPath']}, {'required': ['project_path']}],
 }
+
+# General source evidence is also exposed through the external MCP project
+# leaf.  The Gateway makes projectPath mandatory for that boundary and mints
+# the private authorization root; internal runtime calls retain their injected
+# server-owned root.
+for _general_read_tool, _general_read_properties in {
+    'vrcforge_list_directory': {
+        'path': {'type': 'string', 'description': 'Project-relative directory path; external MCP callers must use a relative path under projectPath.'},
+        'projectPath': {'type': 'string', 'description': 'Absolute existing source workspace root; required for external MCP calls.'},
+        'maxDepth': {'type': 'integer'}, 'maxCount': {'type': 'integer'},
+    },
+    'vrcforge_read_text_file': {
+        'path': {'type': 'string', 'description': 'Project-relative UTF-8 text file path under projectPath.'},
+        'projectPath': {'type': 'string', 'description': 'Absolute existing source workspace root; required for external MCP calls.'},
+        'maxBytes': {'type': 'integer'}, 'maxOutputChars': {'type': 'integer'},
+    },
+    'vrcforge_find_files': {
+        'path': {'type': 'string', 'description': 'Project-relative directory path under projectPath.'},
+        'projectPath': {'type': 'string', 'description': 'Absolute existing source workspace root; required for external MCP calls.'},
+        'pattern': {'type': 'string'}, 'maxDepth': {'type': 'integer'}, 'maxCount': {'type': 'integer'},
+    },
+    'vrcforge_search_text': {
+        'path': {'type': 'string', 'description': 'Project-relative directory path under projectPath.'},
+        'projectPath': {'type': 'string', 'description': 'Absolute existing source workspace root; required for external MCP calls.'},
+        'query': {'type': 'string'}, 'pattern': {'type': 'string'}, 'maxDepth': {'type': 'integer'},
+        'maxCount': {'type': 'integer'}, 'maxFileBytes': {'type': 'integer'}, 'caseSensitive': {'type': 'boolean'},
+    },
+}.items():
+    UNITY_READ_TOOL_INPUT_SCHEMAS[_general_read_tool] = {
+        'type': 'object', 'additionalProperties': False,
+        'required': ['path', 'query'] if _general_read_tool == 'vrcforge_search_text' else ['path'],
+        'properties': _general_read_properties,
+    }

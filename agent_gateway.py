@@ -98,7 +98,7 @@ from external_tool_result_contract import (
 )
 from agent_budget_policy import freeze_agent_budget_policy
 from agent_general_no_progress import general_read_observation_key
-from general_agent_tools import extract_explicit_local_roots
+from general_agent_tools import extract_explicit_local_roots, _authorized_path as _general_authorized_path
 from runtime_planner_service import RuntimePlannerService
 from background_goal_runtime import (
     RepeatedFailureGuard,
@@ -523,6 +523,16 @@ def _external_mcp_tool_block(name: str, *, write: bool) -> str:
     if len(matches) > 1:
         raise RuntimeError(f"External MCP tool is assigned to multiple blocks: {name}")
     return matches[0] if matches else ""
+
+
+_EXTERNAL_GENERAL_READ_TOOLS = frozenset(
+    {
+        "vrcforge_list_directory",
+        "vrcforge_read_text_file",
+        "vrcforge_find_files",
+        "vrcforge_search_text",
+    }
+)
 
 
 def normalize_external_mcp_tool_blocks(value: Any) -> frozenset[str]:
@@ -4100,6 +4110,37 @@ class AgentGateway:
         params_summary = self._tool_params_audit(tool.name, params)
         user_constraints = self.read_user_constraints()
         tool_params = self._inject_user_constraints(params, tool, user_constraints)
+        if tool.name in _EXTERNAL_GENERAL_READ_TOOLS:
+            # General file reads are exposed to external MCP only with an
+            # explicit caller-selected root.  The private authorization list
+            # is minted here and never accepted from the caller.
+            if "_generalAllowedRoots" in params:
+                raise AgentGatewayError(
+                    "_generalAllowedRoots is server-owned and cannot be supplied by external MCP callers.",
+                    status_code=400,
+                )
+            project_path = str(params.get("projectPath") or "").strip()
+            if not project_path or not Path(project_path).is_absolute():
+                raise AgentGatewayError(
+                    "External general file reads require an absolute projectPath root.",
+                    status_code=400,
+                )
+            relative_path = str(params.get("path") or "").strip()
+            if not relative_path or Path(relative_path).is_absolute():
+                raise AgentGatewayError(
+                    "External general file reads require a non-empty relative path.",
+                    status_code=400,
+                )
+            try:
+                authorized_root = _general_authorized_path(project_path, [project_path])
+                if not authorized_root.is_dir():
+                    raise NotADirectoryError(project_path)
+            except (OSError, PermissionError, ValueError) as exc:
+                raise AgentGatewayError(
+                    "projectPath is not an existing authorized directory.",
+                    status_code=400,
+                ) from exc
+            tool_params["_generalAllowedRoots"] = [str(authorized_root)]
         core_call_audits: list[dict[str, Any]] = []
         try:
             with capture_unity_mcp_core_call_audits() as core_call_audits:

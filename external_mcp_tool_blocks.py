@@ -67,6 +67,10 @@ EXTERNAL_MCP_READ_TOOL_BLOCKS: dict[str, frozenset[str]] = {
     ),
     "project": frozenset(
         {
+            "vrcforge_list_directory",
+            "vrcforge_read_text_file",
+            "vrcforge_find_files",
+            "vrcforge_search_text",
             "vrcforge_diagnose_package_install_errors",
             "vrcforge_core_upgrade_status",
             "vrcforge_package_install_plan",
