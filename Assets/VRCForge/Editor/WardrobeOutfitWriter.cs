@@ -928,59 +928,25 @@ namespace VRCForge.Editor
         private static Transform ResolveUnderRoot(Transform root, string rawPath)
         {
             var path = NormalizePath(rawPath);
-            if (string.IsNullOrEmpty(path))
+            if (string.IsNullOrEmpty(path)) return null;
+            if (path.Equals(root.name, StringComparison.Ordinal))
             {
-                return null;
-            }
-
-            // Direct child path relative to the avatar root.
-            var direct = root.Find(path);
-            if (direct != null)
-            {
-                return direct;
-            }
-
-            // Full hierarchy path that starts with the avatar root name.
-            var rootName = root.name;
-            if (path.Equals(rootName, StringComparison.Ordinal))
-            {
+                if (root.GetComponentsInChildren<Transform>(true).Any(item => item != root && item.name == path))
+                    throw new InvalidOperationException("Wardrobe object path is ambiguous: " + rawPath);
                 return root;
             }
-            if (path.StartsWith(rootName + "/", StringComparison.Ordinal))
-            {
-                var sub = path.Substring(rootName.Length + 1);
-                var byFull = root.Find(sub);
-                if (byFull != null)
-                {
-                    return byFull;
-                }
-            }
-
-            // Fallback: unique descendant by leaf name or by suffix match.
-            var leaf = path.Contains("/") ? path.Substring(path.LastIndexOf('/') + 1) : path;
-            Transform match = null;
-            foreach (var t in root.GetComponentsInChildren<Transform>(true))
-            {
-                if (t == root)
-                {
-                    continue;
-                }
-                var rel = RelativePath(root, t);
-                if (rel.Equals(path, StringComparison.Ordinal) || rel.EndsWith("/" + path, StringComparison.Ordinal) || t.name.Equals(leaf, StringComparison.Ordinal))
-                {
-                    if (match != null && !match.Equals(t))
-                    {
-                        // Ambiguous by leaf name; only accept exact relative matches beyond this point.
-                        if (rel.Equals(path, StringComparison.Ordinal))
-                        {
-                            return t;
-                        }
-                        continue;
-                    }
-                    match = t;
-                }
-            }
-            return match;
+            var qualified = path.Contains("/");
+            var prefixed = path.StartsWith(root.name + "/", StringComparison.Ordinal)
+                ? path.Substring(root.name.Length + 1) : null;
+            var descendants = root.GetComponentsInChildren<Transform>(true)
+                .Where(item => item != root).ToArray();
+            var matches = descendants.Where(item => qualified
+                ? RelativePath(root, item).Equals(path, StringComparison.Ordinal)
+                    || (prefixed != null && RelativePath(root, item).Equals(prefixed, StringComparison.Ordinal))
+                : item.name.Equals(path, StringComparison.Ordinal)).ToArray();
+            if (matches.Length > 1)
+                throw new InvalidOperationException("Wardrobe object path is ambiguous: " + rawPath);
+            return matches.SingleOrDefault();
         }
 
         private static string RelativePath(Transform root, Transform target)

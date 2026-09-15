@@ -298,6 +298,12 @@ namespace VRCForge.Editor
             var objectTargets = CollectOnObjects(transitionTargets);
             var warnings = new List<string>();
 
+            if ((action == "remove_outfit" && (deleteObjects || deactivateObjects))
+                || (action == "delete_wardrobe" && deleteObjects))
+                foreach (var objectPath in objectTargets)
+                    if (ResolveUnderRoot(descriptor.transform, objectPath) == null)
+                        throw new InvalidOperationException("Wardrobe object path was not found: " + objectPath);
+
             if (action == "remove_outfit" && objectTargets.Count == 0)
             {
                 warnings.Add("No m_IsActive on-objects were found in the target outfit clip(s); only menu/FX bindings will be removed.");
@@ -722,6 +728,7 @@ namespace VRCForge.Editor
             bool deleteObjects,
             bool deactivateObjects)
         {
+            if (!deleteObjects && !deactivateObjects) return;
             foreach (var path in objectPaths.Distinct().OrderBy(item => item, StringComparer.Ordinal))
             {
                 var transform = ResolveUnderRoot(descriptor.transform, path);
@@ -1063,53 +1070,25 @@ namespace VRCForge.Editor
         private static Transform ResolveUnderRoot(Transform root, string rawPath)
         {
             var path = NormalizePath(rawPath);
-            if (string.IsNullOrEmpty(path))
+            if (string.IsNullOrEmpty(path)) return null;
+            if (path.Equals(root.name, StringComparison.Ordinal))
             {
-                return null;
-            }
-            var direct = root.Find(path);
-            if (direct != null)
-            {
-                return direct;
-            }
-            var rootName = root.name;
-            if (path.Equals(rootName, StringComparison.Ordinal))
-            {
+                if (root.GetComponentsInChildren<Transform>(true).Any(item => item != root && item.name == path))
+                    throw new InvalidOperationException("Wardrobe object path is ambiguous: " + rawPath);
                 return root;
             }
-            if (path.StartsWith(rootName + "/", StringComparison.Ordinal))
-            {
-                var byFull = root.Find(path.Substring(rootName.Length + 1));
-                if (byFull != null)
-                {
-                    return byFull;
-                }
-            }
-            var leaf = path.Contains("/") ? path.Substring(path.LastIndexOf('/') + 1) : path;
-            Transform match = null;
-            foreach (var transform in root.GetComponentsInChildren<Transform>(true))
-            {
-                if (transform == root)
-                {
-                    continue;
-                }
-                var rel = RelativePath(root, transform);
-                if (rel.Equals(path, StringComparison.Ordinal)
-                    || rel.EndsWith("/" + path, StringComparison.Ordinal)
-                    || transform.name.Equals(leaf, StringComparison.Ordinal))
-                {
-                    if (match != null && !match.Equals(transform))
-                    {
-                        if (rel.Equals(path, StringComparison.Ordinal))
-                        {
-                            return transform;
-                        }
-                        continue;
-                    }
-                    match = transform;
-                }
-            }
-            return match;
+            var qualified = path.Contains("/");
+            var prefixed = path.StartsWith(root.name + "/", StringComparison.Ordinal)
+                ? path.Substring(root.name.Length + 1) : null;
+            var descendants = root.GetComponentsInChildren<Transform>(true)
+                .Where(item => item != root).ToArray();
+            var matches = descendants.Where(item => qualified
+                ? RelativePath(root, item).Equals(path, StringComparison.Ordinal)
+                    || (prefixed != null && RelativePath(root, item).Equals(prefixed, StringComparison.Ordinal))
+                : item.name.Equals(path, StringComparison.Ordinal)).ToArray();
+            if (matches.Length > 1)
+                throw new InvalidOperationException("Wardrobe object path is ambiguous: " + rawPath);
+            return matches.SingleOrDefault();
         }
 
         private static string RelativePath(Transform root, Transform target)
