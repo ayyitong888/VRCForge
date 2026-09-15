@@ -2098,7 +2098,6 @@ namespace VRCForge.Editor
                 mutationApplied = true;
                 EditorUtility.SetDirty(component);
                 EditorUtility.SetDirty(go);
-                AssetDatabase.SaveAssets();
                 failureStage = "scene_save";
                 var afterScene = ComponentCrudCore.SaveAndResolveScene(beforeScene);
                 failureStage = "persisted_readback";
