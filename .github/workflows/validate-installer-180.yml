@@ -17,6 +17,10 @@ permissions:
 
 jobs:
   installer:
+    # GitHub exposes draft releases only to callers with push access.
+    # GH_TOKEN is scoped to the download step and is never passed to installers.
+    permissions:
+      contents: write
     # Each matrix entry is a separate fresh GitHub-hosted Windows VM.
     # Production identity exists only for that job; never use a self-hosted runner.
     strategy:
