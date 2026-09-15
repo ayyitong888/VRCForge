@@ -18,6 +18,8 @@ def test_menu_control_failure_preserves_existing_and_preview_rejects(tmp_path):
     compiler=compilers[-1]; newtonsoft=compiler.parents[2]/"Newtonsoft.Json.dll"
     source=(ROOT/"Assets/VRCForge/Editor/Generic/UnityAvatarPrimitiveCrud.cs").read_text(encoding="utf-8").split("public static class ManageExpressionMenuTool",1)[1].split("public static class ManageFxAnimatorTool",1)[0]
     signatures=["private static VRCExpressionsMenu.Control BuildControl", "private static VRCExpressionsMenu.Control.ControlType ParseControlType", "private static T LoadAssetOrNull<T>", "private static void SetSubParameters", "private static List<string> PlanMenuAssetPaths", "private static int ResolveControlIndex"]
+    if "private static void ValidateReorder" in source:
+        signatures.append("private static void ValidateReorder")
     if "private static void ValidateControlAssets" in source: signatures.append("private static void ValidateControlAssets")
     selected=[method(source,sig) for sig in signatures]
     stubs=r'''

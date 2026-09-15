@@ -1276,6 +1276,7 @@ namespace VRCForge.Editor
 
         private static object BuildPlan(string action, VRCAvatarDescriptor descriptor, VRCExpressionParameters asset, JObject @params)
         {
+            ValidateRequest(action, asset, @params);
             return new
             {
                 action,
@@ -1291,6 +1292,7 @@ namespace VRCForge.Editor
 
         private static void Apply(string action, VRCExpressionParameters asset, JObject @params)
         {
+            ValidateRequest(action, asset, @params);
             var parameters = asset.parameters?.Where(item => item != null).ToList() ?? new List<VRCExpressionParameters.Parameter>();
             var name = (@params["parameterName"]?.ToString() ?? "").Trim();
             if (action != "reorder" && string.IsNullOrWhiteSpace(name))
@@ -1345,6 +1347,33 @@ namespace VRCForge.Editor
                 parameters = ordered;
             }
             asset.parameters = parameters.ToArray();
+        }
+
+        private static void ValidateRequest(string action, VRCExpressionParameters asset, JObject args)
+        {
+            var parameters = (asset.parameters ?? Array.Empty<VRCExpressionParameters.Parameter>())
+                .Where(item => item != null).ToArray();
+            if (action == "reorder")
+            {
+                var order = (args["orderNames"] as JArray)?.Select(item => item.ToString()).ToArray() ?? Array.Empty<string>();
+                if (order.Length == 0 || order.Distinct(StringComparer.Ordinal).Count() != order.Length)
+                    throw new InvalidOperationException("orderNames must contain unique parameter names.");
+                if (parameters.Select(item => item.name).Distinct(StringComparer.Ordinal).Count() != parameters.Length)
+                    throw new InvalidOperationException("Expression parameter names are ambiguous; reorder requires unique names.");
+                foreach (var name in order)
+                    if (!parameters.Any(item => item.name == name)) throw new InvalidOperationException("Cannot reorder: parameter not found: " + name);
+                return;
+            }
+            var target = (args["parameterName"]?.ToString() ?? "").Trim();
+            if (string.IsNullOrWhiteSpace(target) || parameters.Count(item => item.name == target) != 1)
+                throw new InvalidOperationException("Expression parameter name is missing or ambiguous: " + target);
+            if (action == "rename")
+            {
+                var renamed = (args["newName"]?.ToString() ?? "").Trim();
+                if (string.IsNullOrWhiteSpace(renamed)) throw new InvalidOperationException("newName is required.");
+                if (renamed != target && parameters.Any(item => item.name == renamed))
+                    throw new InvalidOperationException("Expression parameter name already exists: " + renamed);
+            }
         }
     }
 
@@ -1497,8 +1526,7 @@ namespace VRCForge.Editor
             foreach (var raw in menuPath.Split(new[] { '/' }, StringSplitOptions.RemoveEmptyEntries))
             {
                 var part = raw.Trim();
-                var existing = current?.controls?.FirstOrDefault(control => control != null
-                    && control.type == VRCExpressionsMenu.Control.ControlType.SubMenu && control.name == part && control.subMenu != null);
+                var existing = (current?.controls ?? new List<VRCExpressionsMenu.Control>()).SingleOrDefault(item => item != null && item.name == part && item.type == VRCExpressionsMenu.Control.ControlType.SubMenu && item.subMenu != null);
                 if (existing != null)
                 {
                     current = existing.subMenu;
@@ -1508,6 +1536,9 @@ namespace VRCForge.Editor
                 GeneratedAssetPaths.ReserveAssetPath($"{assetDir}/{AvatarPrimitiveCrudCore.Sanitize(part, "Menu")}_SubMenu.asset", reserved, GeneratedAssetPaths.UniqueAssetPath);
                 current = null;
             }
+            if (action == "update" || action == "delete")
+                ResolveControlIndex(current ?? throw new InvalidOperationException("Expression menu was not found."), @params);
+            if (action == "reorder") ValidateReorder(current, @params);
             if ((action == "create" || action == "update") && @params["createSubMenu"]?.Value<bool?>() == true)
             {
                 var control = action == "update" && current != null ? current.controls[ResolveControlIndex(current, @params)] : null;
@@ -1537,7 +1568,7 @@ namespace VRCForge.Editor
             foreach (var raw in menuPath.Split(new[] { '/' }, StringSplitOptions.RemoveEmptyEntries))
             {
                 var part = raw.Trim();
-                var existing = current.controls.FirstOrDefault(control => control != null && control.type == VRCExpressionsMenu.Control.ControlType.SubMenu && control.name == part && control.subMenu != null);
+                var existing = (current?.controls ?? new List<VRCExpressionsMenu.Control>()).SingleOrDefault(item => item != null && item.name == part && item.type == VRCExpressionsMenu.Control.ControlType.SubMenu && item.subMenu != null);
                 if (existing != null)
                 {
                     current = existing.subMenu;
@@ -1571,11 +1602,7 @@ namespace VRCForge.Editor
             foreach (var raw in menuPath.Split(new[] { '/' }, StringSplitOptions.RemoveEmptyEntries))
             {
                 var part = raw.Trim();
-                var control = current.controls?.FirstOrDefault(item =>
-                    item != null
-                    && item.type == VRCExpressionsMenu.Control.ControlType.SubMenu
-                    && item.name == part
-                    && item.subMenu != null);
+                var control = (current?.controls ?? new List<VRCExpressionsMenu.Control>()).SingleOrDefault(item => item != null && item.name == part && item.type == VRCExpressionsMenu.Control.ControlType.SubMenu && item.subMenu != null);
                 if (control == null)
                 {
                     return null;
@@ -1680,6 +1707,8 @@ namespace VRCForge.Editor
             {
                 throw new InvalidOperationException($"Control not found: {name}");
             }
+            if (menu.controls.Count(control => control != null && control.name == name) != 1)
+                throw new InvalidOperationException("Expression control name is ambiguous: " + name);
             return match;
         }
 
@@ -1788,6 +1817,7 @@ namespace VRCForge.Editor
 
         private static void Reorder(VRCExpressionsMenu menu, JObject @params)
         {
+            ValidateReorder(menu, @params);
             var orderNames = (@params["orderNames"] as JArray)?.Select(item => item.ToString()).ToList() ?? new List<string>();
             if (orderNames.Count == 0)
             {
@@ -1807,6 +1837,16 @@ namespace VRCForge.Editor
             }
             ordered.AddRange(remaining);
             menu.controls = ordered;
+        }
+
+        private static void ValidateReorder(VRCExpressionsMenu menu, JObject args)
+        {
+            var names = (args["orderNames"] as JArray)?.Select(item => item.ToString()).ToArray() ?? Array.Empty<string>();
+            if (names.Length == 0 || names.Distinct(StringComparer.Ordinal).Count() != names.Length)
+                throw new InvalidOperationException("orderNames must contain unique control names.");
+            foreach (var name in names)
+                if ((menu?.controls ?? new List<VRCExpressionsMenu.Control>()).Count(item => item != null && item.name == name) != 1)
+                    throw new InvalidOperationException("Expression control name is missing or ambiguous: " + name);
         }
     }
 

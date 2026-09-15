@@ -373,7 +373,10 @@ namespace VRCForge.Editor
                 var asset = descriptor.expressionParameters;
                 var assetPath = asset != null ? AssetDatabase.GetAssetPath(asset)
                     : GeneratedAssetPaths.UniqueAssetPath($"{assetDir}/{AvatarAuthoringCrudCore.Sanitize(descriptor.name, "Avatar")}_ExpressionParameters.asset");
-                var existing = asset?.parameters?.FirstOrDefault(parameter => parameter != null && parameter.name == parameterName);
+                var matchingParameters = (asset?.parameters ?? Array.Empty<VRCExpressionParameters.Parameter>())
+                    .Where(parameter => parameter != null && parameter.name == parameterName).ToArray();
+                if (matchingParameters.Length > 1) throw new InvalidOperationException("Expression parameter name is ambiguous: " + parameterName);
+                var existing = matchingParameters.FirstOrDefault();
                 var plan = new
                 {
                     action = "ensure_expression_parameter",
@@ -817,9 +820,7 @@ namespace VRCForge.Editor
             {
                 var part = rawPart.Trim();
                 if (string.IsNullOrWhiteSpace(part)) continue;
-                var existing = current?.controls?.FirstOrDefault(control => control != null
-                    && control.type == VRCExpressionsMenu.Control.ControlType.SubMenu
-                    && control.name == part && control.subMenu != null);
+                var existing = (current?.controls ?? new List<VRCExpressionsMenu.Control>()).SingleOrDefault(item => item != null && item.name == part && item.type == VRCExpressionsMenu.Control.ControlType.SubMenu && item.subMenu != null);
                 if (existing != null)
                 {
                     current = existing.subMenu;
@@ -841,9 +842,7 @@ namespace VRCForge.Editor
             if ((menu?.controls?.Count ?? 0) < VRCExpressionsMenu.MAX_CONTROLS) return;
             visited = visited ?? new HashSet<int>();
             if (!visited.Add(menu.GetInstanceID())) throw new InvalidOperationException("Expression menu overflow contains a cycle.");
-            var overflow = menu.controls.FirstOrDefault(control => control != null
-                && control.type == VRCExpressionsMenu.Control.ControlType.SubMenu
-                && control.subMenu != null && control.name == "More");
+            var overflow = (menu?.controls ?? new List<VRCExpressionsMenu.Control>()).SingleOrDefault(item => item != null && item.name == "More" && item.type == VRCExpressionsMenu.Control.ControlType.SubMenu && item.subMenu != null);
             if (overflow != null)
                 PlanMenuRoom(overflow.subMenu, assetDir, reserved, visited);
             else
@@ -864,11 +863,7 @@ namespace VRCForge.Editor
                 {
                     continue;
                 }
-                var existing = current.controls?.FirstOrDefault(control =>
-                    control != null
-                    && control.type == VRCExpressionsMenu.Control.ControlType.SubMenu
-                    && string.Equals(control.name, part, StringComparison.Ordinal)
-                    && control.subMenu != null);
+                var existing = (current?.controls ?? new List<VRCExpressionsMenu.Control>()).SingleOrDefault(item => item != null && item.name == part && item.type == VRCExpressionsMenu.Control.ControlType.SubMenu && item.subMenu != null);
                 if (existing != null)
                 {
                     current = existing.subMenu;
@@ -905,11 +900,7 @@ namespace VRCForge.Editor
             {
                 return menu;
             }
-            var existingOverflow = menu.controls.FirstOrDefault(control =>
-                control != null
-                && control.type == VRCExpressionsMenu.Control.ControlType.SubMenu
-                && control.subMenu != null
-                && string.Equals(control.name, "More", StringComparison.Ordinal));
+            var existingOverflow = (menu?.controls ?? new List<VRCExpressionsMenu.Control>()).SingleOrDefault(item => item != null && item.name == "More" && item.type == VRCExpressionsMenu.Control.ControlType.SubMenu && item.subMenu != null);
             if (existingOverflow?.subMenu != null)
             {
                 if (existingOverflow.subMenu.controls == null)
@@ -937,6 +928,8 @@ namespace VRCForge.Editor
             EditorUtility.SetDirty(menu);
             return overflow;
         }
+
+        
 
         private static bool MenuContainsControl(VRCExpressionsMenu menu, string menuPath, string controlName, string parameterName, int intValue, HashSet<int> visited, int depth)
         {
@@ -981,16 +974,8 @@ namespace VRCForge.Editor
             {
                 return null;
             }
-            foreach (var control in menu.controls)
-            {
-                if (control?.type == VRCExpressionsMenu.Control.ControlType.SubMenu
-                    && control.subMenu != null
-                    && string.Equals(control.name, parts[index], StringComparison.Ordinal))
-                {
-                    return FindMenuByPathParts(control.subMenu, parts, index + 1, visited, depth + 1);
-                }
-            }
-            return null;
+            var control = (menu?.controls ?? new List<VRCExpressionsMenu.Control>()).SingleOrDefault(item => item != null && item.name == parts[index] && item.type == VRCExpressionsMenu.Control.ControlType.SubMenu && item.subMenu != null);
+            return control == null ? null : FindMenuByPathParts(control.subMenu, parts, index + 1, visited, depth + 1);
         }
     }
 
