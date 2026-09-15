@@ -1397,6 +1397,17 @@ class AvatarTuningPreparedService:
             tool_name,
             tool_arguments,
         )
+        serialized_result = self._ports.serialize_result(result)
+        failure = _unity_result_failure(result, serialized_result)
+        if failure is not None:
+            return {
+                "ok": False,
+                "sourceType": source_type,
+                "selectedAvatar": self._ports.serialize_avatar(context),
+                "executionMode": "live-unity",
+                "result": serialized_result,
+                **failure,
+            }
         undo_items = evidence.get("undoItems")
         if not isinstance(undo_items, list):
             raise RuntimeError("Prepared saved tuning undo evidence is invalid.")
@@ -1611,6 +1622,16 @@ class AvatarTuningPreparedService:
             tool_name,
             tool_arguments,
         )
+        serialized_result = self._ports.serialize_result(result)
+        failure = _unity_result_failure(result, serialized_result)
+        if failure is not None:
+            return {
+                "ok": False,
+                "selectedAvatar": self._ports.serialize_avatar(context),
+                "executionMode": "live-unity",
+                "result": serialized_result,
+                **failure,
+            }
         undo_items = evidence.get("undoItems")
         if not isinstance(undo_items, list):
             raise RuntimeError("Prepared face-tuning undo evidence is invalid.")
