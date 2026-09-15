@@ -417,13 +417,19 @@ namespace VRCForge.Editor
         private static int FindWardrobeLayerIndex(AnimatorController controller, string parameterName)
         {
             var layers = controller.layers;
+            var selected = -1;
             for (var i = 0; i < layers.Length; i++)
             {
                 var layer = layers[i];
                 if (layer?.stateMachine == null) { continue; }
-                if (LayerHasEquals(layer.stateMachine, parameterName)) { return i; }
+                if (LayerHasEquals(layer.stateMachine, parameterName))
+                {
+                    if (selected >= 0)
+                        throw new InvalidOperationException("Multiple FX layers match the wardrobe parameter; select an unambiguous wardrobe before adding a part.");
+                    selected = i;
+                }
             }
-            return -1;
+            return selected;
         }
 
         private static bool LayerHasEquals(AnimatorStateMachine machine, string parameterName)
@@ -474,9 +480,12 @@ namespace VRCForge.Editor
             if (machine == null) { return; }
             foreach (var child in machine.states)
             {
-                if (child.state != null && !sink.ContainsKey(child.state.name ?? ""))
+                if (child.state != null)
                 {
-                    sink[child.state.name ?? ""] = child.state;
+                    var name = child.state.name ?? "";
+                    if (sink.TryGetValue(name, out var existing) && existing != child.state)
+                        throw new InvalidOperationException("Wardrobe state name is ambiguous: " + name);
+                    sink[name] = child.state;
                 }
             }
             foreach (var sub in machine.stateMachines)

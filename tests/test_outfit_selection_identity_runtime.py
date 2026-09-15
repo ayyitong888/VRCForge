@@ -1,0 +1,28 @@
+"""Production wardrobe-specific layer/state identity regression; no Unity writes."""
+from pathlib import Path
+import sys,os,json,subprocess
+sys.path.insert(0,str(Path(__file__).resolve().parent))
+from test_wardrobe_scanner_runtime import STUBS,_method
+
+def test_outfit_part_layer_state_identity(tmp_path):
+    root=Path(__file__).resolve().parents[1];ref=os.environ.get('VRCFORGE_OUTFIT_SELECTION_GIT_REF');s=subprocess.check_output(['git','show',ref+':Assets/VRCForge/Editor/WardrobeOutfitPartWriter.cs'],cwd=root,text=True) if ref else (root/'Assets/VRCForge/Editor/WardrobeOutfitPartWriter.cs').read_text(encoding='utf-8-sig')
+    selected='\n'.join(_method(s,x) for x in ['private static int FindWardrobeLayerIndex','private static bool LayerHasEquals','private static void CollectStatesByName'])
+    program=STUBS+'class AnimatorController {public AnimatorControllerLayer[] layers;} class AnimatorControllerLayer {public AnimatorStateMachine stateMachine;} class Probe {'+selected+r'''
+    static bool Reject(Action a){try{a();return false;}catch(InvalidOperationException){return true;}}
+    public static void Main(){var first=new AnimatorState{name="Same"};var second=new AnimatorState{name="Same"};var m1=new AnimatorStateMachine{states=new[]{new ChildAnimatorState{state=first}},anyStateTransitions=new[]{new AnimatorStateTransition{destinationState=first,conditions=new[]{new AnimatorCondition{mode=AnimatorConditionMode.Equals,parameter="Clothes",threshold=1}}}}};var m2=new AnimatorStateMachine{states=new[]{new ChildAnimatorState{state=second}},anyStateTransitions=m1.anyStateTransitions};var controller=new AnimatorController{layers=new[]{new AnimatorControllerLayer{stateMachine=m1},new AnimatorControllerLayer{stateMachine=m2}}};if(!Reject(()=>FindWardrobeLayerIndex(controller,"Clothes")))throw new Exception("ambiguous wardrobe layer accepted");controller.layers=new[]{controller.layers[1]};if(FindWardrobeLayerIndex(controller,"Clothes")!=0||FindWardrobeLayerIndex(controller,"Other")!=-1)throw new Exception("unique/missing layer regressed");m1.stateMachines=new[]{new ChildAnimatorStateMachine{stateMachine=m2}};var states=new Dictionary<string,AnimatorState>();if(!Reject(()=>CollectStatesByName(m1,states)))throw new Exception("duplicate state names accepted");second.name="Unique";states.Clear();CollectStatesByName(m1,states);if(states.Count!=2||states["Unique"]!=second)throw new Exception("unique nested state regressed");CollectStatesByName(m1,states);if(states.Count!=2)throw new Exception("same instance revisit regressed");Console.WriteLine("PASS ambiguous layer/state rejected; unique/missing layer, unique nested state, same instance revisit preserved");}}
+    
+    '''
+    p=tmp_path/'selection';p.mkdir(exist_ok=True);cs=p/'Probe.cs';cs.write_text(program);base=Path(os.environ.get('ProgramFiles','C:/Program Files'))/'dotnet';c=sorted((base/'sdk').glob('*/Roslyn/bincore/csc.dll'))[-1];refs=sorted((base/'packs/Microsoft.NETCore.App.Ref').glob('*/ref/netcoreapp3.1'))[-1];dll=p/'Probe.dll';r=subprocess.run(['dotnet',str(c),'-nologo','-target:exe','-nostdlib+',f'-out:{dll}']+[f'-r:{x}' for x in refs.glob('*.dll')]+[str(cs)],capture_output=True,text=True);print(r.stdout,r.stderr);assert r.returncode==0
+    (p/'Probe.runtimeconfig.json').write_text(json.dumps({'runtimeOptions':{'tfm':'netcoreapp3.1','framework':{'name':'Microsoft.NETCore.App','version':'3.1.0'}}}));r=subprocess.run(['dotnet',str(dll)],capture_output=True,text=True);print(r.stdout,r.stderr);assert r.returncode==0
+
+
+def test_setup_avatar_identity(tmp_path):
+    from pathlib import Path
+    import sys,subprocess
+    sys.path.insert(0,'tests');from test_wardrobe_avatar_identity_runtime import _public
+    ref=os.environ.get('VRCFORGE_OUTFIT_SELECTION_GIT_REF');s=subprocess.check_output(['git','show',ref+':Assets/VRCForge/Editor/SetupOutfitTool.cs'],text=True) if ref else Path('Assets/VRCForge/Editor/SetupOutfitTool.cs').read_text(encoding='utf-8-sig');methods='\n'.join(_public(s,'private static '+x) for x in ['Component ResolveAvatarDescriptor','Type FindType','bool IsSceneComponent','string GetTransformPath','string NormalizePath'])
+    t=Path('tests/test_animation_reader_identity_runtime.py').read_text();prefix=t.split("program=r'''",1)[1].split("'''+",1)[0]
+    program=prefix+'static class Setup {'+methods+'}'+r'''
+    class Probe {static void Main(){foreach(var paths in new[]{new[]{"One/A","Two/B"},new[]{"One/Avatar","Two/Avatar"},new[]{"Root/Avatar","Root/Avatar"}}){Resources.Items.Clear();foreach(var path in paths){Transform t=null;foreach(var part in path.Split('/'))t=new Transform{name=part,parent=t};Resources.Items.Add(new VRCAvatarDescriptor{transform=t,gameObject=new GameObject{name=t.name}});}var selector=paths[0]=="One/A"?"":paths[0]=="One/Avatar"?"Avatar":"Root/Avatar";bool rejected=false;try{Setup.ResolveAvatarDescriptor(selector);}catch(InvalidOperationException){rejected=true;}if(!rejected)throw new Exception("ambiguous setup Avatar accepted");Resources.Items.RemoveAt(1);if(Setup.ResolveAvatarDescriptor("")==null||Setup.ResolveAvatarDescriptor(paths[0])==null)throw new Exception("unique Avatar regressed");Console.WriteLine("PASS setup selector ambiguity and unique identity preserved");}}}
+    '''
+    p=tmp_path/'setup';p.mkdir(exist_ok=True);(p/'Program.cs').write_text(program);(p/'probe.csproj').write_text('<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><OutputType>Exe</OutputType><TargetFramework>netcoreapp3.1</TargetFramework></PropertyGroup></Project>');r=subprocess.run(['dotnet','run','--project',str(p/'probe.csproj')],capture_output=True,text=True);print(r.stdout,r.stderr);assert r.returncode==0

@@ -633,17 +633,19 @@ namespace VRCForge.Editor
             var normalized = NormalizePath(avatarPath);
             if (string.IsNullOrEmpty(normalized))
             {
+                if (descriptors.Count != 1)
+                    throw new InvalidOperationException("Avatar descriptor selection is ambiguous; provide an exact avatarPath.");
                 return descriptors[0];
             }
 
-            var match = descriptors.FirstOrDefault(item => NormalizePath(GetTransformPath(item.transform)) == normalized)
-                ?? descriptors.FirstOrDefault(item => item.name.Equals(avatarPath, StringComparison.OrdinalIgnoreCase));
-            if (match == null)
-            {
+            var matches = descriptors.Where(item => NormalizePath(GetTransformPath(item.transform)) == normalized).ToArray();
+            if (matches.Length == 0)
+                matches = descriptors.Where(item => item.name.Equals(avatarPath, StringComparison.OrdinalIgnoreCase)).ToArray();
+            if (matches.Length == 0)
                 throw new InvalidOperationException($"Avatar descriptor not found: {avatarPath}");
-            }
-
-            return match;
+            if (matches.Length != 1)
+                throw new InvalidOperationException($"Avatar descriptor selection is ambiguous: {avatarPath}");
+            return matches[0];
         }
 
         private static Transform ResolveOutfitTransform(Transform avatarRoot, string outfitPath)
