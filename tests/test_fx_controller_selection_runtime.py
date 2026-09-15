@@ -13,6 +13,9 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 AUTHORING = "Assets/VRCForge/Editor/Generic/UnityAvatarAuthoringCrud.cs"
 PRIMITIVE = "Assets/VRCForge/Editor/Generic/UnityAvatarPrimitiveCrud.cs"
+WARDROBE_MANAGER = "Assets/VRCForge/Editor/WardrobeManagerWriter.cs"
+WARDROBE_PART = "Assets/VRCForge/Editor/WardrobeOutfitPartWriter.cs"
+WARDROBE_OUTFIT = "Assets/VRCForge/Editor/WardrobeOutfitWriter.cs"
 
 
 def _source(relative: str) -> str:
@@ -73,7 +76,7 @@ def _method(source: str, signature: str) -> str:
     raise AssertionError(f"unterminated method: {signature}")
 
 
-def _run_probe(tmp_path: Path, authoring: str, primitive: str) -> subprocess.CompletedProcess[str]:
+def _run_probe(tmp_path: Path, authoring: str, primitive: str, manager: str, part: str, outfit: str) -> subprocess.CompletedProcess[str]:
     program = r'''
 using System;
 using System.Linq;
@@ -87,8 +90,20 @@ class VRCAvatarDescriptor {
   public struct CustomAnimLayer { public AnimLayerType type; public bool isDefault; public RuntimeAnimatorController animatorController; }
   public CustomAnimLayer[] baseAnimationLayers;
 }
+static class AvatarAuthoringCrudCore {
+  public static AnimatorController GetFxController(VRCAvatarDescriptor descriptor) {
+    var slots=(descriptor.baseAnimationLayers??Array.Empty<VRCAvatarDescriptor.CustomAnimLayer>()).Where(layer=>layer.type==VRCAvatarDescriptor.AnimLayerType.FX).ToArray();
+    if(slots.Length>1) throw new InvalidOperationException("Avatar FX layer is ambiguous");
+    if(slots.Length==0||slots[0].animatorController==null)return null;
+    if(!(slots[0].animatorController is AnimatorController controller))throw new InvalidOperationException("unsupported runtime controller");
+    return controller;
+  }
+}
 static class Authoring { LOOKUP }
 static class Primitive { LOOKUP }
+static class Manager { LOOKUP }
+static class Part { LOOKUP }
+static class Outfit { LOOKUP }
 class Probe {
   static int failures;
   static void Check(bool value, string label) { Console.WriteLine((value ? "PASS " : "FAIL ") + label); if (!value) failures++; }
@@ -111,12 +126,18 @@ class Probe {
   public static int Main() {
     CheckHelper("authoring", Authoring.GetFxController);
     CheckHelper("primitive", Primitive.GetFxController);
+    CheckHelper("manager", Manager.GetFxController);
+    CheckHelper("part", Part.GetFxController);
+    CheckHelper("outfit", Outfit.GetFxController);
     return failures == 0 ? 0 : 1;
   }
 }
 '''
-    program = program.replace("LOOKUP", _method(authoring, "internal static AnimatorController GetFxController(") , 1)
+    program = program.replace("LOOKUP", _method(authoring, "internal static AnimatorController GetFxController("), 1)
     program = program.replace("LOOKUP", _method(primitive, "internal static AnimatorController GetFxController("), 1)
+    program = program.replace("LOOKUP", _method(manager, "private static AnimatorController GetFxController(").replace("private static", "public static", 1), 1)
+    program = program.replace("LOOKUP", _method(part, "private static AnimatorController GetFxController(").replace("private static", "public static", 1), 1)
+    program = program.replace("LOOKUP", _method(outfit, "private static AnimatorController GetFxController(").replace("private static", "public static", 1), 1)
     base = Path(os.environ.get("DOTNET_ROOT", str(Path.home() / "AppData/Local/Microsoft/dotnet")))
     compilers = sorted((base / "sdk").glob("8.*/Roslyn/bincore/csc.dll"))
     refs = sorted((base / "packs/Microsoft.NETCore.App.Ref").glob("8.*/ref/net8.0"))
@@ -135,6 +156,6 @@ class Probe {
 
 
 def test_both_production_fx_controller_selectors(tmp_path: Path) -> None:
-    result = _run_probe(tmp_path, _source(AUTHORING), _source(PRIMITIVE))
+    result = _run_probe(tmp_path, _source(AUTHORING), _source(PRIMITIVE), _source(WARDROBE_MANAGER), _source(WARDROBE_PART), _source(WARDROBE_OUTFIT))
     assert result.returncode == 0, result.stdout + result.stderr
-    assert result.stdout.count("PASS ") == 12
+    assert result.stdout.count("PASS ") == 30
