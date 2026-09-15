@@ -894,6 +894,10 @@ UNITY_READ_TOOL_INPUT_SCHEMAS["vrcforge_preview_restore_checkpoint"] = {
     "properties": {
         "checkpointId": {"type": "string", "description": "Retained checkpoint id returned by list_checkpoints. The checkpoint determines the project and restore scope."},
         "checkpoint_id": {"type": "string", "description": "Existing alias of checkpointId."},
+        "projectPath": {"type": "string", "description": "Optional expected project root. If supplied, it must match the selected checkpoint; it never redirects a restore."},
+        "project_path": {"type": "string", "description": "Alias of projectPath; all supplied project aliases must agree with the checkpoint."},
+        "projectRoot": {"type": "string", "description": "Alias of projectPath; all supplied project aliases must agree with the checkpoint."},
+        "project_root": {"type": "string", "description": "Alias of projectPath; all supplied project aliases must agree with the checkpoint."},
     },
     "anyOf": [{"required": ["checkpointId"]}, {"required": ["checkpoint_id"]}],
 }

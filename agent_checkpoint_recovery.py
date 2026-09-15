@@ -1131,10 +1131,29 @@ class AgentCheckpointRecoveryService:
         with self._ports.state.checkpoint_storage_lock:
             return self._preview_restore_checkpoint_locked(params)
 
+    @staticmethod
+    def _checkpoint_requested_project_error(checkpoint: dict[str, Any], params: dict[str, Any]) -> dict[str, Any] | None:
+        expected = str(checkpoint.get("projectRoot") or "").strip()
+        for key in ("projectPath", "project_path", "projectRoot", "project_root",
+                    "unity_project", "unityProject", "workspace_root", "workspaceRoot", "cwd"):
+            requested = str(params.get(key) or "").strip()
+            if requested and (not expected or normalize_filesystem_path(requested) != normalize_filesystem_path(expected)):
+                return {
+                    "ok": False, "errorCode": "checkpoint_project_mismatch",
+                    "error": f"{key} does not match the selected checkpoint's project. Select a checkpoint for the intended project.",
+                    "checkpointId": checkpoint.get("id"), "projectRoot": expected,
+                    "mutationStarted": False, "committed": False,
+                    "commitState": "not_started", "commitStateKnown": True,
+                }
+        return None
+
     def _preview_restore_checkpoint_locked(self, params: dict[str, Any]) -> dict[str, Any]:
         checkpoint = self._load_checkpoint(str(params.get("checkpoint_id") or params.get("checkpointId") or "").strip())
         if not checkpoint:
             return {"ok": False, "error": "checkpoint_id was not found."}
+        project_error = self._checkpoint_requested_project_error(checkpoint, params)
+        if project_error:
+            return project_error
         available = self._checkpoint_available(checkpoint)
         if not available.get("ok"):
             return available
@@ -1183,6 +1202,9 @@ class AgentCheckpointRecoveryService:
             return {"ok": False, "error": "checkpoint_id was not found."}
         if params.get("confirm_restore") is not True and params.get("confirmRestore") is not True:
             return {"ok": False, "error": "confirmRestore=true is required to restore a checkpoint."}
+        project_error = self._checkpoint_requested_project_error(checkpoint, params)
+        if project_error:
+            return project_error
         available = self._checkpoint_available(checkpoint)
         if not available.get("ok"):
             return available

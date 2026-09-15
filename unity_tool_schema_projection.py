@@ -20,6 +20,7 @@ _PROJECT_APPLICATION_WRITE_TOOLS = {
     "vrcforge_register_project_catalog", "vrcforge_restore_unity_core",
     "vrcforge_rollback_project_catalog_registration",
     "vrcforge_rollback_project_lifecycle", "vrcforge_select_project",
+    "vrcforge_restore_checkpoint",
 }
 
 
@@ -64,6 +65,10 @@ def canonical_unity_read_tool_input_schema(tool_name: str) -> dict[str, Any]:
     name = str(tool_name or "").strip()
     registered = UNITY_READ_TOOL_INPUT_SCHEMAS.get(name)
     if isinstance(registered, Mapping):
+        # A retained checkpoint supplies its own project/restore scope, including
+        # local-state recovery when no Editor is running.
+        if name == "vrcforge_preview_restore_checkpoint":
+            return deepcopy(dict(registered))
         return (
             _with_execution_target_schema(registered, required=True)
             if name in {"vrcforge_get_property"} or name.startswith("vrcforge_preview_")

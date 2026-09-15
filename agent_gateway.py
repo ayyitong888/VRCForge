@@ -4352,6 +4352,11 @@ class AgentGateway:
     ) -> None:
         """Reject ambiguous optional-project calls after multiple scopes appear."""
 
+        # Checkpoint IDs already select one durable scope, including local state.
+        # The recovery service validates any explicitly supplied project path.
+        if tool_name in {"vrcforge_preview_restore_checkpoint", "vrcforge_restore_checkpoint"}:
+            return
+
         schema = (
             canonical_unity_write_tool_input_schema(tool_name)
             if tool_name in EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS
