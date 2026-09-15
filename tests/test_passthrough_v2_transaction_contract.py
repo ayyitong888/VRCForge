@@ -17,7 +17,7 @@ def test_restore_safe_backup_returns_bounded_transaction_with_fresh_file_receipt
     assert "handle = manifestPath" in source
     assert 'status = "succeeded"' in source
     assert 'status = "failed"' in source
-    assert "rolled_back = false" in source
+    assert "rolled_back = item.rolled_back" in source
 
 
 def test_create_safe_backup_returns_bounded_transaction_with_copied_file_readback() -> None:

@@ -62,6 +62,10 @@ namespace VRCForge.Editor
             }
             catch (RestoreTransactionException ex)
             {
+                if (ex.Payload.rollback_verified)
+                    return VRCForgeToolResult.Failed($"Safe backup restore failed and was rolled back: {ex.Message}",
+                        new { result = ex.Payload, commitState = "rolled_back", commitStateKnown = true,
+                            committed = false, restored = true, checkpointRecoveryRequired = false, cleanupRequired = false });
                 return VRCForgeToolResult.Failed($"Safe backup restore failed: {ex.Message}", ex.Payload);
             }
             catch (Exception ex)
@@ -192,12 +196,34 @@ namespace VRCForge.Editor
             var confirmed = parameters.confirmRestore ?? false;
             if (confirmed)
             {
+                var recoveryPath = Path.Combine(backupPath, ".restore-" + Guid.NewGuid().ToString("N"));
+                var baselines = new Dictionary<RestorePlanItem, string>();
+                var attempted = new List<RestorePlanItem>();
+                var createdDirectories = new List<string>();
+                var preserveRecovery = false;
+                try
+                {
                 // Check every source before the first target write, including drift since planning.
                 foreach (var item in planned)
                 {
                     VerifyBackupIntegrity(
                         ResolveContainedPath(backupPath, item.backup_relative_path, "Backup file"),
                         item.backup_sha256);
+                    var target = ResolveContainedPath(projectRoot, item.project_relative_path, "Restore target");
+                    if (Directory.Exists(target))
+                        throw new IOException("Restore target is a directory: " + item.project_relative_path);
+                    if (File.Exists(target) != item.target_exists
+                        || (item.target_exists && ComputeSha256(target) != item.current_sha256))
+                        throw new IOException("Restore target changed since planning: " + item.project_relative_path);
+                    if (item.target_exists)
+                    {
+                        Directory.CreateDirectory(recoveryPath);
+                        var baseline = Path.Combine(recoveryPath, baselines.Count.ToString());
+                        baselines.Add(item, baseline);
+                        File.Copy(target, baseline, false);
+                        if (ComputeSha256(baseline) != item.current_sha256)
+                            throw new IOException("Restore baseline differs from target: " + item.project_relative_path);
+                    }
                 }
                 foreach (var item in planned)
                 {
@@ -206,14 +232,25 @@ namespace VRCForge.Editor
                     var directory = Path.GetDirectoryName(targetPath);
                     if (!string.IsNullOrEmpty(directory))
                     {
+                        var missing = new Stack<string>();
+                        for (var path = directory; !Directory.Exists(path); path = Path.GetDirectoryName(path))
+                            missing.Push(path);
+                        foreach (var path in missing)
+                        {
+                            Directory.CreateDirectory(path);
+                            createdDirectories.Add(path);
+                        }
                         Directory.CreateDirectory(directory);
                     }
 
                     try
                     {
+                        attempted.Add(item);
                         File.Copy(backupFilePath, targetPath, true);
                         item.after_exists = File.Exists(targetPath);
                         item.after_sha256 = ComputeSha256(targetPath);
+                        if (item.after_sha256 != item.backup_sha256)
+                            throw new IOException("Restored file hash does not match the snapshot.");
                         item.status = "succeeded";
                         restored.Add(item);
                     }
@@ -223,15 +260,59 @@ namespace VRCForge.Editor
                         item.after_sha256 = item.after_exists ? ComputeSha256(targetPath) : "";
                         item.status = "failed";
                         item.error = ex.Message;
-                        throw new RestoreTransactionException(
-                            $"Failed while restoring '{item.project_relative_path}': {ex.Message}",
-                            BuildPayload(manifest, manifestPath, backupPath, projectMatches, confirmed, planned, restored, skipped, warnings));
+                        throw;
                     }
                 }
 
                 if (parameters.refreshAssets ?? true)
                 {
                     AssetDatabase.Refresh();
+                }
+                }
+                catch (Exception failure)
+                {
+                    foreach (var item in attempted.AsEnumerable().Reverse())
+                    {
+                        try
+                        {
+                            var target = ResolveContainedPath(projectRoot, item.project_relative_path, "Restore target");
+                            if (item.target_exists)
+                            {
+                                if (!File.Exists(target) || ComputeSha256(target) != item.current_sha256)
+                                    File.Copy(baselines[item], target, true);
+                                if (ComputeSha256(target) != item.current_sha256)
+                                    throw new IOException("Rollback hash mismatch.");
+                            }
+                            else if (File.Exists(target)) File.Delete(target);
+                            item.rolled_back = true;
+                            item.after_exists = File.Exists(target);
+                            item.after_sha256 = item.after_exists ? ComputeSha256(target) : "";
+                        }
+                        catch (Exception rollbackError)
+                        {
+                            preserveRecovery = true;
+                            warnings.Add("Rollback failed for " + item.project_relative_path + ": " + rollbackError.Message);
+                        }
+                    }
+                    foreach (var directory in createdDirectories.AsEnumerable().Reverse())
+                    {
+                        try { Directory.Delete(directory, false); }
+                        catch (Exception cleanupError) { preserveRecovery = true; warnings.Add(cleanupError.Message); }
+                    }
+                    if (preserveRecovery) warnings.Add("Recovery files preserved at: " + recoveryPath);
+                    restored.RemoveAll(item => item.rolled_back);
+                    var payload = BuildPayload(manifest, manifestPath, backupPath, projectMatches, confirmed, planned, restored, skipped, warnings);
+                    payload.rollback_verified = !preserveRecovery;
+                    payload.recovery_path = preserveRecovery ? recoveryPath : "";
+                    throw new RestoreTransactionException(failure.Message, payload);
+                }
+                finally
+                {
+                    if (!preserveRecovery)
+                    {
+                        foreach (var baseline in baselines.Values) File.Delete(baseline);
+                        if (Directory.Exists(recoveryPath)) Directory.Delete(recoveryPath, false);
+                    }
                 }
             }
             else
@@ -262,7 +343,7 @@ namespace VRCForge.Editor
                     : new { exists = item.after_exists, sha256 = item.after_sha256 },
                 item.status,
                 item.error,
-                rolled_back = false
+                rolled_back = item.rolled_back
             }).ToList();
             return new RestorePayload
             {
@@ -451,6 +532,8 @@ namespace VRCForge.Editor
         [Serializable]
         private class RestorePayload
         {
+            public bool rollback_verified;
+            public string recovery_path = "";
             public string type;
             public string version;
             public string backup_id;
@@ -469,6 +552,7 @@ namespace VRCForge.Editor
         [Serializable]
         private class RestorePlanItem
         {
+            public bool rolled_back;
             public string project_relative_path;
             public string backup_relative_path;
             public bool target_exists;
