@@ -701,6 +701,22 @@ def build_dependency_doctor(params: dict[str, Any]) -> dict[str, Any]:
 def build_optimization_report(params: dict[str, Any], validation_report: dict[str, Any] | None = None) -> dict[str, Any]:
     params = params or {}
     validation = validation_report if isinstance(validation_report, dict) else {}
+    source_failures = []
+    for source_name, source in _validation_sources(validation).items():
+        failure = _reported_source_failure(source_name, source)
+        if failure:
+            source_failures.append(failure)
+    if source_failures:
+        return {
+            "ok": False, "status": "failed", "schema": OPTIMIZATION_SCHEMA,
+            "readOnly": True, "planOnly": True, "noProjectWrites": True,
+            "directApplyExposed": False, "recommendedOrder": [], "nextSafeAction": None,
+            "error": {
+                "code": "optimization_source_failed",
+                "message": "Optimization evidence scans failed; resolve the reported scanner errors before requesting a plan.",
+                "sourceFailures": source_failures,
+            },
+        }
     profile = build_target_profile(params)
     dependency_doctor = build_dependency_doctor(params)
     baseline = build_baseline_scan(params, validation)
@@ -837,22 +853,15 @@ def build_optimization_tool_result(
     }
     for source_name in required_sources.get(external_name, ()):
         source = _validation_sources(validation).get(source_name)
-        if not isinstance(source, dict):
-            continue
-        for value in (source, source.get("payload")):
-            if not isinstance(value, dict):
-                continue
-            if value.get("ok") is False or value.get("success") is False or str(value.get("status") or "").lower() in {"failed", "error"}:
-                return {
-                    "ok": False, "status": "failed", "schema": OPTIMIZATION_SCHEMA,
-                    "tool": external_name, "gatewayTool": definition["gatewayName"],
-                    "readOnly": True, "planOnly": definition["category"] == "plan/preview",
-                    "noProjectWrites": True, "directApplyExposed": False,
-                    "error": {
-                        "code": "optimization_source_failed", "source": source_name,
-                        "message": str(value.get("error") or value.get("message") or "Required scanner failed."),
-                    },
-                }
+        failure = _reported_source_failure(source_name, source)
+        if failure:
+            return {
+                "ok": False, "status": "failed", "schema": OPTIMIZATION_SCHEMA,
+                "tool": external_name, "gatewayTool": definition["gatewayName"],
+                "readOnly": True, "planOnly": definition["category"] == "plan/preview",
+                "noProjectWrites": True, "directApplyExposed": False,
+                "error": failure,
+            }
     dependency_doctor = build_dependency_doctor(params)
     profile = build_target_profile(params)
     result: Any
@@ -3230,6 +3239,20 @@ def _extract_version(raw: Any) -> str:
             if value:
                 return str(value)
     return ""
+
+
+def _reported_source_failure(source_name: str, source: Any) -> dict[str, Any] | None:
+    if not isinstance(source, dict):
+        return None
+    for value in (source, source.get("payload")):
+        if not isinstance(value, dict):
+            continue
+        if value.get("ok") is False or value.get("success") is False or str(value.get("status") or "").lower() in {"failed", "error"}:
+            return {
+                "code": "optimization_source_failed", "source": source_name,
+                "message": str(value.get("error") or value.get("message") or "Required scanner failed."),
+            }
+    return None
 
 
 def _validation_sources(validation: dict[str, Any]) -> dict[str, Any]:
