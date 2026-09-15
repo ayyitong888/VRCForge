@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Globalization;
@@ -36,7 +36,7 @@ namespace VRCForge.Editor
                 var boolCount = parameters.Count(item => string.Equals(item.valueType, "Bool", StringComparison.OrdinalIgnoreCase));
                 var intCount = parameters.Count(item => string.Equals(item.valueType, "Int", StringComparison.OrdinalIgnoreCase));
                 var floatCount = parameters.Count(item => string.Equals(item.valueType, "Float", StringComparison.OrdinalIgnoreCase));
-                var totalCost = parameters.Sum(item =>
+                var totalCost = parameters.Where(item => item.networkSynced).Sum(item =>
                     string.Equals(item.valueType, "Bool", StringComparison.OrdinalIgnoreCase) ? 1 : 8);
                 var mergedParameterUsage = NdmfParameterUsageBridge.Inspect(descriptor.gameObject);
                 var outputPath = (@params?["outputPath"]?.ToString() ?? string.Empty).Trim();
@@ -149,19 +149,14 @@ namespace VRCForge.Editor
             }
 
             var normalizedAvatarPath = NormalizePath(avatarPath);
-            if (string.IsNullOrEmpty(normalizedAvatarPath))
-            {
-                return descriptors[0];
-            }
-
-            var match = descriptors.FirstOrDefault(item => NormalizePath(GetTransformPath(item.transform)) == normalizedAvatarPath)
-                ?? descriptors.FirstOrDefault(item => item.name.Equals(avatarPath, StringComparison.OrdinalIgnoreCase));
-            if (match == null)
-            {
-                throw new InvalidOperationException($"Avatar descriptor not found: {avatarPath}");
-            }
-
-            return match;
+            var matches = string.IsNullOrEmpty(normalizedAvatarPath)
+                ? descriptors
+                : descriptors.Where(item => NormalizePath(GetTransformPath(item.transform)) == normalizedAvatarPath).ToList();
+            if (matches.Count == 0)
+                matches = descriptors.Where(item => item.name.Equals(avatarPath, StringComparison.OrdinalIgnoreCase)).ToList();
+            if (matches.Count != 1)
+                throw new InvalidOperationException($"Avatar descriptor is missing or ambiguous: {avatarPath}");
+            return matches[0];
         }
 
         private static bool IsSceneComponent(Component component)
