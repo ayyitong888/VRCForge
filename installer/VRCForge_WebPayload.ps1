@@ -239,6 +239,15 @@ function Assert-InstallNotRunning([string]$Root) {
     $root = Assert-SafeProgramFilesDestination $Root
     if (-not [IO.Directory]::Exists($root)) { return }
     Assert-NoReparseTree $root
+    # Windows can allow an exclusive read of a running executable image.
+    # Check exact installed process identities before checking remaining locks.
+    $resources = @(
+        (Join-Path $root "VRCForge.exe"),
+        (Join-Path $root "backend\vrcforge_backend.exe")
+    )
+    if (@(Get-ExactInstalledProcessTargets $resources).Count -gt 0) {
+        Fail "The installed VRCForge is still running. Save your work and fully exit VRCForge before continuing."
+    }
     foreach ($relativePath in @("VRCForge.exe", "backend\\vrcforge_backend.exe")) {
         $path = Assert-ContainedPath $root (Join-Path $root $relativePath)
         if (-not [IO.File]::Exists($path)) { continue }

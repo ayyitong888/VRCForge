@@ -444,6 +444,9 @@ def test_nsis_message_boxes_have_silent_default_and_keep_error_abort_paths() -> 
 def test_installer_busy_preflight_and_activation_retry_stay_in_same_installation() -> None:
     helper = (REPO_ROOT / "installer/VRCForge_WebPayload.ps1").read_text(encoding="utf-8")
     assert '"CheckNotRunning"' in helper
+    busy_check = helper[helper.index("function Assert-InstallNotRunning"):helper.index("function Get-ExactInstalledProcessTargets")]
+    assert "Get-ExactInstalledProcessTargets $resources" in busy_check
+    assert busy_check.index("Get-ExactInstalledProcessTargets") < busy_check.index("New-Object IO.FileStream")
     for name in ("VRCForge_Offline_Installer_x64.nsi", "VRCForge_Web_Installer_x64.nsi"):
         source = (REPO_ROOT / "installer" / name).read_text(encoding="utf-8")
         section = source[source.index('Section "Install"'):source.index('Section "Uninstall"')]
