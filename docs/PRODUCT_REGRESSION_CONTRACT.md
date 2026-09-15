@@ -5,6 +5,11 @@ covers user-visible features, Agent behavior, approvals, UI/UX, Providers,
 vision, persistence, latency, compatibility and release evidence. It is not a
 session log or a replacement for implementation planning.
 
+The release-specific evidence index and post-release anti-regression checklist
+are maintained in [RELEASE_REGRESSION_GATES.md](RELEASE_REGRESSION_GATES.md).
+That supplement indexes concrete audit classes and hosted package evidence;
+this contract remains the normative behavior source.
+
 ## Authority and use
 
 - Current executable behavior plus this contract define the product boundary.
