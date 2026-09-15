@@ -151,9 +151,22 @@ namespace VRCForge.Editor
             var renderers = Resources.FindObjectsOfTypeAll<SkinnedMeshRenderer>();
 
             var avatarGroups = new Dictionary<string, AvatarExport>();
+            var avatarRoots = new Dictionary<string, Transform>();
             var blendshapeCount = 0;
             var rendererCount = 0;
             var sceneNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            var descriptorType = FindType("VRC.SDK3.Avatars.Components.VRCAvatarDescriptor");
+            if (descriptorType != null)
+            {
+                foreach (var descriptor in Resources.FindObjectsOfTypeAll(descriptorType).OfType<Component>()
+                    .Where(item => item != null && item.gameObject.scene.IsValid()
+                        && item.gameObject.scene.isLoaded && !EditorUtility.IsPersistent(item)))
+                {
+                    AddAvatarRoot(avatarGroups, avatarRoots, descriptor.transform);
+                    sceneNames.Add(descriptor.gameObject.scene.name);
+                }
+            }
 
             foreach (var renderer in renderers.Where(IsSceneObject))
             {
@@ -166,19 +179,7 @@ namespace VRCForge.Editor
                 sceneNames.Add(renderer.gameObject.scene.name);
 
                 var avatarRoot = FindAvatarRoot(renderer.transform);
-                var avatarKey = GetTransformPath(avatarRoot);
-                if (!avatarGroups.TryGetValue(avatarKey, out var avatarExport))
-                {
-                    avatarExport = new AvatarExport
-                    {
-                        avatarName = avatarRoot.name,
-                        avatarPath = avatarKey,
-                        sceneName = avatarRoot.gameObject.scene.name,
-                        scenePath = avatarRoot.gameObject.scene.path,
-                        isVrChatAvatar = HasVrChatAvatarDescriptor(avatarRoot)
-                    };
-                    avatarGroups.Add(avatarKey, avatarExport);
-                }
+                var avatarExport = AddAvatarRoot(avatarGroups, avatarRoots, avatarRoot);
 
                 var rendererExport = new RendererExport
                 {
@@ -219,6 +220,31 @@ namespace VRCForge.Editor
                     blendshapeCount = blendshapeCount
                 }
             };
+        }
+
+        private static AvatarExport AddAvatarRoot(
+            Dictionary<string, AvatarExport> avatars,
+            Dictionary<string, Transform> roots,
+            Transform root)
+        {
+            var path = GetTransformPath(root);
+            if (roots.TryGetValue(path, out var existingRoot))
+            {
+                if (existingRoot != root)
+                    throw new InvalidOperationException($"Avatar hierarchy path is ambiguous across loaded scene objects: {path}. Give the roots unique hierarchy paths before scanning.");
+                return avatars[path];
+            }
+            var avatar = new AvatarExport
+            {
+                avatarName = root.name,
+                avatarPath = path,
+                sceneName = root.gameObject.scene.name,
+                scenePath = root.gameObject.scene.path,
+                isVrChatAvatar = HasVrChatAvatarDescriptor(root)
+            };
+            roots.Add(path, root);
+            avatars.Add(path, avatar);
+            return avatar;
         }
 
         private static bool IsSceneObject(SkinnedMeshRenderer renderer)

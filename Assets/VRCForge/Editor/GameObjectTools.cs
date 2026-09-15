@@ -242,10 +242,13 @@ namespace VRCForge.Editor
                 return;
             }
 
-            if (!roots.ContainsKey(path))
+            if (roots.TryGetValue(path, out var existingRoot))
             {
-                roots.Add(path, root);
+                if (existingRoot != root)
+                    throw new InvalidOperationException($"Avatar hierarchy path is ambiguous across loaded scene objects: {path}. Give the roots unique hierarchy paths before scanning.");
+                return;
             }
+            roots.Add(path, root);
         }
 
         private static Transform FindAvatarRoot(Transform source)

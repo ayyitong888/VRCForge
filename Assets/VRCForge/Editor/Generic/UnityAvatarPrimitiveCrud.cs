@@ -18,24 +18,7 @@ namespace VRCForge.Editor
     {
         internal static VRCAvatarDescriptor ResolveAvatarDescriptor(string avatarPath)
         {
-            var descriptors = Resources.FindObjectsOfTypeAll<VRCAvatarDescriptor>()
-                .Where(item => item != null && item.gameObject.scene.IsValid() && item.gameObject.scene.isLoaded && !EditorUtility.IsPersistent(item))
-                .OrderBy(item => item.name)
-                .ToList();
-            if (descriptors.Count == 0)
-            {
-                throw new InvalidOperationException("No scene VRChat avatar descriptor was found.");
-            }
-
-            var normalized = NormalizePath(avatarPath);
-            if (string.IsNullOrEmpty(normalized))
-            {
-                return descriptors[0];
-            }
-
-            return descriptors.FirstOrDefault(item => NormalizePath(GetTransformPath(item.transform)) == normalized)
-                ?? descriptors.FirstOrDefault(item => item.name.Equals(avatarPath, StringComparison.OrdinalIgnoreCase))
-                ?? throw new InvalidOperationException($"Avatar descriptor not found: {avatarPath}");
+            return AvatarAuthoringCrudCore.ResolveAvatarDescriptor(avatarPath);
         }
 
         internal static string GetTransformPath(Transform transform)

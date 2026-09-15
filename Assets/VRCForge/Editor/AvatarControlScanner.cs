@@ -84,32 +84,7 @@ namespace VRCForge.Editor
 
         private static Component ResolveAvatarDescriptor(string avatarPath)
         {
-            var descriptorType = FindType("VRC.SDK3.Avatars.Components.VRCAvatarDescriptor")
-                ?? throw new InvalidOperationException("VRC SDK avatar descriptor type was not found.");
-            var descriptors = Resources.FindObjectsOfTypeAll(descriptorType)
-                .OfType<Component>()
-                .Where(IsSceneComponent)
-                .OrderBy(item => item.name)
-                .ToList();
-            if (descriptors.Count == 0)
-            {
-                throw new InvalidOperationException("No scene VRChat avatar descriptor was found.");
-            }
-
-            var normalizedAvatarPath = NormalizePath(avatarPath);
-            if (string.IsNullOrEmpty(normalizedAvatarPath))
-            {
-                return descriptors[0];
-            }
-
-            var match = descriptors.FirstOrDefault(item => NormalizePath(GetTransformPath(item.transform)) == normalizedAvatarPath)
-                ?? descriptors.FirstOrDefault(item => item.name.Equals(avatarPath, StringComparison.OrdinalIgnoreCase));
-            if (match == null)
-            {
-                throw new InvalidOperationException($"Avatar descriptor not found: {avatarPath}");
-            }
-
-            return match;
+            return AvatarAuthoringCrudCore.ResolveAvatarDescriptor(avatarPath);
         }
 
         private static Dictionary<string, ParameterInfo> ReadExpressionParameters(Component descriptor)
