@@ -211,8 +211,23 @@ namespace VRCForge.Editor
             }
             catch
             {
-                if (target.parent == proxy.transform) target.SetParent(originalParent, true);
+                if (target == null || (target.parent != originalParent
+                    && (proxy == null || target.parent != proxy.transform)))
+                    throw new InvalidOperationException("The target hierarchy changed during prepare; proxy and recovery state were preserved.");
+                target.SetParent(originalParent, false);
+                target.localPosition = ReadVector(state["localPosition"], "localPosition");
+                target.localRotation = ReadQuaternion(state["localRotation"], "localRotation");
+                target.localScale = ReadVector(state["localScale"], "localScale");
                 if (proxy != null) UnityEngine.Object.DestroyImmediate(proxy);
+                EditorSceneManager.MarkSceneDirty(s.Target.scene);
+                if (!EditorSceneManager.SaveScene(s.Target.scene))
+                    throw new InvalidOperationException("The failed handoff rollback could not be saved; recovery state was retained.");
+                var readback = Resolve(s.TargetId, "rollback target readback").transform;
+                if (readback != target || readback.parent != originalParent
+                    || readback.localPosition != ReadVector(state["localPosition"], "localPosition")
+                    || readback.localRotation != ReadQuaternion(state["localRotation"], "localRotation")
+                    || readback.localScale != ReadVector(state["localScale"], "localScale"))
+                    throw new InvalidOperationException("The failed handoff rollback readback did not match; recovery state was retained.");
                 if (File.Exists(StatePath(id))) File.Delete(StatePath(id));
                 throw;
             }
