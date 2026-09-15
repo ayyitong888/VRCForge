@@ -424,6 +424,18 @@ def test_installers_gracefully_close_only_the_installed_app_before_atomic_activa
         assert "taskkill" not in installer
 
 
+def test_nsis_message_boxes_have_silent_default_and_keep_error_abort_paths() -> None:
+    for name in ("VRCForge_Offline_Installer_x64.nsi", "VRCForge_Web_Installer_x64.nsi"):
+        lines = (REPO_ROOT / "installer" / name).read_text(encoding="utf-8").splitlines()
+        message_box_indexes = [index for index, line in enumerate(lines) if "MessageBox " in line]
+
+        assert message_box_indexes
+        for index in message_box_indexes:
+            assert lines[index].rstrip().endswith(" /SD IDOK")
+            if "MB_ICONSTOP" in lines[index]:
+                assert lines[index + 1].strip() == "Abort"
+
+
 def test_desktop_cooperates_with_restart_manager_without_changing_normal_close_to_tray() -> None:
     main = (REPO_ROOT / "src-tauri" / "src" / "main.rs").read_text(encoding="utf-8")
     lifecycle = (

@@ -288,7 +288,7 @@ Section "Install"
   InitPluginsDir
   Call ValidateScopedInstallDir
   ${If} $0 != 0
-    MessageBox MB_ICONSTOP "The requested install directory does not match this installer identity."
+    MessageBox MB_ICONSTOP "The requested install directory does not match this installer identity." /SD IDOK
     Abort
   ${EndIf}
   SetOutPath "$PLUGINSDIR"
@@ -300,7 +300,7 @@ Section "Install"
   StrCpy $HelperSourcePath "$PLUGINSDIR\VRCForge_WebPayload.ps1"
   Call ValidateInstallBoundary
   ${If} $0 != 0
-    MessageBox MB_ICONSTOP "The protected Program Files installation boundary could not be verified."
+    MessageBox MB_ICONSTOP "The protected Program Files installation boundary could not be verified." /SD IDOK
     Abort
   ${EndIf}
   StrCpy $PayloadStatePath "$PLUGINSDIR\payload-stage.txt"
@@ -316,18 +316,18 @@ Section "Install"
     Pop $0
   ${EndIf}
   ${If} $0 != 0
-    MessageBox MB_ICONSTOP "$(DownloadFailedText)"
+    MessageBox MB_ICONSTOP "$(DownloadFailedText)" /SD IDOK
     Abort
   ${EndIf}
   FileOpen $0 "$PayloadStatePath" r
   ${If} $0 == ""
-    MessageBox MB_ICONSTOP "$(DownloadFailedText)"
+    MessageBox MB_ICONSTOP "$(DownloadFailedText)" /SD IDOK
     Abort
   ${EndIf}
   FileRead $0 $PayloadStageRoot
   FileClose $0
   ${If} $PayloadStageRoot == ""
-    MessageBox MB_ICONSTOP "$(HashMismatchText)"
+    MessageBox MB_ICONSTOP "$(HashMismatchText)" /SD IDOK
     Abort
   ${EndIf}
 
@@ -345,7 +345,7 @@ Section "Install"
     Pop $0
   ${EndIf}
   ${If} $0 != 0
-    MessageBox MB_ICONSTOP "$(ActivationFailedText)"
+    MessageBox MB_ICONSTOP "$(ActivationFailedText)" /SD IDOK
     Abort
   ${EndIf}
   StrCpy $UserDataRoot "$LOCALAPPDATA\${USER_DATA_RELATIVE}"
@@ -381,7 +381,7 @@ Section "Uninstall"
   SetRegView 64
   Call un.ValidateScopedInstallDir
   ${If} $0 != 0
-    MessageBox MB_ICONSTOP "The uninstall directory does not match this installer identity."
+    MessageBox MB_ICONSTOP "The uninstall directory does not match this installer identity." /SD IDOK
     Abort
   ${EndIf}
   StrCpy $UserDataRoot "$LOCALAPPDATA\${USER_DATA_RELATIVE}"
@@ -392,7 +392,7 @@ Section "Uninstall"
   StrCpy $HelperSourcePath "$INSTDIR\installer\VRCForge_WebPayload.ps1"
   Call un.ValidateInstallBoundary
   ${If} $0 != 0
-    MessageBox MB_ICONSTOP "The protected Program Files uninstall boundary could not be verified."
+    MessageBox MB_ICONSTOP "The protected Program Files uninstall boundary could not be verified." /SD IDOK
     Abort
   ${EndIf}
   Delete "$DESKTOP\${DESKTOP_SHORTCUT}"
@@ -412,8 +412,8 @@ Section "Uninstall"
   DeleteRegValue HKCU "${INSTALLER_LANGUAGE_KEY}" "InstallerLanguage"
   DeleteRegKey /ifempty HKCU "${INSTALLER_LANGUAGE_KEY}"
   ${If} $ClearUserData == ${BST_CHECKED}
-    MessageBox MB_OK "$(UninstallClearedUserData)"
+    MessageBox MB_OK "$(UninstallClearedUserData)" /SD IDOK
   ${Else}
-    MessageBox MB_OK "$(UninstallKeptUserData)"
+    MessageBox MB_OK "$(UninstallKeptUserData)" /SD IDOK
   ${EndIf}
 SectionEnd
