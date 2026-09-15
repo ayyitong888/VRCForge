@@ -2284,8 +2284,8 @@
       "VisionCaptureStatusRequest",
       "VisionConfigRequest"
     ],
-    "schemasSha256": "46d55d631d41d2e90454c2e21d32a04b883ae48ff0b0e945d926612b12471fa7",
-    "sha256WithoutRuntimeVersion": "dc0a9ebb8369902ad5880f6abce8a0399c9fb8d4b74a2e5d333802f5ae33460f"
+    "schemasSha256": "0b39a0cc89c6e35a3e6ff1d31254af37ec08280cb393ffc5ef679aa30e5b5063",
+    "sha256WithoutRuntimeVersion": "f6ee499351f4f5a3a0fa31b629dd5deacae25412b9d06167e5fce6c6119b4154"
   },
   "events": {
     "envelopeKeys": [

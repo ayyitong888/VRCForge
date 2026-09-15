@@ -10,13 +10,15 @@ import unity_read_input_schemas
 import unity_write_input_schemas
 
 
-def test_write_schemas_keep_one_owner_and_exact_pre_extraction_values() -> None:
+def test_write_schemas_keep_one_owner_and_reviewed_revision_159_contract() -> None:
     schemas = unity_write_input_schemas.EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS
     assert agent_gateway.EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS is schemas
-    # The new relocation contract must not alter any pre-existing public schema.
+    # Revision 159 includes reviewed writer schemas, explicit copy destinations,
+    # and the existing constraint params/arguments envelope. Relocation remains
+    # separately covered and excluded from this reviewed contract digest.
     existing = {name: schema for name, schema in schemas.items() if name != "vrcforge_relocate_generated_assets"}
     encoded = json.dumps(existing, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
-    assert hashlib.sha256(encoded).hexdigest() == "30d3022807ff9a6e9ddf4a92cc9b5687a28172476a2e74ae62414501156a3dff"
+    assert hashlib.sha256(encoded).hexdigest() == "60fb16ae90896c8ae19f1f68c0b4de5ddb1508beb2f45341a6744f787e4a1328"
     for name, schema in schemas.items():
         preview = "vrcforge_preview_" + name.removeprefix("vrcforge_")
         read = unity_read_input_schemas.UNITY_READ_TOOL_INPUT_SCHEMAS.get(preview)

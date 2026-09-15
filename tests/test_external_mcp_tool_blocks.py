@@ -30,21 +30,22 @@ def test_tool_blocks_keep_one_definition_and_existing_exports() -> None:
         assert getattr(agent_gateway, name) is getattr(external_mcp_tool_blocks, name)
         node = definitions[name]
         if name == "EXTERNAL_MCP_WRITE_TOOL_BLOCKS":
-            # The relocation leaf is an explicitly authorized additive entry;
-            # compare the remainder against the immutable pre-relocation AST.
-            class _RemoveAuthorizedRelocation(ast.NodeTransformer):
+            # Reviewed relocation and typed chat repair are additive entries;
+            # retain the immutable AST digest for every other membership.
+            assert "vrcforge_repair_project_chat_store" in external_mcp_tool_blocks.EXTERNAL_MCP_WRITE_TOOL_BLOCKS["checkpoint"]
+            class _RemoveReviewedAdditions(ast.NodeTransformer):
                 def visit_Set(self, current):
                     current = self.generic_visit(current)
                     current.elts = [
                         item for item in current.elts
                         if not (
                             isinstance(item, ast.Constant)
-                            and item.value == "vrcforge_relocate_generated_assets"
+                            and item.value in {"vrcforge_relocate_generated_assets", "vrcforge_repair_project_chat_store"}
                         )
                     ]
                     return current
 
-            node = _RemoveAuthorizedRelocation().visit(node)
+            node = _RemoveReviewedAdditions().visit(node)
         assert hashlib.sha256(ast.dump(node, include_attributes=False).encode()).hexdigest() == expected
     assert not any(isinstance(node, (ast.FunctionDef, ast.ClassDef, ast.Import)) for node in ast.walk(tree))
     assert {node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)} == {"__future__"}

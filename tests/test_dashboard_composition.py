@@ -101,6 +101,37 @@ def test_openapi_contract_matches_the_entry_baseline() -> None:
     assert _canonical_sha256(openapi) == contract["openApi"]["sha256WithoutRuntimeVersion"]
 
 
+def test_shader_material_scan_paging_is_optional_and_preserves_prior_openapi() -> None:
+    openapi = copy.deepcopy(dashboard_server.app.openapi())
+    openapi["info"]["version"] = "<runtime-version>"
+    schema = openapi["components"]["schemas"]["ShaderMaterialScanRequest"]
+    assert schema.get("required", []) == []
+    properties = schema["properties"]
+    assert properties["offset"] == {
+        "type": "integer", "minimum": 0, "title": "Offset", "default": 0,
+        "description": "Zero-based result offset; follow paging.nextOffset while keeping the avatar and filters unchanged.",
+    }
+    assert properties["limit"] == {
+        "anyOf": [{"type": "integer", "maximum": 100, "minimum": 1}, {"type": "null"}],
+        "title": "Limit",
+        "description": "Optional page size. Omit with offset 0 and indexOnly false for the existing full result; explicit paging otherwise defaults to 25 rows.",
+    }
+    assert properties["indexOnly"] == {
+        "type": "boolean", "title": "Indexonly", "default": False,
+        "description": "Discover exact material IDs, names, renderer paths and shaders in bounded index pages, then read selected details using materialIds. Follow paging.nextOffset until null.",
+    }
+    request = dashboard_server.ShaderMaterialScanRequest()
+    assert (request.offset, request.limit, request.index_only) == (0, None, False)
+    assert properties["materialIds"]["description"] == "Exact IDs discovered through indexOnly pages; omit to scan all materials."
+    # Reversing only the reviewed additive paging fields restores the prior
+    # whole contract, guarding every unrelated route and schema field.
+    for name in ("offset", "limit", "indexOnly"):
+        properties.pop(name)
+    properties["materialIds"].pop("description")
+    assert _canonical_sha256(openapi["components"]["schemas"]) == "46d55d631d41d2e90454c2e21d32a04b883ae48ff0b0e945d926612b12471fa7"
+    assert _canonical_sha256(openapi) == "dc0a9ebb8369902ad5880f6abce8a0399c9fb8d4b74a2e5d333802f5ae33460f"
+
+
 def test_catch_all_agent_mcp_mount_is_registered_last() -> None:
     routes = dashboard_server.app.routes
     catch_all = [
