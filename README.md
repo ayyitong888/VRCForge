@@ -86,7 +86,7 @@ VRCForge 对 Unity 资产写入采用以下受监督流程：
 
 从 [最新 Release](https://github.com/ayyitong888/VRCForge/releases/latest) 下载：
 
-- `VRCForge_Web_Installer_x64.exe`，或离线安装器 `VRCForge_Offline_Installer_x64.exe`
+- 1.8.0 请使用 `VRCForge_Web_Installer_x64_Hotfix1.exe`，或离线安装器 `VRCForge_Offline_Installer_x64_Hotfix1.exe`（修复程序运行时的关闭提示与重试安装）
 - `VRCForge.unitypackage`
 
 然后完成三步连接：

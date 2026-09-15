@@ -1305,7 +1305,14 @@ Each item ends with its version history in this exact form:
   finish page; desktop and Start-menu shortcuts remain the normal-integrity
   launch boundary so the installed window keeps ordinary drag/drop, title-bar
   movement and desktop automation behavior.
-- Contract: after the replacement payload has been staged and verified, an
+- Contract: before payload activation (and before Web download), inspect the
+  exact installed App/backend process paths as well as file locks. A readable
+  executable does not prove its process has exited. If busy, show an actionable
+  Retry/Cancel dialog: the user saves and fully exits the App, then Retry continues
+  the same setup. Cancel preserves the installation. Silent mode defaults to
+  Cancel and returns nonzero without an interactive wait or automatic retry.
+- Contract: if a process starts after that preflight, after the replacement
+  payload has been staged and verified, an
   install or upgrade registers only the exact existing
   `$INSTDIR\VRCForge.exe` and
   `$INSTDIR\backend\vrcforge_backend.exe` resources with Windows Restart
@@ -1314,8 +1321,10 @@ Each item ends with its version history in this exact form:
   that still converts the Restart Manager close into "hide to tray", setup may
   terminate only a process whose absolute executable path, PID and process start
   time still match the exact pre-shutdown snapshot. Any identity drift or
-  remaining lock stops installation with a clear error while preserving the
-  complete old installation; it never continues a partial overwrite, kills by
+  remaining lock stops activation with a Retry/Cancel error while preserving the
+  complete old installation. Web Retry must recreate both its consumed download
+  directory and state descriptor; it must not reuse either stale path. Setup
+  never continues a partial overwrite, kills by
   broad process name, or closes a portable/other-directory instance.
 - Forbidden regression: no elevated finish-page launch, inherited administrator
   desktop process, advice-only "close VRCForge first" workflow, opaque file-in-
@@ -1332,7 +1341,13 @@ Each item ends with its version history in this exact form:
 - Acceptance: release-policy tests freeze the absence of finish-page launch and
   name-only termination, the exact installed-resource registration, the bounded
   legacy path/PID/start-time fallback, verified-payload-before-shutdown order,
-  fresh lock readback and the atomic failure boundary.
+  fresh process/lock readback and the atomic failure boundary.
+  `scripts/test_installer_retry_ui.py` additionally runs the real NSIS UI on
+  disposable hosted Windows with the published payload. Both installers must
+  pass locked-file Cancel/preservation, unlocked Retry, actual running-App
+  detection before shutdown, a late activation failure followed by successful
+  Retry, and bounded silent failure. Every case verifies installed hashes and
+  a user-data sentinel; a successful source test alone cannot close this gate.
   `tests/test_installer_restart_manager_bootstrap.py` copies the actual NSIS
   x86-unicode native `System.dll` into the .NET process working directory and
   must successfully compile and call `RmStartSession` through the same isolation
@@ -1340,14 +1355,16 @@ Each item ends with its version history in this exact form:
   first runs `scripts/smoke_restart_manager_shutdown.ps1` against the packaged
   desktop with an isolated profile and observes the exact desktop/backend pair
   exit with no port 8757 listener. It then launches the exact installed
-  candidate, runs the matching installer, observes cooperative desktop exit plus
-  identity-checked legacy fallback where required, completes upgrade, starts the
+  candidate, runs the matching installer, observes the user-facing close-and-Retry
+  prompt, and completes upgrade after the exact installed processes exit. The
+  late-start race retains cooperative exit and identity-checked legacy fallback
+  where required. Acceptance then starts the
   new version from a normal shortcut, and confirms preserved settings, chats,
   checkpoints and project history. The running-app upgrade gate additionally
   requires installer exit code 0, disappearance of the exact pre-upgrade desktop
   and backend PIDs, release of port 8757, preservation of isolated user data and
   fresh installed-file hashes matching the packaged payload.
-- [首次实现: 1.8.0] [强化/修复: 1.8.0] [最近验证: 源码、打包及真实运行中升级]
+- [首次实现: 1.8.0] [强化/修复: 1.8.0 Installer Hotfix1] [最近验证: 双安装器真实 Windows Retry/Cancel、进程检测与故障恢复]
 
 ## Change procedure
 

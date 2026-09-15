@@ -38,7 +38,8 @@ These classes are the recurring failure surfaces found in the VRC tool audit:
 | Permissions | Read, write, approval, and external-tool boundaries are enforced by the tool contract and execution layer. | `tests/test_agent_gateway_action_identity.py`; `tests/test_avatar_encryption_addon.py`; `tests/test_release_build_policy.py` |
 | Rollback | Approved writes have a recoverable checkpoint; rollback failure preserves the current state and exposes recovery information. | `tests/test_agent_checkpoint_recovery_service.py`; `tests/test_agent_approval_transaction_service.py` |
 | Installer target and preservation | Install and upgrade operate on the exact VRCForge leaf, preserve the prior installation when activation fails, and keep uninstall cleanup scoped. | `installer/VRCForge_WebPayload.ps1`; `tests/test_web_payload_helper.py`; hosted Windows run 34987883889 |
-| Silent installer behavior | Silent mode supplies a deterministic default response while interactive mode retains its dialogs; error dialogs still abort. | `installer/VRCForge_Offline_Installer_x64.nsi`; `installer/VRCForge_Web_Installer_x64.nsi`; `tests/test_release_build_policy.py` |
+| Running-app retry | Detect exact installed App/backend processes as well as file locks before activation. Interactive users can close the App and Retry in the same setup; Cancel preserves the old installation. Late activation retries also recreate consumed Web download state. | `tests/test_release_build_policy.py`; `scripts/test_installer_retry_ui.py`; Hotfix1 real Windows evidence below |
+| Silent installer behavior | Silent mode defaults Retry/Cancel dialogs to Cancel and exits nonzero without blocking. It never defaults to Retry or loops unattended. | `installer/VRCForge_Offline_Installer_x64.nsi`; `installer/VRCForge_Web_Installer_x64.nsi`; `tests/test_release_build_policy.py`; `scripts/test_installer_retry_ui.py` |
 | PowerShell module resolution | Installer-launched Windows PowerShell children receive the native Windows PowerShell module path at process scope; registry state and the caller environment are unchanged. | The two NSIS `.onInit` entrypoints; `tests/test_release_build_policy.py` |
 | ZIP layout safety | The archive entry count and byte limits bound extraction without rejecting the 1.8.0 payload: 5,989 entries are accepted and 8,193 are rejected against the 8,192 limit. | `installer/VRCForge_WebPayload.ps1`; `tests/test_web_payload_helper.py` |
 
@@ -66,6 +67,26 @@ a live-coverage claim, and do not count a listening port or successful process
 start as proof of an MCP or Unity workflow.
 
 ## 1.8.0 closeout references
+
+### Installer Hotfix1
+
+The original fresh-install/upgrade gate did not cover interactive Retry. Hotfix1
+adds real Windows UI tests for both installers: locked-file Cancel/preservation,
+unlocked Retry, an actual running App that stays alive until the test closes it,
+late activation failure followed by Retry, and bounded silent failure. Each case
+reads back installed hashes and a user-data sentinel. Running images must be
+detected by exact process identity: Windows can permit an exclusive read of an
+executable while it is running, so a file-lock check alone is insufficient.
+
+- [Offline job](https://github.com/ayyitong888/VRCForge/actions/runs/34996314930/job/104473337259)
+  passed at `332fe12`. The Web job in that older run failed and was superseded.
+- [Web run](https://github.com/ayyitong888/VRCForge/actions/runs/34997563193)
+  passed at `0455473`, including deletion of the consumed state descriptor before
+  a later retry calls `Prepare` again.
+- The published `*_Hotfix1.exe` assets match the tested bytes. Their hashes,
+  source commits and case exit codes are in
+  [installer-hotfix1-manifest.json](https://github.com/ayyitong888/VRCForge/releases/download/v1.8.0/installer-hotfix1-manifest.json).
+  App/backend payload, Unity package and original release tag remain unchanged.
 
 The installer and package fixes were reviewed against these exact commits:
 
