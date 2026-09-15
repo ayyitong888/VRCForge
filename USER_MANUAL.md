@@ -5,11 +5,11 @@ VRCForge 是一个面向 VRChat Avatar 编辑的本地桌面 Agent 工作区。
 
 This manual explains the public workflow and feature status without project-specific paths or private configuration details.
 
-Current source / target release: `1.8.0` (`v1.8.0`). Latest published stable release: `1.7.10`
-(`v1.7.10`). The 1.8.0 target keeps internal Agent and external MCP tool results
+Manual version: `1.8.0` (`v1.8.0`). Download matching installers and Unity packages
+from the [latest published release](https://github.com/ayyitong888/VRCForge/releases/latest).
+The 1.8.0 version keeps internal Agent and external MCP tool results
 causally equivalent, reports the exact reason when a successful inspection is
 still not ready, and adds a true Bottom Scene-view capture for neck-seam review.
-The published v1.7.10 tag and Release remain available and unchanged until formal publication.
 The Avatar Encryption / Anti-Rip addon remains a connector preview
 for lilToon and Poiyomi with scan/plan/preview
 plus request-only interfaces for a separately installed private addon module.

@@ -1,11 +1,10 @@
 # VRCForge 1.8.0
 
-VRCForge 1.8.0 is a Windows x64 test candidate. These notes describe the
-candidate's changes, not a publication or a claim that every real-avatar
-workflow has passed acceptance. The previously published stable release is
-unchanged.
+VRCForge 1.8.0 updates the shared Agent tools, exact-target editing and
+recovery workflows on Windows x64. These notes describe implemented changes;
+they do not claim that every possible avatar workflow has been validated.
 
-The shared boundary targets MCP 2.0 (`2026-07-28`). Local test installers are
+The shared boundary targets MCP 2.0 (`2026-07-28`). Windows installers are
 not code-signed; Windows may show an unverified-publisher warning. This does
 not constitute permission to bypass a failed integrity or pairing check.
 

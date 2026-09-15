@@ -2,7 +2,7 @@
 
 ![VRCForge — AI Agent + MCP for VRChat Avatar Editing](docs/assets/social-preview.svg)
 
-[![Stable](https://img.shields.io/badge/stable-v1.7.10-22c55e?style=flat-square)](https://github.com/ayyitong888/VRCForge/releases/latest)
+[![Stable](https://img.shields.io/github/v/release/ayyitong888/VRCForge?label=stable&style=flat-square)](https://github.com/ayyitong888/VRCForge/releases/latest)
 ![Development target](https://img.shields.io/badge/development-v1.8.0-4f46e5?style=flat-square)
 [![License GPL-3.0-only](https://img.shields.io/badge/license-GPL--3.0--only-64748b?style=flat-square)](LICENSE)
 ![Platform Windows x64](https://img.shields.io/badge/platform-Windows%20x64-0ea5e9?style=flat-square)
@@ -30,10 +30,9 @@ requires project-specific verification.
 
 > Back up your Unity / VRChat Avatar project before using any asset-writing feature.
 
-The current published stable release is
-[v1.7.10](https://github.com/ayyitong888/VRCForge/releases/tag/v1.7.10).
-Version `v1.8.0` is under development and testing and has not been formally
-released. Use the published Releases for installation and upgrades.
+This page describes the features and usage of `v1.8.0`. Get matching installers
+and Unity packages from the [latest published stable release](https://github.com/ayyitong888/VRCForge/releases/latest);
+use the version shown on that Release page for installation and upgrades.
 
 ## What VRCForge can do
 
@@ -149,7 +148,7 @@ writes still pass through the desktop approval flow.
 - The target environment is Windows x64, Unity 2022.3 LTS, and a VRChat SDK3 Avatar project.
 - Some read-only checks work without a Provider. AI chat, planning, and vision reasoning require a configured compatible Provider.
 - Outfit import, generic Unity CRUD, some optimization writes, and community Skills are Beta paths. Preview them first and validate in a copied or backed-up project.
-- `v1.8.0` is a source test candidate. Protocol, source-test, or successful tool-call evidence does not replace complete real-avatar, visual, restore, and packaged-build acceptance.
+- Protocol, source-test, or successful tool-call evidence does not establish visual correctness for every avatar. Verify the result on the avatar being edited and preserve its recovery point.
 - Quest/Android support, third-party asset licensing, and paid dependencies depend on the specific Avatar and assets.
 
 ## Documentation

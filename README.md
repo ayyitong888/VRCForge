@@ -2,7 +2,7 @@
 
 ![VRCForge — AI Agent + MCP for VRChat Avatar Editing](docs/assets/social-preview.svg)
 
-[![稳定版](https://img.shields.io/badge/稳定版-v1.7.10-22c55e?style=flat-square)](https://github.com/ayyitong888/VRCForge/releases/latest)
+[![稳定版](https://img.shields.io/github/v/release/ayyitong888/VRCForge?label=稳定版&style=flat-square)](https://github.com/ayyitong888/VRCForge/releases/latest)
 ![开发目标](https://img.shields.io/badge/开发目标-v1.8.0-4f46e5?style=flat-square)
 [![许可证 GPL-3.0-only](https://img.shields.io/badge/许可证-GPL--3.0--only-64748b?style=flat-square)](LICENSE)
 ![平台 Windows x64](https://img.shields.io/badge/平台-Windows%20x64-0ea5e9?style=flat-square)
@@ -27,8 +27,8 @@ Unity Editor 工具与 MCP Server，辅助捏脸、换装、材质调整和优�
 
 > 使用任何会写入 Unity 资产的功能前，请先备份 Unity / VRChat Avatar 工程。
 
-当前公开稳定版为 [v1.7.10](https://github.com/ayyitong888/VRCForge/releases/tag/v1.7.10)。
-`v1.8.0` 正在开发和测试，尚未正式发布。安装与升级请以公开 Release 为准。
+本页对应 `v1.8.0` 的功能与使用说明。安装与升级请从
+[最新公开稳定版](https://github.com/ayyitong888/VRCForge/releases/latest)获取配套安装器与 Unity 包，以 Release 页面显示的版本为准。
 
 ## VRCForge 能做什么
 
