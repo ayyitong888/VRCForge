@@ -8,6 +8,7 @@ import re
 import secrets
 import shutil
 import stat
+import tempfile
 import time
 import zipfile
 import zlib
@@ -1917,32 +1918,9 @@ class AgentCheckpointRecoveryService:
                             if source.is_file():
                                 current[source.relative_to(project_root).as_posix()] = source
 
-                deleted: list[str] = []
-                for relative in sorted(current.keys() - archived.keys()):
-                    current[relative].unlink()
-                    deleted.append(relative)
-
-                restored: list[str] = []
-                for relative, info in archived.items():
-                    target = (project_root / Path(*PurePosixPath(relative).parts)).resolve()
-                    if not is_path_within(target, project_root):
-                        raise ValueError(f"Unsafe restore target: {target}")
-                    needs_restore = not target.is_file() or target.stat().st_size != info.file_size
-                    if not needs_restore:
-                        crc = 0
-                        with target.open("rb") as handle:
-                            while chunk := handle.read(1024 * 1024):
-                                crc = zlib.crc32(chunk, crc)
-                        needs_restore = (crc & 0xFFFFFFFF) != info.CRC
-                    if not needs_restore:
-                        continue
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    temp_target = target.with_name(target.name + ".vrcforge-restore-tmp")
-                    with archive.open(info, "r") as source, temp_target.open("wb") as destination:
-                        shutil.copyfileobj(source, destination, length=1024 * 1024)
-                        flush_and_fsync(destination)
-                    os.replace(temp_target, target)
-                    restored.append(relative)
+                restored, deleted = self._publish_project_archive_restore(
+                    archive, archived, current, project_root
+                )
 
                 if not archive_files:
                     for name in pathspecs:
@@ -1965,6 +1943,86 @@ class AgentCheckpointRecoveryService:
             }
         except Exception as exc:  # noqa: BLE001
             return {"ok": False, "checkpoint": checkpoint, "error": f"Archive restore failed: {exc}"}
+
+    def _publish_project_archive_restore(
+        self, archive: zipfile.ZipFile, archived: dict[str, zipfile.ZipInfo],
+        current: dict[str, Path], project_root: Path,
+    ) -> tuple[list[str], list[str]]:
+        # Current-user, exclusive sibling files belong to this transaction only.
+        # Keep original files until every publish succeeds; preserve failed recovery.
+        records: list[dict[str, Any]] = []
+        directories: list[Path] = []
+        scratch: list[Path] = []
+
+        def reserve(parent: Path) -> Path:
+            fd, name = tempfile.mkstemp(prefix=".vrcforge-restore-", suffix=".tmp", dir=parent)
+            os.close(fd)
+            path = Path(name)
+            scratch.append(path)
+            return path
+
+        try:
+            for relative in sorted(set(archived) | set(current)):
+                info = archived.get(relative)
+                target = (project_root / Path(*PurePosixPath(relative).parts)).resolve()
+                if not is_path_within(target, project_root):
+                    raise ValueError(f"Unsafe restore target: {target}")
+                if target.exists() and not target.is_file():
+                    raise ValueError(f"Restore target is not a regular file: {target}")
+                if info is not None and target.is_file() and target.stat().st_size == info.file_size:
+                    crc = 0
+                    with target.open("rb") as handle:
+                        while chunk := handle.read(1024 * 1024):
+                            crc = zlib.crc32(chunk, crc)
+                    if (crc & 0xFFFFFFFF) == info.CRC:
+                        continue
+                missing: list[Path] = []
+                parent = target.parent
+                while not parent.exists():
+                    missing.append(parent)
+                    parent = parent.parent
+                for parent in reversed(missing):
+                    parent.mkdir()
+                    directories.append(parent)
+                stage = reserve(target.parent) if info is not None else None
+                if stage is not None:
+                    with archive.open(info, "r") as source, stage.open("wb") as destination:
+                        shutil.copyfileobj(source, destination, length=1024 * 1024)
+                        flush_and_fsync(destination)
+                records.append({"name": relative, "target": target, "stage": stage,
+                                "backup": reserve(target.parent), "moved": False, "published": False})
+            # All archive reads and target shape checks finish before any original moves.
+            for record in records:
+                target = record["target"]
+                if target.exists():
+                    os.replace(target, record["backup"])
+                    record["moved"] = True
+                if record["stage"] is not None:
+                    os.replace(record["stage"], target)
+                    record["published"] = True
+        except Exception as error:
+            recovery_errors: list[str] = []
+            for record in reversed(records):
+                try:
+                    if record["published"]:
+                        os.replace(record["target"], record["stage"])
+                    if record["moved"]:
+                        os.replace(record["backup"], record["target"])
+                except Exception as rollback_error:
+                    recovery_errors.append(f"{record['target']}: {rollback_error}; backup={record['backup']}")
+            if recovery_errors:
+                raise RuntimeError(
+                    f"{error}; rollback failed, recovery files preserved: {'; '.join(recovery_errors)}"
+                ) from error
+            for path in scratch:
+                path.unlink(missing_ok=True)
+            for directory in reversed(directories):
+                directory.rmdir()
+            raise
+        for path in scratch:
+            path.unlink(missing_ok=True)
+        return ([r["name"] for r in records if r["stage"] is not None],
+                [r["name"] for r in records if r["stage"] is None])
 
     def _restore_local_state_checkpoint(
         self,
