@@ -815,7 +815,7 @@ namespace VRCForge.Editor
                 Undo.IncrementCurrentGroup();
                 undoGroup = Undo.GetCurrentGroup();
                 Undo.SetCurrentGroupName($"Instantiate {instanceName}");
-                var instance = PrefabUtility.InstantiatePrefab(asset) as GameObject;
+                var instance = PrefabUtility.InstantiatePrefab(asset, scene) as GameObject;
                 if (instance == null)
                 {
                     VRCForgeApprovedObjectReceipt.CancelReservation(continuationNonce);

@@ -24232,6 +24232,15 @@ def unpack_prefab_sync(params: dict[str, Any]) -> dict[str, Any]:
     mode = str(params.get("mode") or "outermost").strip()
     preview = bool(params.get("preview", False))
     request = {"gameObjectPath": go_path, "mode": mode, "preview": preview}
+    for key in (
+        "expectedGlobalObjectId",
+        "expectedPrefabGuid",
+        "expectedAssetDependencyHash",
+        "expectedScenePath",
+        "approvedObjectReceiptNonce",
+    ):
+        if key in params:
+            request[key] = params[key]
     settings = load_dashboard_settings(build_agent_connection_request(params))
     payload = ensure_dict_payload(
         extract_tool_result_payload(invoke_unity_mcp(settings, "vrc_unpack_prefab", request)),
