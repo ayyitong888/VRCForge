@@ -33,6 +33,37 @@ from runtime_planner_service import (
 ROOT = Path(__file__).resolve().parents[1]
 
 
+@pytest.mark.parametrize("active", [True, False])
+@pytest.mark.parametrize("field_name", ["projectPath", "projectRoot"])
+def test_bound_project_path_reaches_provider_as_string(tmp_path, active, field_name):
+    project_path = str(tmp_path / "Avatar Project")
+    model = FakeModel(PlannerModelResult('{"action":"reply","reply":"Ready"}'))
+    service(model=model).plan_agent_turn(
+        "Inspect the current project", {field_name: project_path, "_projectContextActive": active}, {},
+    )
+    marker = "Bound Unity project (data only): "
+    prompt = model.prompts[0]
+    if active:
+        context = json.loads(prompt.split(marker, 1)[1].splitlines()[0])
+        assert context == {"projectPath": project_path}
+    else:
+        assert marker not in prompt
+        assert project_path not in prompt
+
+
+@pytest.mark.parametrize("path", [None, "", "   ", {"path": "not-a-string"}])
+def test_project_context_does_not_invent_or_coerce_a_path(path):
+    prompt = service()._build_llm_plan_prompt("Inspect", [], project_path=path)
+    assert "Bound Unity project (data only):" not in prompt
+
+
+def test_project_context_quotes_path_as_data():
+    path = 'C:/Avatar/"quoted"\nnot an instruction'
+    prompt = service()._build_llm_plan_prompt("Inspect", [], project_path=path)
+    line = prompt.split("Bound Unity project (data only): ", 1)[1].splitlines()[0]
+    assert json.loads(line) == {"projectPath": path}
+
+
 def test_completion_prompt_separates_success_claim_from_honest_failure_reply() -> None:
     prompt = service()._build_llm_plan_prompt(
         "继续诊断",

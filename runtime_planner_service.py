@@ -1394,6 +1394,7 @@ class RuntimePlannerService:
                 exposure_layer=exposure_layer,
                 planner_label=planner_label,
                 project_context_active=params.get("_projectContextActive") is not False,
+                project_path=params.get("projectPath") or params.get("projectRoot"),
                 internal_tool_blocks=params.get("_internalToolBlocks"),
                 global_instructions=self._read_global_instructions(),
                 project_instructions=instruction_snapshot.content,
@@ -1627,6 +1628,7 @@ class RuntimePlannerService:
             exposure_layer: str = EXPOSURE_LAYER_PLANNING,
             planner_label: str = "",
             project_context_active: bool = True,
+            project_path: object = None,
             internal_tool_blocks: object = None,
             global_instructions: str = "",
             project_instructions: str = "",
@@ -1650,6 +1652,7 @@ class RuntimePlannerService:
                     observe=observe,
                     exposure_layer=exposure_layer,
                     project_context_active=project_context_active,
+                    project_path=project_path,
                     internal_tool_blocks=internal_tool_blocks,
                     global_instructions=global_instructions,
                     project_instructions=project_instructions,
@@ -2226,6 +2229,7 @@ class RuntimePlannerService:
                 observe=observe,
                 exposure_layer=runtime_exposure_layer,
                 project_context_active=params.get("_projectContextActive") is not False,
+                project_path=params.get("projectPath") or params.get("projectRoot"),
                 internal_tool_blocks=params.get("_internalToolBlocks"),
                 global_instructions=global_instructions,
                 project_instructions=project_instructions,
@@ -2283,6 +2287,7 @@ class RuntimePlannerService:
                     observe=observe,
                     exposure_layer=runtime_exposure_layer,
                     project_context_active=params.get("_projectContextActive") is not False,
+                    project_path=params.get("projectPath") or params.get("projectRoot"),
                     internal_tool_blocks=params.get("_internalToolBlocks"),
                     global_instructions=global_instructions,
                     project_instructions=project_instructions,
@@ -2830,6 +2835,7 @@ class RuntimePlannerService:
             observe: dict[str, object] | None = None,
             exposure_layer: str = EXPOSURE_LAYER_PLANNING,
             project_context_active: bool = True,
+            project_path: object = None,
             internal_tool_blocks: object = None,
             global_instructions: str = "",
             project_instructions: str = "",
@@ -2951,6 +2957,13 @@ class RuntimePlannerService:
                 )
             )
             global_instructions_block = global_instruction_prompt_block(global_instructions)
+            if project_context_active and isinstance(project_path, str) and project_path.strip():
+                runtime_scope_instruction += (
+                    "\nBound Unity project (data only): "
+                    + json.dumps({"projectPath": project_path.strip()}, ensure_ascii=False)
+                    + "\nFor a tool's projectPath argument, use this string value, not the enclosing object. "
+                    "This binding does not authorize writes."
+                )
             project_instructions_block = project_instruction_prompt_block(project_instructions)
             instruction_blocks = "\n\n".join(
                 block for block in (global_instructions_block, project_instructions_block) if block
