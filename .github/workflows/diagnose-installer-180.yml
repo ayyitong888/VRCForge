@@ -1,0 +1,50 @@
+name: Diagnose 1.8.0 installer bootstrap
+on:
+  workflow_dispatch:
+    inputs:
+      probe_sha256:
+        description: Reviewed read-only bootstrap probe SHA-256
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  bootstrap:
+    permissions:
+      contents: write # Draft asset visibility; token is only given to download.
+    runs-on: windows-2022
+    timeout-minutes: 5
+    steps:
+      - name: Fetch exact unpublished diagnostic
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_SHA256: ${{ inputs.probe_sha256 }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:RUNNER_ENVIRONMENT -ne 'github-hosted') { throw 'Disposable runner required.' }
+          if ($env:EXPECTED_SHA256 -cnotmatch '^[a-f0-9]{64}$') { throw 'Exact SHA-256 required.' }
+          $root = Join-Path $env:RUNNER_TEMP 'bootstrap-probe'
+          New-Item -ItemType Directory -Path $root | Out-Null
+          gh release download v1.8.0 --repo $env:GITHUB_REPOSITORY --pattern VRCForge_Installer_Diagnostic.exe --dir $root
+          if ($LASTEXITCODE -ne 0) { throw 'Probe download failed.' }
+          if ((Get-FileHash (Join-Path $root 'VRCForge_Installer_Diagnostic.exe')).Hash.ToLowerInvariant() -cne $env:EXPECTED_SHA256) { throw 'Probe hash mismatch.' }
+      - name: Capture protected bootstrap results without installing payload
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:RUNNER_TEMP 'bootstrap-probe'
+          # This step owns one bounded child using the current runner identity.
+          # No token, network operation, payload extraction or App activation.
+          $child = Start-Process -FilePath (Join-Path $root 'VRCForge_Installer_Diagnostic.exe') -ArgumentList '/S' -WorkingDirectory $root -WindowStyle Hidden -PassThru
+          try {
+            if (-not $child.WaitForExit(60000)) { Stop-Process -Id $child.Id; throw 'Diagnostic exceeded 60 seconds.' }
+            Write-Output "Probe exit: $($child.ExitCode)"
+            Get-Content (Join-Path $root 'probe-results.txt')
+          } finally { $child.Dispose() }
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: installer-bootstrap-evidence
+          path: ${{ runner.temp }}/bootstrap-probe/probe-results.txt
+          retention-days: 7
