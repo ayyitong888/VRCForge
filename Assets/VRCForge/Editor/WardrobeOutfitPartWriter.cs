@@ -252,6 +252,9 @@ namespace VRCForge.Editor
                 var saveScope = new WardrobeAssetSaveScope(fxController,
                     !boolParamExists ? parametersAsset : null,
                     addMenuToggle ? descriptor.expressionsMenu : null);
+                var sceneSaveScope = new WardrobeSceneSaveScope(
+                    setObjectsDefaultOff && !defaultOn && resolvedTargets.Any(item => item.gameObject.activeSelf)
+                        ? descriptor.gameObject : null);
                 AvatarAuthoringCrudCore.EnsureAssetFolder(clipDir);
                 var undoGroup = Undo.GetCurrentGroup();
                 Undo.SetCurrentGroupName($"Add outfit part '{partName}'");
@@ -275,7 +278,7 @@ namespace VRCForge.Editor
                 // b. Part objects scene-default OFF (unless they should default on).
                 if (setObjectsDefaultOff && !defaultOn)
                 {
-                    foreach (var t in resolvedTargets)
+                    foreach (var t in resolvedTargets.Where(item => item.gameObject.activeSelf))
                     {
                         var go = t.gameObject;
                         Undo.RecordObject(go, "Outfit part default off");
@@ -367,6 +370,7 @@ namespace VRCForge.Editor
 
                 saveScope.Save(fxController, !boolParamExists ? parametersAsset : null,
                     addMenuToggle ? descriptor.expressionsMenu : null, onClip, offClip);
+                sceneSaveScope.Save();
                 AssetDatabase.Refresh();
                 Undo.CollapseUndoOperations(undoGroup);
 

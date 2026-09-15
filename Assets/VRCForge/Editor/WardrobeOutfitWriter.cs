@@ -372,6 +372,9 @@ namespace VRCForge.Editor
                 }
                 var saveScope = new WardrobeAssetSaveScope(fxController,
                     addMenuToggle ? descriptor.expressionsMenu : null);
+                var sceneSaveScope = new WardrobeSceneSaveScope(
+                    setObjectsDefaultOff && resolvedTargets.Any(item => item.gameObject.activeSelf)
+                        ? descriptor.gameObject : null);
                 if (!string.IsNullOrWhiteSpace(approvedObjectReceiptNonce))
                 {
                     if (resolvedTargets.Count != 1)
@@ -392,7 +395,7 @@ namespace VRCForge.Editor
                 // a. New objects scene-default OFF.
                 if (setObjectsDefaultOff)
                 {
-                    foreach (var t in resolvedTargets)
+                    foreach (var t in resolvedTargets.Where(item => item.gameObject.activeSelf))
                     {
                         var go = t.gameObject;
                         Undo.RecordObject(go, "Wardrobe outfit default off");
@@ -482,6 +485,7 @@ namespace VRCForge.Editor
                 }
 
                 saveScope.Save(fxController, addMenuToggle ? descriptor.expressionsMenu : null, clip);
+                sceneSaveScope.Save();
                 AssetDatabase.Refresh();
                 Undo.CollapseUndoOperations(undoGroup);
                 var postWardrobeFingerprint = WardrobeScanner.ComputeStableFingerprintForAvatar(avatarRootPath);

@@ -203,10 +203,17 @@ namespace VRCForge.Editor
                         : new UnityEngine.Object[] { context.rootMenu, context.fxController,
                             action == "delete_wardrobe" ? context.parametersAsset : null };
                 var saveScope = new WardrobeAssetSaveScope(saveRoots);
+                var changesScene = ((action == "remove_outfit" && (deleteObjects || deactivateObjects))
+                    || (action == "delete_wardrobe" && deleteObjects))
+                    && plan.affectedObjects.Select(path => ResolveUnderRoot(descriptor.transform, path))
+                        .Any(item => item != null && item != descriptor.transform
+                            && (deleteObjects || item.gameObject.activeSelf));
+                var sceneSaveScope = new WardrobeSceneSaveScope(changesScene ? descriptor.gameObject : null);
                 var undoGroup = Undo.GetCurrentGroup();
                 Undo.SetCurrentGroupName($"Manage wardrobe '{parameterName}'");
                 ApplyAction(action, descriptor, context, targetValues, newName, deleteObjects, deactivateObjects, deleteGeneratedAssets, assetDir, new Queue<string>(plan.newMenuAssetPaths), @params);
                 saveScope.Save(saveRoots);
+                sceneSaveScope.Save();
                 AssetDatabase.Refresh();
                 Undo.CollapseUndoOperations(undoGroup);
 
@@ -741,7 +748,7 @@ namespace VRCForge.Editor
                     Undo.DestroyObjectImmediate(transform.gameObject);
                     continue;
                 }
-                if (deactivateObjects)
+                if (deactivateObjects && transform.gameObject.activeSelf)
                 {
                     Undo.RecordObject(transform.gameObject, "Deactivate removed wardrobe outfit object");
                     transform.gameObject.SetActive(false);
