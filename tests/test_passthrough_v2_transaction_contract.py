@@ -24,7 +24,7 @@ def test_create_safe_backup_returns_bounded_transaction_with_copied_file_readbac
     source = (ROOT / "Assets/VRCForge/Editor/ConsoleTools.cs").read_text(
         encoding="utf-8"
     )
-    copy_index = source.index("File.Copy(sourceFullPath, backupFullPath, true);")
+    copy_index = source.index("File.Copy(sourceFullPath, backupFullPath, false);")
     readback_index = source.index("item.after_sha256 = ComputeSha256(backupFullPath);", copy_index)
     assert copy_index < readback_index
     assert "catch (SafeBackupTransactionException ex)" in source

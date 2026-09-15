@@ -73,7 +73,7 @@ namespace VRCForge.Editor
         {
             var projectRoot = GetProjectRoot();
             var backupRoot = ResolveProjectPath(parameters.backupRoot, projectRoot);
-            var backupId = $"vrcforge_backup_{DateTime.UtcNow:yyyyMMdd_HHmmss}";
+            var backupId = $"vrcforge_backup_{DateTime.UtcNow:yyyyMMdd_HHmmss}_{Guid.NewGuid():N}";
             var backupPath = Path.Combine(backupRoot, backupId).Replace("\\", "/");
             var filesRoot = Path.Combine(backupPath, "files").Replace("\\", "/");
             var manifestPath = Path.Combine(backupPath, "backup.json").Replace("\\", "/");
@@ -106,7 +106,7 @@ namespace VRCForge.Editor
                 item.before_sha256 = item.before_exists ? ComputeSha256(backupFullPath) : "";
                 try
                 {
-                    File.Copy(sourceFullPath, backupFullPath, true);
+                    File.Copy(sourceFullPath, backupFullPath, false);
                     item.sha256 = ComputeSha256(sourceFullPath);
                     item.byte_count = new FileInfo(sourceFullPath).Length;
                     item.after_exists = File.Exists(backupFullPath);
@@ -155,10 +155,11 @@ namespace VRCForge.Editor
 
             var manifestBeforeExists = File.Exists(manifestPath);
             var manifestBeforeSha = manifestBeforeExists ? ComputeSha256(manifestPath) : "";
-            File.WriteAllText(
-                manifestPath,
-                JsonConvert.SerializeObject(payload, Formatting.Indented),
-                Encoding.UTF8);
+            using (var stream = new FileStream(manifestPath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+            using (var writer = new StreamWriter(stream, Encoding.UTF8))
+            {
+                writer.Write(JsonConvert.SerializeObject(payload, Formatting.Indented));
+            }
             var manifestAfterExists = File.Exists(manifestPath);
             var manifestAfterSha = ComputeSha256(manifestPath);
             payload.transaction = BuildTransaction(
