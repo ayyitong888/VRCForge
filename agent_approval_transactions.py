@@ -3496,6 +3496,8 @@ class AgentApprovalTransactionService:
             if effective_risk_level in {"high", "critical"} and not full_permission
             else ""
         ).strip()
+        if normalize_execution_mode(config.execution_mode) == "approval" and not confirmation_reason:
+            confirmation_reason = "Current permission mode requires user confirmation for each write."
         if authoritative_preview_only:
             confirmation_reason = ""
 
@@ -3807,8 +3809,13 @@ class AgentApprovalTransactionService:
             current_config = self._ports.ensure_config()
             if (
                 not prepared.get("requiresUserConfirmation")
-                and str(prepared.get("riskLevel") or "").lower() in {"high", "critical"}
-                and normalize_execution_mode(current_config.execution_mode) != "roslyn_full_auto"
+                and (
+                    normalize_execution_mode(current_config.execution_mode) == "approval"
+                    or (
+                        str(prepared.get("riskLevel") or "").lower() in {"high", "critical"}
+                        and normalize_execution_mode(current_config.execution_mode) != "roslyn_full_auto"
+                    )
+                )
             ):
                 raise AgentGatewayError(
                     "Permission changed after write preparation. Prepare this operation again under the current permission mode.",
