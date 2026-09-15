@@ -20694,7 +20694,7 @@ def scan_addon_framework_sync(framework: str, params: dict[str, Any]) -> dict[st
         or ""
     ).strip()
 
-    unity_state: dict[str, Any] = {"scanned": False}
+    unity_state: dict[str, Any] = {"scanned": False, "complete": False, "missingMatchProvesAbsence": False}
     matches: list[dict[str, Any]] = []
     if params.get("skip_unity") is not True and params.get("skipUnity") is not True:
         try:
@@ -20707,6 +20707,11 @@ def scan_addon_framework_sync(framework: str, params: dict[str, Any]) -> dict[st
                 )
             )
             items = payload.get("items") if isinstance(payload, dict) else None
+            if not isinstance(payload, dict) or payload.get("ok") is False or not isinstance(items, list):
+                raise RuntimeError("Unity addon scan did not return a successful item inventory.")
+            scan_summary = payload.get("summary")
+            raw_truncated = scan_summary.get("truncated") if isinstance(scan_summary, dict) else None
+            truncated = raw_truncated if isinstance(raw_truncated, bool) else None
             for item in items or []:
                 if not isinstance(item, dict):
                     continue
@@ -20721,9 +20726,13 @@ def scan_addon_framework_sync(framework: str, params: dict[str, Any]) -> dict[st
                             "activeInHierarchy": item.get("active_in_hierarchy"),
                         }
                     )
-            unity_state = {"scanned": True, "itemCount": len(items or []), "matchCount": len(matches)}
+            unity_state = {
+                "scanned": True, "itemCount": len(items), "matchCount": len(matches),
+                "truncated": truncated, "complete": truncated is False,
+                "missingMatchProvesAbsence": truncated is False,
+            }
         except (RuntimeError, UnityMcpError) as exc:
-            unity_state = {"scanned": False, "error": str(exc)[:240]}
+            unity_state = {"scanned": False, "complete": False, "missingMatchProvesAbsence": False, "error": str(exc)[:240]}
 
     if package_info.get("installed"):
         package_text = "installed" + (f" {package_info['version']}" if package_info.get("version") else "")
@@ -20731,6 +20740,8 @@ def scan_addon_framework_sync(framework: str, params: dict[str, Any]) -> dict[st
         package_text = "not detected"
     if unity_state.get("scanned"):
         component_text = f"{len(matches)} component carrier(s) found on scanned avatars"
+        if not unity_state.get("complete"):
+            component_text += "; inventory incomplete or completeness unknown, so missing matches do not prove absence"
     else:
         component_text = "Unity component scan unavailable"
     summary = f"{spec['label']}: package {package_text}; {component_text}."
