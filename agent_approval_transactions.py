@@ -3804,6 +3804,22 @@ class AgentApprovalTransactionService:
         project_lock_acquired = False
 
         with self._ports.state.shared_state_lock:
+            current_config = self._ports.ensure_config()
+            if (
+                not prepared.get("requiresUserConfirmation")
+                and str(prepared.get("riskLevel") or "").lower() in {"high", "critical"}
+                and normalize_execution_mode(current_config.execution_mode) != "roslyn_full_auto"
+            ):
+                raise AgentGatewayError(
+                    "Permission changed after write preparation. Prepare this operation again under the current permission mode.",
+                    status_code=409,
+                    cause_code="external_mcp_permission_changed",
+                    failure_layer="transaction_start",
+                    failure_phase="before_write_handler",
+                    operation_kind="write", tool=target_tool,
+                    tool_routing_started=False, mutation_started=False,
+                    committed=False, commit_state="not_started",
+                )
             if self._project_has_background_read(project_root):
                 raise AgentGatewayError(
                     "A background project read is active. Retry this external write after it finishes.",
