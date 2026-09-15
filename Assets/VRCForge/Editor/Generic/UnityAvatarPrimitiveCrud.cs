@@ -2700,6 +2700,9 @@ namespace VRCForge.Editor
                 var directedIndex = @params["transitionIndex"]?.Value<int?>() ?? -1;
                 if (directedIndex < 0)
                 {
+                    if (transitions.Count(item => item != null && item.destinationState != null
+                        && item.destinationState.name == destinationName) > 1)
+                        throw new InvalidOperationException("Transition destination is ambiguous; pass transitionIndex.");
                     directedIndex = Array.FindIndex(transitions, item => item != null && item.destinationState != null
                         && item.destinationState.name == destinationName);
                 }
@@ -2721,6 +2724,8 @@ namespace VRCForge.Editor
             {
                 var destination = @params["destinationStateName"]?.ToString() ?? @params["stateName"]?.ToString() ?? "";
                 var transitions = layer.stateMachine.anyStateTransitions ?? Array.Empty<AnimatorStateTransition>();
+                if (transitions.Count(item => item != null && item.destinationState != null && item.destinationState.name == destination) > 1)
+                    throw new InvalidOperationException("Transition destination is ambiguous; pass transitionIndex.");
                 index = Array.FindIndex(transitions, item => item != null && item.destinationState != null && item.destinationState.name == destination);
             }
             if (index < 0 || index >= (layer.stateMachine.anyStateTransitions?.Length ?? 0))
@@ -2766,6 +2771,9 @@ namespace VRCForge.Editor
                 var index = @params["transitionIndex"]?.Value<int?>() ?? -1;
                 if (index < 0)
                 {
+                    if (transitions.Count(item => item != null && item.destinationState != null
+                        && (string.IsNullOrWhiteSpace(destinationName) || item.destinationState.name == destinationName)) > 1)
+                        throw new InvalidOperationException("Transition destination is ambiguous; pass transitionIndex.");
                     index = Array.FindIndex(transitions, item => item != null && item.destinationState != null
                         && (string.IsNullOrWhiteSpace(destinationName) || item.destinationState.name == destinationName));
                 }
@@ -2784,6 +2792,9 @@ namespace VRCForge.Editor
                 var index = @params["transitionIndex"]?.Value<int?>() ?? -1;
                 if (index < 0)
                 {
+                    if (transitions.Count(item => item != null && item.destinationState != null
+                        && (string.IsNullOrWhiteSpace(destinationName) || item.destinationState.name == destinationName)) > 1)
+                        throw new InvalidOperationException("Transition destination is ambiguous; pass transitionIndex.");
                     index = Array.FindIndex(transitions, item => item != null && item.destinationState != null
                         && (string.IsNullOrWhiteSpace(destinationName) || item.destinationState.name == destinationName));
                 }
