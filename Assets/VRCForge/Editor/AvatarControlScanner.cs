@@ -111,7 +111,7 @@ namespace VRCForge.Editor
 
         private static Dictionary<string, ParameterInfo> ReadExpressionParameters(Component descriptor)
         {
-            var result = new Dictionary<string, ParameterInfo>(StringComparer.OrdinalIgnoreCase);
+            var result = new Dictionary<string, ParameterInfo>(StringComparer.Ordinal);
             var asset = GetMemberValue(descriptor, "expressionParameters");
             var parameters = GetMemberValue(asset, "parameters") as IEnumerable;
             if (parameters == null)
@@ -221,7 +221,7 @@ namespace VRCForge.Editor
         {
             var menuParameterNames = new HashSet<string>(
                 menuItems.Select(item => item.parameterName).Where(value => !string.IsNullOrWhiteSpace(value)),
-                StringComparer.OrdinalIgnoreCase);
+                StringComparer.Ordinal);
 
             return parameterMap.Values
                 .Where(parameter => !menuParameterNames.Contains(parameter.name))

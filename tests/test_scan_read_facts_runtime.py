@@ -25,6 +25,10 @@ public static class AssetDatabase {public static string GetAssetPath(AnimationCl
 public static class Application {public static string dataPath=>"/Project/Assets";}
 public class Probe {
 static object GetMemberValue(object o,string key)=>o?.GetType().GetField(key)?.GetValue(o);
+class Component {public object expressionParameters;}
+class ParameterAsset {public ParameterInfo[] parameters;}
+static bool ToBool(object o)=>o!=null && Convert.ToBoolean(o);
+static bool IsWardrobeCandidate(string name,string display,string path)=>name.Contains("Cloth") || name.Contains("cloth");
 static float ToFloat(object o)=>o==null?0:Convert.ToSingle(o,CultureInfo.InvariantCulture);
 static string ReadControlParameterName(object o)=>(string)GetMemberValue(o,"parameterName");
 static string[] ReadControlSubParameterNames(object o)=>Array.Empty<string>();
@@ -36,7 +40,15 @@ class WarningItem {public string clip_path,path,property_name,severity,message;}
 static List<AnimationClip> ResolveClips(string a,string b,List<string> paths,bool all)=>paths.Select(p=>new AnimationClip{path=p}).ToList();
 static ClipBindingItem ScanClip(AnimationClip c,int keys,bool details)=>new ClipBindingItem{asset_path=c.path};
 public static void Main(string[] args) {
- if(args[0]=="controls") {
+ if(args[0]=="parameter-case") {
+  var descriptor=new Component{expressionParameters=new ParameterAsset{parameters=new[]{
+   new ParameterInfo{name="Clothes",valueType="Int",defaultValue=1,saved=true},
+   new ParameterInfo{name="clothes",valueType="Bool",defaultValue=0,saved=false}}}};
+  var map=ReadExpressionParameters(descriptor);
+  var rows=new List<ControlItem>();
+  TraverseMenu(new Menu{controls=new[]{new Control{name="Upper",parameterName="Clothes",value=1}}},"",map,rows,new HashSet<int>(),0);
+  Console.WriteLine(JsonConvert.SerializeObject(new{parameterCount=map.Count,menu=rows,unlinked=ReadParameterOnlyItems(map,rows)}));
+ } else if(args[0]=="controls") {
   var rows=new List<ControlItem>();
   var menu=new Menu {controls=new[]{new Control{name="A",value=1},new Control{name="B",value=10},new Control{name="B alternate",value=10}}};
   TraverseMenu(menu,"",new Dictionary<string,ParameterInfo>{{"Clothes",new ParameterInfo{name="Clothes",valueType="Int",defaultValue=10}}},rows,new HashSet<int>(),0);
@@ -47,7 +59,7 @@ public static void Main(string[] args) {
  }
 }
 '''
-    for declaration in ("private static void TraverseMenu", "private class ParameterInfo", "private class ControlItem"):
+    for declaration in ("private static void TraverseMenu", "private static Dictionary<string, ParameterInfo> ReadExpressionParameters", "private static List<ControlItem> ReadParameterOnlyItems", "private class ParameterInfo", "private class ControlItem"):
         source += method(controls, declaration)
     for declaration in ("private static AnimationBindingsPayload BuildAnimationBindingsPayload", "private class AnimationBindingsPayload", "private class AnimationBindingsSummary"):
         source += method(assets, declaration)
@@ -75,6 +87,15 @@ def test_int_menu_controls_report_own_values_and_default_selection(scanner_probe
     assert [row["active"] for row in rows] == [False, True, True]
     assert [row["value"] for row in rows] == [1, 10, 10]
     assert [row["menuPath"] for row in rows] == ["A", "B", "B alternate"]
+
+
+def test_control_scan_preserves_case_distinct_parameter_metadata(scanner_probe):
+    result = run(scanner_probe, "parameter-case")
+    assert result["parameterCount"] == 2
+    assert result["menu"][0]["valueType"] == "Int"
+    assert result["menu"][0]["active"] is True
+    assert result["menu"][0]["saved"] is True
+    assert [item["parameterName"] for item in result["unlinked"]] == ["clothes"]
 
 
 def test_legacy_clip_scan_marks_omitted_clips(scanner_probe):
