@@ -148,6 +148,10 @@ namespace VRCForge.Editor
                                     blocking = true,
                                     recoverable = false,
                                     scene = scene.path,
+                                    mutationStarted = true,
+                                    committed = (bool?)null,
+                                    commitState = "unknown",
+                                    requestMayHaveCommitted = true,
                                     transaction = BuildTransaction(receipts, transactionHandle)
                                 });
                         }
@@ -213,6 +217,11 @@ namespace VRCForge.Editor
                     }
                     return VRCForgeToolResult.Failed($"Checkpoint preparation failed: {ex.Message}", new
                     {
+                        blocking = true,
+                        mutationStarted = true,
+                        committed = (bool?)null,
+                        commitState = "unknown",
+                        requestMayHaveCommitted = true,
                         transaction = BuildTransaction(receipts, transactionHandle)
                     });
                 }

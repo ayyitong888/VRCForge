@@ -19827,9 +19827,9 @@ def normalize_unity_checkpoint_result(
             "projectPath": str(project_root),
             "result": serialize_result(result),
             "failureCause": _checkpoint_result_cause(result, code, message),
-            "commitState": str(data.get("commitState") or "not_started"),
-            "mutationStarted": data.get("mutationStarted") if isinstance(data.get("mutationStarted"), bool) else False,
-            "committed": data.get("committed") if isinstance(data.get("committed"), bool) else False,
+            "commitState": str(data.get("commitState") or "unknown"),
+            "mutationStarted": data.get("mutationStarted") if isinstance(data.get("mutationStarted"), bool) else None,
+            "committed": data.get("committed") if isinstance(data.get("committed"), bool) else None,
         }
     return {
         **data,
