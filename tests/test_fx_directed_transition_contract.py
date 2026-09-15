@@ -61,8 +61,10 @@ def test_optional_interruption_source_uses_unity_enum_and_is_read_back() -> None
     assert "transition.interruptionSource = ParseInterruptionSource" in SOURCE
     assert "interruptionSource = FormatInterruptionSource" in SOURCE
     scan = (ROOT / "Assets/VRCForge/Editor/ComponentTools.cs").read_text(encoding="utf-8-sig")
-    assert "interruption_source = FormatInterruptionSource" in scan
-    assert "ordered_interruption = transition.orderedInterruption" in scan
+    assert "interruption_source = stateTransition != null" in scan
+    assert "? FormatInterruptionSource(stateTransition.interruptionSource)" in scan
+    assert 'private static string FormatInterruptionSource(TransitionInterruptionSource value)' in scan
+    assert "ordered_interruption = stateTransition != null && stateTransition.orderedInterruption" in scan
 
 
 def test_optional_ordered_interruption_is_schema_and_read_back_contract() -> None:

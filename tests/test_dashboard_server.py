@@ -8315,9 +8315,16 @@ class DashboardServerTests(unittest.TestCase):
         self.assertTrue(real_write_handlers.isdisjoint(planning_visible))
         self.assertTrue(real_write_handlers.issubset(planning_routable))
         self.assertTrue(all(planning_routable[name].write for name in real_write_handlers))
-        self.assertTrue(
-            dashboard_server.WRAPPER_ONLY_WRITE_TARGETS.isdisjoint(execution_tools)
+        repair_name = "vrcforge_repair_project_chat_store"
+        self.assertEqual(
+            gateway._write_handlers[repair_name].external_mcp_capability,
+            dashboard_server.EXTERNAL_MCP_TYPED_WRAPPER_CAPABILITIES[repair_name],
         )
+        self.assertEqual(
+            dashboard_server.WRAPPER_ONLY_WRITE_TARGETS.intersection(execution_tools),
+            {repair_name},
+        )
+        self.assertTrue(execution_tools[repair_name].write)
         self.assertTrue(real_write_handlers.issubset(execution_tools))
         self.assertTrue(real_write_handlers.issubset(execution_routable))
         self.assertNotIn("vrcforge_vision_audit_multi", external_planning)
@@ -10857,7 +10864,13 @@ class DashboardServerTests(unittest.TestCase):
         self.assertIn("TryResolveReference", source)
         self.assertIn("Undo.RevertAllDownToGroup", source)
         self.assertIn("preview", source)
-        self.assertIn(
+        self.assertIn("if (matches.Count > 1)", source)
+        self.assertIn("Avatar root path is ambiguous:", source)
+        self.assertIn("return matches.SingleOrDefault();", source)
+        self.assertIn("if (scoped.Count > 1)", source)
+        self.assertIn("if (exact.Count > 1)", source)
+        self.assertIn("if (leaves.Count > 1)", source)
+        self.assertNotIn(
             "FirstOrDefault(component => NormalizePath(GetTransformPath(component.transform)) == normalized)",
             source,
         )

@@ -181,7 +181,8 @@ def test_composition_workflow_atoms_have_internal_external_contract_parity() -> 
         assert internal.runtime_name == name
         assert internal.write is is_write
         if projection.tool_set is ToolSet.UNITY:
-            assert internal.block == f"unity/{external['_meta']['toolBlock']}"
+            from internal_tool_blocks import canonical_tool_owner
+            assert internal.block == canonical_tool_owner(f"unity/{external['_meta']['toolBlock']}", projection.model_name)
 
         if is_write:
             handler = gateway._write_handlers[name]

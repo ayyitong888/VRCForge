@@ -320,7 +320,11 @@ def test_catalog_filters_only_visible_tools_and_keeps_full_routing_metadata() ->
         name
         for name in gateway._write_handlers
         if name not in gateway._tools
-        and name not in dashboard_server.WRAPPER_ONLY_WRITE_TARGETS
+        and (name not in dashboard_server.WRAPPER_ONLY_WRITE_TARGETS or (
+            name == "vrcforge_repair_project_chat_store"
+            and gateway._write_handlers[name].external_mcp_capability
+            == dashboard_server.EXTERNAL_MCP_TYPED_WRAPPER_CAPABILITIES[name]
+        ))
     }
     visible_execution_writes = {
         name
