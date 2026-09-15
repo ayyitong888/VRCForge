@@ -850,6 +850,14 @@ def build_optimization_tool_result(
         "optimization.meshia.simplify-plan": ("avatar_items", "performance_pc"),
         "optimization.physbone.audit": ("avatar_items", "performance_pc", "performance_quest"),
         "optimization.physbone.reduce-plan": ("avatar_items", "performance_pc", "performance_quest"),
+        "optimization.ttt.atlas-plan": ("materials",),
+        "optimization.aao.trace-plan": ("avatar_items",),
+        "optimization.aao.hidden-body-cut-plan": ("avatar_items",),
+        "optimization.vrcfury.compatibility-report": ("fx",),
+        "optimization.ma-responsive-layer-audit": ("fx",),
+        "optimization.ma2bt.convertibility-plan": ("fx",),
+        "optimization.ma2bt.skipped-reasons": ("fx",),
+        "optimization.performance-tools.report": ("performance_pc", "materials"),
     }
     for source_name in required_sources.get(external_name, ()):
         source = _validation_sources(validation).get(source_name)
