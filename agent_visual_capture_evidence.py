@@ -279,7 +279,7 @@ class ManagedVisualCaptureAuthority:
         raw_images = consumed.get("images")
         if not isinstance(raw_images, Sequence) or isinstance(raw_images, (str, bytes)):
             raise ManagedVisualCaptureError("Consumed visual evidence is missing its images.")
-        if not 1 <= len(raw_images) <= 4:
+        if not 1 <= len(raw_images) <= 5:
             raise ManagedVisualCaptureError("Consumed visual evidence has an invalid image count.")
 
         images: list[_ManagedImage] = []
