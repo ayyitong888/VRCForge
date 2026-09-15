@@ -194,6 +194,19 @@ def confirm_unity_reload_dialog(params: dict[str, Any]) -> dict[str, Any]:
     deadline = time.monotonic() + 2.0
     while True:
         after = probe_unity_reload_dialog(project_root)
+        if after.get("available") is not True or after.get("probeError") or after.get("unityProcessId") != process_id:
+            return {
+                "schema": _RELOAD_CONFIRMATION_SCHEMA,
+                "ok": False,
+                "projectPath": str(project_root),
+                "unityProcessId": process_id,
+                "reloadClicked": True,
+                "dialogClosed": None,
+                "mutationStarted": True,
+                "commitState": "unknown",
+                "error": "Reload was clicked, but the same Unity process could not be inspected to verify dialog closure.",
+                "retryable": False,
+            }
         if not after.get("blocked"):
             return {
                 "schema": _RELOAD_CONFIRMATION_SCHEMA,

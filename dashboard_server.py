@@ -25288,9 +25288,9 @@ def register_agent_gateway_tools() -> None:
         "vrcforge_unity_tools",
         "List Unity MCP tools visible to VRCForge.",
         "read/debug",
-        lambda params: UNITY_STATUS.build_unity_status_snapshot(
+        lambda params: UNITY_STATUS.build_unity_tools_snapshot(
             load_dashboard_settings(build_agent_connection_request(params))
-        ).get("tools", {}),
+        ),
     )
     AGENT_GATEWAY.register_tool("vrcforge_list_avatars", "List avatars from the current Unity project.", "read/debug", lambda params: AVATAR_TUNING_WORKFLOWS.read_avatars(build_agent_dashboard_request(params)))
     AGENT_GATEWAY.register_tool("vrcforge_scan_blendshapes", "Read avatar blendshape names, current weights and renderer identity. when-to-use: inspect facial shapes by default, or use scope=all and optional exact rendererPaths for body/clothing/accessories. when-NOT-to-use: do not use to change weights or inspect material properties; for example, 'set the dress blendshape to 100' requires a separate approved write.", "read/debug", lambda params: AVATAR_TUNING_WORKFLOWS.read_avatar_blendshapes(AvatarBlendshapeListRequest(**{**build_agent_dashboard_request(params).model_dump(), "rendererPaths": params.get("rendererPaths")})))

@@ -104,6 +104,27 @@ class UnityStatusService:
             "causeCode": cause_code,
         }
 
+    def build_unity_tools_snapshot(self, settings: Any | None = None) -> dict[str, Any]:
+        settings = settings or self._ports.load_settings()
+        status = self.build_unity_status_snapshot(settings)
+        result = dict(status["tools"])
+        if not status.get("connected"):
+            return result
+        try:
+            tools = UnityMcpCoreClient(
+                Path(status["projectPath"]),
+                timeout_seconds=max(1, min(int(settings.unity_mcp_timeout_seconds or 10), 10)),
+            ).list_tools(exposure_layer="execution")
+        except UnityMcpCoreError as exc:
+            return {**result, "ok": False, "inspectionMode": "tools_list",
+                    "inspectionSkipped": False, "error": str(exc)}
+        names = [tool["name"] for tool in tools]
+        owned = [name for name in names if name.startswith("vrc_")]
+        return {**result, "ok": True, "inspectionMode": "tools_list", "inspectionSkipped": False,
+                "totalTools": len(names), "defaultToolsCount": len(names) - len(owned),
+                "vrcForgeToolsCount": len(owned), "toolNames": names, "vrcForgeToolNames": owned,
+                "missingRequiredVrcForgeTools": sorted(set(self._ports.required_tools) - set(names))}
+
     def build_vrcforge_mcp_core_status(self, project_root: Path, settings: Any) -> dict[str, Any]:
         try:
             core_info = UnityMcpCoreClient(

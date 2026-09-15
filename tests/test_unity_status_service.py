@@ -13,6 +13,7 @@ from unity_status_service import UnityStatusPorts, UnityStatusService
 
 ROOT = Path(__file__).parents[1]
 METHODS = {
+    "build_unity_tools_snapshot",
     "build_unity_status_snapshot",
     "build_vrcforge_mcp_core_unavailable_status",
     "build_vrcforge_mcp_core_status",
