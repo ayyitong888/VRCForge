@@ -199,7 +199,7 @@ RENDERER_MATERIAL_SLOT_PUBLIC_INPUT_SCHEMA["properties"]["assignments"] = {
 SCENE_OBJECT_DUPLICATE_PUBLIC_INPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["projectPath", "sourceScenePath", "sourceObjectPath"],
+    "required": ["projectPath", "sourceScenePath", "sourceObjectPath", "targetParentScenePath", "targetParentPath", "targetName"],
     "properties": {
         "projectPath": _PROJECT_PATH_PROPERTY,
         "sourceScenePath": {"type": "string", "pattern": "^Assets/.*\\.unity$"},
