@@ -120,3 +120,19 @@ def test_bind_requires_exactly_one_candidate_and_uses_same_gateway_registry(monk
     )
     assert result["status"] == "bound"
     assert observed == {"target": {"scope": "project"}, "projectRoot": "D:/Unity/Avatar"}
+
+
+@pytest.mark.parametrize("metadata", [
+    {"totalCandidateCount": 3568, "hasMore": True, "complete": False},
+    {"totalCandidateCount": 3568, "hasMore": False, "complete": True},
+    {"hasMore": True}, {"complete": False}, {"ok": False},
+])
+def test_binding_rejects_one_row_from_incomplete_or_multi_candidate_discovery(monkeypatch, metadata):
+    monkeypatch.setattr(dashboard_server, "list_execution_targets_sync", lambda _params: {
+        "targets": [{"scope": "component"}], "projectPath": "D:/Unity/Avatar", **metadata})
+    calls = []
+    monkeypatch.setattr(dashboard_server.AGENT_GATEWAY, "bind_execution_target",
+                        lambda *args, **kwargs: calls.append(args) or {})
+    with pytest.raises(RuntimeError, match="exact"):
+        dashboard_server.bind_execution_target_sync({"scope": "component", "maxItems": 1})
+    assert calls == []

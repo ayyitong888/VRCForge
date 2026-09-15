@@ -22970,9 +22970,16 @@ def list_execution_targets_sync(params: dict[str, Any]) -> dict[str, Any]:
 def bind_execution_target_sync(params: dict[str, Any]) -> dict[str, Any]:
     payload = list_execution_targets_sync(params)
     targets = payload["targets"]
-    if len(targets) != 1:
+    if (
+        payload.get("ok") is False
+        or len(targets) != 1
+        or payload.get("totalCandidateCount", len(targets)) != 1
+        or payload.get("hasMore") is True
+        or payload.get("complete") is False
+    ):
         raise RuntimeError(
-            f"ExecutionTarget binding requires exactly one exact candidate; Core returned {len(targets)}."
+            "ExecutionTarget binding requires exactly one exact candidate across complete discovery; "
+            "select the object's and component's exact GlobalObjectIds before binding."
         )
     binding = AGENT_GATEWAY.bind_execution_target(
         targets[0],
