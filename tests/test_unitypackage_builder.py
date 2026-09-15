@@ -159,6 +159,21 @@ def test_public_guid_manifest_pins_the_published_1_3_6_common_paths() -> None:
     assert not RETIRED_GUIDS.intersection(entry["guid"] for entry in entries)
 
 
+def test_guid_manifest_covers_current_source_files_and_matches_source_meta() -> None:
+    repo = Path(__file__).resolve().parents[1]
+    manifest = json.loads((repo / "packaging/unitypackage_guid_manifest.json").read_text(encoding="utf-8"))
+    guids = {entry["path"]: entry["guid"] for entry in manifest["entries"]}
+    for source in (repo / "Assets/VRCForge").rglob("*"):
+        if not source.is_file() or source.suffix == ".meta":
+            continue
+        relative = source.relative_to(repo).as_posix()
+        assert relative in guids, relative
+        meta = Path(str(source) + ".meta")
+        if meta.exists():
+            match = re.search(r"^guid:\s*([0-9a-f]{32})", meta.read_text(encoding="utf-8"), re.MULTILINE)
+            assert match and match.group(1) == guids[relative], relative
+
+
 def test_unitypackage_builder_does_not_write_asset_for_folders(tmp_path: Path) -> None:
     shell = shutil.which("powershell") or shutil.which("pwsh")
     if not shell:
@@ -495,9 +510,22 @@ def test_real_unitypackage_bundles_first_party_core_and_all_product_sources(tmp_
     manifest = json.loads((repo_root / "packaging" / "unitypackage_guid_manifest.json").read_text(encoding="utf-8"))
     manifest_guids = {entry["path"]: entry["guid"] for entry in manifest["entries"]}
     assert packaged_guids == manifest_guids
-    assert len(packaged_paths) == 106
-    assert len(file_paths) == 98
-    assert len(directory_paths) == 8
+    expected_files = {
+        path.relative_to(repo_root).as_posix()
+        for path in (repo_root / "Assets/VRCForge").rglob("*")
+        if path.is_file() and path.suffix != ".meta"
+    } | {
+        "Assets/VRCForge/Documentation/" + name
+        for name in ("README.txt", "LICENSE-GPL-3.0.txt", "NOTICE.txt", "USER_MANUAL.txt", "DEPENDENCIES.txt")
+    }
+    assert file_paths == expected_files
+    expected_directories = {
+        parent.as_posix()
+        for name in expected_files
+        for parent in Path(name).parents
+        if parent.as_posix() == "Assets/VRCForge" or parent.as_posix().startswith("Assets/VRCForge/")
+    }
+    assert directory_paths == expected_directories
     assert not any(
         path == excluded or path.startswith(f"{excluded}/")
         for path in packaged_paths

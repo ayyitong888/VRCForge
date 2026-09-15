@@ -104,6 +104,7 @@
     { "path": "Assets/VRCForge/Editor/WardrobeOutfitPartWriter.cs", "guid": "d738fda955854c42875af52632b4c823" },
     { "path": "Assets/VRCForge/Editor/WardrobeOutfitWriter.cs", "guid": "2f9bc0a8cac747498ca8ca6d9026c180" },
     { "path": "Assets/VRCForge/Editor/WardrobeScanner.cs", "guid": "d40e2e47dca649189684b81c11ce248a" },
+    { "path": "Assets/VRCForge/Editor/WardrobeSceneSaveScope.cs", "guid": "789fc2e331f27825f7c16aed282f3e52" },
     { "path": "Assets/VRCForge/Editor/RuntimeObservationTool.cs", "guid": "23a0e6670f584f808cba8dde56ade34d" },
     { "path": "Assets/VRCForge/Runtime", "guid": "5300c6a571304751ac6d0129dcff220e" },
     { "path": "Assets/VRCForge/Runtime/RuntimeObservationFramePump.cs", "guid": "fadcc474b86e4d93a630da954846b45b" }
