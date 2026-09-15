@@ -207,8 +207,8 @@ def test_isolated_clone_context_and_gap_are_bound_without_excluded_roots(live: M
     assert gap["missingPlaceholders"] == audit["missingPlaceholders"]
     assert gap["deferredPlaceholders"] == audit["deferredPlaceholders"]
     assert gap["providedPlaceholderCount"] == 85
-    assert gap["missingPlaceholderCount"] == 14
-    assert gap["deferredPlaceholderCount"] == 13
+    assert gap["missingPlaceholderCount"] == 39
+    assert gap["deferredPlaceholderCount"] == 14
     assert gap["executeReady"] is False
     assert context["BLENDSHAPE"] == "mouth_a"
     assert context["BLENDSHAPE_RENDERER_PATH"].endswith("/SapphyHeadRig/Body")

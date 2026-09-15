@@ -643,6 +643,7 @@ def test_gateway_old_facades_and_host_proxy_are_gone() -> None:
 
 
 def test_gateway_skill_registry_size_budget() -> None:
-    source = (REPO_ROOT / "agent_gateway.py").read_bytes()
+    # Keep the same budget across LF and Windows CRLF checkouts.
+    source = (REPO_ROOT / "agent_gateway.py").read_bytes().replace(b"\r\n", b"\n")
     assert len(source) <= 476_574
     assert source.count(b"\n") <= 10_422
