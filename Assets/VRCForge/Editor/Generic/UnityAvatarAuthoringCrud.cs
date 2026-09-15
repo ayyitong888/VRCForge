@@ -280,6 +280,16 @@ namespace VRCForge.Editor
                 return existing;
             }
 
+            var scene = descriptor.gameObject.scene;
+            if (!scene.IsValid() || !scene.isLoaded || scene.isDirty || string.IsNullOrWhiteSpace(scene.path))
+                throw new InvalidOperationException("Assigning a new FX controller requires a saved, clean Avatar scene.");
+            var descriptorId = GlobalObjectId.GetGlobalObjectIdSlow(descriptor).targetObjectId;
+            SceneObjectCopyCore.ReadStableAssetEvidence(scene.path, "FX slot assignment preflight",
+                (path, meta) =>
+                {
+                    if ((long)EnsureAnimatorStateTool.ReadFxSceneReference(File.ReadAllText(path), descriptorId)["fileID"] != 0)
+                        throw new InvalidOperationException("An existing serialized FX reference could not be resolved; it will not be replaced.");
+                });
             EnsureAssetFolder(assetDir);
             var path = string.IsNullOrWhiteSpace(plannedPath) ? GeneratedAssetPaths.UniqueAssetPath($"{assetDir}/{Sanitize(descriptor.name, "Avatar")}_FX.controller") : GeneratedAssetPaths.ValidateNewAssetPath(plannedPath);
             var controller = AnimatorController.CreateAnimatorControllerAtPath(path);
@@ -309,27 +319,13 @@ namespace VRCForge.Editor
 
         internal static AnimatorController GetFxController(VRCAvatarDescriptor descriptor)
         {
-            if (descriptor.baseAnimationLayers == null)
-            {
-                return null;
-            }
-            foreach (var layer in descriptor.baseAnimationLayers)
-            {
-                if (layer.type == VRCAvatarDescriptor.AnimLayerType.FX && !layer.isDefault
-                    && layer.animatorController is AnimatorController controller)
-                {
-                    return controller;
-                }
-            }
-            foreach (var layer in descriptor.baseAnimationLayers)
-            {
-                if (layer.type == VRCAvatarDescriptor.AnimLayerType.FX
-                    && layer.animatorController is AnimatorController controller)
-                {
-                    return controller;
-                }
-            }
-            return null;
+            var slots = (descriptor.baseAnimationLayers ?? Array.Empty<VRCAvatarDescriptor.CustomAnimLayer>())
+                .Where(layer => layer.type == VRCAvatarDescriptor.AnimLayerType.FX).ToArray();
+            if (slots.Length > 1) throw new InvalidOperationException("Avatar FX layer is ambiguous; resolve duplicate FX slots before editing.");
+            if (slots.Length == 0 || slots[0].animatorController == null) return null;
+            if (!(slots[0].animatorController is AnimatorController controller))
+                throw new InvalidOperationException("The FX slot contains an unsupported runtime controller; it will not be replaced.");
+            return controller;
         }
     }
 

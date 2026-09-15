@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.IO;
@@ -152,25 +152,13 @@ namespace VRCForge.Editor
 
         internal static AnimatorController GetFxController(VRCAvatarDescriptor descriptor)
         {
-            if (descriptor.baseAnimationLayers == null)
-            {
-                return null;
-            }
-            foreach (var layer in descriptor.baseAnimationLayers)
-            {
-                if (layer.type == VRCAvatarDescriptor.AnimLayerType.FX && !layer.isDefault && layer.animatorController is AnimatorController controller)
-                {
-                    return controller;
-                }
-            }
-            foreach (var layer in descriptor.baseAnimationLayers)
-            {
-                if (layer.type == VRCAvatarDescriptor.AnimLayerType.FX && layer.animatorController is AnimatorController controller)
-                {
-                    return controller;
-                }
-            }
-            return null;
+            var slots = (descriptor.baseAnimationLayers ?? Array.Empty<VRCAvatarDescriptor.CustomAnimLayer>())
+                .Where(layer => layer.type == VRCAvatarDescriptor.AnimLayerType.FX).ToArray();
+            if (slots.Length > 1) throw new InvalidOperationException("Avatar FX layer is ambiguous; resolve duplicate FX slots before editing.");
+            if (slots.Length == 0 || slots[0].animatorController == null) return null;
+            if (!(slots[0].animatorController is AnimatorController controller))
+                throw new InvalidOperationException("The FX slot contains an unsupported runtime controller; it will not be replaced.");
+            return controller;
         }
 
         internal static AnimatorController ResolveAnimatorController(VRCAvatarDescriptor descriptor, JObject @params, string assetDir, string plannedPath = null)
@@ -192,7 +180,6 @@ namespace VRCForge.Editor
                 return existing;
             }
 
-            AvatarAuthoringCrudCore.EnsureAssetFolder(assetDir);
             return AvatarAuthoringCrudCore.EnsureFxController(descriptor, assetDir, plannedPath);
         }
 
