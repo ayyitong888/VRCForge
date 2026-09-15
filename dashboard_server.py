@@ -21751,6 +21751,11 @@ def _run_validation_source(name: str, runner: Callable[[], dict[str, Any]]) -> d
         if not isinstance(payload, dict):
             payload = {"ok": True, "value": payload}
         payload.setdefault("ok", True)
+        if not payload.get("ok"):
+            error = payload.get("error") or payload.get("message") or "Scanner returned ok=false."
+            if isinstance(error, dict):
+                error = error.get("message") or error.get("detail") or json.dumps(error, ensure_ascii=False)
+            return {"ok": False, "error": str(error), "payload": payload, "source": name}
         return {"ok": bool(payload.get("ok")), "payload": payload}
     except HTTPException as exc:
         return {"ok": False, "error": str(exc.detail)}
