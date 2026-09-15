@@ -99,6 +99,9 @@ jobs:
 
       - name: Run production install, upgrade, preservation and uninstall checks
         # No repository token is passed to the installers or installed backend.
+        # Launch the published previous installer from its native Windows PowerShell
+        # environment; pwsh module paths break its Windows PowerShell 5.1 helpers.
+        shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
           $downloadRoot = Join-Path $env:RUNNER_TEMP 'installer-inputs'
