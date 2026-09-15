@@ -104,24 +104,23 @@ namespace VRCForge.Editor
             var version = OptionalText(parameters.version, "1.0", "version", 64);
             var temporaryPath = outputPath + ".partial";
             var replacementBackupPath = outputPath + ".replace-backup";
-            DeleteTemporaryFile(temporaryPath);
             RecoverInterruptedReplacement(outputPath, replacementBackupPath);
             Directory.CreateDirectory(Path.GetDirectoryName(outputPath)
                 ?? throw new InvalidOperationException("VRM output directory could not be resolved."));
 
+            var temporaryCreated = false;
             try
             {
                 var bytes = InvokeExporter(capability, avatar, title, version, author);
-                File.WriteAllBytes(temporaryPath, bytes);
+                WriteTemporaryFile(temporaryPath, bytes, ref temporaryCreated);
                 ValidateVrm10Glb(temporaryPath);
                 CommitValidatedOutput(temporaryPath, outputPath, replacementBackupPath);
             }
             finally
             {
-                DeleteTemporaryFile(temporaryPath);
-                if (File.Exists(outputPath))
+                if (temporaryCreated)
                 {
-                    DeleteTemporaryFile(replacementBackupPath);
+                    DeleteTemporaryFile(temporaryPath);
                 }
             }
 
@@ -317,7 +316,6 @@ namespace VRCForge.Editor
                 return;
             }
 
-            DeleteTemporaryFile(backupPath);
             File.Move(outputPath, backupPath);
             try
             {
@@ -340,12 +338,19 @@ namespace VRCForge.Editor
             {
                 return;
             }
-            if (!File.Exists(outputPath))
+            throw new InvalidOperationException(
+                "VRM replacement backup already exists. The existing output and backup were preserved. " +
+                "Inspect and recover the backup before retrying export.");
+        }
+
+        private static void WriteTemporaryFile(string path, byte[] bytes, ref bool created)
+        {
+            // CreateNew refuses collisions; the caller only cleans up a file this call created.
+            using (var stream = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None))
             {
-                File.Move(backupPath, outputPath);
-                return;
+                created = true;
+                stream.Write(bytes, 0, bytes.Length);
             }
-            DeleteTemporaryFile(backupPath);
         }
 
         private static void DeleteTemporaryFile(string path)

@@ -38,7 +38,8 @@ def test_vrm_export_restricts_output_and_validates_vrm1_content_before_replace()
     assert '"Assets/VRCForge/Exports"' in SOURCE
     assert '"VRM export path must use the .vrm extension."' in SOURCE
     assert "VRCForgeOutputPathGuard.ResolveManagedProjectPath" in SOURCE
-    assert "File.WriteAllBytes(temporaryPath, bytes)" in SOURCE
+    assert "WriteTemporaryFile(temporaryPath, bytes, ref temporaryCreated)" in SOURCE
+    assert "if (temporaryCreated)" in SOURCE
     assert "ValidateVrm10Glb(temporaryPath)" in SOURCE
     assert "CommitValidatedOutput(temporaryPath, outputPath, replacementBackupPath)" in SOURCE
     assert "missing glTF header" in SOURCE
