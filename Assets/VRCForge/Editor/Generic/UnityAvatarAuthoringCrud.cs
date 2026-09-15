@@ -148,14 +148,16 @@ namespace VRCForge.Editor
             }
 
             var normalized = NormalizePath(avatarPath);
-            if (string.IsNullOrEmpty(normalized))
-            {
-                return descriptors[0];
-            }
-
-            return descriptors.FirstOrDefault(item => NormalizePath(GetTransformPath(item.transform)) == normalized)
-                ?? descriptors.FirstOrDefault(item => item.name.Equals(avatarPath, StringComparison.OrdinalIgnoreCase))
-                ?? throw new InvalidOperationException($"Avatar descriptor not found: {avatarPath}");
+            var matches = string.IsNullOrEmpty(normalized)
+                ? descriptors
+                : descriptors.Where(item => NormalizePath(GetTransformPath(item.transform)) == normalized).ToList();
+            if (matches.Count == 0 && !normalized.Contains("/"))
+                matches = descriptors.Where(item => item.name.Equals(avatarPath, StringComparison.OrdinalIgnoreCase)).ToList();
+            if (matches.Count != 1)
+                throw new InvalidOperationException(matches.Count > 1
+                    ? $"Avatar descriptor is ambiguous: {avatarPath}. Provide an exact unique hierarchy path."
+                    : $"Avatar descriptor not found: {avatarPath}");
+            return matches[0];
         }
 
         internal static VRCExpressionParameters.ValueType ParseExpressionParameterType(string value)
