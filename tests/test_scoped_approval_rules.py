@@ -208,6 +208,7 @@ def test_external_mcp_direct_write_never_uses_internal_pending_refresh_callback(
     config.enabled = True
     config.token = "gateway-token"
     config.allow_write_requests = True
+    config.execution_mode = "auto"
     gateway.save_config(config)
     observed: list[dict] = []
     app = create_agent_mcp_app(gateway, on_pending_approval=lambda approval: observed.append(approval))

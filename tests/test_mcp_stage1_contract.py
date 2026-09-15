@@ -89,6 +89,7 @@ def test_gateway_read_and_supervised_write_return_operation_and_fresh_readback_c
     config = gateway.ensure_config()
     config.enabled = True
     config.allow_write_requests = True
+    config.execution_mode = "auto"
     gateway.save_config(config)
 
     gateway.register_tool("vrcforge_stage1_read", "Read one exact value.", "unity", lambda _args: {"ok": True, "value": 1})

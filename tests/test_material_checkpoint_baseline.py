@@ -4,7 +4,8 @@ import pytest
 import dashboard_server as server
 
 
-def test_material_checkpoint_preserves_real_core_rejection(tmp_path, monkeypatch):
+@pytest.mark.parametrize("mutation_started", [None, False, True])
+def test_material_checkpoint_preserves_real_core_rejection(tmp_path, monkeypatch, mutation_started):
     args = {"projectPath": str(tmp_path), "toolName": server.MATERIAL_TEXTURE_ASSIGNMENT_TOOL,
             "arguments": {"materialAssetPath": "Assets/Clothes.mat"}}
     monkeypatch.setattr(server, "prepare_unity_mcp_write_request", lambda args, _: (deepcopy(args), {}))
@@ -12,13 +13,15 @@ def test_material_checkpoint_preserves_real_core_rejection(tmp_path, monkeypatch
     monkeypatch.setattr(server, "build_agent_connection_request", lambda *_: {})
     payload = {"isError": True, "structuredContent": {"success": False,
                "code": "safety_control_not_allowed", "error": "The App safety-control tool is not allowed."}}
+    if mutation_started is not None:
+        payload["structuredContent"]["data"] = {"mutationStarted": mutation_started}
     monkeypatch.setattr(server, "invoke_unity_mcp", lambda *a, **kw: server.McpResult(
         exit_code=1, stdout="", stderr="", payload=payload))
     result = server.prepare_authoritative_unity_checkpoint_sync(tmp_path, args)
     assert result["ok"] is False
     assert result["code"] == "safety_control_not_allowed"
     assert result["error"] == "The App safety-control tool is not allowed."
-    assert result["mutationStarted"] is False
+    assert result["mutationStarted"] is mutation_started
 
 @pytest.mark.parametrize("valid", [True, False])
 def test_single_material_checkpoint_captures_readonly_baseline(tmp_path, monkeypatch, valid):

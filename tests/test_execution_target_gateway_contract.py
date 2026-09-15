@@ -21,12 +21,20 @@ def test_bootstrap_tools_are_shared_core_reads_with_strict_public_schemas() -> N
         "vrcforge_list_execution_targets"
     )["properties"]
 
+    project_application_tools = {
+        "vrcforge_create_project", "vrcforge_register_project", "vrcforge_register_project_catalog",
+        "vrcforge_restore_unity_core", "vrcforge_rollback_project_catalog_registration",
+        "vrcforge_rollback_project_lifecycle", "vrcforge_select_project", "vrcforge_restore_checkpoint",
+    }
     for name, schema in agent_gateway.EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS.items():
         if "projectPath" not in schema.get("properties", {}):
             continue
         projected = agent_gateway.canonical_unity_write_tool_input_schema(name)
         assert "executionTarget" in projected["properties"]
-        assert "executionTarget" in projected["required"]
+        if name in project_application_tools:
+            assert "executionTarget" not in projected.get("required", [])
+        else:
+            assert "executionTarget" in projected["required"]
 
 
 def test_shared_descriptor_projects_optional_identity_extension_for_material_scan() -> None:

@@ -186,6 +186,9 @@ def test_public_external_observation_pending_allows_same_project_write(tmp_path)
     from test_mcp_write_transaction_contract import _gateway
 
     gateway = _gateway(tmp_path / "gateway")
+    config = gateway.ensure_config()
+    config.execution_mode = "auto"
+    gateway.save_config(config)
     project = tmp_path / "UnityProject"
     project.mkdir()
     target = {"schema": "vrcforge.execution_target.v1", "scope": "avatar",

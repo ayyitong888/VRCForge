@@ -91,7 +91,7 @@ def test_gateway_tool_result_target_batch_persists_once_and_preserves_order(tmp_
     resources = gateway._mcp_resources.list(page_size=10)["resources"]
     assert len(calls) == 1
     assert [item["_meta"]["resourceType"] for item in resources] == [
-        "operation_receipt", "session_identity_lock", "unity_snapshot"
+        "session_identity_lock", "unity_snapshot", "operation_receipt"
     ]
     assert all(
         gateway._mcp_resources.read(item["uri"])["structuredContent"]["data"]["sourceOperationId"] == "op"
@@ -112,7 +112,7 @@ def test_gateway_gesture_manager_result_persists_five_resources_once(tmp_path, m
     resources = gateway._mcp_resources.list(page_size=10)["resources"]
     assert len(calls) == 1 and len(resources) == 5
     assert [item["_meta"]["resourceType"] for item in resources] == [
-        "control_graph", "gm_runtime", "operation_receipt", "session_identity_lock", "unity_snapshot"
+        "session_identity_lock", "gm_runtime", "control_graph", "unity_snapshot", "operation_receipt"
     ]
     assert all(
         gateway._mcp_resources.read(item["uri"])["structuredContent"]["data"]["sourceOperationId"] == "gm-op"
