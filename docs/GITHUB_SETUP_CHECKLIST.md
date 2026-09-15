@@ -12,7 +12,7 @@ following values.
 ### Description
 
 ```text
-AI-assisted VRChat avatar editor, Unity MCP server and local AI agent. Tools for avatar customization, outfits, wardrobes, BlendShapes, lilToon materials and optimization checks, with approval, checkpoints and restore. VRChat 改模工具：捏脸、换装、衣柜、材质与优化诊断。VRChat アバター改変・着せ替え・表情調整支援。
+Local AI Agent + MCP workbench for supervised VRChat (VRC) Avatar editing / 本地 VRChat 改模工作台，集成 Unity 工具、审批、检查点、验证与恢复。
 ```
 
 ### Website

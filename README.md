@@ -12,7 +12,7 @@
 
 </div>
 
-# VRCForge：AI 辅助 VRChat Avatar 编辑器与 Unity MCP 工具
+# VRCForge：用 AI Agent + MCP 辅助 VRChat Avatar 改模
 
 VRCForge 是面向 VRChat（VRC）Avatar 创作者的开源改模工具，结合本地 AI Agent、
 Unity Editor 工具与 MCP Server，辅助捏脸、换装、材质调整和优化诊断。

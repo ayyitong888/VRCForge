@@ -18,8 +18,8 @@ VRCForge is an open-source VRChat avatar editor and Unity MCP server for
 AI-assisted avatar customization: face and BlendShape editing, outfits,
 materials, and optimization checks. It connects a local desktop AI agent,
 a local FastAPI runtime, and Unity Editor tools in one supervised workflow
-for inspecting an avatar, planning a
-change, requesting execution, validating the result, and restoring changes.
+for inspecting an avatar, planning a change, requesting execution, validating
+the result, and restoring changes.
 
 You can discuss face shapes and BlendShapes, materials and shaders, wardrobes
 and outfits, avatar composition, and performance optimization in natural
