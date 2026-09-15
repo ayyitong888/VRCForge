@@ -1382,7 +1382,7 @@ namespace VRCForge.Editor
                 {
                     continue;
                 }
-                if (transition.conditions.Any(condition =>
+                if (transition.conditions.Length == 1 && transition.conditions.Any(condition =>
                     condition.mode == conditionMode
                     && string.Equals(condition.parameter, parameterName, StringComparison.Ordinal)
                     && Mathf.Approximately(condition.threshold, threshold)))
