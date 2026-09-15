@@ -8,17 +8,18 @@ def test_blendshape_flushes_before_scoped_save_and_checks_result(tmp_path):
  s=(ROOT/"Assets/VRCForge/Editor/BlendshapeApplier.cs").read_text(encoding="utf-8")
  body=method(s,"public static object HandleCommand(JObject @params)")
  receipt=method(s,"private sealed class BlendshapeChangeReceipt")
- code=r"""using System;using System.Linq;using System.Collections.Generic;using Newtonsoft.Json.Linq;
+ code=r"""using System;using System.Linq;using System.Collections.Generic;using Newtonsoft.Json.Linq;using SkinnedMeshRenderer=Renderer;
 namespace UnityEngine.SceneManagement {public class Scene {public string path="Assets/Test.unity";public bool isDirty;public bool isLoaded=true;public bool IsValid()=>true;}}
 class Go {public UnityEngine.SceneManagement.Scene scene=new UnityEngine.SceneManagement.Scene();}
 class Mesh {public int GetBlendShapeIndex(string s)=>0;}
-class Renderer {public Go gameObject=new Go();public Mesh sharedMesh=new Mesh();public float weight=100;public float GetBlendShapeWeight(int i)=>weight;public void SetBlendShapeWeight(int i,float w){weight=w;}}
+class Renderer {public Go gameObject=new Go();public Mesh sharedMesh=new Mesh();public float weight=100;public static bool ThrowAfterWrite;public float GetBlendShapeWeight(int i)=>weight;public void SetBlendShapeWeight(int i,float w){weight=w;if(ThrowAfterWrite)throw new Exception("injected write failure");}}
 class Mathf {public static float Clamp(float x,float min,float max)=>Math.Max(min,Math.Min(max,x));}
 class EditorUtility {public static void SetDirty(object o){}}
 class Undo {public static bool Pending;public static void RecordObject(object r,string s){Pending=true;}public static void FlushUndoRecordObjects(){if(Pending)Probe.Target.gameObject.scene.isDirty=true;Pending=false;}}
 class AssetDatabase {public static int Saves;public static void SaveAssets(){Saves++;}}
 class EditorSceneManager {public static bool Fail;public static int GlobalSaves;public static void MarkSceneDirty(UnityEngine.SceneManagement.Scene s){s.isDirty=true;}public static bool SaveScene(UnityEngine.SceneManagement.Scene s){if(Fail)return false;s.isDirty=false;return true;}public static bool SaveOpenScenes(){GlobalSaves++;return SaveScene(Probe.Target.gameObject.scene);}}
-class VRCForgeToolResult {public bool ok;public object payload;public static object Completed(string s,object p)=>new VRCForgeToolResult{ok=true,payload=p};public static object Failed(string s)=>new VRCForgeToolResult{ok=false};}
+class VRCForgeToolResult {public bool ok;public object payload;public static object Completed(string s,object p)=>new VRCForgeToolResult{ok=true,payload=p};public static object Failed(string s,object p=null)=>new VRCForgeToolResult{ok=false,payload=p};}
+class WriteAnimationCurveTool {public class AssetEditRecovery {float weight;bool dirty;public static bool Fail,MemoryMismatch,DirtyMismatch;public static int Restores,Captures;public void Capture(string p){Captures++;}public void Begin(){weight=Probe.Target.weight;dirty=Probe.Target.gameObject.scene.isDirty;}public void Complete(){}public bool Restore(){Restores++;if(!MemoryMismatch)Probe.Target.weight=weight;Probe.Target.gameObject.scene.isDirty=DirtyMismatch?!dirty:dirty;Undo.Pending=false;return !Fail;}}}
 class Probe {public static Renderer Target=new Renderer();static Renderer ResolveRenderer(string a,string r)=>Target;
 """+body+receipt+r"""
 static int Main(){var request=JObject.FromObject(new {adjustments=new[]{new {rendererPath="Avatar/Coat",blendshapeName="BigBreast",targetWeight=99}}});

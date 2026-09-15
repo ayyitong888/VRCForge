@@ -29,6 +29,10 @@ namespace VRCForge.Editor
 
         public static object HandleCommand(JObject @params)
         {
+            var recovery = new WriteAnimationCurveTool.AssetEditRecovery();
+            var originals = new Dictionary<Tuple<SkinnedMeshRenderer, int>, float>();
+            var sceneDirty = new Dictionary<UnityEngine.SceneManagement.Scene, bool>();
+            var mutationStarted = false;
             try
             {
                 var avatarPath = (@params?["avatarPath"]?.ToString() ?? string.Empty).Trim();
@@ -41,12 +45,17 @@ namespace VRCForge.Editor
 
                 var applied = new List<BlendshapeChangeReceipt>();
                 var touchedScenes = new HashSet<UnityEngine.SceneManagement.Scene>();
-                foreach (var token in adjustments.OfType<JObject>())
+                var planned = new List<Tuple<SkinnedMeshRenderer, int, string, string, float>>();
+                foreach (var entry in adjustments)
                 {
+                    var token = entry as JObject;
+                    if (token == null)
+                        throw new InvalidOperationException("Each adjustment must be an object.");
                     var rendererPath = (token["rendererPath"]?.ToString() ?? string.Empty).Trim();
                     var blendshapeName = (token["blendshapeName"]?.ToString() ?? string.Empty).Trim();
                     var targetWeight = token["targetWeight"]?.Value<float?>() ?? float.NaN;
-                    if (string.IsNullOrWhiteSpace(rendererPath) || string.IsNullOrWhiteSpace(blendshapeName) || float.IsNaN(targetWeight))
+                    if (string.IsNullOrWhiteSpace(rendererPath) || string.IsNullOrWhiteSpace(blendshapeName)
+                        || float.IsNaN(targetWeight) || float.IsInfinity(targetWeight))
                     {
                         return VRCForgeToolResult.Failed("Each adjustment requires rendererPath, blendshapeName, and targetWeight.");
                     }
@@ -68,12 +77,34 @@ namespace VRCForge.Editor
                     if (saveAssets && (string.IsNullOrWhiteSpace(scene.path)
                         || !scene.path.StartsWith("Assets/", StringComparison.Ordinal)))
                         throw new InvalidOperationException("Blendshape persistence requires a saved project scene.");
+                    if (saveAssets && scene.isDirty)
+                        throw new InvalidOperationException("Save the target scene before applying persistent blendshape changes.");
                     touchedScenes.Add(scene);
+                    sceneDirty[scene] = scene.isDirty;
+                    var key = Tuple.Create(renderer, blendshapeIndex);
+                    if (!originals.ContainsKey(key))
+                        originals.Add(key, renderer.GetBlendShapeWeight(blendshapeIndex));
+                    planned.Add(Tuple.Create(renderer, blendshapeIndex, rendererPath, blendshapeName,
+                        Mathf.Clamp(targetWeight, 0f, 100f)));
+                }
+
+                if (saveAssets)
+                    foreach (var scene in touchedScenes) recovery.Capture(scene.path);
+                recovery.Begin();
+                foreach (var change in planned)
+                {
+                    var renderer = change.Item1;
+                    var blendshapeIndex = change.Item2;
+                    var rendererPath = change.Item3;
+                    var blendshapeName = change.Item4;
+                    var clampedWeight = change.Item5;
                     var previousWeight = renderer.GetBlendShapeWeight(blendshapeIndex);
-                    var clampedWeight = Mathf.Clamp(targetWeight, 0f, 100f);
                     Undo.RecordObject(renderer, "Apply VRCForge blendshape weight");
+                    mutationStarted = true;
                     renderer.SetBlendShapeWeight(blendshapeIndex, clampedWeight);
                     var currentWeight = renderer.GetBlendShapeWeight(blendshapeIndex);
+                    if (currentWeight != clampedWeight)
+                        throw new InvalidOperationException("Blendshape weight readback did not match the requested value.");
                     EditorUtility.SetDirty(renderer);
                     EditorUtility.SetDirty(renderer.gameObject);
                     EditorSceneManager.MarkSceneDirty(renderer.gameObject.scene);
@@ -99,6 +130,7 @@ namespace VRCForge.Editor
                     }
                 }
 
+                recovery.Complete();
                 return VRCForgeToolResult.Completed(
                     $"Applied {applied.Count} blendshape adjustment(s).",
                     new
@@ -125,7 +157,39 @@ namespace VRCForge.Editor
             }
             catch (Exception ex)
             {
-                return VRCForgeToolResult.Failed($"Blendshape apply failed: {ex.Message}\n{ex.StackTrace}");
+                var restored = false;
+                if (mutationStarted)
+                {
+                    // Finalize same-call RecordObject snapshots before reverting.
+                    try { Undo.FlushUndoRecordObjects(); }
+                    catch { /* Restore still runs and its loaded-state checks decide the outcome. */ }
+                    restored = recovery.Restore();
+                    // Asset recovery verifies saved bytes/meta and reverts our Undo
+                    // group. A scene import may invalidate references; verify the
+                    // loaded objects and dirty baseline separately before claiming
+                    // compensation. Never save a scene during this recovery path.
+                    foreach (var original in originals)
+                    {
+                        try
+                        {
+                            restored &= original.Key.Item1 != null
+                                && original.Key.Item1.GetBlendShapeWeight(original.Key.Item2) == original.Value;
+                        }
+                        catch { restored = false; }
+                    }
+                    foreach (var scene in sceneDirty)
+                        restored &= scene.Key.IsValid() && scene.Key.isLoaded && scene.Key.isDirty == scene.Value;
+                }
+                return VRCForgeToolResult.Failed($"Blendshape apply failed: {ex.Message}\n{ex.StackTrace}", new
+                {
+                    mutationStarted,
+                    committed = !mutationStarted || restored ? (bool?)false : null,
+                    commitState = !mutationStarted ? "not_started" : restored ? "rolled_back" : "unknown",
+                    commitStateKnown = !mutationStarted || restored,
+                    restored,
+                    checkpointRecoveryRequired = mutationStarted && !restored,
+                    retryable = false
+                });
             }
         }
 
@@ -145,18 +209,18 @@ namespace VRCForge.Editor
             var normalizedAvatarPath = NormalizePath(avatarPath);
             var normalizedRendererPath = NormalizePath(rendererPath);
 
-            var match = renderers.FirstOrDefault(renderer =>
+            var matches = renderers.Where(renderer =>
                 NormalizePath(GetTransformPath(renderer.transform)) == normalizedRendererPath
                 && (string.IsNullOrEmpty(normalizedAvatarPath)
-                    || NormalizePath(GetTransformPath(FindAvatarRoot(renderer.transform))) == normalizedAvatarPath));
+                    || NormalizePath(GetTransformPath(FindAvatarRoot(renderer.transform))) == normalizedAvatarPath)).ToArray();
 
-            if (match == null)
+            if (matches.Length != 1)
             {
                 throw new InvalidOperationException(
-                    $"Could not locate renderer '{rendererPath}' under avatar '{avatarPath}'.");
+                    $"Expected one renderer '{rendererPath}' under avatar '{avatarPath}', found {matches.Length}.");
             }
 
-            return match;
+            return matches[0];
         }
 
         private static bool IsSceneObject(Component component)
