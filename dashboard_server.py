@@ -12912,6 +12912,8 @@ def prepare_shader_material_restore_request(
 
 def restore_shader_material_plan_approved_sync(arguments: dict[str, Any]) -> dict[str, Any]:
     try:
+        from prepared_shader_tuning_writes import _arguments_with_effective_target
+        arguments = _arguments_with_effective_target(arguments)
         request = ShaderMaterialRestoreRequest(**arguments)
         evidence = prepared_evidence(arguments)
         if not isinstance(evidence, dict):
