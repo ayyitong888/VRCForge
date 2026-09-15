@@ -2,6 +2,12 @@ name: Validate installer Retry and Cancel
 
 on:
   workflow_dispatch:
+    inputs:
+      kind:
+        description: Installer surface to validate
+        type: choice
+        options: [all, offline, web]
+        default: all
 
 permissions:
   contents: read
@@ -13,7 +19,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        kind: [offline, web]
+        kind: ${{ fromJSON(inputs.kind == 'web' && '["web"]' || inputs.kind == 'offline' && '["offline"]' || '["offline","web"]') }}
     defaults:
       run:
         shell: pwsh

@@ -355,6 +355,9 @@ Section "Install"
   ${EndIf}
   FileRead $0 $PayloadStageRoot
   FileClose $0
+  ; The opaque descriptor is consumed. Prepare requires a fresh state file on
+  ; retry; Extract owns and cleans up the separate verified download directory.
+  Delete "$PayloadStatePath"
   ${If} $PayloadStageRoot == ""
     MessageBox MB_ICONSTOP "$(HashMismatchText)" /SD IDOK
     Abort

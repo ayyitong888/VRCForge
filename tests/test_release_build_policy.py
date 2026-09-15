@@ -459,6 +459,7 @@ def test_installer_busy_preflight_and_activation_retry_stay_in_same_installation
             # Extract consumes the verified download stage even after failure.
             # Retry must prepare a fresh stage, never reuse the deleted one.
             assert section.index("install_retry:") < section.index("-Action Prepare")
+            assert section.index("FileClose $0") < section.index('Delete "$PayloadStatePath"') < section.index("-Action Extract")
 
 
 def test_installers_scope_powershell_module_path_to_both_process_entrypoints() -> None:
