@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using UnityEngine;
+using UnityEngine.Rendering;
 
 namespace VRCForge.Editor
 {
@@ -208,9 +209,19 @@ namespace VRCForge.Editor
 
         private static bool TryResolveProperty(Material material, SemanticPropertyMapping mapping, out string propertyName)
         {
+            propertyName = "";
+            if (material == null || material.shader == null) return false;
             foreach (var alias in mapping.aliases)
             {
-                if (material.HasProperty(alias))
+                var index = material.shader.FindPropertyIndex(alias);
+                if (index < 0 || !material.HasProperty(alias)) continue;
+                var type = material.shader.GetPropertyType(index);
+                var compatible = mapping.kind == SemanticPropertyKind.Color
+                    ? type == ShaderPropertyType.Color
+                    : mapping.kind == SemanticPropertyKind.VectorComponent
+                        ? type == ShaderPropertyType.Vector
+                        : type == ShaderPropertyType.Float || type == ShaderPropertyType.Range;
+                if (compatible)
                 {
                     propertyName = alias;
                     return true;
@@ -416,18 +427,10 @@ namespace VRCForge.Editor
 
         public override bool Supports(Material material)
         {
-            if (material == null || material.shader == null)
-            {
-                return false;
-            }
-
-            var shaderName = material.shader.name.ToLowerInvariant();
-            if (shaderName.Contains("liltoon") || shaderName.Contains("lil/toon") || shaderName.Contains("poiyomi"))
-            {
-                return false;
-            }
-
-            return ReadSupportedProperties(material).Count > 0;
+            // Other shaders remain discoverable even without a known semantic
+            // alias. Their semantic property list can be empty; raw property
+            // tools validate the shader's actual declared properties separately.
+            return material != null && material.shader != null;
         }
     }
 

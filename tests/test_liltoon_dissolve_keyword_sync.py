@@ -9,11 +9,12 @@ SOURCE_PATH = ROOT / "Assets/VRCForge/Editor/ShaderMaterialAdapters.cs"
 STUBS = r'''
 using System; using System.Collections.Generic; using System.Linq;
 namespace VRCForge.Editor { public sealed class MaterialPropertyValue { public string type; public object value; public bool writable; } }
+namespace UnityEngine.Rendering { public enum ShaderPropertyType { Color,Vector,Float,Range,Texture,Int } }
 namespace UnityEngine {
  public struct Vector4 {public float x,y,z,w; public float this[int i]{get=>i==0?x:i==1?y:i==2?z:w;set{if(i==0)x=value;else if(i==1)y=value;else if(i==2)z=value;else w=value;}}}
  public class LocalKeyword {public string name;public bool isValid;}
  public class LocalKeywordSpace {public bool Declared=true;public LocalKeyword FindKeyword(string n)=>new LocalKeyword{name=n,isValid=Declared&&n=="GEOM_TYPE_BRANCH_DETAIL"};}
- public class Shader {public string name;public bool DeclareBranch=true;public LocalKeywordSpace keywordSpace=>new LocalKeywordSpace{Declared=DeclareBranch};}
+ public class Shader {public int FindPropertyIndex(string name)=>name=="_DissolveParams"?0:-1;public UnityEngine.Rendering.ShaderPropertyType GetPropertyType(int index)=>UnityEngine.Rendering.ShaderPropertyType.Vector;public string name;public bool DeclareBranch=true;public LocalKeywordSpace keywordSpace=>new LocalKeywordSpace{Declared=DeclareBranch};}
  public class Material {public Shader shader; public Vector4 Dissolve; public HashSet<string> Keywords=new HashSet<string>(); public Dictionary<string,bool> Props=new Dictionary<string,bool>();
   public bool HasProperty(string n)=>n=="_DissolveParams"; public Vector4 GetVector(string n)=>Dissolve; public void SetVector(string n,Vector4 v){Dissolve=v;}
   public float GetFloat(string n)=>0; public void SetFloat(string n,float v){} public Color GetColor(string n)=>new Color(); public void SetColor(string n,Color v){} public bool IsKeywordEnabled(string n)=>Keywords.Contains(n); public void EnableKeyword(string n){Keywords.Add(n);} public void DisableKeyword(string n){Keywords.Remove(n);}
@@ -43,7 +44,7 @@ def compile_run(tmp_path, source, label):
     dotnet = str(root / ("dotnet.exe" if os.name == "nt" else "dotnet"))
     compiler = compilers[-1]
     source_body = source[source.index("namespace VRCForge.Editor"):]
-    cs=tmp_path/(label+".cs"); cs.write_text("using System; using System.Linq; using System.Collections.Generic; using System.Globalization; using UnityEngine; using VRCForge.Editor;"+STUBS+source_body+RUNNER,encoding="utf-8-sig"); dll=tmp_path/(label+".dll")
+    cs=tmp_path/(label+".cs"); cs.write_text("using System; using System.Linq; using System.Collections.Generic; using System.Globalization; using UnityEngine; using UnityEngine.Rendering; using VRCForge.Editor;"+STUBS+source_body+RUNNER,encoding="utf-8-sig"); dll=tmp_path/(label+".dll")
     # Test-owned finite children; closed stdin, captured pipes, no listener or authentication.
     cmd=[dotnet,str(compiler),"-nologo","-target:exe","-nostdlib+","-langversion:8.0",f"-out:{dll}"]+[f"-r:{p}" for p in refs[-1].glob("*.dll")]+[str(cs)]
     built=subprocess.run(cmd,stdin=subprocess.DEVNULL,capture_output=True,text=True,encoding="utf-8",timeout=60); assert built.returncode==0,built.stdout+built.stderr
