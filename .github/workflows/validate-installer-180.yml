@@ -58,10 +58,17 @@ jobs:
           }
           foreach ($releaseInput in $releaseInputs) {
             $tag = $releaseInput.Tag
-            $releaseJson = & gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/$tag"
-            if ($LASTEXITCODE -ne 0) { throw "Cannot read release $tag." }
-            $release = $releaseJson | ConvertFrom-Json
-            if ($release.tag_name -cne $tag) { throw 'Release tag mismatch.' }
+            $releasePagesJson = & gh api --paginate --slurp "repos/$env:GITHUB_REPOSITORY/releases?per_page=100"
+            if ($LASTEXITCODE -ne 0) { throw 'Cannot read repository releases.' }
+            $releasePages = @($releasePagesJson | ConvertFrom-Json)
+            $releaseMatches = @()
+            foreach ($page in $releasePages) {
+              foreach ($candidate in @($page)) {
+                if ($candidate.tag_name -ceq $tag) { $releaseMatches += $candidate }
+              }
+            }
+            if ($releaseMatches.Count -ne 1) { throw "Expected exactly one release for tag $tag; found $($releaseMatches.Count)." }
+            $release = $releaseMatches[0]
             if ($tag -eq 'v1.7.10' -and ($release.draft -or $release.prerelease)) { throw 'Previous installer must be a published stable release.' }
             $assetName = 'VRCForge_Offline_Installer_x64.exe'
             $assets = @($release.assets | Where-Object { $_.name -ceq $assetName })
