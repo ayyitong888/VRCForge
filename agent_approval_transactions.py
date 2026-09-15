@@ -2627,76 +2627,25 @@ class AgentApprovalTransactionService:
             return self._ports.checkpoint.create_archive_checkpoint(project_root, record)
         base_commit_result = self._ports.run_git(git_root, ["rev-parse", "HEAD"])
         base_commit = base_commit_result["stdout"].strip() if base_commit_result["ok"] else ""
-
-        status_before = self._ports.run_git(git_root, ["status", "--porcelain", "--", *pathspecs])
-        add_result = self._ports.run_git(git_root, ["add", "-A", "--", *pathspecs], timeout_seconds=120)
-        if not add_result["ok"]:
-            record.update(
-                {
-                    "ok": False,
-                    "blocking": True,
-                    "status": "failed",
-                    "gitRoot": str(git_root),
-                    "pathspecs": pathspecs,
-                    "baseCommit": base_commit,
-                    "error": add_result["error"] or "git add failed while creating checkpoint.",
-                }
-            )
+        # A checkpoint must never stage files or advance the user's branch.
+        # Reuse HEAD only for a clean scope; the existing archive strategy
+        # captures dirty/unborn worktrees without consuming partial staging.
+        status_before = self._ports.run_git(
+            git_root, ["--no-optional-locks", "status", "--porcelain", "--", *pathspecs]
+        )
+        if not status_before["ok"]:
+            record.update({
+                "ok": False, "blocking": True, "status": "failed",
+                "gitRoot": str(git_root), "pathspecs": pathspecs,
+                "error": status_before["error"] or "git status failed while creating checkpoint.",
+            })
             self._ports.checkpoint.append_checkpoint(record)
             return record
-
-        staged_diff = self._ports.run_git(git_root, ["diff", "--cached", "--quiet", "--", *pathspecs])
-        created_commit = False
-        checkpoint_ref = base_commit
-        if staged_diff["returncode"] == 1:
-            message = f"chore(vrcforge): checkpoint before {target_tool} {checkpoint_id}"
-            commit_result = self._ports.run_git(
-                git_root,
-                [
-                    "-c",
-                    "user.name=VRCForge",
-                    "-c",
-                    "user.email=vrcforge@example.invalid",
-                    "commit",
-                    "--no-verify",
-                    "-m",
-                    message,
-                ],
-                timeout_seconds=120,
+        if not base_commit or status_before["stdout"].strip():
+            record["gitFallbackReason"] = (
+                "project_has_uncommitted_changes" if base_commit else "repository_has_no_head"
             )
-            if not commit_result["ok"]:
-                record.update(
-                    {
-                        "ok": False,
-                        "blocking": True,
-                        "status": "failed",
-                        "gitRoot": str(git_root),
-                        "pathspecs": pathspecs,
-                        "baseCommit": base_commit,
-                        "error": commit_result["error"] or "git commit failed while creating checkpoint.",
-                        "stdout": commit_result["stdout"],
-                        "stderr": commit_result["stderr"],
-                    }
-                )
-                self._ports.checkpoint.append_checkpoint(record)
-                return record
-            created_commit = True
-            head_result = self._ports.run_git(git_root, ["rev-parse", "HEAD"])
-            checkpoint_ref = head_result["stdout"].strip() if head_result["ok"] else base_commit
-        elif staged_diff["returncode"] not in {0, 1}:
-            record.update(
-                {
-                    "ok": False,
-                    "blocking": True,
-                    "status": "failed",
-                    "gitRoot": str(git_root),
-                    "pathspecs": pathspecs,
-                    "baseCommit": base_commit,
-                    "error": staged_diff["error"] or "git diff failed while creating checkpoint.",
-                }
-            )
-            self._ports.checkpoint.append_checkpoint(record)
-            return record
+            return self._ports.checkpoint.create_archive_checkpoint(project_root, record)
 
         record.update(
             {
@@ -2706,8 +2655,8 @@ class AgentApprovalTransactionService:
                 "gitRoot": str(git_root),
                 "pathspecs": pathspecs,
                 "baseCommit": base_commit,
-                "checkpointRef": checkpoint_ref,
-                "createdCommit": created_commit,
+                "checkpointRef": base_commit,
+                "createdCommit": False,
                 "statusBefore": [line for line in status_before["stdout"].splitlines() if line.strip()] if status_before["ok"] else [],
             }
         )
