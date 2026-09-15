@@ -7,7 +7,7 @@ import tempfile
 from pathlib import Path
 
 from agent_approval_transactions import AgentApprovalTransactionService, ApprovalGoalPorts
-from agent_gateway import AgentGateway, stable_hash
+from agent_gateway import AgentGateway
 
 
 REPO_ROOT = Path(__file__).parents[1]
@@ -129,6 +129,10 @@ def test_external_gesture_manager_pending_receipt_skips_connection_finalizer() -
     with tempfile.TemporaryDirectory() as temp_dir:
         root = Path(temp_dir)
         gateway = _gateway(root)
+        config = gateway.ensure_config()
+        config.allow_write_requests = True
+        config.execution_mode = "auto"
+        gateway.save_config(config)
         finalized = False
 
         def finalize(_arguments, _baseline, _result):
@@ -160,13 +164,11 @@ def test_external_gesture_manager_pending_receipt_skips_connection_finalizer() -
             verification_profile="gesture_manager",
         )
         arguments = {"projectPath": str(root / "Project"), "avatarPath": "Avatar"}
-        prepared = {
-            "targetTool": "vrcforge_gesture_manager_enter_play_mode",
-            "arguments": arguments,
-            "argumentsDigest": stable_hash(
-                json.dumps(arguments, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
-            ),
-        }
+        prepared = gateway.approval_transactions.prepare_external_mcp_write(
+            "vrcforge_gesture_manager_enter_play_mode", arguments,
+        )
+        assert prepared["riskLevel"] == "low"
+        assert prepared["requiresUserConfirmation"] is False
 
         result = gateway.approval_transactions.execute_prepared_external_mcp_write(prepared)
 
