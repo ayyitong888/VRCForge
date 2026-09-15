@@ -184,6 +184,7 @@ namespace VRCForge.Editor
                 mutationStarted = true;
                 TypedStructuredListCore.Apply(snapshot.Component, snapshot.Plan);
                 EditorUtility.SetDirty(snapshot.Component);
+                Undo.FlushUndoRecordObjects();
                 EditorSceneManager.MarkSceneDirty(snapshot.Scene.Scene);
                 if (!EditorSceneManager.SaveScene(snapshot.Scene.Scene))
                 {
@@ -256,6 +257,7 @@ namespace VRCForge.Editor
                 }
                 TypedStructuredListCore.RestoreOriginal(snapshot.Component, snapshot.Plan);
                 EditorUtility.SetDirty(snapshot.Component);
+                Undo.FlushUndoRecordObjects();
                 EditorSceneManager.MarkSceneDirty(snapshot.Scene.Scene);
                 if (!EditorSceneManager.SaveScene(snapshot.Scene.Scene))
                 {
