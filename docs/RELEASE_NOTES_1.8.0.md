@@ -34,12 +34,37 @@ not constitute permission to bypass a failed integrity or pairing check.
 - Scene capture supports an explicit free camera. Visual acceptance still
   requires inspecting the resulting image, not just a successful Tool return.
 
+## Tool correctness and diagnostics
+
+- Avatar, component, animation and recovery selectors reject ambiguous or
+  contradictory targets. Qualified paths are not silently reduced to leaf names.
+  Parameter identity remains case-sensitive; parameter budgets count synced values.
+- Scene, wardrobe, expression and material writers save only the relevant assets
+  and scenes. Failed or pending operations preserve recovery information instead
+  of reporting unverified completion.
+- Material discovery supports bounded pages and exact IDs for subsequent reads.
+  Generic shader capabilities are discovered from actual property types;
+  unsupported operations and restricted properties remain explicitly rejected.
+- External Agents can list directories, read text, find files and search text
+  through the shared MCP handlers. These read tools do not expose arbitrary shell
+  execution or source-file modification.
+- External writes honor the selected confirmation mode and recheck permission
+  changes before applying a prepared operation. Chat-storage repair uses its
+  explicit supervised capability rather than a general permission bypass.
+- Resource storage uses SQLite transactions for batches of related results.
+  Pending observations, cancellations and capture retries retain their actual
+  status; diagnostics expose the running Core and tool catalogue.
+
 ## Desktop and storage
 
 - Selecting a project opens that project's new conversation; selecting a
   conversation child opens history, for both general and Unity projects.
 - Manual checkpoint deletion is independent of the automatic keep-latest
   policy, with confirmation and protection for an active write's recovery point.
+- Automatic checkpoints preserve the user's Git staging area and commit history.
+  A clean scope can reference its existing commit; changed scopes use the existing
+  archive checkpoint mechanism. Restore validates the selected record and contents
+  and preserves recovery evidence when compensation is needed.
 - Checkpoint archive usage above the configured budget triggers a warning;
   the warning does not silently delete user archives.
 - Settings panels load independently of slow Agent notes, deduplicate in-flight
@@ -50,4 +75,5 @@ not constitute permission to bypass a failed integrity or pairing check.
 Source regression, isolated Unity compilation, packaged smoke tests and real
 desktop/Agent acceptance are recorded separately. Installer upgrade, desktop
 latency and full avatar workflow claims require evidence from the exact package
-being delivered. No public release or tag is created by these notes.
+being delivered. No public release or tag is created by these notes. Lightweight checkpoint storage
+and a new plugin extension architecture are not included in this release.
