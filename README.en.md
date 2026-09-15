@@ -3,7 +3,7 @@
 ![VRCForge — AI Agent + MCP for VRChat Avatar Editing](docs/assets/social-preview.svg)
 
 [![Stable](https://img.shields.io/github/v/release/ayyitong888/VRCForge?label=stable&style=flat-square)](https://github.com/ayyitong888/VRCForge/releases/latest)
-![Development target](https://img.shields.io/badge/development-v1.8.0-4f46e5?style=flat-square)
+![Current version](https://img.shields.io/badge/current-v1.8.0-4f46e5?style=flat-square)
 [![License GPL-3.0-only](https://img.shields.io/badge/license-GPL--3.0--only-64748b?style=flat-square)](LICENSE)
 ![Platform Windows x64](https://img.shields.io/badge/platform-Windows%20x64-0ea5e9?style=flat-square)
 [![GitHub Stars](https://img.shields.io/github/stars/ayyitong888/VRCForge?style=social)](https://github.com/ayyitong888/VRCForge/stargazers)
@@ -30,9 +30,8 @@ requires project-specific verification.
 
 > Back up your Unity / VRChat Avatar project before using any asset-writing feature.
 
-This page describes the features and usage of `v1.8.0`. Get matching installers
-and Unity packages from the [latest published stable release](https://github.com/ayyitong888/VRCForge/releases/latest);
-use the version shown on that Release page for installation and upgrades.
+This page describes the published [v1.8.0 stable release](https://github.com/ayyitong888/VRCForge/releases/tag/v1.8.0).
+Get matching installers and Unity packages from that same Release.
 
 ## What VRCForge can do
 
@@ -154,6 +153,7 @@ writes still pass through the desktop approval flow.
 ## Documentation
 
 - [User Manual / 使用手册](USER_MANUAL.md)
+- [v1.8.0 stable release notes](docs/RELEASE_NOTES_1.8.0.md)
 - [v1.7.10 stable release notes](docs/RELEASE_NOTES_1.7.10.md)
 - [Compatibility matrix](docs/COMPATIBILITY_MATRIX.md)
 - [Product regression contract](docs/PRODUCT_REGRESSION_CONTRACT.md)

@@ -5,6 +5,7 @@ VRCForge 是一个面向 VRChat Avatar 编辑的本地桌面 Agent 工作区。
 
 This manual explains the public workflow and feature status without project-specific paths or private configuration details.
 
+Latest published stable release: `1.8.0`.
 Manual version: `1.8.0` (`v1.8.0`). Download matching installers and Unity packages
 from the [latest published release](https://github.com/ayyitong888/VRCForge/releases/latest).
 The 1.8.0 version keeps internal Agent and external MCP tool results

@@ -69,10 +69,26 @@ not constitute permission to bypass a failed integrity or pairing check.
 - Settings panels load independently of slow Agent notes, deduplicate in-flight
   requests and guard against stale responses while switching contexts.
 
+## Installer validation
+
+The published offline installer passed fresh installation and upgrade from the
+official 1.7.10 installer on separate clean Windows runners, including installed
+backend health, uninstall and user-data preservation. The evidence is available
+in [the installer validation run](https://github.com/ayyitong888/VRCForge/actions/runs/34987883889).
+Silent error dialogs have deterministic defaults, installer PowerShell children
+use native module discovery, and packaging checks the payload against its own
+archive entry budget before release.
+
+The five published assets have matching release-manifest digests. The public ZIP
+download was independently verified. These checks do not claim a separate
+end-to-end Web installer run. The manifest distinguishes the original runtime
+source identity from the installer and packaged-helper repair commit.
+
 ## Verification boundary
 
 Source regression, isolated Unity compilation, packaged smoke tests and real
 desktop/Agent acceptance are recorded separately. Installer upgrade, desktop
 latency and full avatar workflow claims require evidence from the exact package
-being delivered. No public release or tag is created by these notes. Lightweight checkpoint storage
+being delivered. The [1.8.0 stable release](https://github.com/ayyitong888/VRCForge/releases/tag/v1.8.0)
+is published. Lightweight checkpoint storage
 and a new plugin extension architecture are not included in this release.

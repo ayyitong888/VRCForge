@@ -3,7 +3,7 @@
 ![VRCForge — AI Agent + MCP for VRChat Avatar Editing](docs/assets/social-preview.svg)
 
 [![稳定版](https://img.shields.io/github/v/release/ayyitong888/VRCForge?label=稳定版&style=flat-square)](https://github.com/ayyitong888/VRCForge/releases/latest)
-![开发目标](https://img.shields.io/badge/开发目标-v1.8.0-4f46e5?style=flat-square)
+![当前版本](https://img.shields.io/badge/当前版本-v1.8.0-4f46e5?style=flat-square)
 [![许可证 GPL-3.0-only](https://img.shields.io/badge/许可证-GPL--3.0--only-64748b?style=flat-square)](LICENSE)
 ![平台 Windows x64](https://img.shields.io/badge/平台-Windows%20x64-0ea5e9?style=flat-square)
 [![GitHub Stars](https://img.shields.io/github/stars/ayyitong888/VRCForge?style=social)](https://github.com/ayyitong888/VRCForge/stargazers)
@@ -27,8 +27,8 @@ Unity Editor 工具与 MCP Server，辅助捏脸、换装、材质调整和优�
 
 > 使用任何会写入 Unity 资产的功能前，请先备份 Unity / VRChat Avatar 工程。
 
-本页对应 `v1.8.0` 的功能与使用说明。安装与升级请从
-[最新公开稳定版](https://github.com/ayyitong888/VRCForge/releases/latest)获取配套安装器与 Unity 包，以 Release 页面显示的版本为准。
+本页对应已发布的 [v1.8.0 稳定版](https://github.com/ayyitong888/VRCForge/releases/tag/v1.8.0)。
+安装与升级请获取同一 Release 的配套安装器与 Unity 包。
 
 ## VRCForge 能做什么
 
@@ -139,12 +139,13 @@ python tools\vrcforge_cli.py validation run --project C:\Path\To\UnityProject
 - 目标平台是 Windows x64、Unity 2022.3 LTS 和 VRChat SDK3 Avatar 工程。
 - VRCForge 可以在无 Provider 模式下完成部分只读检查；AI 对话、规划和视觉推理需要已配置的兼容 Provider。
 - 衣柜导入、通用 Unity CRUD、部分优化写入和社区技能属于 Beta 路径，应先预览并在副本或有备份的工程中验证。
-- `v1.8.0` 是源码测试候选，协议、源码测试或工具调用成功不能替代完整实模、视觉、恢复和发行包验收。
+- `v1.8.0` 已发布；协议、源码测试或工具调用成功仍不能替代具体模型的视觉与恢复验收。
 - Quest/Android、第三方资产许可和付费依赖由具体 Avatar 与资源决定。
 
 ## 文档入口
 
 - [用户手册 / User Manual](USER_MANUAL.md)
+- [v1.8.0 稳定版说明](docs/RELEASE_NOTES_1.8.0.md)
 - [v1.7.10 稳定版说明](docs/RELEASE_NOTES_1.7.10.md)
 - [兼容性矩阵](docs/COMPATIBILITY_MATRIX.md)
 - [产品回归契约](docs/PRODUCT_REGRESSION_CONTRACT.md)

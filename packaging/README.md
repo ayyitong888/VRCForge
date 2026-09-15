@@ -66,11 +66,10 @@ installation. uv is licensed `MIT OR Apache-2.0`; preserve:
 
 ## Commands
 
-The current source / target package is `1.8.0` (`v1.8.0`). `1.7.10` remains the latest published stable package
-until formal publication. The release moves the tag, manifest, source, and
-asset evidence together; the v1.7.10 tag and Release page remain available and
-unchanged until that boundary. It also supersedes
-the unpublished `v1.7.0` Draft. Check the GitHub Releases page before preparing
+The current published stable package is `1.8.0` (`v1.8.0`). Its manifest retains
+the original desktop/backend/Core source identity and separately records the
+installer and packaged-helper repair commit. The v1.7.10 tag and Release remain
+available as release history. Check the GitHub Releases page before preparing
 any later build. The Avatar
 Encryption / Anti-Rip addon remains a connector preview and is not bundled with
 the `v1.8.0` package. The public repo must not contain encryption
