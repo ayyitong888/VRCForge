@@ -162,6 +162,7 @@ namespace VRCForge.Editor
                     continue;
                 }
 
+                var backupSha = VerifyBackupIntegrity(backupFilePath, originalSha);
                 var targetExists = File.Exists(targetPath);
                 var currentSha = targetExists ? ComputeSha256(targetPath) : "";
                 var changedSinceBackup = targetExists
@@ -184,13 +185,20 @@ namespace VRCForge.Editor
                     target_exists = targetExists,
                     changed_since_backup = changedSinceBackup,
                     current_sha256 = currentSha,
-                    backup_sha256 = ComputeSha256(backupFilePath)
+                    backup_sha256 = backupSha
                 });
             }
 
             var confirmed = parameters.confirmRestore ?? false;
             if (confirmed)
             {
+                // Check every source before the first target write, including drift since planning.
+                foreach (var item in planned)
+                {
+                    VerifyBackupIntegrity(
+                        ResolveContainedPath(backupPath, item.backup_relative_path, "Backup file"),
+                        item.backup_sha256);
+                }
                 foreach (var item in planned)
                 {
                     var backupFilePath = ResolveContainedPath(backupPath, item.backup_relative_path, "Backup file");
@@ -407,6 +415,18 @@ namespace VRCForge.Editor
                 DefaultBackupRoot,
                 DefaultBackupRoot,
                 "Safe backup root");
+        }
+
+        private static string VerifyBackupIntegrity(string fullPath, string expectedSha)
+        {
+            var actualSha = ComputeSha256(fullPath);
+            if (string.IsNullOrWhiteSpace(expectedSha)
+                || !string.Equals(actualSha, expectedSha, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException(
+                    $"Backup integrity check failed for '{Path.GetFileName(fullPath)}': snapshot hash does not match the manifest. No restore was started.");
+            }
+            return actualSha;
         }
 
         private static string ComputeSha256(string fullPath)
