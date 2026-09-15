@@ -17,8 +17,12 @@ permissions:
 
 jobs:
   installer:
-    # GitHub provisions a fresh Windows VM with admin privileges and UAC off.
-    # Production identity exists only for this job; never use a self-hosted runner.
+    # Each matrix entry is a separate fresh GitHub-hosted Windows VM.
+    # Production identity exists only for that job; never use a self-hosted runner.
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [fresh, upgrade]
     runs-on: windows-2022
     timeout-minutes: 20
     defaults:
@@ -27,6 +31,7 @@ jobs:
     env:
       CANDIDATE_SHA256: ${{ inputs.candidate_sha256 }}
       PREVIOUS_SHA256: ${{ inputs.previous_sha256 }}
+      VALIDATION_MODE: ${{ matrix.mode }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -45,10 +50,13 @@ jobs:
           $evidenceRoot = Join-Path $env:GITHUB_WORKSPACE 'installer-evidence'
           New-Item -ItemType Directory -Path $downloadRoot, $evidenceRoot | Out-Null
           $bindings = @()
-          foreach ($releaseInput in @(
-            @{ Tag = 'v1.8.0'; Folder = 'candidate'; Sha = $env:CANDIDATE_SHA256.ToLowerInvariant() },
-            @{ Tag = 'v1.7.10'; Folder = 'previous'; Sha = $env:PREVIOUS_SHA256.ToLowerInvariant() }
-          )) {
+          $releaseInputs = @(
+            @{ Tag = 'v1.8.0'; Folder = 'candidate'; Sha = $env:CANDIDATE_SHA256.ToLowerInvariant() }
+          )
+          if ($env:VALIDATION_MODE -eq 'upgrade') {
+            $releaseInputs += @{ Tag = 'v1.7.10'; Folder = 'previous'; Sha = $env:PREVIOUS_SHA256.ToLowerInvariant() }
+          }
+          foreach ($releaseInput in $releaseInputs) {
             $tag = $releaseInput.Tag
             $releaseJson = & gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/$tag"
             if ($LASTEXITCODE -ne 0) { throw "Cannot read release $tag." }
@@ -69,6 +77,7 @@ jobs:
             $bindings += [ordered]@{ tag = $tag; releaseId = $release.id; assetId = $asset.id; assetName = $assetName; sha256 = $actualSha; size = $asset.size; draft = $release.draft }
           }
           [ordered]@{
+            mode = $env:VALIDATION_MODE
             workflowCommit = $env:GITHUB_SHA
             repository = $env:GITHUB_REPOSITORY
             runId = $env:GITHUB_RUN_ID
@@ -83,23 +92,30 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $downloadRoot = Join-Path $env:RUNNER_TEMP 'installer-inputs'
           $evidenceRoot = Join-Path $env:GITHUB_WORKSPACE 'installer-evidence'
-          python scripts/smoke_installer_install_uninstall.py `
-            --scope production-clean `
-            --production-clean-confirmation I-OWN-THIS-DISPOSABLE-WINDOWS-ENVIRONMENT `
-            --installer (Join-Path $downloadRoot 'candidate/VRCForge_Offline_Installer_x64.exe') `
-            --upgrade-installer (Join-Path $downloadRoot 'previous/VRCForge_Offline_Installer_x64.exe') `
-            --artifacts-dir $evidenceRoot --timeout 180 `
-            2>&1 | Tee-Object -FilePath (Join-Path $evidenceRoot 'smoke-output.log')
+          $smokeArgs = @(
+            'scripts/smoke_installer_install_uninstall.py',
+            '--scope', 'production-clean',
+            '--production-clean-confirmation', 'I-OWN-THIS-DISPOSABLE-WINDOWS-ENVIRONMENT',
+            '--installer', (Join-Path $downloadRoot 'candidate/VRCForge_Offline_Installer_x64.exe')
+          )
+          if ($env:VALIDATION_MODE -eq 'upgrade') {
+            $smokeArgs += @('--upgrade-installer', (Join-Path $downloadRoot 'previous/VRCForge_Offline_Installer_x64.exe'))
+          }
+          $smokeArgs += @('--artifacts-dir', $evidenceRoot, '--timeout', '180')
+          & python @smokeArgs 2>&1 | Tee-Object -FilePath (Join-Path $evidenceRoot 'smoke-output.log')
           if ($LASTEXITCODE -ne 0) { throw 'Production installer smoke failed; inspect retained evidence.' }
           $reports = @(Get-ChildItem -LiteralPath $evidenceRoot -Filter 'installer-install-uninstall-*.json')
           if ($reports.Count -ne 1) { throw 'Expected one installer report.' }
           $report = Get-Content -LiteralPath $reports[0].FullName -Raw | ConvertFrom-Json
           $health = @($report.steps | Where-Object { $_.name -eq 'installed_backend.health' })
+          $upgradeExpected = $env:VALIDATION_MODE -eq 'upgrade'
+          $upgradeSha = if ($upgradeExpected) { $env:PREVIOUS_SHA256.ToLowerInvariant() } else { '' }
+          $upgradePhase = if ($upgradeExpected) { 'passed' } else { 'skipped' }
           if ($report.ok -ne $true -or $report.summary.status -ne 'passed' -or
               $report.scope.mode -ne 'production-clean' -or $report.scope.cleanEnvironmentConfirmed -ne $true -or
               $report.installerSha256 -cne $env:CANDIDATE_SHA256.ToLowerInvariant() -or
-              $report.upgradeInstallerSha256 -cne $env:PREVIOUS_SHA256.ToLowerInvariant() -or
-              $report.summary.phases.upgrade -ne 'passed' -or $health.Count -ne 1 -or $health[0].version -ne '1.8.0') {
+              $report.upgradeInstallerSha256 -cne $upgradeSha -or
+              $report.summary.phases.upgrade -ne $upgradePhase -or $health.Count -ne 1 -or $health[0].version -ne '1.8.0') {
             throw 'Installer report does not prove the requested version and immutable inputs.'
           }
 
@@ -107,7 +123,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: installer-180-${{ github.run_id }}-${{ github.run_attempt }}
+          name: installer-180-${{ matrix.mode }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: installer-evidence/
           if-no-files-found: warn
           retention-days: 7
