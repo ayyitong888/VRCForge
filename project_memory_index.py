@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import re
+import stat as stat_mode
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -57,10 +58,7 @@ def scan_project_memory(project_path: str | Path, index_root: str | Path, max_fi
         if len(current_files) >= max_files:
             truncated = True
             break
-        try:
-            stat = file_path.stat()
-        except OSError:
-            continue
+        stat = file_path.stat()
         previous_entry = ensure_dict(previous_files.get(rel_path))
         size = int(stat.st_size)
         mtime_ns = int(stat.st_mtime_ns)
@@ -159,14 +157,18 @@ def stable_project_id(project_root: Path) -> str:
 
 def iter_project_files(project_root: Path) -> list[tuple[str, Path]]:
     results: list[tuple[str, Path]] = []
+    def fail_walk(error: OSError) -> None:
+        raise error
     for root_name in INDEXED_ROOTS:
         root = project_root / root_name
-        if not root.exists():
+        try:
+            root_stat = root.stat()
+        except FileNotFoundError:
             continue
-        if root.is_file():
+        if stat_mode.S_ISREG(root_stat.st_mode):
             results.append((root_name, root))
             continue
-        for current_root, dir_names, file_names in os.walk(root):
+        for current_root, dir_names, file_names in os.walk(root, onerror=fail_walk):
             dir_names[:] = [name for name in dir_names if name not in EXCLUDED_DIR_NAMES]
             for file_name in file_names:
                 file_path = Path(current_root) / file_name
@@ -253,10 +255,7 @@ def build_package_fingerprints(entries: dict[str, dict[str, Any]]) -> dict[str, 
 
 
 def read_meta_guid(path: Path) -> str:
-    try:
-        text = path.read_text(encoding="utf-8-sig", errors="ignore")
-    except OSError:
-        return ""
+    text = path.read_text(encoding="utf-8-sig", errors="ignore")
     match = GUID_RE.search(text)
     return match.group(1).lower() if match else ""
 
