@@ -81,11 +81,12 @@ def _external_mcp_call(
     return asyncio.run(run())
 
 
-def _external_gateway(tmp_path: Path) -> AgentGateway:
+def _external_gateway(tmp_path: Path, *, execution_mode: str = "approval") -> AgentGateway:
     gateway = _gateway(tmp_path)
     config = gateway.ensure_config()
     config.enabled = True
     config.allow_write_requests = True
+    config.execution_mode = execution_mode
     gateway.save_config(config)
     return gateway
 
@@ -187,7 +188,7 @@ def test_gesture_manager_and_editor_state_atoms_are_lazy_blocked_with_exact_sche
     )
 
 
-def test_missing_authoritative_atoms_have_direct_external_facades_and_closed_schemas() -> None:
+def test_missing_authoritative_atoms_have_direct_external_facades_and_exact_schemas() -> None:
     expected_blocks = {
         "vrcforge_atomic_reference_rename": "avatar",
         "vrcforge_set_constraint_sources": "avatar",
@@ -200,7 +201,16 @@ def test_missing_authoritative_atoms_have_direct_external_facades_and_closed_sch
         assert name in EXTERNAL_MCP_WRITE_TOOL_BLOCKS[block]
         schema = EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS[name]
         assert schema["type"] == "object"
-        assert schema["additionalProperties"] is False
+        if name == "vrcforge_set_constraint_sources":
+            assert schema["additionalProperties"] is True
+            leaf_required = ["scenePath", "gameObjectPath", "constraintKind", "componentIndex", "sources"]
+            assert schema["anyOf"] == [
+                {"required": leaf_required}, {"required": ["arguments"]}, {"required": ["params"]},
+            ]
+            for envelope in ("arguments", "params"):
+                assert schema["properties"][envelope]["required"] == leaf_required
+        else:
+            assert schema["additionalProperties"] is False
         assert "projectPath" in schema["required"]
 
 
@@ -825,7 +835,7 @@ def test_external_mcp_write_contract_is_real_target_and_two_phase(tmp_path: Path
 
 
 def test_public_mcp_gesture_manager_pending_receipt_projects_pending_operation(tmp_path: Path) -> None:
-    gateway = _external_gateway(tmp_path)
+    gateway = _external_gateway(tmp_path, execution_mode="auto")
     for marker in ("Assets", "Packages", "ProjectSettings"):
         (tmp_path / marker).mkdir(parents=True, exist_ok=True)
     fixture = Path(__file__).parent / "fixtures" / "gesture_manager_pending_receipt.json"
@@ -1066,7 +1076,7 @@ def test_public_mcp_gesture_manager_pending_receipt_projects_pending_operation(t
 
 
 @pytest.mark.parametrize("execution_mode", ["approval", "auto", "roslyn_full_auto"])
-def test_external_low_medium_write_ignores_internal_permission_mode(tmp_path: Path, execution_mode: str) -> None:
+def test_external_low_medium_write_obeys_permission_mode(tmp_path: Path, execution_mode: str) -> None:
     gateway = _external_gateway(tmp_path)
     project = tmp_path / "UnityProject"
     for marker in ("Assets", "Packages", "ProjectSettings"):
@@ -1090,8 +1100,13 @@ def test_external_low_medium_write_ignores_internal_permission_mode(tmp_path: Pa
         },
         bearer=config.token,
     )["result"]["structuredContent"]
-    assert result["status"] == "executed"
-    assert executed == [{"value": execution_mode, "projectRoot": str(project)}]
+    if execution_mode == "approval":
+        assert result["status"] == "user_confirmation_required"
+        assert result["confirmation"]["targetTool"] == "vrcforge_external_medium_write"
+        assert executed == []
+    else:
+        assert result["status"] == "executed"
+        assert executed == [{"value": execution_mode, "projectRoot": str(project)}]
     assert "checkpoint" not in result
     assert "approval" not in result
     assert gateway.approval_transactions.list_approvals(include_expired=False) == []
@@ -1105,7 +1120,7 @@ def test_external_low_medium_write_ignores_internal_permission_mode(tmp_path: Pa
 def test_external_advanced_medium_write_is_not_misclassified_as_high_risk(
     tmp_path: Path,
 ) -> None:
-    gateway = _external_gateway(tmp_path)
+    gateway = _external_gateway(tmp_path, execution_mode="auto")
     project = tmp_path / "UnityProject"
     for marker in ("Assets", "Packages", "ProjectSettings"):
         (project / marker).mkdir(parents=True, exist_ok=True)
@@ -1354,7 +1369,7 @@ def test_external_write_checkpoint_survives_compact_presentation_without_full_re
 def test_external_write_returns_raw_handler_result_and_adjacent_console_facts(
     tmp_path: Path,
 ) -> None:
-    gateway = _external_gateway(tmp_path)
+    gateway = _external_gateway(tmp_path, execution_mode="auto")
     project = tmp_path / "UnityProject"
     for marker in ("Assets", "Packages", "ProjectSettings"):
         (project / marker).mkdir(parents=True, exist_ok=True)
@@ -1409,7 +1424,7 @@ def test_external_write_returns_raw_handler_result_and_adjacent_console_facts(
 def test_external_write_exception_preserves_raw_core_result_and_exact_reason(
     tmp_path: Path,
 ) -> None:
-    gateway = _external_gateway(tmp_path)
+    gateway = _external_gateway(tmp_path, execution_mode="auto")
     project = tmp_path / "UnityProject"
     for marker in ("Assets", "Packages", "ProjectSettings"):
         (project / marker).mkdir(parents=True, exist_ok=True)
@@ -1477,7 +1492,7 @@ def test_external_write_exception_preserves_raw_core_result_and_exact_reason(
 def test_external_medium_project_create_does_not_treat_read_only_template_as_out_of_project_write(
     tmp_path: Path,
 ) -> None:
-    gateway = _external_gateway(tmp_path)
+    gateway = _external_gateway(tmp_path, execution_mode="auto")
     template = tmp_path / "ManagerTemplate"
     target = tmp_path / "RepositoryProjects" / "VisibleAvatarProject"
     target.parent.mkdir()
@@ -1515,7 +1530,7 @@ def test_external_medium_project_create_does_not_treat_read_only_template_as_out
 
 
 def test_external_manual_resolver_does_not_elevate_low_or_medium_risk(tmp_path: Path) -> None:
-    gateway = _external_gateway(tmp_path)
+    gateway = _external_gateway(tmp_path, execution_mode="auto")
     executed: list[dict] = []
     gateway.approval_transactions.register_write_handler(
         "vrcforge_external_manual_write",
@@ -1604,7 +1619,7 @@ def test_external_high_risk_confirmation_executes_once_and_rejects_replay(tmp_pa
 def test_external_unity_write_uses_exact_external_lane_without_internal_transaction(
     tmp_path: Path,
 ) -> None:
-    gateway = _external_gateway(tmp_path)
+    gateway = _external_gateway(tmp_path, execution_mode="auto")
     project = tmp_path / "UnityProject"
     for marker in ("Assets", "Packages", "ProjectSettings"):
         (project / marker).mkdir(parents=True, exist_ok=True)
@@ -1884,7 +1899,7 @@ def test_external_restore_requires_external_user_confirmation_then_executes(tmp_
 
 
 def test_external_write_preparation_and_handler_failures_return_structured_facts(tmp_path: Path) -> None:
-    gateway = _external_gateway(tmp_path)
+    gateway = _external_gateway(tmp_path, execution_mode="auto")
     project = tmp_path / "UnityProject"
     for marker in ("Assets", "Packages", "ProjectSettings"):
         (project / marker).mkdir(parents=True, exist_ok=True)
@@ -2200,7 +2215,7 @@ def test_external_unity_write_missing_project_binding_is_explicitly_no_write(
 
 
 def test_external_mcp_exposes_only_the_typed_vpm_wrapper_write(tmp_path: Path) -> None:
-    gateway = _external_gateway(tmp_path)
+    gateway = _external_gateway(tmp_path, execution_mode="auto")
     project = tmp_path / "UnityProject"
     for marker in ("Assets", "Packages", "ProjectSettings"):
         (project / marker).mkdir(parents=True, exist_ok=True)
@@ -2760,7 +2775,10 @@ def test_dedicated_checkpoint_preflight_failure_blocks_without_global_fallback(
     assert checkpoint["ok"] is False
     assert checkpoint["blocking"] is True
     assert checkpoint["status"] == "failed"
-    assert dedicated_calls == [(project.resolve(), arguments)]
+    assert dedicated_calls == [(
+        project.resolve(),
+        {**arguments, "_checkpointTargetTool": "vrcforge_test_dedicated_checkpoint"},
+    )]
     assert global_calls == []
 
 
@@ -2904,7 +2922,7 @@ def test_in_flight_project_write_query_covers_live_and_applying_state(tmp_path: 
 def test_external_atomic_project_creation_handler_executes_without_fake_unity_checkpoint(
     tmp_path: Path,
 ) -> None:
-    gateway = _external_gateway(tmp_path)
+    gateway = _external_gateway(tmp_path, execution_mode="auto")
     calls: list[dict] = []
     gateway.approval_transactions.register_write_handler(
         "vrcforge_create_project",
