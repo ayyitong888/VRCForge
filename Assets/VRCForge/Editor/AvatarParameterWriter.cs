@@ -26,6 +26,8 @@ namespace VRCForge.Editor
 
         public static object HandleCommand(JObject @params)
         {
+            WriteAnimationCurveTool.AssetEditRecovery recovery = null;
+            bool mutationStarted = false;
             try
             {
                 var avatarPath = (@params?["avatarPath"]?.ToString() ?? string.Empty).Trim();
@@ -42,6 +44,9 @@ namespace VRCForge.Editor
                     return VRCForgeToolResult.Failed("Avatar has no VRCExpressionParameters asset.");
                 }
 
+                if (EditorUtility.IsDirty(parametersAsset))
+                    throw new InvalidOperationException("Save or discard pending edits to the parameter asset before optimization.");
+                var persistedBefore = ExpressionWritePersistence.Capture(parametersAsset);
                 var parameters = parametersAsset.parameters;
                 var requestedNames = ValidateRequestedParameterNames(
                     suggestions
@@ -58,6 +63,11 @@ namespace VRCForge.Editor
                 var applied = new List<object>();
                 var before = new List<object>();
 
+                recovery = new WriteAnimationCurveTool.AssetEditRecovery();
+                recovery.Capture(AssetDatabase.GetAssetPath(parametersAsset));
+                recovery.Begin();
+                Undo.RegisterCompleteObjectUndo(parametersAsset, "VRCForge optimize parameters");
+                mutationStarted = true;
                 for (var i = 0; i < parameters.Length; i++)
                 {
                     var parameter = parameters[i];
@@ -79,13 +89,9 @@ namespace VRCForge.Editor
                 }
 
                 parametersAsset.parameters = parameters;
-                EditorUtility.SetDirty(parametersAsset);
-                AssetDatabase.SaveAssets();
-                AssetDatabase.Refresh();
+                var persistence = ExpressionWritePersistence.SaveAndVerify(
+                    persistedBefore, parametersAsset, descriptor, false, false);
                 var assetPath = AssetDatabase.GetAssetPath(parametersAsset);
-                AssetDatabase.ImportAsset(
-                    assetPath,
-                    ImportAssetOptions.ForceSynchronousImport | ImportAssetOptions.ForceUpdate);
                 var readbackAsset = AssetDatabase.LoadAssetAtPath<VRCExpressionParameters>(assetPath);
                 if (readbackAsset == null || readbackAsset.parameters == null)
                 {
@@ -96,6 +102,8 @@ namespace VRCForge.Editor
                     .Select(DescribeParameter)
                     .ToList();
 
+                recovery.Complete();
+                mutationStarted = false;
                 return VRCForgeToolResult.Completed(
                     $"Applied {applied.Count} parameter optimization(s).",
                     new
@@ -104,6 +112,7 @@ namespace VRCForge.Editor
                         appliedCount = applied.Count,
                         applied,
                         assetPath,
+                        persistence,
                         before,
                         after,
                         affected = new
@@ -116,7 +125,8 @@ namespace VRCForge.Editor
             }
             catch (Exception ex)
             {
-                return VRCForgeToolResult.Failed($"Parameter optimization apply failed: {ex.Message}\n{ex.StackTrace}");
+                var restored = !mutationStarted || (recovery != null && recovery.Restore());
+                return VRCForgeToolResult.Failed($"Parameter optimization apply failed: {ex.Message}\nFailure compensation: {(restored ? "restored" : "incomplete; preserve current state for recovery")}\n{ex.StackTrace}");
             }
         }
 
@@ -173,14 +183,16 @@ namespace VRCForge.Editor
             }
 
             var normalizedAvatarPath = NormalizePath(avatarPath);
-            if (string.IsNullOrEmpty(normalizedAvatarPath))
-            {
-                return descriptors[0];
-            }
-
-            return descriptors.FirstOrDefault(item => NormalizePath(GetTransformPath(item.transform)) == normalizedAvatarPath)
-                ?? descriptors.FirstOrDefault(item => item.name.Equals(avatarPath, StringComparison.OrdinalIgnoreCase))
-                ?? throw new InvalidOperationException($"Avatar descriptor not found: {avatarPath}");
+            var matches = string.IsNullOrEmpty(normalizedAvatarPath)
+                ? descriptors
+                : descriptors.Where(item => NormalizePath(GetTransformPath(item.transform)) == normalizedAvatarPath).ToList();
+            if (matches.Count == 0 && !normalizedAvatarPath.Contains("/"))
+                matches = descriptors.Where(item => item.name.Equals(avatarPath, StringComparison.OrdinalIgnoreCase)).ToList();
+            if (matches.Count != 1)
+                throw new InvalidOperationException(matches.Count > 1
+                    ? $"Avatar descriptor is ambiguous: {avatarPath}. Provide an exact unique hierarchy path."
+                    : $"Avatar descriptor not found: {avatarPath}");
+            return matches[0];
         }
 
         private static string GetTransformPath(Transform transform)
@@ -218,6 +230,8 @@ namespace VRCForge.Editor
 
         public static object HandleCommand(JObject @params)
         {
+            WriteAnimationCurveTool.AssetEditRecovery recovery = null;
+            bool mutationStarted = false;
             try
             {
                 var avatarPath = (@params?["avatarPath"]?.ToString() ?? string.Empty).Trim();
@@ -233,19 +247,23 @@ namespace VRCForge.Editor
                 {
                     return VRCForgeToolResult.Failed("Avatar has no VRCExpressionParameters asset.");
                 }
+                if (EditorUtility.IsDirty(parametersAsset))
+                    throw new InvalidOperationException("Save or discard pending edits to the parameter asset before restoration.");
+                var persistedBefore = ExpressionWritePersistence.Capture(parametersAsset);
                 var beforeParameters = (parametersAsset.parameters ?? Array.Empty<VRCExpressionParameters.Parameter>())
                     .Where(parameter => parameter != null)
                     .ToArray();
                 var before = beforeParameters.Select(DescribeParameter).ToList();
 
                 var restored = new List<VRCExpressionParameters.Parameter>();
-                foreach (var item in parameterItems.OfType<JObject>())
+                var names = new HashSet<string>(StringComparer.Ordinal);
+                foreach (var rawItem in parameterItems)
                 {
+                    var item = rawItem as JObject
+                        ?? throw new InvalidOperationException("Every snapshot parameter must be an object.");
                     var name = (item["name"]?.ToString() ?? string.Empty).Trim();
-                    if (string.IsNullOrWhiteSpace(name))
-                    {
-                        continue;
-                    }
+                    if (string.IsNullOrWhiteSpace(name) || !names.Add(name))
+                        throw new InvalidOperationException("Snapshot parameter name is missing or duplicated.");
 
                     restored.Add(new VRCExpressionParameters.Parameter
                     {
@@ -257,14 +275,15 @@ namespace VRCForge.Editor
                     });
                 }
 
+                recovery = new WriteAnimationCurveTool.AssetEditRecovery();
+                recovery.Capture(AssetDatabase.GetAssetPath(parametersAsset));
+                recovery.Begin();
+                Undo.RegisterCompleteObjectUndo(parametersAsset, "VRCForge restore parameters");
+                mutationStarted = true;
                 parametersAsset.parameters = restored.ToArray();
-                EditorUtility.SetDirty(parametersAsset);
-                AssetDatabase.SaveAssets();
-                AssetDatabase.Refresh();
+                var persistence = ExpressionWritePersistence.SaveAndVerify(
+                    persistedBefore, parametersAsset, descriptor, false, false);
                 var assetPath = AssetDatabase.GetAssetPath(parametersAsset);
-                AssetDatabase.ImportAsset(
-                    assetPath,
-                    ImportAssetOptions.ForceSynchronousImport | ImportAssetOptions.ForceUpdate);
                 var readbackAsset = AssetDatabase.LoadAssetAtPath<VRCExpressionParameters>(assetPath);
                 if (readbackAsset == null || readbackAsset.parameters == null)
                 {
@@ -282,6 +301,8 @@ namespace VRCForge.Editor
                     .OrderBy(name => name, StringComparer.Ordinal)
                     .ToArray();
 
+                recovery.Complete();
+                mutationStarted = false;
                 return VRCForgeToolResult.Completed(
                     $"Restored {restored.Count} avatar parameter(s).",
                     new
@@ -289,6 +310,7 @@ namespace VRCForge.Editor
                         ok = true,
                         restoredCount = restored.Count,
                         assetPath,
+                        persistence,
                         before,
                         after,
                         affected = new
@@ -301,7 +323,8 @@ namespace VRCForge.Editor
             }
             catch (Exception ex)
             {
-                return VRCForgeToolResult.Failed($"Parameter rollback failed: {ex.Message}\n{ex.StackTrace}");
+                var restored = !mutationStarted || (recovery != null && recovery.Restore());
+                return VRCForgeToolResult.Failed($"Parameter rollback failed: {ex.Message}\nFailure compensation: {(restored ? "restored" : "incomplete; preserve current state for recovery")}\n{ex.StackTrace}");
             }
         }
 
@@ -319,12 +342,13 @@ namespace VRCForge.Editor
 
         private static VRCExpressionParameters.ValueType ParseValueType(string value)
         {
-            if (Enum.TryParse(value, true, out VRCExpressionParameters.ValueType parsed))
+            if (Enum.TryParse(value, true, out VRCExpressionParameters.ValueType parsed)
+                && Enum.IsDefined(typeof(VRCExpressionParameters.ValueType), parsed))
             {
                 return parsed;
             }
 
-            return VRCExpressionParameters.ValueType.Bool;
+            throw new InvalidOperationException("Snapshot parameter valueType is invalid.");
         }
 
         private static VRCAvatarDescriptor ResolveAvatarDescriptor(string avatarPath)
@@ -339,14 +363,16 @@ namespace VRCForge.Editor
             }
 
             var normalizedAvatarPath = NormalizePath(avatarPath);
-            if (string.IsNullOrEmpty(normalizedAvatarPath))
-            {
-                return descriptors[0];
-            }
-
-            return descriptors.FirstOrDefault(item => NormalizePath(GetTransformPath(item.transform)) == normalizedAvatarPath)
-                ?? descriptors.FirstOrDefault(item => item.name.Equals(avatarPath, StringComparison.OrdinalIgnoreCase))
-                ?? throw new InvalidOperationException($"Avatar descriptor not found: {avatarPath}");
+            var matches = string.IsNullOrEmpty(normalizedAvatarPath)
+                ? descriptors
+                : descriptors.Where(item => NormalizePath(GetTransformPath(item.transform)) == normalizedAvatarPath).ToList();
+            if (matches.Count == 0 && !normalizedAvatarPath.Contains("/"))
+                matches = descriptors.Where(item => item.name.Equals(avatarPath, StringComparison.OrdinalIgnoreCase)).ToList();
+            if (matches.Count != 1)
+                throw new InvalidOperationException(matches.Count > 1
+                    ? $"Avatar descriptor is ambiguous: {avatarPath}. Provide an exact unique hierarchy path."
+                    : $"Avatar descriptor not found: {avatarPath}");
+            return matches[0];
         }
 
         private static string GetTransformPath(Transform transform)
