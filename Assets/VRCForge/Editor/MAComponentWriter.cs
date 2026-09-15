@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
@@ -693,36 +693,34 @@ namespace VRCForge.Editor
         {
             var path = NormalizePath(rawPath);
             if (string.IsNullOrEmpty(path)) { return null; }
-
-            // Relative to the avatar root first.
+            var candidates = Resources.FindObjectsOfTypeAll<Transform>()
+                .Where(IsSceneComponent).ToList();
             if (avatarRoot != null)
             {
-                var rel = avatarRoot.Find(path);
-                if (rel != null) { return rel.gameObject; }
-                if (path.Equals(avatarRoot.name, StringComparison.Ordinal)) { return avatarRoot.gameObject; }
-                if (path.StartsWith(avatarRoot.name + "/", StringComparison.Ordinal))
-                {
-                    var sub = avatarRoot.Find(path.Substring(avatarRoot.name.Length + 1));
-                    if (sub != null) { return sub.gameObject; }
-                }
+                var rootPath = NormalizePath(GetTransformPath(avatarRoot));
+                var scopedPath = path == rootPath || path == avatarRoot.name
+                    ? rootPath
+                    : path.StartsWith(rootPath + "/", StringComparison.Ordinal)
+                        ? path
+                        : path.StartsWith(avatarRoot.name + "/", StringComparison.Ordinal)
+                            ? rootPath + path.Substring(avatarRoot.name.Length)
+                            : rootPath + "/" + path;
+                var scoped = candidates.Where(t => (t == avatarRoot || t.IsChildOf(avatarRoot))
+                    && NormalizePath(GetTransformPath(t)) == scopedPath).ToList();
+                if (scoped.Count > 1)
+                    throw new InvalidOperationException($"Scene object path is ambiguous: '{rawPath}'.");
+                if (scoped.Count == 1) { return scoped[0].gameObject; }
             }
-
-            // Full-scene scan: exact hierarchy path, then unique leaf name.
-            var leaf = path.Contains("/") ? path.Substring(path.LastIndexOf('/') + 1) : path;
-            GameObject byLeaf = null;
-            var leafMatches = 0;
-            foreach (var t in Resources.FindObjectsOfTypeAll<Transform>())
-            {
-                if (!IsSceneComponent(t)) { continue; }
-                var full = NormalizePath(GetTransformPath(t));
-                if (full == path) { return t.gameObject; }
-                if (t.name.Equals(leaf, StringComparison.Ordinal))
-                {
-                    byLeaf = t.gameObject;
-                    leafMatches++;
-                }
-            }
-            return leafMatches == 1 ? byLeaf : null;
+            var exact = candidates.Where(t => NormalizePath(GetTransformPath(t)) == path).ToList();
+            if (exact.Count > 1)
+                throw new InvalidOperationException($"Scene object path is ambiguous: '{rawPath}'.");
+            if (exact.Count == 1) { return exact[0].gameObject; }
+            // A qualified path must never degrade to an unrelated object's leaf name.
+            if (path.Contains("/")) { return null; }
+            var leaves = candidates.Where(t => t.name.Equals(path, StringComparison.Ordinal)).ToList();
+            if (leaves.Count > 1)
+                throw new InvalidOperationException($"Scene object name is ambiguous: '{rawPath}'.");
+            return leaves.Count == 1 ? leaves[0].gameObject : null;
         }
 
         private static bool IsSceneComponent(Component component)
