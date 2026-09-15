@@ -704,7 +704,16 @@ def test_avatar_encryption_public_repo_contains_no_unity_or_shader_implementatio
 
 def test_avatar_encryption_external_mcp_lists_reads_but_hides_internal_write_requests(
     force_gateway_approval_mode,
+    tmp_path,
+    monkeypatch,
 ) -> None:
+    # Model the shared Gateway after calls have observed multiple projects.
+    # Keep its ambiguity guard active and restore the prior scopes after this test.
+    monkeypatch.setattr(
+        dashboard_server.AGENT_GATEWAY,
+        "_external_mcp_project_paths",
+        {str(tmp_path / "project-a"), str(tmp_path / "project-b")},
+    )
     config = dashboard_server.AGENT_GATEWAY.ensure_config()
     config.enabled = True
     dashboard_server.AGENT_GATEWAY.save_config(config)
@@ -787,6 +796,7 @@ def test_avatar_encryption_external_mcp_lists_reads_but_hides_internal_write_req
                 "params": {
                     "name": "vrcforge_avatar_encryption_scan",
                     "arguments": {
+                        "projectPath": str(tmp_path / "project-a"),
                         "params": {
                             "avatarPath": "Scene/HeroAvatar",
                             "inventory": make_encryption_inventory(),
@@ -796,7 +806,7 @@ def test_avatar_encryption_external_mcp_lists_reads_but_hides_internal_write_req
                 },
             },
         )
-        assert scan.status_code == 200
+        assert scan.status_code == 200, scan.text
         scan_payload = json.loads(scan.json()["result"]["content"][0]["text"])
         assert scan.json()["result"]["isError"] is True
         assert "MCP2 unitypackage installed and ready" in scan_payload["error"]
