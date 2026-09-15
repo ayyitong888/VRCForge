@@ -53,6 +53,17 @@ _BLENDSHAPE_PREVIEW_ITEM: dict[str, Any] = {
 
 
 UNITY_READ_TOOL_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
+    **{name: {
+        "type": "object", "additionalProperties": False,
+        "properties": {
+            "avatarPath": {"type": "string", "description": "Optional saved avatar path/name filter; not a project identity lock."},
+            "offset": {"type": "integer", "minimum": 0, "default": 0},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 20},
+        },
+    } for name in (
+        "vrcforge_list_shader_tuning_history", "vrcforge_list_shader_tuning_presets",
+        "vrcforge_list_tuning_history", "vrcforge_list_tuning_presets",
+    )},
     "vrcforge_inspect_project_chat_store": {
         "type": "object",
         "additionalProperties": False,

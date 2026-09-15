@@ -331,6 +331,7 @@ from prepared_blendshape_writes import (
     canonical_sha256 as blendshape_evidence_sha256,
     require_exact_evidence as require_exact_blendshape_evidence,
 )
+from tuning_record_discovery import page_tuning_records
 from prepared_shader_tuning_writes import (
     require_avatar_material_scope,
     require_shader_receipt_avatar,
@@ -25256,6 +25257,21 @@ def register_agent_gateway_tools() -> None:
     AGENT_GATEWAY.register_tool("vrcforge_list_avatars", "List avatars from the current Unity project.", "read/debug", lambda params: AVATAR_TUNING_WORKFLOWS.read_avatars(build_agent_dashboard_request(params)))
     AGENT_GATEWAY.register_tool("vrcforge_scan_blendshapes", "Read avatar blendshape names, current weights and renderer identity. when-to-use: inspect facial shapes by default, or use scope=all and optional exact rendererPaths for body/clothing/accessories. when-NOT-to-use: do not use to change weights or inspect material properties; for example, 'set the dress blendshape to 100' requires a separate approved write.", "read/debug", lambda params: AVATAR_TUNING_WORKFLOWS.read_avatar_blendshapes(AvatarBlendshapeListRequest(**{**build_agent_dashboard_request(params).model_dump(), "rendererPaths": params.get("rendererPaths")})))
     AGENT_GATEWAY.register_tool("vrcforge_scan_materials", "Scan shader/material inventory for an avatar.", "read/debug", lambda params: SHADER_VISION_PROTECTION.scan_shader_materials(ShaderMaterialScanRequest(**params)))
+    for name, reader_name, collection in (
+        ("vrcforge_list_shader_tuning_history", "read_shader_tuning_history", "records"),
+        ("vrcforge_list_shader_tuning_presets", "read_shader_tuning_presets", "presets"),
+        ("vrcforge_list_tuning_history", "read_tuning_history", "records"),
+        ("vrcforge_list_tuning_presets", "read_tuning_presets", "presets"),
+    ):
+        AGENT_GATEWAY.register_tool(
+            name,
+            "Read saved " + ("shader/material" if "shader" in name else "face/blendshape")
+            + " tuning " + collection + " with exact IDs and paginated changes. "
+            "when-to-use: discover an existing historyId or presetId before selecting a saved tuning operation; follow nextOffset while hasMore. "
+            "when-NOT-to-use: do not use to apply or undo changes, inspect live values, or claim records belong to the current project; applying a preset requires a separate approved write.",
+            "read/debug",
+            lambda params, reader_name=reader_name, collection=collection: page_tuning_records(globals()[reader_name], collection, params),
+        )
     AGENT_GATEWAY.register_tool("vrcforge_scan_modular_avatar", "Detect the Modular Avatar package and scan avatars for Modular Avatar components.", "read/debug", lambda params: scan_addon_framework_sync("modular_avatar", params or {}))
     AGENT_GATEWAY.register_tool("vrcforge_inspect_modular_avatar_component", "Read the exact presence, count, type, scene dirty state, and AvatarObjectReference paths for one Modular Avatar component without writing.", "read/debug", inspect_modular_avatar_component_sync)
     AGENT_GATEWAY.register_tool("vrcforge_inspect_primitive_basis_fixture", "Read the fixed primitive-basis fixture identity and active-scene binding without writing.", "read/debug", inspect_primitive_basis_fixture_sync)

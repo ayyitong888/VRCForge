@@ -134,6 +134,8 @@ EXTERNAL_MCP_READ_TOOL_BLOCKS: dict[str, frozenset[str]] = {
             "vrcforge_preview_material_texture_assignment",
             "vrcforge_preview_renderer_material_slot",
             "vrcforge_preview_shader_apply",
+            "vrcforge_list_shader_tuning_history",
+            "vrcforge_list_shader_tuning_presets",
             "vrcforge_scan_materials",
             "vrcforge_preview_texture_import_settings",
         }
@@ -207,6 +209,8 @@ EXTERNAL_MCP_READ_TOOL_BLOCKS: dict[str, frozenset[str]] = {
     "checkpoint": frozenset(
         {
             "vrcforge_list_checkpoints",
+            "vrcforge_list_tuning_history",
+            "vrcforge_list_tuning_presets",
             "vrcforge_preview_restore_backup",
             "vrcforge_preview_restore_checkpoint",
             "vrcforge_preview_interrupted_apply_recovery",
