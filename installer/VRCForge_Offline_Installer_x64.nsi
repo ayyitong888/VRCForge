@@ -146,12 +146,20 @@ LangString ActivationFailedText ${LANG_JAPANESE} "実行中の VRCForge を正�
 LangString ActivationFailedText ${LANG_ENGLISH} "The running VRCForge could not close normally, or the new version could not be activated safely. The prior installation was preserved; close VRCForge manually and retry."
 
 Function .onInit
+  ; Set only this installer's child-process environment; the change ends with this process.
+  System::Call 'kernel32::SetEnvironmentVariable(t "PSModulePath", t "$WINDIR\System32\WindowsPowerShell\v1.0\Modules") i .r0'
+  StrCmp $0 0 0 +2
+    Abort
   ; Language dialog: preselects the OS UI language (or the previously
   ; persisted choice) and stores the result under HKCU\Software\VRCForge.
   !insertmacro MUI_LANGDLL_DISPLAY
 FunctionEnd
 
 Function un.onInit
+  ; Set only this uninstaller's child-process environment; the change ends with this process.
+  System::Call 'kernel32::SetEnvironmentVariable(t "PSModulePath", t "$WINDIR\System32\WindowsPowerShell\v1.0\Modules") i .r0'
+  StrCmp $0 0 0 +2
+    Abort
   ; Reuse the language chosen at install time instead of asking again.
   !insertmacro MUI_UNGETLANGUAGE
 FunctionEnd

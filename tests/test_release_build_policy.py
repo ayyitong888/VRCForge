@@ -436,6 +436,24 @@ def test_nsis_message_boxes_have_silent_default_and_keep_error_abort_paths() -> 
                 assert lines[index + 1].strip() == "Abort"
 
 
+def test_installers_scope_powershell_module_path_to_both_process_entrypoints() -> None:
+    expected_call = (
+        'System::Call \'kernel32::SetEnvironmentVariable(t "PSModulePath", '
+        't "$WINDIR\\System32\\WindowsPowerShell\\v1.0\\Modules") i .r0\''
+    )
+    for name in ("VRCForge_Offline_Installer_x64.nsi", "VRCForge_Web_Installer_x64.nsi"):
+        source = (REPO_ROOT / "installer" / name).read_text(encoding="utf-8")
+        assert source.count(expected_call) == 2
+        for function_name in ("Function .onInit", "Function un.onInit"):
+            block = source[source.index(function_name) : source.index("FunctionEnd", source.index(function_name))]
+            assert expected_call in block
+            call_index = block.index(expected_call)
+            compare_index = block.index("StrCmp $0 0 0 +2", call_index)
+            assert block.index("Abort", compare_index) > compare_index
+        assert "WriteReg" not in source[source.index("Function .onInit") : source.index("FunctionEnd", source.index("Function .onInit"))]
+        assert "WriteReg" not in source[source.index("Function un.onInit") : source.index("FunctionEnd", source.index("Function un.onInit"))]
+
+
 def test_desktop_cooperates_with_restart_manager_without_changing_normal_close_to_tray() -> None:
     main = (REPO_ROOT / "src-tauri" / "src" / "main.rs").read_text(encoding="utf-8")
     lifecycle = (
@@ -793,7 +811,6 @@ def test_installers_execute_only_the_protected_hash_checked_helper() -> None:
         assert "Call ValidateInstallBoundary" in installer
         assert "Call un.ValidateInstallBoundary" in installer
         assert "ExecutionPolicy Bypass" in installer
-        assert "SetEnvironmentVariable" not in installer
     assert 'File /oname=payload.zip "${PAYLOAD_ZIP}"' in installers[0]
 
 
