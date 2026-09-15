@@ -259,6 +259,21 @@ def test_web_payload_layout_rejects_mixed_separator_collision(tmp_path: Path) ->
 
 
 @pytest.mark.skipif(not SHELL, reason="PowerShell is required")
+def test_web_payload_layout_matches_release_entry_limit(tmp_path: Path) -> None:
+    accepted = tmp_path / "accepted.zip"
+    rejected = tmp_path / "rejected.zip"
+    _write_zip(accepted, {f"entries/{index:04d}.bin": b"x" for index in range(5989)})
+    _write_zip(rejected, {f"entries/{index:04d}.bin": b"x" for index in range(8193)})
+
+    accepted_result = _run_layout_validation(accepted)
+    rejected_result = _run_layout_validation(rejected)
+
+    assert accepted_result.returncode == 0, accepted_result.stderr + accepted_result.stdout
+    assert rejected_result.returncode != 0
+    assert "too many entries" in (rejected_result.stderr + rejected_result.stdout)
+
+
+@pytest.mark.skipif(not SHELL, reason="PowerShell is required")
 def test_web_payload_helper_rejects_non_official_url_before_any_staging(tmp_path: Path) -> None:
     native_program_files = os.environ.get("ProgramW6432") or os.environ["ProgramFiles"]
     result = subprocess.run(
@@ -413,7 +428,7 @@ def test_web_payload_helper_rejects_hostile_archives(
 @pytest.mark.skipif(not _is_admin(), reason="production ACL fixture requires an elevated Windows token")
 def test_web_payload_helper_rejects_archive_entry_count_over_limit(tmp_path: Path) -> None:
     payload = tmp_path / "payload.zip"
-    _write_zip(payload, {f"items/{index}.txt": b"x" for index in range(4097)})
+    _write_zip(payload, {f"items/{index}.txt": b"x" for index in range(8193)})
 
     result = _run_extract(tmp_path, payload)
 

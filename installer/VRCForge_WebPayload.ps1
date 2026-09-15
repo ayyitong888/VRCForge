@@ -31,7 +31,9 @@ $ErrorActionPreference = "Stop"
 [UInt64]$script:MaxArchiveBytes = 2147483648
 [UInt64]$script:MaxEntryBytes = 536870912
 [UInt64]$script:MaxExtractedBytes = 4294967296
-[int]$script:MaxEntryCount = 4096
+# The bundled 1.8.0 backend payload contains 5,989 ZIP entries; retain headroom
+# for ordinary release growth while rejecting unbounded archive expansion.
+[int]$script:MaxEntryCount = 8192
 $script:StageParentName = "VRCForge Installer Staging"
 $script:InstallSiblingPrefix = "VRCForge"
 $script:PayloadFileName = "payload.zip"

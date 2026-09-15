@@ -80,6 +80,20 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def validate_installer_archive_entry_count(path: Path) -> dict[str, int]:
+    # Read the shipped helper, not a second constant that can drift from it.
+    with zipfile.ZipFile(path) as archive:
+        helper = archive.read("installer/VRCForge_WebPayload.ps1").decode("utf-8-sig")
+        match = re.search(r"(?m)^\[int\]\$script:MaxEntryCount\s*=\s*(\d+)\s*$", helper)
+        if match is None:
+            raise ValueError("Cannot establish the packaged installer entry limit")
+        limit = int(match.group(1))
+        entries = len(archive.infolist())
+        if entries > limit:
+            raise ValueError(f"Payload has {entries} entries, exceeding installer entry limit {limit}")
+        return {"entries": entries, "limit": limit}
+
+
 def choose_port(requested: int) -> int:
     if requested:
         if requested < 1 or requested > 65535:
@@ -756,6 +770,7 @@ def main() -> int:
     raw_privacy_values: dict[str, Any] = {}
     raw_api_bodies: list[str] = []
     support_bundle_file: Path | None = None
+    installer_archive_budget: dict[str, int] = {}
 
     try:
         missing_inputs = [
@@ -765,6 +780,7 @@ def main() -> int:
         ]
         if missing_inputs:
             raise FileNotFoundError(f"packaged payload is missing required files: {missing_inputs}")
+        installer_archive_budget = validate_installer_archive_entry_count(payload_zip)
         packaged_version = (packaged_root / "VERSION").read_text(encoding="utf-8").strip()
         if packaged_version != version:
             raise RuntimeError(f"packaged VERSION mismatch: expected {version}, got {packaged_version}")
@@ -1063,6 +1079,7 @@ def main() -> int:
         "supportBundlePath": support_bundle_path,
         "payloadZip": str(payload_zip),
         "payloadZipSha256": payload_zip_sha256,
+        "installerArchiveBudget": installer_archive_budget,
         "packagedRoot": str(packaged_root),
         "backend": str(backend_exe),
         "port": port,
