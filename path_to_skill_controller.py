@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -179,6 +180,30 @@ class PathToSkillWriteService:
     def __init__(self, ports: PathToSkillWritePorts) -> None:
         self._ports = ports
 
+    @staticmethod
+    def _retract_owned_source(source: Path, captured: CapturedSkillSource) -> None:
+        """Retract only this call's exact source files; preserve changed trees."""
+        source = source.absolute()
+        entries = [source, *source.rglob("*")]
+        if any(p.is_symlink() or getattr(p, "is_junction", lambda: False)() for p in [*source.parents, *entries]):
+            raise ValueError(f"Source recovery refused linked paths; retained at {source}")
+        files = {p.relative_to(source).as_posix(): p for p in entries if p.is_file()}
+        if set(files) != set(captured.source_files):
+            raise ValueError(f"Source recovery found changed files; retained at {source}")
+        directories = {source}
+        for path in files.values():
+            directories.update(p for p in path.parents if p == source or source in p.parents)
+        if {p for p in entries if p.is_dir()} != directories:
+            raise ValueError(f"Source recovery found changed directories; retained at {source}")
+        for name, path in files.items():
+            expected = hashlib.sha256(captured.source_files[name].encode("utf-8")).digest()
+            if hashlib.sha256(path.read_bytes()).digest() != expected:
+                raise ValueError(f"Source recovery found changed content; retained at {source}")
+        for path in files.values():
+            path.unlink()
+        for path in sorted((p for p in entries if p.is_dir()), key=lambda p: len(p.parts), reverse=True):
+            path.rmdir()
+
     def write(self, params: dict[str, Any]) -> dict[str, Any]:
         summary = params.get("summary")
         if not isinstance(summary, dict) or not summary:
@@ -257,11 +282,24 @@ class PathToSkillWriteService:
             )
             if package_output.suffix.lower() != ".vsk":
                 package_output = package_output.with_name(package_output.name + ".vsk")
-            if self._ports.path_lexists(package_output):
+            try:
+                if self._ports.path_lexists(package_output):
+                    raise PathToSkillControllerError(
+                        "packageOutputPath already exists; Path-to-Skill export requires a new package path.",
+                        status_code=400,
+                    )
+                self._ports.ensure_parent(package_output.parent)
+                result["exported"] = self._ports.export_dev(source_dir, package_output)
+            except Exception as exc:
+                try:
+                    self._retract_owned_source(source_dir, captured)
+                except Exception as recovery_exc:
+                    raise PathToSkillControllerError(
+                        f"Skill export failed: {exc}; source recovery failed: {recovery_exc}",
+                        status_code=500,
+                    ) from exc
                 raise PathToSkillControllerError(
-                    "packageOutputPath already exists; Path-to-Skill export requires a new package path.",
-                    status_code=400,
-                )
-            self._ports.ensure_parent(package_output.parent)
-            result["exported"] = self._ports.export_dev(source_dir, package_output)
+                    f"Skill export failed; generated source was retracted: {exc}",
+                    status_code=500,
+                ) from exc
         return result
