@@ -10,7 +10,7 @@ import httpx
 import pytest
 
 from agent_mcp_2026 import PROTOCOL_VERSION, Mcp2026Router, create_asgi_app, run_stdio_loop
-from agent_gateway import AgentGatewayError
+from agent_gateway import AgentGateway, AgentGatewayError
 
 
 def _meta(**extra):
@@ -379,6 +379,61 @@ def test_prompt_provenance_rejection_is_a_pre_routing_validation_error():
     assert data["commitStateKnown"] is True
     assert data["recovery"]["required"] is False
     assert "http_500" not in json.dumps(data)
+
+
+def test_actual_ambiguous_project_guard_returns_http409_without_recovery(tmp_path):
+    from fastapi.testclient import TestClient
+
+    gateway = AgentGateway(tmp_path / "gateway.json", tmp_path / "audit")
+    config = gateway.ensure_config()
+    config.enabled = True
+    gateway.save_config(config)
+    gateway._register_runtime_project_scope(str(tmp_path / "project-a"))
+    gateway._register_runtime_project_scope(str(tmp_path / "project-b"))
+    calls = []
+    name = "vrcforge_avatar_encryption_scan"
+    gateway.register_tool(name, "Read encryption candidates.", "read/debug", lambda args: calls.append(args))
+    router = Mcp2026Router(
+        lambda _params: [{"name": name}],
+        lambda tool, arguments: gateway.call_external_mcp_tool(tool, arguments),
+    )
+    with TestClient(create_asgi_app(router)) as client:
+        response = client.post(
+            "/",
+            headers={"Accept": "application/json, text/event-stream", "Mcp-Method": "tools/call", "Mcp-Name": name, "MCP-Protocol-Version": PROTOCOL_VERSION},
+            json=_request("tools/call", {"name": name, "arguments": {}}),
+        )
+    assert response.status_code == 409, response.text
+    data = response.json()["error"]["data"]
+    assert calls == []
+    assert data["errorCode"] == "external_mcp_project_scope_ambiguous"
+    assert data["failurePhase"] == "external_mcp_project_scope_validation"
+    assert data["operationKind"] == "read"
+    assert data["tool"] == name
+    assert data["toolRoutingStarted"] is False
+    assert data["mutationStarted"] is False
+    assert data["committed"] is False
+    assert data["commitState"] == "not_started"
+    assert data["recovery"]["required"] is False
+    assert data["checkpointRecoveryRequired"] is False
+    assert "arguments.projectPath" in data["nextAction"]
+
+
+@pytest.mark.parametrize("started", [None, True])
+def test_project_scope_error_without_explicit_no_route_proof_stays_unknown(started):
+    def fail(_tool, _arguments):
+        raise AgentGatewayError(
+            "Project scope rejection without pre-routing proof",
+            status_code=409,
+            cause_code="external_mcp_project_scope_ambiguous",
+            failure_phase="external_mcp_project_scope_validation",
+            tool_routing_started=started,
+            mutation_started=started,
+        )
+    router = Mcp2026Router(lambda _params: [{"name": "read"}], fail)
+    response, status = router.handle(_request("tools/call", {"name": "read", "arguments": {}}))
+    assert status == 500
+    assert response["error"]["data"]["commitState"] == "unknown"
 
 
 def test_actual_820_preparation_rejection_repairs_outer_no_write_state():

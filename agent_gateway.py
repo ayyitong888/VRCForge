@@ -4418,6 +4418,15 @@ class AgentGateway:
             raise AgentGatewayError(
                 "projectPath is required for this external MCP call because multiple Unity project scopes are active.",
                 status_code=409,
+                cause_code="external_mcp_project_scope_ambiguous",
+                failure_layer="gateway_validation",
+                failure_phase="external_mcp_project_scope_validation",
+                operation_kind="write" if tool_name in self._write_handlers else "read",
+                tool=tool_name,
+                tool_routing_started=False,
+                mutation_started=False,
+                committed=False,
+                commit_state="not_started",
             )
 
     def _register_runtime_project_scope(self, project_root: str) -> None:

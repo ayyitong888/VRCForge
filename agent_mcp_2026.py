@@ -100,7 +100,7 @@ def _pre_routing_gateway_rejection(
     *,
     tool: str,
 ) -> dict[str, Any] | None:
-    """Project the one gateway validation refusal that never entered routing.
+    """Project exact gateway validation refusals that never entered routing.
 
     AgentGatewayError is intentionally not imported here: this transport is
     also used by lightweight callers.  The exact cause code plus the absence
@@ -109,9 +109,26 @@ def _pre_routing_gateway_rejection(
     operation cannot be reported as ``not_started``.
     """
 
-    if getattr(exception, "cause_code", "") != "prompt_skill_provenance_mismatch":
-        return None
+    cause_code = getattr(exception, "cause_code", "")
     source = getattr(exception, "external_error", None)
+    if cause_code == "external_mcp_project_scope_ambiguous":
+        # The project guard runs before Tool dispatch. Require its explicit
+        # evidence; a status code or exception message alone proves no such thing.
+        if not isinstance(source, Mapping) or (
+            source.get("failurePhase") != "external_mcp_project_scope_validation"
+            or source.get("toolRoutingStarted") is not False
+            or source.get("mutationStarted") is not False
+            or source.get("committed") is not False
+            or source.get("commitState") != "not_started"
+        ):
+            return None
+        return {
+            **source,
+            "tool": tool,
+            "nextAction": "Provide arguments.projectPath for the intended Unity project, then retry the call.",
+        }
+    if cause_code != "prompt_skill_provenance_mismatch":
+        return None
     if isinstance(source, Mapping):
         if source.get("toolRoutingStarted") is True or source.get("mutationStarted") is True:
             return None
@@ -614,7 +631,7 @@ class Mcp2026Router:
                         return (
                             _error(
                                 request_id, -32602, str(exc), validation_error,
-                                failure_phase="prompt_skill_provenance_validation",
+                                failure_phase=validation_error["failurePhase"],
                                 tool_routing_started=False, mutation_started=False, committed=False,
                             ),
                             int(getattr(exc, "status_code", 409) or 409),
@@ -739,7 +756,7 @@ class Mcp2026Router:
                         -32602,
                         str(exc),
                         validation_error,
-                        failure_phase="prompt_skill_provenance_validation",
+                        failure_phase=validation_error["failurePhase"],
                         tool_routing_started=False,
                         mutation_started=False,
                         committed=False,
