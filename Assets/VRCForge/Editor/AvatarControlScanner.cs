@@ -493,7 +493,7 @@ namespace VRCForge.Editor
         {
             [VRCForgeInput("Exact loaded scene hierarchy path.", IsRequired = true)] public string objectPath { get; set; } = "";
             [VRCForgeInput("Requested active-self state.", IsRequired = true)] public bool? active { get; set; }
-            [VRCForgeInput("Save open scenes and assets after the change.", IsRequired = false)] public bool? saveAssets { get; set; } = true;
+            [VRCForgeInput("Save and verify only the target scene after the change.", IsRequired = false)] public bool? saveAssets { get; set; } = true;
         }
 
         public static object HandleCommand(JObject @params)
@@ -507,26 +507,49 @@ namespace VRCForge.Editor
                 {
                     return VRCForgeToolResult.Failed("Missing required parameter: objectPath");
                 }
-
-                var normalized = NormalizePath(objectPath);
-                var target = Resources.FindObjectsOfTypeAll<Transform>()
-                    .Where(item => item != null && item.gameObject.scene.IsValid() && item.gameObject.scene.isLoaded && !EditorUtility.IsPersistent(item))
-                    .FirstOrDefault(item => NormalizePath(GetTransformPath(item)) == normalized);
-                if (target == null)
+                if (@params?["active"]?.Type != JTokenType.Boolean)
                 {
-                    return VRCForgeToolResult.Failed($"Scene object not found: {objectPath}");
+                    return VRCForgeToolResult.Failed("active must be an explicit boolean.");
                 }
 
+                var normalized = NormalizePath(objectPath);
+                if (saveAssets)
+                {
+                    var outcome = (VRCForgeToolResult)SetGameObjectActiveTool.HandleCommand(
+                        new JObject { ["gameObjectPath"] = normalized, ["active"] = active });
+                    if (!outcome.IsSuccessful) return outcome;
+                    var persisted = JObject.FromObject(outcome.Payload);
+                    if (persisted["persistedReadback"]?.Value<bool>() != true)
+                        return VRCForgeToolResult.Failed("Active-state save did not provide persisted readback.", persisted);
+                    persisted["schema"] = "vrcforge.scene_object_active.v1";
+                    persisted["objectPath"] = persisted["gameObjectPath"];
+                    persisted["active"] = persisted["newActive"];
+                    persisted["before"] = persisted["oldActive"];
+                    persisted["after"] = persisted["newActive"];
+                    persisted["saved"] = true;
+                    persisted["pending"] = false;
+                    persisted["verified"] = true;
+                    persisted["readback"] = new JObject
+                    {
+                        ["persisted"] = true,
+                        ["data"] = new JObject
+                        {
+                            ["objectPath"] = persisted["objectPath"],
+                            ["active"] = persisted["active"],
+                            ["scenePath"] = persisted["scenePath"],
+                            ["sceneFileDigest"] = persisted["sceneFileDigestAfter"]
+                        }
+                    };
+                    return VRCForgeToolResult.Completed($"Set {objectPath} active={active}.", persisted);
+                }
+
+                var target = ComponentCrudCore.ResolveGameObject(normalized).transform;
                 var beforeActive = target.gameObject.activeSelf;
+                Undo.RecordObject(target.gameObject, $"Set Active {target.name}");
                 target.gameObject.SetActive(active);
                 var afterActive = target.gameObject.activeSelf;
                 EditorUtility.SetDirty(target.gameObject);
                 EditorSceneManager.MarkSceneDirty(target.gameObject.scene);
-                if (saveAssets)
-                {
-                    AssetDatabase.SaveAssets();
-                    EditorSceneManager.SaveOpenScenes();
-                }
 
                 return VRCForgeToolResult.Completed(
                     $"Set {objectPath} active={active}.",

@@ -21559,7 +21559,7 @@ def toggle_scene_object_sync(params: dict[str, Any]) -> dict[str, Any]:
     settings = load_dashboard_settings(build_agent_connection_request(params))
     payload = toggle_scene_object_direct(settings, object_path, active)
     emit_log("info", "wardrobe", "Scene object toggled.", {"objectPath": object_path, "active": active})
-    return {"ok": True, "objectPath": object_path, "active": active, "result": payload}
+    return {**ensure_dict_payload(payload, "scene object toggle"), "ok": True, "objectPath": object_path, "active": active, "result": payload}
 
 
 def build_inspect_modular_avatar_component_request(params: dict[str, Any]) -> dict[str, Any]:
