@@ -1139,11 +1139,15 @@ class AvatarTuningPreparedService:
                 expected,
                 "undo Core arguments",
             )
-            return self._ports.invoke_unity(
+            result = self._ports.invoke_unity(
                 self._ports.resolve_write_settings(arguments),
                 tool_name,
                 tool_arguments,
             )
+            failure = _unity_result_failure(result, self._ports.serialize_result(result))
+            if failure is not None:
+                raise RuntimeError(f"Blendshape undo failed: {failure['error']}")
+            return result
 
         result, undo_items, undo_depth = self._undo.consume_exact(
             avatar_path,
