@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.IO;
@@ -533,6 +533,8 @@ namespace VRCForge.Editor
 
         private static DescriptorPlan BuildPlan(VRCAvatarDescriptor descriptor, JObject @params)
         {
+            ValidateLayerTypes(@params["baseAnimationLayers"] as JArray);
+            ValidateLayerTypes(@params["specialAnimationLayers"] as JArray);
             var changed = new List<string>();
             foreach (var key in new[] { "viewPosition", "lipSync", "visemeSkinnedMeshPath", "visemeBlendShapes", "expressionParametersPath", "expressionsMenuPath", "baseAnimationLayers", "specialAnimationLayers", "eyeLookSettingsSourceAvatarPath", "eyeLookEnabled" })
             {
@@ -606,6 +608,7 @@ namespace VRCForge.Editor
 
         private static VRCAvatarDescriptor.CustomAnimLayer[] ApplyLayers(VRCAvatarDescriptor.CustomAnimLayer[] existing, JArray updates)
         {
+            ValidateLayerTypes(updates);
             var layers = (existing ?? Array.Empty<VRCAvatarDescriptor.CustomAnimLayer>()).ToList();
             foreach (var token in updates.OfType<JObject>())
             {
@@ -614,7 +617,8 @@ namespace VRCForge.Editor
                 {
                     throw new InvalidOperationException("Playable layer update requires type.");
                 }
-                var layerType = ParseEnum(typeText, VRCAvatarDescriptor.AnimLayerType.FX);
+                var layerType = (VRCAvatarDescriptor.AnimLayerType)Enum.Parse(
+                    typeof(VRCAvatarDescriptor.AnimLayerType), typeText, true);
                 var index = layers.FindIndex(layer => layer.type == layerType);
                 var layer = index >= 0 ? layers[index] : new VRCAvatarDescriptor.CustomAnimLayer { type = layerType };
                 if (token["isDefault"] != null)
@@ -639,6 +643,22 @@ namespace VRCForge.Editor
                 }
             }
             return layers.ToArray();
+        }
+
+        private static void ValidateLayerTypes(JArray updates)
+        {
+            if (updates == null) { return; }
+            foreach (var token in updates)
+            {
+                var update = token as JObject;
+                var typeText = update?["type"]?.ToString() ?? string.Empty;
+                if (string.IsNullOrWhiteSpace(typeText)
+                    || !Enum.TryParse(typeText, true, out VRCAvatarDescriptor.AnimLayerType layerType)
+                    || !Enum.IsDefined(typeof(VRCAvatarDescriptor.AnimLayerType), layerType))
+                {
+                    throw new InvalidOperationException($"Playable layer update requires a valid type: '{typeText}'.");
+                }
+            }
         }
 
         private static T ParseEnum<T>(string value, T fallback) where T : struct
@@ -668,15 +688,19 @@ namespace VRCForge.Editor
             {
                 return null;
             }
+            var matches = new HashSet<T>();
             foreach (var item in Resources.FindObjectsOfTypeAll<T>())
             {
                 if (item != null && item.gameObject.scene.IsValid() && item.gameObject.scene.isLoaded && !EditorUtility.IsPersistent(item)
                     && AvatarPrimitiveCrudCore.NormalizePath(AvatarPrimitiveCrudCore.GetTransformPath(item.transform)) == normalized)
                 {
-                    return item;
+                    matches.Add(item);
                 }
             }
-            throw new InvalidOperationException($"Scene component not found: {path}");
+            if (matches.Count == 1) { return matches.Single(); }
+            throw new InvalidOperationException(matches.Count > 1
+                ? $"Scene component path is ambiguous: {path}"
+                : $"Scene component not found: {path}");
         }
 
         private class DescriptorPlan

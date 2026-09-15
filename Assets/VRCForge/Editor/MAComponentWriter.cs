@@ -653,6 +653,7 @@ namespace VRCForge.Editor
         {
             if (string.IsNullOrWhiteSpace(avatarPath)) { return null; }
             var normalized = NormalizePath(avatarPath);
+            var matches = new HashSet<Transform>();
             foreach (var rootTypeName in new[]
             {
                 "VRC.SDK3.Avatars.Components.VRCAvatarDescriptor",
@@ -661,13 +662,17 @@ namespace VRCForge.Editor
             {
                 var rootType = FindType(rootTypeName);
                 if (rootType == null) { continue; }
-                var match = Resources.FindObjectsOfTypeAll(rootType)
+                foreach (var component in Resources.FindObjectsOfTypeAll(rootType)
                     .OfType<Component>()
                     .Where(IsSceneComponent)
-                    .FirstOrDefault(component => NormalizePath(GetTransformPath(component.transform)) == normalized);
-                if (match != null) { return match.transform; }
+                    .Where(component => NormalizePath(GetTransformPath(component.transform)) == normalized))
+                {
+                    matches.Add(component.transform);
+                }
             }
-            return null;
+            if (matches.Count > 1)
+                throw new InvalidOperationException($"Avatar root path is ambiguous: '{avatarPath}'.");
+            return matches.SingleOrDefault();
         }
 
         private static Transform FindAvatarRootFor(Transform t)
