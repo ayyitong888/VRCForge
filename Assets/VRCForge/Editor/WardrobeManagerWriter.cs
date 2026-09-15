@@ -12,6 +12,49 @@ using VRCForge.Core.MCP;
 
 namespace VRCForge.Editor
 {
+    internal sealed class WardrobeAssetSaveScope
+    {
+        private readonly HashSet<string> paths;
+
+        internal WardrobeAssetSaveScope(params UnityEngine.Object[] roots)
+        {
+            paths = Collect(roots);
+            foreach (var path in paths)
+                if (AssetDatabase.LoadAllAssetsAtPath(path).Any(asset => asset != null && EditorUtility.IsDirty(asset)))
+                    throw new InvalidOperationException("Save the affected wardrobe asset before editing: " + path);
+        }
+
+        internal void Save(params UnityEngine.Object[] roots)
+        {
+            paths.UnionWith(Collect(roots));
+            foreach (var path in paths.OrderBy(value => value, StringComparer.Ordinal))
+            {
+                if (AssetDatabase.LoadMainAssetAtPath(path) == null) continue;
+                AssetDatabase.SaveAssetIfDirty(new GUID(AssetDatabase.AssetPathToGUID(path)));
+            }
+        }
+
+        private static HashSet<string> Collect(IEnumerable<UnityEngine.Object> roots)
+        {
+            var result = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var pending = new Stack<UnityEngine.Object>(roots.Where(asset => asset != null));
+            var visited = new HashSet<int>();
+            while (pending.Count > 0)
+            {
+                var asset = pending.Pop();
+                if (!visited.Add(asset.GetInstanceID())) continue;
+                var path = AssetDatabase.GetAssetPath(asset);
+                if (string.IsNullOrWhiteSpace(path))
+                    throw new InvalidOperationException("Wardrobe asset has no persistent path.");
+                result.Add(path);
+                if (asset is VRCExpressionsMenu menu)
+                    foreach (var control in menu.controls ?? new List<VRCExpressionsMenu.Control>())
+                        if (control?.subMenu != null) pending.Push(control.subMenu);
+            }
+            return result;
+        }
+    }
+
     // High-risk wardrobe management writer for existing int-exclusive wardrobes.
     // Complements WardrobeScanner and WardrobeOutfitWriter:
     //   - remove_outfit: remove menu toggles + FX Any-State Equals binding/state;
@@ -153,10 +196,17 @@ namespace VRCForge.Editor
                     });
                 }
 
+                var saveRoots = action == "set_default"
+                    ? new UnityEngine.Object[] { context.parametersAsset }
+                    : action == "reorder_outfits"
+                        ? new UnityEngine.Object[] { context.rootMenu }
+                        : new UnityEngine.Object[] { context.rootMenu, context.fxController,
+                            action == "delete_wardrobe" ? context.parametersAsset : null };
+                var saveScope = new WardrobeAssetSaveScope(saveRoots);
                 var undoGroup = Undo.GetCurrentGroup();
                 Undo.SetCurrentGroupName($"Manage wardrobe '{parameterName}'");
                 ApplyAction(action, descriptor, context, targetValues, newName, deleteObjects, deactivateObjects, deleteGeneratedAssets, assetDir, new Queue<string>(plan.newMenuAssetPaths), @params);
-                AssetDatabase.SaveAssets();
+                saveScope.Save(saveRoots);
                 AssetDatabase.Refresh();
                 Undo.CollapseUndoOperations(undoGroup);
 

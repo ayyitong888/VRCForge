@@ -28,8 +28,8 @@ def test_rename_has_scoped_save_and_persisted_identity_readback():
     assert 'controlCount' in method
     handler = text[:text.index('        private static void ApplyAction(')]
     branch = handler.index('var evidence = RenameOutfitVerified(')
-    assert branch < handler.index('AssetDatabase.SaveAssets()')
-    assert handler.index('return VRCForgeToolResult.Completed', branch) < handler.index('AssetDatabase.SaveAssets()')
+    assert branch < handler.index('saveScope.Save(saveRoots)')
+    assert handler.index('return VRCForgeToolResult.Completed', branch) < handler.index('saveScope.Save(saveRoots)')
 
 
 def test_production_readback_rejects_missing_or_changed_target(tmp_path):

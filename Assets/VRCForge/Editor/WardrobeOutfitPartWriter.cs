@@ -249,6 +249,9 @@ namespace VRCForge.Editor
                 }
 
                 // ---- APPLY -------------------------------------------------------
+                var saveScope = new WardrobeAssetSaveScope(fxController,
+                    !boolParamExists ? parametersAsset : null,
+                    addMenuToggle ? descriptor.expressionsMenu : null);
                 AvatarAuthoringCrudCore.EnsureAssetFolder(clipDir);
                 var undoGroup = Undo.GetCurrentGroup();
                 Undo.SetCurrentGroupName($"Add outfit part '{partName}'");
@@ -362,7 +365,8 @@ namespace VRCForge.Editor
                     }
                 }
 
-                AssetDatabase.SaveAssets();
+                saveScope.Save(fxController, !boolParamExists ? parametersAsset : null,
+                    addMenuToggle ? descriptor.expressionsMenu : null, onClip, offClip);
                 AssetDatabase.Refresh();
                 Undo.CollapseUndoOperations(undoGroup);
 

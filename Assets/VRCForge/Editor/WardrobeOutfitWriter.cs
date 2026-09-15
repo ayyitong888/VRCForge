@@ -370,6 +370,8 @@ namespace VRCForge.Editor
                     };
                     receipts.Add(menuReceipt);
                 }
+                var saveScope = new WardrobeAssetSaveScope(fxController,
+                    addMenuToggle ? descriptor.expressionsMenu : null);
                 if (!string.IsNullOrWhiteSpace(approvedObjectReceiptNonce))
                 {
                     if (resolvedTargets.Count != 1)
@@ -479,7 +481,7 @@ namespace VRCForge.Editor
                     }
                 }
 
-                AssetDatabase.SaveAssets();
+                saveScope.Save(fxController, addMenuToggle ? descriptor.expressionsMenu : null, clip);
                 AssetDatabase.Refresh();
                 Undo.CollapseUndoOperations(undoGroup);
                 var postWardrobeFingerprint = WardrobeScanner.ComputeStableFingerprintForAvatar(avatarRootPath);
