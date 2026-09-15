@@ -3670,9 +3670,9 @@ def _parameter_entries(parameters: dict[str, Any]) -> list[dict[str, Any]]:
     seen: set[str] = set()
     for item in raw_items:
         name = _direct_text(item, ("parameterName", "name", "param"))
-        if not name or name.lower() in seen:
+        if not name or name in seen:
             continue
-        seen.add(name.lower())
+        seen.add(name)
         value_type = _normalize_parameter_type(_direct_text(item, ("valueType", "type", "parameterType")))
         explicit_bits = _direct_numeric(item, ("bits", "cost", "syncedBits", "bitCost", "bitUsage"))
         network_synced = _direct_bool(item, ("networkSynced", "synced", "wantSynced"))
