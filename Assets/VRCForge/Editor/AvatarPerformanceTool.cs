@@ -380,7 +380,7 @@ namespace VRCForge.Editor
                 {
                     return ComponentCrudCore.ResolveGameObject(normalized);
                 }
-                catch
+                catch (ComponentCrudCore.GameObjectNotFoundException)
                 {
                     // Fall through to descriptor matching for avatar names.
                 }
@@ -396,6 +396,7 @@ namespace VRCForge.Editor
                 .Where(component => component != null
                     && component.gameObject != null
                     && component.gameObject.scene.IsValid()
+                    && component.gameObject.scene.isLoaded
                     && !EditorUtility.IsPersistent(component.gameObject))
                 .OrderBy(item => item.name)
                 .ToList();
@@ -405,16 +406,27 @@ namespace VRCForge.Editor
             }
             if (string.IsNullOrEmpty(normalized))
             {
+                if (descriptors.Count != 1)
+                {
+                    throw new InvalidOperationException("Multiple scene avatars were found; provide a unique avatarPath.");
+                }
                 return descriptors[0].gameObject;
             }
 
-            var match = descriptors.FirstOrDefault(item => NormalizePath(GetTransformPath(item.transform)) == normalized)
-                ?? descriptors.FirstOrDefault(item => item.name.Equals(avatarPath, StringComparison.OrdinalIgnoreCase));
-            if (match == null)
+            var matches = descriptors.Where(item => NormalizePath(GetTransformPath(item.transform)) == normalized).ToList();
+            if (matches.Count == 0)
+            {
+                matches = descriptors.Where(item => item.name.Equals(avatarPath, StringComparison.OrdinalIgnoreCase)).ToList();
+            }
+            if (matches.Count == 0)
             {
                 throw new InvalidOperationException($"Avatar descriptor not found: {avatarPath}");
             }
-            return match.gameObject;
+            if (matches.Count != 1)
+            {
+                throw new InvalidOperationException($"Avatar descriptor is ambiguous: {avatarPath}. Provide a unique hierarchy path.");
+            }
+            return matches[0].gameObject;
         }
 
         private static long ReadLongField(object instance, string fieldName)
