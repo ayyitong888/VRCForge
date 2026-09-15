@@ -499,53 +499,15 @@ namespace VRCForge.Editor
 
         private static Component ResolveAvatarDescriptor(string avatarPath)
         {
-            var descriptorType = FindType("VRC.SDK3.Avatars.Components.VRCAvatarDescriptor")
-                ?? throw new InvalidOperationException("VRC SDK avatar descriptor type was not found.");
-            var descriptors = Resources.FindObjectsOfTypeAll(descriptorType)
-                .OfType<Component>()
-                .Where(IsSceneObject)
-                .OrderBy(item => item.name)
-                .ToList();
-            if (descriptors.Count == 0)
-            {
-                throw new InvalidOperationException("No scene VRChat avatar descriptor was found.");
-            }
-
-            var normalizedAvatarPath = NormalizePath(avatarPath);
-            if (string.IsNullOrEmpty(normalizedAvatarPath))
-            {
-                return descriptors[0];
-            }
-
-            return descriptors.FirstOrDefault(item => NormalizePath(GetTransformPath(item.transform)) == normalizedAvatarPath)
-                ?? descriptors.FirstOrDefault(item => item.name.Equals(avatarPath, StringComparison.OrdinalIgnoreCase))
-                ?? throw new InvalidOperationException($"Avatar descriptor not found: {avatarPath}");
+            return AvatarAuthoringCrudCore.ResolveAvatarDescriptor(avatarPath);
         }
 
         private static AnimatorController ResolveFxController(Component descriptor)
         {
-            var layers = GetMemberValue(descriptor, "baseAnimationLayers") as IEnumerable;
-            if (layers == null)
-            {
-                throw new InvalidOperationException("Avatar descriptor has no baseAnimationLayers field.");
-            }
-
-            foreach (var layer in layers)
-            {
-                var layerType = Convert.ToString(GetMemberValue(layer, "type"), CultureInfo.InvariantCulture) ?? "";
-                if (!string.Equals(layerType, "FX", StringComparison.OrdinalIgnoreCase))
-                {
-                    continue;
-                }
-
-                var controller = GetMemberValue(layer, "animatorController") as AnimatorController;
-                if (controller != null)
-                {
-                    return controller;
-                }
-            }
-
-            throw new InvalidOperationException("No FX AnimatorController found on the avatar.");
+            var avatar = descriptor as VRC.SDK3.Avatars.Components.VRCAvatarDescriptor
+                ?? throw new InvalidOperationException("The selected component is not a VRChat avatar descriptor.");
+            return AvatarAuthoringCrudCore.GetFxController(avatar)
+                ?? throw new InvalidOperationException("No FX AnimatorController found on the avatar.");
         }
 
         private static bool ContainsAny(string value, params string[] keywords)
