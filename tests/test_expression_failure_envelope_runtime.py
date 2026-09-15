@@ -19,11 +19,12 @@ def test_ensure_parameter_actual_failure_envelope(tmp_path):
     source=(ROOT/"Assets/VRCForge/Editor/Generic/UnityAvatarAuthoringCrud.cs").read_text(encoding="utf-8").split("public static class EnsureExpressionParameterTool",1)[1].split("public static class ",1)[0]
     actual_catch=method(source,"catch (Exception ex)")
     stubs=r'''
-class Receipt {public string Status="not_attempted";public string Error="";}
+class Receipt {public string Status="not_attempted";public string Error="";public bool RolledBack;}
+class Recovery {public bool Restore()=>false;}
 static class VRCForgeToolResult {public static object Failed(string message,object detail)=>detail;}
 public class Probe {
  static object BuildTransaction(List<Receipt> r,string h)=>new {handle=h};
- static object Run(bool mutationStarted){var receipts=new List<Receipt>{new Receipt()};var transactionHandle="Assets/P.asset";try{throw new InvalidOperationException("persisted readback mismatch");}
+ static object Run(bool mutationStarted){var recovery=new Recovery();var receipts=new List<Receipt>{new Receipt()};var transactionHandle="Assets/P.asset";try{throw new InvalidOperationException("persisted readback mismatch");}
 '''
     runner=r'''
  }

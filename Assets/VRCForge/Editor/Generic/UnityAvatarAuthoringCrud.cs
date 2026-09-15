@@ -350,6 +350,7 @@ namespace VRCForge.Editor
         public static object HandleCommand(JObject @params)
         {
             var mutationStarted = false;
+            var recovery = new WriteAnimationCurveTool.AssetEditRecovery();
             var receipts = new List<TransactionReceipt>();
             var transactionHandle = "";
             try
@@ -396,7 +397,11 @@ namespace VRCForge.Editor
 
                 var assetWasMissing = asset == null;
                 ExpressionWritePersistence.RequireCleanSceneForNewReference(descriptor, assetWasMissing);
+                if (asset != null && EditorUtility.IsDirty(asset))
+                    throw new InvalidOperationException("Save existing expression parameter edits before this operation.");
                 var persistenceBefore = ExpressionWritePersistence.Capture(asset);
+                recovery.Capture(assetPath);
+                if (assetWasMissing) recovery.Capture(descriptor.gameObject.scene.path);
                 var assetReceipt = new TransactionReceipt
                 {
                     Asset = asset != null ? AssetDatabase.GetAssetPath(asset) : "expression_parameters",
@@ -413,6 +418,8 @@ namespace VRCForge.Editor
                     };
                     receipts.Add(descriptorReceipt);
                 }
+                recovery.Begin();
+                if (assetWasMissing) Undo.RegisterCompleteObjectUndo(descriptor, "Assign expression parameters");
                 mutationStarted = true;
                 asset = AvatarAuthoringCrudCore.EnsureExpressionParametersAsset(descriptor, assetDir, assetPath);
                 assetPath = AssetDatabase.GetAssetPath(asset);
@@ -453,6 +460,7 @@ namespace VRCForge.Editor
                 var readbackParameter = readbackAsset.parameters?.FirstOrDefault(parameter => parameter != null && parameter.name == parameterName);
                 assetReceipt.After = DescribeParameter(readbackParameter);
                 assetReceipt.Status = "succeeded";
+                recovery.Complete();
                 return VRCForgeToolResult.Completed($"Ensured expression parameter '{parameterName}'.", new
                 {
                     ok = true,
@@ -471,6 +479,8 @@ namespace VRCForge.Editor
             }
             catch (Exception ex)
             {
+                var restored = mutationStarted && recovery.Restore();
+                if (restored) foreach (var receipt in receipts) receipt.RolledBack = true;
                 var failed = receipts.FirstOrDefault(item => item.Status == "not_attempted");
                 if (failed != null)
                 {
@@ -482,7 +492,9 @@ namespace VRCForge.Editor
                     new
                     {
                         schema = "vrcforge.expression_write.v1", verified = false, mutationStarted,
-                        commitState = mutationStarted ? "unknown" : "not_started", checkpointRecoveryRequired = mutationStarted,
+                        committed = false, restored,
+                        commitState = !mutationStarted ? "not_started" : restored ? "rolled_back" : "unknown",
+                        checkpointRecoveryRequired = mutationStarted && !restored,
                         transaction = BuildTransaction(receipts, transactionHandle)
                     });
             }
@@ -557,6 +569,7 @@ namespace VRCForge.Editor
         public static object HandleCommand(JObject @params)
         {
             var mutationStarted = false;
+            var recovery = new WriteAnimationCurveTool.AssetEditRecovery();
             var beforeGraph = new Dictionary<string, JToken>(StringComparer.OrdinalIgnoreCase);
             VRCExpressionsMenu trackedRoot = null;
             var rootWasMissing = false;
@@ -609,6 +622,20 @@ namespace VRCForge.Editor
                 ExpressionWritePersistence.RequireCleanSceneForNewReference(descriptor, rootWasMissing);
                 var persistenceBefore = ExpressionWritePersistence.Capture(root);
                 beforeGraph = CaptureMenuGraph(root);
+                foreach (var path in persistenceBefore.Keys)
+                {
+                    var menu = AssetDatabase.LoadAssetAtPath<VRCExpressionsMenu>(path);
+                    if (menu == null || EditorUtility.IsDirty(menu))
+                        throw new InvalidOperationException("Save existing expression menu edits before this operation.");
+                    recovery.Capture(path);
+                }
+                if (rootWasMissing) recovery.Capture(rootMenuAssetPath);
+                foreach (var path in newMenuAssetPaths) recovery.Capture(path);
+                if (rootWasMissing) recovery.Capture(descriptor.gameObject.scene.path);
+                recovery.Begin();
+                if (rootWasMissing) Undo.RegisterCompleteObjectUndo(descriptor, "Assign expression menu");
+                foreach (var path in persistenceBefore.Keys)
+                    Undo.RegisterCompleteObjectUndo(AssetDatabase.LoadAssetAtPath<VRCExpressionsMenu>(path), "Ensure expression menu");
                 mutationStarted = true;
                 root = AvatarAuthoringCrudCore.EnsureRootMenuAsset(descriptor, assetDir, rootMenuAssetPath);
                 trackedRoot = root;
@@ -651,6 +678,7 @@ namespace VRCForge.Editor
                     transactionHandle,
                     rootWasMissing,
                     null);
+                recovery.Complete();
                 return VRCForgeToolResult.Completed($"Ensured menu control '{controlName}'.", new
                 {
                     ok = true,
@@ -672,16 +700,26 @@ namespace VRCForge.Editor
             }
             catch (Exception ex)
             {
+                var restored = mutationStarted && recovery.Restore();
+                var failedGraph = beforeGraph;
+                var failureReadbackComplete = restored || !mutationStarted;
+                if (mutationStarted && !restored)
+                {
+                    try { failedGraph = CaptureMenuGraph(trackedRoot); failureReadbackComplete = true; }
+                    catch { /* Preserve the original failure when a damaged menu cannot be inspected. */ }
+                }
                 return VRCForgeToolResult.Failed(
                     $"Ensure expression menu control failed: {ex.Message}\n{ex.StackTrace}",
                     new
                     {
-                        schema = "vrcforge.expression_write.v1", verified = false, mutationStarted, commitState = mutationStarted ? "unknown" : "not_started", checkpointRecoveryRequired = mutationStarted,
+                        schema = "vrcforge.expression_write.v1", verified = false, mutationStarted, committed = false, restored,
+                        commitState = !mutationStarted ? "not_started" : restored ? "rolled_back" : "unknown",
+                        checkpointRecoveryRequired = mutationStarted && !restored, failureReadbackComplete,
                         transaction = BuildMenuTransaction(
                             beforeGraph,
-                            CaptureMenuGraph(trackedRoot),
+                            failedGraph,
                             transactionHandle,
-                            rootWasMissing,
+                            rootWasMissing && mutationStarted && !restored,
                             ex.Message)
                     });
             }
