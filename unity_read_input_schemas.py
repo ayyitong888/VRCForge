@@ -148,8 +148,6 @@ UNITY_READ_TOOL_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
         "properties": {
             "projectPath": _PROJECT_PATH_PROPERTY,
             "avatarPath": {"type": "string", "description": "Exact loaded-scene avatar hierarchy path; omit only when avatar selection is unambiguous."},
-            "outputPath": {"type": "string", "description": "Optional asset-relative or absolute JSON output path."},
-            "refreshAssets": {"type": "boolean", "default": False},
             "materialIds": {"type": "array", "items": {"type": "string"}, "maxItems": 2000, "description": "Exact IDs discovered through indexOnly pages; omit to scan all materials."},
             "includeTextures": {"type": "boolean", "default": True},
             "categoryOverrides": SHADER_CATEGORY_OVERRIDES_SCHEMA,
