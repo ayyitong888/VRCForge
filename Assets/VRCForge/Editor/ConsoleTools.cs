@@ -91,6 +91,11 @@ namespace VRCForge.Editor
                 throw new InvalidOperationException("No valid Assets/ files were found to back up.");
             }
 
+            if (Directory.Exists(backupPath) || File.Exists(backupPath))
+                throw new IOException("Backup destination already exists: " + backupId);
+            var manifestCreated = false;
+            try
+            {
             Directory.CreateDirectory(filesRoot);
             foreach (var item in fileMap.Values)
             {
@@ -156,8 +161,9 @@ namespace VRCForge.Editor
             var manifestBeforeExists = File.Exists(manifestPath);
             var manifestBeforeSha = manifestBeforeExists ? ComputeSha256(manifestPath) : "";
             using (var stream = new FileStream(manifestPath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
-            using (var writer = new StreamWriter(stream, Encoding.UTF8))
             {
+                manifestCreated = true;
+                using (var writer = new StreamWriter(stream, Encoding.UTF8))
                 writer.Write(JsonConvert.SerializeObject(payload, Formatting.Indented));
             }
             var manifestAfterExists = File.Exists(manifestPath);
@@ -178,6 +184,43 @@ namespace VRCForge.Editor
             }
 
             return payload;
+            }
+            catch (Exception failure)
+            {
+                var cleanupErrors = new List<Exception>();
+                var directories = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { filesRoot, backupPath };
+                foreach (var item in fileMap.Values)
+                {
+                    var path = Path.Combine(backupPath, item.backup_relative_path).Replace("\\", "/");
+                    for (var parent = Path.GetDirectoryName(path)?.Replace("\\", "/");
+                        !string.IsNullOrEmpty(parent) && IsInside(backupPath, parent);
+                        parent = Path.GetDirectoryName(parent)?.Replace("\\", "/"))
+                        directories.Add(parent);
+                    try
+                    {
+                        if (!item.before_exists && item.status != "not_attempted" && File.Exists(path))
+                        {
+                            if (string.IsNullOrEmpty(item.after_sha256) || ComputeSha256(path) != item.after_sha256)
+                                throw new IOException("Partial backup changed; preserved: " + path);
+                            File.Delete(path);
+                        }
+                    }
+                    catch (Exception cleanupError) { cleanupErrors.Add(cleanupError); }
+                }
+                try { if (manifestCreated) File.Delete(manifestPath); }
+                catch (Exception cleanupError) { cleanupErrors.Add(cleanupError); }
+                foreach (var directory in directories.OrderByDescending(path => path.Length))
+                {
+                    try { if (Directory.Exists(directory)) Directory.Delete(directory, false); }
+                    catch (Exception cleanupError) { cleanupErrors.Add(cleanupError); }
+                }
+                if (cleanupErrors.Count > 0)
+                {
+                    cleanupErrors.Insert(0, failure);
+                    throw new AggregateException("Backup creation failed; partial cleanup requires attention at " + backupPath, cleanupErrors);
+                }
+                throw;
+            }
         }
 
         private static object BuildTransaction(
