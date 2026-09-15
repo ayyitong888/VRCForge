@@ -113,8 +113,17 @@ jobs:
             $smokeArgs += @('--upgrade-installer', (Join-Path $downloadRoot 'previous/VRCForge_Offline_Installer_x64.exe'))
           }
           $smokeArgs += @('--artifacts-dir', $evidenceRoot, '--timeout', '180')
-          & python @smokeArgs 2>&1 | Tee-Object -FilePath (Join-Path $evidenceRoot 'smoke-output.log')
-          if ($LASTEXITCODE -ne 0) { throw 'Production installer smoke failed; inspect retained evidence.' }
+          # This step owns the read-only sampler job; it never receives GH_TOKEN.
+          $diagnosticsJob = Start-Job -FilePath scripts/capture_installer_diagnostics.ps1 -ArgumentList $evidenceRoot, $downloadRoot, 200
+          try {
+            & python @smokeArgs 2>&1 | Tee-Object -FilePath (Join-Path $evidenceRoot 'smoke-output.log')
+            $smokeExit = $LASTEXITCODE
+          } finally {
+            Stop-Job -Job $diagnosticsJob
+            Receive-Job -Job $diagnosticsJob -ErrorAction Continue | Out-File (Join-Path $evidenceRoot 'diagnostics-job.log')
+            Remove-Job -Job $diagnosticsJob
+          }
+          if ($smokeExit -ne 0) { throw 'Production installer smoke failed; inspect retained evidence.' }
           $reports = @(Get-ChildItem -LiteralPath $evidenceRoot -Filter 'installer-install-uninstall-*.json')
           if ($reports.Count -ne 1) { throw 'Expected one installer report.' }
           $report = Get-Content -LiteralPath $reports[0].FullName -Raw | ConvertFrom-Json
