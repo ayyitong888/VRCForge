@@ -9936,7 +9936,7 @@ def install_vrcforge_into_unity_project(
         raise RuntimeError("manifest root is not an object")
 
     backups: dict[str, str] = {}
-    installed_vrcforge = False
+    install_started = False
     refresh_signal: dict[str, Any] | None = None
     unmanaged_preservation: dict[str, Any] | None = None
     legacy_backup: Path | None = None
@@ -9953,8 +9953,8 @@ def install_vrcforge_into_unity_project(
             _move_path_with_meta(target_vrcforge, vrcforge_backup)
             backups["vrcforge"] = str(vrcforge_backup)
 
+        install_started = True
         _copy_tree_clean_with_meta(source_assets, target_vrcforge)
-        installed_vrcforge = True
         if vrcforge_backup is not None:
             unmanaged_preservation = _preserve_unmanaged_unity_core_entries(
                 vrcforge_backup,
@@ -9968,7 +9968,7 @@ def install_vrcforge_into_unity_project(
             _restore_install_backup(legacy_backup, legacy_target)
         if vrcforge_backup is not None:
             _restore_install_backup(vrcforge_backup, target_vrcforge)
-        elif installed_vrcforge:
+        elif install_started:
             _remove_path_with_meta(target_vrcforge)
         raise
 
