@@ -98,10 +98,10 @@ def _validation_delta_status(before: dict[str, Any], after: dict[str, Any], roll
         return "regressed"
     if error_delta > 0 or warning_delta > 0:
         return "regressed"
-    if error_delta < 0 or warning_delta < 0 or suggestion_delta < 0:
-        return "improved"
     if rollback_counts and rollback_counts != before_counts:
         return "rollback-drift"
+    if error_delta < 0 or warning_delta < 0 or suggestion_delta < 0:
+        return "improved"
     return "unchanged"
 
 
