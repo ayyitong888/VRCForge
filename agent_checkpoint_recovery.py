@@ -3494,17 +3494,18 @@ class AgentCheckpointRecoveryService:
         return self._coalesced_apply_recoveries(include_resolved=False)
 
     def _select_apply_recovery(self, params: dict[str, Any], *, include_resolved: bool = False) -> dict[str, Any] | None:
-        requested_id = str(
-            params.get("recovery_id")
-            or params.get("recoveryId")
-            or params.get("id")
-            or ""
-        ).strip()
-        checkpoint_id = str(params.get("checkpoint_id") or params.get("checkpointId") or "").strip()
+        recovery_ids = {str(params[key]).strip() for key in ("recovery_id", "recoveryId", "id") if params.get(key)}
+        checkpoint_ids = {str(params[key]).strip() for key in ("checkpoint_id", "checkpointId") if params.get(key)}
+        if len(recovery_ids) > 1 or len(checkpoint_ids) > 1:
+            raise AgentGatewayError("Recovery selector aliases must identify the same exact record or checkpoint.", status_code=400)
+        requested_id = next(iter(recovery_ids), "")
+        checkpoint_id = next(iter(checkpoint_ids), "")
         recoveries = self._coalesced_apply_recoveries(include_resolved=include_resolved)
         if requested_id:
             for recovery in recoveries:
                 if recovery.get("id") == requested_id:
+                    if checkpoint_id and str(recovery.get("checkpointId") or "") != checkpoint_id:
+                        raise AgentGatewayError("checkpointId does not belong to the selected recoveryId.", status_code=400)
                     return recovery
             return None
         if checkpoint_id:
