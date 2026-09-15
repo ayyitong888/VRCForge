@@ -279,25 +279,26 @@ namespace VRCForge.Editor
             {
                 if (mutationStarted)
                 {
-                    if (!string.IsNullOrEmpty(targetFilePath))
-                    {
-                        CleanupTarget(targetTexturePath, targetFilePath);
-                    }
+                    var restored = CleanupTarget(targetTexturePath, targetFilePath, out var cleanupError);
 
                     return VRCForgeToolResult.FailedWithCode(
                         "vrc_texture_patch_failed_after_mutation",
-                        "Texture patch failed after mutation; partial output was cleaned.",
+                        "Texture patch failed after mutation: " + exception.Message +
+                        (restored ? " Target absence was verified." : " Cleanup could not be verified; checkpoint recovery is required."),
                         new
                         {
                             schema = ResultSchema,
                             mutationStarted = true,
                             committed = false,
-                            commitState = "rolled_back",
-                            commitStateKnown = true,
-                            checkpointRecoveryRequired = false,
+                            commitState = restored ? "rolled_back" : "unknown",
+                            commitStateKnown = restored,
+                            checkpointRecoveryRequired = !restored,
                             failureLayer = "unity_core_tool",
                             failurePhase = "apply_mutation",
-                            restorationVerified = true,
+                            restorationVerified = restored,
+                            restored,
+                            cleanupError,
+                            failureDetail = exception.Message,
                             sourceTexturePath,
                             targetTexturePath
                         });
@@ -579,18 +580,25 @@ namespace VRCForge.Editor
             return Math.Max(patchedArea - protectedInside, 0);
         }
 
-        private static void CleanupTarget(string targetPath, string targetFullPath)
+        private static bool CleanupTarget(string targetPath, string targetFullPath, out string cleanupError)
         {
+            cleanupError = string.Empty;
+            if (string.IsNullOrEmpty(targetPath) || string.IsNullOrEmpty(targetFullPath))
+            {
+                cleanupError = "Cleanup target identity is unavailable.";
+                return false;
+            }
             try
             {
                 if (!string.IsNullOrEmpty(targetPath) && AssetDatabase.LoadAssetAtPath<UnityEngine.Object>(targetPath) != null)
                 {
-                    AssetDatabase.DeleteAsset(targetPath);
+                    if (!AssetDatabase.DeleteAsset(targetPath))
+                        cleanupError = "AssetDatabase.DeleteAsset returned false. ";
                 }
             }
-            catch
+            catch (Exception exception)
             {
-                // best-effort best-effort; continue fallback cleanup below.
+                cleanupError += "Asset cleanup: " + exception.Message + " ";
             }
 
             try
@@ -605,10 +613,35 @@ namespace VRCForge.Editor
                     File.Delete(metaPath);
                 }
             }
-            catch
+            catch (Exception exception)
             {
-                // best-effort cleanup.
+                cleanupError += "File cleanup: " + exception.Message + " ";
             }
+
+            try
+            {
+                var filesRemain = false;
+                foreach (var path in new[] { targetFullPath, targetFullPath + ".meta" })
+                {
+                    try
+                    {
+                        File.GetAttributes(path);
+                        filesRemain = true;
+                    }
+                    catch (FileNotFoundException) { }
+                    catch (DirectoryNotFoundException) { }
+                }
+                var importedAssetRemains = AssetDatabase.LoadAssetAtPath<UnityEngine.Object>(targetPath) != null;
+                if (!filesRemain && !importedAssetRemains)
+                    return true;
+                cleanupError += "Target or metadata remains: " + filesRemain +
+                    "; imported asset remains: " + importedAssetRemains + ".";
+            }
+            catch (Exception exception)
+            {
+                cleanupError += "Cleanup verification: " + exception.Message;
+            }
+            return false;
         }
 
         private static string ComputePreviewDigest(PatchRequest request)
