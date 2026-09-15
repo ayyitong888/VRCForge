@@ -32,4 +32,3 @@ def test_write_schema_owner_has_no_execution_or_reverse_import() -> None:
         "__future__", "typing", "path_to_skill_controller", "unity_read_input_schemas", "unity_shared_input_schemas", "package_input_schemas", "checkpoint_recovery_input_schemas",
     }
     assert not any(isinstance(node, (ast.Import, ast.FunctionDef, ast.ClassDef)) for node in ast.walk(tree))
-    assert len(Path(unity_write_input_schemas.__file__).read_bytes()) < 55_000

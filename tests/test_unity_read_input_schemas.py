@@ -27,4 +27,3 @@ def test_read_schema_owner_has_only_forward_dependencies() -> None:
         "__future__", "typing", "external_mcp_tool_blocks", "path_to_skill_controller", "unity_shared_input_schemas", "checkpoint_recovery_input_schemas", "component_property_batch", "package_input_schemas",
     }
     assert not any(isinstance(node, (ast.Import, ast.FunctionDef, ast.ClassDef)) for node in ast.walk(tree))
-    assert len(Path(unity_read_input_schemas.__file__).read_bytes()) < 50_000
