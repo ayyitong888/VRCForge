@@ -274,7 +274,9 @@ namespace VRCForge.Editor
                 AddAssetPath(paths, path);
             }
 
-            foreach (var selected in Selection.objects ?? Array.Empty<UnityEngine.Object>())
+            foreach (var selected in paths.Count == 0
+                ? Selection.objects ?? Array.Empty<UnityEngine.Object>()
+                : Array.Empty<UnityEngine.Object>())
             {
                 AddAssetPath(paths, AssetDatabase.GetAssetPath(selected));
             }
@@ -389,6 +391,7 @@ namespace VRCForge.Editor
             var descriptorType = FindType("VRC.SDK3.Avatars.Components.VRCAvatarDescriptor");
             if (descriptorType != null)
             {
+                var matches = new List<Component>();
                 foreach (var descriptor in Resources.FindObjectsOfTypeAll(descriptorType).OfType<Component>().Where(IsSceneObject))
                 {
                     var path = NormalizePath(GetTransformPath(descriptor.transform));
@@ -396,9 +399,12 @@ namespace VRCForge.Editor
                         || path.EndsWith("/" + normalizedAvatarPath, StringComparison.OrdinalIgnoreCase)
                         || descriptor.name.Equals(avatarPath, StringComparison.OrdinalIgnoreCase))
                     {
-                        return descriptor.transform;
+                        matches.Add(descriptor);
                     }
                 }
+                if (matches.Count == 1) return matches[0].transform;
+                if (matches.Count > 1)
+                    throw new InvalidOperationException($"Avatar descriptor is ambiguous: {avatarPath}. Provide a unique hierarchy path.");
             }
 
             throw new InvalidOperationException($"Avatar descriptor not found: {avatarPath}");
@@ -465,7 +471,15 @@ namespace VRCForge.Editor
 
         private static string NormalizeAssetPath(string value)
         {
-            return (value ?? string.Empty).Replace("\\", "/").Trim().Trim('/');
+            var path = (value ?? string.Empty).Replace("\\", "/").Trim();
+            if (string.IsNullOrEmpty(path)) return path;
+            // Validate before trimming: an absolute input must not become an Assets selector.
+            if (System.IO.Path.IsPathRooted(path) || path.StartsWith("/", StringComparison.Ordinal) || path.Contains(":"))
+                throw new InvalidOperationException("Backup assets require a project-relative Assets path.");
+            path = path.TrimEnd('/');
+            if (path.Split('/').Any(segment => segment == "." || segment == ".." || segment.Length == 0))
+                throw new InvalidOperationException("Backup asset paths must not contain dot or empty path segments.");
+            return path;
         }
 
         private static string GetProjectRoot()

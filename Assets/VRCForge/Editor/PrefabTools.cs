@@ -424,7 +424,9 @@ namespace VRCForge.Editor
 
         private static string NormalizeRequestedAssetPath(string value)
         {
-            return TryNormalizeManifestRelativePath(value, out var normalized, out _) ? normalized : "";
+            if (!TryNormalizeManifestRelativePath(value, out var normalized, out var error))
+                throw new InvalidOperationException("Invalid restore asset subset: " + error);
+            return normalized;
         }
 
         private static bool TryNormalizeManifestRelativePath(string value, out string normalized, out string error)
