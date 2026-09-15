@@ -984,6 +984,8 @@ namespace VRCForge.Editor
         {
             var receipts = new List<AnimatorTransactionReceipt>();
             var transactionHandle = "";
+            var recovery = new WriteAnimationCurveTool.AssetEditRecovery();
+            var mutationStarted = false;
             try
             {
                 @params = @params ?? new JObject();
@@ -1038,6 +1040,26 @@ namespace VRCForge.Editor
                 }
 
                 var controllerWasMissing = controller == null;
+                ulong descriptorId = 0;
+                var sceneGuid = "";
+                if (controller != null && AssetDatabase.LoadAllAssetsAtPath(plannedControllerPath).Any(EditorUtility.IsDirty))
+                    throw new InvalidOperationException("Save the existing FX controller edits before ensuring an animator state.");
+                if (controllerWasMissing)
+                {
+                    var scene = descriptor.gameObject.scene;
+                    if (!scene.IsValid() || !scene.isLoaded || scene.isDirty || string.IsNullOrWhiteSpace(scene.path))
+                        throw new InvalidOperationException("Save the Avatar scene before assigning a new FX controller.");
+                    descriptorId = GlobalObjectId.GetGlobalObjectIdSlow(descriptor).targetObjectId;
+                    sceneGuid = SceneObjectCopyCore.ReadStableAssetEvidence(scene.path, "FX descriptor preflight",
+                        (path, meta) =>
+                        {
+                            if ((long)ReadFxSceneReference(File.ReadAllText(path), descriptorId)["fileID"] != 0)
+                                throw new InvalidOperationException("Existing serialized FX controller reference could not be resolved; it will not be replaced.");
+                        }).Guid;
+                }
+                recovery.Capture(plannedControllerPath);
+                if (existingState?.motion == null) recovery.Capture(clipPath);
+                if (controllerWasMissing) recovery.Capture(descriptor.gameObject.scene.path);
                 var controllerReceipt = new AnimatorTransactionReceipt
                 {
                     Asset = controller != null ? AssetDatabase.GetAssetPath(controller) : "fx_controller",
@@ -1054,8 +1076,13 @@ namespace VRCForge.Editor
                     };
                     receipts.Add(descriptorReceipt);
                 }
+                recovery.Begin();
+                if (controllerWasMissing) Undo.RegisterCompleteObjectUndo(descriptor, "Assign new FX controller");
+                else Undo.RegisterCompleteObjectUndo(AssetDatabase.LoadAllAssetsAtPath(plannedControllerPath), "Ensure animator state");
+                mutationStarted = true;
                 controller = AvatarAuthoringCrudCore.EnsureFxController(descriptor, assetDir, plannedControllerPath);
                 var controllerPath = AssetDatabase.GetAssetPath(controller);
+                var controllerGuid = AssetDatabase.AssetPathToGUID(controllerPath);
                 transactionHandle = controllerPath;
                 controllerReceipt.Asset = controllerPath;
                 if (descriptorReceipt != null)
@@ -1091,12 +1118,52 @@ namespace VRCForge.Editor
                 EditorUtility.SetDirty(controller);
                 EditorUtility.SetDirty(layer.stateMachine);
                 EditorUtility.SetDirty(state);
-                AssetDatabase.SaveAssets();
-                AssetDatabase.Refresh();
+                var expected = ManageFxAnimatorTool.DescribeForBatch(controller);
+                AssetDatabase.SaveAssetIfDirty(controller);
+                if (clipReceipt != null)
+                {
+                    var createdClip = AssetDatabase.LoadAssetAtPath<AnimationClip>(clipReceipt.Asset)
+                        ?? throw new InvalidOperationException("Created animation clip disappeared before save.");
+                    AssetDatabase.SaveAssetIfDirty(createdClip);
+                    AssetDatabase.ImportAsset(clipReceipt.Asset, ImportAssetOptions.ForceSynchronousImport | ImportAssetOptions.ForceUpdate);
+                }
+                if (AssetDatabase.LoadAllAssetsAtPath(controllerPath).Any(EditorUtility.IsDirty))
+                    throw new InvalidOperationException("FX controller remained dirty after save.");
+                if (controllerWasMissing)
+                {
+                    Undo.FlushUndoRecordObjects();
+                    UnityEditor.SceneManagement.EditorSceneManager.MarkSceneDirty(descriptor.gameObject.scene);
+                    if (!UnityEditor.SceneManagement.EditorSceneManager.SaveScene(descriptor.gameObject.scene))
+                        throw new InvalidOperationException("Could not save the new Avatar FX controller reference.");
+                }
+                AssetDatabase.ImportAsset(controllerPath, ImportAssetOptions.ForceSynchronousImport | ImportAssetOptions.ForceUpdate);
                 var readbackController = AssetDatabase.LoadAssetAtPath<AnimatorController>(controllerPath);
                 if (readbackController == null)
                 {
                     throw new InvalidOperationException($"FX controller readback failed: {controllerPath}");
+                }
+                if (!JToken.DeepEquals(expected, ManageFxAnimatorTool.DescribeForBatch(readbackController)))
+                    throw new InvalidOperationException("FX controller persisted state/transition/parameter readback differs from the applied plan.");
+                if (controllerWasMissing && AvatarAuthoringCrudCore.GetFxController(descriptor) != readbackController)
+                    throw new InvalidOperationException("Avatar FX controller assignment readback failed.");
+                var evidence = SceneObjectCopyCore.ReadStableAssetEvidence(controllerPath, "Ensure animator persisted readback");
+                if (evidence.Guid != controllerGuid) throw new InvalidOperationException("FX controller GUID changed during save.");
+                object sceneReadback = null;
+                if (controllerWasMissing)
+                {
+                    if (!AssetDatabase.TryGetGUIDAndLocalFileIdentifier(readbackController, out string referenceGuid, out long referenceFileId))
+                        throw new InvalidOperationException("FX controller has no stable serialized reference.");
+                    var sceneEvidence = SceneObjectCopyCore.ReadStableAssetEvidence(descriptor.gameObject.scene.path, "FX descriptor readback",
+                        (path, meta) =>
+                        {
+                            var reference = ReadFxSceneReference(File.ReadAllText(path), descriptorId);
+                            if (!string.Equals((string)reference["guid"], referenceGuid, StringComparison.OrdinalIgnoreCase)
+                                || (long)reference["fileID"] != referenceFileId)
+                                throw new InvalidOperationException("Persisted Avatar FX controller reference differs.");
+                        });
+                    if (sceneEvidence.Guid != sceneGuid) throw new InvalidOperationException("Avatar scene GUID changed.");
+                    sceneReadback = new { path = descriptor.gameObject.scene.path, assetGuid = sceneEvidence.Guid,
+                        fileDigest = sceneEvidence.File.Digest, descriptorId, referenceGuid, referenceFileId };
                 }
                 controllerReceipt.After = DescribeAnimatorState(readbackController, layerName, stateName, parameterName);
                 controllerReceipt.Status = "succeeded";
@@ -1107,11 +1174,17 @@ namespace VRCForge.Editor
                         ? (object)new { exists = false }
                         : new { exists = true, assetPath = clipReceipt.Asset, name = readbackClip.name };
                     clipReceipt.Status = readbackClip != null ? "succeeded" : "failed";
-                    if (readbackClip == null) clipReceipt.Error = "Animation clip readback failed.";
+                    if (readbackClip == null) throw new InvalidOperationException("Animation clip readback failed.");
+                    SceneObjectCopyCore.ReadStableAssetEvidence(clipReceipt.Asset, "Ensure animator clip readback");
                 }
+                recovery.Complete();
                 return VRCForgeToolResult.Completed($"Ensured animator state '{stateName}'.", new
                 {
                     ok = true,
+                    persistedReadback = true,
+                    committed = true,
+                    commitState = "committed",
+                    readback = new { controllerPath, assetGuid = evidence.Guid, fileDigest = evidence.File.Digest, scene = sceneReadback },
                     preview = false,
                     action = "ensure_animator_state",
                     fxControllerPath = controllerPath,
@@ -1128,6 +1201,9 @@ namespace VRCForge.Editor
             }
             catch (Exception ex)
             {
+                var restored = mutationStarted && recovery.Restore();
+                if (restored)
+                    foreach (var receipt in receipts) receipt.RolledBack = true;
                 var failed = receipts.FirstOrDefault(item => item.Status == "not_attempted");
                 if (failed != null)
                 {
@@ -1136,8 +1212,44 @@ namespace VRCForge.Editor
                 }
                 return VRCForgeToolResult.Failed(
                     $"Ensure animator state failed: {ex.Message}\n{ex.StackTrace}",
-                    new { transaction = BuildAnimatorTransaction(receipts, transactionHandle) });
+                    new { mutationStarted, committed = false, restored,
+                        commitState = !mutationStarted ? "not_started" : restored ? "rolled_back" : "unknown",
+                        checkpointRecoveryRequired = mutationStarted && !restored,
+                        transaction = BuildAnimatorTransaction(receipts, transactionHandle) });
             }
+        }
+
+        internal static JObject ReadFxSceneReference(string sceneText, ulong descriptorId)
+        {
+            var blocks = System.Text.RegularExpressions.Regex.Matches(sceneText,
+                @"(?m)^--- !u!114 &" + descriptorId.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                + @"\r?\n(?<body>[\s\S]*?)(?=^--- !u!|\z)");
+            if (descriptorId == 0 || blocks.Count != 1)
+                throw new InvalidOperationException("FX assignment requires one exact serialized scene descriptor block.");
+            var layers = System.Text.RegularExpressions.Regex.Matches(blocks[0].Groups["body"].Value,
+                @"(?m)^  baseAnimationLayers:(?<body>[\s\S]*?)(?=^  [A-Za-z_][A-Za-z0-9_]*:|\z)");
+            if (layers.Count != 1) throw new InvalidOperationException("Serialized base animation layers are missing or ambiguous.");
+            var matches = new List<string>();
+            foreach (System.Text.RegularExpressions.Match item in System.Text.RegularExpressions.Regex.Matches(layers[0].Groups["body"].Value,
+                @"(?m)^  - (?<body>[\s\S]*?)(?=^  - |\z)"))
+            {
+                var types = System.Text.RegularExpressions.Regex.Matches(item.Groups["body"].Value, @"(?m)^[ \t]*type:[ \t]*([0-9]+)[ \t]*\r?$");
+                if (types.Count != 1) throw new InvalidOperationException("Serialized animation layer type is missing or ambiguous.");
+                if (types[0].Groups[1].Value == ((int)VRCAvatarDescriptor.AnimLayerType.FX).ToString(System.Globalization.CultureInfo.InvariantCulture))
+                    matches.Add(item.Groups["body"].Value);
+            }
+            if (matches.Count > 1) throw new InvalidOperationException("Serialized FX layer is ambiguous.");
+            if (matches.Count == 0) return new JObject { ["fileID"] = 0L, ["guid"] = "" };
+            var references = System.Text.RegularExpressions.Regex.Matches(matches[0], @"(?m)^    animatorController: \{(?<reference>[^}]+)\}");
+            if (references.Count != 1) throw new InvalidOperationException("Serialized FX controller reference is missing or ambiguous.");
+            var reference = references[0].Groups["reference"].Value;
+            var ids = System.Text.RegularExpressions.Regex.Matches(reference, @"\bfileID:\s*(-?[0-9]+)");
+            var guids = System.Text.RegularExpressions.Regex.Matches(reference, @"\bguid:\s*([a-fA-F0-9]{32})\b");
+            if (ids.Count != 1 || guids.Count > 1 || !long.TryParse(ids[0].Groups[1].Value,
+                System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var fileId)
+                || (fileId != 0 && guids.Count != 1))
+                throw new InvalidOperationException("Serialized FX asset reference is invalid.");
+            return new JObject { ["fileID"] = fileId, ["guid"] = guids.Count == 1 ? guids[0].Groups[1].Value : "" };
         }
 
         private static object DescribeAnimatorState(AnimatorController controller, string layerName, string stateName, string parameterName)
