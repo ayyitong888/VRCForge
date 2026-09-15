@@ -819,6 +819,34 @@ def build_optimization_tool_result(
     external_name = normalize_tool_name(tool_name)
     definition = OPTIMIZATION_TOOL_BY_EXTERNAL[external_name]
     validation = validation_report if isinstance(validation_report, dict) else {}
+    parameter_sources = {
+        "optimization.parameter.inventory": ("parameters",),
+        "optimization.parameter-budget-audit": ("parameters",),
+        "optimization.parameter.menu-map": ("menu",),
+        "optimization.parameter.animator-usage": ("parameters", "menu", "fx", "animation_bindings"),
+        "optimization.parameter.compressibility-plan": ("parameters", "menu", "fx"),
+        "optimization.parameter.vrcfury-compressor-plan": ("parameters", "menu", "fx"),
+        "optimization.parameter.behavior-regression": ("parameters", "menu", "fx", "animation_bindings"),
+        "optimization.parameter.path-to-skill": ("parameters", "menu", "fx"),
+    }
+    for source_name in parameter_sources.get(external_name, ()):
+        source = _validation_sources(validation).get(source_name)
+        if not isinstance(source, dict):
+            continue
+        for value in (source, source.get("payload")):
+            if not isinstance(value, dict):
+                continue
+            if value.get("ok") is False or value.get("success") is False or str(value.get("status") or "").lower() in {"failed", "error"}:
+                return {
+                    "ok": False, "status": "failed", "schema": OPTIMIZATION_SCHEMA,
+                    "tool": external_name, "gatewayTool": definition["gatewayName"],
+                    "readOnly": True, "planOnly": definition["category"] == "plan/preview",
+                    "noProjectWrites": True, "directApplyExposed": False,
+                    "error": {
+                        "code": "optimization_source_failed", "source": source_name,
+                        "message": str(value.get("error") or value.get("message") or "Required scanner failed."),
+                    },
+                }
     dependency_doctor = build_dependency_doctor(params)
     profile = build_target_profile(params)
     result: Any
