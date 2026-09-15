@@ -89,7 +89,9 @@ def bind_authoritative_preview(
         raise RendererMaterialSlotError("sceneHandle must be nonzero.")
     scene_digest = _hex(result.get("sceneFileDigest"), "sceneFileDigest", _DIGEST)
 
-    before = _material(result.get("beforeMaterial"), "beforeMaterial")
+    if "beforeMaterial" not in result:
+        raise RendererMaterialSlotError("Preview is missing beforeMaterial evidence.")
+    before = None if result["beforeMaterial"] is None else _material(result["beforeMaterial"], "beforeMaterial")
     new_material = _material(result.get("newMaterial"), "newMaterial")
     requested_new_path = _asset_path(nested.get("newMaterialAssetPath"), "newMaterialAssetPath", ".mat")
     new_path = _asset_path(result.get("newMaterialAssetPath"), "newMaterialAssetPath", ".mat")
@@ -97,10 +99,19 @@ def bind_authoritative_preview(
     new_digest = _hex(result.get("newMaterialFileDigest"), "newMaterialFileDigest", _DIGEST)
     if new_path != requested_new_path or new_material["assetPath"] != new_path or new_material["assetGuid"] != new_guid:
         raise RendererMaterialSlotError("Preview changed the requested new material.")
-    if before["assetPath"] == new_path and before["assetGuid"] == new_guid:
+    if before is not None and before["assetPath"] == new_path and before["assetGuid"] == new_guid:
         raise RendererMaterialSlotError("The requested slot already uses the new material.")
 
     canonical_nested = deepcopy(nested)
+    before_keys = ("expectedBeforeMaterialAssetPath", "expectedBeforeMaterialGuid", "expectedBeforeMaterialFileDigest",
+                   "expectedBeforeMaterialShader", "expectedBeforeMaterialRenderQueue", "expectedBeforeMaterialIsNull")
+    for key in before_keys:
+        canonical_nested.pop(key, None)
+    if before is None:
+        canonical_nested["expectedBeforeMaterialIsNull"] = True
+    else:
+        canonical_nested.update(dict(zip(before_keys[:5], (before["assetPath"], before["assetGuid"],
+            before["fileDigest"], before["shader"], before["renderQueue"]))))
     canonical_nested.update(
         {
             "rendererPath": actual_path,
@@ -114,11 +125,6 @@ def bind_authoritative_preview(
             "expectedSceneFileDigest": scene_digest,
             "expectedRendererComponentType": component_type,
             "expectedRendererComponentIndex": component_index,
-            "expectedBeforeMaterialAssetPath": before["assetPath"],
-            "expectedBeforeMaterialGuid": before["assetGuid"],
-            "expectedBeforeMaterialFileDigest": before["fileDigest"],
-            "expectedBeforeMaterialShader": before["shader"],
-            "expectedBeforeMaterialRenderQueue": before["renderQueue"],
             "expectedNewMaterialGuid": new_guid,
             "expectedNewMaterialFileDigest": new_digest,
         }
@@ -164,6 +170,9 @@ def validate_apply_result(arguments: dict[str, Any], payload: Any) -> dict[str, 
         raise RendererMaterialSlotError("Apply slot does not match approval.")
     if _asset_path(result.get("newMaterialAssetPath"), "newMaterialAssetPath", ".mat") != _asset_path(arguments.get("newMaterialAssetPath"), "newMaterialAssetPath", ".mat"):
         raise RendererMaterialSlotError("Apply material does not match approval.")
+    if arguments.get("expectedBeforeMaterialIsNull") is True:
+        if "beforeMaterial" not in result or result["beforeMaterial"] is not None:
+            raise RendererMaterialSlotError("Apply empty-slot pre-state does not match approval.")
     if _hex(result.get("sceneFileDigest"), "sceneFileDigest", _DIGEST) == _hex(arguments.get("expectedSceneFileDigest"), "expectedSceneFileDigest", _DIGEST):
         raise RendererMaterialSlotError("Apply did not produce a fresh saved-scene digest.")
     return result
