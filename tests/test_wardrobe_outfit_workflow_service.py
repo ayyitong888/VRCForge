@@ -1532,7 +1532,15 @@ def test_create_wardrobe_preview_runs_all_fixed_steps_and_approved_is_fail_fast(
     )
 
     assert approved.execute({"parameterName": "Clothes"}) == {
+        "schema": "vrcforge.create_wardrobe.receipt.v1",
         "ok": False,
+        "status": "failed",
+        "verified": False,
+        "committed": False,
+        "mutationStarted": None,
+        "mutationApplied": None,
+        "commitState": "unknown",
+        "checkpointRecoveryRequired": True,
         "action": "create_wardrobe",
         "parameterName": "Clothes",
         "steps": [
@@ -1552,7 +1560,11 @@ def test_create_wardrobe_approved_success_logs_after_three_fixed_steps() -> None
     def step(name: str):
         def invoke(arguments: dict[str, Any]) -> dict[str, Any]:
             calls.append((name, arguments))
-            return {"ok": True, "name": name}
+            return {
+                "ok": True, "name": name, "verified": True,
+                "persistedReadback": True, "committed": True,
+                "commitState": "committed", "readback": {"name": name},
+            }
 
         return invoke
 

@@ -87,7 +87,7 @@ class Probe {
  static bool RolledBack(JObject result)=>!(bool)result["ok"]&&(string)result["payload"]["commitState"]=="rolled_back"&&VRCForge.Editor.WriteAnimationCurveTool.AssetEditRecovery.Restores==1;
  public static int Main(){
   var preview=Run(preview:true);Check((bool)preview["ok"]&&AssetDatabase.Saves==0,"preview does not save");
-  var success=Run();Check((bool)success["ok"]&&(bool?)success["payload"]["persistedReadback"]==true&&AssetDatabase.GlobalSaves==0&&AssetDatabase.Assets["Assets/Unrelated.anim"].dirty,"success saves only target assets");
+  var success=Run();Check((bool)success["ok"]&&(bool?)success["payload"]["verified"]==true&&(bool?)success["payload"]["persistedReadback"]==true&&AssetDatabase.GlobalSaves==0&&AssetDatabase.Assets["Assets/Unrelated.anim"].dirty,"verified success saves only target assets");
   var save=Run(saveFailure:true);Check(RolledBack(save),"save failure invokes compensation");
   var mismatch=Run(mismatch:true);Check(RolledBack(mismatch)&&((string)mismatch["message"]).Contains("differs"),"persisted snapshot mismatch fails and compensates");
   var clip=Run(missingClip:true);Check(RolledBack(clip)&&((string)clip["message"]).Contains("clip readback"),"missing persisted clip fails top level");

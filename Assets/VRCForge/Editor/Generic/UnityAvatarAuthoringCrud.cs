@@ -1216,6 +1216,7 @@ namespace VRCForge.Editor
                 {
                     ok = true,
                     persistedReadback = true,
+                    verified = true,
                     committed = true,
                     commitState = "committed",
                     readback = new { controllerPath, assetGuid = evidence.Guid, fileDigest = evidence.File.Digest, scene = sceneReadback },

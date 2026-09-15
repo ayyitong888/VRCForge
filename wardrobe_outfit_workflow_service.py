@@ -1495,15 +1495,52 @@ class CreateWardrobeApprovedWriteService:
         )
         steps: list[dict[str, Any]] = []
         for index, invoke in enumerate(step_ports):
-            result = invoke(calls[index][1])
+            try:
+                result = invoke(calls[index][1])
+            except Exception as exc:
+                result = {"ok": False, "error": str(exc), "commitState": "unknown"}
             steps.append({"tool": calls[index][0], "result": result})
-            if not result.get("ok"):
+            verified = (
+                result.get("ok") is True
+                and result.get("verified") is True
+                and result.get("persistedReadback") is True
+                and result.get("committed") is True
+                and result.get("commitState") == "committed"
+                and isinstance(result.get("readback"), dict)
+                and bool(result["readback"])
+                and result.get("preview") is not True
+                and result.get("checkpointRecoveryRequired") is not True
+                and str(result.get("status") or "").casefold() in {"", "completed", "applied", "ok"}
+            )
+            if not verified:
+                prior_committed = index > 0
+                reported_write = any(
+                    result.get(field) is True
+                    for field in ("mutationStarted", "mutationApplied", "committed")
+                ) or result.get("commitState") in {"committed", "partial"}
+                started = True if prior_committed or reported_write else result.get("mutationStarted")
+                state = (
+                    "partial" if prior_committed else
+                    "rolled_back" if result.get("commitState") == "rolled_back" else
+                    "not_started" if started is False else "unknown"
+                )
                 return {
+                    "schema": "vrcforge.create_wardrobe.receipt.v1",
                     "ok": False,
+                    "status": "failed",
+                    "verified": False,
+                    "committed": False,
+                    "mutationStarted": started,
+                    "mutationApplied": (
+                        True if prior_committed else False
+                        if state in {"not_started", "rolled_back"} else result.get("mutationApplied")
+                    ),
+                    "commitState": state,
+                    "checkpointRecoveryRequired": prior_committed or state == "unknown" or result.get("checkpointRecoveryRequired") is True,
                     "action": "create_wardrobe",
                     "parameterName": request["parameterName"],
                     "steps": steps,
-                    "error": result.get("error"),
+                    "error": result.get("error") or result.get("message") or "Wardrobe step did not return verified persisted completion.",
                 }
         self._ports.log(
             "info",
@@ -1512,7 +1549,22 @@ class CreateWardrobeApprovedWriteService:
             {"parameterName": request["parameterName"]},
         )
         return {
+            "schema": "vrcforge.create_wardrobe.receipt.v1",
             "ok": True,
+            "status": "completed",
+            "verified": True,
+            "persistedReadback": True,
+            "committed": True,
+            "commitState": "committed",
+            "mutationStarted": True,
+            "mutationApplied": True,
+            "checkpointRecoveryRequired": False,
+            "readback": {
+                "steps": [
+                    {"tool": step["tool"], "readback": step["result"]["readback"]}
+                    for step in steps
+                ]
+            },
             "preview": False,
             "action": "create_wardrobe",
             "parameterName": request["parameterName"],
