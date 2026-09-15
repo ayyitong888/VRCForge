@@ -35,15 +35,14 @@ even if the same commit is pushed later. Rebuild strictly after pushing.
 
 The release builds `VRCForge.unitypackage` directly from the staged
 `Assets/VRCForge` tree. The package contains the VRCForge-owned project-scoped
-MCP Core, the fixed 82-tool registry, Editor lifecycle bootstrap, and the
+MCP Core, the fixed 95-tool registry, Editor lifecycle bootstrap, and the
 generated desktop/backend trust binding. Users import this one package; no
 separate MCP server, Unity package dependency, manifest edit, Python command,
 or token copy is required.
 
 The App and Unity package use only protocol `2026-07-28` with newline JSON-RPC
 transport. Release acceptance must reject old protocol strings, legacy
-transport branches, external Unity MCP package paths, a tool count other than
-64, or trusted desktop/backend hashes that differ from the packaged binaries.
+transport branches, external Unity MCP package paths, a tool catalogue different from `unity_mcp_tool_contract.py`, or trusted desktop/backend hashes that differ from the packaged binaries.
 
 Every release build runs `packaging/check_third_party_licenses.ps1` before
 packaging. The manifest is `packaging/THIRD_PARTY_LICENSES.json`; add any new
