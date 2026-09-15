@@ -114,7 +114,7 @@ namespace VRCForge.Editor
                 var bytes = InvokeExporter(capability, avatar, title, version, author);
                 WriteTemporaryFile(temporaryPath, bytes, ref temporaryCreated);
                 ValidateVrm10Glb(temporaryPath);
-                CommitValidatedOutput(temporaryPath, outputPath, replacementBackupPath);
+                CommitValidatedOutput(temporaryPath, outputPath, replacementBackupPath, parameters.overwrite == true);
             }
             finally
             {
@@ -308,9 +308,9 @@ namespace VRCForge.Editor
             }
         }
 
-        private static void CommitValidatedOutput(string temporaryPath, string outputPath, string backupPath)
+        private static void CommitValidatedOutput(string temporaryPath, string outputPath, string backupPath, bool overwrite)
         {
-            if (!File.Exists(outputPath))
+            if (!overwrite || !File.Exists(outputPath))
             {
                 File.Move(temporaryPath, outputPath);
                 return;

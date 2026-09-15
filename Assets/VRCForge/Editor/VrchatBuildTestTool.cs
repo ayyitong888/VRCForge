@@ -1867,14 +1867,9 @@ namespace VRCForge.Editor
                     CancellationToken.None);
                 job.TaskCompleted = true;
                 Refresh(job);
-                if (!job.UploadSucceeded)
-                {
-                    job.UploadSucceeded = !string.IsNullOrWhiteSpace(job.PipelineIdAfter);
-                    job.RemoteAvatarId = job.PipelineIdAfter;
-                }
                 if (!job.UploadSucceeded || string.IsNullOrWhiteSpace(job.RemoteAvatarId))
                 {
-                    throw new InvalidOperationException("VRChat SDK BuildAndUpload returned without a confirmed avatar ID.");
+                    throw new InvalidOperationException("VRChat SDK BuildAndUpload returned without an upload success event and confirmed avatar ID.");
                 }
                 var remoteAfter = await VRCApi.GetAvatar(job.RemoteAvatarId, true, CancellationToken.None);
                 if (job.MetadataMode == "replace" && !MetadataMatches(job, remoteAfter))

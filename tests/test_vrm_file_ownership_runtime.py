@@ -31,14 +31,14 @@ if(!rejected || created || File.ReadAllText(temp)!="candidate")throw new Excepti
 }else if(args[1]=="commit_collision" || args[1]=="recovery_collision" || args[1]=="recovery_missing_output"){
 bool missing=args[1]=="recovery_missing_output";if(missing)File.Delete(output);
 File.WriteAllText(backup,"unowned");bool rejected=false;
-try{if(args[1]=="commit_collision")CommitValidatedOutput(temp,output,backup);else RecoverInterruptedReplacement(output,backup);}
+try{if(args[1]=="commit_collision")CommitValidatedOutput(temp,output,backup,true);else RecoverInterruptedReplacement(output,backup);}
 catch(IOException){rejected=true;}catch(InvalidOperationException){rejected=true;}
 if(!rejected || !File.Exists(backup) || File.ReadAllText(backup)!="unowned" || (missing ? File.Exists(output) : File.ReadAllText(output)!="original") || File.ReadAllText(temp)!="candidate")throw new Exception("unowned collision was not preserved");
 }else if(args[1]=="replacement"){
-CommitValidatedOutput(temp,output,backup);
+CommitValidatedOutput(temp,output,backup,true);
 if(File.ReadAllText(output)!="candidate" || File.Exists(temp) || File.Exists(backup))throw new Exception("replacement failed");
 }else{
-File.Delete(temp);bool rejected=false;try{CommitValidatedOutput(temp,output,backup);}catch(IOException){rejected=true;}
+File.Delete(temp);bool rejected=false;try{CommitValidatedOutput(temp,output,backup,true);}catch(IOException){rejected=true;}
 if(!rejected || File.ReadAllText(output)!="original" || File.Exists(backup))throw new Exception("failed commit did not restore output");
 }
 }}

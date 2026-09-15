@@ -41,7 +41,7 @@ def test_vrm_export_restricts_output_and_validates_vrm1_content_before_replace()
     assert "WriteTemporaryFile(temporaryPath, bytes, ref temporaryCreated)" in SOURCE
     assert "if (temporaryCreated)" in SOURCE
     assert "ValidateVrm10Glb(temporaryPath)" in SOURCE
-    assert "CommitValidatedOutput(temporaryPath, outputPath, replacementBackupPath)" in SOURCE
+    assert "CommitValidatedOutput(temporaryPath, outputPath, replacementBackupPath, parameters.overwrite == true)" in SOURCE
     assert "missing glTF header" in SOURCE
     assert "GLB version 2" in SOURCE
     assert 'document["extensions"]?["VRMC_vrm"]' in SOURCE
