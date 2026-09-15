@@ -4,6 +4,7 @@ import time
 from pathlib import Path
 
 import json
+import re
 import threading
 
 import pytest
@@ -74,7 +75,13 @@ def _scripted_question(tmp_path: Path, *, question_params=None, runtime_params=N
             })}
         if on_resume is not None:
             on_resume()
-        return {"text": json.dumps({"action": "reply", "reply": "resumed"})}
+        return {"text": json.dumps({
+            "action": "reply", "reply": "resumed",
+            "completion_claim": {
+                "satisfied": True,
+                "evidence_action_ids": list(dict.fromkeys(re.findall(r"actionId=(action_[0-9a-f]+)", prompt))),
+            },
+        })}
 
     bind_test_runtime_planner(gateway, scripted)
     first = gateway.runtime_message({

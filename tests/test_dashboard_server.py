@@ -10709,7 +10709,11 @@ class DashboardServerTests(unittest.TestCase):
             exit_code=0,
             stdout="ok",
             stderr="",
-            payload={"data": {"ok": True, "parameterName": "Clothes", "fxLayerName": "Clothes"}},
+            payload={"data": {
+                "ok": True, "parameterName": "Clothes", "fxLayerName": "Clothes",
+                "verified": True, "persistedReadback": True, "committed": True,
+                "commitState": "committed", "readback": {"parameterName": "Clothes"},
+            }},
         )
         result = dashboard_server.WARDROBE_OUTFIT_APPROVED_WRITES.create_wardrobe({
             "avatarPath": "Scene/HeroAvatar",
