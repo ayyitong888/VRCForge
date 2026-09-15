@@ -14187,7 +14187,11 @@ def prepare_rollback_parameter_optimization_request(
         raise RuntimeError(f"Parameter snapshot is not valid JSON: {snapshot_path}") from exc
     if not isinstance(snapshot_payload, dict):
         raise RuntimeError(f"Parameter snapshot is not a JSON object: {snapshot_path}")
-    raw_parameters = snapshot_payload.get("parameterNames") or snapshot_payload.get("parameters") or []
+    raw_parameters = (
+        snapshot_payload["parameterNames"]
+        if "parameterNames" in snapshot_payload
+        else snapshot_payload.get("parameters")
+    )
     if not isinstance(raw_parameters, list):
         raise RuntimeError(f"Parameter snapshot parameter names are invalid: {snapshot_path}")
     parameter_names: list[dict[str, Any]] = []
