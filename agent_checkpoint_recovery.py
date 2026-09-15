@@ -826,13 +826,16 @@ class AgentCheckpointRecoveryService:
                 recovery for recovery in recoveries
                 if normalize_filesystem_path(str(recovery.get("projectRoot") or "")) == normalized
             ]
-        recoveries = recoveries[:limit]
         active = [recovery for recovery in recoveries if self._ports.approval.apply_recovery_blocks_writes(recovery)]
+        total_count = len(recoveries)
+        recoveries = recoveries[:limit]
         return {
             "ok": True,
             "schema": APPLY_RECOVERY_SCHEMA,
             "recoveries": recoveries,
             "count": len(recoveries),
+            "totalCount": total_count,
+            "hasMore": total_count > len(recoveries),
             "activeCount": len(active),
             "blockingWrites": bool(active),
             "restoreTool": "vrcforge_restore_checkpoint",
@@ -3354,11 +3357,14 @@ class AgentCheckpointRecoveryService:
                 return entry
         return None
 
-    def _read_apply_recovery_entries(self, limit: int = 1000) -> list[dict[str, Any]]:
+    def _read_apply_recovery_entries(self, limit: int | None = 1000) -> list[dict[str, Any]]:
         if not self._ports.apply_recovery_log_path().exists():
             return []
         entries: list[dict[str, Any]] = []
-        for line in self._ports.apply_recovery_log_path().read_text(encoding="utf-8").splitlines()[-max(1, limit):]:
+        lines = self._ports.apply_recovery_log_path().read_text(encoding="utf-8").splitlines()
+        if limit is not None:
+            lines = lines[-max(1, limit):]
+        for line in lines:
             try:
                 payload = json.loads(line)
             except json.JSONDecodeError:
@@ -3386,7 +3392,8 @@ class AgentCheckpointRecoveryService:
 
     def _coalesced_apply_recoveries(self, *, include_resolved: bool = False) -> list[dict[str, Any]]:
         states: dict[str, dict[str, Any]] = {}
-        for entry in self._read_apply_recovery_entries(limit=2000):
+        # Unresolved recoveries remain authoritative regardless of log age.
+        for entry in self._read_apply_recovery_entries(limit=None):
             recovery_id = str(entry.get("id") or "").strip()
             if not recovery_id:
                 continue
