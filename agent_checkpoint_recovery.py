@@ -3279,6 +3279,16 @@ class AgentCheckpointRecoveryService:
                 protected.add(checkpoint_id)
         if include_recent:
             candidates = archives if archives is not None else self._checkpoint_archive_files()
+            # A third successful edit must not evict the first step's rollback
+            # point while the user is still composing the operation. Automatic
+            # quota cleanup gets a 15-minute grace period; explicit user deletion
+            # and active-recovery protection retain their existing semantics.
+            cutoff = time.time() - 15 * 60
+            protected.update(
+                str(archive["checkpointId"])
+                for archive in candidates
+                if archive["modifiedAt"] >= cutoff
+            )
             for archive in sorted(candidates, key=lambda item: item["modifiedAt"], reverse=True)[
                 :CHECKPOINT_ARCHIVE_PROTECTED_RECENT_COUNT
             ]:

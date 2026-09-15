@@ -1,4 +1,6 @@
 from pathlib import Path
+import os
+import time
 
 import pytest
 
@@ -111,3 +113,31 @@ def test_auto_cleanup_preserves_latest_two_but_reports_remaining_overage(archive
     assert usage["overLimitBytes"] == 1_400_000 - 1_048_576
     service.delete_checkpoint_archives([archives[0].stem])
     assert service.checkpoint_archive_usage()["overLimit"] is False
+
+
+def test_auto_cleanup_keeps_all_recent_steps_of_a_composed_edit(archive_gateway: AgentGateway) -> None:
+    service = archive_gateway.checkpoint_recovery
+    archives = make_archives(archive_gateway, 3, 700_000)
+    result = service.prune_checkpoint_archives(max_size_mb=1)
+    assert result["deletedCount"] == 0
+    assert all(path.exists() for path in archives)
+    assert result["remainingBytes"] == 2_100_000
+
+
+def test_auto_cleanup_expires_grace_but_keeps_latest_two(archive_gateway: AgentGateway) -> None:
+    service = archive_gateway.checkpoint_recovery
+    archives = make_archives(archive_gateway, 3, 700_000)
+    for index, path in enumerate(archives):
+        timestamp = time.time() - 901 - (len(archives) - index)
+        os.utime(path, (timestamp, timestamp))
+    result = service.prune_checkpoint_archives(max_size_mb=1)
+    assert result["deletedCount"] == 1
+    assert not archives[0].exists()
+    assert all(path.exists() for path in archives[1:])
+
+
+def test_explicit_user_delete_can_remove_recent_completed_checkpoint(archive_gateway: AgentGateway) -> None:
+    archives = make_archives(archive_gateway, 3)
+    result = archive_gateway.checkpoint_recovery.delete_checkpoint_archives([archives[0].stem])
+    assert result["deletedCount"] == 1
+    assert not archives[0].exists()
