@@ -16,11 +16,13 @@ export function OnboardingOverlay({
   projectType,
   unityToolsReady,
   unityToolsCount,
-  apiKeyPresent,
+  providerVerified,
+  externalAgentReady,
   loadingRuntime,
   currentLanguage,
   onRetryRuntime,
   onOpenSettings,
+  onOpenExternalSettings,
   onOpenProjectPicker,
   onResume,
   onFinish,
@@ -36,11 +38,13 @@ export function OnboardingOverlay({
   projectType: ProjectType;
   unityToolsReady: boolean;
   unityToolsCount: number;
-  apiKeyPresent: boolean;
+  providerVerified: boolean;
+  externalAgentReady: boolean;
   loadingRuntime: boolean;
   currentLanguage: string;
   onRetryRuntime: () => void;
   onOpenSettings: () => void;
+  onOpenExternalSettings: () => void;
   onOpenProjectPicker: () => void;
   onResume: () => void;
   onFinish: () => void;
@@ -82,19 +86,33 @@ export function OnboardingOverlay({
     };
   const providerStep = {
       title: t("onboarding.step2Title"),
-      done: apiKeyPresent,
+      done: providerVerified || externalAgentReady,
       doneDesc: t("onboarding.step2DoneDesc"),
       todoDesc: t("onboarding.step2TodoDesc"),
       action: (
-        <Button variant="outline" onClick={onOpenSettings}>
-          <Settings className="mr-1 h-4 w-4" />
-          {t("onboarding.goToSettings")}
-        </Button>
+        <div className="grid gap-3 sm:grid-cols-2" data-vrcforge-onboarding-provider-choice>
+          <div className="rounded-lg border border-border bg-background/50 p-3">
+            <div className="text-sm font-medium">{t("onboarding.internalProviderTitle")}</div>
+            <p className="mt-1 text-xs leading-5 text-muted-foreground">{t("onboarding.internalProviderDesc")}</p>
+            <Button variant="outline" className="mt-3 w-full" onClick={onOpenSettings}>
+              <Settings className="mr-1 h-4 w-4" />
+              {t("onboarding.configureInternal")}
+            </Button>
+          </div>
+          <div className="rounded-lg border border-border bg-background/50 p-3">
+            <div className="text-sm font-medium">{t("onboarding.externalAgentTitle")}</div>
+            <p className="mt-1 text-xs leading-5 text-muted-foreground">{t("onboarding.externalAgentDesc")}</p>
+            <Button variant="outline" className="mt-3 w-full" onClick={onOpenExternalSettings}>
+              <Globe className="mr-1 h-4 w-4" />
+              {t("onboarding.configureExternal")}
+            </Button>
+          </div>
+        </div>
       ),
     };
   const steps = projectType === "unity"
-    ? [projectStep, unityStep, providerStep]
-    : [projectStep, providerStep];
+    ? [providerStep, projectStep, unityStep]
+    : [providerStep, projectStep];
   if (minimized) {
     return (
       <button

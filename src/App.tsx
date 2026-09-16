@@ -482,6 +482,7 @@ export default function App() {
     modelsError,
     testingProvider,
     providerTestMessage,
+    providerTestPassed,
     visionProvider,
     visionApiKey,
     setVisionApiKey,
@@ -692,6 +693,13 @@ export default function App() {
   const projects = bootstrap?.health.projects?.projects ?? cachedProjectSnapshot?.projects ?? [];
   const projectScanState = projectDiscoveryState(bootstrap?.health.projects ?? cachedProjectSnapshot ?? undefined);
   const externalAgentGatewayEnabled = Boolean(connectorStatus?.gateway?.enabled);
+  const externalAgentVerified = Boolean(
+    externalAgentGatewayEnabled
+      && connectorStatus?.lastConnectorAction?.ok
+      && connectorStatus.lastConnectorAction.handshake?.ready
+      && connectorStatus.lastConnectorAction.handshake?.preflightOk
+      && connectorStatus.lastConnectorAction.handshake?.preflightRuntimeOnline,
+  );
   const chatAvailable = providerConfigured || externalAgentGatewayEnabled;
   const chatDisabledReason = !runtimeConnected
     ? t("agent.modeLabel.notConnected")
@@ -1893,12 +1901,12 @@ export default function App() {
       return;
     }
     const stepStates = activeProjectType === "unity"
-      ? [onboardingSelectedProjectReady, onboardingUnityToolsReady, Boolean(apiConfig?.apiKeyPresent)]
-      : [onboardingSelectedProjectReady, Boolean(apiConfig?.apiKeyPresent)];
+      ? [providerTestPassed || externalAgentVerified, onboardingSelectedProjectReady, onboardingUnityToolsReady]
+      : [providerTestPassed || externalAgentVerified, onboardingSelectedProjectReady];
     if (stepStates[Math.min(onboardingStep, stepStates.length - 1)]) {
       setOnboardingMinimized(false);
     }
-  }, [showOnboarding, onboardingMinimized, onboardingStep, onboardingSelectedProjectReady, onboardingUnityToolsReady, activeProjectType, apiConfig?.apiKeyPresent]);
+  }, [showOnboarding, onboardingMinimized, onboardingStep, onboardingSelectedProjectReady, onboardingUnityToolsReady, activeProjectType, providerTestPassed, externalAgentVerified]);
 
   useEffect(() => {
     if (!isTauriRuntime()) {
@@ -4213,13 +4221,18 @@ export default function App() {
         projectType={activeProjectType}
         unityToolsReady={onboardingUnityToolsReady}
         unityToolsCount={vrcForgeToolsCount}
-        apiKeyPresent={Boolean(apiConfig?.apiKeyPresent)}
+        providerVerified={providerTestPassed}
+        externalAgentReady={externalAgentVerified}
         loadingRuntime={loading}
         currentLanguage={i18n.language}
         onRetryRuntime={() => void startRuntime()}
         onOpenSettings={() => {
           setOnboardingMinimized(true);
           openSettingsSection("models");
+        }}
+        onOpenExternalSettings={() => {
+          setOnboardingMinimized(true);
+          openSettingsSection("connectors");
         }}
         onOpenProjectPicker={() => {
           setOnboardingMinimized(true);

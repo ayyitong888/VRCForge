@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
   AppBootstrap,
@@ -70,6 +70,9 @@ export function useProviderSettings({
   const [modelsError, setModelsError] = useState("");
   const [testingProvider, setTestingProvider] = useState("");
   const [providerTestMessage, setProviderTestMessage] = useState("");
+  const [providerTestPassed, setProviderTestPassed] = useState(false);
+  const [providerTestFingerprint, setProviderTestFingerprint] = useState("");
+  const providerTestGeneration = useRef(0);
 
   useEffect(() => {
     if (!apiConfig) {
@@ -83,6 +86,8 @@ export function useProviderSettings({
     setApiThinkingLevel(apiConfig.thinking_level || "default");
     setModelOptions([]);
     setModelOptionsScope(null);
+    setProviderTestPassed(false);
+    setProviderTestFingerprint("");
   }, [apiConfig?.provider, apiConfig?.base_url, apiConfig?.model, apiConfig?.api_type, apiConfig?.apiType, apiConfig?.thinking_level, apiConfig?.contextWindow]);
 
   useEffect(() => {
@@ -190,15 +195,45 @@ export function useProviderSettings({
     setModelOptions([]);
     setModelOptionsScope(null);
     setModelsError("");
+    invalidateProviderTest();
   }
 
   function handleApiModelChange(model: string) {
     setApiModel(model);
+    invalidateProviderTest();
   }
 
   function handleDeepSeekAutoNegotiationChange(enabled: boolean) {
     setApiModel(enabled ? "deepseek-auto" : "deepseek-v4-flash");
     setApiType("auto");
+    invalidateProviderTest();
+  }
+
+  function invalidateProviderTest() {
+    providerTestGeneration.current += 1;
+    setTestingProvider("");
+    setProviderTestPassed(false);
+    setProviderTestFingerprint("");
+  }
+
+  function handleApiKeyChange(value: string) {
+    setApiKey(value);
+    invalidateProviderTest();
+  }
+
+  function handleApiBaseUrlChange(value: string) {
+    setApiBaseUrl(value);
+    invalidateProviderTest();
+  }
+
+  function handleApiTypeChange(value: ProviderApiType) {
+    setApiType(value);
+    invalidateProviderTest();
+  }
+
+  function handleApiThinkingLevelChange(value: string) {
+    setApiThinkingLevel(value);
+    invalidateProviderTest();
   }
 
   function handleVisionProviderChange(provider: string) {
@@ -298,7 +333,10 @@ export function useProviderSettings({
       return;
     }
     setTestingProvider(capability);
+    const generation = ++providerTestGeneration.current;
     setProviderTestMessage("");
+    setProviderTestPassed(false);
+    setProviderTestFingerprint("");
     setModelsError("");
     try {
       const targetEndpoint = await ensureRuntime();
@@ -316,14 +354,22 @@ export function useProviderSettings({
         capability,
       });
       const attempts = payload.attempts?.map((item) => `${item.model} / ${item.apiType}: ${item.status}`).join("; ");
+      if (generation !== providerTestGeneration.current) {
+        return;
+      }
       setProviderTestMessage(`${payload.capability}: ${payload.status} - ${payload.message}${attempts ? ` (${attempts})` : ""}`);
+      const passed = capability === "text" && Boolean(payload.ok);
+      setProviderTestPassed(passed);
+      setProviderTestFingerprint(passed ? providerFingerprint({ provider: apiProvider, baseUrl: apiBaseUrl, model: apiModel, apiType }) : "");
       if (!payload.ok && payload.status !== "skipped") {
         setModelsError(payload.message);
       }
     } catch (cause) {
       setModelsError(cause instanceof Error ? cause.message : String(cause));
     } finally {
-      setTestingProvider("");
+      if (generation === providerTestGeneration.current) {
+        setTestingProvider("");
+      }
     }
   }
 
@@ -331,19 +377,19 @@ export function useProviderSettings({
     apiProvider,
     setApiProvider,
     apiKey,
-    setApiKey,
+    setApiKey: handleApiKeyChange,
     apiBaseUrl,
-    setApiBaseUrl,
+    setApiBaseUrl: handleApiBaseUrlChange,
     apiModel,
     setApiModel: handleApiModelChange,
     apiType,
-    setApiType,
+    setApiType: handleApiTypeChange,
     apiContextWindow,
     setApiContextWindow,
     selectedModelCapabilities,
     selectedModelCapabilitySource,
     apiThinkingLevel,
-    setApiThinkingLevel,
+    setApiThinkingLevel: handleApiThinkingLevelChange,
     reasoningVariants,
     apiKeySaved,
     savingApiConfig,
@@ -353,6 +399,7 @@ export function useProviderSettings({
     modelsError,
     testingProvider,
     providerTestMessage,
+    providerTestPassed: providerTestPassed && providerTestFingerprint === providerFingerprint({ provider: apiProvider, baseUrl: apiBaseUrl, model: apiModel, apiType }),
     visionProvider,
     setVisionProvider,
     visionApiKey,
@@ -388,4 +435,8 @@ function normalizeContextWindowK(value: string): number | null {
     return null;
   }
   return thousands * 1000;
+}
+
+function providerFingerprint(config: { provider: string; baseUrl: string; model: string; apiType: ProviderApiType }): string {
+  return [config.provider, config.baseUrl.trim(), config.model.trim(), config.apiType].join("\u001f");
 }

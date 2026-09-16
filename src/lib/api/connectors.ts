@@ -187,6 +187,8 @@ export type ExternalAgentConnectorActionResult = {
     ok?: boolean;
     connected?: boolean;
     ready?: boolean;
+    preflightOk?: boolean;
+    preflightRuntimeOnline?: boolean;
     stage?: string;
     toolCount?: number;
     toolsSample?: string[];

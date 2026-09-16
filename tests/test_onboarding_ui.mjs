@@ -102,6 +102,11 @@ assert.ok(overlay.includes('aria-current={state.position === "current" ? "step" 
 assert.match(overlay, /state\.completion === "done" \? \([\s\S]*?<Check[\s\S]*?: \([\s\S]*?<Circle/);
 assert.ok(overlay.includes("onboardingChecklistVisualClasses.item[state.position]"));
 assert.ok(overlay.includes("onboardingChecklistVisualClasses.icon[state.completion]"));
+assert.ok(overlay.includes("data-vrcforge-onboarding-provider-choice"));
+assert.ok(overlay.includes("externalAgentReady"));
+assert.ok(overlay.includes("onOpenExternalSettings"));
+assert.ok(app.includes("providerTestPassed || externalAgentVerified"));
+assert.ok(app.includes("handshake?.ready"));
 assert.ok(overlay.includes("SUPPORTED_LOCALES.map"));
 assert.ok(overlay.includes('aria-label={t("settings.language")}'));
 assert.ok(!overlay.includes('"h-1.5 flex-1 rounded-full transition-colors"'));
