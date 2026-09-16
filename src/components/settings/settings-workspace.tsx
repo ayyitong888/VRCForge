@@ -1,3 +1,4 @@
+import { version as appVersion } from "../../../package.json";
 import { Check, Eye, Globe, Loader2, RefreshCw } from "lucide-react";
 import type { FormEvent } from "react";
 import { useTranslation } from "react-i18next";
@@ -315,7 +316,7 @@ export function SettingsWorkspace({
             <section className="mt-10" data-vrcforge-about>
               <h2 className="text-base font-semibold">{t("settings.aboutTitle")}</h2>
               <div className="mt-4 rounded-xl border border-border bg-card p-4">
-                <div className="text-sm font-semibold">{t("settings.aboutProduct")}</div>
+                <div className="text-sm font-semibold">{t("settings.aboutProduct", { version: appVersion })}</div>
                 <div className="mt-2 text-sm text-muted-foreground">{t("settings.aboutMcp")}</div>
                 <div className="mt-2 text-sm text-muted-foreground">{t("settings.aboutSafety")}</div>
                 <div className="mt-2 text-xs text-muted-foreground">{t("settings.aboutLicense")}</div>
