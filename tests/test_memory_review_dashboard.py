@@ -540,6 +540,11 @@ def test_explicit_review_from_default_preferences_only_proposes_candidates(memor
     env.sources.append(_source(scope))
     before = env.host.snapshot(requested_project_root=project_root)
     assert before["mode"] == "off"
+    assert before["providerDisclosure"]["paidRun"] is True
+    assert before["providerDisclosure"]["provider"] == env.settings["value"].llm_provider
+    assert before["providerDisclosure"]["model"] == env.settings["value"].llm_model
+    assert before["providerDisclosure"]["providerLabel"]
+    assert env.provider_calls == []
     response = env.run(revision=before["revision"], scope=scope_name, project_root=project_root)
     assert response.status_code == 200, response.text
     result = response.json()
@@ -548,6 +553,20 @@ def test_explicit_review_from_default_preferences_only_proposes_candidates(memor
     assert len(env.provider_calls) == 1
     assert result["candidates"][0]["state"] == "proposed"
     assert env.host.service.accepted_store.list_active() == []
+
+
+def test_default_off_disclosure_tracks_active_model_without_enabling_background(memory_review_dashboard):
+    env = memory_review_dashboard
+    before = env.host.service.review_store.snapshot(include_internal=True)
+    env.settings["value"] = _settings(model="active-manual-review-model")
+    shown = env.client.get("/api/app/agent/memory/review", params={"scope": "user"}).json()
+    assert shown["mode"] == "off"
+    assert shown["providerDisclosure"]["paidRun"] is True
+    assert shown["providerDisclosure"]["model"] == "active-manual-review-model"
+    assert shown["providerDisclosure"]["activeConfigMatches"] is True
+    assert env.host.service.review_store.snapshot(include_internal=True) == before
+    assert asyncio.run(env.host.schedule_due_background(lambda: "")) is False
+    assert env.provider_calls == []
 
 
 def test_explicit_review_is_rejected_when_memory_disabled(memory_review_dashboard):

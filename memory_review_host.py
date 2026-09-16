@@ -31,6 +31,7 @@ from memory_consolidation_sources import (
     ScopeResolutionError,
     SourceProjection,
     project_scope_key,
+    redact_memory_text,
 )
 from memory_review_provider import MemoryReviewProviderError
 from memory_review_runtime import (
@@ -334,15 +335,27 @@ class MemoryReviewHost:
         retention_days = int(raw.get("retentionDays") or config.get("retentionDays") or 30)
         configured_provider = str(config.get("provider") or raw.get("provider") or "")
         configured_model = str(config.get("model") or raw.get("model") or "")
-        paid_run = mode in {"suggest_only", "bounded_background"}
+        disclosed_provider, disclosed_model = configured_provider, configured_model
+        if mode == "off":
+            # Off disables scheduled review, but an explicit manual run uses
+            # the current chat provider. Disclose it before the user clicks Run.
+            disclosed_provider, disclosed_model = provider_context.provider, provider_context.model
+            for value, limit in ((disclosed_provider, 120), (disclosed_model, 160), (provider_context.provider_label, 200)):
+                sanitized, report = redact_memory_text(value, limit=limit)
+                if report.get("total") or sanitized != value:
+                    disclosed_provider = disclosed_model = ""
+                    break
+        paid_run = bool(raw.get("memoryEnabled", True)) and mode in {
+            "off", "suggest_only", "bounded_background",
+        }
         provider_matches = not paid_run or (
-            configured_provider == provider_context.provider
-            and configured_model == provider_context.model
+            disclosed_provider == provider_context.provider
+            and disclosed_model == provider_context.model
         )
         provider_label = (
             provider_context.provider_label
-            if configured_provider == provider_context.provider
-            else configured_provider
+            if disclosed_provider and disclosed_provider == provider_context.provider
+            else disclosed_provider
         )
         configured_project_matches = (
             configured_scope != "project"
@@ -378,9 +391,9 @@ class MemoryReviewHost:
             "dreamingProposal": self.service.dreaming_proposal(requested_project_root),
             "providerDisclosure": {
                 "paidRun": paid_run,
-                "provider": configured_provider,
+                "provider": disclosed_provider,
                 "providerLabel": provider_label,
-                "model": configured_model,
+                "model": disclosed_model,
                 "activeConfigMatches": provider_matches,
                 "cadenceMinutes": cadence,
                 "inputCharCap": input_cap,
