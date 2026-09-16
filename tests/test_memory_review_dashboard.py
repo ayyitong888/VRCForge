@@ -532,6 +532,34 @@ def test_config_revision_cas_and_auto_safe_gate(
     assert current["revision"] == 1
 
 
+@pytest.mark.parametrize("scope_name", ["user", "project"])
+def test_explicit_review_from_default_preferences_only_proposes_candidates(memory_review_dashboard, scope_name):
+    env = memory_review_dashboard
+    project_root = str(env.project) if scope_name == "project" else ""
+    scope, _root = env.composition.resolve_scope(scope_name, project_root)
+    env.sources.append(_source(scope))
+    before = env.host.snapshot(requested_project_root=project_root)
+    assert before["mode"] == "off"
+    response = env.run(revision=before["revision"], scope=scope_name, project_root=project_root)
+    assert response.status_code == 200, response.text
+    result = response.json()
+    assert result["mode"] == "off"
+    assert result["automaticCaptureEnabled"] is True
+    assert len(env.provider_calls) == 1
+    assert result["candidates"][0]["state"] == "proposed"
+    assert env.host.service.accepted_store.list_active() == []
+
+
+def test_explicit_review_is_rejected_when_memory_disabled(memory_review_dashboard):
+    env = memory_review_dashboard
+    disabled = asyncio.run(env.host.update_config(MemoryReviewConfigRequest(
+        memoryEnabled=False, expectedRevision=0,
+    )))
+    response = env.run(revision=disabled["revision"])
+    assert response.status_code == 400
+    assert env.provider_calls == []
+
+
 def test_saved_scope_and_provider_must_match_before_a_paid_run(
     memory_review_dashboard: DashboardMemoryReviewHarness,
 ) -> None:
@@ -612,18 +640,19 @@ def test_switching_projects_does_not_masquerade_as_the_saved_binding(
     assert "scopeKey" not in json.dumps(returned["journal"], ensure_ascii=False)
 
 
-def test_off_and_shadow_make_no_provider_call_or_candidate_prose_persistence(
+def test_empty_manual_review_and_shadow_make_no_provider_call_or_candidate_prose_persistence(
     memory_review_dashboard: DashboardMemoryReviewHarness,
 ) -> None:
     env = memory_review_dashboard
     off = env.run(revision=0)
-    assert off.status_code == 400
+    assert off.status_code == 200
+    assert off.json()["mode"] == "off"
     assert env.provider_calls == []
 
     scope, _root = env.composition.resolve_scope("user", "")
     secret_source_text = "Please remember concise replies with credential-never-persist at C:\\Users\\Private\\notes.txt"
     env.sources.append(_source(scope, text=secret_source_text))
-    configured = env.configure("shadow")
+    configured = env.configure("shadow", revision=off.json()["revision"])
     shadow = env.run(revision=configured["revision"])
     assert shadow.status_code == 200, shadow.text
     assert env.provider_calls == []
@@ -1959,7 +1988,13 @@ def test_dreaming_rechecks_the_same_memory_batch_before_any_merge(
         "vrcforge.memory_dreaming_plan_request.v1",
         "vrcforge.memory_dreaming_review_request.v1",
     ]
-    assert result["deduplicatedCount"] == 2
+    assert result["deduplicatedCount"] == 0
+    assert result["reason"] == "awaiting_user_approval"
+    assert len(service.accepted_store.list_active()) == len(active_before)
+    approved = asyncio.run(env.host.decide_dreaming(
+        result["proposalId"], "accept", expected_revision=result["revision"],
+    ))
+    assert approved["dreamingProposal"] is None
     active_after = {
         str(memory["memoryId"])
         for memory in service.accepted_store.list_active()
@@ -1968,6 +2003,61 @@ def test_dreaming_rechecks_the_same_memory_batch_before_any_merge(
     assert ids[5] not in active_after
     assert ids[3] in active_after
     assert active_after == active_before - {ids[1], ids[5]}
+
+
+def test_disabling_memory_cancels_dreaming_before_second_provider_pass(memory_review_dashboard):
+    env = memory_review_dashboard
+    env.host.runtime._provider_timeout_seconds = 5
+    for index in range(5):
+        env.host.service.accepted_store.create({"scope": "user", "text": f"Saved fact {index}."})
+    started, release = threading.Event(), threading.Event()
+    phases = []
+
+    def provider(_settings, payload, **_kwargs):
+        phases.append(payload["phase"])
+        started.set()
+        assert release.wait(5)
+        return {"duplicateGroups": []}
+
+    env.provider["call"] = provider
+
+    async def run():
+        assert await env.host.schedule_due_background(lambda: "")
+        task = env.host._background_task
+        assert await asyncio.to_thread(started.wait, 3)
+        try:
+            await env.host.update_config(MemoryReviewConfigRequest(
+                memoryEnabled=False, crossSessionEnabled=False,
+                expectedRevision=env.host.snapshot()["revision"],
+            ))
+            assert task.done()
+        finally:
+            release.set()
+        await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(run())
+    assert phases == ["organize"]
+    assert env.host.service.dreaming_proposal() is None
+    assert len(env.host.service.accepted_store.list_active()) == 5
+
+
+@pytest.mark.parametrize("action", ["accept", "reject"])
+def test_dreaming_candidate_prefix_routes_explicit_user_decision(memory_review_dashboard, action):
+    env = memory_review_dashboard
+    service = env.host.service
+    rows = [service.accepted_store.create({"scope": "user", "text": f"Preference {index}."}) for index in range(5)]
+    prepared = service.prepare_dreaming()
+    proposed = service.commit_dreaming(prepared, {"reviewed": True, "duplicateGroups": [
+        {"keepId": rows[0]["memoryId"], "removeIds": [rows[1]["memoryId"]]},
+    ]})
+    url = f"/api/app/agent/memory/review/candidates/dreaming:{proposed['proposalId']}/{action}"
+    stale = env.client.post(url, json={"expectedRevision": proposed["revision"] - 1})
+    assert stale.status_code == 409
+    assert len(service.accepted_store.list_active()) == 5
+    decided = env.client.post(url, json={"expectedRevision": proposed["revision"]})
+    assert decided.status_code == 200, decided.text
+    assert decided.json()["dreamingProposal"] is None
+    assert len(service.accepted_store.list_active()) == (4 if action == "accept" else 5)
 
 
 def test_background_schedule_epoch_closes_blocker_to_task_race(

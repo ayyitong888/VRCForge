@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import copy
+
+import pytest
 
 from memory_consolidation import MemoryConsolidationService
 from memory_consolidation_sources import MemoryScope, project_scope_key
@@ -25,6 +28,61 @@ def _chat(
 def _after_watermark(service: MemoryConsolidationService) -> str:
     service.ensure_automatic_capture_watermark()
     return (datetime.now(timezone.utc) + timedelta(seconds=1)).isoformat()
+
+
+def _remembered_turn(service, created, *, project_root=""):
+    scope = "project" if project_root else "user"
+    memory = service.accepted_store.create({"scope": scope, "projectRoot": project_root, "text": "请用中文回复"})
+    chats = _chat("记住：请用中文回复", created_at=created, project_path=project_root)
+    chats[0]["items"][1]["response"] = {"ok": True, "plan": {}, "steps": [{
+        "kind": "write", "tool": "vrcforge_remember_memory", "status": "executed",
+        "result": {"ok": True, "status": "saved", "memoryId": memory["memoryId"], "scope": scope,
+                   "committed": True, "completionKnown": True,
+                   "verification": {"state": "passed", "checks": [{"kind": "accepted_memory_readback", "state": "passed"}]}},
+    }]}
+    return chats, memory
+
+
+@pytest.mark.parametrize("project", [False, True])
+def test_automatic_capture_skips_same_turn_verified_memory_tool_receipt(tmp_path, project):
+    service = MemoryConsolidationService(tmp_path / "state")
+    created = _after_watermark(service)
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    root = str(project_root) if project else ""
+    scope = MemoryScope("project", project_scope_key(root)) if project else MemoryScope("user", "user")
+    chats, _ = _remembered_turn(service, created, project_root=root)
+    assert service.capture_automatic_chat_sources(chats, scope=scope, project_root=root)["acceptedCount"] == 0
+    assert len(service.accepted_store.list_active()) == 1
+
+
+@pytest.mark.parametrize("invalid", ["prose_only", "missing_memory", "wrong_content", "wrong_scope", "failed_receipt", "other_turn", "partial_content"])
+def test_automatic_capture_does_not_trust_invalid_or_unrelated_memory_receipts(tmp_path, invalid):
+    service = MemoryConsolidationService(tmp_path)
+    created = _after_watermark(service)
+    chats, memory = _remembered_turn(service, created)
+    reply = chats[0]["items"][1]
+    receipt = reply["response"]["steps"][0]["result"]
+    if invalid == "prose_only":
+        reply["text"] = "已记住 " + str(receipt)
+        reply.pop("response")
+    elif invalid == "missing_memory":
+        service.accepted_store.delete(memory["memoryId"])
+    elif invalid == "wrong_content":
+        other = service.accepted_store.create({"scope": "user", "text": "English replies."})
+        receipt["memoryId"] = other["memoryId"]
+    elif invalid == "wrong_scope":
+        receipt["scope"] = "project"
+    elif invalid == "failed_receipt":
+        receipt["committed"] = False
+    elif invalid == "other_turn":
+        earlier = copy.deepcopy(reply)
+        reply.pop("response")
+        chats[0]["items"].insert(0, earlier)
+    else:
+        chats[0]["items"][0]["text"] += "，并且我喜欢蓝色。"
+    result = service.capture_automatic_chat_sources(chats, scope=MemoryScope("user", "user"))
+    assert result["acceptedCount"] == 1
 
 
 def test_automatic_memory_first_ensure_never_backfills_history(tmp_path: Path) -> None:

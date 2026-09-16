@@ -6,7 +6,7 @@ import json
 import os
 import re
 import secrets
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -32,6 +32,58 @@ _REJECT = re.compile(
     r"(?:キー|トークン|パスワード|認証情報|秘密|権限|承認|許可|実行|削除|書き込み|ツール|コマンド)",
     re.I,
 )
+_REMEMBER_PREFIX = re.compile(
+    r"^\s*(?:(?:请|請|please)\s*)?(?:记住|記住|记下|記下|remember(?:\s+(?:that|this))?|覚えて)\s*[：:,，]?\s*",
+    re.IGNORECASE,
+)
+
+
+def _turn_has_verified_memory_receipt(
+    items: Sequence[Any], index: int, scope: MemoryScope, accepted: Mapping[str, Mapping[str, Any]],
+) -> bool:
+    """Only a same-turn tool receipt plus accepted-store readback suppresses capture."""
+    user_text = str(items[index].get("text") or "")
+    exact_texts = {" ".join(user_text.split()), " ".join(_REMEMBER_PREFIX.sub("", user_text, count=1).split())}
+    for later in items[index + 1:]:
+        if not isinstance(later, Mapping):
+            continue
+        if later.get("type") == "user":
+            break
+        if later.get("type") != "agent" or later.get("status", "completed") != "completed":
+            continue
+        response = later.get("response")
+        if not isinstance(response, Mapping) or response.get("ok") is not True or not isinstance(response.get("plan"), Mapping):
+            continue
+        steps = response.get("steps")
+        if not isinstance(steps, list):
+            continue
+        for step in steps:
+            if not isinstance(step, Mapping) or step.get("kind") != "write" or step.get("tool") != "vrcforge_remember_memory" or step.get("status") != "executed":
+                continue
+            receipt = step.get("result")
+            if not isinstance(receipt, Mapping) or receipt.get("ok") is not True or receipt.get("status") != "saved" or receipt.get("committed") is not True or receipt.get("completionKnown") is not True:
+                continue
+            verification = receipt.get("verification")
+            if not isinstance(verification, Mapping) or verification.get("state") != "passed":
+                continue
+            checks = verification.get("checks")
+            if not isinstance(checks, list) or not any(isinstance(check, Mapping) and check.get("kind") == "accepted_memory_readback" and check.get("state") == "passed" for check in checks):
+                continue
+            memory = accepted.get(str(receipt.get("memoryId") or ""))
+            if memory is None or receipt.get("scope") != scope.kind or memory.get("scope") != scope.kind:
+                continue
+            if scope.kind == "project":
+                try:
+                    if project_scope_key(str(memory.get("projectRoot") or ""), require_existing=False) != scope.scope_key:
+                        continue
+                except (OSError, RuntimeError, ValueError):
+                    continue
+            elif memory.get("projectRoot"):
+                continue
+            stored_text = " ".join(str(memory.get("text") or "").split())
+            if stored_text and stored_text in exact_texts:
+                return True
+    return False
 
 
 def _parse(value: Any) -> datetime | None:
@@ -117,6 +169,7 @@ def collect_automatic_chat_sources(
     scope: MemoryScope,
     project_root: str,
     enabled_at: str,
+    accepted_memories: Iterable[Mapping[str, Any]] = (),
 ) -> list[SourceProjection]:
     """Keep only new, short, unmodified direct preference/fact sources."""
 
@@ -124,6 +177,7 @@ def collect_automatic_chat_sources(
     if watermark is None:
         return []
     latest_allowed = datetime.now(timezone.utc) + timedelta(minutes=5)
+    accepted = {str(item.get("memoryId") or ""): item for item in accepted_memories if isinstance(item, Mapping)}
     scoped_chats: list[Mapping[str, Any]] = []
     for chat in chats:
         if not isinstance(chat, Mapping):
@@ -139,7 +193,19 @@ def collect_automatic_chat_sources(
                     continue
             except (OSError, RuntimeError, ValueError):
                 continue
-        scoped_chats.append(chat)
+        items = chat.get("items")
+        if accepted and isinstance(items, Sequence) and not isinstance(items, (str, bytes, bytearray)):
+            # Preserve user turn boundaries, including skipped turns; never edit the transcript.
+            projected_items = [
+                {**item, "text": ""}
+                if isinstance(item, Mapping) and item.get("type") == "user"
+                and _turn_has_verified_memory_receipt(items, index, scope, accepted)
+                else item
+                for index, item in enumerate(items)
+            ]
+            scoped_chats.append({**chat, "items": projected_items})
+        else:
+            scoped_chats.append(chat)
 
     kept: list[dict[str, Any]] = []
     for record in collect_user_chat_records(scoped_chats, scope=scope.kind, project_root=project_root):

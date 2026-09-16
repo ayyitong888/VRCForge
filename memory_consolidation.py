@@ -27,6 +27,7 @@ from automatic_memory import AUTOMATIC_MEMORY_POLICY_VERSION, AutomaticMemoryPol
 from background_goal_runtime import aggregate_bounded_usage
 from durable_audit_outbox import DurableMetadataAudit
 from memory_consolidation_sources import (
+    ScopeResolutionError,
     MemoryScope,
     SourceProjection,
     project_scope_key,
@@ -831,6 +832,7 @@ class MemoryReviewStore:
             "auditOutbox": [],
             "candidates": [],
             "runs": [],
+            "dreamingProposal": None,
         }
 
     def _load_path(self, path: Path, *, absent_ok: bool = True) -> dict[str, Any]:
@@ -862,6 +864,7 @@ class MemoryReviewStore:
             "auditOutbox",
             "candidates",
             "runs",
+            "dreamingProposal",
         }
         if any(str(key) not in allowed_top_level for key in payload):
             raise StoreCorruptionError("Memory Review store contains unsupported top-level fields.")
@@ -1194,7 +1197,43 @@ class MemoryReviewStore:
             payload["runs"] = [self._validate_loaded_run(item) for item in payload.get("runs", [])]
         except (MemoryConsolidationError, TypeError, ValueError) as exc:
             raise StoreCorruptionError("Memory Review store contains an unsafe record.") from exc
+        payload["dreamingProposal"] = self._validate_dreaming_proposal(payload.get("dreamingProposal"))
         return payload
+
+    @staticmethod
+    def _validate_dreaming_proposal(value: Any) -> dict[str, Any] | None:
+        if value is None:
+            return None
+        fields = {"proposalId", "snapshotDigest", "scope", "projectRoot", "duplicateGroups", "createdAt"}
+        if not isinstance(value, dict) or set(value) != fields:
+            raise StoreCorruptionError("Dreaming proposal is invalid.")
+        if not re.fullmatch(r"dream_[0-9a-f]{32}", str(value["proposalId"])) or not re.fullmatch(r"[0-9a-f]{64}", str(value["snapshotDigest"])):
+            raise StoreCorruptionError("Dreaming proposal identity is invalid.")
+        if not isinstance(value["scope"], str) or value["scope"] not in {"user", "project"} or not isinstance(value["projectRoot"], str):
+            raise StoreCorruptionError("Dreaming proposal scope is invalid.")
+        if bool(value["projectRoot"]) != (value["scope"] == "project"):
+            raise StoreCorruptionError("Dreaming proposal project scope is invalid.")
+        groups = value["duplicateGroups"]
+        if not isinstance(groups, list) or not 1 <= len(groups) <= 64 or not _bounded_timestamp(value["createdAt"], fallback=""):
+            raise StoreCorruptionError("Dreaming proposal groups are invalid.")
+        assigned: set[str] = set()
+        for group in groups:
+            if not isinstance(group, dict) or set(group) != {"keepId", "removeIds"} or not isinstance(group["removeIds"], list) or not 1 <= len(group["removeIds"]) <= 80:
+                raise StoreCorruptionError("Dreaming proposal group is invalid.")
+            ids = [group["keepId"], *group["removeIds"]]
+            if any(not isinstance(item, str) or not re.fullmatch(r"mem_[A-Za-z0-9_]+", item) for item in ids) or len(set(ids)) != len(ids) or assigned.intersection(ids):
+                raise StoreCorruptionError("Dreaming proposal Memory identity is invalid.")
+            assigned.update(ids)
+        return copy.deepcopy(value)
+
+    def set_dreaming_proposal(self, proposal: dict[str, Any] | None, *, expected_revision: int) -> dict[str, Any]:
+        with self._lock:
+            state = self._sweep_retention_locked(self._load())
+            self._assert_revision(state, expected_revision)
+            state["dreamingProposal"] = self._validate_dreaming_proposal(proposal)
+            state["revision"] += 1
+            self._commit_with_audit(state, [{"event": "dreaming_proposed" if proposal else "dreaming_decided", "revision": state["revision"]}])
+            return self.snapshot(include_internal=True)
 
     @staticmethod
     def _loaded_int(value: Any, default: int, minimum: int, maximum: int) -> int:
@@ -2326,6 +2365,7 @@ class MemoryReviewStore:
         deleted_memory_ids: Sequence[str],
         rolled_back: bool = False,
         failure_class: str = "",
+        decided_proposal_id: str = "",
     ) -> dict[str, Any]:
         normalized_run_id = _bounded_identifier(run_id, field="runId", limit=120)
         normalized_completed_at = _bounded_timestamp(completed_at, fallback="")
@@ -2337,6 +2377,10 @@ class MemoryReviewStore:
             raise MemoryConsolidationError("Dreaming rollback cannot also be failed.")
         with self._lock:
             state = self._sweep_retention_locked(self._load())
+            if decided_proposal_id:
+                if (state.get("dreamingProposal") or {}).get("proposalId") != decided_proposal_id:
+                    raise MemoryConsolidationError("Dreaming proposal changed before decision.")
+                state["dreamingProposal"] = None
             config = dict(state.get("config") or {})
             config["lastDreamingAt"] = normalized_completed_at
             config["lastDreamingRunId"] = (
@@ -4496,6 +4540,9 @@ class MemoryConsolidationService:
         scope = str(config.get("scopeKind") or "user")
         if scope not in {"user", "project"}:
             scope = "user"
+        manual_view = config.get("mode") == MODE_OFF
+        if manual_view:
+            scope = "project" if str(project_root or "").strip() else "user"
         keys: set[str] = {"user"} if scope == "user" else set()
         resolved_project = ""
         configured_scope_key = str(config.get("projectScopeKey") or "")
@@ -4506,6 +4553,8 @@ class MemoryConsolidationService:
             except (OSError, ValueError):
                 supplied_scope_key = ""
                 supplied_project = ""
+            if manual_view:
+                configured_scope_key = supplied_scope_key
             if supplied_scope_key and supplied_scope_key == configured_scope_key:
                 resolved_project = supplied_project
                 keys.add(configured_scope_key)
@@ -4742,6 +4791,8 @@ class MemoryConsolidationService:
         preferences = self.memory_preferences()
         if not preferences["memoryEnabled"]:
             return {"due": False, "reason": "memory_disabled", "revision": snapshot["revision"]}
+        if snapshot.get("dreamingProposal"):
+            return {"due": False, "reason": "awaiting_user_approval", "revision": snapshot["revision"]}
         current = now or datetime.now(timezone.utc)
         if current.tzinfo is None:
             current = current.replace(tzinfo=timezone.utc)
@@ -4993,7 +5044,69 @@ class MemoryConsolidationService:
         reviewed_result: Mapping[str, Any],
         now: datetime | None = None,
     ) -> dict[str, Any]:
-        """Commit only the second model pass after snapshot and loss checks."""
+        """Stage a reviewed proposal; model review never authorizes Memory changes."""
+
+        with self._transaction_lock:
+            if not self.memory_preferences()["memoryEnabled"]:
+                raise MemoryConsolidationError("Memory is disabled.")
+            if reviewed_result.get("reviewed") is not True:
+                raise MemoryConsolidationError("Dreaming requires a second model review.")
+            current = self.accepted_store.list_active()
+            if self._dreaming_snapshot_digest(current) != str(prepared.get("snapshotDigest") or ""):
+                raise MemoryConsolidationError("Memory changed before Dreaming proposal.")
+            groups = self._validated_dreaming_groups(prepared, reviewed_result)
+            if sum(len(group["removeIds"]) for group in groups) > max(1, int(len(current) * DREAMING_MAX_REMOVAL_FRACTION)):
+                raise MemoryConsolidationError("Dreaming result exceeds the prior-Memory loss limit.")
+            completed = now or datetime.now(timezone.utc)
+            if not groups:
+                snapshot = self.review_store.record_dreaming_result(run_id=str(prepared["runId"]), completed_at=completed.isoformat(), deleted_memory_ids=[])
+                return {"due": True, "reason": "completed", "runId": prepared["runId"], "deduplicatedCount": 0, "revision": snapshot["revision"]}
+            by_id = {row["memoryId"]: row for row in current}
+            first = by_id[groups[0]["keepId"]]
+            scope, root = str(first.get("scope") or "user"), str(first.get("projectRoot") or "")
+            # One scope per approval: never ask a project page to approve hidden changes elsewhere.
+            groups = [group for group in groups if self._dreaming_scope_key(by_id[group["keepId"]]) == self._dreaming_scope_key(first)]
+            state = self.review_store.snapshot(include_internal=True)
+            if state.get("dreamingProposal"):
+                raise MemoryConsolidationError("A Dreaming proposal is already awaiting approval.")
+            proposal = {"proposalId": prepared["runId"], "snapshotDigest": prepared["snapshotDigest"], "scope": scope, "projectRoot": root, "duplicateGroups": groups, "createdAt": completed.isoformat()}
+            snapshot = self.review_store.set_dreaming_proposal(proposal, expected_revision=state["revision"])
+            return {"due": True, "reason": "awaiting_user_approval", "runId": prepared["runId"], "proposalId": prepared["runId"], "deduplicatedCount": 0, "revision": snapshot["revision"]}
+
+    def dreaming_proposal(self, project_root: str = "") -> dict[str, Any] | None:
+        """Return a scoped, safe preview; pending records never enter recall."""
+        snapshot = self.review_store.snapshot(include_internal=True)
+        proposal = snapshot.get("dreamingProposal")
+        if not proposal:
+            return None
+        if proposal["scope"] == "project" and self.accepted_store._normalized_project(project_root) != self.accepted_store._normalized_project(proposal["projectRoot"]):
+            return None
+        by_id = {row["memoryId"]: row for row in self.accepted_store.list_active()}
+        groups = [{"keepId": group["keepId"], "keepText": str(by_id.get(group["keepId"], {}).get("text") or ""), "removeIds": group["removeIds"], "removeTexts": [str(by_id.get(item, {}).get("text") or "") for item in group["removeIds"]]} for group in proposal["duplicateGroups"]]
+        return {"proposalId": proposal["proposalId"], "revision": snapshot["revision"], "scope": proposal["scope"], "projectRoot": proposal["projectRoot"], "state": "proposed", "groups": groups, "createdAt": proposal["createdAt"], "stale": self._dreaming_snapshot_digest(list(by_id.values())) != proposal["snapshotDigest"]}
+
+    def decide_dreaming(self, proposal_id: str, action: str, *, expected_revision: int, project_root: str = "") -> dict[str, Any]:
+        """UI-only explicit user decision; never expose acceptance as a model tool."""
+        with self._transaction_lock, self.accepted_store._lock:
+            state = self.review_store.snapshot(include_internal=True)
+            self.review_store._assert_revision(state, expected_revision)
+            proposal = state.get("dreamingProposal")
+            if not proposal or proposal["proposalId"] != proposal_id:
+                raise MemoryConsolidationError("Dreaming proposal is unavailable.")
+            if proposal["scope"] == "project" and self.accepted_store._normalized_project(project_root) != self.accepted_store._normalized_project(proposal["projectRoot"]):
+                raise ScopeResolutionError("Dreaming proposal requires the exact project root.")
+            if action == "reject":
+                snapshot = self.review_store.record_dreaming_result(run_id=proposal_id, completed_at=datetime.now(timezone.utc).isoformat(), deleted_memory_ids=[], decided_proposal_id=proposal_id)
+                return {"reason": "rejected", "deduplicatedCount": 0, "revision": snapshot["revision"]}
+            if action != "accept":
+                raise MemoryConsolidationError("Dreaming decision must be accept or reject.")
+            if not self.memory_preferences()["memoryEnabled"]:
+                raise MemoryConsolidationError("Memory is disabled.")
+            current = self.accepted_store.list_active()
+            prepared = {"runId": proposal_id, "snapshotDigest": proposal["snapshotDigest"], "memories": [{"memoryId": row["memoryId"], "scopeKey": self._dreaming_scope_key(row), "kind": row.get("kind")} for row in current]}
+            return self._apply_approved_dreaming(prepared, {"reviewed": True, "duplicateGroups": proposal["duplicateGroups"]})
+
+    def _apply_approved_dreaming(self, prepared: Mapping[str, Any], reviewed_result: Mapping[str, Any], now: datetime | None = None) -> dict[str, Any]:
 
         with self._transaction_lock:
             if reviewed_result.get("reviewed") is not True:
@@ -5025,6 +5138,7 @@ class MemoryConsolidationService:
                     run_id=run_id,
                     completed_at=completed.astimezone(timezone.utc).isoformat(),
                     deleted_memory_ids=deleted,
+                    decided_proposal_id=run_id,
                 )
             except BaseException:
                 for memory_id in reversed(deleted):
@@ -5101,6 +5215,7 @@ class MemoryConsolidationService:
                 scope=scope,
                 project_root=project_root,
                 enabled_at=self.automatic_policy.ensure(),
+                accepted_memories=self.accepted_store.list_active(),
             )
             accepted_count = conflict_count = 0
             for source in sources:
@@ -5178,16 +5293,20 @@ class MemoryConsolidationService:
         provider: str,
         model: str,
         budget: Mapping[str, Any] | None = None,
+        user_requested: bool = False,
     ) -> dict[str, Any]:
         snapshot = self.review_store.snapshot(include_internal=True)
         config = snapshot.get("config") if isinstance(snapshot.get("config"), dict) else {}
-        if config.get("mode") not in {MODE_SUGGEST_ONLY, MODE_BOUNDED_BACKGROUND}:
+        manual = user_requested and config.get("mode") == MODE_OFF
+        if not bool(config.get("memoryEnabled", True)):
+            raise MemoryConsolidationError("Memory is disabled.")
+        if not manual and config.get("mode") not in {MODE_SUGGEST_ONLY, MODE_BOUNDED_BACKGROUND}:
             raise MemoryConsolidationError("Paid review mode is not enabled in persisted configuration.")
         configured_scope = str(config.get("scopeKind") or "user")
         configured_key = "user" if configured_scope == "user" else str(config.get("projectScopeKey") or "")
-        if scope.kind != configured_scope or scope.scope_key != configured_key:
+        if not manual and (scope.kind != configured_scope or scope.scope_key != configured_key):
             raise MemoryConsolidationError("Review scope does not match persisted configuration.")
-        if (
+        if not manual and (
             str(config.get("provider") or "") != str(provider or "")
             or str(config.get("model") or "") != str(model or "")
         ):
@@ -5247,7 +5366,7 @@ class MemoryConsolidationService:
             cost_upper_bound_usd=cost_upper_bound_usd,
         )
 
-    def assert_provider_run_current(self, run_id: str) -> None:
+    def assert_provider_run_current(self, run_id: str, *, user_requested: bool = False) -> None:
         """Fail closed before every paid attempt if its saved config changed."""
 
         normalized_id = _bounded_identifier(run_id, field="runId")
@@ -5264,10 +5383,12 @@ class MemoryConsolidationService:
         if run is None or str(run.get("status") or "") != "running":
             raise MemoryConsolidationError("Memory Review run is no longer active.")
         config = state.get("config") if isinstance(state.get("config"), Mapping) else {}
-        if _normalize_mode(config.get("mode")) not in {
+        mode = _normalize_mode(config.get("mode"))
+        manual = user_requested and mode == MODE_OFF
+        if not bool(config.get("memoryEnabled", True)) or (not manual and mode not in {
             MODE_SUGGEST_ONLY,
             MODE_BOUNDED_BACKGROUND,
-        } or str(run.get("configDigest") or "") != _review_config_digest(config):
+        }) or str(run.get("configDigest") or "") != _review_config_digest(config):
             raise MemoryConsolidationError("Memory Review configuration changed during the run.")
 
     def update_run_state(

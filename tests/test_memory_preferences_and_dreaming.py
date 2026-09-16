@@ -149,6 +149,12 @@ def test_dreaming_requires_second_model_review_before_deduplicating_saved_memory
     }
     result = service.commit_dreaming(prepared, reviewed, run_at)
 
+    assert result["reason"] == "awaiting_user_approval"
+    assert len(service.accepted_store.list_active()) == 8
+    result = service.decide_dreaming(
+        result["proposalId"], "accept", expected_revision=result["revision"],
+    )
+
     assert result["reason"] == "completed"
     assert result["deduplicatedCount"] == 2
     active_ids = {str(row["memoryId"]) for row in service.accepted_store.list_active()}
@@ -160,7 +166,7 @@ def test_dreaming_requires_second_model_review_before_deduplicating_saved_memory
     assert str(missed_remove["memoryId"]) not in active_ids
     assert len(active_ids) == 6
 
-    cadence = service.prepare_dreaming(run_at + timedelta(hours=1))
+    cadence = service.prepare_dreaming(datetime.now(timezone.utc) + timedelta(hours=1))
     assert cadence["due"] is False
     assert cadence["reason"] == "cadence"
 

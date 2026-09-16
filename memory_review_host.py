@@ -221,6 +221,11 @@ class MemoryReviewHost:
     def snapshot(self, *, requested_project_root: str = "") -> dict[str, Any]:
         internal = self.service.review_store.snapshot(include_internal=True)
         internal_config = internal.get("config") if isinstance(internal.get("config"), dict) else {}
+        if internal_config.get("mode") == "off" and requested_project_root:
+            try:
+                _, requested_project_root = self._resolve_scope("project", requested_project_root)
+            except ScopeResolutionError:
+                requested_project_root = ""
         configured_scope_key = str(internal_config.get("projectScopeKey") or "")
         configured_project_available = bool(
             configured_scope_key and self._available_root_for_scope_key(configured_scope_key)
@@ -250,6 +255,8 @@ class MemoryReviewHost:
         ).strip().casefold()
         if configured_scope not in {"user", "project"}:
             configured_scope = "user"
+        if mode == "off":
+            configured_scope = str(raw.get("scope") or "user")
         candidates: list[dict[str, Any]] = []
         for item in raw.get("candidates", []):
             if not isinstance(item, dict):
@@ -368,6 +375,7 @@ class MemoryReviewHost:
             "runStatus": run_status,
             "unreadCount": sum(1 for candidate in candidates if candidate.get("unread")),
             "candidates": candidates,
+            "dreamingProposal": self.service.dreaming_proposal(requested_project_root),
             "providerDisclosure": {
                 "paidRun": paid_run,
                 "provider": configured_provider,
@@ -559,6 +567,8 @@ class MemoryReviewHost:
                 self._active_run_tasks.pop(run_id, None)
 
     async def _cancel_active_runs(self, run_id: str = "") -> int:
+        if not run_id:
+            self._idle_gate.signal_activity("memory_preferences_changed")
         current = asyncio.current_task()
         with self._active_run_tasks_lock:
             selected = [
@@ -568,6 +578,9 @@ class MemoryReviewHost:
                 and task is not current
                 and not task.done()
             ]
+        background = self._background_task
+        if not run_id and background is not None and background is not current and not background.done() and all(task is not background for _, task in selected):
+            selected.append(("dreaming", background))
         same_loop: list[asyncio.Task[Any]] = []
         loop = asyncio.get_running_loop()
         for _candidate_id, task in selected:
@@ -629,14 +642,19 @@ class MemoryReviewHost:
                 f"Memory Review revision changed from {expected_revision} to {snapshot['revision']}."
             )
         mode = str(snapshot.get("mode") or "off")
-        if mode == "off":
+        user_requested = lane == "interactive" and mode == "off"
+        if not snapshot.get("memoryEnabled", True):
+            raise MemoryConsolidationError("Memory is disabled.")
+        if user_requested:
+            mode = "suggest_only"
+        elif mode == "off":
             raise MemoryConsolidationError("Memory Review is off.")
         durable = await asyncio.to_thread(self.service.review_store.snapshot, include_internal=True)
         config = durable.get("config") if isinstance(durable.get("config"), dict) else {}
         configured_scope = str(config.get("scopeKind") or config.get("scope") or "user")
-        if configured_scope != scope.kind:
+        if not user_requested and configured_scope != scope.kind:
             raise MemoryConsolidationError("Memory Review run scope does not match its saved configuration.")
-        if scope.kind == "project" and str(config.get("projectScopeKey") or "") != scope.scope_key:
+        if not user_requested and scope.kind == "project" and str(config.get("projectScopeKey") or "") != scope.scope_key:
             raise MemoryConsolidationError("Memory Review run project does not match its saved configuration.")
         inventory = await asyncio.to_thread(
             self._collect_sources_with_project_lease,
@@ -681,6 +699,7 @@ class MemoryReviewHost:
                     expected_revision=expected_revision,
                     provider=configured_provider,
                     model=configured_model,
+                    user_requested=user_requested,
                     budget={
                         "inputCharCap": input_cap,
                         "tokenCap": token_cap,
@@ -734,7 +753,14 @@ class MemoryReviewHost:
         try:
             provider_context = await asyncio.to_thread(self._load_provider_context)
         except Exception:  # noqa: BLE001 - persist a bounded schema deferral.
+            if user_requested:
+                raise MemoryConsolidationError("The current provider is unavailable.")
             return await persist_preflight_deferral("config_changed", "schema")
+        if user_requested:
+            configured_provider = provider_context.provider
+            configured_model = provider_context.model
+            if not configured_provider or not configured_model:
+                raise MemoryConsolidationError("The current provider is unavailable.")
         if (
             configured_provider != provider_context.provider
             or configured_model != provider_context.model
@@ -785,6 +811,7 @@ class MemoryReviewHost:
             expected_revision=expected_revision,
             provider=provider_context.provider,
             model=provider_context.model,
+            user_requested=user_requested,
             budget={
                 "inputCharCap": input_cap,
                 "tokenCap": token_cap,
@@ -893,7 +920,7 @@ class MemoryReviewHost:
 
         def provider_call() -> Mapping[str, Any]:
             nonlocal provider_attempts, validated_usage
-            self.service.assert_provider_run_current(run_id)
+            self.service.assert_provider_run_current(run_id, user_requested=user_requested)
             if lane == "background" and not self._idle_gate.is_current(background_generation):
                 raise MemoryReviewCommitDeferred("Background Memory Review was revoked before provider work.")
             provider_attempts += 1
@@ -1237,6 +1264,22 @@ class MemoryReviewHost:
             return None
         return "project", project_root, int(state.get("revision") or 0)
 
+    async def decide_dreaming(
+        self, proposal_id: str, action: str, *, expected_revision: int, requested_project_root: str = ""
+    ) -> dict[str, Any]:
+        """Accept/reject from a user UI decision, never from provider output."""
+        canonical_project = ""
+        if requested_project_root:
+            _, canonical_project = self._resolve_scope("project", requested_project_root)
+        result = await asyncio.to_thread(
+            self.service.decide_dreaming, proposal_id, action,
+            expected_revision=expected_revision, project_root=canonical_project,
+        )
+        await self._await_callback(self._on_changed)
+        if result.get("deduplicatedCount"):
+            await self._await_callback(self._on_memory_changed, canonical_project)
+        return self.snapshot(requested_project_root=canonical_project)
+
     async def _execute_dreaming(self, generation: int) -> dict[str, Any]:
         if not self._idle_gate.is_current(generation):
             raise asyncio.CancelledError
@@ -1269,11 +1312,17 @@ class MemoryReviewHost:
             }
 
         def provider_call() -> Mapping[str, Any]:
+            def require_enabled() -> None:
+                if not self._idle_gate.is_current(generation) or not self.service.memory_preferences()["memoryEnabled"]:
+                    raise MemoryReviewCommitDeferred("Dreaming was disabled or revoked.")
+
+            require_enabled()
             first_pass = self._provider_call(
                 provider_context.settings,
                 prepared["request"],
                 DREAMING_OUTPUT_TOKEN_CAP,
             )
+            require_enabled()
             review_request = self.service.build_dreaming_review_request(
                 prepared,
                 first_pass,
@@ -1309,7 +1358,7 @@ class MemoryReviewHost:
             base_url=provider_context.base_url,
             call=provider_call,
             commit=commit_reviewed,
-            continue_guard=lambda: self._idle_gate.is_current(generation),
+            continue_guard=lambda: self._idle_gate.is_current(generation) and self.service.memory_preferences()["memoryEnabled"],
         )
         if not runtime_result.ok:
             if runtime_result.status not in {"cancelled", "capacity", "duplicate"}:
@@ -1574,6 +1623,13 @@ def build_memory_review_router(host: MemoryReviewHost) -> APIRouter:
         request: MemoryReviewCandidateRequest,
     ) -> dict[str, Any]:
         try:
+            if candidate_id.startswith("dreaming:"):
+                return await host.decide_dreaming(
+                    candidate_id.removeprefix("dreaming:"),
+                    action,
+                    expected_revision=request.expected_revision,
+                    requested_project_root=request.project_root or "",
+                )
             return await host.mutate(candidate_id, action, request)
         except Exception as exc:  # noqa: BLE001
             raise_memory_review_http_error(exc)

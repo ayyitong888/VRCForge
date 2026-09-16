@@ -15,12 +15,18 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Mapping
 
 from durable_audit_outbox import DurableMetadataAudit
-from memory_consolidation_sources import project_scope_key
+from memory_consolidation_sources import project_scope_key, redact_memory_text
 
 AGENT_MEMORY_SCHEMA = "vrcforge.agent_memory.v1"
 MEMORY_REVIEW_AUDIT_SCHEMA = "vrcforge.memory_review_audit.v1"
 MAX_MEMORY_TEXT_CHARS = 2_000
 MAX_MEMORY_JSONL_LINE_BYTES = 1_048_576
+
+
+def memory_text_is_private(text: Any) -> bool:
+    """Use the same privacy boundary for direct saves, recall and consolidation."""
+    _, report = redact_memory_text(text, limit=MAX_MEMORY_TEXT_CHARS)
+    return bool(report.get("total"))
 
 PathSource = str | Path | Callable[[], str | Path]
 
@@ -376,7 +382,7 @@ class AgentMemoryStore:
 
     def list_active(self) -> list[dict[str, Any]]:
         with self._lock:
-            values = list(self._project().values())
+            values = [item for item in self._project().values() if not memory_text_is_private(item.get("text"))]
         values.sort(key=lambda item: str(item.get("updatedAt") or item.get("createdAt") or ""), reverse=True)
         return values
 
@@ -461,6 +467,8 @@ class AgentMemoryStore:
 
     def create(self, params: Mapping[str, Any] | None = None) -> dict[str, Any]:
         values = dict(params or {})
+        if memory_text_is_private(values.get("text") or values.get("content")):
+            raise ValueError("Memory text contains sensitive information.")
         text = _summarize_text(values.get("text") or values.get("content"), MAX_MEMORY_TEXT_CHARS)
         if not text:
             raise ValueError("Memory text is required.")
@@ -579,7 +587,7 @@ class AgentMemoryStore:
     def list(self, *, limit: int = 50, project_root: str = "", scope: str = "") -> list[dict[str, Any]]:
         normalized_project = self._normalized_project(project_root)
         with self._lock:
-            memories = list(self._project().values())
+            memories = [item for item in self._project().values() if not memory_text_is_private(item.get("text"))]
         if normalized_project:
             memories = [
                 memory
@@ -649,6 +657,8 @@ class AgentMemoryStore:
             raise ValueError("User promotion cannot carry projectRoot.")
         normalized_kind = _bounded_text(kind or "preference", field="kind", limit=80)
         normalized_text = _bounded_text(text, field="text", limit=MAX_MEMORY_TEXT_CHARS)
+        if memory_text_is_private(normalized_text):
+            raise ValueError("Memory text contains sensitive information.")
         memory_id = self.stable_memory_id(normalized_promotion)
 
         with self._lock:
