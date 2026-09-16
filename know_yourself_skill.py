@@ -1,12 +1,31 @@
 from __future__ import annotations
 
 import re
+import contextvars
+from contextlib import contextmanager
 from collections import defaultdict
 from typing import Any, Mapping
 
 
 KNOW_YOURSELF_SCHEMA = "vrcforge.know_yourself.v1"
 SUPPORTED_UNITY_EDITOR_SERIES = ("2022.3",)
+
+_CALLER_CONTEXT: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "vrcforge_know_yourself_caller", default="internal_agent"
+)
+
+
+@contextmanager
+def bind_know_yourself_caller(context: str):
+    """Bind caller identity from a trusted router boundary, never request params."""
+    normalized = str(context or "").strip().lower()
+    if normalized not in {"internal_agent", "external_mcp"}:
+        normalized = "internal_agent"
+    token = _CALLER_CONTEXT.set(normalized)
+    try:
+        yield
+    finally:
+        _CALLER_CONTEXT.reset(token)
 
 _PREPARATION_CHECKS: tuple[tuple[str, str, str], ...] = (
     ("provider_configured", "provider.configured", "Provider configured"),
@@ -134,10 +153,17 @@ def _provider_projection(report: Mapping[str, Any]) -> dict[str, Any]:
 def _preparation_steps(
     report: Mapping[str, Any],
     project_context: Mapping[str, Any],
+    *,
+    require_provider: bool = True,
 ) -> list[dict[str, Any]]:
     checks = _doctor_checks(report)
     steps: list[dict[str, Any]] = []
-    for step_id, check_id, title in _PREPARATION_CHECKS:
+    checks_to_run = (
+        _PREPARATION_CHECKS
+        if require_provider
+        else tuple(item for item in _PREPARATION_CHECKS if item[0] != "provider_configured")
+    )
+    for step_id, check_id, title in checks_to_run:
         check = checks.get(check_id, {})
         status = _normalized_status(check.get("status"))
         steps.append(
@@ -934,7 +960,13 @@ def build_know_yourself_report(
 ) -> dict[str, Any]:
     project_context = _as_mapping(project_context)
     permission_state = _as_mapping(permission_state)
-    preparation = _preparation_steps(doctor_report, project_context)
+    caller_context = _CALLER_CONTEXT.get()
+    external_caller = caller_context == "external_mcp"
+    preparation = _preparation_steps(
+        doctor_report,
+        project_context,
+        require_provider=not external_caller,
+    )
     live = _live_readback(unity_status, _as_mapping(compile_diagnostics))
     prerequisites_ready = all(step["ready"] for step in preparation)
     live_environment_ready = all(
@@ -1043,8 +1075,11 @@ def build_know_yourself_report(
         "ok": True,
         "schema": KNOW_YOURSELF_SCHEMA,
         "notice": (
-            "This readiness report is authoritative for work-start. Reply to the user now "
-            "from this result; do not inspect project files or run setup actions."
+            "This readiness report is diagnosis-only and performs no writes. Respond "
+            "naturally to diagnosis requests. If the user explicitly requests setup or "
+            "repair, continue with the existing supervised tools within the caller's "
+            "already authorized scope."
+            + (" The external Agent owns its model provider." if external_caller else "")
         ),
         "summary": (
             f"readyForUnityWork={'true' if ready_for_baseline else 'false'}; "
@@ -1077,7 +1112,15 @@ def build_know_yourself_report(
         },
         "liveReadback": live,
         "nextAction": next_action,
-        "provider": _provider_projection(doctor_report),
+        "callerContext": caller_context,
+        "provider": (
+            {
+                **_provider_projection(doctor_report),
+                "requiredForReadiness": False,
+            }
+            if external_caller
+            else _provider_projection(doctor_report)
+        ),
         "selectedUnityEnvironment": {
             "configured": selected_environment.get("configured") is True,
             "label": str(selected_environment.get("label") or ""),
@@ -1101,6 +1144,8 @@ def build_know_yourself_report(
         "authorization": authorization,
         "selfKnowledge": self_knowledge,
         "operatingBoundaries": {
+            "diagnosisOnly": external_caller,
+            "repairRequiresExplicitPermission": external_caller,
             "skillMutatesUnityProject": False,
             "skillInstallsDependencies": False,
             "skillLaunchesOrClosesUnity": False,

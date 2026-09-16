@@ -35,6 +35,7 @@ from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, Callable, Iterator, Mapping, Sequence
 
 from agent_memory_store import AgentMemoryStore
+from know_yourself_skill import bind_know_yourself_caller
 import agent_command_safety as command_safety
 import runtime_planner_service as planner_policy
 from agent_shell_service import (
@@ -1434,7 +1435,9 @@ BUILTIN_SKILL_GROUPS: list[dict[str, Any]] = [
             "any guarded write request. Explain abilities only from the returned bounded "
             "tools and capability groups, state structured blockers and unavailable "
             "reasons, and preserve approval, checkpoint, validation, and rollback "
-            "boundaries for every later write."
+            "boundaries for every later write. If the user explicitly requests setup "
+            "or repair, continue with the existing supervised tools within the "
+            "already authorized scope; this diagnostic Skill does not perform repair."
         ),
         "tags": ["builtin", "group", "self-check", "work-start", "unity", "mcp", "connection", "readiness"],
     },
@@ -4153,7 +4156,11 @@ class AgentGateway:
                 owner_token = self._tool_owner_context.set(f"agent:{agent_name}")
                 try:
                     with bind_operation_context(request_id, params.get("executionTarget")):
-                        raw_result = tool.handler(tool_params)
+                        # The external caller context is process-bound and cannot be
+                        # forged through MCP arguments; Know Yourself uses it only to
+                        # omit the VRCForge-owned provider gate.
+                        with bind_know_yourself_caller("external_mcp"):
+                            raw_result = tool.handler(tool_params)
                 finally:
                     self._tool_owner_context.reset(owner_token)
                     self._tool_agent_context.reset(agent_token)

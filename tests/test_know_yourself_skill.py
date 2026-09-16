@@ -5,7 +5,11 @@ from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
 
-from know_yourself_skill import KNOW_YOURSELF_SCHEMA, build_know_yourself_report
+from know_yourself_skill import (
+    KNOW_YOURSELF_SCHEMA,
+    bind_know_yourself_caller,
+    build_know_yourself_report,
+)
 
 
 REQUIRED_DOCTOR_IDS = (
@@ -223,11 +227,35 @@ def test_api_only_without_project_stops_at_project_selection() -> None:
     assert report["stage"] == "select_unity_project"
     assert "readyForUnityWork=false" in report["summary"]
     assert "nextSafeAction=select_unity_project" in report["summary"]
-    assert "Reply to the user now" in report["notice"]
+    assert "Respond naturally" in report["notice"]
+    assert "continue with the existing supervised tools" in report["notice"]
+    assert "do not inspect project files" not in report["notice"]
     assert "Select the Unity project root" in report["message"]
     assert report["editorFocusGate"]["status"] == "blocked"
     assert report["nextAction"]["approvalRequired"] is False
     assert report["capabilities"]["unityDependentWorkStartEligible"] is False
+
+
+def test_external_caller_does_not_require_vrcforge_provider_and_is_diagnosis_only() -> None:
+    with bind_know_yourself_caller("external_mcp"):
+        report = _report(doctor=_doctor(**{"provider.configured": "error"}))
+
+    assert report["callerContext"] == "external_mcp"
+    assert report["provider"]["requiredForReadiness"] is False
+    assert report["readyForUnityWork"] is True
+    assert "provider_configured" not in report["gaps"]
+    assert report["operatingBoundaries"]["diagnosisOnly"] is True
+    assert report["operatingBoundaries"]["repairRequiresExplicitPermission"] is True
+    assert "diagnosis-only" in report["notice"]
+
+
+def test_untrusted_request_fields_cannot_switch_internal_caller_context() -> None:
+    report = _report(doctor=_doctor(**{"provider.configured": "error"}))
+
+    assert report["callerContext"] == "internal_agent"
+    assert "requiredForReadiness" not in report["provider"]
+    assert report["readyForUnityWork"] is False
+    assert "provider_configured" in report["gaps"]
 
 
 def test_missing_required_sdk_blocks_before_editor_focus() -> None:
