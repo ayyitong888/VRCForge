@@ -66,7 +66,7 @@ The current self-check may return only a discovery count, not project names or p
 
 Let the user identify the intended existing project if ambiguous. Use `vrcforge_register_project` only if registration is needed, then `vrcforge_select_project` through the current write flow. `projectPath` is the exact validated root containing Assets, Packages and ProjectSettings. Do not register external manager catalogues unnecessarily.
 
-There is currently no MCP tool to open an existing Unity project. Ask the user to open the selected project using the App, Hub, VCC or ALCOM. Verify the actual process/instance afterward; a user acknowledgement alone is not readiness.
+There is currently no MCP tool to open an existing Unity project. Ask the user to open the selected project using Unity Hub, VCC or ALCOM. The App's Open Folder action only opens the folder, not Unity. Verify the actual process/instance afterward; a user acknowledgement alone is not readiness.
 
 ## 4. Install Core without a bootstrap loop
 

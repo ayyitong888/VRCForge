@@ -28,7 +28,7 @@ Agent 应记住这次选择，后续检查、安装和读模型都使用同一�
 
 ## 打开 Unity，安装 VRCForge 插件
 
-目前“打开现有 Unity 工程”有 App 操作入口，但没有对应 MCP 工具。Agent 应让你在 App、Hub、VCC 或 ALCOM 中打开刚才选择的工程；随后由 Agent 检查实际运行的工程是否匹配。只看列表里的名字不算打开成功。
+目前没有“打开现有 Unity 工程”的 MCP 工具。Agent 应让你在 Unity Hub、VCC 或 ALCOM 中打开刚才选择的工程；随后由 Agent 检查实际运行的工程是否匹配。VRCForge 的“打开文件夹”只打开文件夹，不会启动 Unity。
 
 安装插件有两条路径，选一条完成，不要反复叠加安装：
 
@@ -66,7 +66,7 @@ Unity 正在编译或刷新时需要等待。必要时 Agent 会请你点击一�
 
 Agent 应先读到正确的工程和 Avatar，给出简短确认，再继续你原本的改模要求。进入修改前仍按你选择的权限模式执行，保留验证和恢复能力。
 
-本文配套的 [Agent Skill](../examples/skill-packages/vrcforge-first-run-guide/SKILL.md) 包含工具选择与复查规则。Skill 源码本身不会自动出现在 App 中；需要通过现有技能安装流程安装、启用，并在内外 Agent 的技能/Prompt 列表中确认可见。
+1.8.1 随 App 提供本文配套的 [Agent Skill](../examples/skill-packages/vrcforge-first-run-guide/SKILL.md)，无需另行下载。可在能力库中查找“连接引导与日常排障”；外部 Agent 也能从 MCP 的技能与 Prompt 列表发现它。已有的同名自定义内容或停用设置会保留，不会被启动过程覆盖。
 
 ## 平时突然用不了，也用这份引导
 
