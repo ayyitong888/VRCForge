@@ -1,0 +1,10 @@
+LiteDB 5.0.21
+
+Purpose: bundled read-only ALCOM project catalogue helper dependency.
+Source: https://www.nuget.org/packages/LiteDB/5.0.21
+License: MIT (see https://github.com/mbdavid/LiteDB/blob/v5.0.21/LICENSE)
+Package SHA-256: 938a4f5f9d6a28383de8ccfcbdb8897e78432399215232cf38dbf147e03ec167
+
+The release build must obtain the official package, verify this hash, and
+extract only lib/net45/LiteDB.dll. The helper opens one explicitly supplied
+database with LiteDB ReadOnly=true and does not write or migrate it.

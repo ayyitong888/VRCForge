@@ -97,6 +97,7 @@ class ProjectSnapshotSelectionService:
                 "selectedProjectPath": str(payload.get("selectedProjectPath") or ""),
                 "unityEditorPath": str(payload.get("unityEditorPath") or ""),
                 "projects": [project for project in self.project_snapshot_list(payload.get("projects")) if isinstance(project, dict)],
+                "catalogueScan": copy.deepcopy(payload.get("catalogueScan")) if isinstance(payload.get("catalogueScan"), dict) else {},
             },
         }
 
@@ -118,6 +119,7 @@ class ProjectSnapshotSelectionService:
             "selectedProjectPath": str(snapshot.get("selectedProjectPath") or ""),
             "unityEditorPath": str(snapshot.get("unityEditorPath") or ""),
             "projects": [project for project in self.project_snapshot_list(snapshot.get("projects")) if isinstance(project, dict)],
+            "catalogueScan": copy.deepcopy(snapshot.get("catalogueScan")) if isinstance(snapshot.get("catalogueScan"), dict) else {},
         }
         with self._cache_lock:
             self._cache = copy.deepcopy(cached)
@@ -183,6 +185,7 @@ class ProjectSnapshotSelectionService:
             "selectedProjectPath": self._ports.selected_project_path(),
             "unityEditorPath": self._ports.unity_editor_path(),
             "projects": [],
+            "catalogueScan": {},
             "scan": {"status": status, "cached": True, **scan},
         }
 
@@ -284,7 +287,9 @@ class ProjectSnapshotSelectionService:
             refreshing = self._refreshing
             error = self._last_error
         if cached is None:
-            return self.empty_project_snapshot_payload(status="refreshing" if refreshing else "pending")
+            return self.empty_project_snapshot_payload(
+                status="refreshing" if refreshing else ("error" if error else "pending")
+            )
         status = "refreshing" if refreshing else ("error" if error else "ready")
         return self.annotate_project_snapshot(cached, status=status, cached=True, error=error)
 

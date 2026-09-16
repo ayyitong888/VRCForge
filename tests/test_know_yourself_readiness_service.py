@@ -144,3 +144,23 @@ def test_dashboard_constructs_know_yourself_service_with_strict_process_port() -
     assert dashboard_server.KNOW_YOURSELF_READINESS._ports.list_running_unity_processes_strict
     source = (ROOT / "dashboard_server.py").read_text(encoding="utf-8")
     assert "list_running_unity_processes(require_discovery_evidence=True)" in source
+
+
+def test_discovery_guidance_distinguishes_empty_pending_failure_and_cached_items():
+    from know_yourself_readiness_service import project_discovery_guidance
+    cases = [("ready", False, "", [], "empty"), ("pending", False, "", [], "not_checked"), ("refreshing", True, "", [], "scanning"), ("error", False, "denied", [], "error"), ("ready", False, "", [{"path": "avatar"}], "found")]
+    for status, refreshing, error, projects, expected in cases:
+        report = project_discovery_guidance({"scan": {"status": status, "refreshing": refreshing, "error": error}, "projects": projects})
+        assert report["state"] == expected
+        assert report["discoveryNeverProvesUnityReady"] is True
+        assert "ALCOM" in report["supportedSources"]
+        assert len(report["normalWorkflow"]) == 5
+
+
+def test_shared_work_start_report_exposes_project_discovery_without_claiming_ready():
+    from dataclasses import replace
+    service = _service(unity=_unity(connected=False))
+    service._ports = replace(service._ports, project_snapshot=lambda: {"projects": [], "scan": {"status": "ready"}})
+    report = service.know_yourself_sync({})
+    assert report["projectDiscovery"]["state"] == "empty"
+    assert report["readyForUnityWork"] is False

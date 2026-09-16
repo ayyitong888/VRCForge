@@ -88,7 +88,7 @@ def test_project_catalog_is_typed_read_owner_without_host_proxy() -> None:
     }
 
     assert METHODS <= methods
-    assert regex_patterns == [r"[A-Za-z]:\\\\[^\"\\r\\n,]+(?:\\\\[^\"\\r\\n,]+)*"]
+    assert regex_patterns == [r"[A-Za-z]:[\\/]+[^\"\r\n,]+"]
     assert ProjectCatalogDiscovery.__slots__ == ("_ports",)
     assert set(ProjectCatalogDiscoveryPorts.__dataclass_fields__) == {
         "appdata_path",
@@ -100,6 +100,7 @@ def test_project_catalog_is_typed_read_owner_without_host_proxy() -> None:
         "normalize_path_string",
         "is_unity_project_path",
         "parse_editor_version",
+        "read_litedb_projects",
     }
     for forbidden in (
         "_host",
@@ -154,6 +155,56 @@ def test_vcc_and_alcom_use_only_known_environment_catalogues(monkeypatch, tmp_pa
     expected = dashboard_server.normalize_path_string(str(project))
     assert service.discover_vcc_projects() == [expected]
     assert service.discover_alcom_projects() == [expected]
+
+
+def test_alcom_litedb_is_explicitly_reported_unsupported_without_binary_parsing(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    local = tmp_path / "local"
+    database = local / "VRChatCreatorCompanion" / "vcc.liteDb"
+    database.parent.mkdir(parents=True)
+    database.write_bytes(b"opaque-litedb-fixture")
+    monkeypatch.setenv("LOCALAPPDATA", str(local))
+    monkeypatch.setenv("APPDATA", str(tmp_path / "empty"))
+    result = _service().scan_catalogues()
+    alcom = result["sources"]["alcom"]
+    assert alcom["status"] == "unsupported"
+    assert alcom["databaseStatus"] == "unsupported"
+    assert alcom["errorCount"] == 1
+    assert alcom["errors"][0]["error"] == "reader_unsupported"
+    assert alcom["databasePaths"] == [str(database)]
+    assert alcom["projects"] == []
+
+
+def test_litedb_reader_empty_and_exception_are_honest(tmp_path: Path, monkeypatch) -> None:
+    database = tmp_path / "VRChatCreatorCompanion" / "vcc.liteDb"
+    database.parent.mkdir()
+    database.write_bytes(b"fixture")
+
+    def ports(reader):
+        return ProjectCatalogDiscoveryPorts(
+            appdata_path=lambda: tmp_path / "roaming",
+            local_appdata_path=lambda: tmp_path,
+            path_exists=lambda path: path.name == "vcc.liteDb",
+            read_text=lambda *_args: "{}",
+            list_children=lambda _path: (), path_is_dir=lambda _path: False,
+            normalize_path_string=str, is_unity_project_path=lambda _path: True,
+            parse_editor_version=lambda _path: "Unknown", read_litedb_projects=reader,
+        )
+
+    empty_service = ProjectCatalogDiscovery(ports(lambda _path: {"status": "empty", "projects": []}))
+    monkeypatch.setattr(ProjectCatalogDiscovery, "discover_alcom_database_paths", lambda _self: [database])
+    empty = empty_service.scan_catalogues()
+    assert empty["sources"]["alcom"]["status"] == "empty"
+    assert empty["sources"]["alcom"]["databaseStatus"] == "empty"
+
+    failed_service = ProjectCatalogDiscovery(ports(lambda _path: (_ for _ in ()).throw(OSError("locked"))))
+    monkeypatch.setattr(ProjectCatalogDiscovery, "discover_alcom_database_paths", lambda _self: [database])
+    failed = failed_service.scan_catalogues()
+    alcom = failed["sources"]["alcom"]
+    assert alcom["status"] == "error"
+    assert alcom["databaseStatus"] == "error"
+    assert alcom["errorCount"] == 1
 
 
 def test_vcc_and_alcom_candidate_order_is_exact_and_read_only() -> None:
@@ -233,9 +284,9 @@ def test_settings_json_and_bounded_text_fallback_preserve_path_rules(tmp_path: P
     )
     malformed = tmp_path / "malformed.json"
     malformed.write_text(r'broken "C:\\Unity\\Projects\\Avatar"', encoding="utf-8")
-    # Preserve the existing escaped-text matcher exactly; this double-escaped
-    # input is read safely but does not pass its legacy Unity/path filter.
-    assert normalize_only.discover_projects_from_settings_files([malformed]) == []
+    assert normalize_only.discover_projects_from_settings_files([malformed]) == [
+        "C:/Unity/Projects/Avatar"
+    ]
 
 
 def test_settings_first_read_failure_retries_only_with_ignore_errors() -> None:
@@ -261,8 +312,59 @@ def test_settings_first_read_failure_retries_only_with_ignore_errors() -> None:
         )
     )
 
-    assert service.discover_projects_from_settings_files([Path("settings.json")]) == []
+    assert service.discover_projects_from_settings_files([Path("settings.json")]) == [
+        "C:/Unity/Projects/Avatar"
+    ]
     assert reads == [("utf-8-sig", None), (None, "ignore")]
+
+
+def test_catalogue_scan_distinguishes_empty_from_read_failure(tmp_path: Path) -> None:
+    empty = tmp_path / "empty.json"
+    empty.write_text(json.dumps({"projects": []}), encoding="utf-8")
+    service = _service()
+    empty_scan = service.scan_settings_files([empty])
+    assert empty_scan["status"] == "empty"
+    assert empty_scan["errorCount"] == 0
+
+    broken = tmp_path / "broken.json"
+    broken.write_text("{", encoding="utf-8")
+    failing = ProjectCatalogDiscovery(
+        ProjectCatalogDiscoveryPorts(
+            appdata_path=lambda: Path(), local_appdata_path=lambda: Path(),
+            path_exists=lambda path: True,
+            read_text=lambda _path, _encoding, _errors: (_ for _ in ()).throw(OSError("denied")),
+            list_children=lambda _path: (), path_is_dir=lambda _path: False,
+            normalize_path_string=str, is_unity_project_path=lambda _path: False,
+            parse_editor_version=lambda _path: "Unknown",
+        )
+    )
+    failed_scan = failing.scan_settings_files([broken])
+    assert failed_scan["status"] == "error"
+    assert failed_scan["errorCount"] == 1
+
+
+def test_catalogue_scan_does_not_reuse_previous_file_text_after_read_failure(tmp_path: Path) -> None:
+    first = tmp_path / "first.json"
+    second = tmp_path / "second.json"
+    first.write_text(json.dumps({"projects": []}), encoding="utf-8")
+    second.write_text("broken", encoding="utf-8")
+
+    def read_text(path: Path, encoding: str | None, errors: str | None) -> str:
+        if path == second and errors is None:
+            raise OSError("second unreadable")
+        return path.read_text(encoding=encoding, errors=errors)
+
+    service = ProjectCatalogDiscovery(ProjectCatalogDiscoveryPorts(
+        appdata_path=lambda: Path(), local_appdata_path=lambda: Path(),
+        path_exists=lambda path: path.exists(), read_text=read_text,
+        list_children=lambda _path: (), path_is_dir=lambda _path: False,
+        normalize_path_string=str, is_unity_project_path=lambda _path: False,
+        parse_editor_version=lambda _path: "Unknown",
+    ))
+    result = service.scan_settings_files([first, second])
+    assert result["status"] == "error"
+    assert result["errorCount"] == 1
+    assert result["errors"][0]["path"] == str(second)
 
 
 def test_json_extraction_keeps_original_key_and_nested_list_semantics() -> None:
@@ -347,6 +449,36 @@ def test_unity_hub_merges_json_and_project_root_without_duplicates(
     }
 
 
+def test_unity_hub_includes_project_when_project_dir_is_the_project_root(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    local = tmp_path / "local"
+    root_project = _project(tmp_path / "OpenedDirectly")
+    roots_file = local / "UnityHub" / "projectDir.json"
+    roots_file.parent.mkdir(parents=True)
+    roots_file.write_text(json.dumps({"directoryPath": str(root_project)}), encoding="utf-8")
+    monkeypatch.setenv("LOCALAPPDATA", str(local))
+    monkeypatch.setenv("APPDATA", str(tmp_path / "empty"))
+    projects = _service().discover_unity_hub_projects()
+    assert projects == [{
+        "name": "OpenedDirectly",
+        "path": dashboard_server.normalize_path_string(str(root_project)),
+        "editorVersion": "2022.3.22f1",
+    }]
+
+
+def test_unity_hub_scan_reports_malformed_catalogue_as_error(tmp_path: Path, monkeypatch) -> None:
+    roaming = tmp_path / "roaming"
+    projects_file = roaming / "UnityHub" / "projects-v1.json"
+    projects_file.parent.mkdir(parents=True)
+    projects_file.write_text("{", encoding="utf-8")
+    monkeypatch.setenv("APPDATA", str(roaming))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "empty"))
+    result = _service().scan_unity_hub()
+    assert result["status"] == "error"
+    assert result["errorCount"] >= 1
+
+
 def test_catalog_owner_does_not_absorb_snapshot_process_or_doctor_domains() -> None:
     dashboard_functions = {
         node.name
@@ -363,3 +495,14 @@ def test_catalog_owner_does_not_absorb_snapshot_process_or_doctor_domains() -> N
     assert "load_persisted_selected_project_path" not in dashboard_functions
     assert "build_unity_status_snapshot" not in dashboard_functions
     assert "build_app_doctor_report" not in dashboard_functions
+
+
+def test_empty_hub_uses_path_read_port_without_false_error(tmp_path, monkeypatch):
+    hub = tmp_path / "roaming" / "UnityHub"
+    hub.mkdir(parents=True)
+    (hub / "projects-v1.json").write_text('{"data": {}}', encoding="utf-8")
+    monkeypatch.setenv("APPDATA", str(hub.parent))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local"))
+    result = _service().scan_unity_hub()
+    assert result["status"] == "empty", result
+    assert result["errorCount"] == 0, result

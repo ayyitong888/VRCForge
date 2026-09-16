@@ -73,6 +73,7 @@ from dashboard_foundation import (
     runtime_settings_path,
 )
 from bounded_process import BoundedProcessResult, run_bounded_process
+from alcom_litedb_reader import read_alcom_litedb_projects
 from app_update_service import AppUpdateService
 from agent_command_safety import normalize_filesystem_path
 from general_agent_tools import (
@@ -1344,6 +1345,10 @@ PROJECT_CATALOG_DISCOVERY = ProjectCatalogDiscovery(
         normalize_path_string=lambda value: normalize_path_string(value),
         is_unity_project_path=lambda path: is_unity_project_path(path),
         parse_editor_version=lambda path: parse_editor_version(path),
+        read_litedb_projects=lambda path: read_alcom_litedb_projects(
+            path,
+            helper_path=runtime_paths.ROOT_DIR / "tools" / "alcom_litedb_reader" / "vrcforge_alcom_litedb_reader.exe",
+        ),
     )
 )
 PROVIDER_MODEL_CATALOG = ProviderModelCatalogService(
@@ -1489,6 +1494,7 @@ KNOW_YOURSELF_READINESS = KnowYourselfReadinessService(
         build_tool_registry=lambda: AGENT_GATEWAY.build_tool_registry(),
         build_skill_registry=lambda: AGENT_GATEWAY.skills.build_skill_registry(),
         permission_state=lambda: AGENT_GATEWAY.approval_transactions.permission_state(),
+        project_snapshot=lambda: PROJECT_SNAPSHOT_SELECTION.project_snapshot_payload(use_cache=True, refresh_async=False),
         ensure_dict=lambda value: ensure_dict(value),
         normalize_bool=lambda value, default: normalize_bool(value, default),
     )
@@ -5972,6 +5978,10 @@ def read_project_prefs() -> dict[str, Any]:
 async def write_project_prefs(request: ProjectPrefsRequest) -> dict[str, Any]:
     custom_projects: list[dict[str, str]] = []
     seen: set[str] = set()
+    previous_entries = {
+        (normalize_path_string(str(item.get("path") or "")).casefold(), item.get("projectType"))
+        for item in load_project_prefs().get("customProjects", [])
+    }
     requested_projects = list(request.custom_projects)
     requested_projects.extend({"path": raw, "projectType": "unity"} for raw in request.custom_paths)
     for raw in requested_projects[:PROJECT_PREFS_MAX_PATHS]:
@@ -5980,10 +5990,12 @@ async def write_project_prefs(request: ProjectPrefsRequest) -> dict[str, Any]:
         if not normalized or normalized.casefold() in seen:
             continue
         candidate = Path(normalized)
-        if not candidate.is_absolute() or not candidate.is_dir() or project_type not in {"general", "unity"}:
-            continue
-        if project_type == "unity" and not is_unity_project_path(candidate):
-            continue
+        preserved = (normalized.casefold(), project_type) in previous_entries
+        valid = candidate.is_absolute() and candidate.is_dir() and project_type in {"general", "unity"}
+        if valid and project_type == "unity":
+            valid = is_unity_project_path(candidate)
+        if not valid and not preserved:
+            raise HTTPException(status_code=422, detail="Invalid project folder. Select an existing folder; Unity projects must contain Assets, Packages and ProjectSettings. No project list changes were saved.")
         seen.add(normalized.casefold())
         custom_projects.append({"path": normalized, "projectType": project_type})
     hidden_paths: list[str] = []
@@ -18446,15 +18458,35 @@ def serialize_dashboard_state() -> dict[str, Any]:
 
 
 def build_project_snapshot_payload() -> dict[str, Any]:
-    projects = discover_projects(DASHBOARD_STATE.project_roots, include_external=True)
+    # Keep a structured read report beside the merged list so an empty Hub or
+    # manager catalogue is distinguishable from an unreadable catalogue.
+    try:
+        catalogue_scan = PROJECT_CATALOG_DISCOVERY.scan_catalogues()
+    except Exception as exc:  # noqa: BLE001 - the project list remains usable.
+        catalogue_scan = {
+            "status": "error",
+            "projectCount": 0,
+            "sources": {},
+            "errors": [{"error": str(exc)}],
+        }
+    projects = discover_projects(
+        DASHBOARD_STATE.project_roots,
+        include_external=True,
+        catalogue_scan=catalogue_scan,
+    )
     return {
         "selectedProjectPath": DASHBOARD_STATE.selected_project_path,
         "unityEditorPath": DASHBOARD_STATE.unity_editor_path,
         "projects": projects,
+        "catalogueScan": catalogue_scan,
     }
 
 
-def discover_projects(project_roots: list[Path], include_external: bool = False) -> list[dict[str, Any]]:
+def discover_projects(
+    project_roots: list[Path],
+    include_external: bool = False,
+    catalogue_scan: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
     projects_by_key: dict[str, dict[str, Any]] = {}
     name_index: dict[str, str] = {}
 
@@ -18533,13 +18565,17 @@ def discover_projects(project_roots: list[Path], include_external: bool = False)
             upsert_project(name=child.name, path=str(child), editor_version=parse_editor_version(version_file), source="configured-root")
 
     if include_external:
-        for project_path in PROJECT_CATALOG_DISCOVERY.discover_vcc_projects():
+        sources = (catalogue_scan or {}).get("sources") if isinstance(catalogue_scan, dict) else None
+        vcc_projects = (sources or {}).get("vcc", {}).get("projects") if isinstance(sources, dict) else None
+        alcom_projects = (sources or {}).get("alcom", {}).get("projects") if isinstance(sources, dict) else None
+        hub_projects = (sources or {}).get("unityHub", {}).get("projects") if isinstance(sources, dict) else None
+        for project_path in vcc_projects if isinstance(vcc_projects, list) else PROJECT_CATALOG_DISCOVERY.discover_vcc_projects():
             upsert_project(name=Path(project_path).name, path=project_path, source="vcc")
 
-        for project_path in PROJECT_CATALOG_DISCOVERY.discover_alcom_projects():
+        for project_path in alcom_projects if isinstance(alcom_projects, list) else PROJECT_CATALOG_DISCOVERY.discover_alcom_projects():
             upsert_project(name=Path(project_path).name, path=project_path, source="alcom")
 
-        for project in PROJECT_CATALOG_DISCOVERY.discover_unity_hub_projects():
+        for project in hub_projects if isinstance(hub_projects, list) else PROJECT_CATALOG_DISCOVERY.discover_unity_hub_projects():
             upsert_project(
                 name=project.get("name") or Path(project.get("path") or "").name,
                 path=project.get("path") or "",

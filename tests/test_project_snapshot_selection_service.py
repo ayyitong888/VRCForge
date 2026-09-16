@@ -111,6 +111,20 @@ def test_cache_write_failure_keeps_new_memory_snapshot_and_exposes_error(tmp_pat
     assert cached["projects"] == []
 
 
+def test_empty_snapshot_reports_error_after_initial_discovery_failure(tmp_path: Path) -> None:
+    service = make_service(tmp_path, build_snapshot=lambda: (_ for _ in ()).throw(OSError("catalogue unreadable")))
+    try:
+        service.refresh_project_snapshot_cache_sync()
+    except OSError:
+        pass
+    else:  # pragma: no cover - regression guard
+        raise AssertionError("discovery failure unexpectedly succeeded")
+    payload = service.cached_project_snapshot_payload(refresh_async=False)
+    assert payload["projects"] == []
+    assert payload["scan"]["status"] == "error"
+    assert payload["scan"]["error"] == "catalogue unreadable"
+
+
 def test_selection_write_verifies_atomic_readback_and_never_guesses(tmp_path: Path) -> None:
     project = tmp_path / "UnityProject"
     for name in ("Assets", "Packages", "ProjectSettings"):

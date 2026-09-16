@@ -857,6 +857,10 @@ try {
     Remove-Item -LiteralPath (Join-Path $legacyLauncherBuildRoot "VRCForge.pdb") -Force -ErrorAction SilentlyContinue
 
     & .\packaging\build_backend.ps1 -OutputDir (Join-Path $payloadRoot "backend")
+    & .\packaging\build_alcom_litedb_reader.ps1 -OutputDirectory (Join-Path $repoRoot "tools\alcom_litedb_reader")
+    if ($LASTEXITCODE -ne 0) {
+        throw "ALCOM LiteDB reader build failed."
+    }
 
     Copy-Item -LiteralPath .\src-tauri\icons\icon.ico -Destination (Join-Path $payloadRoot "VRCForge.ico") -Force
     Copy-Item -LiteralPath .\src-tauri\icons\icon.png -Destination (Join-Path $payloadRoot "VRCForge.png") -Force
@@ -952,6 +956,9 @@ try {
     Copy-Item -LiteralPath (Join-Path $resolvedUvLicensePath "LICENSE-MIT") -Destination (Join-Path $payloadRoot "licenses\uv-LICENSE-MIT.txt") -Force
     Copy-Item -LiteralPath (Join-Path $resolvedUvLicensePath "LICENSE-APACHE") -Destination (Join-Path $payloadRoot "licenses\uv-LICENSE-APACHE-2.0.txt") -Force
     Copy-Item -LiteralPath (Join-Path $resolvedUvLicensePath "VRCFORGE_DISTRIBUTION_NOTES.txt") -Destination (Join-Path $payloadRoot "licenses\uv-DISTRIBUTION-NOTES.txt") -Force
+    Copy-Item -LiteralPath (Join-Path $repoRoot "third_party\litedb\LICENSE.txt") -Destination (Join-Path $payloadRoot "licenses\LiteDB-LICENSE-MIT.txt") -Force
+    Copy-Item -LiteralPath (Join-Path $repoRoot "third_party\litedb\SYSTEM.BUFFERS-LICENSE.txt") -Destination (Join-Path $payloadRoot "licenses\System.Buffers-LICENSE-MIT.txt") -Force
+    Copy-Item -LiteralPath (Join-Path $repoRoot "third_party\litedb\VRCFORGE_DISTRIBUTION_NOTES.txt") -Destination (Join-Path $payloadRoot "licenses\LiteDB-DISTRIBUTION-NOTES.txt") -Force
     Copy-Item -LiteralPath (Join-Path $repoRoot "third_party\pywinpty\LICENSE.txt") -Destination (Join-Path $payloadRoot "licenses\pywinpty-LICENSE-MIT.txt") -Force
     Copy-Item -LiteralPath (Join-Path $repoRoot "third_party\pywinpty\VRCFORGE_DISTRIBUTION_NOTES.txt") -Destination (Join-Path $payloadRoot "licenses\pywinpty-DISTRIBUTION-NOTES.txt") -Force
 

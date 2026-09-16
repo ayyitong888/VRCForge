@@ -67,10 +67,25 @@ def test_unity_type_rejects_plain_directory_without_changing_general_acceptance(
             },
         )
 
-    assert response.status_code == 200, response.text
-    assert response.json()["customProjects"] == [
-        {"path": str(plain).replace("\\", "/"), "projectType": "general"},
-    ]
+    assert response.status_code == 422, response.text
+    assert not prefs_path.exists()
+
+
+def test_invalid_project_path_edit_preserves_saved_list(tmp_path, monkeypatch):
+    import asyncio
+    from fastapi import HTTPException
+    import pytest
+    unity = _make_unity_project(tmp_path / "existing")
+    prefs = tmp_path / "prefs.json"
+    original = {"version": 2, "customProjects": [{"path": str(unity), "projectType": "unity"}], "hiddenPaths": []}
+    prefs.write_text(json.dumps(original), encoding="utf-8")
+    before = prefs.read_bytes()
+    monkeypatch.setattr(dashboard_server, "project_prefs_path", lambda: prefs)
+    request = dashboard_server.ProjectPrefsRequest.model_validate({"customProjects": [{"path": str(tmp_path / "missing"), "projectType": "unity"}]})
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(dashboard_server.write_project_prefs(request))
+    assert error.value.status_code == 422
+    assert prefs.read_bytes() == before
 
 
 def test_runtime_payload_keeps_general_directory_out_of_unity_tool_context(tmp_path: Path) -> None:
