@@ -462,6 +462,13 @@
     "memoryReviewPermanentErase": "完全に消去",
     "memoryReviewProjectUnavailable": "プロジェクトを利用できません",
     "memoryReviewEraseOnlyDescription": "参照元のプロジェクトを利用できません。候補本文を非表示にしたまま、完全削除のみ実行できます。",
+    "memoryDreamingTitle": "Memory 整理案",
+    "memoryDreamingDesc": "削除する前に重複グループを確認してください。承認するまで変更されません。",
+    "memoryDreamingKeep": "保持",
+    "memoryDreamingRemove": "削除",
+    "memoryDreamingApprove": "整理を承認",
+    "memoryDreamingReject": "拒否",
+    "memoryDreamingStale": "Memory が変更されたため、この整理案は古くなっています。判断する前に更新してください.",
     "developerOptions": "開発者オプション",
     "developerOptionsDesc": "低レベル診断やPC操作などの高リスク機能を解放します。オフでも通常のログ設定は利用できます。",
     "developerChallengeStartFailed": "開発者オプションの安全確認を開始できませんでした。もう一度お試しください。",
@@ -612,7 +619,8 @@
     "providerResponseTimedOut": "Provider から 300 秒間応答がありませんでした。手動で再試行してください。VRCForge はこのリクエストを自動再試行・再実行していません。",
     "runtimeTerminal": {
       "noProgressStatus": "停止 · 進展なし · 未完了",
-      "noProgressMessage": "新しい根拠を追加しない調査をモデルが繰り返し提案したため、VRCForge はこのターンを停止しました。タスクは進展しなかったため失敗し、完了扱いにはなっていません。"
+      "noProgressMessage": "新しい根拠を追加しない調査をモデルが繰り返し提案したため、VRCForge はこのターンを停止しました。タスクは進展しなかったため失敗し、完了扱いにはなっていません。",
+      "providerTimeoutStatus": "Provider タイムアウト · 未完了"
     },
     "connectProviderBeforeSend": "送信前にモデルプロバイダまたは外部 agent を接続してください。",
     "queueFull": "キューが満杯です（{{max}} 件）。現在のターンを待つか、停止してください。",

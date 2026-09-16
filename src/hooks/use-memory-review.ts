@@ -30,6 +30,14 @@ function normalizeSnapshot(snapshot: MemoryReviewSnapshot): MemoryReviewSnapshot
     revision: finiteRevision(snapshot.revision),
     unreadCount: Math.max(0, Number(snapshot.unreadCount) || 0),
     candidates: Array.isArray(snapshot.candidates) ? snapshot.candidates : [],
+    dreamingProposal: snapshot.dreamingProposal && typeof snapshot.dreamingProposal === "object"
+      ? {
+          ...snapshot.dreamingProposal,
+          revision: finiteRevision(snapshot.dreamingProposal.revision),
+          stale: snapshot.dreamingProposal.stale === true,
+          groups: Array.isArray(snapshot.dreamingProposal.groups) ? snapshot.dreamingProposal.groups : [],
+        }
+      : null,
   };
 }
 
@@ -210,11 +218,15 @@ export function useMemoryReview({
     `candidate:${candidateId}:${action}`,
     (current) => {
       const candidate = current.candidates.find((item) => item.candidateId === candidateId);
-      const projectBoundMutation = candidate?.scope === "project";
+      const dreaming = candidateId.startsWith("dreaming:")
+        && current.dreamingProposal?.proposalId === candidateId.slice("dreaming:".length)
+        ? current.dreamingProposal
+        : null;
+      const projectBoundMutation = candidate?.scope === "project" || dreaming?.scope === "project";
       return mutateMemoryReviewCandidate(endpoint, candidateId, action, {
-        expectedRevision: finiteRevision(current.revision),
+        expectedRevision: finiteRevision(dreaming?.revision ?? current.revision),
         ...(projectBoundMutation
-          ? { projectRoot: current.projectRoot || selectedProjectPath || undefined }
+          ? { projectRoot: dreaming?.projectRoot || current.projectRoot || selectedProjectPath || undefined }
           : {}),
         ...(action === "accept" && editedText?.trim() ? { editedText: editedText.trim() } : {}),
       });

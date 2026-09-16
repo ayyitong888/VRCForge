@@ -462,6 +462,13 @@
     "memoryReviewPermanentErase": "永久清除",
     "memoryReviewProjectUnavailable": "專案無法使用",
     "memoryReviewEraseOnlyDescription": "來源專案目前無法使用。候選正文維持隱藏，此處只允許永久刪除。",
+    "memoryDreamingTitle": "Memory 清理提案",
+    "memoryDreamingDesc": "刪除前請檢查重複群組。只有你核准後才會發生變更。",
+    "memoryDreamingKeep": "保留",
+    "memoryDreamingRemove": "刪除",
+    "memoryDreamingApprove": "核准清理",
+    "memoryDreamingReject": "拒絕",
+    "memoryDreamingStale": "Memory 已變更，此提案已過期。請重新整理後再決定。",
     "developerOptions": "開發者選項",
     "developerOptionsDesc": "解鎖低階診斷和電腦控制等高風險能力；關閉後一般日誌設定仍可使用。",
     "developerChallengeStartFailed": "無法啟動開發者選項安全確認，請重試。",
@@ -612,7 +619,8 @@
     "providerResponseTimedOut": "Provider 已連續 300 秒沒有活動，請手動重試。VRCForge 沒有自動重試或重播本次請求。",
     "runtimeTerminal": {
       "noProgressStatus": "已停止 · 無進展 · 未完成",
-      "noProgressMessage": "模型持續提出無法增加新證據的檢查，VRCForge 已停止本輪。任務因無進展而失敗，未標記為完成。"
+      "noProgressMessage": "模型持續提出無法增加新證據的檢查，VRCForge 已停止本輪。任務因無進展而失敗，未標記為完成。",
+      "providerTimeoutStatus": "Provider 逾時 · 未完成"
     },
     "connectProviderBeforeSend": "請先連接模型供應商或外部 agent，再發送訊息。",
     "queueFull": "佇列已滿（{{max}} 條）。請等待目前任務結束，或按停止。",

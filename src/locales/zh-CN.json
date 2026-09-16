@@ -462,6 +462,13 @@
     "memoryReviewPermanentErase": "永久擦除",
     "memoryReviewProjectUnavailable": "项目不可用",
     "memoryReviewEraseOnlyDescription": "来源项目当前不可用。候选正文保持隐藏，这里只允许永久删除。",
+    "memoryDreamingTitle": "Memory 清理提案",
+    "memoryDreamingDesc": "删除前请检查重复分组。只有你批准后才会发生变化。",
+    "memoryDreamingKeep": "保留",
+    "memoryDreamingRemove": "删除",
+    "memoryDreamingApprove": "批准清理",
+    "memoryDreamingReject": "拒绝",
+    "memoryDreamingStale": "Memory 已发生变化，此提案已过期。请刷新后再决定。",
     "developerOptions": "开发者选项",
     "developerOptionsDesc": "解锁低层诊断和电脑控制等高风险能力；关闭后普通日志设置仍然可用。",
     "developerChallengeStartFailed": "无法启动开发者选项安全确认，请重试。",
@@ -612,7 +619,8 @@
     "providerResponseTimedOut": "Provider 已连续 300 秒没有活动，请手动重试。VRCForge 没有自动重试或重放本次请求。",
     "runtimeTerminal": {
       "noProgressStatus": "已停止 · 无进展 · 未完成",
-      "noProgressMessage": "模型持续提出无法增加新证据的检查，VRCForge 已停止本轮。任务因无进展而失败，未标记为完成。"
+      "noProgressMessage": "模型持续提出无法增加新证据的检查，VRCForge 已停止本轮。任务因无进展而失败，未标记为完成。",
+      "providerTimeoutStatus": "Provider 超时 · 未完成"
     },
     "connectProviderBeforeSend": "请先连接模型供应商或外部 agent，再发送消息。",
     "queueFull": "队列已满（{{max}} 条）。请等待当前任务结束，或按停止。",

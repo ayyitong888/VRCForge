@@ -77,7 +77,6 @@ export function buildAgentTimelineRows({
   );
   const shouldSurfaceModelIdentity = Boolean(response.plan.plannerFailure?.code);
   if (durableRows.length) {
-    const durableKinds = new Set(durableTimeline.map((event) => event.kind || ""));
     const fallbackAnswer = response.plan.reply || response.plan.summary;
     const rows = [...durableRows];
     const orderedSteps = normalizeAgentSteps(response.steps);
@@ -100,13 +99,17 @@ export function buildAgentTimelineRows({
         t,
       }));
     }
-    if (!durableKinds.has("assistant")) {
+    const hasDurableAssistant = durableTimeline.some(
+      (event) => event.kind === "assistant" && Boolean(event.payload?.summary),
+    );
+    const hasStepAnswer = orderedSteps.some(({ step }) => isStepKindAnswer(step.kind));
+    if (!hasDurableAssistant && !hasStepAnswer) {
       if (fallbackAnswer) {
         rows.push(renderPlanReplyRow(fallbackAnswer, planLabel, elapsedSeconds, t));
       } else if (shouldSurfaceModelIdentity) {
         rows.push(renderPlanIdentityRow(planLabel, elapsedSeconds, t));
       }
-    } else if (!fallbackAnswer && shouldSurfaceModelIdentity && planLabel) {
+    } else if (!fallbackAnswer && shouldSurfaceModelIdentity && planLabel && hasDurableAssistant) {
       rows.push(renderPlanIdentityRow(planLabel, elapsedSeconds, t, "assistant-model"));
     }
     return rows;

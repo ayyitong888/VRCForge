@@ -99,6 +99,9 @@ export function runtimeTerminalStatusKey(failureCode = ""): string | undefined {
   if (failureCode === "planner_no_progress") {
     return "chat.runtimeTerminal.noProgressStatus";
   }
+  if (failureCode === "provider_timeout") {
+    return "chat.runtimeTerminal.providerTimeoutStatus";
+  }
   return undefined;
 }
 

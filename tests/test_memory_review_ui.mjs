@@ -22,6 +22,9 @@ assert.match(api, /update_agent_memory_review/);
 assert.match(hook, /memoryEnabled: snapshot\.memoryEnabled !== false/);
 assert.match(hook, /crossSessionEnabled: snapshot\.memoryEnabled !== false && snapshot\.crossSessionEnabled !== false/);
 assert.match(hook, /expectedRevision: finiteRevision\(current\.revision\)/);
+assert.match(hook, /current\.dreamingProposal\?\.proposalId === candidateId\.slice\("dreaming:"\.length\)/);
+assert.match(hook, /expectedRevision: finiteRevision\(dreaming\?\.revision \?\? current\.revision\)/);
+assert.match(hook, /dreaming\?\.projectRoot \|\| current\.projectRoot/);
 assert.match(hook, /setError\("stale_revision"\)/);
 assert.match(hook, /setError\("request_failed"\)/);
 
@@ -40,20 +43,20 @@ assert.match(settings, /automaticCaptureEnabled: effectiveCrossSession/);
 assert.match(settings, /settings\.memoryPreferencesTitle/);
 assert.match(settings, /settings\.memoryEnabled/);
 assert.match(settings, /settings\.crossSessionMemory/);
+assert.match(settings, /<MemoryReviewInbox/);
+assert.match(settings, /controller\.startReview\(\)/);
+assert.match(settings, /data-memory-dreaming-proposal/);
 
 for (const forbidden of [
   "MEMORY_REVIEW_MODES",
-  "MemoryReviewInbox",
   "memoryReviewModeShadow",
   "memoryReviewModeSuggest",
   "memoryReviewModeBackground",
   "memoryReviewModeAutoSafe",
   "memoryConsolidationStage",
   "memoryReviewJournal",
-  "memoryReviewProvider",
   "memoryReviewToken",
   "memoryReviewCost",
-  "startReview",
 ]) {
   assert.doesNotMatch(settings, new RegExp(forbidden), `advanced Memory UI must stay hidden: ${forbidden}`);
 }

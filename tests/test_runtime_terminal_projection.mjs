@@ -43,6 +43,7 @@ const response = {
 
 const translations = {
   "chat.runtimeTerminal.noProgressMessage": "LOCALIZED_NO_PROGRESS_FAILED_NOT_COMPLETE",
+  "chat.runtimeTerminal.providerTimeoutStatus": "LOCALIZED_PROVIDER_TIMEOUT_STATUS",
   "chat.providerResponseTimedOut": "LOCALIZED_PROVIDER_TIMEOUT",
 };
 const localized = projectRuntimeResponseForDisplay(response, (key) => translations[key] || key);
@@ -79,6 +80,7 @@ const providerTimeout = projectRuntimeResponseForDisplay({
 }, (key) => translations[key] || key);
 assert.equal(providerTimeout.plan.reply, translations["chat.providerResponseTimedOut"]);
 assert.equal(providerTimeout.timeline.at(-1).payload.summary, translations["chat.providerResponseTimedOut"]);
+assert.equal(runtimeTerminalStatusKey("provider_timeout"), "chat.runtimeTerminal.providerTimeoutStatus");
 
 const unknownResponse = {
   ...response,
@@ -94,6 +96,8 @@ for (const locale of ["en-US", "ja-JP", "zh-CN", "zh-TW"]) {
     `${locale} must localize the no-progress terminal message`);
   assert.equal(typeof messages.chat.runtimeTerminal.noProgressStatus, "string",
     `${locale} must localize the explicit failed/not-complete status`);
+  assert.equal(typeof messages.chat.runtimeTerminal.providerTimeoutStatus, "string",
+    `${locale} must localize the provider-timeout status`);
 }
 
 const timelineComponent = await readFile(
@@ -106,6 +110,8 @@ const conversationCard = await readFile(
 );
 assert.match(timelineComponent, /data-vrcforge-terminal-status/,
   "a no-progress failure must not look like an ordinary assistant answer");
+assert.match(timelineComponent, /hasDurableAssistant[\s\S]*hasStepAnswer/,
+  "an empty durable assistant event must not suppress the real fallback answer");
 const terminalBranch = timelineComponent.slice(
   timelineComponent.indexOf("const terminalStatusKey"),
   timelineComponent.indexOf("continue;", timelineComponent.indexOf("const terminalStatusKey")),

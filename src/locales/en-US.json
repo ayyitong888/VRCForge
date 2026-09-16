@@ -462,6 +462,13 @@
     "memoryReviewPermanentErase": "Permanently erase",
     "memoryReviewProjectUnavailable": "Project unavailable",
     "memoryReviewEraseOnlyDescription": "The source project is unavailable. Candidate text stays hidden; only permanent erase is allowed.",
+    "memoryDreamingTitle": "Memory cleanup proposal",
+    "memoryDreamingDesc": "Review duplicate groups before removing anything. Nothing changes until you approve.",
+    "memoryDreamingKeep": "Keep",
+    "memoryDreamingRemove": "Remove",
+    "memoryDreamingApprove": "Approve cleanup",
+    "memoryDreamingReject": "Reject",
+    "memoryDreamingStale": "This proposal is stale because Memory changed. Refresh before deciding.",
     "developerOptions": "Developer Options",
     "developerOptionsDesc": "Unlock high-risk low-level diagnostics and computer control. Normal logging settings stay available when this is off.",
     "developerChallengeStartFailed": "Could not start the developer-options safety check. Try again.",
@@ -612,7 +619,8 @@
     "providerResponseTimedOut": "Provider had no activity for 300 seconds. Retry manually; VRCForge did not retry or replay this request.",
     "runtimeTerminal": {
       "noProgressStatus": "Stopped · No progress · Not complete",
-      "noProgressMessage": "VRCForge stopped this turn because the model kept proposing inspections that added no new evidence. The task failed to make progress and is not marked complete."
+      "noProgressMessage": "VRCForge stopped this turn because the model kept proposing inspections that added no new evidence. The task failed to make progress and is not marked complete.",
+      "providerTimeoutStatus": "Provider timeout · Not complete"
     },
     "connectProviderBeforeSend": "Connect a provider or external agent before sending.",
     "queueFull": "Queue is full ({{max}}). Wait for the running turn or press Stop.",

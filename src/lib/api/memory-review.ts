@@ -179,6 +179,7 @@ export type MemoryReviewSnapshot = {
   lastRun?: MemoryReviewLastRun;
   shadowSummary?: MemoryReviewShadowSummary;
   journal?: MemoryReviewJournalEntry[];
+  dreamingProposal?: MemoryDreamingProposal | null;
 };
 
 export type MemoryReviewConfigMutation = {
@@ -214,6 +215,24 @@ export type MemoryReviewCandidateMutation = {
   expectedRevision: number;
   projectRoot?: string;
   editedText?: string;
+};
+
+export type MemoryDreamingProposalGroup = {
+  keepId: string;
+  keepText: string;
+  removeIds: string[];
+  removeTexts: string[];
+};
+
+export type MemoryDreamingProposal = {
+  proposalId: string;
+  revision: number;
+  scope: MemoryReviewScope;
+  projectRoot?: string;
+  state: "proposed" | "accepted" | "rejected" | (string & {});
+  groups: MemoryDreamingProposalGroup[];
+  createdAt?: string;
+  stale: boolean;
 };
 
 export function normalizeMemoryReviewMode(value: unknown): MemoryReviewMode {
