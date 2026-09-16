@@ -6655,7 +6655,8 @@ class AgentGateway:
                     break
                 continue
 
-            if any(
+            planner_reply = str(plan.get("reply") or "").strip()
+            if planner_reply and any(
                 (
                     str(plan.get("shellCommand") or params.get("shell_command") or params.get("shellCommand") or "").strip(),
                     plan.get("writeNeeded") and plan.get("writeTool"),
@@ -6665,7 +6666,7 @@ class AgentGateway:
                 append_timeline_event(
                     "planner",
                     label="Agent update",
-                    summary=str(plan.get("reply") or plan.get("summary") or ""),
+                    summary=planner_reply,
                     status="planned",
                 )
 

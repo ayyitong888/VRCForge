@@ -929,6 +929,17 @@ class AgentLoopP0Tests(unittest.TestCase):
             planner_calls[1][0]["skillContext"]["instructions"],
             "Call vrcforge_health, then inspect its result.",
         )
+        timeline = result.get("timeline") or []
+        self.assertFalse(
+            any(
+                event.get("kind") == "planner"
+                and event.get("payload", {}).get("summary") == "Load the installed workflow instructions."
+                for event in timeline
+            ),
+            "a tool plan without reply must not become phantom planner commentary",
+        )
+        self.assertTrue(any(event.get("kind") == "tool_call" for event in timeline))
+        self.assertTrue(any(event.get("kind") == "tool_result" for event in timeline))
         self.assertEqual(result["plan"]["nextStep"], "completion_unverified")
         self.assertEqual(result["plan"]["completionGate"]["reason"], "required_action_missing")
         self.assertNotIn("taskCompletion", result["plan"])
@@ -4277,6 +4288,7 @@ class AgentLoopP0Tests(unittest.TestCase):
                 {
                     "planner": "llm",
                     "summary": "Scan the first avatar.",
+                    "reply": "I am scanning the first avatar.",
                     "skillNeeded": True,
                     "skillTool": "vrcforge_scan_materials",
                     "skillParams": first_arguments,
@@ -4286,6 +4298,7 @@ class AgentLoopP0Tests(unittest.TestCase):
                 {
                     "planner": "llm",
                     "summary": "Scan the second avatar.",
+                    "reply": "I am scanning the second avatar.",
                     "skillNeeded": True,
                     "skillTool": "vrcforge_scan_materials",
                     "skillParams": second_arguments,

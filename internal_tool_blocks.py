@@ -194,6 +194,12 @@ _SELECTORS.update({alias.casefold(): target for alias, target in CANONICAL_TOOL_
 
 _CORE_TOOLS = frozenset(
     {
+        # Basic bounded reads need no discovery round trip. Their handlers
+        # still enforce the same path authorization and project boundaries.
+        "vrcforge_list_directory",
+        "vrcforge_read_text_file",
+        "vrcforge_find_files",
+        "vrcforge_search_text",
         "vrcforge_get_goal",
         "vrcforge_create_goal",
         "vrcforge_update_goal",

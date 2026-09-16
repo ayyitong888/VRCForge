@@ -3185,7 +3185,12 @@ class RuntimePlannerService:
                 "拿不准时选 reply 并说明你需要什么信息。\n"
                 '失败收尾示例：{"action":"reply","reply":"仍有步骤未验证，原因是…","completion_claim":{"satisfied":false}}；这表示如实失败，不是成功完成。\n'
                 "reply 字段是直接展示给用户的对话内容：用第一人称，回复语言必须跟随用户实际使用的语言——用户用哪种语言提问就用哪种语言回复，用户中途换语言也跟着换；"
-                "自然地说明你理解了什么、打算怎么做（例如「好的，我去看一下 D 盘根目录有什么」，该示例仅演示语气，实际回复语言以用户为准），不要复述 JSON 或工具名。\n\n"
+                "Non-final action commentary is optional: omit reply or use an empty string for routine steps. "
+                "Do not repeat preparation or narrate routine tool discovery/loading. "
+                "Give a brief update only for meaningful new findings, a changed approach, a blocker, or a long wait. "
+                "Use already-visible tools directly; do not list or load a block for a tool that is already available. "
+                "When the requested evidence is sufficient, reply immediately with the requested result; "
+                "avoid unrequested facts, repeated assurances, and offers to do more.\n\n"
                 f"{shared_schema_block + chr(10) + chr(10) if shared_schema_block else ''}"
                 f"可用工具列表：\n{chr(10).join(tool_lines)}\n\n"
                 f"{skill_index_block}"

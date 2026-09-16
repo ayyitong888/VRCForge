@@ -134,7 +134,7 @@ def test_root_routing_strings_are_serialized_as_single_entries() -> None:
 
 
 def test_internal_blocks_classify_general_tools_without_exposing_them_externally() -> None:
-    assert internal_tool_block_for_name("vrcforge_read_text_file", "general") == "project_environment/files"
+    assert internal_tool_block_for_name("vrcforge_read_text_file", "general") == "core"
     assert internal_tool_block_for_name("vrcforge_web_search", "general") == "research/web_research"
     assert internal_tool_block_for_name("vrcforge_agent_desktop_action", "core") == "project_environment/shell"
     assert internal_tool_block_for_name("vrcforge_execute_shell", "core") == "project_environment/shell"
@@ -479,4 +479,5 @@ def test_registered_loaded_block_exposes_every_advertised_tool_schema():
                     assert f"- {name}" in prompt, (leaf["name"], name, tool.block)
     status = next(t for t in catalog.visible_tools if t.name == "unity_status")
     prompt = planner._build_llm_plan_prompt("Inspect only", [], exposure_layer="planning", project_context_active=True, internal_tool_blocks=[status.block])
-    assert "- unity_status schema=" in prompt
+    status_line = next(line for line in prompt.splitlines() if line.startswith("- unity_status "))
+    assert "schema=" in status_line
