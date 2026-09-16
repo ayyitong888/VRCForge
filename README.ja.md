@@ -3,7 +3,7 @@
 ![VRCForge — AI Agent + MCP for VRChat Avatar Editing](docs/assets/vrcforge-atelier-banner.png)
 
 [![Stable](https://img.shields.io/github/v/release/ayyitong888/VRCForge?label=stable&style=flat-square)](https://github.com/ayyitong888/VRCForge/releases/latest)
-![Current version](https://img.shields.io/badge/current-v1.8.0-d9487c?style=flat-square)
+![Current version](https://img.shields.io/badge/current-v1.8.1-d9487c?style=flat-square)
 [![License GPL-3.0-only](https://img.shields.io/badge/license-GPL--3.0--only-64748b?style=flat-square)](LICENSE)
 ![Windows x64](https://img.shields.io/badge/platform-Windows%20x64-0ea5e9?style=flat-square)
 
@@ -29,7 +29,7 @@ VRCForge は、Booth などでアバターや衣装を選ぶクリエイター�
 
 > Unity / VRChat Avatar プロジェクトを書き換える機能を使う前に、必ずバックアップしてください。
 
-**[VRCForge v1.8.0 をダウンロード](https://github.com/ayyitong888/VRCForge/releases/tag/v1.8.0)**
+**[VRCForge v1.8.1 をダウンロード](https://github.com/ayyitong888/VRCForge/releases/tag/v1.8.1)**
 
 ## できること
 
@@ -51,7 +51,7 @@ VRCForge は、Booth などでアバターや衣装を選ぶクリエイター�
 
 ## Booth のアバターを始める手順
 
-1. [v1.8.0 Release](https://github.com/ayyitong888/VRCForge/releases/tag/v1.8.0) から
+1. [v1.8.1 Release](https://github.com/ayyitong888/VRCForge/releases/tag/v1.8.1) から
    修正済みの Web Installer または Offline Installer と `VRCForge.unitypackage` を取得します。実行中のアプリを終了した後、「再試行」でインストールを続行できます。
 2. Unity 2022.3 LTS の VRChat SDK3 Avatar プロジェクトをバックアップし、
    package を Import All します。コンパイル完了後、`[VRCForge MCP] Core Ready` を確認します。
@@ -77,7 +77,7 @@ Avatar 保護コネクターは確認・計画・プレビューに対応しま�
 
 ## リンク
 
-- [v1.8.0 Release / Download](https://github.com/ayyitong888/VRCForge/releases/tag/v1.8.0)
+- [v1.8.1 Release / Download](https://github.com/ayyitong888/VRCForge/releases/tag/v1.8.1)
 - [Release Notes](https://github.com/ayyitong888/VRCForge/releases)
 - [User Manual](USER_MANUAL.md)
 - [English README](README.en.md) · [简体中文 README](README.md)
