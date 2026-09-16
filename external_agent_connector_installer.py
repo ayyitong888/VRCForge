@@ -98,8 +98,12 @@ class ConfigSnapshot:
     inode: int
 
 
-def resolve_stdio_bridge(root_dir: Path) -> StdioBridgeSpec:
+def resolve_stdio_bridge(root_dir: Path, *, gateway_config_path: Path | None = None) -> StdioBridgeSpec:
     root = root_dir.expanduser().resolve()
+    # Bind the external process to the App's profile without copying its token.
+    bridge_args = ["--no-start"]
+    if gateway_config_path is not None:
+        bridge_args.extend(["--config", str(gateway_config_path.expanduser().resolve())])
     packaged_candidates = [
         root / "backend" / "vrcforge_backend.exe",
         root / "backend" / "vrcforge_backend",
@@ -108,7 +112,7 @@ def resolve_stdio_bridge(root_dir: Path) -> StdioBridgeSpec:
         if candidate.is_file():
             return StdioBridgeSpec(
                 command=str(candidate.resolve()),
-                args=["--agent-mcp-stdio", "--no-start"],
+                args=["--agent-mcp-stdio", *bridge_args],
                 cwd=str(root),
                 packaged=True,
                 source="packaged-backend",
@@ -125,7 +129,7 @@ def resolve_stdio_bridge(root_dir: Path) -> StdioBridgeSpec:
     command = str(executable.resolve()) if executable.is_file() else "python"
     return StdioBridgeSpec(
         command=command,
-        args=[str(script.resolve()), "--no-start"],
+        args=[str(script.resolve()), *bridge_args],
         cwd=str(root),
         packaged=False,
         source="source-python",
@@ -139,8 +143,9 @@ def install_connector(
     project_path: str | None = None,
     config_path: str | None = None,
     run_self_test: bool = True,
+    gateway_config_path: Path | None = None,
 ) -> dict[str, Any]:
-    bridge = resolve_stdio_bridge(root_dir)
+    bridge = resolve_stdio_bridge(root_dir, gateway_config_path=gateway_config_path)
     options = bridge.to_options()
     if client == "claudeCode":
         result = _install_claude_code(project_path=project_path, options=options)
@@ -182,6 +187,7 @@ def uninstall_connector(
     root_dir: Path | None = None,
     project_path: str | None = None,
     config_path: str | None = None,
+    gateway_config_path: Path | None = None,
 ) -> dict[str, Any]:
     if client == "claudeCode":
         path = claude_code_config_path(project_path)
@@ -197,7 +203,7 @@ def uninstall_connector(
                 stage="verify_ownership",
                 suggestion="Remove the connector from VRCForge Settings, or delete the vrcforge entry manually after verifying it belongs to VRCForge.",
             )
-        expected = build_claude_code_stdio_config(resolve_stdio_bridge(root_dir).to_options())["mcpServers"][DEFAULT_SERVER_NAME]
+        expected = build_claude_code_stdio_config(resolve_stdio_bridge(root_dir, gateway_config_path=gateway_config_path).to_options())["mcpServers"][DEFAULT_SERVER_NAME]
         result = _update_generic_json_mcp_server(path, expected, install=False)
     elif client == "deepseekHarness":
         if root_dir is None:
@@ -206,7 +212,7 @@ def uninstall_connector(
                 stage="verify_ownership",
             )
         path = deepseek_harness_config_path()
-        expected = build_deepseek_harness_patch(resolve_stdio_bridge(root_dir).to_options())
+        expected = build_deepseek_harness_patch(resolve_stdio_bridge(root_dir, gateway_config_path=gateway_config_path).to_options())
         result = _update_deepseek_harness_patch(expected, install=False)
     elif client in {"codex", "codexApp", "codexCli"}:
         path = codex_config_path()
@@ -227,10 +233,11 @@ def connector_client_statuses(
     root_dir: Path,
     project_path: str | None = None,
     generic_config_path_value: str | None = None,
+    gateway_config_path: Path | None = None,
 ) -> dict[str, Any]:
     bridge: dict[str, Any]
     try:
-        bridge = resolve_stdio_bridge(root_dir).as_dict()
+        bridge = resolve_stdio_bridge(root_dir, gateway_config_path=gateway_config_path).as_dict()
     except ConnectorInstallError as exc:
         bridge = {"ok": False, "error": str(exc), "suggestion": exc.suggestion}
     return {
@@ -243,8 +250,8 @@ def connector_client_statuses(
     }
 
 
-def build_runtime_connector_bundle(root_dir: Path) -> dict[str, Any]:
-    bridge = resolve_stdio_bridge(root_dir)
+def build_runtime_connector_bundle(root_dir: Path, *, gateway_config_path: Path | None = None) -> dict[str, Any]:
+    bridge = resolve_stdio_bridge(root_dir, gateway_config_path=gateway_config_path)
     return build_connector_bundle(bridge.to_options())
 
 

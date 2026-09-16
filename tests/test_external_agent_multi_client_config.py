@@ -128,3 +128,94 @@ def test_selftest_expires_and_restart_has_no_proof(controller, monkeypatch):
     assert "handshake" not in status["connectorActions"]["codexApp"]
     app.CONNECTOR_ACTION_STATUS = ConnectorActionStatusStore()
     assert app.external_agent_status_sync(str(project))["connectorActions"] == {}
+
+
+@pytest.fixture
+def profile_auth_server():
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    from threading import Thread
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            accepted = self.headers.get("Authorization") == "Bearer active-profile-fixture"
+            self.send_response(200 if accepted else 401)
+            self.end_headers()
+            self.wfile.write(json.dumps({"ok": accepted}).encode())
+
+        def log_message(self, *_args):
+            pass
+
+    # Test-owned read-only loopback listener, fixture-token auth; closed below.
+    with HTTPServer(("127.0.0.1", 0), Handler) as server:
+        worker = Thread(target=server.serve_forever, daemon=True)
+        worker.start()
+        try:
+            yield f"http://127.0.0.1:{server.server_port}"
+        finally:
+            server.shutdown()
+            worker.join(timeout=5)
+
+
+@pytest.mark.parametrize("packaged", [False, True])
+def test_client_configs_pin_active_gateway_profile_without_credentials(controller, packaged, tmp_path, profile_auth_server):
+    import hashlib
+    import os
+    import subprocess
+    import sys
+
+    app, action, project, generic, codex = controller
+    if packaged:
+        backend = app.runtime_paths.ROOT_DIR / "backend" / "vrcforge_backend.exe"
+        backend.parent.mkdir()
+        backend.write_bytes(b"fixture executable")
+    active = app.AGENT_GATEWAY.config_path.resolve()
+    active.parent.mkdir(parents=True, exist_ok=True)
+    active.write_text(json.dumps({"token": "active-profile-fixture"}), encoding="utf-8")
+    default = tmp_path / "default-local-app-data" / "VRCForge" / "agentic-app" / "config" / "agent_gateway.json"
+    default.parent.mkdir(parents=True)
+    default.write_text(json.dumps({"token": "wrong-profile-fixture"}), encoding="utf-8")
+    action("codexApp")
+    action("generic", path=generic)
+    configs = [tomllib.loads(codex.read_text())["mcp_servers"]["vrcforge"],
+               json.loads(generic.read_text())["mcpServers"]["vrcforge"]]
+    bundle = app.connector_bundle_sync()["clientConfigs"]
+    configs.extend(bundle[name]["config"]["mcpServers"]["vrcforge"]
+                   for name in ("claudeCodeStdio", "claudeCowork", "generic"))
+    configs.append(bundle["codexStdio"]["config"]["mcp_servers"]["vrcforge"])
+    configs.append(bundle["deepseekHarness"]["config"][0]["insert"][0]["config"])
+    for config in configs:
+        assert config["args"][1:4] == ["--no-start", "--config", str(active)]
+        assert "active-profile-fixture" not in json.dumps(config)
+        assert not config.get("env")
+
+    # Fresh process uses the real bridge parser/config reader without inheriting
+    # App profile/token variables. Only non-secret config paths cross the boundary.
+    env = {key: value for key, value in os.environ.items() if not key.startswith("VRCFORGE_")}
+    env["LOCALAPPDATA"] = str(default.parents[3])
+    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
+    probe = """
+import hashlib, json
+from pathlib import Path
+from tools.vrcforge_agent_mcp_stdio import parse_args, VRCForgeBridge
+args = parse_args()
+bridge = VRCForgeBridge(base_url=args.base_url, config_path=Path(args.config) if args.config else None,
+                        timeout_seconds=2, start_runtime=False)
+print(json.dumps({'configPath': str(bridge.resolve_config_path()),
+                  'identityHash': hashlib.sha256(bridge.require_token().encode()).hexdigest(),
+                  'auth': bridge.request_json('GET', '/profile-probe', token=bridge.require_token())}))
+"""
+    for config in configs[:2]:
+        command = [sys.executable, "-c", probe, *config["args"][1:], "--base-url", profile_auth_server]
+        result = subprocess.run(command,
+                                cwd=tmp_path, env=env, capture_output=True, text=True, timeout=15, check=True)
+        identity = json.loads(result.stdout)
+        assert identity["configPath"] == str(active)
+        assert identity["identityHash"] == hashlib.sha256(b"active-profile-fixture").hexdigest()
+        assert identity["auth"]["ok"]
+        # Removing only the fix reproduces the fresh-client 401 using the same
+        # bridge and endpoint, despite an existing default-profile credential.
+        config_index = command.index("--config")
+        del command[config_index:config_index + 2]
+        previous = subprocess.run(command, cwd=tmp_path, env=env, capture_output=True,
+                                  text=True, timeout=15, check=True)
+        assert json.loads(previous.stdout)["auth"]["status"] == 401

@@ -24,7 +24,8 @@ def test_generic_connector_status_query_is_scoped_to_config_path(tmp_path: Path)
     root = _make_source_root(tmp_path)
     managed = tmp_path / "managed.json"
     conflicting = tmp_path / "conflicting.json"
-    install_connector("generic", root_dir=root, config_path=str(managed), run_self_test=False)
+    install_connector("generic", root_dir=root, config_path=str(managed), run_self_test=False,
+                      gateway_config_path=dashboard_server.AGENT_GATEWAY.config_path)
     conflicting.write_text(
         json.dumps({"mcpServers": {"vrcforge": {"command": "user-owned"}}}),
         encoding="utf-8",

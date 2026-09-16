@@ -6649,7 +6649,7 @@ def scan_project_index_sync(params: dict[str, Any]) -> dict[str, Any]:
 
 def connector_bundle_sync(params: dict[str, Any] | None = None) -> dict[str, Any]:
     params = params or {}
-    bridge = resolve_stdio_bridge(runtime_paths.ROOT_DIR)
+    bridge = resolve_stdio_bridge(runtime_paths.ROOT_DIR, gateway_config_path=AGENT_GATEWAY.config_path)
     stdio_command = str(params.get("stdioCommand") or params.get("stdio_command") or bridge.command)
     stdio_script = params.get("stdioScript") or params.get("stdio_script") or (bridge.args[0] if bridge.args else "")
     stdio_cwd = params.get("stdioCwd") or params.get("stdio_cwd") or bridge.cwd
@@ -6665,6 +6665,7 @@ def connector_bundle_sync(params: dict[str, Any] | None = None) -> dict[str, Any
         ),
         stdio_command=stdio_command,
         stdio_script=str(stdio_script),
+        stdio_extra_args=tuple(bridge.args[1:]) if stdio_command == bridge.command and str(stdio_script) == bridge.args[0] else (),
         stdio_cwd=str(stdio_cwd),
         smoke_script=str(smoke_script),
     )
@@ -6718,6 +6719,7 @@ def external_agent_status_sync(project_path: str | None = None, generic_config_p
         root_dir=runtime_paths.ROOT_DIR,
         project_path=selected_project_path,
         generic_config_path_value=generic_config_path,
+        gateway_config_path=AGENT_GATEWAY.config_path,
     )
     return {
         **connector_bundle_sync({}),
@@ -6808,7 +6810,8 @@ def install_external_agent_connector_sync(params: dict[str, Any]) -> dict[str, A
     project_path = _selected_project_path_or(params.get("projectPath") or params.get("project_path"))
     config_path = str(params.get("configPath") or params.get("config_path") or "").strip() or None
     try:
-        action = install_connector(client, root_dir=runtime_paths.ROOT_DIR, project_path=project_path, config_path=config_path)
+        action = install_connector(client, root_dir=runtime_paths.ROOT_DIR, project_path=project_path, config_path=config_path,
+                                   gateway_config_path=AGENT_GATEWAY.config_path)
     except ConnectorInstallError as exc:
         action = exc.as_result(client=client or "unknown", action="install")
     except Exception as exc:  # noqa: BLE001 - connector UX should return diagnostics instead of crashing Settings.
@@ -6845,7 +6848,8 @@ def uninstall_external_agent_connector_sync(params: dict[str, Any]) -> dict[str,
     project_path = _selected_project_path_or(params.get("projectPath") or params.get("project_path"))
     config_path = str(params.get("configPath") or params.get("config_path") or "").strip() or None
     try:
-        action = uninstall_connector(client, root_dir=runtime_paths.ROOT_DIR, project_path=project_path, config_path=config_path)
+        action = uninstall_connector(client, root_dir=runtime_paths.ROOT_DIR, project_path=project_path, config_path=config_path,
+                                     gateway_config_path=AGENT_GATEWAY.config_path)
     except ConnectorInstallError as exc:
         action = exc.as_result(client=client or "unknown", action="uninstall")
     except Exception as exc:  # noqa: BLE001
