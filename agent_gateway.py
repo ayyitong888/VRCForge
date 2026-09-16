@@ -35,6 +35,7 @@ from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, Callable, Iterator, Mapping, Sequence
 
 from agent_memory_store import AgentMemoryStore
+from agent_memory_tools import MEMORY_TOOL_NAMES, MEMORY_WRITE_TOOLS, bind_memory_tool_context, safe_memory_record, requested_memory_tool
 from know_yourself_skill import bind_know_yourself_caller
 import agent_command_safety as command_safety
 import runtime_planner_service as planner_policy
@@ -415,7 +416,7 @@ EXTERNAL_AGENT_INTERNAL_TOOLS = {
     "vrcforge_apply_approved",
     "vrcforge_execute_approved_shell",
     "vrcforge_vision_audit_multi",
-}
+} | MEMORY_TOOL_NAMES
 EXTERNAL_MCP_INTERNAL_LOOP_TOOLS = EXTERNAL_AGENT_INTERNAL_TOOLS | {
     "vrcforge_ask_user",
     "vrcforge_classify_shell",
@@ -2631,7 +2632,7 @@ class AgentGateway:
                 invoke_tool=invoke_runtime_tool,
                 blocked_skills=frozenset(RUNTIME_BLOCKED_SKILLS),
                 direct_categories=frozenset(RUNTIME_DIRECT_SKILL_CATEGORIES),
-                direct_write_tools=frozenset({"vrcforge_shell_process"}),
+                direct_write_tools=frozenset({"vrcforge_shell_process"}) | MEMORY_WRITE_TOOLS,
                 request_supervised_write=lambda name, arguments, agent_name: (
                     self.approval_transactions.create_apply_request(
                         {
@@ -6176,13 +6177,24 @@ class AgentGateway:
         cap_reached = False
         consumed_steer_input_ids: list[str] = []
         consumed_steer_seen: set[str] = set()
+        memory_request_text = message
+        memory_user_texts = [message, *(str(item.get("text") or item.get("message") or "") for item in history if item.get("role") == "user")]
+        required_memory_tool = requested_memory_tool(memory_request_text)
+        if required_memory_tool:
+            task_loop.require_action(kind="write", tool=required_memory_tool)
 
         def record_consumed_steers(items: list[dict[str, Any]]) -> None:
+            nonlocal memory_request_text
             for item in items:
                 input_id = str(item.get("inputId") or "").strip()
                 if input_id and input_id not in consumed_steer_seen and len(consumed_steer_input_ids) < 256:
                     consumed_steer_seen.add(input_id)
                     consumed_steer_input_ids.append(input_id)
+                    memory_request_text = str(item.get("message") or "")
+                    memory_user_texts.append(memory_request_text)
+                    required_memory_tool = requested_memory_tool(memory_request_text)
+                    if required_memory_tool:
+                        task_loop.require_action(kind="write", tool=required_memory_tool)
         tool_calls_used = task_loop.tool_calls_used if continuation_context else 0
         runtime_exposure_layer = (
             task_loop.exposure_layer if continuation_context else EXPOSURE_LAYER_PLANNING
@@ -7139,21 +7151,25 @@ class AgentGateway:
                     "vrcforge_apply_patch",
                 }:
                     action_arguments["_generalAllowedRoots"] = list(general_allowed_roots)
-                step_payload = self.approval_transactions._execute_write_request(
-                    step_tool,
-                    action_arguments,
-                    agent_name,
-                    goal_delivery_id=goal_delivery_id,
-                    task_context=task_loop.approval_seed(
-                        tool_calls_used=tool_calls_used,
-                        exposure_layer=runtime_exposure_layer,
-                        requested_tool=step_tool,
-                        requested_arguments=action_arguments,
-                        provider_request_count=prior_provider_request_count + int(context_usage.get("requestCount") or 0),
-                        provider_usage=task_seed_provider_usage(),
-                        continue_after_approval=bool(plan.get("continueLoop")),
-                    ),
-                )
+                if step_tool in MEMORY_WRITE_TOOLS:
+                    with bind_memory_tool_context(project_root, memory_request_text, tuple(memory_user_texts)):
+                        step_payload = self._runtime_skill_executor.execute(step_tool, action_arguments, agent_name)
+                else:
+                    step_payload = self.approval_transactions._execute_write_request(
+                        step_tool,
+                        action_arguments,
+                        agent_name,
+                        goal_delivery_id=goal_delivery_id,
+                        task_context=task_loop.approval_seed(
+                            tool_calls_used=tool_calls_used,
+                            exposure_layer=runtime_exposure_layer,
+                            requested_tool=step_tool,
+                            requested_arguments=action_arguments,
+                            provider_request_count=prior_provider_request_count + int(context_usage.get("requestCount") or 0),
+                            provider_usage=task_seed_provider_usage(),
+                            continue_after_approval=bool(plan.get("continueLoop")),
+                        ),
+                    )
                 write_payload = step_payload
                 loop_state.append(
                     {
@@ -7269,12 +7285,13 @@ class AgentGateway:
                     "vrcforge_tool_registry",
                 }:
                     step_params.setdefault("exposureLayer", runtime_exposure_layer)
-                step_payload = self._runtime_skill_executor.execute(
-                    step_tool,
-                    step_params,
-                    agent_name,
-                    owner_id=self._runtime_shell_owner(turn_id, client_turn_id, session_id),
-                )
+                with (bind_memory_tool_context(project_root, memory_request_text, tuple(memory_user_texts)) if step_tool in MEMORY_TOOL_NAMES else nullcontext()):
+                    step_payload = self._runtime_skill_executor.execute(
+                        step_tool,
+                        step_params,
+                        agent_name,
+                        owner_id=self._runtime_shell_owner(turn_id, client_turn_id, session_id),
+                    )
                 skill_payload = step_payload
                 loop_step = {
                     "tool": step_tool,
@@ -8134,6 +8151,8 @@ class AgentGateway:
         return DesktopComputerUseService.desktop_action_params_audit(params)
 
     def _tool_params_audit(self, tool_name: str, params: dict[str, Any]) -> dict[str, Any]:
+        if tool_name in MEMORY_TOOL_NAMES:
+            return {"memoryId": str(params.get("memoryId") or "")[:200], "textLength": len(str(params.get("text") or ""))}
         if tool_name != "vrcforge_agent_desktop_action":
             return summarize_params(params)
         desktop_params = ensure_dict(params.get("params"))
@@ -8353,7 +8372,7 @@ class AgentGateway:
             raise AgentGatewayError(str(exc), status_code=400) from exc
         except OSError as exc:
             raise AgentGatewayError("Memory storage is unavailable.", status_code=503) from exc
-        return {**payload, "memory": redact_sensitive(payload["memory"])}
+        return {**payload, "memory": redact_sensitive(safe_memory_record(payload["memory"]))}
 
     def delete_agent_memory(self, memory_id: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         try:
@@ -8364,7 +8383,7 @@ class AgentGateway:
             raise AgentGatewayError(f"Memory was not found: {memory_id}", status_code=404) from exc
         except OSError as exc:
             raise AgentGatewayError("Memory storage is unavailable.", status_code=503) from exc
-        return {**payload, "memory": redact_sensitive(payload["memory"])}
+        return {**payload, "memory": redact_sensitive(safe_memory_record(payload["memory"]))}
 
     def clear_agent_memory(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         try:
@@ -8383,7 +8402,7 @@ class AgentGateway:
             )
         except (ValueError, OSError) as exc:
             raise AgentGatewayError("Memory storage is unavailable.", status_code=503) from exc
-        memories = [redact_sensitive(memory) for memory in payload["memories"]]
+        memories = [redact_sensitive(safe_memory_record(memory)) for memory in payload["memories"]]
         return {**payload, "memories": memories, "count": len(memories)}
 
 

@@ -8,6 +8,7 @@ mode/permission filtering after a leaf is lazily loaded.
 from __future__ import annotations
 
 from typing import Any, Iterable, Mapping
+from agent_memory_tools import MEMORY_TOOL_NAMES
 
 
 INTERNAL_DEFAULT_TOOL_BLOCK = "core"
@@ -308,7 +309,7 @@ def internal_tool_block_for_name(name: str, tool_set: str) -> str:
     """Classify one internal model tool without changing handler ownership."""
 
     normalized_name = str(name or "").strip()
-    if normalized_name in _CORE_TOOLS:
+    if normalized_name in _CORE_TOOLS or normalized_name in MEMORY_TOOL_NAMES:
         return "core"
     if normalized_name in _FILE_TOOLS:
         return "project_environment/files"

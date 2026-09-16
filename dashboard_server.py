@@ -1352,6 +1352,7 @@ PROJECT_CATALOG_DISCOVERY = ProjectCatalogDiscovery(
         ),
     )
 )
+from agent_memory_tools import MEMORY_TOOL_NAMES, register_memory_tools
 PROVIDER_MODEL_CATALOG = ProviderModelCatalogService(
     ProviderModelCatalogPolicyPorts(
         validate_provider_api_key=validate_provider_api_key,
@@ -15628,7 +15629,7 @@ RUNTIME_PLANNER_GENERAL_AGENT_TOOLS = frozenset(
         "vrcforge_load_internal_tool_block",
         "vrcforge_unload_internal_tool_block",
     }
-) | INTERNAL_GENERAL_TOOL_NAMES
+) | INTERNAL_GENERAL_TOOL_NAMES | MEMORY_TOOL_NAMES
 
 RUNTIME_PLANNER_CORE_AGENT_TOOLS = frozenset(
     {
@@ -15653,7 +15654,7 @@ RUNTIME_PLANNER_CORE_AGENT_TOOLS = frozenset(
         "vrcforge_load_internal_tool_block",
         "vrcforge_unload_internal_tool_block",
     }
-)
+) | MEMORY_TOOL_NAMES
 
 
 def _runtime_tool_set(tool_name: str) -> ToolSet:
@@ -25183,6 +25184,7 @@ def register_agent_gateway_tools() -> None:
         "read/debug",
         lambda params: AGENT_GATEWAY.goal.get_current_agent_goal(params or {}),
     )
+    register_memory_tools(AGENT_GATEWAY, MEMORY_REVIEW.service.reconcile_external_memory_deletions)
     AGENT_GATEWAY.register_tool(
         "vrcforge_create_goal",
         "when-to-use: create a durable Goal only when the user explicitly asks to start or create one; the App keeps it in context across turns. when-NOT-to-use: do not create a Goal for an ordinary multi-step task, and do not set token budgets. Negative example: do not turn every user request into a Goal.",
