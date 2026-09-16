@@ -27699,6 +27699,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--host", default="127.0.0.1", help="Dashboard bind host.")
     parser.add_argument("--port", default=8757, type=int, help="Dashboard bind port.")
     parser.add_argument("--agent-mcp-stdio", action="store_true", help="Run the external-agent stdio MCP bridge instead of the HTTP backend.")
+    parser.add_argument("--config", default=os.environ.get("VRCFORGE_AGENT_GATEWAY_CONFIG", ""),
+                        help="With --agent-mcp-stdio, read Gateway identity from this config file.")
     parser.add_argument("--start-runtime", action="store_true", help="With --agent-mcp-stdio, launch VRCForge Desktop when the runtime is offline.")
     parser.add_argument("--no-start", action="store_true", help="Compatibility flag; stdio runtime auto-launch is disabled by default.")
     parser.add_argument("--preflight", action="store_true", help="With --agent-mcp-stdio, print a bridge preflight report and exit.")
@@ -27846,9 +27848,7 @@ def main() -> int:
 
         bridge = VRCForgeBridge(
             base_url=os.environ.get("VRCFORGE_AGENT_BASE_URL", "http://127.0.0.1:8757").rstrip("/"),
-            config_path=Path(os.environ["VRCFORGE_AGENT_GATEWAY_CONFIG"]).expanduser().resolve()
-            if os.environ.get("VRCFORGE_AGENT_GATEWAY_CONFIG")
-            else None,
+            config_path=Path(args.config).expanduser().resolve() if args.config else None,
             timeout_seconds=float(os.environ.get("VRCFORGE_AGENT_TIMEOUT", "30")),
             start_runtime=start_runtime,
         )
