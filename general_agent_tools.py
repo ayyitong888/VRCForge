@@ -426,35 +426,45 @@ def search_text(
     max_file_bytes: int = 1_048_576,
     case_sensitive: bool = True,
 ) -> dict[str, Any]:
-    """Search UTF-8 text files and return bounded line matches."""
+    """Search an authorized UTF-8 file or directory and return bounded line matches."""
     if not isinstance(query, str) or not query:
         raise ValueError("query must be a non-empty string")
     max_count = _limit(max_count, "max_count", MAX_COUNT)
     max_file_bytes = _limit(max_file_bytes, "max_file_bytes", MAX_READ_BYTES)
-    files = find_files(
-        path,
-        allowed_roots=allowed_roots,
-        pattern=pattern,
-        max_depth=max_depth,
-        max_count=min(MAX_COUNT, max_count * 10 + 1),
-    )
+    max_depth = _limit(max_depth, "max_depth", MAX_DEPTH)
+    allowed_roots = tuple(allowed_roots)
+    target = _authorized_path(path, allowed_roots)
+    if target.is_file():
+        # A user may authorize only this file. Never expand that grant to its
+        # parent directory merely to continue a truncated read.
+        files = {"files": [{"path": str(target)}] if target.match(pattern) else [], "truncated": False}
+    else:
+        files = find_files(
+            target,
+            allowed_roots=allowed_roots,
+            pattern=pattern,
+            max_depth=max_depth,
+            max_count=min(MAX_COUNT, max_count * 10 + 1),
+        )
     matches: list[dict[str, Any]] = []
     needle = query if case_sensitive else query.casefold()
     skipped_binary = 0
+    truncated = files["truncated"]
     for item in files["files"]:
         try:
             payload = read_text_file(item["path"], allowed_roots=allowed_roots, max_bytes=max_file_bytes)
         except (PermissionError, ValueError):
             skipped_binary += 1
             continue
+        truncated = truncated or payload["truncated"]
         for number, line in enumerate(payload["text"].splitlines(), 1):
             haystack = line if case_sensitive else line.casefold()
             if needle not in haystack:
                 continue
             if len(matches) >= max_count:
-                return {"path": str(_lexical_absolute(path)), "matches": matches, "truncated": True, "skipped_binary": skipped_binary}
+                return {"path": str(target), "matches": matches, "truncated": True, "skipped_binary": skipped_binary}
             matches.append({"path": item["path"], "line": number, "text": line[:MAX_MATCH_LINE_CHARS]})
-    return {"path": str(_lexical_absolute(path)), "matches": matches, "truncated": files["truncated"], "skipped_binary": skipped_binary}
+    return {"path": str(target), "matches": matches, "truncated": truncated, "skipped_binary": skipped_binary}
 
 
 def _web_timeout(value: float) -> float:

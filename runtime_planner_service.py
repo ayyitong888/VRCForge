@@ -1218,7 +1218,7 @@ def planner_read_output_evidence(tool: str, result: dict[str, object]) -> dict[s
 
     if tool == "vrcforge_read_text_file" and isinstance(result.get("text"), str):
         evidence.update({"source": source(result.get("path")), "text": content(result["text"]),
-                         "continuation": "If truncated, use search_text with a specific query to locate the needed section; this read tool has no offset parameter."})
+                         "continuation": "If truncated, use search_text on the same exact file path with a specific query to locate the needed section; do not widen to its parent directory. This read tool has no offset parameter."})
     elif tool in {"vrcforge_search_text", "vrcforge_find_files", "vrcforge_list_directory"}:
         key = {"vrcforge_search_text": "matches", "vrcforge_find_files": "files", "vrcforge_list_directory": "entries"}[tool]
         rows = result.get(key)

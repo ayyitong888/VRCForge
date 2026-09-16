@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import dashboard_server
@@ -52,6 +53,27 @@ def test_general_search_returns_a_model_visible_semantic_summary(tmp_path: Path)
 
     assert "note.txt" in result["summary"]
     assert "encryption marker" in result["summary"]
+
+
+def test_truncated_read_continues_with_search_on_same_authorized_file(tmp_path: Path) -> None:
+    from runtime_planner_service import planner_read_output_evidence
+
+    target = tmp_path / "fixture.txt"
+    target.write_text("padding\n" * 800 + "EVIDENCE_TAIL = amber-lattice-946\n", encoding="utf-8")
+    roots = [str(target)]
+    tools = dashboard_server.AGENT_GATEWAY._tools
+    read = tools["vrcforge_read_text_file"].handler({"path": str(target), "_generalAllowedRoots": roots})
+    observation = planner_read_output_evidence("vrcforge_read_text_file", read)
+    assert observation["truncated"] is True
+    assert "amber-lattice-946" not in observation["text"]
+    assert "same" in observation["continuation"]
+
+    search = tools["vrcforge_search_text"].handler({"path": str(target), "query": "EVIDENCE_TAIL", "_generalAllowedRoots": roots})
+    evidence = planner_read_output_evidence("vrcforge_search_text", search)
+    assert evidence["authority"] == "untrusted_tool_output"
+    assert evidence["items"] == [{"source": "fixture.txt", "line": 801, "text": "EVIDENCE_TAIL = amber-lattice-946"}]
+    assert evidence["truncated"] is False
+    assert len(json.dumps(evidence)) <= 6000
 
 
 def test_directory_listing_directs_the_loop_to_materially_new_evidence(tmp_path: Path) -> None:

@@ -65,6 +65,35 @@ def test_tools_reject_invalid_directory_and_depth(tmp_path: Path) -> None:
         list_directory(tmp_path, allowed_roots=[tmp_path], max_depth=-1)
 
 
+def test_search_text_accepts_exact_authorized_file_without_expanding_scope(tmp_path: Path) -> None:
+    target = tmp_path / "fixture.txt"
+    target.write_text("prefix\n" + "padding\n" * 800 + "EVIDENCE_TAIL = amber-lattice-946\n", encoding="utf-8")
+    sibling = tmp_path / "private.txt"
+    sibling.write_text("EVIDENCE_TAIL = unrelated", encoding="utf-8")
+
+    result = search_text(target, "EVIDENCE_TAIL", allowed_roots=[target])
+
+    assert result["matches"] == [{"path": str(target.resolve()), "line": 802, "text": "EVIDENCE_TAIL = amber-lattice-946"}]
+    assert result["truncated"] is False
+    with pytest.raises(PermissionError, match="authorized root"):
+        search_text(tmp_path, "EVIDENCE_TAIL", allowed_roots=[target])
+    with pytest.raises(PermissionError, match="authorized root"):
+        search_text(sibling, "EVIDENCE_TAIL", allowed_roots=[target])
+
+
+def test_search_exact_file_retains_bounds_redaction_and_pattern(tmp_path: Path) -> None:
+    target = tmp_path / "fixture.txt"
+    target.write_text("api_key = fixture-secret\nneedle\nneedle\n", encoding="utf-8")
+    result = search_text(target, "api_key", allowed_roots=[target])
+    assert "fixture-secret" not in str(result)
+    assert "[REDACTED]" in result["matches"][0]["text"]
+    assert search_text(target, "needle", allowed_roots=[target], max_count=1)["truncated"] is True
+    assert search_text(target, "needle", allowed_roots=[target], max_file_bytes=4)["truncated"] is True
+    assert search_text(target, "needle", allowed_roots=[target], pattern="*.py")["matches"] == []
+    with pytest.raises(ValueError, match="max_depth"):
+        search_text(target, "needle", allowed_roots=[target], max_depth=-1)
+
+
 def test_tools_reject_unscoped_paths_symlinks_sensitive_files_and_excessive_limits(tmp_path: Path) -> None:
     allowed = tmp_path / "allowed"
     outside = tmp_path / "outside"
