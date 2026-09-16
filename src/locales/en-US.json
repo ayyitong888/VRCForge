@@ -550,6 +550,7 @@
     "step3Title": "Select Unity Project",
     "done": "Done",
     "detecting": "Detecting",
+    "actionNeeded": "Action needed",
     "skipOnboarding": "Skip Onboarding",
     "prevStep": "Back",
     "nextStep": "Next",
@@ -872,6 +873,11 @@
     "hiddenProjects": "Hidden Projects",
     "addProjectFolder": "Add Project Folder Manually",
     "chooseProjectType": "Choose one of two project types",
+    "refreshProjects": "Refresh",
+    "scanningProjects": "Scanning project list…",
+    "projectListUnavailable": "Project list is unavailable. You can add an existing folder below.",
+    "runtimeRequired": "Connect VRCForge runtime before saving project preferences.",
+    "editPath": "Edit recorded path",
     "selectProjectTitle": "Select Project",
     "generalProject": "General project",
     "unityProject": "Unity project",
@@ -903,7 +909,9 @@
     "reviewChanges": "Review project changes in background",
     "noProjectsHint": "No projects found yet. You can manually enter a Unity project folder path below.",
     "pathPlaceholder": "e.g. D:\\Unity\\MyAvatarProject",
-    "pathHint": "Enter the full path to a Unity project root. It will be saved locally and remain visible on next launch."
+    "pathHint": "Enter the full path to a Unity project root. It will be saved locally and remain visible on next launch.",
+    "scanNotStarted": "Project discovery has not completed. Refresh or add an existing folder manually.",
+    "sourceScanFailed": "Some sources could not be scanned: {{sources}}. Found projects remain available; you can also add a folder manually."
   },
   "contextMenu": {
     "cut": "Cut",
@@ -1473,7 +1481,11 @@
     },
     "tablePackage": "Package",
     "tableRisk": "Risk",
-    "risk": {"high": "High risk", "medium": "Medium risk", "low": "Low risk"},
+    "risk": {
+      "high": "High risk",
+      "medium": "Medium risk",
+      "low": "Low risk"
+    },
     "tableStatus": "Status",
     "tableActions": "Actions",
     "noPackages": "No installed .vsk packages.",

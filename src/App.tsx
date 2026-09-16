@@ -1,3 +1,4 @@
+import { projectDiscoveryState } from "./lib/project-discovery-state";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
@@ -689,16 +690,7 @@ export default function App() {
   }, [computerUseEnabled, developerOptionsEnabled, t]);
   // Keep the last known project list visible while backend startup/refresh is still pending.
   const projects = bootstrap?.health.projects?.projects ?? cachedProjectSnapshot?.projects ?? [];
-  const onboardingSelectedProjectReady = Boolean(
-    activeProjectPath
-    && projects.some(
-      (project) => normalizeProjectPathKey(projectKey(project)) === normalizeProjectPathKey(activeProjectPath),
-    )
-  );
-  const onboardingProjectMatchesBackend = !authoritativeSelectedProjectPath || (
-    normalizeProjectPathKey(authoritativeSelectedProjectPath) === normalizeProjectPathKey(activeProjectPath)
-  );
-  const onboardingUnityToolsReady = onboardingSelectedProjectReady && onboardingProjectMatchesBackend && vrcForgeToolsReady;
+  const projectScanState = projectDiscoveryState(bootstrap?.health.projects ?? cachedProjectSnapshot ?? undefined);
   const externalAgentGatewayEnabled = Boolean(connectorStatus?.gateway?.enabled);
   const chatAvailable = providerConfigured || externalAgentGatewayEnabled;
   const chatDisabledReason = !runtimeConnected
@@ -777,6 +769,14 @@ export default function App() {
     scanActiveProjectIndex,
     planActiveOutfitImport,
     requestActiveOutfitImport,
+    editingProjectPath,
+    editProjectPathDraft,
+    setEditProjectPathDraft,
+    startEditProject,
+    cancelEditProject,
+    saveEditProject,
+    projectListError,
+    refreshProjectList: refreshManagedProjectList,
     toggleProjectCollapse,
     expandProjectGroup,
   } = useProjectManagement({
@@ -786,6 +786,7 @@ export default function App() {
     activeProjectType,
     projects,
     refresh,
+    refreshProjects: (target?: string) => refreshProjectList(target, { throwOnError: true, allowDuringStartup: true }),
     startRuntime,
     setError,
     onProjectAdded: (projectPath, projectType) => {
@@ -881,6 +882,11 @@ export default function App() {
     return project?.projectType === "general" ? "general" : "unity";
   };
   const selectProjectByPath = (projectPath: string) => selectProject(projectPath, projectTypeForPath(projectPath));
+  const onboardingSelectedProjectReady = Boolean(
+    activeProjectPath && projectItems.some((project) => normalizeProjectPathKey(projectKey(project)) === normalizeProjectPathKey(activeProjectPath)),
+  );
+  const onboardingProjectMatchesBackend = !authoritativeSelectedProjectPath || normalizeProjectPathKey(authoritativeSelectedProjectPath) === normalizeProjectPathKey(activeProjectPath);
+  const onboardingUnityToolsReady = onboardingSelectedProjectReady && onboardingProjectMatchesBackend && vrcForgeToolsReady;
   const newConversationForProject = (projectPath?: string) => newConversation(
     projectPath,
     projectPath ? projectTypeForPath(projectPath) : "general",
@@ -2443,7 +2449,7 @@ export default function App() {
 
   async function refreshProjectList(
     target = endpoint,
-    options: { allowDuringStartup?: boolean } = {},
+    options: { allowDuringStartup?: boolean; throwOnError?: boolean } = {},
   ) {
     if ((!runtimeConnected && !options.allowDuringStartup) || projectRefreshInFlightRef.current) {
       return;
@@ -2468,6 +2474,9 @@ export default function App() {
       setError((current) => (current.toLowerCase().includes("project") ? "" : current));
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
+      if (options.throwOnError) {
+        throw cause;
+      }
     } finally {
       projectRefreshInFlightRef.current = false;
       setLoadingProjects(false);
@@ -4248,6 +4257,16 @@ export default function App() {
         onProjectTypeChange={setNewProjectType}
         onClearError={() => setProjectModalError("")}
         onAddProjectPath={() => void addProjectPath()}
+        onRefreshProjects={() => void refreshManagedProjectList()}
+        loadingProjects={loadingProjects || projectScanState.scanning}
+        discoveryPending={projectScanState.notChecked}
+        projectListError={projectListError || projectScanState.error || (projectScanState.sourceErrors.length ? t("project.sourceScanFailed", { sources: projectScanState.sourceErrors.join(", ") }) : "")}
+        editingProjectPath={editingProjectPath}
+        editProjectPathDraft={editProjectPathDraft}
+        onEditProjectPathChange={setEditProjectPathDraft}
+        onStartEditProject={startEditProject}
+        onCancelEditProject={cancelEditProject}
+        onSaveEditProject={() => void saveEditProject()}
       />
 
       <SidebarMenus

@@ -550,6 +550,7 @@
     "step3Title": "Unity プロジェクトを選択",
     "done": "完了",
     "detecting": "検出中",
+    "actionNeeded": "操作が必要",
     "skipOnboarding": "ガイドをスキップ",
     "prevStep": "前へ",
     "nextStep": "次へ",
@@ -872,6 +873,11 @@
     "hiddenProjects": "非表示のプロジェクト",
     "addProjectFolder": "プロジェクトフォルダを手動追加",
     "chooseProjectType": "2 種類のプロジェクトから 1 つ選択",
+    "refreshProjects": "更新",
+    "scanningProjects": "プロジェクト一覧をスキャン中…",
+    "projectListUnavailable": "プロジェクト一覧を利用できません。下から既存フォルダーを追加できます。",
+    "runtimeRequired": "プロジェクト設定を保存する前に VRCForge ランタイムへ接続してください。",
+    "editPath": "記録済みパスを編集",
     "selectProjectTitle": "プロジェクトを選択",
     "generalProject": "一般プロジェクト",
     "unityProject": "Unity プロジェクト",
@@ -903,7 +909,9 @@
     "reviewChanges": "バックグラウンドでプロジェクト変更を確認",
     "noProjectsHint": "プロジェクトが見つかりません。下にUnityプロジェクトフォルダのパスを手動入力できます。",
     "pathPlaceholder": "例: D:\\Unity\\MyAvatarProject",
-    "pathHint": "Unityプロジェクトルートのフルパスを入力してください。ローカルに保存され、次回起動時にも表示されます。"
+    "pathHint": "Unityプロジェクトルートのフルパスを入力してください。ローカルに保存され、次回起動時にも表示されます。",
+    "scanNotStarted": "プロジェクトの検索がまだ完了していません。更新するか、既存のフォルダーを追加してください。",
+    "sourceScanFailed": "一部の検索に失敗しました：{{sources}}。見つかったプロジェクトの選択や手動追加はできます。"
   },
   "contextMenu": {
     "cut": "切り取り",
@@ -1473,7 +1481,11 @@
     },
     "tablePackage": "Package",
     "tableRisk": "リスク",
-    "risk": {"high": "高リスク", "medium": "中リスク", "low": "低リスク"},
+    "risk": {
+      "high": "高リスク",
+      "medium": "中リスク",
+      "low": "低リスク"
+    },
     "tableStatus": "Status",
     "tableActions": "Actions",
     "noPackages": "インストール済みの .vsk パッケージはありません。",

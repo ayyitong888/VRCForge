@@ -35,7 +35,7 @@ const gateLogic = await importTypeScript(
 const [overlay, languageGate, app] = await Promise.all([
   readFile(path.join(root, "src/components/onboarding/onboarding-overlay.tsx"), "utf8"),
   readFile(path.join(root, "src/components/onboarding/onboarding-language-gate.tsx"), "utf8"),
-  readFile(path.join(root, "src/App.tsx"), "utf8"),
+  readFile(path.join(root, "src/App.tsx"), "utf8").then((source) => source.replace(/\r\n/g, "\n")),
 ]);
 
 assert.deepEqual(checklistLogic.onboardingChecklistItemState(true, true), { completion: "done", position: "current" });

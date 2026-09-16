@@ -550,6 +550,7 @@
     "step3Title": "選擇 Unity 專案",
     "done": "已完成",
     "detecting": "偵測中",
+    "actionNeeded": "需要操作",
     "skipOnboarding": "跳過引導",
     "prevStep": "上一步",
     "nextStep": "下一步",
@@ -872,6 +873,11 @@
     "hiddenProjects": "已隱藏的專案",
     "addProjectFolder": "手動新增專案資料夾",
     "chooseProjectType": "在兩種專案類型中選擇一種",
+    "refreshProjects": "重新整理",
+    "scanningProjects": "正在掃描專案列表…",
+    "projectListUnavailable": "專案列表暫時無法使用。你仍可在下方加入現有資料夾。",
+    "runtimeRequired": "儲存專案偏好前，請先連線 VRCForge 執行環境。",
+    "editPath": "編輯記錄的路徑",
     "selectProjectTitle": "選擇專案",
     "generalProject": "一般專案",
     "unityProject": "Unity 專案",
@@ -903,7 +909,9 @@
     "reviewChanges": "背景複查專案變更",
     "noProjectsHint": "暫未掃描到專案，可以在下方手動填入 Unity 工程資料夾路徑。",
     "pathPlaceholder": "例如 D:\\Unity\\MyAvatarProject",
-    "pathHint": "填入 Unity 工程根目錄的完整路徑，新增後會儲存到本地，下次啟動仍然可見。"
+    "pathHint": "填入 Unity 工程根目錄的完整路徑，新增後會儲存到本地，下次啟動仍然可見。",
+    "scanNotStarted": "尚未完成專案掃描。點擊重新整理，或手動新增現有專案。",
+    "sourceScanFailed": "部分來源掃描失敗：{{sources}}。已找到的專案仍可使用，也可手動新增。"
   },
   "contextMenu": {
     "cut": "剪下",
@@ -1473,7 +1481,11 @@
     },
     "tablePackage": "套件",
     "tableRisk": "風險",
-    "risk": {"high": "高風險", "medium": "中風險", "low": "低風險"},
+    "risk": {
+      "high": "高風險",
+      "medium": "中風險",
+      "low": "低風險"
+    },
     "tableStatus": "狀態",
     "tableActions": "操作",
     "noPackages": "未安裝任何 .vsk 套件。",

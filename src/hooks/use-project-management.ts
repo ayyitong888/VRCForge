@@ -32,6 +32,7 @@ type UseProjectManagementParams = {
   activeProjectType: ProjectType;
   projects: ProjectEntry[];
   refresh: (target?: string) => Promise<void>;
+  refreshProjects?: (target?: string) => Promise<void>;
   startRuntime: () => Promise<string | null>;
   setError: (message: string) => void;
   onProjectAdded: (projectPath: string, projectType?: ProjectType) => void;
@@ -45,6 +46,7 @@ export function useProjectManagement({
   activeProjectType,
   projects,
   refresh,
+  refreshProjects,
   startRuntime,
   setError,
   onProjectAdded,
@@ -53,12 +55,13 @@ export function useProjectManagement({
   const { t } = useTranslation();
   const [showProjectModal, setShowProjectModal] = useState(false);
   const [newProjectPath, setNewProjectPath] = useState("");
-  const [newProjectType, setNewProjectType] = useState<ProjectType>("general");
+  const [newProjectType, setNewProjectType] = useState<ProjectType>("unity");
   const [savingProjectPrefs, setSavingProjectPrefs] = useState(false);
   const [projectModalError, setProjectModalError] = useState("");
   const [projectPrefs, setProjectPrefs] = useState<ProjectPrefs>({ customPaths: [], customProjects: [], hiddenPaths: [] });
   const [projectPrefsReady, setProjectPrefsReady] = useState(false);
   const [loadingProjects, setLoadingProjects] = useState(false);
+  const [projectListError, setProjectListError] = useState("");
   const [projectMenu, setProjectMenu] = useState<{ projectPath: string; x: number; y: number } | null>(null);
   const [projectUiPrefs, setProjectUiPrefs] = useState<ProjectUiPrefs>(() => loadProjectUiPrefs());
   const [renamingProjectPath, setRenamingProjectPath] = useState("");
@@ -67,6 +70,8 @@ export function useProjectManagement({
   const [projectIndexProject, setProjectIndexProject] = useState("");
   const [loadingProjectIndex, setLoadingProjectIndex] = useState(false);
   const [projectIndexError, setProjectIndexError] = useState("");
+  const [editingProjectPath, setEditingProjectPath] = useState("");
+  const [editProjectPathDraft, setEditProjectPathDraft] = useState("");
   const [outfitPackagePath, setOutfitPackagePath] = useState("");
   const [outfitImportPlan, setOutfitImportPlan] = useState<OutfitImportPlanResult | null>(null);
   const [outfitImportStatus, setOutfitImportStatus] = useState("");
@@ -174,14 +179,66 @@ export function useProjectManagement({
   async function persistProjectPrefs(next: ProjectPrefs): Promise<ProjectPrefs | null> {
     setSavingProjectPrefs(true);
     try {
-      const saved = await saveProjectPrefs(endpoint, next);
+      let targetEndpoint = endpoint;
+      if (!runtimeConnected) {
+        const readyEndpoint = await startRuntime();
+        if (!readyEndpoint) {
+          setProjectModalError(t("project.runtimeRequired"));
+          return null;
+        }
+        targetEndpoint = readyEndpoint;
+      }
+      const saved = await saveProjectPrefs(targetEndpoint, next);
       setProjectPrefs(saved);
       return saved;
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      const message = cause instanceof Error ? cause.message : String(cause);
+      setProjectModalError(message);
       return null;
     } finally {
       setSavingProjectPrefs(false);
+    }
+  }
+
+  function startEditProject(path: string) {
+    setEditingProjectPath(path);
+    setEditProjectPathDraft(path);
+    setProjectModalError("");
+  }
+
+  function cancelEditProject() {
+    setEditingProjectPath("");
+    setEditProjectPathDraft("");
+  }
+
+  async function saveEditProject() {
+    const previous = editingProjectPath.trim();
+    const nextPath = editProjectPathDraft.trim();
+    if (!previous || !nextPath || savingProjectPrefs) return;
+    if (normalizeProjectPathKey(previous) === normalizeProjectPathKey(nextPath)) {
+      cancelEditProject();
+      return;
+    }
+    const existing = projectPrefs.customProjects.find((item) => normalizeProjectPathKey(item.path) === normalizeProjectPathKey(previous)) || projectItems.find((item) => normalizeProjectPathKey(item.path || "") === normalizeProjectPathKey(previous));
+    const saved = await persistProjectPrefs({
+      ...projectPrefs,
+      hiddenPaths: [...projectPrefs.hiddenPaths.filter((item) => normalizeProjectPathKey(item) !== normalizeProjectPathKey(nextPath)), previous],
+      customPaths: [...projectPrefs.customPaths.filter((item) => normalizeProjectPathKey(item) !== normalizeProjectPathKey(previous)), nextPath],
+      customProjects: [
+        ...projectPrefs.customProjects.filter((item) => normalizeProjectPathKey(item.path) !== normalizeProjectPathKey(previous) && normalizeProjectPathKey(item.path) !== normalizeProjectPathKey(nextPath)),
+        { path: nextPath, projectType: existing?.projectType || "unity" },
+      ],
+    });
+    if (!saved) return;
+    if (!saved.customProjects.some((item) => normalizeProjectPathKey(item.path) === normalizeProjectPathKey(nextPath))) {
+      setProjectModalError(t("project.invalidProjectRoot"));
+      return;
+    }
+    cancelEditProject();
+    try { if (refreshProjects) await refreshProjects(); }
+    catch (cause) { setProjectListError(cause instanceof Error ? cause.message : String(cause)); }
+    if (normalizeProjectPathKey(activeProjectPath) === normalizeProjectPathKey(previous)) {
+      onProjectAdded(nextPath, existing?.projectType || "unity");
     }
   }
 
@@ -193,6 +250,7 @@ export function useProjectManagement({
     setProjectModalError("");
     const saved = await persistProjectPrefs({
       ...projectPrefs,
+      hiddenPaths: projectPrefs.hiddenPaths.filter((item) => normalizeProjectPathKey(item) !== normalizeProjectPathKey(path)),
       customPaths: [...projectPrefs.customPaths, path],
       customProjects: [...projectPrefs.customProjects.filter((item) => normalizeProjectPathKey(item.path) !== normalizeProjectPathKey(path)), { path, projectType: newProjectType }],
     });
@@ -221,20 +279,20 @@ export function useProjectManagement({
       ...projectPrefs,
       customPaths: projectPrefs.customPaths.filter((item) => normalizeProjectPathKey(item) !== normalizeProjectPathKey(path)),
       customProjects: projectPrefs.customProjects.filter((item) => normalizeProjectPathKey(item.path) !== normalizeProjectPathKey(path)),
+      hiddenPaths: [...projectPrefs.hiddenPaths.filter((item) => normalizeProjectPathKey(item) !== normalizeProjectPathKey(path)), path],
+    }).then((saved) => {
+      if (saved && normalizeProjectPathKey(activeProjectPath) === normalizeProjectPathKey(path)) onActiveProjectHidden();
     });
   }
 
   function hideProject(path: string) {
-    if (!path) {
-      return;
-    }
+    if (!path) return;
     void persistProjectPrefs({
       ...projectPrefs,
       hiddenPaths: [...projectPrefs.hiddenPaths.filter((item) => normalizeProjectPathKey(item) !== normalizeProjectPathKey(path)), path],
+    }).then((saved) => {
+      if (saved && normalizeProjectPathKey(activeProjectPath) === normalizeProjectPathKey(path)) onActiveProjectHidden();
     });
-    if (normalizeProjectPathKey(activeProjectPath) === normalizeProjectPathKey(path)) {
-      onActiveProjectHidden();
-    }
   }
 
   function unhideProject(path: string) {
@@ -486,6 +544,32 @@ export function useProjectManagement({
     scanActiveProjectIndex,
     planActiveOutfitImport,
     requestActiveOutfitImport,
+    editingProjectPath,
+    editProjectPathDraft,
+    setEditProjectPathDraft,
+    startEditProject,
+    cancelEditProject,
+    saveEditProject,
+    projectListError,
+    refreshProjectList: async () => {
+      setProjectListError("");
+      setLoadingProjects(true);
+      try {
+        if (refreshProjects) {
+          let target = endpoint;
+          if (!runtimeConnected) {
+            target = (await startRuntime()) || "";
+            if (!target) throw new Error(t("project.runtimeRequired"));
+          }
+          await refreshProjects(target);
+        }
+        else await refresh();
+      } catch (cause) {
+        setProjectListError(cause instanceof Error ? cause.message : String(cause));
+      } finally {
+        setLoadingProjects(false);
+      }
+    },
     toggleProjectCollapse,
     expandProjectGroup,
   };

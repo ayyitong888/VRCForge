@@ -1072,6 +1072,10 @@ export type UnityMcpRepairResult = {
 };
 
 export type ProjectSnapshot = {
+  catalogueScan?: {
+    status?: string;
+    sources?: Record<string, { status?: string; errorCount?: number }>;
+  };
   selectedProjectPath?: string;
   unityEditorPath?: string;
   projects?: Array<{

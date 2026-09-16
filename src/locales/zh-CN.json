@@ -550,6 +550,7 @@
     "step3Title": "选择 Unity 项目",
     "done": "已完成",
     "detecting": "检测中",
+    "actionNeeded": "需要操作",
     "skipOnboarding": "跳过引导",
     "prevStep": "上一步",
     "nextStep": "下一步",
@@ -872,6 +873,11 @@
     "hiddenProjects": "已隐藏的项目",
     "addProjectFolder": "手动添加项目文件夹",
     "chooseProjectType": "在两种项目类型中选择一种",
+    "refreshProjects": "刷新",
+    "scanningProjects": "正在扫描项目列表…",
+    "projectListUnavailable": "项目列表暂时不可用。你仍可在下方添加已有文件夹。",
+    "runtimeRequired": "保存项目偏好前请先连接 VRCForge 运行时。",
+    "editPath": "编辑记录的路径",
     "selectProjectTitle": "选择项目",
     "generalProject": "普通项目",
     "unityProject": "Unity 项目",
@@ -903,7 +909,9 @@
     "reviewChanges": "后台复查项目变更",
     "noProjectsHint": "暂未扫描到项目，可以在下方手动填入 Unity 工程文件夹路径。",
     "pathPlaceholder": "例如 D:\\Unity\\MyAvatarProject",
-    "pathHint": "填入 Unity 工程根目录的完整路径，添加后会保存到本地，下次启动仍然可见。"
+    "pathHint": "填入 Unity 工程根目录的完整路径，添加后会保存到本地，下次启动仍然可见。",
+    "scanNotStarted": "尚未完成工程扫描。点击刷新，或手动添加已有工程。",
+    "sourceScanFailed": "部分来源扫描失败：{{sources}}。已找到的工程仍可使用，也可手动添加。"
   },
   "contextMenu": {
     "cut": "剪切",
@@ -1473,7 +1481,11 @@
     },
     "tablePackage": "包",
     "tableRisk": "风险",
-    "risk": {"high": "高风险", "medium": "中风险", "low": "低风险"},
+    "risk": {
+      "high": "高风险",
+      "medium": "中风险",
+      "low": "低风险"
+    },
     "tableStatus": "状态",
     "tableActions": "操作",
     "noPackages": "没有已安装的 .vsk 包。",
