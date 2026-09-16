@@ -1088,6 +1088,8 @@
     "lastUpdated": "最終更新"
   },
   "connector": {
+    "configStatusHint": "複数の外部 Agent を接続できます。各クライアントに VRCForge MCP が設定されているかを表示します。アプリの検出結果と接続テストは別々に表示されます。設定後は、そのクライアントで MCP を再読み込みしてください。",
+    "notChecked": "設定は未確認",
     "title": "エージェントコネクタ",
     "enabled": "有効",
     "disabled": "無効",
@@ -1108,10 +1110,10 @@
     "revokeToken": "Token を失効",
     "event": "イベント",
     "status": "ステータス",
-    "installed": "インストール済み",
+    "installed": "VRCForge MCP 設定済み",
     "needsProject": "プロジェクトが必要",
-    "notInstalled": "未インストール",
-    "needsAttention": "対応が必要",
+    "notInstalled": "VRCForge MCP 未設定",
+    "needsAttention": "MCP 設定に問題があります",
     "cliFound": "CLI が見つかりました",
     "cliNotFound": "CLI が見つかりません",
     "appFound": "App が見つかりました",

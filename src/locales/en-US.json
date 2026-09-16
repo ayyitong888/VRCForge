@@ -1088,6 +1088,8 @@
     "lastUpdated": "Last updated"
   },
   "connector": {
+    "configStatusHint": "Connect multiple external agents. Each status shows whether its configuration contains VRCForge MCP. App detection and connection self-tests are shown separately. Reload MCP in the client after configuring it.",
+    "notChecked": "Configuration not checked",
     "title": "Agent Connectors",
     "enabled": "Enabled",
     "disabled": "Disabled",
@@ -1108,10 +1110,10 @@
     "revokeToken": "Revoke token",
     "event": "Event",
     "status": "Status",
-    "installed": "Installed",
+    "installed": "VRCForge MCP configured",
     "needsProject": "Needs project",
-    "notInstalled": "Not installed",
-    "needsAttention": "Needs attention",
+    "notInstalled": "VRCForge MCP not configured",
+    "needsAttention": "MCP configuration needs attention",
     "cliFound": "CLI found",
     "cliNotFound": "CLI not found",
     "appFound": "App found",

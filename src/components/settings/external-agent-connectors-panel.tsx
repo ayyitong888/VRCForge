@@ -134,6 +134,7 @@ export function ExternalAgentConnectorsPanel({
           {gateway?.enabled ? t("skills.enabled") : t("connector.disabled")}
         </Badge>
       </div>
+      <p className="mt-2 text-xs text-muted-foreground">{t("connector.configStatusHint")}</p>
 
       <div className="mt-4 grid gap-3">
         <DataLine label={t("connector.endpoint")} value={status?.mcp?.url || gateway?.mcpUrl || "http://127.0.0.1:8757/mcp"} mono />
@@ -275,8 +276,9 @@ function ConnectorClientRow({
   const actionMatches = normalizeConnectorClient(lastAction?.client) === client;
   const action = actionMatches ? lastAction : undefined;
   const handshake = action?.handshake;
-  const statusTone = installed ? "ok" : installable ? "muted" : "warn";
-  const statusLabel = installed ? t("connector.installed") : needsProject ? t("connector.needsProject") : installable ? t("connector.notInstalled") : t("connector.needsAttention");
+  const configError = Boolean(state?.lastError || state?.conflict);
+  const statusTone = configError ? "warn" : installed ? "ok" : installable ? "muted" : "warn";
+  const statusLabel = !state ? t("connector.notChecked") : configError ? t("connector.needsAttention") : installed ? t("connector.installed") : needsProject ? t("connector.needsProject") : installable ? t("connector.notInstalled") : t("connector.needsAttention");
   return (
     <div className="grid min-w-0 gap-3 rounded-lg border border-border bg-background/40 p-3 md:grid-cols-[minmax(0,1fr)_auto]">
       <div className="min-w-0">
@@ -295,12 +297,12 @@ function ConnectorClientRow({
           ) : null}
           {state?.cliDetected !== null && state?.cliDetected !== undefined ? (
             <Badge tone={state.cliDetected ? "ok" : "muted"} className="shrink-0">
-              CLI {state.cliDetected ? "found" : "not found"}
+              {t(state.cliDetected ? "connector.cliFound" : "connector.cliNotFound")}
             </Badge>
           ) : null}
           {state?.appDetected !== null && state?.appDetected !== undefined ? (
             <Badge tone={state.appDetected ? "ok" : "muted"} className="shrink-0">
-              App {state.appDetected ? "found" : "not found"}
+              {t(state.appDetected ? "connector.appFound" : "connector.appNotFound")}
             </Badge>
           ) : null}
         </div>
@@ -391,12 +393,13 @@ function GenericConnectorRow({
   const action = actionMatches ? lastAction : undefined;
   const handshake = action?.handshake;
   const installedHere = Boolean(state?.installed && statusMatchesCurrent);
+  const configError = statusMatchesCurrent && Boolean(state?.lastError || state?.conflict);
   return (
     <div className="min-w-0 rounded-lg border border-border bg-background/40 p-3">
       <div className="flex min-w-0 flex-wrap items-center gap-2">
         <span className="min-w-0 truncate text-sm font-semibold">{t("connector.genericTitle")}</span>
-        <Badge tone={installedHere ? "ok" : state?.conflict ? "warn" : "muted"} className="shrink-0">
-          {installedHere ? t("connector.installed") : t("connector.notInstalled")}
+        <Badge tone={configError ? "warn" : installedHere ? "ok" : "muted"} className="shrink-0">
+          {!statusMatchesCurrent ? t("connector.notChecked") : configError ? t("connector.needsAttention") : installedHere ? t("connector.installed") : t("connector.notInstalled")}
         </Badge>
         <Badge tone="muted" className="shrink-0">
           {t("connector.customConfig")}

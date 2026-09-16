@@ -594,6 +594,55 @@ def test_connector_status_prefers_configured_codex_cli_over_broken_path(monkeypa
     assert statuses["codexCli"]["cliSource"].startswith("config:")
 
 
+def test_connector_status_reports_invalid_json_instead_of_unconfigured(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    root = make_source_root(tmp_path)
+    project = tmp_path / "Unity Project"
+    project.mkdir()
+    (project / ".mcp.json").write_text("{\"mcpServers\":", encoding="utf-8")
+    monkeypatch.setenv("APPDATA", str(tmp_path / "AppData" / "Roaming"))
+
+    status = connector_client_statuses(root_dir=root, project_path=str(project))["claudeCode"]
+
+    assert status["installed"] is False
+    assert "not valid JSON" in status["lastError"]
+
+
+def test_connector_status_reports_invalid_codex_toml_instead_of_unconfigured(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    root = make_source_root(tmp_path)
+    codex_home = tmp_path / ".codex"
+    codex_home.mkdir()
+    (codex_home / "config.toml").write_text("[mcp_servers.vrcforge\n", encoding="utf-8")
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    monkeypatch.setenv("APPDATA", str(tmp_path / "AppData" / "Roaming"))
+
+    statuses = connector_client_statuses(root_dir=root, project_path=str(tmp_path))
+
+    for client in ("codexApp", "codexCli"):
+        assert statuses[client]["installed"] is False
+        assert "not valid TOML" in statuses[client]["lastError"]
+
+
+def test_connector_status_reports_invalid_server_entry_shape(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    root = make_source_root(tmp_path)
+    project = tmp_path / "Unity Project"
+    project.mkdir()
+    (project / ".mcp.json").write_text(
+        json.dumps({"mcpServers": {"vrcforge": "not-an-entry"}}), encoding="utf-8"
+    )
+    monkeypatch.setenv("APPDATA", str(tmp_path / "AppData" / "Roaming"))
+
+    status = connector_client_statuses(root_dir=root, project_path=str(project))["claudeCode"]
+
+    assert status["installed"] is False
+    assert "mcpServers.vrcforge must be a JSON object" in status["lastError"]
+
+
 def test_appx_package_probe_does_not_shell_out(monkeypatch: pytest.MonkeyPatch) -> None:
     def fake_which(command: str) -> str | None:
         raise AssertionError(f"unexpected command lookup: {command}")

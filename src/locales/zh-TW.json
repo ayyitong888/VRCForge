@@ -1088,6 +1088,8 @@
     "lastUpdated": "最近更新"
   },
   "connector": {
+    "configStatusHint": "可連接多個外部 Agent。這裡顯示各用戶端是否已寫入 VRCForge MCP 設定；是否找到用戶端程式、連線自我檢查是否通過會分別顯示。設定完成後，請在對應用戶端重新載入 MCP。",
+    "notChecked": "尚未檢查設定",
     "title": "智能體連接器",
     "enabled": "已啟用",
     "disabled": "已停用",
@@ -1108,10 +1110,10 @@
     "revokeToken": "撤銷 Token",
     "event": "事件",
     "status": "狀態",
-    "installed": "已安裝",
+    "installed": "已設定 VRCForge MCP",
     "needsProject": "需要專案",
-    "notInstalled": "未安裝",
-    "needsAttention": "需要處理",
+    "notInstalled": "未設定 VRCForge MCP",
+    "needsAttention": "MCP 設定異常",
     "cliFound": "已找到 CLI",
     "cliNotFound": "未找到 CLI",
     "appFound": "已找到 App",

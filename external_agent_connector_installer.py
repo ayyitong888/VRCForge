@@ -1126,12 +1126,19 @@ def _codex_status(client: Literal["codexApp", "codexCli"], bridge: dict[str, Any
     path = codex_config_path()
     app_probe = _probe_windows_app("OpenAI.Codex") if client == "codexApp" else {}
     cli_probe = _probe_codex_cli() if client == "codexCli" else {}
+    installed = False
+    last_error = ""
+    try:
+        installed = _codex_server_installed(path)
+    except ConnectorInstallError as exc:
+        last_error = str(exc)
     return {
         "label": CLIENT_LABELS[client],
         "scope": "user",
         "configPath": str(path),
-        "installed": _codex_server_installed(path),
+        "installed": installed,
         "installable": True,
+        "lastError": last_error,
         "sharedConfigGroup": "codex",
         "cliDetected": bool(cli_probe.get("ok")) if client == "codexCli" else None,
         "cliPath": cli_probe.get("path", "") if cli_probe else "",
@@ -1400,20 +1407,56 @@ def _probe_error(probe: dict[str, Any]) -> str:
 
 
 def _json_server_installed(path: Path, server_name: str) -> bool:
-    try:
-        payload = _load_json_object(path)
-    except ConnectorInstallError:
-        return False
+    payload = _load_json_object(path)
     servers = payload.get("mcpServers")
-    return isinstance(servers, dict) and isinstance(servers.get(server_name), dict)
+    if servers is None:
+        return False
+    if not isinstance(servers, dict):
+        raise ConnectorInstallError(
+            "mcpServers must be a JSON object.",
+            stage="parse_config",
+            suggestion=f"Repair {_canonical_config_path(path)} so mcpServers is an object, then retry.",
+        )
+    if server_name not in servers:
+        return False
+    entry = servers[server_name]
+    if not isinstance(entry, dict):
+        raise ConnectorInstallError(
+            f"mcpServers.{server_name} must be a JSON object.",
+            stage="parse_config",
+            suggestion=f"Repair {_canonical_config_path(path)} so the VRCForge server entry is an object, then retry.",
+        )
+    return True
 
 
 def _codex_server_installed(path: Path) -> bool:
-    if not path.exists():
+    snapshot = _read_config_snapshot(path)
+    if not snapshot.exists:
         return False
     try:
-        parsed = tomllib.loads(path.read_text(encoding="utf-8-sig") or "")
-    except Exception:  # noqa: BLE001
-        return False
+        parsed = tomllib.loads(_decode_config_snapshot(path, snapshot) or "")
+    except Exception as exc:  # noqa: BLE001 - tomllib/tomli expose different exception classes.
+        raise ConnectorInstallError(
+            f"Config file is not valid TOML: {exc}",
+            stage="parse_config",
+            suggestion=f"Fix or rename {path}; VRCForge did not modify the file.",
+        ) from exc
     servers = parsed.get("mcp_servers")
-    return isinstance(servers, dict) and isinstance(servers.get(DEFAULT_SERVER_NAME), dict)
+    if servers is None:
+        return False
+    if not isinstance(servers, dict):
+        raise ConnectorInstallError(
+            "mcp_servers must be a TOML table.",
+            stage="parse_config",
+            suggestion=f"Repair {path} so mcp_servers is a table, then retry.",
+        )
+    if DEFAULT_SERVER_NAME not in servers:
+        return False
+    entry = servers[DEFAULT_SERVER_NAME]
+    if not isinstance(entry, dict):
+        raise ConnectorInstallError(
+            f"mcp_servers.{DEFAULT_SERVER_NAME} must be a TOML table.",
+            stage="parse_config",
+            suggestion=f"Repair {path} so the VRCForge server entry is a table, then retry.",
+        )
+    return True
