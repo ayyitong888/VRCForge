@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from agent_gateway import AgentGatewayConfig, summarize_skill_registry
+from agent_task_loop import AgentTaskLoop
 from bundled_skill_delivery import SKILL_NAME, deliver_bundled_guide
 from runtime_planner_service import (
     PlannerCatalogSnapshot, PlannerModelResult, PlannerSkill, PlannerTool, RuntimePlannerService,
@@ -154,6 +155,32 @@ def test_runtime_alias_never_exposes_hidden_inferred_ambiguous_or_write_tools(re
     plan = planner.plan_agent_turn("Read only", {"_projectContextActive": False}, {})
     assert not plan.get("skillNeeded"), plan
     assert not plan.get("writeNeeded"), plan
+
+
+def test_activated_bundled_guide_allows_its_readonly_discovery_and_support_reads(installed_guide):
+    app, gateway = installed_guide
+    loaded = gateway.runtime_skills.execute(SKILL_NAME, {}, "test")
+    assert loaded["ok"] and loaded["status"] == "loaded"
+    loop = AgentTaskLoop("Follow the connection guide")
+    loop.activate_skill_policy(name=SKILL_NAME, allowed_tools=loaded["result"]["allowedTools"], disallowed_tools=[])
+    for name, arguments in (
+        ("vrcforge_list_internal_tool_blocks", {}),
+        ("vrcforge_load_internal_tool_block", {"block": "project_environment/files"}),
+        ("vrcforge_read_installed_skill", {"name": SKILL_NAME, "file": "references/repair-guide.md"}),
+    ):
+        planner = RuntimePlannerService(
+            catalog=app._RuntimePlannerCatalog(), desktop=app._RuntimePlannerDesktopObservation(),
+            model=SimpleNamespace(plan=lambda _prompt: PlannerModelResult(json.dumps({
+                "action": "skill", "skill_tool": name, "skill_params": arguments,
+            }))),
+        )
+        plan = planner.plan_agent_turn("Follow the guide", {"_projectContextActive": True}, {}, exposure_layer="execution")
+        assert plan.get("skillNeeded"), plan
+        assert loop.skill_policy_block_reason(plan["skillTool"]) == ""
+        result = gateway.runtime_skills.execute(plan["skillTool"], {**plan["skillParams"], "sessionId": "guide-policy-test"}, "test")
+        assert result["ok"], result
+    assert loop.skill_policy_block_reason("vrcforge_execute_shell") == "skill_tool_not_allowed"
+    assert loop.skill_policy_block_reason("vrcforge_delete_path") == "skill_tool_not_allowed"
 
 
 def test_observe_summary_keeps_installed_guides_after_large_builtin_catalogue():

@@ -6768,7 +6768,7 @@ class AgentGateway:
                 break
 
             policy_tool = (
-                "vrcforge_shell_execute"
+                "vrcforge_execute_shell"
                 if action_kind == "shell"
                 else str(plan.get("writeTool") or plan.get("skillTool") or "").strip()
             )

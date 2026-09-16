@@ -8,6 +8,9 @@ workflow-domain: diagnostics
 required-resources: []
 game-only-acceptance: []
 allowed-tools:
+  - vrcforge_list_internal_tool_blocks
+  - vrcforge_load_internal_tool_block
+  - vrcforge_read_installed_skill
   - vrcforge_know_yourself
   - vrcforge_health
   - vrcforge_unity_status
