@@ -7,6 +7,27 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_first_run_diagnosis_is_discoverable_and_callable_without_unity(tmp_path: Path) -> None:
+    from agent_gateway import AgentGateway
+
+    gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
+    config = gateway.ensure_config()
+    config.enabled = True
+    config.allow_write_requests = False
+    gateway.save_config(config)
+    observed = {"projectDiscovery": {"state": "empty", "projectCount": 0}}
+    gateway.register_tool(
+        "vrcforge_know_yourself",
+        "When to use: diagnose project startup. When NOT to use: unrelated questions.",
+        "read/debug",
+        lambda _params: observed,
+    )
+    tools = gateway.build_external_mcp_tools("planning", ["core"])
+    assert "vrcforge_know_yourself" in {tool["name"] for tool in tools}
+    result = gateway.call_external_mcp_tool("vrcforge_know_yourself", {})
+    assert result["result"]["projectDiscovery"] == observed["projectDiscovery"]
+
+
 def test_onboarding_requires_exact_selected_project_and_all_64_tools() -> None:
     app_source = (ROOT / "src" / "App.tsx").read_text(encoding="utf-8")
     overlay_source = (

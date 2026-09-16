@@ -53,6 +53,7 @@ EXTERNAL_MCP_READ_TOOL_BLOCKS: dict[str, frozenset[str]] = {
         {
             "vrcforge_external_tool_blocks",
             "vrcforge_health",
+            "vrcforge_know_yourself",
             "vrcforge_unity_status",
             "vrcforge_unity_tools",
             "vrcforge_get_compile_errors",
