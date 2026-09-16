@@ -252,6 +252,8 @@ _DIAGNOSTIC_TOOLS = frozenset(
         "vrcforge_health",
         "vrcforge_import_skill_package",
         "vrcforge_list_skill_packages",
+        "vrcforge_list_installed_skills",
+        "vrcforge_read_installed_skill",
         "vrcforge_mcp_write",
         "vrcforge_preflight_skill_package",
         "vrcforge_preview_path_to_skill",

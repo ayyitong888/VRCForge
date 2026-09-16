@@ -9377,6 +9377,8 @@ def discard_runtime_image_payloads(
 
 
 def summarize_skill_registry(registry: dict[str, Any]) -> dict[str, Any]:
+    skills = [item for item in ensure_list(registry.get("skills")) if isinstance(item, dict)]
+    skills.sort(key=lambda item: not (item.get("source") == "user" and item.get("skillType") == "package"))
     return {
         "schema": registry.get("schema"),
         "count": registry.get("count"),
@@ -9387,6 +9389,7 @@ def summarize_skill_registry(registry: dict[str, Any]) -> dict[str, Any]:
             {
                 "name": skill.get("name"),
                 "title": skill.get("title"),
+                "description": summarize_text(str(skill.get("description") or ""), 300),
                 "source": skill.get("source"),
                 "skillType": skill.get("skillType"),
                 "category": skill.get("category"),
@@ -9395,9 +9398,10 @@ def summarize_skill_registry(registry: dict[str, Any]) -> dict[str, Any]:
                 "allowedTools": skill.get("allowedTools"),
                 "entrypointTool": skill.get("entrypointTool"),
             }
-            for skill in ensure_list(registry.get("skills"))[:80]
-            if isinstance(skill, dict)
+            for skill in skills[:80]
         ],
+        "shownCount": min(len(skills), 80),
+        "truncated": len(skills) > 80,
     }
 
 

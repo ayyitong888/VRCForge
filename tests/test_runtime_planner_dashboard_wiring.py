@@ -394,8 +394,10 @@ def test_no_project_catalog_exposes_only_general_agent_capabilities() -> None:
     assert "vrcforge_scan_project_index" not in routable_runtime
     assert "vrcforge_unity_status" not in routable_runtime
     assert all(not name.startswith("unity_") for name in planning_names | execution_names | routable_names)
-    assert planning.skills == ()
-    assert execution.skills == ()
+    # Installed instruction metadata is readable before a Unity project is
+    # bound; this does not expose builtin workflows or executable Unity tools.
+    assert all(skill.source == "user" and skill.skill_type == "package" for skill in planning.skills)
+    assert all(skill.source == "user" and skill.skill_type == "package" for skill in execution.skills)
 
 
 def test_internal_indexed_catalog_loads_per_session_without_leaking_to_external_mcp() -> None:

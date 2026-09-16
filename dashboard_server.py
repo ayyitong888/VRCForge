@@ -15869,11 +15869,13 @@ class _RuntimePlannerCatalog:
                 description=str(skill.get("description") or ""),
                 when_to_use=str(skill.get("whenToUse") or ""),
                 enabled=bool(skill.get("enabled", True)),
+                available=bool(skill.get("available", True)),
                 disable_model_invocation=bool(skill.get("disableModelInvocation")),
             )
             for skill in skill_payloads
             if isinstance(skill, dict) and str(skill.get("name") or "").strip()
-        ) if project_context_active else ()
+            and (project_context_active or (skill.get("source") == "user" and skill.get("skillType") == "package"))
+        )
         return PlannerCatalogSnapshot(
             visible_tools=visible_tools,
             routable_tools=routable_tools,

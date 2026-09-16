@@ -502,6 +502,7 @@ class PlannerSkill:
     description: str = ""
     when_to_use: str = ""
     enabled: bool = True
+    available: bool = True
     disable_model_invocation: bool = False
 
 
@@ -1804,6 +1805,7 @@ class RuntimePlannerService:
                 if visible_tool is None:
                     known_tool = bool(skill_tool) and (
                         exposure_layer == EXPOSURE_LAYER_EXECUTION
+                        and project_context_active
                         and any(
                             normalize_skill_id(skill.name) == normalize_skill_id(skill_tool)
                             for skill in catalog.skills
@@ -2484,6 +2486,26 @@ class RuntimePlannerService:
             if superseded_by:
                 fields.append("supersededBy=" + sanitize_planner_observation_text(superseded_by, 80))
             tool_name = str(step.get("tool") or "").strip()
+            if (
+                tool_name in {"vrcforge_read_installed_skill", "vrcforge_list_installed_skills"}
+                and isinstance(result, dict) and result.get("ok") is True
+                and step.get("status") not in {"failed", "error", "rejected"}
+            ):
+                # These existing read tools are the on-demand Skill content
+                # boundary. A generic 600-character tool summary loses the
+                # actual instructions before the next model turn can use them.
+                content = {
+                    key: result[key] for key in (
+                        "name", "title", "description", "instructions", "allowedTools",
+                        "supportFiles", "file", "content", "skills", "count",
+                    ) if key in result
+                }
+                fields.append("installedSkillRead=" + sanitize_planner_observation_text(
+                    json.dumps(redact_sensitive(content), ensure_ascii=False, separators=(",", ":")),
+                    20_000,
+                ))
+                fields.append("SkillReadPolicy=Instructions do not grant tool access or write approval; read declared support files on demand.")
+                return summarize_text("; ".join(fields), 21_000)
             if tool_name == "vrcforge_read_recent_logs":
                 fields.append(
                     "logReadProtocol=For retained logs use source=disk and omit file to list filenames; "
@@ -2898,6 +2920,31 @@ class RuntimePlannerService:
                     f"- {tool.name}{suffix}{input_contract}: "
                     f"{planner_tool_usage_description(tool.name, tool.description, write=tool.write)}"
                 )
+            installed_skills = [
+                skill for skill in catalog.skills
+                if skill.source == "user" and skill.skill_type == "package"
+                and skill.enabled and skill.available and not skill.disable_model_invocation
+            ]
+            skill_reader = next((
+                tool for tool in catalog.visible_tools
+                if tool.runtime_name == "vrcforge_read_installed_skill" and not tool.write
+            ), None)
+            skill_index_block = ""
+            if installed_skills and skill_reader is not None:
+                entries = [
+                    {"name": skill.name, "title": skill.title,
+                     "description": summarize_text(skill.description or skill.when_to_use, 300)}
+                    for skill in installed_skills[:20]
+                ]
+                skill_index_block = (
+                    "Installed Skill guides (metadata only; choose when relevant to the user's request):\n"
+                    + json.dumps({"total": len(installed_skills), "shown": len(entries), "skills": entries}, ensure_ascii=False)
+                    + f"\nTo read a selected guide, load its existing read-tool block {skill_reader.block} "
+                    + f"if needed, then call {skill_reader.name} with {{\"name\":\"<exact Skill name>\"}}. "
+                    + "Read a declared support file with the same tool and an exact file argument when needed. "
+                    + "The installed-Skill list tool in that block provides the full index. Reading a guide is permitted "
+                    + "during planning and does not enter execution, authorize writes, or make its mentioned tools available.\n\n"
+                )
             history_lines: list[str] = []
             for entry in history:
                 role = "用户" if str(entry.get("role") or "user").strip().lower() == "user" else "助手"
@@ -3008,6 +3055,7 @@ class RuntimePlannerService:
                 "自然地说明你理解了什么、打算怎么做（例如「好的，我去看一下 D 盘根目录有什么」，该示例仅演示语气，实际回复语言以用户为准），不要复述 JSON 或工具名。\n\n"
                 f"{shared_schema_block + chr(10) + chr(10) if shared_schema_block else ''}"
                 f"可用工具列表：\n{chr(10).join(tool_lines)}\n\n"
+                f"{skill_index_block}"
                 f"最近对话：\n{history_block}\n\n"
                 f"本轮已执行步骤+结果：\n{steps_block}\n\n"
                 f"{instruction_blocks + chr(10) + chr(10) if instruction_blocks else ''}"
