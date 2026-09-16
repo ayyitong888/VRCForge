@@ -204,12 +204,18 @@ def planner_tool_input_schema(name: str) -> dict[str, object]:
 
 
 def _matches_planner_schema_type(value: object, value_type: str) -> bool:
+    if value_type == "null":
+        return value is None
     if value_type == "string":
         return isinstance(value, str)
     if value_type == "boolean":
         return isinstance(value, bool)
     if value_type == "integer":
-        return isinstance(value, int) and not isinstance(value, bool)
+        return (
+            isinstance(value, int) and not isinstance(value, bool)
+        ) or (
+            isinstance(value, float) and math.isfinite(value) and value.is_integer()
+        )
     if value_type == "number":
         return (
             isinstance(value, (int, float))
@@ -271,7 +277,22 @@ def _validate_planner_schema_node(
 ) -> None:
     if len(issues) >= _PLANNER_TOOL_SCHEMA_MAX_ISSUES:
         return
-    value_type = str(schema.get("type") or "")
+    declared_type = schema.get("type")
+    if isinstance(declared_type, list):
+        supported_types = {"string", "boolean", "integer", "number", "object", "array", "null"}
+        if (
+            not declared_type
+            or any(not isinstance(item, str) or item not in supported_types for item in declared_type)
+            or len(set(declared_type)) != len(declared_type)
+        ):
+            _append_planner_schema_issue(issues, path, "invalid_schema_type", "non-empty unique JSON Schema types")
+            return
+        value_type = next((item for item in declared_type if _matches_planner_schema_type(value, item)), "")
+        if not value_type:
+            _append_planner_schema_issue(issues, path, "wrong_type", " | ".join(declared_type))
+            return
+    else:
+        value_type = str(declared_type or "")
     if not value_type and any(
         key in schema for key in ("properties", "required", "additionalProperties")
     ):
@@ -339,8 +360,6 @@ def _validate_planner_schema_node(
                     _append_planner_schema_issue(
                         issues, child_path, "unknown_property", "declared property"
                     )
-                continue
-            if raw_value is None and name not in required_names:
                 continue
             _validate_planner_schema_node(raw_spec, raw_value, child_path, issues)
             if len(issues) >= _PLANNER_TOOL_SCHEMA_MAX_ISSUES:
