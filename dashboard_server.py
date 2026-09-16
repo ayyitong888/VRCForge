@@ -6704,18 +6704,25 @@ def _selected_project_path_or(project_path: str | None = None) -> str:
     return DASHBOARD_STATE.selected_project_path if DASHBOARD_STATE else ""
 
 
+from connector_action_status import ConnectorActionStatusStore
+
+CONNECTOR_ACTION_STATUS = ConnectorActionStatusStore()
+
+
 def external_agent_status_sync(project_path: str | None = None, generic_config_path: str | None = None) -> dict[str, Any]:
     config = AGENT_GATEWAY.ensure_config()
     health = safe_agent_health()
     manifest = safe_agent_manifest()
     selected_project_path = _selected_project_path_or(project_path)
+    clients = connector_client_statuses(
+        root_dir=runtime_paths.ROOT_DIR,
+        project_path=selected_project_path,
+        generic_config_path_value=generic_config_path,
+    )
     return {
         **connector_bundle_sync({}),
-        "clients": connector_client_statuses(
-            root_dir=runtime_paths.ROOT_DIR,
-            project_path=selected_project_path,
-            generic_config_path_value=generic_config_path,
-        ),
+        "contextProjectPath": selected_project_path,
+        "clients": clients,
         "gateway": {
             "enabled": bool(config.enabled),
             "requiresToken": bool(config.require_token),
@@ -6740,6 +6747,9 @@ def external_agent_status_sync(project_path: str | None = None, generic_config_p
             if isinstance(target, dict)
         ],
         "lastCalls": summarize_external_agent_audit(),
+        "connectorActions": CONNECTOR_ACTION_STATUS.current(
+            str(AGENT_GATEWAY.config_path), selected_project_path, clients,
+        ),
     }
 
 
@@ -6812,6 +6822,8 @@ def install_external_agent_connector_sync(params: dict[str, Any]) -> dict[str, A
         }
     if config_path:
         action.setdefault("configPath", config_path)
+    action_diagnostics = redact_support_payload({key: action[key] for key in ("error", "suggestion") if key in action})
+    action = {**CONNECTOR_ACTION_STATUS.record(str(AGENT_GATEWAY.config_path), project_path, action), **action_diagnostics}
     emit_log(
         "success" if action.get("ok") else "warn",
         "connectors",
@@ -6847,6 +6859,8 @@ def uninstall_external_agent_connector_sync(params: dict[str, Any]) -> dict[str,
         }
     if config_path:
         action.setdefault("configPath", config_path)
+    action_diagnostics = redact_support_payload({key: action[key] for key in ("error", "suggestion") if key in action})
+    action = {**CONNECTOR_ACTION_STATUS.record(str(AGENT_GATEWAY.config_path), project_path, action), **action_diagnostics}
     emit_log(
         "success" if action.get("ok") else "warn",
         "connectors",

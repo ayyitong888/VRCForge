@@ -166,12 +166,17 @@ export type ExternalAgentConnectorStatus = {
   writeTargets?: Array<{ name?: string; riskLevel?: string; advanced?: boolean }>;
   lastCalls?: Array<{ event?: string; createdAt?: string; agentName?: string; targetTool?: string; status?: string; riskLevel?: string }>;
   lastConnectorAction?: ExternalAgentConnectorActionResult;
+  connectorActions?: Record<string, ExternalAgentConnectorActionResult>;
+  contextProjectPath?: string;
 };
 
 export type ExternalAgentConnectorClient = "codexApp" | "codexCli" | "claudeCode" | "claudeCowork" | "generic" | "deepseekHarness";
 
 export type ExternalAgentConnectorActionResult = {
   ok: boolean;
+  observedAt?: number;
+  verificationExpiresAt?: number;
+  verificationScope?: "installation_self_test";
   client?: string;
   action?: "install" | "uninstall" | string;
   stage?: string;

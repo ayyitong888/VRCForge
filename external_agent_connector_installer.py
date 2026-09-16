@@ -39,7 +39,7 @@ ConnectorClient = Literal["codex", "codexApp", "codexCli", "claudeCode", "claude
 _CONFIG_PATH_LOCKS_GUARD = threading.Lock()
 _CONFIG_PATH_LOCKS: dict[str, threading.RLock] = {}
 _HIDDEN_EXTERNAL_EXECUTION_TOOLS = frozenset(
-    {"vrcforge_apply_approved", "vrcforge_execute_approved_shell"}
+    {"vrcforge_apply_approved", "vrcforge_execute_approved_shell", "vrcforge_request_apply"}
 )
 
 
@@ -553,7 +553,10 @@ def run_stdio_mcp_handshake(bridge: StdioBridgeSpec, *, timeout_seconds: float =
         tools = listed.get("result", {}).get("tools", []) if isinstance(listed.get("result"), dict) else []
         tool_names = [str(tool.get("name") or "") for tool in tools if isinstance(tool, dict)]
         connected = "vrcforge_bridge_preflight" in tool_names
-        ready = "vrcforge_request_apply" in tool_names
+        discovery_ready = {
+            "vrcforge_list_tool_blocks", "vrcforge_load_tool_block",
+            "vrcforge_invoke_loaded_read_tool",
+        }.issubset(tool_names)
         direct_apply_listed = sorted(_HIDDEN_EXTERNAL_EXECUTION_TOOLS.intersection(tool_names))
         preflight_called = False
         preflight_result: dict[str, Any] = {}
@@ -587,7 +590,11 @@ def run_stdio_mcp_handshake(bridge: StdioBridgeSpec, *, timeout_seconds: float =
                 raise RuntimeError("MCP tools/call did not return structuredContent for bridge preflight.")
             preflight_called = True
             preflight_result = structured
-        ok = connected
+        ready = bool(
+            connected and discovery_ready and preflight_result.get("ok")
+            and preflight_result.get("runtimeOnline") and not direct_apply_listed
+        )
+        ok = ready
         return {
             "ok": ok,
             "connected": connected,
@@ -599,7 +606,9 @@ def run_stdio_mcp_handshake(bridge: StdioBridgeSpec, *, timeout_seconds: float =
             "toolCount": len(tool_names),
             "toolsSample": tool_names[:12],
             "hasBridgePreflight": connected,
-            "hasRequestApply": ready,
+            "hasRequestApply": "vrcforge_request_apply" in tool_names,
+            "hasLoadedReadTool": "vrcforge_invoke_loaded_read_tool" in tool_names,
+            "hasLoadedWriteTool": "vrcforge_invoke_loaded_write_tool" in tool_names,
             "preflightCalled": preflight_called,
             "preflightOk": bool(preflight_result.get("ok")),
             "preflightRuntimeOnline": bool(preflight_result.get("runtimeOnline")),
@@ -607,7 +616,7 @@ def run_stdio_mcp_handshake(bridge: StdioBridgeSpec, *, timeout_seconds: float =
             "directApplyListed": direct_apply_listed,
             "stderrTail": _tail(stderr_lines),
             "transcriptTail": transcript[-6:],
-            "error": "" if ok else "MCP tools/list did not expose the VRCForge bridge preflight tool.",
+            "error": "" if ok else "MCP discovery or authenticated bridge preflight did not pass.",
             "warning": "" if ready else "Connector is visible, but Gateway/token readiness may be incomplete. Run bridge preflight from the client or open VRCForge Doctor.",
             "suggestion": "" if ok else "Open VRCForge, run Doctor, then retry connector install.",
         }

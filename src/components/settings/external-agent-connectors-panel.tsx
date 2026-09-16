@@ -79,7 +79,6 @@ export function ExternalAgentConnectorsPanel({
   const genericHttpText = status?.clientConfigs?.genericHttp?.text || claudeText;
   const deepseekHarnessText = status?.clientConfigs?.deepseekHarness?.text || "";
   const clients = status?.clients;
-  const lastAction = status?.lastConnectorAction;
   const connectorRows: Array<{
     client: ExternalAgentConnectorClient;
     title: string;
@@ -173,7 +172,7 @@ export function ExternalAgentConnectorsPanel({
             copyLabel={row.copyLabel}
             shared={row.shared}
             selectedProjectPath={selectedProjectPath}
-            lastAction={lastAction}
+            lastAction={status?.connectorActions?.[row.client]}
             onInstall={onInstall}
             onUninstall={onUninstall}
             onCopy={onCopy}
@@ -182,7 +181,7 @@ export function ExternalAgentConnectorsPanel({
         <GenericConnectorRow
           loading={loading}
           state={clients?.generic}
-          lastAction={lastAction}
+          lastAction={status?.connectorActions?.generic}
           stdioText={genericStdioText}
           httpText={genericHttpText}
           onInstall={onInstall}
@@ -193,7 +192,7 @@ export function ExternalAgentConnectorsPanel({
 
       <div className="mt-5 flex flex-wrap justify-end gap-2">
         {message ? (
-          <Badge tone={lastAction?.ok === false ? "danger" : "ok"} className="mr-auto shrink-0">
+          <Badge tone={status?.lastConnectorAction?.ok === false ? "danger" : "ok"} className="mr-auto shrink-0">
             {message}
           </Badge>
         ) : null}
@@ -333,10 +332,8 @@ function ConnectorClientRow({
               )}
             >
               <div className="flex min-w-0 flex-wrap items-center gap-2">
-                <span className="font-medium">{action.ok ? t("connector.selfTestPassed") : t("connector.selfTestFailed")}</span>
+                <span className="font-medium">{action.ok ? t(action.action === "uninstall" ? "connector.notInstalled" : "connector.selfTestPassed") : t("connector.selfTestFailed")}</span>
                 {handshake?.toolCount !== undefined ? <span>{handshake.toolCount} tools</span> : null}
-                {handshake?.connected ? <span>{t("connector.connected")}</span> : null}
-                {handshake?.ready ? <span>{t("connector.ready")}</span> : null}
               </div>
               {action.error ? <div className="break-words">{action.error}</div> : null}
               {handshake?.warning ? <div className="break-words">{handshake.warning}</div> : null}
@@ -482,10 +479,8 @@ function GenericConnectorRow({
               )}
             >
               <div className="flex min-w-0 flex-wrap items-center gap-2">
-                <span className="font-medium">{action.ok ? t("connector.selfTestPassed") : t("connector.selfTestFailed")}</span>
+                <span className="font-medium">{action.ok ? t(action.action === "uninstall" ? "connector.notInstalled" : "connector.selfTestPassed") : t("connector.selfTestFailed")}</span>
                 {handshake?.toolCount !== undefined ? <span>{handshake.toolCount} tools</span> : null}
-                {handshake?.connected ? <span>{t("connector.connected")}</span> : null}
-                {handshake?.ready ? <span>{t("connector.ready")}</span> : null}
               </div>
               {action.configPath ? <div className="truncate font-mono text-[11px]">{action.configPath}</div> : null}
               {action.error ? <div className="break-words">{action.error}</div> : null}

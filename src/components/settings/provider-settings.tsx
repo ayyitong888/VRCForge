@@ -312,15 +312,15 @@ export function ProviderSetup({
       <div className="mt-5 flex flex-wrap justify-end gap-2">
         <Button type="button" variant="outline" disabled={!runtimeConnected || saving || Boolean(testingProvider)} onClick={() => onTestProvider("text")}>
           {testingProvider === "text" ? <Loader2 className="h-4 w-4 animate-spin" /> : <MessageSquare className="h-4 w-4" />}
-          Text
+          {i18n.t("provider.testConnection")}
         </Button>
         <Button type="button" variant="outline" disabled={!runtimeConnected || saving || Boolean(testingProvider)} onClick={() => onTestProvider("structured")}>
           {testingProvider === "structured" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
-          JSON
+          {i18n.t("provider.testStructured")}
         </Button>
         <Button type="button" variant="outline" disabled={!runtimeConnected || saving || Boolean(testingProvider)} onClick={() => onTestProvider("vision")}>
           {testingProvider === "vision" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Eye className="h-4 w-4" />}
-          Vision
+          {i18n.t("provider.testVision")}
         </Button>
         <Button disabled={!runtimeConnected || saving || !contextWindowValid || (providerNeedsApiKey(provider) && !apiKey.trim() && !keySaved) || !model.trim()} type="submit">
           {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : null}

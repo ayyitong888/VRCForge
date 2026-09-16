@@ -136,6 +136,10 @@ export function useProviderSettings({
     providerLabel: savedProviderLabel,
     model: savedModel,
   };
+  const persistedProviderFingerprint = apiConfig
+    ? providerFingerprint({ provider: apiConfig.provider || "gemini", baseUrl: apiConfig.base_url || "", model: apiConfig.model || defaultModelForProvider(apiConfig.provider || "gemini"), apiType: apiConfig.api_type || apiConfig.apiType || "auto" })
+    : "";
+  const persistedProviderConfigured = Boolean(apiConfig && (!apiConfig.apiKeyRequired || apiConfig.apiKeyPresent));
   const selectedModelInfo = modelOptions.find((item) => item.id === apiModel);
   const selectedModelCapabilities = selectedModelInfo?.capabilities ??
     (apiConfig?.provider === apiProvider && apiConfig?.model === apiModel ? apiConfig.capabilities : undefined);
@@ -400,6 +404,7 @@ export function useProviderSettings({
     testingProvider,
     providerTestMessage,
     providerTestPassed: providerTestPassed && providerTestFingerprint === providerFingerprint({ provider: apiProvider, baseUrl: apiBaseUrl, model: apiModel, apiType }),
+    providerReadyForOnboarding: providerTestPassed && persistedProviderConfigured && !apiKey.trim() && providerTestFingerprint === persistedProviderFingerprint,
     visionProvider,
     setVisionProvider,
     visionApiKey,

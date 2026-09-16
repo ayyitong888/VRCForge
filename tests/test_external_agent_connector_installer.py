@@ -457,7 +457,7 @@ def test_stdio_mcp_handshake_runs_2026_discover_and_tools_list(tmp_path: Path) -
                 "    if msg.get('method') == 'server/discover' and valid_meta and valid_client_info:",
                 "        print(json.dumps({'jsonrpc':'2.0','id':msg['id'],'result':dict(common, supportedVersions=['2026-07-28'])}), flush=True)",
                 "    elif msg.get('method') == 'tools/list':",
-                "        tools = [{'name':'vrcforge_bridge_preflight'}, {'name':'vrcforge_request_apply'}]",
+                "        tools = [{'name':name} for name in ['vrcforge_bridge_preflight','vrcforge_list_tool_blocks','vrcforge_load_tool_block','vrcforge_invoke_loaded_read_tool']]",
                 "        print(json.dumps({'jsonrpc':'2.0','id':msg['id'],'result':dict(common, tools=tools) if valid_meta and valid_client_info else {'error':'bad metadata'}}), flush=True)",
                 "    elif msg.get('method') == 'tools/call' and msg.get('params', {}).get('name') == 'vrcforge_bridge_preflight':",
                 "        print(json.dumps({'jsonrpc':'2.0','id':msg['id'],'result':dict(common, structuredContent={'ok':True,'runtimeOnline':True})}), flush=True)",
@@ -474,7 +474,10 @@ def test_stdio_mcp_handshake_runs_2026_discover_and_tools_list(tmp_path: Path) -
     assert result["ok"] is True
     assert result["connected"] is True
     assert result["ready"] is True
-    assert result["toolCount"] == 2
+    assert result["toolCount"] == 4
+    assert result["hasRequestApply"] is False
+    assert result["hasLoadedReadTool"] is True
+    assert result["hasLoadedWriteTool"] is False
     assert result["preflightCalled"] is True
     assert result["preflightOk"] is True
     assert result["preflightRuntimeOnline"] is True

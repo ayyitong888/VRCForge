@@ -128,6 +128,7 @@ export function OnboardingOverlay({
   const step = steps[Math.min(stepIndex, steps.length - 1)];
   const isLast = stepIndex >= steps.length - 1;
   const projectNeedsAction = step === projectStep && !step.done;
+  const providerNeedsAction = step === providerStep && !step.done;
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/35 p-6">
       <section
@@ -204,10 +205,10 @@ export function OnboardingOverlay({
         </ol>
         <div className="mt-5 rounded-xl border border-border px-5 py-4">
           <div className="flex min-w-0 items-center gap-2">
-            {step.done ? <Check className="h-4 w-4 shrink-0 text-primary" /> : projectNeedsAction ? <FolderPlus className="h-4 w-4 shrink-0 text-primary" /> : <Loader2 className="h-4 w-4 shrink-0 animate-spin text-muted-foreground" />}
+            {step.done ? <Check className="h-4 w-4 shrink-0 text-primary" /> : providerNeedsAction ? <Settings className="h-4 w-4 shrink-0 text-primary" /> : projectNeedsAction ? <FolderPlus className="h-4 w-4 shrink-0 text-primary" /> : <Loader2 className="h-4 w-4 shrink-0 animate-spin text-muted-foreground" />}
             <div className="truncate text-sm font-medium">{step.title}</div>
             <Badge tone={step.done ? "ok" : "muted"} className="ml-auto shrink-0">
-              {step.done ? t("onboarding.done") : projectNeedsAction ? t("onboarding.actionNeeded") : t("onboarding.detecting")}
+              {step.done ? t("onboarding.done") : (projectNeedsAction || providerNeedsAction) ? t("onboarding.actionNeeded") : t("onboarding.detecting")}
             </Badge>
           </div>
           <p className="mt-2 text-sm text-muted-foreground">{step.done ? step.doneDesc : step.todoDesc}</p>

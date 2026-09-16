@@ -106,7 +106,7 @@ assert.ok(overlay.includes("data-vrcforge-onboarding-provider-choice"));
 assert.ok(overlay.includes("externalAgentReady"));
 assert.ok(overlay.includes("onOpenExternalSettings"));
 assert.ok(app.includes("providerTestPassed || externalAgentVerified"));
-assert.ok(app.includes("handshake?.ready"));
+assert.ok(app.includes("hasRecentConnectorSelfTest(connectorStatus, runtimeConnected, activeProjectPath)"));
 assert.ok(overlay.includes("SUPPORTED_LOCALES.map"));
 assert.ok(overlay.includes('aria-label={t("settings.language")}'));
 assert.ok(!overlay.includes('"h-1.5 flex-1 rounded-full transition-colors"'));

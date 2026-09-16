@@ -353,14 +353,26 @@ class VRCForgeBridge:
             report["advertisesRequestApply"] = "vrcforge_request_apply" in tool_names
             report["advertisesDirectApply"] = bool(HIDDEN_EXTERNAL_TOOLS & tool_names)
             report["actualWriteToolCount"] = len(actual_write_names)
-            report["ok"] = (
+            planning_write_names = {
+                str(tool.get("name") or "") for tool in planning_tools
+                if isinstance(tool, dict) and isinstance(tool.get("_meta"), dict)
+                and str(tool["_meta"].get("permission") or "") == "Write"
+            }
+            report["readReady"] = (
                 bool(config.get("enabled"))
-                and bool(config.get("allow_write_requests", True))
-                and bool(actual_write_names)
+                and bool(planning_names)
+                and not planning_write_names
                 and actual_write_names.isdisjoint(planning_names)
-                and "vrcforge_request_apply" not in tool_names
-                and not bool(HIDDEN_EXTERNAL_TOOLS & tool_names)
+                and not bool(HIDDEN_EXTERNAL_TOOLS & (tool_names | planning_names))
             )
+            report["writeReady"] = bool(
+                report["readReady"] and config.get("allow_write_requests", True)
+                and actual_write_names
+            )
+            # Read-only/planning clients are fully connected without write
+            # authority. Report write readiness separately; never demand a
+            # hidden legacy write wrapper as proof of a working connection.
+            report["ok"] = report["readReady"]
             if not report["ok"]:
                 return reject(
                     status="external_tool_contract_not_ready",
