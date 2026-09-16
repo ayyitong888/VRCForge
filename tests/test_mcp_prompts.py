@@ -167,6 +167,33 @@ def test_prompt_get_without_resource_validator_fails_closed() -> None:
     assert context["missingRequiredResources"] == ["identityLockUri", "sessionContextUri"]
 
 
+def test_first_run_prompt_is_ready_without_avatar_identity_bootstrap() -> None:
+    skill = {
+        "name": "vrcforge-first-run-guide",
+        "title": "连接引导与日常排障",
+        "description": "Provider and Unity connection setup.",
+        "source": "user", "skillType": "package", "enabled": True, "available": True,
+        "allowedTools": ["vrcforge_know_yourself", "vrcforge_health"],
+        "instructions": "Diagnose first, then follow supervised repair.",
+        "workflowDomain": "diagnostics",
+        "requiredResources": [],
+        "gameOnlyAcceptance": [],
+        "supportFiles": ["workflows/first-run.json"],
+    }
+    registry = McpPromptRegistry(
+        lambda: {"skills": [skill]},
+        lambda _layer: [{"name": "vrcforge_know_yourself"}, {"name": "vrcforge_health"}],
+        support_files_loader=lambda _skill: [{"path": "workflows/first-run.json", "content": "{}"}],
+    )
+
+    context = registry.get("vrcforge-first-run-guide")["structuredContent"]["context"]
+    assert context["status"] == "ready_for_planning"
+    assert context["missingRequiredResources"] == []
+    assert context["gmCases"] == []
+    assert context["gameOnlyAcceptance"] == []
+    assert context["planningTools"] == ["vrcforge_health", "vrcforge_know_yourself"]
+
+
 def test_prompt_get_accepts_only_matching_live_resources_from_real_registry(tmp_path) -> None:
     resources = McpResourceRegistry(tmp_path / "resources")
     identity = resources.publish(

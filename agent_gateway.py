@@ -8828,6 +8828,11 @@ class AgentGateway:
             return {}
 
         package_store = self.user_constraints_path.parent / "skill-packages"
+        from bundled_skill_delivery import bundled_guide_audit_context
+
+        bundled = bundled_guide_audit_context(skill, self.skills.user_skills_dir, package_store)
+        if bundled:
+            return bundled
         registry_path = package_store / "registry.json"
         if not registry_path.is_file() or registry_path.is_symlink():
             return {}
@@ -9833,6 +9838,9 @@ def render_skill_markdown(skill: dict[str, Any]) -> str:
         ("requires-binaries", "requiresBinaries"),
         ("supported-os", "supportedOs"),
         ("support-files", "supportFiles"),
+        ("workflow-domain", "workflowDomain"),
+        ("required-resources", "requiredResources"),
+        ("game-only-acceptance", "gameOnlyAcceptance"),
         ("test-command", "testCommand"),
         ("enabled", "enabled"),
         ("tags", "tags"),

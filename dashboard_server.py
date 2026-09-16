@@ -73,6 +73,7 @@ from dashboard_foundation import (
     runtime_settings_path,
 )
 from bounded_process import BoundedProcessResult, run_bounded_process
+from bundled_skill_delivery import deliver_bundled_guide
 from alcom_litedb_reader import read_alcom_litedb_projects
 from app_update_service import AppUpdateService
 from agent_command_safety import normalize_filesystem_path
@@ -2115,6 +2116,16 @@ async def on_startup() -> None:
     await asyncio.to_thread(reconcile_diagnostic_trace_policy)
     await emit_safety_posture_snapshot("startup")
     if BACKEND_OWNER_LEASE.owned:
+        try:
+            with SKILL_PACKAGE_WRITE_LOCK, AGENT_GATEWAY.skills.write_lock:
+                bundled_guide = deliver_bundled_guide(
+                    SKILL_PACKAGE_PROJECTION,
+                    AGENT_GATEWAY.skills.user_skills_dir,
+                    version=app.version,
+                )
+            emit_log("info", "skills", "Bundled setup and repair guide checked.", {"status": bundled_guide["status"]})
+        except Exception as exc:  # noqa: BLE001 - guide delivery cannot block startup repair.
+            emit_log("warn", "skills", "Bundled setup and repair guide is unavailable.", {"error": str(exc)})
         try:
             SUB_AGENT_COLLABORATION.start()
             await asyncio.to_thread(

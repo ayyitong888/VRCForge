@@ -4,15 +4,75 @@
   "execution": "agentic",
   "minVRCForgeVersion": "1.8.1",
   "steps": [
-    {"id": "identify_agent", "instruction": "Distinguish internal provider setup from the external client's own provider. Never collect credentials in chat."},
-    {"id": "diagnose", "readTool": "vrcforge_know_yourself", "instruction": "Discover and load first; expand omitted workflow through the returned Resource."},
-    {"id": "select_project", "instruction": "Ask only when the exact existing project is unknown; use registered supervised selection tools."},
-    {"id": "open_project", "requiresUserAction": true, "capabilityGap": "No MCP open-existing-Unity-project tool; guide the App/Hub/VCC/ALCOM action and verify it."},
-    {"id": "install_core", "writeTool": "vrcforge_install_unity_core", "requiresApproval": true, "manualAlternative": "Import matching VRCForge.unitypackage in the selected Unity window; Import All."},
-    {"id": "verify_core", "readTools": ["vrcforge_core_upgrade_status", "vrcforge_unity_status", "vrcforge_unity_tools", "vrcforge_get_compile_errors"], "instruction": "Preserve pending status. Diagnose actual errors before a repair; do not repeat an in-progress install."},
-    {"id": "read_avatar", "readTool": "vrcforge_list_avatars", "instruction": "Require matching project/instance, complete tools and settled compilation before resuming the user's edit request."}
+    {
+      "id": "identify_agent",
+      "instruction": "Distinguish internal provider setup from the external client's own provider. Never collect credentials in chat."
+    },
+    {
+      "id": "diagnose",
+      "readTool": "vrcforge_know_yourself",
+      "instruction": "Discover and load first; expand omitted workflow through the returned Resource."
+    },
+    {
+      "id": "select_project",
+      "instruction": "Ask only when the exact existing project is unknown; use registered supervised selection tools."
+    },
+    {
+      "id": "open_project",
+      "requiresUserAction": true,
+      "capabilityGap": "No MCP open-existing-Unity-project tool; guide the App/Hub/VCC/ALCOM action and verify it."
+    },
+    {
+      "id": "install_core",
+      "writeTool": "vrcforge_install_unity_core",
+      "requiresApproval": true,
+      "manualAlternative": "Import matching VRCForge.unitypackage in the selected Unity window; Import All."
+    },
+    {
+      "id": "verify_core",
+      "readTools": [
+        "vrcforge_core_upgrade_status",
+        "vrcforge_unity_status",
+        "vrcforge_unity_tools",
+        "vrcforge_get_compile_errors"
+      ],
+      "instruction": "Preserve pending status. Diagnose actual errors before a repair; do not repeat an in-progress install."
+    },
+    {
+      "id": "read_avatar",
+      "readTool": "vrcforge_list_avatars",
+      "instruction": "Require matching project/instance, complete tools and settled compilation before resuming the user's edit request."
+    }
   ],
-  "recovery": {"tool": "vrcforge_restore_unity_core", "requiresSeparateApproval": true, "receiptFields": ["projectPath", "backupPath", "backupSha256", "installedSha256"]},
-  "completionRequires": ["exact_project", "matching_editor_and_core", "required_tools", "settled_compile", "successful_avatar_read"],
-  "never": ["invent_tool", "guess_project", "expose_credentials", "treat_saved_key_as_tested", "require_app_key_for_external_agent", "claim_pending_as_success", "use_outfit_import_for_first_core_install", "bypass_approval"]
+  "recovery": {
+    "tool": "vrcforge_restore_unity_core",
+    "requiresSeparateApproval": true,
+    "receiptFields": [
+      "projectPath",
+      "backupPath",
+      "backupSha256",
+      "installedSha256"
+    ]
+  },
+  "completionRequires": [
+    "exact_project",
+    "matching_editor_and_core",
+    "required_tools",
+    "settled_compile",
+    "successful_avatar_read"
+  ],
+  "never": [
+    "invent_tool",
+    "guess_project",
+    "expose_credentials",
+    "treat_saved_key_as_tested",
+    "require_app_key_for_external_agent",
+    "claim_pending_as_success",
+    "use_outfit_import_for_first_core_install",
+    "bypass_approval"
+  ],
+  "entryModes": {
+    "first_run": "Choose internal AI or an external client, then verify that route before project setup.",
+    "daily_repair": "Preserve the working configuration and current task; diagnose the failing layer, repair only what evidence requires, then retry and resume."
+  }
 }

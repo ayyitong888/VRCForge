@@ -1,9 +1,12 @@
 ---
 name: vrcforge-first-run-guide
-title: 第一次连接与排障
-description: Guide a complete beginner through VRCForge model-provider or external MCP setup, existing Unity project selection, bundled Core installation or manual unitypackage import, compilation, connection diagnosis and verified recovery. Use for first-run or connection failures, not ordinary avatar edits or unrelated network questions.
+title: 连接引导与日常排障
+description: Guide a complete beginner through VRCForge model-provider or external MCP setup, existing Unity project selection, bundled Core installation or manual unitypackage import, compilation, connection diagnosis and verified recovery. Use for first-run setup and everyday provider, project, Core, compile or MCP connection failures, not ordinary avatar edits or unrelated network questions.
 permission-mode: approval_required
 risk-level: high
+workflow-domain: diagnostics
+required-resources: []
+game-only-acceptance: []
 allowed-tools:
   - vrcforge_know_yourself
   - vrcforge_health
@@ -36,9 +39,16 @@ Use the user's language. Keep technical fields in tool calls; explain to the use
 
 ## 1. Establish which Agent is helping
 
+- If the user has not chosen a mode, explain the two App choices: use AI inside VRCForge, or connect an existing external AI client. Let the user choose; never require both. For external mode use the App Connectors page to select the actual client and follow its generated configuration/install instructions. Verify an authenticated MCP tool call after the client reloads; enabling Gateway or copying configuration alone is not a connection.
 - Internal Agent: model endpoint, model and Key must be configured and actually tested. Never claim that a saved Key proves a successful request. A model that cannot answer cannot repair its own unavailable provider; use App settings/Doctor or an already working external Agent for that stage.
 - External Agent: use its own provider. The VRCForge Gateway token authenticates MCP, not the model. An App `configure_provider` gap does not itself block an external Agent. Record this distinction without modifying or fabricating the report, and still enforce all project/Core/compile checks.
 - If MCP itself is unavailable, provide the exact App/client reconnection step. Do not pretend a tool ran, invent a second transport, inspect unrelated browser tabs, or ask the user to paste secrets.
+
+## Everyday troubleshooting
+
+Use this same Skill when a previously working setup fails. Preserve the current project, provider choice, permission mode and unfinished task. Start with current read-only diagnosis, not onboarding resets, provider replacement or Core reinstallation. Ask what changed only when live evidence does not identify the failing layer.
+
+Read only the relevant branch in `references/repair-guide.md`. Distinguish a failing model request from a working external Agent, a running App from a connected Unity instance, and compilation in progress from failed installation. After a targeted repair, repeat the failed operation and its relevant readback. Resume the original task when its prerequisites pass; do not restart the whole setup or claim all unrelated functionality has been tested.
 
 ## 2. Discover before invoking
 

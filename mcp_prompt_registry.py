@@ -227,10 +227,12 @@ class McpPromptRegistry:
         }
         identity_lock_uri = _uri_argument(args.get("identityLockUri"), "identityLockUri")
         session_context_uri = _uri_argument(args.get("sessionContextUri"), "sessionContextUri")
-        required_resources = _string_list(skill.get("requiredResources")) or [
-            "identityLockUri",
-            "sessionContextUri",
-        ]
+        declared_required_resources = skill.get("requiredResources")
+        required_resources = (
+            _string_list(declared_required_resources)
+            if declared_required_resources is not None
+            else ["identityLockUri", "sessionContextUri"]
+        )
         supplied = {
             "identityLockUri": identity_lock_uri,
             "sessionContextUri": session_context_uri,
@@ -297,9 +299,13 @@ class McpPromptRegistry:
                 if gm_relevant
                 else []
             ),
-            "gameOnlyAcceptance": _string_list(skill.get("gameOnlyAcceptance")) or [
-                "First-person shader behavior, final particle space, actual audio, Contact/DPS interaction, formal Build & Test and Upload remain user/game validation unless explicit evidence exists.",
-            ],
+            "gameOnlyAcceptance": (
+                _string_list(skill.get("gameOnlyAcceptance"))
+                if skill.get("gameOnlyAcceptance") is not None
+                else [
+                    "First-person shader behavior, final particle space, actual audio, Contact/DPS interaction, formal Build & Test and Upload remain user/game validation unless explicit evidence exists.",
+                ]
+            ),
             "planningTools": planning_tools,
             "executionWriteTools": write_tools,
             "writeToolBlocksToLoad": write_blocks,

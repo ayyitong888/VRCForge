@@ -40,6 +40,17 @@ foreach ($module in $excludeModules) {
     $excludeArgs += @("--exclude-module", $module)
 }
 
+# Ship the same complete first-party source used for .vsk export. The backend
+# projects it for new profiles without weakening community package trust.
+$bundledGuide = Join-Path $repoRoot "examples\skill-packages\vrcforge-first-run-guide"
+$bundledManifest = Get-Content -LiteralPath (Join-Path $bundledGuide "manifest.json") -Raw | ConvertFrom-Json
+$bundledGuideFiles = @("manifest.json") + @($bundledManifest.entrypoints.PSObject.Properties.Value)
+foreach ($relativePath in $bundledGuideFiles) {
+    if (-not (Test-Path -LiteralPath (Join-Path $bundledGuide $relativePath) -PathType Leaf)) {
+        throw "Bundled setup guide file is missing: $relativePath"
+    }
+}
+
 & $pyinstaller.Source `
     --noconfirm `
     --clean `
@@ -54,6 +65,7 @@ foreach ($module in $excludeModules) {
     --collect-data winpty `
     --hidden-import tools.vrcforge_agent_mcp_stdio `
     --hidden-import tools.vrcforge_cli `
+    --add-data "$bundledGuide;examples/skill-packages/vrcforge-first-run-guide" `
     @excludeArgs `
     --distpath $tempDist `
     --specpath (Join-Path $repoRoot "build\pyinstaller") `
@@ -67,6 +79,15 @@ if ($LASTEXITCODE -ne 0) {
 $sourceOutputDir = Join-Path $tempDist "vrcforge_backend"
 if (-not (Test-Path -LiteralPath (Join-Path $sourceOutputDir "vrcforge_backend.exe"))) {
     throw "PyInstaller did not produce vrcforge_backend.exe."
+}
+foreach ($relativePath in $bundledGuideFiles) {
+    $collectedPath = Join-Path $sourceOutputDir "_internal\examples\skill-packages\vrcforge-first-run-guide\$relativePath"
+    if (-not (Test-Path -LiteralPath $collectedPath -PathType Leaf)) {
+        throw "PyInstaller did not collect the bundled setup guide: $relativePath"
+    }
+    if ((Get-FileHash -LiteralPath $collectedPath).Hash -ne (Get-FileHash -LiteralPath (Join-Path $bundledGuide $relativePath)).Hash) {
+        throw "Bundled setup guide differs from its source: $relativePath"
+    }
 }
 $requiredWinPtyFiles = @(
     "_internal\winpty\OpenConsole.exe",

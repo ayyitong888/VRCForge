@@ -1,13 +1,19 @@
 {
   "id": "com.vrcforge.workflows.first_run_guide",
-  "name": "第一次连接与排障",
+  "name": "连接引导与日常排障",
   "skill_name": "vrcforge-first-run-guide",
   "version": "1.0.0",
   "author": "VRCForge",
-  "description": "Guide first-time users through provider or external MCP setup, project selection, bundled Core installation, connection diagnosis and verified recovery.",
+  "description": "Guide internal or external Agent setup and diagnose everyday provider, project, Unity Core and MCP failures with verified recovery.",
   "min_vrcforge_version": "1.8.1",
   "execution": "agentic",
-  "permissions": ["read_project", "read_package", "analyze_logs", "unity_scan_scene", "write_project_files"],
+  "permissions": [
+    "read_project",
+    "read_package",
+    "analyze_logs",
+    "unity_scan_scene",
+    "write_project_files"
+  ],
   "entrypoints": {
     "skill": "SKILL.md",
     "workflow": "workflows/first-run.json",
