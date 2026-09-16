@@ -2437,7 +2437,10 @@ class AgentGateway:
                         "turnId": turn_id,
                         "clientTurnId": client_turn_id,
                         "result": (
-                            summarize_owned_shell_result(ensure_dict(event.get("result")))
+                            {
+                                **summarize_owned_shell_result(event["result"]),
+                                "readEvidence": planner_policy.planner_read_output_evidence("shell", event["result"]),
+                            }
                             if isinstance(event.get("result"), dict)
                             else {}
                         ),
@@ -5497,6 +5500,7 @@ class AgentGateway:
                 if "stdoutSummary" in terminal_result or "stderrSummary" in terminal_result
                 else summarize_owned_shell_result(terminal_result)
             )
+            terminal_result_summary["readEvidence"] = planner_policy.planner_read_output_evidence("shell", terminal_result)
             continuation["plannerObservation"] = {
                 "tool": "shell",
                 "kind": "shell",
@@ -6810,6 +6814,23 @@ class AgentGateway:
                         "status": "blocked",
                     }
                 )
+                policy_arguments = (
+                    plan.get("writeParams") if action_kind == "write"
+                    else plan.get("skillParams") if action_kind == "skill"
+                    else {"command": command, "shellParams": shell_step_params}
+                )
+                if repeated_failure_guard.record_failure(
+                    policy_tool, policy_arguments, "skill_policy:" + skill_policy_reason,
+                ):
+                    steps[-1]["loopSuppressed"] = True
+                    last_plan = {
+                        **plan,
+                        "summary": "Repeated Skill policy rejection was suppressed.",
+                        "reply": "VRCForge stopped after the same action was rejected by the loaded Skill policy three times. Choose an allowed action or revise the workflow.",
+                        "nextStep": "loop_suppressed",
+                        "loopSuppression": repeated_failure_guard.snapshot(),
+                    }
+                    break
                 continue
 
             # Only a consecutive semantic replay is suppressed. A distinct
@@ -7096,6 +7117,8 @@ class AgentGateway:
                         "session": ensure_dict(step_payload.get("session")),
                     }
                 )
+                if isinstance(step_payload.get("result"), dict):
+                    shell_observation["readEvidence"] = planner_policy.planner_read_output_evidence("shell", step_payload["result"])
                 loop_state.append(
                     {
                         "tool": "shell",

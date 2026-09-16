@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 import hashlib
 import json
 import math
+import ntpath
 from pathlib import Path
 import re
 import time
@@ -1164,7 +1165,7 @@ def _planner_tool_observation_candidates(value: dict[object, object]) -> list[tu
     ordered = [preferred[key] for key in _PLANNER_TOOL_OBSERVATION_FIELD_ORDER if key in preferred]
     return ordered + counts
 
-def sanitize_planner_observation_text(value: object, limit: int = RUNTIME_PLANNER_TOOL_OBSERVATION_TEXT_MAX_CHARS) -> str:
+def sanitize_planner_observation_text(value: object, limit: int = RUNTIME_PLANNER_TOOL_OBSERVATION_TEXT_MAX_CHARS, *, preserve_whitespace: bool = False) -> str:
     """Make a short, model-visible tool summary safe even when a tool mislabeled it.
 
     This is intentionally stricter than UI/audit redaction: planning observations
@@ -1177,7 +1178,95 @@ def sanitize_planner_observation_text(value: object, limit: int = RUNTIME_PLANNE
     text = _PLANNER_TOOL_OBSERVATION_JWT_PATTERN.sub("<redacted>", text)
     text = _PLANNER_TOOL_OBSERVATION_WINDOWS_PATH_PATTERN.sub("<path redacted>", text)
     text = _PLANNER_TOOL_OBSERVATION_UNIX_PATH_PATTERN.sub("<path redacted>", text)
-    return summarize_text(text, limit)
+    return text[:limit] if preserve_whitespace else summarize_text(text, limit)
+
+
+def planner_read_output_evidence(tool: str, result: dict[str, object]) -> dict[str, object]:
+    """Bound actual read data separately from short status prose; never grant authority."""
+    evidence: dict[str, object] = {
+        "authority": "untrusted_tool_output",
+        "sourceTruncated": result.get("truncated") is True,
+        "truncated": result.get("truncated") is True,
+    }
+    # Budget escaped JSON characters, so quote/control-heavy data cannot expand
+    # beyond the observation allowance. Leave room for provenance and metadata.
+    remaining = 4400
+    omitted_chars = 0
+
+    def content(value: object, limit: int = 4000) -> str:
+        nonlocal remaining, omitted_chars
+        original = str(value or "")
+        text = sanitize_planner_observation_text(original, len(original), preserve_whitespace=True)
+        kept = text[:limit]
+        while len(json.dumps(kept, ensure_ascii=False)) > remaining and kept:
+            kept = kept[:len(kept) // 2]
+        remaining = max(0, remaining - len(json.dumps(kept, ensure_ascii=False)))
+        omitted_chars += len(text) - len(kept)
+        return kept
+
+    def source(value: object, root: object = "") -> str:
+        path = str(value or "").replace("\\", "/")
+        base = str(root or "").replace("\\", "/").rstrip("/")
+        if base and path.casefold().startswith(base.casefold() + "/"):
+            path = path[len(base) + 1:]
+        elif ntpath.isabs(path):
+            path = ntpath.basename(path)
+        return sanitize_planner_observation_text(path, 180)
+
+    if tool == "vrcforge_read_text_file" and isinstance(result.get("text"), str):
+        evidence.update({"source": source(result.get("path")), "text": content(result["text"]),
+                         "continuation": "If truncated, use search_text with a specific query to locate the needed section; this read tool has no offset parameter."})
+    elif tool in {"vrcforge_search_text", "vrcforge_find_files", "vrcforge_list_directory"}:
+        key = {"vrcforge_search_text": "matches", "vrcforge_find_files": "files", "vrcforge_list_directory": "entries"}[tool]
+        rows = result.get(key)
+        if not isinstance(rows, list):
+            return {}
+        items = []
+        for row in rows[:12]:
+            if not isinstance(row, dict) or remaining < 500:
+                break
+            item: dict[str, object] = {"source": source(row.get("path") or row.get("name"), result.get("path"))}
+            if isinstance(row.get("line"), int):
+                item["line"] = row["line"]
+            if isinstance(row.get("text"), str):
+                item["text"] = content(row["text"], 600)
+            if row.get("type") in {"file", "directory"}:
+                item["type"] = row["type"]
+            remaining = max(0, remaining - 220)
+            items.append(item)
+        evidence.update({"source": source(result.get("path")), "items": items,
+                         "returnedItems": len(rows), "omittedItems": len(rows) - len(items),
+                         "continuation": "If truncated, narrow the path/pattern/query; inspect an exact returned relative file with read_text_file or search_text."})
+    elif tool in {"shell", "unity_shell", "vrcforge_execute_shell"}:
+        if isinstance(result.get("readEvidence"), dict):
+            # The gateway assembles this from raw output before its durable
+            # legacy summary discards the rest. Reapply bounds and redaction;
+            # a nested result never becomes an unrestricted prompt payload.
+            cached = result["readEvidence"]
+            result = {"stdout": cached.get("stdout"), "stderr": cached.get("stderr"),
+                      "truncated": cached.get("truncated") is True}
+        has_raw = "stdout" in result or "stderr" in result
+        if not has_raw and not any(key in result for key in ("stdoutSummary", "stderrSummary")):
+            return {}
+        evidence.update({"source": "shell_output" if has_raw else "shell_summary",
+                         "stdout": content(result.get("stdout" if has_raw else "stdoutSummary"), 3000),
+                         "stderr": content(result.get("stderr" if has_raw else "stderrSummary"), 1000),
+                         "continuation": "If truncated, inspect the owned shell session output with shell_process when available, or run a narrower read-only diagnostic; do not replay a mutating command merely to recover output."})
+        evidence["sourceTruncated"] = bool(
+            result.get("truncated") or result.get("outputTruncated")
+            or result.get("stdoutTruncated") or result.get("stderrTruncated") or not has_raw
+            or any(str(result.get(key) or "").endswith("[truncated]") for key in ("stdout", "stderr"))
+        )
+    else:
+        return {}
+    evidence["omittedChars"] = omitted_chars
+    while isinstance(evidence.get("items"), list) and len(json.dumps(evidence, ensure_ascii=False)) > 6000:
+        evidence["items"].pop()
+        evidence["omittedItems"] += 1
+    evidence["truncated"] = bool(evidence["sourceTruncated"] or omitted_chars or evidence.get("omittedItems"))
+    if not evidence["truncated"]:
+        evidence["continuation"] = ""
+    return evidence
 
 def _planner_safe_tool_observation_value(value: object, *, depth: int = 0) -> object | None:
     if isinstance(value, bool) or isinstance(value, (int, float)):
@@ -2503,6 +2592,7 @@ class RuntimePlannerService:
             if superseded_by:
                 fields.append("supersededBy=" + sanitize_planner_observation_text(superseded_by, 80))
             tool_name = str(step.get("tool") or "").strip()
+            read_evidence = planner_read_output_evidence(tool_name, result) if isinstance(result, dict) else {}
             if (
                 tool_name in {"vrcforge_read_installed_skill", "vrcforge_list_installed_skills"}
                 and isinstance(result, dict) and result.get("ok") is True
@@ -2864,6 +2954,12 @@ class RuntimePlannerService:
                 if canonical_outcome or tool_name == "vrcforge_read_recent_logs"
                 else RUNTIME_PLANNER_TOOL_OBSERVATION_MAX_CHARS
             )
+            if read_evidence:
+                # Keep normal status/error semantics, then append intact JSON
+                # rather than truncating a serialized evidence object mid-field.
+                return summarize_text("; ".join(fields), 1000) + "; readEvidence=" + json.dumps(
+                    read_evidence, ensure_ascii=False, separators=(",", ":"),
+                )
             return summarize_text("; ".join(fields), observation_limit)
 
     def _build_llm_plan_prompt(

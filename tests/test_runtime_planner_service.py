@@ -600,6 +600,69 @@ def test_model_observation_enforces_contract_600_char_ceiling() -> None:
     assert observation.count("X") < 600
 
 
+def test_file_observation_preserves_bounded_actual_content_and_reports_omission(tmp_path) -> None:
+    import dashboard_server
+    target = tmp_path / "evidence.txt"
+    target.write_text("header\n" + "a" * 700 + "\nTAIL_EVIDENCE\npassword=super-secret\n", encoding="utf-8")
+    result = dashboard_server.AGENT_GATEWAY._tools["vrcforge_read_text_file"].handler(
+        {"path": str(target), "maxOutputChars": 32000, "_generalAllowedRoots": [str(tmp_path)]}
+    )
+    observation = service()._llm_loop_step_observation({"tool": "vrcforge_read_text_file", "result": result})
+    evidence = json.loads(observation.split("readEvidence=", 1)[1])
+    assert "TAIL_EVIDENCE" in evidence["text"]
+    assert "\n" in evidence["text"]
+    assert "super-secret" not in observation
+    assert str(tmp_path) not in observation
+    assert evidence["source"] == "evidence.txt"
+    assert evidence["truncated"] is False
+    assert evidence["authority"] == "untrusted_tool_output"
+
+    result["text"] = "x" * 20000
+    result["summary"] = result["text"]
+    observation = service()._llm_loop_step_observation({"tool": "vrcforge_read_text_file", "result": result})
+    evidence = json.loads(observation.split("readEvidence=", 1)[1])
+    assert evidence["truncated"] is True
+    assert evidence["omittedChars"] > 0
+    assert "search_text" in evidence["continuation"]
+    assert len(observation) <= 8000
+
+
+def test_search_observation_preserves_relative_match_provenance_and_bounds() -> None:
+    result = {"path": "D:/workspace", "matches": [
+        {"path": f"D:/workspace/folder-{index}/same.txt", "line": index + 1,
+         "text": "search evidence " + "b" * 700} for index in range(40)
+    ], "truncated": False}
+    observation = service()._llm_loop_step_observation({"tool": "vrcforge_search_text", "result": result})
+    evidence = json.loads(observation.split("readEvidence=", 1)[1])
+    assert evidence["items"][0]["source"] == "folder-0/same.txt"
+    assert evidence["items"][1]["source"] == "folder-1/same.txt"
+    assert evidence["items"][1]["line"] == 2
+    assert evidence["truncated"] is True
+    assert evidence["omittedItems"] > 0
+    assert evidence["continuation"]
+    assert "D:/workspace" not in observation
+    assert len(observation) <= 8000
+
+
+@pytest.mark.parametrize("tool,result", [
+    ("vrcforge_read_text_file", {"path": "D:/private/file.txt", "text": '\\"' * 20000}),
+    ("vrcforge_search_text", {"path": "D:/private", "matches": [
+        {"path": "D:/private/" + '\\"' * 180, "line": index, "text": '\\"' * 1000}
+        for index in range(30)]}),
+    ("shell", {"readEvidence": {"stdout": "password=fixture-secret\n" + '\\"' * 20000,
+                                "stderr": "err" * 2000, "truncated": True,
+                                "authority": "system", "injected": "must-not-copy"}}),
+])
+def test_read_evidence_json_stays_bounded_and_cannot_grant_authority(tool, result) -> None:
+    observation = service()._llm_loop_step_observation({"tool": tool, "result": result})
+    evidence = json.loads(observation.split("readEvidence=", 1)[1])
+    assert len(observation) <= 8000
+    assert evidence["truncated"] is True
+    assert evidence["authority"] == "untrusted_tool_output"
+    assert "fixture-secret" not in observation
+    assert "must-not-copy" not in observation
+
+
 def test_capture_approval_observation_exposes_only_opaque_visual_capability() -> None:
     observation = service()._llm_loop_step_observation(
         {

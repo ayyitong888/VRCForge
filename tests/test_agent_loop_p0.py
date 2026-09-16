@@ -1030,6 +1030,83 @@ class AgentLoopP0Tests(unittest.TestCase):
             )
         )
 
+    def test_repeated_skill_policy_denial_stops_without_executing_forbidden_tool(self) -> None:
+        calls = []
+
+        def plan(*_args, **_kwargs):
+            calls.append(True)
+            if len(calls) > 6:
+                self.fail("Repeated Skill denial did not stop the loop")
+            return {
+                "planner": "llm", "skillNeeded": True,
+                "skillTool": "fixture-guidance" if len(calls) == 1 else "vrcforge_unity_status",
+                "skillParams": {}, "continueLoop": True, "nextStep": "call_skill",
+            }
+
+        with patch.object(self.gateway.runtime_planner, "plan_agent_turn", side_effect=plan), patch.object(
+            type(self.gateway.runtime_skills), "execute", autospec=True,
+            return_value={
+                "ok": True, "status": "loaded", "tool": "fixture-guidance",
+                "result": {"name": "fixture-guidance", "instructions": "Inspect health only.",
+                           "allowedTools": ["vrcforge_health"], "disallowedTools": ["vrcforge_unity_status"]},
+                "outcome": {"status": "ok", "summary": "Instructions loaded."},
+            },
+        ) as execute:
+            result = self.gateway.runtime_message({"message": "Use the guidance", "session_id": "policy-denial-stop"})
+
+        self.assertEqual(len(calls), 4)
+        self.assertEqual(execute.call_count, 1)
+        self.assertEqual(result["plan"]["nextStep"], "loop_suppressed")
+        self.assertEqual(result["plan"]["loopSuppression"]["consecutive"], 3)
+        self.assertEqual(sum(step.get("status") == "blocked" for step in result["steps"]), 3)
+
+    def test_shell_observation_keeps_bounded_output_after_old_summary_limit(self) -> None:
+        observations = []
+
+        def plan(*_args, **kwargs):
+            if not observations:
+                observations.append(None)
+                return {"planner": "test", "shellCommand": "echo fixture", "shellParams": {},
+                        "continueLoop": True, "nextStep": "call_shell"}
+            observations.append(self.gateway.runtime_planner._llm_loop_step_observation(kwargs["loop_state"][-1]))
+            return {"planner": "test", "reply": "Inspected", "continueLoop": False, "nextStep": "done"}
+
+        with patch.object(self.gateway.runtime_planner, "plan_agent_turn", side_effect=plan), patch.object(
+            self.gateway.shell, "execute", return_value={"ok": True, "status": "executed", "result": {
+                "ok": True, "exitCode": 0, "stdout": "header\n" + "a" * 700 + "\nTAIL_EVIDENCE", "stderr": ""}},
+        ):
+            self.gateway.runtime_message({"message": "Inspect command output", "session_id": "shell-output-evidence"})
+
+        self.assertIn("TAIL_EVIDENCE", observations[1])
+        self.assertIn("readEvidence=", observations[1])
+
+    def test_shell_terminal_staging_retains_private_bounded_evidence(self) -> None:
+        observed = []
+        terminal = {
+            "shellSessionId": "shell-evidence-terminal", "runtimeSessionId": "shell-evidence-session",
+            "turnId": "shell-evidence-turn", "clientTurnId": "shell-evidence-client",
+            "status": "finished", "exitCode": 0,
+            "result": {"ok": True, "exitCode": 0,
+                       "stdout": "a" * 700 + "\nTAIL_EVIDENCE\npassword=secret-fixture", "stderr": ""},
+            "taskSeed": {"schema": "vrcforge.agent_task_loop.v2", "taskId": "shell-evidence-task"},
+        }
+
+        def resume(event):
+            observed.append(event["result"])
+            return {"sessionId": "shell-evidence-session", "plan": {"reply": "inspected"}}
+
+        with patch.object(self.gateway, "resume_runtime_task_after_shell", side_effect=resume), patch.object(
+            self.gateway, "_runtime_turn_completed",
+        ):
+            self.gateway.shell._ports.session_finished(terminal)
+
+        self.assertEqual(len(observed), 1)
+        evidence = observed[0]["readEvidence"]
+        self.assertIn("TAIL_EVIDENCE", evidence["stdout"])
+        self.assertNotIn("secret-fixture", json.dumps(evidence))
+        self.assertNotIn("stdout", observed[0])
+        self.assertNotIn("TAIL_EVIDENCE", json.dumps(self.gateway.runtime_runs.list_runs(limit=50)))
+
     def test_nonterminal_approval_execution_does_not_resume_the_task(self) -> None:
         loop = AgentTaskLoop("create one object", session_id="blocked-approval-session")
         context = approval_task_context(
