@@ -704,6 +704,8 @@
     "workSegment": "作業セグメント",
     "commandBatch": "コマンドを実行",
     "toolBatch": "ツールを使用",
+    "callTool": "ツールを呼び出す",
+    "runCommand": "コマンドを実行",
     "subagentBatch": "サブエージェントを実行",
     "workSegmentFiles": "{{count}} ファイルを編集",
     "workSegmentDuration": "{{duration}} で処理 · {{count}} 件",

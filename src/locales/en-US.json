@@ -704,6 +704,8 @@
     "workSegment": "Work segment",
     "commandBatch": "Ran commands",
     "toolBatch": "Used tools",
+    "callTool": "Call tool",
+    "runCommand": "Run command",
     "subagentBatch": "Ran sub agents",
     "workSegmentFiles": "Edited {{count}} files",
     "workSegmentDuration": "Handled in {{duration}} · {{count}} events",

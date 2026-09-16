@@ -704,6 +704,8 @@
     "workSegment": "工作段",
     "commandBatch": "執行了命令",
     "toolBatch": "呼叫了工具",
+    "callTool": "呼叫工具",
+    "runCommand": "執行命令",
     "subagentBatch": "執行了子代理",
     "workSegmentFiles": "已編輯 {{count}} 個檔案",
     "workSegmentDuration": "已處理 {{duration}} · {{count}} 個事件",

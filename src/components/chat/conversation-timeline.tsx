@@ -322,7 +322,10 @@ function InvocationDetailCard({ invocation, detail }: { invocation: TimelineInvo
       data-agent-invocation-output-card
       className="min-w-0 overflow-hidden rounded-xl border border-border bg-muted/20 shadow-sm"
     >
-      <div className="border-b border-border px-3 py-2 text-xs font-medium text-foreground">{title}</div>
+      <div className="border-b border-border px-3 py-2 text-xs font-medium text-foreground">
+        <div>{title}</div>
+        <div className="mt-0.5 break-all font-mono text-[11px] font-normal text-muted-foreground">{invocation.label}</div>
+      </div>
       <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words px-3 py-2.5 font-mono text-xs leading-relaxed text-foreground">
         {content}
       </pre>
@@ -915,22 +918,21 @@ export function RunRow({
 }) {
   const [open, setOpen] = useState(false);
   const Icon = icon === "shell" ? TerminalSquare : icon === "skill" ? Wrench : icon === "vision" ? Eye : ListChecks;
+  const compactExecution = icon === "shell" || icon === "skill";
   return (
-    <div className="group/run text-muted-foreground" style={timelineOrder !== undefined ? { order: timelineOrder } : undefined}>
+    <div className="text-muted-foreground" style={timelineOrder !== undefined ? { order: timelineOrder } : undefined}>
       <button
         type="button"
         onClick={() => setOpen((value) => !value)}
-        className="flex min-w-0 items-center gap-2 rounded-md px-1 py-1 text-left transition-colors hover:bg-muted/50"
+        className="group/run flex w-full min-w-0 items-center gap-2 rounded-md px-1 py-1 text-left transition-colors hover:bg-muted/50"
       >
-        {open ? (
-          <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-        ) : (
-          <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-        )}
         <Icon className="h-3.5 w-3.5 shrink-0" />
-        <span className={cn("min-w-0 truncate text-xs", icon === "shell" ? "font-mono" : "")}>{title}</span>
-        <span className={cn("shrink-0 text-xs", statusTone === "danger" ? "text-destructive" : statusTone === "warn" ? "text-amber-600" : statusTone === "ok" ? "text-emerald-600" : "text-muted-foreground")}>
+        <span className={cn("min-w-0 truncate text-xs", icon === "shell" ? "font-mono" : "")}>{compactExecution ? (icon === "shell" ? i18n.t("agent.runCommand") : i18n.t("agent.callTool")) : title}</span>
+        {!compactExecution ? <span className={cn("shrink-0 text-xs", statusTone === "danger" ? "text-destructive" : statusTone === "warn" ? "text-amber-600" : statusTone === "ok" ? "text-emerald-600" : "text-muted-foreground")}>
           {statusLabel}
+        </span> : null}
+        <span className="ml-auto shrink-0 opacity-0 transition-opacity group-hover/run:opacity-100 group-focus-visible/run:opacity-100">
+          {open ? <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" /> : <ChevronRight className="h-3.5 w-3.5 text-muted-foreground" />}
         </span>
       </button>
       {open ? (
@@ -957,19 +959,20 @@ function WorkSegmentRow({
 }) {
   const [open, setOpen] = useState(false);
   return (
-    <div className="group/work-segment text-muted-foreground">
+    <div className="text-muted-foreground">
       <button
         type="button"
         aria-expanded={open}
         onClick={() => setOpen((value) => !value)}
-        className="flex min-w-0 items-center gap-2 rounded-md px-1 py-1 text-left transition-colors hover:bg-muted/50"
+        className="group/work-segment flex w-full min-w-0 items-center gap-2 rounded-md px-1 py-1 text-left transition-colors hover:bg-muted/50"
       >
-        {open ? <ChevronDown className="h-3.5 w-3.5 shrink-0" /> : <ChevronRight className="h-3.5 w-3.5 shrink-0" />}
         {kind === "command" ? <TerminalSquare className="h-3.5 w-3.5 shrink-0" /> : kind === "tool" || kind === "file_edit" ? <Wrench className="h-3.5 w-3.5 shrink-0" /> : <ListChecks className="h-3.5 w-3.5 shrink-0" />}
-        <span className="min-w-0 truncate text-xs">{title}</span>
-        <span className={cn("shrink-0 text-xs", statusTone === "danger" ? "text-destructive" : "text-muted-foreground")}>{statusLabel}</span>
+        <span className="min-w-0 truncate text-xs">{kind === "command" ? i18n.t("agent.runCommand") : i18n.t("agent.callTool")}</span>
+        <span className="ml-auto shrink-0 opacity-0 transition-opacity group-hover/work-segment:opacity-100 group-focus-visible/work-segment:opacity-100">
+          {open ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+        </span>
       </button>
-      {open ? <div className="ml-6 mt-1 space-y-1 rounded-lg bg-muted/20 px-2 py-1">{children}</div> : null}
+      {open ? <div className="ml-6 mt-1 space-y-1 rounded-lg bg-muted/20 px-2 py-1"><div className="text-xs text-muted-foreground">{statusLabel}</div>{children}</div> : null}
     </div>
   );
 }
