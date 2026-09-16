@@ -1168,7 +1168,7 @@ def _planner_tool_observation_candidates(value: dict[object, object]) -> list[tu
     ordered = [preferred[key] for key in _PLANNER_TOOL_OBSERVATION_FIELD_ORDER if key in preferred]
     return ordered + counts
 
-def sanitize_planner_observation_text(value: object, limit: int = RUNTIME_PLANNER_TOOL_OBSERVATION_TEXT_MAX_CHARS, *, preserve_whitespace: bool = False) -> str:
+def sanitize_planner_observation_text(value: object, limit: int = RUNTIME_PLANNER_TOOL_OBSERVATION_TEXT_MAX_CHARS, *, preserve_whitespace: bool = False, preserve_urls: bool = False) -> str:
     """Make a short, model-visible tool summary safe even when a tool mislabeled it.
 
     This is intentionally stricter than UI/audit redaction: planning observations
@@ -1179,8 +1179,15 @@ def sanitize_planner_observation_text(value: object, limit: int = RUNTIME_PLANNE
     text = _PLANNER_TOOL_OBSERVATION_SECRET_PATTERN.sub(r"\1=<redacted>", text)
     text = _PLANNER_TOOL_OBSERVATION_KNOWN_TOKEN_PATTERN.sub("<redacted>", text)
     text = _PLANNER_TOOL_OBSERVATION_JWT_PATTERN.sub("<redacted>", text)
-    text = _PLANNER_TOOL_OBSERVATION_WINDOWS_PATH_PATTERN.sub("<path redacted>", text)
-    text = _PLANNER_TOOL_OBSERVATION_UNIX_PATH_PATTERN.sub("<path redacted>", text)
+    if preserve_urls:
+        text = re.sub(r"(https?://)[^/\s]*@", r"\1", text, flags=re.IGNORECASE)
+    # Public web evidence contains URLs whose slash components are not local
+    # paths. Protect those spans only after credential redaction has run.
+    parts = re.split(r'(https?://[^\s<>"\']+)', text, flags=re.IGNORECASE) if preserve_urls else [text]
+    for index in range(0, len(parts), 2):
+        parts[index] = _PLANNER_TOOL_OBSERVATION_WINDOWS_PATH_PATTERN.sub("<path redacted>", parts[index])
+        parts[index] = _PLANNER_TOOL_OBSERVATION_UNIX_PATH_PATTERN.sub("<path redacted>", parts[index])
+    text = "".join(parts)
     return text[:limit] if preserve_whitespace else summarize_text(text, limit)
 
 
@@ -1195,11 +1202,12 @@ def planner_read_output_evidence(tool: str, result: dict[str, object]) -> dict[s
     # beyond the observation allowance. Leave room for provenance and metadata.
     remaining = 4400
     omitted_chars = 0
+    web_evidence = tool in {"vrcforge_web_fetch", "vrcforge_web_search"}
 
     def content(value: object, limit: int = 4000) -> str:
         nonlocal remaining, omitted_chars
         original = str(value or "")
-        text = sanitize_planner_observation_text(original, len(original), preserve_whitespace=True)
+        text = sanitize_planner_observation_text(original, len(original), preserve_whitespace=True, preserve_urls=web_evidence)
         kept = text[:limit]
         while len(json.dumps(kept, ensure_ascii=False)) > remaining and kept:
             kept = kept[:len(kept) // 2]
@@ -1216,7 +1224,35 @@ def planner_read_output_evidence(tool: str, result: dict[str, object]) -> dict[s
             path = ntpath.basename(path)
         return sanitize_planner_observation_text(path, 180)
 
-    if tool == "vrcforge_read_text_file" and isinstance(result.get("text"), str):
+    def web_url(value: object) -> str:
+        nonlocal remaining, omitted_chars
+        original = str(value or "")
+        safe = sanitize_planner_observation_text(original, len(original), preserve_whitespace=True, preserve_urls=True)
+        size = len(json.dumps(safe, ensure_ascii=False))
+        # A cut URL is a different address. Omit it instead of fabricating a
+        # navigable prefix when the bounded observation cannot carry it.
+        if not re.fullmatch(r'https?://[^\s<>"\']+', safe, flags=re.IGNORECASE) or size > min(1000, remaining):
+            omitted_chars += len(original)
+            return ""
+        remaining -= size
+        return safe
+
+    if tool == "vrcforge_web_fetch" and isinstance(result.get("text"), str):
+        evidence.update({"url": web_url(result.get("url")), "title": content(result.get("title"), 240),
+                         "text": content(result["text"]),
+                         "continuation": "The page evidence is truncated; web_fetch has no offset parameter. Use web_search with the page URL/domain and a specific question to locate a narrower source, or state that the missing section remains unverified. Repeating the same fetch will not reveal the omitted tail."})
+    elif tool == "vrcforge_web_search" and isinstance(result.get("results"), list):
+        rows = result["results"]
+        items = []
+        for row in rows[:10]:
+            if not isinstance(row, dict) or remaining < 500:
+                break
+            items.append({"url": web_url(row.get("url")), "title": content(row.get("title"), 200),
+                          "snippet": content(row.get("snippet"), 500)})
+            remaining = max(0, remaining - 100)
+        evidence.update({"results": items, "returnedItems": len(rows), "omittedItems": len(rows) - len(items),
+                         "continuation": "Narrow web_search.query to retrieve omitted results; use web_fetch on an intact returned URL to inspect the source. Snippets alone may not support the requested conclusion."})
+    elif tool == "vrcforge_read_text_file" and isinstance(result.get("text"), str):
         evidence.update({"source": source(result.get("path")), "text": content(result["text"]),
                          "continuation": "If truncated, use search_text on the same exact file path with a specific query to locate the needed section; do not widen to its parent directory. This read tool has no offset parameter."})
     elif tool in {"vrcforge_search_text", "vrcforge_find_files", "vrcforge_list_directory"}:
