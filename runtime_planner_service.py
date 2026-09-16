@@ -492,6 +492,17 @@ class PlannerTool:
         object.__setattr__(self, "definition_digest", str(self.definition_digest or "").strip())
 
 
+def resolve_catalog_tool(tools: tuple[PlannerTool, ...] | list[PlannerTool], name: str) -> PlannerTool | None:
+    """Resolve only explicit typed names within the caller's existing catalogue."""
+    exact = next((tool for tool in tools if tool.name == name), None)
+    if exact is not None:
+        return exact
+    aliases = {tool.name: tool for tool in tools if tool.runtime_name == name}
+    # One implementation may have distinct capability projections (e.g. Shell).
+    # An ambiguous runtime name must never pick one of those capabilities.
+    return next(iter(aliases.values())) if len(aliases) == 1 else None
+
+
 @dataclass(frozen=True, slots=True)
 class PlannerSkill:
     name: str
@@ -1764,14 +1775,8 @@ class RuntimePlannerService:
                     exposure_layer,
                     project_context_active=project_context_active,
                 )
-                visible_tool = next(
-                    (tool for tool in catalog.visible_tools if tool.name == skill_tool),
-                    None,
-                )
-                routable_tool = next(
-                    (tool for tool in catalog.routable_tools if tool.name == skill_tool),
-                    None,
-                )
+                visible_tool = resolve_catalog_tool(catalog.visible_tools, skill_tool)
+                routable_tool = resolve_catalog_tool(catalog.routable_tools, skill_tool)
                 selected_tool = visible_tool or routable_tool
                 selected_runtime_tool = (
                     selected_tool.runtime_name if selected_tool is not None else skill_tool
@@ -1956,15 +1961,8 @@ class RuntimePlannerService:
                     exposure_layer,
                     project_context_active=project_context_active,
                 )
-                known_write_tool = next(
-                    (
-                        tool
-                        for tool in catalog.visible_tools
-                        if tool.name == write_tool and tool.write
-                    ),
-                    None,
-                )
-                if known_write_tool is not None:
+                known_write_tool = resolve_catalog_tool(catalog.visible_tools, write_tool)
+                if known_write_tool is not None and known_write_tool.write:
                     argument_validation = validate_planner_tool_arguments(
                         known_write_tool.input_schema,
                         write_params,
@@ -2913,11 +2911,17 @@ class RuntimePlannerService:
                 if tool.advanced:
                     flags.append("advanced")
                 suffix = f"（{','.join(flags)}）" if flags else ""
+                alias = (
+                    f" runtimeAlias={tool.runtime_name}"
+                    if tool.runtime_name != tool.name
+                    and resolve_catalog_tool(catalog.visible_tools, tool.runtime_name) is tool
+                    else ""
+                )
                 input_contract = planner_tool_schema_prompt(
                     _planner_schema_without_shared_defs(projected_schema, shared_schema_defs)
                 )
                 tool_lines.append(
-                    f"- {tool.name}{suffix}{input_contract}: "
+                    f"- {tool.name}{suffix}{alias}{input_contract}: "
                     f"{planner_tool_usage_description(tool.name, tool.description, write=tool.write)}"
                 )
             installed_skills = [

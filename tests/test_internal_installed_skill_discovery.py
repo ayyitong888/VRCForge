@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -102,6 +103,57 @@ def test_readable_metadata_does_not_enable_general_mode_package_execution(instal
         "Read the guide", {"_projectContextActive": False}, {}, exposure_layer="execution",
     )
     assert not plan.get("skillNeeded"), plan
+
+
+@pytest.mark.parametrize("name,arguments", [
+    ("vrcforge_list_internal_tool_blocks", {}),
+    ("vrcforge_load_internal_tool_block", {"block": "project_environment/files"}),
+])
+def test_shared_skill_runtime_names_route_through_registered_internal_alias(installed_guide, name, arguments):
+    app, gateway = installed_guide
+    read = gateway.runtime_skills.execute("vrcforge_read_installed_skill", {"name": SKILL_NAME}, "test")
+    assert read["ok"]
+    prompts = []
+    planner = RuntimePlannerService(
+        catalog=app._RuntimePlannerCatalog(), desktop=app._RuntimePlannerDesktopObservation(),
+        model=SimpleNamespace(plan=lambda prompt: (prompts.append(prompt) or PlannerModelResult(json.dumps({
+            "action": "skill", "skill_tool": name, "skill_params": arguments,
+        })))),
+    )
+    plan = planner.plan_agent_turn(
+        "Continue the read-only guide", {"_projectContextActive": False, "_internalToolBlocks": ["core"]}, {},
+        loop_state=[{"tool": "vrcforge_read_installed_skill", "status": "executed", "result": read["result"]}],
+    )
+    assert plan.get("skillNeeded"), plan
+    assert plan["skillTool"] == name
+    assert not plan.get("writeNeeded")
+    assert f"runtimeAlias={name}" in prompts[0]
+    result = gateway.runtime_skills.execute(plan["skillTool"], {**plan["skillParams"], "sessionId": "skill-alias-test"}, "test")
+    assert result["ok"], result
+
+
+@pytest.mark.parametrize("requested,visible", [
+    ("vrcforge_hidden", ()),
+    ("vrcforge_unknown", (PlannerTool(name="unknown", description="read", category="read/debug"),)),
+    ("vrcforge_shared", (
+        PlannerTool(name="one", runtime_name="vrcforge_shared", description="read", category="read/debug"),
+        PlannerTool(name="two", runtime_name="vrcforge_shared", description="read", category="read/debug"),
+    )),
+    ("vrcforge_write", (PlannerTool(name="write_alias", runtime_name="vrcforge_write", description="write", category="write", write=True),)),
+])
+def test_runtime_alias_never_exposes_hidden_inferred_ambiguous_or_write_tools(requested, visible):
+    catalog = PlannerCatalogSnapshot(visible_tools=visible, routable_tools=(
+        PlannerTool(name="hidden", runtime_name="vrcforge_hidden", description="hidden", category="read/debug"),
+    ))
+    planner = RuntimePlannerService(
+        catalog=SimpleNamespace(read=lambda *_args, **_kwargs: catalog), desktop=SimpleNamespace(),
+        model=SimpleNamespace(plan=lambda _prompt: PlannerModelResult(json.dumps({
+            "action": "skill", "skill_tool": requested, "skill_params": {},
+        }))),
+    )
+    plan = planner.plan_agent_turn("Read only", {"_projectContextActive": False}, {})
+    assert not plan.get("skillNeeded"), plan
+    assert not plan.get("writeNeeded"), plan
 
 
 def test_observe_summary_keeps_installed_guides_after_large_builtin_catalogue():
