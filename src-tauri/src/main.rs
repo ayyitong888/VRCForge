@@ -196,6 +196,7 @@ fn main() {
             check_skills,
             clear_agent_memory,
             clear_theme_background,
+            authorize_theme_background,
             cancel_agent_desktop_action,
             cancel_agent_memory_review,
             compact_agent_history,

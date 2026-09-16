@@ -1,5 +1,6 @@
 use crate::backend::user_data_dir;
 use sha2::{Digest, Sha256};
+use tauri::Manager;
 use std::{
     fs,
     io::{self, Read},
@@ -17,7 +18,7 @@ static THEME_BACKGROUND_LOCK: Mutex<()> = Mutex::new(());
 /// read access lasts for the picker operation and the managed copy lives until
 /// it is replaced, cleared, or the App data is removed.
 #[tauri::command]
-pub(crate) fn pick_theme_background() -> Result<Option<String>, String> {
+pub(crate) fn pick_theme_background(app: tauri::AppHandle) -> Result<Option<String>, String> {
     #[cfg(windows)]
     {
         let selected = rfd::FileDialog::new()
@@ -26,7 +27,10 @@ pub(crate) fn pick_theme_background() -> Result<Option<String>, String> {
             .pick_file();
         let _guard = theme_background_lock()?;
         selected
-            .map(|path| persist_theme_background_file(&path))
+            .map(|path| persist_theme_background_file(&path).and_then(|saved| {
+                register_theme_background_asset(&app, &saved)?;
+                Ok(saved)
+            }))
             .transpose()
             .map(|path| path.map(|value| value.display().to_string()))
     }
@@ -41,15 +45,49 @@ pub(crate) fn pick_theme_background() -> Result<Option<String>, String> {
 /// New selections never cross IPC as image bytes and never use Base64.
 #[tauri::command]
 pub(crate) fn import_legacy_theme_background(
+    app: tauri::AppHandle,
     bytes: Vec<u8>,
     extension: String,
 ) -> Result<String, String> {
     let _guard = theme_background_lock()?;
     let theme_dir = theme_background_directory()?;
     if let Some(existing) = first_managed_background(&theme_dir)? {
+        register_theme_background_asset(&app, &existing)?;
         return Ok(existing.display().to_string());
     }
-    persist_theme_background_bytes(&bytes, &extension).map(|path| path.display().to_string())
+    persist_theme_background_bytes(&bytes, &extension).and_then(|path| {
+        register_theme_background_asset(&app, &path)?;
+        Ok(path.display().to_string())
+    })
+}
+
+fn register_theme_background_asset(app: &tauri::AppHandle, path: &Path) -> Result<(), String> {
+    app.asset_protocol_scope()
+        .allow_file(path)
+        .map_err(|error| format!("Unable to authorize the saved background image: {error}"))
+}
+
+#[tauri::command]
+pub(crate) fn authorize_theme_background(
+    app: tauri::AppHandle,
+    path: String,
+) -> Result<String, String> {
+    let user_data = user_data_dir()?;
+    let path = validate_managed_background_path(Path::new(&path), &user_data)?;
+    register_theme_background_asset(&app, &path)?;
+    Ok(path.display().to_string())
+}
+
+fn validate_managed_background_path(path: &Path, user_data: &Path) -> Result<PathBuf, String> {
+    let theme_dir = theme_background_directory_at(user_data)?;
+    let canonical_theme_dir = fs::canonicalize(&theme_dir)
+        .map_err(|error| format!("Unable to inspect the theme background directory: {error}"))?;
+    let canonical_path = fs::canonicalize(path)
+        .map_err(|error| format!("The saved background image is unavailable: {error}"))?;
+    if !canonical_path.starts_with(&canonical_theme_dir) || !is_managed_background(&canonical_path) {
+        return Err("The saved background image is outside the managed theme directory.".to_string());
+    }
+    Ok(canonical_path)
 }
 
 /// Removes only VRCForge-owned managed backgrounds from the App data theme
@@ -349,6 +387,35 @@ mod tests {
         remove_managed_backgrounds(&theme_dir, None).expect("clear");
         assert!(!second.exists());
         assert!(user_named_file.exists());
+        fs::remove_dir_all(&root).expect("remove temp root");
+    }
+
+    #[test]
+    fn validates_only_existing_managed_background_paths() {
+        let root = std::env::temp_dir().join(format!("vrcforge-theme-auth-{}", std::process::id()));
+        let theme = root.join(THEME_BACKGROUND_DIRECTORY);
+        fs::create_dir_all(&theme).expect("theme dir");
+        let managed = theme.join("background-0123456789abcdef.png");
+        fs::write(&managed, b"\x89PNG\r\n\x1a\n").expect("managed file");
+        assert_eq!(validate_managed_background_path(&managed, &root).unwrap(), fs::canonicalize(&managed).unwrap());
+        let outside = root.join("outside.png");
+        fs::write(&outside, b"\x89PNG\r\n\x1a\n").expect("outside file");
+        assert!(validate_managed_background_path(&outside, &root).is_err());
+        fs::remove_dir_all(&root).expect("remove temp root");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_managed_name_symlink_escape() {
+        use std::os::unix::fs::symlink;
+        let root = std::env::temp_dir().join(format!("vrcforge-theme-link-{}", std::process::id()));
+        let theme = root.join(THEME_BACKGROUND_DIRECTORY);
+        fs::create_dir_all(&theme).expect("theme dir");
+        let outside = root.join("outside.png");
+        fs::write(&outside, b"\x89PNG\r\n\x1a\n").expect("outside file");
+        let link = theme.join("background-0123456789abcdef.png");
+        symlink(&outside, &link).expect("symlink");
+        assert!(validate_managed_background_path(&link, &root).is_err());
         fs::remove_dir_all(&root).expect("remove temp root");
     }
 }

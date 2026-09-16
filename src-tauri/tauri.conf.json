@@ -28,7 +28,9 @@
         "enable": true,
         "scope": [
           "$LOCALDATA/VRCForge/agentic-app/theme/**/*",
-          "$DATA/VRCForge/agentic-app/theme/**/*"
+          "$DATA/VRCForge/agentic-app/theme/**/*",
+          "$LOCALDATA/VRCForge/theme/**/*",
+          "$DATA/VRCForge/theme/**/*"
         ]
       }
     }

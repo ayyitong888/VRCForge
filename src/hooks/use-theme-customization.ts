@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useState } from "react";
-import { migrateLegacyThemeBackground, themeBackgroundAssetUrl } from "../lib/theme-background";
+import { authorizeThemeBackground, migrateLegacyThemeBackground, themeBackgroundAssetUrl } from "../lib/theme-background";
 import { readableForegroundForHsl, themeColorToHsl } from "../lib/theme-color";
 import {
   DEFAULT_THEME_CUSTOMIZATION,
@@ -13,6 +13,25 @@ import {
 export function useThemeCustomization() {
   const [customization, setCustomization] = useState<ThemeCustomization>(() => loadThemeCustomization());
   const [legacyBackground] = useState(() => loadLegacyThemeBackgroundDataUrl());
+  const [authorizedBackgroundPath, setAuthorizedBackgroundPath] = useState("");
+  const [backgroundError, setBackgroundError] = useState("");
+
+  useEffect(() => {
+    const path = customization.backgroundImagePath;
+    if (!path) { setAuthorizedBackgroundPath(""); setBackgroundError(""); return; }
+    let active = true;
+    void authorizeThemeBackground(path)
+      .then((authorizedPath) => {
+        if (active) { setAuthorizedBackgroundPath(authorizedPath); setBackgroundError(""); }
+      })
+      .catch((error: unknown) => {
+        if (active) {
+          setAuthorizedBackgroundPath("");
+          setBackgroundError(error instanceof Error ? error.message : String(error));
+        }
+      });
+    return () => { active = false; };
+  }, [customization.backgroundImagePath]);
 
   useEffect(() => {
     if (!legacyBackground || customization.backgroundImagePath) return;
@@ -91,7 +110,7 @@ export function useThemeCustomization() {
       root.style.removeProperty("--vrcforge-custom-surface-muted-s");
     }
 
-    const backgroundAssetUrl = themeBackgroundAssetUrl(customization.backgroundImagePath);
+    const backgroundAssetUrl = themeBackgroundAssetUrl(authorizedBackgroundPath);
     if (backgroundAssetUrl) {
       root.dataset.vrcforgeWallpaper = "active";
       root.dataset.vrcforgeWallpaperScope = customization.backgroundScope;
@@ -113,10 +132,11 @@ export function useThemeCustomization() {
         // The current session still uses the selected theme when storage is blocked.
       }
     }
-  }, [customization, legacyBackground]);
+  }, [customization, legacyBackground, authorizedBackgroundPath]);
 
   return {
     themeCustomization: customization,
+    backgroundError,
     updateThemeCustomization: (next: Partial<ThemeCustomization>) => {
       setCustomization((current) => normalizeThemeCustomization({ ...current, ...next }));
     },

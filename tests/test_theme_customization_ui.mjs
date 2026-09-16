@@ -65,11 +65,16 @@ assert.match(preference, /backgroundImagePath: string/);
 assert.match(preference, /backgroundScope: ThemeBackgroundScope/);
 assert.match(preference, /THEME_BACKGROUND_SCOPE_IDS = \["workspace", "app"\]/);
 assert.match(preference, /backgroundScope: "workspace"/);
-assert.match(hook, /themeBackgroundAssetUrl\(customization\.backgroundImagePath\)/);
+assert.match(hook, /themeBackgroundAssetUrl\(authorizedBackgroundPath\)/);
 assert.match(hook, /root\.dataset\.vrcforgeWallpaperScope = customization\.backgroundScope/);
 assert.match(rust, /persist_theme_background_file/);
 assert.match(rust, /remove_managed_backgrounds\(&theme_dir, Some\(&destination\)\)/);
 assert.match(rust, /pub\(crate\) fn clear_theme_background/);
+assert.match(rust, /asset_protocol_scope\(\)\s*\n?\s*\.allow_file\(path\)/);
+assert.match(rust, /authorize_theme_background/);
+assert.match(hook, /authorizeThemeBackground\(path\)/);
+assert.match(hook, /setBackgroundError/);
+assert.match(panel, /role="alert"/);
 assert.doesNotMatch(panel, /FileReader|readAsDataURL|MAX_THEME_BACKGROUND_BYTES/);
 
 // The previous Base64 record is a one-time compatibility input only. Once it
@@ -135,6 +140,10 @@ assert.equal(tauriConfig.app.security.assetProtocol.enable, true);
 assert.deepEqual(tauriConfig.app.security.assetProtocol.scope, [
   "$LOCALDATA/VRCForge/agentic-app/theme/**/*",
   "$DATA/VRCForge/agentic-app/theme/**/*",
+  // The legacy launcher fallback stores backend-owned user data directly
+  // under VRCForge; keep its managed theme directory readable as well.
+  "$LOCALDATA/VRCForge/theme/**/*",
+  "$DATA/VRCForge/theme/**/*",
 ]);
 assert.match(tauriConfig.app.security.csp, /asset:/);
 

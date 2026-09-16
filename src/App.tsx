@@ -303,7 +303,7 @@ export default function App() {
     dismissTransientFailure,
   } = useTransientFailureNotice();
   const [theme, setTheme] = useState<ThemeMode>(() => loadThemePreference());
-  const { themeCustomization, updateThemeCustomization, resetThemeCustomization } = useThemeCustomization();
+  const { themeCustomization, backgroundError: themeBackgroundError, updateThemeCustomization, resetThemeCustomization } = useThemeCustomization();
   const [input, setInput] = useState("");
   const [activeProjectPath, setActiveProjectPath] = useState("");
   const [activeProjectType, setActiveProjectType] = useState<ProjectType>("general");
@@ -3917,6 +3917,7 @@ export default function App() {
               runtimeConnected={runtimeConnected}
               currentLanguage={i18n.language}
               themeCustomization={themeCustomization}
+              themeBackgroundError={themeBackgroundError}
               apiProvider={apiProvider}
               apiKey={apiKey}
               apiBaseUrl={apiBaseUrl}

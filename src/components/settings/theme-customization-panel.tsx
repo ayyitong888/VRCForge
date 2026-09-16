@@ -14,13 +14,14 @@ import { ThemeColorEditor } from "./theme-color-editor";
 
 type ThemeCustomizationPanelProps = {
   value: ThemeCustomization;
+  backgroundError?: string;
   onChange: (next: Partial<ThemeCustomization>) => void;
   onReset: () => void;
 };
 
 const BACKGROUND_SCOPE_OPTIONS: readonly ThemeBackgroundScope[] = ["workspace", "app"];
 
-export function ThemeCustomizationPanel({ value, onChange, onReset }: ThemeCustomizationPanelProps) {
+export function ThemeCustomizationPanel({ value, backgroundError = "", onChange, onReset }: ThemeCustomizationPanelProps) {
   const { t } = useTranslation();
   const [message, setMessage] = useState("");
   const [backgroundBusy, setBackgroundBusy] = useState(false);
@@ -191,6 +192,7 @@ export function ThemeCustomizationPanel({ value, onChange, onReset }: ThemeCusto
             </div>
           ) : null}
           {message ? <p className="mt-2 text-xs text-muted-foreground" role="status">{message}</p> : null}
+          {backgroundError ? <p className="mt-2 text-xs text-destructive" role="alert">{backgroundError}</p> : null}
         </div>
         <div>
           <Button type="button" variant="ghost" disabled={backgroundBusy} onClick={() => void resetTheme()}>

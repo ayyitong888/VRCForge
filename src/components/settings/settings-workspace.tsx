@@ -44,6 +44,7 @@ type SettingsWorkspaceProps = {
   runtimeConnected: boolean;
   currentLanguage: string;
   themeCustomization: ThemeCustomization;
+  themeBackgroundError?: string;
   apiProvider: string;
   apiKey: string;
   apiBaseUrl: string;
@@ -143,6 +144,7 @@ export function SettingsWorkspace({
   runtimeConnected,
   currentLanguage,
   themeCustomization,
+  themeBackgroundError = "",
   apiProvider,
   apiKey,
   apiBaseUrl,
@@ -257,6 +259,7 @@ export function SettingsWorkspace({
             <section className="mt-10">
               <ThemeCustomizationPanel
                 value={themeCustomization}
+                backgroundError={themeBackgroundError}
                 onChange={onThemeCustomizationChange}
                 onReset={onResetThemeCustomization}
               />

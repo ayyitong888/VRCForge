@@ -15,6 +15,11 @@ export async function clearThemeBackground(): Promise<void> {
   await invoke("clear_theme_background");
 }
 
+export async function authorizeThemeBackground(path: string): Promise<string> {
+  if (!isTauriRuntime()) throw new Error("Background images require the desktop App.");
+  return invoke<string>("authorize_theme_background", { path });
+}
+
 export async function migrateLegacyThemeBackground(dataUrl: string): Promise<string> {
   const match = dataUrl.match(LEGACY_DATA_URL_PATTERN);
   if (!match || !isTauriRuntime()) {
