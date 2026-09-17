@@ -5,6 +5,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 import hashlib
 import json
+from planner_structured_tool_evidence import project_structured_tool_evidence
 import math
 import ntpath
 from pathlib import Path
@@ -3010,6 +3011,38 @@ class RuntimePlannerService:
                 return summarize_text("; ".join(fields), 1000) + "; readEvidence=" + json.dumps(
                     read_evidence, ensure_ascii=False, separators=(",", ":"),
                 )
+            if isinstance(result, dict) and tool_name not in {
+                "vrcforge_list_internal_tool_blocks",
+                "vrcforge_load_internal_tool_block",
+                "vrcforge_unload_internal_tool_block",
+                # These tools already have an owner-validated evidence channel.
+                # A recursive domain projection must not bypass compile field
+                # validation, opaque visual capabilities, or typed desktop reads,
+                # including when their dedicated payload is missing/malformed.
+                "vrcforge_get_compile_errors",
+                "vrcforge_read_recent_logs",
+                "vrcforge_agent_desktop_action",
+                "vrcforge_capture_screenshot",
+                "vrcforge_capture_multi_screenshot",
+                "vrcforge_vision_audit",
+                "vrcforge_vision_audit_multi",
+                "vrcforge_read_text_file",
+                "vrcforge_search_text",
+                "vrcforge_find_files",
+                "vrcforge_list_directory",
+                "vrcforge_web_fetch",
+                "vrcforge_web_search",
+                "shell", "unity_shell", "vrcforge_execute_shell",
+            }:
+                structured_evidence = project_structured_tool_evidence(
+                    result, sanitize_text=sanitize_planner_observation_text,
+                )
+                if structured_evidence:
+                    # Appending domain data must not shorten the pre-existing
+                    # canonical failure/recovery evidence allowance.
+                    return summarize_text("; ".join(fields), observation_limit) + "; structuredEvidence=" + json.dumps(
+                        structured_evidence, ensure_ascii=False, separators=(",", ":"),
+                    )
             return summarize_text("; ".join(fields), observation_limit)
 
     def _build_llm_plan_prompt(
