@@ -72,7 +72,7 @@ _PLANNER_SCHEMA_ANNOTATION_KEYS = frozenset({"description", "title", "examples"}
 
 _HIGH_CONFUSION_TOOL_INPUT_CONTRACTS: dict[str, tuple[str, ...]] = {
     "vrcforge_list_internal_tool_blocks": ("block?:string",),
-    "vrcforge_load_internal_tool_block": ("block:string",),
+    "vrcforge_load_internal_tool_block": ("block:string", "tools?:array"),
     "vrcforge_unload_internal_tool_block": ("block:string",),
     "vrcforge_list_directory": ("path:string", "projectPath?:string", "maxDepth?:integer", "maxCount?:integer"),
     "vrcforge_read_text_file": ("path:string", "projectPath?:string", "maxBytes?:integer", "maxOutputChars?:integer"),
@@ -212,6 +212,18 @@ def planner_tool_input_schema(name: str) -> dict[str, object]:
         return deepcopy(result_reader_schema)
     if name in MEMORY_TOOL_SCHEMAS:
         return deepcopy(MEMORY_TOOL_SCHEMAS[name])
+    if name == "vrcforge_load_internal_tool_block":
+        return {
+            "type": "object", "required": ["block"], "additionalProperties": False,
+            "properties": {
+                "block": {"type": "string", "minLength": 1},
+                "tools": {
+                    "type": "array", "items": {"type": "string", "minLength": 1},
+                    "minItems": 1, "uniqueItems": True,
+                    "description": "Optional exact tool names from this block's directory. Load only tools needed next; omit to load the whole block.",
+                },
+            },
+        }
     return bounded_planner_tool_schema(
         _contract_shallow_schema(planner_tool_input_contract(name))
     )
@@ -439,12 +451,7 @@ def planner_tool_schema_prompt(schema: object) -> str:
 def _shared_planner_schema_defs(
     schemas: list[dict[str, object]],
 ) -> dict[str, object]:
-    """Find the repeated, byte-equivalent provenance definition safe to show once.
-
-    The planner currently adds one known shared definition to every standard
-    tool. Keep this deliberately narrow: conflicts or unreferenced definitions
-    remain local, and unrelated schema definitions are never deduplicated.
-    """
+    """Share exact repeated contracts in the prompt, never in runtime schemas."""
 
     name = "vrcforge.prompt_skill_provenance.v1"
     occurrences: list[tuple[str, object]] = []
@@ -461,18 +468,41 @@ def _shared_planner_schema_defs(
                     deepcopy(definition),
                 )
             )
-    if len(occurrences) < 2 or not all(key == occurrences[0][0] for key, _ in occurrences[1:]):
-        return {}
-    return {name: occurrences[0][1]}
+    shared = (
+        {name: occurrences[0][1]}
+        if len(occurrences) >= 2 and all(key == occurrences[0][0] for key, _ in occurrences[1:])
+        else {}
+    )
+    groups: dict[str, list[dict[str, object]]] = {}
+    for schema in schemas:
+        projected = _planner_schema_without_shared_defs(schema, shared)
+        encoded = json.dumps(projected, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        # Keep local reference scopes and anchors local. Only the already-shared
+        # provenance reference may occur in these complete shared contracts.
+        if any(f'"{key}":' in encoded for key in ("$defs", "definitions", "$id", "$anchor", "$dynamicRef", "$dynamicAnchor")):
+            continue
+        if any(ref != "#/$defs/" + name for ref in re.findall(r'"\$ref":"([^\"]+)"', encoded)):
+            continue
+        groups.setdefault(encoded, []).append(projected)
+    for encoded, group in groups.items():
+        if len(group) < 2:
+            continue
+        shared_name = "vrcforge.tool_input." + hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:12]
+        reference = json.dumps({"$ref": "#/$defs/" + shared_name}, separators=(",", ":"))
+        # Avoid factoring tiny schemas where references save no useful space.
+        if len(encoded) * (len(group) - 1) <= len(reference) * len(group) + len(shared_name) + 128:
+            continue
+        shared[shared_name] = deepcopy(group[0])
+    return shared
 
 
 def _planner_schema_without_shared_defs(
     schema: dict[str, object],
     shared_defs: Mapping[str, object],
 ) -> dict[str, object]:
-    """Remove only definitions already emitted in the shared prompt section."""
+    """Replace only exact contracts/definitions already in the prompt section."""
 
-    if not shared_defs or not isinstance(schema.get("$defs"), Mapping):
+    if not shared_defs:
         return schema
     projected = deepcopy(schema)
     local_defs = dict(projected.get("$defs") or {})
@@ -488,6 +518,9 @@ def _planner_schema_without_shared_defs(
         projected["$defs"] = local_defs
     else:
         projected.pop("$defs", None)
+    for name, definition in shared_defs.items():
+        if name.startswith("vrcforge.tool_input.") and projected == definition:
+            return {"$ref": "#/$defs/" + name}
     return projected
 
 
@@ -1578,6 +1611,8 @@ class RuntimePlannerService:
             exposure_layer: str = EXPOSURE_LAYER_PLANNING,
         ) -> dict[str, object]:
             loop_state = loop_state or []
+            if isinstance(params.get("_internalToolSelections"), Mapping):
+                observe = {**observe, "internalToolSelections": deepcopy(params["_internalToolSelections"])}
             planner_label = str(params.get("_plannerAttemptLabel") or "").strip()
             if self._model is None:
                 return self._planner_failure_plan(
@@ -2433,6 +2468,8 @@ class RuntimePlannerService:
             """
 
             context_limit = usage_int(params.get("_contextCompactionLimit"))
+            if isinstance(params.get("_internalToolSelections"), Mapping):
+                observe = {**observe, "internalToolSelections": deepcopy(params["_internalToolSelections"])}
             compact_port = self._compactor
             if not context_limit or context_limit <= 0 or not history:
                 return history, None, False
@@ -2710,6 +2747,40 @@ class RuntimePlannerService:
                 fields.append("supersededBy=" + sanitize_planner_observation_text(superseded_by, 80))
             tool_name = str(step.get("tool") or "").strip()
             read_evidence = planner_read_output_evidence(tool_name, result) if isinstance(result, dict) else {}
+            if (
+                tool_name in {"vrcforge_load_internal_tool_block", "vrcforge_unload_internal_tool_block"}
+                and isinstance(result, dict) and result.get("ok") is True
+                and step.get("status") not in {"failed", "error", "rejected"}
+                and ensure_dict(step.get("outcome")).get("status") not in {"failed", "needs_user_action"}
+            ):
+                receipt: dict[str, object] = {"ok": True, "snapshotScope": "after_this_action"}
+                for key in ("status", "block", "selectionMode"):
+                    value = result.get(key)
+                    if isinstance(value, str):
+                        safe = sanitize_planner_observation_text(value, 200)
+                        if safe == value:
+                            receipt[key] = value
+                loaded = result.get("loadedBlocks")
+                if isinstance(loaded, list):
+                    names = [name for name in loaded[:64] if isinstance(name, str)
+                             and sanitize_planner_observation_text(name, 200) == name]
+                    receipt["loadedBlocks"] = names
+                    if len(names) != len(loaded):
+                        receipt["omittedBlocks"] = len(loaded) - len(names)
+                if "selectedTools" in result:
+                    selected = result["selectedTools"]
+                    if selected is None:
+                        receipt["selectedTools"] = None
+                    elif isinstance(selected, list):
+                        names = [name for name in selected[:128] if isinstance(name, str)
+                                 and sanitize_planner_observation_text(name, 200) == name]
+                        receipt["selectedTools"] = names
+                        if len(names) != len(selected):
+                            receipt["omittedTools"] = len(selected) - len(names)
+                if type(result.get("toolCount")) is int:
+                    receipt["toolCount"] = result["toolCount"]
+                fields.append("toolBlockReceipt=" + json.dumps(receipt, ensure_ascii=False, separators=(",", ":")))
+                return "; ".join(fields)
             if tool_name in MEMORY_TOOL_NAMES and isinstance(result, dict):
                 receipt = {key: result[key] for key in ("ok", "status", "memoryId", "scope", "count", "truncated", "alreadyExisted", "verification") if key in result}
                 if isinstance(result.get("memories"), list):
@@ -2756,6 +2827,7 @@ class RuntimePlannerService:
                     if log_evidence:
                         fields.append("logReadEvidence=" + json.dumps(log_evidence, ensure_ascii=False, separators=(",", ":")))
             if tool_name == "vrcforge_list_internal_tool_blocks" and isinstance(result, dict):
+                fields.append("toolBlockState=snapshot at this action; later load/unload actions may change it")
                 loaded_blocks = result.get("loadedBlocks")
                 if isinstance(loaded_blocks, list) and loaded_blocks:
                     fields.append(
@@ -2830,6 +2902,7 @@ class RuntimePlannerService:
                             "skill_tool=load_internal_tool_block;"
                             "skill_params={\"block\":\"<exact block name>\"}"
                         )
+                        fields.append("toolBlockSelection=Supply optional tools=[<exact directory tool names>] to load only the needed tools; the directory remains complete.")
             outcome = ensure_dict(step.get("outcome"))
             if outcome:
                 fields.append(
@@ -3168,8 +3241,12 @@ class RuntimePlannerService:
                 }
                 selected_blocks.add("core")
             selected_tools: list[PlannerTool] = []
+            tool_selections = ensure_dict(observe.get("internalToolSelections"))
             for tool in catalog.visible_tools:
                 if selected_blocks is not None and tool.block not in selected_blocks:
+                    continue
+                block_selection = tool_selections.get(tool.block)
+                if tool.block != "core" and isinstance(block_selection, list) and tool.name not in block_selection:
                     continue
                 if tool.requires_user_activation and not catalog.computer_use_model_invocable:
                     continue
@@ -3202,8 +3279,11 @@ class RuntimePlannerService:
                     and resolve_catalog_tool(catalog.visible_tools, tool.runtime_name) is tool
                     else ""
                 )
-                input_contract = planner_tool_schema_prompt(
-                    _planner_schema_without_shared_defs(projected_schema, shared_schema_defs)
+                prompt_schema = _planner_schema_without_shared_defs(projected_schema, shared_schema_defs)
+                input_contract = (
+                    " schema=" + json.dumps(prompt_schema, ensure_ascii=False, separators=(",", ":"))
+                    if set(prompt_schema) == {"$ref"}
+                    else planner_tool_schema_prompt(prompt_schema)
                 )
                 tool_lines.append(
                     f"- {tool.name}{suffix}{alias}{input_contract}: "
@@ -3279,7 +3359,11 @@ class RuntimePlannerService:
                             " and state what remains unverified.\n"
                         )
             runtime_scope_instruction = (
-                "A Unity project is explicitly bound to this turn. Use the project tool catalog when it is relevant."
+                "A Unity project is explicitly bound to this turn. Use the project tool catalog when it is relevant. "
+                "For questions about the current scene, component bindings, or Avatar behavior, prefer the dedicated read-only inspection tools; "
+                "if they are not exposed, discover and load the relevant tool block first. "
+                "Use scene/component evidence to identify the active binding: filenames do not prove current bindings. "
+                "Explicit file-content or file-location tasks should still use the filesystem readers."
                 if project_context_active
                 else (
                     "This is a general-purpose local Agent turn with no Unity project bound. "
@@ -3292,6 +3376,18 @@ class RuntimePlannerService:
                     "the user must explicitly open a project conversation before those capabilities exist."
                 )
             )
+            if selected_blocks is not None:
+                runtime_scope_instruction += (
+                    "\nCurrent loaded tool blocks: "
+                    + sanitize_planner_observation_text(json.dumps(sorted(selected_blocks), ensure_ascii=False, separators=(",", ":")), 8_000)
+                    + "\nEarlier list/load/unload receipts are historical snapshots; this current state and the visible tool catalog govern the next call."
+                    + "\nLoad only the exact tools needed next by passing optional tools=[<exact directory names>] with the block. "
+                    "The discovery directory lists all available tools; omit tools only when the whole block is needed."
+                )
+                if tool_selections:
+                    runtime_scope_instruction += "\nCurrent tool selections (null means whole block): " + sanitize_planner_observation_text(
+                        json.dumps(tool_selections, ensure_ascii=False, separators=(",", ":")), 8_000,
+                    )
             visible_read_names = {
                 tool.runtime_name: tool.name for tool in selected_tools if not tool.write
             }

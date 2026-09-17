@@ -109,6 +109,19 @@ def test_internal_tool_blocks_are_session_scoped_and_core_cannot_be_unloaded() -
     )
 
 
+def test_internal_tool_selection_unions_promotes_and_unload_clears() -> None:
+    state, _lock = make_state()
+
+    assert state.load_internal_tool_block_selected("session-a", "unity", ["scan_fx"]) == frozenset({"core", "unity"})
+    assert state.internal_tool_selections("session-a") == {"unity": ["scan_fx"]}
+    state.load_internal_tool_block_selected("session-a", "unity", ["list_avatars"])
+    assert state.internal_tool_selections("session-a") == {"unity": ["list_avatars", "scan_fx"]}
+    state.load_internal_tool_block_selected("session-a", "unity", None)
+    assert state.internal_tool_selections("session-a") == {"unity": None}
+    state.unload_internal_tool_block("session-a", "unity")
+    assert state.internal_tool_selections("session-a") == {}
+
+
 def test_cancel_markers_preserve_turn_precedence_and_single_consumption() -> None:
     state, _lock = make_state()
 

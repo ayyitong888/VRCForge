@@ -6469,6 +6469,7 @@ class AgentGateway:
             params["_internalToolBlocks"] = sorted(
                 self._runtime_session_state.internal_tool_blocks(session_id)
             )
+            params["_internalToolSelections"] = self._runtime_session_state.internal_tool_selections(session_id)
             budget_decision = task_loop.budget_policy.check(
                 model_turns_used=task_loop.model_turns_used,
                 tool_calls_used=tool_calls_used,

@@ -489,6 +489,33 @@ def test_internal_indexed_catalog_loads_per_session_without_leaking_to_external_
     }.isdisjoint(external_names)
 
 
+def test_internal_catalog_labels_core_tools_as_core_for_exact_load() -> None:
+    leaves = dashboard_server._internal_tool_block_leaves(
+        "execution", project_context_active=True,
+    )
+    health = next(item for item in leaves if item["name"] == "find_files")
+    assert health["block"] == "core"
+    session_id = "core-exact-load-regression"
+    loaded = dashboard_server.load_internal_tool_block({
+        "sessionId": session_id,
+        "block": "diagnostics_build/compile_logs",
+        "tools": ["find_files"],
+        "exposureLayer": "execution",
+        "projectContextActive": True,
+    })
+    assert loaded["ok"] is False
+    assert loaded["mutationStarted"] is False
+    core_loaded = dashboard_server.load_internal_tool_block({
+        "sessionId": session_id,
+        "block": "core",
+        "tools": ["find_files"],
+        "exposureLayer": "execution",
+        "projectContextActive": True,
+    })
+    assert core_loaded["ok"] is True
+    assert core_loaded["selectedTools"] == ["find_files"]
+
+
 def test_no_project_planner_prompt_is_general_and_omits_unity_tools() -> None:
     planner = dashboard_server.RuntimePlannerService(
         catalog=dashboard_server._RuntimePlannerCatalog(),

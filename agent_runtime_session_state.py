@@ -89,6 +89,11 @@ class AgentRuntimeSessionState:
             return frozenset({"core", *(str(item) for item in blocks if str(item))})
 
     def load_internal_tool_block(self, session_id: str, block: str) -> frozenset[str]:
+        return self.load_internal_tool_block_selected(session_id, block, None)
+
+    def load_internal_tool_block_selected(
+        self, session_id: str, block: str, tools: list[str] | None,
+    ) -> frozenset[str]:
         session_id = str(session_id or "").strip()
         block = str(block or "").strip()
         if not session_id or not block:
@@ -101,7 +106,24 @@ class AgentRuntimeSessionState:
             blocks = {"core", *(str(item) for item in session.get("internalToolBlocks", []))}
             blocks.add(block)
             session["internalToolBlocks"] = sorted(blocks)
+            selections = session.setdefault("internalToolSelections", {})
+            if tools is None:
+                selections[block] = None
+            elif block not in selections:
+                selections[block] = set(tools)
+            elif selections[block] is not None:
+                selections[block] = set(selections[block] or set()) | set(tools)
+            # A previously whole-loaded block is monotonic: a later subset
+            # request cannot hide tools already exposed in this session.
             return frozenset(blocks)
+
+    def internal_tool_selections(self, session_id: str) -> dict[str, list[str] | None]:
+        with self._ports.shared_state_lock:
+            session = self._sessions.get(str(session_id or "").strip()) or {}
+            return {
+                block: (sorted(value) if value is not None else None)
+                for block, value in (session.get("internalToolSelections") or {}).items()
+            }
 
     def unload_internal_tool_block(self, session_id: str, block: str) -> frozenset[str]:
         session_id = str(session_id or "").strip()
@@ -113,6 +135,8 @@ class AgentRuntimeSessionState:
             blocks = {"core", *(str(item) for item in (session or {}).get("internalToolBlocks", []))}
             if block != "core":
                 blocks.discard(block)
+                if session is not None:
+                    (session.get("internalToolSelections") or {}).pop(block, None)
             if session is not None:
                 session["internalToolBlocks"] = sorted(blocks)
             return frozenset(blocks)

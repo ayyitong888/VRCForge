@@ -15725,7 +15725,15 @@ def _internal_tool_block_leaves(
         leaves.append(
             {
                 "name": tool.name,
-                "block": tool.block,
+                # Core residency is authoritative; preserve the planner's
+                # canonical leaf for every non-core tool (including Unity).
+                "block": (
+                    "core"
+                    if internal_tool_block_for_name(
+                        str(getattr(tool, "runtime_name", "") or tool.name), ""
+                    ) == "core"
+                    else str(tool.block)
+                ),
                 "mode": "write" if tool.write else "read",
             }
         )
@@ -15736,7 +15744,7 @@ def build_internal_tool_block_inventory(params: dict[str, Any]) -> dict[str, Any
     session_id = str(params.get("sessionId") or params.get("session_id") or "").strip()
     exposure_layer = normalize_exposure_layer(params.get("exposureLayer"))
     project_context_active = params.get("projectContextActive") is True
-    return build_internal_tool_block_tree(
+    result = build_internal_tool_block_tree(
         selector=params.get("block") or params.get("index"),
         loaded_blocks=AGENT_GATEWAY.runtime_sessions.internal_tool_blocks(session_id),
         leaves=_internal_tool_block_leaves(
@@ -15744,6 +15752,8 @@ def build_internal_tool_block_inventory(params: dict[str, Any]) -> dict[str, Any
             project_context_active=project_context_active,
         ),
     )
+    result["internalToolSelections"] = AGENT_GATEWAY.runtime_sessions.internal_tool_selections(session_id)
+    return result
 
 
 def load_internal_tool_block(params: dict[str, Any]) -> dict[str, Any]:
@@ -15793,12 +15803,27 @@ def load_internal_tool_block(params: dict[str, Any]) -> dict[str, Any]:
                 "parent categories cannot be loaded."
             ]
         return response
-    loaded = AGENT_GATEWAY.runtime_sessions.load_internal_tool_block(session_id, block)
+    requested_tools = params.get("tools")
+    if requested_tools is not None:
+        if not isinstance(requested_tools, list) or not requested_tools:
+            return {"ok": False, "status": "failed", "errorCode": "internal_tool_selection_invalid", "error": "tools must be a non-empty array of exact tool names", "mutationStarted": False}
+        if any(not isinstance(name, str) or not name.strip() for name in requested_tools) or len(set(requested_tools)) != len(requested_tools):
+            return {"ok": False, "status": "failed", "errorCode": "internal_tool_selection_invalid", "error": "tools must contain unique non-empty exact names", "mutationStarted": False}
+        exposure_layer = normalize_exposure_layer(params.get("exposureLayer"))
+        leaves = _internal_tool_block_leaves(exposure_layer, project_context_active=params.get("projectContextActive") is True)
+        by_name = {str(item["name"]): str(item.get("block") or "") for item in leaves}
+        invalid = [name for name in requested_tools if by_name.get(name) != block]
+        if invalid:
+            return {"ok": False, "status": "failed", "errorCode": "internal_tool_selection_invalid", "error": f"Unknown or cross-block tool: {invalid[0]}", "mutationStarted": False}
+    loaded = AGENT_GATEWAY.runtime_sessions.load_internal_tool_block_selected(session_id, block, requested_tools)
+    selections = AGENT_GATEWAY.runtime_sessions.internal_tool_selections(session_id)
     return {
         "ok": True,
         "status": "loaded",
         "block": block,
         "loadedBlocks": sorted(loaded),
+        "selectionMode": "whole" if selections.get(block) is None else "subset",
+        "selectedTools": selections.get(block),
     }
 
 
@@ -15822,11 +15847,14 @@ def unload_internal_tool_block(params: dict[str, Any]) -> dict[str, Any]:
             "commitState": "not_started",
         }
     loaded = AGENT_GATEWAY.runtime_sessions.unload_internal_tool_block(session_id, block)
+    selections = AGENT_GATEWAY.runtime_sessions.internal_tool_selections(session_id)
     return {
         "ok": True,
         "status": "loaded" if block == "core" else "unloaded",
         "block": block,
         "loadedBlocks": sorted(loaded),
+        "selectionMode": "whole" if selections.get(block) is None else "subset",
+        "selectedTools": selections.get(block),
     }
 
 
