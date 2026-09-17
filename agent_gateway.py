@@ -36,7 +36,7 @@ from typing import TYPE_CHECKING, Any, Callable, Iterator, Mapping, Sequence
 
 from agent_memory_store import AgentMemoryStore
 from agent_memory_tools import MEMORY_TOOL_NAMES, MEMORY_WRITE_TOOLS, bind_memory_tool_context, safe_memory_record, requested_memory_tool
-from agent_tool_result_reader import TOOL_NAME as RESULT_READER_TOOL, bind_tool_result_context, read_tool_result, result_continuation
+from agent_tool_result_reader import TOOL_NAME as RESULT_READER_TOOL, bind_tool_result_context, page_next_request_arguments, read_tool_result, result_continuation
 from know_yourself_skill import bind_know_yourself_caller
 import agent_command_safety as command_safety
 import runtime_planner_service as planner_policy
@@ -7424,6 +7424,10 @@ class AgentGateway:
                         loop_state[-1]["correctionForActionId"] = task_action[
                             "correctedActionId"
                         ]
+                    for prior_step in loop_state[:-1]:
+                        if prior_step.get("actionId") in task_action.get("correctedActionIds", []):
+                            prior_step["status"] = "superseded"
+                            prior_step["supersededBy"] = task_action["actionId"]
 
             steps.append(
                 {
@@ -7495,9 +7499,7 @@ class AgentGateway:
             step_outcome = ensure_dict(step_payload.get("outcome"))
             step_outcome_status = str(step_outcome.get("status") or "").strip()
             task_action_id = str(task_action.get("actionId") or "").strip()
-            correction_action_id = str(
-                task_action.get("correctedActionId") or ""
-            ).strip()
+            correction_action_ids = task_action.get("correctedActionIds") or []
             if (
                 step_tool in _EXTERNAL_GENERAL_READ_TOOLS
                 and ensure_dict(step_outcome.get("error")).get("code") == "authorization_scope_denied"
@@ -7555,7 +7557,7 @@ class AgentGateway:
                 unresolved_completion_outcomes.pop(action_key, None)
                 if task_action_id:
                     unresolved_completion_action_keys.pop(task_action_id, None)
-                if correction_action_id:
+                for correction_action_id in correction_action_ids:
                     superseded_key = unresolved_completion_action_keys.pop(
                         correction_action_id,
                         None,
@@ -10094,6 +10096,13 @@ def redact_sensitive(value: Any) -> Any:
                 result[str(key)] = summarize_params(item)
             else:
                 result[str(key)] = redact_sensitive(item)
+        # Reader continuations are executable selectors, not diagnostic path
+        # summaries. Preserve only the validated four scalar argument fields.
+        reader_arguments = page_next_request_arguments(value)
+        if reader_arguments is not None:
+            result["nextRequest"]["arguments"] = {
+                key: redact_sensitive(item) for key, item in reader_arguments.items()
+            }
         return result
     if isinstance(value, list):
         return [redact_sensitive(item) for item in value]

@@ -18,6 +18,22 @@ from planner_structured_tool_evidence import _private_or_opaque, project_structu
 TOOL_NAME = "vrcforge_read_tool_result"
 PAGE_SCHEMA = "vrcforge.tool_result_page.v1"
 MAX_PAGE_CHARS = 6000
+INPUT_SCHEMA = {
+    "type": "object",
+    "required": ["resultRef"],
+    "additionalProperties": False,
+    "properties": {
+        "resultRef": {"type": "string", "pattern": "^result_[0-9a-f]{32}$",
+                      "description": "Exact current-turn resultRef from resultContinuation; never guess or reuse another turn's reference."},
+        "jsonPointer": {"type": "string", "maxLength": 1024, "default": "",
+                        "pattern": r"^(?:/(?:[^~/]|~[01])*){0,32}$",
+                        "description": "RFC6901 pointer: empty string selects root; otherwise keep the leading slash, e.g. /parameters or /layers/0/states. Escape a key's slash as ~1 and tilde as ~0. Copy exact pointers from returned rows."},
+        "offset": {"type": "integer", "minimum": 0, "default": 0,
+                   "description": "Zero-based item or field offset within the selected collection; at most its returned count. Use nextRequest to continue."},
+        "limit": {"type": "integer", "minimum": 1, "maximum": 20, "default": 6,
+                  "description": "Maximum items in this page (1 through 20). The character budget may return fewer; follow nextRequest when hasMore is true."},
+    },
+}
 # Existing owner-validated channels must not gain a generic raw-result escape.
 _RESTRICTED = frozenset({
     TOOL_NAME, "vrcforge_list_internal_tool_blocks", "vrcforge_load_internal_tool_block",
@@ -68,6 +84,34 @@ def _size(value: object) -> int:
 
 def _pointer(parent: str, name: object) -> str:
     return parent + "/" + str(name).replace("~", "~0").replace("/", "~1")
+
+
+def page_next_request_arguments(page: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Recognize the bounded reader continuation before generic log summarization.
+
+    Only these four scalar fields may bypass path shortening. Page content and
+    unrelated arguments retain the existing recursive redaction behavior.
+    """
+    request = page.get("nextRequest")
+    if (page.get("schema") != PAGE_SCHEMA or page.get("authority") != "untrusted_tool_output"
+            or page.get("ok") is not True or page.get("hasMore") is not True
+            or not isinstance(request, dict) or set(request) != {"tool", "arguments"}
+            or request.get("tool") != TOOL_NAME):
+        return None
+    args = request.get("arguments")
+    if not isinstance(args, dict) or set(args) != set(INPUT_SCHEMA["properties"]):
+        return None
+    ref, pointer = args.get("resultRef"), args.get("jsonPointer")
+    if (not isinstance(ref, str) or re.fullmatch(r"result_[0-9a-f]{32}", ref) is None
+            or ref != page.get("resultRef") or not isinstance(pointer, str)
+            or len(pointer) > 1024 or pointer != page.get("jsonPointer")
+            or re.fullmatch(INPUT_SCHEMA["properties"]["jsonPointer"]["pattern"], pointer) is None):
+        return None
+    offset, limit, current, count = args.get("offset"), args.get("limit"), page.get("offset"), page.get("totalItems")
+    if (any(type(value) is not int for value in (offset, limit, current, count))
+            or not 0 <= current < offset < count or not 1 <= limit <= 20):
+        return None
+    return dict(args)
 
 
 def _safe_key(name: object, value: object, sanitize: Callable[[object, int], str]) -> bool:

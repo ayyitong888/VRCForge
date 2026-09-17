@@ -46,8 +46,14 @@ def test_real_gateway_issues_current_turn_ref_and_reader_recovers_tail_parameter
             continuation = state[-1]["resultRead"]
             assert any(row["jsonPointer"] == "/parameters" and row["count"] == 28 for row in continuation["collections"])
             return {"planner": "llm", "skillNeeded": True, "skillTool": "vrcforge_read_tool_result",
-                    "skillParams": {"resultRef": continuation["resultRef"], "jsonPointer": "/parameters", "offset": 27},
+                    "skillParams": {"resultRef": continuation["resultRef"], "jsonPointer": "/parameters", "offset": 26, "limit": 1},
                     "continueLoop": True, "nextStep": "call_skill"}
+        if len(state) == 2:
+            request = state[-1]["result"]["nextRequest"]
+            assert request["arguments"]["jsonPointer"] == "/parameters"
+            assert request["arguments"]["offset"] == 27
+            return {"planner": "llm", "skillNeeded": True, "skillTool": request["tool"],
+                    "skillParams": request["arguments"], "continueLoop": True, "nextStep": "call_skill"}
         assert state[-1]["result"]["items"][0]["value"] == scan_result()["parameters"][27]
         observation = gateway.runtime_planner._llm_loop_step_observation(state[-1])
         assert "衣柜" in observation and '"type":"Int"' in observation
@@ -58,8 +64,8 @@ def test_real_gateway_issues_current_turn_ref_and_reader_recovers_tail_parameter
         with patch.object(gateway.runtime_planner, "plan_agent_turn", side_effect=planner):
             response = gateway.runtime_message({"message": "Inspect the supplied parameter result", "session_id": "reader-test"})
         assert response["plan"]["nextStep"] == "done"
-        assert [step["tool"] for step in response["steps"]] == [name, "vrcforge_read_tool_result"]
-        assert len(seen) == 2
+        assert [step["tool"] for step in response["steps"]] == [name, TOOL_NAME, TOOL_NAME]
+        assert len(seen) == 3
     finally:
         gateway._tools.pop(name, None)
         fixture.tearDown()
@@ -156,3 +162,58 @@ def test_json_pointer_escaping_and_no_owner_argument_override():
         for pointer in ("/a~2b", "relative", "/a~1b~0c/01", "/a~1b~0c/8"):
             with pytest.raises((ValueError, PermissionError)):
                 read(step, jsonPointer=pointer)
+
+
+def test_live_reader_schema_exposes_executable_bounds_and_rejects_r2_mistakes():
+    import dashboard_server
+    from runtime_planner_service import validate_planner_tool_arguments
+    from unity_tool_schema_projection import canonical_unity_read_tool_input_schema
+
+    schema = canonical_unity_read_tool_input_schema(TOOL_NAME)
+    assert schema["additionalProperties"] is False
+    assert schema["required"] == ["resultRef"]
+    assert schema["properties"]["limit"]["minimum"] == 1
+    assert schema["properties"]["limit"]["maximum"] == 20
+    assert schema["properties"]["offset"]["minimum"] == 0
+    assert "RFC6901" in schema["properties"]["jsonPointer"]["description"]
+    assert "~1" in schema["properties"]["jsonPointer"]["description"]
+    catalog = dashboard_server._RuntimePlannerCatalog().read("planning", project_context_active=True)
+    actual = next(tool for tool in catalog.visible_tools if tool.runtime_name == TOOL_NAME)
+    valid = {"resultRef": "result_" + "a" * 32, "jsonPointer": "/parameters", "offset": 6, "limit": 20}
+    assert validate_planner_tool_arguments(actual.input_schema, valid)["ok"]
+    for wrong in ({**valid, "limit": 28}, {**valid, "query": "衣柜"}, {**valid, "jsonPointer": "parameters"}):
+        assert not validate_planner_tool_arguments(actual.input_schema, wrong)["ok"]
+
+
+def test_reader_next_request_survives_real_gateway_redaction_and_observation():
+    from agent_gateway import redact_sensitive
+
+    step = retained({"parameters": scan_result()["parameters"], "layers": [{"states": [1, 2, 3]}]})
+    with bind_tool_result_context("session", "turn", "project", [step]):
+        for pointer in ("/parameters", "/layers/0/states"):
+            first = read(step, jsonPointer=pointer, limit=1)
+            persisted = redact_sensitive(first)
+            assert persisted["nextRequest"]["arguments"]["jsonPointer"] == pointer
+            following = read_tool_result(persisted["nextRequest"]["arguments"], sanitize=sanitize)
+            assert following["offset"] == 1
+            observation = RuntimePlannerService._llm_loop_step_observation(
+                None, {"tool": TOOL_NAME, "status": "executed", "result": persisted})
+            assert json.dumps(persisted["nextRequest"], ensure_ascii=False, separators=(",", ":")) in observation
+
+
+def test_page_marker_cannot_bypass_redaction_for_arbitrary_arguments():
+    from copy import deepcopy
+    from agent_gateway import redact_sensitive
+    from agent_tool_result_reader import page_next_request_arguments
+
+    step = retained(scan_result())
+    with bind_tool_result_context("session", "turn", "project", [step]):
+        page = read(step, jsonPointer="/parameters", limit=1)
+    for key, value in (("authorization", "Bearer sentinel"), ("path", "C:/private/host.txt"),
+                       ("jsonPointer", "/other"), ("resultRef", "invented"), ("limit", 21)):
+        forged = deepcopy(page)
+        forged["nextRequest"]["arguments"][key] = value
+        assert page_next_request_arguments(forged) is None
+        redacted = redact_sensitive(forged)
+        assert redacted["nextRequest"]["arguments"]["jsonPointer"] != forged["nextRequest"]["arguments"]["jsonPointer"]
+        assert "sentinel" not in json.dumps(redacted) and "C:/private" not in json.dumps(redacted)

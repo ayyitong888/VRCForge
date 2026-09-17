@@ -207,6 +207,9 @@ def bounded_planner_tool_schema(value: object) -> dict[str, object]:
 
 
 def planner_tool_input_schema(name: str) -> dict[str, object]:
+    from agent_tool_result_reader import INPUT_SCHEMA as result_reader_schema, TOOL_NAME as result_reader_tool
+    if name == result_reader_tool:
+        return deepcopy(result_reader_schema)
     if name in MEMORY_TOOL_SCHEMAS:
         return deepcopy(MEMORY_TOOL_SCHEMAS[name])
     return bounded_planner_tool_schema(

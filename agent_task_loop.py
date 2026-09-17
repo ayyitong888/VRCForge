@@ -1198,6 +1198,9 @@ class AgentTaskLoop:
     _skill_policy: dict[str, Any] = field(default_factory=dict)
     _skill_context: dict[str, Any] = field(default_factory=dict)
     _managed_visual_capture_action_ids: list[str] = field(default_factory=list)
+    # Result references are scoped to this turn; retain exact call identities
+    # only here, never reconstruct them from redacted summaries or persisted tasks.
+    _result_reader_targets: dict[str, tuple[str, str, int]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.objective = _bounded_text(self.objective, 600)
@@ -1425,6 +1428,22 @@ class AgentTaskLoop:
         pre_provider: bool = False,
     ) -> dict[str, Any]:
         action_id = _bounded_text(action_id, 80) or canonical_action_id(kind, tool, arguments)
+        reader_target = None
+        if kind == "skill" and tool == "vrcforge_read_tool_result" and isinstance(arguments, Mapping):
+            ref = arguments.get("resultRef")
+            pointer = arguments.get("jsonPointer", "")
+            offset = arguments.get("offset", 0)
+            if (
+                isinstance(ref, str) and ref
+                and isinstance(pointer, str) and len(pointer) <= 1024
+                and (not pointer or pointer.startswith("/"))
+                and "~" not in pointer.replace("~0", "").replace("~1", "")
+                and type(offset) is int and offset >= 0
+            ):
+                # Page size is intentionally excluded: correcting an invalid
+                # limit must still identify the same requested page start.
+                reader_target = (ref, pointer, offset)
+                self._result_reader_targets[action_id] = reader_target
         correction_id = _bounded_text(correction_for_action_id, 80)
         accepted_correction_id = ""
         if correction_id and correction_id != action_id:
@@ -1501,11 +1520,27 @@ class AgentTaskLoop:
         if running_state:
             record["runtimeStatus"] = running_state
         self._actions[action_id] = record
+        corrected_ids = [accepted_correction_id] if accepted_correction_id else []
+        if reader_target is not None and lifecycle == "completed" and outcome_status == "ok":
+            for previous_id, previous_branch in self._actions.items():
+                if (
+                    previous_id != action_id
+                    and previous_branch.get("status") == "failed"
+                    and self._result_reader_targets.get(previous_id) == reader_target
+                ):
+                    previous_branch["status"] = "superseded"
+                    previous_branch["supersededBy"] = action_id
+                    corrected_ids.append(previous_id)
+                    for requirement in self._requirements.values():
+                        if requirement.get("actionId") == previous_id:
+                            requirement["actionId"] = action_id
         if tool == "vrcforge_capture_multi_screenshot" and lifecycle == "completed":
             self._remember_managed_visual_capture(action_id)
         result = dict(record)
         if accepted_correction_id:
             result["correctedActionId"] = accepted_correction_id
+        if corrected_ids:
+            result["correctedActionIds"] = corrected_ids
         return result
 
     def require_action(
