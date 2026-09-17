@@ -1171,27 +1171,35 @@ class DashboardServerTests(unittest.TestCase):
         self.assertNotIn("text", compacted_ref)
         self.assertNotIn("dataUrl", compacted_ref)
 
-    def test_extract_streaming_dialogue_text_reads_summary_fallback(self) -> None:
+    def test_extract_streaming_dialogue_text_does_not_stream_summary(self) -> None:
         field, text = dashboard_server.extract_streaming_dialogue_text('{"action":"reply","summary":"hel')
 
-        self.assertEqual(field, "summary")
-        self.assertEqual(text, "hel")
+        self.assertEqual(field, "")
+        self.assertEqual(text, "")
 
     def test_extract_streaming_dialogue_text_prefers_reply(self) -> None:
         field, text = dashboard_server.extract_streaming_dialogue_text(
-            '{"summary":"draft","reply":"final line"}'
+            '{"action":"reply","summary":"draft","reply":"final line"}'
         )
 
         self.assertEqual(field, "reply")
         self.assertEqual(text, "final line")
 
-    def test_extract_streaming_dialogue_text_skips_non_string_reply(self) -> None:
+    def test_extract_streaming_dialogue_text_does_not_stream_tool_reply_or_summary(self) -> None:
         field, text = dashboard_server.extract_streaming_dialogue_text(
-            '{"reply":null,"summary":"visible"}'
+            '{"action":"skill","summary":"I will inspect the project.","reply":"tool preamble"}'
         )
 
-        self.assertEqual(field, "summary")
-        self.assertEqual(text, "visible")
+        self.assertEqual(field, "")
+        self.assertEqual(text, "")
+
+    def test_extract_streaming_dialogue_text_skips_non_string_reply(self) -> None:
+        field, text = dashboard_server.extract_streaming_dialogue_text(
+            '{"action":"reply","reply":null,"summary":"visible"}'
+        )
+
+        self.assertEqual(field, "")
+        self.assertEqual(text, "")
 
     def test_project_prefs_accepts_only_unity_project_roots(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -8084,7 +8092,7 @@ class DashboardServerTests(unittest.TestCase):
     @patch("dashboard_server.EVENT_BUS.broadcast_from_sync")
     @patch("dashboard_server.request_llm_plan_with_metadata")
     @patch.object(dashboard_server.PROVIDER_CONFIGURATION, "current_api_config")
-    def test_agent_runtime_stream_callback_emits_summary_deltas(
+    def test_agent_runtime_stream_callback_emits_only_explicit_reply_deltas(
         self,
         mock_current_api_config,
         mock_request_llm_plan,
@@ -8094,7 +8102,8 @@ class DashboardServerTests(unittest.TestCase):
 
         def fake_request(_settings, _prompt, stream_callback=None, **_kwargs):
             self.assertIsNotNone(stream_callback)
-            stream_callback('{"action":"reply","summary":"hel')
+            stream_callback('{"action":"reply","summary":"draft"')
+            stream_callback(',"reply":"hel')
             stream_callback('lo"}')
             return LlmPlanResponse(
                 text=json.dumps({"action": "reply", "summary": "hello"}),
@@ -8142,7 +8151,7 @@ class DashboardServerTests(unittest.TestCase):
 
         def fake_request(_settings, _prompt, stream_callback=None, **_kwargs):
             self.assertIsNotNone(stream_callback)
-            stream_callback('{"summary":"hel"')
+            stream_callback('{"action":"reply","summary":"draft"')
             stream_callback(',"reply":"hello wor')
             stream_callback('ld"}')
             return LlmPlanResponse(
@@ -8165,7 +8174,7 @@ class DashboardServerTests(unittest.TestCase):
 
         self.assertEqual(payload["reply"], "hello world")
         delta_events = [call.args[1] for call in mock_broadcast.call_args_list if call.args[0] == "agentRuntimeDelta" and "textDelta" in call.args[1]]
-        self.assertEqual([event["textDelta"] for event in delta_events], ["hel", "lo wor", "ld"])
+        self.assertEqual([event["textDelta"] for event in delta_events], ["hello wor", "ld"])
         self.assertTrue(mock_broadcast.call_args_list[-1].args[1]["done"])
 
     def test_agent_runtime_prompt_uses_full_visible_dialogue_only(self) -> None:

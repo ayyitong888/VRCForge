@@ -1276,7 +1276,18 @@ def _is_valid_agent_response(value: Any) -> bool:
         return False
     if any(not isinstance(plan.get(field), str) for field in ("summary", "planner")):
         return False
-    if not isinstance(plan.get("shellNeeded"), bool):
+    # Approval continuations that end in a user rejection are runtime
+    # terminal notices, not new planner decisions. Their compact plan may omit
+    # shellNeeded because no follow-up tool is being proposed. Keep the strict
+    # boolean contract for every other response.
+    if "shellNeeded" not in plan:
+        if not (
+            value.get("continuationSource") == "approval_finished"
+            and plan.get("planner") == "runtime"
+            and plan.get("nextStep") == "needs_user_action"
+        ):
+            return False
+    elif not isinstance(plan.get("shellNeeded"), bool):
         return False
     if "skillNeeded" in plan and not isinstance(plan.get("skillNeeded"), bool):
         return False

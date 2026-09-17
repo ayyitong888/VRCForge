@@ -15077,7 +15077,7 @@ def load_dashboard_settings(request: DashboardRequest | ConnectionRequest) -> Se
     return settings
 
 
-STREAMING_DIALOGUE_FIELDS = ("reply", "summary")
+STREAMING_DIALOGUE_FIELDS = ("reply",)
 
 
 def extract_streaming_json_string_field(raw_json_fragment: str, field_name: str) -> str | None:
@@ -15118,11 +15118,14 @@ def extract_streaming_json_string_field(raw_json_fragment: str, field_name: str)
 
 
 def extract_streaming_dialogue_text(raw_json_fragment: str) -> tuple[str, str]:
-    for field_name in STREAMING_DIALOGUE_FIELDS:
-        text = extract_streaming_json_string_field(raw_json_fragment, field_name)
-        if text:
-            return field_name, text
-    return "", ""
+    # Only an explicit terminal reply is safe to show while the Provider is
+    # still producing planner JSON. A summary may be an unverified plan for a
+    # tool call and must stay out of the user-facing streaming answer.
+    action = extract_streaming_json_string_field(raw_json_fragment, "action")
+    if action != "reply":
+        return "", ""
+    text = extract_streaming_json_string_field(raw_json_fragment, "reply")
+    return ("reply", text) if text else ("", "")
 
 
 def extract_streaming_reply_text(raw_json_fragment: str) -> str:

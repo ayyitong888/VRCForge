@@ -63,7 +63,7 @@ def test_each_model_call_starts_a_fresh_stream_boundary_even_for_format_retry(se
                     with pytest.raises(RuntimeError, match="fixture stopped"):
                         model.plan("format correction")
         phases = [payload.get("phase") or "done" for kind, payload in events if kind == "agentRuntimeDelta"]
-        expected = ["waiting_for_model", "receiving_response", "done", "waiting_for_model"]
+        expected = ["waiting_for_model", "done", "waiting_for_model"]
         if second_outcome == "reply":
             expected.extend(["receiving_response", "done"])
         assert phases == expected

@@ -5,6 +5,55 @@ import ts from "typescript";
 // Execute the actual hook's save/reconcile and enqueue functions with local ports.
 // No renderer, provider, backend, or live chat storage is involved.
 const source = fs.readFileSync("src/hooks/use-chat-sessions.ts", "utf8");
+// Reproduce a passive effect from an earlier render arriving between deltas.
+// Execute the real chats-only effects, if any, against that earlier snapshot.
+const chatsOnlyEffects = [];
+const hookAst = ts.createSourceFile("hook.ts", source, ts.ScriptTarget.Latest, true);
+function collectEffects(node) {
+  if (ts.isCallExpression(node) && node.expression.getText(hookAst) === "useEffect") {
+    const [callback, dependencies] = node.arguments;
+    if (dependencies && ts.isArrayLiteralExpression(dependencies)
+      && dependencies.elements.length === 1 && dependencies.elements[0].getText(hookAst) === "chats") {
+      chatsOnlyEffects.push(callback.getText(hookAst));
+    }
+  }
+  ts.forEachChild(node, collectEffects);
+}
+collectEffects(hookAst);
+const mutatorSource = source.slice(
+  source.indexOf("  function updateChatIfRevision("),
+  source.indexOf("\n  function appendToChat(", source.indexOf("  function updateChatIfRevision(")),
+);
+const mutatorJs = ts.transpileModule(mutatorSource, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+const mutatorPorts = {
+  chatsRef: { current: [{ id: "stream-chat", items: [{ id: "stream", type: "streaming", clientTurnId: "turn-1", text: "" }] }] },
+  applyRevisionedChatUpdate: (chat, _revision, updater) => ({ applied: true, chat: updater(chat) }),
+  stripSupersededStreamingItems: items => items,
+  cacheChatContextUsageFast: chat => chat,
+  markChatsDirty: () => { mutatorPorts.dirty += 1; },
+  setChats: chats => { mutatorPorts.savedSnapshot = chats; },
+  dirty: 0,
+  savedSnapshot: null,
+};
+const updateChatIfRevision = new Function(
+  ...Object.keys(mutatorPorts),
+  `${mutatorJs}\nreturn updateChatIfRevision;`,
+)(...Object.values(mutatorPorts));
+updateChatIfRevision("stream-chat", undefined, current => ({
+  ...current,
+  items: [{ ...current.items[0], text: `${current.items[0].text}first` }],
+}));
+const earlierRender = mutatorPorts.savedSnapshot;
+updateChatIfRevision("stream-chat", undefined, current => ({
+  ...current,
+  items: [{ ...current.items[0], text: `${current.items[0].text}second` }],
+}));
+for (const effect of chatsOnlyEffects) {
+  new Function("chatsRef", "chats", `(${effect})();`)(mutatorPorts.chatsRef, earlierRender);
+}
+assert.equal(mutatorPorts.chatsRef.current[0].items[0].text, "firstsecond", "rapid deltas must retain both mutations in the ref");
+assert.equal(mutatorPorts.savedSnapshot[0].items[0].text, "firstsecond", "the persisted snapshot must read the mutation-owned ref");
+assert.equal(mutatorPorts.dirty, 2);
 const functions = [
   source.slice(source.indexOf("  async function saveWithOneReconcileRetryWithinStorageOperation("), source.indexOf("\n  useEffect(() => {", source.indexOf("  async function saveWithOneReconcileRetryWithinStorageOperation("))),
   source.slice(source.indexOf("  function enqueueChatSave("), source.indexOf("\n  function touchChat(", source.indexOf("  function enqueueChatSave("))),

@@ -110,10 +110,6 @@ export function useChatSessions({
     [chats, i18n.language],
   );
 
-  useEffect(() => {
-    chatsRef.current = chats;
-  }, [chats]);
-
   useEffect(
     () => () => {
       if (chatTimestampCacheTimerRef.current) {

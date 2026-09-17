@@ -58,3 +58,32 @@ def test_lifecycle_event_requires_complete_public_envelope():
         del chat["items"][0]["event"][field]
         assert not is_valid_chat_record(chat), field
 
+
+def test_rejected_approval_terminal_response_is_persistable(tmp_path, monkeypatch):
+    import dashboard_server as server
+    from dashboard_api_models import ChatTranscriptsRequest
+
+    monkeypatch.setattr(server, "chat_transcripts_path", lambda: tmp_path / "chats.json")
+    monkeypatch.setattr(server, "chat_project_index_path", lambda: tmp_path / "projects.json")
+    chat = {
+        "id": "approval-rejected-chat",
+        "sessionId": "session-approval-rejected",
+        "items": [{
+            "id": "turn-approval-rejected",
+            "type": "agent",
+            "response": {
+                "ok": True,
+                "continuationSource": "approval_finished",
+                "resumedApprovalId": "approval-1",
+                "plan": {
+                    "summary": "The requested project change was rejected by the user.",
+                    "planner": "runtime",
+                    "reply": "The requested project change was rejected by the user.",
+                    "nextStep": "needs_user_action",
+                },
+            },
+        }],
+    }
+    assert is_valid_chat_record(chat)
+    result, _, _ = server.write_chat_transcripts_storage(ChatTranscriptsRequest(chats=[chat]))
+    assert result["ok"] is True
