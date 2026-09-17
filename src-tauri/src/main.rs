@@ -155,7 +155,10 @@ fn main() {
                         let _ = app.emit("vrcforge-tray-check-update", ());
                     }
                     "quit" => {
-                        shutdown_and_exit_app(app);
+                        // Let the WebView flush its in-memory chat snapshot before
+                        // the backend owner is stopped. The listener invokes the
+                        // confirmed quit command after persistence completes.
+                        let _ = app.emit("vrcforge-app-quit-requested", ());
                     }
                     _ => {}
                 })
@@ -382,12 +385,22 @@ fn prepare_app_quit() -> AppQuitReceipt {
 
 #[tauri::command]
 fn confirm_app_quit(app: tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.hide();
+    }
     shutdown_and_exit_app(&app);
 }
 
 fn shutdown_and_exit_app(app: &tauri::AppHandle) {
-    shutdown_managed_backend(app);
-    app.exit(0);
+    let state = app.state::<BackendState>();
+    if !begin_managed_backend_shutdown(&state) {
+        return;
+    }
+    let app = app.clone();
+    thread::spawn(move || {
+        shutdown_managed_backend(&app);
+        app.exit(0);
+    });
 }
 
 #[cfg(test)]
@@ -402,7 +415,8 @@ mod tests {
         runtime_session_busy_error, runtime_session_probe_error,
         runtime_session_verification_error, sanitize_backend_event, sanitize_text_for_webview,
         sanitize_webview_response, send_backend_graceful_shutdown_request_to,
-        stop_managed_backend_child, tauri_ipc_bridge_proof, try_ensure_agent_notes_file,
+        begin_managed_backend_shutdown, stop_managed_backend_child, tauri_ipc_bridge_proof,
+        try_ensure_agent_notes_file,
         validate_local_folder_to_open, validate_primitive_live_bootstrap,
         validate_project_folder_to_open, wait_for_child_exit, webview2_args_with_accessibility,
         webview_error_message, BackendSessionProbe, BackendState,
@@ -685,6 +699,14 @@ mod tests {
             .lock()
             .expect("job lock should remain valid")
             .is_none());
+    }
+
+    #[test]
+    fn managed_backend_shutdown_has_one_cleanup_owner() {
+        let state = BackendState::new();
+
+        assert!(begin_managed_backend_shutdown(&state));
+        assert!(!begin_managed_backend_shutdown(&state));
     }
 
     #[cfg(windows)]

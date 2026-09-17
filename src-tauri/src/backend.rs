@@ -16,7 +16,10 @@ use std::{
     net::{TcpStream, ToSocketAddrs},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
-    sync::{Mutex, OnceLock},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Mutex, OnceLock,
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -82,6 +85,8 @@ pub(crate) struct BackendState {
     pub(crate) event_bridge_started: Mutex<bool>,
     pub(crate) start_in_progress: Mutex<bool>,
     pub(crate) primitive_live_bootstrap: Mutex<Option<SensitiveBootstrap>>,
+    /// Ensures tray/IPC/restart shutdown requests share one cleanup owner.
+    pub(crate) shutdown_started: AtomicBool,
 }
 
 impl BackendState {
@@ -98,6 +103,7 @@ impl BackendState {
             event_bridge_started: Mutex::new(false),
             start_in_progress: Mutex::new(false),
             primitive_live_bootstrap: Mutex::new(bootstrap.map(SensitiveBootstrap::new)),
+            shutdown_started: AtomicBool::new(false),
         }
     }
 }
@@ -1633,4 +1639,14 @@ pub(crate) fn stop_managed_backend_child(state: &BackendState) {
 pub(crate) fn shutdown_managed_backend(app: &tauri::AppHandle) {
     let state = app.state::<BackendState>();
     stop_managed_backend_child(&state);
+}
+
+/// Claim the single shutdown lane before work is moved off the Tauri event
+/// thread. A second tray/IPC/restart request must not call `app.exit` while
+/// the first owner is still draining the backend child.
+pub(crate) fn begin_managed_backend_shutdown(state: &BackendState) -> bool {
+    state
+        .shutdown_started
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
 }

@@ -86,6 +86,7 @@ import { useThemeCustomization } from "./hooks/use-theme-customization";
 import { TEMP_CHATS_COLLAPSE_KEY, type ActiveView, type SettingsSection } from "./lib/app-view";
 import { presentApproval } from "./lib/approval-presentation";
 import { replyToSessionHandoff } from "./lib/api/session-handoff";
+import { flushChatsBeforeQuit } from "./lib/app-quit";
 import {
   DEVELOPER_OPTIONS_ENABLED_KEY,
   LAYOUT_PANE_WIDTHS_KEY,
@@ -379,6 +380,8 @@ export default function App() {
   const [dismissedDoctorPromptSignature, setDismissedDoctorPromptSignature] = useState("");
   const conversationEndRef = useRef<HTMLDivElement | null>(null);
   const conversationPinnedRef = useRef(true);
+  const persistChatsNowRef = useRef<() => Promise<void>>(async () => undefined);
+  const quitRequestedRef = useRef(false);
   const [pinnedToConversationBottom, setPinnedToConversationBottom] = useState(true);
   const updateConversationPinned = useCallback((pinned: boolean) => {
     conversationPinnedRef.current = pinned;
@@ -851,6 +854,7 @@ export default function App() {
     expandProjectGroup,
     initialChatState,
   });
+  persistChatsNowRef.current = persistChatsNow;
   const sessionHandoff = useSessionHandoff(endpoint, activeChatId);
   const handoffTargetChats = useMemo(() => {
     const sourceScope = normalizeProjectPathKey(activeChat?.projectPath || "");
@@ -2115,6 +2119,7 @@ export default function App() {
     let active = true;
     let unlistenTrayOpenChat: (() => void) | undefined;
     let unlistenTrayCheckUpdate: (() => void) | undefined;
+    let unlistenTrayQuit: (() => void) | undefined;
     void listen("vrcforge-tray-open-chat", () => {
       setActiveView("chat");
       setError("");
@@ -2150,10 +2155,35 @@ export default function App() {
         }
       })
       .catch(() => undefined);
+    void listen("vrcforge-app-quit-requested", () => {
+      if (quitRequestedRef.current) return;
+      quitRequestedRef.current = true;
+      void flushChatsBeforeQuit(
+        persistChatsNowRef.current,
+        () => invoke("confirm_app_quit").then(() => undefined),
+      ).then((result) => {
+        if (result === "persistence_failed") {
+          quitRequestedRef.current = false;
+          setError(t("chat.sessionSaveBlocked"));
+        }
+      }).catch(() => {
+        quitRequestedRef.current = false;
+        setError(t("chat.sessionSaveBlocked"));
+      });
+    })
+      .then((unlisten) => {
+        if (active) {
+          unlistenTrayQuit = unlisten;
+        } else {
+          unlisten();
+        }
+      })
+      .catch(() => undefined);
     return () => {
       active = false;
       unlistenTrayOpenChat?.();
       unlistenTrayCheckUpdate?.();
+      unlistenTrayQuit?.();
     };
   }, [activeChatId, chats, checkForAppUpdateNow]);
 

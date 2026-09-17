@@ -194,7 +194,7 @@ def test_main_window_close_hides_to_tray_while_explicit_quit_stops_backend() -> 
     quit_start = source.index('"quit" => {')
     quit_end = source.index("_ => {}", quit_start)
     quit_handler = source[quit_start:quit_end]
-    assert "shutdown_and_exit_app(app)" in quit_handler
+    assert 'app.emit("vrcforge-app-quit-requested", ())' in quit_handler
     prepare_start = source.index("fn prepare_app_quit")
     prepare_end = source.index("fn confirm_app_quit", prepare_start)
     prepare_command = source[prepare_start:prepare_end]
@@ -207,9 +207,20 @@ def test_main_window_close_hides_to_tray_while_explicit_quit_stops_backend() -> 
     lifecycle_start = source.index("fn shutdown_and_exit_app")
     lifecycle_end = source.index("#[cfg(test)]", lifecycle_start)
     lifecycle = source[lifecycle_start:lifecycle_end]
-    assert lifecycle.index("shutdown_managed_backend(app)") < lifecycle.index("app.exit(0)")
+    assert "begin_managed_backend_shutdown(&state)" in lifecycle
+    cleanup_start = lifecycle.index("thread::spawn(move ||")
+    cleanup = lifecycle[cleanup_start:]
+    assert cleanup.index("shutdown_managed_backend(&app)") < cleanup.index("app.exit(0)")
+    assert "if !begin_managed_backend_shutdown(&state)" in lifecycle
     assert "prepare_app_quit," in source
     assert "confirm_app_quit," in source
+    app_source = _read("src/App.tsx")
+    assert 'listen("vrcforge-app-quit-requested"' in app_source
+    assert "flushChatsBeforeQuit(" in app_source
+    assert "persistChatsNowRef.current" in app_source
+    assert 'setError(t("chat.sessionSaveBlocked"))' in app_source
+    assert "window.hide()" in source[source.index("fn confirm_app_quit"):source.index("fn shutdown_and_exit_app")]
+    assert 'invoke("confirm_app_quit")' in app_source
     quit_commands = source[prepare_start:lifecycle_end]
     assert "Duration::from_millis" not in quit_commands
     assert "thread::sleep" not in quit_commands
