@@ -17,7 +17,7 @@ _SECRET_KEYS = frozenset({
     "apikey", "key", "token", "accesstoken", "refreshtoken", "authtoken", "apptoken",
     "authorization", "password", "passwd", "secret", "clientsecret", "privatekey",
     "cookie", "cookies", "headers", "approvaltoken", "artifacttoken", "artifactsig",
-    "artifactsignature", "sessiontoken", "executiontargethandle",
+    "artifactsignature", "sessiontoken", "controltoken", "executiontargethandle",
 })
 _OPAQUE_KEYS = frozenset({
     "stdout", "stderr", "output", "outputs", "content", "body", "traceback", "stack",

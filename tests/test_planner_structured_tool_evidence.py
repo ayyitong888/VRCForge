@@ -65,6 +65,16 @@ def test_escaped_payload_and_depth_remain_bounded():
     assert evidence["truncated"] is True
 
 
+@pytest.mark.parametrize("field", ["control_token", "controltoken", "controlToken"])
+def test_process_control_credentials_are_removed_from_nested_domain_evidence(field):
+    evidence = project({"failureCause": {"code": "readiness_blocked", field: "control-credential-sentinel"},
+                        "observed": {"ready": False}})
+    assert "control-credential-sentinel" not in json.dumps(evidence)
+    assert evidence["data"]["failureCause"] == {"code": "readiness_blocked"}
+    assert evidence["data"]["observed"] == {"ready": False}
+    assert evidence["redactedFields"] == 1
+
+
 def test_large_early_collection_cannot_starve_other_domain_collections():
     result = {"animation_clips": [{"name": f"Clip{i}", "asset_path": "Assets/" + "x" * 300 + ".anim"} for i in range(100)],
               "layers": [{"name": "Wardrobe", "states": [{"name": "Rest"}]}],
