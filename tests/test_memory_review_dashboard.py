@@ -2024,9 +2024,25 @@ def test_dreaming_rechecks_the_same_memory_batch_before_any_merge(
     assert active_after == active_before - {ids[1], ids[5]}
 
 
-def test_disabling_memory_cancels_dreaming_before_second_provider_pass(memory_review_dashboard):
+def test_disabling_memory_cancels_dreaming_before_second_provider_pass(
+    memory_review_dashboard,
+    monkeypatch: pytest.MonkeyPatch,
+):
     env = memory_review_dashboard
     env.host.runtime._provider_timeout_seconds = 5
+    original_snapshot = env.host.service.snapshot
+
+    def stale_terminal_snapshot(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        value = original_snapshot(*args, **kwargs)
+        value["runStatus"] = {
+            "state": "completed",
+            "phase": "completed",
+            "completedAt": "old-terminal-run",
+            "failureClass": "old-failure",
+        }
+        return value
+
+    monkeypatch.setattr(env.host.service, "snapshot", stale_terminal_snapshot)
     for index in range(5):
         env.host.service.accepted_store.create({"scope": "user", "text": f"Saved fact {index}."})
     started, release = threading.Event(), threading.Event()
@@ -2044,6 +2060,11 @@ def test_disabling_memory_cancels_dreaming_before_second_provider_pass(memory_re
         assert await env.host.schedule_due_background(lambda: "")
         task = env.host._background_task
         assert await asyncio.to_thread(started.wait, 3)
+        in_flight = env.host.snapshot()
+        assert in_flight["runStatus"]["phase"] == "provider_call"
+        assert str(in_flight["runStatus"]["runId"])
+        assert "completedAt" not in in_flight["runStatus"]
+        assert "failureClass" not in in_flight["runStatus"]
         try:
             await env.host.update_config(MemoryReviewConfigRequest(
                 memoryEnabled=False, crossSessionEnabled=False,
@@ -2053,6 +2074,10 @@ def test_disabling_memory_cancels_dreaming_before_second_provider_pass(memory_re
         finally:
             release.set()
         await asyncio.gather(task, return_exceptions=True)
+        monkeypatch.undo()
+        settled = env.host.snapshot()
+        assert settled["runStatus"]["state"] == "idle"
+        assert settled["dreamingProposal"] is None
 
     asyncio.run(run())
     assert phases == ["organize"]

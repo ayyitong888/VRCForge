@@ -163,10 +163,29 @@ class MemoryReviewHost:
         self._background_task: asyncio.Task[dict[str, Any]] | None = None
         self._active_run_tasks: dict[str, asyncio.Task[Any]] = {}
         self._active_run_tasks_lock = threading.RLock()
+        # Dreaming uses the runtime coordinator directly rather than the
+        # durable review-run store. Keep its transient provider phase visible
+        # to snapshot callers while the paid background work is in flight.
+        self._dreaming_status: dict[str, Any] | None = None
+        self._dreaming_status_lock = threading.RLock()
 
     @property
     def background_active(self) -> bool:
         return self._background_task is not None and not self._background_task.done()
+
+    def _set_dreaming_status(self, run_id: str, state: Mapping[str, Any]) -> None:
+        phase = str(state.get("phase") or state.get("state") or "preflight")
+        with self._dreaming_status_lock:
+            self._dreaming_status = {
+                "state": phase,
+                "phase": phase,
+                "runId": str(run_id),
+                "attempt": max(0, int(state.get("attempt") or 0)),
+            }
+
+    def _dreaming_status_snapshot(self) -> dict[str, Any] | None:
+        with self._dreaming_status_lock:
+            return dict(self._dreaming_status) if self._dreaming_status else None
 
     def _available_root_for_scope_key(self, scope_key: str) -> str:
         try:
@@ -313,6 +332,11 @@ class MemoryReviewHost:
         else:
             run_state = str(raw_run_status or "idle")
             run_status = {"state": run_state, "phase": run_state}
+        dreaming_status = self._dreaming_status_snapshot()
+        if dreaming_status is not None:
+            # Replace durable terminal metadata while the separate Dreaming
+            # coordinator is active; it has its own current phase contract.
+            run_status = dreaming_status
         last_run = dict(raw.get("lastRun") or {}) if isinstance(raw.get("lastRun"), dict) else None
         if last_run is not None:
             last_run["usage"] = self._usage(last_run.get("usage"))
@@ -1299,6 +1323,8 @@ class MemoryReviewHost:
         prepared = await asyncio.to_thread(self.service.prepare_dreaming)
         if not prepared.get("prepared"):
             return {**prepared, "deduplicatedCount": 0}
+        run_id = str(prepared.get("runId") or "")
+        self._set_dreaming_status(run_id, {"phase": "preflight", "attempt": 0})
         try:
             provider_context = await asyncio.to_thread(self._load_provider_context)
         except Exception:  # noqa: BLE001 - optional housekeeping fails closed.
@@ -1371,6 +1397,7 @@ class MemoryReviewHost:
             base_url=provider_context.base_url,
             call=provider_call,
             commit=commit_reviewed,
+            on_run_state=lambda state: self._set_dreaming_status(run_id, state),
             continue_guard=lambda: self._idle_gate.is_current(generation) and self.service.memory_preferences()["memoryEnabled"],
         )
         if not runtime_result.ok:
@@ -1473,6 +1500,8 @@ class MemoryReviewHost:
         generation: int,
     ) -> None:
         self._idle_gate.release(generation)
+        with self._dreaming_status_lock:
+            self._dreaming_status = None
         if self._background_task is task:
             self._background_task = None
         try:
