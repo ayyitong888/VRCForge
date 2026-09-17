@@ -25,6 +25,12 @@ assert.match(helper, /finalAssistant/, "only the final assistant answer stays ex
 assert.match(source, /renderDirectTimelineInvocation/, "single invocations must not hide behind a generic semantic batch");
 assert.match(source, /compactExecution = icon === "shell" \|\| icon === "skill"/, "all command and tool rows use compact execution presentation");
 assert.match(source, /compactExecution \? \(icon === "shell" \? i18n\.t\("agent\.runCommand"\) : i18n\.t\("agent\.callTool"\)\)/, "collapsed invocation rows use generic labels");
+assert.match(source, /<span className="min-w-0 truncate text-xs">\{compactExecution \?/,
+  "collapsed command and tool summaries use the shared proportional text style");
+assert.doesNotMatch(source, /<span className=\{cn\("min-w-0 truncate text-xs", icon === "shell" \? "font-mono"/,
+  "collapsed command summaries must not use a code font");
+assert.match(source, /<pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words px-3 py-2\.5 font-mono text-xs/,
+  "expanded invocation output remains monospaced");
 assert.match(source, /group-hover\/run:opacity-100 group-focus-visible\/run:opacity-100/, "invocation chevrons stay hidden until hover or keyboard focus");
 assert.match(source, /group-hover\/work-segment:opacity-100 group-focus-visible\/work-segment:opacity-100/, "work segment chevrons stay hidden until hover or keyboard focus");
 assert.match(source, /invocation\.label[\s\S]*status/, "expanded invocation details retain the real label and status");
