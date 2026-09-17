@@ -4273,6 +4273,47 @@ class AgentLoopP0Tests(unittest.TestCase):
         self.assertNotEqual(captured["turnId"], "")
         self.assertEqual(result["plan"]["nextStep"], "done")
 
+    def test_final_assistant_timeline_preserves_markdown_in_recorded_turn(self) -> None:
+        reply = (
+            "Declared versions:\n\n- React: `^18.3.1`\n- Vite: `^6.4.3`\n\n"
+            "```json\n{\n  \"verified\": true\n}\n```\n\n"
+            + "Additional evidence.\n" * 90
+        ).strip()
+        emitted = []
+        with patch.object(self.gateway.runtime_planner, "plan_agent_turn", return_value={
+            "planner": "llm", "reply": reply, "summary": "Finished.",
+            "continueLoop": False, "nextStep": "done",
+        }), patch.object(self.gateway, "_runtime_timeline_changed", emitted.append):
+            response = self.gateway.runtime_message({
+                "message": "Explain these supplied versions.",
+                "session_id": "formatted-final-answer",
+            })
+        recorded = self.gateway.get_runtime_session("formatted-final-answer")["session"]["turns"][-1]
+        for timeline in (response["timeline"], recorded["timeline"],
+                         [item["timelineEvent"] for item in emitted]):
+            final = next(event for event in reversed(timeline) if event["kind"] == "assistant")
+            self.assertEqual(final["payload"]["summary"], reply)
+        # Exercise the actual durable payload through the JSON storage boundary.
+        path = Path(self.temp_dir.name) / "formatted-turn.json"
+        path.write_text(json.dumps(recorded), encoding="utf-8")
+        restored = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(restored["timeline"][-1]["payload"]["summary"], reply)
+
+    def test_final_assistant_timeline_has_separate_explicit_body_bound(self) -> None:
+        reply = "Details:\n\n" + "- Verified item\n" * 3000
+        with patch.object(self.gateway.runtime_planner, "plan_agent_turn", return_value={
+            "planner": "llm", "reply": reply, "summary": "Finished.",
+            "continueLoop": False, "nextStep": "done",
+        }):
+            response = self.gateway.runtime_message({
+                "message": "Explain these supplied details.",
+                "session_id": "bounded-final-answer",
+            })
+        final = response["timeline"][-1]["payload"]["summary"]
+        self.assertEqual(len(final), 32000)
+        self.assertEqual(final, reply.strip()[:31999] + "…")
+        self.assertEqual(response["plan"]["reply"], reply)
+
     def test_repeated_tool_steps_keep_their_own_results_in_execution_order(self) -> None:
         gateway = self.gateway
         first_arguments = {"avatarPath": "AvatarA"}

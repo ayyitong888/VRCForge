@@ -336,6 +336,14 @@ export function materializeRuntimeTimeline(response: AgentRuntimeResponse, fallb
       ? raw.kind as ChatTimelineEvent["kind"]
       : "assistant";
     const payload = raw.payload && typeof raw.payload === "object" ? raw.payload : {};
+    // Final Markdown bodies have a separate bound from compact tool summaries.
+    // Keep aligned with the gateway's assistant timeline event projection.
+    const summaryLimit = kind === "assistant" ? 32_000 : 1000;
+    const summary = typeof payload.summary === "string"
+      ? kind === "assistant" && payload.summary.length > summaryLimit
+        ? payload.summary.slice(0, summaryLimit - 1) + "…"
+        : payload.summary.slice(0, summaryLimit)
+      : undefined;
     return {
       id: typeof raw.id === "string" && raw.id ? raw.id : `timeline-${response.clientTurnId || response.turnId || response.turn_id || "turn"}-${index}`,
       sequence: Number.isFinite(raw.sequence) ? Number(raw.sequence) : index,
@@ -343,7 +351,7 @@ export function materializeRuntimeTimeline(response: AgentRuntimeResponse, fallb
       kind,
       payload: {
         ...(typeof payload.label === "string" ? { label: payload.label.slice(0, 160) } : {}),
-        ...(typeof payload.summary === "string" ? { summary: payload.summary.slice(0, 1000) } : {}),
+        ...(summary !== undefined ? { summary } : {}),
         ...(typeof payload.status === "string" ? { status: payload.status.slice(0, 80) } : {}),
         ...(typeof payload.tool === "string" ? { tool: payload.tool.slice(0, 160) } : {}),
         ...(typeof payload.phase === "string" ? { phase: payload.phase.slice(0, 80) } : {}),

@@ -6092,7 +6092,14 @@ class AgentGateway:
                 ("subagentStatus", subagent_status, 40),
                 ("actionId", action_id, 96),
             ):
-                bounded = summarize_text(str(value or ""), limit)
+                if kind == "assistant" and key == "summary":
+                    # Final answers are Markdown bodies, not compact tool summaries.
+                    # Keep this body bound aligned with materializeRuntimeTimeline.
+                    body_limit = 32_000
+                    body = str(value or "").strip()
+                    bounded = body if len(body) <= body_limit else body[:body_limit - 1] + "…"
+                else:
+                    bounded = summarize_text(str(value or ""), limit)
                 if bounded:
                     payload[key] = bounded
             event = {
