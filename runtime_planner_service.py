@@ -76,6 +76,7 @@ _HIGH_CONFUSION_TOOL_INPUT_CONTRACTS: dict[str, tuple[str, ...]] = {
     "vrcforge_unload_internal_tool_block": ("block:string",),
     "vrcforge_list_directory": ("path:string", "projectPath?:string", "maxDepth?:integer", "maxCount?:integer"),
     "vrcforge_read_text_file": ("path:string", "projectPath?:string", "maxBytes?:integer", "maxOutputChars?:integer"),
+    "vrcforge_read_tool_result": ("resultRef:string", "jsonPointer?:string", "offset?:integer", "limit?:integer"),
     "vrcforge_find_files": ("path:string", "projectPath?:string", "pattern?:string", "maxDepth?:integer", "maxCount?:integer"),
     "vrcforge_search_text": ("path:string", "projectPath?:string", "query:string", "pattern?:string", "maxDepth?:integer", "maxCount?:integer", "maxFileBytes?:integer", "caseSensitive?:boolean"),
     "vrcforge_edit_file": ("path:string", "content:string"),
@@ -152,36 +153,41 @@ def _contract_shallow_schema(input_contract: tuple[str, ...]) -> dict[str, objec
     }
 
 
-def _project_planner_schema(value: object) -> object:
-    """Keep JSON Schema semantics while dropping prose-only annotations."""
+def _project_planner_schema(value: object, *, property_schema: bool = False, description_budget: list[int] | None = None) -> object:
+    """Keep constraints and bounded parameter semantics without bulk annotations."""
+    if description_budget is None:
+        description_budget = [24]
 
     if isinstance(value, Mapping):
         projected: dict[str, object] = {}
         for raw_key, raw_value in value.items():
             key = str(raw_key)
             if key in _PLANNER_SCHEMA_ANNOTATION_KEYS:
+                if key == "description" and property_schema and isinstance(raw_value, str) and description_budget[0] > 0:
+                    projected[key] = summarize_text(raw_value, 240)
+                    description_budget[0] -= 1
                 continue
             if key in {"properties", "patternProperties", "$defs", "definitions", "dependentSchemas"} and isinstance(raw_value, Mapping):
                 projected[key] = {
-                    str(property_name): _project_planner_schema(property_schema)
+                    str(property_name): _project_planner_schema(property_schema, property_schema=key in {"properties", "patternProperties"}, description_budget=description_budget)
                     for property_name, property_schema in raw_value.items()
                 }
             elif key == "dependencies" and isinstance(raw_value, Mapping):
                 projected[key] = {
-                    str(name): _project_planner_schema(dependency)
+                    str(name): _project_planner_schema(dependency, description_budget=description_budget)
                     if isinstance(dependency, Mapping) else deepcopy(dependency)
                     for name, dependency in raw_value.items()
                 }
             elif key in {"allOf", "anyOf", "oneOf", "prefixItems"} and isinstance(raw_value, list):
-                projected[key] = [_project_planner_schema(item) for item in raw_value]
+                projected[key] = [_project_planner_schema(item, description_budget=description_budget) for item in raw_value]
             elif key == "items" and isinstance(raw_value, list):
-                projected[key] = [_project_planner_schema(item) for item in raw_value]
+                projected[key] = [_project_planner_schema(item, description_budget=description_budget) for item in raw_value]
             elif key in {
                 "additionalProperties", "additionalItems", "items", "contains",
                 "not", "if", "then", "else", "propertyNames",
                 "unevaluatedProperties", "unevaluatedItems", "contentSchema",
             }:
-                projected[key] = _project_planner_schema(raw_value)
+                projected[key] = _project_planner_schema(raw_value, description_budget=description_budget)
             else:
                 # Literal data (including const/enum/default) is not a schema.
                 projected[key] = deepcopy(raw_value)
@@ -1216,14 +1222,36 @@ def planner_read_output_evidence(tool: str, result: dict[str, object]) -> dict[s
         omitted_chars += len(text) - len(kept)
         return kept
 
+    # Preserve the complete asset-relative identity without exposing the host
+    # prefix. This is a lexical locator relation, not proof of Avatar binding.
+    result_root = str(result.get("path") or "").replace("\\", "/").rstrip("/")
+    asset_segment = re.search(r"(^|/)Assets(?:/|$)", result_root)
+    asset_prefix = result_root[:asset_segment.start() + len(asset_segment.group(1))] if asset_segment else ""
+
     def source(value: object, root: object = "") -> str:
+        nonlocal remaining, omitted_chars
         path = str(value or "").replace("\\", "/")
         base = str(root or "").replace("\\", "/").rstrip("/")
-        if base and path.casefold().startswith(base.casefold() + "/"):
+        if asset_segment and path.casefold().startswith(asset_prefix.casefold() + "assets"):
+            path = path[len(asset_prefix):]
+        elif base and path.casefold() == base.casefold():
+            path = "."
+        elif base and path.casefold().startswith(base.casefold() + "/"):
             path = path[len(base) + 1:]
         elif ntpath.isabs(path):
             path = ntpath.basename(path)
-        return sanitize_planner_observation_text(path, 180)
+        # Paths are structured selectors, not prose: slash after punctuation is
+        # not an absolute path. Apply credential checks without path rewriting.
+        safe = _PLANNER_TOOL_OBSERVATION_BEARER_PATTERN.sub("Bearer <redacted>", path)
+        safe = _PLANNER_TOOL_OBSERVATION_SECRET_PATTERN.sub(r"\1=<redacted>", safe)
+        safe = _PLANNER_TOOL_OBSERVATION_KNOWN_TOKEN_PATTERN.sub("<redacted>", safe)
+        safe = _PLANNER_TOOL_OBSERVATION_JWT_PATTERN.sub("<redacted>", safe)
+        size = len(json.dumps(path, ensure_ascii=False))
+        if safe != path or len(path) > 1000 or size > remaining:
+            omitted_chars += len(path)
+            return ""
+        remaining -= size
+        return path
 
     def web_url(value: object) -> str:
         nonlocal remaining, omitted_chars
@@ -1275,6 +1303,8 @@ def planner_read_output_evidence(tool: str, result: dict[str, object]) -> dict[s
             remaining = max(0, remaining - 220)
             items.append(item)
         evidence.update({"source": source(result.get("path")), "items": items,
+                         "relativeTo": "path_prefix_before_Assets" if asset_segment else "exact_tool_call_path",
+                         "locatorInstructions": "Resolve item.source against relativeTo, never against the display source basename. A dot means the exact input file. Empty source means the locator was omitted; do not guess it.",
                          "returnedItems": len(rows), "omittedItems": len(rows) - len(items),
                          "continuation": "If truncated, narrow the path/pattern/query; inspect an exact returned relative file with read_text_file or search_text."})
     elif tool in {"shell", "unity_shell", "vrcforge_execute_shell"}:
@@ -3011,6 +3041,12 @@ class RuntimePlannerService:
                 return summarize_text("; ".join(fields), 1000) + "; readEvidence=" + json.dumps(
                     read_evidence, ensure_ascii=False, separators=(",", ":"),
                 )
+            if tool_name == "vrcforge_read_tool_result" and isinstance(result, dict):
+                from agent_tool_result_reader import MAX_PAGE_CHARS, PAGE_SCHEMA
+                page_text = json.dumps(result, ensure_ascii=False, separators=(",", ":"))
+                if result.get("schema") == PAGE_SCHEMA and len(page_text) <= MAX_PAGE_CHARS:
+                    return summarize_text("; ".join(fields), observation_limit) + "; retainedResultPage=" + page_text
+                return summarize_text("; ".join(fields), observation_limit)
             if isinstance(result, dict) and tool_name not in {
                 "vrcforge_list_internal_tool_blocks",
                 "vrcforge_load_internal_tool_block",
@@ -3040,9 +3076,13 @@ class RuntimePlannerService:
                 if structured_evidence:
                     # Appending domain data must not shorten the pre-existing
                     # canonical failure/recovery evidence allowance.
+                    continuation = step.get("resultRead")
+                    continuation_text = ""
+                    if isinstance(continuation, dict) and isinstance(continuation.get("resultRef"), str):
+                        continuation_text = "; resultContinuation=" + json.dumps(continuation, ensure_ascii=False, separators=(",", ":"))
                     return summarize_text("; ".join(fields), observation_limit) + "; structuredEvidence=" + json.dumps(
                         structured_evidence, ensure_ascii=False, separators=(",", ":"),
-                    )
+                    ) + continuation_text
             return summarize_text("; ".join(fields), observation_limit)
 
     def _build_llm_plan_prompt(

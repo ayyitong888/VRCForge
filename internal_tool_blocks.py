@@ -198,6 +198,7 @@ _CORE_TOOLS = frozenset(
         # still enforce the same path authorization and project boundaries.
         "vrcforge_list_directory",
         "vrcforge_read_text_file",
+        "vrcforge_read_tool_result",
         "vrcforge_find_files",
         "vrcforge_search_text",
         "vrcforge_web_fetch",

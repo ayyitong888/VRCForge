@@ -15596,6 +15596,7 @@ _RUNTIME_PLANNER_VISUAL_AUDIT_TOOLS = frozenset(
 
 RUNTIME_PLANNER_GENERAL_AGENT_TOOLS = frozenset(
     {
+        "vrcforge_read_tool_result",
         "vrcforge_know_yourself",
         "vrcforge_list_directory",
         "vrcforge_read_text_file",
