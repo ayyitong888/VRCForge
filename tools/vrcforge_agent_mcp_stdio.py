@@ -597,7 +597,7 @@ class VRCForgeBridge:
             "io.modelcontextprotocol/clientCapabilities": {},
             "io.modelcontextprotocol/clientInfo": {
                 "name": "vrcforge-agent-stdio-bridge",
-                "version": "1.8.0",
+                "version": "1.8.3",
             },
         }
         if method in {"tools/call", "tools/list", "prompts/get"}:
@@ -1538,7 +1538,7 @@ def run_stdio_server(
         lambda: list_tools({"exposureLayer": requested_layer["value"]}),
         call_tool,
         server_name=DEFAULT_SERVER_NAME,
-        server_version="1.8.0",
+        server_version="1.8.3",
         tool_list_revision=lambda: tool_list_revision,
         tool_call_catalogue=lambda: list_tools({"exposureLayer": requested_layer["value"]}),
         tool_call_catalogue_for_call=lambda name, params: list_tools({
@@ -1561,7 +1561,7 @@ def run_stdio_server(
         list_tools,
         call_tool,
         server_name=DEFAULT_SERVER_NAME,
-        server_version="1.8.0",
+        server_version="1.8.3",
         tool_list_revision=lambda: tool_list_revision,
         tool_call_catalogue=lambda params: list_tools({"exposureLayer": requested_layer["value"], "_lookupToolNames": [str(params.get("name") or "")]}) if isinstance(params, Mapping) and params.get("name") else list_tools({"exposureLayer": requested_layer["value"]}),
         resource_list=list_resources,
