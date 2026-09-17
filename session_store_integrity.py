@@ -29,7 +29,7 @@ ListItemKind = Literal["any", "nonempty_string", "chat"]
 _STORE_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$")
 _SAFE_REASON_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_]{0,63}$")
 _PAYLOAD_HASH_PATTERN = re.compile(r"^[a-f0-9]{64}$")
-_CHAT_ITEM_TYPES = frozenset({"user", "streaming", "agent", "result", "error", "compact", "subagent"})
+_CHAT_ITEM_TYPES = frozenset({"user", "streaming", "agent", "result", "error", "compact", "subagent", "timeline_event"})
 _MAX_JSON_DEPTH = 64
 _MAX_SAFE_JSON_INTEGER = 9_007_199_254_740_991
 
@@ -995,6 +995,27 @@ def _is_json_safe_runtime_value(value: Any) -> bool:
     return True
 
 
+def _is_valid_chat_timeline_event(value: Any) -> bool:
+    """Validate the existing public display envelope, never raw runtime data."""
+    if not isinstance(value, dict) or set(value) != {"id", "sequence", "timestamp", "kind", "payload"}:
+        return False
+    if any(not isinstance(value.get(key), str) or not value[key].strip() for key in ("id", "timestamp")):
+        return False
+    if not _is_safe_nonnegative_integer(value.get("sequence")):
+        return False
+    kind = value.get("kind")
+    if kind not in ("phase", "planner", "tool_call", "tool_result", "file_edit", "command", "subagent", "assistant"):
+        return False
+    payload = value.get("payload")
+    limits = {"label": 160, "summary": 32_000 if kind == "assistant" else 1000,
+              "status": 80, "tool": 160, "phase": 80, "actionId": 96, "subagentStatus": 40}
+    if not isinstance(payload, dict) or any(key not in limits for key in payload):
+        return False
+    if any(not isinstance(text, str) or len(text) > limits[key] for key, text in payload.items()):
+        return False
+    return "subagentStatus" not in payload or payload["subagentStatus"] in ("created", "started", "completed", "failed")
+
+
 def is_valid_chat_record(value: Any) -> bool:
     if not isinstance(value, dict):
         return False
@@ -1042,6 +1063,8 @@ def is_valid_chat_record(value: Any) -> bool:
             if not isinstance(attachments, list) or any(not _is_valid_chat_attachment(value) for value in attachments):
                 return False
         if item_type == "user" and "queuedFrom" in item and not isinstance(item.get("queuedFrom"), bool):
+            return False
+        if item_type == "timeline_event" and not _is_valid_chat_timeline_event(item.get("event")):
             return False
         if item_type == "streaming" and (
             not isinstance(item.get("clientTurnId"), str)

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { fetchChats, saveChats, type ChatRecoveryMarker, type ChatSourceRevision, type StoredChats } from "../lib/api";
+import { ApiError } from "../lib/api/http";
 import { TEMP_CHATS_COLLAPSE_KEY, type ActiveView } from "../lib/app-view";
 import { normalizeAttachmentPayloadVault, normalizeCompactedAttachmentReferences } from "../lib/attachment-payloads";
 import {
@@ -298,7 +299,11 @@ export function useChatSessions({
         await saveChatSnapshotWithinStorageOperation(snapshot, saveVersion, clearDirty);
         return;
       } catch (cause) {
-        if (attempt > 0) {
+        // Only a storage conflict can be resolved by fetching and merging.
+        // Reconciliation calls setChats; doing that for a stable rejection
+        // restarts the autosave debounce indefinitely. Keep the dirty local
+        // snapshot so a new edit or explicit retry can save it later.
+        if (attempt > 0 || !(cause instanceof ApiError) || cause.status !== 409) {
           throw cause;
         }
         const payload = await fetchChats<unknown>(endpoint, collectChatStorageProjectPaths());
