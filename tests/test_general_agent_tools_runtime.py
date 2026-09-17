@@ -71,7 +71,10 @@ def test_truncated_read_continues_with_search_on_same_authorized_file(tmp_path: 
     search = tools["vrcforge_search_text"].handler({"path": str(target), "query": "EVIDENCE_TAIL", "_generalAllowedRoots": roots})
     evidence = planner_read_output_evidence("vrcforge_search_text", search)
     assert evidence["authority"] == "untrusted_tool_output"
-    assert evidence["items"] == [{"source": "fixture.txt", "line": 801, "text": "EVIDENCE_TAIL = amber-lattice-946"}]
+    assert evidence["relativeTo"] == "exact_tool_call_path"
+    assert evidence["items"] == [{"source": ".", "line": 801, "text": "EVIDENCE_TAIL = amber-lattice-946"}]
+    assert "A dot means the exact input file" in evidence["locatorInstructions"]
+    assert str(tmp_path) not in json.dumps(evidence)
     assert evidence["truncated"] is False
     assert len(json.dumps(evidence)) <= 6000
 

@@ -1210,12 +1210,17 @@ class DashboardServerTests(unittest.TestCase):
             with TestClient(dashboard_server.app) as client:
                 response = client.post(
                     "/api/app/projects/prefs",
+                    json={"customPaths": [str(valid)], "hiddenPaths": []},
+                )
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.json()["customPaths"], [str(valid).replace("\\", "/")])
+                saved = dashboard_server.project_prefs_path().read_bytes()
+                rejected = client.post(
+                    "/api/app/projects/prefs",
                     json={"customPaths": [str(valid), str(plain_dir)], "hiddenPaths": []},
                 )
-
-            self.assertEqual(response.status_code, 200)
-            payload = response.json()
-            self.assertEqual(payload["customPaths"], [str(valid).replace("\\", "/")])
+                self.assertEqual(rejected.status_code, 422)
+                self.assertEqual(dashboard_server.project_prefs_path().read_bytes(), saved)
 
     def test_project_prefs_rejects_parent_directory_without_project_version(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1229,14 +1234,16 @@ class DashboardServerTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
+            prefs_path = dashboard_server.project_prefs_path()
+            saved = prefs_path.read_bytes() if prefs_path.exists() else None
             with TestClient(dashboard_server.app) as client:
                 response = client.post(
                     "/api/app/projects/prefs",
                     json={"customPaths": [str(parent)], "hiddenPaths": []},
                 )
 
-            self.assertEqual(response.status_code, 200)
-            self.assertEqual(response.json()["customPaths"], [])
+            self.assertEqual(response.status_code, 422)
+            self.assertEqual(prefs_path.read_bytes() if prefs_path.exists() else None, saved)
 
     def test_app_bootstrap_does_not_wait_for_full_health_diagnostics(self) -> None:
         async def idle_status_monitor() -> None:
@@ -8498,6 +8505,13 @@ class DashboardServerTests(unittest.TestCase):
         self.assertNotIn("token", payload["skill"]["result"])
 
     def test_app_skill_registry_crud_uses_local_skill_markdown(self) -> None:
+        # This Unity skill must execute in a bound project, not Quick Chat.
+        project = Path(self.tuning_store_dir.name) / "AvatarProject"
+        for directory in ("Assets", "Packages", "ProjectSettings"):
+            (project / directory).mkdir(parents=True, exist_ok=True)
+        (project / "ProjectSettings" / "ProjectVersion.txt").write_text(
+            "m_EditorVersion: 2022.3.22f1", encoding="utf-8"
+        )
         invocation_params = {"arguments": "Scene/Hero"}
         responses = iter(
             [
@@ -8576,7 +8590,7 @@ class DashboardServerTests(unittest.TestCase):
 
             turn = client.post(
                 "/api/app/agent/message",
-                json={"message": "/avatar-review Scene/Hero"},
+                json={"message": "/avatar-review Scene/Hero", "projectPath": str(project)},
             )
             self.assertEqual(turn.status_code, 200)
             self.assertEqual(turn.json()["skill"]["status"], "executed")
@@ -9203,7 +9217,10 @@ class DashboardServerTests(unittest.TestCase):
 
         stdio = payload["clientConfigs"]["codexStdio"]["config"]["mcp_servers"]["vrcforge"]
         self.assertEqual(Path(stdio["command"]), backend_exe)
-        self.assertEqual(stdio["args"], ["--agent-mcp-stdio", "--no-start"])
+        self.assertEqual(
+            stdio["args"],
+            ["--agent-mcp-stdio", "--no-start", "--config", str(dashboard_server.AGENT_GATEWAY.config_path)],
+        )
         self.assertEqual(Path(stdio["cwd"]), root)
 
     def test_external_agent_connector_status_uses_project_query_for_claude_code(self) -> None:
@@ -11292,7 +11309,17 @@ class DashboardServerTests(unittest.TestCase):
         default_external_tools = dashboard_server.AGENT_GATEWAY.build_external_mcp_tools(
             "execution", tool_blocks=["core"]
         )
-        self.assertLessEqual(len(default_external_tools), 12)
+        self.assertEqual(
+            {tool["name"] for tool in default_external_tools},
+            {
+                "vrcforge_external_tool_blocks", "vrcforge_health", "vrcforge_know_yourself",
+                "vrcforge_unity_status", "vrcforge_unity_tools", "vrcforge_get_compile_errors",
+                "vrcforge_list_execution_targets", "vrcforge_bind_execution_target",
+                "vrcforge_refresh_execution_target", "vrcforge_list_avatars",
+                "vrcforge_get_gameobject", "vrcforge_get_property",
+                "vrcforge_inspect_skinned_mesh_deformation",
+            },
+        )
         self.assertTrue(
             all(item["_meta"]["toolBlock"] == "core" for item in default_external_tools)
         )
