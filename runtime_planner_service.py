@@ -1223,11 +1223,12 @@ def _planner_tool_observation_candidates(value: dict[object, object]) -> list[tu
     ordered = [preferred[key] for key in _PLANNER_TOOL_OBSERVATION_FIELD_ORDER if key in preferred]
     return ordered + counts
 
-def sanitize_planner_observation_text(value: object, limit: int = RUNTIME_PLANNER_TOOL_OBSERVATION_TEXT_MAX_CHARS, *, preserve_whitespace: bool = False, preserve_urls: bool = False) -> str:
+def sanitize_planner_observation_text(value: object, limit: int = RUNTIME_PLANNER_TOOL_OBSERVATION_TEXT_MAX_CHARS, *, preserve_whitespace: bool = False, preserve_urls: bool = False, preserve_paths: bool = False) -> str:
     """Make a short, model-visible tool summary safe even when a tool mislabeled it.
 
     This is intentionally stricter than UI/audit redaction: planning observations
-    must never disclose credential-like strings or absolute filesystem locations.
+    must never disclose credential-like strings. Absolute filesystem locations
+    are redacted unless preserving the already-submitted execution receipt.
     """
     text = "" if value is None else str(value)
     text = _PLANNER_TOOL_OBSERVATION_BEARER_PATTERN.sub("Bearer <redacted>", text)
@@ -1239,9 +1240,10 @@ def sanitize_planner_observation_text(value: object, limit: int = RUNTIME_PLANNE
     # Public web evidence contains URLs whose slash components are not local
     # paths. Protect those spans only after credential redaction has run.
     parts = re.split(r'(https?://[^\s<>"\']+)', text, flags=re.IGNORECASE) if preserve_urls else [text]
-    for index in range(0, len(parts), 2):
-        parts[index] = _PLANNER_TOOL_OBSERVATION_WINDOWS_PATH_PATTERN.sub("<path redacted>", parts[index])
-        parts[index] = _PLANNER_TOOL_OBSERVATION_UNIX_PATH_PATTERN.sub("<path redacted>", parts[index])
+    if not preserve_paths:
+        for index in range(0, len(parts), 2):
+            parts[index] = _PLANNER_TOOL_OBSERVATION_WINDOWS_PATH_PATTERN.sub("<path redacted>", parts[index])
+            parts[index] = _PLANNER_TOOL_OBSERVATION_UNIX_PATH_PATTERN.sub("<path redacted>", parts[index])
     text = "".join(parts)
     return text[:limit] if preserve_whitespace else summarize_text(text, limit)
 
@@ -1670,12 +1672,12 @@ class RuntimePlannerService:
             elif post_tool and invalid_response:
                 reply = (
                     "上一步工具已经执行，结果也已保留，但模型返回的下一步规划格式无效。"
-                    "本轮没有继续猜测或重复调用工具，请重试。"
+                    "规划失败后未再执行工具，请重试。"
                 )
             elif post_tool:
                 reply = (
                     "上一步工具已经执行，结果也已保留，但读取结果后的下一次模型规划失败。"
-                    "本轮没有重复调用工具，请重试；如果仍然失败，再检查 Provider 连接或账户状态。"
+                    "规划失败后未再执行工具，请重试；如果仍然失败，再检查 Provider 连接或账户状态。"
                 )
             elif invalid_response:
                 reply = (
@@ -1699,11 +1701,12 @@ class RuntimePlannerService:
             )
             if provider_error_details:
                 planner_failure["providerError"] = provider_error_details
-            if cause_code == "planner_invalid_response" and invalid_response_preview:
+            if cause_code == "planner_invalid_response":
                 parse_diagnostics: dict[str, object] = {}
                 parse_llm_plan_response(invalid_response_preview, diagnostics=parse_diagnostics)
                 planner_failure["invalidResponse"] = {
                     **parse_diagnostics,
+                    "responseCharacters": len(invalid_response_preview),
                     "stage": str(invalid_response_stage or "response_validation")[:80],
                     "preview": sanitize_planner_observation_text(
                         invalid_response_preview,
@@ -1917,21 +1920,24 @@ class RuntimePlannerService:
                     payload = parse_llm_plan_response(response_text, diagnostics=parse_diagnostics)
                     if format_correction:
                         format_correction["parseRecovered"] = isinstance(payload, dict)
-                    if format_attempt or not parse_diagnostics.get("jsonError"):
+                    format_error = parse_diagnostics.get("jsonError") or (
+                        {"reason": "empty_response"} if not response_text.strip() else None
+                    )
+                    if format_attempt or not format_error:
                         break
                     # One formatting correction in this planning step, before
                     # dispatch. Keep the same observations, tools and authority;
                     # return only bounded parser diagnostics, never raw output.
                     format_correction = {
                         "attemptCount": 1, "parseRecovered": False,
-                        "initialError": parse_diagnostics["jsonError"],
+                        "initialError": format_error,
                     }
                     prompt += (
                         "\n\nYour preceding response could not be parsed as JSON. "
                         "Return one valid outer planner JSON object with escaped string characters. "
                         "Use the same task, observations, tool catalog and permissions above. "
                         "No tool was dispatched from that invalid response. Parser error: "
-                        + json.dumps(parse_diagnostics["jsonError"], ensure_ascii=False)
+                        + json.dumps(format_error, ensure_ascii=False)
                     )
             except Exception as exc:  # noqa: BLE001 - interactive failures become a bounded typed result.
                 if propagate_provider_errors:
@@ -3156,9 +3162,21 @@ class RuntimePlannerService:
                 else RUNTIME_PLANNER_TOOL_OBSERVATION_MAX_CHARS
             )
             if read_evidence:
+                executed_input = ""
+                if tool_name in {"shell", "unity_shell"} and isinstance(step.get("executedInput"), dict):
+                    # These are the already submitted action inputs, not paths
+                    # discovered in untrusted output. Keep target identity while
+                    # applying the same credential redaction and a fixed bound.
+                    inputs = step["executedInput"]
+                    receipt = {
+                        key: sanitize_planner_observation_text(inputs[key], limit, preserve_whitespace=True, preserve_paths=True)
+                        for key, limit in (("command", 1800), ("cwd", 400))
+                        if isinstance(inputs.get(key), str)
+                    }
+                    executed_input = "; executedInput=" + json.dumps(receipt, ensure_ascii=False, separators=(",", ":"))
                 # Keep normal status/error semantics, then append intact JSON
                 # rather than truncating a serialized evidence object mid-field.
-                return summarize_text("; ".join(fields), 1000) + "; readEvidence=" + json.dumps(
+                return summarize_text("; ".join(fields), 1000) + executed_input + "; readEvidence=" + json.dumps(
                     read_evidence, ensure_ascii=False, separators=(",", ":"),
                 )
             if tool_name == "vrcforge_read_tool_result" and isinstance(result, dict):

@@ -275,11 +275,15 @@ Each item ends with its version history in this exact form:
 
 - Priority: P0.
 - Contract: one `ProfiledToolRegistry` projects one shared implementation set as
-  `CoreToolSet`, `GeneralToolSet` and `UnityToolSet`. General Mode exposes Core
-  plus General; Unity Project Mode exposes Core plus General plus Unity, so it
-  remains a strict capability superset rather than a second workflow Runtime.
-  General/Core tools use plain model-visible names; Unity-only tools use the
-  `unity_` namespace. Profile selection controls model visibility, not safety.
+  `CoreToolSet`, `GeneralToolSet` and `UnityToolSet`. A projectless or ordinary
+  project conversation is a General Agent; Unity Project Mode is that same
+  General Agent with Unity tools added, so it remains a strict capability
+  superset rather than a second workflow Runtime. Selecting Unity must never
+  remove or narrow ordinary file reads/writes, permission-gated Shell/process
+  work, network research, downloads or package retrieval. The user's selected
+  permission mode applies identically in both contexts. General/Core tools use
+  plain model-visible names; Unity-only tools use the `unity_` namespace.
+  Profile selection controls model visibility, not safety.
 - Registered Unity project roots form a minimal cooperative-Agent path guard.
   Read/List/Glob/Grep remain available inside them. Ordinary `edit_file`,
   `write_file`, `delete_path`, `move_path`, `apply_patch` and ordinary Shell
@@ -294,15 +298,25 @@ Each item ends with its version history in this exact form:
   separate user, filesystem interception, network isolation, Shadow Workspace,
   subprocess/script escape detector, junction defense or active path-bypass
   system. Capability profiles never duplicate General and Unity implementations.
-- Forbidden regression: no Unity Mode that loses a General tool; no second
-  Agent Runtime or copied file-tool implementation; no profile-only write
-  protection; no ordinary project write/Shell access; no guard applied to
-  project reads or paths outside registered Unity roots; and no broad security
-  infrastructure beyond this declared cooperative threat model.
-- Acceptance: registry tests prove the exact profile set relationship and
-  handler identity reuse. Path/tool/Shell tests prove General read access,
-  ordinary write and cwd/direct-reference refusal, current-root-only
-  `unity_project_access`, other-root refusal and unrestricted external paths.
+- Forbidden regression: no Unity Mode that loses a General tool or silently
+  changes the selected permission mode; no Unity context that turns ordinary
+  file, Shell, network, download or package work into Unity-only work; no
+  second Agent Runtime or copied file-tool implementation; no profile-only
+  write protection; no ordinary project write/Shell access; no guard applied
+  to project reads or paths outside registered Unity roots; and no broad
+  security infrastructure beyond this declared cooperative threat model.
+- Acceptance: registry tests prove the exact profile set relationship,
+  handler identity reuse and equal permission-mode projection. Path/tool/Shell
+  tests prove General and Unity-context access to an explicitly named external
+  file, an ordinary external Shell command, network research and a download or
+  package retrieval request, while Unity project writes remain approval-bound.
+  Regression coverage must also prove that an ordinary Shell command is not
+  rejected merely because a Unity project is selected, and that a failed
+  permission or scope decision stops without retrying equivalent cwd/argument
+  variants. Live acceptance runs the same read-only external-file and ordinary
+  Shell scenarios once with a General project and once with a Unity project,
+  recording the selected permission mode, tool sequence, call count, elapsed
+  time and terminal result.
 - [首次实现: 1.6.2] [强化/修复: 1.6.2] [最近验证: 1.6.2]
 
 ### AGT-013 — Locked 1.7 Agentic closeout scope

@@ -224,6 +224,51 @@ def test_profiled_path_guard_blocks_ordinary_shell_and_scopes_unity_shell(tmp_pa
     )["risk"] == "reject"
 
 
+def test_host_read_with_selected_unity_context_executes_outside_project(tmp_path: Path) -> None:
+    current = tmp_path / "UnityProjects" / "Dogfood"
+    for marker in ("Assets", "Packages", "ProjectSettings"):
+        (current / marker).mkdir(parents=True, exist_ok=True)
+    package = tmp_path / "package.json"
+    package.write_text('{"dependencies":{"react":"19"}}', encoding="utf-8")
+    shell, approvals, processes, _audits = service(tmp_path)
+    shell.bind_project_path_guard(lambda: UnityPathGuard([current], current_root=current))
+
+    result = shell.execute({
+        "command": f'Get-Content -LiteralPath "{package}" -Raw',
+        "cwd": str(tmp_path),
+        "workspace_root": str(current),
+        "projectRoot": str(current),
+    })
+
+    assert result["status"] == "executed"
+    assert result["classification"]["readOnly"] is True
+    assert result["classification"]["protectionScope"] == "host"
+    assert len(processes.spawn_calls) == 1
+    assert approvals.requests == []
+
+
+@pytest.mark.parametrize("target_in_command", [False, True])
+def test_selected_unity_context_still_rejects_actual_unity_shell_targets(
+    tmp_path: Path, target_in_command: bool
+) -> None:
+    current = tmp_path / "Dogfood"
+    for marker in ("Assets", "Packages", "ProjectSettings"):
+        (current / marker).mkdir(parents=True, exist_ok=True)
+    shell, approvals, processes, _audits = service(tmp_path)
+    shell.bind_project_path_guard(lambda: UnityPathGuard([current], current_root=current))
+
+    result = shell.execute({
+        "command": f'Get-Content "{current / "Assets" / "a.txt"}"' if target_in_command else "Get-ChildItem",
+        "cwd": str(tmp_path if target_in_command else current),
+        "projectRoot": str(current),
+    })
+
+    assert result["status"] == "rejected"
+    assert result["errorDetails"]["error"]["code"] == "unity_project_shell_scope"
+    assert processes.spawn_calls == []
+    assert approvals.requests == []
+
+
 def test_rejected_unity_cwd_exposes_bounded_planner_recovery_details(tmp_path: Path) -> None:
     current = tmp_path / "current"
     for marker in ("Assets", "Packages", "ProjectSettings"):

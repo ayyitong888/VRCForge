@@ -5949,8 +5949,9 @@ class AgentGateway:
             str(params.get("workspace_root") or params.get("workspaceRoot") or "").strip(),
             str(params.get("cwd") or "").strip(),
         ]
-        if not project_root:
-            root_candidates.extend(extract_explicit_local_roots(message))
+        # Explicit user paths grant narrow General read access in every chat.
+        # These roots are never registered as Unity write/project authority.
+        root_candidates.extend(extract_explicit_local_roots(message))
         seen_general_roots: set[str] = set()
         for candidate in root_candidates:
             if not candidate:
@@ -6173,6 +6174,7 @@ class AgentGateway:
         # allowed for read-after-change verification within the bounded budget.
         last_successful_action_id = ""
         repeated_failure_guard = RepeatedFailureGuard()
+        shell_scope_denials = 0
         shell_payload: dict[str, Any] | None = None
         skill_payload: dict[str, Any] | None = None
         write_payload: dict[str, Any] | None = (
@@ -6722,30 +6724,35 @@ class AgentGateway:
             if not command and step_index == 0 and plan.get("shellNeeded") is True:
                 command = param_command
             shell_step_params = ensure_dict(plan.get("shellParams"))
+            unity_shell_access = "unity_project_access" in ensure_list(plan.get("toolCapabilities"))
+            general_shell_root = general_allowed_roots[0] if general_allowed_roots else ""
+            shell_workspace_root = (
+                params.get("workspace_root")
+                or params.get("workspaceRoot")
+                or (project_root if project_context_active and unity_shell_access else "")
+                or (str(self.shell.default_workspace_root) if project_context_active else general_shell_root)
+            )
+            shell_cwd = shell_step_params.get("cwd") or params.get("cwd") or shell_workspace_root
             shell_protection_scope = ""
-            if command and not project_root:
+            if command:
                 shell_protection_scope = str(
                     self.shell.classify(
                         {
                             **shell_step_params,
                             "command": command,
-                            "cwd": shell_step_params.get("cwd") or params.get("cwd") or "",
-                            "workspace_root": (
-                                params.get("workspace_root")
-                                or params.get("workspaceRoot")
-                                or ""
-                            ),
-                            "projectRoot": "",
-                        }
+                            "cwd": shell_cwd,
+                            "workspace_root": shell_workspace_root,
+                            "projectRoot": project_root if project_context_active else "",
+                        },
+                        unity_project_access=unity_shell_access,
                     ).get("protectionScope")
                     or ""
                 )
             if (
                 command
-                and not project_root
                 and shell_protection_scope != "unity_project"
             ):
-                # Projectless chat uses the complete host Shell lane.  Freeze
+                # Host commands use the same Shell lane in every chat. Freeze
                 # the effective defaults before deriving action identity,
                 # completion requirements, execution, and the async task seed.
                 shell_step_params.setdefault("yieldMs", 10_000)
@@ -6909,7 +6916,15 @@ class AgentGateway:
             # into the validated/executed call.  The external MCP boundary
             # remains strict and still requires an explicit projectPath.
             execution_arguments = dict(planned_arguments)
-            if action_kind in {"write", "skill"} and project_root:
+            if action_kind == "skill" and planned_tool in _EXTERNAL_GENERAL_READ_TOOLS:
+                # General projectPath describes the source workspace, not the
+                # Unity execution target. Resolve it without granting access:
+                # the handler still checks only server-owned allowed roots.
+                source_root = str(execution_arguments.get("projectPath") or "").strip()
+                source_path = str(execution_arguments.get("path") or "").strip()
+                if source_root and source_path and not Path(source_path).is_absolute():
+                    execution_arguments["path"] = str(Path(source_root) / source_path)
+            elif action_kind in {"write", "skill"} and project_root:
                 schema_tool = (
                     planned_tool
                     if planned_tool.startswith("vrcforge_")
@@ -6972,8 +6987,6 @@ class AgentGateway:
                     tool=planned_tool,
                     arguments=planned_arguments,
                 )
-                if not project_context_active
-                else ""
             )
             semantic_general_replay = bool(
                 general_read_key and general_read_key == last_general_read_key
@@ -7082,18 +7095,7 @@ class AgentGateway:
             )
             tool_calls_used += 1
             if action_kind == "shell":
-                step_tool = "unity_shell" if "unity_project_access" in ensure_list(plan.get("toolCapabilities")) else "shell"
-                general_shell_root = general_allowed_roots[0] if general_allowed_roots else ""
-                shell_workspace_root = (
-                    params.get("workspace_root")
-                    or params.get("workspaceRoot")
-                    or (project_root if project_context_active else general_shell_root)
-                )
-                shell_cwd = (
-                    shell_step_params.get("cwd")
-                    or params.get("cwd")
-                    or shell_workspace_root
-                )
+                step_tool = "unity_shell" if unity_shell_access else "shell"
                 explicit_shell_location = bool(
                     shell_step_params.get("cwd")
                     or params.get("cwd")
@@ -7169,6 +7171,7 @@ class AgentGateway:
                     {
                         "tool": "shell",
                         "kind": "shell",
+                        "executedInput": {"command": command, "cwd": shell_cwd},
                         "status": step_payload.get("status"),
                         "result": shell_observation,
                         "outcome": step_payload.get("outcome"),
@@ -7501,25 +7504,42 @@ class AgentGateway:
             step_outcome_status = str(step_outcome.get("status") or "").strip()
             task_action_id = str(task_action.get("actionId") or "").strip()
             correction_action_ids = task_action.get("correctedActionIds") or []
+            scope_error_code = str(ensure_dict(step_outcome.get("error")).get("code") or "")
+            repeated_shell_scope_denial = False
+            if action_kind == "shell" and scope_error_code == "unity_project_shell_scope":
+                # The first receipt contains a concrete cwd/tool correction. Allow
+                # that recovery, then stop repeated policy denials even if the
+                # model varies command text or cwd and evades argument deduping.
+                shell_scope_denials += 1
+                repeated_shell_scope_denial = shell_scope_denials >= 2
+            elif action_kind == "shell" and not step_failure_class:
+                shell_scope_denials = 0
             if (
                 step_tool in _EXTERNAL_GENERAL_READ_TOOLS
-                and ensure_dict(step_outcome.get("error")).get("code") == "authorization_scope_denied"
-            ):
+                and scope_error_code == "authorization_scope_denied"
+            ) or repeated_shell_scope_denial:
                 # An alternate tool/cwd cannot grant access to the denied target.
                 # Keep the failed action receipt, but stop before another model call.
                 reply = (
                     "目标路径不在当前会话的授权范围内，本次未读取该文件。"
-                    "请在 Quick Chat 中明确提供目标路径，或切换到包含该路径的已授权工程后重试。"
+                    "请在消息中明确提供目标路径后重试。"
                     if re.search(r"[\u4e00-\u9fff]", message)
                     else "The requested path is outside this conversation's authorized scope; it was not read. "
-                    "Use Quick Chat with the explicit path, or switch to an authorized project containing it and retry."
+                    "Provide the explicit target path in your message and retry."
                 )
+                if repeated_shell_scope_denial:
+                    reply = (
+                        "Shell 的工程访问范围校正后仍被拒绝，已停止重复尝试，本次请求尚未完成。"
+                        if re.search(r"[\u4e00-\u9fff]", message)
+                        else "Shell project scope was still denied after a correction attempt. "
+                        "Repeated attempts were stopped; the request remains incomplete."
+                    )
                 last_plan = {
                     **plan, "summary": reply, "reply": reply,
                     "continueLoop": False, "nextStep": "needs_user_action",
                     "scopeDenied": True,
                     "completionClaim": {"satisfied": False},
-                    "completionGate": {"status": "needs_user_action", "reason": "authorization_scope_denied"},
+                    "completionGate": {"status": "needs_user_action", "reason": scope_error_code},
                 }
                 break
             if step_outcome_status == "needs_user_action":

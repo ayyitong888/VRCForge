@@ -104,12 +104,29 @@ def test_second_bad_json_remains_terminal_without_a_third_request():
     assert plan["plannerFailure"]["invalidResponse"]["stage"] == "json_object_parse"
 
 
-@pytest.mark.parametrize("raw", ["", "not json", "[]", '{"action":"unknown"}', '{"action":"skill","skill_params":[]}'])
+@pytest.mark.parametrize("raw", ["not json", "[]", '{"action":"unknown"}', '{"action":"skill","skill_params":[]}'])
 def test_other_invalid_responses_do_not_trigger_format_retry(raw):
     model = SequenceModel(response(raw))
     plan = service(model=model)._llm_plan_agent_turn("continue", {}, [])
     assert len(model.prompts) == 1
     assert "formatCorrection" not in plan
+
+
+def test_empty_post_tool_response_retries_planning_once_with_existing_evidence():
+    model = SequenceModel(response(""), response('{"action":"reply","reply":"Saved"}'))
+    loop = [{"tool": "shell", "status": "executed", "result": {"exitCode": 0, "stdoutSummary": "hello"}}]
+    plan = service(model=model)._llm_plan_agent_turn("save hello", {}, [], loop_state=loop)
+    assert len(model.prompts) == 2
+    assert "exitCode=0" in model.prompts[1]
+    assert plan["reply"] == "Saved"
+
+
+def test_repeated_empty_response_retains_diagnostics_and_stops_after_one_retry():
+    model = SequenceModel(response(""), response(""))
+    plan = service(model=model)._llm_plan_agent_turn("continue", {}, [])
+    assert len(model.prompts) == 2
+    assert plan["nextStep"] == "planner_failed"
+    assert plan["plannerFailure"]["invalidResponse"]["responseCharacters"] == 0
 
 
 def test_cancellation_in_correction_uses_original_error_propagation_and_keeps_usage():

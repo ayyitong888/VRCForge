@@ -162,3 +162,15 @@ def test_vrcforge_internal_directory_is_never_exposed(tmp_path: Path) -> None:
     for path in (internal / "chat-transcripts.json", variant / "secret.txt", ".vrcforge/chat-transcripts.json"):
         with pytest.raises(PermissionError, match="internal"):
             read_text_file(path, allowed_roots=[tmp_path])
+
+
+def test_relative_filename_resolves_exact_file_grant_without_sibling_access(tmp_path: Path) -> None:
+    target = tmp_path / "package.json"
+    target.write_text("exact file evidence", encoding="utf-8")
+    sibling = tmp_path / "private.txt"
+    sibling.write_text("private sibling", encoding="utf-8")
+    assert read_text_file("package.json", allowed_roots=[target])["text"] == "exact file evidence"
+    with pytest.raises(PermissionError):
+        read_text_file("private.txt", allowed_roots=[target])
+    with pytest.raises(PermissionError):
+        read_text_file("../private.txt", allowed_roots=[target])

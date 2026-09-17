@@ -284,8 +284,8 @@ class AgentShellService:
                 guard = self._project_path_guard()
                 capability = "unity_project_access" if unity_project_access else None
                 allowed = guard.is_shell_allowed(command, cwd=cwd, capability=capability)
-                if requested_project_value and not unity_project_access:
-                    allowed = allowed and guard.is_write_allowed(requested_project_value)
+                # A selected project supplies chat context, not a host command
+                # target. Ordinary Shell remains bounded by its command and cwd.
                 if requested_project_value and unity_project_access:
                     allowed = allowed and guard.is_write_allowed(
                         requested_project_value,

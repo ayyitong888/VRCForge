@@ -12,6 +12,7 @@ handler dispatch, and fallback behavior are exercised through the real backend
 path.
 """
 
+import copy
 import json
 import tempfile
 import unittest
@@ -1090,6 +1091,8 @@ class AgentLoopP0Tests(unittest.TestCase):
 
         self.assertIn("TAIL_EVIDENCE", observations[1])
         self.assertIn("readEvidence=", observations[1])
+        self.assertIn('"command":"echo fixture"', observations[1])
+        self.assertIn("executedInput=", observations[1])
 
     def test_shell_terminal_staging_retains_private_bounded_evidence(self) -> None:
         observed = []
@@ -1934,6 +1937,12 @@ class AgentLoopP0Tests(unittest.TestCase):
         self.assertEqual(result["plan"]["completionGate"]["reason"], "completion_claim_unbound")
 
     def test_projectless_general_agent_suppresses_equivalent_directory_replays_and_pivots(self) -> None:
+        self._assert_equivalent_directory_replays_suppressed("")
+
+    def test_unity_general_agent_suppresses_equivalent_directory_replays_and_pivots(self) -> None:
+        self._assert_equivalent_directory_replays_suppressed(str(self._unity_project()))
+
+    def _assert_equivalent_directory_replays_suppressed(self, selected_project: str) -> None:
         gateway = self.gateway
         planner_calls = 0
         planner_states: list[list[dict]] = []
@@ -2040,8 +2049,9 @@ class AgentLoopP0Tests(unittest.TestCase):
                     "message": r"Inspect E:\fixture\app and explain its mechanism.",
                     "session_id": "general-no-progress-session",
                     "client_turn_id": "general-no-progress-turn",
-                    "projectType": "general",
-                    "_projectContextActive": False,
+                    "projectRoot": selected_project,
+                    "projectType": "unity" if selected_project else "general",
+                    "_projectContextActive": bool(selected_project),
                 }
             )
 
@@ -4001,7 +4011,7 @@ class AgentLoopP0Tests(unittest.TestCase):
                              "continueLoop": True, "nextStep": "call_shell"}
                 with patch.object(self.gateway.runtime_planner, "plan_agent_turn", side_effect=[first, alternate]) as planner, patch.object(self.gateway.shell, "execute") as shell:
                     result = self.gateway.runtime_message({
-                        "message": f"Read {outside}", "projectRoot": str(project),
+                        "message": "Read the external file discovered by the model", "projectRoot": str(project),
                         "session_id": f"outside-scope-{index}",
                     })
                 self.assertEqual(planner.call_count, 1, result)
@@ -4011,8 +4021,7 @@ class AgentLoopP0Tests(unittest.TestCase):
                 self.assertEqual(result["plan"]["nextStep"], "needs_user_action")
                 self.assertFalse(result["plan"]["continueLoop"])
                 self.assertFalse(result["plan"]["completionClaim"]["satisfied"])
-                self.assertIn("Quick Chat", result["plan"]["reply"])
-                self.assertIn("authorized project", result["plan"]["reply"])
+                self.assertIn("explicit", result["plan"]["reply"])
                 self.assertNotIn("not in project", str(result))
         # A new Quick Chat turn with an explicit path grants its own read scope;
         # the denied project turn must not poison that independently bound turn.
@@ -4023,6 +4032,140 @@ class AgentLoopP0Tests(unittest.TestCase):
             quick_chat = self.gateway.runtime_message({"message": f"Read {outside}", "session_id": "quick-chat-explicit-path"})
         self.assertEqual(quick_chat["steps"][0]["outcome"]["status"], "ok")
         self.assertNotIn("scopeDenied", quick_chat["plan"])
+
+    def test_unity_session_can_read_explicit_external_file_without_sibling_scope(self) -> None:
+        self._assert_explicit_external_file_scope(False)
+
+    def test_general_source_workspace_is_not_rebound_to_unity_project(self) -> None:
+        self._assert_explicit_external_file_scope(True)
+
+    def _assert_explicit_external_file_scope(self, use_source_workspace: bool) -> None:
+        project = self._unity_project()
+        outside = Path(self.temp_dir.name) / "outside.txt"
+        sibling = outside.with_name("private.txt")
+        outside.write_text("user requested external text", encoding="utf-8")
+        sibling.write_text("must remain private", encoding="utf-8")
+        plans = [
+            {"planner": "llm", "skillNeeded": True, "skillTool": "vrcforge_read_text_file",
+             "skillParams": ({"path": path.name, "projectPath": str(path.parent)}
+                             if use_source_workspace else {"path": str(path)}),
+             "continueLoop": True, "nextStep": "call_skill"}
+            for path in (outside, sibling)
+        ]
+        with patch.object(self.gateway.runtime_planner, "plan_agent_turn", side_effect=plans) as planner:
+            result = self.gateway.runtime_message({
+                "message": f"Read {outside}", "projectRoot": str(project),
+                "session_id": "unity-explicit-external-file",
+            })
+        self.assertEqual(planner.call_count, 2, result)
+        self.assertEqual(result["steps"][0]["outcome"]["status"], "ok", result)
+        self.assertIn("user requested external text", str(result["steps"][0]))
+        self.assertEqual(result["steps"][1]["outcome"]["error"]["code"], "authorization_scope_denied")
+        self.assertNotIn("must remain private", str(result))
+
+    def test_repeated_shell_scope_denial_stops_across_argument_variants(self) -> None:
+        project = self._unity_project()
+        plans = [
+            {"planner": "llm", "action": "shell", "shellNeeded": True,
+             "shellCommand": command, "shellParams": {"cwd": str(project)},
+             "continueLoop": True, "nextStep": "call_shell"}
+            for command in ("Get-Content one.txt", "Get-Content two.txt", "Get-Content three.txt")
+        ]
+        with patch.object(self.gateway.runtime_planner, "plan_agent_turn", side_effect=plans) as planner:
+            result = self.gateway.runtime_message({
+                "message": "Inspect runtime logs", "projectRoot": str(project),
+                "session_id": "repeated-shell-scope",
+            })
+        self.assertEqual(planner.call_count, 2, result)
+        self.assertEqual(len(result["steps"]), 2)
+        self.assertEqual(result["plan"]["nextStep"], "needs_user_action")
+        self.assertFalse(result["plan"]["continueLoop"])
+        self.assertIn("unity_project_shell_scope", str(result["plan"]["completionGate"]))
+
+    def test_shell_scope_correction_can_succeed_and_reset_denial_count(self) -> None:
+        project = self._unity_project()
+        host = Path(self.temp_dir.name)
+        plans = [
+            {"planner": "llm", "action": "shell", "shellNeeded": True,
+             "shellCommand": "echo fixture", "shellParams": {"cwd": str(cwd)},
+             "continueLoop": True, "nextStep": "call_shell"}
+            for cwd in (project, host, project)
+        ] + [{"planner": "llm", "reply": "A later request was denied.",
+              "continueLoop": False, "nextStep": "done"}]
+        denied = {"ok": False, "status": "rejected", "error": "scope denied",
+                  "errorDetails": {"error": {"type": "permission",
+                      "code": "unity_project_shell_scope", "retryable": False}}}
+        succeeded = {"ok": True, "status": "completed", "exitCode": 0,
+                     "stdout": "fixture", "stderr": ""}
+        with patch.object(self.gateway.runtime_planner, "plan_agent_turn", side_effect=plans) as planner, patch.object(
+            self.gateway.shell, "execute", side_effect=[denied, succeeded, denied],
+        ) as shell:
+            result = self.gateway.runtime_message({
+                "message": "Inspect runtime logs", "projectRoot": str(project),
+                "session_id": "shell-scope-correction-success",
+            })
+        self.assertEqual(planner.call_count, 4, result)
+        self.assertEqual(shell.call_count, 3)
+        self.assertEqual(result["steps"][1]["outcome"]["status"], "ok", result)
+        self.assertNotIn("scopeDenied", result["plan"])
+
+    def test_general_shell_defaults_match_with_unity_selected(self) -> None:
+        project = self._unity_project()
+        host = Path(self.temp_dir.name)
+        calls = []
+        plan = {"planner": "llm", "action": "shell", "shellNeeded": True,
+                "shellCommand": "echo fixture", "shellParams": {"cwd": str(host)},
+                "continueLoop": False, "nextStep": "call_shell"}
+        for index, selected in enumerate(("", str(project))):
+            with patch.object(self.gateway.runtime_planner, "plan_agent_turn", side_effect=[copy.deepcopy(plan) for _ in range(4)]), patch.object(
+                self.gateway.shell, "execute", return_value={"ok": True, "status": "completed", "exitCode": 0},
+            ) as shell:
+                self.gateway.runtime_message({"message": "Run echo fixture", "projectRoot": selected,
+                                              "session_id": f"shell-parity-{index}"})
+                calls.append(shell.call_args.args[0])
+        for key, expected in (("yieldMs", 10000), ("timeout", 1800)):
+            self.assertEqual(calls[0].get(key), expected)
+            self.assertEqual(calls[1].get(key), expected)
+
+    def test_general_external_write_approval_and_readback_match_with_unity_selected(self) -> None:
+        project = self._unity_project()
+        for index, selected in enumerate(("", str(project))):
+            with self.subTest(projectRoot=selected):
+                target = Path(self.temp_dir.name) / f"external-parity-{index}.txt"
+                plan = {"planner": "llm", "writeNeeded": True, "writeTool": "vrcforge_write_file",
+                        "writeParams": {"path": str(target), "content": "approved external text"},
+                        "continueLoop": False, "nextStep": "call_write"}
+                with patch.object(self.gateway.runtime_planner, "plan_agent_turn", side_effect=[dict(plan) for _ in range(4)]):
+                    result = self.gateway.runtime_message({"message": f"Write {target}", "projectRoot": selected,
+                                                          "session_id": f"write-parity-{index}"})
+                self.assertFalse(target.exists(), result)
+                approval_id = result.get("approvalId") or result.get("approval_id")
+                self.assertTrue(approval_id, result)
+                self.gateway.approval_transactions.approve(approval_id)
+                applied = self.gateway.approval_transactions.apply_approved({"approval_id": approval_id})
+                self.assertEqual(target.read_text(encoding="utf-8"), "approved external text", applied)
+                read_plan = {"planner": "llm", "skillNeeded": True, "skillTool": "vrcforge_read_text_file",
+                             "skillParams": {"path": str(target)}, "continueLoop": False, "nextStep": "call_skill"}
+                with patch.object(self.gateway.runtime_planner, "plan_agent_turn", return_value=read_plan):
+                    readback = self.gateway.runtime_message({"message": f"Read {target}", "projectRoot": selected,
+                                                            "session_id": f"read-parity-{index}"})
+                self.assertEqual(readback["steps"][0]["outcome"]["status"], "ok", readback)
+                self.assertIn("approved external text", str(readback["steps"][0]))
+
+    def test_unity_context_does_not_default_host_shell_into_protected_project(self) -> None:
+        project = self._unity_project()
+        plan = {"planner": "llm", "shellNeeded": True, "shellCommand": "echo fixture",
+                "continueLoop": False, "nextStep": "call_shell"}
+        with patch.object(self.gateway.runtime_planner, "plan_agent_turn", return_value=plan), patch.object(
+            self.gateway.shell, "execute", return_value={"ok": True, "status": "completed", "exitCode": 0},
+        ) as shell:
+            self.gateway.runtime_message({"message": "Run echo fixture", "projectRoot": str(project),
+                                          "session_id": "host-shell-default-location"})
+        params = shell.call_args.args[0]
+        self.assertEqual(Path(params["cwd"]), self.gateway.shell.default_workspace_root)
+        self.assertNotEqual(Path(params["cwd"]), project)
+        self.assertEqual(params["yieldMs"], 10_000)
+        self.assertEqual(params["timeout"], 1800)
 
     def test_nonretryable_argument_error_can_still_be_corrected(self) -> None:
         project = self._unity_project()
@@ -4069,7 +4212,7 @@ class AgentLoopP0Tests(unittest.TestCase):
                     "summary": "List the external runtime logs.",
                     "shellNeeded": True,
                     "shellCommand": 'dir "C:/Users/example/AppData/Local/VRCForge/agentic-app/logs" /b',
-                    "shellParams": {},
+                    "shellParams": {"cwd": str(project)},
                     "continueLoop": True,
                     "nextStep": "call_shell",
                 }

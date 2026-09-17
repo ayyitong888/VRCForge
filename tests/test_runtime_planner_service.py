@@ -33,6 +33,19 @@ from runtime_planner_service import (
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_shell_observation_binds_output_to_executed_input_without_leaking_secrets():
+    command = "Set-Content D:/workspace/hello.txt 'hello'; Get-Content D:/workspace/hello.txt; $api_key='fixture-secret'"
+    observation = service()._llm_loop_step_observation({
+        "tool": "shell", "kind": "shell", "status": "executed",
+        "executedInput": {"command": command, "cwd": "D:/workspace"},
+        "result": {"exitCode": 0, "stdout": "hello"},
+    })
+    assert "executedInput=" in observation
+    assert "Set-Content" in observation and "D:/workspace/hello.txt" in observation
+    assert "hello" in observation and "exitCode=0" in observation
+    assert "fixture-secret" not in observation
+
+
 @pytest.mark.parametrize("active", [True, False])
 @pytest.mark.parametrize("field_name", ["projectPath", "projectRoot"])
 def test_bound_project_path_reaches_provider_as_string(tmp_path, active, field_name):
@@ -1924,7 +1937,7 @@ def test_invalid_model_actions_fail_closed_instead_of_claiming_success(response_
             "json_object_parse" if response_text in {"not-json", "[]"} else "action_validation"
         )
     else:
-        assert "invalidResponse" not in failure
+        assert failure["invalidResponse"]["responseCharacters"] == 0
     assert plan["nextStep"] == "planner_failed"
     assert plan["skillNeeded"] is False
     assert plan["shellNeeded"] is False

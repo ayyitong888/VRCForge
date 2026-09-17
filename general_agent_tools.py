@@ -177,7 +177,13 @@ def _authorized_path(value: str | Path, allowed_roots: Iterable[str | Path]) -> 
         ]
         if len(existing_roots) != 1:
             raise PermissionError("relative path requires exactly one authorized root; scope is ambiguous")
-        candidate_lexical = existing_roots[0] / raw_value
+        base = existing_roots[0]
+        # An exact-file grant remains exact, but its filename is relative to
+        # its containing directory. The authorization loop below still rejects
+        # siblings; this does not turn the parent into an authorized root.
+        if base.is_file():
+            base = base.parent
+        candidate_lexical = _lexical_absolute(base / raw_value)
     else:
         candidate_lexical = _lexical_absolute(value)
 
