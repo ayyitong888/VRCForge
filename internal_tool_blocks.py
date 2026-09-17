@@ -8,7 +8,7 @@ mode/permission filtering after a leaf is lazily loaded.
 from __future__ import annotations
 
 from typing import Any, Iterable, Mapping
-from agent_memory_tools import MEMORY_TOOL_NAMES
+from agent_memory_tool_contract import MEMORY_TOOL_NAMES
 
 
 INTERNAL_DEFAULT_TOOL_BLOCK = "core"

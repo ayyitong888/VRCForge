@@ -137,6 +137,16 @@ def test_external_stdio_import_closure_survives_packaging(tmp_path: Path) -> Non
     )
     assert result.returncode == 0, result.stderr
     assert "--protocol-profile" in result.stdout
+    # Loading the bridge catalogue must not pull in the memory runtime merely
+    # to classify three tool names. -I also excludes environment import paths.
+    import_probe = subprocess.run(
+        [sys.executable, "-I", "-c",
+         f"import runpy, sys; runpy.run_path({str(bridge)!r}, run_name='_packaged_import_probe'); "
+         "assert 'agent_memory_tool_contract' in sys.modules; "
+         "assert not {'agent_memory_tools', 'memory_consolidation_sources', 'memory_safety'} & sys.modules.keys()"],
+        cwd=payload, env=environment, capture_output=True, text=True, timeout=30,
+    )
+    assert import_probe.returncode == 0, import_probe.stderr
 
 
 def test_desktop_project_selection_is_confirmed_before_unity_readiness() -> None:

@@ -9,9 +9,8 @@ from typing import Any, Callable, Iterator, Mapping
 
 from memory_consolidation_sources import project_scope_key, redact_memory_text
 from memory_safety import memory_text_is_instruction_sensitive
+from agent_memory_tool_contract import MEMORY_TOOL_NAMES, MEMORY_WRITE_TOOLS
 
-MEMORY_WRITE_TOOLS = frozenset({"vrcforge_remember_memory", "vrcforge_delete_memory"})
-MEMORY_TOOL_NAMES = MEMORY_WRITE_TOOLS | {"vrcforge_list_memory"}
 MEMORY_TOOL_SCHEMAS = {
     "vrcforge_list_memory": {"type": "object", "properties": {"limit": {"type": "integer", "minimum": 1, "maximum": 12}, "query": {"type": "string", "maxLength": 200}}, "additionalProperties": False},
     "vrcforge_remember_memory": {"type": "object", "properties": {
