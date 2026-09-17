@@ -3982,6 +3982,77 @@ class AgentLoopP0Tests(unittest.TestCase):
             failed_action_id,
         )
 
+    def test_outside_project_read_stops_before_cross_tool_or_cwd_retry(self) -> None:
+        project = self._unity_project()
+        outside = Path(self.temp_dir.name) / "outside.txt"
+        outside.write_text("not in project", encoding="utf-8")
+        variants = [
+            ("vrcforge_read_text_file", {"path": str(outside)}),
+            ("vrcforge_search_text", {"path": str(outside), "query": "project"}),
+            ("vrcforge_list_directory", {"path": str(outside.parent)}),
+            ("vrcforge_find_files", {"path": str(outside.parent), "pattern": "*.txt"}),
+        ]
+        for index, (tool, arguments) in enumerate(variants):
+            with self.subTest(tool=tool):
+                first = {"planner": "llm", "skillNeeded": True, "skillTool": tool,
+                         "skillParams": arguments, "continueLoop": True, "nextStep": "call_skill"}
+                alternate = {"planner": "llm", "action": "shell", "shellNeeded": True,
+                             "shellCommand": "Get-Content outside.txt", "shellParams": {"cwd": str(outside.parent)},
+                             "continueLoop": True, "nextStep": "call_shell"}
+                with patch.object(self.gateway.runtime_planner, "plan_agent_turn", side_effect=[first, alternate]) as planner, patch.object(self.gateway.shell, "execute") as shell:
+                    result = self.gateway.runtime_message({
+                        "message": f"Read {outside}", "projectRoot": str(project),
+                        "session_id": f"outside-scope-{index}",
+                    })
+                self.assertEqual(planner.call_count, 1, result)
+                shell.assert_not_called()
+                self.assertEqual(len(result["steps"]), 1, result)
+                self.assertEqual(result["steps"][0]["outcome"]["error"]["code"], "authorization_scope_denied")
+                self.assertEqual(result["plan"]["nextStep"], "needs_user_action")
+                self.assertFalse(result["plan"]["continueLoop"])
+                self.assertFalse(result["plan"]["completionClaim"]["satisfied"])
+                self.assertIn("Quick Chat", result["plan"]["reply"])
+                self.assertIn("authorized project", result["plan"]["reply"])
+                self.assertNotIn("not in project", str(result))
+        # A new Quick Chat turn with an explicit path grants its own read scope;
+        # the denied project turn must not poison that independently bound turn.
+        with patch.object(self.gateway.runtime_planner, "plan_agent_turn", side_effect=[
+            {"planner": "llm", "skillNeeded": True, "skillTool": "vrcforge_read_text_file",
+             "skillParams": {"path": str(outside)}, "continueLoop": False, "nextStep": "call_skill"},
+        ]):
+            quick_chat = self.gateway.runtime_message({"message": f"Read {outside}", "session_id": "quick-chat-explicit-path"})
+        self.assertEqual(quick_chat["steps"][0]["outcome"]["status"], "ok")
+        self.assertNotIn("scopeDenied", quick_chat["plan"])
+
+    def test_nonretryable_argument_error_can_still_be_corrected(self) -> None:
+        project = self._unity_project()
+        target = project / "readme.txt"
+        target.write_text("authorized text", encoding="utf-8")
+        plans = [
+            {"planner": "llm", "skillNeeded": True, "skillTool": "vrcforge_read_text_file",
+             "skillParams": {"path": str(project / "invalid.txt")}, "continueLoop": True, "nextStep": "call_skill"},
+            {"planner": "llm", "skillNeeded": True, "skillTool": "vrcforge_read_text_file",
+             "skillParams": {"path": str(target)}, "continueLoop": True, "nextStep": "call_skill"},
+            {"planner": "llm", "reply": "Read succeeded.", "continueLoop": False, "nextStep": "done"},
+        ]
+        tool = self.gateway._tools["vrcforge_read_text_file"]
+        original_handler = tool.handler
+        def handler(params):
+            if params.get("path") == str(project / "invalid.txt"):
+                return {"ok": False, "status": "failed", "error": "choose the existing file path",
+                        "errorCode": "invalid_arguments", "retryable": False}
+            return original_handler(params)
+        with patch.object(tool, "handler", side_effect=handler) as read, patch.object(
+            self.gateway.runtime_planner, "plan_agent_turn", side_effect=plans,
+        ) as planner:
+            result = self.gateway.runtime_message({
+                "message": f"Read {target}", "projectRoot": str(project), "session_id": "correctable-argument",
+            })
+        self.assertEqual(read.call_count, 2, result.get("plan"))
+        self.assertGreaterEqual(planner.call_count, 2)
+        self.assertEqual(result["steps"][1]["outcome"]["status"], "ok")
+        self.assertNotIn("scopeDenied", result["plan"])
+
     def test_shell_scope_rejection_reaches_next_planner_observation(self) -> None:
         gateway = self.gateway
         project = self._unity_project()

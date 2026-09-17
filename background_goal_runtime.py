@@ -93,6 +93,15 @@ def classify_runtime_step_failure(payload: Any) -> str:
     )
     if not failed:
         return ""
+    # Canonical error identity outranks natural-language summaries. Wrapper
+    # results can preserve this code without repeating it in their status.
+    for view in (outcome, payload, result):
+        error = view.get("error") if isinstance(view.get("error"), dict) else {}
+        details = view.get("errorDetails") if isinstance(view.get("errorDetails"), dict) else {}
+        if any(str(code or "").strip().casefold() in {
+            "permission_denied", "authorization_scope_denied",
+        } for code in (error.get("code"), view.get("errorCode"), details.get("errorCode"))):
+            return "permission_denied"
     combined = " ".join(
         str(value or "").strip().casefold()
         for value in (

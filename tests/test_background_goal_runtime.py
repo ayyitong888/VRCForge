@@ -543,3 +543,18 @@ def test_usage_aggregation_saturates_token_values() -> None:
     assert result["outputTokens"] == 200
     assert result["totalTokens"] == 1_000
     assert result["bounded"] is True
+
+
+@pytest.mark.parametrize("code", ["permission_denied", "authorization_scope_denied"])
+def test_canonical_permission_code_survives_loop_classification(code):
+    payload = {"ok": False, "status": "failed", "outcome": {
+        "status": "failed", "summary": "path is outside every authorized root: fixture",
+        "error": {"code": code, "retryable": False},
+    }}
+    assert classify_runtime_step_failure(payload) == "permission_denied"
+
+
+def test_nonretryable_argument_error_is_not_permission_denial():
+    assert classify_runtime_step_failure({"ok": False, "outcome": {
+        "status": "failed", "error": {"code": "invalid_arguments", "retryable": False},
+    }}) == "tool_error"

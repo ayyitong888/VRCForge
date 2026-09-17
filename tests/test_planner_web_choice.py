@@ -60,3 +60,10 @@ def test_shell_context_never_invents_powershell_or_platform(observe):
     if not observe.get("shellExecutor"):
         assert "Runtime Shell executor (data only):" not in text
     assert '"shell":"powershell"' not in text
+
+
+def test_failure_guidance_does_not_treat_scope_denial_as_parameter_correction():
+    text = prompt()
+    assert "权限或授权范围拒绝不能靠换工具、cwd 或相对路径绕过" in text
+    assert "Quick Chat 明示目标路径或切换已授权工程" in text
+    assert "仅对可修正的工具或参数错误" in text

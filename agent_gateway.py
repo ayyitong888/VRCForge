@@ -2608,6 +2608,23 @@ class AgentGateway:
             owner_token = self._tool_owner_context.set(tool_owner_id)
             try:
                 return tool.handler(tool_params)
+            except PermissionError as exc:
+                # Only native denials from the fixed file-read handlers define
+                # this boundary; tool prose or a generic nonretryable error does not.
+                if tool.name in _EXTERNAL_GENERAL_READ_TOOLS and str(exc).startswith((
+                    "path is outside every authorized root:",
+                    "path escapes its authorized root:",
+                )):
+                    return {
+                        "ok": False,
+                        "status": "failed",
+                        "error": str(exc),
+                        "errorCode": "authorization_scope_denied",
+                        "retryable": False,
+                        "mutationStarted": False,
+                        "committed": False,
+                    }
+                raise
             finally:
                 self._tool_owner_context.reset(owner_token)
                 self._tool_agent_context.reset(agent_token)
@@ -7464,6 +7481,27 @@ class AgentGateway:
             correction_action_id = str(
                 task_action.get("correctedActionId") or ""
             ).strip()
+            if (
+                step_tool in _EXTERNAL_GENERAL_READ_TOOLS
+                and ensure_dict(step_outcome.get("error")).get("code") == "authorization_scope_denied"
+            ):
+                # An alternate tool/cwd cannot grant access to the denied target.
+                # Keep the failed action receipt, but stop before another model call.
+                reply = (
+                    "目标路径不在当前会话的授权范围内，本次未读取该文件。"
+                    "请在 Quick Chat 中明确提供目标路径，或切换到包含该路径的已授权工程后重试。"
+                    if re.search(r"[\u4e00-\u9fff]", message)
+                    else "The requested path is outside this conversation's authorized scope; it was not read. "
+                    "Use Quick Chat with the explicit path, or switch to an authorized project containing it and retry."
+                )
+                last_plan = {
+                    **plan, "summary": reply, "reply": reply,
+                    "continueLoop": False, "nextStep": "needs_user_action",
+                    "scopeDenied": True,
+                    "completionClaim": {"satisfied": False},
+                    "completionGate": {"status": "needs_user_action", "reason": "authorization_scope_denied"},
+                }
+                break
             if step_outcome_status == "needs_user_action":
                 unresolved_completion_outcomes[action_key] = step_outcome
                 if task_action_id:
@@ -7620,7 +7658,7 @@ class AgentGateway:
                 )
         first_plan = first_plan or last_plan or {}
         # 单步（含纯回复/未连接）保持与历史一致的顶层 plan 形状；多步才综合成 loop 计划。
-        terminal_override = str(last_plan.get("nextStep") or "") in {
+        terminal_override = last_plan.get("scopeDenied") is True or str(last_plan.get("nextStep") or "") in {
             "cancelled",
             "context_compaction_required",
             "loop_suppressed",
@@ -7641,7 +7679,7 @@ class AgentGateway:
             )
             top_plan["reply"] = f"{base_reply}\n\n{notice}".strip() if base_reply else notice
         terminal_status = str(top_plan.get("nextStep") or "").strip()
-        if unresolved_planner_argument_failure is not None and terminal_status not in {
+        if unresolved_planner_argument_failure is not None and not top_plan.get("scopeDenied") and terminal_status not in {
             "cancelled",
             "context_compaction_required",
             "loop_suppressed",
@@ -7667,7 +7705,7 @@ class AgentGateway:
                 "nextStep": "planner_failed",
             }
             terminal_status = "planner_failed"
-        if unresolved_completion_outcomes and terminal_status not in {
+        if unresolved_completion_outcomes and not top_plan.get("scopeDenied") and terminal_status not in {
             "cancelled",
             "context_compaction_required",
             "loop_suppressed",
