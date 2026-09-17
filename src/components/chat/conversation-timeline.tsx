@@ -187,7 +187,8 @@ export function buildDurableTimelineRows(
   terminalFailureCode = "",
   steps: AgentRuntimeResponse["steps"] = [],
 ): ReactNode[] {
-  const presentation = buildTimelinePresentation(events, elapsedSeconds);
+  // Lifecycle evidence stays durable; the right sidebar owns its presentation.
+  const presentation = buildTimelinePresentation(events.filter((event) => event.kind !== "subagent"), elapsedSeconds);
   if (!presentation.entries.length) return [];
   const resultQueues = buildRuntimeStepResultQueues(steps);
   const takeFullResult = (invocation: TimelineInvocation): unknown => {

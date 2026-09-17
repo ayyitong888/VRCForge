@@ -1,5 +1,4 @@
 import {
-  Bot,
   Check,
   ChevronRight,
   Copy,
@@ -21,7 +20,6 @@ import type { ApprovalActionState, ChatAttachment, ConversationItem } from "../.
 import { providerReconnectAttempt, type AgentRuntimePhase } from "../../lib/chat-streaming";
 import { copyableAgentDialogueText } from "../../lib/conversation-utils";
 import type { PathToSkillOperationSummary } from "../../lib/path-to-skill-context";
-import { displaySubAgentStatus, subAgentRoleLabel, subAgentStatusTone } from "../../lib/subagent-ui";
 import { cn, formatCount } from "../../lib/utils";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
@@ -210,11 +208,12 @@ export function ConversationCard({
 
   if (item.type === "streaming") {
     const runtimeModelLabel = formatRuntimeModelLine(item.providerLabel, item.model);
+    const timelineRows = buildDurableTimelineRows(item.timeline);
     return (
       <div className="group flex justify-start" data-conversation-streaming-turn={item.clientTurnId}>
         <div className="relative w-full max-w-[85%] space-y-1.5 px-1 text-sm">
           <StreamingPhaseStatus item={item} />
-          {item.timeline?.length ? <div data-vrcforge-live-runtime-timeline>{buildDurableTimelineRows(item.timeline)}</div> : null}
+          {timelineRows.length ? <div data-vrcforge-live-runtime-timeline>{timelineRows}</div> : null}
           {item.text ? <ChatMarkdown text={item.text} /> : null}
           <div className="mt-1 flex items-center gap-2 text-[10px] text-muted-foreground">
             {runtimeModelLabel ? (
@@ -286,42 +285,17 @@ export function ConversationCard({
   }
 
   if (item.type === "subagent") {
-    const task = item.task;
-    return (
-      <div className="group flex justify-start">
-        <div className="relative w-full max-w-[85%] space-y-2 rounded-2xl border border-border bg-card px-4 py-3 text-sm shadow-panel">
-          <div className="flex min-w-0 items-center gap-2">
-            <Bot className="h-4 w-4 shrink-0 text-primary" />
-            <span className="min-w-0 flex-1 truncate font-medium">
-              {task.displayName || t("agent.subagentTask")} · {subAgentRoleLabel(task.role)}
-            </span>
-            <Badge tone={subAgentStatusTone(task.status)} className="shrink-0">
-              {displaySubAgentStatus(task.status)}
-            </Badge>
-          </div>
-          <p className="whitespace-pre-wrap break-words leading-relaxed text-muted-foreground">
-            {task.summary || task.error || task.task || t("agent.noSummaryReturned")}
-          </p>
-          {task.mergeDecision ? (
-            <div className="text-xs text-muted-foreground">
-              {t("subagent.review")}: {task.mergeDecision === "adopted" ? t("subagent.mergedBadge") : t("subagent.dismissedBadge")}
-              {task.mergedAt ? ` · ${task.mergedAt}` : ""}
-            </div>
-          ) : null}
-          {task.result !== undefined ? <OutputBlock label={t("subagent.result")} value={formatPayload(task.result)} /> : null}
-          <MessageActions
-            onRetry={canRetry ? () => onRetryItem?.(item.id) : undefined}
-          />
-        </div>
-      </div>
-    );
+    // Keep older transcript records intact; subagent details live in the sidebar.
+    return null;
   }
 
   if (item.type === "timeline_event") {
+    const timelineRows = buildDurableTimelineRows([item.event]);
+    if (!timelineRows.length) return null;
     return (
       <div className="group flex justify-start" data-vrcforge-timeline-event={item.event.kind}>
         <div className="relative w-full max-w-[85%] space-y-1.5">
-          {buildDurableTimelineRows([item.event])}
+          {timelineRows}
         </div>
       </div>
     );
