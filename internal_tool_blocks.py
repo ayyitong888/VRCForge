@@ -200,6 +200,8 @@ _CORE_TOOLS = frozenset(
         "vrcforge_read_text_file",
         "vrcforge_find_files",
         "vrcforge_search_text",
+        "vrcforge_web_fetch",
+        "vrcforge_web_search",
         "vrcforge_get_goal",
         "vrcforge_create_goal",
         "vrcforge_update_goal",

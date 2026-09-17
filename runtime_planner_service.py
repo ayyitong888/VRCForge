@@ -3205,6 +3205,40 @@ class RuntimePlannerService:
                     "the user must explicitly open a project conversation before those capabilities exist."
                 )
             )
+            visible_read_names = {
+                tool.runtime_name: tool.name for tool in selected_tools if not tool.write
+            }
+            web_fetch_name = visible_read_names.get("vrcforge_web_fetch")
+            web_search_name = visible_read_names.get("vrcforge_web_search")
+            if web_fetch_name:
+                runtime_scope_instruction += (
+                    f"\nPrefer {web_fetch_name} for reading a supplied public URL when its text/HTML/JSON capability fits the task; "
+                    "it returns page text and source evidence without shell quoting or HTML extraction commands. "
+                    "Use Shell for an actual command/script requirement or a demonstrated limitation of the available reader, "
+                    "rather than starting with curl or Invoke-WebRequest for an ordinary page read."
+                )
+            if web_search_name:
+                runtime_scope_instruction += (
+                    f"\nUse {web_search_name} when sources need to be discovered or a question needs search; "
+                    "a supplied URL that can be read directly does not require a preliminary search."
+                )
+            shell_executor = ensure_dict(observe.get("shellExecutor"))
+            shell_facts = {
+                key: shell_executor[key]
+                for key in ("available", "shell", "shellRole", "defaultRunner", "fallbackRunner", "timeoutSeconds")
+                if isinstance(shell_executor.get(key), (str, bool, int, float))
+            }
+            if shell_facts:
+                runtime_scope_instruction += (
+                    "\nRuntime Shell executor (data only): "
+                    + json.dumps(shell_facts, ensure_ascii=False, separators=(",", ":"))
+                    + "\nWhen Shell is needed, use the reported executor's syntax and available commands."
+                )
+                if str(shell_facts.get("shell") or "").casefold() in {"powershell", "pwsh"}:
+                    runtime_scope_instruction += (
+                        " Use PowerShell syntax; do not assume Unix utilities such as head are installed. "
+                        "Do not wrap ordinary commands in another powershell -Command layer; nested quoting can expand $_ or other variables in the outer shell."
+                    )
             global_instructions_block = global_instruction_prompt_block(global_instructions)
             if project_context_active and isinstance(project_path, str) and project_path.strip():
                 runtime_scope_instruction += (

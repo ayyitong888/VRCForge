@@ -135,7 +135,7 @@ def test_root_routing_strings_are_serialized_as_single_entries() -> None:
 
 def test_internal_blocks_classify_general_tools_without_exposing_them_externally() -> None:
     assert internal_tool_block_for_name("vrcforge_read_text_file", "general") == "core"
-    assert internal_tool_block_for_name("vrcforge_web_search", "general") == "research/web_research"
+    assert internal_tool_block_for_name("vrcforge_web_search", "general") == "core"
     assert internal_tool_block_for_name("vrcforge_agent_desktop_action", "core") == "project_environment/shell"
     assert internal_tool_block_for_name("vrcforge_execute_shell", "core") == "project_environment/shell"
     assert internal_tool_block_for_name("vrcforge_health", "unity") == "diagnostics_build/compile_logs"
