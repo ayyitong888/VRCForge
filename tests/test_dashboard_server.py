@@ -8110,10 +8110,11 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(payload["summary"], "hello")
         events = [call.args for call in mock_broadcast.call_args_list]
         self.assertEqual(events[0][0], "agentRuntimeDelta")
-        self.assertEqual(events[0][1]["phase"], "receiving_response")
-        self.assertEqual(events[0][1]["textDelta"], "hel")
+        self.assertEqual(events[0][1]["phase"], "waiting_for_model")
         self.assertEqual(events[0][1]["clientTurnId"], "client-stream")
-        self.assertEqual(events[1][1]["textDelta"], "lo")
+        self.assertEqual(events[1][1]["phase"], "receiving_response")
+        self.assertEqual(events[1][1]["textDelta"], "hel")
+        self.assertEqual(events[2][1]["textDelta"], "lo")
         self.assertEqual(events[-1][1]["done"], True)
 
     @patch("dashboard_server.EVENT_BUS.broadcast_from_sync")
@@ -8156,7 +8157,7 @@ class DashboardServerTests(unittest.TestCase):
             dashboard_server.AGENT_GATEWAY.runtime_sessions.clear_stream_context()
 
         self.assertEqual(payload["reply"], "hello world")
-        delta_events = [call.args[1] for call in mock_broadcast.call_args_list if call.args[0] == "agentRuntimeDelta" and not call.args[1].get("done")]
+        delta_events = [call.args[1] for call in mock_broadcast.call_args_list if call.args[0] == "agentRuntimeDelta" and "textDelta" in call.args[1]]
         self.assertEqual([event["textDelta"] for event in delta_events], ["hel", "lo wor", "ld"])
         self.assertTrue(mock_broadcast.call_args_list[-1].args[1]["done"])
 

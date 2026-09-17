@@ -117,6 +117,25 @@ const nextWaiting = applyAgentRuntimeDeltaToStreamingItem(completed, {
 }, nextCallAt);
 assert.equal(nextWaiting.providerLastActivityAt, nextCallAt, "the next Provider call owns a fresh idle clock");
 
+// A format correction is another Provider call in the same runtime turn.
+// Its done event does not finish the turn; the next call's waiting boundary
+// discards the invalid draft before any pure-content deltas arrive.
+let correctedStream = applyAgentRuntimeDeltaToStreamingItem(base, {
+  type: "agentRuntimeDelta", clientTurnId: "client-live", phase: "receiving_response", textDelta: "invalid draft",
+});
+correctedStream = applyAgentRuntimeDeltaToStreamingItem(correctedStream, {
+  type: "agentRuntimeDelta", clientTurnId: "client-live", done: true,
+});
+assert.equal(correctedStream.text, "invalid draft", "done keeps its existing nonterminal semantics");
+correctedStream = applyAgentRuntimeDeltaToStreamingItem(correctedStream, {
+  type: "agentRuntimeDelta", clientTurnId: "client-live", phase: "waiting_for_model",
+});
+assert.equal(correctedStream.text, "", "retry clears the previous draft even if it later fails or is cancelled");
+correctedStream = applyAgentRuntimeDeltaToStreamingItem(correctedStream, {
+  type: "agentRuntimeDelta", clientTurnId: "client-live", phase: "receiving_response", textDelta: "corrected\nreply",
+});
+assert.equal(correctedStream.text, "corrected\nreply", "a second pure-content response never appends the invalid draft");
+
 for (const locale of ["en-US", "ja-JP", "zh-CN", "zh-TW"]) {
   const messages = JSON.parse(await readFile(resolve(import.meta.dirname, "..", "src", "locales", `${locale}.json`), "utf8"));
   assert.equal(typeof messages.chat.runtimePhase.reconnecting, "string", `${locale} must localize the bounded reconnect status`);

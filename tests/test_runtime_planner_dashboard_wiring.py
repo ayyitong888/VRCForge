@@ -31,6 +31,50 @@ def fixture_config() -> ProviderApiConfig:
     )
 
 
+@pytest.mark.parametrize("second_outcome", ["reply", "failed", "cancelled"])
+def test_each_model_call_starts_a_fresh_stream_boundary_even_for_format_retry(second_outcome):
+    binding = dashboard_server._RuntimePlannerProviderTurnBinding()
+    model = dashboard_server._RuntimePlannerModel(binding)
+    calls = []
+    events = []
+
+    def request(_settings, _prompt, *, stream_callback, **_kwargs):
+        calls.append(_prompt)
+        if len(calls) == 2 and second_outcome != "reply":
+            error = (dashboard_server.RuntimePlannerProviderCancelledError
+                     if second_outcome == "cancelled" else RuntimeError)
+            raise error("fixture stopped")
+        text = '{"reply":"first invalid draft"' if len(calls) == 1 else '{"action":"reply","reply":"corrected reply"}'
+        stream_callback(text)
+        return LlmPlanResponse(text=text, reasoning={}, usage={})
+
+    context = {"sessionId": "stream-boundary", "turnId": "turn-boundary", "clientTurnId": "client-boundary"}
+    dashboard_server.AGENT_GATEWAY.runtime_sessions.set_stream_context(context)
+    try:
+        with (patch.object(dashboard_server.PROVIDER_CONFIGURATION, "current_api_config", return_value=fixture_config()),
+              patch.object(dashboard_server.PROVIDER_TEXT_PROBE, "probe_settings", return_value=SimpleNamespace()),
+              patch.object(dashboard_server, "request_llm_plan_with_metadata", side_effect=request),
+              patch.object(dashboard_server.EVENT_BUS, "broadcast_from_sync", side_effect=lambda kind, payload: events.append((kind, payload)))):
+            with binding.bind({}):
+                model.plan("first")
+                if second_outcome == "reply":
+                    model.plan("format correction")
+                else:
+                    with pytest.raises(RuntimeError, match="fixture stopped"):
+                        model.plan("format correction")
+        phases = [payload.get("phase") or "done" for kind, payload in events if kind == "agentRuntimeDelta"]
+        expected = ["waiting_for_model", "receiving_response", "done", "waiting_for_model"]
+        if second_outcome == "reply":
+            expected.extend(["receiving_response", "done"])
+        assert phases == expected
+        assert all(payload["clientTurnId"] == context["clientTurnId"] for _, payload in events)
+        assert model.active_call_count() == 0
+        assert "fixture-secret-key" not in repr(events)
+    finally:
+        model.shutdown()
+        dashboard_server.AGENT_GATEWAY.runtime_sessions.clear_stream_context()
+
+
 def test_internal_tool_index_lists_only_tools_visible_in_the_requested_planner_layer() -> None:
     visible = PlannerTool(
         name="unity_status",

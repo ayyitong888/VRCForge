@@ -15277,6 +15277,18 @@ class _RuntimePlannerModel:
         )
         stream_state = {"raw": "", "field": "", "text": "", "firstByteAt": None, "lastActivityAt": time.monotonic()}
         context = AGENT_GATEWAY.runtime_sessions.stream_context()
+        # A format correction can call the model again without another gateway
+        # loop iteration. Start every call with the existing transient-text reset.
+        if context.get("clientTurnId"):
+            EVENT_BUS.broadcast_from_sync(
+                "agentRuntimeDelta",
+                {
+                    "sessionId": context.get("sessionId") or "",
+                    "turnId": context.get("turnId") or "",
+                    "clientTurnId": context.get("clientTurnId") or "",
+                    "phase": "waiting_for_model",
+                },
+            )
         owner_id = str(
             context.get("clientTurnId")
             or context.get("turnId")

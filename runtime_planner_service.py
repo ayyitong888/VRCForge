@@ -788,31 +788,43 @@ def parse_native_planner_tool_call(raw_response: str) -> dict[str, object] | Non
     }
 
 
-def parse_llm_plan_response(raw_response: str) -> dict[str, object] | None:
+def parse_llm_plan_response(
+    raw_response: str, *, diagnostics: dict[str, object] | None = None,
+) -> dict[str, object] | None:
     """Extract JSON or one strict provider-native tool call from a planner response."""
-    stripped = str(raw_response or "").strip()
+    raw = str(raw_response or "")
+    stripped = raw.strip()
+    if diagnostics is not None:
+        diagnostics.clear()
+        diagnostics["selectedKeys"] = []
     if not stripped:
         return None
-    if stripped.startswith("```"):
-        stripped = re.sub(r"^```[a-zA-Z]*\s*", "", stripped)
-        stripped = re.sub(r"\s*```$", "", stripped).strip()
     native_tool_call = parse_native_planner_tool_call(stripped)
     if native_tool_call is not None:
         return native_tool_call
-    start = stripped.find("{")
-    if start < 0:
+    # Decode the first outer JSON container once. Searching subsequent braces
+    # after a malformed envelope could execute a nested object as a new plan.
+    # Decode against the original text so diagnostic positions retain whitespace
+    # and fence/prose offsets; raw_decode still permits those supported wrappers.
+    start = re.search(r"[\[{]", raw)
+    if start is None:
         return None
-    decoder = json.JSONDecoder()
-    for index in range(start, len(stripped)):
-        if stripped[index] != "{":
-            continue
-        try:
-            payload, _ = decoder.raw_decode(stripped[index:])
-        except ValueError:
-            continue
-        if isinstance(payload, dict):
-            return payload
-    return None
+    try:
+        payload, _ = json.JSONDecoder().raw_decode(raw, start.start())
+    except json.JSONDecodeError as exc:
+        if diagnostics is not None:
+            diagnostics["jsonError"] = {
+                "reason": sanitize_planner_observation_text(exc.msg, 200),
+                "position": exc.pos, "line": exc.lineno, "column": exc.colno,
+            }
+        return None
+    if not isinstance(payload, dict):
+        return None
+    if diagnostics is not None:
+        diagnostics["selectedKeys"] = [
+            sanitize_planner_observation_text(key, 80) for key in list(payload)[:16]
+        ]
+    return payload
 
 def normalize_llm_plan_result(
     raw_response: str | Mapping[str, object] | PlannerModelResult,
@@ -1610,6 +1622,7 @@ class RuntimePlannerService:
             provider_error: Exception | None = None,
             invalid_response_preview: str = "",
             invalid_response_stage: str = "",
+            format_correction: Mapping[str, object] | None = None,
         ) -> dict[str, object]:
             post_tool = phase == "post_tool"
             invalid_response = cause_code == "planner_invalid_response"
@@ -1652,14 +1665,19 @@ class RuntimePlannerService:
             if provider_error_details:
                 planner_failure["providerError"] = provider_error_details
             if cause_code == "planner_invalid_response" and invalid_response_preview:
+                parse_diagnostics: dict[str, object] = {}
+                parse_llm_plan_response(invalid_response_preview, diagnostics=parse_diagnostics)
                 planner_failure["invalidResponse"] = {
+                    **parse_diagnostics,
                     "stage": str(invalid_response_stage or "response_validation")[:80],
                     "preview": sanitize_planner_observation_text(
                         invalid_response_preview,
                         1_200,
+                        preserve_whitespace=True,
                     ),
                 }
             plan: dict[str, object] = {
+                **({"formatCorrection": dict(format_correction)} if format_correction else {}),
                 "summary": "The model planner failed before producing a valid next action.",
                 "reply": reply,
                 "planner": "llm",
@@ -1837,6 +1855,7 @@ class RuntimePlannerService:
                 if int((context_usage or {}).get("requestCount") or 0) > 0
                 else "initial"
             )
+            format_correction: dict[str, object] = {}
             try:
                 prompt = self._build_llm_plan_prompt(
                     self._message_with_runtime_context(message, observe),
@@ -1850,15 +1869,35 @@ class RuntimePlannerService:
                     global_instructions=global_instructions,
                     project_instructions=project_instructions,
                 )
-                raw_response = model_port.plan(prompt)
-                provider_reasoning = dict(raw_response.reasoning)
-                if reasoning_trace is not None:
-                    reasoning_trace.clear()
-                    reasoning_trace.update(provider_reasoning)
-                planner_label = raw_response.planner_label.strip() or str(planner_label or "").strip()
-                response_text, provider_usage = normalize_llm_plan_result(raw_response)
-                self.record_context_usage(context_usage if context_usage is not None else {}, prompt, history, provider_usage)
-                payload = parse_llm_plan_response(response_text)
+                for format_attempt in range(2):
+                    raw_response = model_port.plan(prompt)
+                    provider_reasoning = dict(raw_response.reasoning)
+                    if reasoning_trace is not None:
+                        reasoning_trace.clear()
+                        reasoning_trace.update(provider_reasoning)
+                    planner_label = raw_response.planner_label.strip() or str(planner_label or "").strip()
+                    response_text, provider_usage = normalize_llm_plan_result(raw_response)
+                    self.record_context_usage(context_usage if context_usage is not None else {}, prompt, history, provider_usage)
+                    parse_diagnostics: dict[str, object] = {}
+                    payload = parse_llm_plan_response(response_text, diagnostics=parse_diagnostics)
+                    if format_correction:
+                        format_correction["parseRecovered"] = isinstance(payload, dict)
+                    if format_attempt or not parse_diagnostics.get("jsonError"):
+                        break
+                    # One formatting correction in this planning step, before
+                    # dispatch. Keep the same observations, tools and authority;
+                    # return only bounded parser diagnostics, never raw output.
+                    format_correction = {
+                        "attemptCount": 1, "parseRecovered": False,
+                        "initialError": parse_diagnostics["jsonError"],
+                    }
+                    prompt += (
+                        "\n\nYour preceding response could not be parsed as JSON. "
+                        "Return one valid outer planner JSON object with escaped string characters. "
+                        "Use the same task, observations, tool catalog and permissions above. "
+                        "No tool was dispatched from that invalid response. Parser error: "
+                        + json.dumps(parse_diagnostics["jsonError"], ensure_ascii=False)
+                    )
             except Exception as exc:  # noqa: BLE001 - interactive failures become a bounded typed result.
                 if propagate_provider_errors:
                     raise
@@ -1868,6 +1907,7 @@ class RuntimePlannerService:
                     planner_label=str(planner_label or "").strip(),
                     transport_phase=self._planner_transport_phase(exc),
                     provider_error=exc,
+                    format_correction=format_correction,
                 )
             if not isinstance(payload, dict):
                 return self._planner_failure_plan(
@@ -1876,6 +1916,7 @@ class RuntimePlannerService:
                     planner_label=planner_label,
                     invalid_response_preview=response_text,
                     invalid_response_stage="json_object_parse",
+                    format_correction=format_correction,
                 )
 
             action = str(payload.get("action") or "").strip().lower()
@@ -1906,6 +1947,7 @@ class RuntimePlannerService:
                     planner_label=planner_label,
                     invalid_response_preview=response_text,
                     invalid_response_stage="parameter_object_validation",
+                    format_correction=format_correction,
                 )
             correction_for_action_id = str(
                 payload.get("correction_for_action_id")
@@ -1917,6 +1959,7 @@ class RuntimePlannerService:
             )
 
             base = {
+                **({"formatCorrection": dict(format_correction)} if format_correction else {}),
                 "planner": "llm",
                 "plannerLabel": planner_label,
                 "reply": reply,
@@ -2272,6 +2315,7 @@ class RuntimePlannerService:
                 planner_label=planner_label,
                 invalid_response_preview=response_text,
                 invalid_response_stage="action_validation",
+                format_correction=format_correction,
             )
 
     def record_context_usage(
