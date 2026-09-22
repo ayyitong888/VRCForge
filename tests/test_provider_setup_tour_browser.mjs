@@ -4,20 +4,34 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { createRequire } from "node:module";
 import { readFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import path from "node:path";
 import { build } from "esbuild";
 const require = createRequire(import.meta.url);
 const { chromium } = require(process.env.VRCFORGE_PLAYWRIGHT_PATH || "playwright");
+const baselineProviderTourPlugin = process.env.VRCFORGE_PROVIDER_TOUR_BASELINE === "1"
+  ? [{
+      name: "provider-tour-baseline",
+      setup(esbuild) {
+        esbuild.onLoad({ filter: /provider-setup-tour\.tsx$/ }, () => ({
+          contents: execFileSync("git", ["show", "HEAD:src/components/onboarding/provider-setup-tour.tsx"], { encoding: "utf8" }),
+          loader: "tsx",
+          resolveDir: path.resolve("src/components/onboarding"),
+        }));
+      },
+    }]
+  : [];
 const bundle = await build({ stdin: { resolveDir: process.cwd(), loader: "tsx", contents: `
 import React,{StrictMode,useState} from 'react';import{createRoot}from'react-dom/client';
 import i18n from 'i18next';import{initReactI18next}from'react-i18next';import en from './src/locales/en-US.json';
 import{ProviderSetupTour}from'./src/components/onboarding/provider-setup-tour';
 i18n.use(initReactI18next).init({lng:'en-US',resources:{'en-US':{translation:en}}});
 function Fixture(){const[open,setOpen]=useState(false);const[mounted,setMounted]=useState(true);const[count,setCount]=useState(0);
-window.fixture={open:()=>setOpen(true),unmount:()=>setMounted(false)};
-return <><output id="returned">{count}</output><main style={{maxWidth:500,margin:'100px auto'}}>
-{['connection','credentials','model','actions'].map(key=><label key={key} data-onboarding-provider={key} style={{display:'block',padding:15,marginBottom:20}}>{key}<input aria-label={key}/></label>)}
-</main>{mounted&&<ProviderSetupTour open={open} onReturn={()=>{setCount(c=>c+1);setOpen(false)}}/>}</>}
-createRoot(document.getElementById('root')).render(<StrictMode><Fixture/></StrictMode>);` }, bundle: true, write: false, format: "iife", jsx: "automatic", loader: { ".css": "empty" }, define: { "process.env.NODE_ENV": '"development"' } });
+window.fixture={open:()=>setOpen(true),unmount:()=>setMounted(false),scrollInner:()=>{const el=document.querySelector('#settings-scroll');el.scrollTop=120;el.dispatchEvent(new Event('scroll'))}};
+return <><output id="returned">{count}</output><div id="settings-scroll" style={{height:260,overflowY:'auto',maxWidth:500,margin:'100px auto'}}><main>
+{['connection','credentials','model','actions'].map(key=><label key={key} data-onboarding-provider={key} style={{display:'block',padding:15,minHeight:150,marginBottom:20}}>{key}<input aria-label={key}/></label>)}
+</main></div>{mounted&&<ProviderSetupTour open={open} onReturn={()=>{setCount(c=>c+1);setOpen(false)}}/>}</>}
+createRoot(document.getElementById('root')).render(<StrictMode><Fixture/></StrictMode>);` }, bundle: true, write: false, format: "iife", jsx: "automatic", loader: { ".css": "empty" }, plugins: baselineProviderTourPlugin, define: { "process.env.NODE_ENV": '"development"' } });
 const css = await readFile('node_modules/driver.js/dist/driver.css','utf8') + await readFile('src/components/onboarding/provider-setup-tour.css','utf8');
 const server = createServer((request,response)=>{
   if(request.url==='/fixture.js'){response.setHeader('Content-Type','text/javascript');response.end(bundle.outputFiles[0].text);return;}
@@ -33,7 +47,14 @@ try {
   await page.waitForFunction(()=>Boolean(window.fixture));
   await page.evaluate(()=>window.fixture.open());
   await page.waitForSelector('.driver-popover');
+  await page.waitForSelector('.driver-overlay path');
   assert.equal(await page.locator('#returned').innerText(),'0','StrictMode must not end the guide');
+  const beforeInnerScroll = await page.evaluate(()=>{const target=document.querySelector('.driver-active-element');return {top:target.getBoundingClientRect().top,path:document.querySelector('.driver-overlay')?.innerHTML}});
+  await page.evaluate(()=>window.fixture.scrollInner());
+  await page.waitForFunction((before)=>{const target=document.querySelector('.driver-active-element');const path=document.querySelector('.driver-overlay')?.innerHTML;return target&&target.getBoundingClientRect().top < before.top - 50 && path && path !== before.path}, beforeInnerScroll);
+  const afterInnerScroll = await page.evaluate(()=>({top:document.querySelector('.driver-active-element').getBoundingClientRect().top,path:document.querySelector('.driver-overlay')?.innerHTML}));
+  assert.ok(afterInnerScroll.top < beforeInnerScroll.top - 50,'nested scroll must move the active target');
+  assert.notEqual(afterInnerScroll.path,beforeInnerScroll.path,'overlay spotlight must follow nested scroll');
   await page.getByLabel('connection',{exact:true}).fill('editable');
   assert.equal(await page.getByLabel('connection',{exact:true}).inputValue(),'editable');
   await page.keyboard.press('Escape');

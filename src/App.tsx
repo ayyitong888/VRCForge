@@ -1906,6 +1906,14 @@ export default function App() {
   }, [initialOnboardingState.migrateLanguageGateCompletion]);
 
   useEffect(() => {
+    if (showOnboarding && onboardingMinimized && providerSetupGuide && providerReadyForOnboarding) {
+      setActiveView("chat");
+      setProviderSetupGuide(false);
+      setOnboardingMinimized(false);
+    }
+  }, [showOnboarding, onboardingMinimized, providerSetupGuide, providerReadyForOnboarding]);
+
+  useEffect(() => {
     if (!showOnboarding || !onboardingMinimized || providerSetupGuide || activeView === "settings" || showProjectModal) {
       return;
     }

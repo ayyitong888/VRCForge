@@ -138,9 +138,21 @@ export function ProviderSetupTour({ open, onReturn }: ProviderSetupTourProps) {
       };
     }
 
+    // Settings scroll inside a pane; its scroll events do not bubble to window.
+    let refreshFrame = 0;
+    const refreshPosition = () => {
+      if (refreshFrame || disposed) return;
+      refreshFrame = window.requestAnimationFrame(() => {
+        refreshFrame = 0;
+        if (!disposed) tour.refresh();
+      });
+    };
+    document.addEventListener("scroll", refreshPosition, true);
     tour.drive();
     return () => {
       disposed = true;
+      document.removeEventListener("scroll", refreshPosition, true);
+      window.cancelAnimationFrame(refreshFrame);
       tour.destroy();
     };
   }, [open, t]);
