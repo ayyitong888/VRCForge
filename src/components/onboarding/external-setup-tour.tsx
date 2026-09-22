@@ -146,20 +146,25 @@ export function ExternalSetupTour({ open, onReturn }: ExternalSetupTourProps) {
       };
     }
 
-    let refreshFrame = 0;
-    const refreshPosition = () => {
-      if (refreshFrame || disposed) return;
-      refreshFrame = window.requestAnimationFrame(() => {
-        refreshFrame = 0;
-        if (!disposed) tour.refresh();
-      });
+    // Connector status can expand earlier rows without scrolling or resizing
+    // the active row. Track its viewport rectangle for this tour's lifetime.
+    let positionFrame = 0;
+    let previousRect = "";
+    const trackPosition = () => {
+      if (disposed) return;
+      const rect = tour.getActiveElement()?.getBoundingClientRect();
+      const nextRect = rect ? `${rect.x},${rect.y},${rect.width},${rect.height}` : "";
+      if (nextRect !== previousRect) {
+        previousRect = nextRect;
+        tour.refresh();
+      }
+      positionFrame = window.requestAnimationFrame(trackPosition);
     };
-    document.addEventListener("scroll", refreshPosition, true);
     tour.drive();
+    positionFrame = window.requestAnimationFrame(trackPosition);
     return () => {
       disposed = true;
-      document.removeEventListener("scroll", refreshPosition, true);
-      window.cancelAnimationFrame(refreshFrame);
+      window.cancelAnimationFrame(positionFrame);
       tour.destroy();
     };
   }, [open, t]);

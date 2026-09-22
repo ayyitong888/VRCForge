@@ -20,7 +20,7 @@ import{ExternalSetupTour}from'./src/components/onboarding/external-setup-tour';
 i18n.use(initReactI18next).init({lng:'en-US',resources:{'en-US':{translation:en}}});
 const clients=[['codexApp','Codex App'],['codexCli','Codex CLI'],['claudeCode','Claude Code CLI'],['claudeCowork','Claude Cowork App'],['deepseekHarness','DeepSeek Harness'],['generic','Generic client']];
 function Fixture(){const[open,setOpen]=useState(false);const[mounted,setMounted]=useState(true);const[returned,setReturned]=useState(0);const[mutations,setMutations]=useState(0);
-window.fixture={open:()=>setOpen(true),unmount:()=>setMounted(false),scrollInner:()=>{const el=document.querySelector('#client-scroll');el.scrollTop-=60;el.dispatchEvent(new Event('scroll'))}};
+window.fixture={open:()=>setOpen(true),unmount:()=>setMounted(false),shiftLayout:()=>{const row=document.querySelector('[data-onboarding-client="deepseekHarness"]');const block=document.createElement('div');block.id='layout-shift';block.style.height='96px';row.before(block)},scrollInner:()=>{const el=document.querySelector('#client-scroll');el.scrollTop-=60;el.dispatchEvent(new Event('scroll'))}};
 return <><output id="returned">{returned}</output><output id="mutations">{mutations}</output><div data-onboarding-external="gateway" style={{margin:'40px auto',maxWidth:600}}><button onClick={()=>setMutations(x=>x+1)}>Gateway toggle</button></div><div id="client-scroll" style={{height:260,overflowY:'auto',maxWidth:600,margin:'0 auto'}}>{clients.map(([id,label])=><div key={id} data-onboarding-client={id} data-onboarding-client-label={label} style={{height:150,marginBottom:20,padding:20,border:'1px solid gray'}}><span>{label}</span><button onClick={()=>setMutations(x=>x+1)}>Install</button><input type="checkbox" onChange={()=>setMutations(x=>x+1)}/></div>)}</div>{mounted&&<ExternalSetupTour open={open} onReturn={()=>{setReturned(x=>x+1);setOpen(false)}}/>}</>}
 createRoot(document.getElementById('root')).render(<StrictMode><Fixture/></StrictMode>);` }, bundle: true, write: false, format: "iife", jsx: "automatic", loader: { ".css": "empty" }, define: { "process.env.NODE_ENV": '"development"' } });
 const css = await readFile("node_modules/driver.js/dist/driver.css", "utf8") + await readFile("src/components/onboarding/provider-setup-tour.css", "utf8");
@@ -49,6 +49,13 @@ try {
   await page.waitForFunction(()=>document.querySelector('[data-onboarding-client="deepseekHarness"]')?.classList.contains("driver-active-element"));
   assert.equal(await page.locator("#mutations").innerText(),"0","client selection must not install, click, or toggle anything");
   assert.equal(await page.locator(".driver-active-element").count(),1,"switching clients must clear the previous highlight");
+  const beforeLayoutShift=await page.evaluate(()=>({top:document.querySelector(".driver-active-element").getBoundingClientRect().top,path:document.querySelector(".driver-overlay path")?.getAttribute("d")}));
+  await page.evaluate(()=>window.fixture.shiftLayout());
+  await page.waitForFunction((old)=>{const target=document.querySelector(".driver-active-element");const path=document.querySelector(".driver-overlay path")?.getAttribute("d");return target&&target.getBoundingClientRect().top>old.top+50&&path&&path!==old.path},beforeLayoutShift);
+  const afterLayoutShift=await page.evaluate(()=>({top:document.querySelector(".driver-active-element").getBoundingClientRect().top,path:document.querySelector(".driver-overlay path")?.getAttribute("d")}));
+  assert.ok(afterLayoutShift.top>beforeLayoutShift.top+50,"layout shift must move the active target");assert.notEqual(afterLayoutShift.path,beforeLayoutShift.path,"overlay spotlight must follow layout shift");
+  const holeTop = Number(afterLayoutShift.path.match(/Z\s*M[-\d.]+,([-\d.]+)/)?.[1]);
+  assert.ok(Math.abs(holeTop - (afterLayoutShift.top - 10)) < 1, "spotlight must align with the shifted target");
   const before=await page.evaluate(()=>({top:document.querySelector(".driver-active-element").getBoundingClientRect().top,path:document.querySelector(".driver-overlay path")?.getAttribute("d")}));
   await page.evaluate(()=>window.fixture.scrollInner());
   await page.waitForFunction((old)=>{const target=document.querySelector(".driver-active-element");const path=document.querySelector(".driver-overlay path")?.getAttribute("d");return target&&Math.abs(target.getBoundingClientRect().top-old.top)>50&&path&&path!==old.path},before);
