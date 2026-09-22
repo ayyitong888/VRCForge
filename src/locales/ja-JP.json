@@ -581,7 +581,23 @@
     "selectProject": "プロジェクトを選択",
     "importAndSelectProject": "Unity で VRCForge.unitypackage を Import All してから、開いているプロジェクトをここで選択してください。",
     "keepUnityOpen": "選択した Unity プロジェクトを開いたままコンパイルを待ち、再試行してください。{{count}} ツールを検出しました。",
-    "toolsConnected": "接続済み — {{count}} ツール"
+    "toolsConnected": "接続済み — {{count}} ツール",
+    "providerTour": {
+      "connectionTitle": "プロバイダーを選択",
+      "connectionDescription": "VRCForge で使う AI プロバイダーを選択してください。",
+      "credentialsTitle": "認証情報を入力",
+      "credentialsDescription": "ここに API キーを入力します。このガイドが値を読み取ったり保存したりすることはありません。",
+      "endpointTitle": "Base URL を設定",
+      "endpointDescription": "カスタムエンドポイントを使うプロバイダーでは、提供された Base URL を入力してください。",
+      "modelTitle": "モデルを選択",
+      "modelDescription": "VRCForge で使うモデルを選択または入力し、必要ならモデル一覧を更新してください。",
+      "actionsTitle": "保存してテスト",
+      "actionsDescription": "先に設定を保存し、「接続をテスト」で確認してください。このガイドが自動でテストを実行することはありません。",
+      "progress": "{{total}} ステップ中 {{current}}",
+      "next": "次へ",
+      "previous": "前へ",
+      "return": "オンボーディングに戻る"
+    }
   },
   "executionMode": {
     "approval": "制限モード",

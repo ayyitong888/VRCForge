@@ -48,6 +48,7 @@ import { SidebarMenus } from "./components/sidebar/sidebar-menus";
 import { TransientFailureToast } from "./components/ui/transient-failure-toast";
 import { TextEditContextMenu } from "./components/common/text-edit-context-menu";
 import { OnboardingOverlay } from "./components/onboarding/onboarding-overlay";
+import { ProviderSetupTour } from "./components/onboarding/provider-setup-tour";
 import { OnboardingLanguageGate } from "./components/onboarding/onboarding-language-gate";
 import {
   persistOnboardingLanguageGateCompletion,
@@ -344,6 +345,7 @@ export default function App() {
   );
   const [onboardingStep, setOnboardingStep] = useState(0);
   const [onboardingMinimized, setOnboardingMinimized] = useState(false);
+  const [providerSetupGuide, setProviderSetupGuide] = useState(false);
   const [subAgentList, setSubAgentList] = useState<SubAgentTaskList | null>(() =>
     initialSubAgentTask
       ? {
@@ -1904,7 +1906,7 @@ export default function App() {
   }, [initialOnboardingState.migrateLanguageGateCompletion]);
 
   useEffect(() => {
-    if (!showOnboarding || !onboardingMinimized) {
+    if (!showOnboarding || !onboardingMinimized || providerSetupGuide || activeView === "settings" || showProjectModal) {
       return;
     }
     const stepStates = activeProjectType === "unity"
@@ -1913,7 +1915,7 @@ export default function App() {
     if (stepStates[Math.min(onboardingStep, stepStates.length - 1)]) {
       setOnboardingMinimized(false);
     }
-  }, [showOnboarding, onboardingMinimized, onboardingStep, onboardingSelectedProjectReady, onboardingUnityToolsReady, activeProjectType, providerReadyForOnboarding, externalAgentVerified]);
+  }, [showOnboarding, onboardingMinimized, onboardingStep, onboardingSelectedProjectReady, onboardingUnityToolsReady, activeProjectType, providerReadyForOnboarding, externalAgentVerified, providerSetupGuide, activeView, showProjectModal]);
 
   useEffect(() => {
     if (!isTauriRuntime()) {
@@ -3583,6 +3585,13 @@ export default function App() {
     setShowOnboarding(false);
     setShowOnboardingLanguageGate(false);
     setOnboardingMinimized(false);
+    setProviderSetupGuide(false);
+  }
+
+  function returnFromOnboardingSettings() {
+    setActiveView("chat");
+    setProviderSetupGuide(false);
+    if (showOnboarding) setOnboardingMinimized(false);
   }
 
   function restartOnboarding() {
@@ -3594,6 +3603,7 @@ export default function App() {
     setActiveView("chat");
     setOnboardingStep(0);
     setOnboardingMinimized(false);
+    setProviderSetupGuide(false);
     setShowOnboardingLanguageGate(false);
     setShowOnboarding(true);
   }
@@ -3746,7 +3756,7 @@ export default function App() {
           onOpenCheckpoints={() => void openCheckpoints()}
           onOpenSettings={() => openSettingsSection("general")}
           onOpenSettingsSection={openSettingsSection}
-          onBackFromSettings={() => setActiveView("chat")}
+          onBackFromSettings={returnFromOnboardingSettings}
           onRefreshProjects={() => void refreshProjectList()}
           onSelectProject={newConversationForProject}
           onToggleProjectCollapse={toggleProjectCollapse}
@@ -4264,6 +4274,7 @@ export default function App() {
         onRetryRuntime={() => void startRuntime()}
         onOpenSettings={() => {
           setOnboardingMinimized(true);
+          setProviderSetupGuide(true);
           openSettingsSection("models");
         }}
         onOpenExternalSettings={() => {
@@ -4275,11 +4286,16 @@ export default function App() {
           setProjectModalError("");
           setShowProjectModal(true);
         }}
-        onResume={() => setOnboardingMinimized(false)}
+        onResume={returnFromOnboardingSettings}
         onFinish={finishOnboarding}
         onPreviousStep={() => setOnboardingStep((value) => Math.max(0, value - 1))}
         onNextStep={() => setOnboardingStep((value) => value + 1)}
         onLocaleChange={(locale) => void setLocale(locale)}
+      />
+
+      <ProviderSetupTour
+        open={showOnboarding && onboardingMinimized && providerSetupGuide && activeView === "settings" && activeSettingsSection === "models"}
+        onReturn={returnFromOnboardingSettings}
       />
 
       <ProjectPickerModal
@@ -4294,11 +4310,13 @@ export default function App() {
         onClose={() => {
           setShowProjectModal(false);
           setProjectModalError("");
+          if (showOnboarding) setOnboardingMinimized(false);
         }}
         onSelectProject={(key) => {
           selectProjectByPath(key);
           setShowProjectModal(false);
           setProjectModalError("");
+          if (showOnboarding) setOnboardingMinimized(false);
         }}
         onRemoveCustomProject={removeCustomProject}
         onRestoreProject={unhideProject}

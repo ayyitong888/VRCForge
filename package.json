@@ -18,6 +18,7 @@
     "@tauri-apps/api": "^2.5.0",
     "@tauri-apps/plugin-notification": "^2.3.3",
     "clsx": "^2.1.1",
+    "driver.js": "^1.8.0",
     "i18next": "^26.3.3",
     "i18next-browser-languagedetector": "^8.2.1",
     "lucide-react": "^0.468.0",

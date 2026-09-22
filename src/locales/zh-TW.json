@@ -581,7 +581,23 @@
     "selectProject": "選擇專案",
     "importAndSelectProject": "在 Unity 中從 VRCForge.unitypackage 選擇 Import All，然後在這裡選擇該已開啟專案。",
     "keepUnityOpen": "保持所選 Unity 專案開啟並等待編譯完成，然後重試。已偵測 {{count}} 個工具。",
-    "toolsConnected": "已連線 — {{count}} 個工具"
+    "toolsConnected": "已連線 — {{count}} 個工具",
+    "providerTour": {
+      "connectionTitle": "選擇服務商",
+      "connectionDescription": "選擇 VRCForge 要使用的 AI 服務商。",
+      "credentialsTitle": "填寫憑據",
+      "credentialsDescription": "在這裡輸入 API Key。本引導不會讀取或儲存它。",
+      "endpointTitle": "設定 Base URL",
+      "endpointDescription": "如果服務商使用自訂端點，請填寫服務商提供的 Base URL。",
+      "modelTitle": "選擇模型",
+      "modelDescription": "選擇或填寫 VRCForge 要使用的模型，需要時可以重新整理模型清單。",
+      "actionsTitle": "儲存並測試",
+      "actionsDescription": "先儲存設定，再點擊「測試連線」進行驗證。本引導不會替你自動測試。",
+      "progress": "第 {{current}} / {{total}} 步",
+      "next": "下一步",
+      "previous": "上一步",
+      "return": "返回新手引導"
+    }
   },
   "executionMode": {
     "approval": "受限模式",

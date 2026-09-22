@@ -115,7 +115,7 @@ export function ProviderSetup({
   return (
     <form onSubmit={onSubmit} className="rounded-2xl border border-border bg-card p-5 shadow-composer">
       <div className="grid gap-4">
-        <SettingsFieldLabel label={i18n.t("provider.apiProvider")}>
+        <SettingsFieldLabel label={i18n.t("provider.apiProvider")} onboardingTarget="connection">
           <select
             value={provider}
             onChange={(event) => onProviderChange(event.target.value)}
@@ -138,7 +138,7 @@ export function ProviderSetup({
             ))}
           </div>
         </SettingsFieldLabel>
-        <SettingsFieldLabel label={i18n.t("provider.apiKey")}>
+        <SettingsFieldLabel label={i18n.t("provider.apiKey")} onboardingTarget="credentials">
           {providerNeedsApiKey(provider) ? (
             <input
               value={apiKey}
@@ -157,7 +157,7 @@ export function ProviderSetup({
           )}
         </SettingsFieldLabel>
         {requiresBaseUrl ? (
-          <SettingsFieldLabel label={i18n.t("provider.baseUrl")}>
+          <SettingsFieldLabel label={i18n.t("provider.baseUrl")} onboardingTarget="endpoint">
             <input
               value={baseUrl}
               onChange={(event) => onBaseUrlChange(event.target.value)}
@@ -182,7 +182,7 @@ export function ProviderSetup({
             </label>
           </SettingsFieldLabel>
         ) : null}
-        <SettingsFieldLabel label={i18n.t("provider.model")}>
+        <SettingsFieldLabel label={i18n.t("provider.model")} onboardingTarget="model">
           <div className="flex min-w-0 items-center gap-2">
             {deepseekAutoNegotiation ? (
               <div className="flex h-10 w-full min-w-0 items-center rounded-md border border-border bg-muted px-3 text-sm text-muted-foreground">
@@ -225,7 +225,6 @@ export function ProviderSetup({
             </Button>
           </div>
           {modelsError ? <div className="mt-1.5 text-xs text-destructive/80">{modelsError}</div> : null}
-          {providerTestMessage ? <div className="mt-1.5 text-xs text-muted-foreground">{providerTestMessage}</div> : null}
           {hasModelList && !modelsError ? (
             <div className="mt-1.5 text-xs text-muted-foreground">{i18n.t("provider.fetchedModels", { count: models.length })}</div>
           ) : null}
@@ -309,7 +308,8 @@ export function ProviderSetup({
           </SettingsFieldLabel>
         ) : null}
       </div>
-      <div className="mt-5 flex flex-wrap justify-end gap-2">
+      <div data-onboarding-provider="actions" className="mt-5 flex flex-wrap justify-end gap-2">
+        <div aria-live="polite" className="min-h-5 w-full text-xs text-muted-foreground">{providerTestMessage}</div>
         <Button type="button" variant="outline" disabled={!runtimeConnected || saving || Boolean(testingProvider)} onClick={() => onTestProvider("text")}>
           {testingProvider === "text" ? <Loader2 className="h-4 w-4 animate-spin" /> : <MessageSquare className="h-4 w-4" />}
           {i18n.t("provider.testConnection")}
@@ -470,9 +470,9 @@ export function VisionProfileSetup({
   );
 }
 
-function SettingsFieldLabel({ label, children }: { label: string; children: ReactNode }) {
+function SettingsFieldLabel({ label, children, onboardingTarget }: { label: string; children: ReactNode; onboardingTarget?: string }) {
   return (
-    <label className="grid min-w-0 gap-2 text-sm">
+    <label data-onboarding-provider={onboardingTarget} className="grid min-w-0 gap-2 text-sm">
       <span className="truncate font-medium text-muted-foreground">{label}</span>
       {children}
     </label>

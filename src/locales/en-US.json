@@ -581,7 +581,23 @@
     "selectProject": "Select Project",
     "importAndSelectProject": "Import All from VRCForge.unitypackage, then select that open project here.",
     "keepUnityOpen": "Keep the selected Unity project open and wait for compilation, then Retry. Detected {{count}} tools.",
-    "toolsConnected": "Connected — {{count}} tools"
+    "toolsConnected": "Connected — {{count}} tools",
+    "providerTour": {
+      "connectionTitle": "Choose a provider",
+      "connectionDescription": "Select the AI provider you want VRCForge to use.",
+      "credentialsTitle": "Add credentials",
+      "credentialsDescription": "Enter your API key here. This guide never reads or stores the value.",
+      "endpointTitle": "Set the base URL",
+      "endpointDescription": "For providers that use a custom endpoint, enter the base URL supplied by that provider.",
+      "modelTitle": "Choose a model",
+      "modelDescription": "Select or enter the model VRCForge should use, then refresh the list if needed.",
+      "actionsTitle": "Save and test",
+      "actionsDescription": "Save your settings first, then choose Test connection to verify them. This tour does not run the test for you.",
+      "progress": "Step {{current}} of {{total}}",
+      "next": "Next",
+      "previous": "Back",
+      "return": "Return to onboarding"
+    }
   },
   "executionMode": {
     "approval": "Restricted",
