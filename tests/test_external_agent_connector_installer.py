@@ -12,6 +12,7 @@ import pytest
 import yaml
 
 import external_agent_connector_installer as connector_installer
+from test_windows_app_detection import _FakeKey, _FakeWinreg
 
 from external_agent_connector_installer import (
     ConnectorInstallError,
@@ -643,7 +644,7 @@ def test_connector_status_reports_invalid_server_entry_shape(
     assert "mcpServers.vrcforge must be a JSON object" in status["lastError"]
 
 
-def test_appx_package_probe_does_not_shell_out(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_appx_package_probe_does_not_shell_out(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     def fake_which(command: str) -> str | None:
         raise AssertionError(f"unexpected command lookup: {command}")
 
@@ -652,9 +653,26 @@ def test_appx_package_probe_does_not_shell_out(monkeypatch: pytest.MonkeyPatch) 
 
     monkeypatch.setattr("external_agent_connector_installer.shutil.which", fake_which)
     monkeypatch.setattr("external_agent_connector_installer.subprocess.run", fake_run)
+    monkeypatch.setattr(connector_installer.os, "name", "nt")
+    package_root = tmp_path / "Claude_1.0.0.0_x64__test"
+    package_root.mkdir()
+    package_name = package_root.name
+    monkeypatch.setattr(
+        connector_installer,
+        "winreg",
+        _FakeWinreg(
+            {
+                package_name: _FakeKey(
+                    {
+                        "PackageRootFolder": str(package_root),
+                        "PackageID": package_name,
+                    }
+                )
+            }
+        ),
+    )
 
     probe = _probe_appx_package("Claude")
 
-    assert probe["ok"] is False
-    assert probe["matches"] == []
-    assert "WindowsApps" in probe["error"]
+    assert probe["ok"] is True
+    assert probe["matches"] == [str(package_root)]

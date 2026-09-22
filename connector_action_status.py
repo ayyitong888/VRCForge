@@ -50,13 +50,17 @@ class ConnectorActionStatusStore:
         if re.fullmatch(r"[a-zA-Z0-9_./-]{1,64}", stage):
             summary["stage"] = stage
         if not summary.get("ok"):
-            summary["error"] = "Connector action failed. Check the configuration and retry the connection test."
+            summary["error"] = (
+                "MCP configuration is saved. Enable Agent Gateway, then retry the connection test."
+                if stage == "gateway_disabled"
+                else "Connector action failed. Check the configuration and retry the connection test."
+            )
         handshake = action.get("handshake")
         if isinstance(handshake, dict):
             summary["handshake"] = {
                 key: handshake[key] for key in (
                     "ok", "connected", "ready", "preflightOk", "preflightRuntimeOnline",
-                    "toolCount", "hasBridgePreflight", "hasRequestApply",
+                    "toolCount", "hasBridgePreflight", "hasRequestApply", "preflightGatewayEnabled",
                 ) if isinstance(handshake.get(key), (bool, int))
             }
         now = time.time()

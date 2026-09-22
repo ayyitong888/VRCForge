@@ -17,6 +17,11 @@ from pathlib import Path
 from typing import Any, Literal
 
 try:
+    import winreg
+except ImportError:  # pragma: no cover - non-Windows hosts.
+    winreg = None  # type: ignore[assignment]
+
+try:
     import tomllib
 except ModuleNotFoundError:  # pragma: no cover - Python 3.10 fallback for source users.
     import tomli as tomllib  # type: ignore[no-redef]
@@ -178,6 +183,9 @@ def install_connector(
             result["stage"] = "stdio_handshake"
             result["error"] = handshake.get("error") or "MCP stdio handshake failed."
             result["suggestion"] = handshake.get("suggestion") or handshake_suggestion(client)
+            if handshake.get("preflightGatewayEnabled") is False:
+                result["stage"] = "gateway_disabled"
+                result["error"] = "MCP configuration is saved. Enable Agent Gateway, then retry the connection test."
     return result
 
 
@@ -619,6 +627,10 @@ def run_stdio_mcp_handshake(bridge: StdioBridgeSpec, *, timeout_seconds: float =
             "preflightCalled": preflight_called,
             "preflightOk": bool(preflight_result.get("ok")),
             "preflightRuntimeOnline": bool(preflight_result.get("runtimeOnline")),
+            "preflightGatewayEnabled": (
+                preflight_result.get("gatewayEnabled")
+                if isinstance(preflight_result.get("gatewayEnabled"), bool) else None
+            ),
             "preflightError": str(preflight_result.get("error") or ""),
             "directApplyListed": direct_apply_listed,
             "stderrTail": _tail(stderr_lines),
@@ -1393,13 +1405,54 @@ def _probe_windows_app(name_fragment: str) -> dict[str, Any]:
 
 
 def _probe_appx_package(name_fragment: str) -> dict[str, Any]:
-    _ = name_fragment
-    return {
-        "found": False,
-        "ok": False,
-        "matches": [],
-        "error": "App package registry probing is not used; PATH and WindowsApps directories were checked instead.",
-    }
+    result: dict[str, Any] = {"found": False, "ok": False, "matches": []}
+    if os.name != "nt" or winreg is None:
+        result["error"] = "AppX package registry is unavailable on this platform."
+        return result
+
+    package_key_path = (
+        r"Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion"
+        r"\AppModel\Repository\Packages"
+    )
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, package_key_path, 0, winreg.KEY_READ) as packages_key:
+            package_count = winreg.QueryInfoKey(packages_key)[0]
+            for index in range(package_count):
+                package_name = winreg.EnumKey(packages_key, index)
+                if name_fragment.casefold() not in package_name.casefold():
+                    continue
+                try:
+                    with winreg.OpenKey(packages_key, package_name, 0, winreg.KEY_READ) as package_key:
+                        package_root, _ = winreg.QueryValueEx(package_key, "PackageRootFolder")
+                        package_id, _ = winreg.QueryValueEx(package_key, "PackageID")
+                except FileNotFoundError:
+                    continue
+                if not isinstance(package_root, str) or not package_root:
+                    continue
+                if not isinstance(package_id, str) or not package_id:
+                    package_id = package_name
+                root_path = Path(package_root)
+                try:
+                    if not root_path.is_dir():
+                        continue
+                except OSError as exc:
+                    result["error"] = f"Unable to verify registered AppX package path: {exc}"
+                    return result
+                result["matches"].append(str(root_path))
+                result["packageIds"] = [*result.get("packageIds", []), package_id]
+    except PermissionError as exc:
+        result["error"] = f"Unable to read current-user AppX package registry: {exc}"
+        return result
+    except OSError as exc:
+        result["error"] = f"Unable to read current-user AppX package registry: {exc}"
+        return result
+
+    if result["matches"]:
+        result["found"] = True
+        result["ok"] = True
+    else:
+        result["error"] = f"No registered AppX package matching {name_fragment} was found."
+    return result
 
 
 def _probe_error(probe: dict[str, Any]) -> str:

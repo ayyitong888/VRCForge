@@ -4320,6 +4320,7 @@ export default function App() {
 
       <ExternalSetupTour
         open={showOnboarding && onboardingMinimized && externalSetupGuide && activeView === "settings" && activeSettingsSection === "connectors"}
+        gatewayEnabled={Boolean(connectorStatus?.gateway?.enabled)}
         onReturn={returnFromOnboardingSettings}
       />
 

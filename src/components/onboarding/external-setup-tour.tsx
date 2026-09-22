@@ -7,18 +7,29 @@ import "./provider-setup-tour.css";
 export type ExternalSetupTourProps = {
   open: boolean;
   onReturn: () => void;
+  gatewayEnabled?: boolean;
 };
 
 const gatewaySelector = '[data-onboarding-external="gateway"]';
 const clientSelector = "[data-onboarding-client]";
 
-export function ExternalSetupTour({ open, onReturn }: ExternalSetupTourProps) {
+export function ExternalSetupTour({ open, onReturn, gatewayEnabled = false }: ExternalSetupTourProps) {
   const { t } = useTranslation();
   const onReturnRef = useRef(onReturn);
+  const gatewayEnabledRef = useRef(gatewayEnabled);
+  const tourRef = useRef<ReturnType<typeof driver> | null>(null);
 
   useEffect(() => {
     onReturnRef.current = onReturn;
   }, [onReturn]);
+
+  useEffect(() => {
+    gatewayEnabledRef.current = gatewayEnabled;
+    const tour = tourRef.current;
+    if (!tour || !open || tour.getActiveIndex() !== 0) return;
+    const nextButton = document.querySelector<HTMLButtonElement>(".driver-popover-next-btn");
+    if (nextButton) nextButton.disabled = !gatewayEnabled;
+  }, [gatewayEnabled, open]);
 
   useEffect(() => {
     if (!open) return undefined;
@@ -80,9 +91,17 @@ export function ExternalSetupTour({ open, onReturn }: ExternalSetupTourProps) {
       nextBtnText: t("onboarding.externalTour.next"),
       prevBtnText: t("onboarding.externalTour.previous"),
       doneBtnText: t("onboarding.externalTour.return"),
+      onNextClick: (_element, _step, opts) => {
+        if (opts.driver.getActiveIndex() === 0 && !gatewayEnabledRef.current) return;
+        opts.driver.moveNext();
+      },
       onPopoverRender: (popover: PopoverDOM, options) => {
         popover.closeButton.textContent = "×";
         popover.closeButton.setAttribute("aria-label", t("onboarding.externalTour.return"));
+        if (options.driver.getActiveIndex() === 0) {
+          const nextButton = popover.footer.querySelector<HTMLButtonElement>(".driver-popover-next-btn");
+          if (nextButton) nextButton.disabled = !gatewayEnabledRef.current;
+        }
         if (options.driver.getActiveIndex() === 1) {
           const available = clientOptions();
           if (available.length) {
@@ -160,11 +179,13 @@ export function ExternalSetupTour({ open, onReturn }: ExternalSetupTourProps) {
       }
       positionFrame = window.requestAnimationFrame(trackPosition);
     };
+    tourRef.current = tour;
     tour.drive();
     positionFrame = window.requestAnimationFrame(trackPosition);
     return () => {
       disposed = true;
       window.cancelAnimationFrame(positionFrame);
+      if (tourRef.current === tour) tourRef.current = null;
       tour.destroy();
     };
   }, [open, t]);

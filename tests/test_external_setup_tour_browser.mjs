@@ -19,9 +19,9 @@ import i18n from 'i18next';import{initReactI18next}from'react-i18next';import en
 import{ExternalSetupTour}from'./src/components/onboarding/external-setup-tour';
 i18n.use(initReactI18next).init({lng:'en-US',resources:{'en-US':{translation:en}}});
 const clients=[['codexApp','Codex App'],['codexCli','Codex CLI'],['claudeCode','Claude Code CLI'],['claudeCowork','Claude Cowork App'],['deepseekHarness','DeepSeek Harness'],['generic','Generic client']];
-function Fixture(){const[open,setOpen]=useState(false);const[mounted,setMounted]=useState(true);const[returned,setReturned]=useState(0);const[mutations,setMutations]=useState(0);
-window.fixture={open:()=>setOpen(true),unmount:()=>setMounted(false),shiftLayout:()=>{const row=document.querySelector('[data-onboarding-client="deepseekHarness"]');const block=document.createElement('div');block.id='layout-shift';block.style.height='96px';row.before(block)},scrollInner:()=>{const el=document.querySelector('#client-scroll');el.scrollTop-=60;el.dispatchEvent(new Event('scroll'))}};
-return <><output id="returned">{returned}</output><output id="mutations">{mutations}</output><div data-onboarding-external="gateway" style={{margin:'40px auto',maxWidth:600}}><button onClick={()=>setMutations(x=>x+1)}>Gateway toggle</button></div><div id="client-scroll" style={{height:260,overflowY:'auto',maxWidth:600,margin:'0 auto'}}>{clients.map(([id,label])=><div key={id} data-onboarding-client={id} data-onboarding-client-label={label} style={{height:150,marginBottom:20,padding:20,border:'1px solid gray'}}><span>{label}</span><button onClick={()=>setMutations(x=>x+1)}>Install</button><input type="checkbox" onChange={()=>setMutations(x=>x+1)}/></div>)}</div>{mounted&&<ExternalSetupTour open={open} onReturn={()=>{setReturned(x=>x+1);setOpen(false)}}/>}</>}
+function Fixture(){const[open,setOpen]=useState(false);const[mounted,setMounted]=useState(true);const[returned,setReturned]=useState(0);const[mutations,setMutations]=useState(0);const[gatewayEnabled,setGatewayEnabled]=useState(false);
+window.fixture={open:()=>setOpen(true),enableGateway:()=>setGatewayEnabled(true),unmount:()=>setMounted(false),shiftLayout:()=>{const row=document.querySelector('[data-onboarding-client="deepseekHarness"]');const block=document.createElement('div');block.id='layout-shift';block.style.height='96px';row.before(block)},scrollInner:()=>{const el=document.querySelector('#client-scroll');el.scrollTop-=60;el.dispatchEvent(new Event('scroll'))}};
+return <><output id="returned">{returned}</output><output id="mutations">{mutations}</output><div data-onboarding-external="gateway" style={{margin:'40px auto',maxWidth:600}}><button onClick={()=>setMutations(x=>x+1)}>Gateway toggle</button></div><div id="client-scroll" style={{height:260,overflowY:'auto',maxWidth:600,margin:'0 auto'}}>{clients.map(([id,label])=><div key={id} data-onboarding-client={id} data-onboarding-client-label={label} style={{height:150,marginBottom:20,padding:20,border:'1px solid gray'}}><span>{label}</span><button onClick={()=>setMutations(x=>x+1)}>Install</button><input type="checkbox" onChange={()=>setMutations(x=>x+1)}/></div>)}</div>{mounted&&<ExternalSetupTour open={open} gatewayEnabled={gatewayEnabled} onReturn={()=>{setReturned(x=>x+1);setOpen(false)}}/>}</>}
 createRoot(document.getElementById('root')).render(<StrictMode><Fixture/></StrictMode>);` }, bundle: true, write: false, format: "iife", jsx: "automatic", loader: { ".css": "empty" }, define: { "process.env.NODE_ENV": '"development"' } });
 const css = await readFile("node_modules/driver.js/dist/driver.css", "utf8") + await readFile("src/components/onboarding/provider-setup-tour.css", "utf8");
 const server = createServer((request,response)=>{
@@ -40,7 +40,11 @@ try {
   await page.evaluate(()=>window.fixture.open());
   await page.waitForSelector(".driver-popover");
   assert.equal(await page.locator('[data-onboarding-external="gateway"].driver-active-element').count(),1);
+  assert.equal(await page.locator(".driver-popover-next-btn").isDisabled(),true,"gateway-off must block progression");
+  assert.equal(await page.locator(".vrcforge-provider-tour-return").count(),1,"return must remain available while gateway is off");
   assert.equal(await page.locator("#mutations").innerText(),"0");
+  await page.evaluate(()=>window.fixture.enableGateway());
+  await page.waitForFunction(()=>!document.querySelector(".driver-popover-next-btn")?.disabled);
   await page.locator(".driver-popover-next-btn").click();
   await page.waitForSelector(".vrcforge-external-tour-client-picker select");
   const clientSelect=page.locator(".vrcforge-external-tour-client-picker select");
