@@ -94,6 +94,54 @@ def test_one_format_correction_reuses_prompt_and_accumulates_usage():
     assert plan["formatCorrection"]["parseRecovered"] is True
 
 
+def test_missing_planner_action_retries_without_inventing_a_tool_call():
+    raw = json.dumps({"resultRef": "opaque", "jsonPointer": "/items", "offset": 0, "limit": 6})
+    model = SequenceModel(response(raw), response('{"action":"reply","reply":"verified"}', 22))
+    plan = service(model=model)._llm_plan_agent_turn("continue", {}, [])
+    assert len(model.prompts) == 2
+    assert plan["nextStep"] == "done"
+    assert plan["reply"] == "verified"
+    assert "valid planner envelope" in model.prompts[1]
+    assert "missing_planner_action" in model.prompts[1]
+    assert "tool" not in plan.get("writeTool", "")
+    assert plan["formatCorrection"]["attemptCount"] == 1
+    assert plan["formatCorrection"]["parseRecovered"] is True
+
+
+def test_missing_planner_action_twice_stops_at_two_requests_and_marks_unrecovered():
+    raw = json.dumps({"resultRef": "opaque", "jsonPointer": "/items", "offset": 0, "limit": 6})
+    model = SequenceModel(response(raw), response(raw, 22))
+    plan = service(model=model)._llm_plan_agent_turn("continue", {}, [])
+    assert len(model.prompts) == 2
+    assert plan["nextStep"] == "planner_failed"
+    assert plan["formatCorrection"]["attemptCount"] == 1
+    assert plan["formatCorrection"]["parseRecovered"] is False
+    assert plan["plannerFailure"]["invalidResponse"]["stage"] == "action_validation"
+
+
+def test_missing_action_then_truncated_native_call_stops_without_third_request():
+    missing_action = json.dumps({"resultRef": "opaque", "jsonPointer": "/items", "offset": 0, "limit": 6})
+    truncated_native = (
+        "<tool_call><function=skill_tool_selector>"
+        "<parameter=skill_tool>vrcforge_health</parameter>"
+    )
+    model = SequenceModel(response(missing_action), response(truncated_native, 22))
+    plan = service(model=model)._llm_plan_agent_turn("continue", {}, [])
+    assert len(model.prompts) == 2
+    assert plan["nextStep"] == "planner_failed"
+    assert plan["formatCorrection"]["parseRecovered"] is False
+    assert plan["plannerFailure"]["invalidResponse"]["stage"] == "json_object_parse"
+
+
+def test_missing_action_with_legacy_tool_hint_keeps_suffix_correction_path():
+    model = SequenceModel(response(json.dumps({
+        "skill_tool": "vrcforge_health", "skill_params": {},
+    })))
+    plan = service(model=model)._llm_plan_agent_turn("continue", {}, [])
+    assert len(model.prompts) == 1
+    assert "formatCorrection" not in plan
+
+
 def test_second_bad_json_remains_terminal_without_a_third_request():
     model = SequenceModel(response(BAD_JSON), response(BAD_JSON))
     plan = service(model=model)._llm_plan_agent_turn("continue", {}, [])

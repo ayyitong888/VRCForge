@@ -1829,11 +1829,20 @@ class RuntimePlannerService:
                     self.record_context_usage(context_usage if context_usage is not None else {}, prompt, history, provider_usage)
                     parse_diagnostics: dict[str, object] = {}
                     payload = parse_llm_plan_response(response_text, diagnostics=parse_diagnostics)
+                    action_value = payload.get("action") if isinstance(payload, dict) else None
+                    has_valid_action = isinstance(action_value, str) and bool(action_value.strip())
+                    has_legacy_tool_hint = isinstance(payload, dict) and any(
+                        isinstance(payload.get(key), str) and payload.get(key).strip()
+                        for key in ("skill_tool", "skillTool", "write_tool", "writeTool")
+                    )
                     if format_correction:
-                        format_correction["parseRecovered"] = isinstance(payload, dict)
+                        format_correction["parseRecovered"] = has_valid_action
                     format_error = parse_diagnostics.get("jsonError") or (
                         {"reason": "empty_response"} if not response_text.strip() else None
                     )
+                    if format_error is None and isinstance(payload, dict):
+                        if not has_valid_action and not has_legacy_tool_hint:
+                            format_error = {"reason": "missing_planner_action"}
                     if format_attempt or not format_error:
                         break
                     # One formatting correction in this planning step, before
@@ -1843,10 +1852,19 @@ class RuntimePlannerService:
                         "attemptCount": 1, "parseRecovered": False,
                         "initialError": format_error,
                     }
+                    if format_error.get("reason") == "missing_planner_action":
+                        correction_instruction = (
+                            "Your preceding response did not contain a valid planner envelope. "
+                            "Return one outer planner JSON object with an explicit action field. "
+                        )
+                    else:
+                        correction_instruction = (
+                            "Your preceding response could not be parsed as JSON. "
+                            "Return one valid outer planner JSON object with escaped string characters. "
+                        )
                     prompt += (
-                        "\n\nYour preceding response could not be parsed as JSON. "
-                        "Return one valid outer planner JSON object with escaped string characters. "
-                        "Use the same task, observations, tool catalog and permissions above. "
+                        "\n\n" + correction_instruction
+                        + "Use the same task, observations, tool catalog and permissions above. "
                         "No tool was dispatched from that invalid response. Parser error: "
                         + json.dumps(format_error, ensure_ascii=False)
                     )

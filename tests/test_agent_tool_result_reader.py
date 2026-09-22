@@ -231,3 +231,30 @@ def test_completed_outer_page_preserves_nested_preview_scope_and_exact_readback(
         tail = read(step, jsonPointer=field["jsonPointer"], offset=field["nextOffset"], limit=20)
         assert tail["items"][0]["value"] == field["nextOffset"]
         assert page["previewTruncated"] is True
+
+
+def test_nested_candidate_page_keeps_ancestor_resolution_constraints():
+    step = retained({"recognitionCoverage": {"candidateEnumerationComplete": False},
+        "groups": [{"classification": "candidate", "controls": [{"resolutionStatus": "ambiguous",
+        "candidateCount": 41, "candidates": [{"name": "PossibleTarget"}]}]}]})
+    with bind_tool_result_context("session", "turn", "project", [step]):
+        page = read(step, jsonPointer="/groups/0/controls/0/candidates/0/name")
+    assert page["hasMore"] is False
+    facts = {row["jsonPointer"]: row["facts"] for row in page["sourceConstraints"]}
+    assert facts["/groups/0/controls/0"]["resolutionStatus"] == "ambiguous"
+    assert facts["/groups/0/controls/0"]["candidateCount"] == 41
+    assert facts["/groups/0"]["classification"] == "candidate"
+    assert facts["/recognitionCoverage"]["candidateEnumerationComplete"] is False
+    assert page["items"][0]["value"] == "PossibleTarget"
+
+
+def test_ancestor_constraints_are_scoped_bounded_and_redacted():
+    step = retained({"groups": [{"classification": "candidate", "privateEvidence": {"resolutionStatus": "secret"},
+        "evidence": {"analysisRequired": True, "apiKey": "SECRET"},
+        "other": {"resolutionStatus": "resolved"}, "values": list(range(30))}]})
+    with bind_tool_result_context("session", "turn", "project", [step]):
+        page = read(step, jsonPointer="/groups/0/values")
+    rendered = json.dumps(page)
+    assert "privateEvidence" not in rendered and "SECRET" not in rendered
+    assert not any(row["jsonPointer"].endswith("/other") for row in page["sourceConstraints"])
+    assert len(json.dumps(page, ensure_ascii=False, separators=(",", ":"))) <= 6000

@@ -207,3 +207,12 @@ def test_source_enumeration_incomplete_is_preserved_as_a_control_fact():
         **{f"target{i}Name": "item" * 15 for i in range(10)}, "candidates": list(range(41))}]}, max_chars=1500)
     assert evidence["data"]["rows"][0]["candidateEnumerationComplete"] is False
     assert evidence["sourceTruncated"] is True
+
+
+def test_local_resolution_survives_identity_heavy_preview_budget():
+    evidence = project({"controls": [{"resolutionStatus": "ambiguous", "candidateCount": 41,
+        **{f"target{i}Name": "possible" * 30 for i in range(10)},
+        "candidates": [{"clipPath": "Assets/Possible.anim"}]}]}, max_chars=1500)
+    row = evidence["data"]["controls"][0]
+    assert row["resolutionStatus"] == "ambiguous"
+    assert row["candidateCount"] == 41

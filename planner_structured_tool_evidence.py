@@ -31,7 +31,7 @@ _CONTROL_KEYS = frozenset({
     "persistencestate", "readbackstate", "verification", "retryable", "safetoretry",
     "paging", "pagination", "nextrequest", "nextkeyrequest", "nextoffset", "hasmore",
     "truncated", "readhints", "fingerprint", "expectedsnapshotdigest", "snapshotdigest",
-    "classification", "recognitioncoverage", "blockingreasons", "rejectionreasons",
+    "classification", "resolutionstatus", "candidatecount", "recognitioncoverage", "blockingreasons", "rejectionreasons",
 })
 _ABSENT = object()
 

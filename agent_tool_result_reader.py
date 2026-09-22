@@ -168,6 +168,41 @@ def _select(root: object, pointer: str, sanitize: Callable[[object, int], str]) 
     return value
 
 
+def _source_constraints(root: object, pointer: str, sanitize: Callable[[object, int], str]) -> tuple[list[dict[str, Any]], bool]:
+    """Carry source uncertainty into narrow reads without traversing sibling data."""
+    keys = ("classification", "resolutionStatus", "candidateCount", "analysisRequired",
+            "hasAmbiguousDestinations", "candidateEnumerationComplete",
+            "generalTopologyComplete", "missingMatchProvesAbsence")
+    parts = pointer.split("/")[1:] if pointer else []
+    rows: list[dict[str, Any]] = []
+    # Most local constraints have priority. Parent scopes remain explicit; a
+    # global incomplete search does not invalidate an individually proven item.
+    for depth in range(len(parts), -1, -1):
+        path = "/" + "/".join(parts[:depth]) if depth else ""
+        value = _select(root, path, sanitize)
+        if not isinstance(value, dict):
+            continue
+        scopes = [(path, value)]
+        scopes.extend((_pointer(path, name), child) for name, child in value.items()
+                      if isinstance(child, dict) and _safe_key(name, child, sanitize)
+                      and (name.lower().endswith("evidence") or name == "recognitionCoverage"))
+        for scope, fields in scopes:
+            facts = {}
+            for key in keys:
+                raw = fields.get(key)
+                if type(raw) in (bool, int):
+                    facts[key] = raw
+                elif isinstance(raw, str) and len(raw) <= 100 and sanitize(raw, 100) == raw:
+                    facts[key] = raw
+            if not facts or any(row["jsonPointer"] == scope for row in rows):
+                continue
+            candidate = [*rows, {"jsonPointer": scope, "facts": facts}]
+            if len(candidate) > 12 or _size(candidate) > 1600:
+                return rows, True
+            rows = candidate
+    return rows, False
+
+
 def read_tool_result(params: Mapping[str, Any], *, sanitize: Callable[[object, int], str]) -> dict[str, Any]:
     context = _CONTEXT.get()
     if context is None or not context.session_id or not context.turn_id:
@@ -192,6 +227,16 @@ def read_tool_result(params: Mapping[str, Any], *, sanitize: Callable[[object, i
                            "resultRef": ref, "sourceStep": step["index"], "sourceTool": step["tool"],
                            "jsonPointer": pointer, "offset": offset, "totalItems": len(members),
                            "items": [], "redactedFields": 0, "hasMore": False, "previewTruncated": False}
+    constraints, constraints_truncated = _source_constraints(step["result"], pointer, sanitize)
+    if constraints or constraints_truncated:
+        page["sourceConstraints"] = constraints
+        page["sourceConstraintsTruncated"] = constraints_truncated
+        page["interpretation"] = (
+            "Preserve these source-scoped constraints when interpreting this page. "
+            "Candidate details are not confirmed mappings when their resolution is ambiguous or unresolved. "
+            "hasMore=false only completes this retained page, not source resolution or search coverage. "
+            "If constraints are truncated, inspect the parent scopes before claiming resolution."
+        )
     cursor = offset
     for key, child in members[offset:]:
         if len(page["items"]) >= limit:

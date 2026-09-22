@@ -67,3 +67,45 @@ def test_compact_public_scan_keeps_limitations_and_followup_visible():
     assert "recognition loop" in coverage["nextAction"]
     assert compact["resultPresentation"]["fullResultUri"].endswith("receipt?revision=1")
     assert len(result["looseControls"]) == 200
+
+
+def test_control_resolution_is_explicit_without_relabeling_candidate_lists():
+    snapshot = {
+        "ok": True,
+        "wardrobes": [{
+            "parameterName": "Confirmed",
+            "animatorEvidence": {
+                "hasAmbiguousDestinations": False,
+                "ambiguousDestinationValues": [],
+            },
+            "controls": [{
+                "value": 1,
+                "fxStateName": "Outfit_1",
+                "fxCandidates": [{"fxStateName": "Outfit_1"}, {"fxStateName": "Outfit_1"}],
+            }],
+        }],
+        "wardrobeCandidates": [{
+            "parameterName": "Candidate",
+            "animatorEvidence": {
+                "hasAmbiguousDestinations": True,
+                "ambiguousDestinationValues": [2],
+            },
+            "controls": [{
+                "value": 2,
+                "fxStateName": "",
+                "fxCandidates": [{"fxStateName": "A"}, {"fxStateName": "B"}],
+            }],
+        }],
+        "looseControls": [],
+    }
+    before = copy.deepcopy(snapshot)
+    result = scan(snapshot)
+
+    confirmed = result["wardrobes"][0]["controls"][0]
+    candidate = result["wardrobeCandidates"][0]["controls"][0]
+    assert confirmed["resolutionStatus"] == "resolved"
+    assert confirmed["candidateCount"] == 2
+    assert candidate["resolutionStatus"] == "ambiguous"
+    assert candidate["candidateCount"] == 2
+    assert candidate["fxStateName"] == ""
+    assert snapshot == before

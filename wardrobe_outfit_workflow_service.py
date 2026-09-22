@@ -214,6 +214,53 @@ class WardrobeArtifactReadPorts:
     scan_wardrobe: Callable[[dict[str, Any]], dict[str, Any]]
 
 
+def _decorate_wardrobe_controls(item: dict[str, Any]) -> dict[str, Any]:
+    """Add per-control resolution metadata without changing Core fields."""
+    evidence = item.get("animatorEvidence")
+    evidence = evidence if isinstance(evidence, dict) else {}
+    ambiguous_values = set(evidence.get("ambiguousDestinationValues") or [])
+    controls = item.get("controls")
+    if not isinstance(controls, list):
+        return dict(item)
+
+    decorated: list[Any] = []
+    for raw_control in controls:
+        if not isinstance(raw_control, dict):
+            decorated.append(raw_control)
+            continue
+        control = dict(raw_control)
+        candidates = raw_control.get("fxCandidates")
+        control["candidateCount"] = len(candidates) if isinstance(candidates, list) else 0
+        value = raw_control.get("value")
+        has_single_resolution = any(
+            raw_control.get(field) not in (None, "")
+            for field in ("fxStateName", "fxStatePath", "clipPath")
+        )
+        if value in ambiguous_values:
+            status = "ambiguous"
+        elif has_single_resolution:
+            status = "resolved"
+        else:
+            status = "unresolved"
+        control["resolutionStatus"] = status
+        decorated.append(control)
+    result = dict(item)
+    result["controls"] = decorated
+    return result
+
+
+def _decorate_wardrobe_groups(payload: dict[str, Any]) -> dict[str, Any]:
+    result = dict(payload)
+    for group in ("wardrobes", "wardrobeCandidates", "looseControls"):
+        rows = payload.get(group)
+        if isinstance(rows, list):
+            result[group] = [
+                _decorate_wardrobe_controls(row) if isinstance(row, dict) else row
+                for row in rows
+            ]
+    return result
+
+
 class WardrobeArtifactReadService:
     """Own Wardrobe avatar-item, control, and wardrobe artifact reads."""
 
@@ -236,7 +283,7 @@ class WardrobeArtifactReadService:
         if payload.get("ok") is False or not isinstance(payload.get("wardrobes"), list):
             return payload
         # The Core scanner proves one pattern; its misses do not classify other topologies.
-        result = dict(payload)
+        result = _decorate_wardrobe_groups(payload)
         result.setdefault("recognitionCoverage", {
             "automaticPattern": "int_menu_any_state_equals_object_activation",
             "generalTopologyComplete": False,
