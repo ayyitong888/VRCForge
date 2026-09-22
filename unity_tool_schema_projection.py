@@ -5,12 +5,10 @@ from copy import deepcopy
 from typing import Any, Mapping
 
 import runtime_planner_service as planner_policy
-from mcp_tool_descriptor import identity_scope
+from mcp_tool_descriptor import read_runtime_identity_required
 from unity_read_input_schemas import UNITY_READ_TOOL_INPUT_SCHEMAS
 from unity_write_input_schemas import EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS
 
-
-_READ_RUNTIME_IDENTITY_SCOPES = {"scene", "avatar", "object", "component"}
 
 # Application-owned project operations have always used their own preparation
 # and receipts, with requires_approved_execution_context=False. Adding their
@@ -25,15 +23,9 @@ _PROJECT_APPLICATION_WRITE_TOOLS = {
 
 
 def _read_uses_runtime_identity(name: str) -> bool:
-    """Mirror descriptor metadata for read Tools without wrapping bootstrap calls."""
+    """Consume descriptor policy without wrapping identity bootstrap calls."""
 
-    if name in {
-        "vrcforge_list_execution_targets",
-        "vrcforge_bind_execution_target",
-        "vrcforge_refresh_execution_target",
-    }:
-        return False
-    return identity_scope(name, write=False) in _READ_RUNTIME_IDENTITY_SCOPES
+    return read_runtime_identity_required(name)
 
 
 def _with_execution_target_schema(schema: Mapping[str, Any], *, required: bool) -> dict[str, Any]:
@@ -58,6 +50,7 @@ def _with_execution_target_schema(schema: Mapping[str, Any], *, required: bool) 
             required_fields.append("executionTarget")
         projected["required"] = required_fields
     return projected
+
 
 def canonical_unity_read_tool_input_schema(tool_name: str) -> dict[str, Any]:
     """Return the one model-facing schema shared by internal and external Agents."""

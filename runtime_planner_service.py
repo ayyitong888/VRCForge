@@ -14,6 +14,9 @@ import time
 from types import MappingProxyType
 from typing import Callable, Mapping, Protocol
 
+from tool_usage_contract import tool_usage_description
+
+from planner_schema_sharing import _shared_planner_schema_defs, _planner_schema_without_shared_defs
 from project_instruction_context import (
     global_instruction_prompt_block,
     load_project_instructions,
@@ -447,81 +450,6 @@ def planner_tool_schema_prompt(schema: object) -> str:
     )
     return " schema=" + semantic_schema
 
-
-def _shared_planner_schema_defs(
-    schemas: list[dict[str, object]],
-) -> dict[str, object]:
-    """Share exact repeated contracts in the prompt, never in runtime schemas."""
-
-    name = "vrcforge.prompt_skill_provenance.v1"
-    occurrences: list[tuple[str, object]] = []
-    for schema in schemas:
-        defs = schema.get("$defs")
-        if not isinstance(defs, Mapping) or name not in defs:
-            continue
-        encoded = json.dumps(schema, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-        if f'"$ref":"#/$defs/{name}"' in encoded:
-            definition = defs[name]
-            occurrences.append(
-                (
-                    json.dumps(definition, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
-                    deepcopy(definition),
-                )
-            )
-    shared = (
-        {name: occurrences[0][1]}
-        if len(occurrences) >= 2 and all(key == occurrences[0][0] for key, _ in occurrences[1:])
-        else {}
-    )
-    groups: dict[str, list[dict[str, object]]] = {}
-    for schema in schemas:
-        projected = _planner_schema_without_shared_defs(schema, shared)
-        encoded = json.dumps(projected, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-        # Keep local reference scopes and anchors local. Only the already-shared
-        # provenance reference may occur in these complete shared contracts.
-        if any(f'"{key}":' in encoded for key in ("$defs", "definitions", "$id", "$anchor", "$dynamicRef", "$dynamicAnchor")):
-            continue
-        if any(ref != "#/$defs/" + name for ref in re.findall(r'"\$ref":"([^\"]+)"', encoded)):
-            continue
-        groups.setdefault(encoded, []).append(projected)
-    for encoded, group in groups.items():
-        if len(group) < 2:
-            continue
-        shared_name = "vrcforge.tool_input." + hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:12]
-        reference = json.dumps({"$ref": "#/$defs/" + shared_name}, separators=(",", ":"))
-        # Avoid factoring tiny schemas where references save no useful space.
-        if len(encoded) * (len(group) - 1) <= len(reference) * len(group) + len(shared_name) + 128:
-            continue
-        shared[shared_name] = deepcopy(group[0])
-    return shared
-
-
-def _planner_schema_without_shared_defs(
-    schema: dict[str, object],
-    shared_defs: Mapping[str, object],
-) -> dict[str, object]:
-    """Replace only exact contracts/definitions already in the prompt section."""
-
-    if not shared_defs:
-        return schema
-    projected = deepcopy(schema)
-    local_defs = dict(projected.get("$defs") or {})
-    encoded_schema = json.dumps(schema, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    for name in shared_defs:
-        if name in local_defs and json.dumps(
-            local_defs[name], ensure_ascii=False, sort_keys=True, separators=(",", ":")
-        ) == json.dumps(
-            shared_defs[name], ensure_ascii=False, sort_keys=True, separators=(",", ":")
-        ) and f'"$ref":"#/$defs/{name}"' in encoded_schema:
-            del local_defs[name]
-    if local_defs:
-        projected["$defs"] = local_defs
-    else:
-        projected.pop("$defs", None)
-    for name, definition in shared_defs.items():
-        if name.startswith("vrcforge.tool_input.") and projected == definition:
-            return {"$ref": "#/$defs/" + name}
-    return projected
 
 
 @dataclass(frozen=True, slots=True)
@@ -1102,23 +1030,6 @@ def normalize_exposure_layer(value: object) -> str:
     if layer not in {EXPOSURE_LAYER_PLANNING, EXPOSURE_LAYER_EXECUTION}:
         raise RuntimePlannerError("exposureLayer must be planning or execution.", status_code=400)
     return layer
-
-def tool_usage_description(name: str, summary: str, *, write: bool) -> str:
-    text = str(summary or name).strip()
-    if all(section in text for section in ("When to use:", "When NOT to use:", "Negative example:")):
-        return text
-    when_not = (
-        "Do not use while planning, for hypothetical or quoted requests, or without an explicit project change request and approval."
-        if write
-        else "Do not use for general questions, quoted examples, hypothetical requests, or when the user forbids inspection."
-    )
-    negative = (
-        f"Explain {name} conceptually, but do not modify the project."
-        if write
-        else f"Mention {name} without inspecting the current project."
-    )
-    return f"When to use: {text}\nWhen NOT to use: {when_not}\nNegative example: {negative}"
-
 
 def planner_tool_usage_description(name: str, summary: str, *, write: bool) -> str:
     """Keep all three trigger sections visible while bounding prompt growth."""

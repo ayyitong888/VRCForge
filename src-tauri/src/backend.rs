@@ -304,44 +304,75 @@ pub(crate) fn bounded_backend_error_detail(detail: &str) -> String {
     }
 }
 
-pub(crate) fn backend_json_request(
+struct BackendRequestContext {
+    agent: ureq::Agent,
+    url: String,
+    token: String,
+    transport_proof: String,
+}
+
+impl BackendRequestContext {
+    // This context owns one short-lived loopback request's token and proof.
+    // It is intentionally not shared with the nonce handshake or websocket
+    // event bridge, which have different lifetimes and wire contracts.
+    fn authenticated_request(&self, method: &str) -> ureq::Request {
+        self.agent
+            .request(method, &self.url)
+            .set("Accept", "application/json")
+            .set("Origin", "tauri://localhost")
+            .set("X-VRCForge-Transport", "tauri-ipc-bridge")
+            .set("X-VRCForge-Transport-Proof", &self.transport_proof)
+            .set("Authorization", &format!("Bearer {}", self.token))
+    }
+}
+
+fn backend_request_context(
     method: &str,
-    path: String,
-    body: Option<serde_json::Value>,
+    path: &str,
     timeout_ms: Option<u64>,
-) -> Result<serde_json::Value, String> {
+    default_timeout_ms: u64,
+) -> Result<BackendRequestContext, String> {
     let user_data = user_data_dir()?;
-    let app_session_token = ensure_app_session_token(&user_data)?;
-    ensure_backend_session_verified(&app_session_token)?;
-    let timeout = Duration::from_millis(timeout_ms.unwrap_or(30_000).clamp(1_000, 600_000));
+    let token = ensure_app_session_token(&user_data)?;
+    ensure_backend_session_verified(&token)?;
+    let timeout = bounded_backend_request_timeout(timeout_ms, default_timeout_ms);
     let agent = ureq::builder()
         .timeout_connect(Duration::from_secs(2))
         .timeout(timeout)
         .redirects(0)
         .build();
-    let url = format!("{BACKEND_ENDPOINT}{path}");
-    let transport_proof = tauri_ipc_bridge_proof(&app_session_token, method, &path);
-    let send_once = || {
-        let http_request = agent
-            .request(method, &url)
-            .set("Accept", "application/json")
-            .set("Origin", "tauri://localhost")
-            .set("X-VRCForge-Transport", "tauri-ipc-bridge")
-            .set("X-VRCForge-Transport-Proof", &transport_proof)
-            .set("Authorization", &format!("Bearer {app_session_token}"));
-        let response = if let Some(body) = body.as_ref() {
-            http_request
-                .set("Content-Type", "application/json")
-                .send_string(&body.to_string())
-        } else {
-            http_request.call()
-        };
-        app_api_response_from_ureq(response)
-    };
+    Ok(BackendRequestContext {
+        agent,
+        url: format!("{BACKEND_ENDPOINT}{path}"),
+        transport_proof: tauri_ipc_bridge_proof(&token, method, path),
+        token,
+    })
+}
+
+fn authenticated_backend_response<F>(
+    token: &str,
+    send_once: F,
+) -> Result<AppApiResponse, String>
+where
+    F: FnMut() -> Result<AppApiResponse, String>,
+{
+    authenticated_backend_response_with_probe(send_once, || {
+        wait_for_backend_session_probe(token, BACKEND_SESSION_VERIFY_WAIT)
+    })
+}
+
+fn authenticated_backend_response_with_probe<F, P>(
+    mut send_once: F,
+    mut probe: P,
+) -> Result<AppApiResponse, String>
+where
+    F: FnMut() -> Result<AppApiResponse, String>,
+    P: FnMut() -> BackendSessionProbe,
+{
     let mut response = send_once()?;
     if matches!(response.status, 401 | 403) {
         clear_backend_session_verify_cache();
-        match wait_for_backend_session_probe(&app_session_token, BACKEND_SESSION_VERIFY_WAIT) {
+        match probe() {
             BackendSessionProbe::Accepted => {
                 mark_backend_session_verified();
                 response = send_once()?;
@@ -352,6 +383,27 @@ pub(crate) fn backend_json_request(
             probe => return Err(runtime_session_probe_error(probe)),
         }
     }
+    Ok(response)
+}
+
+pub(crate) fn backend_json_request(
+    method: &str,
+    path: String,
+    body: Option<serde_json::Value>,
+    timeout_ms: Option<u64>,
+) -> Result<serde_json::Value, String> {
+    let context = backend_request_context(method, &path, timeout_ms, 30_000)?;
+    let response = authenticated_backend_response(&context.token, || {
+        let http_request = context.authenticated_request(method);
+        let response = if let Some(body) = body.as_ref() {
+            http_request
+                .set("Content-Type", "application/json")
+                .send_string(&body.to_string())
+        } else {
+            http_request.call()
+        };
+        app_api_response_from_ureq(response)
+    })?;
     if response.ok {
         Ok(response.body)
     } else {
@@ -380,27 +432,10 @@ pub(crate) fn backend_json_request_with_error_envelope(
     body: Option<serde_json::Value>,
     timeout_ms: Option<u64>,
 ) -> Result<serde_json::Value, BackendJsonErrorEnvelope> {
-    let user_data = user_data_dir().map_err(BackendJsonErrorEnvelope::transport)?;
-    let app_session_token =
-        ensure_app_session_token(&user_data).map_err(BackendJsonErrorEnvelope::transport)?;
-    ensure_backend_session_verified(&app_session_token)
+    let context = backend_request_context(method, &path, timeout_ms, 30_000)
         .map_err(BackendJsonErrorEnvelope::transport)?;
-    let timeout = bounded_backend_request_timeout(timeout_ms, 30_000);
-    let agent = ureq::builder()
-        .timeout_connect(Duration::from_secs(2))
-        .timeout(timeout)
-        .redirects(0)
-        .build();
-    let url = format!("{BACKEND_ENDPOINT}{path}");
-    let transport_proof = tauri_ipc_bridge_proof(&app_session_token, method, &path);
-    let send_once = || {
-        let http_request = agent
-            .request(method, &url)
-            .set("Accept", "application/json")
-            .set("Origin", "tauri://localhost")
-            .set("X-VRCForge-Transport", "tauri-ipc-bridge")
-            .set("X-VRCForge-Transport-Proof", &transport_proof)
-            .set("Authorization", &format!("Bearer {app_session_token}"));
+    let response = authenticated_backend_response(&context.token, || {
+        let http_request = context.authenticated_request(method);
         let response = if let Some(body) = body.as_ref() {
             http_request
                 .set("Content-Type", "application/json")
@@ -408,26 +443,9 @@ pub(crate) fn backend_json_request_with_error_envelope(
         } else {
             http_request.call()
         };
-        app_api_response_from_ureq(response).map_err(BackendJsonErrorEnvelope::transport)
-    };
-    let mut response = send_once()?;
-    if matches!(response.status, 401 | 403) {
-        clear_backend_session_verify_cache();
-        match wait_for_backend_session_probe(&app_session_token, BACKEND_SESSION_VERIFY_WAIT) {
-            BackendSessionProbe::Accepted => {
-                mark_backend_session_verified();
-                response = send_once()?;
-                if matches!(response.status, 401 | 403) {
-                    clear_backend_session_verify_cache();
-                }
-            }
-            probe => {
-                return Err(BackendJsonErrorEnvelope::transport(
-                    runtime_session_probe_error(probe),
-                ))
-            }
-        }
-    }
+        app_api_response_from_ureq(response)
+    })
+    .map_err(BackendJsonErrorEnvelope::transport)?;
     if response.ok {
         Ok(response.body)
     } else {
@@ -454,8 +472,10 @@ where
 #[cfg(test)]
 mod memory_review_backend_error_tests {
     use super::{
+        authenticated_backend_response_with_probe,
         backend_json_error_from_response, bounded_backend_error_detail,
-        bounded_backend_request_timeout, BackendJsonErrorEnvelope,
+        bounded_backend_request_timeout, tauri_ipc_bridge_proof, AppApiResponse,
+        BackendJsonErrorEnvelope, BackendRequestContext, BackendSessionProbe,
     };
     use std::time::Duration;
 
@@ -534,6 +554,151 @@ mod memory_review_backend_error_tests {
         let long = "x".repeat(800);
         assert_eq!(bounded_backend_error_detail(&long).chars().count(), 500);
     }
+
+    #[test]
+    fn shared_request_context_binds_method_path_proof_and_headers_without_network() {
+        let token = "fixture-session-token".to_string();
+        let method = "POST";
+        let path = "/api/app/test?scope=fixture";
+        let context = BackendRequestContext {
+            agent: ureq::AgentBuilder::new().build(),
+            url: format!("{super_endpoint}{path}", super_endpoint = super::BACKEND_ENDPOINT),
+            transport_proof: tauri_ipc_bridge_proof(&token, method, path),
+            token: token.clone(),
+        };
+        let request = context.authenticated_request(method);
+        assert_eq!(request.method(), method);
+        assert_eq!(request.url(), format!("{}{path}", super::BACKEND_ENDPOINT));
+        assert_eq!(request.header("Accept"), Some("application/json"));
+        assert_eq!(request.header("Origin"), Some("tauri://localhost"));
+        assert_eq!(
+            request.header("X-VRCForge-Transport"),
+            Some("tauri-ipc-bridge")
+        );
+        assert_eq!(
+            request.header("X-VRCForge-Transport-Proof"),
+            Some(tauri_ipc_bridge_proof(&token, method, path).as_str())
+        );
+        assert_eq!(
+            request.header("Authorization"),
+            Some("Bearer fixture-session-token")
+        );
+        assert_ne!(
+            tauri_ipc_bridge_proof(&token, "GET", path),
+            tauri_ipc_bridge_proof(&token, method, path)
+        );
+        assert_ne!(
+            tauri_ipc_bridge_proof(&token, method, "/api/app/other"),
+            tauri_ipc_bridge_proof(&token, method, path)
+        );
+    }
+
+    #[test]
+    fn shared_response_path_reverifies_once_for_401_and_403_then_resends() {
+        for rejected_status in [401, 403] {
+            let mut attempts = 0;
+            let response = authenticated_backend_response_with_probe(
+                || {
+                    attempts += 1;
+                    if attempts == 1 {
+                        Ok(AppApiResponse {
+                            status: rejected_status,
+                            ok: false,
+                            body: serde_json::json!({"detail": "stale session"}),
+                        })
+                    } else {
+                        Ok(AppApiResponse {
+                            status: 200,
+                            ok: true,
+                            body: serde_json::json!({"ok": true}),
+                        })
+                    }
+                },
+                || BackendSessionProbe::Accepted,
+            )
+            .expect("accepted reverify should resend once");
+            assert_eq!(attempts, 2);
+            assert_eq!(response.status, 200);
+            assert!(response.ok);
+        }
+    }
+
+    #[test]
+    fn shared_response_path_bounds_reverify_and_skips_probe_when_not_needed() {
+        let mut attempts = 0;
+        let mut probes = 0;
+        let response = authenticated_backend_response_with_probe(
+            || {
+                attempts += 1;
+                Ok(AppApiResponse {
+                    status: 401,
+                    ok: false,
+                    body: serde_json::json!({"detail": "still rejected"}),
+                })
+            },
+            || {
+                probes += 1;
+                BackendSessionProbe::Accepted
+            },
+        )
+        .expect("the bounded retry should return the second rejection");
+        assert_eq!(attempts, 2);
+        assert_eq!(probes, 1);
+        assert_eq!(response.status, 401);
+
+        let mut rejected_attempts = 0;
+        let mut rejected_probes = 0;
+        let response = authenticated_backend_response_with_probe(
+            || {
+                rejected_attempts += 1;
+                Ok(AppApiResponse {
+                    status: 403,
+                    ok: false,
+                    body: serde_json::json!({"detail": "rejected"}),
+                })
+            },
+            || {
+                rejected_probes += 1;
+                BackendSessionProbe::Rejected
+            },
+        )
+        .err()
+        .expect("rejected probe should stop before a resend");
+        assert_eq!(rejected_attempts, 1);
+        assert_eq!(rejected_probes, 1);
+        assert!(response.contains("verification failed"));
+
+        let mut ordinary_probes = 0;
+        let response = authenticated_backend_response_with_probe(
+            || {
+                Ok(AppApiResponse {
+                    status: 500,
+                    ok: false,
+                    body: serde_json::json!({"detail": "server error"}),
+                })
+            },
+            || {
+                ordinary_probes += 1;
+                BackendSessionProbe::Accepted
+            },
+        )
+        .expect("ordinary HTTP errors should pass through");
+        assert_eq!(response.status, 500);
+        assert_eq!(ordinary_probes, 0);
+
+        let mut transport_probes = 0;
+        let error = authenticated_backend_response_with_probe(
+            || Err("transport failed".to_string()),
+            || {
+                transport_probes += 1;
+                BackendSessionProbe::Accepted
+            },
+        )
+        .err()
+        .expect("transport errors should pass through");
+        assert_eq!(error, "transport failed");
+        assert_eq!(transport_probes, 0);
+    }
 }
 
 /// Raw-body variant of `backend_json_request` for binary uploads (chat
@@ -546,43 +711,14 @@ pub(crate) fn backend_bytes_request(
     content_type: &str,
     timeout_ms: Option<u64>,
 ) -> Result<serde_json::Value, String> {
-    let user_data = user_data_dir()?;
-    let app_session_token = ensure_app_session_token(&user_data)?;
-    ensure_backend_session_verified(&app_session_token)?;
-    let timeout = Duration::from_millis(timeout_ms.unwrap_or(120_000).clamp(1_000, 600_000));
-    let agent = ureq::builder()
-        .timeout_connect(Duration::from_secs(2))
-        .timeout(timeout)
-        .redirects(0)
-        .build();
-    let url = format!("{BACKEND_ENDPOINT}{path}");
-    let transport_proof = tauri_ipc_bridge_proof(&app_session_token, method, &path);
-    let send_once = || {
-        let response = agent
-            .request(method, &url)
-            .set("Accept", "application/json")
-            .set("Origin", "tauri://localhost")
-            .set("X-VRCForge-Transport", "tauri-ipc-bridge")
-            .set("X-VRCForge-Transport-Proof", &transport_proof)
-            .set("Authorization", &format!("Bearer {app_session_token}"))
+    let context = backend_request_context(method, &path, timeout_ms, 120_000)?;
+    let response = authenticated_backend_response(&context.token, || {
+        let response = context
+            .authenticated_request(method)
             .set("Content-Type", content_type)
             .send_bytes(body);
         app_api_response_from_ureq(response)
-    };
-    let mut response = send_once()?;
-    if matches!(response.status, 401 | 403) {
-        clear_backend_session_verify_cache();
-        match wait_for_backend_session_probe(&app_session_token, BACKEND_SESSION_VERIFY_WAIT) {
-            BackendSessionProbe::Accepted => {
-                mark_backend_session_verified();
-                response = send_once()?;
-                if matches!(response.status, 401 | 403) {
-                    clear_backend_session_verify_cache();
-                }
-            }
-            probe => return Err(runtime_session_probe_error(probe)),
-        }
-    }
+    })?;
     if response.ok {
         Ok(response.body)
     } else {

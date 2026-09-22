@@ -98,6 +98,23 @@ def identity_scope(name: str, *, write: bool = False, arguments: Mapping[str, An
     return "project"
 
 
+_READ_RUNTIME_IDENTITY_SCOPES = frozenset({"scene", "avatar", "object", "component"})
+_READ_IDENTITY_BOOTSTRAP_TOOLS = frozenset({
+    "vrcforge_list_execution_targets",
+    "vrcforge_bind_execution_target",
+    "vrcforge_refresh_execution_target",
+})
+
+
+def read_runtime_identity_required(name: str) -> bool:
+    """Return the descriptor-owned read projection identity decision."""
+
+    normalized = str(name or "").strip()
+    if normalized in _READ_IDENTITY_BOOTSTRAP_TOOLS:
+        return False
+    return identity_scope(normalized, write=False) in _READ_RUNTIME_IDENTITY_SCOPES
+
+
 def _result_schema(write: bool) -> dict[str, Any]:
     return {
         "type": "object",
@@ -219,7 +236,7 @@ def standardize_tool_descriptor(
         "inputEnvelopeExtension": {
             "field": "executionTarget",
             "schema": "vrcforge.execution_target.v1",
-            "requiredAtRuntime": bool(write or scope in {"scene", "avatar", "object", "component"}),
+            "requiredAtRuntime": bool(write or read_runtime_identity_required(name)),
             "acceptedWithoutChangingLegacyRequired": True,
         },
         "approval": result["approval"],

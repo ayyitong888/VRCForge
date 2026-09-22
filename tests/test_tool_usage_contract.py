@@ -1,4 +1,4 @@
-"""Tool trigger descriptions remain behaviorally identical without extra modularization."""
+"""Shared tool trigger descriptions retain the existing exposure contract."""
 
 import agent_gateway
 import runtime_planner_service

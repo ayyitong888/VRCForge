@@ -6,6 +6,7 @@ from pathlib import Path
 
 import agent_gateway
 import unity_tool_schema_projection as projection
+from mcp_tool_descriptor import identity_scope, read_runtime_identity_required, standardize_tool_descriptor
 
 
 def test_gateway_exports_the_same_canonical_projection_functions() -> None:
@@ -54,6 +55,44 @@ def test_execution_target_bootstrap_remains_unwrapped() -> None:
     ):
         schema = projection.canonical_unity_read_tool_input_schema(name)
         assert "executionTarget" not in schema.get("properties", {})
+
+
+def test_all_registered_read_identity_decisions_match_descriptor_policy() -> None:
+    bootstrap = {
+        "vrcforge_list_execution_targets",
+        "vrcforge_bind_execution_target",
+        "vrcforge_refresh_execution_target",
+    }
+    runtime_scopes = {"scene", "avatar", "object", "component"}
+    names = set(projection.UNITY_READ_TOOL_INPUT_SCHEMAS)
+    names.update(
+        "vrcforge_preview_" + name.removeprefix("vrcforge_")
+        for name in projection.EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS
+    )
+    for name in names:
+        legacy_decision = name not in bootstrap and identity_scope(name) in runtime_scopes
+        assert read_runtime_identity_required(name) == legacy_decision
+        assert projection._read_uses_runtime_identity(name) == legacy_decision
+
+
+def test_descriptor_runtime_requirement_uses_the_same_read_policy() -> None:
+    names = set(projection.UNITY_READ_TOOL_INPUT_SCHEMAS)
+    names.update(
+        "vrcforge_preview_" + name.removeprefix("vrcforge_")
+        for name in projection.EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS
+    )
+    for name in names:
+        descriptor = standardize_tool_descriptor(
+            {"name": name, "inputSchema": {"type": "object"}},
+            write=False,
+        )
+        assert descriptor["_meta"]["inputEnvelopeExtension"]["requiredAtRuntime"] == read_runtime_identity_required(name)
+
+    write_descriptor = standardize_tool_descriptor(
+        {"name": "vrcforge_set_property", "inputSchema": {"type": "object"}},
+        write=True,
+    )
+    assert write_descriptor["_meta"]["inputEnvelopeExtension"]["requiredAtRuntime"] is True
 
 
 def test_refresh_asset_database_exposes_core_parameters() -> None:
