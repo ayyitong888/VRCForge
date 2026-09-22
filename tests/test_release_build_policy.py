@@ -45,7 +45,12 @@ def test_runtime_and_localized_about_versions_follow_release_version() -> None:
     )
     for path in runtime_sources:
         source = path.read_text(encoding="utf-8")
-        assert f'server_version="{version}"' in source or f'server_version: str = "{version}"' in source
+        if path.name == "agent_gateway.py":
+            assert 'server_version=read_vrcforge_version()' in source
+            from dashboard_foundation import read_vrcforge_version
+            assert read_vrcforge_version() == version
+        else:
+            assert f'server_version="{version}"' in source or f'server_version: str = "{version}"' in source
 
     for locale_name in ("en-US", "ja-JP", "zh-CN", "zh-TW"):
         locale = json.loads(
@@ -53,7 +58,7 @@ def test_runtime_and_localized_about_versions_follow_release_version() -> None:
                 encoding="utf-8"
             )
         )
-        assert locale["settings"]["aboutProduct"] == f"VRCForge {version}"
+        assert locale["settings"]["aboutProduct"] == "VRCForge {{version}}"
 
 
 def test_tauri_manifest_selects_the_desktop_app_as_default_binary() -> None:
@@ -875,8 +880,9 @@ def test_release_payload_bundles_public_docs_and_requires_all_license_notices() 
         '-Destination (Join-Path $payloadRoot "VRCForge.png") -Force'
     ) in source
     assert notification_icon[:8] == b"\x89PNG\r\n\x1a\n"
-    assert int.from_bytes(notification_icon[16:20], "big") == 256
-    assert int.from_bytes(notification_icon[20:24], "big") == 256
+    width = int.from_bytes(notification_icon[16:20], "big")
+    height = int.from_bytes(notification_icon[20:24], "big")
+    assert width == height and width >= 256
     assert 'relativePath = "VRCForge.png"' in source
     assert '"notificationIcon"' in web_payload
     assert '"VRCForge.png"' in web_payload

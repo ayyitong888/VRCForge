@@ -71,11 +71,13 @@ export function OnboardingOverlay({
   const unityStep = {
       title: t("onboarding.step1Title"),
       done: unityToolsReady,
-      doneDesc: t("onboarding.toolsConnected", { count: unityToolsCount, total: 68 }),
+      doneDesc: unityToolsCount > 0
+        ? t("onboarding.toolsConnected", { count: unityToolsCount })
+        : t("onboarding.step1DoneDesc"),
       todoDesc: !selectedProjectReady
         ? t("onboarding.importAndSelectProject")
         : runtimeConnected
-          ? t("onboarding.keepUnityOpen", { count: unityToolsCount, total: 68 })
+          ? t("onboarding.keepUnityOpen", { count: unityToolsCount })
           : t("onboarding.step1TodoDesc"),
       action: (
         <Button variant="outline" disabled={loadingRuntime} onClick={onRetryRuntime}>

@@ -580,8 +580,8 @@
     "step3TodoDesc": "VRCForge をインポートした正確な Unity プロジェクトを選択",
     "selectProject": "プロジェクトを選択",
     "importAndSelectProject": "Unity で VRCForge.unitypackage を Import All してから、開いているプロジェクトをここで選択してください。",
-    "keepUnityOpen": "選択した Unity プロジェクトを開いたままコンパイルを待ち、再試行してください。{{count}} / {{total}} ツールを検出しました。",
-    "toolsConnected": "接続済み — {{count}} / {{total}} ツール"
+    "keepUnityOpen": "選択した Unity プロジェクトを開いたままコンパイルを待ち、再試行してください。{{count}} ツールを検出しました。",
+    "toolsConnected": "接続済み — {{count}} ツール"
   },
   "executionMode": {
     "approval": "制限モード",

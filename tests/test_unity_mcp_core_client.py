@@ -347,6 +347,7 @@ def test_pre_handshake_diagnostics_returns_compiled_identity_and_compile_failure
         "server/core-info",
         "server/discover",
     ]
+    assert all(entry["authorization"] == "Bearer " + descriptor["authToken"] for entry in server.seen)
     assert result["coreInfo"]["coreVersion"] == "1.7.7"
     assert result["coreInfo"]["versionSource"] == "compiled_constant"
     assert result["compileResult"]["structuredContent"]["data"]["errorCount"] == 1
@@ -917,3 +918,39 @@ def test_invalid_modern_result_shape_retains_actual_type() -> None:
         UnityMcpCoreClient._validate_response(envelope, 7, require_complete=True)
     assert caught.value.cause_code == "unity_core_invalid_result_shape"
     assert caught.value.details["resultType"] == "partial"
+
+
+@pytest.mark.parametrize("field,value", [
+    ("host", "192.0.2.1"),
+    ("port", True),
+    ("port", 65536),
+    ("authToken", "not-base64"),
+    ("authToken", base64.b64encode(b"short").decode("ascii")),
+    ("instanceId", ""),
+])
+def test_shared_core_auth_rejects_invalid_binding_before_any_connection(core_files, field, value):
+    from unity_mcp_core_auth import load_core_diagnostic_binding, load_unity_mcp_core_connection
+
+    project, path, descriptor = core_files
+    descriptor[field] = value
+    path.write_text(json.dumps(descriptor), encoding="utf-8")
+    for load in (load_core_diagnostic_binding, load_unity_mcp_core_connection):
+        with pytest.raises(UnityMcpCoreError):
+            load(project)
+
+
+def test_shared_core_auth_reloads_rotated_project_credentials(core_files):
+    from unity_mcp_core_auth import load_core_diagnostic_binding, load_unity_mcp_core_connection
+
+    project, path, descriptor = core_files
+    _write_descriptor(path, descriptor, 1234)
+    first = load_unity_mcp_core_connection(project)
+    descriptor["authToken"] = base64.b64encode(b"r" * 32).decode("ascii")
+    descriptor["instanceId"] = "restarted-instance"
+    _write_descriptor(path, descriptor, 2345)
+    second = load_unity_mcp_core_connection(project)
+    diagnostic = load_core_diagnostic_binding(project)
+    assert first.discovery_token != second.discovery_token
+    assert (second.port, second.discovery_token, second.instance_id) == diagnostic[2:5]
+    assert second.port == 2345
+    assert second.instance_id == "restarted-instance"

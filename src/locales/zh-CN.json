@@ -580,8 +580,8 @@
     "step3TodoDesc": "选择刚刚导入 VRCForge 的准确 Unity 项目",
     "selectProject": "选择项目",
     "importAndSelectProject": "在 Unity 中从 VRCForge.unitypackage 选择 Import All，然后在这里选择该已打开项目。",
-    "keepUnityOpen": "保持所选 Unity 项目打开并等待编译完成，然后重试。已检测 {{count}} / {{total}} 个工具。",
-    "toolsConnected": "已连接 — {{count}} / {{total}} 个工具"
+    "keepUnityOpen": "保持所选 Unity 项目打开并等待编译完成，然后重试。已检测 {{count}} 个工具。",
+    "toolsConnected": "已连接 — {{count}} 个工具"
   },
   "executionMode": {
     "approval": "受限模式",

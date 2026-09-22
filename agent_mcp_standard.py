@@ -116,7 +116,7 @@ class McpStandardRouter:
         tool_call: ToolCallCallback,
         *,
         server_name: str = "VRCForge",
-        server_version: str = "1.8.3",
+        server_version: str = "1.8.4",
         tool_list_revision: ToolListRevisionCallback | None = None,
         tool_name_resolver: ToolNameResolver | None = None,
         tool_call_catalogue: ToolCallCatalogueCallback | None = None,

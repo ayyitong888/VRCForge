@@ -16,6 +16,13 @@ const importTypeScript = async (relativePath, transform = (source) => source) =>
 };
 
 const checklistLogic = await importTypeScript("src/components/onboarding/onboarding-checklist-state.ts");
+const unityReadiness = await importTypeScript(
+  "src/lib/unity-readiness.ts",
+  (source) => source.replace(
+    'import { asRecord } from "./runtime-parsing";\n',
+    `const asRecord = (value) => value && typeof value === "object" && !Array.isArray(value) ? value : null;\n`,
+  ),
+);
 const gateLogicSource = await readFile(
   path.join(root, "src/components/onboarding/onboarding-language-gate-state.ts"),
   "utf8",
@@ -42,6 +49,66 @@ assert.deepEqual(checklistLogic.onboardingChecklistItemState(true, true), { comp
 assert.deepEqual(checklistLogic.onboardingChecklistItemState(true, false), { completion: "done", position: "other" });
 assert.deepEqual(checklistLogic.onboardingChecklistItemState(false, true), { completion: "pending", position: "current" });
 assert.deepEqual(checklistLogic.onboardingChecklistItemState(false, false), { completion: "pending", position: "other" });
+
+const issueTwoReady = unityReadiness.isVrcForgeUnityToolsReady(true,
+  { status: "ok", detail: {
+    mcpServerReachable: true,
+    executionReady: true,
+    unityInstanceRegistered: true,
+    selectedInstanceMatched: true,
+    coreVersionMatched: true,
+    vrcForgeToolsRegistered: true,
+    missingRequiredVrcForgeTools: [],
+  } },
+  { status: "ok", detail: { selectedInstanceMatched: true } },
+  { status: "ok", detail: { coreVersionMatched: true, inspectionMode: "core_version_only", inspectionSkipped: true, vrcForgeToolsCount: 0 } },
+);
+assert.equal(issueTwoReady, true);
+assert.equal(unityReadiness.isVrcForgeUnityToolsReady(true,
+  { status: "ok", detail: {
+    mcpServerReachable: true, executionReady: true, unityInstanceRegistered: true,
+    selectedInstanceMatched: true, coreVersionMatched: true, vrcForgeToolsRegistered: true,
+    missingRequiredVrcForgeTools: [],
+  } },
+  { status: "ok" }, { status: "ok", detail: { coreVersionMatched: true, vrcForgeToolsCount: 95 } }), true);
+assert.equal(unityReadiness.isVrcForgeUnityToolsReady(true,
+  { status: "ok", detail: { coreVersionMatched: true, selectedInstanceMatched: true, executionReady: false } },
+  { status: "ok", detail: { selectedInstanceMatched: true } },
+  { status: "ok", detail: { coreVersionMatched: true, inspectionMode: "core_version_only" } }), false);
+assert.equal(unityReadiness.isVrcForgeUnityToolsReady(true,
+  { status: "ok", detail: { coreVersionMatched: true, selectedInstanceMatched: true } },
+  { status: "ok", detail: { selectedInstanceMatched: true } },
+  { status: "ok", detail: { coreVersionMatched: true, inspectionMode: "core_version_only", vrcForgeToolsRegistered: false } }), false);
+assert.equal(unityReadiness.isVrcForgeUnityToolsReady(true,
+  { status: "ok", detail: { coreVersionMatched: true, selectedInstanceMatched: true } },
+  { status: "ok", detail: { selectedInstanceMatched: true } },
+  { status: "ok", detail: { coreVersionMatched: true, missingRequiredVrcForgeTools: ["unity_scan_avatar_items"] } }), false);
+assert.equal(unityReadiness.isVrcForgeUnityToolsReady(true,
+  { status: "ok", detail: { coreVersionMatched: true, selectedInstanceMatched: true } },
+  { status: "ok", detail: { selectedInstanceMatched: true } },
+  { status: "ok", detail: { coreVersionMatched: true } }), false);
+assert.equal(unityReadiness.isVrcForgeUnityToolsReady(true,
+  { status: "ok", detail: { ...{
+    mcpServerReachable: true, executionReady: true, unityInstanceRegistered: true,
+    selectedInstanceMatched: true, coreVersionMatched: true, vrcForgeToolsRegistered: true,
+  }, missingRequiredVrcForgeTools: ["vrc_export_blendshapes"] } },
+  { status: "ok" }, { status: "ok", detail: { coreVersionMatched: true } }), false);
+assert.equal(unityReadiness.isVrcForgeUnityToolsReady(false,
+  { status: "ok", detail: { coreVersionMatched: true } },
+  { status: "ok", detail: { selectedInstanceMatched: true } },
+  { status: "ok", detail: { coreVersionMatched: true } }), false);
+assert.equal(unityReadiness.isVrcForgeUnityToolsReady(true,
+  { status: "ok", detail: { coreVersionMatched: false, selectedInstanceMatched: true } },
+  { status: "ok", detail: { selectedInstanceMatched: true } },
+  { status: "ok", detail: { coreVersionMatched: false } }), false);
+assert.equal(unityReadiness.isVrcForgeUnityToolsReady(true,
+  { status: "ok", detail: { coreVersionMatched: true, selectedInstanceMatched: false } },
+  { status: "ok", detail: { selectedInstanceMatched: false } },
+  { status: "ok", detail: { coreVersionMatched: true } }), false);
+assert.equal(unityReadiness.isVrcForgeUnityToolsReady(true,
+  { status: "ok", detail: { coreVersionMatched: true, selectedInstanceMatched: true, missingRequiredVrcForgeTools: ["unity_scan_avatar_items"] } },
+  { status: "ok", detail: { selectedInstanceMatched: true } },
+  { status: "ok", detail: { coreVersionMatched: true } }), false);
 
 const resolve = (stored, smokeMode = false) => gateLogic.resolveOnboardingLaunchState(stored, smokeMode);
 const savedLocaleStorage = new Map([
@@ -105,11 +172,13 @@ assert.ok(overlay.includes("onboardingChecklistVisualClasses.icon[state.completi
 assert.ok(overlay.includes("data-vrcforge-onboarding-provider-choice"));
 assert.ok(overlay.includes("externalAgentReady"));
 assert.ok(overlay.includes("onOpenExternalSettings"));
-assert.ok(app.includes("providerTestPassed || externalAgentVerified"));
+assert.ok(app.includes("providerReadyForOnboarding || externalAgentVerified"));
 assert.ok(app.includes("hasRecentConnectorSelfTest(connectorStatus, runtimeConnected, activeProjectPath)"));
 assert.ok(overlay.includes("SUPPORTED_LOCALES.map"));
 assert.ok(overlay.includes('aria-label={t("settings.language")}'));
 assert.ok(!overlay.includes('"h-1.5 flex-1 rounded-full transition-colors"'));
+assert.ok(!overlay.includes("total: 68"));
+assert.ok(!overlay.includes("/ 68"));
 
 assert.ok(languageGate.includes('role="dialog"'));
 assert.ok(languageGate.includes('aria-modal="true"'));

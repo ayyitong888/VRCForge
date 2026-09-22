@@ -133,6 +133,7 @@ import { resolveComputerUseAccentHex } from "./lib/computer-use-visuals";
 import { normalizeProjectPathKey, projectKey, shortPath } from "./lib/project-path";
 import { sortSidebarProjects } from "./lib/sidebar-project-order";
 import { asRecord, getHealthDetailNumber } from "./lib/runtime-parsing";
+import { isVrcForgeUnityToolsReady } from "./lib/unity-readiness";
 import { buildEmptyProjectState } from "./lib/sidebar-view";
 import { localizeRuntimeHealthMessage } from "./lib/runtime-workspace-view";
 import {
@@ -606,7 +607,12 @@ export default function App() {
     t,
   });
   const vrcForgeToolsCount = getHealthDetailNumber(healthComponents.vrcForgeUnityTools?.detail, "vrcForgeToolsCount");
-  const vrcForgeToolsReady = runtimeConnected && healthComponents.vrcForgeUnityTools?.status === "ok" && vrcForgeToolsCount === 68;
+  const vrcForgeToolsReady = isVrcForgeUnityToolsReady(
+    runtimeConnected,
+    healthComponents.unityMcpBridgeReachable,
+    healthComponents.unityMcpInstance,
+    healthComponents.vrcForgeUnityTools,
+  );
   const {
     optimizationReport,
     optimizationTargetProfile,

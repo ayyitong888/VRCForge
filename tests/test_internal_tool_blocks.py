@@ -481,3 +481,20 @@ def test_registered_loaded_block_exposes_every_advertised_tool_schema():
     prompt = planner._build_llm_plan_prompt("Inspect only", [], exposure_layer="planning", project_context_active=True, internal_tool_blocks=[status.block])
     status_line = next(line for line in prompt.splitlines() if line.startswith("- unity_status "))
     assert "schema=" in status_line
+
+
+def test_cross_block_selection_reports_authoritative_owner_for_retry() -> None:
+    result = dashboard_server.load_internal_tool_block({
+        "sessionId": "cross-block-owner-regression",
+        "block": "behavior/parameters_menus_layers",
+        "tools": ["unity_scan_avatar_items"],
+        "exposureLayer": "execution",
+        "projectContextActive": True,
+    })
+
+    assert result["ok"] is False
+    assert result["status"] == "failed"
+    assert result["errorCode"] == "internal_tool_selection_invalid"
+    assert result["mutationStarted"] is False
+    assert result["expectedBlock"] == "avatar_structure/hierarchy_components"
+    assert "block=avatar_structure/hierarchy_components" in result["nextActions"][0]

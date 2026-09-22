@@ -580,8 +580,8 @@
     "step3TodoDesc": "Select the exact Unity project you imported VRCForge into",
     "selectProject": "Select Project",
     "importAndSelectProject": "Import All from VRCForge.unitypackage, then select that open project here.",
-    "keepUnityOpen": "Keep the selected Unity project open and wait for compilation, then Retry. Detected {{count}} / {{total}} tools.",
-    "toolsConnected": "Connected — {{count}} / {{total}} tools"
+    "keepUnityOpen": "Keep the selected Unity project open and wait for compilation, then Retry. Detected {{count}} tools.",
+    "toolsConnected": "Connected — {{count}} tools"
   },
   "executionMode": {
     "approval": "Restricted",

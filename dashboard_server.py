@@ -15817,7 +15817,34 @@ def load_internal_tool_block(params: dict[str, Any]) -> dict[str, Any]:
         by_name = {str(item["name"]): str(item.get("block") or "") for item in leaves}
         invalid = [name for name in requested_tools if by_name.get(name) != block]
         if invalid:
-            return {"ok": False, "status": "failed", "errorCode": "internal_tool_selection_invalid", "error": f"Unknown or cross-block tool: {invalid[0]}", "mutationStarted": False}
+            invalid_name = invalid[0]
+            expected_block = by_name.get(invalid_name, "")
+            response = {
+                "ok": False,
+                "status": "failed",
+                "errorCode": "internal_tool_selection_invalid",
+                "error": f"Unknown or cross-block tool: {invalid_name}",
+                "mutationStarted": False,
+            }
+            # Keep the exact-block permission boundary, but return enough
+            # routing evidence for the planner to correct a model-selected
+            # block on its next turn.  The previous response gave no way to
+            # distinguish a typo from a valid tool owned by another leaf.
+            if expected_block:
+                response["expectedBlock"] = expected_block
+                response["data"] = {
+                    "expectedBlock": expected_block,
+                    "tool": invalid_name,
+                    "requestedTools": list(requested_tools),
+                }
+                response["nextActions"] = [
+                    f"Retry with block={expected_block} and the exact tool name {invalid_name}."
+                ]
+            else:
+                response["nextActions"] = [
+                    "List internal tool blocks and choose an exact visible tool name before retrying."
+                ]
+            return response
     loaded = AGENT_GATEWAY.runtime_sessions.load_internal_tool_block_selected(session_id, block, requested_tools)
     selections = AGENT_GATEWAY.runtime_sessions.internal_tool_selections(session_id)
     return {

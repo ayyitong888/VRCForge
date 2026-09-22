@@ -3,7 +3,7 @@
 ![VRCForge — AI Agent + MCP for VRChat Avatar Editing](docs/assets/vrcforge-atelier-banner.png)
 
 [![稳定版](https://img.shields.io/github/v/release/ayyitong888/VRCForge?label=稳定版&style=flat-square)](https://github.com/ayyitong888/VRCForge/releases/latest)
-![当前版本](https://img.shields.io/badge/当前版本-v1.8.1-d9487c?style=flat-square)
+![当前版本](https://img.shields.io/badge/当前版本-v1.8.4-d9487c?style=flat-square)
 [![许可证 GPL-3.0-only](https://img.shields.io/badge/许可证-GPL--3.0--only-64748b?style=flat-square)](LICENSE)
 ![平台 Windows x64](https://img.shields.io/badge/平台-Windows%20x64-0ea5e9?style=flat-square)
 [![GitHub Stars](https://img.shields.io/github/stars/ayyitong888/VRCForge?style=social)](https://github.com/ayyitong888/VRCForge/stargazers)
@@ -29,10 +29,10 @@ VRCForge 是给 VRChat Avatar 创作者使用的开源改模工具。你可以�
 
 > 使用任何会写入 Unity 资产的功能前，请先备份 Unity / VRChat Avatar 工程。
 
-本页对应已发布的 [v1.8.1 稳定版](https://github.com/ayyitong888/VRCForge/releases/tag/v1.8.1)。
+本页对应已发布的 [v1.8.4 稳定版](https://github.com/ayyitong888/VRCForge/releases/tag/v1.8.4)。
 安装与升级请获取同一 Release 的配套安装器与 Unity 包。
 
-**[下载 VRCForge v1.8.1](https://github.com/ayyitong888/VRCForge/releases/tag/v1.8.1)** · [查看 Release Notes](https://github.com/ayyitong888/VRCForge/releases)
+**[下载 VRCForge v1.8.4](https://github.com/ayyitong888/VRCForge/releases/tag/v1.8.4)** · [查看 Release Notes](https://github.com/ayyitong888/VRCForge/releases)
 
 ## VRCForge 能做什么
 
@@ -86,7 +86,7 @@ VRCForge 对 Unity 资产写入采用以下受监督流程：
 
 从 [最新 Release](https://github.com/ayyitong888/VRCForge/releases/latest) 下载：
 
-- 1.8.1 请使用 `VRCForge_Web_Installer_x64.exe`，或离线安装器 `VRCForge_Offline_Installer_x64.exe`（修复程序运行时的关闭提示与重试安装）
+- 1.8.4 请使用 `VRCForge_Web_Installer_x64.exe`，或离线安装器 `VRCForge_Offline_Installer_x64.exe`
 - `VRCForge.unitypackage`
 
 然后完成三步连接：
@@ -146,13 +146,13 @@ python tools\vrcforge_cli.py validation run --project C:\Path\To\UnityProject
 - VRCForge 可以在无 Provider 模式下完成部分只读检查；AI 对话、规划和视觉推理需要已配置的兼容 Provider。
 - 优化插件集成需要已安装的兼容版本；配置 AAO 等组件不等于已经完成其构建阶段优化。换头与部件移植工作流不能代替必要的网格接缝、权重或 UV 编辑。
 - Avatar 保护连接器提供检查、规划与预览；公开包不包含私有保护执行组件。
-- `v1.8.1` 已发布；协议、源码测试或工具调用成功仍不能替代具体模型的视觉与恢复验收。
+- `v1.8.4` 已发布；协议、源码测试或工具调用成功仍不能替代具体模型的视觉与恢复验收。
 - Quest/Android、第三方资产许可和付费依赖由具体 Avatar 与资源决定。
 
 ## 文档入口
 
 - [用户手册 / User Manual](USER_MANUAL.md)
-- [v1.8.0 稳定版说明](docs/RELEASE_NOTES_1.8.0.md)
+- [v1.8.4 稳定版说明](docs/RELEASE_NOTES_1.8.4.md)
 - [v1.7.10 稳定版说明](docs/RELEASE_NOTES_1.7.10.md)
 - [兼容性矩阵](docs/COMPATIBILITY_MATRIX.md)
 - [产品回归契约](docs/PRODUCT_REGRESSION_CONTRACT.md)

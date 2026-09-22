@@ -65,21 +65,22 @@ def test_external_gateway_binds_trusted_caller_for_provider_independent_readines
     assert result["result"]["readyForUnityWork"] is True
 
 
-def test_onboarding_requires_exact_selected_project_and_all_64_tools() -> None:
+def test_onboarding_requires_exact_selected_project_and_health_readiness() -> None:
     app_source = (ROOT / "src" / "App.tsx").read_text(encoding="utf-8")
     overlay_source = (
         ROOT / "src" / "components" / "onboarding" / "onboarding-overlay.tsx"
     ).read_text(encoding="utf-8")
 
-    assert "vrcForgeToolsCount === 68" in app_source
+    assert "isVrcForgeUnityToolsReady(" in app_source
     assert "normalizeProjectPathKey(projectKey(project)) === normalizeProjectPathKey(activeProjectPath)" in app_source
     assert "onboardingProjectMatchesBackend" in app_source
     assert "onboardingSelectedProjectReady && onboardingProjectMatchesBackend && vrcForgeToolsReady" in app_source
     assert "projectItems.length" not in app_source[app_source.index("const onboardingSelectedProjectReady") : app_source.index("const onboardingUnityToolsReady")]
     assert 't("onboarding.importAndSelectProject")' in overlay_source
-    assert 't("onboarding.keepUnityOpen", { count: unityToolsCount, total: 68 })' in overlay_source
+    assert 't("onboarding.keepUnityOpen", { count: unityToolsCount })' in overlay_source
     assert 't("onboarding.retryConnection")' in overlay_source
-    assert 't("onboarding.toolsConnected", { count: unityToolsCount, total: 68 })' in overlay_source
+    assert 't("onboarding.toolsConnected", { count: unityToolsCount })' in overlay_source
+    assert "total: 68" not in overlay_source
 
 
 def test_all_onboarding_locales_include_inline_import_connection_guidance() -> None:
@@ -95,6 +96,4 @@ def test_all_onboarding_locales_include_inline_import_connection_guidance() -> N
         ):
             assert str(onboarding.get(key) or "").strip(), f"{locale_path.name}: {key}"
         assert "{{count}}" in onboarding["keepUnityOpen"]
-        assert "{{total}}" in onboarding["keepUnityOpen"]
         assert "{{count}}" in onboarding["toolsConnected"]
-        assert "{{total}}" in onboarding["toolsConnected"]

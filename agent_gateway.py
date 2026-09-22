@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dashboard_foundation import read_vrcforge_version
+
 from external_mcp_tool_blocks import (
     EXTERNAL_MCP_DEFAULT_TOOL_BLOCK,
     EXTERNAL_MCP_TOOL_BLOCK_BRANCHES,
@@ -40,6 +42,8 @@ from agent_tool_result_reader import TOOL_NAME as RESULT_READER_TOOL, bind_tool_
 from know_yourself_skill import bind_know_yourself_caller
 import agent_command_safety as command_safety
 import runtime_planner_service as planner_policy
+from tool_usage_contract import tool_usage_description
+from internal_tool_selection_recovery import selection_correction_matches, selection_error_code
 from agent_shell_service import (
     SHELL_RUNNER_NATIVE as SHELL_OWNER_RUNNER_NATIVE,
     SHELL_RUNNER_POWERSHELL as SHELL_OWNER_RUNNER_POWERSHELL,
@@ -6175,6 +6179,7 @@ class AgentGateway:
         last_successful_action_id = ""
         repeated_failure_guard = RepeatedFailureGuard()
         shell_scope_denials = 0
+        recoverable_block_selection_attempts = 0
         shell_payload: dict[str, Any] | None = None
         skill_payload: dict[str, Any] | None = None
         write_payload: dict[str, Any] | None = (
@@ -7407,6 +7412,17 @@ class AgentGateway:
                         tool=task_record_tool,
                         arguments=requirement_arguments,
                     )
+                automatic_correction_id = ""
+                if (
+                    str(step_payload.get("status") or "").strip().casefold()
+                    in {"executed", "loaded"}
+                    and step_tool == "vrcforge_load_internal_tool_block"
+                ):
+                    for prior_action_id, prior_key in unresolved_completion_action_keys.items():
+                        prior_outcome = unresolved_completion_outcomes.get(prior_key, {})
+                        if selection_correction_matches(prior_outcome, step_tool, action_arguments):
+                            automatic_correction_id = prior_action_id
+                            break
                 task_action = task_loop.record_action(
                     kind=action_kind,
                     tool=task_record_tool,
@@ -7418,7 +7434,10 @@ class AgentGateway:
                         if task_record_tool != step_tool
                         else str(step_payload.get("taskActionId") or planned_action_id)
                     ),
-                    correction_for_action_id=str(plan.get("correctionForActionId") or ""),
+                    correction_for_action_id=(
+                        str(plan.get("correctionForActionId") or "")
+                        or automatic_correction_id
+                    ),
                 )
                 step_payload["outcome"] = task_action["outcome"]
                 if loop_state:
@@ -7565,15 +7584,61 @@ class AgentGateway:
                         last_plan = gated_plan
                         break
             elif step_outcome_status == "failed":
+                raw_selection_result = ensure_dict(step_payload.get("result"))
+                if (
+                    step_tool == "vrcforge_load_internal_tool_block"
+                    and selection_error_code(step_outcome) == "internal_tool_selection_invalid"
+                    and raw_selection_result.get("expectedBlock")
+                ):
+                    step_outcome = {
+                        **step_outcome,
+                        "data": {
+                            "expectedBlock": raw_selection_result.get("expectedBlock"),
+                            "tool": raw_selection_result.get("data", {}).get("tool")
+                            if isinstance(raw_selection_result.get("data"), dict)
+                            else "",
+                            "requestedTools": raw_selection_result.get("data", {}).get("requestedTools")
+                            if isinstance(raw_selection_result.get("data"), dict)
+                            else [],
+                        },
+                    }
+                    steps[-1]["outcome"] = step_outcome
                 unresolved_completion_outcomes[action_key] = step_outcome
                 if task_action_id:
                     unresolved_completion_action_keys[task_action_id] = action_key
-                if str(plan.get("planner") or "").strip().casefold() != "llm":
+                # A cross-block selection is a bounded routing error.  The
+                # loader returns the authoritative owner block, so give the
+                # planner one normal post-tool turn to correct the selection
+                # even when the original action came from the LLM.  Other
+                # LLM-selected failures remain terminal as before.
+                selection_error = ensure_dict(step_outcome.get("error"))
+                selection_code = str(
+                    selection_error.get("code")
+                    or step_outcome.get("errorCode")
+                    or ""
+                ).strip().casefold()
+                recoverable_block_selection = (
+                    step_tool == "vrcforge_load_internal_tool_block"
+                    and selection_code == "internal_tool_selection_invalid"
+                    and bool(selection_error.get("nextActions") or step_outcome.get("nextAction") or step_outcome.get("nextActions"))
+                    and recoverable_block_selection_attempts == 0
+                )
+                if (
+                    str(plan.get("planner") or "").strip().casefold() != "llm"
+                    or recoverable_block_selection
+                ):
+                    if recoverable_block_selection:
+                        recoverable_block_selection_attempts += 1
                     # Deterministic routing owns fast first selection, not the
                     # failure verdict. Re-feed the structured result to the
                     # model so it can correct arguments or choose a diagnostic
                     # action instead of terminating at the first tool error.
                     plan["continueLoop"] = True
+                elif selection_code == "internal_tool_selection_invalid":
+                    gated_plan = completion_gate_plan(plan, step_outcome)
+                    if gated_plan is not None:
+                        last_plan = gated_plan
+                    break
             elif not step_failure_class:
                 unresolved_completion_outcomes.pop(action_key, None)
                 if task_action_id:
@@ -7624,6 +7689,22 @@ class AgentGateway:
                 last_successful_action_id = planned_action_id
                 general_no_progress_attempts = 0
                 last_general_read_key = general_read_key
+                if unresolved_completion_outcomes and step_tool == "vrcforge_load_internal_tool_block":
+                    # A successful block load is the explicit correction for
+                    # the recoverable cross-block selection failure above.
+                    # Model plans do not always carry correctionActionIds, so
+                    # clear only that precise unresolved failure here; other
+                    # failed tool outcomes must remain completion-gated.
+                    stale_selection_keys = {
+                        key for key, outcome in unresolved_completion_outcomes.items()
+                        if selection_correction_matches(outcome, step_tool, action_arguments)
+                    }
+                    for stale_key in stale_selection_keys:
+                        unresolved_completion_outcomes.pop(stale_key, None)
+                    unresolved_completion_action_keys = {
+                        action_id: key for action_id, key in unresolved_completion_action_keys.items()
+                        if key not in stale_selection_keys
+                    }
                 if (
                     unresolved_planner_argument_failure is not None
                     and task_action.get("status") == "completed"
@@ -9228,7 +9309,7 @@ def create_agent_mcp_app(
         list_tools,
         call_tool,
         server_name="VRCForge Agent Gateway",
-        server_version="1.8.0",
+        server_version=read_vrcforge_version(),
         tool_name_resolver=gateway.resolve_external_mcp_tool_name,
         resource_list=gateway.list_mcp_resources,
         resource_templates=gateway.list_mcp_resource_templates,
@@ -9826,23 +9907,6 @@ def normalize_exposure_layer(value: Any) -> str:
     if layer not in {EXPOSURE_LAYER_PLANNING, EXPOSURE_LAYER_EXECUTION}:
         raise AgentGatewayError("exposureLayer must be planning or execution.", status_code=400)
     return layer
-
-
-def tool_usage_description(name: str, summary: str, *, write: bool) -> str:
-    text = str(summary or name).strip()
-    if all(section in text for section in ("When to use:", "When NOT to use:", "Negative example:")):
-        return text
-    when_not = (
-        "Do not use while planning, for hypothetical or quoted requests, or without an explicit project change request and approval."
-        if write
-        else "Do not use for general questions, quoted examples, hypothetical requests, or when the user forbids inspection."
-    )
-    negative = (
-        f"Explain {name} conceptually, but do not modify the project."
-        if write
-        else f"Mention {name} without inspecting the current project."
-    )
-    return f"When to use: {text}\nWhen NOT to use: {when_not}\nNegative example: {negative}"
 
 
 def parse_skill_markdown(path: Path, *, max_bytes: int | None = None) -> dict[str, Any]:

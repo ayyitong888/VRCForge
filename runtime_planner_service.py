@@ -21,6 +21,7 @@ from project_instruction_context import (
 )
 from agent_tool_result_contract import _views
 from agent_memory_tools import MEMORY_TOOL_NAMES, MEMORY_TOOL_SCHEMAS
+from tool_usage_contract import tool_usage_description
 
 CONTEXT_USAGE_SCHEMA = "vrcforge.context_usage.v1"
 RUNTIME_CONTEXT_COMPACTION_SCHEMA = "vrcforge.runtime_context_compaction.v1"
@@ -1102,23 +1103,6 @@ def normalize_exposure_layer(value: object) -> str:
     if layer not in {EXPOSURE_LAYER_PLANNING, EXPOSURE_LAYER_EXECUTION}:
         raise RuntimePlannerError("exposureLayer must be planning or execution.", status_code=400)
     return layer
-
-def tool_usage_description(name: str, summary: str, *, write: bool) -> str:
-    text = str(summary or name).strip()
-    if all(section in text for section in ("When to use:", "When NOT to use:", "Negative example:")):
-        return text
-    when_not = (
-        "Do not use while planning, for hypothetical or quoted requests, or without an explicit project change request and approval."
-        if write
-        else "Do not use for general questions, quoted examples, hypothetical requests, or when the user forbids inspection."
-    )
-    negative = (
-        f"Explain {name} conceptually, but do not modify the project."
-        if write
-        else f"Mention {name} without inspecting the current project."
-    )
-    return f"When to use: {text}\nWhen NOT to use: {when_not}\nNegative example: {negative}"
-
 
 def planner_tool_usage_description(name: str, summary: str, *, write: bool) -> str:
     """Keep all three trigger sections visible while bounding prompt growth."""

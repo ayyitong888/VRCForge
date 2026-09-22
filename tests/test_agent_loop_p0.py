@@ -35,6 +35,7 @@ from agent_task_loop import (
 )
 from provider_configuration_service import ProviderApiConfig
 from runtime_planner_service import PlannerModelResult
+from agent_runtime_skill_executor import AgentRuntimeSkillExecutor
 from execution_target import canonical_namespace, project_identity
 
 
@@ -185,6 +186,162 @@ class AgentLoopP0Tests(unittest.TestCase):
         guard.register_root(project)
         guard.set_current_root(project)
         return project
+
+    def test_repeated_cross_block_selection_stops_after_one_correction(self) -> None:
+        project = self._unity_project()
+        wrong = {
+            "action": "skill", "skill_tool": "load_internal_tool_block",
+            "skill_params": {"block": "behavior/parameters_menus_layers", "tools": ["unity_scan_avatar_items"]},
+        }
+        with patch.object(dashboard_server._RUNTIME_PLANNER_MODEL, "plan", side_effect=[
+            PlannerModelResult(text=json.dumps(wrong), usage={}, reasoning={}, planner_label="fixture"),
+            PlannerModelResult(text=json.dumps(wrong), usage={}, reasoning={}, planner_label="fixture"),
+        ]) as model:
+            result = self.gateway.runtime_message({
+                "message": "Inspect the outfit", "provider": "fixture", "model": "fixture",
+                "projectPath": str(project), "projectRoot": str(project),
+                "session_id": "repeated-cross-block-selection", "client_turn_id": "repeated-cross-block-turn",
+            })
+        self.assertEqual(model.call_count, 2)
+        self.assertEqual(len(result["steps"]), 2)
+        self.assertTrue(all(step["outcome"]["status"] == "failed" for step in result["steps"]))
+        self.assertEqual(result["plan"].get("nextStep"), "tool_failed")
+
+    def test_cross_block_tool_selection_recovers_to_read_success(self) -> None:
+        """A model-selected wrong leaf must recover only through owner evidence."""
+
+        project = self._unity_project()
+        session_id = "cross-block-selection-e2e"
+        scan_arguments = {"projectPath": str(project), "avatarPath": "Avatar"}
+        scan_action_id = canonical_action_id(
+            "skill", "vrcforge_scan_avatar_items", scan_arguments
+        )
+        planner_prompts = []
+        plans = iter(
+            [
+                {
+                    "action": "skill",
+                    "skill_tool": "load_internal_tool_block",
+                    "skill_params": {
+                        "block": "behavior/parameters_menus_layers",
+                        "tools": ["unity_scan_avatar_items"],
+                    },
+                },
+                {
+                    "action": "skill",
+                    "skill_tool": "load_internal_tool_block",
+                    "skill_params": {
+                        "block": "avatar_structure/hierarchy_components",
+                        "tools": ["unity_scan_avatar_items"],
+                    },
+                },
+                {
+                    "action": "skill",
+                    "skill_tool": "unity_scan_avatar_items",
+                    "skill_params": scan_arguments,
+                    "completion_claim": {
+                        "satisfied": True,
+                        "evidence_action_ids": [scan_action_id],
+                    },
+                },
+            ]
+        )
+        original_execute = AgentRuntimeSkillExecutor.execute
+
+        def fake_execute(executor, tool, params, agent_name, owner_id=""):
+            if tool == "vrcforge_scan_avatar_items":
+                return {
+                    "ok": True,
+                    "status": "executed",
+                    "tool": tool,
+                    "result": {"ok": True, "items": []},
+                    "outcome": {
+                        "status": "ok",
+                        "summary": "avatar items read",
+                        "verification": {"state": "not_required", "checks": []},
+                    },
+                }
+            return original_execute(executor, tool, params, agent_name, owner_id)
+
+        with patch.object(
+            dashboard_server._RUNTIME_PLANNER_MODEL,
+            "plan",
+            side_effect=lambda prompt: PlannerModelResult(
+                text=json.dumps((planner_prompts.append(prompt) or next(plans))),
+                usage={},
+                reasoning={},
+                planner_label="fixture",
+            ),
+        ), patch.object(
+            AgentRuntimeSkillExecutor,
+            "execute",
+            new=fake_execute,
+        ):
+            result = self.gateway.runtime_message(
+                {
+                    "message": "扫描衣物",
+                    "provider": "fixture",
+                    "model": "fixture",
+                    "projectPath": str(project),
+                    "projectRoot": str(project),
+                    "session_id": session_id,
+                    "client_turn_id": "cross-block-selection-e2e-turn",
+                }
+            )
+
+        self.assertEqual(
+            [(step["tool"], step["outcome"]["status"]) for step in result["steps"]],
+            [
+                ("vrcforge_load_internal_tool_block", "failed"),
+                ("vrcforge_load_internal_tool_block", "ok"),
+                ("vrcforge_scan_avatar_items", "ok"),
+            ],
+        )
+        self.assertEqual(result["steps"][0]["result"]["expectedBlock"], "avatar_structure/hierarchy_components")
+        self.assertGreaterEqual(len(planner_prompts), 2)
+        self.assertIn("Retry with block=avatar_structure/hierarchy_components", planner_prompts[1])
+        self.assertNotEqual(result["plan"].get("nextStep"), "tool_failed")
+
+    def test_cross_block_selection_still_stops_without_unity_context(self) -> None:
+        """The recovery evidence must not expose Unity tools in a general turn."""
+
+        plans = iter(
+            [
+                {
+                    "action": "skill",
+                    "skill_tool": "load_internal_tool_block",
+                    "skill_params": {
+                        "block": "behavior/parameters_menus_layers",
+                        "tools": ["unity_scan_avatar_items"],
+                    },
+                },
+                {"action": "reply", "reply": "停止"},
+            ]
+        )
+        with patch.object(
+            dashboard_server._RUNTIME_PLANNER_MODEL,
+            "plan",
+            side_effect=lambda _prompt: PlannerModelResult(
+                text=json.dumps(next(plans)),
+                usage={},
+                reasoning={},
+                planner_label="fixture",
+            ),
+        ):
+            result = self.gateway.runtime_message(
+                {
+                    "message": "扫描衣物",
+                    "provider": "fixture",
+                    "model": "fixture",
+                    "session_id": "cross-block-no-project",
+                    "client_turn_id": "cross-block-no-project-turn",
+                }
+            )
+
+        first = result["steps"][0]
+        self.assertEqual(first["outcome"]["status"], "failed")
+        self.assertNotIn("expectedBlock", first["result"])
+        self.assertEqual(len(result["steps"]), 1)
 
     def _fixture_execution_target(self, project_root: str | Path) -> dict[str, object]:
         root = str(Path(project_root).resolve())
