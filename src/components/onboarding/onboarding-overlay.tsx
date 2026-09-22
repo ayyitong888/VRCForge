@@ -17,6 +17,7 @@ export function OnboardingOverlay({
   unityToolsReady,
   unityToolsCount,
   providerVerified,
+  providerConfigured,
   externalAgentReady,
   loadingRuntime,
   currentLanguage,
@@ -39,6 +40,7 @@ export function OnboardingOverlay({
   unityToolsReady: boolean;
   unityToolsCount: number;
   providerVerified: boolean;
+  providerConfigured: boolean;
   externalAgentReady: boolean;
   loadingRuntime: boolean;
   currentLanguage: string;
@@ -90,7 +92,7 @@ export function OnboardingOverlay({
       title: t("onboarding.step2Title"),
       done: providerVerified || externalAgentReady,
       doneDesc: t("onboarding.step2DoneDesc"),
-      todoDesc: t("onboarding.step2TodoDesc"),
+      todoDesc: providerConfigured ? t("onboarding.providerSavedPendingDescription") : t("onboarding.step2TodoDesc"),
       action: (
         <div className="grid gap-3 sm:grid-cols-2" data-vrcforge-onboarding-provider-choice>
           <div className="rounded-lg border border-border bg-background/50 p-3">
@@ -210,7 +212,7 @@ export function OnboardingOverlay({
             {step.done ? <Check className="h-4 w-4 shrink-0 text-primary" /> : providerNeedsAction ? <Settings className="h-4 w-4 shrink-0 text-primary" /> : projectNeedsAction ? <FolderPlus className="h-4 w-4 shrink-0 text-primary" /> : <Loader2 className="h-4 w-4 shrink-0 animate-spin text-muted-foreground" />}
             <div className="truncate text-sm font-medium">{step.title}</div>
             <Badge tone={step.done ? "ok" : "muted"} className="ml-auto shrink-0">
-              {step.done ? t("onboarding.done") : (projectNeedsAction || providerNeedsAction) ? t("onboarding.actionNeeded") : t("onboarding.detecting")}
+              {step.done ? t("onboarding.done") : providerNeedsAction && providerConfigured ? t("onboarding.providerSavedPending") : (projectNeedsAction || providerNeedsAction) ? t("onboarding.actionNeeded") : t("onboarding.detecting")}
             </Badge>
           </div>
           <p className="mt-2 text-sm text-muted-foreground">{step.done ? step.doneDesc : step.todoDesc}</p>

@@ -4268,6 +4268,7 @@ export default function App() {
         unityToolsReady={onboardingUnityToolsReady}
         unityToolsCount={vrcForgeToolsCount}
         providerVerified={providerReadyForOnboarding}
+        providerConfigured={providerConfigured}
         externalAgentReady={externalAgentVerified}
         loadingRuntime={loading}
         currentLanguage={i18n.language}

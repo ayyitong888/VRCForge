@@ -309,7 +309,7 @@ export function ProviderSetup({
         ) : null}
       </div>
       <div data-onboarding-provider="actions" className="mt-5 flex flex-wrap justify-end gap-2">
-        <div aria-live="polite" className="min-h-5 w-full text-xs text-muted-foreground">{providerTestMessage}</div>
+        <div aria-live="polite" className="min-h-5 w-full text-xs text-muted-foreground">{providerTestMessage || (!modelsError && keySaved && !apiKey.trim() ? i18n.t("provider.savedKeyTestHint") : "")}</div>
         <Button type="button" variant="outline" disabled={!runtimeConnected || saving || Boolean(testingProvider)} onClick={() => onTestProvider("text")}>
           {testingProvider === "text" ? <Loader2 className="h-4 w-4 animate-spin" /> : <MessageSquare className="h-4 w-4" />}
           {i18n.t("provider.testConnection")}
