@@ -218,6 +218,7 @@ export function ProviderSetup({
               variant="outline"
               className="h-10 shrink-0 gap-2 px-3 text-sm"
               onClick={onLoadModels}
+              data-onboarding-provider="models-refresh"
               disabled={!runtimeConnected || loadingModels || saving}
             >
               {loadingModels ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}

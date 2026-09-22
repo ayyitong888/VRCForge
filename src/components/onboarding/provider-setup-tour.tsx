@@ -13,6 +13,7 @@ const targetSelectors = [
   '[data-onboarding-provider="connection"]',
   '[data-onboarding-provider="credentials"]',
   '[data-onboarding-provider="endpoint"]',
+  '[data-onboarding-provider="models-refresh"]',
   '[data-onboarding-provider="model"]',
   '[data-onboarding-provider="actions"]',
 ] as const;
@@ -65,12 +66,19 @@ export function ProviderSetupTour({ open, onReturn }: ProviderSetupTourProps) {
       {
         element: targetSelectors[3],
         popover: {
+          title: t("onboarding.providerTour.refreshTitle"),
+          description: t("onboarding.providerTour.refreshDescription"),
+        },
+      },
+      {
+        element: targetSelectors[4],
+        popover: {
           title: t("onboarding.providerTour.modelTitle"),
           description: t("onboarding.providerTour.modelDescription"),
         },
       },
       {
-        element: targetSelectors[4],
+        element: targetSelectors[5],
         popover: {
           title: t("onboarding.providerTour.actionsTitle"),
           description: t("onboarding.providerTour.actionsDescription"),

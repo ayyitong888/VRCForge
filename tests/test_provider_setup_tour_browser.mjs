@@ -26,10 +26,10 @@ import React,{StrictMode,useState} from 'react';import{createRoot}from'react-dom
 import i18n from 'i18next';import{initReactI18next}from'react-i18next';import en from './src/locales/en-US.json';
 import{ProviderSetupTour}from'./src/components/onboarding/provider-setup-tour';
 i18n.use(initReactI18next).init({lng:'en-US',resources:{'en-US':{translation:en}}});
-function Fixture(){const[open,setOpen]=useState(false);const[mounted,setMounted]=useState(true);const[count,setCount]=useState(0);
-window.fixture={open:()=>setOpen(true),unmount:()=>setMounted(false),scrollInner:()=>{const el=document.querySelector('#settings-scroll');el.scrollTop=120;el.dispatchEvent(new Event('scroll'))}};
-return <><output id="returned">{count}</output><div id="settings-scroll" style={{height:260,overflowY:'auto',maxWidth:500,margin:'100px auto'}}><main>
-{['connection','credentials','model','actions'].map(key=><label key={key} data-onboarding-provider={key} style={{display:'block',padding:15,minHeight:150,marginBottom:20}}>{key}<input aria-label={key}/></label>)}
+function Fixture(){const[open,setOpen]=useState(false);const[mounted,setMounted]=useState(true);const[count,setCount]=useState(0);const[refreshes,setRefreshes]=useState(0);
+window.fixture={open:()=>setOpen(true),unmount:()=>setMounted(false),refreshes:()=>refreshes,scrollInner:()=>{const el=document.querySelector('#settings-scroll');el.scrollTop=120;el.dispatchEvent(new Event('scroll'))}};
+return <><output id="returned">{count}</output><output id="refreshes">{refreshes}</output><div id="settings-scroll" style={{height:260,overflowY:'auto',maxWidth:500,margin:'100px auto'}}><main>
+{['connection','credentials','model','actions'].map(key=><label key={key} data-onboarding-provider={key} style={{display:'block',padding:15,minHeight:150,marginBottom:20}}>{key}<input aria-label={key}/>{key==='model'&&<button type="button" data-onboarding-provider="models-refresh" onClick={()=>setRefreshes(value=>value+1)}>refresh models</button>}</label>)}
 </main></div>{mounted&&<ProviderSetupTour open={open} onReturn={()=>{setCount(c=>c+1);setOpen(false)}}/>}</>}
 createRoot(document.getElementById('root')).render(<StrictMode><Fixture/></StrictMode>);` }, bundle: true, write: false, format: "iife", jsx: "automatic", loader: { ".css": "empty" }, plugins: baselineProviderTourPlugin, define: { "process.env.NODE_ENV": '"development"' } });
 const css = await readFile('node_modules/driver.js/dist/driver.css','utf8') + await readFile('src/components/onboarding/provider-setup-tour.css','utf8');
@@ -65,8 +65,15 @@ try {
   await page.locator('.driver-popover-next-btn').click();
   await page.waitForFunction(()=>document.querySelector('[data-onboarding-provider="credentials"]').classList.contains('driver-active-element'));
   await page.locator('.driver-popover-next-btn').click();
+  await page.waitForFunction(()=>document.querySelector('[data-onboarding-provider="models-refresh"]').classList.contains('driver-active-element'));
+  assert.equal(await page.locator('#refreshes').innerText(),'0','Opening the guide must not refresh models automatically');
+  await page.locator('[data-onboarding-provider="models-refresh"]').click();
+  assert.equal(await page.locator('#refreshes').innerText(),'1','The guide must leave the real refresh button actionable');
+  await page.locator('.driver-popover-next-btn').click();
   await page.waitForFunction(()=>document.querySelector('[data-onboarding-provider="model"]').classList.contains('driver-active-element'));
-  await page.locator('.vrcforge-provider-tour-return').click();
+  await page.locator('.driver-popover-next-btn').click();
+  await page.waitForFunction(()=>document.querySelector('[data-onboarding-provider="actions"]').classList.contains('driver-active-element'));
+  await page.locator('.driver-popover-next-btn').click();
   await page.waitForFunction(()=>document.querySelector('#returned').textContent==='2');
   await page.evaluate(()=>window.fixture.open());
   await page.waitForSelector('.driver-popover');
