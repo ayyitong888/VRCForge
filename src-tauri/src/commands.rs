@@ -611,58 +611,64 @@ pub fn update_vision_config(
 }
 
 #[tauri::command]
-pub fn fetch_provider_models(
+pub async fn fetch_provider_models(
     request: DesktopProviderConfigRequest,
 ) -> Result<serde_json::Value, String> {
-    let secret = request.api_key.clone().unwrap_or_default();
-    sanitize_provider_result(
-        backend_json_request(
-            "POST",
-            "/api/models".to_string(),
-            Some(provider_config_body(
-                request.provider,
-                request.api_key,
-                request.base_url,
-                request.model,
-                request.api_type,
-            )),
-            request.timeout_ms,
-        ),
-        &[secret.as_str()],
-    )
+    blocking_backend_json_request(move || {
+        let secret = request.api_key.clone().unwrap_or_default();
+        sanitize_provider_result(
+            backend_json_request(
+                "POST",
+                "/api/models".to_string(),
+                Some(provider_config_body(
+                    request.provider,
+                    request.api_key,
+                    request.base_url,
+                    request.model,
+                    request.api_type,
+                )),
+                request.timeout_ms,
+            ),
+            &[secret.as_str()],
+        )
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn test_provider_capability(
+pub async fn test_provider_capability(
     request: DesktopProviderTestRequest,
 ) -> Result<serde_json::Value, String> {
-    let secret = request.api_key.clone().unwrap_or_default();
-    let mut body = provider_config_body(
-        request.provider,
-        request.api_key,
-        request.base_url,
-        request.model,
-        request.api_type,
-    );
-    if let serde_json::Value::Object(object) = &mut body {
-        object.insert(
-            "thinking_level".to_string(),
-            serde_json::Value::String(request.thinking_level.unwrap_or_default()),
+    blocking_backend_json_request(move || {
+        let secret = request.api_key.clone().unwrap_or_default();
+        let mut body = provider_config_body(
+            request.provider,
+            request.api_key,
+            request.base_url,
+            request.model,
+            request.api_type,
         );
-        object.insert(
-            "capability".to_string(),
-            serde_json::Value::String(request.capability),
-        );
-    }
-    sanitize_provider_result(
-        backend_json_request(
-            "POST",
-            "/api/app/provider/test".to_string(),
-            Some(body),
-            request.timeout_ms,
-        ),
-        &[secret.as_str()],
-    )
+        if let serde_json::Value::Object(object) = &mut body {
+            object.insert(
+                "thinking_level".to_string(),
+                serde_json::Value::String(request.thinking_level.unwrap_or_default()),
+            );
+            object.insert(
+                "capability".to_string(),
+                serde_json::Value::String(request.capability),
+            );
+        }
+        sanitize_provider_result(
+            backend_json_request(
+                "POST",
+                "/api/app/provider/test".to_string(),
+                Some(body),
+                request.timeout_ms,
+            ),
+            &[secret.as_str()],
+        )
+    })
+    .await
 }
 
 #[tauri::command]

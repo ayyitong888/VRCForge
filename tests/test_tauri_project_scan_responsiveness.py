@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -25,3 +27,16 @@ def test_settings_storage_commands_never_block_the_tauri_event_loop() -> None:
         command = source[start:end]
         assert "blocking_backend_json_request(move ||" in command, name
         assert ".await" in command, name
+
+
+@pytest.mark.parametrize("name", ("fetch_provider_models", "test_provider_capability"))
+def test_provider_connection_commands_are_offloaded_and_sanitized(name: str) -> None:
+    source = (ROOT / "src-tauri/src/commands.rs").read_text(encoding="utf-8")
+    start = source.index(f"pub async fn {name}(")
+    end = source.index("#[tauri::command]", start)
+    command = source[start:end]
+
+    assert "blocking_backend_json_request(move ||" in command, name
+    assert ".await" in command, name
+    assert "backend_json_request(" in command, name
+    assert "sanitize_provider_result(" in command, name
