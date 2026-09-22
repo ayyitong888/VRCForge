@@ -582,7 +582,7 @@
     "step3TodoDesc": "选择刚刚导入 VRCForge 的准确 Unity 项目",
     "selectProject": "选择项目",
     "importAndSelectProject": "在 Unity 中从 VRCForge.unitypackage 选择 Import All，然后在这里选择该已打开项目。",
-    "keepUnityOpen": "请在 Unity 里打开刚才选的项目，等它加载完成，再点“重试连接”。",
+    "keepUnityOpen": "首次使用，需要先给这个 Unity 项目安装 VRCForge 插件：\n1. 在 Unity 里打开刚才选的项目。\n2. 点击顶部菜单 Assets → Import Package → Custom Package…，选择与应用版本配套的 VRCForge.unitypackage 文件。\n3. 在导入窗口点击 Import All，等待导入和加载完成。\n4. 保持 Unity 打开，回到这里点击“重试连接”。\n\n如果已经安装好插件并加载完成，直接点击“重试连接”即可。",
     "toolsConnected": "已连接 Unity，可以开始使用了。",
     "providerTour": {
       "connectionTitle": "选择服务商",

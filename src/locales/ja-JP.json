@@ -582,7 +582,7 @@
     "step3TodoDesc": "VRCForge をインポートした正確な Unity プロジェクトを選択",
     "selectProject": "プロジェクトを選択",
     "importAndSelectProject": "Unity で VRCForge.unitypackage を Import All してから、開いているプロジェクトをここで選択してください。",
-    "keepUnityOpen": "先ほど選んだプロジェクトを Unity で開いてください。読み込みが終わったら、接続を再試行してください。",
+    "keepUnityOpen": "初めて使う場合は、この Unity プロジェクトに VRCForge プラグインを追加します。\n1. 先ほど選んだプロジェクトを Unity で開きます。\n2. 上部メニューの Assets → Import Package → Custom Package… から、アプリのバージョンに対応する VRCForge.unitypackage を選びます。\n3. インポート画面で Import All を押し、インポートと読み込みの完了を待ちます。\n4. Unity を開いたままここに戻り、接続を再試行します。\n\nプラグインのインストールと読み込みが済んでいれば、そのまま接続を再試行してください。",
     "toolsConnected": "接続済み — {{count}} ツール",
     "providerTour": {
       "connectionTitle": "プロバイダーを選択",

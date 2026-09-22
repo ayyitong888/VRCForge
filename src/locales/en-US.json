@@ -582,7 +582,7 @@
     "step3TodoDesc": "Select the exact Unity project you imported VRCForge into",
     "selectProject": "Select Project",
     "importAndSelectProject": "Import All from VRCForge.unitypackage, then select that open project here.",
-    "keepUnityOpen": "Open the project you selected in Unity. Once it finishes loading, click Retry connection.",
+    "keepUnityOpen": "For first-time setup, install the VRCForge plugin in this Unity project:\n1. Open the project you selected in Unity.\n2. Choose Assets → Import Package → Custom Package… and select the VRCForge.unitypackage file matching your app version.\n3. Click Import All in the import window, then wait for importing and loading to finish.\n4. Keep Unity open, return here, and click Retry connection.\n\nIf the plugin is already installed and loaded, click Retry connection directly.",
     "toolsConnected": "Connected — {{count}} tools",
     "providerTour": {
       "connectionTitle": "Choose a provider",

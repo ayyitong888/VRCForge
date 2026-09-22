@@ -215,7 +215,7 @@ export function OnboardingOverlay({
               {step.done ? t("onboarding.done") : providerNeedsAction && providerConfigured ? t("onboarding.providerSavedPending") : (projectNeedsAction || providerNeedsAction) ? t("onboarding.actionNeeded") : t("onboarding.detecting")}
             </Badge>
           </div>
-          <p className="mt-2 text-sm text-muted-foreground">{step.done ? step.doneDesc : step.todoDesc}</p>
+          <p className="mt-2 whitespace-pre-line text-sm leading-relaxed text-muted-foreground">{step.done ? step.doneDesc : step.todoDesc}</p>
           {!step.done ? <div className="mt-4">{step.action}</div> : null}
         </div>
         <div className="mt-6 flex items-center gap-3">
