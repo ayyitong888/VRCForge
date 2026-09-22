@@ -25230,6 +25230,9 @@ def register_agent_gateway_tools() -> None:
             ),
             approval_category=f"general-file-{model_name.replace('_', '-')}",
             allow_future_category=True,
+            # Host-file operations retain approval and path guards without
+            # requiring a checkpoint of an unrelated Unity project.
+            pre_write_checkpoint_required=False,
         )
     AGENT_GATEWAY.register_tool(
         "vrcforge_web_fetch",

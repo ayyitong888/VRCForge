@@ -12703,6 +12703,10 @@ class DashboardServerTests(unittest.TestCase):
         irreversible_ephemeral_tools = {
             "vrcforge_confirm_unity_reload_dialog",
         }
+        general_host_file_tools = {
+            "vrcforge_edit_file", "vrcforge_write_file", "vrcforge_delete_path",
+            "vrcforge_move_path", "vrcforge_apply_patch",
+        }
         observed_no_rollback_tools = {
             name
             for name, target in targets.items()
@@ -12710,7 +12714,7 @@ class DashboardServerTests(unittest.TestCase):
         }
         self.assertEqual(
             observed_no_rollback_tools,
-            explicit_rollback_tools | managed_artifact_tools | irreversible_ephemeral_tools,
+            explicit_rollback_tools | managed_artifact_tools | irreversible_ephemeral_tools | general_host_file_tools,
         )
         for name, target in targets.items():
             policy = target.get("rollbackPolicy")
@@ -12721,6 +12725,7 @@ class DashboardServerTests(unittest.TestCase):
                 name in explicit_rollback_tools
                 or name in managed_artifact_tools
                 or name in irreversible_ephemeral_tools
+                or name in general_host_file_tools
             ):
                 self.assertFalse(policy["required"], name)
                 if name in explicit_rollback_tools:
@@ -12728,6 +12733,20 @@ class DashboardServerTests(unittest.TestCase):
             else:
                 self.assertTrue(policy["required"], name)
                 self.assertTrue(policy["restoreTool"], name)
+
+        for name in general_host_file_tools:
+            policy = targets[name]["rollbackPolicy"]
+            self.assertEqual(policy["kind"], "general_host_file_write")
+            self.assertFalse(policy["preWriteCheckpointRequired"])
+            self.assertEqual(policy["checkpointScope"], [])
+            self.assertEqual(policy["restoreTool"], "")
+            self.assertEqual(policy["coverageAudit"], "")
+        unknown = replace(
+            dashboard_server.AGENT_GATEWAY._write_handlers["vrcforge_write_file"],
+            name="fixture_unknown_write",
+        )
+        with self.assertRaisesRegex(ValueError, "no truthful rollback policy"):
+            dashboard_server.AGENT_GATEWAY.approval_transactions._write_handler_rollback_policy(unknown)
 
         for name in managed_artifact_tools:
             policy = targets[name]["rollbackPolicy"]

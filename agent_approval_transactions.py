@@ -3072,6 +3072,28 @@ class AgentApprovalTransactionService:
                     "no automatic inverse rollback is advertised."
                 ),
             }
+        if handler.name in {
+            "vrcforge_edit_file",
+            "vrcforge_write_file",
+            "vrcforge_delete_path",
+            "vrcforge_move_path",
+            "vrcforge_apply_patch",
+        }:
+            return {
+                "schema": ROLLBACK_POLICY_SCHEMA,
+                "required": False,
+                "kind": "general_host_file_write",
+                "approvalRequired": True,
+                "preWriteCheckpointRequired": False,
+                "checkpointScope": [],
+                "restoreTool": "",
+                "coverageAudit": "",
+                "postRestoreValidationRequired": False,
+                "note": (
+                    "Approved host-file operations retain path guards excluding Unity projects. "
+                    "No Unity checkpoint or automatic rollback is provided."
+                ),
+            }
         if not handler.pre_write_checkpoint_required:
             raise ValueError(f"Write handler {handler.name!r} has no truthful rollback policy.")
         if handler.name == "vrcforge_restore_checkpoint":

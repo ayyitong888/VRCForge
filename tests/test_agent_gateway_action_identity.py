@@ -18,7 +18,14 @@ def test_skill_registration_retains_planned_identity(entrypoint, explicit):
         and ast.unparse(node.test) == "action_kind == 'skill' and (not completion_requirement)"
     )
     siblings = next(value for node in ast.walk(tree) for _, value in ast.iter_fields(node) if isinstance(value, list) and registration in value)
-    record = siblings[siblings.index(registration) + 1]
+    # The runtime now performs a small correction-preparation step between
+    # registration and recording.  Keep the test coupled to the action
+    # assignment itself rather than to incidental sibling ordering.
+    record = next(
+        node for node in siblings[siblings.index(registration) + 1 :]
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "task_action" for target in node.targets)
+    )
     code = compile(ast.fix_missing_locations(ast.Module(body=[registration, record], type_ignores=[])), "gateway_registration", "exec")
     tool = "vrcforge_get_compile_errors"
     planned = {}
@@ -32,6 +39,7 @@ def test_skill_registration_retains_planned_identity(entrypoint, explicit):
         "planned_arguments": planned, "action_arguments": executed,
         "step_tool": tool, "task_record_tool": "entrypoint" if entrypoint else tool,
         "task_loop": loop, "planned_action_id": planned_id, "plan": {},
+        "automatic_correction_id": "",
         "step_payload": {"outcome": {"status": "ok", "success": True}},
         "ensure_dict": lambda value: value if isinstance(value, dict) else {},
     }

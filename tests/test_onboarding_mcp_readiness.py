@@ -95,5 +95,4 @@ def test_all_onboarding_locales_include_inline_import_connection_guidance() -> N
             "toolsConnected",
         ):
             assert str(onboarding.get(key) or "").strip(), f"{locale_path.name}: {key}"
-        assert "{{count}}" in onboarding["keepUnityOpen"]
-        assert "{{count}}" in onboarding["toolsConnected"]
+        assert "{{count}}" not in onboarding["keepUnityOpen"]

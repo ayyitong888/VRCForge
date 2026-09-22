@@ -557,7 +557,7 @@ mod memory_review_backend_error_tests {
 
     #[test]
     fn shared_request_context_binds_method_path_proof_and_headers_without_network() {
-        let token = "fixture-session-token".to_string();
+        let token = "fixture-token".to_string();
         let method = "POST";
         let path = "/api/app/test?scope=fixture";
         let context = BackendRequestContext {
@@ -581,7 +581,7 @@ mod memory_review_backend_error_tests {
         );
         assert_eq!(
             request.header("Authorization"),
-            Some("Bearer fixture-session-token")
+            Some("Bearer fixture-token")
         );
         assert_ne!(
             tauri_ipc_bridge_proof(&token, "GET", path),

@@ -4309,6 +4309,30 @@ class AgentLoopP0Tests(unittest.TestCase):
                 self.assertEqual(readback["steps"][0]["outcome"]["status"], "ok", readback)
                 self.assertIn("approved external text", str(readback["steps"][0]))
 
+    def test_general_external_write_does_not_require_unity_checkpoint(self) -> None:
+        """Host-file writes remain usable in a fresh profile with no Unity scope."""
+        dashboard_server.UNITY_PROJECT_PATH_GUARD.replace_roots(())
+        target = Path(self.temp_dir.name) / "general-no-unity.txt"
+        plan = {
+            "planner": "llm",
+            "writeNeeded": True,
+            "writeTool": "vrcforge_write_file",
+            "writeParams": {"path": str(target), "content": "host file text"},
+            "continueLoop": False,
+            "nextStep": "call_write",
+        }
+        with patch.object(self.gateway.runtime_planner, "plan_agent_turn", return_value=dict(plan)):
+            result = self.gateway.runtime_message(
+                {"message": f"Write {target}", "projectRoot": "", "session_id": "write-no-unity"}
+            )
+        approval_id = result.get("approvalId") or result.get("approval_id")
+        self.assertTrue(approval_id, result)
+        self.assertFalse(target.exists(), "General writes must wait for approval")
+        self.gateway.approval_transactions.approve(approval_id)
+        applied = self.gateway.approval_transactions.apply_approved({"approval_id": approval_id})
+        self.assertTrue(applied["ok"], applied)
+        self.assertEqual(target.read_text(encoding="utf-8"), "host file text")
+
     def test_unity_context_does_not_default_host_shell_into_protected_project(self) -> None:
         project = self._unity_project()
         plan = {"planner": "llm", "shellNeeded": True, "shellCommand": "echo fixture",
