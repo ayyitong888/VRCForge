@@ -186,6 +186,7 @@ export function buildDurableTimelineRows(
   elapsedSeconds?: number,
   terminalFailureCode = "",
   steps: AgentRuntimeResponse["steps"] = [],
+  options: { includeAssistant?: boolean } = {},
 ): ReactNode[] {
   // Lifecycle evidence stays durable; the right sidebar owns its presentation.
   const presentation = buildTimelinePresentation(events.filter((event) => event.kind !== "subagent"), elapsedSeconds);
@@ -200,6 +201,12 @@ export function buildDurableTimelineRows(
     return result;
   };
   const rows: ReactNode[] = [];
+  const processRows: ReactNode[] = [];
+  const assistantRows: ReactNode[] = [];
+  const includeAssistant = options.includeAssistant !== false;
+  let processEventCount = 0;
+  let processHasFailure = false;
+  let processHasStarted = false;
   if (Number.isFinite(presentation.elapsedSeconds)) {
     rows.push(
       <div key="agent-turn-duration" data-agent-turn-duration className="px-1 text-xs text-muted-foreground">
@@ -209,8 +216,9 @@ export function buildDurableTimelineRows(
   }
   for (const entry of presentation.entries) {
     if (entry.type === "assistant") {
+      if (!includeAssistant) continue;
       const terminalStatusKey = runtimeTerminalStatusKey(terminalFailureCode);
-      rows.push(terminalStatusKey ? (
+      assistantRows.push(terminalStatusKey ? (
         <div
           key={entry.id}
           data-vrcforge-terminal-status={terminalFailureCode}
@@ -232,16 +240,25 @@ export function buildDurableTimelineRows(
     }
     if (entry.kind === "process") {
       for (const invocation of entry.invocations) {
-        rows.push(renderDirectTimelineInvocation(invocation, takeFullResult(invocation)));
+        processEventCount += 1;
+        processHasFailure ||= ["failed", "error"].includes(invocation.status.toLowerCase());
+        processHasStarted ||= invocation.status === "started";
+        processRows.push(renderDirectTimelineInvocation(invocation, takeFullResult(invocation)));
       }
       continue;
     }
     if (entry.invocations.length === 1) {
-      rows.push(renderDirectTimelineInvocation(entry.invocations[0], takeFullResult(entry.invocations[0])));
+      processEventCount += 1;
+      processHasFailure ||= ["failed", "error"].includes(entry.invocations[0].status.toLowerCase());
+      processHasStarted ||= entry.invocations[0].status === "started";
+      processRows.push(renderDirectTimelineInvocation(entry.invocations[0], takeFullResult(entry.invocations[0])));
       continue;
     }
+    processEventCount += entry.invocations.length;
+    processHasFailure ||= entry.invocations.some((invocation) => ["failed", "error"].includes(invocation.status.toLowerCase()));
+    processHasStarted ||= entry.invocations.some((invocation) => invocation.status === "started");
     const failed = entry.invocations.some((invocation) => ["failed", "error"].includes(invocation.status.toLowerCase()));
-    rows.push(
+    processRows.push(
       <WorkSegmentRow
         key={entry.id}
         kind={entry.kind}
@@ -268,6 +285,22 @@ export function buildDurableTimelineRows(
       </WorkSegmentRow>,
     );
   }
+  if (processRows.length) {
+    rows.push(
+      <div key="agent-turn-process" data-agent-turn-process-group>
+        <WorkSegmentRow
+          kind="process"
+          title={i18n.t("agent.workSegment")}
+          statusLabel={i18n.t("agent.workSegmentItems", { count: processEventCount })}
+          statusTone={processHasFailure ? "danger" : processHasStarted ? "warn" : "muted"}
+          showStatus
+        >
+          {processRows}
+        </WorkSegmentRow>
+      </div>,
+    );
+  }
+  rows.push(...assistantRows);
   return rows;
 }
 
@@ -950,12 +983,14 @@ function WorkSegmentRow({
   title,
   statusLabel,
   statusTone,
+  showStatus = false,
   children,
 }: {
   kind: TimelineBatchKind;
   title: string;
   statusLabel: string;
-  statusTone: "danger" | "muted";
+  statusTone: "danger" | "warn" | "muted";
+  showStatus?: boolean;
   children: ReactNode;
 }) {
   const [open, setOpen] = useState(false);
@@ -969,6 +1004,7 @@ function WorkSegmentRow({
       >
         {kind === "command" ? <TerminalSquare className="h-3.5 w-3.5 shrink-0" /> : kind === "tool" || kind === "file_edit" ? <Wrench className="h-3.5 w-3.5 shrink-0" /> : <ListChecks className="h-3.5 w-3.5 shrink-0" />}
         <span className="min-w-0 truncate text-xs">{kind === "command" ? i18n.t("agent.runCommand") : i18n.t("agent.callTool")}</span>
+        {showStatus ? <span className={cn("shrink-0 text-xs", statusTone === "danger" ? "text-destructive" : statusTone === "warn" ? "text-amber-600" : "text-muted-foreground")}>{statusLabel}</span> : null}
         <span className="ml-auto shrink-0 opacity-0 transition-opacity group-hover/work-segment:opacity-100 group-focus-visible/work-segment:opacity-100">
           {open ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
         </span>

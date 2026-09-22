@@ -150,6 +150,8 @@ const card = await readFile(resolve(import.meta.dirname, "..", "src", "component
 const controller = await readFile(resolve(import.meta.dirname, "..", "src", "hooks", "use-chat-run-controller.ts"), "utf8");
 const timelinePresentationSource = await readFile(resolve(import.meta.dirname, "..", "src", "lib", "chat-timeline-presentation.ts"), "utf8");
 assert.match(card, /clearInterval\(timer\)/, "terminal replacement and Stop unmount must clear the reconnect clock");
+assert.match(card, /buildDurableTimelineRows\(item\.timeline, undefined, \"\", \[\], \{ includeAssistant: false \}\)/,
+  "the complete live answer must not be rendered a second time from the durable assistant event");
 assert.match(card, /<details[\s\S]*<summary/, "reconnecting status must expose a compact disclosure detail");
 assert.match(card, /ChevronRight[\s\S]*group-open:rotate-90/, "reconnecting disclosure must show an explicit expandable chevron");
 assert.match(card, /reconnectingRetry/, "terminal reconnect status must provide a manual retry next step");

@@ -39,6 +39,11 @@ assert.match(source, /!compactExecution \? <span[\s\S]*statusLabel/, "execution 
 assert.match(source, /entry\.kind === "process"/, "safe planner commentary must render directly even when adjacent");
 assert.match(source, /data-agent-timeline-invocation="process"/, "non-CoT planner commentary owns a visible timeline row");
 assert.match(source, /<ChatMarkdown text=\{commentary\}/, "safe planner commentary must retain its complete projected text");
+assert.match(source, /const processRows: ReactNode\[\] = \[\]/, "one Agent turn owns one outer process group");
+assert.match(source, /key=\"agent-turn-process\"/, "planner commentary and tool batches share one collapsible turn group");
+assert.match(source, /rows\.push\(\.\.\.assistantRows\)/, "the final assistant answer stays outside the process group");
+assert.match(source, /showStatus/, "the outer process group exposes a compact running or failed status");
+assert.match(source, /processEventCount/, "the process summary counts actual invocations rather than rendered batch rows");
 assert.doesNotMatch(source, /<time|toLocaleTimeString/, "expanded invocation rows must not repeat timestamps");
 
 const timeline = [

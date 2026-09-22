@@ -208,7 +208,10 @@ export function ConversationCard({
 
   if (item.type === "streaming") {
     const runtimeModelLabel = formatRuntimeModelLine(item.providerLabel, item.model);
-    const timelineRows = buildDurableTimelineRows(item.timeline);
+    // The streaming text is the complete live answer. Keep it visible while
+    // the durable process group supplies the execution history, but do not
+    // render the same assistant event a second time when the turn closes.
+    const timelineRows = buildDurableTimelineRows(item.timeline, undefined, "", [], { includeAssistant: false });
     return (
       <div className="group flex justify-start" data-conversation-streaming-turn={item.clientTurnId}>
         <div className="relative w-full max-w-[85%] space-y-1.5 px-1 text-sm">
