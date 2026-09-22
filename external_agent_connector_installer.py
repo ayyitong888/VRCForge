@@ -165,6 +165,9 @@ def install_connector(
     else:  # pragma: no cover - Literal request validation should stop this.
         raise ConnectorInstallError(f"Unsupported connector client: {client}", stage="validate_client")
 
+    configured_bridge = result.pop("configuredBridge", None)
+    if configured_bridge:
+        bridge = StdioBridgeSpec(**configured_bridge)
     result.update(
         {
             "ok": True,
@@ -1009,6 +1012,16 @@ def _update_codex_toml_server(path: Path, server_name: str, server_text: str | N
                     stage="binding_conflict",
                     suggestion="Remove the MCP entry from its original VRCForge installation, then install it here and reload the external client.",
                 )
+            if existing is not None and server_text is not None:
+                return {
+                    "changed": False, "installed": True, "removed": False, "backupPath": "",
+                    "configuredBridge": {
+                        "command": existing["command"], "args": list(existing.get("args", [])),
+                        "cwd": existing.get("cwd", ""),
+                        "packaged": "--agent-mcp-stdio" in existing.get("args", []),
+                        "source": "shared-client-config",
+                    },
+                }
         without_server = _remove_codex_server_block(original, server_name)
         if server_text is None:
             changed = without_server != original
@@ -1503,8 +1516,33 @@ def _json_server_installed(path: Path, server_name: str) -> bool:
 def _codex_binding_matches(entry: Any, expected: Any) -> bool:
     if not isinstance(entry, dict) or not isinstance(expected, dict):
         return False
-    return all(entry.get(key, default) == expected.get(key, default)
-               for key, default in (("command", ""), ("args", []), ("cwd", ""), ("env", {}), ("url", "")))
+    if all(entry.get(key, default) == expected.get(key, default)
+           for key, default in (("command", ""), ("args", []), ("cwd", ""), ("env", {}), ("url", ""))):
+        return True
+    # Versions may use different executables while sharing one authenticated
+    # Gateway. Preserve the already installed launch entry and test that entry.
+    shared = _codex_gateway_identity(entry)
+    return shared is not None and shared == _codex_gateway_identity(expected)
+
+
+def _codex_gateway_identity(entry: dict[str, Any]) -> str | None:
+    args = entry.get("args")
+    if entry.get("env") or entry.get("url") or not isinstance(args, list) or len(args) != 4:
+        return None
+    if not all(isinstance(arg, str) for arg in args) or args[1:3] != ["--no-start", "--config"]:
+        return None
+    command = Path(str(entry.get("command") or ""))
+    config = Path(args[3])
+    if not command.is_absolute() or not command.is_file() or not config.is_absolute():
+        return None
+    if args[0] == "--agent-mcp-stdio":
+        if command.name.lower() not in {"vrcforge_backend.exe", "vrcforge_backend"}:
+            return None
+    else:
+        script = Path(args[0])
+        if not script.is_absolute() or script.name != "vrcforge_agent_mcp_stdio.py" or not script.is_file():
+            return None
+    return os.path.normcase(str(config.resolve()))
 
 
 def _codex_server_installed(path: Path) -> bool:

@@ -43,3 +43,36 @@ def test_owner_can_remove_then_other_profile_can_install(tmp_path,monkeypatch):
         status=c._codex_status('codexApp',c.resolve_stdio_bridge(root,gateway_config_path=b).as_dict())
     assert status['bindingMatchesCurrent'] is True
     assert status['bindingConflict'] is False
+
+def test_versions_sharing_gateway_reuse_existing_entry(tmp_path,monkeypatch):
+    root,a,b,path=setup(tmp_path,monkeypatch)
+    other=tmp_path/'another-version'; (other/'tools').mkdir(parents=True)
+    (other/'tools/vrcforge_agent_mcp_stdio.py').write_text('# fixture')
+    before=path.read_bytes()
+    with patch.object(c,'_probe_windows_app',return_value={}):
+        status=c._codex_status('codexApp',c.resolve_stdio_bridge(other,gateway_config_path=a).as_dict())
+    assert status['bindingMatchesCurrent'] is True
+    assert status['bindingConflict'] is False
+    with patch.object(c,'run_stdio_mcp_handshake',return_value={'ok':True}) as handshake:
+        result=c.install_connector('codexApp',root_dir=other,gateway_config_path=a)
+    assert result['changed'] is False
+    assert path.read_bytes()==before
+    assert handshake.call_args.args[0].cwd==str(root.resolve())
+    c.uninstall_connector('codexApp',root_dir=other,gateway_config_path=a)
+    assert not c._codex_server_installed(path)
+
+def test_packaged_and_source_versions_share_gateway(tmp_path,monkeypatch):
+    root,a,b,path=setup(tmp_path,monkeypatch)
+    packaged=tmp_path/'installed-app'; (packaged/'backend').mkdir(parents=True)
+    (packaged/'backend/vrcforge_backend.exe').write_bytes(b'fixture')
+    with patch.object(c,'_probe_windows_app',return_value={}):
+        status=c._codex_status('codexApp',c.resolve_stdio_bridge(packaged,gateway_config_path=a).as_dict())
+    assert status['bindingMatchesCurrent'] is True
+    assert status['bindingConflict'] is False
+
+
+def test_shared_gateway_does_not_trust_unknown_launch_arguments(tmp_path,monkeypatch):
+    root,a,b,path=setup(tmp_path,monkeypatch)
+    expected=c.resolve_stdio_bridge(root,gateway_config_path=a).as_dict()
+    unknown=dict(expected);unknown['args']=[*expected['args'],'--unknown-option']
+    assert not c._codex_binding_matches(unknown,expected)
