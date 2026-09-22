@@ -2388,14 +2388,11 @@ class RuntimePlannerService:
             if isinstance(params.get("_internalToolSelections"), Mapping):
                 observe = {**observe, "internalToolSelections": deepcopy(params["_internalToolSelections"])}
             compact_port = self._compactor
-            if not context_limit or context_limit <= 0 or not history:
-                return history, None, False
-            if not bool(context_usage.get("exact")):
+            if not context_limit or context_limit <= 0:
                 return history, None, False
             last_input_tokens = usage_int(context_usage.get("lastInputTokens"))
             previous_prompt_tokens = usage_int(context_usage.get("lastPromptEstimatedTokens"))
-            if last_input_tokens is None or previous_prompt_tokens is None:
-                return history, None, False
+            usage_exact = bool(context_usage.get("exact"))
 
             project_instructions = load_project_instructions(
                 params.get("projectRoot") or params.get("projectPath")
@@ -2414,7 +2411,11 @@ class RuntimePlannerService:
                 project_instructions=project_instructions,
             )
             next_prompt_tokens = estimate_runtime_context_tokens(next_prompt)
-            provider_overhead = max(0, last_input_tokens - previous_prompt_tokens)
+            provider_overhead = (
+                max(0, last_input_tokens - previous_prompt_tokens)
+                if usage_exact and last_input_tokens is not None and previous_prompt_tokens is not None
+                else 0
+            )
             projected_tokens = provider_overhead + next_prompt_tokens
             trigger_tokens = max(1, int(context_limit * RUNTIME_CONTEXT_COMPACTION_TRIGGER_RATIO + 0.999999))
             hard_limit_tokens = max(1, int(context_limit * RUNTIME_CONTEXT_COMPACTION_HARD_RATIO + 0.999999))
@@ -2432,6 +2433,11 @@ class RuntimePlannerService:
                 "triggerTokens": trigger_tokens,
                 "hardLimitTokens": hard_limit_tokens,
                 "targetAfterTokens": target_tokens,
+                "usageExact": usage_exact and last_input_tokens is not None and previous_prompt_tokens is not None,
+                "providerOverheadTokens": provider_overhead,
+                "measurement": "provider_usage_plus_prompt_estimate"
+                if usage_exact and last_input_tokens is not None and previous_prompt_tokens is not None
+                else "prompt_estimate_only",
             }
             if compact_port is None or not attempt_compaction:
                 metadata["failureClass"] = (

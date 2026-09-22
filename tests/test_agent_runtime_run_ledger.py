@@ -593,6 +593,29 @@ def test_run_builder_and_terminal_status_contract_are_preserved(tmp_path: Path) 
     assert record["contextCompaction"] == {"applied": True}
     assert record["continuationEvent"]["turnId"] == "turn"
 
+
+def test_foreground_completion_replay_is_idempotent_by_session_and_client_turn(tmp_path: Path) -> None:
+    ledger, _lock = make_ledger(tmp_path)
+    completion = {
+        "schema": "vrcforge.runtime_turn_event.v1",
+        "continuationSource": "foreground_completed",
+        "sessionId": "session-replay",
+        "turnId": "turn-replay",
+        "clientTurnId": "client-replay",
+        "plan": {"reply": "complete answer", "summary": "done"},
+    }
+    for _ in range(2):
+        ledger.append({
+            "event": "runtime_turn_completed",
+            "status": "completed",
+            "sessionId": "session-replay",
+            "turnId": "turn-replay",
+            "clientTurnId": "client-replay",
+            "continuationEvent": completion,
+        })
+    replay = ledger.list_runtime_continuations(limit=10)
+    assert replay == [completion]
+
     assert ledger.turn_run_status(
         top_plan={"nextStep": "context_compaction_required"},
         shell_payload=None,

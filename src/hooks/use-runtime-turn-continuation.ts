@@ -3,7 +3,7 @@ import type { AgentRuntimeResponse } from "../lib/api";
 import type { ChatThread, ConversationItem } from "../lib/chat-types";
 
 const RUNTIME_TURN_EVENT_SCHEMA = "vrcforge.runtime_turn_event.v1";
-const RUNTIME_CONTINUATION_SOURCES = new Set(["shell_process_finished", "sub_agent_finished", "question_answered"]);
+const RUNTIME_CONTINUATION_SOURCES = new Set(["approval_finished", "shell_process_finished", "sub_agent_finished", "question_answered", "foreground_completed"]);
 const MAX_PENDING_CONTINUATIONS = 32;
 const MAX_DELIVERED_CONTINUATIONS = 512;
 
@@ -20,12 +20,35 @@ type RuntimeTurnEvent = {
     nextStep?: string;
     taskCompletion?: Record<string, unknown>;
   };
+  timeline?: AgentRuntimeResponse["timeline"];
 };
 
 type UseRuntimeTurnContinuationParams = {
   chats: ChatThread[];
   appendToChat: (chatId: string, item: ConversationItem) => void;
+  updateChat?: (chatId: string, updater: (chat: ChatThread) => ChatThread) => boolean;
 };
+
+export function runtimeContinuationDeliveryState(
+  event: RuntimeTurnEvent,
+  items: ConversationItem[],
+): "append" | "defer" | "stored" | "replace-failed" {
+  const clientTurnId = event.clientTurnId?.trim();
+  const matches = (item: ConversationItem) => item.type === "agent"
+    && ((clientTurnId && item.response.clientTurnId === clientTurnId)
+      || (item.response.turnId || item.response.turn_id) === event.turnId);
+  if (event.continuationSource === "foreground_completed"
+    && items.some((item) => item.type === "streaming" && clientTurnId && item.clientTurnId === clientTurnId)) {
+    return "defer";
+  }
+  const stored = items.find(matches);
+  if (!stored || stored.type !== "agent") return "append";
+  if (event.continuationSource === "foreground_completed"
+    && ["cancelled", "failed", "error"].includes(String(stored.response.status || "").toLowerCase())) {
+    return "replace-failed";
+  }
+  return "stored";
+}
 
 function runtimeTurnEvent(value: unknown): RuntimeTurnEvent | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -62,20 +85,24 @@ function responseFromRuntimeTurnEvent(event: RuntimeTurnEvent): AgentRuntimeResp
       nextStep: event.plan?.nextStep || "done",
       taskCompletion: event.plan?.taskCompletion,
     },
+    timeline: event.timeline,
   };
 }
 
 export function useRuntimeTurnContinuationDelivery({
   chats,
   appendToChat,
+  updateChat,
 }: UseRuntimeTurnContinuationParams) {
   const chatsRef = useRef(chats);
   const appendToChatRef = useRef(appendToChat);
+  const updateChatRef = useRef(updateChat);
   const pendingRef = useRef(new Map<string, RuntimeTurnEvent>());
   const deliveredRef = useRef(new Set<string>());
   const deliveredOrderRef = useRef<string[]>([]);
   chatsRef.current = chats;
   appendToChatRef.current = appendToChat;
+  updateChatRef.current = updateChat;
 
   const deliver = useCallback((value: unknown): boolean => {
     const event = runtimeTurnEvent(value);
@@ -102,14 +129,11 @@ export function useRuntimeTurnContinuationDelivery({
       }
       return false;
     }
-    const alreadyStored = ownerChat.items.some(
-      (item) => item.type === "agent"
-        && (
-          (event.clientTurnId?.trim()
-            && item.response.clientTurnId === event.clientTurnId.trim())
-          || (item.response.turnId || item.response.turn_id) === event.turnId
-        ),
-    );
+    const deliveryState = runtimeContinuationDeliveryState(event, ownerChat.items);
+    if (deliveryState === "defer") {
+      pendingRef.current.set(key, event);
+      return false;
+    }
     deliveredRef.current.add(key);
     deliveredOrderRef.current.push(key);
     while (deliveredOrderRef.current.length > MAX_DELIVERED_CONTINUATIONS) {
@@ -119,7 +143,18 @@ export function useRuntimeTurnContinuationDelivery({
       }
     }
     pendingRef.current.delete(key);
-    if (!alreadyStored) {
+    if (deliveryState === "replace-failed") {
+      const replaced = updateChatRef.current?.(ownerChat.id, (chat) => ({
+        ...chat,
+        items: chat.items.map((item) => item.type === "agent"
+          && ((event.clientTurnId?.trim() && item.response.clientTurnId === event.clientTurnId.trim())
+            || (item.response.turnId || item.response.turn_id) === event.turnId)
+          ? { ...item, response: responseFromRuntimeTurnEvent(event), elapsedSeconds: 0 }
+          : item),
+      }));
+      if (replaced) return true;
+    }
+    if (deliveryState === "append" || deliveryState === "replace-failed") {
       appendToChatRef.current(ownerChat.id, {
         id: `task-continuation-${continuationId}`,
         type: "agent",

@@ -349,6 +349,9 @@ export function materializeRuntimeTimeline(response: AgentRuntimeResponse, fallb
       sequence: Number.isFinite(raw.sequence) ? Number(raw.sequence) : index,
       timestamp: typeof raw.timestamp === "string" && raw.timestamp ? raw.timestamp : fallbackTimestamp,
       kind,
+      ...(typeof raw.sessionId === "string" && raw.sessionId ? { sessionId: raw.sessionId.slice(0, 180) } : {}),
+      ...(typeof raw.turnId === "string" && raw.turnId ? { turnId: raw.turnId.slice(0, 180) } : {}),
+      ...(typeof raw.clientTurnId === "string" && raw.clientTurnId ? { clientTurnId: raw.clientTurnId.slice(0, 240) } : {}),
       payload: {
         ...(typeof payload.label === "string" ? { label: payload.label.slice(0, 160) } : {}),
         ...(summary !== undefined ? { summary } : {}),
@@ -372,6 +375,24 @@ function eventTime(item: Extract<ConversationItem, { type: "timeline_event" }>):
   return timestampValue(item.event.timestamp || item.createdAt || "");
 }
 
+function timelineEventHasOwner(event: ChatTimelineEvent): boolean {
+  return Boolean(event.sessionId || event.turnId || event.clientTurnId);
+}
+
+function timelineEventBelongsToAgent(
+  event: ChatTimelineEvent,
+  item: Extract<ConversationItem, { type: "agent" | "streaming" }>,
+): boolean {
+  if (!timelineEventHasOwner(event)) return true;
+  const response = item.type === "agent" ? item.response : undefined;
+  const sessionId = response?.sessionId || response?.session_id || "";
+  const turnId = response?.turnId || response?.turn_id || "";
+  const clientTurnId = (item.type === "streaming" ? item.clientTurnId : "") || response?.clientTurnId || "";
+  return (!event.sessionId || event.sessionId === sessionId)
+    && (!event.turnId || event.turnId === turnId)
+    && (!event.clientTurnId || event.clientTurnId === clientTurnId);
+}
+
 /** Keep Runtime and registry facts inside their owning turn card. */
 export function mergeConversationTimelineItems(items: ConversationItem[]): ConversationItem[] {
   const lifecycleItems = items
@@ -387,6 +408,7 @@ export function mergeConversationTimelineItems(items: ConversationItem[]): Conve
     const candidates: Array<{ index: number; width: number }> = [];
     for (const [index, item] of items.entries()) {
       if (item.type !== "agent") continue;
+      if (!timelineEventBelongsToAgent(lifecycle.event, item)) continue;
       const timeline = mergeRuntimeTimelines(materializeRuntimeTimeline(item.response), item.timeline || []);
       const times = timeline.map((event) => timestampValue(event.timestamp)).filter(Number.isFinite);
       if (!times.length) continue;
@@ -409,6 +431,7 @@ export function mergeConversationTimelineItems(items: ConversationItem[]): Conve
       const candidate = items[index];
       if (candidate?.type === "agent") break;
       if (candidate?.type !== "streaming") continue;
+      if (!timelineEventBelongsToAgent(lifecycle.event, candidate)) break;
       const timeline = candidate.timeline || [];
       const start = timeline.length
         ? Math.min(...timeline.map((event) => timestampValue(event.timestamp)))

@@ -173,3 +173,37 @@ def test_identity_over_prose_string_limit_is_kept_whole_when_budget_allows():
     evidence = project({"rows": [{"name": name}]})
     assert evidence["data"]["rows"][0]["name"] == name
     assert evidence["truncated"] is False
+
+
+def test_nested_preview_declares_exact_collection_counts_and_pointer():
+    evidence = project({"controls": [{"candidates": list(range(41))}], "ambiguous": list(range(11))})
+    fields = {item["jsonPointer"]: item for item in evidence["incompleteFields"]}
+    assert fields["/controls/0/candidates"]["totalItems"] == 41
+    assert fields["/controls/0/candidates"]["returnedItems"] == 6
+    assert fields["/ambiguous"]["omittedItems"] == 5
+    assert fields["/ambiguous"]["nextOffset"] == 6
+
+
+def test_preview_metadata_is_bounded_and_never_exposes_private_keys():
+    evidence = project({"rows": [{"safe/list~": list(range(40)), "privateDump": list(range(99))} for _ in range(30)]}, max_chars=1500)
+    encoded = json.dumps(evidence, ensure_ascii=False, separators=(",", ":"))
+    assert len(encoded) <= 1500
+    assert "privateDump" not in encoded
+    assert evidence["incompleteFields"]
+    assert "/rows/0/safe~1list~0" in [row["jsonPointer"] for row in evidence["incompleteFields"]]
+
+
+@pytest.mark.parametrize("field", ["bearerToken", "userToken", "api_secret_value"])
+def test_secret_aliases_are_redacted_from_preview_and_metadata(field):
+    evidence = project({field: ["SENTINELSECRET"] * 20, "rows": list(range(30))})
+    rendered = json.dumps(evidence)
+    assert "SENTINELSECRET" not in rendered
+    assert field not in rendered
+    assert evidence["redactedFields"] == 1
+
+
+def test_source_enumeration_incomplete_is_preserved_as_a_control_fact():
+    evidence = project({"rows": [{"candidateEnumerationComplete": False, "candidateCount": 41,
+        **{f"target{i}Name": "item" * 15 for i in range(10)}, "candidates": list(range(41))}]}, max_chars=1500)
+    assert evidence["data"]["rows"][0]["candidateEnumerationComplete"] is False
+    assert evidence["sourceTruncated"] is True

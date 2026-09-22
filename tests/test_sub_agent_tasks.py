@@ -876,6 +876,29 @@ def test_completed_task_and_result_rehydrate_with_immutable_owner(tmp_path):
     assert "does not match" in wrong_chat["error"]
 
 
+def test_task_snapshot_projects_parent_turn_owner_from_seed(tmp_path):
+    registry = SubAgentTaskRegistry(
+        tmp_path,
+        roles=[SubAgentRole("project_index_review", "Project", "Read local project index.")],
+        handlers={"project_index_review": lambda _payload, _cancel_event: {"ok": True, "summaryText": "done"}},
+    )
+    created = registry.create_task(
+        role="project_index_review",
+        task="scan",
+        display_name="Owner probe",
+        parent_chat_id="chat-owner",
+        parent_session_id="session-owner",
+        params={"_taskSeed": {"turnId": "turn-owner", "clientTurnId": "client-owner"}},
+    )
+    task = created["task"]
+    assert task["parentTurnId"] == "turn-owner"
+    assert task["parentClientTurnId"] == "client-owner"
+    payload = registry._task_payload(registry._tasks[task["id"]])
+    assert payload["parentTurnId"] == "turn-owner"
+    assert payload["parentClientTurnId"] == "client-owner"
+    registry.shutdown()
+
+
 def test_retry_is_new_attempt_and_merge_revision_is_idempotent(tmp_path):
     registry = SubAgentTaskRegistry(
         tmp_path,

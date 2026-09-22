@@ -748,6 +748,10 @@ class SubAgentTaskRegistry:
         payload.setdefault("projectPath", task.project_path)
         payload.setdefault("parentChatId", task.parent_chat_id)
         payload.setdefault("parentSessionId", task.parent_session_id)
+        seed = task.params.get("_taskSeed")
+        if isinstance(seed, dict):
+            payload.setdefault("parentTurnId", str(seed.get("turnId") or "")[:180])
+            payload.setdefault("parentClientTurnId", str(seed.get("clientTurnId") or "")[:240])
         payload.setdefault("displayName", task.display_name)
         payload.setdefault("retryOf", task.retry_of)
         return payload
@@ -772,6 +776,9 @@ class SubAgentTaskRegistry:
         return payload
 
     def _task_snapshot(self, task: SubAgentTask) -> dict[str, Any]:
+        seed = task.params.get("_taskSeed")
+        parent_turn_id = str(seed.get("turnId") or "")[:180] if isinstance(seed, dict) else ""
+        parent_client_turn_id = str(seed.get("clientTurnId") or "")[:240] if isinstance(seed, dict) else ""
         return {
             "id": task.id,
             "role": task.role,
@@ -779,6 +786,8 @@ class SubAgentTaskRegistry:
             "task": task.task,
             "parentChatId": task.parent_chat_id,
             "parentSessionId": task.parent_session_id,
+            "parentTurnId": parent_turn_id,
+            "parentClientTurnId": parent_client_turn_id,
             "projectPath": task.project_path,
             "toolProfile": task.tool_profile,
             "status": task.status,

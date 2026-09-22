@@ -6,6 +6,7 @@ import os
 import shutil
 import threading
 import asyncio
+import time
 import httpx
 from pathlib import Path
 from types import SimpleNamespace
@@ -29,10 +30,164 @@ from vrchat_blendshape_agent import UnityMcpError
 from external_mcp_tool_blocks import EXTERNAL_MCP_TOOL_BLOCK_BRANCHES
 from external_mcp_result_projection import project_result
 from execution_target import canonical_namespace, process_start_time, project_identity
+from sub_agent_tasks import SubAgentRole, SubAgentTaskRegistry
 
 
 def _gateway(tmp_path: Path) -> AgentGateway:
     return AgentGateway(tmp_path / "config" / "agent_gateway.json", tmp_path / "audit")
+
+
+def test_runtime_cancel_requests_only_matching_active_subagents(tmp_path: Path) -> None:
+    gateway = _gateway(tmp_path)
+    tasks = [
+        {
+            "id": "same-owner",
+            "status": "running",
+            "sessionId": "session-a",
+            "parentTurnId": "turn-a",
+            "parentClientTurnId": "client-a",
+        },
+        {
+            "id": "other-turn",
+            "status": "running",
+            "sessionId": "session-a",
+            "parentTurnId": "turn-b",
+            "parentClientTurnId": "client-b",
+        },
+        {
+            "id": "other-session",
+            "status": "running",
+            "sessionId": "session-b",
+            "parentTurnId": "turn-a",
+            "parentClientTurnId": "client-a",
+        },
+    ]
+    cancelled: list[str] = []
+    gateway.bind_runtime_subagent_control(
+        list_tasks=lambda: {"items": tasks},
+        cancel_task=lambda task_id: cancelled.append(task_id) or {"ok": True},
+    )
+
+    result = gateway.request_runtime_cancel(
+        {"sessionId": "session-a", "turnId": "turn-a", "clientTurnId": "client-a"}
+    )
+
+    assert cancelled == ["same-owner"]
+    assert result["cancelledSubAgentTaskIds"] == ["same-owner"]
+
+
+def test_runtime_cancel_stops_only_matching_registry_worker(tmp_path: Path) -> None:
+    entered: dict[str, threading.Event] = {}
+    released = threading.Event()
+
+    def handler(payload: dict[str, object], cancel_event: threading.Event) -> dict[str, object]:
+        entered[str(payload.get("taskId"))] = threading.Event()
+        entered[str(payload.get("taskId"))].set()
+        while not cancel_event.is_set():
+            time.sleep(0.01)
+        released.set()
+        return {"ok": True, "summaryText": "cooperatively cancelled"}
+
+    registry = SubAgentTaskRegistry(
+        tmp_path / "registry",
+        roles=[SubAgentRole("validation_triage", "Validation", "Read-only validation.")],
+        handlers={"validation_triage": handler},
+    )
+    gateway = _gateway(tmp_path / "gateway")
+    gateway.bind_runtime_subagent_control(
+        list_tasks=lambda: registry.list_tasks(),
+        cancel_task=registry.cancel_task,
+    )
+    same = registry.create_task(
+        role="validation_triage",
+        task="same",
+        display_name="Worker",
+        parent_session_id="session-a",
+        params={"_taskSeed": {"sessionId": "session-a", "turnId": "turn-a", "clientTurnId": "client-a"}},
+    )["task"]["id"]
+    other = registry.create_task(
+        role="validation_triage",
+        task="other",
+        display_name="Worker",
+        parent_session_id="session-a",
+        params={"_taskSeed": {"sessionId": "session-a", "turnId": "turn-b", "clientTurnId": "client-b"}},
+    )["task"]["id"]
+    deadline = time.time() + 1
+    while len(entered) < 2 and time.time() < deadline:
+        time.sleep(0.01)
+
+    result = gateway.request_runtime_cancel(
+        {"sessionId": "session-a", "turnId": "turn-a", "clientTurnId": "client-a"}
+    )
+
+    assert result["cancelledSubAgentTaskIds"] == [same]
+    assert released.wait(1)
+    assert registry.get_task(other)["task"]["status"] == "running"
+    registry.cancel_task(other)
+
+
+def test_runtime_cancel_by_session_targets_only_that_session(tmp_path: Path) -> None:
+    gateway = _gateway(tmp_path)
+    tasks = [
+        {"id": "session-a-1", "status": "running", "parentSessionId": "session-a", "parentTurnId": "turn-a"},
+        {"id": "session-a-2", "status": "queued", "parentSessionId": "session-a", "parentTurnId": "turn-b"},
+        {"id": "session-b", "status": "running", "parentSessionId": "session-b", "parentTurnId": "turn-a"},
+    ]
+    cancelled: list[str] = []
+    gateway.bind_runtime_subagent_control(
+        list_tasks=lambda: {"tasks": tasks},
+        cancel_task=lambda task_id: cancelled.append(task_id) or {"ok": True},
+    )
+
+    result = gateway.request_runtime_cancel({"sessionId": "session-a"})
+
+    assert cancelled == ["session-a-1", "session-a-2"]
+    assert result["cancelledSubAgentTaskIds"] == cancelled
+
+
+def test_runtime_cancel_reports_subagent_partial_failures_without_leaking_errors(tmp_path: Path) -> None:
+    gateway = _gateway(tmp_path)
+    tasks = [
+        {"id": "ok-task", "status": "running", "parentSessionId": "session-a"},
+        {"id": "rejected-task", "status": "running", "parentSessionId": "session-a"},
+        {"id": "raised-task", "status": "running", "parentSessionId": "session-a"},
+    ]
+
+    def cancel(task_id: str) -> dict[str, object]:
+        if task_id == "rejected-task":
+            return {"ok": False, "error": "private detail"}
+        if task_id == "raised-task":
+            raise RuntimeError("private detail")
+        return {"ok": True}
+
+    gateway.bind_runtime_subagent_control(
+        list_tasks=lambda: {"tasks": tasks},
+        cancel_task=cancel,
+    )
+
+    result = gateway.request_runtime_cancel({"sessionId": "session-a"})
+
+    assert result["cancelledSubAgentTaskIds"] == ["ok-task"]
+    assert result["failedSubAgentTaskIds"] == ["rejected-task", "raised-task"]
+    assert result["subAgentLookupFailed"] is False
+    assert result["subAgentCancelPartialFailure"] is True
+    assert "private detail" not in str(result)
+
+
+def test_runtime_cancel_reports_subagent_lookup_failure(tmp_path: Path) -> None:
+    gateway = _gateway(tmp_path)
+    gateway.bind_runtime_subagent_control(
+        list_tasks=lambda: (_ for _ in ()).throw(RuntimeError("private detail")),
+        cancel_task=lambda _task_id: {"ok": True},
+    )
+
+    result = gateway.request_runtime_cancel({"sessionId": "session-a"})
+
+    assert result["cancelledSubAgentTaskIds"] == []
+    assert result["failedSubAgentTaskIds"] == []
+    assert result["subAgentLookupFailed"] is True
+    assert result["subAgentCancelPartialFailure"] is True
+    assert "private detail" not in str(result)
 
 
 def _external_mcp_call(

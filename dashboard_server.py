@@ -1914,6 +1914,10 @@ SUB_AGENT_COLLABORATION = SubAgentCollaborationService(
         task_finished=_sub_agent_task_finished,
     )
 )
+AGENT_GATEWAY.bind_runtime_subagent_control(
+    list_tasks=SUB_AGENT_COLLABORATION.list_tasks,
+    cancel_task=SUB_AGENT_COLLABORATION.cancel_task,
+)
 AGENT_MCP_MOUNT = AgentMcpMount()
 AGENT_MCP_APP = None
 AGENT_MCP_CONTEXT = None

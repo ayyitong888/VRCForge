@@ -633,6 +633,9 @@ export type AgentRuntimeResponse = {
     sequence?: number;
     timestamp?: string;
     kind?: string;
+    sessionId?: string;
+    turnId?: string;
+    clientTurnId?: string;
     payload?: {
       label?: string;
       summary?: string;

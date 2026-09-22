@@ -908,6 +908,7 @@ export default function App() {
   const deliverRuntimeTurnContinuation = useRuntimeTurnContinuationDelivery({
     chats,
     appendToChat,
+    updateChat,
   });
   useEffect(() => {
     for (const continuation of bootstrap?.runtimeContinuations ?? []) {
@@ -3224,6 +3225,9 @@ export default function App() {
             sequence: revision,
             timestamp,
             kind: "subagent",
+            sessionId: String(task.parentSessionId || "").slice(0, 180) || undefined,
+            turnId: String(task.parentTurnId || "").slice(0, 180) || undefined,
+            clientTurnId: String(task.parentClientTurnId || "").slice(0, 240) || undefined,
             payload: {
               label: task.displayName || t("agent.subagentTask"),
               summary: summary.slice(0, 1000),

@@ -16,6 +16,8 @@ export type SubAgentTask = {
   task: string;
   parentChatId?: string;
   parentSessionId?: string;
+  parentTurnId?: string;
+  parentClientTurnId?: string;
   projectPath?: string;
   toolProfile?: string;
   status: "queued" | "running" | "cancelling" | "completed" | "failed" | "cancelled" | "interrupted" | string;

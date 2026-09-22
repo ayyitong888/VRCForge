@@ -2049,6 +2049,8 @@ class AgentGateway:
         runtime_turn_completed: Callable[[dict[str, Any]], None] | None = None,
         runtime_status_changed: Callable[[dict[str, Any]], None] | None = None,
         runtime_timeline_changed: Callable[[dict[str, Any]], None] | None = None,
+        runtime_subagent_list_tasks: Callable[[], Any] | None = None,
+        runtime_subagent_cancel_task: Callable[[str], Any] | None = None,
         load_mcp_resources: bool = True,
     ) -> None:
         self.config_path = config_path
@@ -2098,6 +2100,8 @@ class AgentGateway:
         self._runtime_continuations_inflight: set[str] = set()
         self._runtime_continuation_condition = threading.Condition(self._lock)
         self._question_continuations_inflight: set[str] = set()
+        self._runtime_subagent_list_tasks = runtime_subagent_list_tasks
+        self._runtime_subagent_cancel_task = runtime_subagent_cancel_task
         self._tool_agent_context: contextvars.ContextVar[str] = contextvars.ContextVar(
             "vrcforge_tool_agent",
             default="",
@@ -2914,6 +2918,76 @@ class AgentGateway:
     @property
     def runtime_sessions(self) -> AgentRuntimeSessionState:
         return self._runtime_session_state
+
+    def bind_runtime_subagent_control(
+        self,
+        *,
+        list_tasks: Callable[[], Any],
+        cancel_task: Callable[[str], Any],
+    ) -> None:
+        """Bind the app-owned cooperative sub-agent cancellation port."""
+
+        if not callable(list_tasks) or not callable(cancel_task):
+            raise TypeError("sub-agent control callbacks must be callable")
+        self._runtime_subagent_list_tasks = list_tasks
+        self._runtime_subagent_cancel_task = cancel_task
+
+    def _cancel_runtime_subagents(
+        self,
+        *,
+        session_id: str,
+        turn_id: str,
+        client_turn_id: str,
+    ) -> dict[str, Any]:
+        list_tasks = self._runtime_subagent_list_tasks
+        cancel_task = self._runtime_subagent_cancel_task
+        result: dict[str, Any] = {
+            "requestedTaskIds": [],
+            "failedTaskIds": [],
+            "lookupFailed": False,
+        }
+        if not callable(list_tasks) or not callable(cancel_task):
+            return result
+        try:
+            listing = list_tasks()
+        except Exception:
+            result["lookupFailed"] = True
+            return result
+        items = (
+            (listing.get("items") or listing.get("tasks"))
+            if isinstance(listing, dict)
+            else listing
+        )
+        if not isinstance(items, list):
+            result["lookupFailed"] = True
+            return result
+        for task in items:
+            if not isinstance(task, dict):
+                continue
+            if str(task.get("status") or "").strip().casefold() not in {"queued", "running"}:
+                continue
+            task_session = str(task.get("sessionId") or task.get("parentSessionId") or "").strip()
+            task_turn = str(task.get("parentTurnId") or "").strip()
+            task_client = str(task.get("parentClientTurnId") or "").strip()
+            if session_id and task_session != session_id:
+                continue
+            if turn_id and task_turn != turn_id:
+                continue
+            if client_turn_id and task_client != client_turn_id:
+                continue
+            task_id = str(task.get("id") or task.get("taskId") or "").strip()
+            if not task_id or (not task_session and not task_turn and not task_client):
+                continue
+            try:
+                cancel_result = cancel_task(task_id)
+            except Exception:
+                result["failedTaskIds"].append(task_id)
+                continue
+            if isinstance(cancel_result, dict) and cancel_result.get("ok") is False:
+                result["failedTaskIds"].append(task_id)
+                continue
+            result["requestedTaskIds"].append(task_id)
+        return result
 
     @property
     def runtime_runs(self) -> AgentRuntimeRunLedger:
@@ -7929,25 +8003,34 @@ class AgentGateway:
         continuation_source = str(
             ensure_dict(task_continuation).get("source") or ""
         ).strip()
+        run_status = self._runtime_run_ledger.turn_run_status(
+            top_plan=top_plan,
+            shell_payload=shell_payload,
+            skill_payload=skill_payload,
+            write_payload=write_payload,
+            approval_id=approval_id,
+        )
+        # Waiting turns keep their existing approval/question/tool path. Only
+        # a terminal foreground turn gets the crash-replay projection.
+        foreground_source = (
+            "foreground_completed"
+            if run_status in {"completed", "failed", "denied", "cancelled"}
+            else ""
+        )
         continuation_event = project_runtime_turn_event(
             {
-                "continuationSource": continuation_source,
+                "continuationSource": continuation_source or foreground_source,
                 "sessionId": session_id,
                 "turnId": turn_id,
                 "clientTurnId": client_turn_id,
                 "plan": top_plan,
+                "timeline": timeline,
             }
         )
         self._runtime_run_ledger.append(
             self._runtime_run_ledger.build_run_from_turn(
                 event="runtime_turn_completed",
-                status=self._runtime_run_ledger.turn_run_status(
-                    top_plan=top_plan,
-                    shell_payload=shell_payload,
-                    skill_payload=skill_payload,
-                    write_payload=write_payload,
-                    approval_id=approval_id,
-                ),
+                status=run_status,
                 agent_name=agent_name,
                 session_id=session_id,
                 turn_id=turn_id,
@@ -8250,6 +8333,14 @@ class AgentGateway:
         if resolved_turn_id and not resolved_client_turn_id:
             resolved_client_turn_id = str((matching_run or {}).get("clientTurnId") or "")
         resolved_session_id = session_id or str((matching_run or {}).get("sessionId") or "")
+        subagent_cancel_result = self._cancel_runtime_subagents(
+            session_id=resolved_session_id,
+            turn_id=resolved_turn_id,
+            client_turn_id=resolved_client_turn_id,
+        )
+        cancelled_subagent_task_ids = subagent_cancel_result["requestedTaskIds"]
+        failed_subagent_task_ids = subagent_cancel_result["failedTaskIds"]
+        subagent_lookup_failed = subagent_cancel_result["lookupFailed"]
         shell_owner_ids: set[str] = set()
         if resolved_turn_id:
             shell_owner_ids.add(
@@ -8292,6 +8383,14 @@ class AgentGateway:
             event["cancelledDesktopActionIds"] = cancelled_desktop_action_ids
         if cancelled_shell_session_ids:
             event["cancelledShellSessionIds"] = cancelled_shell_session_ids
+        if cancelled_subagent_task_ids:
+            event["cancelledSubAgentTaskIds"] = cancelled_subagent_task_ids
+        if failed_subagent_task_ids:
+            event["failedSubAgentTaskIds"] = failed_subagent_task_ids
+        if subagent_lookup_failed:
+            event["subAgentLookupFailed"] = True
+        if failed_subagent_task_ids or subagent_lookup_failed:
+            event["subAgentCancelPartialFailure"] = True
         self._runtime_run_ledger.append(event)
         return {
             "ok": True,
@@ -8299,6 +8398,10 @@ class AgentGateway:
             "event": event,
             "cancelledDesktopActionIds": cancelled_desktop_action_ids,
             "cancelledShellSessionIds": cancelled_shell_session_ids,
+            "cancelledSubAgentTaskIds": cancelled_subagent_task_ids,
+            "failedSubAgentTaskIds": failed_subagent_task_ids,
+            "subAgentLookupFailed": subagent_lookup_failed,
+            "subAgentCancelPartialFailure": bool(failed_subagent_task_ids or subagent_lookup_failed),
         }
 
     @staticmethod

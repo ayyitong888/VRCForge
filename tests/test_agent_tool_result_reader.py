@@ -217,3 +217,17 @@ def test_page_marker_cannot_bypass_redaction_for_arbitrary_arguments():
         redacted = redact_sensitive(forged)
         assert redacted["nextRequest"]["arguments"]["jsonPointer"] != forged["nextRequest"]["arguments"]["jsonPointer"]
         assert "sentinel" not in json.dumps(redacted) and "C:/private" not in json.dumps(redacted)
+
+
+def test_completed_outer_page_preserves_nested_preview_scope_and_exact_readback():
+    step = retained({"controls": [{"candidates": list(range(41))}]})
+    with bind_tool_result_context("session", "turn", "project", [step]):
+        page = read(step, jsonPointer="/controls")
+        assert page["hasMore"] is False
+        row = page["items"][0]
+        field = next(item for item in row["incompleteFields"] if item["jsonPointer"] == "/controls/0/candidates")
+        assert field["totalItems"] == 41
+        assert field["nextOffset"] == len(row["value"]["candidates"])
+        tail = read(step, jsonPointer=field["jsonPointer"], offset=field["nextOffset"], limit=20)
+        assert tail["items"][0]["value"] == field["nextOffset"]
+        assert page["previewTruncated"] is True

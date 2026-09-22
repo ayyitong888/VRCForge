@@ -98,3 +98,26 @@ def test_runtime_turn_projection_can_carry_only_the_safe_harness_receipt() -> No
     assert projected is not None
     assert projected["harnessJourneyReceipt"] == receipt
     assert "result" not in projected
+
+
+def test_foreground_completion_projection_preserves_full_reply_and_safe_timeline() -> None:
+    reply = "最终答复 " + ("x" * 12000)
+    projected = project_runtime_turn_event(
+        {
+            "continuationSource": "foreground_completed",
+            "sessionId": "session-1",
+            "turnId": "turn-1",
+            "clientTurnId": "client-1",
+            "plan": {"summary": "done", "reply": reply, "planner": "runtime", "nextStep": "done"},
+            "timeline": [
+                {"id": "plan", "sequence": 0, "timestamp": "2026-09-22T00:00:00Z", "kind": "planner", "payload": {"summary": "private planner summary"}},
+                {"id": "final", "sequence": 1, "timestamp": "2026-09-22T00:00:01Z", "kind": "assistant", "payload": {"summary": reply}},
+            ],
+            "observe": {"secret": "drop"},
+        }
+    )
+    assert projected is not None
+    assert projected["plan"]["reply"] == reply
+    assert projected["timeline"][0]["payload"]["summary"] == "private planner summary"
+    assert projected["timeline"][1]["payload"]["summary"] == reply
+    assert "observe" not in projected

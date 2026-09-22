@@ -16,6 +16,7 @@ from typing import Any
 _SECRET_KEYS = frozenset({
     "apikey", "key", "token", "accesstoken", "refreshtoken", "authtoken", "apptoken",
     "authorization", "password", "passwd", "secret", "clientsecret", "privatekey",
+    "bearertoken", "usertoken", "apisecretvalue",
     "cookie", "cookies", "headers", "approvaltoken", "artifacttoken", "artifactsig",
     "artifactsignature", "sessiontoken", "controltoken", "executiontargethandle",
 })
@@ -86,7 +87,7 @@ def project_structured_tool_evidence(
     def priority(item: tuple[object, object]) -> tuple[int, str]:
         name, value = item
         normalized = _key(name)
-        if normalized in _CONTROL_KEYS or "ambiguous" in normalized:
+        if normalized in _CONTROL_KEYS or "ambiguous" in normalized or normalized.endswith("enumerationcomplete"):
             return (0, str(name))
         if _identity_key(name):
             return (1, str(name))
@@ -142,7 +143,8 @@ def project_structured_tool_evidence(
             if _private_or_opaque(name, item):
                 stats["redactedFields"] += 1
                 continue
-            if (normalized.endswith("truncated") or normalized == "hasmore") and item is True:
+            if ((normalized.endswith("truncated") or normalized == "hasmore") and item is True
+                    or normalized.endswith("enumerationcomplete") and item is False):
                 source_truncated = True
             if len(selected_dict) >= 24:
                 stats["omittedFields"] += 1
@@ -186,10 +188,53 @@ def project_structured_tool_evidence(
         **stats,
         "continuation": (
             "Use the source tool's returned paging/nextRequest or narrow selectors to inspect omitted data. "
-            "Do not assume omitted fields are absent, invent a cursor, or replay a mutation to recover output."
+            "Preview values are not exhaustive. incompleteFields pointers address retained source data; "
+            "read those fields before making exhaustive claims. Do not assume omitted fields are absent, "
+            "invent a cursor, or replay a mutation to recover output."
             if truncated or source_truncated else ""
         ),
     }
-    # The fixed metadata allowance exceeds the longest metadata envelope above.
+    # Describe incomplete collections separately so domain values retain their
+    # original shape. Pointers address the retained source, not the projection.
+    if truncated:
+        evidence["incompleteFields"] = []
+        evidence["incompleteFieldsTruncated"] = False
+
+        def describe(original: object, preview: object, pointer: str, depth: int = 0) -> None:
+            if depth >= 8 or not isinstance(original, (Mapping, list)):
+                return
+            if isinstance(original, Mapping):
+                visible = preview if isinstance(preview, Mapping) else {}
+                for name, child in original.items():
+                    if _private_or_opaque(name, child) or sanitize_text(str(name), 100) != str(name):
+                        continue
+                    part = str(name).replace("~", "~0").replace("/", "~1")
+                    if isinstance(child, (Mapping, list)) and preview is not _ABSENT:
+                        describe(child, visible.get(str(name), _ABSENT), pointer + "/" + part, depth + 1)
+                    if evidence["incompleteFieldsTruncated"]:
+                        break
+            else:
+                visible = preview if isinstance(preview, list) else []
+                # Only descend into displayed members; omitted subtrees are
+                # covered by this collection's count and can be read on demand.
+                for index, child in enumerate(visible):
+                    describe(original[index], child, pointer + "/" + str(index), depth + 1)
+                    if evidence["incompleteFieldsTruncated"]:
+                        break
+            returned = len(visible)
+            if returned < len(original):
+                entry = {"jsonPointer": pointer, "type": "array" if isinstance(original, list) else "object", "totalItems": len(original),
+                         "returnedItems": returned, "omittedItems": len(original) - returned}
+                # Lists preserve prefix order. Object keys are priority sorted,
+                # so there is no safe numeric continuation offset for objects.
+                if isinstance(original, list):
+                    entry["nextOffset"] = returned
+                candidate = [*evidence["incompleteFields"], entry]
+                if len(candidate) <= 24 and _size({**evidence, "incompleteFields": candidate}) <= max_chars:
+                    evidence["incompleteFields"] = candidate
+                else:
+                    evidence["incompleteFieldsTruncated"] = True
+
+        describe(result, evidence["data"], "")
     assert _size(evidence) <= max_chars
     return evidence

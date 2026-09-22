@@ -8,12 +8,19 @@ from typing import Any
 
 RUNTIME_TURN_EVENT_SCHEMA = "vrcforge.runtime_turn_event.v1"
 RUNTIME_CONTINUATION_SOURCES = frozenset(
-    {"approval_finished", "shell_process_finished", "sub_agent_finished", "question_answered"}
+    {"approval_finished", "shell_process_finished", "sub_agent_finished", "question_answered", "foreground_completed"}
 )
 
 
 def _text(value: Any, limit: int) -> str:
     return str(value or "").strip()[:limit]
+
+
+def _sequence(value: Any, fallback: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return fallback
 
 
 def project_runtime_turn_event(payload: Mapping[str, Any] | None) -> dict[str, Any] | None:
@@ -34,6 +41,7 @@ def project_runtime_turn_event(payload: Mapping[str, Any] | None) -> dict[str, A
     completion = completion if isinstance(completion, Mapping) else {}
     evidence = completion.get("evidenceActionIds")
     evidence = evidence if isinstance(evidence, list) else []
+    reply_limit = 32_000 if source == "foreground_completed" else 6_000
     result = {
         "schema": RUNTIME_TURN_EVENT_SCHEMA,
         "continuationSource": source,
@@ -42,7 +50,7 @@ def project_runtime_turn_event(payload: Mapping[str, Any] | None) -> dict[str, A
         "clientTurnId": _text(payload.get("clientTurnId"), 240),
         "plan": {
             "summary": _text(plan.get("summary"), 1200),
-            "reply": _text(plan.get("reply"), 6000),
+            "reply": _text(plan.get("reply"), reply_limit),
             "planner": _text(plan.get("planner"), 80),
             "nextStep": _text(plan.get("nextStep"), 80),
             "taskCompletion": {
@@ -56,6 +64,28 @@ def project_runtime_turn_event(payload: Mapping[str, Any] | None) -> dict[str, A
             },
         },
     }
+    timeline = payload.get("timeline")
+    if isinstance(timeline, list):
+        projected_timeline = []
+        for index, raw in enumerate(timeline[:256]):
+            if not isinstance(raw, Mapping):
+                continue
+            item = {
+                "id": _text(raw.get("id"), 180) or f"runtime-event-{index}",
+                "sequence": _sequence(raw.get("sequence"), index),
+                "timestamp": _text(raw.get("timestamp"), 80),
+                "kind": _text(raw.get("kind"), 40),
+            }
+            raw_payload = raw.get("payload")
+            if isinstance(raw_payload, Mapping):
+                item["payload"] = {
+                    key: _text(raw_payload.get(key), 32_000 if key == "summary" and item["kind"] == "assistant" else 1000)
+                    for key in ("label", "summary", "status", "tool", "phase", "actionId", "subagentStatus")
+                    if raw_payload.get(key) is not None
+                }
+            projected_timeline.append(item)
+        if projected_timeline:
+            result["timeline"] = projected_timeline
     projected_completion = result["plan"]["taskCompletion"]
     for key, limit in (("actionId", 80), ("kind", 32), ("tool", 160)):
         bounded = _text(completion.get(key), limit)

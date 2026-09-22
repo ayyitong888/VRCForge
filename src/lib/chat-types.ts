@@ -134,6 +134,10 @@ export type ChatTimelineEvent = {
   sequence: number;
   timestamp: string;
   kind: ChatTimelineEventKind;
+  /** Optional owner identity for lifecycle events; absent on legacy records. */
+  sessionId?: string;
+  turnId?: string;
+  clientTurnId?: string;
   /** Safe display projection only; never raw prompt/CoT/credentials/arguments. */
   payload: {
     label?: string;

@@ -234,6 +234,33 @@ def test_runtime_finish_clears_client_cancel_marker() -> None:
     assert state.cancel_requested(client_turn_id="client-cancel") is False
 
 
+def test_session_only_cancel_binds_active_turn_and_does_not_leak_to_next_turn() -> None:
+    state, _lock = make_state()
+    state.begin_turn(session_id="session-race", turn_id="turn-a", client_turn_id="client-a")
+
+    state.mark_cancel_requested(session_id="session-race")
+    state.finish_turn(session_id="session-race", turn_id="turn-a", client_turn_id="client-a")
+
+    state.begin_turn(session_id="session-race", turn_id="turn-b", client_turn_id="client-b")
+    assert state.consume_cancel_request(
+        session_id="session-race", turn_id="turn-b", client_turn_id="client-b"
+    ) is False
+
+
+def test_session_only_cancel_binds_all_active_turns() -> None:
+    state, _lock = make_state()
+    state.begin_turn(session_id="session-many", turn_id="turn-a", client_turn_id="client-a")
+    state.begin_turn(session_id="session-many", turn_id="turn-b", client_turn_id="client-b")
+
+    state.mark_cancel_requested(session_id="session-many")
+    assert state.consume_cancel_request(
+        session_id="session-many", turn_id="turn-a", client_turn_id="client-a"
+    ) is True
+    assert state.consume_cancel_request(
+        session_id="session-many", turn_id="turn-b", client_turn_id="client-b"
+    ) is True
+
+
 def test_runtime_active_turns_are_exact_pairs_for_concurrent_session_turns() -> None:
     state, _lock = make_state()
     state.begin_turn(session_id="shared", turn_id="a", client_turn_id="client-a")

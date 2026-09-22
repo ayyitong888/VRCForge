@@ -2418,6 +2418,66 @@ def test_compaction_projects_pre_and_post_prompts_with_current_exposure_layer() 
     assert catalog.reads == [EXPOSURE_LAYER_EXECUTION, EXPOSURE_LAYER_EXECUTION]
 
 
+def test_compaction_blocks_empty_history_when_loop_evidence_exceeds_context() -> None:
+    loop_state = [
+        {
+            "tool": "vrcforge_scan_materials",
+            "status": "executed",
+            "result": {"summary": "step evidence " + ("x" * 1_000)},
+        }
+        for _ in range(20)
+    ]
+    compactor = FakeCompactor({"summary": "bounded summary", "providerAttempts": 1})
+    planner = service(compactor=compactor)
+
+    original, metadata, blocked = planner.maybe_compact_runtime_history(
+        message="continue",
+        params={"_contextCompactionLimit": 1_000},
+        observe={},
+        history=[],
+        loop_state=loop_state,
+        context_usage={
+            "exact": True,
+            "lastInputTokens": 1_000,
+            "lastPromptEstimatedTokens": 900,
+        },
+    )
+
+    assert original == []
+    assert metadata is not None
+    assert metadata["blocked"] is True
+    assert blocked is True
+    assert len(compactor.calls) == 1
+
+
+def test_compaction_uses_prompt_estimate_when_provider_usage_is_missing() -> None:
+    loop_state = [
+        {
+            "tool": "vrcforge_scan_materials",
+            "status": "executed",
+            "result": {"summary": "step evidence " + ("x" * 1_000)},
+        }
+        for _ in range(20)
+    ]
+    compactor = FakeCompactor({"summary": "bounded summary", "providerAttempts": 1})
+    planner = service(compactor=compactor)
+
+    original, metadata, blocked = planner.maybe_compact_runtime_history(
+        message="continue",
+        params={"_contextCompactionLimit": 2_000},
+        observe={},
+        history=[{"role": "user", "text": "prior context"}],
+        loop_state=loop_state,
+        context_usage={"exact": False, "unavailableReason": "provider_usage_missing"},
+    )
+
+    assert original == [{"role": "user", "text": "prior context"}]
+    assert metadata is not None
+    assert metadata["blocked"] is True
+    assert blocked is True
+    assert len(compactor.calls) == 1
+
+
 def _function_map(tree: ast.Module, class_name: str | None = None) -> dict[str, ast.FunctionDef]:
     body: list[ast.stmt]
     if class_name is None:

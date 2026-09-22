@@ -191,7 +191,7 @@ def read_tool_result(params: Mapping[str, Any], *, sanitize: Callable[[object, i
     page: dict[str, Any] = {"schema": PAGE_SCHEMA, "ok": True, "authority": "untrusted_tool_output",
                            "resultRef": ref, "sourceStep": step["index"], "sourceTool": step["tool"],
                            "jsonPointer": pointer, "offset": offset, "totalItems": len(members),
-                           "items": [], "redactedFields": 0, "hasMore": False}
+                           "items": [], "redactedFields": 0, "hasMore": False, "previewTruncated": False}
     cursor = offset
     for key, child in members[offset:]:
         if len(page["items"]) >= limit:
@@ -210,6 +210,14 @@ def read_tool_result(params: Mapping[str, Any], *, sanitize: Callable[[object, i
                "redactedFields": evidence["redactedFields"]}
         if wrapper_key in safe:
             row["value"] = safe[wrapper_key]
+        if evidence["truncated"]:
+            wrapper_pointer = _pointer("", wrapper_key)
+            row["incompleteFields"] = [
+                {**field, "jsonPointer": child_pointer + field["jsonPointer"][len(wrapper_pointer):]}
+                for field in evidence.get("incompleteFields", [])
+                if field["jsonPointer"] == wrapper_pointer or field["jsonPointer"].startswith(wrapper_pointer + "/")
+            ]
+            row["incompleteFieldsTruncated"] = evidence.get("incompleteFieldsTruncated", False)
         if isinstance(child, (dict, list)):
             row["type"] = "object" if isinstance(child, dict) else "array"
             row["count"] = len(child)
@@ -225,5 +233,7 @@ def read_tool_result(params: Mapping[str, Any], *, sanitize: Callable[[object, i
     if page["hasMore"]:
         page["nextRequest"] = {"tool": TOOL_NAME, "arguments": {"resultRef": ref, "jsonPointer": pointer, "offset": cursor, "limit": limit}}
     page["returnedItems"] = len(page["items"])
+    # hasMore describes this page only, not completeness of nested previews.
+    page["previewTruncated"] = any(row["truncated"] for row in page["items"])
     assert _size(page) <= MAX_PAGE_CHARS
     return page

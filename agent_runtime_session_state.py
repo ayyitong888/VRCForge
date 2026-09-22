@@ -229,7 +229,21 @@ class AgentRuntimeSessionState:
     ) -> None:
         with self._ports.shared_state_lock:
             if session_id and not (turn_id or client_turn_id):
-                self._cancelled_ids.add(session_id)
+                active = [
+                    (key, active_turn_id)
+                    for key, active_turn_id in self._active_turns.items()
+                    if key[0] == session_id
+                ]
+                if active:
+                    for (_active_session_id, active_client_turn_id), active_turn_id in active:
+                        if active_turn_id:
+                            self._cancelled_ids.add(active_turn_id)
+                        if active_client_turn_id:
+                            self._cancelled_ids.add(active_client_turn_id)
+                else:
+                    # Preserve the supported "stop before the turn starts"
+                    # behavior; the next turn consumes this session marker.
+                    self._cancelled_ids.add(session_id)
             if turn_id:
                 self._cancelled_ids.add(turn_id)
             if client_turn_id:

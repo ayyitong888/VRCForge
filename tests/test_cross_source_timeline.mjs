@@ -47,6 +47,41 @@ const completed = mergeConversationTimelineItems([
 assert.deepEqual(completed.map((item) => item.type), ["user", "agent"], "registry lifecycle inside a completed turn must not remain a top-level chat item");
 assert.deepEqual(completed[1].response.timeline.map((event) => event.id), ["turn-plan", "registry-1", "turn-final"]);
 
+// When two same-session turns overlap, the durable owner identity wins over
+// the legacy timestamp interval heuristic. Legacy events without an owner
+// remain compatible with the interval-based behavior above.
+const overlappingA = {
+  sessionId: "session-overlap",
+  turnId: "turn-a",
+  clientTurnId: "client-a",
+  plan: { planner: "llm", reply: "a" },
+  timeline: [
+    { id: "a-start", sequence: 0, timestamp: "2026-08-14T00:00:01.000Z", kind: "planner", payload: {} },
+    { id: "a-end", sequence: 1, timestamp: "2026-08-14T00:00:10.000Z", kind: "assistant", payload: { summary: "a" } },
+  ],
+};
+const overlappingB = {
+  sessionId: "session-overlap",
+  turnId: "turn-b",
+  clientTurnId: "client-b",
+  plan: { planner: "llm", reply: "b" },
+  timeline: [
+    { id: "b-start", sequence: 0, timestamp: "2026-08-14T00:00:05.000Z", kind: "planner", payload: {} },
+    { id: "b-end", sequence: 1, timestamp: "2026-08-14T00:00:15.000Z", kind: "assistant", payload: { summary: "b" } },
+  ],
+};
+const ownedOverlap = mergeConversationTimelineItems([
+  { id: "agent-a", type: "agent", response: overlappingA, createdAt: "2026-08-14T00:00:10.000Z" },
+  { id: "agent-b", type: "agent", response: overlappingB, createdAt: "2026-08-14T00:00:15.000Z" },
+  { id: "owned-b", type: "timeline_event", createdAt: "2026-08-14T00:00:07.000Z", event: {
+    id: "owned-b", sequence: 2, timestamp: "2026-08-14T00:00:07.000Z", kind: "subagent",
+    sessionId: "session-overlap", turnId: "turn-b", clientTurnId: "client-b",
+    payload: { label: "review", subagentStatus: "started" },
+  } },
+]);
+assert.deepEqual(ownedOverlap[0].response.timeline.map((event) => event.id), ["a-start", "a-end"]);
+assert.deepEqual(ownedOverlap[1].response.timeline.map((event) => event.id), ["b-start", "owned-b", "b-end"]);
+
 const active = mergeConversationTimelineItems([
   { id: "user-2", type: "user", text: "go", createdAt: "2026-08-14T00:00:00.000Z" },
   { id: "stream-1", type: "streaming", clientTurnId: "turn-2", text: "", createdAt: "2026-08-14T00:00:01.000Z", timeline: [

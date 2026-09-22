@@ -7,6 +7,7 @@ import {
   providerReconnectAttempt,
 } from "../src/lib/chat-streaming.ts";
 import { buildTimelinePresentation } from "../src/lib/chat-timeline-presentation.ts";
+import { runtimeContinuationDeliveryState } from "../src/hooks/use-runtime-turn-continuation.ts";
 
 const startedAt = "2026-08-14T00:00:00.000Z";
 const startedMs = Date.parse(startedAt);
@@ -16,6 +17,24 @@ assert.equal(providerReconnectAttempt(startedAt, startedMs + 119_999), 1);
 assert.equal(providerReconnectAttempt(startedAt, startedMs + 120_000), 2);
 assert.equal(providerReconnectAttempt(startedAt, startedMs + 300_000), 5);
 assert.equal(providerReconnectAttempt(startedAt, startedMs + 900_000), 5, "the display is bounded to the Provider call's five windows");
+
+const foregroundReplay = {
+  schema: "vrcforge.runtime_turn_event.v1",
+  continuationSource: "foreground_completed",
+  sessionId: "session-replay",
+  turnId: "turn-replay",
+  clientTurnId: "client-replay",
+  plan: { reply: "recovered" },
+};
+assert.equal(runtimeContinuationDeliveryState(foregroundReplay, [
+  { id: "live", type: "streaming", clientTurnId: "client-replay", text: "partial" },
+]), "defer", "bootstrap replay must wait for an in-flight foreground HTTP turn");
+assert.equal(runtimeContinuationDeliveryState(foregroundReplay, [
+  { id: "cancelled", type: "agent", response: { clientTurnId: "client-replay", turnId: "turn-replay", status: "cancelled", plan: { reply: "cancelled" } } },
+]), "replace-failed", "a cancelled durable placeholder must not block the recovered completion");
+assert.equal(runtimeContinuationDeliveryState(foregroundReplay, [
+  { id: "done", type: "agent", response: { clientTurnId: "client-replay", turnId: "turn-replay", status: "completed", plan: { reply: "done" } } },
+]), "stored", "a durable successful completion must remain exactly once");
 
 const base = {
   id: "stream-client-live",
