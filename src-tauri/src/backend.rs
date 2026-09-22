@@ -1006,7 +1006,7 @@ pub(crate) fn start_backend_in_background(
         }
         if !existing_backend_accepts_session(&app_session_token) {
             return Err(
-                "Port 8757 is already used by a VRCForge runtime that does not accept this desktop session. Close all VRCForge.exe processes in Task Manager and launch VRCForge again.".to_string()
+                "Another VRCForge installation or profile is already using port 8757. Close the other VRCForge window before starting this one. Its MCP binding is separate: switching windows does not switch the external client's saved configuration.".to_string()
             );
         }
         mark_backend_session_verified();

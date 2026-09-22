@@ -1156,6 +1156,8 @@
     "needsProject": "Needs project",
     "notInstalled": "VRCForge MCP not configured",
     "needsAttention": "MCP configuration needs attention",
+    "bindingConflict": "Configured for another version",
+    "bindingConflictHint": "This MCP entry belongs to another VRCForge version or config ({{target}}). Remove it in the original version first, then install it here.",
     "cliFound": "CLI found",
     "cliNotFound": "CLI not found",
     "appFound": "App found",

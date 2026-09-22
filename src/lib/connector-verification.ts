@@ -14,6 +14,7 @@ export function hasRecentConnectorSelfTest(
     const action = status.connectorActions?.[client];
     return Boolean(
       state.installed
+        && !state.bindingConflict
         && action?.ok
         && action.action === "install"
         && action.verificationScope === "installation_self_test"

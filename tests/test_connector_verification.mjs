@@ -19,6 +19,7 @@ assert.equal(hasRecentConnectorSelfTest(fresh, true, "project-b", 119000), false
 assert.equal(hasRecentConnectorSelfTest(fresh, true, "project-a", 120000), false);
 for (const change of [
   { clients: { codexApp: { installed: false } } },
+  { clients: { codexApp: { installed: true, bindingConflict: true } } },
   { connectorActions: {} },
   { gateway: { enabled: false } },
 ]) assert.equal(hasRecentConnectorSelfTest({ ...fresh, ...change }, true, "project-a", 119000), false);

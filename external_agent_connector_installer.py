@@ -224,7 +224,10 @@ def uninstall_connector(
         result = _update_deepseek_harness_patch(expected, install=False)
     elif client in {"codex", "codexApp", "codexCli"}:
         path = codex_config_path()
-        result = _update_codex_toml_server(path, DEFAULT_SERVER_NAME, None)
+        if root_dir is None:
+            raise ConnectorInstallError("The current installation is required to verify MCP ownership.", stage="verify_ownership")
+        expected = render_codex_stdio_toml(resolve_stdio_bridge(root_dir, gateway_config_path=gateway_config_path).to_options())
+        result = _update_codex_toml_server(path, DEFAULT_SERVER_NAME, None, expected_text=expected)
     else:  # pragma: no cover - Literal request validation should stop this.
         raise ConnectorInstallError(f"Unsupported connector client: {client}", stage="validate_client")
     return {
@@ -991,13 +994,21 @@ def _load_json_object(path: Path, *, snapshot: ConfigSnapshot | None = None) -> 
     return payload
 
 
-def _update_codex_toml_server(path: Path, server_name: str, server_text: str | None) -> dict[str, Any]:
+def _update_codex_toml_server(path: Path, server_name: str, server_text: str | None, *, expected_text: str | None = None) -> dict[str, Any]:
     path = _canonical_config_path(path)
     with _config_path_lock(path):
         snapshot = _read_config_snapshot(path)
         original = _decode_config_snapshot(path, snapshot)
         if original.strip():
             _validate_toml_object(original)
+            existing = tomllib.loads(original).get("mcp_servers", {}).get(server_name)
+            expected = tomllib.loads(server_text or expected_text or "").get("mcp_servers", {}).get(server_name)
+            if existing is not None and not _codex_binding_matches(existing, expected):
+                raise ConnectorInstallError(
+                    "This MCP entry belongs to another installation or profile; it was not changed.",
+                    stage="binding_conflict",
+                    suggestion="Remove the MCP entry from its original VRCForge installation, then install it here and reload the external client.",
+                )
         without_server = _remove_codex_server_block(original, server_name)
         if server_text is None:
             changed = without_server != original
@@ -1139,9 +1150,13 @@ def _codex_status(client: Literal["codexApp", "codexCli"], bridge: dict[str, Any
     app_probe = _probe_windows_app("OpenAI.Codex") if client == "codexApp" else {}
     cli_probe = _probe_codex_cli() if client == "codexCli" else {}
     installed = False
+    entry = None
+    binding_matches = False
     last_error = ""
     try:
-        installed = _codex_server_installed(path)
+        entry = _codex_server_entry(path)
+        installed = entry is not None
+        binding_matches = installed and _codex_binding_matches(entry, bridge)
     except ConnectorInstallError as exc:
         last_error = str(exc)
     return {
@@ -1149,7 +1164,10 @@ def _codex_status(client: Literal["codexApp", "codexCli"], bridge: dict[str, Any
         "scope": "user",
         "configPath": str(path),
         "installed": installed,
-        "installable": True,
+        "installable": not installed or binding_matches,
+        "bindingMatchesCurrent": binding_matches,
+        "bindingConflict": installed and not binding_matches,
+        "bindingTarget": str(entry.get("cwd") or "") if entry else "",
         "lastError": last_error,
         "sharedConfigGroup": "codex",
         "cliDetected": bool(cli_probe.get("ok")) if client == "codexCli" else None,
@@ -1482,10 +1500,21 @@ def _json_server_installed(path: Path, server_name: str) -> bool:
     return True
 
 
+def _codex_binding_matches(entry: Any, expected: Any) -> bool:
+    if not isinstance(entry, dict) or not isinstance(expected, dict):
+        return False
+    return all(entry.get(key, default) == expected.get(key, default)
+               for key, default in (("command", ""), ("args", []), ("cwd", ""), ("env", {}), ("url", "")))
+
+
 def _codex_server_installed(path: Path) -> bool:
+    return _codex_server_entry(path) is not None
+
+
+def _codex_server_entry(path: Path) -> dict[str, Any] | None:
     snapshot = _read_config_snapshot(path)
     if not snapshot.exists:
-        return False
+        return None
     try:
         parsed = tomllib.loads(_decode_config_snapshot(path, snapshot) or "")
     except Exception as exc:  # noqa: BLE001 - tomllib/tomli expose different exception classes.
@@ -1496,7 +1525,7 @@ def _codex_server_installed(path: Path) -> bool:
         ) from exc
     servers = parsed.get("mcp_servers")
     if servers is None:
-        return False
+        return None
     if not isinstance(servers, dict):
         raise ConnectorInstallError(
             "mcp_servers must be a TOML table.",
@@ -1504,7 +1533,7 @@ def _codex_server_installed(path: Path) -> bool:
             suggestion=f"Repair {path} so mcp_servers is a table, then retry.",
         )
     if DEFAULT_SERVER_NAME not in servers:
-        return False
+        return None
     entry = servers[DEFAULT_SERVER_NAME]
     if not isinstance(entry, dict):
         raise ConnectorInstallError(
@@ -1512,4 +1541,4 @@ def _codex_server_installed(path: Path) -> bool:
             stage="parse_config",
             suggestion=f"Repair {path} so the VRCForge server entry is a table, then retry.",
         )
-    return True
+    return entry

@@ -1156,6 +1156,8 @@
     "needsProject": "需要项目",
     "notInstalled": "未配置 VRCForge MCP",
     "needsAttention": "MCP 配置异常",
+    "bindingConflict": "已配置到其他版本",
+    "bindingConflictHint": "当前 MCP 已配置到另一个版本或配置（{{target}}）。请先在原版本移除该配置，再回到当前版本安装。",
     "cliFound": "已找到 CLI",
     "cliNotFound": "未找到 CLI",
     "appFound": "已找到 App",

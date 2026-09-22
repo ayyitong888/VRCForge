@@ -324,7 +324,7 @@ def test_codex_app_and_cli_share_safe_toml_install_uninstall(monkeypatch: pytest
     assert cli_install["ok"] is True
     assert cli_install["changed"] is False
 
-    removed = uninstall_connector("codexCli")
+    removed = uninstall_connector("codexCli", root_dir=root)
     parsed_after = tomllib.loads(config.read_text(encoding="utf-8"))
 
     assert removed["ok"] is True

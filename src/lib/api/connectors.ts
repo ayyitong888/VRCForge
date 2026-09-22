@@ -110,6 +110,12 @@ export type ExternalAgentConnectorStatus = {
       requestedConfigPath?: string;
       installed?: boolean;
       conflict?: boolean;
+      /** Whether the existing entry points at this running VRCForge instance/config. */
+      bindingMatchesCurrent?: boolean;
+      /** Existing entry is valid, but belongs to another VRCForge install/config. */
+      bindingConflict?: boolean;
+      /** Safe, display-only path for the configuration currently owning the entry. */
+      bindingTarget?: string;
       installable?: boolean;
       requiresConfigPath?: boolean;
       lastError?: string;

@@ -274,13 +274,14 @@ function ConnectorClientRow({
   const installed = Boolean(state?.installed);
   const needsProject = client === "claudeCode" && !selectedProjectPath;
   const installable = state?.installable !== false && !needsProject;
-  const installActionDisabled = loading || !state;
+  const bindingConflict = Boolean(state?.bindingConflict);
+  const installActionDisabled = loading || !state || bindingConflict;
   const actionMatches = normalizeConnectorClient(lastAction?.client) === client;
   const action = actionMatches ? lastAction : undefined;
   const handshake = action?.handshake;
-  const configError = Boolean(state?.lastError || state?.conflict);
+  const configError = Boolean(state?.lastError || state?.conflict || bindingConflict);
   const statusTone = configError ? "warn" : installed ? "ok" : installable ? "muted" : "warn";
-  const statusLabel = !state ? t("connector.notChecked") : configError ? t("connector.needsAttention") : installed ? t("connector.installed") : needsProject ? t("connector.needsProject") : installable ? t("connector.notInstalled") : t("connector.needsAttention");
+  const statusLabel = !state ? t("connector.notChecked") : bindingConflict ? t("connector.bindingConflict") : configError ? t("connector.needsAttention") : installed ? t("connector.installed") : needsProject ? t("connector.needsProject") : installable ? t("connector.notInstalled") : t("connector.needsAttention");
   return (
     <div data-onboarding-client={client} data-onboarding-client-label={title} className="grid min-w-0 gap-3 rounded-lg border border-border bg-background/40 p-3 md:grid-cols-[minmax(0,1fr)_auto]">
       <div className="min-w-0">
@@ -323,7 +324,11 @@ function ConnectorClientRow({
           {state?.cliError ? <div className="break-words text-amber-700 dark:text-amber-300">{state.cliError}</div> : null}
           {state?.appError ? <div className="break-words text-amber-700 dark:text-amber-300">{state.appError}</div> : null}
           {state?.lastError ? <div className="text-amber-700 dark:text-amber-300">{state.lastError}</div> : null}
-          {needsProject ? (
+          {bindingConflict ? (
+            <div className="break-words text-amber-700 dark:text-amber-300">
+              {t("connector.bindingConflictHint", { target: state?.bindingTarget || "-" })}
+            </div>
+          ) : needsProject ? (
             <div className="text-amber-700 dark:text-amber-300">{t("connector.needsProjectHint")}</div>
           ) : !installable ? (
             <div className="text-amber-700 dark:text-amber-300">{t("connector.notInstallableHint")}</div>
@@ -356,7 +361,7 @@ function ConnectorClientRow({
           {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
           Install
         </Button>
-        <Button type="button" variant="danger" className="h-8 px-3 text-xs" disabled={loading || !installed} onClick={() => onUninstall(client)}>
+        <Button type="button" variant="danger" className="h-8 px-3 text-xs" disabled={loading || !installed || bindingConflict} onClick={() => onUninstall(client)}>
           <Trash2 className="h-3.5 w-3.5" />
           {t("connector.remove")}
         </Button>
