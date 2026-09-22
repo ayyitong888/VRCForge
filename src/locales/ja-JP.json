@@ -552,7 +552,7 @@
   "onboarding": {
     "welcome": "VRCForge へようこそ",
     "stepProgress": "ステップ {{current}} / {{total}}",
-    "step1Title": "コアと Unity を接続",
+    "step1Title": "Unity に接続",
     "step2Title": "AIを選ぶ",
     "step3Title": "Unity プロジェクトを選択",
     "done": "完了",
@@ -582,7 +582,7 @@
     "step3TodoDesc": "VRCForge をインポートした正確な Unity プロジェクトを選択",
     "selectProject": "プロジェクトを選択",
     "importAndSelectProject": "Unity で VRCForge.unitypackage を Import All してから、開いているプロジェクトをここで選択してください。",
-    "keepUnityOpen": "選択した Unity プロジェクトを開いたままコンパイルを待ち、再試行してください。{{count}} ツールを検出しました。",
+    "keepUnityOpen": "先ほど選んだプロジェクトを Unity で開いてください。読み込みが終わったら、接続を再試行してください。",
     "toolsConnected": "接続済み — {{count}} ツール",
     "providerTour": {
       "connectionTitle": "プロバイダーを選択",

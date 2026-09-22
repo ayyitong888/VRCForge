@@ -552,7 +552,7 @@
   "onboarding": {
     "welcome": "Welcome to VRCForge",
     "stepProgress": "Step {{current}} / {{total}}",
-    "step1Title": "Connect Core & Unity",
+    "step1Title": "Connect Unity",
     "step2Title": "Choose your AI",
     "step3Title": "Select Unity Project",
     "done": "Done",
@@ -582,7 +582,7 @@
     "step3TodoDesc": "Select the exact Unity project you imported VRCForge into",
     "selectProject": "Select Project",
     "importAndSelectProject": "Import All from VRCForge.unitypackage, then select that open project here.",
-    "keepUnityOpen": "Keep the selected Unity project open and wait for compilation, then Retry. Detected {{count}} tools.",
+    "keepUnityOpen": "Open the project you selected in Unity. Once it finishes loading, click Retry connection.",
     "toolsConnected": "Connected — {{count}} tools",
     "providerTour": {
       "connectionTitle": "Choose a provider",
