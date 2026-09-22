@@ -40,17 +40,18 @@
   line-height: 1;
 }
 
-.vrcforge-provider-tour-return {
+.vrcforge-provider-tour .driver-popover-footer .vrcforge-provider-tour-return {
   order: 3;
   width: 100%;
   min-height: 2rem;
   padding: 0.35rem 0.6rem;
+  text-align: center;
   color: hsl(var(--muted-foreground));
   background: transparent;
   border: 1px solid hsl(var(--border));
 }
 
-.vrcforge-provider-tour-return:hover {
+.vrcforge-provider-tour .driver-popover-footer .vrcforge-provider-tour-return:hover {
   color: hsl(var(--foreground));
   background: hsl(var(--muted));
 }
