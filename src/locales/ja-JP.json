@@ -599,6 +599,19 @@
       "next": "次へ",
       "previous": "前へ",
       "return": "オンボーディングに戻る"
+    },
+    "externalTour": {
+      "gatewayTitle": "MCP ゲートウェイを有効にする",
+      "gatewayDescription": "外部 AI クライアントからのアクセスを有効にします。このガイドは書き込み要求を自動で有効にしません。",
+      "clientTitle": "クライアントを選ぶ",
+      "clientDescription": "ガイド内の選択欄から設定するクライアントを選び、強調表示された行に従ってください。",
+      "clientPicker": "設定するクライアント",
+      "verifyTitle": "設定して確認する",
+      "verifyDescription": "この行の Install を使ってクライアント設定を書き込み、セルフテストを実行します。その後クライアントを再読み込みして VRCForge を使います。",
+      "progress": "{{total}} ステップ中 {{current}}",
+      "next": "次へ",
+      "previous": "前へ",
+      "return": "オンボーディングに戻る"
     }
   },
   "executionMode": {

@@ -599,6 +599,19 @@
       "next": "下一步",
       "previous": "上一步",
       "return": "返回新手引导"
+    },
+    "externalTour": {
+      "gatewayTitle": "启用 MCP 网关",
+      "gatewayDescription": "为外部 AI 客户端开启访问权限。本引导不会替你启用写入请求。",
+      "clientTitle": "选择客户端",
+      "clientDescription": "从引导中的选择器挑选要配置的客户端，然后按高亮的行操作。",
+      "clientPicker": "要配置的客户端",
+      "verifyTitle": "配置并验证",
+      "verifyDescription": "在这一行使用“安装”来写入客户端配置并运行自检，然后重新加载客户端以使用 VRCForge。",
+      "progress": "第 {{current}} 步，共 {{total}} 步",
+      "next": "下一步",
+      "previous": "上一步",
+      "return": "返回新手引导"
     }
   },
   "executionMode": {

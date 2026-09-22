@@ -48,6 +48,7 @@ import { SidebarMenus } from "./components/sidebar/sidebar-menus";
 import { TransientFailureToast } from "./components/ui/transient-failure-toast";
 import { TextEditContextMenu } from "./components/common/text-edit-context-menu";
 import { OnboardingOverlay } from "./components/onboarding/onboarding-overlay";
+import { ExternalSetupTour } from "./components/onboarding/external-setup-tour";
 import { ProviderSetupTour } from "./components/onboarding/provider-setup-tour";
 import { OnboardingLanguageGate } from "./components/onboarding/onboarding-language-gate";
 import {
@@ -346,6 +347,7 @@ export default function App() {
   const [onboardingStep, setOnboardingStep] = useState(0);
   const [onboardingMinimized, setOnboardingMinimized] = useState(false);
   const [providerSetupGuide, setProviderSetupGuide] = useState(false);
+  const [externalSetupGuide, setExternalSetupGuide] = useState(false);
   const [subAgentList, setSubAgentList] = useState<SubAgentTaskList | null>(() =>
     initialSubAgentTask
       ? {
@@ -1912,6 +1914,14 @@ export default function App() {
       setOnboardingMinimized(false);
     }
   }, [showOnboarding, onboardingMinimized, providerSetupGuide, providerReadyForOnboarding]);
+
+  useEffect(() => {
+    if (showOnboarding && onboardingMinimized && externalSetupGuide && externalAgentVerified) {
+      setActiveView("chat");
+      setExternalSetupGuide(false);
+      setOnboardingMinimized(false);
+    }
+  }, [showOnboarding, onboardingMinimized, externalSetupGuide, externalAgentVerified]);
 
   useEffect(() => {
     if (!showOnboarding || !onboardingMinimized || providerSetupGuide || activeView === "settings" || showProjectModal) {
@@ -3594,11 +3604,13 @@ export default function App() {
     setShowOnboardingLanguageGate(false);
     setOnboardingMinimized(false);
     setProviderSetupGuide(false);
+    setExternalSetupGuide(false);
   }
 
   function returnFromOnboardingSettings() {
     setActiveView("chat");
     setProviderSetupGuide(false);
+    setExternalSetupGuide(false);
     if (showOnboarding) setOnboardingMinimized(false);
   }
 
@@ -3612,6 +3624,7 @@ export default function App() {
     setOnboardingStep(0);
     setOnboardingMinimized(false);
     setProviderSetupGuide(false);
+    setExternalSetupGuide(false);
     setShowOnboardingLanguageGate(false);
     setShowOnboarding(true);
   }
@@ -4284,10 +4297,13 @@ export default function App() {
         onOpenSettings={() => {
           setOnboardingMinimized(true);
           setProviderSetupGuide(true);
+          setExternalSetupGuide(false);
           openSettingsSection("models");
         }}
         onOpenExternalSettings={() => {
           setOnboardingMinimized(true);
+          setExternalSetupGuide(true);
+          setProviderSetupGuide(false);
           openSettingsSection("connectors");
         }}
         onOpenProjectPicker={() => {
@@ -4300,6 +4316,11 @@ export default function App() {
         onPreviousStep={() => setOnboardingStep((value) => Math.max(0, value - 1))}
         onNextStep={() => setOnboardingStep((value) => value + 1)}
         onLocaleChange={(locale) => void setLocale(locale)}
+      />
+
+      <ExternalSetupTour
+        open={showOnboarding && onboardingMinimized && externalSetupGuide && activeView === "settings" && activeSettingsSection === "connectors"}
+        onReturn={returnFromOnboardingSettings}
       />
 
       <ProviderSetupTour

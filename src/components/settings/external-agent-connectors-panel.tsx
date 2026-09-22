@@ -146,12 +146,14 @@ export function ExternalAgentConnectorsPanel({
       </div>
 
       <div className="mt-5 grid gap-3 md:grid-cols-2">
-        <ConnectorToggle
-          label={t("connector.gateway")}
-          checked={Boolean(gateway?.enabled)}
-          disabled={loading || !status}
-          onChange={onToggleGateway}
-        />
+        <div data-onboarding-external="gateway" className="grid">
+          <ConnectorToggle
+            label={t("connector.gateway")}
+            checked={Boolean(gateway?.enabled)}
+            disabled={loading || !status}
+            onChange={onToggleGateway}
+          />
+        </div>
         <ConnectorToggle
           label={t("connector.writeRequests")}
           checked={Boolean(gateway?.allowWriteRequests)}
@@ -280,7 +282,7 @@ function ConnectorClientRow({
   const statusTone = configError ? "warn" : installed ? "ok" : installable ? "muted" : "warn";
   const statusLabel = !state ? t("connector.notChecked") : configError ? t("connector.needsAttention") : installed ? t("connector.installed") : needsProject ? t("connector.needsProject") : installable ? t("connector.notInstalled") : t("connector.needsAttention");
   return (
-    <div className="grid min-w-0 gap-3 rounded-lg border border-border bg-background/40 p-3 md:grid-cols-[minmax(0,1fr)_auto]">
+    <div data-onboarding-client={client} data-onboarding-client-label={title} className="grid min-w-0 gap-3 rounded-lg border border-border bg-background/40 p-3 md:grid-cols-[minmax(0,1fr)_auto]">
       <div className="min-w-0">
         <div className="flex min-w-0 flex-wrap items-center gap-2">
           <span className="min-w-0 truncate text-sm font-semibold">{title}</span>
@@ -395,7 +397,7 @@ function GenericConnectorRow({
   const installedHere = Boolean(state?.installed && statusMatchesCurrent);
   const configError = statusMatchesCurrent && Boolean(state?.lastError || state?.conflict);
   return (
-    <div className="min-w-0 rounded-lg border border-border bg-background/40 p-3">
+    <div data-onboarding-client="generic" data-onboarding-client-label={t("connector.genericTitle")} className="min-w-0 rounded-lg border border-border bg-background/40 p-3">
       <div className="flex min-w-0 flex-wrap items-center gap-2">
         <span className="min-w-0 truncate text-sm font-semibold">{t("connector.genericTitle")}</span>
         <Badge tone={configError ? "warn" : installedHere ? "ok" : "muted"} className="shrink-0">

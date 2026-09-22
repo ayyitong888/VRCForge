@@ -3274,37 +3274,43 @@ pub async fn fetch_checkpoint_archive_usage() -> Result<serde_json::Value, Strin
 }
 
 #[tauri::command]
-pub fn install_external_agent_connector(
+pub async fn install_external_agent_connector(
     request: DesktopExternalAgentConnectorActionRequest,
 ) -> Result<serde_json::Value, String> {
-    backend_json_request(
-        "POST",
-        "/api/app/external-agent/connectors/install".to_string(),
-        Some(serde_json::json!({
-            "client": request.client,
-            "projectPath": request.project_path,
-            "configPath": request.config_path,
-        })),
-        request.timeout_ms.or(Some(120_000)),
-    )
-    .map(sanitize_webview_response)
+    blocking_backend_json_request(move || {
+        backend_json_request(
+            "POST",
+            "/api/app/external-agent/connectors/install".to_string(),
+            Some(serde_json::json!({
+                "client": request.client,
+                "projectPath": request.project_path,
+                "configPath": request.config_path,
+            })),
+            request.timeout_ms.or(Some(120_000)),
+        )
+        .map(sanitize_webview_response)
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn uninstall_external_agent_connector(
+pub async fn uninstall_external_agent_connector(
     request: DesktopExternalAgentConnectorActionRequest,
 ) -> Result<serde_json::Value, String> {
-    backend_json_request(
-        "POST",
-        "/api/app/external-agent/connectors/uninstall".to_string(),
-        Some(serde_json::json!({
-            "client": request.client,
-            "projectPath": request.project_path,
-            "configPath": request.config_path,
-        })),
-        request.timeout_ms.or(Some(60_000)),
-    )
-    .map(sanitize_webview_response)
+    blocking_backend_json_request(move || {
+        backend_json_request(
+            "POST",
+            "/api/app/external-agent/connectors/uninstall".to_string(),
+            Some(serde_json::json!({
+                "client": request.client,
+                "projectPath": request.project_path,
+                "configPath": request.config_path,
+            })),
+            request.timeout_ms.or(Some(60_000)),
+        )
+        .map(sanitize_webview_response)
+    })
+    .await
 }
 
 #[tauri::command]

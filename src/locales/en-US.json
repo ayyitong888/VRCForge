@@ -599,6 +599,19 @@
       "next": "Next",
       "previous": "Back",
       "return": "Return to onboarding"
+    },
+    "externalTour": {
+      "gatewayTitle": "Enable the MCP gateway",
+      "gatewayDescription": "Turn on access for external AI clients. This guide does not enable write requests for you.",
+      "clientTitle": "Choose your client",
+      "clientDescription": "Pick the client you want to configure from this guide, then follow its highlighted row.",
+      "clientPicker": "Client to configure",
+      "verifyTitle": "Configure and verify",
+      "verifyDescription": "Use Install in this row to write the client config and run its self-test, then reload the client to use VRCForge.",
+      "progress": "Step {{current}} of {{total}}",
+      "next": "Next",
+      "previous": "Back",
+      "return": "Return to onboarding"
     }
   },
   "executionMode": {

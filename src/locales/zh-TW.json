@@ -599,6 +599,19 @@
       "next": "下一步",
       "previous": "上一步",
       "return": "返回新手引導"
+    },
+    "externalTour": {
+      "gatewayTitle": "啟用 MCP 閘道",
+      "gatewayDescription": "為外部 AI 用戶端開啟存取權。本導覽不會替你啟用寫入要求。",
+      "clientTitle": "選擇用戶端",
+      "clientDescription": "從導覽中的選擇器挑選要設定的用戶端，然後依照醒目顯示的列操作。",
+      "clientPicker": "要設定的用戶端",
+      "verifyTitle": "設定並驗證",
+      "verifyDescription": "在這一列使用「安裝」來寫入用戶端設定並執行自我測試，然後重新載入用戶端以使用 VRCForge。",
+      "progress": "第 {{current}} 步，共 {{total}} 步",
+      "next": "下一步",
+      "previous": "上一步",
+      "return": "返回新手引導"
     }
   },
   "executionMode": {

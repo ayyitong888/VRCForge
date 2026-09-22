@@ -40,3 +40,14 @@ def test_provider_connection_commands_are_offloaded_and_sanitized(name: str) -> 
     assert ".await" in command, name
     assert "backend_json_request(" in command, name
     assert "sanitize_provider_result(" in command, name
+
+
+@pytest.mark.parametrize("name", ("install_external_agent_connector", "uninstall_external_agent_connector"))
+def test_connector_setup_commands_are_offloaded(name: str) -> None:
+    source = (ROOT / "src-tauri/src/commands.rs").read_text(encoding="utf-8")
+    start = source.index(f"pub async fn {name}(")
+    end = source.index("#[tauri::command]", start)
+    command = source[start:end]
+    assert "blocking_backend_json_request(move ||" in command
+    assert ".await" in command
+    assert "sanitize_webview_response" in command
