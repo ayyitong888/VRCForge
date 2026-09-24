@@ -14,14 +14,14 @@ Create a normal `.vsk` package through the existing Skill package service. The p
       "toolId": "asset.note_create",
       "typeName": "Example.UserTools.AssetNoteCreateTool",
       "source": "AssetNoteCreateTool.cs",
-      "description": "when-to-use: create one new note TextAsset under the managed generated folder. when-NOT-to-use: do not overwrite existing assets, edit scenes, or write outside that folder.",
+      "description": "when-to-use: create one new note TextAsset under the managed generated folder. when-NOT-to-use: do not overwrite existing assets or write outside that folder.",
       "inputSchema": {
         "type": "object",
         "properties": {
           "targetAssetPath": { "type": "string", "description": "New .txt path under Assets/VRCForgeGenerated/ToolNotes/." },
           "note": { "type": "string", "description": "Text to persist in the new TextAsset." }
         },
-        "required": ["targetAssetPath", "note"],
+        "required": ["note", "targetAssetPath"],
         "additionalProperties": false
       }
     }
@@ -112,7 +112,25 @@ namespace Example.UserTools
 }
 ```
 
-For richer schema projection, put `VRCForgeInput` attributes on the request object's public fields or properties and keep the descriptor's `inputSchema` in agreement. Validate values in the handler too. Return structured data or the existing VRCForge result object; do not create a second approval or result protocol. The first user-tool wrapper still requires approval even when a handler describes itself as read-only; the attribute never bypasses Gateway approval.
+Generate the descriptor from the compiled source during authoring, before exporting the package. Run this snippet in your authoring code with `Newtonsoft.Json.Linq` and `VRCForge.Core.MCP` imported:
+
+```csharp
+var tool = VRCForgeToolRegistry.Describe(typeof(Example.UserTools.AssetNoteCreateTool));
+var packageDescriptor = new JObject {
+    ["schema"] = "vrcforge.user_unity_tools.v1",
+    ["tools"] = new JArray(new JObject {
+        ["toolId"] = tool.Name,
+        ["typeName"] = tool.ToolType.FullName,
+        ["source"] = "AssetNoteCreateTool.cs",
+        ["description"] = tool.Description,
+        ["inputSchema"] = tool.CreateInputSchema()
+    })
+};
+```
+
+Save `packageDescriptor.ToString()` as the JSON file declared by `entrypoints.unityTools` in your authoring package folder, then export through the existing Skill package service. The JSON above illustrates the generated result; regenerate it after changing the C# metadata instead of maintaining a second schema by hand. The registry includes parameter descriptions, required fields in its stable order, enum values and any `DefaultLiteral` metadata. A C# property initializer alone does not declare a schema default. Existing packages still require their declared schema to match the compiled registry exactly.
+
+Put `VRCForgeInput` attributes on the request object's public fields or properties. Validate values in the handler too. Return structured data or the existing VRCForge result object; do not create a second approval or result protocol. The first user-tool wrapper still requires approval even when a handler describes itself as read-only; the attribute never bypasses Gateway approval.
 
 ## Install and readback
 

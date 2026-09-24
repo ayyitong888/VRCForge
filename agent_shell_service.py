@@ -1707,6 +1707,12 @@ def summarize_shell_result(result: dict[str, Any]) -> dict[str, Any]:
 
 
 def normalize_execution_mode(value: Any) -> str:
+    """Three permission tiers:
+
+    - "approval"          受限模式（沙箱）：高风险 shell 与写操作逐项审批。
+    - "auto"              自动审批：审批仍然生成并留痕，但删除和项目外路径仍需确认。
+    - "roslyn_full_auto"  兼容旧配置名的完全权限：自动审批所有请求，不启用动态代码执行。
+    """
     mode = str(value or "approval").strip().lower().replace("-", "_")
     if mode in {
         "roslyn_full_auto",

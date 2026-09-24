@@ -1,3 +1,4 @@
+import { formatPayload } from "../../lib/conversation-utils";
 import { Check, Copy, Eye, EyeOff, FileUp, Loader2, Plus, RefreshCw, Shield, Trash2, X } from "lucide-react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { useEffect, useRef, useState, type ReactNode } from "react";
@@ -848,19 +849,6 @@ function SkillOutputBlock({ label, value, danger = false }: { label: string; val
   );
 }
 
-function formatPayload(value: unknown): string {
-  if (value === null || value === undefined) {
-    return "-";
-  }
-  if (typeof value === "string") {
-    return value;
-  }
-  try {
-    return JSON.stringify(value, null, 2);
-  } catch {
-    return String(value);
-  }
-}
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   if (value && typeof value === "object" && !Array.isArray(value)) {

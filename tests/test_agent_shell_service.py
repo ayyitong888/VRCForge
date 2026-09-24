@@ -11,6 +11,10 @@ from typing import Any
 
 import pytest
 
+import agent_gateway
+import agent_shell_service
+
+
 from agent_command_safety import is_path_within, strip_quotes, tokenize_command
 from agent_gateway import AgentGateway, AgentGatewayError
 from agent_shell_service import (
@@ -24,6 +28,19 @@ from agent_shell_service import (
     stable_hash,
 )
 from agent_unity_path_guard import UnityPathGuard
+
+
+@pytest.mark.parametrize("aliases,expected", [
+    (("roslyn_full_auto", "full_auto", "roslyn_auto", "advanced", "full", "full_permission"), "roslyn_full_auto"),
+    (("auto", "auto_approve", "auto_approval", "autoapprove"), "auto"),
+    (("approval", "unknown", "", None, False, 0, 123), "approval"),
+])
+def test_gateway_and_shell_share_execution_mode_policy(aliases, expected):
+    assert agent_gateway.normalize_execution_mode is agent_shell_service.normalize_execution_mode
+    for value in aliases:
+        assert agent_gateway.normalize_execution_mode(value) == expected
+        if isinstance(value, str):
+            assert agent_gateway.normalize_execution_mode("  " + value.upper().replace("_", "-") + "  ") == expected
 
 
 @dataclass

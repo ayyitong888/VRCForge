@@ -23,6 +23,49 @@ from avatar_tuning_workflow_service import (
 from prepared_unity_execution import prepared_call, prepared_evidence
 
 
+def test_dashboard_tuning_policy_entries_share_store_owner():
+    import dashboard_server as dashboard
+
+    assert dashboard.normalize_locked_blendshape_item is AvatarTuningStoreService.normalize_locked_item
+    assert dashboard.trim_presets_for_avatar is AvatarTuningStoreService.trim_presets_for_avatar
+
+
+@pytest.mark.parametrize("item, expected", [
+    (None, None),
+    ([], None),
+    ({"blendshapeName": "  "}, None),
+    ({"rendererPath": " Face ", "renderer_path": "ignored", "blendshapeName": " Smile ",
+      "blendshape_name": "ignored", "blendshape": "ignored"},
+     {"rendererPath": "Face", "blendshapeName": "Smile"}),
+    ({"rendererPath": "", "renderer_path": " Face ", "blendshapeName": "",
+      "blendshape_name": " Smile ", "blendshape": "ignored"},
+     {"rendererPath": "Face", "blendshapeName": "Smile"}),
+    ({"blendshape": " Smile "}, {"rendererPath": "", "blendshapeName": "Smile"}),
+])
+def test_dashboard_lock_normalization_preserves_field_precedence(item, expected):
+    import dashboard_server as dashboard
+
+    assert dashboard.normalize_locked_blendshape_item(item) == expected
+
+
+@pytest.mark.parametrize("limit, retained", [(0, 10), (None, 10), (-2, 1), (1, 1), ("2", 2), (101, 100)])
+def test_dashboard_preset_trim_preserves_limits_order_and_references(limit, retained):
+    import dashboard_server as dashboard
+
+    avatar_a = [{"id": index, "avatar_path": "A", "avatar_name": "ignored"} for index in range(102)]
+    avatar_b = {"id": "b", "avatar_name": "B"}
+    global_preset = {"id": "global"}
+    presets = [avatar_a[0], avatar_b, global_preset, *avatar_a[1:]]
+    original = list(presets)
+    expected = [*avatar_a[-retained:], avatar_b, global_preset]
+    result = dashboard.trim_presets_for_avatar(presets, limit)
+    assert result == expected
+    assert all(actual is source for actual, source in zip(result, expected))
+    assert presets == original
+    assert result is not presets
+    assert dashboard.trim_presets_for_avatar([], limit) == []
+
+
 LEGACY_DASHBOARD_AVATAR_ROOTS = {
     "scan_scene_avatars_sync",
     "read_avatars_sync",

@@ -11085,19 +11085,7 @@ def make_tuning_id(prefix: str) -> str:
     return f"{prefix}_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')}"
 
 
-def normalize_locked_blendshape_item(item: Any) -> dict[str, str] | None:
-    if not isinstance(item, dict):
-        return None
-
-    renderer_path = str(item.get("rendererPath") or item.get("renderer_path") or "").strip()
-    blendshape_name = str(item.get("blendshapeName") or item.get("blendshape_name") or item.get("blendshape") or "").strip()
-    if not blendshape_name:
-        return None
-
-    return {
-        "rendererPath": renderer_path,
-        "blendshapeName": blendshape_name,
-    }
+normalize_locked_blendshape_item = AvatarTuningStoreService.normalize_locked_item
 
 
 def normalize_locked_blendshape_list(items: list[dict[str, Any]] | list[Any]) -> list[dict[str, str]]:
@@ -11458,24 +11446,7 @@ def extract_tuning_thumbnail_paths(visual_proof: dict[str, Any] | None) -> dict[
 
 
 
-def trim_presets_for_avatar(presets: list[dict[str, Any]], max_presets: int) -> list[dict[str, Any]]:
-    safe_limit = max(1, min(int(max_presets or 10), 100))
-    grouped: dict[str, list[dict[str, Any]]] = {}
-    ordered_keys: list[str] = []
-    for preset in presets:
-        avatar_key = str(preset.get("avatar_path") or preset.get("avatar_name") or "__global__")
-        if avatar_key not in grouped:
-            grouped[avatar_key] = []
-            ordered_keys.append(avatar_key)
-        grouped[avatar_key].append(preset)
-
-    trimmed: list[dict[str, Any]] = []
-    for avatar_key in ordered_keys:
-        avatar_presets = grouped[avatar_key]
-        if len(avatar_presets) > safe_limit:
-            avatar_presets = avatar_presets[-safe_limit:]
-        trimmed.extend(avatar_presets)
-    return trimmed
+trim_presets_for_avatar = AvatarTuningStoreService.trim_presets_for_avatar
 
 
 

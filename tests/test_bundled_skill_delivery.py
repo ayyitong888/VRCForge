@@ -129,18 +129,18 @@ def test_reviewed_guide_version_import_updates_prior_immutable_version(app_profi
     shutil.copytree(delivery.bundled_source_dir(), old_source)
     old_manifest_path = old_source / "manifest.json"
     old_manifest = json.loads(old_manifest_path.read_text(encoding="utf-8"))
-    old_manifest["version"] = "1.0.1"
+    old_manifest["version"] = "1.0.2"
     old_manifest_path.write_text(json.dumps(old_manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     service = SkillPackageService(gateway.user_constraints_path.parent / "skill-packages", vrcforge_version="1.8.5")
-    old_archive = service.export_dev(old_source, tmp_path / "guide-1.0.1.vsk").package_path
+    old_archive = service.export_dev(old_source, tmp_path / "guide-1.0.2.vsk").package_path
     old_result = app.SKILL_PACKAGE_CONTROLLER.import_package({"packagePath": str(old_archive), "devMode": True, "projectToUserSkills": True})
     assert old_result["ok"] and old_result["projectedSkill"]["name"] == delivery.SKILL_NAME
 
-    current_archive = service.export_dev(delivery.bundled_source_dir(), tmp_path / "guide-1.0.2.vsk").package_path
+    current_archive = service.export_dev(delivery.bundled_source_dir(), tmp_path / "guide-1.0.3.vsk").package_path
     current_result = app.SKILL_PACKAGE_CONTROLLER.import_package({"packagePath": str(current_archive), "devMode": True, "projectToUserSkills": True})
     assert current_result["ok"] and current_result["projectedSkill"]["name"] == delivery.SKILL_NAME
     installed = service.load_registry()["skills"][delivery.PACKAGE_ID]
-    assert installed["version"] == "1.0.2"
+    assert installed["version"] == "1.0.3"
     projected = gateway.skills.user_skills_dir / delivery.SKILL_NAME / "references" / "user-tool-author-guide.md"
     assert projected.read_bytes() == (delivery.bundled_source_dir() / "references" / "user-tool-author-guide.md").read_bytes()
 
@@ -204,8 +204,10 @@ def test_backend_builder_reads_utf8_bomless_manifest_with_powershell():
     assert __import__("base64").b64decode(completed.stdout.strip()).decode("utf-8") == expected_name
 
 
-def test_user_tool_author_example_compiles_with_real_core_attributes(tmp_path: Path):
-    """The documented write example must compile against the shipped attributes."""
+@pytest.fixture(scope="module")
+def author_example_runtime(tmp_path_factory):
+    """Compile the documented source and generator against the actual registry."""
+    tmp_path = tmp_path_factory.mktemp("author-example-runtime")
     guide = (delivery.bundled_source_dir() / "references" / "user-tool-author-guide.md").read_text(encoding="utf-8")
     match = re.search(r"```csharp\n(?P<source>.*?)\n```", guide, re.DOTALL)
     assert match, "author guide is missing its C# example"
@@ -238,12 +240,52 @@ namespace UnityEditor {
     attrs = [
         ROOT / "Assets/VRCForge/Core/MCP/VRCForgeCommandAttribute.cs",
         ROOT / "Assets/VRCForge/Core/MCP/VRCForgeInputAttribute.cs",
+        ROOT / "Assets/VRCForge/Core/MCP/VRCForgeParameterSchema.cs",
+        ROOT / "Assets/VRCForge/Core/MCP/VRCForgeToolRegistry.cs",
     ]
+    snippets = re.findall(r"```csharp\n(.*?)\n```", guide, re.DOTALL)
+    generator = snippets[1] if len(snippets) > 1 else "JObject packageDescriptor = null;"
+    probe = tmp_path / "Probe.cs"
+    probe.write_text(
+        "using System; using Newtonsoft.Json.Linq; using VRCForge.Core.MCP;\n"
+        "internal static class Program { public static void Main(string[] args) {\n"
+        + generator
+        + '\nvar runtime = VRCForgeToolRegistry.Describe(typeof(Example.UserTools.AssetNoteCreateTool));\n'
+        + 'var expected = JObject.Parse(System.IO.File.ReadAllText(args[0]));\n'
+        + 'if (!JToken.DeepEquals(expected["tools"][0]["inputSchema"], runtime.CreateInputSchema())) '
+        + 'throw new Exception("Documented inputSchema differs from runtime: " + runtime.CreateInputSchema());\n'
+        + 'Console.WriteLine(new JObject { ["runtimeSchema"] = runtime.CreateInputSchema(), '
+        + '["runtimeDescription"] = runtime.Description, ["generated"] = packageDescriptor }.ToString());\n}} ',
+        encoding="utf-8",
+    )
+    descriptor = json.loads(re.search(r"```json\n(.*?)\n```", guide, re.DOTALL).group(1))
+    expected = tmp_path / "descriptor.json"
+    expected.write_text(json.dumps(descriptor), encoding="utf-8")
     command = [
-        str(dotnet_root / "dotnet.exe"), str(compiler), "-nologo", "-target:library",
+        str(dotnet_root / "dotnet.exe"), str(compiler), "-nologo", "-target:exe",
         "-langversion:9.0", f"-out:{output}",
         *[f"-r:{path}" for path in refs[-1].glob("*.dll")], f"-r:{newtonsoft}",
-        *(str(path) for path in attrs), str(stubs), str(source),
+        *(str(path) for path in attrs), str(stubs), str(source), str(probe),
     ]
     result = subprocess.run(command, capture_output=True, text=True, timeout=60)
     assert result.returncode == 0, result.stdout + result.stderr
+    shutil.copy2(newtonsoft, tmp_path / newtonsoft.name)
+    output.with_suffix(".runtimeconfig.json").write_text(json.dumps({"runtimeOptions": {
+        "tfm": "net8.0", "framework": {"name": "Microsoft.NETCore.App", "version": "8.0.0"},
+    }}), encoding="utf-8")
+    result = subprocess.run([str(dotnet_root / "dotnet.exe"), str(output), str(expected)],
+                            capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
+    return descriptor, json.loads(result.stdout)
+
+
+def test_user_tool_author_example_compiles_with_real_core_attributes(author_example_runtime):
+    descriptor, actual = author_example_runtime
+    # Compare all generated fields, including descriptions/defaults and required order.
+    assert descriptor["tools"][0]["inputSchema"] == actual["runtimeSchema"]
+    assert descriptor["tools"][0]["description"] == actual["runtimeDescription"]
+
+
+def test_user_tool_author_generator_emits_runtime_descriptor(author_example_runtime):
+    descriptor, actual = author_example_runtime
+    assert actual["generated"] == descriptor, "Execute the documented descriptor generator"

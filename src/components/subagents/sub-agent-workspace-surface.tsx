@@ -1,3 +1,4 @@
+import { formatPayload } from "../../lib/conversation-utils";
 import { Ban, Check, CornerDownRight, Loader2, RefreshCw, X } from "lucide-react";
 import { useMemo } from "react";
 import { useTranslation } from "react-i18next";
@@ -31,19 +32,6 @@ function taskStyleByStatus(task: SubAgentTask): "warn" | "ok" | "muted" | "dange
   return subAgentStatusTone(task.status);
 }
 
-function formatPayload(value: unknown): string {
-  if (value === null || value === undefined) {
-    return "-";
-  }
-  if (typeof value === "string") {
-    return value;
-  }
-  try {
-    return JSON.stringify(value, null, 2);
-  } catch {
-    return String(value);
-  }
-}
 
 function formatRevision(value: number | undefined): string {
   return typeof value === "number" && Number.isFinite(value) ? String(value) : "-";

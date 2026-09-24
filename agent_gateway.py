@@ -51,6 +51,7 @@ from agent_shell_service import (
     ShellApprovalPorts,
     ShellApprovalRequest,
     ShellProcessPorts,
+    normalize_execution_mode,
     summarize_shell_result as summarize_owned_shell_result,
 )
 from agent_shell_process_supervisor import ShellSessionPorts
@@ -10385,21 +10386,6 @@ def yaml_scalar(value: str) -> str:
 def remove_tree(path: Path) -> None:
     if path.exists():
         shutil.rmtree(path)
-
-
-def normalize_execution_mode(value: Any) -> str:
-    """Three permission tiers:
-
-    - "approval"          受限模式（沙箱）：高风险 shell 与写操作逐项审批。
-    - "auto"              自动审批：审批仍然生成并留痕，但删除和项目外路径仍需确认。
-    - "roslyn_full_auto"  兼容旧配置名的完全权限：自动审批所有请求，不启用动态代码执行。
-    """
-    mode = str(value or "approval").strip().lower().replace("-", "_")
-    if mode in {"roslyn_full_auto", "full_auto", "roslyn_auto", "advanced", "full", "full_permission"}:
-        return "roslyn_full_auto"
-    if mode in {"auto", "auto_approve", "auto_approval", "autoapprove"}:
-        return "auto"
-    return "approval"
 
 
 def normalize_checkpoint_archive_max_size_mb(value: Any) -> int:

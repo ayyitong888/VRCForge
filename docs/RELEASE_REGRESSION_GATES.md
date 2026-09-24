@@ -276,3 +276,29 @@ Regression: `tests/test_bundled_skill_delivery.py`.
   do not substitute for App acceptance or guarantee model compliance.
 
 Regression: `tests/test_runtime_planner_service.py`.
+
+### User-tool authoring descriptor parity
+
+- Compile the documented C# example and execute its descriptor-generation
+  snippet against the actual tool registry. Compare the complete generated
+  descriptor with the documented JSON, including descriptions and required
+  parameter order; do not weaken runtime validation to accept a stale example.
+- Generate handler metadata and input schema through the existing registry
+  instead of maintaining a second hand-written definition.
+- Increment the bundled guide version when changing delivered content and
+  verify an installed older guide upgrades through the normal import path.
+
+Regression: `tests/test_bundled_skill_delivery.py`.
+
+### Shared execution and tuning policies
+
+- Gateway and Shell must reference the same execution-mode normalizer;
+  preserve existing aliases, defaults and unknown-value behavior.
+- Dashboard tuning helpers must reference the tuning store's normalization
+  and retention rules. Preserve locked-item field precedence, avatar grouping,
+  retention bounds and existing Shader-preset behavior.
+- Shared presentation formatting must retain null, string, structured and
+  unserializable-value behavior without becoming a runtime policy source.
+
+Regression: `tests/test_agent_shell_service.py`,
+`tests/test_avatar_tuning_state_service.py` and existing skill/sub-agent UI checks.
