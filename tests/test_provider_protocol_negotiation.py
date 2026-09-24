@@ -42,6 +42,17 @@ def test_exact_deepseek_models_never_silently_change_model() -> None:
     ]
 
 
+def test_official_deepseek_flash_alias_keeps_model_id_while_negotiating_protocols() -> None:
+    assert _pairs("deepseek", "deepseek-flash", "auto") == [
+        ("deepseek-flash", "responses"),
+        ("deepseek-flash", "messages"),
+        ("deepseek-flash", "chat_completions"),
+    ]
+    assert _pairs("deepseek", "deepseek-flash", "chat_completions") == [
+        ("deepseek-flash", "chat_completions"),
+    ]
+
+
 @pytest.mark.parametrize(
     "api_type",
     ["responses", "chat_completions", "messages", "generate_content"],

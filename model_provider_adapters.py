@@ -5,6 +5,7 @@ from __future__ import annotations
 from provider_protocol_negotiation import (
     DEEPSEEK_AUTO_MODEL,
     DEEPSEEK_FLASH_MODEL,
+    DEEPSEEK_FLASH_MODELS,
     DEEPSEEK_PRO_MODEL,
     provider_protocol_candidates,
     supported_provider_api_types,
@@ -58,7 +59,7 @@ def normalize_provider_api_type(provider: str, model: str, api_type: object) -> 
     # DeepSeek model identifiers are protocol values, not display labels.  Do
     # not silently canonicalize a near-match onto a different transport.
     model_id = str(model).strip()
-    if api_type is None and provider_id == "deepseek" and model_id in {DEEPSEEK_FLASH_MODEL, DEEPSEEK_PRO_MODEL}:
+    if api_type is None and provider_id == "deepseek" and model_id in DEEPSEEK_FLASH_MODELS | {DEEPSEEK_PRO_MODEL}:
         requested = "auto"
     else:
         requested = legacy_provider_api_type(provider_id) if api_type is None else str(api_type).strip().lower()
@@ -106,15 +107,16 @@ def provider_model_descriptor(provider: str, model: str, api_type: object) -> di
             modelContextWindow=1_000_000,
             maxOutputTokens=384_000,
         )
-    elif provider_id == "deepseek" and model_id == DEEPSEEK_FLASH_MODEL:
+    elif provider_id == "deepseek" and model_id in DEEPSEEK_FLASH_MODELS:
         descriptor.update(
             supportedApiTypes=["responses", "messages", "chat_completions"],
             capabilities=["text", "structured_json", "reasoning", "tools"],
             capabilitySource="official_registry",
-            modelContextWindow=1_000_000,
-            maxOutputTokens=384_000,
-            modelVersion="DeepSeek-V4-Flash-0731",
         )
+        if model_id == DEEPSEEK_FLASH_MODEL:
+            descriptor["modelContextWindow"] = 1_000_000
+            descriptor["maxOutputTokens"] = 384_000
+            descriptor["modelVersion"] = "DeepSeek-V4-Flash-0731"
     elif provider_id == "deepseek" and model_id == DEEPSEEK_PRO_MODEL:
         descriptor.update(
             supportedApiTypes=["responses", "messages", "chat_completions"],

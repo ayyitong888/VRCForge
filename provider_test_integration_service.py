@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Callable, Protocol
 
 from provider_configuration_service import (
@@ -62,6 +64,7 @@ class RuntimeRequestFactoryPort(Protocol):
         max_output_tokens: int,
         mode: str,
         structured_output: bool,
+        cancel_event: Any | None = None,
     ) -> Any: ...
 
 
@@ -72,6 +75,9 @@ class ProviderTextProbePort(Protocol):
         prompt: str,
         *,
         structured: bool = False,
+        cancel_event: Any | None = None,
+        instructions: str | None = None,
+        max_output_tokens: int | None = None,
     ) -> str: ...
 
 
@@ -303,7 +309,12 @@ class ProviderTextProbeRunner:
         prompt: str,
         *,
         structured: bool = False,
+        cancel_event: Any | None = None,
+        instructions: str | None = None,
+        max_output_tokens: int | None = None,
     ) -> str:
+        if cancel_event is not None and cancel_event.is_set():
+            raise RuntimeError("Provider review was cancelled.")
         self._policy.validate_provider_api_key(config.api_key)
         _requested_api_type, resolved_api_type = self._policy.normalize_provider_api_type(
             config.provider,
@@ -316,17 +327,23 @@ class ProviderTextProbeRunner:
                 self._policy.runtime_request_factory(
                     model=config.model,
                     prompt=prompt,
-                    instructions=(
+                    instructions=instructions if instructions is not None else (
                         "You are a provider connectivity probe. Return only the "
                         "requested result."
                     ),
                     reasoning_effort=config.thinking_level,
-                    max_output_tokens=512 if structured else 64,
+                    max_output_tokens=max_output_tokens if max_output_tokens is not None else (512 if structured else 64),
                     mode="probe",
                     structured_output=structured,
+                    **({"cancel_event": cancel_event} if cancel_event is not None else {}),
                 )
             )
             return response.text
+        settings = self.probe_settings(config)
+        if instructions is not None:
+            settings.llm_system_instruction = instructions
+        if max_output_tokens is not None:
+            settings.llm_max_output_tokens = max_output_tokens
         if resolved_api_type == "generate_content":
             vertex_location: tuple[str, str] | None = None
             if config.provider == "vertexai":
@@ -334,13 +351,12 @@ class ProviderTextProbeRunner:
                     config.base_url
                 )
             client = self._sdk.google_client(config, vertex_location)
-            try:
+            with _cancellable_probe_client(client, cancel_event):
                 generate_kwargs: dict[str, Any] = {
                     "model": config.model,
                     "contents": prompt,
                 }
-                if config.thinking_level:
-                    settings = self.probe_settings(config)
+                if config.thinking_level or instructions is not None or max_output_tokens is not None:
                     generate_config = self._policy.build_gemini_generate_config(
                         settings,
                         self._sdk.google_types(),
@@ -349,8 +365,6 @@ class ProviderTextProbeRunner:
                         generate_kwargs["config"] = generate_config
                 response = client.models.generate_content(**generate_kwargs)
                 return str(getattr(response, "text", "") or response)
-            finally:
-                _close_sdk_client(client)
         if resolved_api_type == "messages":
             base_url = (
                 endpoint_for_protocol(config.base_url, "messages", provider=config.provider)
@@ -358,27 +372,25 @@ class ProviderTextProbeRunner:
                 else ""
             )
             client = self._sdk.anthropic_client(config.api_key, base_url)
-            try:
+            with _cancellable_probe_client(client, cancel_event):
                 request_payload = self._policy.build_anthropic_request_payload(
-                    self.probe_settings(config),
+                    settings,
                     prompt,
                 )
                 response = client.messages.create(**request_payload)
                 parts = getattr(response, "content", []) or []
                 texts = [str(getattr(part, "text", "") or "") for part in parts]
                 return "\n".join(text for text in texts if text).strip()
-            finally:
-                _close_sdk_client(client)
         if not config.base_url.strip() and config.provider not in {"openai"}:
             raise RuntimeError("Base URL is empty.")
         kwargs = self._policy.build_openai_compatible_request_payload(
-            self.probe_settings(config),
+            settings,
             prompt,
         )
         if self._policy.model_rejects_fixed_temperature(config.model):
-            kwargs["max_completion_tokens"] = 512
+            kwargs["max_completion_tokens"] = max_output_tokens if max_output_tokens is not None else 512
         else:
-            kwargs["max_tokens"] = 64
+            kwargs["max_tokens"] = max_output_tokens if max_output_tokens is not None else 64
         if structured:
             kwargs["response_format"] = {"type": "json_object"}
         client = self._sdk.openai_client(
@@ -386,15 +398,13 @@ class ProviderTextProbeRunner:
             config.base_url or None,
             30.0,
         )
-        try:
+        with _cancellable_probe_client(client, cancel_event):
             response = client.chat.completions.create(**kwargs)
             choices = getattr(response, "choices", []) or []
             if not choices:
                 return ""
             message = getattr(choices[0], "message", None)
             return str(getattr(message, "content", "") or "")
-        finally:
-            _close_sdk_client(client)
 
     def probe_settings(self, config: ProviderApiConfig) -> Any:
         return self._policy.settings_factory(
@@ -509,7 +519,29 @@ def _default_openai_client(
     )
 
 
+@contextmanager
+def _cancellable_probe_client(client: Any, cancel_event: Any | None):
+    from vrchat_blendshape_agent import _start_provider_cancel_watcher
+
+    stopped, watcher = _start_provider_cancel_watcher(
+        SimpleNamespace(close=lambda: _close_sdk_client(client)),
+        cancel_event, name="vrcforge-provider-review-cancel",
+    )
+    try:
+        if cancel_event is not None and cancel_event.is_set():
+            raise RuntimeError("Provider review was cancelled.")
+        yield client
+    finally:
+        stopped.set()
+        if watcher is not None:
+            watcher.join(0.1)
+        _close_sdk_client(client)
+
+
 def _close_sdk_client(client: Any) -> None:
     close = getattr(client, "close", None)
     if callable(close):
-        close()
+        try:
+            close()
+        except Exception:
+            pass

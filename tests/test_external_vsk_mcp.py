@@ -76,10 +76,14 @@ def test_external_vsk_block_lazily_exposes_preview_write_import_and_state_tools(
         assert set(planning) == {
             "vrcforge_preflight_skill_package",
             "vrcforge_preview_path_to_skill",
+            "vrcforge_list_user_unity_tools",
         }
         assert set(execution) == {
             "vrcforge_preflight_skill_package",
             "vrcforge_preview_path_to_skill",
+            "vrcforge_list_user_unity_tools",
+            "vrcforge_install_user_unity_tools",
+            "vrcforge_invoke_user_unity_tool",
             "vrcforge_import_skill_package",
             "vrcforge_export_skill_package",
             "vrcforge_set_skill_package_enabled",

@@ -20,15 +20,11 @@ import type { MouseEvent as ReactMouseEvent, ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { TEMP_CHATS_COLLAPSE_KEY, type ActiveView, type SettingsSection } from "../../lib/app-view";
 import type { ChatThread } from "../../lib/chat-types";
-import type { ChatSidebarGroups } from "../../lib/chat-thread";
+import type { SidebarChatGroupsWithTimes } from "../../lib/sidebar-view";
 import { normalizeProjectPathKey, projectKey } from "../../lib/project-path";
 import { groupSidebarProjects } from "../../lib/sidebar-project-order";
 import { cn } from "../../lib/utils";
 import { SidebarChat, SidebarProject, SidebarSection } from "./sidebar";
-
-type SidebarChatGroupsWithTimes = ChatSidebarGroups & {
-  times: Map<string, string>;
-};
 
 type SidebarProjectItem = {
   name?: string;
@@ -246,6 +242,7 @@ export function AppSidebar({
                           chatId={chat.id}
                           title={chat.title || t("sidebar.newChat")}
                           meta={chatSidebar.times.get(chat.id) || ""}
+                          activity={chatSidebar.activityByChat.get(chat.id)}
                           active={activeView === "chat" && chat.id === activeChatId}
                           unreadCount={backgroundGoalUnreadByChat[chat.id] || 0}
                           indent
@@ -317,6 +314,7 @@ export function AppSidebar({
                       chatId={chat.id}
                       title={chat.title || t("sidebar.newChat")}
                       meta={chatSidebar.times.get(chat.id) || ""}
+                      activity={chatSidebar.activityByChat.get(chat.id)}
                       active={activeView === "chat" && chat.id === activeChatId}
                       unreadCount={backgroundGoalUnreadByChat[chat.id] || 0}
                       indent
@@ -352,6 +350,7 @@ export function AppSidebar({
                 chatId={chat.id}
                 title={chat.title || t("sidebar.newChat")}
                 meta={chatSidebar.times.get(chat.id) || ""}
+                activity={chatSidebar.activityByChat.get(chat.id)}
                 active={activeView === "chat" && chat.id === activeChatId}
                 unreadCount={backgroundGoalUnreadByChat[chat.id] || 0}
                 pinned={chat.pinned}

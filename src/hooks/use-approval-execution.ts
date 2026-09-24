@@ -85,6 +85,12 @@ export function useApprovalExecution({
     if (approval.goalDeliveryId?.trim()) {
       return;
     }
+    const taskSessionId = approval.taskContext?.sessionId?.trim() || "";
+    const ownerChatId = chatIdForSessionId(taskSessionId);
+    if (!taskSessionId || !ownerChatId) {
+      setRuntimeNotice(t("approval.ownerUnavailable"));
+      return;
+    }
     const target = approval.targetTool || t("approval.thisApproval");
     const reason = revisionReasonText.trim() || t("approval.revisionReason");
     const note = t("approval.revisionNote", { id: approval.id, target });
@@ -104,10 +110,9 @@ export function useApprovalExecution({
       const revisedApproval = payload.approval || approval;
       const safeTarget = revisedApproval.targetTool || approval.targetTool || "";
       const requestedAt = revisedApproval.revisionRequestedAt || new Date().toISOString();
-      const ownerChatId = chatIdForSessionId(revisedApproval.taskContext?.sessionId || "");
-      const revisionChatId = ownerChatId || activeChatId;
-      if (revisionChatId) {
-        appendToChat(revisionChatId, {
+      const revisedOwnerChatId = chatIdForSessionId(revisedApproval.taskContext?.sessionId || "") || ownerChatId;
+      if (revisedOwnerChatId) {
+        appendToChat(revisedOwnerChatId, {
           id: `approval-revision-${approval.id}-${Date.now()}`,
           type: "approval_revision",
           approvalId: approval.id,
@@ -143,7 +148,7 @@ export function useApprovalExecution({
     const pendingTargetTool = pendingApproval?.targetTool || "";
     const taskSessionId = pendingApproval?.taskContext?.sessionId || "";
     const ownerChatId = chatIdForSessionId(taskSessionId);
-    const resultChatId = taskSessionId ? ownerChatId : activeChatId;
+    const resultChatId = taskSessionId ? ownerChatId : "";
     try {
       const payload = await approveAgentApproval(endpoint, approvalId, approvalScope);
       if (payload.continuationError) {
@@ -210,7 +215,7 @@ export function useApprovalExecution({
       const approval = pendingApprovalItems.find((item) => item.id === approvalId);
       const taskSessionId = approval?.taskContext?.sessionId || "";
       const ownerChatId = chatIdForSessionId(taskSessionId);
-      const resultChatId = taskSessionId ? ownerChatId : activeChatId;
+      const resultChatId = taskSessionId ? ownerChatId : "";
       if (resultChatId) {
         appendToChat(resultChatId, {
           id: `result-${approvalId}-${Date.now()}`,

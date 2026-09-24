@@ -15,8 +15,8 @@ namespace VRCForge.Editor
         internal const string CoreIdentity = "vrcforge.unity-core";
         internal const string HandshakeProtocol = "vrcforge.core-handshake.v1";
         internal const string ProductVersion = "1.8.0";
-        internal const string ToolContractVersion = "159";
-        internal const int ToolCount = 95;
+        internal const string ToolContractVersion = "160";
+        internal const int ToolCount = 97;
 
         private static readonly Dictionary<string, string> ExpectedTypes =
             new Dictionary<string, string>(StringComparer.Ordinal)
@@ -116,6 +116,8 @@ namespace VRCForge.Editor
                 { "vrc_user_adjustment_handoff", "VRCForge.Editor.UserAdjustmentHandoffTool" },
                 { "vrc_write_animation_curve", "VRCForge.Editor.WriteAnimationCurveTool" },
                 { "vrc_write_avatar_descriptor", "VRCForge.Editor.WriteAvatarDescriptorTool" },
+                { "vrc_list_user_tools", "VRCForge.Editor.ListUserToolsTool" },
+                { "vrc_invoke_user_tool", "VRCForge.Editor.InvokeUserToolTool" },
             };
 
         private static readonly HashSet<string> ExpectedReadOnlyNames =
@@ -137,6 +139,7 @@ namespace VRCForge.Editor
                 "vrc_read_vrchat_sdk_builder_alerts",
                 "vrc_avatar_upload_readiness",
                 "vrc_scan_inbound_reference_closure",
+                "vrc_list_user_tools",
             };
 
         // Planning exposes direct reads plus tools that Core can execute through
@@ -156,6 +159,7 @@ namespace VRCForge.Editor
                 "vrc_scan_inbound_reference_closure",
                 "vrc_scan_thry_avatar_performance",
                 "vrc_scan_wardrobe",
+                "vrc_list_user_tools",
             };
 
         internal static ISet<string> ExpectedToolNames
@@ -203,17 +207,30 @@ namespace VRCForge.Editor
             return !string.IsNullOrEmpty(toolName) && ExpectedTypes.ContainsKey(toolName);
         }
 
+        internal static bool IsExpectedDeclaration(Type toolType, VRCForgeCommandAttribute attribute)
+        {
+            return toolType != null
+                && attribute != null
+                && IsExpectedIdentity(toolType, attribute.ToolId);
+        }
+
         internal static bool IsExpectedDescriptor(VRCForgeToolDescriptor descriptor)
         {
-            string expectedType;
             return descriptor != null
                 && !string.IsNullOrEmpty(descriptor.Name)
-                && ExpectedTypes.TryGetValue(descriptor.Name, out expectedType)
-                && descriptor.ToolType != null
-                && string.Equals(descriptor.ToolType.FullName, expectedType, StringComparison.Ordinal)
+                && IsExpectedIdentity(descriptor.ToolType, descriptor.Name)
                 && descriptor.Permission == (ExpectedReadOnlyNames.Contains(descriptor.Name)
                     ? VRCForgeCommandAccess.ReadOnly
                     : VRCForgeCommandAccess.RequiresApproval);
+        }
+
+        private static bool IsExpectedIdentity(Type toolType, string toolName)
+        {
+            string expectedType;
+            return toolType != null
+                && !string.IsNullOrEmpty(toolName)
+                && ExpectedTypes.TryGetValue(toolName, out expectedType)
+                && string.Equals(toolType.FullName, expectedType, StringComparison.Ordinal);
         }
     }
 }

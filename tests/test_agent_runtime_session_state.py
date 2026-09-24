@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import json
 import threading
 from pathlib import Path
+
+import pytest
 
 from agent_gateway import AgentGateway
 from agent_runtime_session_state import AgentRuntimeSessionState, AgentRuntimeSessionStatePorts
@@ -89,6 +92,145 @@ def test_restore_append_bootstrap_and_clear_preserve_session_contract() -> None:
     state.clear()
     assert state.session_count() == 0
     assert state.get_session("sess-1") is None
+
+
+def test_final_response_recovery_is_exact_bounded_and_hidden_from_session_transcript() -> None:
+    state, _lock = make_state()
+    response = {
+        "ok": True,
+        "sessionId": "sess-1",
+        "clientTurnId": "turn-0",
+        "status": "completed",
+        "contextCompaction": {"summary": "full summary"},
+        "consumedSteerInputIds": ["steer-1"],
+        "deferredSteerFollowups": [{"inputId": "steer-2", "status": "pending"}],
+        "result": {"value": "preserved"},
+    }
+    state.begin_turn(session_id="sess-1", turn_id="server-0", client_turn_id="turn-0")
+    assert state.final_response(session_id="sess-1", client_turn_id="turn-0")["status"] == "running"
+    assert state.submit_steer(
+        session_id="sess-1", target_client_turn_id="turn-0", input_id="steer-2", message="follow up"
+    )["accepted"] is True
+    late_steers = state.finish_turn(session_id="sess-1", turn_id="server-0", client_turn_id="turn-0")
+    assert late_steers[0]["inputId"] == "steer-2"
+    state.record_final_response(
+        session_id="sess-1", client_turn_id="turn-0", status="completed", response=response
+    )
+
+    recovered = state.final_response(session_id="sess-1", client_turn_id="turn-0")
+    assert recovered["status"] == "completed"
+    assert recovered["response"] == response
+    assert state.get_session("sess-1") is None
+    assert state.final_response(session_id="sess-1", client_turn_id="other")["status"] == "missing"
+
+    for index in range(1, state.MAX_FINAL_RESPONSES + 3):
+        state.record_final_response(
+            session_id="sess-1", client_turn_id=f"turn-{index}", status="completed", response={"index": index}
+        )
+    assert state.final_response(session_id="sess-1", client_turn_id="turn-0")["status"] == "missing"
+    assert state.final_response(session_id="sess-1", client_turn_id="turn-10")["status"] == "completed"
+
+
+def test_final_response_failed_and_finalizing_state_do_not_report_missing() -> None:
+    state, _lock = make_state()
+    state.begin_turn(session_id="sess-2", turn_id="server-2", client_turn_id="turn-2")
+    state.finish_turn(session_id="sess-2", turn_id="server-2", client_turn_id="turn-2")
+    assert state.final_response(session_id="sess-2", client_turn_id="turn-2")["status"] == "running"
+    state.record_final_response(
+        session_id="sess-2",
+        client_turn_id="turn-2",
+        status="failed",
+        response={"ok": False, "status": "failed"},
+        error="provider failed",
+    )
+    failed = state.final_response(session_id="sess-2", client_turn_id="turn-2")
+    assert failed["status"] == "failed"
+    assert failed["error"] == "provider failed"
+    state.clear()
+    assert state.final_response(session_id="sess-2", client_turn_id="turn-2")["status"] == "missing"
+
+
+@pytest.mark.parametrize("next_step", ["pending_approval", "planner_failed"])
+@pytest.mark.parametrize("original_status", [None, "failed"])
+def test_gateway_final_response_cache_preserves_normal_response_shape(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, next_step: str, original_status: str | None,
+) -> None:
+    gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
+    expected = {
+        "ok": True,
+        "sessionId": "sess-normal",
+        "clientTurnId": "client-normal",
+        "observe": {"value": "kept"},
+        "plan": {"nextStep": next_step, "reply": "kept"},
+        "steps": [{"tool": "read", "status": "ok"}],
+        "contextCompaction": {"summary": "kept"},
+    }
+    if original_status is not None:
+        expected["status"] = original_status
+
+    def body(params: dict[str, object], **_kwargs: object) -> dict[str, object]:
+        params["_resolvedRuntimeSessionId"] = "sess-normal"
+        params["_resolvedRuntimeTurnId"] = "server-normal"
+        params["_resolvedRuntimeClientTurnId"] = "client-normal"
+        return expected
+
+    monkeypatch.setattr(gateway, "_runtime_message_impl_body", body)
+    result = gateway._runtime_message_impl({})
+    assert result == expected
+    recovered = gateway.get_runtime_session("sess-normal", client_turn_id="client-normal")
+    assert recovered["status"] == "completed"
+    assert recovered["response"] == expected
+
+
+def test_gateway_early_exception_converges_and_duplicate_owner_cannot_overwrite(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
+
+    def early_failure(params: dict[str, object], **_kwargs: object) -> dict[str, object]:
+        params["_resolvedRuntimeSessionId"] = "sess-early"
+        params["_resolvedRuntimeTurnId"] = "server-early"
+        params["_resolvedRuntimeClientTurnId"] = "client-early"
+        assert gateway.runtime_sessions.begin_turn(
+            session_id="sess-early", turn_id="server-early", client_turn_id="client-early"
+        )
+        raise RuntimeError("early failure")
+
+    monkeypatch.setattr(gateway, "_runtime_message_impl_body", early_failure)
+    with pytest.raises(RuntimeError, match="early failure"):
+        gateway._runtime_message_impl({})
+    early = gateway.get_runtime_session("sess-early", client_turn_id="client-early")
+    assert early["status"] == "failed"
+    assert early["response"]["plan"]["nextStep"] == "failed"
+
+    gateway.runtime_sessions.record_final_response(
+        session_id="sess-duplicate", client_turn_id="client-duplicate",
+        status="completed", response={"sentinel": "original"},
+    )
+    assert gateway.runtime_sessions.begin_turn(
+        session_id="sess-duplicate", turn_id="server-existing", client_turn_id="client-duplicate"
+    )
+
+    def duplicate_failure(params: dict[str, object], **_kwargs: object) -> dict[str, object]:
+        params["_resolvedRuntimeSessionId"] = "sess-duplicate"
+        params["_resolvedRuntimeTurnId"] = "server-new"
+        params["_resolvedRuntimeClientTurnId"] = "client-duplicate"
+        assert not gateway.runtime_sessions.begin_turn(
+            session_id="sess-duplicate", turn_id="server-new", client_turn_id="client-duplicate"
+        )
+        raise RuntimeError("duplicate owner")
+
+    monkeypatch.setattr(gateway, "_runtime_message_impl_body", duplicate_failure)
+    with pytest.raises(RuntimeError, match="duplicate owner"):
+        gateway._runtime_message_impl({})
+    gateway.runtime_sessions.finish_turn(
+        session_id="sess-duplicate", turn_id="server-existing", client_turn_id="client-duplicate"
+    )
+    gateway.runtime_sessions.record_final_response(
+        session_id="sess-duplicate", client_turn_id="client-duplicate",
+        status="completed", response={"sentinel": "original"},
+    )
+    assert gateway.get_runtime_session("sess-duplicate", client_turn_id="client-duplicate")["response"] == {"sentinel": "original"}
 
 
 def test_internal_tool_blocks_are_session_scoped_and_core_cannot_be_unloaded() -> None:
@@ -315,3 +457,254 @@ def test_concurrent_reuse_of_active_client_turn_is_rejected_without_replacing_ow
         input_id="late-b",
         message="late",
     )["reason"] == "turn_not_active"
+
+
+def test_native_conversation_is_private_and_tracks_pending_calls() -> None:
+    state, _lock = make_state()
+    snapshot = state.begin_native_turn(
+        "native-1", binding="project|model|protocol|endpoint", turn_id="turn-1", message="hello"
+    )
+    assert snapshot == {
+        "binding": "project|model|protocol|endpoint",
+        "turnId": "turn-1",
+        "messages": [{"role": "user", "content": "hello"}],
+        "activeTurnStart": 0,
+    }
+    state.append_native_assistant(
+        "native-1",
+        binding="project|model|protocol|endpoint",
+        message={
+            "role": "assistant",
+            "content": None,
+            "reasoning_content": "private reasoning",
+            "tool_calls": [{
+                "id": "call-1", "type": "function",
+                "function": {"name": "inspect", "arguments": "{not-json"},
+            }],
+        },
+    )
+    assert state.native_conversation("native-1", binding="project|model|protocol|endpoint")["messages"][-1]["reasoning_content"] == "private reasoning"
+    assert state.session_summary("native-1") == {"turnCount": 0, "restoredFromTranscript": False}
+    assert state.get_session("native-1") is None
+    with pytest.raises(ValueError, match="pending"):
+        state.begin_native_turn("native-1", binding="other", turn_id="turn-2", message="blocked")
+
+
+def test_native_conversation_settles_multiple_calls_and_rejects_orphans_and_duplicates() -> None:
+    state, _lock = make_state()
+    state.begin_native_turn("s", binding="b", turn_id="t", message="u")
+    state.append_native_assistant(
+        "s", binding="b", message={"role": "assistant", "content": None, "tool_calls": [
+            {"id": "a", "type": "function", "function": {"name": "one", "arguments": "raw"}},
+            {"id": "b", "type": "function", "function": {"name": "two", "arguments": "{}"}},
+        ]}
+    )
+    with pytest.raises(ValueError, match="unknown"):
+        state.settle_native_call("s", binding="b", call_id="missing", content="x")
+    state.settle_native_call("s", binding="b", call_id="a", content="one-result")
+    with pytest.raises(ValueError, match="already"):
+        state.settle_native_call("s", binding="b", call_id="a", content="again")
+    with pytest.raises(ValueError, match="pending"):
+        state.append_native_assistant("s", binding="b", message={"role": "assistant", "content": "no"})
+    state.settle_native_call("s", binding="b", call_id="b", content="two-result")
+    state.append_native_assistant("s", binding="b", message={"role": "assistant", "content": "done"})
+    assert [m["role"] for m in state.native_conversation("s", binding="b")["messages"]] == [
+        "user", "assistant", "tool", "tool", "assistant"
+    ]
+
+
+def test_native_conversation_same_turn_is_idempotent_and_binding_changes_after_settle() -> None:
+    state, _lock = make_state()
+    first = state.begin_native_turn("s", binding="b", turn_id="t", message="u")
+    assert state.begin_native_turn("s", binding="b", turn_id="t", message="different") == first
+    continued = state.begin_native_turn("s", binding="b", turn_id="t2", message="next")
+    assert continued["messages"] == [
+        {"role": "user", "content": "u"},
+        {"role": "user", "content": "next"},
+    ]
+    with pytest.raises(ValueError, match="non-empty"):
+        state.begin_native_turn("s", binding="", turn_id="t2", message="x")
+    changed = state.begin_native_turn("s", binding="new", turn_id="t2", message="new-u")
+    assert changed == {"binding": "new", "turnId": "t2", "messages": [{"role": "user", "content": "new-u"}], "activeTurnStart": 0}
+
+
+def test_native_conversation_size_rejection_is_atomic_and_cleanup_releases_private_state() -> None:
+    state, _lock = make_state()
+    state.begin_native_turn("s", binding="b", turn_id="t", message="u")
+    before = state.native_conversation("s", binding="b")
+    with pytest.raises(ValueError, match="size"):
+        state.append_native_assistant("s", binding="b", message={"role": "assistant", "content": "x" * (2 * 1024 * 1024)})
+    assert state.native_conversation("s", binding="b") == before
+    state.clear()
+    assert state.native_conversation("s", binding="b") is None
+    state.begin_native_turn("s", binding="b", turn_id="t", message="u")
+    state.discard_session("s")
+    assert state.native_conversation("s", binding="b") is None
+
+
+def test_restore_native_pending_snapshot_settles_then_allows_following_messages() -> None:
+    state, _lock = make_state()
+    snapshot = {
+        "binding": "b", "turnId": "t", "activeTurnStart": 0, "messages": [
+            {"role": "user", "content": "u"},
+            {"role": "assistant", "content": None, "tool_calls": [
+                {"id": "call", "type": "function", "function": {"name": "f", "arguments": "raw"}},
+            ]},
+        ],
+    }
+    assert state.restore_native_conversation("s", binding="b", snapshot=snapshot) == snapshot
+    state.settle_native_call("s", binding="b", call_id="call", content="ok")
+    state.append_native_user("s", binding="b", message="after")
+    assert state.native_conversation("s", binding="b")["messages"][-1] == {"role": "user", "content": "after"}
+
+
+def test_restore_native_rejects_corrupt_orphan_duplicate_and_wrong_binding_snapshots() -> None:
+    state, _lock = make_state()
+    base = {"binding": "b", "turnId": "t", "activeTurnStart": 0, "messages": [{"role": "user", "content": "u"}]}
+    with pytest.raises(ValueError):
+        state.restore_native_conversation("s", binding="wrong", snapshot=base)
+    for bad in (
+        {**base, "messages": [{"role": "user", "content": 1}]},
+        {**base, "messages": [{"role": "tool", "tool_call_id": "orphan", "content": "x"}]},
+        {**base, "messages": [{"role": "assistant", "content": None, "tool_calls": [
+            {"id": "dup", "type": "function", "function": {"name": "f", "arguments": ""}},
+            {"id": "dup", "type": "function", "function": {"name": "g", "arguments": ""}},
+        ]}]},
+    ):
+        with pytest.raises(ValueError):
+            state.restore_native_conversation("s", binding="b", snapshot=bad)
+    assert state.native_conversation("s", binding="b") is None
+
+
+def test_restore_native_prefix_updates_but_never_rolls_back_newer_state() -> None:
+    state, _lock = make_state()
+    first = {"binding": "b", "turnId": "t", "activeTurnStart": 0, "messages": [{"role": "user", "content": "u"}]}
+    newer = {"binding": "b", "turnId": "t2", "activeTurnStart": 0, "messages": [
+        {"role": "user", "content": "u"}, {"role": "user", "content": "new"}
+    ]}
+    state.restore_native_conversation("s", binding="b", snapshot=first)
+    assert state.restore_native_conversation("s", binding="b", snapshot=newer) == newer
+    assert state.restore_native_conversation("s", binding="b", snapshot=first) == newer
+    with pytest.raises(ValueError):
+        state.restore_native_conversation("s", binding="b", snapshot={"binding": "b", "turnId": "x", "activeTurnStart": 0, "messages": [{"role": "user", "content": "other"}]})
+
+
+def test_append_native_user_rejects_pending_and_size_is_atomic() -> None:
+    state, _lock = make_state()
+    state.begin_native_turn("s", binding="b", turn_id="t", message="u")
+    state.append_native_assistant("s", binding="b", message={"role": "assistant", "content": None, "tool_calls": [
+        {"id": "call", "type": "function", "function": {"name": "f", "arguments": ""}},
+    ]})
+    with pytest.raises(ValueError, match="pending"):
+        state.append_native_user("s", binding="b", message="blocked")
+    state.settle_native_call("s", binding="b", call_id="call", content="ok")
+    before = state.native_conversation("s", binding="b")
+    with pytest.raises(ValueError, match="size"):
+        state.append_native_user("s", binding="b", message="x" * (2 * 1024 * 1024))
+    assert state.native_conversation("s", binding="b") == before
+
+
+def test_native_first_turn_hydrates_visible_history_once_and_tracks_active_boundary() -> None:
+    state, _lock = make_state()
+    history = [
+        {"role": "user", "text": "earlier question", "createdAt": "old"},
+        {"role": "system", "text": "display metadata only"},
+        {"role": "agent", "text": "earlier answer", "metadata": {"compact": True}},
+        {"role": "agent", "text": "   ", "metadata": {"displayOnly": True}},
+    ]
+    first = state.begin_native_turn(
+        "s", binding="b", turn_id="t", message="current question", initial_history=history
+    )
+    assert first["activeTurnStart"] == 2
+    assert first["messages"] == [
+        {"role": "user", "content": "earlier question"},
+        {"role": "assistant", "content": "earlier answer"},
+        {"role": "user", "content": "current question"},
+    ]
+    assert state.begin_native_turn(
+        "s", binding="b", turn_id="t", message="duplicate", initial_history=history
+    ) == first
+
+
+def test_native_completed_prefix_replace_is_atomic_cas_and_preserves_current_suffix() -> None:
+    state, _lock = make_state()
+    state.begin_native_turn(
+        "s", binding="b", turn_id="t", message="current", initial_history=[
+            {"role": "user", "text": "old"}, {"role": "agent", "text": "answer"}
+        ]
+    )
+    source = state.native_conversation("s", binding="b")
+    replaced = state.replace_native_completed_prefix(
+        "s", binding="b", expected_snapshot=source, summary="Older continuity"
+    )
+    assert replaced["activeTurnStart"] == 1
+    assert replaced["messages"] == [
+        {"role": "assistant", "content": "Older continuity"},
+        {"role": "user", "content": "current"},
+    ]
+    with pytest.raises(ValueError, match="snapshot"):
+        state.replace_native_completed_prefix(
+            "s", binding="b", expected_snapshot=source, summary="stale"
+        )
+    assert state.native_conversation("s", binding="b") == replaced
+
+
+def test_native_prefix_cas_preserves_pending_current_suffix_and_rejects_invalid_boundary() -> None:
+    state, _lock = make_state()
+    state.begin_native_turn(
+        "s", binding="b", turn_id="t", message="current", initial_history=[
+            {"role": "user", "text": "old"}, {"role": "agent", "text": "answer"}
+        ]
+    )
+    state.append_native_assistant(
+        "s", binding="b", message={"role": "assistant", "content": None, "tool_calls": [
+            {"id": "pending", "type": "function", "function": {"name": "f", "arguments": "raw"}},
+        ]}
+    )
+    source = state.native_conversation("s", binding="b")
+    replaced = state.replace_native_completed_prefix(
+        "s", binding="b", expected_snapshot=source, summary="Older continuity"
+    )
+    assert replaced["messages"][1:] == source["messages"][source["activeTurnStart"]:]
+    assert state._native_pending(replaced) == {"pending"}
+    invalid = dict(replaced)
+    invalid["activeTurnStart"] = 2
+    with pytest.raises(ValueError, match="active turn"):
+        state.restore_native_conversation("other", binding="b", snapshot=invalid)
+
+
+def test_native_stale_precompaction_snapshot_cannot_expand_owner() -> None:
+    state, _lock = make_state()
+    state.begin_native_turn(
+        "s", binding="b", turn_id="t", message="current", initial_history=[
+            {"role": "user", "text": "old"}, {"role": "agent", "text": "answer"}
+        ]
+    )
+    stale = state.native_conversation("s", binding="b")
+    compacted = state.replace_native_completed_prefix(
+        "s", binding="b", expected_snapshot=stale, summary="Older continuity"
+    )
+    assert state.restore_native_conversation("s", binding="b", snapshot=stale) == compacted
+
+
+def test_native_new_binding_hydrates_without_old_private_reasoning_and_pending_old_binding_rejects() -> None:
+    state, _lock = make_state()
+    state.begin_native_turn("s", binding="old", turn_id="t", message="old")
+    state.append_native_assistant(
+        "s", binding="old", message={"role": "assistant", "content": None, "reasoning_content": "private", "tool_calls": [
+            {"id": "pending", "type": "function", "function": {"name": "f", "arguments": "raw"}},
+        ]}
+    )
+    with pytest.raises(ValueError, match="pending"):
+        state.begin_native_turn("s", binding="new", turn_id="new", message="new", initial_history=[])
+    state.settle_native_call("s", binding="old", call_id="pending", content="ok")
+    fresh = state.begin_native_turn(
+        "s", binding="new", turn_id="new", message="new", initial_history=[
+            {"role": "agent", "text": "visible old answer", "reasoning_content": "ignored"}
+        ]
+    )
+    assert "private" not in json.dumps(fresh)
+    assert fresh["messages"] == [
+        {"role": "assistant", "content": "visible old answer"},
+        {"role": "user", "content": "new"},
+    ]

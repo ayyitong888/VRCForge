@@ -61,7 +61,26 @@ def _isolated_gateway(tmp_path) -> Iterator[object]:
 
 
 @contextmanager
-def _planner_loopback(responses: list[dict[str, object]], records: list[dict[str, object]]) -> Iterator[str]:
+def _planner_loopback(
+    responses: list[dict[str, object]],
+    records: list[dict[str, object]],
+    *,
+    native: bool = False,
+) -> Iterator[str]:
+    def native_call(response: dict[str, object]) -> tuple[str, dict[str, object]]:
+        action = str(response.get("action") or "reply")
+        if action == "reply":
+            return "vrcforge_runtime_action", response
+        if action == "enter_execution":
+            return "vrcforge_runtime_action", response
+        if action == "write":
+            name = str(response.get("write_tool") or "")
+            arguments = response.get("write_params") or {}
+        else:
+            name = str(response.get("skill_tool") or "")
+            arguments = response.get("skill_params") or {}
+        return name, arguments if isinstance(arguments, dict) else {}
+
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, _format: str, *_args: object) -> None:
             return
@@ -81,13 +100,28 @@ def _planner_loopback(responses: list[dict[str, object]], records: list[dict[str
                 self.end_headers()
                 return
             payload = responses[len(records) - 1]
-            encoded = json.dumps(payload, ensure_ascii=False)
-            midpoint = max(1, len(encoded) // 2)
-            events = [
-                {"choices": [{"index": 0, "delta": {"content": encoded[:midpoint]}, "finish_reason": None}]},
-                {"choices": [{"index": 0, "delta": {"content": encoded[midpoint:]}, "finish_reason": "stop"}]},
-                {"choices": [], "usage": {"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18}},
-            ]
+            if native:
+                function_name, arguments = native_call(payload)
+                if function_name == "vrcforge_runtime_action":
+                    arguments = {key: payload[key] for key in (
+                        "action", "reply", "summary", "shell_command", "shell_params",
+                        "completion_claim", "correction_for_action_id",
+                    ) if key in payload}
+                encoded = json.dumps(arguments, ensure_ascii=False, separators=(",", ":"))
+                midpoint = max(1, len(encoded) // 2)
+                events = [
+                    {"choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0, "id": f"call-{len(records)}", "type": "function", "function": {"name": function_name, "arguments": encoded[:midpoint]}}]}, "finish_reason": None}]},
+                    {"choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0, "function": {"arguments": encoded[midpoint:]}}]}, "finish_reason": "tool_calls"}]},
+                    {"choices": [], "usage": {"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18}},
+                ]
+            else:
+                encoded = json.dumps(payload, ensure_ascii=False)
+                midpoint = max(1, len(encoded) // 2)
+                events = [
+                    {"choices": [{"index": 0, "delta": {"content": encoded[:midpoint]}, "finish_reason": None}]},
+                    {"choices": [{"index": 0, "delta": {"content": encoded[midpoint:]}, "finish_reason": "stop"}]},
+                    {"choices": [], "usage": {"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18}},
+                ]
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Cache-Control", "no-cache")
@@ -178,8 +212,8 @@ def _provider_protocol_loopback(api_type: str, responses: list[dict[str, object]
 def test_persisted_provider_shape_drives_real_multiturn_loop_to_finish(tmp_path) -> None:
     records: list[dict[str, object]] = []
     responses = [
-        {"action": "skill", "skill_tool": "unity_scan_materials", "skill_params": {}, "continueLoop": True},
-        {"action": "skill", "skill_tool": "health", "skill_params": {}, "continueLoop": True},
+        {"action": "skill", "skill_tool": "read_text_file", "skill_params": {"path": "ProjectSettings/ProjectVersion.txt"}, "continueLoop": True},
+        {"action": "skill", "skill_tool": "read_text_file", "skill_params": {"path": "Packages/manifest.json"}, "continueLoop": True},
         {
             "action": "reply",
             "reply": "The configured planner completed both inspections.",
@@ -187,13 +221,13 @@ def test_persisted_provider_shape_drives_real_multiturn_loop_to_finish(tmp_path)
             "completion_claim": {
                 "satisfied": True,
                 "evidence_action_ids": [
-                    canonical_action_id("skill", "vrcforge_scan_materials", {}),
-                    canonical_action_id("skill", "vrcforge_health", {}),
+                    canonical_action_id("skill", "vrcforge_read_text_file", {"path": "ProjectSettings/ProjectVersion.txt"}),
+                    canonical_action_id("skill", "vrcforge_read_text_file", {"path": "Packages/manifest.json"}),
                 ],
             },
         },
     ]
-    with _planner_loopback(responses, records) as base_url:
+    with _planner_loopback(responses, records, native=True) as base_url:
         config_path = tmp_path / "provider-config.json"
         configured_service = _configured_service(config_path, base_url)
 
@@ -232,16 +266,16 @@ def test_persisted_provider_shape_drives_real_multiturn_loop_to_finish(tmp_path)
     }
     assert result["plan"]["reply"] == "The configured planner completed both inspections."
     assert [step["tool"] for step in result["steps"]] == [
-        "vrcforge_scan_materials",
-        "vrcforge_health",
+        "vrcforge_read_text_file",
+        "vrcforge_read_text_file",
     ]
     assert all(step["status"] == "executed" for step in result["steps"])
     assert len(records) == 3
     assert all(record["path"] == "/v1/chat/completions" for record in records)
     assert all(record["authorization"] == "Bearer fixture-loop-key" for record in records)
     assert all(record["body"]["model"] == "loop-model" for record in records)
-    assert "vrcforge_scan_materials completed" in json.dumps(records[1]["body"]["messages"])
-    assert "vrcforge_health completed" in json.dumps(records[2]["body"]["messages"])
+    assert "vrcforge_read_text_file completed" in json.dumps(records[1]["body"]["messages"])
+    assert "vrcforge_read_text_file completed" in json.dumps(records[2]["body"]["messages"])
     assert result["contextUsage"]["cumulativeInputTokens"] == 33
     assert result["contextUsage"]["cumulativeOutputTokens"] == 21
     assert result["contextUsage"]["cumulativeTotalTokens"] == 54

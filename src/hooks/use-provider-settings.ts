@@ -130,7 +130,7 @@ export function useProviderSettings({
   const savedProviderLabel = apiConfig?.providerLabel || providerDisplayName(savedProvider);
   const savedModel = apiConfig?.model || apiModel || defaultModelForProvider(savedProvider);
   const savedBaseUrl = apiConfig?.base_url || apiBaseUrl;
-  const providerConfigured = runtimeConnected && Boolean(apiConfig) && (!apiConfig?.apiKeyRequired || Boolean(apiConfig?.apiKeyPresent));
+  const providerConfigured = runtimeConnected && apiConfig?.configured === true;
   const providerSnapshot: ProviderSnapshot = {
     provider: savedProvider,
     providerLabel: savedProviderLabel,
@@ -139,7 +139,7 @@ export function useProviderSettings({
   const persistedProviderFingerprint = apiConfig
     ? providerFingerprint({ provider: apiConfig.provider || "gemini", baseUrl: apiConfig.base_url || "", model: apiConfig.model || defaultModelForProvider(apiConfig.provider || "gemini"), apiType: apiConfig.api_type || apiConfig.apiType || "auto" })
     : "";
-  const persistedProviderConfigured = Boolean(apiConfig && (!apiConfig.apiKeyRequired || apiConfig.apiKeyPresent));
+  const persistedProviderConfigured = apiConfig?.configured === true;
   const selectedModelInfo = modelOptions.find((item) => item.id === apiModel);
   const selectedModelCapabilities = selectedModelInfo?.capabilities ??
     (apiConfig?.provider === apiProvider && apiConfig?.model === apiModel ? apiConfig.capabilities : undefined);

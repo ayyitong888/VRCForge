@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+import copy
 import hashlib
 import json
 from typing import Any
@@ -410,6 +411,8 @@ def _bounded_action(value: Mapping[str, Any]) -> dict[str, Any] | None:
         result["supersededBy"] = superseded_by
     if value.get("preProvider") is True:
         result["preProvider"] = True
+    if value.get("_nativeReadObservation") is True:
+        result["_nativeReadObservation"] = True
     transaction = _bounded_write_transaction(value.get("writeTransaction"))
     if transaction is not None:
         result["writeTransaction"] = transaction
@@ -639,7 +642,7 @@ def approval_task_context(
     seeded_action_id = _bounded_text(seed.get("requestedActionId"), 80)
     prior_requirements = [
         bounded
-        for item in list(seed.get("requirements") or [])[:3]
+        for item in list(seed.get("requirements") or [])
         if isinstance(item, Mapping)
         if (bounded := _bounded_requirement(item)) is not None
     ]
@@ -657,7 +660,7 @@ def approval_task_context(
         if seeded_action_matches_requirement or seeded_action_id == computed_action_id
         else computed_action_id
     )
-    return {
+    context = {
         "schema": TASK_APPROVAL_CONTEXT_SCHEMA,
         "taskId": _bounded_text(seed.get("taskId"), 80),
         "objective": objective,
@@ -694,7 +697,7 @@ def approval_task_context(
         ),
         "priorActions": [
             bounded
-            for item in list(seed.get("actions") or [])[:3]
+            for item in list(seed.get("actions") or [])
             if isinstance(item, Mapping)
             if (bounded := _bounded_action(item)) is not None
         ],
@@ -715,7 +718,7 @@ def approval_task_context(
         "verificationProfile": next(
             (
                 _bounded_text(item.get("verificationProfile"), 80)
-                for item in list(seed.get("requirements") or [])[:3]
+                for item in list(seed.get("requirements") or [])
                 if isinstance(item, Mapping)
                 and _bounded_text(item.get("kind"), 32) == requested_kind
                 and _bounded_text(item.get("tool"), 160) == requested_tool
@@ -728,6 +731,12 @@ def approval_task_context(
             _TOOL_DEFAULT_VERIFICATION_PROFILE.get(tool, "canonical_tool_result"),
         ),
     }
+    native_conversation = seed.get("_nativeConversation")
+    if isinstance(native_conversation, Mapping):
+        # Private continuation state is frozen outside the normal task-loop
+        # projection so later provider/history mutation cannot rewrite it.
+        context["_nativeConversation"] = copy.deepcopy(native_conversation)
+    return context
 
 
 def approval_completion(
@@ -1256,10 +1265,10 @@ class AgentTaskLoop:
             approval_revision_used=context.get("approvalRevisionUsed") is True,
             history=_bounded_history(context.get("history")),
         )
-        for item in list(context.get("priorActions") or [])[:3]:
+        for item in list(context.get("priorActions") or []):
             if isinstance(item, Mapping) and (bounded := _bounded_action(item)) is not None:
                 loop._actions[bounded["actionId"]] = bounded
-        for item in list(context.get("priorRequirements") or [])[:3]:
+        for item in list(context.get("priorRequirements") or []):
             if isinstance(item, Mapping) and (bounded := _bounded_requirement(item)) is not None:
                 loop._requirements[bounded["requirementId"]] = bounded
         loop._managed_visual_capture_action_ids = list(
@@ -1367,8 +1376,12 @@ class AgentTaskLoop:
                 "normalToolCallLimit": None,
             },
             "exposureLayer": exposure_layer or self.exposure_layer,
-            "actions": [dict(item) for item in self._actions.values()][-3:],
-            "requirements": [dict(item) for item in self._requirements.values()][-3:],
+            # These are completion obligations, not a conversational preview.
+            # Dropping older entries lets approval resume forget unresolved
+            # failures or missing verification. The pending snapshot owner
+            # enforces its existing byte limit atomically instead of truncating.
+            "actions": [dict(item) for item in self._actions.values()],
+            "requirements": [dict(item) for item in self._requirements.values()],
             "managedVisualCaptureActionIds": list(
                 self._managed_visual_capture_action_ids
             ),
@@ -1426,6 +1439,7 @@ class AgentTaskLoop:
         action_id: str = "",
         correction_for_action_id: str = "",
         pre_provider: bool = False,
+        native_read_observation: bool = False,
     ) -> dict[str, Any]:
         action_id = _bounded_text(action_id, 80) or canonical_action_id(kind, tool, arguments)
         reader_target = None
@@ -1517,10 +1531,34 @@ class AgentTaskLoop:
             record["writeTransaction"] = transaction
         if pre_provider:
             record["preProvider"] = True
+        if native_read_observation:
+            record["_nativeReadObservation"] = True
         if running_state:
             record["runtimeStatus"] = running_state
         self._actions[action_id] = record
         corrected_ids = [accepted_correction_id] if accepted_correction_id else []
+        if tool == "vrcforge_load_internal_tool_block" and lifecycle == "completed" and outcome_status == "ok":
+            # A rejected discovery request has no execution obligation. The
+            # model may replace its requested tool set rather than repeat it.
+            # Keep the failed receipt, but bind only loader admission failures
+            # to the successful discovery in this task. Real tool failures and
+            # pending approvals retain their existing completion obligations.
+            for previous_id, previous_branch in self._actions.items():
+                previous_outcome = previous_branch.get("outcome") or {}
+                previous_error = previous_outcome.get("error") or {}
+                if (
+                    previous_id != action_id
+                    and previous_branch.get("tool") == tool
+                    and previous_branch.get("status") == "failed"
+                    and (previous_error.get("code") or previous_outcome.get("errorCode"))
+                    == "internal_tool_selection_invalid"
+                ):
+                    previous_branch["status"] = "superseded"
+                    previous_branch["supersededBy"] = action_id
+                    corrected_ids.append(previous_id)
+                    for requirement in self._requirements.values():
+                        if requirement.get("actionId") == previous_id:
+                            requirement["actionId"] = action_id
         if reader_target is not None and lifecycle == "completed" and outcome_status == "ok":
             for previous_id, previous_branch in self._actions.items():
                 if (
@@ -1592,6 +1630,10 @@ class AgentTaskLoop:
         return dict(self._skill_policy)
 
     def skill_policy_block_reason(self, tool: str) -> str:
+        # Leaving instruction scope never grants a tool permission or completes
+        # an action. A Skill cannot trap its caller by hiding this control.
+        if tool == "vrcforge_exit_skill":
+            return ""
         policy = self._skill_policy
         if not policy:
             return ""
@@ -1604,12 +1646,32 @@ class AgentTaskLoop:
             return "skill_tool_not_allowed"
         return ""
 
+    def exit_skill(self, *, name: str, reason: str) -> dict[str, Any]:
+        active = str(self._skill_policy.get("name") or "")
+        if not active or name != active:
+            raise ValueError("The exact active Skill name is required.")
+        reason = _bounded_text(reason, 600)
+        if not reason:
+            raise ValueError("A Skill exit reason is required.")
+        if any(action.get("status") in {"running", "needs_user_action"} for action in self._actions.values()):
+            raise ValueError("Resolve the pending task action before leaving Skill scope.")
+        self._skill_context = {}
+        self._skill_policy = {}
+        return {"ok": True, "skillScopeStatus": "exited", "name": active,
+                "reason": reason, "completionVerified": False,
+                "message": "Instruction scope exited; existing task evidence and permissions remain unchanged. This does not verify completion."}
+
     def planner_projection(self) -> dict[str, Any]:
+        actions = []
+        for item in self._actions.values():
+            projected = dict(item)
+            projected.pop("_nativeReadObservation", None)
+            actions.append(projected)
         return {
             "schema": TASK_LOOP_SCHEMA,
             "taskId": self.task_id,
             "objective": _bounded_text(self.objective, 600),
-            "actions": [dict(item) for item in self._actions.values()],
+            "actions": actions,
             "requirements": [dict(item) for item in self._requirements.values()],
             "skillPolicy": dict(self._skill_policy),
         }
@@ -1653,8 +1715,15 @@ class AgentTaskLoop:
             for item in self._actions.values()
             if _status(item.get("status")) != "superseded"
         }
+        question_wait = any(
+            _status(item.get("status")) == "needs_user_action"
+            and str(item.get("tool") or "") == "vrcforge_ask_user"
+            for item in self._actions.values()
+        )
         if "cancelled" in statuses:
             status = "cancelled"
+        elif question_wait:
+            status = "needs_user_action"
         elif "failed" in statuses:
             status = "failed"
         elif "needs_user_action" in statuses:
@@ -1670,6 +1739,49 @@ class AgentTaskLoop:
             "status": _bounded_text(status_override, 40) or status,
         }
 
+    def action_blocks_completion(self, action_id: str) -> bool:
+        """Keep obligations authoritative while retaining failed native observations."""
+        action = self._actions.get(action_id)
+        if action is None:
+            return True
+        status = _status(action.get("status"))
+        if status in {"completed", "superseded"}:
+            return False
+        if (status != "failed" or action.get("_nativeReadObservation") is not True
+                or action.get("kind") != "skill" or action.get("writeTransaction")):
+            return True
+        outcome = action.get("outcome") or {}
+        verification = outcome.get("verification") or {}
+        if _status(verification.get("state")) not in {"", "not_required", "passed"}:
+            return True
+        if any(_status(check.get("state")) not in {"passed", "not_required"}
+               for check in verification.get("checks", []) if isinstance(check, Mapping)):
+            return True
+        error = outcome.get("error") or {}
+        if _status(error.get("type")) == "verification":
+            return True
+        if _TOOL_DEFAULT_VERIFICATION_PROFILE.get(str(action.get("tool")), "canonical_tool_result") != "canonical_tool_result":
+            return True
+        for requirement in self._requirements.values():
+            required_id = str(requirement.get("actionId") or "")
+            if required_id:
+                if required_id == action_id:
+                    return True
+                continue
+            def matches(candidate: Mapping[str, Any]) -> bool:
+                return (
+                    requirement.get("kind") == "action" and requirement.get("tool") == "*"
+                ) or (
+                    requirement.get("kind") == candidate.get("kind")
+                    and requirement.get("tool") == candidate.get("tool")
+                )
+            if matches(action) and not any(
+                item.get("status") == "completed" and matches(item)
+                for item in self._actions.values()
+            ):
+                return True
+        return False
+
     def gate_terminal(self, plan: Mapping[str, Any]) -> dict[str, Any]:
         gated = dict(plan)
         next_step = _status(gated.get("nextStep"))
@@ -1677,12 +1789,41 @@ class AgentTaskLoop:
             gated["task"] = self.snapshot(next_step)
             return gated
 
-        for action in self._actions.values():
+        # A live user question is the current terminal boundary.  Older failed
+        # receipts remain in the snapshot, but must not replace the prompt the
+        # user can actually answer now.
+        actions = list(self._actions.values())
+        question_wait = any(
+            _status(item.get("status")) == "needs_user_action"
+            and str(item.get("tool") or "") == "vrcforge_ask_user"
+            for item in actions
+        )
+        if question_wait:
+            actions.sort(
+                key=lambda item: 0
+                if (
+                    _status(item.get("status")) == "needs_user_action"
+                    and str(item.get("tool") or "") == "vrcforge_ask_user"
+                )
+                else 1
+            )
+        for action in actions:
             status = _status(action.get("status"))
             if status == "superseded":
                 continue
+            if status == "failed" and not self.action_blocks_completion(str(action.get("actionId") or "")):
+                continue
             outcome = action.get("outcome")
-            if status in {"failed", "needs_user_action"} and isinstance(outcome, Mapping):
+            is_question_wait = (
+                status == "needs_user_action"
+                and str(action.get("tool") or "") == "vrcforge_ask_user"
+            )
+            eligible = (
+                status == "failed" or is_question_wait
+                if question_wait
+                else status in {"failed", "needs_user_action"}
+            )
+            if eligible and isinstance(outcome, Mapping):
                 replacement = completion_gate_plan(gated, outcome)
                 if replacement is not None:
                     replacement["task"] = self.snapshot()
@@ -1753,6 +1894,17 @@ class AgentTaskLoop:
             return gated
 
         if not completed_ids:
+            if (
+                next_step == "done"
+                and any(item.get("_nativeReadObservation") is True for item in self._actions.values())
+            ):
+                gated["nextStep"] = "completion_unverified"
+                gated["task"] = self.snapshot("completion_unverified")
+                gated["completionGate"] = {
+                    "status": "needs_user_action",
+                    "reason": "completion_evidence_missing",
+                }
+                return gated
             gated["task"] = self.snapshot()
             return gated
 

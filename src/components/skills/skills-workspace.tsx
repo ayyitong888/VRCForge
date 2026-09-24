@@ -104,6 +104,8 @@ export function SkillsWorkspace({
   onBlockPackage,
   onPreviewPathToSkill,
   onWritePathToSkill,
+  selectedUnityProjectPath,
+  onRefreshApprovals,
 }: {
   endpoint: string;
   skills: AgentSkill[];
@@ -138,6 +140,8 @@ export function SkillsWorkspace({
   onBlockPackage: (request: { packageId?: string; packageSha256?: string; lockSha256?: string; reason?: string }) => Promise<unknown>;
   onPreviewPathToSkill: (request: PathToSkillCaptureRequest) => Promise<PathToSkillCaptureResult>;
   onWritePathToSkill: (request: PathToSkillCaptureRequest) => Promise<PathToSkillCaptureResult>;
+  selectedUnityProjectPath: string;
+  onRefreshApprovals: () => void | Promise<void>;
 }) {
   const editable = !draft.source || draft.source === "user";
   const userSkillSelected = Boolean(selectedSkillName && draft.source === "user");
@@ -198,6 +202,8 @@ export function SkillsWorkspace({
           onBlockPackage={onBlockPackage}
           onPreviewPathToSkill={onPreviewPathToSkill}
           onWritePathToSkill={onWritePathToSkill}
+          selectedUnityProjectPath={selectedUnityProjectPath}
+          onRefreshApprovals={onRefreshApprovals}
         />
         <details className="order-last min-w-0 rounded-xl border border-border bg-card p-4 shadow-panel" data-vrcforge-skill-catalog>
           <summary className="cursor-pointer text-sm font-semibold">{i18n.t("skills.title")} · {visibleSkills.length}</summary>

@@ -12,12 +12,14 @@ import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 from pydantic import BaseModel, Field, ValidationError
 from model_provider_adapters import normalize_provider_api_type, validate_provider_api_key
 from provider_endpoint_policy import endpoint_for_protocol, normalize_provider_endpoint
 from provider_protocol_negotiation import (
+    DEEPSEEK_FLASH_MODELS,
+    DEEPSEEK_PRO_MODEL,
     ProviderProtocolCandidate,
 )
 from provider_protocol_runtime import execute_provider_protocol_negotiation
@@ -150,6 +152,8 @@ class LlmPlanResponse:
     text: str
     reasoning: dict[str, Any]
     usage: dict[str, Any] = field(default_factory=dict)
+    assistant_message: dict[str, Any] = field(default_factory=dict, repr=False)
+    finish_reason: str = ""
 
 
 class UnityMcpError(RuntimeError):
@@ -1412,7 +1416,12 @@ def request_llm_plan_with_metadata(
     stream_callback: Callable[[str], None] | None = None,
     cancel_event: Any | None = None,
     stream_activity_callback: Callable[[dict[str, Any]], None] | None = None,
+    native_messages: Sequence[Mapping[str, Any]] | None = None,
+    native_tools: Sequence[Mapping[str, Any]] | None = None,
 ) -> LlmPlanResponse:
+    if native_messages is not None or native_tools is not None:
+        if str(getattr(settings, "llm_api_type", "") or "").strip().lower() != "chat_completions":
+            raise ValueError("Native messages/tools require an explicit chat_completions protocol.")
     image_paths = normalize_reference_image_paths(reference_image_path, reference_image_paths)
     provider = normalize_provider_name(settings.llm_provider)
     requested_api_type, _resolved_api_type = normalize_provider_api_type(
@@ -1436,6 +1445,8 @@ def request_llm_plan_with_metadata(
             candidate_stream_callback,
             cancel_event,
             stream_activity_callback,
+            native_messages,
+            native_tools,
         )
 
     return execute_provider_protocol_negotiation(
@@ -1455,6 +1466,8 @@ def _request_llm_protocol_with_metadata(
     stream_callback: Callable[[str], None] | None,
     cancel_event: Any | None = None,
     stream_activity_callback: Callable[[dict[str, Any]], None] | None = None,
+    native_messages: Sequence[Mapping[str, Any]] | None = None,
+    native_tools: Sequence[Mapping[str, Any]] | None = None,
 ) -> LlmPlanResponse:
     if api_type == "responses":
         return request_responses_plan_with_metadata(
@@ -1468,19 +1481,24 @@ def _request_llm_protocol_with_metadata(
     if api_type == "generate_content":
         if normalize_provider_name(settings.llm_provider) == "vertexai":
             return request_vertex_ai_plan_with_metadata(
-                settings, prompt, reference_image_paths=image_paths, stream_callback=stream_callback
+                settings, prompt, reference_image_paths=image_paths, stream_callback=stream_callback,
+                cancel_event=cancel_event, stream_activity_callback=stream_activity_callback,
             )
         return request_gemini_plan_with_metadata(
-            settings, prompt, reference_image_paths=image_paths, stream_callback=stream_callback
+            settings, prompt, reference_image_paths=image_paths, stream_callback=stream_callback,
+            cancel_event=cancel_event, stream_activity_callback=stream_activity_callback,
         )
     if api_type == "messages":
         return request_anthropic_plan_with_metadata(
-            settings, prompt, reference_image_paths=image_paths, stream_callback=stream_callback
+            settings, prompt, reference_image_paths=image_paths, stream_callback=stream_callback,
+            cancel_event=cancel_event, stream_activity_callback=stream_activity_callback,
         )
     return request_openai_compatible_plan_with_metadata(
         settings, prompt, reference_image_paths=image_paths, stream_callback=stream_callback,
         cancel_event=cancel_event,
         stream_activity_callback=stream_activity_callback,
+        native_messages=native_messages,
+        native_tools=native_tools,
     )
 
 
@@ -1595,6 +1613,8 @@ def request_gemini_plan_with_metadata(
     reference_image_path: str | Path | None = None,
     reference_image_paths: Sequence[str | Path] | None = None,
     stream_callback: Callable[[str], None] | None = None,
+    cancel_event: Any | None = None,
+    stream_activity_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> LlmPlanResponse:
     validate_provider_api_key(settings.llm_api_key)
     try:
@@ -1634,7 +1654,10 @@ def request_gemini_plan_with_metadata(
             httpxClient=httpx.Client(follow_redirects=False),
         )
     client = genai.Client(**client_kwargs)
+    watcher_stop, watcher = _start_provider_cancel_watcher(client, cancel_event, name="vrcforge-gemini-cancel")
     try:
+        if cancel_event is not None and cancel_event.is_set():
+            raise RuntimeError("Gemini request cancelled.")
         if stream_callback is not None and not image_paths:
             chunks: list[str] = []
             final_chunk: Any = None
@@ -1643,9 +1666,13 @@ def request_gemini_plan_with_metadata(
                 contents=contents,
                 config=generate_config,
             ):
+                if cancel_event is not None and cancel_event.is_set():
+                    raise RuntimeError("Gemini stream cancelled.")
                 final_chunk = chunk
                 text = str(getattr(chunk, "text", "") or "")
                 if not text:
+                    if extract_llm_reasoning_trace(chunk, settings, source="gemini")["itemCount"] or _provider_thought_marker(chunk):
+                        _provider_activity(stream_activity_callback)
                     continue
                 chunks.append(text)
                 stream_callback(text)
@@ -1667,9 +1694,10 @@ def request_gemini_plan_with_metadata(
     except Exception as exc:  # noqa: BLE001
         raise RuntimeError(format_multimodal_error(exc, settings, bool(image_paths), "Gemini")) from exc
     finally:
-        close = getattr(client, "close", None)
-        if callable(close):
-            close()
+        watcher_stop.set()
+        if watcher is not None:
+            watcher.join(0.2)
+        _close_provider_client_quietly(client)
 
 
 def request_vertex_ai_plan(
@@ -1692,6 +1720,8 @@ def request_vertex_ai_plan_with_metadata(
     reference_image_path: str | Path | None = None,
     reference_image_paths: Sequence[str | Path] | None = None,
     stream_callback: Callable[[str], None] | None = None,
+    cancel_event: Any | None = None,
+    stream_activity_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> LlmPlanResponse:
     try:
         from google import genai
@@ -1721,35 +1751,48 @@ def request_vertex_ai_plan_with_metadata(
     generate_config = build_gemini_generate_config(settings, genai_types) if genai_types is not None else None
     try:
         client = genai.Client(vertexai=True, project=project, location=location)
-        if stream_callback is not None and not image_paths:
-            chunks: list[str] = []
-            final_chunk: Any = None
-            for chunk in client.models.generate_content_stream(
+        watcher_stop, watcher = _start_provider_cancel_watcher(client, cancel_event, name="vrcforge-vertex-cancel")
+        try:
+            if cancel_event is not None and cancel_event.is_set():
+                raise RuntimeError("Vertex AI request cancelled.")
+            if stream_callback is not None and not image_paths:
+                chunks: list[str] = []
+                final_chunk: Any = None
+                for chunk in client.models.generate_content_stream(
+                    model=settings.llm_model,
+                    contents=contents,
+                    config=generate_config,
+                ):
+                    if cancel_event is not None and cancel_event.is_set():
+                        raise RuntimeError("Vertex AI stream cancelled.")
+                    final_chunk = chunk
+                    text = str(getattr(chunk, "text", "") or "")
+                    if not text:
+                        if extract_llm_reasoning_trace(chunk, settings, source="vertexai")["itemCount"] or _provider_thought_marker(chunk):
+                            _provider_activity(stream_activity_callback)
+                        continue
+                    chunks.append(text)
+                    stream_callback(text)
+                return LlmPlanResponse(
+                    text="".join(chunks),
+                    reasoning=extract_llm_reasoning_trace(final_chunk, settings, source="vertexai") if final_chunk is not None else {"itemCount": 0, "items": [], "provider": settings.llm_provider, "model": settings.llm_model, "source": "vertexai"},
+                    usage=extract_llm_token_usage(final_chunk, settings, source="vertexai") if final_chunk is not None else provider_stream_usage_missing(settings, "vertexai"),
+                )
+            response = client.models.generate_content(
                 model=settings.llm_model,
                 contents=contents,
                 config=generate_config,
-            ):
-                final_chunk = chunk
-                text = str(getattr(chunk, "text", "") or "")
-                if not text:
-                    continue
-                chunks.append(text)
-                stream_callback(text)
-            return LlmPlanResponse(
-                text="".join(chunks),
-                reasoning=extract_llm_reasoning_trace(final_chunk, settings, source="vertexai") if final_chunk is not None else {"itemCount": 0, "items": [], "provider": settings.llm_provider, "model": settings.llm_model, "source": "vertexai"},
-                usage=extract_llm_token_usage(final_chunk, settings, source="vertexai") if final_chunk is not None else provider_stream_usage_missing(settings, "vertexai"),
             )
-        response = client.models.generate_content(
-            model=settings.llm_model,
-            contents=contents,
-            config=generate_config,
-        )
-        return LlmPlanResponse(
-            text=getattr(response, "text", "") or "",
-            reasoning=extract_llm_reasoning_trace(response, settings, source="vertexai"),
-            usage=extract_llm_token_usage(response, settings, source="vertexai"),
-        )
+            return LlmPlanResponse(
+                text=getattr(response, "text", "") or "",
+                reasoning=extract_llm_reasoning_trace(response, settings, source="vertexai"),
+                usage=extract_llm_token_usage(response, settings, source="vertexai"),
+            )
+        finally:
+            watcher_stop.set()
+            if watcher is not None:
+                watcher.join(0.2)
+            _close_provider_client_quietly(client)
     except Exception as exc:  # noqa: BLE001
         detail = (
             f"Google Vertex AI request failed for model {settings.llm_model} "
@@ -1929,10 +1972,10 @@ def _deepseek_reasoning_variants(model_id: str, resolved_api_type: str = "chat_c
     # enum. `high` is VRCForge's semantic label for enabled thinking.
     if re.match(r"^deepseek-(?:chat|reasoner)(?:[-.]|$)", model_id):
         return ["none", "high"]
-    if model_id in {"deepseek-v4-flash", "deepseek-v4-pro"} and resolved_api_type in {"responses", "messages"}:
+    if (model_id in DEEPSEEK_FLASH_MODELS or model_id == DEEPSEEK_PRO_MODEL) and resolved_api_type in {"responses", "messages"}:
         return ["none", "low", "medium", "high", "xhigh", "max"]
     # Chat Completion V4 models use the safe common semantic subset.
-    if model_id in {"deepseek-v4-flash", "deepseek-v4-pro"}:
+    if model_id in DEEPSEEK_FLASH_MODELS or model_id == DEEPSEEK_PRO_MODEL:
         return ["none", "low", "high", "max"]
     return []
 
@@ -2089,13 +2132,23 @@ def gemini_model_thinking_mode(model: str) -> str:
     return ""
 
 
-def build_openai_compatible_request_payload(settings: Settings, user_content: Any) -> dict[str, Any]:
+def build_openai_compatible_request_payload(
+    settings: Settings,
+    user_content: Any,
+    *,
+    native_messages: Sequence[Mapping[str, Any]] | None = None,
+    native_tools: Sequence[Mapping[str, Any]] | None = None,
+) -> dict[str, Any]:
     """Planner chat-completions payload with bounded JSON output."""
 
     payload: dict[str, Any] = {
         "model": settings.llm_model,
-        "response_format": {"type": "json_object"},
     }
+    if native_messages is not None or native_tools is not None:
+        if native_tools:
+            payload["tools"] = [dict(tool) for tool in native_tools]
+    else:
+        payload["response_format"] = {"type": "json_object"}
     level = normalize_reasoning_effort(settings.gemini_thinking_level)
     supported = reasoning_effort_variants(settings.llm_provider, settings.llm_model)
     active_level = level if level in supported else ""
@@ -2103,13 +2156,22 @@ def build_openai_compatible_request_payload(settings: Settings, user_content: An
         normalize_provider_name(settings.llm_provider) == "deepseek" and active_level
     ):
         payload["temperature"] = 0.1
-    payload["messages"] = [
-        {
-            "role": "system",
-            "content": llm_system_instruction(settings),
-        },
-        {"role": "user", "content": user_content},
-    ]
+    if native_messages:
+        serialized_messages: list[dict[str, Any]] = []
+        for message in native_messages:
+            serialized = dict(message)
+            # Chat Completions treats an empty assistant tool_calls array as an
+            # invalid tool-call turn. Preserve real calls and provider-specific
+            # reasoning fields, but omit the empty optional field.
+            if serialized.get("role") == "assistant" and serialized.get("tool_calls") == []:
+                del serialized["tool_calls"]
+            serialized_messages.append(serialized)
+        payload["messages"] = serialized_messages
+    else:
+        payload["messages"] = [
+            {"role": "system", "content": llm_system_instruction(settings)},
+            {"role": "user", "content": user_content},
+        ]
     provider = normalize_provider_name(settings.llm_provider)
     output_limit = llm_max_output_tokens(settings)
     if output_limit is not None:
@@ -2119,7 +2181,8 @@ def build_openai_compatible_request_payload(settings: Settings, user_content: An
         payload["reasoning_effort"] = active_level
     elif active_level and provider == "deepseek":
         payload["extra_body"] = {"thinking": {"type": "disabled" if active_level == "none" else "enabled"}}
-        if bare_provider_model_id(settings.llm_model) in {"deepseek-v4-flash", "deepseek-v4-pro"} and active_level != "none":
+        if (bare_provider_model_id(settings.llm_model) in DEEPSEEK_FLASH_MODELS
+                or bare_provider_model_id(settings.llm_model) == DEEPSEEK_PRO_MODEL) and active_level != "none":
             payload["reasoning_effort"] = active_level
     elif active_level and provider == "openrouter":
         payload["extra_body"] = {"reasoning": {"effort": active_level}}
@@ -2239,7 +2302,13 @@ def request_openai_compatible_plan_with_metadata(
     stream_callback: Callable[[str], None] | None = None,
     stream_activity_callback: Callable[[dict[str, Any]], None] | None = None,
     cancel_event: Any | None = None,
+    native_messages: Sequence[Mapping[str, Any]] | None = None,
+    native_tools: Sequence[Mapping[str, Any]] | None = None,
 ) -> LlmPlanResponse:
+    native_mode = native_messages is not None or native_tools is not None
+    if native_mode:
+        if str(getattr(settings, "llm_api_type", "") or "").strip().lower() != "chat_completions":
+            raise ValueError("Native messages/tools require an explicit chat_completions protocol.")
     validate_provider_api_key(settings.llm_api_key)
     if not settings.llm_base_url:
         provider_name = provider_display_name(settings.llm_provider)
@@ -2285,16 +2354,23 @@ def request_openai_compatible_plan_with_metadata(
     else:
         watcher = None
     try:
-        request_payload = build_openai_compatible_request_payload(settings, user_content)
+        request_payload = build_openai_compatible_request_payload(
+            settings, user_content, native_messages=native_messages, native_tools=native_tools
+        )
         if stream_callback is not None and not image_paths:
             chunks: list[str] = []
             reasoning_chunks: list[Any] = []
+            native_reasoning_content: list[str] = []
+            native_tool_calls: dict[int, dict[str, Any]] = {}
+            native_finish_reason = ""
             usage_event: Any = None
 
             def consume_stream(stream: Any) -> None:
-                nonlocal usage_event
+                nonlocal usage_event, native_finish_reason
                 terminal_seen = False
                 for event in stream:
+                    if cancel_event is not None and cancel_event.is_set():
+                        raise RuntimeError("Native Chat stream cancelled.")
                     error = get_value(event, "error")
                     if error:
                         raise RuntimeError(f"{provider_display_name(settings.llm_provider)} stream error: {stringify_provider_error(error)}")
@@ -2308,11 +2384,35 @@ def request_openai_compatible_plan_with_metadata(
                         if str(finish_reason).lower() in {"error", "failed"}:
                             raise RuntimeError(f"{provider_display_name(settings.llm_provider)} stream reported finish_reason={finish_reason}.")
                         terminal_seen = True
+                        native_finish_reason = str(finish_reason)
                     delta = get_value(choices[0], "delta")
+                    if native_mode:
+                        call_deltas = get_value(delta, "tool_calls") or []
+                        if call_deltas and stream_activity_callback is not None:
+                            stream_activity_callback({"kind": "tool_call_activity"})
+                        for call in call_deltas:
+                            index = get_value(call, "index")
+                            if type(index) is not int or index < 0:
+                                raise RuntimeError("Native Chat tool call index is invalid.")
+                            assembled = native_tool_calls.setdefault(index, {"id": "", "type": "function", "function": {"name": "", "arguments": ""}})
+                            call_id = get_value(call, "id")
+                            function = get_value(call, "function")
+                            if call_id:
+                                if assembled["id"] and assembled["id"] != call_id:
+                                    raise RuntimeError("Native Chat tool call identity changed within one stream.")
+                                assembled["id"] = str(call_id)
+                            if get_value(function, "name"):
+                                assembled["function"]["name"] += str(get_value(function, "name"))
+                            if get_value(function, "arguments"):
+                                assembled["function"]["arguments"] += str(get_value(function, "arguments"))
                     for field in ("reasoning_content", "reasoning", "thinking", "reasoning_details"):
                         value = get_value(delta, field)
                         if value:
-                            reasoning_chunks.append({field: value})
+                            if native_mode:
+                                if field == "reasoning_content":
+                                    native_reasoning_content.append(str(value))
+                            else:
+                                reasoning_chunks.append({field: value})
                             if stream_activity_callback is not None:
                                 stream_activity_callback({"kind": "reasoning_activity"})
                     text = str(get_value(delta, "content") or "")
@@ -2323,13 +2423,17 @@ def request_openai_compatible_plan_with_metadata(
                 if normalize_provider_name(settings.llm_provider) == "openrouter" and not terminal_seen:
                     raise RuntimeError("OpenRouter stream ended before a terminal finish_reason.")
 
-            try:
-                stream = client.chat.completions.create(
-                    **request_payload,
-                    stream=True,
-                    stream_options={"include_usage": True},
-                )
-                consume_stream(stream)
+            def completed_stream_response() -> LlmPlanResponse:
+                if native_mode:
+                    if cancel_event is not None and cancel_event.is_set():
+                        raise RuntimeError("Native Chat stream cancelled.")
+                    if native_finish_reason not in {"stop", "tool_calls"} or (native_finish_reason == "tool_calls" and not native_tool_calls):
+                        raise RuntimeError("Native Chat stream ended without a complete assistant receipt.")
+                    return _native_chat_response(
+                        settings,
+                        {"choices": [{"message": {"role": "assistant", "content": "".join(chunks), "tool_calls": [native_tool_calls[index] for index in sorted(native_tool_calls)], "reasoning_content": "".join(native_reasoning_content)}, "finish_reason": native_finish_reason}], "usage": get_value(usage_event, "usage") if usage_event is not None else {}},
+                        source="openai-compatible",
+                    )
                 return LlmPlanResponse(
                     text="".join(chunks),
                     reasoning=extract_llm_reasoning_trace(
@@ -2343,30 +2447,29 @@ def request_openai_compatible_plan_with_metadata(
                         else provider_stream_usage_missing(settings, "openai-compatible")
                     ),
                 )
+
+            try:
+                stream = client.chat.completions.create(
+                    **request_payload,
+                    stream=True,
+                    stream_options={"include_usage": True},
+                )
+                consume_stream(stream)
+                return completed_stream_response()
             except Exception as exc:  # noqa: BLE001
+                if native_mode and (chunks or native_tool_calls or native_reasoning_content):
+                    raise
                 if not chunks and stream_options_are_unsupported(exc):
                     usage_event = None
                     try:
                         stream = client.chat.completions.create(**request_payload, stream=True)
                         consume_stream(stream)
-                        return LlmPlanResponse(
-                            text="".join(chunks),
-                            reasoning=extract_llm_reasoning_trace(
-                                {"choices": [{"message": {"reasoning_details": reasoning_chunks}}]},
-                                settings,
-                                source="openai-compatible",
-                            ),
-                            usage=(
-                                extract_llm_token_usage(usage_event, settings, source="openai-compatible")
-                                if usage_event is not None
-                                else provider_stream_usage_missing(settings, "openai-compatible")
-                            ),
-                        )
+                        return completed_stream_response()
                     except Exception as compatible_stream_exc:  # noqa: BLE001
-                        if chunks or not should_retry_without_streaming(compatible_stream_exc, settings):
+                        if native_mode or chunks or not should_retry_without_streaming(compatible_stream_exc, settings):
                             raise
                         exc = compatible_stream_exc
-                if not should_retry_without_streaming(exc, settings):
+                if native_mode or not should_retry_without_streaming(exc, settings):
                     raise
         response = client.chat.completions.create(**request_payload)
         response_error = get_value(response, "error")
@@ -2382,6 +2485,14 @@ def request_openai_compatible_plan_with_metadata(
                 raise RuntimeError(
                     f"{provider_display_name(settings.llm_provider)} returned finish_reason={response_finish}."
                 )
+        if native_mode:
+            if cancel_event is not None and cancel_event.is_set():
+                raise RuntimeError("Native Chat request cancelled.")
+            choice = response_choices[0] if response_choices else {}
+            finish_reason = str(get_value(choice, "finish_reason") or "")
+            if finish_reason not in {"stop", "tool_calls"}:
+                raise RuntimeError("Native Chat response did not terminate with stop or tool_calls.")
+            return _native_chat_response(settings, response, source="openai-compatible")
         return LlmPlanResponse(
             text=extract_openai_message_text(response),
             reasoning=extract_llm_reasoning_trace(response, settings, source="openai-compatible"),
@@ -2395,7 +2506,7 @@ def request_openai_compatible_plan_with_metadata(
         watcher_stop.set()
         if watcher is not None:
             watcher.join(0.2)
-        _close_provider_client(client)
+        _close_provider_client_quietly(client)
         http_client.close()
 
 
@@ -2419,6 +2530,8 @@ def request_anthropic_plan_with_metadata(
     reference_image_path: str | Path | None = None,
     reference_image_paths: Sequence[str | Path] | None = None,
     stream_callback: Callable[[str], None] | None = None,
+    cancel_event: Any | None = None,
+    stream_activity_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> LlmPlanResponse:
     validate_provider_api_key(settings.llm_api_key)
     try:
@@ -2463,15 +2576,24 @@ def request_anthropic_plan_with_metadata(
             settings.llm_base_url, "messages", provider=provider_id
         )
     client = anthropic.Anthropic(**client_kwargs)
+    watcher_stop, watcher = _start_provider_cancel_watcher(client, cancel_event, name="vrcforge-messages-cancel")
     response_source = "deepseek-messages" if provider_id == "deepseek" else "anthropic"
     try:
         request_payload = build_anthropic_request_payload(settings, user_content)
+        if cancel_event is not None and cancel_event.is_set():
+            raise RuntimeError("Messages request cancelled.")
         if stream_callback is not None and not image_paths:
             chunks: list[str] = []
             final_message: Any = None
             with client.messages.stream(**request_payload) as stream:
-                for text in stream.text_stream:
-                    text = str(text or "")
+                for event in stream:
+                    if cancel_event is not None and cancel_event.is_set():
+                        raise RuntimeError("Messages stream cancelled.")
+                    event_type = str(get_value(event, "type") or "")
+                    delta = get_value(event, "delta")
+                    if event_type in {"content_block_start", "content_block_delta", "message_start", "message_delta"}:
+                        _provider_activity(stream_activity_callback)
+                    text = str(get_value(delta, "text") or "")
                     if not text:
                         continue
                     chunks.append(text)
@@ -2503,7 +2625,10 @@ def request_anthropic_plan_with_metadata(
             ) from exc
         raise RuntimeError(format_anthropic_error(exc, settings.llm_model or DEFAULT_ANTHROPIC_MODEL)) from exc
     finally:
-        _close_provider_client(client)
+        watcher_stop.set()
+        if watcher is not None:
+            watcher.join(0.2)
+        _close_provider_client_quietly(client)
         http_client.close()
 
 
@@ -2534,6 +2659,45 @@ def _close_provider_client(client: Any) -> None:
     close = getattr(client, "close", None)
     if callable(close):
         close()
+
+
+def _close_provider_client_quietly(client: Any) -> None:
+    try:
+        _close_provider_client(client)
+    except Exception:  # noqa: BLE001 - cleanup must not mask provider outcome.
+        return
+
+
+def _provider_thought_marker(response: Any) -> bool:
+    for candidate in as_list(get_value(response, "candidates")):
+        content = get_value(candidate, "content")
+        for part in as_list(get_value(content, "parts")):
+            if get_value(part, "thought") is True:
+                return True
+    return False
+
+
+def _provider_activity(callback: Callable[[dict[str, Any]], None] | None) -> None:
+    if callback is not None:
+        callback({"kind": "provider_activity"})
+
+
+def _start_provider_cancel_watcher(
+    client: Any, cancel_event: Any | None, *, name: str,
+) -> tuple[threading.Event, threading.Thread | None]:
+    stopped = threading.Event()
+    if cancel_event is None:
+        return stopped, None
+
+    def watch() -> None:
+        while not stopped.is_set():
+            if cancel_event.wait(0.05):
+                _close_provider_client(client)
+                return
+
+    thread = threading.Thread(target=watch, name=name, daemon=True)
+    thread.start()
+    return stopped, thread
 
 
 def resolve_existing_image_path(image_path: str | Path) -> Path:
@@ -2595,20 +2759,58 @@ def resolve_vertex_ai_project_location(base_url: str) -> tuple[str, str]:
     return project, location or "us-central1"
 
 
+def _native_chat_response(settings: Settings, response: Any, *, source: str) -> LlmPlanResponse:
+    choices = as_list(get_value(response, "choices"))
+    choice = choices[0] if choices else {}
+    message = get_value(choice, "message") or {}
+    finish_reason = str(get_value(choice, "finish_reason") or "")
+    tool_calls: list[dict[str, Any]] = []
+    for call in as_list(get_value(message, "tool_calls")):
+        function = get_value(call, "function") or {}
+        call_id = str(get_value(call, "id") or "")
+        if not call_id or any(item["id"] == call_id for item in tool_calls):
+            raise RuntimeError("Native Chat returned an empty or duplicate tool call ID.")
+        tool_calls.append(
+            {
+                "id": call_id,
+                "type": str(get_value(call, "type") or "function"),
+                "function": {
+                    "name": str(get_value(function, "name") or ""),
+                    "arguments": str(get_value(function, "arguments") or ""),
+                },
+            }
+        )
+    receipt: dict[str, Any] = {
+        "role": str(get_value(message, "role") or "assistant"),
+        "content": get_value(message, "content"),
+        "tool_calls": tool_calls,
+    }
+    reasoning_content = get_value(message, "reasoning_content")
+    if reasoning_content is not None:
+        receipt["reasoning_content"] = reasoning_content
+    return LlmPlanResponse(
+        text=extract_openai_message_text(response),
+        reasoning=extract_llm_reasoning_trace({"choices": [{"message": {}}]}, settings, source=source),
+        usage=extract_llm_token_usage(response, settings, source=source),
+        assistant_message=receipt,
+        finish_reason=finish_reason,
+    )
+
+
 def extract_openai_message_text(response: Any) -> str:
-    choices = getattr(response, "choices", None) or []
+    choices = get_value(response, "choices") or []
     if not choices:
         return ""
 
-    message = getattr(choices[0], "message", None)
-    content = getattr(message, "content", "") if message is not None else ""
+    message = get_value(choices[0], "message")
+    content = get_value(message, "content") if message is not None else ""
     if isinstance(content, str):
         return content
 
     if isinstance(content, list):
         parts: list[str] = []
         for block in content:
-            text = getattr(block, "text", None)
+            text = get_value(block, "text")
             if text:
                 parts.append(text)
             elif isinstance(block, dict) and block.get("text"):

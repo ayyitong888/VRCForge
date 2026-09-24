@@ -169,7 +169,7 @@ EXTERNAL_MCP_READ_TOOL_BLOCKS: dict[str, frozenset[str]] = {
         {"vrcforge_list_installed_skills", "vrcforge_read_installed_skill"}
     ),
     "skills/vsk": frozenset(
-        {"vrcforge_preflight_skill_package", "vrcforge_preview_path_to_skill"}
+        {"vrcforge_preflight_skill_package", "vrcforge_preview_path_to_skill", "vrcforge_list_user_unity_tools", "vrcforge_install_user_unity_tools", "vrcforge_invoke_user_unity_tool"}
     ),
     "optimization": frozenset(
         {
@@ -355,6 +355,8 @@ EXTERNAL_MCP_WRITE_TOOL_BLOCKS: dict[str, frozenset[str]] = {
             "vrcforge_export_skill_package",
             "vrcforge_set_skill_package_enabled",
             "vrcforge_write_path_to_skill",
+            "vrcforge_install_user_unity_tools",
+            "vrcforge_invoke_user_unity_tool",
         }
     ),
     "optimization": frozenset(

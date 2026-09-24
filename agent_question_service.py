@@ -7,6 +7,7 @@ by the composition root.
 """
 
 from __future__ import annotations
+from copy import deepcopy
 
 import json
 import os
@@ -19,6 +20,29 @@ from typing import Callable, Mapping, Protocol
 
 AGENT_QUESTION_SCHEMA = "vrcforge.agent_question.v1"
 AGENT_QUESTION_MAX_ITEMS = 60
+QUESTION_INPUT_SCHEMA = {
+    "type": "object", "required": ["question"], "additionalProperties": True,
+    "properties": {
+        "header": {"type": "string", "maxLength": 120},
+        "question": {
+            "type": "string", "minLength": 1, "maxLength": 1000,
+            "description": "One short decision question. Put alternatives in options, not in a long diagnosis here.",
+        },
+        "options": {
+            "type": "array",
+            "description": "Two or more distinct choice cards, recommended first. Omit only for an open-ended question; a custom reply is always available.",
+            "items": {"anyOf": [
+                {"type": "string", "minLength": 1, "maxLength": 160},
+                {"type": "object", "required": ["label"], "properties": {
+                    "id": {"type": "string", "maxLength": 120},
+                    "label": {"type": "string", "minLength": 1, "maxLength": 160},
+                    "description": {"type": "string", "maxLength": 500},
+                    "value": {"type": "string", "maxLength": 500},
+                }},
+            ]},
+        },
+    },
+}
 
 
 class AgentQuestionServiceError(RuntimeError):
@@ -95,6 +119,11 @@ class AgentQuestionPersistence:
         )
         if not isinstance(row, dict):
             raise OSError("Question storage redaction did not return an object.")
+        # This file also owns pending runtime continuations. Preserve their
+        # private replay; public question projections remove the entire seed.
+        seed = event.get("runtimeTaskSeed")
+        if isinstance(seed, Mapping) and isinstance(seed.get("_nativeConversation"), Mapping):
+            row["runtimeTaskSeed"]["_nativeConversation"] = deepcopy(seed["_nativeConversation"])
         with _locked(self._ports.shared_state_lock):
             path = self.log_path
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -164,22 +193,22 @@ class AgentQuestionService:
 
     def create(self, params: Mapping[str, object] | None = None) -> dict[str, object]:
         values = dict(params or {})
-        question = self._summarize(values.get("question") or values.get("prompt"), 1000)
+        question = _question_text(values.get("question") or values.get("prompt"), "question", 1000)
         if not question:
             raise AgentQuestionServiceError("Question is required.", status_code=400)
         raw_options = _as_list(values.get("options") or values.get("choices"))
         options: list[dict[str, str]] = []
         for index, option in enumerate(raw_options):
             if isinstance(option, str):
-                label = self._summarize(option, 160)
+                label = _question_text(option, "option.label", 160)
                 value = label
                 description = ""
                 option_id = f"option-{index + 1}"
             elif isinstance(option, Mapping):
-                label = self._summarize(option.get("label") or option.get("value"), 160)
-                value = self._summarize(option.get("value") or label, 500)
-                description = self._summarize(option.get("description"), 500)
-                option_id = self._summarize(option.get("id") or f"option-{index + 1}", 120)
+                label = _question_text(option.get("label") or option.get("value"), "option.label", 160)
+                value = _question_text(option.get("value") or label, "option.value", 500)
+                description = _question_text(option.get("description"), "option.description", 500)
+                option_id = _question_text(option.get("id") or f"option-{index + 1}", "option.id", 120)
             else:
                 continue
             if label:
@@ -191,7 +220,7 @@ class AgentQuestionService:
             "event": "question_created",
             "status": "pending",
             "questionId": question_id,
-            "header": self._summarize(values.get("header"), 120),
+            "header": _question_text(values.get("header"), "header", 120),
             "question": question,
             "options": options,
             "projectRoot": self._scope_text(values, "projectRoot", "project_root", "projectPath"),
@@ -242,16 +271,17 @@ class AgentQuestionService:
             if str(existing.get("status") or "") == "answered":
                 payload: dict[str, object] = {"ok": True, "question": self._redact(existing), "idempotent": True}
             else:
-                selected_option_id = self._summarize(
+                selected_option_id = _question_text(
                     values.get("selectedOptionId") or values.get("optionId"),
+                    "selectedOptionId",
                     120,
                 )
-                answer_text = self._summarize(values.get("answer") or values.get("value"), 2000)
+                answer_text = _question_text(values.get("answer") or values.get("value"), "answer", 2000)
                 if not answer_text and selected_option_id:
                     for option in _as_list(existing.get("options")):
                         if not isinstance(option, Mapping) or str(option.get("id") or "") != selected_option_id:
                             continue
-                        answer_text = self._summarize(option.get("value") or option.get("label"), 1000)
+                        answer_text = _question_text(option.get("value") or option.get("label"), "answer", 2000)
                         break
                 if not answer_text:
                     raise AgentQuestionServiceError("An answer is required.", status_code=400)
@@ -306,8 +336,9 @@ class AgentQuestionService:
             self.record_runtime_continuation(question_id, "claimed")
             return True
 
-    def cancel_runtime_questions(self, *, session_id: str = "", turn_id: str = "", client_turn_id: str = "") -> None:
-        """Persist cancellation of only the stopped turn's pending questions."""
+    def cancel_runtime_questions(self, *, session_id: str = "", turn_id: str = "", client_turn_id: str = "") -> list[dict[str, object]]:
+        """Persist cancellation and return trusted seeds for the stopped turn."""
+        cancelled_seeds: list[dict[str, object]] = []
         with _locked(self._persistence.shared_state_lock):
             for question_id, question in self._project(include_answered=True).items():
                 seed = question.get("runtimeTaskSeed")
@@ -321,6 +352,8 @@ class AgentQuestionService:
                     continue
                 if question.get("status") == "pending" or question.get("runtimeContinuationStatus") == "queued":
                     self._persistence.append({"event": "question_cancelled", "questionId": question_id, "status": "cancelled", "runtimeContinuationStatus": "interrupted"})
+                    cancelled_seeds.append(deepcopy(dict(seed)))
+        return cancelled_seeds
 
     def reconcile_runtime_continuations(self) -> dict[str, int]:
         """Resume unclaimed answers; never replay an ambiguous claimed task."""
@@ -367,7 +400,12 @@ class AgentQuestionService:
             ]
         if session_id:
             questions = [item for item in questions if str(item.get("sessionId") or "") == session_id]
-        questions.sort(key=lambda item: str(item.get("updatedAt") or item.get("createdAt") or ""), reverse=True)
+        # Answered history must not displace a question that still needs input
+        # or whose owned continuation is active in a bounded App snapshot.
+        questions.sort(key=lambda item: (
+            2 if item.get("status") == "pending" else 1 if item.get("runtimeContinuationStatus") in {"queued", "claimed"} else 0,
+            str(item.get("updatedAt") or item.get("createdAt") or ""),
+        ), reverse=True)
         questions = questions[: max(1, min(int(limit), AGENT_QUESTION_MAX_ITEMS))]
         return {
             "ok": True,
@@ -418,9 +456,9 @@ class AgentQuestionService:
 
     def _continuation_prompt(self, question: object) -> str:
         values = question if isinstance(question, Mapping) else {}
-        question_text = self._summarize(values.get("question") or "Pending question", 1000)
-        answer_text = self._summarize(values.get("answer"), 2000)
-        selected_option_id = self._summarize(values.get("selectedOptionId"), 120)
+        question_text = str(values.get("question") or "Pending question").strip()
+        answer_text = str(values.get("answer") or "").strip()
+        selected_option_id = str(values.get("selectedOptionId") or "").strip()
         return (
             "Continue the same task after the user answered a pending question.\n"
             f"Question: {question_text}\n"
@@ -440,6 +478,16 @@ class AgentQuestionService:
         for key in ("runtimeTaskSeed", "runtimeSessionId", "runtimeClientTurnId", "runtimeTaskId"):
             result.pop(key, None)
         return result
+
+
+def _question_text(value: object, field: str, limit: int) -> str:
+    text = str(value or "").strip()
+    if len(text) > limit:
+        raise AgentQuestionServiceError(
+            f"{field} exceeds {limit} characters. Shorten the text; the request was not saved.",
+            status_code=400,
+        )
+    return text
 
 
 class _locked:

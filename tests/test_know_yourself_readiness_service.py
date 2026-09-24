@@ -35,6 +35,7 @@ def _unity(*, connected: bool = True) -> dict[str, Any]:
         "activeInstanceCount": 1 if connected else 0,
         "vrcForgeToolsRegistered": connected,
         "missingRequiredVrcForgeTools": [],
+        "readiness": {"ready": connected, "blockerCode": "" if connected else "unity_disconnected"},
         "projectPath": r"C:\\private\\Avatar",
         "instance": "project-scoped",
     }
@@ -137,6 +138,17 @@ def test_know_yourself_service_skips_compile_without_live_core_and_preserves_str
     assert offline["liveReadback"]["compile"]["status"] == "not_checked"
     assert unknown["readyForUnityWork"] is False
     assert unknown["gaps"] == ["selected_unity_project_process_unknown"]
+
+
+def test_know_yourself_service_skips_compile_when_unity_execution_is_blocked() -> None:
+    compile_calls: list[dict[str, Any]] = []
+    blocked = _unity()
+    blocked["readiness"] = {"ready": False, "blockerCode": "unity_editor_reload_dialog"}
+    report = _service(unity=blocked, calls=compile_calls).know_yourself_sync({})
+
+    assert compile_calls == []
+    assert report["liveReadback"]["tools"]["ready"] is False
+    assert report["liveReadback"]["readiness"]["blockerCode"] == "unity_editor_reload_dialog"
 
 
 def test_dashboard_constructs_know_yourself_service_with_strict_process_port() -> None:

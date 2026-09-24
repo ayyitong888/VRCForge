@@ -127,11 +127,8 @@ class DoctorReadinessReportService:
         ]
 
         provider = str(api_config.get("provider") or "")
-        provider_requires_key = bool(api_config.get("apiKeyRequired"))
         provider_has_key = bool(api_config.get("apiKeyPresent"))
-        provider_status = "warning" if provider_requires_key and not provider_has_key else "unknown"
-        if provider == "ollama":
-            provider_status = "unknown"
+        provider_status = "unknown" if api_config.get("configured") is True else "warning"
         checks.append(self._ports.doctor_check(
             "provider.test", "Provider test call", provider_status,
             "Provider test has not been run automatically.",

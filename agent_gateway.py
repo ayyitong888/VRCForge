@@ -43,7 +43,6 @@ from know_yourself_skill import bind_know_yourself_caller
 import agent_command_safety as command_safety
 import runtime_planner_service as planner_policy
 from tool_usage_contract import tool_usage_description
-from internal_tool_selection_recovery import selection_correction_matches, selection_error_code
 from agent_shell_service import (
     SHELL_RUNNER_NATIVE as SHELL_OWNER_RUNNER_NATIVE,
     SHELL_RUNNER_POWERSHELL as SHELL_OWNER_RUNNER_POWERSHELL,
@@ -83,6 +82,7 @@ from optimization_service import (
 )
 from path_to_skill_controller import PATH_TO_SKILL_PREVIEW_INPUT_SCHEMA, PATH_TO_SKILL_WRITE_INPUT_SCHEMA
 from agent_runtime_session_state import AgentRuntimeSessionState, AgentRuntimeSessionStatePorts
+from agent_runtime_native_turn import NativeRuntimeTurn
 from agent_runtime_followup_queue import AgentRuntimeFollowupQueue, FollowupQueuePorts
 from agent_runtime_run_ledger import AgentRuntimeRunLedger, AgentRuntimeRunLedgerPorts
 from agent_runtime_event_projection import project_runtime_turn_event
@@ -423,6 +423,7 @@ EXTERNAL_AGENT_INTERNAL_TOOLS = {
     "vrcforge_vision_audit_multi",
 } | MEMORY_TOOL_NAMES
 EXTERNAL_MCP_INTERNAL_LOOP_TOOLS = EXTERNAL_AGENT_INTERNAL_TOOLS | {
+    "vrcforge_exit_skill",
     "vrcforge_ask_user",
     "vrcforge_classify_shell",
     "vrcforge_create_goal",
@@ -2110,6 +2111,11 @@ class AgentGateway:
             "vrcforge_tool_owner",
             default="",
         )
+        # One Gateway-owned, call-scoped runtime reference. No network caller
+        # can supply it; the binding is reset after each synchronous dispatch.
+        self._runtime_skill_scope: contextvars.ContextVar[AgentTaskLoop | None] = contextvars.ContextVar(
+            "vrcforge_runtime_skill_scope", default=None,
+        )
         self._runtime_session_state = AgentRuntimeSessionState(
             AgentRuntimeSessionStatePorts(shared_state_lock=self._lock)
         )
@@ -2171,7 +2177,9 @@ class AgentGateway:
             AgentQuestionScopePorts(
                 normalize_path=command_safety.normalize_filesystem_path,
                 summarize=summarize_text,
-                redact_goal_persistence=redact_background_goal_persistence,
+                redact_goal_persistence=lambda value: planner_policy.sanitize_planner_observation_text(
+                    value, 2_000, preserve_whitespace=True,
+                ),
             ),
             GoalQuestionResolutionPort(
                 resolve=lambda question_id, continuation_prompt: self._goal.resolve_agent_goal_question(
@@ -2677,6 +2685,25 @@ class AgentGateway:
             "read/debug",
             lambda params: read_tool_result(params, sanitize=planner_policy.sanitize_planner_observation_text),
         )
+        self.register_tool(
+            "vrcforge_exit_skill",
+            "When to use: explicitly leave the exact active instruction Skill before returning to the original task or another Skill. Give its name and exit reason. When NOT to use: pending approvals/jobs, claiming a failed repair succeeded, or changing task permissions. Negative example: exiting cannot approve a write or complete the user's task.",
+            "plan/preview", self._exit_runtime_skill,
+        )
+
+    @contextmanager
+    def _bind_runtime_skill_scope(self, loop: AgentTaskLoop) -> Iterator[None]:
+        token = self._runtime_skill_scope.set(loop)
+        try:
+            yield
+        finally:
+            self._runtime_skill_scope.reset(token)
+
+    def _exit_runtime_skill(self, params: dict[str, Any]) -> dict[str, Any]:
+        loop = self._runtime_skill_scope.get()
+        if loop is None:
+            raise ValueError("Skill exit requires the current internal Agent runtime turn.")
+        return loop.exit_skill(name=str(params.get("name") or ""), reason=str(params.get("reason") or ""))
 
     @staticmethod
     def consume_runtime_task_link(
@@ -4187,6 +4214,7 @@ class AgentGateway:
     @staticmethod
     def _external_mcp_visible_value(value: Any) -> Any:
         forbidden = {
+            "_nativeReadObservation",
             "approval",
             "approvalId",
             "approval_id",
@@ -5546,6 +5574,12 @@ class AgentGateway:
         task decision and never calls the approved handler again.
         """
 
+        approval = dict(approval or {})
+        trusted_context = self.approval_transactions.get_trusted_task_context(str(approval.get("id") or ""))
+        if trusted_context is not None:
+            approval["taskContext"] = trusted_context
+        elif "_nativeConversation" in ensure_dict(approval.get("taskContext")):
+            raise AgentGatewayError("Private approval continuation is unavailable; inspect the operation before retrying.", status_code=409)
         prepared = prepare_approval_task_continuation(
             approval,
             execution,
@@ -5859,6 +5893,8 @@ class AgentGateway:
         owned_params.pop("_runtimeFailureProgress", None)
         owned_params.pop("_runtimeTurnRecorded", None)
         response_payload: dict[str, Any] | None = None
+        turn_raised = False
+        recovery_failure: dict[str, Any] | None = None
         try:
             response_payload = self._runtime_message_impl_body(
                 owned_params,
@@ -5866,18 +5902,27 @@ class AgentGateway:
                 task_continuation=task_continuation,
                 continuation_shutdown_guard=continuation_shutdown_guard,
             )
+            response_payload = planner_policy.public_runtime_payload(response_payload)
             return response_payload
         except Exception as exc:
+            turn_raised = True
             # Once a turn has started, a transport/tool exception must not leave
             # only a running ledger entry and an empty session transcript.
             if owned_params.get("_runtimeTurnStarted") and not owned_params.get("_runtimeTurnRecorded"):
                 now = utc_now_iso()
                 progress = ensure_dict(owned_params.get("_runtimeFailureProgress"))
+                native_turn = progress.get("_nativeTurn")
+                if isinstance(native_turn, NativeRuntimeTurn):
+                    try:
+                        native_turn.settle({"nextStep": "interrupted"})
+                    except (ValueError, TypeError):
+                        pass  # Preserve the original error; never replay an ambiguous action.
                 failure = redact_sensitive({
                     "type": type(exc).__name__,
                     "message": str(exc)[:2000],
                     "statusCode": getattr(exc, "status_code", None),
                 })
+                recovery_failure = failure
                 failed_turn = redact_sensitive({
                     "id": str(owned_params.get("_resolvedRuntimeTurnId") or ""),
                     "clientTurnId": str(owned_params.get("_resolvedRuntimeClientTurnId") or ""),
@@ -5889,6 +5934,21 @@ class AgentGateway:
                     **({"contextUsage": progress["contextUsage"]} if progress.get("contextUsage") else {}),
                 })
                 session_id = str(owned_params.get("_resolvedRuntimeSessionId") or "")
+                response_payload = {
+                    "ok": False,
+                    "session_id": session_id,
+                    "sessionId": session_id,
+                    "turn_id": failed_turn["id"],
+                    "turnId": failed_turn["id"],
+                    "clientTurnId": failed_turn["clientTurnId"],
+                    "status": "failed",
+                    "observe": {},
+                    "plan": failed_turn["plan"],
+                    "steps": failed_turn["steps"],
+                    "timeline": failed_turn["timeline"],
+                    "error": failure,
+                    **({"contextUsage": failed_turn["contextUsage"]} if "contextUsage" in failed_turn else {}),
+                }
                 try:
                     self._runtime_session_state.append_turn(session_id, now=now, updated_at=now, turn=failed_turn)
                 except Exception:  # Recording failure must preserve the original HTTP error.
@@ -5924,6 +5984,11 @@ class AgentGateway:
             owned_params.pop("_runtimeTurnRecorded", None)
             resolved_session_id = str(owned_params.get("_resolvedRuntimeSessionId") or "")
             resolved_client_turn_id = str(owned_params.get("_resolvedRuntimeClientTurnId") or "")
+            owns_turn = self._runtime_session_state.owns_turn(
+                session_id=resolved_session_id,
+                turn_id=str(owned_params.get("_resolvedRuntimeTurnId") or ""),
+                client_turn_id=resolved_client_turn_id,
+            )
             late_steers = self._runtime_session_state.finish_turn(
                 session_id=resolved_session_id,
                 turn_id=str(owned_params.get("_resolvedRuntimeTurnId") or ""),
@@ -5968,6 +6033,56 @@ class AgentGateway:
                 response_payload["deferredSteerFollowupOutcomes"] = followup_outcomes
                 if deferred:
                     response_payload["deferredSteerFollowups"] = deferred
+            if response_payload is not None and resolved_session_id and resolved_client_turn_id:
+                response_status = "failed" if turn_raised else "completed"
+                try:
+                    safe_response = planner_policy.public_runtime_payload(response_payload)
+                    self._runtime_session_state.record_final_response(
+                        session_id=resolved_session_id,
+                        client_turn_id=resolved_client_turn_id,
+                        status=response_status,
+                        response=ensure_dict(safe_response),
+                        error=(
+                            str(ensure_dict(response_payload.get("error")).get("message") or "")[:400]
+                            if isinstance(response_payload.get("error"), dict)
+                            else ""
+                        ),
+                    )
+                except Exception:  # noqa: BLE001 - recovery bookkeeping cannot mask the turn result.
+                    self._runtime_session_state.clear_finalizing_turn(
+                        session_id=resolved_session_id,
+                        client_turn_id=resolved_client_turn_id,
+                    )
+            elif turn_raised and owns_turn and resolved_session_id and resolved_client_turn_id:
+                failure = recovery_failure or {
+                    "type": "RuntimeError",
+                    "message": "Runtime turn failed before producing a response.",
+                }
+                failed_response = {
+                    "ok": False,
+                    "session_id": resolved_session_id,
+                    "sessionId": resolved_session_id,
+                    "turn_id": str(owned_params.get("_resolvedRuntimeTurnId") or ""),
+                    "turnId": str(owned_params.get("_resolvedRuntimeTurnId") or ""),
+                    "clientTurnId": resolved_client_turn_id,
+                    "status": "failed",
+                    "observe": {},
+                    "plan": {"reply": str(failure.get("message") or "Runtime turn failed."), "nextStep": "failed"},
+                    "error": failure,
+                }
+                try:
+                    self._runtime_session_state.record_final_response(
+                        session_id=resolved_session_id,
+                        client_turn_id=resolved_client_turn_id,
+                        status="failed",
+                        response=ensure_dict(planner_policy.public_runtime_payload(failed_response)),
+                        error=str(failure.get("message") or "Runtime turn failed.")[:400],
+                    )
+                except Exception:  # noqa: BLE001
+                    self._runtime_session_state.clear_finalizing_turn(
+                        session_id=resolved_session_id,
+                        client_turn_id=resolved_client_turn_id,
+                    )
 
     def _runtime_message_impl_body(
         self,
@@ -6166,11 +6281,37 @@ class AgentGateway:
         )
         if continuation_observation:
             loop_state.append(continuation_observation)
+        native_binding = self.runtime_planner.native_conversation_binding(project_root)
+        try:
+            native_turn = NativeRuntimeTurn(
+                self._runtime_session_state, self.runtime_planner, session_id, turn_id,
+                native_binding, message, loop_state, continuation_context,
+                continuation_completion, continuation_observation,
+                initial_history=history, client_turn_id=client_turn_id,
+            )
+        except ValueError as exc:
+            raise AgentGatewayError(str(exc), status_code=409) from exc
+
+        def runtime_approval_seed(**kwargs: Any) -> dict[str, Any]:
+            return native_turn.approval_seed(task_loop.approval_seed(**kwargs))
+
         steps: list[dict[str, Any]] = (
             task_loop.historical_steps() if continuation_context else []
         )
+        def is_native_read_observation(tool_name: str, *, has_requirement: bool) -> bool:
+            if not native_binding or has_requirement:
+                return False
+            observed_tool = self._tools.get(str(tool_name or "").strip())
+            return bool(
+                observed_tool is not None
+                and not observed_tool.write
+                and not observed_tool.advanced
+                and not observed_tool.requires_user_activation
+                and not self._write_handlers.get(observed_tool.name)
+                and self._external_mcp_read_tool_block(observed_tool, self.ensure_config())
+            )
         timeline: list[dict[str, Any]] = []
-        params["_runtimeFailureProgress"] = {"steps": steps, "timeline": timeline, "contextUsage": context_usage}
+        params["_runtimeFailureProgress"] = {"steps": steps, "timeline": timeline, "contextUsage": context_usage, "_nativeTurn": native_turn}
 
         def append_timeline_event(
             kind: str,
@@ -6297,6 +6438,7 @@ class AgentGateway:
             task_loop.require_action(kind="write", tool=required_memory_tool)
 
         def record_consumed_steers(items: list[dict[str, Any]]) -> None:
+            native_turn.queue_steers(items)
             nonlocal memory_request_text
             for item in items:
                 input_id = str(item.get("inputId") or "").strip()
@@ -6547,6 +6689,7 @@ class AgentGateway:
         # Optional model-turn limits support automation. Tool-call count is
         # telemetry only; normal turns end at the model's final response.
         for step_index in count():
+            native_turn.settle()
             params["_internalToolBlocks"] = sorted(
                 self._runtime_session_state.internal_tool_blocks(session_id)
             )
@@ -6592,16 +6735,19 @@ class AgentGateway:
                 break
             if step_index > 0:
                 usage_before_compaction = dict(context_usage)
-                history, compaction_result, compaction_blocked = self.runtime_planner.maybe_compact_runtime_history(
-                    message=message,
-                    params=params,
-                    observe=observe,
-                    history=history,
-                    loop_state=loop_state,
-                    context_usage=context_usage,
-                    attempt_compaction=not runtime_compaction_attempted,
-                    runtime_exposure_layer=runtime_exposure_layer,
-                )
+                if native_binding:
+                    compaction_result, compaction_blocked = None, False
+                else:
+                    history, compaction_result, compaction_blocked = self.runtime_planner.maybe_compact_runtime_history(
+                        message=message,
+                        params=params,
+                        observe=observe,
+                        history=history,
+                        loop_state=loop_state,
+                        context_usage=context_usage,
+                        attempt_compaction=not runtime_compaction_attempted,
+                        runtime_exposure_layer=runtime_exposure_layer,
+                    )
                 if compaction_result is not None:
                     runtime_compaction_attempted = True
                     if compaction_result.get("applied"):
@@ -6679,6 +6825,7 @@ class AgentGateway:
                     "modelTurnsUsed": task_loop.model_turns_used,
                     "remainingModelTurns": max(0, max_model_turns - task_loop.model_turns_used),
                 }
+            native_turn.settle()
             plan = self.runtime_planner.plan_agent_turn(
                 message,
                 params,
@@ -6688,7 +6835,10 @@ class AgentGateway:
                 context_usage=context_usage,
                 reasoning_trace=reasoning_trace,
                 exposure_layer=runtime_exposure_layer,
+                **({"native_turn": native_turn} if native_binding else {}),
             )
+            if native_binding and native_turn.compaction is not None:
+                runtime_compaction = native_turn.compaction
             task_loop.model_turns_used += 1
             if continuation_shutdown_guard:
                 self._ensure_runtime_continuation_accepting()
@@ -6768,6 +6918,25 @@ class AgentGateway:
                     }
                     break
                 continue
+
+            # Native control calls are admitted by the provider boundary before
+            # they become ordinary task actions, so they have no action record
+            # to match against the planner-validation receipt.  A subsequent
+            # validated native proposal is the narrow correction boundary for
+            # this blocker; it never clears tool execution failures or task
+            # requirements recorded below.
+            if (
+                native_binding
+                and unresolved_planner_argument_failure is not None
+                and str(unresolved_planner_argument_failure.get("actionKind") or "") == "control"
+                and str(unresolved_planner_argument_failure.get("tool") or "") == "vrcforge_runtime_action"
+                and (
+                    isinstance(plan.get("nativeCallIds"), list)
+                    or bool(str(plan.get("reply") or plan.get("summary") or "").strip())
+                )
+            ):
+                unresolved_planner_argument_failure = None
+                planner_argument_failures = 0
 
             planner_reply = str(plan.get("reply") or "").strip()
             if planner_reply and any(
@@ -7137,6 +7306,9 @@ class AgentGateway:
             )
 
             completion_requirement = ensure_dict(plan.get("completionRequirement"))
+            native_read_observation_for_plan = is_native_read_observation(
+                planned_tool, has_requirement=bool(completion_requirement)
+            ) and action_kind == "skill"
             if completion_requirement:
                 task_loop.require_action(
                     kind=str(completion_requirement.get("kind") or action_kind),
@@ -7206,7 +7378,7 @@ class AgentGateway:
                         "reason": plan.get("summary") or "Agent shell step",
                     },
                     agent_name=agent_name,
-                    task_context=task_loop.approval_seed(
+                    task_context=runtime_approval_seed(
                         tool_calls_used=tool_calls_used,
                         exposure_layer=runtime_exposure_layer,
                         requested_kind="shell",
@@ -7276,7 +7448,7 @@ class AgentGateway:
                         action_arguments,
                         agent_name,
                         goal_delivery_id=goal_delivery_id,
-                        task_context=task_loop.approval_seed(
+                        task_context=runtime_approval_seed(
                             tool_calls_used=tool_calls_used,
                             exposure_layer=runtime_exposure_layer,
                             requested_tool=step_tool,
@@ -7316,7 +7488,7 @@ class AgentGateway:
                     )
                     step_params["_runtimeSessionId"] = session_id
                     step_params["_runtimeClientTurnId"] = client_turn_id
-                    step_params["_taskSeed"] = task_loop.approval_seed(
+                    step_params["_taskSeed"] = runtime_approval_seed(
                         tool_calls_used=tool_calls_used,
                         exposure_layer=runtime_exposure_layer,
                         requested_kind="skill",
@@ -7328,7 +7500,7 @@ class AgentGateway:
                     )
                 if step_tool == "vrcforge_vision_audit_multi":
                     step_params["_runtimeSessionId"] = session_id
-                    step_params["_taskSeed"] = task_loop.approval_seed(
+                    step_params["_taskSeed"] = runtime_approval_seed(
                         tool_calls_used=tool_calls_used,
                         exposure_layer=runtime_exposure_layer,
                         requested_kind="skill",
@@ -7347,7 +7519,7 @@ class AgentGateway:
                 if step_tool == "vrcforge_ask_user" and not goal_delivery_id:
                     step_params["_runtimeSessionId"] = session_id
                     step_params["_runtimeClientTurnId"] = client_turn_id
-                    step_params["_taskSeed"] = task_loop.approval_seed(
+                    step_params["_taskSeed"] = runtime_approval_seed(
                         tool_calls_used=tool_calls_used,
                         exposure_layer=runtime_exposure_layer,
                         requested_kind="skill",
@@ -7401,7 +7573,7 @@ class AgentGateway:
                     "vrcforge_tool_registry",
                 }:
                     step_params.setdefault("exposureLayer", runtime_exposure_layer)
-                with (bind_memory_tool_context(project_root, memory_request_text, tuple(memory_user_texts)) if step_tool in MEMORY_TOOL_NAMES else nullcontext()), (
+                with self._bind_runtime_skill_scope(task_loop), (bind_memory_tool_context(project_root, memory_request_text, tuple(memory_user_texts)) if step_tool in MEMORY_TOOL_NAMES else nullcontext()), (
                     bind_tool_result_context(session_id, turn_id, project_root, steps) if step_tool == RESULT_READER_TOOL else nullcontext()
                 ):
                     step_payload = self._runtime_skill_executor.execute(
@@ -7457,12 +7629,16 @@ class AgentGateway:
                         )
                 loop_state.append(loop_step)
 
-            loaded_skill_context_only = bool(
+            instruction_scope_only = bool(
                 action_kind == "skill"
-                and str(step_payload.get("status") or "").strip().casefold() == "loaded"
-                and not str(step_payload.get("entrypointTool") or "").strip()
+                and (
+                    (str(step_payload.get("status") or "").strip().casefold() == "loaded"
+                     and not str(step_payload.get("entrypointTool") or "").strip())
+                    or (step_tool == "vrcforge_exit_skill"
+                        and ensure_dict(step_payload.get("result")).get("skillScopeStatus") == "exited")
+                )
             )
-            if loaded_skill_context_only:
+            if instruction_scope_only:
                 task_loop.require_action(kind="action", tool="*")
                 task_action = {
                     "actionId": "",
@@ -7475,7 +7651,10 @@ class AgentGateway:
                     if action_kind == "skill"
                     else ""
                 ) or step_tool
-                if action_kind == "skill" and not completion_requirement:
+                native_read_observation = (
+                    native_read_observation_for_plan and task_record_tool == step_tool
+                )
+                if action_kind == "skill" and not completion_requirement and not native_read_observation:
                     requirement_arguments = (
                         planned_arguments
                         if task_record_tool == step_tool
@@ -7486,23 +7665,23 @@ class AgentGateway:
                         tool=task_record_tool,
                         arguments=requirement_arguments,
                     )
-                automatic_correction_id = ""
-                if (
-                    str(step_payload.get("status") or "").strip().casefold()
-                    in {"executed", "loaded"}
-                    and step_tool == "vrcforge_load_internal_tool_block"
-                ):
-                    for prior_action_id, prior_key in unresolved_completion_action_keys.items():
-                        prior_outcome = unresolved_completion_outcomes.get(prior_key, {})
-                        if selection_correction_matches(prior_outcome, step_tool, action_arguments):
-                            automatic_correction_id = prior_action_id
-                            break
+                action_outcome = ensure_dict(step_payload.get("outcome"))
+                if step_tool == "vrcforge_ask_user" and str(
+                    action_outcome.get("status") or ""
+                ).strip() == "needs_user_action":
+                    question_payload = ensure_dict(step_payload.get("result")).get("question")
+                    question_text = str(
+                        ensure_dict(question_payload).get("question") or ""
+                    ).strip()
+                    if question_text:
+                        action_outcome = {**action_outcome, "summary": question_text}
+                        step_payload["outcome"] = action_outcome
                 task_action = task_loop.record_action(
                     kind=action_kind,
                     tool=task_record_tool,
                     arguments=action_arguments,
                     raw_result=step_payload,
-                    outcome=ensure_dict(step_payload.get("outcome")),
+                    outcome=action_outcome,
                     action_id=(
                         ""
                         if task_record_tool != step_tool
@@ -7510,8 +7689,8 @@ class AgentGateway:
                     ),
                     correction_for_action_id=(
                         str(plan.get("correctionForActionId") or "")
-                        or automatic_correction_id
                     ),
+                    native_read_observation=native_read_observation,
                 )
                 step_payload["outcome"] = task_action["outcome"]
                 if loop_state:
@@ -7658,25 +7837,6 @@ class AgentGateway:
                         last_plan = gated_plan
                         break
             elif step_outcome_status == "failed":
-                raw_selection_result = ensure_dict(step_payload.get("result"))
-                if (
-                    step_tool == "vrcforge_load_internal_tool_block"
-                    and selection_error_code(step_outcome) == "internal_tool_selection_invalid"
-                    and raw_selection_result.get("expectedBlock")
-                ):
-                    step_outcome = {
-                        **step_outcome,
-                        "data": {
-                            "expectedBlock": raw_selection_result.get("expectedBlock"),
-                            "tool": raw_selection_result.get("data", {}).get("tool")
-                            if isinstance(raw_selection_result.get("data"), dict)
-                            else "",
-                            "requestedTools": raw_selection_result.get("data", {}).get("requestedTools")
-                            if isinstance(raw_selection_result.get("data"), dict)
-                            else [],
-                        },
-                    }
-                    steps[-1]["outcome"] = step_outcome
                 unresolved_completion_outcomes[action_key] = step_outcome
                 if task_action_id:
                     unresolved_completion_action_keys[task_action_id] = action_key
@@ -7763,36 +7923,25 @@ class AgentGateway:
                 last_successful_action_id = planned_action_id
                 general_no_progress_attempts = 0
                 last_general_read_key = general_read_key
-                if unresolved_completion_outcomes and step_tool == "vrcforge_load_internal_tool_block":
-                    # A successful block load is the explicit correction for
-                    # the recoverable cross-block selection failure above.
-                    # Model plans do not always carry correctionActionIds, so
-                    # clear only that precise unresolved failure here; other
-                    # failed tool outcomes must remain completion-gated.
-                    stale_selection_keys = {
-                        key for key, outcome in unresolved_completion_outcomes.items()
-                        if selection_correction_matches(outcome, step_tool, action_arguments)
-                    }
-                    for stale_key in stale_selection_keys:
-                        unresolved_completion_outcomes.pop(stale_key, None)
-                    unresolved_completion_action_keys = {
-                        action_id: key for action_id, key in unresolved_completion_action_keys.items()
-                        if key not in stale_selection_keys
-                    }
                 if (
                     unresolved_planner_argument_failure is not None
                     and task_action.get("status") == "completed"
-                    and action_kind
-                    == str(unresolved_planner_argument_failure.get("actionKind") or "")
-                    and str(unresolved_planner_argument_failure.get("tool") or "")
-                    in {
-                        step_tool,
-                        str(
-                            plan.get("writeDisplayTool")
-                            or plan.get("skillDisplayTool")
-                            or ""
-                        ),
-                    }
+                    and (
+                        native_binding
+                        or (
+                            action_kind
+                            == str(unresolved_planner_argument_failure.get("actionKind") or "")
+                            and str(unresolved_planner_argument_failure.get("tool") or "")
+                            in {
+                                step_tool,
+                                str(
+                                    plan.get("writeDisplayTool")
+                                    or plan.get("skillDisplayTool")
+                                    or ""
+                                ),
+                            }
+                        )
+                    )
                 ):
                     planner_argument_failures = 0
                     unresolved_planner_argument_failure = None
@@ -7873,8 +8022,14 @@ class AgentGateway:
                 "需要的话再说一声，我接着往下做。）"
             )
             top_plan["reply"] = f"{base_reply}\n\n{notice}".strip() if base_reply else notice
+        pending_question = find_current_pending_question(steps)
+        pending_question_boundary = bool(pending_question) and str(
+            top_plan.get("nextStep") or ""
+        ).strip() not in {
+            "cancelled", "context_compaction_required", "loop_suppressed", "paused",
+        }
         terminal_status = str(top_plan.get("nextStep") or "").strip()
-        if unresolved_planner_argument_failure is not None and not top_plan.get("scopeDenied") and terminal_status not in {
+        if unresolved_planner_argument_failure is not None and not pending_question_boundary and not top_plan.get("scopeDenied") and terminal_status not in {
             "cancelled",
             "context_compaction_required",
             "loop_suppressed",
@@ -7900,7 +8055,20 @@ class AgentGateway:
                 "nextStep": "planner_failed",
             }
             terminal_status = "planner_failed"
-        if unresolved_completion_outcomes and not top_plan.get("scopeDenied") and terminal_status not in {
+        # Re-evaluate after all actions: later requirements can make an earlier
+        # observation mandatory. Unknown receipts remain conservative blockers.
+        blocking_completion_outcomes = {
+            key: outcome for key, outcome in unresolved_completion_outcomes.items()
+            if not any(
+                action_key == key
+                for action_id, action_key in unresolved_completion_action_keys.items()
+            )
+            or any(
+                action_key == key and task_loop.action_blocks_completion(action_id)
+                for action_id, action_key in unresolved_completion_action_keys.items()
+            )
+        }
+        if blocking_completion_outcomes and not pending_question_boundary and not top_plan.get("scopeDenied") and terminal_status not in {
             "cancelled",
             "context_compaction_required",
             "loop_suppressed",
@@ -7908,10 +8076,21 @@ class AgentGateway:
         }:
             gated_plan = completion_gate_plan(
                 top_plan,
-                next(iter(unresolved_completion_outcomes.values())),
+                next(iter(blocking_completion_outcomes.values())),
             )
             if gated_plan is not None:
                 top_plan = gated_plan
+        if pending_question_boundary:
+            question = ensure_dict(ensure_dict(pending_question.get("result")).get("question"))
+            prompt = str(question.get("question") or "").strip()
+            top_plan = {
+                **top_plan,
+                "summary": prompt or "The tool action needs user input before it can continue.",
+                "reply": prompt or "The tool action needs user input before it can continue.",
+                "continueLoop": False,
+                "nextStep": "needs_user_action",
+                "completionGate": {"status": "needs_user_action", "reason": "question_pending"},
+            }
         self._emit_runtime_status(
             "verifying",
             session_id=session_id,
@@ -7920,6 +8099,7 @@ class AgentGateway:
         )
         if isinstance(top_plan, dict):
             top_plan = task_loop.gate_terminal(top_plan)
+        native_turn.settle(top_plan)
 
         # Non-analyzed image state is rendered by the structured vision step.
         if (
@@ -7973,6 +8153,7 @@ class AgentGateway:
         if write_payload is not None:
             turn["write"] = write_payload
 
+        turn = planner_policy.public_runtime_payload(turn)
         self._runtime_session_state.append_turn(
             session_id,
             now=now,
@@ -8278,7 +8459,12 @@ class AgentGateway:
             },
         }
 
-    def get_runtime_session(self, session_id: str) -> dict[str, Any]:
+    def get_runtime_session(self, session_id: str, *, client_turn_id: str = "") -> dict[str, Any]:
+        if str(client_turn_id or "").strip():
+            return self._runtime_session_state.final_response(
+                session_id=session_id,
+                client_turn_id=client_turn_id,
+            )
         session = self._runtime_session_state.get_session(session_id)
         if not session:
             raise AgentGatewayError(f"Runtime session was not found: {session_id}", status_code=404)
@@ -8298,7 +8484,11 @@ class AgentGateway:
             turn_id=turn_id,
             client_turn_id=client_turn_id,
         )
-        self.questions.cancel_runtime_questions(session_id=session_id, turn_id=turn_id, client_turn_id=client_turn_id)
+        cancelled_question_seeds = self.questions.cancel_runtime_questions(
+            session_id=session_id, turn_id=turn_id, client_turn_id=client_turn_id
+        )
+        for seed in cancelled_question_seeds:
+            NativeRuntimeTurn.cancel_question(self._runtime_session_state, seed)
         event = {
             "event": "runtime_turn_cancel_requested",
             "status": "cancel_requested",
@@ -9924,6 +10114,27 @@ def ensure_dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def find_current_pending_question(steps: Any) -> dict[str, Any] | None:
+    """Find a question created by this turn, excluding resumed history."""
+
+    if not isinstance(steps, list):
+        return None
+    for step in reversed(steps):
+        if not isinstance(step, dict) or bool(step.get("historical")):
+            continue
+        if str(step.get("tool") or "") != "vrcforge_ask_user":
+            continue
+        if str(ensure_dict(step.get("outcome")).get("status") or "") != "needs_user_action":
+            continue
+        question_id = str(
+            ensure_dict(ensure_dict(step.get("result")).get("question")).get("questionId")
+            or ""
+        ).strip()
+        if question_id:
+            return step
+    return None
+
+
 def ensure_list(value: Any) -> list[Any]:
     if isinstance(value, list):
         return value
@@ -10211,26 +10422,7 @@ def summarize_params(value: Any) -> dict[str, Any]:
         return {
             str(key): summarize_value(key, item)
             for key, item in value.items()
-            if str(key).lower()
-            not in {
-                "token",
-                "app_token",
-                "artifact_sig",
-                "artifact_signature",
-                "artifact_token",
-                "authorization",
-                "api_key",
-                "apikey",
-                "access_token",
-                "approval_token",
-                "control_token",
-                "controltoken",
-                "refresh_token",
-                "secret",
-                "user_constraints",
-                "userconstraints",
-                "_vrcforge_user_constraints",
-            }
+            if str(key).lower() not in planner_policy.RECURSIVE_SENSITIVE_FIELDS
         }
     return {"value": summarize_value("value", value)}
 
@@ -10278,6 +10470,8 @@ def redact_sensitive(value: Any) -> Any:
         result: dict[str, Any] = {}
         for key, item in value.items():
             lowered = str(key).lower()
+            if lowered == "_nativereadobservation":
+                continue
             if lowered in planner_policy.RECURSIVE_SENSITIVE_FIELDS:
                 result[str(key)] = "<redacted>"
             elif lowered in {"arguments"} and isinstance(item, dict):

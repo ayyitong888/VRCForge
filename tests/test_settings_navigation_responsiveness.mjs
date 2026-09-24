@@ -8,7 +8,7 @@ const controller = await readFile(
 );
 
 const openSettingsSection = app.match(
-  /function openSettingsSection\([\s\S]*?\n  \}\n\n  async function createGoalFromSlash/,
+  /function openSettingsSection\([\s\S]*?\r?\n  \}\r?\n\r?\n  async function createGoalFromSlash/,
 )?.[0] || "";
 assert.match(openSettingsSection, /setActiveSettingsSection\(section\);/);
 assert.match(openSettingsSection, /if \(activeView !== "settings"\) \{\s*void openSettings\(\);\s*\}/);

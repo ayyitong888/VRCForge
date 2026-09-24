@@ -109,3 +109,62 @@ def test_question_service_allows_free_text_and_rejects_single_option_or_empty_an
     second = service.create({"question": "Answer required", "sessionId": "s"})
     with pytest.raises(AgentQuestionServiceError, match="answer is required"):
         service.answer(str(second["question"]["questionId"]), {"sessionId": "s"})
+
+
+def test_answered_history_cannot_hide_pending_or_running_questions(tmp_path: Path) -> None:
+    service = _service(tmp_path, threading.RLock(), [])
+    pending = service.create({"question": "Still needs an answer", "sessionId": "s"})["question"]
+    active = service.create({"question": "Continuing", "sessionId": "s"})["question"]
+    service.answer(active["questionId"], {"answer": "yes", "sessionId": "s"})
+    service.record_runtime_continuation(active["questionId"], "claimed")
+    for number in range(8):
+        old = service.create({"question": f"Already answered {number}", "sessionId": "s"})["question"]
+        service.answer(old["questionId"], {"answer": "done", "sessionId": "s"})
+        service.record_runtime_continuation(old["questionId"], "delivered")
+    rows = service.list(session_id="s", limit=2, include_answered=True)["questions"]
+    assert [row["questionId"] for row in rows] == [pending["questionId"], active["questionId"]]
+
+@pytest.mark.parametrize('field,limit', [('question',1000), ('header',120)])
+def test_question_rejects_oversize_text_without_silent_truncation(tmp_path, field, limit):
+    service = _service(tmp_path, threading.RLock(), [])
+    values = {'question': 'Which repair?', field: 'x' * (limit + 1)}
+    with pytest.raises(AgentQuestionServiceError, match=field):
+        service.create(values)
+    assert not service.log_path.exists()
+
+
+@pytest.mark.parametrize('field,limit', [('label',160), ('value',500), ('description',500), ('id',120)])
+def test_question_rejects_oversize_choice_without_changing_decision(tmp_path, field, limit):
+    service = _service(tmp_path, threading.RLock(), [])
+    option = {'id':'first','label':'Reinstall','value':'Install the bundled plugin',field:'x' * (limit + 1)}
+    with pytest.raises(AgentQuestionServiceError, match=field):
+        service.create({'question':'Which repair?', 'options':[option, {'id':'later','label':'Later'}]})
+    assert not service.log_path.exists()
+
+
+def test_question_preserves_multiline_choices_and_has_model_schema(tmp_path):
+    from runtime_planner_service import planner_tool_input_schema
+    schema = planner_tool_input_schema('vrcforge_ask_user')
+    assert 'question' in schema['properties']
+    assert 'options' in schema['properties']
+    option_schema = schema['properties']['options']['items']['anyOf'][1]
+    assert {'id','label','description','value'} <= set(option_schema['properties'])
+    service = _service(tmp_path, threading.RLock(), [])
+    question = 'Choose a repair.\nYour files are kept.'
+    description = 'Install the bundled plugin.\nKeep user tools and the wardrobe.'
+    result = service.create({'question':question,'options':[{'id':'install','label':'Reinstall','description':description}, {'id':'later','label':'Later'}]})
+    assert result['question']['question'] == question
+    assert result['question']['options'][0]['description'] == description
+
+
+def test_question_answer_preserves_multiline_and_rejects_oversize(tmp_path):
+    service = _service(tmp_path, threading.RLock(), [])
+    created = service.create({'question': 'Describe the limits', 'sessionId': 's'})
+    qid = created['question']['questionId']
+    with pytest.raises(AgentQuestionServiceError, match='answer'):
+        service.answer(qid, {'sessionId': 's', 'answer': 'x' * 2001})
+    assert service.list(session_id='s')['count'] == 1
+    text = 'Keep the files.\n    Keep indentation.\n\nDo not edit the wardrobe.'
+    result = service.answer(qid, {'sessionId': 's', 'answer': text})
+    assert result['question']['answer'] == text
+    assert text in service._continuation_prompt(result['question'])

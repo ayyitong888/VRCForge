@@ -995,8 +995,10 @@ def test_non_optimizer_apply_request_can_still_auto_approve(monkeypatch, tmp_pat
     original_approvals = dict(dashboard_server.AGENT_GATEWAY._approvals)
     original_handlers = dict(dashboard_server.AGENT_GATEWAY._write_handlers)
     original_prepare = dashboard_server.AGENT_GATEWAY.approval_transactions.checkpoint_prepare_handler
+    original_reviewer = dashboard_server.AGENT_GATEWAY.approval_transactions.auto_approval_reviewer
     dashboard_server.AGENT_GATEWAY.approval_transactions.checkpoint_prepare_handler = lambda _root: {"ok": True}
     dashboard_server.AGENT_GATEWAY._approvals.clear()
+    dashboard_server.AGENT_GATEWAY.approval_transactions.auto_approval_reviewer = lambda _approval: "allow_auto"
     calls: list[dict] = []
 
     def write_handler(args: dict) -> dict:
@@ -1035,6 +1037,7 @@ def test_non_optimizer_apply_request_can_still_auto_approve(monkeypatch, tmp_pat
         dashboard_server.AGENT_GATEWAY._approvals.update(original_approvals)
         dashboard_server.AGENT_GATEWAY._write_handlers = original_handlers
         dashboard_server.AGENT_GATEWAY.approval_transactions.checkpoint_prepare_handler = original_prepare
+        dashboard_server.AGENT_GATEWAY.approval_transactions.auto_approval_reviewer = original_reviewer
 
 
 def test_full_permission_overrides_explicit_approval_with_checkpoint(monkeypatch, tmp_path: Path) -> None:

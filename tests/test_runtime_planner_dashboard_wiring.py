@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from types import SimpleNamespace
 import threading
 import time
 from unittest.mock import patch
 
 import pytest
+from test_runtime_planner_service import service
 
 import dashboard_server
 from provider_configuration_service import ProviderApiConfig
@@ -17,7 +19,30 @@ from runtime_planner_service import (
     PlannerTool,
 )
 from profiled_tool_registry import CapabilityProfile
-from vrchat_blendshape_agent import LlmPlanResponse
+from vrchat_blendshape_agent import LlmPlanResponse, McpResult
+
+
+def test_real_compile_mcp_result_exposes_typed_diagnostic_to_next_planner_turn():
+    diagnostic = {"file": "Assets/VRCForge/Editor/UserToolCommands.cs", "line": 183,
+                  "column": 53, "message": "CS0117: 'VRCForgeToolRegistry' does not contain a definition for 'Describe'",
+                  "severity": "error", "privateDump": "hidden-diagnostic-dump"}
+    snapshot = {"ok": True, "isCompiling": False, "captureComplete": True,
+                "errorCount": 1, "warningCount": 0, "errors": [diagnostic], "warnings": []}
+    core = McpResult(exit_code=0, stdout="opaque-wire-output-must-stay-hidden", stderr="", payload={
+        "structuredContent": {"success": True, "data": snapshot}, "isError": False,
+    })
+    with patch.object(dashboard_server, "load_dashboard_settings", return_value=SimpleNamespace()), patch.object(
+        dashboard_server, "invoke_unity_mcp", return_value=core,
+    ):
+        result = dashboard_server.read_agent_compile_errors({"maxErrors": 20})
+    observation = service()._llm_loop_step_observation({
+        "tool": "vrcforge_get_compile_errors", "status": "executed", "result": result,
+    })
+    assert "CS0117" in observation and "Describe" in observation
+    assert "UserToolCommands.cs" in observation and '"line":183' in observation
+    assert '"authority":"untrusted_tool_output"' in observation
+    assert "opaque-wire-output" not in observation and "hidden-diagnostic-dump" not in observation
+    assert result == snapshot
 
 
 def fixture_config() -> ProviderApiConfig:
@@ -29,6 +54,51 @@ def fixture_config() -> ProviderApiConfig:
         api_type="chat_completions",
         thinking_level="medium",
     )
+
+
+def test_native_model_reuses_provider_owner_and_keeps_replay_out_of_ui():
+    binding = dashboard_server._RuntimePlannerProviderTurnBinding()
+    model = dashboard_server._RuntimePlannerModel(binding)
+    receipt = {"role": "assistant", "content": None, "reasoning_content": "synthetic-private-replay",
+               "tool_calls": [{"id": "call-native", "type": "function",
+                               "function": {"name": "read_file", "arguments": "{}"}}]}
+    calls, events = [], []
+
+    def request(_settings, _prompt, **kwargs):
+        calls.append((_prompt, kwargs))
+        kwargs["stream_activity_callback"]({"kind": "tool_call_activity"})
+        return LlmPlanResponse("", {}, assistant_message=receipt, finish_reason="tool_calls")
+
+    context = {"sessionId": "native-owner", "turnId": "turn-native", "clientTurnId": "client-native"}
+    dashboard_server.AGENT_GATEWAY.runtime_sessions.set_stream_context(context)
+    try:
+        with (patch.object(dashboard_server.PROVIDER_CONFIGURATION, "current_api_config", return_value=fixture_config()),
+              patch.object(dashboard_server.PROVIDER_TEXT_PROBE, "probe_settings", return_value=SimpleNamespace()),
+              patch.object(dashboard_server, "request_llm_plan_with_metadata", side_effect=request),
+              patch.object(dashboard_server.EVENT_BUS, "broadcast_from_sync", side_effect=lambda kind, payload: events.append(payload))):
+            with binding.bind({}):
+                result = model.plan_native({"instructions": "short policy", "messages": [{"role": "user", "content": "read"}], "tools": []})
+        assert calls[0][1]["native_messages"] == [{"role": "system", "content": "short policy"}, {"role": "user", "content": "read"}]
+        assert calls[0][1]["native_tools"] == []
+        assert result.assistant_message == receipt
+        assert result.finish_reason == "tool_calls"
+        assert model.active_call_count() == 0
+        assert "synthetic-private-replay" not in repr(events)
+        assert "synthetic-private-replay" not in repr(result)
+    finally:
+        dashboard_server.AGENT_GATEWAY.runtime_sessions.clear_stream_context()
+
+
+def test_provider_turn_binding_uses_frozen_explicit_native_route_only():
+    binding = dashboard_server._RuntimePlannerProviderTurnBinding()
+    config = fixture_config()
+    with patch.object(dashboard_server.PROVIDER_CONFIGURATION, "current_api_config", return_value=config):
+        with binding.bind({"native_binding": "client-forged", "api_type": "responses"}) as metadata:
+            assert metadata.native_binding == config.native_binding()
+    non_native = replace(config, api_type="responses")
+    with patch.object(dashboard_server.PROVIDER_CONFIGURATION, "current_api_config", return_value=non_native):
+        with binding.bind({}) as metadata:
+            assert metadata.native_binding == ""
 
 
 @pytest.mark.parametrize("second_outcome", ["reply", "failed", "cancelled"])
@@ -63,13 +133,51 @@ def test_each_model_call_starts_a_fresh_stream_boundary_even_for_format_retry(se
                     with pytest.raises(RuntimeError, match="fixture stopped"):
                         model.plan("format correction")
         phases = [payload.get("phase") or "done" for kind, payload in events if kind == "agentRuntimeDelta"]
-        expected = ["waiting_for_model", "done", "waiting_for_model"]
-        if second_outcome == "reply":
-            expected.extend(["receiving_response", "done"])
+        expected = ["waiting_for_model", "waiting_for_model"]
         assert phases == expected
         assert all(payload["clientTurnId"] == context["clientTurnId"] for _, payload in events)
         assert model.active_call_count() == 0
         assert "fixture-secret-key" not in repr(events)
+    finally:
+        model.shutdown()
+        dashboard_server.AGENT_GATEWAY.runtime_sessions.clear_stream_context()
+
+
+@pytest.mark.parametrize("first_response", [
+    '{"action":"reply","reply":"discarded draft\ninvalid JSON"}',
+    '{"reply":"discarded draft"}',
+    None,
+])
+def test_planner_format_validation_never_publishes_attempt_as_assistant_body(first_response):
+    binding = dashboard_server._RuntimePlannerProviderTurnBinding()
+    model = dashboard_server._RuntimePlannerModel(binding)
+    final = '{"action":"reply","reply":"accepted answer"}'
+    responses = iter([first_response, final] if first_response else [final])
+    prompts, events = [], []
+
+    def request(_settings, prompt, *, stream_callback, **_kwargs):
+        prompts.append(prompt)
+        text = next(responses)
+        stream_callback(text)
+        return LlmPlanResponse(text=text, reasoning={}, usage={})
+
+    dashboard_server.AGENT_GATEWAY.runtime_sessions.set_stream_context({"clientTurnId": "format-publication"})
+    try:
+        with (patch.object(dashboard_server.PROVIDER_CONFIGURATION, "current_api_config", return_value=fixture_config()),
+              patch.object(dashboard_server.PROVIDER_TEXT_PROBE, "probe_settings", return_value=SimpleNamespace()),
+              patch.object(dashboard_server, "request_llm_plan_with_metadata", side_effect=request),
+              patch.object(dashboard_server.EVENT_BUS, "broadcast_from_sync", side_effect=lambda kind, payload: events.append(payload))):
+            with binding.bind({}):
+                plan = service(model=model)._llm_plan_agent_turn("hello", {}, [])
+        assert plan["reply"] == "accepted answer"
+        assert len(prompts) == (2 if first_response else 1)
+        if first_response:
+            assert plan["formatCorrection"]["parseRecovered"] is True
+        # The real parser validates/retries; only the runtime's accepted timeline
+        # may publish a body, after its separate completion-evidence gate too.
+        assert all("textDelta" not in event and not event.get("done") for event in events)
+        assert "discarded draft" not in repr(events)
+        assert '"action"' not in repr(events)
     finally:
         model.shutdown()
         dashboard_server.AGENT_GATEWAY.runtime_sessions.clear_stream_context()
@@ -150,7 +258,7 @@ def test_turn_binding_freezes_one_provider_config_and_resets_it_in_finally() -> 
 def test_model_and_compactor_share_the_exact_bound_config_without_projecting_secret() -> None:
     binding = dashboard_server._RuntimePlannerProviderTurnBinding()
     model = dashboard_server._RuntimePlannerModel(binding)
-    compactor = dashboard_server._RuntimePlannerCompactor(binding)
+    compactor = dashboard_server._RuntimePlannerCompactor(binding, model)
     config = fixture_config()
     settings = SimpleNamespace()
     compact_call: dict[str, object] = {}
@@ -195,7 +303,7 @@ def test_model_and_compactor_share_the_exact_bound_config_without_projecting_sec
             )
 
     current_api_config.assert_called_once_with()
-    assert probe_settings.call_count == 2
+    assert probe_settings.call_count == 1
     assert all(call.args[0] is config for call in probe_settings.call_args_list)
     assert model_result.planner_label.endswith("fixture-model")
     assert model_result.reasoning == {"itemCount": 1, "summary": "fixture"}
@@ -204,6 +312,32 @@ def test_model_and_compactor_share_the_exact_bound_config_without_projecting_sec
     assert compact_call["model"] == "fixture-model"
     assert "fixture-secret-key" not in repr(model_result)
     assert "fixture-secret-key" not in repr(compact_call)
+
+
+def test_compactor_uses_injected_model_owner_and_propagates_cancellation() -> None:
+    binding = dashboard_server._RuntimePlannerProviderTurnBinding()
+
+    class CancelledModel:
+        def plan(self, prompt: str):
+            assert prompt == "compact prompt"
+            raise dashboard_server.RuntimePlannerProviderCancelledError("cancelled")
+
+    compactor = dashboard_server._RuntimePlannerCompactor(binding, CancelledModel())
+    config = fixture_config()
+    settings = SimpleNamespace()
+
+    def invoke_summarizer(history, **kwargs):
+        return kwargs["summarizer"]("compact prompt")
+
+    with (
+        patch.object(dashboard_server.PROVIDER_CONFIGURATION, "current_api_config", return_value=config),
+        patch.object(dashboard_server.PROVIDER_TEXT_PROBE, "probe_settings", return_value=settings),
+        patch.object(dashboard_server, "compact_context", side_effect=invoke_summarizer),
+        patch.object(dashboard_server, "request_llm_plan", return_value="wrong direct path"),
+    ):
+        with binding.bind({"provider": "custom", "model": "fixture-model", "_requestedContextLimit": 64_000}):
+            with pytest.raises(dashboard_server.RuntimePlannerProviderCancelledError, match="cancelled"):
+                compactor.compact(({"role": "user", "text": "history"},), {"targetTokens": 100})
 
 
 def test_model_worker_routes_three_visual_journey_samples_through_one_turn_owner() -> None:
@@ -379,6 +513,10 @@ def test_catalog_filters_only_visible_tools_and_keeps_full_routing_metadata() ->
     }
     expected_execution.update(visible_execution_writes)
     expected_routable = set(gateway._tools) | routable_writes
+    runtime_only_exclusions = dashboard_server.RUNTIME_BLOCKED_SKILLS - {"vrcforge_execute_shell"}
+    expected_planning.difference_update(runtime_only_exclusions)
+    expected_execution.difference_update(runtime_only_exclusions)
+    expected_routable.difference_update(runtime_only_exclusions)
     expected_skills = {
         str(item.get("name") or "")
         for item in gateway.skills.build_skill_registry(config, EXPOSURE_LAYER_EXECUTION)["skills"]

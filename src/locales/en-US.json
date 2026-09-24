@@ -583,7 +583,7 @@
     "selectProject": "Select Project",
     "importAndSelectProject": "Import All from VRCForge.unitypackage, then select that open project here.",
     "keepUnityOpen": "For first-time setup, install the VRCForge plugin in this Unity project:\n1. Open the project you selected in Unity.\n2. Choose Assets → Import Package → Custom Package… and select the VRCForge.unitypackage file matching your app version.\n3. Click Import All in the import window, then wait for importing and loading to finish.\n4. Keep Unity open, return here, and click Retry connection.\n\nIf the plugin is already installed and loaded, click Retry connection directly.",
-    "toolsConnected": "Connected — {{count}} tools",
+    "toolsConnected": "Connected to Unity — ready to use.",
     "providerTour": {
       "connectionTitle": "Choose a provider",
       "connectionDescription": "Select the AI provider you want VRCForge to use.",
@@ -1546,6 +1546,13 @@
     "tableStatus": "Status",
     "tableActions": "Actions",
     "noPackages": "No installed .vsk packages.",
+    "unityProjectSelected": "Selected Unity project",
+    "installUnityTools": "Install Unity tools",
+    "unityToolInstallQueued": "Unity tool installation is waiting for approval.",
+    "unityToolInstallSubmitted": "Unity tool installation request submitted.",
+    "unityToolInstallUnexpected": "Unity tool installation returned an unexpected status: {{status}}.",
+    "unityToolNeedsUnity": "Select a Unity project first.",
+    "unityToolCompileHint": "Installation requires Unity compilation after approval.",
     "disable": "Disable",
     "enable": "Enable",
     "uninstall": "Uninstall",
@@ -1594,7 +1601,17 @@
     "answer": "Answer",
     "retry": "Retry",
     "skip": "Skip",
-    "skipAnswer": "Skipped"
+    "skipAnswer": "Skipped",
+    "continuationCancelling": "Stopping…",
+    "continuationBlocked": "Waiting for the next action",
+    "continuationRunning": "Continuing this task…",
+    "continuationCompleted": "Continuation completed",
+    "continuationCancelled": "Continuation stopped",
+    "continuationFailed": "Continuation failed",
+    "stopContinuation": "Stop"
+,
+    "continuationWaiting": "Waiting…",
+    "continuationDelivered": "Continuation result delivered; inspect the transcript"
   },
   "common": {
     "refresh": "Refresh",

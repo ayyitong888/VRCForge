@@ -14,6 +14,10 @@ from typing import Any, Iterable
 
 DEEPSEEK_AUTO_MODEL = "deepseek-auto"
 DEEPSEEK_FLASH_MODEL = "deepseek-v4-flash"
+# The official DeepSeek harness also exposes this additional model identifier.
+# Keep it distinct rather than rewriting the configured wire model.
+DEEPSEEK_CURRENT_FLASH_MODEL = "deepseek-flash"
+DEEPSEEK_FLASH_MODELS = frozenset({DEEPSEEK_FLASH_MODEL, DEEPSEEK_CURRENT_FLASH_MODEL})
 DEEPSEEK_PRO_MODEL = "deepseek-v4-pro"
 
 
@@ -56,7 +60,7 @@ def provider_protocol_candidates(
                 ProviderProtocolCandidate(provider_id, DEEPSEEK_FLASH_MODEL, "messages"),
                 ProviderProtocolCandidate(provider_id, DEEPSEEK_FLASH_MODEL, "chat_completions"),
             )
-        if model_id in {DEEPSEEK_FLASH_MODEL, DEEPSEEK_PRO_MODEL}:
+        if model_id in DEEPSEEK_FLASH_MODELS | {DEEPSEEK_PRO_MODEL}:
             return (
                 ProviderProtocolCandidate(provider_id, model_id, "responses"),
                 ProviderProtocolCandidate(provider_id, model_id, "messages"),
@@ -92,7 +96,7 @@ def supported_provider_api_types(provider: str, model: str) -> tuple[str, ...]:
     if provider_id == "deepseek":
         if model_id == DEEPSEEK_AUTO_MODEL:
             return ()
-        if model_id in {DEEPSEEK_FLASH_MODEL, DEEPSEEK_PRO_MODEL}:
+        if model_id in DEEPSEEK_FLASH_MODELS | {DEEPSEEK_PRO_MODEL}:
             return ("responses", "messages", "chat_completions")
         return ("chat_completions",)
     if provider_id in {"gemini", "vertexai"}:

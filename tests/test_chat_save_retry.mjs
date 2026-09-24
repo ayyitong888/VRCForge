@@ -5,6 +5,35 @@ import ts from "typescript";
 // Execute the actual hook's save/reconcile and enqueue functions with local ports.
 // No renderer, provider, backend, or live chat storage is involved.
 const source = fs.readFileSync("src/hooks/use-chat-sessions.ts", "utf8");
+const saveErrorHelperStart = source.indexOf("function chatSaveErrorMessage(");
+assert.notEqual(saveErrorHelperStart, -1, "chat save errors need an explicit transient classification");
+const saveErrorHelperEnd = source.indexOf("\n}\n", saveErrorHelperStart) + 2;
+const saveErrorHelper = ts.transpileModule(
+  source.slice(saveErrorHelperStart, saveErrorHelperEnd),
+  { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } },
+).outputText;
+class HelperApiError extends Error { constructor(status, message) { super(message); this.status = status; } }
+const chatSaveErrorMessage = new Function("ApiError", `${saveErrorHelper}\nreturn chatSaveErrorMessage;`)(HelperApiError);
+assert.equal(
+  chatSaveErrorMessage(new HelperApiError(413, "Chat payload exceeds the 16 MiB save limit."), "blocked"),
+  "Chat payload exceeds the 16 MiB save limit.",
+  "413 must expose an accurate retryable save error",
+);
+assert.equal(
+  chatSaveErrorMessage(new HelperApiError(500, "Runtime is temporarily unavailable."), "blocked"),
+  "Runtime is temporarily unavailable.",
+  "temporary failures must remain retryable and accurate",
+);
+assert.equal(
+  chatSaveErrorMessage(new HelperApiError(409, "Concurrent chat update."), "blocked"),
+  "blocked",
+  "conflict fallback remains owned by the recovery path",
+);
+assert.equal(
+  chatSaveErrorMessage(new Error("Local bridge temporarily unavailable."), "blocked"),
+  "Local bridge temporarily unavailable.",
+  "bridge failures must not be mislabeled as source recovery",
+);
 // Reproduce a passive effect from an earlier render arriving between deltas.
 // Execute the real chats-only effects, if any, against that earlier snapshot.
 const chatsOnlyEffects = [];

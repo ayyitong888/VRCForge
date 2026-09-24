@@ -27,7 +27,7 @@ import {
 } from "../lib/chat-thread";
 import type { ChatThread, ConversationItem, ProjectType } from "../lib/chat-types";
 import { normalizeProjectPathKey } from "../lib/project-path";
-import { buildChatSidebarView } from "../lib/sidebar-view";
+import { buildChatSidebarView, chatLatestAgentMarker } from "../lib/sidebar-view";
 
 type InitialChatState = {
   chats: ChatThread[];
@@ -40,11 +40,25 @@ type ChatStorageLoadOutcome = {
   shouldPersist: boolean;
 };
 
+function chatSaveErrorMessage(cause: unknown, fallback: string): string {
+  // A 409 is owned by the fetch/merge recovery path, whose marker and message
+  // already describe the durable conflict. Other API failures leave the
+  // in-memory dirty snapshot retryable and should retain their actual detail.
+  if (cause instanceof ApiError && cause.status === 409) {
+    return fallback;
+  }
+  if (cause instanceof Error) {
+    return cause.message.trim() || fallback;
+  }
+  return fallback;
+}
+
 function projectDurableChatFingerprint(chat: ChatThread): unknown {
   return filterPersistableChats([chat])[0] ?? null;
 }
 
 type UseChatSessionsParams = {
+  activeView: ActiveView;
   endpoint: string;
   runtimeConnected: boolean;
   projectPrefsReady: boolean;
@@ -61,6 +75,7 @@ type UseChatSessionsParams = {
 };
 
 export function useChatSessions({
+  activeView,
   endpoint,
   runtimeConnected,
   projectPrefsReady,
@@ -106,9 +121,17 @@ export function useChatSessions({
 
   const activeChat = chats.find((chat) => chat.id === activeChatId) || null;
   const chatSidebar = useMemo(
-    () => buildChatSidebarView(chats, i18n.language, normalizeProjectPathKey),
-    [chats, i18n.language],
+    () => buildChatSidebarView(chats, i18n.language, normalizeProjectPathKey, Date.now(), activeView === "chat" ? activeChatId : ""),
+    [chats, i18n.language, activeChatId, activeView],
   );
+
+  useEffect(() => {
+    if (activeView !== "chat" || !activeChatId) return;
+    const chat = chatsRef.current.find((candidate) => candidate.id === activeChatId);
+    const marker = chat ? chatLatestAgentMarker(chat) : undefined;
+    if (!chat || !marker || chat.lastViewedAt === marker) return;
+    updateChat(activeChatId, (current) => ({ ...current, lastViewedAt: marker }));
+  }, [activeChatId, activeView, chats]);
 
   useEffect(
     () => () => {
@@ -355,7 +378,7 @@ export function useChatSessions({
                 return;
               }
               void enqueueChatSave(false)
-                .catch(() => setError(t("chat.sessionSaveBlocked")));
+                .catch((cause) => setError(chatSaveErrorMessage(cause, t("chat.sessionSaveBlocked"))));
             }, 3000);
           }
         }
@@ -469,7 +492,7 @@ export function useChatSessions({
     }
     const timer = window.setTimeout(() => {
       void enqueueChatSave(true)
-        .catch(() => setError(t("chat.sessionSaveBlocked")));
+        .catch((cause) => setError(chatSaveErrorMessage(cause, t("chat.sessionSaveBlocked"))));
     }, 800);
     return () => window.clearTimeout(timer);
   }, [chats, runtimeConnected, endpoint]);
@@ -732,6 +755,7 @@ function normalizeStoredChatSnapshot(values: unknown[]): { chats: ChatThread[]; 
       pinned: chat.pinned === true,
       archived: chat.archived === true,
       revision: normalizeChatRevision(chat.revision),
+      lastViewedAt: typeof chat.lastViewedAt === "string" ? chat.lastViewedAt : "",
       compaction: normalizeRestoredCompaction(chat.compaction),
       contextUsageCache: normalizeChatContextUsage(chat.contextUsageCache),
       attachmentPayloads: normalizeAttachmentPayloadVault(chat.attachmentPayloads),

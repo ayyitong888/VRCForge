@@ -19,9 +19,7 @@ export function hasRecentConnectorSelfTest(
         && action.action === "install"
         && action.verificationScope === "installation_self_test"
         && (action.verificationExpiresAt || 0) * 1000 > now
-        && action.handshake?.ready
-        && action.handshake?.preflightOk
-        && action.handshake?.preflightRuntimeOnline,
+        && action.handshake?.ready,
     );
   });
 }

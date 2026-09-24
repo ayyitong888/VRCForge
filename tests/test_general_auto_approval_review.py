@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import dashboard_server
 from provider_configuration_service import ProviderApiConfig
+from types import SimpleNamespace
 
 
-def test_dashboard_general_auto_review_reuses_key_with_a_distinct_model(monkeypatch) -> None:
+def test_dashboard_auto_review_uses_bound_provider_and_tool_free_request(monkeypatch) -> None:
     active = ProviderApiConfig(
         provider="openrouter",
         api_key="user-key",
@@ -13,22 +14,14 @@ def test_dashboard_general_auto_review_reuses_key_with_a_distinct_model(monkeypa
         api_type="auto",
     )
     observed: dict[str, object] = {}
-    monkeypatch.setattr(dashboard_server.PROVIDER_CONFIGURATION, "current_api_config", lambda: active)
-    monkeypatch.setattr(
-        dashboard_server.PROVIDER_MODEL_CATALOG,
-        "fetch_provider_models",
-        lambda config: [
-            {"id": config.model},
-            {"id": "google/gemini-2.5-flash"},
-        ],
-    )
+    monkeypatch.setattr(dashboard_server._RUNTIME_PLANNER_TURN, "current_config", lambda: active)
 
-    def probe(config, prompt, *, structured):
-        observed.update(config=config, prompt=prompt, structured=structured)
-        return '{"decision":"allow_auto"}'
+    def review(prompt):
+        observed["prompt"] = prompt
+        return SimpleNamespace(text='{"decision":"allow_auto"}')
 
-    monkeypatch.setattr(dashboard_server.PROVIDER_TESTS, "probe_text", probe)
-    decision = dashboard_server._review_general_auto_approval(
+    monkeypatch.setattr(dashboard_server._RUNTIME_PLANNER_MODEL, "review", review)
+    decision = dashboard_server._review_auto_approval(
         {
             "targetTool": "vrcforge_write_file",
             "riskLevel": "medium",
@@ -40,17 +33,12 @@ def test_dashboard_general_auto_review_reuses_key_with_a_distinct_model(monkeypa
         }
     )
 
-    reviewer = observed["config"]
     assert decision == "allow_auto"
-    assert reviewer.api_key == active.api_key
-    assert reviewer.model == "google/gemini-2.5-flash"
-    assert reviewer.model != active.model
-    assert reviewer.api_type == "auto"
-    assert observed["structured"] is True
     assert "PRIVATE_CONTENT" not in str(observed["prompt"])
+    assert "No external capabilities" in str(observed["prompt"])
 
 
-def test_dashboard_general_auto_review_fails_closed_without_distinct_model(monkeypatch) -> None:
+def test_dashboard_auto_review_fails_closed_when_reviewer_errors(monkeypatch) -> None:
     active = ProviderApiConfig(
         provider="openrouter",
         api_key="user-key",
@@ -58,13 +46,13 @@ def test_dashboard_general_auto_review_fails_closed_without_distinct_model(monke
         model="google/gemini-2.5-flash",
         api_type="auto",
     )
-    monkeypatch.setattr(dashboard_server.PROVIDER_CONFIGURATION, "current_api_config", lambda: active)
-    monkeypatch.setattr(
-        dashboard_server.PROVIDER_MODEL_CATALOG,
-        "fetch_provider_models",
-        lambda _config: [{"id": active.model}],
-    )
-    assert dashboard_server._review_general_auto_approval(
+    monkeypatch.setattr(dashboard_server._RUNTIME_PLANNER_TURN, "current_config", lambda: active)
+
+    def fail_review(_prompt):
+        raise RuntimeError("reviewer unavailable")
+
+    monkeypatch.setattr(dashboard_server._RUNTIME_PLANNER_MODEL, "review", fail_review)
+    assert dashboard_server._review_auto_approval(
         {"targetTool": "vrcforge_write_file", "arguments": {}}
     ) == "manual"
 

@@ -83,6 +83,16 @@ export function filterPersistableChats(list: ChatThread[]): ChatThread[] {
       const items = stripTransientConversationItems(chat.items);
       const vault: AttachmentPayloadVault = { ...(chat.attachmentPayloads || {}) };
       const referencedItems = items.map((item) => {
+        const runtimePlan = item.type === "agent"
+          ? item.response.plan as typeof item.response.plan & { steps?: unknown }
+          : undefined;
+        if (item.type === "agent" && Array.isArray(item.response.steps)
+          && runtimePlan && Array.isArray(runtimePlan.steps)
+          && JSON.stringify(runtimePlan.steps) === JSON.stringify(item.response.steps)) {
+          // Timeline consumers read response.steps; retain differing or legacy-only history.
+          const { steps: _duplicateSteps, ...plan } = runtimePlan;
+          return { ...item, response: { ...item.response, plan } };
+        }
         if (item.type !== "user" || !item.attachments?.length) {
           return item;
         }

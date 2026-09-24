@@ -6,8 +6,10 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+import pytest
+
 from agent_approval_transactions import AgentApprovalTransactionService, ApprovalGoalPorts
-from agent_gateway import AgentGateway
+from agent_gateway import AgentGateway, AgentGatewayError
 
 
 REPO_ROOT = Path(__file__).parents[1]
@@ -86,6 +88,95 @@ def test_new_pending_approval_has_no_timeout() -> None:
         assert requested["status"] == "pending"
         assert requested["approval"]["status"] == "pending"
         assert "expiresAt" not in requested["approval"]
+
+
+def test_auto_reviewer_receives_raw_owner_execution_target_while_public_receipt_stays_projected() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        gateway = _gateway(Path(temp_dir))
+        config = gateway.ensure_config()
+        config.allow_write_requests = True
+        config.execution_mode = "auto"
+        gateway.save_config(config)
+        reviewed: list[dict[str, object]] = []
+        gateway.approval_transactions.auto_approval_reviewer = lambda approval: reviewed.append(approval) or "manual"
+        gateway.approval_transactions.register_write_handler(
+            "vrcforge_fixture_write",
+            "Write a fixture.",
+            "medium",
+            lambda _arguments: {"ok": True},
+        )
+
+        requested = gateway.approval_transactions.create_apply_request(
+            {
+                "target_tool": "vrcforge_fixture_write",
+                "arguments": {
+                    "projectRoot": str(Path(temp_dir) / "Project"),
+                    "executionTarget": {"kind": "unity", "actionId": "create_gameobject"},
+                },
+            }
+        )
+
+        assert requested["status"] == "pending"
+        assert reviewed
+        assert reviewed[0]["arguments"]["executionTarget"] == {"kind": "unity", "actionId": "create_gameobject"}
+        assert requested["approval"]["arguments"]["executionTarget"] != {"kind": "unity", "actionId": "create_gameobject"}
+
+
+def test_internal_unity_preview_request_is_rejected_before_preparer_or_checkpoint() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        gateway = _gateway(Path(temp_dir))
+        called = False
+
+        def prepare(_arguments: dict, _preview: object) -> tuple[dict, dict]:
+            nonlocal called
+            called = True
+            return {}, {"ok": True}
+
+        gateway.approval_transactions.register_write_handler(
+            "vrcforge_internal_preview_guard",
+            "Internal Unity write.",
+            "high",
+            lambda _arguments: {"ok": True},
+            request_preparer=prepare,
+            requires_approved_execution_context=True,
+            approved_execution_plan_builder=lambda _arguments: [],
+        )
+
+        with pytest.raises(AgentGatewayError, match="preview=false|read-only preview"):
+            gateway.approval_transactions.create_apply_request(
+                {
+                    "target_tool": "vrcforge_internal_preview_guard",
+                    "arguments": {"projectPath": str(Path(temp_dir) / "Project"), "preview": True},
+                }
+            )
+
+        assert called is False
+        assert gateway._approvals == {}
+
+
+@pytest.mark.parametrize("preview", [None, False])
+def test_internal_unity_apply_request_allows_missing_or_false_preview(preview: bool | None) -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        gateway = _gateway(Path(temp_dir))
+        arguments = {"projectPath": str(Path(temp_dir) / "Project")}
+        if preview is not None:
+            arguments["preview"] = preview
+        gateway.approval_transactions.register_write_handler(
+            "vrcforge_internal_preview_guard",
+            "Internal Unity write.",
+            "high",
+            lambda _arguments: {"ok": True},
+            request_preparer=lambda args, _preview: (dict(args), {"ok": True}),
+            requires_approved_execution_context=True,
+            approved_execution_plan_builder=lambda args: [("vrcforge_internal_preview_guard", dict(args))],
+        )
+
+        requested = gateway.approval_transactions.create_apply_request(
+            {"target_tool": "vrcforge_internal_preview_guard", "arguments": arguments}
+        )
+
+        assert requested["status"] == "pending"
+        assert requested["approval"]["approvedUnityExecutionPlan"]["calls"]
 
 
 def test_gesture_manager_entry_pending_receipt_is_not_marked_executed(monkeypatch) -> None:

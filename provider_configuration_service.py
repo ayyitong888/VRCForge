@@ -64,6 +64,24 @@ class ProviderApiConfig:
     thinking_level: str = ""
     context_window: int = 0
 
+    def native_binding(self) -> str:
+        """Return the private replay binding for an explicitly native route."""
+
+        if self.api_type != "chat_completions":
+            return ""
+        key_fingerprint = hashlib.sha256(self.api_key.encode("utf-8")).hexdigest()
+        payload = {
+            "provider": self.provider,
+            "baseUrl": self.base_url,
+            "model": self.model,
+            "apiType": self.api_type,
+            "thinkingLevel": self.thinking_level,
+            "apiKeyFingerprint": key_fingerprint,
+        }
+        return hashlib.sha256(
+            json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+
 
 @dataclass(frozen=True, slots=True)
 class ProviderVisionConfig:
@@ -510,6 +528,7 @@ class ProviderConfigurationService:
 
     def serialize_api_config(self, include_secret: bool) -> dict[str, Any]:
         config = self.current_api_config()
+        requires_key = self._policy.provider_requires_api_key(config.provider)
         return {
             "provider": config.provider,
             "providerLabel": self._policy.provider_display_name(config.provider),
@@ -522,7 +541,8 @@ class ProviderConfigurationService:
             "contextWindow": config.context_window,
             "usesBaseUrl": config.provider not in {"anthropic", "gemini"},
             "authHeader": self._policy.provider_auth_label(config.provider),
-            "apiKeyRequired": self._policy.provider_requires_api_key(config.provider),
+            "apiKeyRequired": requires_key,
+            "configured": not requires_key or bool(config.api_key),
             "savedKeyProviders": self._saved_key_providers(),
         }
 

@@ -277,7 +277,8 @@ def _live_readback(
         }
     )
     tools_registered = unity_status.get("vrcForgeToolsRegistered") is True
-    tools_ready = tools_registered and not missing_tools
+    readiness = _as_mapping(unity_status.get("readiness"))
+    tools_ready = readiness.get("ready") is True
     return {
         "bridge": {
             "status": "ok" if connected else "warning",
@@ -296,6 +297,7 @@ def _live_readback(
             "registered": tools_registered,
             "missingRequiredTools": missing_tools,
         },
+        "readiness": readiness,
         "compile": _compile_readback(compile_diagnostics),
     }
 

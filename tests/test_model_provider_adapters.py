@@ -395,6 +395,22 @@ def test_deepseek_registry_descriptor_is_known_only_for_exact_models() -> None:
     assert auto["maxOutputTokens"] == 384_000
 
 
+def test_official_deepseek_flash_alias_has_registry_metadata_without_renaming() -> None:
+    assert normalize_provider_api_type("deepseek", "deepseek-flash", None) == ("auto", "responses")
+    assert normalize_provider_api_type("deepseek", "deepseek-flash", "chat_completions") == (
+        "chat_completions",
+        "chat_completions",
+    )
+    descriptor = provider_model_descriptor("deepseek", "deepseek-flash", "auto")
+    assert descriptor["resolvedApiType"] == "responses"
+    assert descriptor["supportedApiTypes"] == ["responses", "messages", "chat_completions"]
+    assert descriptor["capabilities"] == ["text", "structured_json", "reasoning", "tools"]
+    assert descriptor["capabilitySource"] == "official_registry"
+    assert "maxOutputTokens" not in descriptor
+    assert "modelContextWindow" not in descriptor
+    assert "modelVersion" not in descriptor
+
+
 def test_api_models_enriches_registry_without_network() -> None:
     catalog = _catalog()
     config = ProviderApiConfig(

@@ -289,6 +289,24 @@ export async function setSkillPackageEnabled(
   });
 }
 
+export async function requestUnityToolInstall(
+  endpoint: string,
+  skillPackageId: string,
+  projectPath: string,
+): Promise<{ ok: boolean; status: string; approvalId?: string }> {
+  const body = { projectPath };
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort("request_unity_tool_install", {
+      request: { id: skillPackageId, body, timeoutMs: 60000 },
+    });
+  }
+  return requestJson(`${endpoint}/api/app/skill-packages/${encodeURIComponent(skillPackageId)}/unity-tools/install`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
 export async function uninstallSkillPackage(
   endpoint: string,
   skillPackageId: string,

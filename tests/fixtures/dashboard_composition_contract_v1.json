@@ -5,9 +5,9 @@
     "runtimeCommit": "49aa5d1"
   },
   "routes": {
-    "count": 266,
+    "count": 267,
     "kinds": {
-      "APIRoute": 257,
+      "APIRoute": 258,
       "APIWebSocketRoute": 1,
       "Mount": 4,
       "Route": 4
@@ -16,10 +16,10 @@
       "DELETE": 6,
       "GET": 74,
       "HEAD": 4,
-      "POST": 178,
+      "POST": 179,
       "PUT": 3
     },
-    "tableSha256": "c065f658c9cc7800e81b688c0dcb2efc1456ca29645857be791fc366063a3e6d",
+    "tableSha256": "7de8483856185206aa0dde7821a7d39c71cad4bd6fae1f63c94ec0b3156ebf5b",
     "items": [
       {
         "kind": "Route",
@@ -1109,6 +1109,14 @@
       },
       {
         "kind": "APIRoute",
+        "name": "app_install_unity_user_tools",
+        "path": "/api/app/skill-packages/{skill_package_id}/unity-tools/install",
+        "methods": [
+          "POST"
+        ]
+      },
+      {
+        "kind": "APIRoute",
         "name": "app_preflight_skill_package",
         "path": "/api/app/skill-packages/preflight",
         "methods": [
@@ -2146,7 +2154,7 @@
     ]
   },
   "openApi": {
-    "pathCount": 231,
+    "pathCount": 232,
     "schemaCount": 134,
     "schemaNames": [
       "AdjustmentCheckpointCreateRequest",
@@ -2285,7 +2293,7 @@
       "VisionConfigRequest"
     ],
     "schemasSha256": "0b39a0cc89c6e35a3e6ff1d31254af37ec08280cb393ffc5ef679aa30e5b5063",
-    "sha256WithoutRuntimeVersion": "f6ee499351f4f5a3a0fa31b629dd5deacae25412b9d06167e5fce6c6119b4154"
+    "sha256WithoutRuntimeVersion": "ec688fa7a7dc64cb37c6c1bac85f93c94c407f9961dada1d835a27773b954947"
   },
   "events": {
     "envelopeKeys": [

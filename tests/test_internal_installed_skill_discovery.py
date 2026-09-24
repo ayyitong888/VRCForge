@@ -75,6 +75,37 @@ def test_actual_skill_reader_content_reaches_next_provider_turn(installed_guide,
     assert "SkillReadPolicy=" in prompts[0]
 
 
+def test_loaded_real_guide_explicit_exit_restores_task_scope_not_user_permissions(installed_guide):
+    app, gateway = installed_guide
+    loaded = gateway.runtime_skills.execute(SKILL_NAME, {}, "test")
+    assert loaded["status"] == "loaded"
+    audit_before = gateway.audit_log_path.read_text(encoding="utf-8")
+    assert "runtime_skill_package_loaded" in audit_before and SKILL_NAME in audit_before
+    loop = AgentTaskLoop("Repair Core then inspect wardrobe")
+    loop.activate_skill_policy(name=SKILL_NAME, instructions=loaded["result"]["instructions"],
+                               allowed_tools=loaded["result"]["allowedTools"], disallowed_tools=[])
+    assert loop.skill_policy_block_reason("vrcforge_install_unity_core") == ""
+    assert loop.skill_policy_block_reason("vrcforge_scan_wardrobe") == "skill_tool_not_allowed"
+    assert loop.skill_policy_block_reason("vrcforge_exit_skill") == ""
+    before = gateway.ensure_config()
+    with gateway._bind_runtime_skill_scope(loop):
+        result = gateway.runtime_skills.execute("vrcforge_exit_skill", {"name": SKILL_NAME, "reason": "Return to the original wardrobe task."}, "test")
+    assert result["ok"], result
+    assert result["result"]["completionVerified"] is False
+    assert loop.skill_policy_block_reason("vrcforge_scan_wardrobe") == ""
+    assert not loop.approval_seed().get("skillPolicy")
+    assert gateway.ensure_config() == before
+    audit_after = gateway.audit_log_path.read_text(encoding="utf-8")
+    assert audit_after.startswith(audit_before)
+    assert "vrcforge_exit_skill" in audit_after
+    assert gateway.ensure_config().allow_write_requests is False
+    with pytest.raises(Exception, match="disabled|not allowed|write requests"):
+        gateway.approval_transactions.create_apply_request({"target_tool": "vrcforge_install_unity_core", "arguments": {"projectPath": "denied"}})
+    # Caller-supplied names/session IDs cannot acquire another turn's loop.
+    outside = gateway.runtime_skills.execute("vrcforge_exit_skill", {"name": SKILL_NAME, "reason": "outside"}, "test")
+    assert outside["ok"] is False
+
+
 def test_disabled_unavailable_and_model_hidden_skills_are_not_advertised():
     catalog = PlannerCatalogSnapshot(
         visible_tools=(PlannerTool(name="read_installed_skill", runtime_name="vrcforge_read_installed_skill", description="Read", category="read/debug"),),

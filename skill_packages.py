@@ -749,7 +749,7 @@ class SkillPackageService:
         normalized_entrypoints: dict[str, str] = {}
         for name, value in entrypoints.items():
             if not isinstance(name, str) or (
-                name != "executionPlan" and not TOKEN_RE.fullmatch(name)
+                name not in {"executionPlan", "unityTools"} and not TOKEN_RE.fullmatch(name)
             ):
                 raise ManifestValidationError(f"Invalid entrypoint name: {name!r}.")
             if not isinstance(value, str):
@@ -1271,6 +1271,43 @@ class SkillPackageService:
             self._decorate_installed_entry(dict(registry["skills"][key]), registry)
             for key in sorted(registry["skills"])
         ]
+
+    def verified_installed_entrypoint_bytes(
+        self, skill_id: str, entrypoint: str
+    ) -> tuple[dict[str, Any], bytes]:
+        """Read one entrypoint from the enabled, governance-verified projection."""
+        normalized = self._normalize_installed_skill_id(skill_id)
+        registry = self.load_registry()
+        entry = self._find_installed_entry(normalized, registry)
+        if entry is None or not bool(entry.get("enabled", True)):
+            raise PackageSecurityError(f"Skill package is not enabled: {normalized}.")
+        governance = self._evaluate_installed_governance(entry, registry)
+        if not governance.get("enableAllowed", False):
+            raise PackageSecurityError(self._format_governance_block("use", governance))
+        candidates = self.projection_candidates(normalized)
+        if not candidates:
+            raise PackageIntegrityError(f"Installed package projection is unavailable: {normalized}.")
+        root, manifest = candidates[-1]
+        relative = _safe_relative_path(entrypoint, label="installed entrypoint")
+        path = root / relative
+        if _path_contains_symlink_like(path, root):
+            raise PackageIntegrityError("Installed entrypoint is unavailable.")
+        # Projection verification and this read are separate filesystem accesses.
+        # Bind the exact returned bytes to the installed lock, including when
+        # both a payload and its on-disk lock change after verification.
+        lock_bytes = _read_regular_file_bounded(root / LOCK_NAME, self.max_file_size, label=LOCK_NAME)
+        if sha256_bytes(lock_bytes) != entry.get("lock_sha256"):
+            raise PackageIntegrityError("Installed lock changed after verification.")
+        expected_digest = _load_json_bytes(lock_bytes, LOCK_NAME)["files"].get(relative)
+        if expected_digest is None:
+            raise PackageIntegrityError("Installed entrypoint is not covered by the verified lock.")
+        payload = _read_regular_file_bounded(path, self.max_file_size, label=relative)
+        if sha256_bytes(payload) != expected_digest:
+            raise PackageIntegrityError(f"Installed entrypoint changed after verification: {relative}.")
+        metadata = dict(entry)
+        metadata["package_sha256"] = str(entry.get("package_sha256") or "")
+        metadata["manifest"] = dict(manifest)
+        return metadata, payload
 
     def projection_candidates(
         self,

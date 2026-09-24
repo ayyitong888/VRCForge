@@ -182,6 +182,14 @@ class ProviderStreamingTests(unittest.TestCase):
         class FakeMessageStream:
             text_stream = iter(['{"reply":"hel', 'lo"}'])
 
+            def __iter__(self):
+                return iter(
+                    [
+                        SimpleNamespace(type="content_block_delta", delta=SimpleNamespace(text='{"reply":"hel')),
+                        SimpleNamespace(type="content_block_delta", delta=SimpleNamespace(text='lo"}')),
+                    ]
+                )
+
             def __enter__(self):
                 return self
 

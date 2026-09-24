@@ -94,6 +94,7 @@
     { "path": "Assets/VRCForge/Editor/ShaderMaterialScanner.cs", "guid": "2c464309fd6146bdbc888f0c4e0ecc47" },
     { "path": "Assets/VRCForge/Editor/TextureImportSettingsTool.cs", "guid": "e4f0b43a5d91ce94c877ea8efe43e692" },
     { "path": "Assets/VRCForge/Editor/TypedStructuredListCore.cs", "guid": "e142f7ca00d47d318e0a17f42e21bda1" },
+    { "path": "Assets/VRCForge/Editor/UserToolCommands.cs", "guid": "3b5e9e2d1c2f4a7b8c9d0e1f2a3b4c5d" },
     { "path": "Assets/VRCForge/Editor/VrchatBuildTestTool.cs", "guid": "de5aa80ae8d889c40be8a0c8d6455e7b" },
     { "path": "Assets/VRCForge/Editor/VrchatConstraintConversionTool.cs", "guid": "7e96e28fdb134f8f9f57c58c59a5e70f" },
     { "path": "Assets/VRCForge/Editor/VrchatSdkBuilderAlertsTool.cs", "guid": "c381c0ff994c4cd68a4b2c903b226b4f" },

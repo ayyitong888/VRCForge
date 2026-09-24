@@ -76,6 +76,7 @@ def _unity(
         "activeInstanceCount": 1 if registered else 0,
         "vrcForgeToolsRegistered": tools,
         "missingRequiredVrcForgeTools": missing or [],
+        "readiness": {"ready": bool(connected and registered and matched is True and tools and not (missing or [])), "blockerCode": ""},
         "projectPath": r"C:\private\UnityProject",
     }
 

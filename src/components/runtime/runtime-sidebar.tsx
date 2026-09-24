@@ -46,6 +46,7 @@ export function RightRuntimeSidebar({
   activeDesktopActions,
   refreshUnityStatus,
   onHideSidebar,
+  onOpenPendingApprovals,
   localizeHealthMessage,
 }: {
   runtimeConnected: boolean;
@@ -74,6 +75,7 @@ export function RightRuntimeSidebar({
   activeDesktopActions: AgentDesktopAction[];
   refreshUnityStatus: () => void | Promise<void>;
   onHideSidebar: () => void;
+  onOpenPendingApprovals: () => void;
   localizeHealthMessage: (message?: string) => string;
 }) {
   const { t } = useTranslation();
@@ -147,6 +149,7 @@ export function RightRuntimeSidebar({
             pendingApprovals={pendingApprovals}
             workspaceSummary={workspaceSummary}
             activeDesktopActions={activeDesktopActions}
+            onOpenPendingApprovals={onOpenPendingApprovals}
           />
         ) : (
           <>
@@ -212,14 +215,14 @@ export function RightRuntimeSidebar({
                   </div>
                 </>
               ) : null}
-              <div data-vrcforge-status="approval">
+              <button type="button" className="w-full text-left" data-vrcforge-status="approval" onClick={pendingApprovals > 0 ? onOpenPendingApprovals : undefined} disabled={pendingApprovals === 0}>
                 <RuntimeInfoRow
                   icon={<ListChecks className="h-4 w-4" />}
                   label={t("workspace.pendingConfirmation")}
                   value={approvalValue}
                   suffix={<StatusDot status={approvalStatus} />}
                 />
-              </div>
+              </button>
             </div>
           </>
         )}

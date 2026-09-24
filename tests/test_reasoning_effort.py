@@ -220,6 +220,18 @@ def test_reasoning_variants_are_provider_and_model_aware():
     assert reasoning_effort_variants("custom", "o3") == []
 
 
+@pytest.mark.parametrize("level", ["none", "low", "high", "max"])
+def test_current_flash_chat_honors_explicit_thinking_without_renaming(level):
+    payload = build_openai_compatible_request_payload(
+        make_settings("deepseek", model="deepseek-flash", thinking_level=level), "hello")
+    assert payload["model"] == "deepseek-flash"
+    assert payload["extra_body"]["thinking"]["type"] == ("disabled" if level == "none" else "enabled")
+    if level == "none":
+        assert "reasoning_effort" not in payload
+    else:
+        assert payload["reasoning_effort"] == level
+
+
 def test_reasoning_descriptor_has_default_separate_from_explicit_none():
     descriptor = reasoning_variants_descriptor("deepseek", "deepseek-reasoner")
     assert descriptor["defaultKey"] == "default"

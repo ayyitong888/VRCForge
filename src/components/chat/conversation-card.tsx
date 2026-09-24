@@ -17,7 +17,7 @@ import i18n from "../../i18n";
 import type { AgentApproval } from "../../lib/api";
 import { projectRuntimeResponseForDisplay } from "../../lib/chat-timeline-presentation";
 import type { ApprovalActionState, ChatAttachment, ConversationItem } from "../../lib/chat-types";
-import { providerReconnectAttempt, type AgentRuntimePhase } from "../../lib/chat-streaming";
+import { elapsedSecondsSince, providerReconnectAttempt, type AgentRuntimePhase } from "../../lib/chat-streaming";
 import { copyableAgentDialogueText } from "../../lib/conversation-utils";
 import type { PathToSkillOperationSummary } from "../../lib/path-to-skill-context";
 import { cn, formatCount } from "../../lib/utils";
@@ -77,6 +77,14 @@ export function ConversationCard({
   onSaveOperationAsSkill?: (summary: PathToSkillOperationSummary) => void;
 }) {
   const { t } = useTranslation();
+  const streamingCreatedAt = item.type === "streaming" ? item.createdAt : undefined;
+  const [streamingNowMs, setStreamingNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    if (!streamingCreatedAt) return undefined;
+    setStreamingNowMs(Date.now());
+    const timer = window.setInterval(() => setStreamingNowMs(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, [streamingCreatedAt]);
   if (item.type === "user") {
     const attachments = item.attachments || [];
     const displayedText = editing ? editingText : item.text;
@@ -211,11 +219,11 @@ export function ConversationCard({
     // The streaming text is the complete live answer. Keep it visible while
     // the durable process group supplies the execution history, but do not
     // render the same assistant event a second time when the turn closes.
-    const timelineRows = buildDurableTimelineRows(item.timeline, undefined, "", [], { includeAssistant: false });
+    const timelineRows = buildDurableTimelineRows(item.timeline, elapsedSecondsSince(item.createdAt, streamingNowMs), "", [], { includeAssistant: false });
     return (
       <div className="group flex justify-start" data-conversation-streaming-turn={item.clientTurnId}>
         <div className="relative w-full max-w-[85%] space-y-1.5 px-1 text-sm">
-          <StreamingPhaseStatus item={item} />
+          <StreamingPhaseStatus item={item} nowMs={streamingNowMs} showElapsed={!timelineRows.length} />
           {timelineRows.length ? <div data-vrcforge-live-runtime-timeline>{timelineRows}</div> : null}
           {item.text ? <ChatMarkdown text={item.text} /> : null}
           <div className="mt-1 flex items-center gap-2 text-[10px] text-muted-foreground">
@@ -451,15 +459,9 @@ export function UserImageAttachments({
   );
 }
 
-function StreamingPhaseStatus({ item }: { item: Extract<ConversationItem, { type: "streaming" }> }) {
+function StreamingPhaseStatus({ item, nowMs, showElapsed }: { item: Extract<ConversationItem, { type: "streaming" }>; nowMs: number; showElapsed: boolean }) {
   const { t } = useTranslation();
-  const [nowMs, setNowMs] = useState(() => Date.now());
-  useEffect(() => {
-    if (item.phase !== "waiting_for_model" || !item.providerLastActivityAt) return undefined;
-    setNowMs(Date.now());
-    const timer = window.setInterval(() => setNowMs(Date.now()), 1_000);
-    return () => window.clearInterval(timer);
-  }, [item.phase, item.providerLastActivityAt]);
+  const elapsedSeconds = elapsedSecondsSince(item.createdAt, nowMs);
   const reconnectAttempt = item.phase === "waiting_for_model"
     ? providerReconnectAttempt(item.providerLastActivityAt, nowMs)
     : undefined;
@@ -478,6 +480,7 @@ function StreamingPhaseStatus({ item }: { item: Extract<ConversationItem, { type
             <ChevronRight className="h-3.5 w-3.5 transition-transform group-open:rotate-90" aria-hidden="true" />
             <Loader2 className="h-3.5 w-3.5 animate-spin" />
             <span>{label}</span>
+            {showElapsed && elapsedSeconds !== undefined ? <span>{t("agent.elapsed", { time: `${elapsedSeconds}s` })}</span> : null}
           </summary>
           <p className="mt-1 pl-5 text-xs text-muted-foreground/80">{reconnectDetail}</p>
         </details>
@@ -485,6 +488,7 @@ function StreamingPhaseStatus({ item }: { item: Extract<ConversationItem, { type
         <div className="flex items-center gap-2">
           <Loader2 className="h-3.5 w-3.5 animate-spin" />
           <span>{label}</span>
+          {showElapsed && elapsedSeconds !== undefined ? <span>{t("agent.elapsed", { time: `${elapsedSeconds}s` })}</span> : null}
         </div>
       )}
     </div>

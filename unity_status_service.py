@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from core_upgrade_readiness import compile_snapshot_is_fresh
 from unity_mcp_core_client import UnityMcpCoreClient, UnityMcpCoreError
 from unity_editor_window_probe import probe_unity_reload_dialog
 
@@ -60,6 +61,38 @@ class UnityStatusService:
             )
         return self.build_vrcforge_mcp_core_status(selected_project_path, settings)
 
+    @staticmethod
+    def readiness(status: dict[str, Any]) -> dict[str, Any]:
+        """Return the single project-scoped execution-readiness decision.
+
+        The raw connection, instance, version and tool fields remain available
+        for diagnostics.  Consumers that need to decide whether Unity tools
+        may be used must consume this projection instead of rebuilding the
+        conjunction independently.
+        """
+        missing = status.get("missingRequiredVrcForgeTools") or []
+        if not missing and isinstance(status.get("tools"), dict):
+            missing = status["tools"].get("missingRequiredVrcForgeTools") or []
+        checks = {
+            "connected": status.get("connected") is True,
+            "mcpServerReachable": status.get("mcpServerReachable") is True,
+            "executionReady": status.get("executionReady") is True,
+            "unityInstanceRegistered": status.get("unityInstanceRegistered") is True,
+            "selectedInstanceMatched": status.get("selectedInstanceMatched") is True,
+            "coreVersionMatched": status.get("coreVersionMatched") is True,
+            "vrcForgeToolsRegistered": status.get("vrcForgeToolsRegistered") is True,
+            "requiredToolsComplete": len(missing) == 0,
+        }
+        blocker = str(status.get("blockerCode") or "")
+        if not all(checks.values()) and not blocker:
+            blocker = next((name for name, passed in checks.items() if not passed), "unity_readiness_unknown")
+        return {
+            "ready": all(checks.values()),
+            "blockerCode": "" if all(checks.values()) else blocker,
+            "inspectionMode": (status.get("tools") or {}).get("inspectionMode") if isinstance(status.get("tools"), dict) else None,
+            "inspectionSkipped": (status.get("tools") or {}).get("inspectionSkipped") is True if isinstance(status.get("tools"), dict) else False,
+        }
+
     def build_vrcforge_mcp_core_unavailable_status(
         self,
         project_root: Path | None,
@@ -69,7 +102,7 @@ class UnityStatusService:
     ) -> dict[str, Any]:
         project_path = self._ports.normalize_path(str(project_root)) if project_root is not None else ""
         missing = list(self._ports.required_tools)
-        return {
+        status = {
             "connected": False,
             "executionReady": False,
             "blockerCode": cause_code,
@@ -103,6 +136,8 @@ class UnityStatusService:
             "error": error,
             "causeCode": cause_code,
         }
+        status["readiness"] = self.readiness(status)
+        return status
 
     def build_unity_tools_snapshot(self, settings: Any | None = None) -> dict[str, Any]:
         settings = settings or self._ports.load_settings()
@@ -121,6 +156,7 @@ class UnityStatusService:
         names = [tool["name"] for tool in tools]
         owned = [name for name in names if name.startswith("vrc_")]
         return {**result, "ok": True, "inspectionMode": "tools_list", "inspectionSkipped": False,
+                "toolNameNamespace": "unity_core", "agentCallable": False,
                 "totalTools": len(names), "defaultToolsCount": len(names) - len(owned),
                 "vrcForgeToolsCount": len(owned), "toolNames": names, "vrcForgeToolNames": owned,
                 "missingRequiredVrcForgeTools": sorted(set(self._ports.required_tools) - set(names))}
@@ -188,9 +224,21 @@ class UnityStatusService:
                 "parsed": None,
                 "error": "",
             }
-            return _apply_editor_readiness(status, project_root)
+            compile_snapshot = core_info.get("compileSnapshot")
+            if (
+                compile_snapshot_is_fresh(compile_snapshot, "")
+                and (
+                    compile_snapshot.get("hasErrors") is True
+                    or compile_snapshot.get("errorCount", 0) > 0
+                )
+            ):
+                status["executionReady"] = False
+                status["blockerCode"] = "unity_compile_errors"
+            status = _apply_editor_readiness(status, project_root)
+            status["readiness"] = self.readiness(status)
+            return status
         except UnityMcpCoreError as exc:
-            return {
+            status = {
                 "connected": False,
                 "executionReady": False,
                 "blockerCode": getattr(exc, "cause_code", "unity_core_contract_invalid"),
@@ -223,6 +271,8 @@ class UnityStatusService:
                 "error": str(exc),
                 "causeCode": getattr(exc, "cause_code", "unity_core_contract_invalid"),
             }
+            status["readiness"] = self.readiness(status)
+            return status
 
 
 

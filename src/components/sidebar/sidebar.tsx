@@ -1,7 +1,8 @@
-import { ChevronDown, ChevronRight, Folder, MessageSquare, MoreHorizontal, Pin, Trash2 } from "lucide-react";
+import { ChevronDown, ChevronRight, Folder, Loader2, MessageSquare, MoreHorizontal, Pin, Trash2 } from "lucide-react";
 import { MouseEvent as ReactMouseEvent, ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import i18n from "../../i18n";
+import type { SidebarChatActivity } from "../../lib/sidebar-view";
 import { cn } from "../../lib/utils";
 
 export function SidebarSection({
@@ -145,6 +146,7 @@ export function SidebarChat({
   chatId,
   title,
   meta,
+  activity,
   active = false,
   unreadCount = 0,
   indent = false,
@@ -161,6 +163,7 @@ export function SidebarChat({
   chatId?: string;
   title: string;
   meta?: string;
+  activity?: SidebarChatActivity;
   active?: boolean;
   unreadCount?: number;
   indent?: boolean;
@@ -221,6 +224,8 @@ export function SidebarChat({
           </span>
         ) : null}
         {meta ? <span className="shrink-0 text-xs text-muted-foreground/75 group-hover:hidden">{meta}</span> : null}
+        {activity === "running" ? <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-primary" aria-label={i18n.t("workspace.runStatusRunning")} /> : null}
+        {activity === "completed" ? <span className="h-2 w-2 shrink-0 rounded-full bg-primary" aria-label={i18n.t("workspace.runStatusCompleted")} /> : null}
       </button>
       {pinned ? <Pin className="h-3.5 w-3.5 shrink-0 text-primary/60 group-hover:hidden" /> : null}
       <div className="hidden shrink-0 items-center gap-0.5 pr-1 group-hover:flex">

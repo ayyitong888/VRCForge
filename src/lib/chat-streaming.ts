@@ -110,6 +110,13 @@ export function providerReconnectAttempt(startedAt: string | undefined, nowMs = 
   return Math.min(PROVIDER_RECONNECT_WINDOW_COUNT, completedWindows);
 }
 
+/** Whole-turn wall-clock duration used by the transient conversation card. */
+export function elapsedSecondsSince(startedAt: string | undefined, nowMs = Date.now()): number | undefined {
+  const startedMs = startedAt ? Date.parse(startedAt) : Number.NaN;
+  if (!Number.isFinite(startedMs)) return undefined;
+  return Math.max(0, Math.round((nowMs - startedMs) / 1000));
+}
+
 /**
  * Apply one bounded Runtime delta to its owning transient Agent card.
  * Provider reasoning never enters this projection. Same-id events update in

@@ -13,10 +13,13 @@ const runtimeApi = read("src/lib/api/agent-runtime.ts");
 const history = read("src/lib/conversation-utils.ts");
 const scopedCard = read("src/components/approvals/scoped-pending-approval-card.tsx");
 const pendingStrip = read("src/components/approvals/pending-approvals-strip.tsx");
+const runtimeSidebar = read("src/components/runtime/runtime-sidebar.tsx");
+const projectSections = read("src/components/runtime/project-workbench-sections.tsx");
 const inlineCard = read("src/components/chat/conversation-card.tsx");
 const inlineTimeline = read("src/components/chat/conversation-timeline.tsx");
 const revisionEditor = read("src/components/approvals/approval-revision-editor.tsx");
 const app = read("src/App.tsx");
+const scope = read("src/lib/runtime-scope.ts");
 
 assert.match(hook, /if \(approval\.goalDeliveryId\?\.trim\(\)\) \{\s*return;/);
 assert.match(hook, /const payload = await requestApprovalRevision/);
@@ -31,7 +34,8 @@ assert.doesNotMatch(hook, /setInput\(|setAttachments\(|textContextAttachment/);
 assert.match(hook, /payload\.execution\?\.status === "needs_user_action"/);
 assert.match(hook, /payload\.execution\.outcome\?\.summary/);
 assert.match(hook, /error: payload\.execution\?\.error \|\| completionNotice/);
-assert.match(hook, /const resultChatId = taskSessionId \? ownerChatId : activeChatId;/);
+assert.doesNotMatch(hook, /const resultChatId = taskSessionId \? ownerChatId : activeChatId;/);
+assert.match(hook, /if \(!taskSessionId \|\| !ownerChatId\)/);
 assert.match(hook, /appendToChat\(resultChatId/);
 const approveStart = hook.indexOf("async function approveShell");
 const approveEnd = hook.indexOf("async function rejectShell");
@@ -41,10 +45,19 @@ assert.ok(
   approve.indexOf("appendToChat(resultChatId") < approve.indexOf("appendContinuation(payload.continuation)"),
   "approved execution result must be appended before its assistant continuation",
 );
-assert.match(app, /const pendingApprovalItems = \(agentApprovals \?\? \[\]\)\.filter\(\s*\(item\) => item\.status === "pending",?\s*\)/);
+assert.match(scope, /approvalBelongsToRuntimeScope/);
+assert.match(app, /approvalBelongsToRuntimeScope/);
+assert.doesNotMatch(app, /const pendingApprovalItems = \(agentApprovals \?\? \[\]\)\.filter\(\s*\(item\) => item\.status === "pending",?\s*\)/);
 assert.doesNotMatch(app, /item\.status === "pending" \|\| item\.status === "approved"/);
 assert.match(scopedCard, /approval\.status === "pending"/);
 assert.match(pendingStrip, /approval\.status === "pending"/);
+assert.match(pendingStrip, /onClose\?: \(\) => void/);
+assert.match(app, /pendingApprovalPanelOpen/);
+assert.match(app, /activeView !== "chat" \|\| pendingApprovalPanelOpen/);
+const projectApprovalEntry = app.slice(app.indexOf("onOpenPendingApprovals={() =>"), app.indexOf("onOpenPendingApprovals={() =>") + 150);
+assert.doesNotMatch(projectApprovalEntry, /setActiveView/);
+assert.match(runtimeSidebar, /onOpenPendingApprovals/);
+assert.match(projectSections, /onOpenPendingApprovals/);
 const rejectStart = hook.indexOf("async function rejectShell");
 const rejectEnd = hook.indexOf("function clearApprovalAction");
 const reject = hook.slice(rejectStart, rejectEnd);

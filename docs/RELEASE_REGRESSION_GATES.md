@@ -102,3 +102,151 @@ gate references `installer/VRCForge_WebPayload.ps1` and
 `tests/test_web_payload_helper.py`. Hosted lifecycle evidence is bound to the
 published candidate by the release report; source and unit results do not
 substitute for that hosted install, upgrade, preservation, or uninstall run.
+
+## Agent runtime and UI regression gates
+
+These contracts preserve the defects covered during the 1.8.6 work. Source
+tests establish their specified behavior; packaged and live evidence remain
+separate and must not be inferred from test counts.
+
+### Native provider history and continuations
+
+- Every admitted tool call receives exactly one result with its original ID.
+  Invalid, invisible, unsupported parallel and cancelled calls must not execute
+  handlers or leave orphan calls in a subsequent provider request.
+- Native history preserves the provider's required reasoning and continuation
+  fields. Omit empty assistant `tool_calls` arrays, but retain real calls,
+  result IDs and provider state. Legacy responses need no native-only fields.
+- Import visible legacy conversation history once. Keep durable private replay
+  in the session owner; public approvals, questions, sessions, observations and
+  sub-agent summaries must not expose it. Public redaction must not mutate it.
+- Accepted steering reaches the next request. Questions and approvals retain
+  and settle their exact original call. Stop settles only the owning pending
+  call; repeated decisions and stale continuations cannot rerun completed work.
+- Background Shell and sub-agent completion settle their original call once.
+  Changing provider, model, credentials or thinking during approval preserves
+  the executed receipt and pauses without replaying a completed write.
+- Context limits measure the native request including history and schemas.
+  Compaction atomically replaces only a completed prefix, excludes private
+  reasoning and preserves current calls, results and steering. Cancellation,
+  races, failed compaction and current-turn overflow send no oversized request.
+- Provider requests and compaction share cancellation, deadline and shutdown
+  ownership. Thinking-only events count as activity; cleanup failures must not
+  replace the primary error. Stop closes the owned request and remains terminal.
+- Exact configured DeepSeek model names and thinking settings reach the selected
+  transport unchanged. Metadata and adapters share the supported model set.
+
+Regression: `tests/test_native_runtime_gateway.py`,
+`tests/test_native_runtime_continuations.py`,
+`tests/test_native_async_continuations.py`,
+`tests/test_native_context_compaction.py`, `tests/test_native_context_guard.py`,
+`tests/test_native_approval_privacy.py`, `tests/test_native_external_privacy.py`,
+`tests/test_native_subagent_privacy.py`, `tests/test_provider_lifecycle.py`,
+`tests/test_provider_protocol_clients.py`, `tests/test_model_provider_adapters.py`,
+`tests/test_reasoning_effort.py` and `tests/test_deepseek_responses_adapter.py`.
+
+### Tool discovery, results and completion
+
+- Discovery, visibility, load and invocation share the callable catalog policy.
+  Diagnostic Core entries are not advertised as callable runtime tools. Reject
+  aliases and implicit loads with the actual current discovery/load recipe.
+- Structured observations preserve action identity, kind, status and validated
+  `vrcforge:` execution identities. Sanitize credentials and private content.
+- Only corrected admission of the same task and route may supersede an older
+  loader-admission failure. Unrelated success cannot erase an executed failure.
+- Preserve full completion obligations through approval, including older failed,
+  pending and unexecuted requirements. Reject oversized persistence explicitly.
+  Missing independent readback must not become a success or completion claim.
+- Instruction Skill scope has an explicit exact-name exit. Refuse exit with
+  pending work, restore the enclosing policy and preserve failures, approvals
+  and task evidence. Exiting a Skill does not complete the original task.
+- Native internal execution must reject unsupported preview requests before
+  approval or handler invocation; the external read-only preview path remains.
+- Bounded source reads support inclusive line ranges and preserve line numbers
+  during redaction. Report truncation and preserve existing access boundaries.
+
+Regression: `tests/test_runtime_callable_catalog.py`,
+`tests/test_native_tool_discovery_recovery.py`,
+`tests/test_planner_structured_tool_evidence.py`,
+`tests/test_agent_gateway_action_identity.py`, `tests/test_agent_task_loop.py`,
+`tests/test_internal_installed_skill_discovery.py`,
+`tests/test_internal_tool_blocks.py`, `tests/test_general_agent_tools_runtime.py`
+and `tests/test_result_reader_completion_recovery.py`.
+
+### Approval and question ownership
+
+- Questions and approvals in chat require the exact non-empty session and
+  normalized project identity. Other sessions' requests remain available only
+  through explicit project confirmation UI. Closing that UI preserves requests.
+- Revision/result delivery must not fall back to the active chat when ownership
+  is unknown. Pending questions take priority over history; Stop requires the
+  owning turn ID and cancelling is transitional until actual termination.
+- Waiting for an answer replaces the ordinary composer with the complete
+  question, wrapping options and an editable multiline custom response. Answered
+  questions settle and leave the active dock. Reject oversize text explicitly
+  instead of truncating it. Preserve options in the shared tool schema.
+- Automatic approval uses one independent no-tools/no-history provider request
+  with the configured request owner/key and bounded redacted evidence. Only an
+  exact `allow_auto` permits execution; failure or uncertainty stays pending.
+  Caller decisions are ignored. Preserve the owner-held execution identity until
+  reviewer redaction, while keeping public approval responses summarized.
+- Restricted, automatic and full-permission paths retain their distinct policy;
+  no mode bypasses required write approval, readback or rollback boundaries.
+
+Regression: `tests/test_runtime_scope.mjs`, `tests/test_approval_revision_ui.mjs`,
+`tests/test_chat_question_dock.mjs`, `tests/test_question_continuation_ui.mjs`,
+`tests/test_agent_question_service.py`,
+`tests/test_agent_question_runtime_continuation.py`,
+`tests/test_native_permission_modes.py`, `tests/test_approval_auto_review.py`
+and `tests/test_approval_reviewer_provider_lifecycle.py`.
+
+### Conversation display and recovery
+
+- Show a spinner on the owning running sidebar row. Background completion shows
+  one theme-colored unread dot. Viewing that chat clears it durably; later
+  background completion may relight it. Failed, cancelled and waiting turns
+  must not look successfully completed.
+- Elapsed time advances locally every second and stops on settlement. Genuine
+  commentary stays visible in order, interleaved with groups of consecutive
+  tool calls. Use one group/count without extra indentation or duplicate layers.
+  Completed history remains expandable; historical fallback steps do not replay.
+- Render keys include runtime and chat ownership. Legacy duplicate item IDs
+  cannot retain old approval DOM when switching chats. Ordinary reply IDs must
+  not be mistaken for secret strings.
+- A known IPC timeout may recover the same session/client turn using owned,
+  abort-aware read-only polling after exactly one initial POST. Keep the complete
+  result and pending approvals; never resend the write. This is not proof of
+  restart durability.
+- Enforce the chat size limit per store, preserve compare-and-swap conflicts and
+  accept valid aggregate responses up to the explicit transport limit. Reject
+  larger responses without truncating or deleting stored history.
+
+Regression: `tests/test_sidebar_view.mjs`, `tests/test_chat_runtime_streaming.mjs`,
+`tests/test_chat_render_keys.mjs`, `tests/test_chat_render_regression.mjs`,
+`tests/test_chat_timeline_ux_ui.mjs`, `tests/test_historical_step_projection.mjs`,
+`tests/test_chat_persistence_dedup.mjs`, `tests/test_chat_save_retry.mjs`,
+`tests/test_agent_runtime_recovery.mjs`, `tests/test_agent_runtime_recovery_entry.mjs`
+and the Rust `backend::app_api_response_tests` cases.
+
+### Shared readiness and installed user tools
+
+- Onboarding, settings, status and diagnostics consume the same readiness and
+  verified provider configuration. A responding old assembly does not prove
+  that the current on-disk plugin compiled successfully.
+- Diagnose official incomplete or mixed-version Core files before proposing
+  the existing bundled repair route. Preserve exact-project approval, backup
+  and independent fresh compilation/readiness checks. Do not silently replace
+  unrelated, unknown or third-party files.
+- Official tool updates preserve user tool ownership and package compatibility
+  boundaries. Compile the emitted installed sources and invoke a real user tool;
+  descriptor validation must not require whole-assembly discovery.
+- Preserve `VRCForgeToolResult.Waiting` as successful pending work, including
+  `_mcp_status`, continuation interval and payload. Do not project it as completed.
+  Failures and terminal outcomes must reach the existing result owner unchanged.
+
+Regression: `tests/test_unity_status_service.py`,
+`tests/test_doctor_readiness_report_service.py`,
+`tests/test_provider_configuration_service.py`,
+`tests/test_unity_mcp_tool_registry_runtime.py`,
+`tests/test_user_tool_commands_runtime.py`, `tests/test_user_unity_tool_gateway.py`,
+`tests/test_user_unity_tool_service.py` and `tests/test_skill_packages.py`.

@@ -339,6 +339,7 @@ def test_allowed_modes_execute_signed_write_through_existing_approval_and_checkp
         ],
     )
     _, gateway, _ = install_signed(tmp_path, source)
+    gateway.approval_transactions.auto_approval_reviewer = lambda _approval: "allow_auto"
     gateway.save_config(
         AgentGatewayConfig(
             enabled=True,

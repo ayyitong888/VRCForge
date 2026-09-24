@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import {
   applyAgentRuntimeDeltaToStreamingItem,
+  elapsedSecondsSince,
   finalizeCancelledStreamingTurn,
   providerReconnectAttempt,
 } from "../src/lib/chat-streaming.ts";
@@ -17,6 +18,8 @@ assert.equal(providerReconnectAttempt(startedAt, startedMs + 119_999), 1);
 assert.equal(providerReconnectAttempt(startedAt, startedMs + 120_000), 2);
 assert.equal(providerReconnectAttempt(startedAt, startedMs + 300_000), 5);
 assert.equal(providerReconnectAttempt(startedAt, startedMs + 900_000), 5, "the display is bounded to the Provider call's five windows");
+assert.equal(elapsedSecondsSince(startedAt, startedMs + 1_499), 1, "running elapsed time advances from the local turn start");
+assert.equal(elapsedSecondsSince(startedAt, startedMs + 2_501), 3, "running elapsed time uses the real wall clock");
 
 const foregroundReplay = {
   schema: "vrcforge.runtime_turn_event.v1",
@@ -169,8 +172,10 @@ const card = await readFile(resolve(import.meta.dirname, "..", "src", "component
 const controller = await readFile(resolve(import.meta.dirname, "..", "src", "hooks", "use-chat-run-controller.ts"), "utf8");
 const timelinePresentationSource = await readFile(resolve(import.meta.dirname, "..", "src", "lib", "chat-timeline-presentation.ts"), "utf8");
 assert.match(card, /clearInterval\(timer\)/, "terminal replacement and Stop unmount must clear the reconnect clock");
-assert.match(card, /buildDurableTimelineRows\(item\.timeline, undefined, \"\", \[\], \{ includeAssistant: false \}\)/,
+assert.match(card, /buildDurableTimelineRows\(item\.timeline, elapsedSecondsSince\(item\.createdAt, streamingNowMs\), \"\", \[\], \{ includeAssistant: false \}\)/,
   "the complete live answer must not be rendered a second time from the durable assistant event");
+assert.match(card, /window\.setInterval\(\(\) => setStreamingNowMs\(Date\.now\(\)\), 1_000\)/,
+  "the transient card advances elapsed time locally while backend events are quiet");
 assert.match(card, /<details[\s\S]*<summary/, "reconnecting status must expose a compact disclosure detail");
 assert.match(card, /ChevronRight[\s\S]*group-open:rotate-90/, "reconnecting disclosure must show an explicit expandable chevron");
 assert.match(card, /reconnectingRetry/, "terminal reconnect status must provide a manual retry next step");

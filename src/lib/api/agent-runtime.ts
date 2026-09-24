@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { hasTauriInternals, invokeTauriWithAbort, requestJson } from "./http";
-import type { AgentApproval, AgentApprovalExecution, AgentDesktopAction, AgentGoal, AgentGoalBackgroundAcknowledgement, AgentGoalBackgroundState, AgentGoalDelivery, AgentMemory, AgentMessageAttachment, AgentProgress, AgentQuestion, AgentRuntimeResponse, AgentRuntimeRun, AgentRuntimeRunLedger, DesktopBridgeStatus, DesktopRuntimeSnapshot } from "./types";
+import { ApiError } from "./http";
+import type { AgentApproval, AgentApprovalExecution, AgentDesktopAction, AgentGoal, AgentGoalBackgroundAcknowledgement, AgentGoalBackgroundState, AgentGoalDelivery, AgentMemory, AgentMessageAttachment, AgentProgress, AgentQuestion, AgentRuntimeContinuation, AgentRuntimeResponse, AgentRuntimeRun, AgentRuntimeRunLedger, AgentTurnResponseRecovery, DesktopBridgeStatus, DesktopRuntimeSnapshot } from "./types";
 
 /** Finite model-turn budget required for unattended/background delivery. */
 export const DEFAULT_BACKGROUND_MAX_AGENTIC_TURNS = 25;
@@ -71,6 +72,118 @@ export type CompactAgentHistoryResponse = AgentHistoryCompactionDetails & {
   model?: string;
 };
 
+const AGENT_TURN_RECOVERY_POLL_MS = 2000;
+const AGENT_TURN_RECOVERY_READ_FAILURE_LIMIT = 3;
+
+export type AgentTurnResponseReader = (
+  sessionId: string,
+  clientTurnId: string,
+  signal?: AbortSignal,
+) => Promise<AgentTurnResponseRecovery>;
+
+function isTransportFailure(cause: unknown): boolean {
+  const message = cause instanceof Error ? cause.message : typeof cause === "string" ? cause : "";
+  if (!/request timed out after\s+\d+(?:\.\d+)?s|vrcforge runtime is not reachable at /i.test(message)) {
+    return false;
+  }
+  return cause instanceof ApiError ? cause.status === 0 : true;
+}
+
+function waitForRecoveryPoll(signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) {
+    return Promise.reject(new ApiError("Request cancelled.", 0));
+  }
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const timer = globalThis.setTimeout(() => {
+      settled = true;
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, AGENT_TURN_RECOVERY_POLL_MS);
+    const onAbort = () => {
+      if (settled) return;
+      settled = true;
+      globalThis.clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      reject(new ApiError("Request cancelled.", 0));
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+export async function recoverAgentTurnResponse(
+  initialError: unknown,
+  sessionId: string,
+  clientTurnId: string,
+  reader: AgentTurnResponseReader,
+  signal?: AbortSignal,
+  waitForPoll: (signal?: AbortSignal) => Promise<void> = waitForRecoveryPoll,
+): Promise<AgentRuntimeResponse> {
+  let accepted = false;
+  let readFailures = 0;
+  while (true) {
+    if (signal?.aborted) {
+      throw new ApiError("Request cancelled.", 0);
+    }
+    let state: AgentTurnResponseRecovery;
+    try {
+      state = await reader(sessionId, clientTurnId, signal);
+      readFailures = 0;
+    } catch (cause) {
+      if (signal?.aborted) throw new ApiError("Request cancelled.", 0);
+      readFailures += 1;
+      if (readFailures >= AGENT_TURN_RECOVERY_READ_FAILURE_LIMIT) {
+        throw cause;
+      }
+      await waitForPoll(signal);
+      continue;
+    }
+    if (signal?.aborted) {
+      throw new ApiError("Request cancelled.", 0);
+    }
+    if (state.ok !== true || !["running", "completed", "failed", "missing"].includes(state.status)) {
+      throw new ApiError("Recovered Agent turn returned an invalid status.", 0, state);
+    }
+    if (state.sessionId !== sessionId || state.clientTurnId !== clientTurnId) {
+      throw new ApiError("Recovered Agent turn identity did not match the active request.", 0, state);
+    }
+    if (state.status === "missing") {
+      if (!accepted) throw initialError;
+      throw new ApiError(state.error || "Recovered Agent turn disappeared before completion.", 0, state);
+    }
+    if (state.status === "failed") {
+      throw new ApiError(state.error || "Recovered Agent turn failed.", 0, state);
+    }
+    if (state.status === "completed") {
+      const response = state.response;
+      const responseSessionId = response?.sessionId || response?.session_id;
+      const responseClientTurnId = response?.clientTurnId;
+      if (!response || responseSessionId !== sessionId || responseClientTurnId !== clientTurnId) {
+        throw new ApiError("Recovered Agent response identity did not match the active request.", 0, state);
+      }
+      return response;
+    }
+    accepted = true;
+    await waitForPoll(signal);
+  }
+}
+
+function recoveryReader(endpoint: string): AgentTurnResponseReader {
+  return (sessionId, clientTurnId, signal) => {
+    const encodedSessionId = encodeURIComponent(sessionId);
+    const query = `?clientTurnId=${encodeURIComponent(clientTurnId)}`;
+    if (hasTauriInternals()) {
+      return invokeTauriWithAbort<AgentTurnResponseRecovery>("fetch_agent_turn_response", {
+        request: { sessionId, clientTurnId, timeoutMs: 10000 },
+      }, signal);
+    }
+    return requestJson<AgentTurnResponseRecovery>(
+      `${endpoint}/api/app/agent/session/${encodedSessionId}${query}`,
+      { signal, timeoutMs: 10000, preferTauriIpc: true },
+    );
+  };
+}
+
 export async function sendAgentMessage(
   endpoint: string,
   message: string,
@@ -102,10 +215,9 @@ export async function sendAgentMessage(
     followupQueueId: options.followupQueueId,
     followupLaneId: options.followupLaneId,
   };
-  if (hasTauriInternals()) {
-    return invokeTauriWithAbort<AgentRuntimeResponse>("send_agent_message", { request }, options.signal);
-  }
-  return requestJson(`${endpoint}/api/app/agent/message`, {
+  const send = hasTauriInternals()
+    ? invokeTauriWithAbort<AgentRuntimeResponse>("send_agent_message", { request }, options.signal)
+    : requestJson<AgentRuntimeResponse>(`${endpoint}/api/app/agent/message`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     signal: options.signal,
@@ -133,6 +245,20 @@ export async function sendAgentMessage(
       followupLaneId: request.followupLaneId,
     }),
   });
+  try {
+    return await send;
+  } catch (cause) {
+    if (!request.sessionId || !request.clientTurnId || options.signal?.aborted || !isTransportFailure(cause)) {
+      throw cause;
+    }
+    return recoverAgentTurnResponse(
+      cause,
+      request.sessionId,
+      request.clientTurnId,
+      recoveryReader(endpoint),
+      options.signal,
+    );
+  }
 }
 
 export async function issueComputerUseTurnGrant(
@@ -680,7 +806,7 @@ export async function answerAgentQuestion(
   endpoint: string,
   questionId: string,
   payload: { answer?: string; value?: string; optionId?: string; selectedOptionId?: string; sessionId?: string; projectRoot?: string },
-): Promise<{ ok: boolean; question: AgentQuestion }> {
+): Promise<{ ok: boolean; question: AgentQuestion; runtimeContinuation?: AgentRuntimeContinuation }> {
   if (hasTauriInternals()) {
     return invokeTauriWithAbort("answer_agent_question", {
       request: { id: questionId, body: payload, timeoutMs: 60000 },

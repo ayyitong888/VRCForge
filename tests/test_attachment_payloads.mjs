@@ -12,6 +12,7 @@ const chatSessionsSource = await readFile(path.join(root, "src/hooks/use-chat-se
 const chatThreadSource = await readFile(path.join(root, "src/lib/chat-thread.ts"), "utf8");
 const compactionControllerSource = await readFile(path.join(root, "src/hooks/use-context-compaction-controller.ts"), "utf8");
 const chatRunControllerSource = await readFile(path.join(root, "src/hooks/use-chat-run-controller.ts"), "utf8");
+const appSource = await readFile(path.join(root, "src/App.tsx"), "utf8");
 const attachmentIngestSource = await readFile(path.join(root, "src/lib/attachment-ingest.ts"), "utf8");
 const rustCommandsSource = await readFile(path.join(root, "src-tauri/src/commands.rs"), "utf8");
 const transpiled = ts.transpileModule(source, {
@@ -251,4 +252,29 @@ test("manual and runtime compaction capture refs only on their successful replac
   assert.match(compactionControllerSource, /compactedAttachmentRefs: snapshot\.compactedAttachmentRefs/);
   assert.match(chatRunControllerSource, /collectCompactedAttachmentReferences\(\s*durableItems\.filter\(\(item\) => summarizedItemIds\.has\(item\.id\)\)/);
   assert.match(chatRunControllerSource, /chat\?\.compactedAttachmentRefs/);
+});
+
+test("successful visible history replacement starts a fresh runtime session", () => {
+  assert.match(
+    compactionControllerSource,
+    /sessionId:\s*""/,
+  );
+});
+
+test("native metrics-only compaction is a completed audit without visible summary replacement", () => {
+  assert.match(chatRunControllerSource, /runtimeCompaction\.target === "native_history"/);
+  assert.match(chatRunControllerSource, /const nativeApplied = runtimeCompaction\.applied === true && runtimeCompaction\.target === "native_history"/);
+  assert.match(chatRunControllerSource, /const status = nativeApplied\s*\n\s*\? "applied"/);
+});
+
+test("compaction guard reads the latest callback before and after provider await", () => {
+  assert.match(compactionControllerSource, /hasUnresolvedRuntimeStateRef\.current\s*=\s*hasUnresolvedRuntimeState/);
+  assert.equal((compactionControllerSource.match(/hasUnresolvedRuntimeStateRef\.current\?\./g) || []).length, 2);
+});
+
+test("compaction guard ignores terminal needs_user_action history and scopes active work", () => {
+  assert.doesNotMatch(appSource, /\["running", "queued", "cancelling", "needs_user_action"\]/);
+  assert.match(appSource, /\["running", "queued", "cancelling", "waiting_for_model", "waiting_for_tool"\]/);
+  assert.match(appSource, /parentSessionId === targetSessionId/);
+  assert.doesNotMatch(appSource, /const owns = \(item: any\)/);
 });

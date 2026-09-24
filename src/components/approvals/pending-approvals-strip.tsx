@@ -13,9 +13,11 @@ type PendingApprovalsStripProps = {
   loading: boolean;
   onApprove: (approvalId: string, allowFutureCategory?: boolean) => void;
   onReject: (approvalId: string) => void;
+  onClose?: () => void;
 };
 
-export function PendingApprovalsStrip({ approvals, actions, loading, onApprove, onReject }: PendingApprovalsStripProps) {
+export function PendingApprovalsStrip({ approvals, actions, loading, onApprove, onReject, onClose }: PendingApprovalsStripProps) {
+  const { t } = useTranslation();
   const visibleApprovals = approvals.filter(
     (approval) => approval.status === "pending" && !["approve", "reject"].includes(actions[approval.id] || ""),
   );
@@ -26,6 +28,8 @@ export function PendingApprovalsStrip({ approvals, actions, loading, onApprove, 
   return (
     <div className="max-h-[40vh] shrink-0 overflow-auto border-t border-amber-500/20 bg-amber-500/5 px-6 py-3">
       <div className="mx-auto max-w-4xl space-y-3">
+        {onClose ? <div className="flex justify-end"><Button variant="ghost" onClick={onClose}>{t("common.close")}</Button></div> : null}
+        <div className="text-sm font-semibold text-foreground">{t("approval.requestTitle")}</div>
         {visibleApprovals.map((approval) => (
           <ApprovalCard key={approval.id} approval={approval} loading={loading || Boolean(actions[approval.id])} onApprove={onApprove} onReject={onReject} />
         ))}
@@ -56,6 +60,12 @@ function ApprovalCard({
       </div>
       <div className="mt-4 grid gap-3">
         <p className="text-sm text-muted-foreground">{presentation.summary}</p>
+        {typeof approval.taskContext?.objective === "string" && approval.taskContext.objective.trim() ? (
+          <p className="whitespace-pre-wrap break-words text-xs text-muted-foreground">
+            <span className="font-medium text-foreground">{t("approval.contextReason")}: </span>
+            {approval.taskContext.objective.trim()}
+          </p>
+        ) : null}
         <DataLine label={t("approval.presentation.project")} value={presentation.project} />
         <DataLine label={t("approval.presentation.rollback")} value={presentation.rollback} />
       </div>

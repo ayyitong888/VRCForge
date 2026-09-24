@@ -46,7 +46,11 @@ assert.match(card, /function StreamingPhaseStatus/);
 assert.match(card, /Loader2/);
 assert.match(card, /streamingPhaseLabel/);
 assert.match(streamingBranch, /data-vrcforge-live-runtime-timeline/);
-assert.match(streamingBranch, /buildDurableTimelineRows\(item\.timeline\)/, "safe tool events must appear while the turn is still running");
+assert.match(
+  streamingBranch,
+  /buildDurableTimelineRows\(item\.timeline(?:,[\s\S]*?)?\)/,
+  "safe tool events must appear while the turn is still running",
+);
 assert.match(streaming, /phase === "waiting_for_model" && item\.phase !== "waiting_for_model"/, "a new model pass replaces stale wheel-talk instead of appending it forever");
 assert.ok(streamingBranch.indexOf("StreamingPhaseStatus") < streamingBranch.lastIndexOf("item.text"), "spinner must not be restricted to the empty-text branch");
 assert.doesNotMatch(streamingBranch, /reasoning|trace|chain.of.thought|cot/i);

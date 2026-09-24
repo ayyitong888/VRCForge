@@ -45,8 +45,8 @@ assert.match(boundInstructionsText, /cannot grant writes.*bypass supervision/i);
 
 const profiledTools = section("AGT-012", "APR-001");
 const profiledToolsText = compact(profiledTools);
-assert.match(profiledToolsText, /General Mode exposes Core plus General/i);
-assert.match(profiledToolsText, /Unity Project Mode exposes Core plus General plus Unity/i);
+assert.match(profiledToolsText, /CoreToolSet.*GeneralToolSet.*UnityToolSet/i);
+assert.match(profiledToolsText, /General Agent.*Unity tools added.*strict capability superset/i);
 assert.match(profiledToolsText, /Read\/List\/Glob\/Grep remain available/i);
 assert.match(profiledToolsText, /ordinary Shell.*cwd.*direct project-path reference/i);
 assert.match(profiledToolsText, /unity_project_access.*current registered Unity project/i);

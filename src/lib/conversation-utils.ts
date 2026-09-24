@@ -36,6 +36,33 @@ export function formatPayload(value: unknown): string {
   }
 }
 
+/**
+ * Build a React key for a conversation item without changing its persisted id.
+ * Runtime identities keep their key when other items are inserted; duplicate
+ * legacy ids receive an occurrence suffix only within the current chat scope.
+ */
+export function conversationItemRenderKey(
+  item: ConversationItem,
+  scope: string,
+  occurrences: Map<string, number>,
+): string {
+  const identity = item.type === "agent"
+    ? item.response.clientTurnId || item.response.turnId || item.response.turn_id
+    : item.type === "streaming"
+      ? item.clientTurnId
+      : item.type === "user"
+        ? item.clientTurnId
+        : item.type === "timeline_event"
+          ? item.event.clientTurnId || item.event.turnId || item.event.id
+          : item.type === "result" || item.type === "approval_revision"
+            ? item.approvalId
+            : item.id;
+  const base = `${scope}:${item.type}:${identity || item.id}`;
+  const occurrence = occurrences.get(base) || 0;
+  occurrences.set(base, occurrence + 1);
+  return occurrence === 0 ? base : `${base}#${occurrence + 1}`;
+}
+
 export function normalizeProviderForContext(provider: string): string {
   return normalizeContextProvider(provider);
 }

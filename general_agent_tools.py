@@ -241,7 +241,7 @@ def _sensitive_file(path: Path) -> bool:
     return False
 
 
-def _redact_sensitive_text(text: str) -> tuple[str, bool]:
+def _redact_sensitive_text(text: str, *, preserve_lines: bool = False) -> tuple[str, bool]:
     redacted = False
 
     def assignment(match: re.Match[str]) -> str:
@@ -253,7 +253,10 @@ def _redact_sensitive_text(text: str) -> tuple[str, bool]:
     updated = _BEARER.sub("Bearer [REDACTED]", text)
     redacted = redacted or updated != text
     text = updated
-    updated = _PRIVATE_KEY.sub("[REDACTED PRIVATE KEY]", text)
+    updated = _PRIVATE_KEY.sub(
+        lambda match: "[REDACTED PRIVATE KEY]" + (
+            "".join(re.findall(r"\r\n|\r|\n", match.group(0))) if preserve_lines else ""
+        ), text)
     redacted = redacted or updated != text
     return updated, redacted
 
@@ -349,6 +352,8 @@ def read_text_file(
     max_bytes: int = 1_048_576,
     max_file_bytes: int | None = None,
     max_output_chars: int | None = None,
+    start_line: int | None = None,
+    end_line: int | None = None,
 ) -> dict[str, Any]:
     """Read UTF-8 text only; reject binary data and bound bytes/output."""
     if max_file_bytes is not None:
@@ -371,11 +376,23 @@ def read_text_file(
         text = data.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise ValueError(f"binary file rejected: {file_path}") from exc
-    text, redacted = _redact_sensitive_text(text)
+    text, redacted = _redact_sensitive_text(text, preserve_lines=start_line is not None or end_line is not None)
+    line_range: dict[str, int] = {}
+    if start_line is not None or end_line is not None:
+        start = 1 if start_line is None else start_line
+        if type(start) is not int or start < 1 or (end_line is not None and
+                (type(end_line) is not int or end_line < start)):
+            raise ValueError("startLine/endLine must be positive inclusive line numbers, with endLine >= startLine")
+        lines = text.splitlines(keepends=True)
+        if start > len(lines):
+            raise ValueError("startLine exceeds the readable file prefix; check maxBytes and the file's line count")
+        end = min(len(lines), end_line if end_line is not None else len(lines))
+        text = "".join(lines[start - 1:end])
+        line_range = {"startLine": start, "endLine": end}
     if max_output_chars is not None and len(text) > max_output_chars:
         text = text[:max_output_chars]
         truncated = True
-    return {"path": str(file_path), "text": text, "truncated": truncated, "bytes": len(data), "redacted": redacted}
+    return {"path": str(file_path), "text": text, "truncated": truncated, "bytes": len(data), "redacted": redacted, **line_range}
 
 
 def _iter_files(root: Path, max_depth: int) -> Iterator[Path]:

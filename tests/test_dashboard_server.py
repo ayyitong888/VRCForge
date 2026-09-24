@@ -22,6 +22,7 @@ from pydantic import ValidationError
 
 import dashboard_server
 import unity_status_service
+from unity_mcp_tool_contract import EXPECTED_TOOL_COUNT, EXPECTED_TOOL_NAMES
 import vrcforge_runtime_paths as runtime_paths
 from agent_task_loop import canonical_action_id
 from path_to_skill import build_path_to_skill_source
@@ -701,6 +702,33 @@ class DashboardServerTests(unittest.TestCase):
                 self.assertEqual(read_response.status_code, 200)
                 self.assertEqual([chat["id"] for chat in read_response.json()["chats"]], ["temp-chat"])
 
+    def test_chat_save_bounds_each_source_without_rejecting_aggregate(self) -> None:
+        """Independent project stores may each use the full durable size budget."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_a = Path(temp_dir) / "ProjectA"
+            project_b = Path(temp_dir) / "ProjectB"
+            project_a.mkdir()
+            project_b.mkdir()
+            chats = [
+                {
+                    "id": "large-project-a",
+                    "projectPath": str(project_a),
+                    "items": [{"id": "a1", "type": "user", "text": "a" * (9 * 1024 * 1024)}],
+                },
+                {
+                    "id": "large-project-b",
+                    "projectPath": str(project_b),
+                    "items": [{"id": "b1", "type": "user", "text": "b" * (9 * 1024 * 1024)}],
+                },
+            ]
+
+            with TestClient(dashboard_server.app) as client:
+                response = client.post("/api/app/chats", json={"chats": chats})
+
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertTrue((project_a / ".vrcforge" / "chat-transcripts.json").is_file())
+            self.assertTrue((project_b / ".vrcforge" / "chat-transcripts.json").is_file())
+
     def test_chat_restore_isolates_corrupt_project_source_and_blocks_overwrite(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project = Path(temp_dir) / "AvatarProject"
@@ -1281,6 +1309,7 @@ class DashboardServerTests(unittest.TestCase):
         previous_connected = dashboard_server.LAST_STATUS_CONNECTED
         snapshot = {
             "connected": True,
+            "executionReady": True,
             "mcpServerReachable": True,
             "unityInstanceRegistered": True,
             "selectedInstanceMatched": True,
@@ -3693,6 +3722,31 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(answered.json()["question"]["selectedOptionId"], "actual")
         self.assertEqual(after_answer.json()["count"], 0)
 
+    def test_answered_runtime_question_survives_snapshot_and_answer_broadcast(self) -> None:
+        scope = {"sessionId": "question-continuation-visible", "projectRoot": "ProjectA"}
+        with TestClient(dashboard_server.app) as client:
+            question = dashboard_server.AGENT_GATEWAY.questions.create({
+                "question": "Continue the unfinished task?", **scope,
+            })["question"]
+            question_id = question["questionId"]
+            dashboard_server.AGENT_GATEWAY.questions.answer(question_id, {"answer": "yes", **scope})
+            dashboard_server.AGENT_GATEWAY.questions.record_runtime_continuation(question_id, "queued")
+            with patch.object(dashboard_server.EVENT_BUS, "broadcast", new_callable=AsyncMock) as broadcast:
+                answered = client.post(f"/api/app/agent/questions/{question_id}/answer", json={"answer": "yes", **scope})
+            snapshot = client.get("/api/app/runtime/snapshot", params=scope)
+            other = client.get("/api/app/runtime/snapshot", params={**scope, "sessionId": "another-session"})
+            pending_only = client.get("/api/app/agent/questions", params=scope)
+
+        self.assertEqual(answered.status_code, 200)
+        rows = snapshot.json()["questions"]["questions"]
+        self.assertEqual([row["questionId"] for row in rows], [question_id])
+        self.assertEqual(rows[0]["runtimeContinuationStatus"], "queued")
+        self.assertNotIn("runtimeTaskSeed", rows[0])
+        question_events = [call.args[1] for call in broadcast.await_args_list if call.args[0] == "agentQuestions"]
+        self.assertEqual([row["questionId"] for row in question_events[-1]["questions"]], [question_id])
+        self.assertEqual(other.json()["questions"]["questions"], [])
+        self.assertEqual(pending_only.json()["questions"], [])
+
     def test_answered_goal_question_recovers_after_interrupted_projection(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -4930,6 +4984,7 @@ class DashboardServerTests(unittest.TestCase):
                 target.write_text("// probe", encoding="utf-8")
             healthy = {
                 "connected": True,
+                "executionReady": True,
                 "mcpServerReachable": True,
                 "unityInstanceRegistered": True,
                 "selectedInstanceMatched": True,
@@ -8092,7 +8147,7 @@ class DashboardServerTests(unittest.TestCase):
     @patch("dashboard_server.EVENT_BUS.broadcast_from_sync")
     @patch("dashboard_server.request_llm_plan_with_metadata")
     @patch.object(dashboard_server.PROVIDER_CONFIGURATION, "current_api_config")
-    def test_agent_runtime_stream_callback_emits_only_explicit_reply_deltas(
+    def test_agent_runtime_stream_callback_keeps_explicit_reply_provisional(
         self,
         mock_current_api_config,
         mock_request_llm_plan,
@@ -8128,15 +8183,12 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(events[0][0], "agentRuntimeDelta")
         self.assertEqual(events[0][1]["phase"], "waiting_for_model")
         self.assertEqual(events[0][1]["clientTurnId"], "client-stream")
-        self.assertEqual(events[1][1]["phase"], "receiving_response")
-        self.assertEqual(events[1][1]["textDelta"], "hel")
-        self.assertEqual(events[2][1]["textDelta"], "lo")
-        self.assertEqual(events[-1][1]["done"], True)
+        self.assertTrue(all("textDelta" not in event and not event.get("done") for _, event in events))
 
     @patch("dashboard_server.EVENT_BUS.broadcast_from_sync")
     @patch("dashboard_server.request_llm_plan_with_metadata")
     @patch.object(dashboard_server.PROVIDER_CONFIGURATION, "current_api_config")
-    def test_agent_runtime_stream_callback_continues_when_reply_replaces_summary_prefix(
+    def test_agent_runtime_stream_callback_does_not_publish_summary_or_reply_prefix(
         self,
         mock_current_api_config,
         mock_request_llm_plan,
@@ -8174,8 +8226,8 @@ class DashboardServerTests(unittest.TestCase):
 
         self.assertEqual(payload["reply"], "hello world")
         delta_events = [call.args[1] for call in mock_broadcast.call_args_list if call.args[0] == "agentRuntimeDelta" and "textDelta" in call.args[1]]
-        self.assertEqual([event["textDelta"] for event in delta_events], ["hello wor", "ld"])
-        self.assertTrue(mock_broadcast.call_args_list[-1].args[1]["done"])
+        self.assertEqual(delta_events, [])
+        self.assertTrue(all(not call.args[1].get("done") for call in mock_broadcast.call_args_list))
 
     def test_agent_runtime_prompt_uses_full_visible_dialogue_only(self) -> None:
         captured: dict[str, str] = {}
@@ -15072,7 +15124,15 @@ class DashboardServerTests(unittest.TestCase):
         ).read_text(encoding="utf-8-sig")
         contract_names = set(re.findall(r'\{\s*"(vrc_[a-z0-9_]+)"\s*,\s*"VRCForge\.', contract_text))
         self.assertEqual(contract_names, set(dashboard_server.VRCFORGE_UNITY_TOOL_REGISTRY))
-        self.assertEqual(len(contract_names), 95)
+        self.assertEqual(contract_names, EXPECTED_TOOL_NAMES)
+        self.assertEqual(len(contract_names), EXPECTED_TOOL_COUNT)
+        # Installation completeness is not Agent exposure. User code remains
+        # reachable only through the package-verified supervised wrappers.
+        for name in ("vrc_list_user_tools", "vrc_invoke_user_tool"):
+            self.assertNotIn(name, dashboard_server.AGENT_GATEWAY._tools)
+            self.assertNotIn(name, dashboard_server.AGENT_GATEWAY._write_handlers)
+        self.assertIn("vrcforge_list_user_unity_tools", dashboard_server.AGENT_GATEWAY._tools)
+        self.assertIn("vrcforge_invoke_user_unity_tool", dashboard_server.AGENT_GATEWAY._write_handlers)
         legacy_hits = [
             path for path in (repo_root / "Assets" / "VRCForge").rglob("*.cs")
             if "McpForUnityTool" in path.read_text(encoding="utf-8-sig")
@@ -15183,6 +15243,15 @@ namespace VRCForge.Editor
         )
 
         self.assertIn("execution connection", message)
+
+    def test_unity_repair_tools_message_preserves_editor_reload_blocker(self) -> None:
+        message = dashboard_server.unity_repair_tools_message({
+            "unityInstanceRegistered": True,
+            "selectedInstanceMatched": True,
+            "coreVersionMatched": True,
+            "readiness": {"ready": False, "blockerCode": "unity_editor_reload_dialog"},
+        })
+        self.assertIn("script reload", message)
 
     @unittest.skip("Replaced by Core-only repair tests; external connector repair is removed.")
     def test_repair_unity_mcp_bridge_restart_recovers_empty_tool_list(self) -> None:
@@ -18718,7 +18787,11 @@ namespace VRCForge.Editor
             unity_mcp_retry_backoff_seconds=2.0,
             unity_mcp_timeout_seconds=600,
         )
-        core_result = SimpleNamespace(exit_code=0, stdout="{}", stderr="", payload=None)
+        core_result = SimpleNamespace(exit_code=0, stdout="{}", stderr="", payload={
+            "structuredContent": {"success": True, "data": {
+                "ok": True, "isCompiling": False, "captureComplete": True, "errors": [], "warnings": [],
+            }},
+        })
         with patch(
             "dashboard_server.load_dashboard_settings",
             return_value=settings,

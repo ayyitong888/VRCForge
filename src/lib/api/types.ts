@@ -137,6 +137,8 @@ export type ProviderApiType = "auto" | "chat_completions" | "responses" | "gener
 export type ProviderCapabilityKey = "text" | "structured_json" | "vision" | "reasoning" | "tools";
 
 export type ApiConfig = {
+  /** Persisted authentication prerequisites; does not imply a successful test. */
+  configured: boolean;
   provider: string;
   providerLabel?: string;
   api_key?: string;
@@ -597,6 +599,7 @@ export type AgentRuntimeResponse = {
     failureClass?: string;
     suppressionReason?: string;
     blocked?: boolean;
+    target?: "native_history" | string;
   };
   attachments?: AgentMessageAttachment[];
   write?: {
@@ -661,6 +664,15 @@ export type AgentRuntimeResponse = {
     usage?: AgentContextUsage;
     imageCount?: number;
   }>;
+};
+
+export type AgentTurnResponseRecovery = {
+  ok: boolean;
+  sessionId: string;
+  clientTurnId: string;
+  status: "running" | "completed" | "failed" | "missing";
+  response?: AgentRuntimeResponse;
+  error?: string;
 };
 
 export type AgentRuntimeRun = {
@@ -959,6 +971,17 @@ export type AgentQuestion = {
   owner?: string;
   createdAt?: string;
   updatedAt?: string;
+  runtimeContinuationStatus?: "queued" | "claimed" | "delivered" | "interrupted" | string;
+  runtimeContinuation?: AgentRuntimeContinuation;
+};
+
+export type AgentRuntimeContinuation = {
+  questionId?: string;
+  status?: string;
+  sessionId?: string;
+  turnId?: string;
+  clientTurnId?: string;
+  error?: string;
 };
 
 export type AgentMemory = {
@@ -979,6 +1002,24 @@ export type HealthComponent = {
   status: "ok" | "warning" | "error" | "unknown";
   message: string;
   detail?: unknown;
+};
+
+/** Canonical project-scoped Unity tool readiness projected by UnityStatusService. */
+export type UnityReadiness = {
+  ready: boolean;
+  blockerCode?: string;
+  inspectionMode?: string | null;
+  inspectionSkipped?: boolean;
+};
+
+export type UnityToolsHealthDetail = {
+  readiness?: UnityReadiness;
+  coreVersion?: string;
+  coreVersionMatched?: boolean;
+  inspectionMode?: string;
+  totalTools?: number;
+  vrcForgeToolsCount?: number;
+  missingRequiredVrcForgeTools?: string[];
 };
 
 export type DoctorStatus = "ok" | "warning" | "error" | "unknown";

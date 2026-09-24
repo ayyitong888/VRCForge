@@ -185,6 +185,8 @@ export type ChatThread = {
   pinned?: boolean;
   archived?: boolean;
   revision?: number;
+  /** Last time this chat's completed output was viewed in the conversation. */
+  lastViewedAt?: string;
   compaction?: ChatCompactionState;
   contextUsageCache?: AgentContextUsage;
   attachmentPayloads?: Record<string, ChatAttachmentPayload>;

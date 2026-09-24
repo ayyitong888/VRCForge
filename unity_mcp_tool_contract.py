@@ -5,7 +5,7 @@ from __future__ import annotations
 CORE_IDENTITY = "vrcforge.unity-core"
 HANDSHAKE_PROTOCOL = "vrcforge.core-handshake.v1"
 PRODUCT_VERSION = "1.8.0"
-TOOL_CONTRACT_VERSION = "159"
+TOOL_CONTRACT_VERSION = "160"
 PREVIOUS_CORE_TOOL_CONTRACT_VERSION = "87"
 
 EXPECTED_TOOL_NAMES = frozenset(
@@ -28,9 +28,10 @@ EXPECTED_TOOL_NAMES = frozenset(
         "vrc_scan_inbound_reference_closure", "vrc_scan_thry_avatar_performance", "vrc_scan_wardrobe", "vrc_set_constraint_sources", "vrc_set_gameobject_active",
         "vrc_set_material_shader", "vrc_set_material_texture", "vrc_set_renderer_material_slot", "vrc_flatten_material_variant", "vrc_set_play_mode", "vrc_set_property", "vrc_set_texture_import_settings", "vrc_setup_outfit", "vrc_texture_patch",
         "vrc_toggle_scene_object", "vrc_unpack_prefab", "vrc_user_adjustment_handoff", "vrc_write_animation_curve", "vrc_write_avatar_descriptor",
+        "vrc_list_user_tools", "vrc_invoke_user_tool",
     }
 )
-EXPECTED_TOOL_COUNT = 95
+EXPECTED_TOOL_COUNT = 97
 
 # Contract revisions describe the discovered tool surface; protocol-range
 # negotiation decides whether the App and Core can communicate. Revision 88
@@ -64,6 +65,7 @@ READ_ONLY_TOOL_NAMES = frozenset(
         "vrc_read_vrchat_sdk_builder_alerts",
         "vrc_avatar_upload_readiness",
         "vrc_scan_inbound_reference_closure",
+        "vrc_list_user_tools",
     }
 )
 

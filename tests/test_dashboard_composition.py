@@ -128,6 +128,10 @@ def test_shader_material_scan_paging_is_optional_and_preserves_prior_openapi() -
     for name in ("offset", "limit", "indexOnly"):
         properties.pop(name)
     properties["materialIds"].pop("description")
+    # Reviewed user-tool installation and exact-turn recovery are additive.
+    openapi["paths"].pop("/api/app/skill-packages/{skill_package_id}/unity-tools/install")
+    session = openapi["paths"]["/api/app/agent/session/{session_id}"]["get"]
+    session["parameters"] = [item for item in session["parameters"] if item["name"] != "clientTurnId"]
     assert _canonical_sha256(openapi["components"]["schemas"]) == "46d55d631d41d2e90454c2e21d32a04b883ae48ff0b0e945d926612b12471fa7"
     assert _canonical_sha256(openapi) == "dc0a9ebb8369902ad5880f6abce8a0399c9fb8d4b74a2e5d333802f5ae33460f"
 

@@ -20,6 +20,7 @@ assert.match(card, /<textarea[\s\S]*value=\{displayedText\}/);
 assert.doesNotMatch(workspace, /editing=\{Boolean\(editingMessage/);
 
 assert.match(timeline, /normalizeAgentSteps/);
+assert.match(timeline, /filter\(\(\{ step \}\) => step\.historical !== true\)/);
 assert.match(timeline, /buildDurableTimelineRows/);
 assert.match(timelinePresentation, /finalAssistant/);
 assert.match(timeline, /<ChatMarkdown text=\{entry\.text\}/);

@@ -34,6 +34,9 @@ INPUT_CONTRACT = (ROOT / "Assets" / "VRCForge" / "Core" / "MCP" / "VRCForgeInput
 RESULT_CONTRACT = (ROOT / "Assets" / "VRCForge" / "Core" / "MCP" / "VRCForgeToolResult.cs").read_text(
     encoding="utf-8-sig"
 )
+TOOL_REGISTRY = (ROOT / "Assets" / "VRCForge" / "Core" / "MCP" / "VRCForgeToolRegistry.cs").read_text(
+    encoding="utf-8-sig"
+)
 SOURCE_MIGRATION = (ROOT / "Assets" / "VRCForge" / "Editor" / "MCP" / "VRCForgeMcpSourceMigration.cs").read_text(
     encoding="utf-8-sig"
 )
@@ -645,6 +648,28 @@ def test_core_has_a_fixed_current_tool_contract_and_never_rediscoveres_at_invoke
     assert 'ExpectedPlanningToolNames.Contains(descriptor.Name)' in SERVER
     assert 'string.IsNullOrEmpty(exposureLayer) ? "planning" : exposureLayer' in SERVER
     assert '"vrcforge_apply_blendshapes"' not in SERVER
+
+
+def test_core_owned_discovery_excludes_foreign_commands_before_handler_inspection() -> None:
+    assert "DiscoverOwnedLoadedAssemblies" in TOOL_REGISTRY
+    owned_start = TOOL_REGISTRY.index("private static VRCForgeToolRegistry Discover(")
+    owned = TOOL_REGISTRY[owned_start : TOOL_REGISTRY.index("public VRCForgeToolDescriptor GetRequired", owned_start)]
+    assert "if (isOwned != null && !isOwned(type, attribute))" in owned
+    assert owned.index("isOwned != null") < owned.index("var handler = FindHandler(type);")
+    assert "VRCForgeExcludedToolDescriptor" in TOOL_REGISTRY
+    assert "VRCForgeToolRegistry.DiscoverOwnedLoadedAssemblies(" in SERVER
+    assert "VRCForgeMcpToolContract.IsExpectedDeclaration" in SERVER
+    assert '"callable"] = false' in SERVER
+    assert '"reason"] = "outside_owned_core_contract"' in SERVER
+
+
+def test_owned_declaration_identity_is_checked_against_the_single_contract_map() -> None:
+    assert "internal static bool IsExpectedDeclaration(Type toolType, VRCForgeCommandAttribute attribute)" in CONTRACT
+    declaration = CONTRACT[CONTRACT.index("internal static bool IsExpectedDeclaration") : CONTRACT.index("internal static bool IsExpectedDescriptor")]
+    assert "IsExpectedIdentity(toolType, attribute.ToolId)" in declaration
+    assert "private static bool IsExpectedIdentity(Type toolType, string toolName)" in CONTRACT
+    assert "ExpectedTypes.TryGetValue(toolName, out expectedType)" in CONTRACT
+    assert 'string.Equals(toolType.FullName, expectedType, StringComparison.Ordinal)' in CONTRACT
 
 
 def test_csharp_contract_exactly_matches_the_current_owned_tool_declarations() -> None:

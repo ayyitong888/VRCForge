@@ -110,6 +110,36 @@ def _owner(
     )
 
 
+def test_native_binding_is_explicit_stable_and_credential_bound() -> None:
+    config = ProviderApiConfig(
+        provider="custom",
+        api_key="secret-a",
+        base_url="https://provider.example/v1",
+        model="model-a",
+        api_type="chat_completions",
+        thinking_level="medium",
+        context_window=128_000,
+    )
+    assert config.native_binding() == replace(config).native_binding()
+    assert config.native_binding()
+    assert replace(config, context_window=256_000).native_binding() == config.native_binding()
+    for changed in (
+        replace(config, api_key="secret-b"),
+        replace(config, provider="other"),
+        replace(config, base_url="https://other.example/v1"),
+        replace(config, model="model-b"),
+        replace(config, api_type="responses"),
+        replace(config, thinking_level="high"),
+    ):
+        assert changed.native_binding() != config.native_binding()
+
+
+@pytest.mark.parametrize("api_type", [None, "auto", "responses", "messages", "gemini"])
+def test_native_binding_requires_explicit_chat_completions(api_type: str | None) -> None:
+    config = ProviderApiConfig("custom", "secret", "https://provider.example/v1", "model", api_type=api_type)
+    assert config.native_binding() == ""
+
+
 def _write_old_document(path: Path, *, api_key: str = "old-api-key") -> bytes:
     original = json.dumps(
         {
@@ -177,6 +207,23 @@ def test_configuration_resolves_same_provider_saved_key_then_revalidates(
     assert resolved.api_key == "old-api-key"
     assert vision.api_key == "old-vision-key"
     assert validated == ["", "old-api-key", "", "old-vision-key"]
+
+
+@pytest.mark.parametrize(
+    ("provider", "key", "expected"),
+    [("openai", "", False), ("openai", "saved-key", True), ("ollama", "", True)],
+)
+def test_configured_projection_uses_provider_auth_policy_without_claiming_verification(
+    tmp_path: Path, provider: str, key: str, expected: bool,
+) -> None:
+    owner = _owner(
+        tmp_path / "config.json",
+        settings=FakeSettings(llm_provider=provider, llm_api_key=key),
+    )
+    projection = owner.serialize_app_api_config()
+    assert projection["configured"] is expected
+    assert "verified" not in projection
+    assert "api_key" not in projection
 
 
 def test_configuration_persists_and_reuses_keys_for_each_provider_and_lane(

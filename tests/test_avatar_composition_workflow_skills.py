@@ -14,6 +14,7 @@ from avatar_composition_workflow_skills import (
 )
 from profiled_tool_registry import CapabilityProfile, ToolSet
 from runtime_planner_service import bounded_planner_tool_schema
+from tests.planner_schema_assertions import assert_internal_write_schema
 
 
 EXPECTED_NAMES = (
@@ -209,7 +210,9 @@ def test_composition_workflow_atoms_have_internal_external_contract_parity() -> 
         assert external_schema.get("required", []) == canonical_schema.get("required", []), name
         assert external_schema["additionalProperties"] == canonical_schema["additionalProperties"], name
         assert "promptSkillProvenance" in external_schema["properties"], name
-        if internal.input_schema != bounded_planner_tool_schema(external_schema):
+        if is_write:
+            assert_internal_write_schema(internal.input_schema, external_schema, approved_execution=handler.requires_approved_execution_context)
+        elif internal.input_schema != bounded_planner_tool_schema(external_schema):
             schema_mismatches.append(name)
 
     assert schema_mismatches == []

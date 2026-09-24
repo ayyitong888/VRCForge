@@ -29,6 +29,16 @@ def test_tool_blocks_keep_one_definition_and_existing_exports() -> None:
     for name, expected in BASELINE_AST_SHA256.items():
         assert getattr(agent_gateway, name) is getattr(external_mcp_tool_blocks, name)
         node = definitions[name]
+        if name in {"EXTERNAL_MCP_READ_TOOL_BLOCKS", "EXTERNAL_MCP_WRITE_TOOL_BLOCKS"}:
+            additions = {"vrcforge_install_user_unity_tools", "vrcforge_invoke_user_unity_tool"}
+            if name == "EXTERNAL_MCP_READ_TOOL_BLOCKS":
+                additions.add("vrcforge_list_user_unity_tools")
+            assert additions <= set(getattr(external_mcp_tool_blocks, name)["skills/vsk"])
+            class _RemoveUserToolAdditions(ast.NodeTransformer):
+                def visit_Set(self, current):
+                    current.elts = [item for item in current.elts if not (isinstance(item, ast.Constant) and item.value in additions)]
+                    return self.generic_visit(current)
+            node = _RemoveUserToolAdditions().visit(node)
         if name == "EXTERNAL_MCP_WRITE_TOOL_BLOCKS":
             # Reviewed relocation and typed chat repair are additive entries;
             # retain the immutable AST digest for every other membership.

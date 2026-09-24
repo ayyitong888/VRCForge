@@ -137,6 +137,7 @@ export function ProjectWorkbenchSections({
   pendingApprovals,
   workspaceSummary,
   activeDesktopActions,
+  onOpenPendingApprovals,
 }: {
   workspaceProjectLabel: string;
   projectType: ProjectType;
@@ -161,6 +162,7 @@ export function ProjectWorkbenchSections({
   pendingApprovals: number;
   workspaceSummary: WorkspaceDiffSummary | null;
   activeDesktopActions: AgentDesktopAction[];
+  onOpenPendingApprovals: () => void;
 }) {
   const { t } = useTranslation();
   const isUnityProject = projectType === "unity";
@@ -462,14 +464,14 @@ export function ProjectWorkbenchSections({
               </>
             )}
             {isUnityProject ? (
-              <div data-vrcforge-status="approval">
+              <button type="button" className="w-full text-left" data-vrcforge-status="approval" onClick={pendingApprovals > 0 ? onOpenPendingApprovals : undefined} disabled={pendingApprovals === 0}>
                 <RuntimeInfoRow
                   icon={<ListChecks className="h-4 w-4" />}
                   label={t("workspace.pendingConfirmation")}
                   value={approvalValue}
                   suffix={<StatusDot status={approvalStatus} />}
                 />
-              </div>
+              </button>
             ) : null}
           </div>
         </div>

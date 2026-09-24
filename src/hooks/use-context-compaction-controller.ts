@@ -58,6 +58,7 @@ type UseContextCompactionControllerParams = {
   ) => boolean;
   persistChatsNow: () => Promise<void>;
   setError: (message: string) => void;
+  hasUnresolvedRuntimeState?: (chatId: string, sessionId: string) => boolean;
 };
 
 type ActiveCompactionJob = {
@@ -71,9 +72,12 @@ export function useContextCompactionController({
   updateChatIfRevision,
   persistChatsNow,
   setError,
+  hasUnresolvedRuntimeState,
 }: UseContextCompactionControllerParams) {
   const { t, i18n } = useTranslation();
   const jobsRef = useRef(new Map<string, ActiveCompactionJob>());
+  const hasUnresolvedRuntimeStateRef = useRef(hasUnresolvedRuntimeState);
+  hasUnresolvedRuntimeStateRef.current = hasUnresolvedRuntimeState;
   const [activeJobCount, setActiveJobCount] = useState(0);
 
   function syncActiveJobCount() {
@@ -90,6 +94,9 @@ export function useContextCompactionController({
     }
     const snapshot = getChatById(request.chatId);
     if (!snapshot) {
+      return { status: "skipped" };
+    }
+    if (hasUnresolvedRuntimeStateRef.current?.(request.chatId, snapshot.sessionId)) {
       return { status: "skipped" };
     }
     const snapshotItems = stripTransientConversationItems(snapshot.items);
@@ -244,6 +251,11 @@ export function useContextCompactionController({
       if (!replacementIsUseful(beforeTokens, afterTokens, decision, contextLimit.known ? contextLimit.limit : 0)) {
         throw new Error("Compaction did not reduce context enough to apply safely.");
       }
+      const latestBeforeCommit = getChatById(request.chatId);
+      if (latestBeforeCommit && hasUnresolvedRuntimeStateRef.current?.(request.chatId, latestBeforeCommit.sessionId)) {
+        markLatestGeneration(request.chatId, generation, "failed", "runtime_pending", t("compact.failed"));
+        return { status: "skipped", decision, chat: latestBeforeCommit };
+      }
       const appliedItems = replacementItems.map((item) => (
         item.type === "compact" && item.id === generation ? { ...item, afterTokens } : item
       ));
@@ -266,7 +278,7 @@ export function useContextCompactionController({
       const committed = updateChatIfRevision(request.chatId, workingRevision, (chat) => ({
         ...chat,
         ...applyCompactedAttachmentReferences(chat, snapshotItems, appliedItems),
-        sessionId: snapshot.sessionId,
+        sessionId: "",
         items: appliedItems,
         compaction: appliedState,
       }));

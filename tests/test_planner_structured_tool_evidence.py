@@ -9,6 +9,52 @@ def project(result, **kwargs):
     return project_structured_tool_evidence(result, sanitize_text=sanitize_planner_observation_text, **kwargs)
 
 
+def test_execution_target_namespace_remains_exact_in_structured_evidence():
+    namespace = "vrcforge:/C:/Projects/UnityProject"
+    evidence = project({"executionTarget": {
+        "schema": "vrcforge.execution_target.v1",
+        "namespace": namespace,
+        "scope": "project",
+    }})
+    assert evidence["data"]["executionTarget"]["namespace"] == namespace
+
+
+def test_non_vrcforge_namespace_is_omitted_instead_of_exposing_a_path():
+    evidence = project({"executionTarget": {
+        "namespace": "D:/Private/UnityProject",
+        "scope": "project",
+    }})
+    assert "namespace" not in evidence["data"]["executionTarget"]
+
+
+def test_runtime_observation_keeps_namespace_identity_and_rejects_secret_bearing_namespace():
+    from runtime_planner_service import RuntimePlannerService
+
+    planner = RuntimePlannerService.__new__(RuntimePlannerService)
+    namespace = "vrcforge:/C:/Projects/UnityProject"
+    observation = planner._llm_loop_step_observation({
+        "tool": "vrcforge_unity_bind_execution_target",
+        "kind": "skill",
+        "status": "executed",
+        "result": {"executionTarget": {"namespace": namespace, "scope": "project"}},
+        "outcome": {"status": "ok"},
+    })
+    evidence = json.loads(observation.split("structuredEvidence=", 1)[1])
+    assert evidence["data"]["executionTarget"]["namespace"] == namespace
+
+    secret_namespace = "vrcforge:/D:/Unity?token=SECRET_NAMESPACE_TOKEN"
+    secret_observation = planner._llm_loop_step_observation({
+        "tool": "vrcforge_unity_bind_execution_target",
+        "kind": "skill",
+        "status": "executed",
+        "result": {"executionTarget": {"namespace": secret_namespace, "scope": "project"}},
+        "outcome": {"status": "ok"},
+    })
+    assert "SECRET_NAMESPACE_TOKEN" not in secret_observation
+    secret_evidence = json.loads(secret_observation.split("structuredEvidence=", 1)[1])
+    assert "namespace" not in secret_evidence["data"]["executionTarget"]
+
+
 def test_domain_rows_keep_identity_paging_ambiguity_and_terminal_state():
     result = {"ok": True, "commitState": "not_started", "paging": {"nextOffset": 2, "hasMore": True},
               "materials": [{"material_id": "mat_stable", "renderer_path": "Avatar/Body",

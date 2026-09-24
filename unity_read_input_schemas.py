@@ -297,7 +297,7 @@ UNITY_READ_TOOL_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
         "required": ["projectPath", "gameObjectPath"],
         "properties": {
             "projectPath": _PROJECT_PATH_PROPERTY,
-            "gameObjectPath": {"type": "string", "description": "Exact hierarchy path or unique scene GameObject name."},
+            "gameObjectPath": {"type": "string", "pattern": r"[^/\\\s]", "description": "Exact hierarchy path or unique scene GameObject name."},
         },
     },
     "vrcforge_list_execution_targets": {
@@ -946,6 +946,16 @@ PROJECT_CREATE_PUBLIC_INPUT_SCHEMA = {
     'anyOf': [{'required': ['projectPath']}, {'required': ['projectRoot']}],
 }
 UNITY_READ_TOOL_INPUT_SCHEMAS['vrcforge_project_create_plan'] = PROJECT_CREATE_PUBLIC_INPUT_SCHEMA
+UNITY_READ_TOOL_INPUT_SCHEMAS['vrcforge_list_user_unity_tools'] = {
+    'type': 'object', 'additionalProperties': False, 'required': ['projectPath'],
+    'properties': {
+        'projectPath': {'type': 'string'},
+        'packageId': {
+            'type': 'string',
+            'description': 'Optional exact package ID filter copied from a discovered packageId. Omit to list all project packages. Do not use a scope label such as project-scoped, a wildcard, or a tool ID.',
+        },
+    },
+}
 for _environment_tool in ('package_manager_status', 'unity_status', 'unity_tools'):
     UNITY_READ_TOOL_INPUT_SCHEMAS['vrcforge_' + _environment_tool] = {
         'type': 'object', 'additionalProperties': True, 'properties': dict(_PROJECT_CONTEXT_PROPERTIES),
@@ -1021,6 +1031,8 @@ for _general_read_tool, _general_read_properties in {
         'path': {'type': 'string', 'description': 'Project-relative UTF-8 text file path under projectPath.'},
         'projectPath': {'type': 'string', 'description': 'Absolute existing source workspace root; required for external MCP calls.'},
         'maxBytes': {'type': 'integer'}, 'maxOutputChars': {'type': 'integer'},
+        'startLine': {'type': 'integer', 'minimum': 1, 'description': 'First line to read, 1-based and inclusive; defaults to 1.'},
+        'endLine': {'type': 'integer', 'minimum': 1, 'description': 'Last line to read, inclusive; must be at least startLine. Omit to read through the bounded file prefix.'},
     },
     'vrcforge_find_files': {
         'path': {'type': 'string', 'description': 'Project-relative directory path under projectPath.'},

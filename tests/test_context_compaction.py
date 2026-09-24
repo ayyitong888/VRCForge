@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import unittest
+from concurrent.futures import CancelledError
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -29,6 +30,23 @@ def _prompt_entries(prompt: str) -> list[dict[str, str]]:
 
 
 class ContextCompactionTests(unittest.TestCase):
+    def test_cancelled_summarizer_is_rethrown_without_retry_or_fallback(self) -> None:
+        calls = 0
+
+        def cancelled(_prompt: str) -> str:
+            nonlocal calls
+            calls += 1
+            raise dashboard_server.RuntimePlannerProviderCancelledError("stop")
+
+        with self.assertRaises(dashboard_server.RuntimePlannerProviderCancelledError) as raised:
+            compact_context(
+                [{"role": "user", "text": "goal"}, {"role": "assistant", "text": "history"}],
+                summarizer=cancelled,
+                target_tokens=100,
+            )
+        self.assertIsInstance(raised.exception, CancelledError)
+        self.assertEqual(calls, 1)
+
     def test_full_and_fitted_boundaries_preserve_goal_and_latest_pair(self) -> None:
         history = [
             {"role": "user", "text": "original goal " + "g" * 40},

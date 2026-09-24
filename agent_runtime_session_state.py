@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import threading
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
@@ -23,14 +24,19 @@ class AgentRuntimeSessionState:
     """Own runtime sessions, cancellation markers, steer mailboxes, and stream identity."""
 
     MAX_STEER_MAILBOX = 20
+    MAX_FINAL_RESPONSES = 8
+    MAX_NATIVE_CONVERSATION_BYTES = 2 * 1024 * 1024
 
     __slots__ = (
         "_ports",
         "_sessions",
         "_cancelled_ids",
         "_active_turns",
+        "_finalizing_turns",
+        "_final_responses",
         "_steer_mailboxes",
         "_steer_seen_ids",
+        "_native_conversations",
         "_stream_context",
     )
 
@@ -39,8 +45,11 @@ class AgentRuntimeSessionState:
         self._sessions: dict[str, dict[str, Any]] = {}
         self._cancelled_ids: set[str] = set()
         self._active_turns: dict[tuple[str, str], str] = {}
+        self._finalizing_turns: set[tuple[str, str]] = set()
+        self._final_responses: dict[str, list[dict[str, Any]]] = {}
         self._steer_mailboxes: dict[tuple[str, str], list[dict[str, Any]]] = {}
         self._steer_seen_ids: dict[tuple[str, str], set[str]] = {}
+        self._native_conversations: dict[str, dict[str, Any]] = {}
         self._stream_context = threading.local()
 
     @property
@@ -52,8 +61,11 @@ class AgentRuntimeSessionState:
             self._sessions.clear()
             self._cancelled_ids.clear()
             self._active_turns.clear()
+            self._finalizing_turns.clear()
+            self._final_responses.clear()
             self._steer_mailboxes.clear()
             self._steer_seen_ids.clear()
+            self._native_conversations.clear()
 
     def session_count(self) -> int:
         with self._ports.shared_state_lock:
@@ -62,10 +74,13 @@ class AgentRuntimeSessionState:
     def discard_session(self, session_id: str) -> None:
         with self._ports.shared_state_lock:
             self._sessions.pop(session_id, None)
-            for key in [key for key in self._active_turns if key[0] == session_id]:
+            self._native_conversations.pop(session_id, None)
+            for key in {key for key in (*self._active_turns.keys(), *self._finalizing_turns) if key[0] == session_id}:
                 self._active_turns.pop(key, None)
+                self._finalizing_turns.discard(key)
                 self._steer_mailboxes.pop(key, None)
                 self._steer_seen_ids.pop(key, None)
+            self._final_responses.pop(session_id, None)
 
     def get_session(self, session_id: str) -> dict[str, Any] | None:
         with self._ports.shared_state_lock:
@@ -81,6 +96,298 @@ class AgentRuntimeSessionState:
                 "turnCount": len(session.get("turns", [])),
                 "restoredFromTranscript": bool(session.get("restoredFromTranscript")),
             }
+
+    @staticmethod
+    def _native_required(value: Any, field: str) -> str:
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"native {field} must be non-empty")
+        return value
+
+    @classmethod
+    def _native_size_ok(cls, snapshot: dict[str, Any]) -> None:
+        encoded = json.dumps(snapshot, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        if len(encoded) > cls.MAX_NATIVE_CONVERSATION_BYTES:
+            raise ValueError("Conversation context size exceeds 2MiB. Use Compact conversation or start a new conversation before retrying.")
+
+    @staticmethod
+    def _native_pending(snapshot: dict[str, Any]) -> set[str]:
+        calls: set[str] = set()
+        settled: set[str] = set()
+        for message in snapshot.get("messages", []):
+            if message.get("role") == "assistant":
+                for call in message.get("tool_calls", []) or []:
+                    calls.add(call["id"])
+            elif message.get("role") == "tool":
+                settled.add(message["tool_call_id"])
+        return calls - settled
+
+    @classmethod
+    def _validate_native_assistant(cls, message: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(message, dict):
+            raise ValueError("native assistant message must be an object")
+        allowed = {"role", "content", "tool_calls", "reasoning_content"}
+        if set(message) - allowed:
+            raise ValueError("native assistant message has unsupported fields")
+        if message.get("role") != "assistant":
+            raise ValueError("native assistant role must be assistant")
+        if "content" in message and message["content"] is not None and not isinstance(message["content"], str):
+            raise ValueError("native assistant content must be string or null")
+        if "reasoning_content" in message and message["reasoning_content"] is not None and not isinstance(message["reasoning_content"], str):
+            raise ValueError("native reasoning_content must be string or null")
+        calls = message.get("tool_calls", [])
+        if not isinstance(calls, list):
+            raise ValueError("native tool_calls must be a list")
+        seen: set[str] = set()
+        normalized = copy.deepcopy(message)
+        for call in calls:
+            if not isinstance(call, dict) or set(call) != {"id", "type", "function"}:
+                raise ValueError("native tool call shape is invalid")
+            call_id = cls._native_required(call["id"], "call id")
+            if call_id in seen:
+                raise ValueError("native call id is duplicate")
+            seen.add(call_id)
+            if call["type"] != "function" or not isinstance(call["function"], dict) or set(call["function"]) != {"name", "arguments"}:
+                raise ValueError("native tool call function shape is invalid")
+            cls._native_required(call["function"]["name"], "function name")
+            if not isinstance(call["function"]["arguments"], str):
+                raise ValueError("native function arguments must be raw string")
+        return normalized
+
+    @classmethod
+    def _validate_native_snapshot(
+        cls, snapshot: dict[str, Any], *, binding: str,
+    ) -> dict[str, Any]:
+        if not isinstance(snapshot, dict) or set(snapshot) != {"binding", "turnId", "messages", "activeTurnStart"}:
+            raise ValueError("native snapshot fields are invalid")
+        if snapshot["binding"] != binding:
+            raise ValueError("native snapshot binding mismatch")
+        cls._native_required(snapshot["binding"], "binding")
+        cls._native_required(snapshot["turnId"], "turn id")
+        messages = snapshot["messages"]
+        if not isinstance(messages, list):
+            raise ValueError("native snapshot messages must be a list")
+        active_turn_start = snapshot["activeTurnStart"]
+        if not isinstance(active_turn_start, int) or isinstance(active_turn_start, bool):
+            raise ValueError("native active turn boundary is invalid")
+        if not messages or active_turn_start < 0 or active_turn_start >= len(messages):
+            raise ValueError("native active turn boundary is invalid")
+        calls: set[str] = set()
+        pending: set[str] = set()
+        normalized_messages: list[dict[str, Any]] = []
+        for message in messages:
+            if not isinstance(message, dict):
+                raise ValueError("native snapshot message must be an object")
+            role = message.get("role")
+            if role == "user":
+                if set(message) != {"role", "content"} or not isinstance(message["content"], str) or not message["content"].strip():
+                    raise ValueError("native user message shape is invalid")
+                if pending:
+                    raise ValueError("native snapshot has pending tool calls before user message")
+                normalized_messages.append(copy.deepcopy(message))
+            elif role == "assistant":
+                normalized = cls._validate_native_assistant(message)
+                if pending:
+                    raise ValueError("native snapshot has pending tool calls before assistant message")
+                for call in normalized.get("tool_calls", []) or []:
+                    call_id = call["id"]
+                    if call_id in calls:
+                        raise ValueError("native call id is duplicate")
+                    calls.add(call_id)
+                    pending.add(call_id)
+                normalized_messages.append(normalized)
+            elif role == "tool":
+                if set(message) != {"role", "tool_call_id", "content"} or not isinstance(message["content"], str):
+                    raise ValueError("native tool message shape is invalid")
+                call_id = cls._native_required(message["tool_call_id"], "call id")
+                if call_id not in pending:
+                    raise ValueError("native tool call is orphaned or already settled")
+                pending.remove(call_id)
+                normalized_messages.append(copy.deepcopy(message))
+            else:
+                raise ValueError("native snapshot role is invalid")
+        normalized = {
+            "binding": snapshot["binding"],
+            "turnId": snapshot["turnId"],
+            "messages": normalized_messages,
+            "activeTurnStart": active_turn_start,
+        }
+        if normalized_messages[active_turn_start].get("role") != "user":
+            raise ValueError("native active turn must begin with user message")
+        cls._native_size_ok(normalized)
+        return normalized
+
+    def begin_native_turn(
+        self, session_id: str, *, binding: str, turn_id: str, message: str,
+        initial_history: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        session_id = self._native_required(session_id, "session id")
+        binding = self._native_required(binding, "binding")
+        turn_id = self._native_required(turn_id, "turn id")
+        message = self._native_required(message, "message")
+        with self._ports.shared_state_lock:
+            existing = self._native_conversations.get(session_id)
+            if existing is not None:
+                pending = self._native_pending(existing)
+                if pending:
+                    raise ValueError("native conversation has pending tool calls")
+                if existing["binding"] == binding and existing["turnId"] == turn_id:
+                    return copy.deepcopy(existing)
+                if existing["binding"] == binding:
+                    candidate = copy.deepcopy(existing)
+                    candidate["turnId"] = turn_id
+                    candidate["activeTurnStart"] = len(candidate["messages"])
+                    candidate["messages"].append({"role": "user", "content": message})
+                    self._native_size_ok(candidate)
+                    self._native_conversations[session_id] = candidate
+                    return copy.deepcopy(candidate)
+            history_messages: list[dict[str, Any]] = []
+            for item in initial_history or []:
+                if not isinstance(item, dict):
+                    raise ValueError("native initial history item is invalid")
+                text = item.get("text")
+                if not isinstance(text, str) or not text.strip():
+                    continue
+                role = item.get("role")
+                if role == "user":
+                    history_messages.append({"role": "user", "content": text})
+                elif role == "agent":
+                    history_messages.append({"role": "assistant", "content": text})
+                else:
+                    continue
+            candidate = {
+                "binding": binding,
+                "turnId": turn_id,
+                "messages": history_messages + [{"role": "user", "content": message}],
+                "activeTurnStart": len(history_messages),
+            }
+            self._native_size_ok(candidate)
+            self._native_conversations[session_id] = candidate
+            return copy.deepcopy(candidate)
+
+    def native_conversation(self, session_id: str, *, binding: str) -> dict[str, Any] | None:
+        session_id = self._native_required(session_id, "session id")
+        binding = self._native_required(binding, "binding")
+        with self._ports.shared_state_lock:
+            snapshot = self._native_conversations.get(session_id)
+            if snapshot is None or snapshot["binding"] != binding:
+                return None
+            return copy.deepcopy(snapshot)
+
+    def restore_native_conversation(
+        self, session_id: str, *, binding: str, snapshot: dict[str, Any],
+    ) -> dict[str, Any]:
+        session_id = self._native_required(session_id, "session id")
+        binding = self._native_required(binding, "binding")
+        normalized = self._validate_native_snapshot(snapshot, binding=binding)
+        with self._ports.shared_state_lock:
+            existing = self._native_conversations.get(session_id)
+            if existing is None:
+                self._native_conversations[session_id] = normalized
+                return copy.deepcopy(normalized)
+            if existing["binding"] != binding:
+                raise ValueError("native conversation binding mismatch")
+            current_messages = existing["messages"]
+            incoming_messages = normalized["messages"]
+            if incoming_messages == current_messages and normalized["turnId"] == existing["turnId"]:
+                return copy.deepcopy(existing)
+            if (
+                normalized["turnId"] == existing["turnId"]
+                and existing["activeTurnStart"] <= normalized["activeTurnStart"]
+                and existing["messages"][existing["activeTurnStart"]:]
+                == incoming_messages[normalized["activeTurnStart"]:]
+            ):
+                return copy.deepcopy(existing)
+            if len(incoming_messages) >= len(current_messages) and incoming_messages[:len(current_messages)] == current_messages:
+                if len(incoming_messages) == len(current_messages):
+                    raise ValueError("native snapshot conflicts with current turn")
+                self._native_conversations[session_id] = normalized
+                return copy.deepcopy(normalized)
+            if len(current_messages) >= len(incoming_messages) and current_messages[:len(incoming_messages)] == incoming_messages:
+                return copy.deepcopy(existing)
+            raise ValueError("native snapshot conflicts with current conversation")
+
+    def replace_native_completed_prefix(
+        self,
+        session_id: str,
+        *,
+        binding: str,
+        expected_snapshot: dict[str, Any],
+        summary: str,
+    ) -> dict[str, Any]:
+        session_id = self._native_required(session_id, "session id")
+        binding = self._native_required(binding, "binding")
+        summary = self._native_required(summary, "summary")
+        expected = self._validate_native_snapshot(expected_snapshot, binding=binding)
+        with self._ports.shared_state_lock:
+            current = self._native_conversations.get(session_id)
+            if current is None or current["binding"] != binding or current != expected:
+                raise ValueError("native snapshot compare-and-replace mismatch")
+            cut = current["activeTurnStart"]
+            if cut <= 0 or self._native_pending({"messages": current["messages"][:cut]}):
+                raise ValueError("native completed prefix is unavailable")
+            candidate = {
+                "binding": binding,
+                "turnId": current["turnId"],
+                "messages": [{"role": "assistant", "content": summary}] + copy.deepcopy(current["messages"][cut:]),
+                "activeTurnStart": 1,
+            }
+            normalized = self._validate_native_snapshot(candidate, binding=binding)
+            self._native_conversations[session_id] = normalized
+            return copy.deepcopy(normalized)
+
+    def append_native_user(self, session_id: str, *, binding: str, message: str) -> None:
+        session_id = self._native_required(session_id, "session id")
+        binding = self._native_required(binding, "binding")
+        message = self._native_required(message, "message")
+        with self._ports.shared_state_lock:
+            snapshot = self._native_conversations.get(session_id)
+            if snapshot is None or snapshot["binding"] != binding:
+                raise ValueError("native conversation binding mismatch")
+            if self._native_pending(snapshot):
+                raise ValueError("native conversation has pending tool calls")
+            candidate = copy.deepcopy(snapshot)
+            candidate["messages"].append({"role": "user", "content": message})
+            self._native_size_ok(candidate)
+            self._native_conversations[session_id] = candidate
+
+    def append_native_assistant(self, session_id: str, *, binding: str, message: dict[str, Any]) -> None:
+        session_id = self._native_required(session_id, "session id")
+        binding = self._native_required(binding, "binding")
+        normalized = self._validate_native_assistant(message)
+        with self._ports.shared_state_lock:
+            snapshot = self._native_conversations.get(session_id)
+            if snapshot is None or snapshot["binding"] != binding:
+                raise ValueError("native conversation binding mismatch")
+            if self._native_pending(snapshot):
+                raise ValueError("native conversation has pending tool calls")
+            existing_ids = {call["id"] for item in snapshot["messages"] for call in item.get("tool_calls", []) or []}
+            if existing_ids.intersection(call["id"] for call in normalized.get("tool_calls", []) or []):
+                raise ValueError("native call id is duplicate")
+            candidate = copy.deepcopy(snapshot)
+            candidate["messages"].append(normalized)
+            self._native_size_ok(candidate)
+            self._native_conversations[session_id] = candidate
+
+    def settle_native_call(self, session_id: str, *, binding: str, call_id: str, content: str) -> None:
+        session_id = self._native_required(session_id, "session id")
+        binding = self._native_required(binding, "binding")
+        call_id = self._native_required(call_id, "call id")
+        if not isinstance(content, str):
+            raise ValueError("native tool content must be string")
+        with self._ports.shared_state_lock:
+            snapshot = self._native_conversations.get(session_id)
+            if snapshot is None or snapshot["binding"] != binding:
+                raise ValueError("native conversation binding mismatch")
+            pending = self._native_pending(snapshot)
+            all_calls = {call["id"] for item in snapshot["messages"] for call in item.get("tool_calls", []) or []}
+            if call_id in all_calls and call_id not in pending:
+                raise ValueError("native call is already settled")
+            if call_id not in pending:
+                raise ValueError("native call is unknown")
+            candidate = copy.deepcopy(snapshot)
+            candidate["messages"].append({"role": "tool", "tool_call_id": call_id, "content": content})
+            self._native_size_ok(candidate)
+            self._native_conversations[session_id] = candidate
 
     def internal_tool_blocks(self, session_id: str) -> frozenset[str]:
         with self._ports.shared_state_lock:
@@ -265,6 +572,7 @@ class AgentRuntimeSessionState:
             if key in self._active_turns:
                 return False
             self._active_turns[key] = turn_id
+            self._finalizing_turns.discard(key)
             self._steer_mailboxes.setdefault(key, [])
             return True
 
@@ -277,6 +585,8 @@ class AgentRuntimeSessionState:
             if turn_id and active_turn_id != turn_id:
                 return []
             undrained = copy.deepcopy(self._steer_mailboxes.get(key, []))
+            if active_turn_id:
+                self._finalizing_turns.add(key)
             self._active_turns.pop(key, None)
             self._steer_mailboxes.pop(key, None)
             self._steer_seen_ids.pop(key, None)
@@ -286,6 +596,74 @@ class AgentRuntimeSessionState:
             if active_turn_id:
                 self._cancelled_ids.discard(active_turn_id)
             return undrained
+
+    def owns_turn(self, *, session_id: str, turn_id: str, client_turn_id: str) -> bool:
+        with self._ports.shared_state_lock:
+            return self._active_turns.get((session_id, client_turn_id)) == turn_id
+
+    def record_final_response(
+        self,
+        *,
+        session_id: str,
+        client_turn_id: str,
+        status: str,
+        response: dict[str, Any],
+        error: str = "",
+    ) -> None:
+        """Keep a bounded, exact-turn response for same-process reconnects."""
+
+        session_id = str(session_id or "").strip()
+        client_turn_id = str(client_turn_id or "").strip()
+        if not session_id or not client_turn_id or not isinstance(response, dict):
+            return
+        normalized_status = "failed" if str(status).strip().lower() == "failed" else "completed"
+        item: dict[str, Any] = {
+            "clientTurnId": client_turn_id,
+            "status": normalized_status,
+            "response": copy.deepcopy(response),
+        }
+        if error:
+            item["error"] = str(error)[:400]
+        key = (session_id, client_turn_id)
+        with self._ports.shared_state_lock:
+            self._finalizing_turns.discard(key)
+            entries = self._final_responses.setdefault(session_id, [])
+            entries[:] = [entry for entry in entries if entry.get("clientTurnId") != client_turn_id]
+            entries.append(item)
+            if len(entries) > self.MAX_FINAL_RESPONSES:
+                del entries[:-self.MAX_FINAL_RESPONSES]
+
+    def clear_finalizing_turn(self, *, session_id: str, client_turn_id: str) -> None:
+        """Close a finalization marker when recovery bookkeeping cannot be stored."""
+
+        with self._ports.shared_state_lock:
+            self._finalizing_turns.discard((str(session_id or "").strip(), str(client_turn_id or "").strip()))
+
+    def final_response(
+        self, *, session_id: str, client_turn_id: str,
+    ) -> dict[str, Any]:
+        """Return one exact-turn recovery projection without exposing the transcript."""
+
+        session_id = str(session_id or "").strip()
+        client_turn_id = str(client_turn_id or "").strip()
+        key = (session_id, client_turn_id)
+        with self._ports.shared_state_lock:
+            if key in self._active_turns or key in self._finalizing_turns:
+                return {"ok": True, "sessionId": session_id, "clientTurnId": client_turn_id, "status": "running"}
+            for item in reversed(self._final_responses.get(session_id, [])):
+                if item.get("clientTurnId") != client_turn_id:
+                    continue
+                result = {
+                    "ok": True,
+                    "sessionId": session_id,
+                    "clientTurnId": client_turn_id,
+                    "status": item.get("status") or "completed",
+                    "response": copy.deepcopy(item.get("response") or {}),
+                }
+                if item.get("error"):
+                    result["error"] = item["error"]
+                return result
+        return {"ok": True, "sessionId": session_id, "clientTurnId": client_turn_id, "status": "missing"}
 
     def submit_steer(
         self,

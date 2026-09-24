@@ -50,65 +50,12 @@ assert.deepEqual(checklistLogic.onboardingChecklistItemState(true, false), { com
 assert.deepEqual(checklistLogic.onboardingChecklistItemState(false, true), { completion: "pending", position: "current" });
 assert.deepEqual(checklistLogic.onboardingChecklistItemState(false, false), { completion: "pending", position: "other" });
 
-const issueTwoReady = unityReadiness.isVrcForgeUnityToolsReady(true,
-  { status: "ok", detail: {
-    mcpServerReachable: true,
-    executionReady: true,
-    unityInstanceRegistered: true,
-    selectedInstanceMatched: true,
-    coreVersionMatched: true,
-    vrcForgeToolsRegistered: true,
-    missingRequiredVrcForgeTools: [],
-  } },
-  { status: "ok", detail: { selectedInstanceMatched: true } },
-  { status: "ok", detail: { coreVersionMatched: true, inspectionMode: "core_version_only", inspectionSkipped: true, vrcForgeToolsCount: 0 } },
-);
-assert.equal(issueTwoReady, true);
-assert.equal(unityReadiness.isVrcForgeUnityToolsReady(true,
-  { status: "ok", detail: {
-    mcpServerReachable: true, executionReady: true, unityInstanceRegistered: true,
-    selectedInstanceMatched: true, coreVersionMatched: true, vrcForgeToolsRegistered: true,
-    missingRequiredVrcForgeTools: [],
-  } },
-  { status: "ok" }, { status: "ok", detail: { coreVersionMatched: true, vrcForgeToolsCount: 95 } }), true);
-assert.equal(unityReadiness.isVrcForgeUnityToolsReady(true,
-  { status: "ok", detail: { coreVersionMatched: true, selectedInstanceMatched: true, executionReady: false } },
-  { status: "ok", detail: { selectedInstanceMatched: true } },
-  { status: "ok", detail: { coreVersionMatched: true, inspectionMode: "core_version_only" } }), false);
-assert.equal(unityReadiness.isVrcForgeUnityToolsReady(true,
-  { status: "ok", detail: { coreVersionMatched: true, selectedInstanceMatched: true } },
-  { status: "ok", detail: { selectedInstanceMatched: true } },
-  { status: "ok", detail: { coreVersionMatched: true, inspectionMode: "core_version_only", vrcForgeToolsRegistered: false } }), false);
-assert.equal(unityReadiness.isVrcForgeUnityToolsReady(true,
-  { status: "ok", detail: { coreVersionMatched: true, selectedInstanceMatched: true } },
-  { status: "ok", detail: { selectedInstanceMatched: true } },
-  { status: "ok", detail: { coreVersionMatched: true, missingRequiredVrcForgeTools: ["unity_scan_avatar_items"] } }), false);
-assert.equal(unityReadiness.isVrcForgeUnityToolsReady(true,
-  { status: "ok", detail: { coreVersionMatched: true, selectedInstanceMatched: true } },
-  { status: "ok", detail: { selectedInstanceMatched: true } },
-  { status: "ok", detail: { coreVersionMatched: true } }), false);
-assert.equal(unityReadiness.isVrcForgeUnityToolsReady(true,
-  { status: "ok", detail: { ...{
-    mcpServerReachable: true, executionReady: true, unityInstanceRegistered: true,
-    selectedInstanceMatched: true, coreVersionMatched: true, vrcForgeToolsRegistered: true,
-  }, missingRequiredVrcForgeTools: ["vrc_export_blendshapes"] } },
-  { status: "ok" }, { status: "ok", detail: { coreVersionMatched: true } }), false);
-assert.equal(unityReadiness.isVrcForgeUnityToolsReady(false,
-  { status: "ok", detail: { coreVersionMatched: true } },
-  { status: "ok", detail: { selectedInstanceMatched: true } },
-  { status: "ok", detail: { coreVersionMatched: true } }), false);
-assert.equal(unityReadiness.isVrcForgeUnityToolsReady(true,
-  { status: "ok", detail: { coreVersionMatched: false, selectedInstanceMatched: true } },
-  { status: "ok", detail: { selectedInstanceMatched: true } },
-  { status: "ok", detail: { coreVersionMatched: false } }), false);
-assert.equal(unityReadiness.isVrcForgeUnityToolsReady(true,
-  { status: "ok", detail: { coreVersionMatched: true, selectedInstanceMatched: false } },
-  { status: "ok", detail: { selectedInstanceMatched: false } },
-  { status: "ok", detail: { coreVersionMatched: true } }), false);
-assert.equal(unityReadiness.isVrcForgeUnityToolsReady(true,
-  { status: "ok", detail: { coreVersionMatched: true, selectedInstanceMatched: true, missingRequiredVrcForgeTools: ["unity_scan_avatar_items"] } },
-  { status: "ok", detail: { selectedInstanceMatched: true } },
-  { status: "ok", detail: { coreVersionMatched: true } }), false);
+const readyTools = { status: "ok", detail: { readiness: { ready: true, inspectionMode: "core_version_only", inspectionSkipped: true } } };
+assert.equal(unityReadiness.isVrcForgeUnityToolsReady(true, readyTools), true);
+assert.equal(unityReadiness.isVrcForgeUnityToolsReady(false, readyTools), false);
+assert.equal(unityReadiness.isVrcForgeUnityToolsReady(true, { status: "warning", detail: { readiness: { ready: true } } }), false);
+assert.equal(unityReadiness.isVrcForgeUnityToolsReady(true, { status: "ok", detail: { readiness: { ready: false, blockerCode: "unity_editor_reload_dialog" } } }), false);
+assert.equal(unityReadiness.isVrcForgeUnityToolsReady(true, { status: "ok", detail: {} }), false);
 
 const resolve = (stored, smokeMode = false) => gateLogic.resolveOnboardingLaunchState(stored, smokeMode);
 const savedLocaleStorage = new Map([

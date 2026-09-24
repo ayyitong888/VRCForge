@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 import agent_gateway
+from tests.native_planner_fixture import NativePlannerFixture
 from runtime_planner_service import (
     EXPOSURE_LAYER_EXECUTION,
     EXPOSURE_LAYER_PLANNING,
@@ -176,6 +177,215 @@ class FakeModel:
         if self.error is not None:
             raise self.error
         return self.result
+
+
+@dataclass
+class NativeModel:
+    message: dict
+    requests: list[dict] = field(default_factory=list)
+
+    def plan(self, prompt):
+        raise AssertionError("Native requests must not use the JSON planner transport")
+
+    def plan_native(self, request):
+        self.requests.append(copy.deepcopy(request))
+        return PlannerModelResult(
+            text=self.message.get("content") or "",
+            assistant_message=self.message,
+            finish_reason="tool_calls" if self.message.get("tool_calls") else "stop",
+        )
+
+
+def native_call(name, arguments="{}", call_id="call-read"):
+    return {"role": "assistant", "content": None, "tool_calls": [
+        {"id": call_id, "type": "function", "function": {"name": name, "arguments": arguments}},
+    ], "reasoning_content": "synthetic-private-replay"}
+
+
+def test_native_request_uses_actual_visible_schemas_without_duplicate_prompt_transcript():
+    read = PlannerTool("read_file", "Read a file.", "read", block="files",
+                       input_schema={"type": "object", "properties": {"path": {"type": "string"}},
+                                     "required": ["path"], "additionalProperties": False})
+    hidden = PlannerTool("hidden_file", "Not loaded.", "read", block="files")
+    write = PlannerTool("write_file", "Write a file.", "write", write=True)
+    catalog = FakeCatalog(planning=PlannerCatalogSnapshot(visible_tools=(read, hidden), routable_tools=(read, hidden, write)))
+    model = NativeModel(native_call("read_file", '{"path":"sample.txt"}'))
+    planner = service(catalog=catalog, model=model)
+    transcript = [{"role": "user", "content": "inspect-unique-marker"}]
+    accepted = []
+    plan = planner.plan_agent_turn(
+        "inspect-unique-marker", {"_internalToolBlocks": ["files"], "_internalToolSelections": {"files": ["read_file"]}}, {},
+        native_turn=NativePlannerFixture(transcript, accepted.append),
+    )
+    request = model.requests[0]
+    assert request["messages"] == transcript
+    definitions = {item["function"]["name"]: item["function"] for item in request["tools"]}
+    assert set(definitions) == {"read_file", "vrcforge_runtime_action"}
+    assert definitions["read_file"]["parameters"] == dict(read.input_schema)
+    assert "inspect-unique-marker" not in request["instructions"]
+    assert "sample.txt" not in request["instructions"]
+    assert "可用工具列表" not in request["instructions"]
+    assert "skill_params" not in request["instructions"]
+    assert plan["skillTool"] == "read_file"
+    assert plan["skillParams"] == {"path": "sample.txt"}
+    assert plan["nativeCallIds"] == ["call-read"]
+    assert accepted == [model.message]
+    assert "synthetic-private-replay" not in json.dumps(plan)
+    assert "synthetic-private-replay" not in repr(PlannerModelResult("", assistant_message=model.message))
+    legacy = planner._build_llm_plan_prompt("inspect-unique-marker", [], internal_tool_blocks=["files"])
+    # Includes schemas/messages, not just the shorter instruction string.
+    assert len(json.dumps(request, ensure_ascii=False)) < len(legacy)
+
+
+def test_native_request_reuses_unity_scope_routing_rules_and_general_exception():
+    planner = service()
+    project_request, _ = planner._build_native_plan_request(
+        [{"role": "user", "content": "inspect"}],
+        observe={}, exposure_layer="planning", project_context_active=True,
+        project_path="D:/Avatar", internal_tool_blocks=None,
+        global_instructions="", project_instructions="",
+    )
+    assert "current scene, component bindings, or Avatar behavior" in project_request["instructions"]
+    assert "Explicit file-content or file-location tasks should still use the filesystem readers." in project_request["instructions"]
+
+    general_request, _ = planner._build_native_plan_request(
+        [{"role": "user", "content": "inspect"}],
+        observe={}, exposure_layer="planning", project_context_active=False,
+        project_path="", internal_tool_blocks=None,
+        global_instructions="", project_instructions="",
+    )
+    assert "A Unity project is explicitly bound to this turn" not in general_request["instructions"]
+
+
+@pytest.mark.parametrize("name,arguments,issue", [
+    ("read_file", "{broken", "invalid_json"),
+    ("read_file", "[]", "type"),
+    ("hidden_file", "{}", "tool_not_visible"),
+    ("write_file", "{}", "tool_not_visible"),
+])
+def test_native_rejected_calls_remain_paired_and_do_not_dispatch(name, arguments, issue):
+    read = PlannerTool("read_file", "Read a file.", "read", block="files")
+    hidden = PlannerTool("hidden_file", "Hidden.", "read", block="other")
+    model = NativeModel(native_call(name, arguments))
+    accepted = []
+    plan = service(catalog=FakeCatalog(planning=PlannerCatalogSnapshot(visible_tools=(read, hidden))), model=model).plan_agent_turn(
+        "inspect", {"_internalToolBlocks": ["files"]}, {},
+        native_turn=NativePlannerFixture([{"role": "user", "content": "inspect"}], accepted.append),
+    )
+    assert accepted == [model.message]
+    assert plan["nativeCallIds"] == ["call-read"]
+    assert plan["continueLoop"] is True
+    assert not plan.get("skillNeeded") and not plan.get("writeNeeded")
+    assert plan["argumentValidation"]["issues"][0]["code"] == issue
+
+
+def test_native_action_payload_does_not_execute_runtime_alias_and_reports_current_catalog() -> None:
+    advertised = PlannerTool("unity_create_gameobject", "Create.", "write", runtime_name="vrc_create_gameobject", write=True)
+    directory = PlannerTool("list_internal_tool_blocks", "Discover.", "read", runtime_name="vrcforge_list_internal_tool_blocks")
+    receipt = native_call("vrc_create_gameobject", '{"name":"x"}')
+    payload, rejection = RuntimePlannerService._native_action_payload(receipt, [advertised, directory])
+    assert payload is None
+    assert rejection["issues"][0]["code"] == "tool_not_visible"
+    assert "Use the advertised function name unity_create_gameobject" in rejection["summary"]
+    assert "loadCall" not in rejection["summary"]
+
+
+def test_native_action_payload_rejects_ambiguous_exact_catalog_names() -> None:
+    first = PlannerTool("same_name", "first", "read")
+    second = PlannerTool("same_name", "second", "read")
+    payload, rejection = RuntimePlannerService._native_action_payload(
+        native_call("same_name", "{}"), [first, second]
+    )
+    assert payload is None
+    assert rejection["issues"][0]["code"] == "tool_not_visible"
+
+
+def test_native_multiple_calls_are_all_retained_but_none_selected_for_execution():
+    message = native_call("read_file")
+    message["tool_calls"].extend(native_call("read_file", call_id="call-two")["tool_calls"])
+    model = NativeModel(message)
+    plan = service(model=model).plan_agent_turn(
+        "inspect", {}, {}, native_turn=NativePlannerFixture([{"role": "user", "content": "inspect"}]),
+    )
+    assert plan["nativeCallIds"] == ["call-read", "call-two"]
+    assert plan["argumentValidation"]["issues"][0]["code"] == "parallel_calls_unsupported"
+    assert not plan.get("skillNeeded") and not plan.get("writeNeeded")
+
+
+@pytest.mark.parametrize("arguments", [
+    {"action": "enter_execution"},
+    {"action": "enter_execution", "tool": "vrcforge_install_unity_core",
+     "arguments": {"projectPath": "fixture-project"}, "summary": "Install the Core"},
+])
+def test_native_execution_control_rejects_repeated_phase_entry_as_correctable_call(arguments):
+    model = NativeModel(native_call("vrcforge_runtime_action", json.dumps(arguments)))
+    accepted = []
+    plan = service(model=model).plan_agent_turn(
+        "repair requested", {}, {}, exposure_layer="execution",
+        native_turn=NativePlannerFixture([{"role": "user", "content": "repair requested"}], accepted.append),
+    )
+    control = next(item["function"] for item in model.requests[0]["tools"]
+                   if item["function"]["name"] == "vrcforge_runtime_action")
+    assert "enter_execution" not in control["parameters"]["properties"]["action"]["enum"]
+    assert plan["argumentValidation"]["issues"][0]["path"] == "action"
+    assert plan["nativeCallIds"] == ["call-read"]
+    assert plan["continueLoop"] is True
+    assert not plan.get("plannerFailed")
+    assert not plan.get("writeNeeded") and not plan.get("skillNeeded")
+    assert accepted == [model.message]
+
+
+def test_native_planning_control_advertises_phase_entry_without_executing_embedded_tool():
+    model = NativeModel(native_call("vrcforge_runtime_action", json.dumps({
+        "action": "enter_execution", "tool": "vrcforge_install_unity_core",
+        "arguments": {"projectPath": "fixture-project"},
+    })))
+    plan = service(model=model).plan_agent_turn(
+        "repair requested", {}, {}, exposure_layer="planning",
+        native_turn=NativePlannerFixture([{"role": "user", "content": "repair requested"}]),
+    )
+    control = next(item["function"] for item in model.requests[0]["tools"]
+                   if item["function"]["name"] == "vrcforge_runtime_action")
+    assert "enter_execution" in control["parameters"]["properties"]["action"]["enum"]
+    assert plan["nextStep"] == "enter_execution" and plan["enterExecution"] is True
+    assert not plan["writeNeeded"] and not plan["skillNeeded"]
+    assert plan["nativeCallIds"] == ["call-read"]
+
+
+def test_native_followup_preserves_exact_history_without_reprinting_it_as_instructions():
+    prior = native_call("read_file")
+    history = [{"role": "user", "content": "read-marker"}, prior,
+               {"role": "tool", "tool_call_id": "call-read", "content": '{"ok":true,"text":"result-marker"}'}]
+    model = NativeModel({"role": "assistant", "content": "Read result."})
+    plan = service(model=model).plan_agent_turn(
+        "read-marker", {}, {}, native_turn=NativePlannerFixture(history),
+    )
+    assert model.requests[0]["messages"] == history
+    assert "result-marker" not in model.requests[0]["instructions"]
+    assert "synthetic-private-replay" not in model.requests[0]["instructions"]
+    assert plan["completionClaim"] == {"satisfied": False}
+    assert plan["nextStep"] == "done"
+
+
+@pytest.mark.parametrize("content", [None, "", "   "])
+def test_native_empty_stop_reply_is_rejected_without_tool_calls(content):
+    model = NativeModel({"role": "assistant", "content": content})
+    plan = service(model=model).plan_agent_turn(
+        "inspect", {}, {}, native_turn=NativePlannerFixture([{"role": "user", "content": "inspect"}]),
+    )
+    assert plan["nextStep"] == "planner_failed"
+    assert plan["plannerFailure"]["code"] == "planner_invalid_response"
+
+
+def test_native_tool_call_may_have_empty_content():
+    model = NativeModel(native_call("read_file", '{"path":"sample.txt"}'))
+    read = PlannerTool("read_file", "Read a file.", "read", block="files",
+                       input_schema={"type": "object", "properties": {"path": {"type": "string"}}})
+    plan = service(catalog=FakeCatalog(planning=PlannerCatalogSnapshot(visible_tools=(read,))), model=model).plan_agent_turn(
+        "inspect", {}, {}, native_turn=NativePlannerFixture([{"role": "user", "content": "inspect"}]),
+    )
+    assert plan["skillTool"] == "read_file"
+    assert plan["nativeCallIds"] == ["call-read"]
 
 
 @dataclass
@@ -388,6 +598,35 @@ def test_compile_observation_keeps_incomplete_and_error_facts(compiling, complet
     assert "hasWarnings" not in observation
 
 
+def test_compile_diagnostics_use_bounded_untrusted_projection_without_raw_reader():
+    secret = "sk-" + "a" * 40
+    result = {"isCompiling": False, "captureComplete": True, "errorCount": 30,
+              "errors": [{"file": "Assets/Tool.cs", "line": 42, "column": 5,
+                          "message": "CS0117 missing member api_key=" + secret + "x" * 2000,
+                          "privateDump": "hidden-marker"} for _ in range(30)],
+              "stdout": "opaque-marker", "warnings": []}
+    observation = service()._llm_loop_step_observation({
+        "tool": "vrcforge_get_compile_errors", "status": "executed", "result": result,
+    })
+    evidence = json.loads(observation.split("; compileDiagnostics=", 1)[1])
+    assert evidence["authority"] == "untrusted_tool_output"
+    assert evidence["truncated"] is True
+    assert len(json.dumps(evidence, ensure_ascii=False, separators=(",", ":"))) <= 2000
+    assert "CS0117" in observation and '"line":42' in observation
+    assert secret not in observation and "hidden-marker" not in observation and "opaque-marker" not in observation
+    assert "resultContinuation" not in observation
+
+
+def test_malformed_compile_diagnostic_cannot_bypass_typed_projection():
+    observation = service()._llm_loop_step_observation({
+        "tool": "vrcforge_get_compile_errors", "status": "executed",
+        "result": {"isCompiling": False, "captureComplete": True, "errorCount": 1,
+                   "errors": [{"line": "not a line", "message": "do-not-project"}]},
+    })
+    assert '"errorCount":1' in observation
+    assert "do-not-project" not in observation and "compileDiagnostics" not in observation
+
+
 def test_model_observation_includes_precise_internal_failure_facts_without_raw_dump() -> None:
     observation = service()._llm_loop_step_observation(
         {
@@ -497,6 +736,32 @@ def test_internal_tool_block_observation_keeps_compact_indices_without_schemas()
     assert "skill_params={\"block\":\"<exact block name>\"}" in observation
     assert "privateSchema" not in observation
     assert len(observation) <= 8_000
+
+
+def test_native_tool_block_observation_uses_structured_load_action_without_changing_legacy() -> None:
+    step = {
+        "tool": "vrcforge_list_internal_tool_blocks", "status": "executed", "result": {
+            "ok": True,
+            "blocks": [{"name": "diagnostics_build", "index": "5", "toolNames": ["unity_get_compile_errors"]}],
+        },
+    }
+    legacy = service()._llm_loop_step_observation(step)
+    native = service()._llm_loop_step_observation(step, native_contract=True)
+    assert 'toolBlockLoadSyntax=action=skill;' in legacy
+    # Native requests already carry the loader's actual function schema.
+    assert "nativeAction=" not in native
+    assert 'toolBlockLoadSyntax=action=skill;' not in native
+
+
+def test_native_result_observation_marks_runtime_tool_and_preserves_completion_identity() -> None:
+    result = service().native_result_observation({
+        "tool": "vrcforge_read_text_file", "kind": "skill", "status": "executed",
+        "actionId": "a1", "outcome": {"status": "ok"},
+    })
+    assert result["runtimeTool"] == "vrcforge_read_text_file"
+    assert result["actionId"] == "a1"
+    assert result["status"] == "executed"
+    assert "tool" not in result
 
 
 def test_canonical_nested_tool_directory_reaches_the_actual_model_observation() -> None:

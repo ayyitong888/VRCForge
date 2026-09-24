@@ -79,11 +79,8 @@ class KnowYourselfReadinessService:
                 selected_project_running = None
 
         compile_diagnostics: dict[str, Any] = {}
-        if (
-            unity_status.get("connected") is True
-            and unity_status.get("unityInstanceRegistered") is True
-            and unity_status.get("selectedInstanceMatched") is True
-        ):
+        unity_readiness = unity_status.get("readiness")
+        if isinstance(unity_readiness, dict) and unity_readiness.get("ready") is True:
             try:
                 compile_diagnostics = self._ports.read_compile_errors(
                     {**params, "maxErrors": 20, "includeConsoleFallback": True}

@@ -79,6 +79,49 @@ def export_release(
     return service.export_release(source, output, private_key_pem).package_path
 
 
+@pytest.mark.parametrize("replacement", ["entrypoint", "manifest", "entrypoint_and_lock"])
+def test_installed_entrypoint_rejects_bytes_replaced_after_verification(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, replacement: str,
+) -> None:
+    service = SkillPackageService(tmp_path / "store", vrcforge_version="1.0.0")
+    source = make_skill_source(tmp_path)
+    package = service.export_dev(source, tmp_path / "fixture.vsk").package_path
+    service.install(package)
+    service.set_enabled("com.example.avatar-helper", True)
+    entrypoint = "manifest.json" if replacement == "manifest" else "workflows/plan.md"
+    original_candidates = service.projection_candidates
+
+    def replace_after_verification(skill_id: str):
+        candidates = original_candidates(skill_id)
+        root, _manifest = candidates[-1]
+        payload = b"changed after successful installed-package verification"
+        (root / entrypoint).write_bytes(payload)
+        if replacement == "entrypoint_and_lock":
+            lock = json.loads((root / LOCK_NAME).read_bytes())
+            lock["files"][entrypoint] = hashlib.sha256(payload).hexdigest()
+            (root / LOCK_NAME).write_bytes(canonical_json_bytes(lock))
+        return candidates
+
+    monkeypatch.setattr(service, "projection_candidates", replace_after_verification)
+    with pytest.raises(PackageIntegrityError, match="changed after verification"):
+        service.verified_installed_entrypoint_bytes("com.example.avatar-helper", entrypoint)
+
+
+def test_installed_entrypoint_returns_verified_bytes_and_manifest(tmp_path: Path) -> None:
+    service = SkillPackageService(tmp_path / "store", vrcforge_version="1.0.0")
+    source = make_skill_source(tmp_path)
+    package = service.export_dev(source, tmp_path / "fixture.vsk").package_path
+    service.install(package)
+    service.set_enabled("com.example.avatar-helper", True)
+    for entrypoint in ("manifest.json", "workflows/plan.md"):
+        metadata, payload = service.verified_installed_entrypoint_bytes(
+            "com.example.avatar-helper", entrypoint,
+        )
+        assert payload == archive_files(package)[entrypoint]
+        assert metadata["manifest"]["id"] == "com.example.avatar-helper"
+        assert metadata["package_sha256"] == hashlib.sha256(package.read_bytes()).hexdigest()
+
+
 def test_read_only_avatar_audit_example_exports_and_preflights(tmp_path: Path) -> None:
     source = Path(__file__).resolve().parents[1] / "examples" / "skill-packages" / "read-only-avatar-audit"
     service = SkillPackageService(tmp_path / "store", vrcforge_version="0.9.0-beta")

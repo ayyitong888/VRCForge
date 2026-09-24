@@ -34,13 +34,16 @@ assert.match(source, /<pre className="max-h-64 overflow-auto whitespace-pre-wrap
 assert.match(source, /group-hover\/run:opacity-100 group-focus-visible\/run:opacity-100/, "invocation chevrons stay hidden until hover or keyboard focus");
 assert.match(source, /group-hover\/work-segment:opacity-100 group-focus-visible\/work-segment:opacity-100/, "work segment chevrons stay hidden until hover or keyboard focus");
 assert.match(source, /invocation\.label[\s\S]*status/, "expanded invocation details retain the real label and status");
-assert.match(source, /statusLabel\}\<\/div\>\{children\}/, "aggregate status stays inside the expanded segment");
+assert.doesNotMatch(source, /statusLabel\}\<\/div\>\{children\}/, "expanded execution details do not repeat the aggregate status");
+assert.doesNotMatch(source, /key=\{entry\.id\}[\s\S]*?<WorkSegmentRow/, "one contiguous execution segment must not nest another work segment");
 assert.match(source, /!compactExecution \? <span[\s\S]*statusLabel/, "execution status stays inside expanded command/tool rows");
 assert.match(source, /entry\.kind === "process"/, "safe planner commentary must render directly even when adjacent");
 assert.match(source, /data-agent-timeline-invocation="process"/, "non-CoT planner commentary owns a visible timeline row");
 assert.match(source, /<ChatMarkdown text=\{commentary\}/, "safe planner commentary must retain its complete projected text");
 assert.match(source, /const processRows: ReactNode\[\] = \[\]/, "one Agent turn owns one outer process group");
-assert.match(source, /key=\"agent-turn-process\"/, "planner commentary and tool batches share one collapsible turn group");
+assert.match(source, /const flushProcessRows = \(\) =>/, "execution segments can flush before direct planner commentary");
+assert.match(source, /flushProcessRows\(\);[\s\S]*rows\.push\(renderDirectTimelineInvocation/, "planner commentary is emitted at its original timeline position");
+assert.match(source, /key=\{`agent-turn-process-\$\{processGroupIndex\+\+\}`\}/, "each contiguous tool segment owns one collapsible group");
 assert.match(source, /rows\.push\(\.\.\.assistantRows\)/, "the final assistant answer stays outside the process group");
 assert.match(source, /showStatus/, "the outer process group exposes a compact running or failed status");
 assert.match(source, /processEventCount/, "the process summary counts actual invocations rather than rendered batch rows");

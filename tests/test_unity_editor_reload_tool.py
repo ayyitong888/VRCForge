@@ -203,7 +203,7 @@ def test_reload_confirmation_is_project_scoped_approval_bound_execution_tool() -
     execution = dashboard_server._RuntimePlannerCatalog().read("execution")
     assert tool_name not in {tool.runtime_name for tool in planning.visible_tools}
     exposed = next(tool for tool in execution.visible_tools if tool.runtime_name == tool_name)
-    assert exposed.block == "diagnostics_build/compile_logs"
+    assert exposed.block == "project_environment/assets_packages"
     assert exposed.write is True
 
     external = {

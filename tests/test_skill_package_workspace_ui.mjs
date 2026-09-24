@@ -34,6 +34,10 @@ assert.match(source, /translate-x-\[26px\].*translate-x-\[2px\]/, "skill switch 
 assert.ok(source.includes("break-words font-medium") && source.includes("break-all text-muted-foreground"), "long official Skill names and IDs must wrap instead of truncating");
 assert.ok(source.includes("advancedActions"), "package governance actions must be behind an advanced disclosure");
 assert.ok(source.includes("preparePackageExport(pkg)"), "package rows must offer export preparation");
+assert.ok(source.includes("requestUnityToolInstall"), "Unity tool installation must use the existing API");
+assert.ok(source.includes("hasUnityToolEntrypoint(pkg)"), "Unity install must only appear for declared Unity tool entrypoints");
+assert.ok(source.includes("selectedUnityProjectPath"), "Unity install must use the selected Unity project");
+assert.ok(source.includes("onRefreshApprovals"), "Unity install must refresh the existing approval queue");
 assert.match(source, /pkg\.title \|\| pkg\.name \|\| pkg\.manifest\?\.title \|\| pkg\.manifest\?\.name/, "installed package titles must use their existing manifest display names");
 assert.ok(source.includes('if (pkg.official === true)'), "Official must require an explicitly verified backend identity");
 assert.ok(source.includes('labels.push("Official")'), "verified official signer identity must be displayed");
@@ -76,6 +80,7 @@ assert.ok(composer.includes("onAttachFiles?.(files)"), "native dropped files mus
 for (const locale of locales) {
   assert.ok(locale.package.dropHint && locale.package.dropInvalid, "all locales must define native skill drop copy");
   assert.ok(locale.package.pathToSkillAdvanced && locale.package.exportSection, "all locales must define advanced section labels");
+  assert.ok(locale.package.installUnityTools && locale.package.unityToolInstallQueued && locale.package.unityToolNeedsUnity && locale.package.unityToolCompileHint, "all locales must define Unity tool install copy");
 }
 assert.ok(!locales[0].package.pathToSkillAdvanced.includes("工作流转"), "operation capture must not present workflows and Skills as separate capability types");
 assert.ok(locales[0].package.pathToSkill.description.includes("原子工具"), "Skill authoring must explain that execution steps and atomic tools belong to the same Skill");

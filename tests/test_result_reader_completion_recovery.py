@@ -70,6 +70,86 @@ def test_omitted_root_defaults_match_explicit_root_and_keep_argument_snapshot():
     assert finish(loop)["nextStep"] == "done"
 
 
+def test_registered_gameobject_schema_rejects_root_path_via_real_planner_validator():
+    from runtime_planner_service import validate_planner_tool_arguments
+    from unity_read_input_schemas import UNITY_READ_TOOL_INPUT_SCHEMAS
+
+    result = validate_planner_tool_arguments(
+        UNITY_READ_TOOL_INPUT_SCHEMAS["vrcforge_get_gameobject"],
+        {"projectPath": "project", "gameObjectPath": "/"},
+    )
+    assert result["ok"] is False
+    assert any(issue["code"] == "pattern" for issue in result["issues"])
+
+
+def test_native_read_only_negative_observation_can_finish_without_hard_requirement():
+    loop = AgentTaskLoop("inspect the selected object")
+    action = loop.record_action(
+        kind="skill", tool="vrcforge_get_gameobject",
+        arguments={"projectPath": "project", "gameObjectPath": "Missing"},
+        raw_result={"ok": False}, outcome={"status": "failed", "summary": "not found"},
+        action_id="native-read-negative", native_read_observation=True,
+    )
+    assert action["status"] == "failed"
+    assert "_nativeReadObservation" not in loop.planner_projection()["actions"][0]
+    gated = loop.gate_terminal({"nextStep": "done", "reply": "The object was not found."})
+    assert gated["nextStep"] == "completion_unverified"
+    assert gated["task"]["status"] == "completion_unverified"
+    assert gated["task"]["actions"][0]["status"] == "failed"
+
+
+def test_native_read_observation_does_not_bypass_explicit_requirement():
+    loop = AgentTaskLoop("read A and verify it")
+    required = loop.require_action(
+        kind="skill", tool="vrcforge_get_gameobject",
+        arguments={"projectPath": "project", "gameObjectPath": "Required"},
+    )
+    loop.record_action(
+        kind="skill", tool="vrcforge_get_gameobject",
+        arguments={"projectPath": "project", "gameObjectPath": "Other"},
+        raw_result={"ok": True}, outcome={"status": "ok", "summary": "other"},
+        action_id="native-read-other", native_read_observation=True,
+    )
+    gated = loop.gate_terminal({"nextStep": "done", "reply": "done", "completionSatisfied": True})
+    assert gated["nextStep"] == "completion_unverified"
+    assert required["requirementId"] in gated["completionGate"]["requirementIds"]
+
+
+def test_native_read_observation_with_failed_verification_still_blocks():
+    loop = AgentTaskLoop("verify the readback")
+    loop.record_action(
+        kind="skill", tool="vrcforge_get_gameobject",
+        arguments={"projectPath": "project", "gameObjectPath": "Object"},
+        raw_result={"ok": False},
+        outcome={"status": "failed", "summary": "verification failed", "verification": {"state": "failed", "checks": []}},
+        action_id="native-read-verification-failed", native_read_observation=True,
+    )
+    gated = loop.gate_terminal({"nextStep": "done", "reply": "done"})
+    assert gated["nextStep"] != "done"
+
+
+def test_native_read_observation_marker_round_trips_private_approval_context():
+    from agent_task_loop import approval_completion, approval_task_context
+
+    loop = AgentTaskLoop("inspect after approval", session_id="native-read-session")
+    loop.record_action(
+        kind="skill", tool="vrcforge_get_gameobject",
+        arguments={"projectPath": "project", "gameObjectPath": "Missing"},
+        raw_result={"ok": False}, outcome={"status": "failed", "summary": "not found"},
+        action_id="native-read-private", native_read_observation=True,
+    )
+    context = approval_task_context(
+        loop.approval_seed(requested_tool="vrcforge_install_unity_core", requested_arguments={}),
+        tool="vrcforge_install_unity_core", arguments={},
+    )
+    resumed = AgentTaskLoop.from_approval_context(
+        context,
+        approval_completion(context, raw_result={"ok": True}, outcome={"status": "ok", "summary": "done"}),
+    )
+    assert "_nativeReadObservation" not in resumed.planner_projection()["actions"][0]
+    assert resumed.planner_projection()["actions"][0]["status"] == "failed"
+
+
 def test_gateway_clears_both_recovered_page_failures_and_preserves_final():
     import test_agent_loop_p0 as fixtures
     fixture = fixtures.AgentLoopP0Tests("test_loaded_skill_policy_blocks_disallowed_tool_then_allows_real_evidence")

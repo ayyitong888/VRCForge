@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef } from "react";
-import type { AgentRuntimeResponse } from "../lib/api";
+import type { AgentQuestion, AgentRuntimeResponse, AgentRuntimeRun } from "../lib/api";
 import type { ChatThread, ConversationItem } from "../lib/chat-types";
 
 const RUNTIME_TURN_EVENT_SCHEMA = "vrcforge.runtime_turn_event.v1";
@@ -7,7 +7,7 @@ const RUNTIME_CONTINUATION_SOURCES = new Set(["approval_finished", "shell_proces
 const MAX_PENDING_CONTINUATIONS = 32;
 const MAX_DELIVERED_CONTINUATIONS = 512;
 
-type RuntimeTurnEvent = {
+export type RuntimeTurnEvent = {
   schema?: string;
   continuationSource?: string;
   sessionId?: string;
@@ -23,10 +23,66 @@ type RuntimeTurnEvent = {
   timeline?: AgentRuntimeResponse["timeline"];
 };
 
+export function questionContinuationDisplay(
+  question: Pick<AgentQuestion, "status" | "runtimeContinuation">,
+): "pending" | "active" | "settled" {
+  const continuation = String(question.runtimeContinuation?.status || "").toLowerCase();
+  if (["queued", "running", "claimed", "cancelling"].includes(continuation)) return "active";
+  return String(question.status || "pending").toLowerCase() === "pending" ? "pending" : "settled";
+}
+
+export function questionContinuationCancelTarget(
+  question: Pick<AgentQuestion, "sessionId" | "runtimeContinuation">,
+): { sessionId?: string; turnId?: string; clientTurnId?: string } | null {
+  const continuation = question.runtimeContinuation;
+  if (!continuation?.turnId && !continuation?.clientTurnId) return null;
+  return {
+    sessionId: continuation.sessionId || question.sessionId,
+    turnId: continuation.turnId,
+    clientTurnId: continuation.clientTurnId,
+  };
+}
+
+export function questionContinuationStatus(raw: string, nextStep = ""): string {
+  if (["cancelled", "canceled"].includes(raw) || ["cancelled", "stopped"].includes(nextStep)) return "cancelled";
+  if (["cancel_requested", "cancelling"].includes(raw) || nextStep === "cancel_requested") return "cancelling";
+  if (["failed", "denied", "interrupted"].includes(raw) || nextStep.includes("failed") || nextStep === "error") return "failed";
+  if (raw === "blocked" || ["pending_approval", "pending_verification", "needs_user_action", "paused"].includes(nextStep)) return "blocked";
+  if (["done", "completed"].includes(nextStep)) return "completed";
+  if (["running", "claimed", "waiting_for_model", "waiting_for_tool"].includes(raw)) return "running";
+  return raw === "completed" ? "delivered" : raw;
+}
+
+export function projectAgentQuestionContinuation(
+  question: AgentQuestion,
+  runs: AgentRuntimeRun[],
+): AgentQuestion {
+  const raw = String(question.runtimeContinuationStatus || question.runtimeContinuation?.status || "").toLowerCase();
+  if (!raw) return question;
+  const marker = `:question:${question.questionId}`;
+  const run = runs.find((candidate) => candidate.sessionId === question.sessionId
+    && String(candidate.clientTurnId || "").endsWith(marker));
+  const runStatus = String(run?.status || "").toLowerCase();
+  const nextStep = String(run?.nextStep || "").toLowerCase();
+  const status = questionContinuationStatus(runStatus || raw, nextStep);
+  return {
+    ...question,
+    runtimeContinuation: {
+      ...question.runtimeContinuation,
+      questionId: question.questionId,
+      status,
+      sessionId: question.sessionId,
+      turnId: run?.turnId || question.runtimeContinuation?.turnId,
+      clientTurnId: run?.clientTurnId || question.runtimeContinuation?.clientTurnId,
+    },
+  };
+}
+
 type UseRuntimeTurnContinuationParams = {
   chats: ChatThread[];
   appendToChat: (chatId: string, item: ConversationItem) => void;
   updateChat?: (chatId: string, updater: (chat: ChatThread) => ChatThread) => boolean;
+  onContinuation?: (event: RuntimeTurnEvent) => void;
 };
 
 export function runtimeContinuationDeliveryState(
@@ -93,6 +149,7 @@ export function useRuntimeTurnContinuationDelivery({
   chats,
   appendToChat,
   updateChat,
+  onContinuation,
 }: UseRuntimeTurnContinuationParams) {
   const chatsRef = useRef(chats);
   const appendToChatRef = useRef(appendToChat);
@@ -103,6 +160,8 @@ export function useRuntimeTurnContinuationDelivery({
   chatsRef.current = chats;
   appendToChatRef.current = appendToChat;
   updateChatRef.current = updateChat;
+  const onContinuationRef = useRef(onContinuation);
+  onContinuationRef.current = onContinuation;
 
   const deliver = useCallback((value: unknown): boolean => {
     const event = runtimeTurnEvent(value);
@@ -117,6 +176,7 @@ export function useRuntimeTurnContinuationDelivery({
     if (deliveredRef.current.has(key)) {
       return true;
     }
+    onContinuationRef.current?.(event);
     const ownerChat = chatsRef.current.find((chat) => chat.sessionId === event.sessionId);
     if (!ownerChat) {
       pendingRef.current.set(key, event);
@@ -156,7 +216,9 @@ export function useRuntimeTurnContinuationDelivery({
     }
     if (deliveryState === "append" || deliveryState === "replace-failed") {
       appendToChatRef.current(ownerChat.id, {
-        id: `task-continuation-${continuationId}`,
+        // Keep the app-owned identifier outside the bridge's secret-prefix
+        // filter (the previous task- prefix contains sk-).
+        id: `runtime-reply-${continuationId}`,
         type: "agent",
         response: responseFromRuntimeTurnEvent(event),
         elapsedSeconds: 0,

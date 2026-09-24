@@ -386,6 +386,15 @@ export function useRuntimeWorkspace({
     setAgentQuestions((items) => [question, ...items.filter((item) => item.questionId !== question.questionId)].slice(0, 8));
   }
 
+  function updateAgentQuestionContinuation(
+    questionId: string,
+    continuation: NonNullable<AgentQuestion["runtimeContinuation"]>,
+  ) {
+    setAgentQuestions((items) => items.map((item) => item.questionId === questionId
+      ? { ...item, runtimeContinuation: { ...item.runtimeContinuation, ...continuation, questionId } }
+      : item));
+  }
+
   function upsertAgentMemory(memory: AgentMemory) {
     setAgentMemory((items) => [memory, ...items.filter((item) => item.memoryId !== memory.memoryId)].slice(0, 8));
   }
@@ -421,6 +430,7 @@ export function useRuntimeWorkspace({
     upsertAgentGoal,
     upsertAgentProgress,
     upsertAgentQuestion,
+    updateAgentQuestionContinuation,
     upsertAgentMemory,
   };
 }

@@ -95,7 +95,8 @@ def project_structured_tool_evidence(
             return (2, str(name))
         return (3, str(name))
 
-    def visit(value: object, budget: int, depth: int, *, exact_strings: bool = False) -> object:
+    def visit(value: object, budget: int, depth: int, *, exact_strings: bool = False,
+              exact_namespace: bool = False) -> object:
         nonlocal source_truncated
         if budget < 8:
             return _ABSENT
@@ -104,6 +105,22 @@ def project_structured_tool_evidence(
         if isinstance(value, float):
             return value if math.isfinite(value) and _size(value) <= budget else _ABSENT
         if isinstance(value, str):
+            if exact_namespace:
+                # Execution namespaces are protocol identities, not arbitrary
+                # filesystem paths. Preserve only the namespaced form after
+                # the normal redactor has explicitly allowed the path; all
+                # other values fail closed and disappear from the projection.
+                if not value.startswith("vrcforge:") or len(value) > 12000 or _size(value) > budget:
+                    stats["omittedChars"] += len(value)
+                    return _ABSENT
+                try:
+                    safe = sanitize_text(value, max(1, len(value)), preserve_paths=True)
+                except TypeError:
+                    return _ABSENT
+                if safe != value:
+                    stats["omittedChars"] += len(value)
+                    return _ABSENT
+                return value
             if exact_strings:
                 # A shortened/redacted target is not a usable target. Omit it
                 # wholly, including list items and continuation selectors.
@@ -168,6 +185,7 @@ def project_structured_tool_evidence(
             projected = visit(
                 item, available, depth + 1,
                 exact_strings=exact_strings or _identity_key(name) or whole_request,
+                exact_namespace=_key(name) == "namespace" and isinstance(item, str),
             )
             # A partially projected request is not a safe continuation request.
             if whole_request and tuple(stats.values()) != previous_omissions:

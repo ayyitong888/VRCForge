@@ -49,7 +49,13 @@ def test_external_gateway_binds_trusted_caller_for_provider_independent_readines
         ]
         return build_know_yourself_report(
             doctor_report={"checks": checks},
-            unity_status={"connected": True, "unityInstanceRegistered": True, "selectedInstanceMatched": True, "vrcForgeToolsRegistered": True},
+            unity_status={
+                "connected": True,
+                "unityInstanceRegistered": True,
+                "selectedInstanceMatched": True,
+                "vrcForgeToolsRegistered": True,
+                "readiness": {"ready": True},
+            },
             tool_registry={"tools": [{"name": "vrcforge_scan_project_index", "availableInMcp": True}]},
             skill_registry={"skills": []},
             project_context={"projectSelected": True, "editorVersion": "2022.3.22f1", "selectedProjectRunning": True},

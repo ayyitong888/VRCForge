@@ -10,7 +10,7 @@ import type {
   SkillPackageEntry,
   SkillPackagePreflight,
 } from "../../lib/api";
-import { exportOfficialKey, fetchOfficialKey, importOfficialKey } from "../../lib/api/skill-packages";
+import { exportOfficialKey, fetchOfficialKey, importOfficialKey, requestUnityToolInstall } from "../../lib/api/skill-packages";
 import type { PathToSkillDraftSeed } from "../../lib/path-to-skill-context";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
@@ -41,6 +41,8 @@ export function SkillPackageManagerPanel({
   onBlockPackage,
   onPreviewPathToSkill,
   onWritePathToSkill,
+  selectedUnityProjectPath,
+  onRefreshApprovals,
 }: {
   packages: SkillPackageEntry[];
   endpoint: string;
@@ -63,6 +65,8 @@ export function SkillPackageManagerPanel({
   onBlockPackage: (request: { packageId?: string; packageSha256?: string; lockSha256?: string; reason?: string }) => Promise<unknown>;
   onPreviewPathToSkill: (request: PathToSkillCaptureRequest) => Promise<PathToSkillCaptureResult>;
   onWritePathToSkill: (request: PathToSkillCaptureRequest) => Promise<PathToSkillCaptureResult>;
+  selectedUnityProjectPath: string;
+  onRefreshApprovals: () => void | Promise<void>;
 }) {
   const [packagePath, setPackagePath] = useState("");
   const [exportSkillName, setExportSkillName] = useState("");
@@ -249,6 +253,21 @@ export function SkillPackageManagerPanel({
       setPackageActionId("");
     }
   }
+  async function runUnityToolInstall(pkg: SkillPackageEntry) {
+    const id = skillPackageId(pkg);
+    if (!id || id === "-" || !selectedUnityProjectPath || !hasUnityToolEntrypoint(pkg)) return;
+    setPackageActionId(`${id}:unity-tool`); setLocalMessage(""); setLocalError("");
+    try {
+      const result = await requestUnityToolInstall(endpoint, id, selectedUnityProjectPath);
+      if (result.status === "pending_approval") {
+        setLocalMessage(i18n.t("package.unityToolInstallQueued"));
+      } else {
+        setLocalError(i18n.t("package.unityToolInstallUnexpected", { status: result.status || "unknown" }));
+      }
+      await onRefreshApprovals();
+    } catch (cause) { setLocalError(cause instanceof Error ? cause.message : String(cause)); }
+    finally { setPackageActionId(""); }
+  }
   async function runSetSafeMode(enabled: boolean) {
     setPackageActionId("safe-mode");
     setLocalMessage("");
@@ -348,6 +367,10 @@ export function SkillPackageManagerPanel({
 
       <div className="mt-5 grid gap-4">
         <div className="grid gap-3">
+          <div className="rounded-md border border-border/60 bg-background px-3 py-2 text-xs text-muted-foreground">
+            <div>{i18n.t("package.unityProjectSelected")}: <span className="font-mono">{selectedUnityProjectPath || i18n.t("package.unityToolNeedsUnity")}</span></div>
+            <div className="mt-1">{i18n.t("package.unityToolCompileHint")}</div>
+          </div>
           {displayMessage ? <Badge tone={skillPackageMessageTone(displayMessage)} className="w-fit">{displayMessage}</Badge> : null}
           {displayError ? <div className="rounded-md border border-destructive/20 bg-destructive/5 px-3 py-2 text-xs text-destructive">{displayError}</div> : null}
         </div>
@@ -360,6 +383,7 @@ export function SkillPackageManagerPanel({
             const id = skillPackageId(pkg);
             const enabled = skillPackageEnabled(pkg);
             const busy = loading || packageActionId === id;
+            const hasUnityTools = hasUnityToolEntrypoint(pkg);
             return (
               <div key={`${id}-${index}`} className="grid min-w-0 gap-3 rounded-lg border border-border/60 bg-card px-3 py-3 text-xs sm:grid-cols-[minmax(0,1fr)_auto]" data-vrcforge-installed-skill-card>
                 <div className="min-w-0">
@@ -383,6 +407,10 @@ export function SkillPackageManagerPanel({
                     <Copy className="h-3.5 w-3.5" />
                     {i18n.t("package.export")}
                   </Button>
+                  {hasUnityTools ? <Button type="button" variant="outline" className="h-8 px-2 text-xs" disabled={busy || !enabled || !selectedUnityProjectPath || packageActionId === `${id}:unity-tool`} onClick={() => void runUnityToolInstall(pkg)} title={!selectedUnityProjectPath ? i18n.t("package.unityToolNeedsUnity") : i18n.t("package.unityToolCompileHint")}>
+                    {packageActionId === `${id}:unity-tool` ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Plus className="h-3.5 w-3.5" />}
+                    {i18n.t("package.installUnityTools")}
+                  </Button> : null}
                   <details className="relative">
                     <summary className="flex h-8 cursor-pointer list-none items-center rounded-md border border-border px-2 text-xs text-muted-foreground">{i18n.t("package.advancedActions")}</summary>
                     <div className="absolute right-0 z-10 mt-1 flex min-w-40 flex-col gap-1 rounded-md border border-border bg-card p-1 shadow-panel">
@@ -663,6 +691,11 @@ function normalizeSkillPackagePreview(payload: SkillPackagePreflight | null): Sk
 
 function skillPackageId(pkg: SkillPackageEntry): string {
   return String(pkg.id || pkg.name || pkg.manifest?.id || "-");
+}
+
+function hasUnityToolEntrypoint(pkg: SkillPackageEntry): boolean {
+  const entrypoints = pkg.manifest?.entrypoints || pkg.entrypoints;
+  return Boolean(entrypoints && typeof entrypoints === "object" && typeof (entrypoints as Record<string, unknown>).unityTools === "string" && (entrypoints as Record<string, unknown>).unityTools);
 }
 
 function skillPackageTitle(pkg: SkillPackageEntry): string {

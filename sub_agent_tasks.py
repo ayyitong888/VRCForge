@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from background_goal_runtime import RuntimeLaneBudget
+from runtime_planner_service import public_runtime_payload
 
 
 SUB_AGENT_SCHEMA = "vrcforge.sub_agent_task.v2"
@@ -769,7 +770,7 @@ class SubAgentTaskRegistry:
         payload = self._task_snapshot(task)
         payload["schema"] = SUB_AGENT_SCHEMA
         payload["result"] = copy.deepcopy(task.result)
-        payload["paramsSummary"] = summarize_params(task.params)
+        payload["paramsSummary"] = summarize_params(public_runtime_payload(task.params))
         payload.pop("params", None)
         if include_events:
             payload["events"] = [event for event in self.recent_events(limit=500) if event.get("taskId") == task.id]
@@ -1203,6 +1204,9 @@ def redact_for_storage(value: Any) -> Any:
         for key, item in value.items():
             key_text = str(key)
             lowered = key_text.lower()
+            if lowered == "_nativeconversation":
+                result[key_text] = copy.deepcopy(item)
+                continue
             if any(secret in lowered for secret in ("token", "secret", "api_key", "apikey", "authorization")):
                 result[key_text] = "<redacted>"
             else:

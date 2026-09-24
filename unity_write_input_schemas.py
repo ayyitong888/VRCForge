@@ -1157,6 +1157,8 @@ EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS['vrcforge_register_project_catalog'] = {
         'catalog': {'type': 'string', 'description': 'Target catalog: vcc, alcom, or unityHub. Existing case-insensitive aliases unityhub, unity_hub and hub are accepted.'},
     },
 }
+EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS["vrcforge_install_user_unity_tools"] = {"type": "object", "additionalProperties": False, "required": ["packageId", "projectPath"], "properties": {"packageId": {"type": "string"}, "projectPath": {"type": "string"}}}
+EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS["vrcforge_invoke_user_unity_tool"] = {"type": "object", "additionalProperties": False, "required": ["projectPath", "packageId", "packageDigest", "toolId", "arguments"], "properties": {"projectPath": {"type": "string"}, "packageId": {"type": "string"}, "packageDigest": {"type": "string", "pattern": "^[0-9a-fA-F]{64}$"}, "toolId": {"type": "string"}, "arguments": {"type": "object", "additionalProperties": True}}}
 for _rollback_tool in ('rollback_project_catalog_registration', 'rollback_project_lifecycle'):
     EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS['vrcforge_' + _rollback_tool] = {
         'type': 'object', 'additionalProperties': True,

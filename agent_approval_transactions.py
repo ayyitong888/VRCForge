@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import hmac
 import math
 import json
@@ -430,6 +431,20 @@ ROLLBACK_MANUAL_APPROVAL_TOOLS = frozenset(
     }
 )
 ROLLBACK_MANUAL_APPROVAL_REASON = "Rollback operations always require explicit manual user confirmation."
+
+
+def _always_manual_approval_reason(target_tool: str, full_permission: bool, handler_reason: str) -> str:
+    """Share the protected-action exceptions between internal and external approval."""
+    if target_tool == "vrcforge_install_user_unity_tools":
+        return handler_reason
+    if target_tool == "vrcforge_restore_checkpoint":
+        return CHECKPOINT_RESTORE_MANUAL_APPROVAL_REASON
+    if target_tool in ROLLBACK_MANUAL_APPROVAL_TOOLS:
+        return ROLLBACK_MANUAL_APPROVAL_REASON
+    if target_tool == "vrcforge_build_and_upload_avatar" and not full_permission:
+        return AVATAR_UPLOAD_MANUAL_APPROVAL_REASON
+    return ""
+
 def _write_failure_facts(
     failure_result: Any,
     *,
@@ -1047,12 +1062,11 @@ class AgentApprovalTransactionService:
     ) -> dict[str, Any]:
         """Route an avatar/Unity write through the supervised tool path.
 
-        The loop never auto-applies writes: write handlers are converted into an
-        approval request, and approved execution later creates the pre-write
-        checkpoint and calls the registered handler. We surface the approval id so
-        the turn can stop and wait. Direct tools remain supported for legacy
-        request wrappers, but write-handler ids must not be sent through
-        `call_tool` because they are not direct tools.
+        Write handlers enter the existing approval owner, which decides whether
+        execution is immediate or requires an approval; approved execution creates
+        the pre-write checkpoint and calls the registered handler.
+        Direct tools remain supported for legacy request wrappers; write-handler ids
+        must not be sent through `call_tool` because they are not direct tools.
         """
         if not tool_name:
             return {"ok": False, "status": "blocked", "tool": "", "error": "No write tool was resolved."}
@@ -1075,11 +1089,6 @@ class AgentApprovalTransactionService:
                         "reason": f"Agent proposed supervised write: {tool_name}",
                         "agent_name": agent_name,
                         "goalDeliveryId": goal_delivery_id,
-                        "requires_explicit_approval": True,
-                        "disable_auto_approval": True,
-                        "explicit_approval_reason": (
-                            "Agent-proposed Unity/project write requires explicit user approval."
-                        ),
                         "preview": {
                             "summary": f"Agent proposed {tool_name}.",
                             "paramsSummary": params_summary,
@@ -1175,6 +1184,12 @@ class AgentApprovalTransactionService:
             raise AgentGatewayError(f"Unknown or unavailable write target: {target_tool}", status_code=404)
 
         arguments = ensure_dict(params.get("arguments") or params.get("params") or {})
+        if write_handler.requires_approved_execution_context and arguments.get("preview") is True:
+            raise AgentGatewayError(
+                f"{target_tool} is an execution entry that performs the requested change; "
+                "use the available read-only preview tool, or omit preview / set preview=false when executing.",
+                status_code=400,
+            )
         user_constraints = self._ports.read_user_constraints()
         arguments = self._inject_user_constraints_for_apply(arguments, user_constraints)
         preview = params.get("preview")
@@ -1251,14 +1266,8 @@ class AgentApprovalTransactionService:
         full_permission_auto = execution_mode == "roslyn_full_auto"
         permission_context = self.permission_audit_context(config)
         auto_policy_reason = self._write_auto_manual_approval_reason(target_tool, arguments, preview)
-        always_manual_reason = (
-            CHECKPOINT_RESTORE_MANUAL_APPROVAL_REASON
-            if target_tool == "vrcforge_restore_checkpoint"
-            else ROLLBACK_MANUAL_APPROVAL_REASON
-            if target_tool in ROLLBACK_MANUAL_APPROVAL_TOOLS
-            else AVATAR_UPLOAD_MANUAL_APPROVAL_REASON
-            if target_tool == "vrcforge_build_and_upload_avatar" and not full_permission_auto
-            else ""
+        always_manual_reason = _always_manual_approval_reason(
+            target_tool, full_permission_auto, mandatory_manual_approval_reason,
         )
         requires_explicit_for_mode = bool(always_manual_reason) or (
             False if full_permission_auto else (
@@ -1350,15 +1359,25 @@ class AgentApprovalTransactionService:
                     "targetTool": target_tool,
                 }
             )
-        auto_review_decision = "not_applicable"
+        auto_review_decision = "manual" if execution_mode == "auto" else "not_applicable"
         if execution_mode == "auto" and self._auto_approval_reviewer is not None:
             try:
+                # The public approval receipt intentionally projects arguments
+                # with summarize_params. The independent reviewer needs the
+                # owner-held record so executionTarget and other safety
+                # identity fields survive until its existing redaction step.
+                review_approval = approval
+                approval_id = str(approval.get("id") or "")
+                with self._ports.state.shared_state_lock:
+                    stored_approval = self._ports.state.approvals.get(approval_id)
+                    if isinstance(stored_approval, dict):
+                        review_approval = copy.deepcopy(stored_approval)
                 auto_review_decision = str(
-                    self._auto_approval_reviewer(redact_sensitive(dict(approval))) or "manual"
+                    self._auto_approval_reviewer(review_approval) or "manual"
                 ).strip()
             except Exception:
                 auto_review_decision = "manual"
-            if auto_review_decision not in {"allow_auto", "manual", "not_applicable"}:
+            if auto_review_decision not in {"allow_auto", "manual"}:
                 auto_review_decision = "manual"
             if auto_review_decision != "not_applicable":
                 self._ports.append_audit(
@@ -1371,7 +1390,7 @@ class AgentApprovalTransactionService:
                     }
                 )
         if self.auto_approval_enabled(config) and not requires_explicit_for_mode:
-            if auto_review_decision in {"allow_auto", "not_applicable"}:
+            if execution_mode != "auto" or auto_review_decision == "allow_auto":
                 auto_payload = self._auto_execute_approval(approval)
                 if auto_payload is not None:
                     return auto_payload
@@ -1394,7 +1413,7 @@ class AgentApprovalTransactionService:
                 decision = "manual"
                 if reviewer is not None:
                     try:
-                        decision = str(reviewer(redact_sensitive(dict(stored_approval))) or "manual").strip()
+                        decision = str(reviewer(copy.deepcopy(stored_approval)) or "manual").strip()
                     except Exception:
                         decision = "manual"
                 if decision == "allow_auto":
@@ -2244,6 +2263,20 @@ class AgentApprovalTransactionService:
                 if item.get("status") != "expired"
             ]
             return [redact_sensitive(item) for item in filtered]
+
+    def get_trusted_task_context(self, approval_id: str) -> dict[str, Any] | None:
+        """Read one approval's persisted task context under the shared lock."""
+        key = str(approval_id or "").strip()
+        if not key:
+            return None
+        with self._ports.state.shared_state_lock:
+            approval = self._ports.state.approvals.get(key)
+            if not isinstance(approval, Mapping):
+                return None
+            task_context = approval.get("taskContext")
+            if not isinstance(task_context, Mapping):
+                return None
+            return copy.deepcopy(dict(task_context))
 
     def approve(
         self,
@@ -3320,7 +3353,7 @@ class AgentApprovalTransactionService:
         if approved_execution_plan is not None:
             approval["approvedUnityExecutionPlan"] = approved_execution_plan
         if isinstance(task_context, Mapping) and task_context:
-            approval["taskContext"] = dict(task_context)
+            approval["taskContext"] = copy.deepcopy(dict(task_context))
         project_root = self._approval_project_root(approval)
         if project_root:
             approval["projectRoot"] = project_root
@@ -3452,21 +3485,18 @@ class AgentApprovalTransactionService:
             preview,
         )
         full_permission = normalize_execution_mode(config.execution_mode) == "roslyn_full_auto"
-        confirmation_reason = str(
-            CHECKPOINT_RESTORE_MANUAL_APPROVAL_REASON
-            if normalized_target == "vrcforge_restore_checkpoint"
-            else ROLLBACK_MANUAL_APPROVAL_REASON
-            if normalized_target in ROLLBACK_MANUAL_APPROVAL_TOOLS
-            else AVATAR_UPLOAD_MANUAL_APPROVAL_REASON
-            if normalized_target == "vrcforge_build_and_upload_avatar" and not full_permission
-            else (
+        always_manual_reason = _always_manual_approval_reason(
+            normalized_target, full_permission, mandatory_confirmation_reason,
+        )
+        confirmation_reason = str(always_manual_reason or (
+            (
                 mandatory_confirmation_reason
                 or destructive_reason
                 or "This external MCP tool is declared high risk and requires user confirmation."
             )
             if effective_risk_level in {"high", "critical"} and not full_permission
             else ""
-        ).strip()
+        )).strip()
         if normalize_execution_mode(config.execution_mode) == "approval" and not confirmation_reason:
             confirmation_reason = "Current permission mode requires user confirmation for each write."
         if authoritative_preview_only:
@@ -4504,11 +4534,11 @@ class AgentApprovalTransactionService:
             )
             approval = self._refresh_approval_expiry(approval)
             if approval.get("status") not in {"pending", "approved"} and status == "approved":
-                return {"ok": False, "approval": approval, "message": f"Approval is {approval.get('status')}."}
+                return {"ok": False, "approval": redact_sensitive(dict(approval)), "message": f"Approval is {approval.get('status')}."}
             if approval.get("status") not in {"pending", "approved"} and status == "rejected":
-                return {"ok": False, "approval": approval, "message": f"Approval is {approval.get('status')}."}
+                return {"ok": False, "approval": redact_sensitive(dict(approval)), "message": f"Approval is {approval.get('status')}."}
             if approval.get("status") == "expired":
-                return {"ok": False, "approval": approval, "message": "Approval has expired."}
+                return {"ok": False, "approval": redact_sensitive(dict(approval)), "message": "Approval has expired."}
             previous = dict(approval)
             approval["status"] = status
             approval[f"{status}At"] = utc_now_iso()

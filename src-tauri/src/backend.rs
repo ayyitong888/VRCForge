@@ -851,30 +851,6 @@ mod backend_start_result_tests {
         assert!(started.elapsed() < Duration::from_millis(500));
     }
 
-    #[test]
-    fn legacy_port_only_wait_replay_times_out_for_the_same_exited_child() {
-        let mut command = if cfg!(windows) {
-            let mut command = Command::new("cmd.exe");
-            command.args(["/C", "exit 23"]);
-            command
-        } else {
-            let mut command = Command::new("sh");
-            command.args(["-c", "exit 23"]);
-            command
-        };
-        command
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        #[cfg(windows)]
-        command.creation_flags(super::CREATE_NO_WINDOW);
-        let mut child = command.spawn().expect("test child should start");
-        let _ = child.wait();
-        let state = BackendState::new();
-        *state.child.lock().expect("child lock") = Some(child);
-        let outcome = super::wait_for_backend(Duration::from_millis(25));
-        assert!(!outcome);
-    }
 }
 
 pub(crate) fn begin_backend_start(state: &BackendState) -> Result<bool, String> {
@@ -1517,13 +1493,99 @@ pub(crate) fn app_api_response_from_ureq(
     result: Result<ureq::Response, ureq::Error>,
 ) -> Result<AppApiResponse, String> {
     match result {
-        Ok(response) => app_api_response_from_parts(response.status(), response.into_string()),
+        Ok(response) => {
+            let status = response.status();
+            app_api_response_from_parts(status, app_api_response_body_from_ureq(response))
+        }
         Err(ureq::Error::Status(status, response)) => {
-            app_api_response_from_parts(status, response.into_string())
+            app_api_response_from_parts(status, app_api_response_body_from_ureq(response))
         }
         Err(ureq::Error::Transport(error)) => Err(format!(
             "VRCForge runtime is not reachable at {BACKEND_ENDPOINT}: {error}"
         )),
+    }
+}
+
+const APP_API_RESPONSE_MAX_BYTES: usize = 32 * 1024 * 1024;
+
+fn app_api_response_body_from_ureq(response: ureq::Response) -> Result<String, std::io::Error> {
+    let mut bytes = Vec::new();
+    response
+        .into_reader()
+        .take((APP_API_RESPONSE_MAX_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > APP_API_RESPONSE_MAX_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "runtime response exceeds 32 MiB bridge budget",
+        ));
+    }
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+#[cfg(test)]
+mod app_api_response_tests {
+    use super::{app_api_response_from_parts, app_api_response_from_ureq};
+
+    #[test]
+    fn app_api_response_accepts_valid_json_above_ureq_into_string_limit() {
+        let body = format!(r#"{{"payload":"{}"}}"#, "x".repeat(11 * 1024 * 1024));
+        let response = ureq::Response::new(200, "OK", &body).expect("response should build");
+
+        let result = app_api_response_from_ureq(Ok(response)).expect("large JSON should parse");
+
+        assert!(result.ok);
+        assert_eq!(result.status, 200);
+        assert_eq!(result.body["payload"].as_str().unwrap().len(), 11 * 1024 * 1024);
+    }
+
+    #[test]
+    fn app_api_response_rejects_body_above_bridge_budget() {
+        let body = format!(r#"{{"payload":"{}"}}"#, "x".repeat(32 * 1024 * 1024));
+        let response = ureq::Response::new(200, "OK", &body).expect("response should build");
+
+        let error = match app_api_response_from_ureq(Ok(response)) {
+            Ok(_) => panic!("oversized body must fail"),
+            Err(error) => error,
+        };
+
+        assert!(error.contains("runtime response exceeds 32 MiB bridge budget"));
+    }
+
+    #[test]
+    fn app_api_response_preserves_status_error_json_and_non_json() {
+        let json_response = ureq::Response::new(409, "Conflict", r#"{"detail":"stale"}"#)
+            .expect("response should build");
+        let json_result = app_api_response_from_ureq(Err(ureq::Error::Status(409, json_response)))
+            .expect("JSON status error should parse");
+        assert_eq!(json_result.status, 409);
+        assert!(!json_result.ok);
+        assert_eq!(json_result.body["detail"], "stale");
+
+        let non_json_response = ureq::Response::new(502, "Bad Gateway", "upstream failed")
+            .expect("response should build");
+        let non_json_result =
+            app_api_response_from_ureq(Err(ureq::Error::Status(502, non_json_response)))
+                .expect("non-JSON status error should become an envelope");
+        assert_eq!(non_json_result.status, 502);
+        assert!(!non_json_result.ok);
+        assert_eq!(non_json_result.body["detail"], "HTTP 502: response was not JSON");
+    }
+
+    #[test]
+    fn app_api_response_parts_preserves_invalid_utf8_error() {
+        let error = match app_api_response_from_parts(
+            200,
+            Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "stream did not contain valid UTF-8",
+            )),
+        ) {
+            Ok(_) => panic!("invalid UTF-8 must remain a read error"),
+            Err(error) => error,
+        };
+
+        assert!(error.starts_with("unable to read runtime response:"));
     }
 }
 

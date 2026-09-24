@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import secrets
+import copy
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -9,6 +10,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from background_goal_runtime import classify_runtime_plan_outcome, classify_runtime_step_failure
+from runtime_planner_service import public_runtime_payload
 
 
 def _ensure_dict(value: Any) -> dict[str, Any]:
@@ -32,6 +34,31 @@ def _public_event(value: dict[str, Any]) -> dict[str, Any]:
         projected.pop("result", None)
         projected.pop("stdout", None)
         projected.pop("stderr", None)
+    return projected
+
+
+def _restore_private_native_snapshot(
+    projected: dict[str, Any],
+    source: dict[str, Any],
+) -> dict[str, Any]:
+    """Keep only the validated native continuation snapshot in private storage."""
+
+    if source.get("shellContinuationState") not in {
+        "pending",
+        "dispatching",
+        "delivered",
+        "interrupted",
+    }:
+        return projected
+    seed = source.get("continuationTaskSeed")
+    snapshot = seed.get("_nativeConversation") if isinstance(seed, dict) else None
+    if not isinstance(snapshot, dict):
+        return projected
+    stored_seed = projected.get("continuationTaskSeed")
+    if not isinstance(stored_seed, dict):
+        stored_seed = {}
+        projected["continuationTaskSeed"] = stored_seed
+    stored_seed["_nativeConversation"] = copy.deepcopy(snapshot)
     return projected
 
 
@@ -77,14 +104,15 @@ class AgentRuntimeRunLedger:
         return self._ports.normalize_visual_accent(value)
 
     def append(self, entry: dict[str, Any]) -> None:
-        safe_entry = self._ports.redact(
-            {
+        source_entry = {
                 "schema": "vrcforge.runtime_run.v1",
                 "id": f"runevt_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')}_{secrets.token_hex(3)}",
                 "createdAt": self._ports.now(),
                 "updatedAt": self._ports.now(),
                 **entry,
             }
+        safe_entry = _restore_private_native_snapshot(
+            self._ports.redact(source_entry), source_entry
         )
         path = self.log_path
         with self._ports.shared_state_lock:
@@ -232,7 +260,7 @@ class AgentRuntimeRunLedger:
             key = f"{session_id}:{client_turn_id or turn_id}"
             if key not in by_key:
                 order.append(key)
-            by_key[key] = self._ports.redact(continuation)
+            by_key[key] = self._ports.redact(public_runtime_payload(continuation))
         selected = order[-max(1, min(int(limit), 200)) :]
         return [by_key[key] for key in selected]
 

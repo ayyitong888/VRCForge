@@ -15,6 +15,37 @@ NAMES = {
 INTERNAL_NAMES = {f"vrcforge_{name}" for name in NAMES}
 
 
+def test_line_range_reads_complete_function_beyond_planner_prefix(tmp_path: Path) -> None:
+    from runtime_planner_service import planner_read_output_evidence
+
+    target = tmp_path / "source.py"
+    body = "def inspect():\n    value = 42\n    return value\n"
+    target.write_text("# padding\n" * 800 + body, encoding="utf-8", newline="\n")
+    tool = dashboard_server.AGENT_GATEWAY._tools["vrcforge_read_text_file"]
+    result = tool.handler({"path": str(target), "startLine": 801, "endLine": 803,
+                           "_generalAllowedRoots": [str(target)]})
+    evidence = planner_read_output_evidence("vrcforge_read_text_file", result)
+    assert evidence["text"] == body
+    assert evidence["startLine"] == 801 and evidence["endLine"] == 803
+    assert evidence["truncated"] is False
+
+
+def test_line_range_preserves_redaction_and_rejects_invalid_ranges(tmp_path: Path) -> None:
+    import pytest
+    from general_agent_tools import read_text_file
+
+    target = tmp_path / "source.txt"
+    target.write_text("intro\npassword=super-secret\nlast\n", encoding="utf-8")
+    result = read_text_file(target, allowed_roots=[target], start_line=2, end_line=3)
+    assert "super-secret" not in result["text"] and "last" in result["text"]
+    for start, end in ((0, 2), (3, 2), (True, 2), (1, False), (99, 100)):
+        with pytest.raises(ValueError):
+            read_text_file(target, allowed_roots=[target], start_line=start, end_line=end)
+    target.write_text("-----BEGIN PRIVATE KEY-----\nfixture-only\n-----END PRIVATE KEY-----\nlast\n", encoding="utf-8")
+    assert read_text_file(target, allowed_roots=[target], start_line=4, end_line=4)["text"].strip() == "last"
+    assert "fixture-only" not in read_text_file(target, allowed_roots=[target], start_line=2, end_line=2)["text"]
+
+
 def test_general_filesystem_tools_are_registered_read_only() -> None:
     registered = {name: dashboard_server.AGENT_GATEWAY._tools[name] for name in INTERNAL_NAMES}
     assert set(registered) == INTERNAL_NAMES

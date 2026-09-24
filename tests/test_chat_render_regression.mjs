@@ -56,14 +56,16 @@ async function compileAt(resolveDir) {
 }
 
 function checkGreen(result) {
-  assert.equal((result.durable.match(/data-agent-turn-process-group/g) || []).length, 1,
-    "one Agent turn must have one outer process group");
+  assert.equal((result.durable.match(/data-agent-turn-process-group/g) || []).length, 2,
+    "planner commentary splits the turn into two contiguous execution groups");
   assert.match(result.durable, /data-agent-turn-process-group[\s\S]*final answer/,
     "the final answer remains after the process group");
   assert.equal((result.streaming.match(/final answer/g) || []).length, 1,
     "the complete streaming answer must not duplicate the durable assistant event");
   assert.equal((result.pureFinal.match(/data-agent-turn-process-group/g) || []).length, 0,
     "a pure final answer must not create an empty process group");
+  assert.equal((result.failed.match(/data-agent-turn-process-group/g) || []).length, 2,
+    "a failed invocation keeps the two contiguous execution groups");
   assert.match(result.failed, /data-agent-turn-process-group[\s\S]*text-destructive/,
     "a failed invocation exposes the outer process status");
 }

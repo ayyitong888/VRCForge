@@ -20,6 +20,9 @@ assert.match(hook, /const continuationId = event\.clientTurnId\?\.trim\(\) \|\| 
 assert.match(hook, /item\.response\.clientTurnId === event\.clientTurnId\.trim\(\)/);
 assert.match(hook, /item\.response\.turnId \|\| item\.response\.turn_id/);
 assert.match(hook, /appendToChatRef\.current\(ownerChat\.id/);
+const replyIdPrefix = hook.match(/id: `([^`$]+)\$\{continuationId\}`/)?.[1];
+assert.ok(replyIdPrefix, "continuation reply must have an app-owned identity");
+assert.equal(replyIdPrefix.includes("sk-"), false, "continuation ids must survive the bridge secret-prefix filter instead of collapsing to [redacted]");
 assert.match(app, /deliverRuntimeTurnContinuation\(event\.payload\?\.payload\)/);
 assert.match(app, /bootstrap\?\.runtimeContinuations \?\? \[\]/);
 assert.match(app, /for \(const continuation of bootstrap\?\.runtimeContinuations/);

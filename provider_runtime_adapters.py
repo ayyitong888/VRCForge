@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Protocol
 
 from model_provider_adapters import validate_provider_api_key
+from provider_protocol_negotiation import DEEPSEEK_FLASH_MODELS, DEEPSEEK_PRO_MODEL
 
 
 class ModelProviderAdapter(Protocol):
@@ -364,19 +365,17 @@ class OpenAIResponsesAdapter(_ResponsesProtocolAdapter):
 
 
 class DeepSeekResponsesAdapter(_ResponsesProtocolAdapter):
-    """Responses adapter for the exact public DeepSeek V4 GA models."""
+    """Responses adapter for the explicitly recognized official DeepSeek models."""
 
     _provider_label = "DeepSeek Responses"
 
     def get_models(self) -> list[dict[str, Any]]:
-        return [
-            {"id": "deepseek-v4-flash", "supportedApiTypes": ["responses", "messages", "chat_completions"]},
-            {"id": "deepseek-v4-pro", "supportedApiTypes": ["responses", "messages", "chat_completions"]},
-        ]
+        return [{"id": model, "supportedApiTypes": ["responses", "messages", "chat_completions"]}
+                for model in sorted(DEEPSEEK_FLASH_MODELS | {DEEPSEEK_PRO_MODEL})]
 
     def _validate_model(self, model: str) -> None:
-        if model not in {"deepseek-v4-flash", "deepseek-v4-pro"}:
-            raise RuntimeError("DeepSeek Responses requires an exact DeepSeek V4 GA model ID.")
+        if model not in DEEPSEEK_FLASH_MODELS and model != DEEPSEEK_PRO_MODEL:
+            raise RuntimeError("DeepSeek Responses requires an exact recognized official model ID.")
 
 
 def _value(item: Any, key: str) -> Any:

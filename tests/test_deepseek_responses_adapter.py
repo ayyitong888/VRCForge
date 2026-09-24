@@ -96,6 +96,13 @@ def test_nonstream_message_sends_stateless_input_and_safe_payload() -> None:
     assert "safe-key" not in str(call)
 
 
+def test_current_flash_responses_reaches_transport_with_exact_model_id() -> None:
+    adapter, holder = adapter_for({"output_text": '{"reply":"ok"}', "output": [], "usage": {}})
+    adapter.send_request(ProviderRuntimeRequest(model="deepseek-flash", prompt="hello", instructions="system"))
+    assert holder["client"].responses.calls[0]["model"] == "deepseek-flash"
+    assert "deepseek-flash" in {item["id"] for item in adapter.get_models()}
+
+
 def test_probe_modes_are_tool_free_and_structured_when_requested() -> None:
     result = {"output_text": "plain", "output": [], "usage": {}}
     client = FakeClient(result)
@@ -561,6 +568,10 @@ def test_deepseek_responses_adapter_accepts_both_ga_v4_models() -> None:
     assert response.text == "ok"
     assert holder["client"].responses.calls[0]["model"] == "deepseek-v4-pro"
     assert adapter.get_models() == [
+        {
+            "id": "deepseek-flash",
+            "supportedApiTypes": ["responses", "messages", "chat_completions"],
+        },
         {
             "id": "deepseek-v4-flash",
             "supportedApiTypes": ["responses", "messages", "chat_completions"],

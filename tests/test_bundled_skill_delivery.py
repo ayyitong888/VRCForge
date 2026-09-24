@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
+import re
 import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -10,6 +13,8 @@ import bundled_skill_delivery as delivery
 from agent_gateway import AgentGatewayConfig
 from external_installed_skill_registry import ExternalInstalledSkillRegistryService
 from skill_packages import SkillPackageError, SkillPackageService
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 @pytest.fixture
@@ -40,6 +45,13 @@ def test_fresh_normal_profile_loads_complete_guide_internally_and_external_promp
     assert skill["enabled"] and skill["available"]
     assert skill["packageId"] == delivery.PACKAGE_ID
     assert skill["validation"]["status"] != "error"
+    assert {
+        "vrcforge_list_user_unity_tools",
+        "vrcforge_install_user_unity_tools",
+        "vrcforge_invoke_user_unity_tool",
+        "vrcforge_refresh_asset_database",
+        "vrcforge_exit_skill",
+    }.issubset(set(skill["allowedTools"]))
     result = gateway.runtime_skills.execute(delivery.SKILL_NAME, {}, "test")
     assert result["ok"] and result["status"] == "loaded", result
     assert result["execution"] == "agentic"
@@ -57,7 +69,11 @@ def test_fresh_normal_profile_loads_complete_guide_internally_and_external_promp
     assert prompt["context"]["gmCases"] == []
     assert prompt["context"]["gameOnlyAcceptance"] == []
     support = {item["path"]: item["content"] for item in prompt["skill"]["supportFiles"]}
-    assert set(support) == {"workflows/first-run.json", "references/repair-guide.md"}
+    assert set(support) == {
+        "workflows/first-run.json",
+        "references/repair-guide.md",
+        "references/user-tool-author-guide.md",
+    }
     for relative, content in support.items():
         assert content == (delivery.bundled_source_dir() / relative).read_bytes().decode("utf-8")
     installed = ExternalInstalledSkillRegistryService(gateway.skills)
@@ -107,6 +123,28 @@ def test_existing_package_governance_remains_authoritative(app_profile, tmp_path
     assert delivery.bundled_guide_audit_context(skill, gateway.skills.user_skills_dir, root / "skill-packages") == {}
 
 
+def test_reviewed_guide_version_import_updates_prior_immutable_version(app_profile, tmp_path):
+    app, gateway, _root = app_profile
+    old_source = tmp_path / "old-guide"
+    shutil.copytree(delivery.bundled_source_dir(), old_source)
+    old_manifest_path = old_source / "manifest.json"
+    old_manifest = json.loads(old_manifest_path.read_text(encoding="utf-8"))
+    old_manifest["version"] = "1.0.1"
+    old_manifest_path.write_text(json.dumps(old_manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    service = SkillPackageService(gateway.user_constraints_path.parent / "skill-packages", vrcforge_version="1.8.5")
+    old_archive = service.export_dev(old_source, tmp_path / "guide-1.0.1.vsk").package_path
+    old_result = app.SKILL_PACKAGE_CONTROLLER.import_package({"packagePath": str(old_archive), "devMode": True, "projectToUserSkills": True})
+    assert old_result["ok"] and old_result["projectedSkill"]["name"] == delivery.SKILL_NAME
+
+    current_archive = service.export_dev(delivery.bundled_source_dir(), tmp_path / "guide-1.0.2.vsk").package_path
+    current_result = app.SKILL_PACKAGE_CONTROLLER.import_package({"packagePath": str(current_archive), "devMode": True, "projectToUserSkills": True})
+    assert current_result["ok"] and current_result["projectedSkill"]["name"] == delivery.SKILL_NAME
+    installed = service.load_registry()["skills"][delivery.PACKAGE_ID]
+    assert installed["version"] == "1.0.2"
+    projected = gateway.skills.user_skills_dir / delivery.SKILL_NAME / "references" / "user-tool-author-guide.md"
+    assert projected.read_bytes() == (delivery.bundled_source_dir() / "references" / "user-tool-author-guide.md").read_bytes()
+
+
 @pytest.mark.parametrize("failure", ["minimum_version", "missing_support"])
 def test_incompatible_or_incomplete_bundle_never_leaves_partial_skill(app_profile, monkeypatch, failure):
     app, gateway, root = app_profile
@@ -131,3 +169,48 @@ def test_normal_release_collects_full_source_and_startup_delivers_it():
     import inspect
     import dashboard_server
     assert "deliver_bundled_guide(" in inspect.getsource(dashboard_server.on_startup)
+
+
+def test_user_tool_author_example_compiles_with_real_core_attributes(tmp_path: Path):
+    """The documented write example must compile against the shipped attributes."""
+    guide = (delivery.bundled_source_dir() / "references" / "user-tool-author-guide.md").read_text(encoding="utf-8")
+    match = re.search(r"```csharp\n(?P<source>.*?)\n```", guide, re.DOTALL)
+    assert match, "author guide is missing its C# example"
+    dotnet_root = Path(os.environ["DOTNET_ROOT"]) if os.environ.get("DOTNET_ROOT") else Path.home() / "AppData" / "Local" / "Microsoft" / "dotnet"
+    compilers = sorted((dotnet_root / "sdk").glob("*/Roslyn/bincore/csc.dll"))
+    refs = sorted((dotnet_root / "packs/Microsoft.NETCore.App.Ref").glob("*/ref/net8.0"))
+    if not compilers or not refs:
+        pytest.skip("Local .NET SDK required; no Unity is launched")
+    compiler = compilers[-1]
+    newtonsoft = compiler.parents[2] / "Newtonsoft.Json.dll"
+    stubs = tmp_path / "UnityStubs.cs"
+    stubs.write_text(
+        """
+namespace UnityEngine { public class Object {} public class TextAsset : Object { public string text { get; set; } } }
+namespace UnityEditor {
+ public enum ImportAssetOptions { ForceSynchronousImport = 1, ForceUpdate = 2 }
+ public static class AssetDatabase {
+  public static UnityEngine.Object LoadMainAssetAtPath(string path) => null;
+  public static T LoadAssetAtPath<T>(string path) where T : UnityEngine.Object => null;
+  public static void ImportAsset(string path, ImportAssetOptions options) { }
+  public static bool DeleteAsset(string path) => true;
+ }
+}
+""",
+        encoding="utf-8",
+    )
+    source = tmp_path / "AssetNoteCreateTool.cs"
+    source.write_text(match.group("source"), encoding="utf-8")
+    output = tmp_path / "AuthorExample.dll"
+    attrs = [
+        ROOT / "Assets/VRCForge/Core/MCP/VRCForgeCommandAttribute.cs",
+        ROOT / "Assets/VRCForge/Core/MCP/VRCForgeInputAttribute.cs",
+    ]
+    command = [
+        str(dotnet_root / "dotnet.exe"), str(compiler), "-nologo", "-target:library",
+        "-langversion:9.0", f"-out:{output}",
+        *[f"-r:{path}" for path in refs[-1].glob("*.dll")], f"-r:{newtonsoft}",
+        *(str(path) for path in attrs), str(stubs), str(source),
+    ]
+    result = subprocess.run(command, capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stdout + result.stderr

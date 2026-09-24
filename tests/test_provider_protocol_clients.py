@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import sys
+import threading
+import types
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Thread
@@ -9,7 +12,277 @@ from typing import Iterator
 import pytest
 
 import dashboard_server
+from vrchat_blendshape_agent import (
+    Settings,
+    build_openai_compatible_request_payload,
+    request_llm_plan_with_metadata,
+    request_openai_compatible_plan_with_metadata,
+)
 from provider_configuration_service import ProviderApiConfig
+
+
+def _native_chat_settings(api_type: str | None = "chat_completions") -> Settings:
+    return Settings(
+        llm_provider="custom",
+        llm_api_key="native-key",
+        llm_base_url="http://native.test/v1",
+        llm_model="native-model",
+        llm_api_key_env="",
+        gemini_thinking_level="",
+        unity_mcp_command=[],
+        unity_mcp_host="127.0.0.1",
+        unity_mcp_port=0,
+        unity_mcp_instance="",
+        unity_mcp_retries=0,
+        unity_mcp_retry_backoff_seconds=0.0,
+        unity_mcp_timeout_seconds=1,
+        export_tool_name="",
+        execute_tool_name="",
+        export_path=__import__("pathlib").Path("export.json"),
+        min_confidence=0.0,
+        llm_api_type=api_type,
+    )
+
+
+def test_native_post_tool_transcript_omits_empty_assistant_tool_calls() -> None:
+    transcript = [
+        {"role": "user", "content": "read the project version"},
+        {
+            "role": "assistant",
+            "content": None,
+            "reasoning_content": "checking the project file",
+            "tool_calls": [{"id": "call-1", "type": "function", "function": {"name": "read", "arguments": "{}"}}],
+        },
+        {"role": "tool", "tool_call_id": "call-1", "content": "2022.3.22f1"},
+        {"role": "assistant", "content": None, "reasoning_content": "tool result received", "tool_calls": []},
+    ]
+
+    payload = build_openai_compatible_request_payload(
+        _native_chat_settings(), "continue", native_messages=transcript, native_tools=[]
+    )
+
+    assert payload["messages"][1]["tool_calls"] == transcript[1]["tool_calls"]
+    assert payload["messages"][1]["reasoning_content"] == "checking the project file"
+    assert payload["messages"][3] == {
+        "role": "assistant", "content": None, "reasoning_content": "tool result received"
+    }
+
+
+def test_native_chat_requires_explicit_chat_protocol_and_preserves_receipt() -> None:
+    with pytest.raises(ValueError, match="chat_completions"):
+        request_llm_plan_with_metadata(
+            _native_chat_settings(None),
+            "continue",
+            native_tools=[{"type": "function", "function": {"name": "read"}}],
+        )
+
+
+def test_native_chat_ordinary_response_keeps_tool_receipt_private(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[dict[str, object]] = []
+
+    class Completions:
+        def create(self, **kwargs: object) -> dict[str, object]:
+            calls.append(kwargs)
+            return {
+                "id": "chat-native-1",
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "content": None,
+                        "reasoning_content": "opaque-provider-thinking",
+                        "tool_calls": [{
+                            "id": "call-1",
+                            "type": "function",
+                            "function": {"name": "read", "arguments": '{"path":"x"}'},
+                        }],
+                    },
+                    "finish_reason": "tool_calls",
+                }],
+                "usage": {"prompt_tokens": 2, "completion_tokens": 3, "total_tokens": 5},
+            }
+
+    class FakeOpenAI:
+        def __init__(self, **_kwargs: object) -> None:
+            self.chat = types.SimpleNamespace(completions=Completions())
+
+        def close(self) -> None:
+            return
+
+    monkeypatch.setitem(sys.modules, "openai", types.SimpleNamespace(OpenAI=FakeOpenAI))
+    tool = {"type": "function", "function": {"name": "read", "parameters": {"type": "object"}}}
+    response = request_openai_compatible_plan_with_metadata(
+        _native_chat_settings(), "continue", native_tools=[tool]
+    )
+
+    assert calls[0]["tools"] == [tool]
+    assert "response_format" not in calls[0]
+    assert response.finish_reason == "tool_calls"
+    assert "id" not in response.assistant_message
+    assert response.assistant_message["tool_calls"][0]["id"] == "call-1"
+    assert response.assistant_message["reasoning_content"] == "opaque-provider-thinking"
+    assert response.reasoning["itemCount"] == 0
+
+
+def test_native_chat_stream_assembles_indexed_tool_fragments(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Completions:
+        def create(self, **kwargs: object) -> object:
+            if not kwargs.get("stream"):
+                raise AssertionError("native stream test must use streaming")
+            return iter([
+                {"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call-stream", "function": {"name": "read", "arguments": '{"pa'}}]}, "finish_reason": None}]},
+                {"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"arguments": 'th":"x"}'}}]}, "finish_reason": "tool_calls"}]},
+            ])
+
+    class FakeOpenAI:
+        def __init__(self, **_kwargs: object) -> None:
+            self.chat = types.SimpleNamespace(completions=Completions())
+
+        def close(self) -> None:
+            return
+
+    monkeypatch.setitem(sys.modules, "openai", types.SimpleNamespace(OpenAI=FakeOpenAI))
+    response = request_openai_compatible_plan_with_metadata(
+        _native_chat_settings(), "continue", stream_callback=lambda _text: None,
+        native_tools=[{"type": "function", "function": {"name": "read"}}],
+    )
+    call = response.assistant_message["tool_calls"][0]
+    assert call["id"] == "call-stream"
+    assert call["function"]["name"] == "read"
+    assert call["function"]["arguments"] == '{"path":"x"}'
+    assert response.finish_reason == "tool_calls"
+
+
+@pytest.mark.parametrize("cancel_at_end", [False, True])
+def test_native_compatible_stream_retains_exact_replay_and_checks_terminal_cancel(monkeypatch, cancel_at_end):
+    cancel = threading.Event()
+    records, activity = [], []
+    tool = {"type": "function", "function": {"name": "read", "parameters": {"type": "object"}}}
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            self.chat = types.SimpleNamespace(completions=self)
+
+        def create(self, **kwargs):
+            records.append(kwargs)
+            if len(records) == 1:
+                raise RuntimeError("stream_options is not supported")
+            if len(records) > 2:
+                return {"choices": [{"finish_reason": "stop", "message": {"role": "assistant", "content": "done"}}]}
+
+            def stream():
+                yield {"choices": [{"delta": {"reasoning_content": "synthetic-"}, "finish_reason": None}]}
+                yield {"choices": [{"delta": {"reasoning_content": "replay", "tool_calls": [
+                    {"index": 0, "id": "paired", "function": {"name": "read", "arguments": "{}"}}
+                ]}, "finish_reason": "tool_calls"}], "usage": {"prompt_tokens": 7, "completion_tokens": 3, "total_tokens": 10}}
+                if cancel_at_end:
+                    cancel.set()
+            return stream()
+
+        def close(self):
+            pass
+
+    monkeypatch.setitem(sys.modules, "openai", types.SimpleNamespace(OpenAI=FakeOpenAI))
+    options = dict(stream_callback=lambda _: None, cancel_event=cancel,
+                   stream_activity_callback=activity.append, native_tools=[tool],
+                   native_messages=[{"role": "user", "content": "read"}])
+    if cancel_at_end:
+        with pytest.raises(RuntimeError, match="cancelled"):
+            request_openai_compatible_plan_with_metadata(_native_chat_settings(), "", **options)
+        assert len(records) == 2
+        return
+    result = request_openai_compatible_plan_with_metadata(_native_chat_settings(), "", **options)
+    assert result.assistant_message["reasoning_content"] == "synthetic-replay"
+    assert result.usage["totalTokens"] == 10
+    assert {"kind": "tool_call_activity"} in activity
+    transcript = [*options["native_messages"], result.assistant_message,
+                  {"role": "tool", "tool_call_id": "paired", "content": '{"ok":true}'}]
+    request_openai_compatible_plan_with_metadata(_native_chat_settings(), "", native_messages=transcript, native_tools=[tool])
+    assert records[-1]["messages"] == transcript
+    assert "synthetic-replay" not in repr(result)
+
+
+@pytest.mark.parametrize("partial", [
+    {"tool_calls": [{"index": 0, "id": "unfinished", "function": {"name": "read", "arguments": "{"}}]},
+    {"reasoning_content": "synthetic-partial"},
+])
+def test_native_compatible_partial_stream_is_never_reissued(monkeypatch, partial):
+    records = []
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            self.chat = types.SimpleNamespace(completions=self)
+
+        def create(self, **kwargs):
+            records.append(kwargs)
+            if len(records) == 1:
+                raise RuntimeError("stream_options is not supported")
+            if len(records) > 2:
+                raise AssertionError("A partially generated native call must not be reissued")
+
+            def stream():
+                yield {"choices": [{"delta": partial, "finish_reason": None}]}
+                raise RuntimeError("stream not supported after partial generation")
+            return stream()
+
+        def close(self):
+            pass
+
+    monkeypatch.setitem(sys.modules, "openai", types.SimpleNamespace(OpenAI=FakeOpenAI))
+    with pytest.raises(RuntimeError, match="partial generation"):
+        request_openai_compatible_plan_with_metadata(_native_chat_settings(), "", native_tools=[], stream_callback=lambda _: None)
+    assert len(records) == 2
+
+
+@pytest.mark.parametrize("finish_reason", [None, "length"])
+def test_native_chat_stream_never_returns_receipt_for_eof_or_truncation(
+    monkeypatch: pytest.MonkeyPatch, finish_reason: str | None,
+) -> None:
+    class Completions:
+        def create(self, **kwargs: object) -> object:
+            return iter([{"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "partial", "function": {"name": "read", "arguments": "{"}}]}, "finish_reason": finish_reason}]}])
+
+    class FakeOpenAI:
+        def __init__(self, **_kwargs: object) -> None:
+            self.chat = types.SimpleNamespace(completions=Completions())
+
+        def close(self) -> None:
+            return
+
+    monkeypatch.setitem(sys.modules, "openai", types.SimpleNamespace(OpenAI=FakeOpenAI))
+    with pytest.raises(RuntimeError, match="Native Chat"):
+        request_openai_compatible_plan_with_metadata(
+            _native_chat_settings(), "continue", stream_callback=lambda _text: None,
+            native_tools=[{"type": "function", "function": {"name": "read"}}],
+        )
+
+
+def test_native_chat_stream_cancelled_tool_only_turn_has_no_receipt(monkeypatch: pytest.MonkeyPatch) -> None:
+    cancel = threading.Event()
+
+    class Completions:
+        def create(self, **kwargs: object) -> object:
+            def stream() -> object:
+                yield {"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "cancelled", "function": {"name": "read"}}]}, "finish_reason": None}]}
+                cancel.set()
+                yield {"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"arguments": "{}"}}]}, "finish_reason": "tool_calls"}]}
+            return stream()
+
+    class FakeOpenAI:
+        def __init__(self, **_kwargs: object) -> None:
+            self.chat = types.SimpleNamespace(completions=Completions())
+
+        def close(self) -> None:
+            return
+
+    monkeypatch.setitem(sys.modules, "openai", types.SimpleNamespace(OpenAI=FakeOpenAI))
+    with pytest.raises(RuntimeError, match="cancelled"):
+        request_openai_compatible_plan_with_metadata(
+            _native_chat_settings(), "continue", stream_callback=lambda _text: None,
+            cancel_event=cancel,
+            native_tools=[{"type": "function", "function": {"name": "read"}}],
+        )
 
 
 @contextmanager

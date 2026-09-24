@@ -1022,8 +1022,12 @@ export function useChatRunController({
             };
           }
         } else if (runtimeCompaction) {
-          const failureClass = boundedRuntimeReason(runtimeCompaction.failureClass) || "unknown";
-          const status = failureClass === "cancelled"
+          const nativeApplied = runtimeCompaction.applied === true && runtimeCompaction.target === "native_history";
+          const failureClass = boundedRuntimeReason(runtimeCompaction.failureClass)
+            || (nativeApplied ? "" : "unknown");
+          const status = nativeApplied
+            ? "applied"
+            : failureClass === "cancelled"
             ? "cancelled"
             : failureClass.startsWith("suppressed") || runtimeCompaction.suppressionReason
               ? "suppressed"

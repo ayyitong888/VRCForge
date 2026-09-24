@@ -13,6 +13,25 @@ from agent_gateway import AgentGateway
 from tests.test_dashboard_server import bind_test_runtime_planner
 
 
+@pytest.mark.parametrize("with_secret", [False, True])
+def test_gateway_question_answer_preserves_unicode_layout_and_redacts_secrets(tmp_path, with_secret):
+    gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
+    question = gateway.create_runtime_question({"question": "继续？", "sessionId": "layout"})["question"]
+    text = "先看衣柜\n    保留缩进\n\n不要修改任何配置。"
+    expected = text
+    if with_secret:
+        text += "\napi_key=synthetic-question-secret\n下一行保留。"
+        expected += "\napi_key=<redacted>\n下一行保留。"
+    result = gateway.questions.answer(question["questionId"], {"sessionId": "layout", "answer": text})
+    assert result["question"]["answer"] == expected
+    restarted = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
+    restored = restarted.questions.list(session_id="layout", include_answered=True)["questions"][0]
+    assert restored["answer"] == expected
+    assert expected in restarted.questions._continuation_prompt(restored)
+    raw = (tmp_path / "audit" / "agent-questions.jsonl").read_text(encoding="utf-8")
+    assert "synthetic-question-secret" not in raw
+
+
 def test_runtime_question_identity_is_fail_closed(tmp_path: Path) -> None:
     gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
     result = gateway.create_runtime_question({

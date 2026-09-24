@@ -90,6 +90,19 @@ namespace VRCForge.Core.MCP
         }
     }
 
+    /// <summary>Metadata for a command intentionally excluded from an owned registry.</summary>
+    public sealed class VRCForgeExcludedToolDescriptor
+    {
+        internal VRCForgeExcludedToolDescriptor(string name, Type toolType)
+        {
+            Name = name ?? string.Empty;
+            TypeName = toolType == null ? string.Empty : (toolType.FullName ?? toolType.Name);
+        }
+
+        public string Name { get; private set; }
+        public string TypeName { get; private set; }
+    }
+
     /// <summary>
     /// Local-only discovery and invocation catalogue. Remote identity validation,
     /// authorization, approval, checkpointing, and write execution belong to the
@@ -98,10 +111,13 @@ namespace VRCForge.Core.MCP
     public sealed class VRCForgeToolRegistry
     {
         private readonly Dictionary<string, VRCForgeToolDescriptor> descriptors;
+        private readonly VRCForgeExcludedToolDescriptor[] excludedTools;
 
-        private VRCForgeToolRegistry(Dictionary<string, VRCForgeToolDescriptor> descriptors)
+        private VRCForgeToolRegistry(Dictionary<string, VRCForgeToolDescriptor> descriptors,
+            IEnumerable<VRCForgeExcludedToolDescriptor> excludedTools)
         {
             this.descriptors = descriptors;
+            this.excludedTools = (excludedTools ?? Enumerable.Empty<VRCForgeExcludedToolDescriptor>()).ToArray();
         }
 
         public IEnumerable<VRCForgeToolDescriptor> Tools
@@ -109,12 +125,61 @@ namespace VRCForge.Core.MCP
             get { return descriptors.Values.OrderBy(item => item.Name, StringComparer.Ordinal).ToArray(); }
         }
 
+        /// <summary>Commands discovered in loaded assemblies but excluded by an owned contract.</summary>
+        public IEnumerable<VRCForgeExcludedToolDescriptor> ExcludedTools
+        {
+            get { return Array.AsReadOnly(excludedTools); }
+        }
+
         public static VRCForgeToolRegistry DiscoverLoadedAssemblies()
         {
             return Discover(AppDomain.CurrentDomain.GetAssemblies());
         }
 
+        /// <summary>
+        /// Discover only commands selected by an owning contract. Commands that
+        /// are not selected are recorded for diagnostics and never inspected for
+        /// handlers or parameters, so foreign malformed commands cannot break the
+        /// owned registry.
+        /// </summary>
+        public static VRCForgeToolRegistry DiscoverOwnedLoadedAssemblies(
+            Func<Type, VRCForgeCommandAttribute, bool> isOwned)
+        {
+            if (isOwned == null)
+            {
+                throw new ArgumentNullException("isOwned");
+            }
+            return Discover(AppDomain.CurrentDomain.GetAssemblies(), isOwned);
+        }
+
         public static VRCForgeToolRegistry Discover(IEnumerable<Assembly> assemblies)
+        {
+            return Discover(assemblies, null);
+        }
+
+        /// <summary>Build one descriptor with the same parameter-schema rules as discovery.</summary>
+        public static VRCForgeToolDescriptor Describe(Type toolType)
+        {
+            if (toolType == null)
+            {
+                throw new ArgumentNullException("toolType");
+            }
+            var attribute = (VRCForgeCommandAttribute)Attribute.GetCustomAttribute(
+                toolType, typeof(VRCForgeCommandAttribute), false);
+            if (attribute == null || !attribute.IsDiscoverable)
+            {
+                throw new InvalidOperationException("The type is not a discoverable VRCForge tool.");
+            }
+            if (!IsValidToolName(attribute.ToolId))
+            {
+                throw new InvalidOperationException("A VRCForge tool has no valid name: " + (toolType.FullName ?? toolType.Name));
+            }
+            return new VRCForgeToolDescriptor(toolType, FindHandler(toolType), attribute, DiscoverParameters(toolType));
+        }
+
+        private static VRCForgeToolRegistry Discover(
+            IEnumerable<Assembly> assemblies,
+            Func<Type, VRCForgeCommandAttribute, bool> isOwned)
         {
             if (assemblies == null)
             {
@@ -122,6 +187,7 @@ namespace VRCForge.Core.MCP
             }
 
             var result = new Dictionary<string, VRCForgeToolDescriptor>(StringComparer.Ordinal);
+            var excluded = new List<VRCForgeExcludedToolDescriptor>();
             foreach (var assembly in assemblies.Where(item => item != null && !item.IsDynamic)
                 .OrderBy(item => item.FullName ?? string.Empty, StringComparer.Ordinal))
             {
@@ -131,6 +197,11 @@ namespace VRCForge.Core.MCP
                     var attribute = (VRCForgeCommandAttribute)Attribute.GetCustomAttribute(type, typeof(VRCForgeCommandAttribute), false);
                     if (attribute == null || !attribute.IsDiscoverable)
                     {
+                        continue;
+                    }
+                    if (isOwned != null && !isOwned(type, attribute))
+                    {
+                        excluded.Add(new VRCForgeExcludedToolDescriptor(attribute.ToolId, type));
                         continue;
                     }
                     if (!IsValidToolName(attribute.ToolId))
@@ -147,7 +218,7 @@ namespace VRCForge.Core.MCP
                     result.Add(descriptor.Name, descriptor);
                 }
             }
-            return new VRCForgeToolRegistry(result);
+            return new VRCForgeToolRegistry(result, excluded);
         }
 
         public VRCForgeToolDescriptor GetRequired(string name)

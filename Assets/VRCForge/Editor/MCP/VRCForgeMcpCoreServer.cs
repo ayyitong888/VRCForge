@@ -149,6 +149,7 @@ namespace VRCForge.Editor
         private static string descriptorPath;
         private static string descriptorInstanceId;
         private static VRCForgeToolDescriptor[] tools = new VRCForgeToolDescriptor[0];
+        private static VRCForgeExcludedToolDescriptor[] excludedExternalTools = new VRCForgeExcludedToolDescriptor[0];
         private static SynchronizationContext editorSynchronizationContext;
 
         internal static string CurrentInstanceId
@@ -393,8 +394,10 @@ namespace VRCForge.Editor
 
         private static VRCForgeToolDescriptor[] SnapshotTools()
         {
-            return VRCForgeMcpToolContract.SnapshotExact(
-                VRCForgeToolRegistry.DiscoverLoadedAssemblies().Tools);
+            var registry = VRCForgeToolRegistry.DiscoverOwnedLoadedAssemblies(
+                VRCForgeMcpToolContract.IsExpectedDeclaration);
+            excludedExternalTools = registry.ExcludedTools.ToArray();
+            return VRCForgeMcpToolContract.SnapshotExact(registry.Tools);
         }
 
         private static ISet<string> SnapshotApprovedWriteTools(IEnumerable<VRCForgeToolDescriptor> snapshot)
@@ -2356,6 +2359,16 @@ namespace VRCForge.Editor
                 ["protocolRange"] = ProtocolRangeResult(),
                 ["toolContractVersion"] = VRCForgeMcpToolContract.ToolContractVersion,
                 ["toolCount"] = VRCForgeMcpToolContract.ToolCount,
+                ["excludedExternalTools"] = new JArray(excludedExternalTools
+                    .OrderBy(item => item.Name, StringComparer.Ordinal)
+                    .ThenBy(item => item.TypeName, StringComparer.Ordinal)
+                    .Select(item => new JObject
+                    {
+                        ["name"] = item.Name,
+                        ["type"] = item.TypeName,
+                        ["callable"] = false,
+                        ["reason"] = "outside_owned_core_contract",
+                    })),
                 ["instanceId"] = descriptorInstanceId,
                 ["processId"] = System.Diagnostics.Process.GetCurrentProcess().Id,
                 ["processStartTime"] = CurrentProcessStartTime(),

@@ -13,6 +13,7 @@ from unity_status_service import UnityStatusPorts, UnityStatusService
 
 ROOT = Path(__file__).parents[1]
 METHODS = {
+    "readiness",
     "build_unity_tools_snapshot",
     "build_unity_status_snapshot",
     "build_vrcforge_mcp_core_unavailable_status",
@@ -30,6 +31,32 @@ def make_service(*, selected_project: str = "", core_installed=lambda _project: 
             required_tools=("vrc_alpha", "vrc_beta"),
         )
     )
+
+
+def test_core_inventory_is_diagnostic_not_an_agent_callable_catalog(monkeypatch, tmp_path):
+    names = ["vrc_create_gameobject", *[f"vrc_diagnostic_{index}" for index in range(96)]]
+
+    class FakeCoreClient:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def list_tools(self, *, exposure_layer):
+            assert exposure_layer == "execution"
+            return [{"name": name} for name in names]
+
+    monkeypatch.setattr(unity_status_service, "UnityMcpCoreClient", FakeCoreClient)
+    monkeypatch.setattr(UnityStatusService, "build_unity_status_snapshot", lambda *_args: {
+        "connected": True, "projectPath": str(tmp_path), "tools": {"ok": True},
+    })
+    result = make_service().build_unity_tools_snapshot()
+    assert result["vrcForgeToolNames"] == names
+    assert result["toolNameNamespace"] == "unity_core"
+    assert result["agentCallable"] is False
+    observation = dashboard_server.RUNTIME_PLANNER.native_result_observation({
+        "tool": "vrcforge_unity_tools", "kind": "skill", "status": "executed", "result": result,
+    })
+    assert '"toolNameNamespace":"unity_core"' in observation["observation"]
+    assert '"agentCallable":false' in observation["observation"]
 
 
 def test_unity_status_service_has_explicit_read_only_ports_and_no_root_facades() -> None:
@@ -150,6 +177,12 @@ def test_unity_status_service_projects_existing_core_schema_with_fake_client(mon
         "coreVersionMatched": True,
         "vrcForgeToolsRegistered": True,
         "missingRequiredVrcForgeTools": [],
+        "readiness": {
+            "ready": True,
+            "blockerCode": "",
+            "inspectionMode": "core_version_only",
+            "inspectionSkipped": True,
+        },
         "output": "",
         "parsed": None,
         "error": "",
@@ -195,6 +228,79 @@ def test_unity_status_binds_core_version_without_listing_tools(
     assert status["tools"]["inspectionMode"] == "core_version_only"
     assert status["tools"]["inspectionSkipped"] is True
     assert status["missingRequiredVrcForgeTools"] == []
+
+
+def test_unity_status_blocks_execution_when_core_reports_compile_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    class FakeCoreClient:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def core_info(self) -> dict[str, object]:
+            return {
+                "schema": "vrcforge.core_info.v1",
+                "coreIdentity": "vrcforge.unity-core",
+                "coreVersion": "1.8.0",
+                "compileSnapshot": {
+                    "isCompiling": False,
+                    "captureComplete": True,
+                    "hasErrors": True,
+                    "hasWarnings": True,
+                    "errorCount": 1,
+                    "warningCount": 3,
+                    "source": "compilation_pipeline",
+                    "capturedAt": "2026-09-23T21:57:41.4491432Z",
+                },
+            }
+
+    monkeypatch.setattr(unity_status_service, "UnityMcpCoreClient", FakeCoreClient)
+    status = make_service().build_unity_status_snapshot(
+        SimpleNamespace(unity_mcp_timeout_seconds=8), tmp_path / "Project"
+    )
+
+    assert status["connected"] is True
+    assert status["executionReady"] is False
+    assert status["blockerCode"] == "unity_compile_errors"
+    assert status["readiness"]["ready"] is False
+    assert status["readiness"]["blockerCode"] == "unity_compile_errors"
+
+
+@pytest.mark.parametrize(
+    "compile_snapshot",
+    [
+        {
+            "isCompiling": False,
+            "captureComplete": True,
+            "hasErrors": False,
+            "errorCount": 0,
+            "warningCount": 3,
+            "source": "compilation_pipeline",
+            "capturedAt": "2026-09-23T21:57:41.4491432Z",
+        },
+        {"hasErrors": True, "errorCount": 1},
+    ],
+)
+def test_unity_status_keeps_warnings_and_unknown_compile_snapshot_semantics(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    compile_snapshot: dict[str, object],
+) -> None:
+    class FakeCoreClient:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def core_info(self) -> dict[str, object]:
+            return {"coreVersion": "1.8.0", "compileSnapshot": compile_snapshot}
+
+    monkeypatch.setattr(unity_status_service, "UnityMcpCoreClient", FakeCoreClient)
+    status = make_service().build_unity_status_snapshot(
+        SimpleNamespace(unity_mcp_timeout_seconds=8), tmp_path / "Project"
+    )
+
+    assert status["executionReady"] is True
+    assert status["readiness"]["ready"] is True
 
 
 def test_unity_status_service_preserves_core_error_and_missing_project_contract(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

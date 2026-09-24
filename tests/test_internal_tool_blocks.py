@@ -11,12 +11,14 @@ from agent_gateway import (
 )
 from runtime_planner_service import bounded_planner_tool_schema, validate_planner_tool_arguments
 from profiled_tool_registry import CapabilityProfile, ToolSet
+from tests.planner_schema_assertions import assert_internal_write_schema
 
 from internal_tool_blocks import (
     CANONICAL_TOOL_BLOCKS,
     CANONICAL_TOOL_LEAVES,
     INTERNAL_LOADABLE_TOOL_BLOCKS,
     build_internal_tool_block_tree,
+    canonical_tool_owner,
     internal_tool_block_for_name,
     normalize_internal_tool_blocks,
     resolve_internal_tool_block_selector,
@@ -106,6 +108,40 @@ def test_internal_index_tree_is_independent_and_unity_is_nested() -> None:
     assert resolve_internal_tool_block_selector("project_environment/files") == "project_environment/files"
     assert resolve_internal_tool_block_selector("files") == "project_environment/files"
     assert resolve_internal_tool_block_selector("research/web_research") == "research/web_research"
+
+
+def test_legacy_unity_block_projection_keeps_the_external_owner() -> None:
+    cases = (
+        ("project", "unity/project", "project_environment/assets_packages"),
+        ("diagnostics", "unity/diagnostics", "diagnostics_build/compile_logs"),
+        ("checkpoint", "unity/checkpoint", "diagnostics_build/checkpoints_history"),
+    )
+    for canonical, legacy, expected in cases:
+        name = "vrcforge_core_upgrade_status"
+        assert canonical_tool_owner(canonical, name) == expected
+        assert canonical_tool_owner(legacy, name) == expected
+
+        projected = build_internal_tool_block_tree(
+            loaded_blocks={expected},
+            leaves=[{"name": name, "block": legacy, "mode": "read"}],
+        )
+        owner = next(
+            child for branch in projected["blocks"] for child in branch["children"]
+            if child["name"] == expected
+        )
+        assert owner["toolNames"] == [name]
+
+
+def test_planning_exposes_core_status_but_not_core_installer() -> None:
+    planning = dashboard_server._RuntimePlannerCatalog().read("planning")
+    visible = {tool.runtime_name: tool for tool in planning.visible_tools}
+    routable = {tool.runtime_name: tool for tool in planning.routable_tools}
+
+    assert "vrcforge_core_upgrade_status" in visible
+    assert visible["vrcforge_core_upgrade_status"].write is False
+    assert visible["vrcforge_core_upgrade_status"].block == "project_environment/assets_packages"
+    assert "vrcforge_install_unity_core" not in visible
+    assert routable["vrcforge_install_unity_core"].write is True
 
 
 def test_visual_artifact_routing_does_not_misclassify_expression_trigger_as_behavior() -> None:
@@ -282,7 +318,7 @@ def test_shared_unity_facades_reuse_external_blocks_and_schemas_inside() -> None
             write=True,
             block=external_block,
         )["inputSchema"]
-        assert internal.input_schema == bounded_planner_tool_schema(canonical)
+        assert_internal_write_schema(internal.input_schema, canonical, approved_execution=handler.requires_approved_execution_context)
         assert internal.definition_digest
 
 
@@ -374,7 +410,7 @@ def test_all_shared_unity_atoms_keep_internal_external_contract_parity() -> None
         )
         canonical = external_catalog[name]["inputSchema"]
         assert external_catalog[name]["inputSchema"] == canonical
-        assert internal.input_schema == bounded_planner_tool_schema(canonical)
+        assert_internal_write_schema(internal.input_schema, canonical, approved_execution=handler.requires_approved_execution_context)
         assert internal.definition_digest == external_catalog[name]["definitionDigest"]
         assert internal.description == external_catalog[name]["description"]
         assert external_catalog[name]["canonicalName"]

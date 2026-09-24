@@ -14,6 +14,7 @@ path.
 
 import copy
 import json
+import re
 import tempfile
 import unittest
 from contextlib import contextmanager
@@ -25,6 +26,7 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 import dashboard_server
+from agent_gateway import find_current_pending_question
 from approved_unity_execution import current_approved_unity_execution
 from agent_harness_journey import RuntimeJourneyReceiptAuthority
 from agent_task_loop import (
@@ -35,6 +37,7 @@ from agent_task_loop import (
 )
 from provider_configuration_service import ProviderApiConfig
 from runtime_planner_service import PlannerModelResult
+from vrchat_blendshape_agent import LlmPlanResponse
 from agent_runtime_skill_executor import AgentRuntimeSkillExecutor
 from execution_target import canonical_namespace, project_identity
 
@@ -301,6 +304,143 @@ class AgentLoopP0Tests(unittest.TestCase):
         self.assertGreaterEqual(len(planner_prompts), 2)
         self.assertIn("Retry with block=avatar_structure/hierarchy_components", planner_prompts[1])
         self.assertNotEqual(result["plan"].get("nextStep"), "tool_failed")
+
+    def test_failed_loader_then_correct_subset_then_question_keeps_question_pending(self) -> None:
+        """A live question must remain the visible wait after an older loader failure."""
+        project = self._unity_project()
+        plans = iter(
+            [
+                {
+                    "action": "skill",
+                    "skill_tool": "load_internal_tool_block",
+                    "skill_params": {
+                        "block": "behavior/parameters_menus_layers",
+                        "tools": ["unity_scan_avatar_items"],
+                    },
+                },
+                {
+                    "action": "skill",
+                    "skill_tool": "load_internal_tool_block",
+                    "skill_params": {
+                        "block": "avatar_structure/hierarchy_components",
+                        "tools": ["unity_scan_avatar_items"],
+                    },
+                },
+                {
+                    "action": "skill",
+                    "skill_tool": "vrcforge_ask_user",
+                    "skill_params": {"question": "Continue after the loader correction?"},
+                },
+            ]
+        )
+        with patch.object(
+            dashboard_server._RUNTIME_PLANNER_MODEL,
+            "plan",
+            side_effect=lambda _prompt: PlannerModelResult(
+                text=json.dumps(next(plans)), usage={}, reasoning={}, planner_label="fixture"
+            ),
+        ):
+            result = self.gateway.runtime_message(
+                {
+                    "message": "Load diagnostics and ask before continuing",
+                    "provider": "fixture",
+                    "model": "fixture",
+                    "projectPath": str(project),
+                    "projectRoot": str(project),
+                    "session_id": "loader-question-regression",
+                    "client_turn_id": "loader-question-regression-turn",
+                }
+            )
+
+        self.assertEqual(
+            [step["outcome"]["status"] for step in result["steps"]],
+            ["failed", "ok", "needs_user_action"],
+        )
+        self.assertEqual(result["plan"]["nextStep"], "needs_user_action", result)
+        self.assertEqual(result["plan"]["completionGate"]["status"], "needs_user_action")
+        self.assertIn("Continue after the loader correction?", result["plan"]["reply"], result)
+        self.assertEqual(result["steps"][0]["outcome"]["status"], "failed")
+
+    def test_rejected_loader_then_different_valid_subset_can_finish(self) -> None:
+        project = self._unity_project()
+        good = {"block": "diagnostics_build/compile_logs", "tools": ["health"]}
+        action_id = canonical_action_id("skill", "vrcforge_load_internal_tool_block", good)
+        plans = iter([
+            {"action": "skill", "skill_tool": "load_internal_tool_block",
+             "skill_params": {"block": "core", "tools": ["ask_user", "health"]}},
+            {"action": "skill", "skill_tool": "load_internal_tool_block", "skill_params": good},
+            {"action": "reply", "reply": "Discovery corrected; no write performed.",
+             "completion_claim": {"satisfied": True, "evidence_action_ids": [action_id]}},
+        ])
+        with patch.object(dashboard_server._RUNTIME_PLANNER_MODEL, "plan", side_effect=lambda _prompt:
+            PlannerModelResult(text=json.dumps(next(plans)), usage={}, reasoning={}, planner_label="fixture")):
+            result = self.gateway.runtime_message({
+                "message": "Discover available diagnostics", "provider": "fixture", "model": "fixture",
+                "projectPath": str(project), "projectRoot": str(project),
+                "session_id": "loader-subset-completion", "client_turn_id": "loader-subset-turn",
+            })
+        self.assertEqual([s["outcome"]["status"] for s in result["steps"]], ["failed", "ok"])
+        self.assertEqual(result["plan"]["nextStep"], "done", result["plan"])
+        self.assertEqual(result["plan"]["reply"], "Discovery corrected; no write performed.")
+
+    def test_historical_question_does_not_override_later_successful_turn(self) -> None:
+        historical_question = {
+            "tool": "vrcforge_ask_user",
+            "historical": True,
+            "outcome": {"status": "needs_user_action"},
+            "result": {"question": {"questionId": "answered-question"}},
+        }
+        successful_current_steps = [
+            historical_question,
+            {"tool": "vrcforge_refresh_asset_database", "outcome": {"status": "ok"}},
+        ]
+        self.assertIsNone(find_current_pending_question(successful_current_steps))
+        current_question = {
+            **historical_question,
+            "historical": False,
+            "result": {"question": {"questionId": "current-question"}},
+        }
+        self.assertIs(find_current_pending_question([historical_question, current_question]), current_question)
+
+    def test_four_core_loader_failure_three_diagnostics_subset_then_question_waits(self) -> None:
+        project = self._unity_project()
+        plans = iter([
+            {"action": "skill", "skill_tool": "load_internal_tool_block", "skill_params": {
+                "block": "core",
+                "tools": ["know_yourself", "tool_registry", "unity_external_tool_blocks", "health"],
+            }},
+            {"action": "skill", "skill_tool": "load_internal_tool_block", "skill_params": {
+                "block": "diagnostics_build/compile_logs",
+                "tools": ["health", "tool_registry", "unity_external_tool_blocks"],
+            }},
+            {"action": "skill", "skill_tool": "vrcforge_ask_user", "skill_params": {
+                "question": "Continue after diagnostics?",
+            }},
+        ])
+        with patch.object(
+            dashboard_server._RUNTIME_PLANNER_MODEL,
+            "plan",
+            side_effect=lambda _prompt: PlannerModelResult(
+                text=json.dumps(next(plans)), usage={}, reasoning={}, planner_label="fixture"
+            ),
+        ):
+            result = self.gateway.runtime_message({
+                "message": "Load diagnostics and ask before continuing",
+                "provider": "fixture", "model": "fixture",
+                "projectPath": str(project), "projectRoot": str(project),
+                "session_id": "four-core-three-diagnostics-question",
+                "client_turn_id": "four-core-three-diagnostics-question-turn",
+            })
+        self.assertEqual(
+            [(step["outcome"]["status"], step["tool"]) for step in result["steps"]],
+            [("failed", "vrcforge_load_internal_tool_block"),
+             ("ok", "vrcforge_load_internal_tool_block"),
+             ("needs_user_action", "vrcforge_ask_user")],
+        )
+        self.assertEqual(result["plan"]["nextStep"], "needs_user_action", result)
+        self.assertIn("Continue after diagnostics?", result["plan"]["reply"])
+        self.assertTrue(any(item["status"] == "superseded" and item["outcome"]["status"] == "failed"
+                            for item in result["plan"]["task"]["actions"]))
 
     def test_cross_block_selection_still_stops_without_unity_context(self) -> None:
         """The recovery evidence must not expose Unity tools in a general turn."""
@@ -1199,6 +1339,39 @@ class AgentLoopP0Tests(unittest.TestCase):
             )
         )
 
+    def test_explicit_exit_of_real_guide_continues_original_read_without_completion_credit(self) -> None:
+        import shutil
+        from bundled_skill_delivery import SKILL_NAME
+
+        source = Path(dashboard_server.__file__).parent / "examples/skill-packages/vrcforge-first-run-guide"
+        shutil.copytree(source, self.gateway.skills.user_skills_dir / SKILL_NAME)
+        arguments = {"projectPath": str(Path(self.temp_dir.name)), "avatarPath": "FinalAvatar"}
+        action_id = canonical_action_id("skill", "vrcforge_scan_wardrobe", arguments)
+
+        def step(tool, params):
+            return {"planner": "llm", "skillNeeded": True, "skillTool": tool, "skillParams": params,
+                    "continueLoop": True, "nextStep": "call_skill"}
+
+        plans = iter([
+            step(SKILL_NAME, {}),
+            step("vrcforge_scan_wardrobe", arguments),
+            step("vrcforge_exit_skill", {"name": SKILL_NAME, "reason": "Continue the original wardrobe inspection."}),
+            step("vrcforge_scan_wardrobe", arguments),
+            {"planner": "llm", "reply": "The original inspection finished.", "continueLoop": False,
+             "nextStep": "done", "completionClaim": {"satisfied": True, "evidenceActionIds": [action_id]}},
+        ])
+        with patch.object(self.gateway.runtime_planner, "plan_agent_turn", side_effect=lambda *_args, **_kwargs: next(plans)), patch.object(
+            self.gateway._tools["vrcforge_scan_wardrobe"], "handler", return_value={"ok": True, "wardrobes": []},
+        ) as scan:
+            result = self.gateway.runtime_message({"message": "Use the guide then inspect FinalAvatar's wardrobe", "session_id": "real-guide-exit"})
+        self.assertEqual(scan.call_count, 1)
+        self.assertTrue(any(item.get("tool") == "vrcforge_scan_wardrobe" and item.get("status") == "blocked" for item in result["steps"]))
+        exit_step = next(item for item in result["steps"] if item.get("tool") == "vrcforge_exit_skill")
+        self.assertFalse(exit_step.get("actionId"), "Leaving instruction scope is not original-task completion evidence")
+        self.assertFalse(exit_step["result"]["completionVerified"])
+        self.assertEqual(result["plan"]["nextStep"], "done")
+        self.assertEqual(result["plan"]["taskCompletion"]["evidenceActionIds"], [action_id])
+
     def test_repeated_skill_policy_denial_stops_without_executing_forbidden_tool(self) -> None:
         calls = []
 
@@ -1903,6 +2076,55 @@ class AgentLoopP0Tests(unittest.TestCase):
         )
         self.assertEqual(result["plan"]["nextStep"], "done", result)
         self.assertEqual(result["plan"]["taskCompletion"]["status"], "completed")
+
+    def test_completion_gate_retry_keeps_provider_draft_out_of_assistant_body(self) -> None:
+        prompts, events = [], []
+
+        def request(_settings, prompt, *, stream_callback, **_kwargs):
+            prompts.append(prompt)
+            if len(prompts) == 1:
+                plan = {"action": "shell", "shell_command": "Get-ChildItem -LiteralPath ."}
+            elif len(prompts) == 2:
+                plan = {"action": "reply", "reply": "UNACCEPTED_DRAFT"}
+            else:
+                self.assertIn("runtime_completion_gate", prompt)
+                self.assertIn("correct_completion_claim", prompt)
+                ids = list(dict.fromkeys(re.findall(r"action_[a-f0-9]+", prompt)))
+                self.assertTrue(ids)
+                plan = {"action": "reply", "reply": "ACCEPTED_FINAL", "completion_claim": {
+                    "satisfied": True, "evidence_action_ids": ids,
+                }}
+            text = json.dumps(plan)
+            stream_callback(text)
+            return LlmPlanResponse(text=text, reasoning={}, usage={})
+
+        with patch.object(dashboard_server, "request_llm_plan_with_metadata", side_effect=request), patch.object(
+            dashboard_server.EVENT_BUS, "broadcast_from_sync", side_effect=lambda kind, payload: events.append((kind, payload)),
+        ), patch.object(self.gateway.shell, "execute", return_value={
+            "ok": True, "status": "executed", "sessionId": "stream-gate-shell",
+            "session": {"sessionId": "stream-gate-shell", "status": "finished"},
+            "classification": {"risk": "low", "protectionScope": "host"},
+            "result": {"ok": True, "exitCode": 0, "stdout": "fixture.txt"},
+        }):
+            result = self.gateway.runtime_message({
+                "message": "Inspect this ordinary local directory.", "cwd": str(Path.cwd()),
+                "session_id": "stream-gate-session", "client_turn_id": "stream-gate-turn",
+                "_projectContextActive": False,
+            })
+
+        self.assertEqual(len(prompts), 3, result)
+        self.assertEqual(result["plan"]["reply"], "ACCEPTED_FINAL")
+        self.assertEqual(result["plan"]["taskCompletion"]["status"], "completed")
+        assistant_events = [item for item in result["timeline"] if item.get("kind") == "assistant"]
+        self.assertEqual(len(assistant_events), 1, result["timeline"])
+        published = [payload["timelineEvent"] for kind, payload in events
+                     if kind == "agentRuntimeDelta" and "timelineEvent" in payload
+                     and payload["timelineEvent"]["kind"] == "assistant"]
+        self.assertEqual(published, assistant_events)
+        self.assertEqual(published[0]["payload"]["summary"], "ACCEPTED_FINAL")
+        self.assertTrue(any(payload.get("phase") == "running_tool" for _, payload in events))
+        self.assertNotIn("UNACCEPTED_DRAFT", repr(events))
+        self.assertNotIn('"action":', repr(events))
 
     def test_projectless_completion_claim_correction_is_bounded_and_fails_closed(self) -> None:
         gateway = self.gateway
@@ -3658,7 +3880,7 @@ class AgentLoopP0Tests(unittest.TestCase):
         with patch.object(
             dashboard_server.PROVIDER_CONFIGURATION,
             "current_api_config",
-            return_value=SimpleNamespace(
+            return_value=ProviderApiConfig(
                 provider="",
                 api_key="",
                 base_url="",
@@ -3719,7 +3941,7 @@ class AgentLoopP0Tests(unittest.TestCase):
         with patch.object(
             dashboard_server.PROVIDER_CONFIGURATION,
             "current_api_config",
-            return_value=SimpleNamespace(
+            return_value=ProviderApiConfig(
                 provider="",
                 api_key="",
                 base_url="",

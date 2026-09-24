@@ -1,7 +1,7 @@
 ---
 name: vrcforge-first-run-guide
 title: 连接引导与日常排障
-description: Guide a complete beginner through VRCForge model-provider or external MCP setup, existing Unity project selection, bundled Core installation or manual unitypackage import, compilation, connection diagnosis and verified recovery. Use for first-run setup and everyday provider, project, Core, compile or MCP connection failures, not ordinary avatar edits or unrelated network questions.
+description: Guide a complete beginner through VRCForge model-provider or external MCP setup, existing Unity project selection, bundled Core installation or manual unitypackage import, compilation, connection diagnosis, verified recovery, and the existing approved user Unity-tool package workflow. Use for first-run setup, everyday provider/project/Core/compile/MCP failures, or authoring and verifying a user tool package; not ordinary avatar edits or unrelated network questions.
 permission-mode: approval_required
 risk-level: high
 workflow-domain: diagnostics
@@ -23,6 +23,11 @@ allowed-tools:
   - vrcforge_restore_unity_core
   - vrcforge_core_upgrade_status
   - vrcforge_get_compile_errors
+  - vrcforge_list_user_unity_tools
+  - vrcforge_install_user_unity_tools
+  - vrcforge_invoke_user_unity_tool
+  - vrcforge_refresh_asset_database
+  - vrcforge_exit_skill
   - vrcforge_package_manager_status
   - vrcforge_package_install_plan
   - vrcforge_diagnose_package_install_errors
@@ -30,6 +35,7 @@ allowed-tools:
 support-files:
   - workflows/first-run.json
   - references/repair-guide.md
+  - references/user-tool-author-guide.md
 ---
 
 # Purpose and triggering
@@ -37,6 +43,21 @@ support-files:
 when-to-use: 用户第一次使用、不知道如何开始，或请求帮助连接/修复 VRCForge 与 Unity。用户可以完全不知道 MCP、Core、工程目录的含义。
 
 when-NOT-to-use: 普通改模已经连通、一般互联网问题、仅讨论原理、用户禁止操作。例：“什么是 MCP”只解释；“帮我把 VRCForge 连到我的工程”才进入本流程。
+
+For a user-tool authoring request, read `references/user-tool-author-guide.md`, use the existing discovery/load controls to expose the public Gateway user-tool tools, and keep install/invoke behind their existing approval and checkpoint flow. Do not expose the Core-facing wrapper names as author APIs.
+
+After this Skill's diagnosis and verification branch is complete, explicitly leave its active scope before continuing the user's original task:
+
+```json
+{
+  "name": "vrcforge-first-run-guide",
+  "reason": "diagnosis and verification complete; continue the original task"
+}
+```
+
+Call the existing internal `vrcforge_exit_skill` with that exact active Skill name. This exits only the guide policy; it does not claim the repair or original task is complete, and pending approvals or actions must be handled first. For user-tool authoring, read `references/user-tool-author-guide.md` first, exit this diagnosis scope, then use the general file/package workflow to prepare the package; installation and invocation still use the existing approval path.
+
+Bundled delivery seeds only an absent guide. On an existing profile it returns `preserved` and must not overwrite the user's projected guide. To intentionally update that profile, export the reviewed guide source as a `.vsk` with the existing `SkillPackageService.export_dev`, then use the existing package import route with `projectToUserSkills: true`, and read back `/api/app/skills` plus `vrcforge_read_installed_skill`. Do not call bundled delivery as an update mechanism.
 
 Use the user's language. Keep technical fields in tool calls; explain to the user what to choose or click. Ask only for facts or choices that cannot be safely observed. Preserve the original editing task and resume it after readiness is verified.
 
@@ -88,6 +109,8 @@ Follow the repair guide's branches. Read actual logs/status before selecting one
 Use `vrcforge_core_upgrade_status`, `vrcforge_unity_status`, `vrcforge_unity_tools` and `vrcforge_get_compile_errors` to distinguish installation, reload, compilation, wrong instance and missing tools. Do not overwrite working Core just because Unity is compiling.
 
 Every write follows the current permission/confirmation path. External callers echo only the exact confirmation returned for that operation; internal callers use the App's existing supervised write path. Skill text is neither a blanket approval nor a new executable tool. Recovery needs separate approval and exact evidence from the same installation.
+
+When the user asks to author, install or repair a Unity user tool, read `references/user-tool-author-guide.md` first. It documents the existing descriptor and generated-record contract; it does not grant permission to compile, install or invoke code.
 
 ## 6. Finish honestly
 

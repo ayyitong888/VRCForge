@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 from pathlib import Path
+from dataclasses import replace
 from typing import Any
 
 import dashboard_server
@@ -54,7 +55,7 @@ def _ports(*, calls: list[dict[str, Any]]) -> DoctorReadinessReportPorts:
     }
     return DoctorReadinessReportPorts(
         build_health=lambda: health,
-        serialize_api_config=lambda: {"provider": "openai", "apiKeyRequired": True, "apiKeyPresent": True, "model": "model", "base_url": "https://example.invalid"},
+        serialize_api_config=lambda: {"provider": "openai", "configured": True, "apiKeyRequired": True, "apiKeyPresent": True, "model": "model", "base_url": "https://example.invalid"},
         safe_agent_health=lambda: {"enabled": True, "requiresToken": True, "mcpUrl": "http://127.0.0.1:8757/mcp", "pendingApprovalCount": 0, "allowWriteRequests": False},
         safe_agent_manifest=lambda: {"writeTargets": ["request"]},
         safe_permission_state=lambda: {"allowWriteRequests": False},
@@ -132,3 +133,15 @@ def test_doctor_readiness_service_projects_existing_schema_from_fake_ports() -> 
 
 def test_dashboard_constructs_doctor_report_service_with_frozen_ports() -> None:
     assert isinstance(dashboard_server.DOCTOR_READINESS_REPORT, DoctorReadinessReportService)
+
+
+def test_provider_test_uses_configuration_owner_without_claiming_test_success():
+    ports = _ports(calls=[])
+    for configured, expected in [(False, "warning"), (True, "unknown")]:
+        projection = {"provider": "openai", "configured": configured,
+                      "apiKeyRequired": True, "apiKeyPresent": True}
+        report = DoctorReadinessReportService(replace(
+            ports, serialize_api_config=lambda: projection,
+        )).build_app_doctor_report()
+        check = next(item for item in report["checks"] if item["id"] == "provider.test")
+        assert check["status"] == expected

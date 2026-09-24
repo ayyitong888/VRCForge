@@ -207,6 +207,26 @@ export function buildDurableTimelineRows(
   let processEventCount = 0;
   let processHasFailure = false;
   let processHasStarted = false;
+  let processGroupIndex = 0;
+  const flushProcessRows = () => {
+    if (!processRows.length) return;
+    rows.push(
+      <div key={`agent-turn-process-${processGroupIndex++}`} data-agent-turn-process-group>
+        <WorkSegmentRow
+          kind="process"
+          title={i18n.t("agent.workSegment")}
+          statusLabel={i18n.t("agent.workSegmentItems", { count: processEventCount })}
+          statusTone={processHasFailure ? "danger" : processHasStarted ? "warn" : "muted"}
+          showStatus
+        >
+          {processRows.splice(0)}
+        </WorkSegmentRow>
+      </div>,
+    );
+    processEventCount = 0;
+    processHasFailure = false;
+    processHasStarted = false;
+  };
   if (Number.isFinite(presentation.elapsedSeconds)) {
     rows.push(
       <div key="agent-turn-duration" data-agent-turn-duration className="px-1 text-xs text-muted-foreground">
@@ -239,67 +259,20 @@ export function buildDurableTimelineRows(
       continue;
     }
     if (entry.kind === "process") {
+      flushProcessRows();
       for (const invocation of entry.invocations) {
-        processEventCount += 1;
-        processHasFailure ||= ["failed", "error"].includes(invocation.status.toLowerCase());
-        processHasStarted ||= invocation.status === "started";
-        processRows.push(renderDirectTimelineInvocation(invocation, takeFullResult(invocation)));
+        rows.push(renderDirectTimelineInvocation(invocation, takeFullResult(invocation)));
       }
       continue;
     }
-    if (entry.invocations.length === 1) {
+    for (const invocation of entry.invocations) {
       processEventCount += 1;
-      processHasFailure ||= ["failed", "error"].includes(entry.invocations[0].status.toLowerCase());
-      processHasStarted ||= entry.invocations[0].status === "started";
-      processRows.push(renderDirectTimelineInvocation(entry.invocations[0], takeFullResult(entry.invocations[0])));
-      continue;
+      processHasFailure ||= ["failed", "error"].includes(invocation.status.toLowerCase());
+      processHasStarted ||= invocation.status === "started";
+      processRows.push(renderDirectTimelineInvocation(invocation, takeFullResult(invocation)));
     }
-    processEventCount += entry.invocations.length;
-    processHasFailure ||= entry.invocations.some((invocation) => ["failed", "error"].includes(invocation.status.toLowerCase()));
-    processHasStarted ||= entry.invocations.some((invocation) => invocation.status === "started");
-    const failed = entry.invocations.some((invocation) => ["failed", "error"].includes(invocation.status.toLowerCase()));
-    processRows.push(
-      <WorkSegmentRow
-        key={entry.id}
-        kind={entry.kind}
-        title={workBatchTitle(entry.kind, entry.invocations.length)}
-        statusLabel={i18n.t("agent.workSegmentItems", { count: entry.invocations.length })}
-        statusTone={failed ? "danger" : "muted"}
-      >
-        {entry.invocations.map((invocation) => {
-          const danger = ["failed", "error"].includes(invocation.status.toLowerCase());
-          const fullResult = takeFullResult(invocation);
-          return (
-            <RunRow
-              key={invocation.id}
-              icon={workBatchIcon(entry.kind)}
-              title={timelineInvocationDisplayLabel(invocation.label)}
-              statusTone={danger ? "danger" : invocation.status === "started" ? "warn" : "ok"}
-              statusLabel={invocation.status}
-              detailCard
-            >
-              <InvocationDetailCard invocation={invocation} detail={fullResult} />
-            </RunRow>
-          );
-        })}
-      </WorkSegmentRow>,
-    );
   }
-  if (processRows.length) {
-    rows.push(
-      <div key="agent-turn-process" data-agent-turn-process-group>
-        <WorkSegmentRow
-          kind="process"
-          title={i18n.t("agent.workSegment")}
-          statusLabel={i18n.t("agent.workSegmentItems", { count: processEventCount })}
-          statusTone={processHasFailure ? "danger" : processHasStarted ? "warn" : "muted"}
-          showStatus
-        >
-          {processRows}
-        </WorkSegmentRow>
-      </div>,
-    );
-  }
+  flushProcessRows();
   rows.push(...assistantRows);
   return rows;
 }
@@ -829,15 +802,18 @@ function buildLegacyAgentTimelineRows({
   return rows;
 }
 
-function normalizeAgentSteps(steps: AgentRuntimeResponse["steps"]): OrderedAgentStep[] {
-  return (steps || []).map((step, sourceIndex) => ({ step, sourceIndex })).sort((left, right) => {
+export function normalizeAgentSteps(steps: AgentRuntimeResponse["steps"]): OrderedAgentStep[] {
+  return (steps || [])
+    .map((step, sourceIndex) => ({ step: step as AgentTimelineStep, sourceIndex }))
+    .filter(({ step }) => step.historical !== true)
+    .sort((left, right) => {
     const leftIndex = typeof left.step.index === "number" ? left.step.index : Number.MAX_SAFE_INTEGER;
     const rightIndex = typeof right.step.index === "number" ? right.step.index : Number.MAX_SAFE_INTEGER;
     if (leftIndex !== rightIndex) {
       return leftIndex - rightIndex;
     }
     return left.sourceIndex - right.sourceIndex;
-  });
+    });
 }
 
 function normalizeAgentStepKind(kind: string, tool = ""): string {
@@ -970,7 +946,7 @@ export function RunRow({
         </span>
       </button>
       {open ? (
-        <div className={cn("ml-6 mt-1", detailCard ? "" : "space-y-2 rounded-lg bg-muted/40 px-3 py-2 text-xs")}>
+        <div className={cn("mt-1", detailCard ? "" : "space-y-2 rounded-lg bg-muted/40 px-3 py-2 text-xs")}>
           {children}
         </div>
       ) : null}
@@ -1009,7 +985,7 @@ function WorkSegmentRow({
           {open ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
         </span>
       </button>
-      {open ? <div className="ml-6 mt-1 space-y-1 rounded-lg bg-muted/20 px-2 py-1"><div className="text-xs text-muted-foreground">{statusLabel}</div>{children}</div> : null}
+      {open ? <div className="mt-1 space-y-1 rounded-lg bg-muted/20 py-1">{children}</div> : null}
     </div>
   );
 }

@@ -172,6 +172,14 @@ pub(crate) struct DesktopAgentRunCancelRequest {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct DesktopAgentTurnResponseRequest {
+    session_id: String,
+    client_turn_id: String,
+    timeout_ms: Option<u64>,
+}
+
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DesktopAgentRunQueuedRequest {
     session_id: Option<String>,
@@ -2157,6 +2165,25 @@ pub fn uninstall_skill_package(
 }
 
 #[tauri::command]
+pub async fn request_unity_tool_install(
+    request: DesktopIdJsonBodyRequest,
+) -> Result<serde_json::Value, String> {
+    blocking_backend_json_request(move || {
+        backend_json_request(
+            "POST",
+            format!(
+                "/api/app/skill-packages/{}/unity-tools/install",
+                percent_encode_query_component(&request.id)
+            ),
+            Some(request.body),
+            request.timeout_ms.or(Some(60_000)),
+        )
+        .map(sanitize_webview_response)
+    })
+    .await
+}
+
+#[tauri::command]
 pub fn preview_path_to_skill(request: DesktopJsonBodyRequest) -> Result<serde_json::Value, String> {
     post_json_body_command("/api/app/path-to-skill/preview", request, 120_000)
 }
@@ -2346,6 +2373,50 @@ pub async fn fetch_agent_runs(
         .map(sanitize_webview_response)
     })
     .await
+}
+
+#[tauri::command]
+pub async fn fetch_agent_turn_response(
+    request: DesktopAgentTurnResponseRequest,
+) -> Result<serde_json::Value, String> {
+    let path = agent_turn_response_path(&request.session_id, &request.client_turn_id)?;
+    // Same authenticated loopback backend and request-owned blocking lifetime
+    // as the other typed reads; this never starts or retries an Agent turn.
+    // The Gateway returns the same public response as send_agent_message.
+    blocking_backend_json_request(move || {
+        backend_json_request("GET", path, None, request.timeout_ms.or(Some(10_000)))
+    })
+    .await
+}
+
+fn agent_turn_response_path(session_id: &str, client_turn_id: &str) -> Result<String, String> {
+    if session_id.trim().is_empty() || client_turn_id.trim().is_empty() {
+        return Err("sessionId and clientTurnId are required.".to_string());
+    }
+    Ok(format!(
+        "/api/app/agent/session/{}?clientTurnId={}",
+        percent_encode_query_component(session_id),
+        percent_encode_query_component(client_turn_id),
+    ))
+}
+
+#[cfg(test)]
+mod agent_turn_response_tests {
+    use super::agent_turn_response_path;
+
+    #[test]
+    fn exact_turn_response_read_requires_both_identities() {
+        assert!(agent_turn_response_path("", "turn").is_err());
+        assert!(agent_turn_response_path("session", " ").is_err());
+    }
+
+    #[test]
+    fn exact_turn_response_read_encodes_identity_without_changing_route() {
+        assert_eq!(
+            agent_turn_response_path("session/a?b", "turn:1&other=2").unwrap(),
+            "/api/app/agent/session/session%2Fa%3Fb?clientTurnId=turn%3A1%26other%3D2"
+        );
+    }
 }
 
 #[tauri::command]
@@ -3086,8 +3157,19 @@ pub async fn fetch_chats(request: DesktopChatListRequest) -> Result<serde_json::
 }
 
 #[tauri::command]
-pub fn save_chats(request: DesktopJsonBodyRequest) -> Result<serde_json::Value, String> {
-    post_json_body_command("/api/app/chats", request, 60_000)
+pub async fn save_chats(
+    request: DesktopJsonBodyRequest,
+) -> Result<serde_json::Value, BackendJsonErrorEnvelope> {
+    blocking_backend_json_request_with_error_envelope(move || {
+        backend_json_request_with_error_envelope(
+            "POST",
+            "/api/app/chats".to_string(),
+            Some(request.body),
+            request.timeout_ms.or(Some(60_000)),
+        )
+        .map(sanitize_webview_response)
+    })
+    .await
 }
 
 /// Hard shell-side ceiling for chat attachment uploads. The backend vault

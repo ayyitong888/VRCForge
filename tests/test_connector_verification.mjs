@@ -14,6 +14,11 @@ const fresh = {
   } },
 };
 assert.equal(hasRecentConnectorSelfTest(fresh, true, "project-a", 119000), true);
+const projected = structuredClone(fresh);
+projected.connectorActions.codexApp.handshake = { ready: true };
+assert.equal(hasRecentConnectorSelfTest(projected, true, "project-a", 119000), true);
+projected.connectorActions.codexApp.handshake.ready = false;
+assert.equal(hasRecentConnectorSelfTest(projected, true, "project-a", 119000), false);
 assert.equal(hasRecentConnectorSelfTest(fresh, false, "project-a", 119000), false);
 assert.equal(hasRecentConnectorSelfTest(fresh, true, "project-b", 119000), false);
 assert.equal(hasRecentConnectorSelfTest(fresh, true, "project-a", 120000), false);

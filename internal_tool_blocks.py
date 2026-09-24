@@ -135,6 +135,9 @@ def canonical_tool_block_description(block_id: str) -> str:
 
 
 def canonical_tool_owner(block: str, name: str) -> str:
+    # Internal Unity projections namespace the same legacy external block.
+    # Remove that transport prefix before applying its routing semantics.
+    block = str(block or "").strip().casefold().removeprefix("unity/")
     canonical_block = canonical_external_block(block)
     if str(block or "").strip().casefold() in CANONICAL_TOOL_LEAVES:
         return canonical_block
@@ -216,6 +219,7 @@ _CORE_TOOLS = frozenset(
         "vrcforge_list_internal_tool_blocks",
         "vrcforge_load_internal_tool_block",
         "vrcforge_unload_internal_tool_block",
+        "vrcforge_exit_skill",
     }
 )
 _FILE_TOOLS = frozenset(
@@ -263,6 +267,8 @@ _DIAGNOSTIC_TOOLS = frozenset(
         "vrcforge_import_skill_package",
         "vrcforge_list_skill_packages",
         "vrcforge_list_installed_skills",
+        "vrcforge_list_user_unity_tools",
+        "vrcforge_invoke_user_unity_tool",
         "vrcforge_read_installed_skill",
         "vrcforge_mcp_write",
         "vrcforge_preflight_skill_package",

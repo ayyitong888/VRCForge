@@ -4,6 +4,7 @@ import hashlib
 import json
 import re
 import time
+from concurrent.futures import CancelledError
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Sequence
 
@@ -598,6 +599,8 @@ def compact_context(
             attempts += 1
             try:
                 raw = summarizer(prompt)
+            except CancelledError:
+                raise
             except Exception as exc:  # noqa: BLE001 - provider adapters have heterogeneous errors.
                 fallback_reason, retryable = _provider_error_kind(exc)
                 if not retryable or attempts >= MAX_PROVIDER_ATTEMPTS:

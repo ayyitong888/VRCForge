@@ -14,7 +14,7 @@ from agent_task_loop import canonical_action_id
 from tests.test_agent_configured_provider_loop import (
     _configured_service,
     _isolated_gateway,
-    _planner_loopback,
+    _provider_protocol_loopback,
 )
 
 
@@ -41,8 +41,10 @@ def test_configured_loop_reads_real_chat_diagnostic_before_approved_repair(tmp_p
             "evidence_action_ids": [canonical_action_id("skill", "vrcforge_inspect_project_chat_store", {"projectPath": str(project)})],
         },
     }]
-    with _planner_loopback(responses, records) as base_url:
-        configured = _configured_service(tmp_path / "provider.json", base_url)
+    # These repair and approval journeys cover the legacy Responses-compatible
+    # provider route; Chat Completions native tool_calls are covered separately.
+    with _provider_protocol_loopback("responses", responses, records) as base_url:
+        configured = _configured_service(tmp_path / "provider.json", base_url, "responses")
         with _isolated_gateway(tmp_path) as gateway:
             with patch.object(dashboard_server, "PROVIDER_CONFIGURATION", configured):
                 result = gateway.runtime_message({"message": "Inspect the selected project chat store.", "provider": "custom", "model": "loop-model", "session_id": "repair-loop", "client_turn_id": "repair-loop-turn", "maxAgenticTurns": 3})
@@ -82,8 +84,8 @@ def test_configured_loop_pending_approval_then_independent_readback(tmp_path: Pa
         {"action": "enter_execution", "summary": "Request supervised repair approval.", "continueLoop": True},
         {"action": "write", "write_tool": "unity_repair_project_chat_store", "write_params": {"projectPath": str(project), "expectedDigest": digest, "storeId": target.store_id, "executionTarget": execution_target}, "continueLoop": True},
     ]
-    with _planner_loopback(first_responses, first_records) as base_url:
-        configured = _configured_service(tmp_path / "provider-first.json", base_url)
+    with _provider_protocol_loopback("responses", first_responses, first_records) as base_url:
+        configured = _configured_service(tmp_path / "provider-first.json", base_url, "responses")
         with _isolated_gateway(tmp_path) as gateway:
             with patch.object(dashboard_server, "PROVIDER_CONFIGURATION", configured), patch.object(dashboard_server, "DIAGNOSTIC_LOGGER", diagnostic_logger):
                 pending = gateway.runtime_message({"message": "Inspect and repair the corrupt project chat store after my approval.", "provider": "custom", "model": "loop-model", "projectRoot": str(project), "session_id": "repair-pending", "client_turn_id": "repair-pending-turn", "maxAgenticTurns": 5})
@@ -105,8 +107,8 @@ def test_configured_loop_pending_approval_then_independent_readback(tmp_path: Pa
         {"action": "skill", "skill_tool": "unity_inspect_project_chat_store", "skill_params": {"projectPath": str(project)}, "continueLoop": True},
         {"action": "reply", "reply": "Repair is independently verified.", "continueLoop": False, "completion_claim": {"satisfied": True, "evidence_action_ids": [canonical_action_id("skill", "vrcforge_inspect_project_chat_store", {"projectPath": str(project)})]}},
     ]
-    with _planner_loopback(second_responses, second_records) as base_url:
-        configured = _configured_service(tmp_path / "provider-second.json", base_url)
+    with _provider_protocol_loopback("responses", second_responses, second_records) as base_url:
+        configured = _configured_service(tmp_path / "provider-second.json", base_url, "responses")
         with _isolated_gateway(tmp_path) as gateway:
             with patch.object(dashboard_server, "PROVIDER_CONFIGURATION", configured):
                 readback = gateway.runtime_message({"message": "Read the repaired project chat store and report its health.", "provider": "custom", "model": "loop-model", "projectRoot": str(project), "session_id": "repair-readback", "client_turn_id": "repair-readback-turn", "maxAgenticTurns": 3})
@@ -153,8 +155,8 @@ def test_configured_loop_recovers_interrupted_apply_after_human_confirmation(tmp
             {"action": "skill", "skill_tool": "unity_list_interrupted_apply_recoveries", "skill_params": {}, "continueLoop": True},
             {"action": "reply", "reply": "Independent state confirms recovery is resolved.", "continueLoop": False, "completion_claim": {"satisfied": True, "evidence_action_ids": [canonical_action_id("skill", "vrcforge_list_interrupted_apply_recoveries", {})]}},
         ]
-        with _planner_loopback(responses, records) as base_url:
-            configured = _configured_service(tmp_path / "recovery-provider.json", base_url)
+        with _provider_protocol_loopback("responses", responses, records) as base_url:
+            configured = _configured_service(tmp_path / "recovery-provider.json", base_url, "responses")
             with patch.object(dashboard_server, "PROVIDER_CONFIGURATION", configured), patch.object(dashboard_server, "DIAGNOSTIC_LOGGER", diagnostic_logger):
                 pending = gateway.runtime_message({"message": "Inspect the interrupted write and request my confirmation before resolving it.", "provider": "custom", "model": "loop-model", "projectRoot": str(project), "session_id": "recover-pending", "client_turn_id": "recover-pending-turn", "maxAgenticTurns": 6})
                 assert pending["steps"][0]["tool"] == "vrcforge_read_recent_logs"

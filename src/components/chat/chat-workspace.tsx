@@ -14,6 +14,7 @@ import type {
 } from "../../lib/chat-types";
 import { Composer } from "./composer";
 import { AgentQuestionCard } from "./agent-question-card";
+import { projectAgentQuestionContinuation, questionContinuationDisplay } from "../../hooks/use-runtime-turn-continuation";
 import { BackgroundGoalCatchUpCard } from "./background-goal-catch-up-card";
 import { ConversationCard } from "./conversation-card";
 import { SessionHandoffCard } from "./session-handoff-card";
@@ -22,6 +23,7 @@ import { ScopedPendingApprovalCard } from "../approvals/scoped-pending-approval-
 import { Button } from "../ui/button";
 import { matchPathToSkillRuntimeOperation, type PathToSkillOperationSummary } from "../../lib/path-to-skill-context";
 import { mergeConversationTimelineItems } from "../../lib/chat-thread";
+import { conversationItemRenderKey } from "../../lib/conversation-utils";
 
 function formatGoalElapsed(totalSeconds: number): string {
   const seconds = Math.max(0, Math.round(totalSeconds));
@@ -76,6 +78,7 @@ export function ChatWorkspace({
   onBackgroundGoalProviderWarningsRendered,
   onBackgroundGoalCatchUpDismiss,
   onAnswerQuestion,
+  onStopQuestionContinuation,
   conversationEndRef,
   onConversationMouseUp,
   onConversationScroll,
@@ -152,6 +155,7 @@ export function ChatWorkspace({
   onBackgroundGoalProviderWarningsRendered: (warnings: AgentGoalBackgroundAcknowledgement[]) => void;
   onBackgroundGoalCatchUpDismiss: () => void;
   onAnswerQuestion: (questionId: string, optionId: string, value: string) => void | Promise<void>;
+  onStopQuestionContinuation?: (question: AgentQuestion) => void | Promise<void>;
   conversationEndRef: Ref<HTMLDivElement>;
   onConversationMouseUp: () => void;
   onConversationScroll: (scrollElement: HTMLDivElement) => void;
@@ -194,12 +198,17 @@ export function ChatWorkspace({
   const { t } = useTranslation();
   const pendingAgentQuestions = useMemo(
     () =>
-      agentQuestions.filter(
-        (question) => (question.status || "pending").toLowerCase() === "pending",
+      agentQuestions.map((question) => projectAgentQuestionContinuation(question, runtimeRuns)).filter(
+        (question) => questionContinuationDisplay(question) !== "settled",
       ),
-    [agentQuestions],
+    [agentQuestions, runtimeRuns],
+  );
+  const waitingForQuestion = pendingAgentQuestions.some(
+    (question) => questionContinuationDisplay(question) === "pending",
   );
   const conversationItems = mergeConversationTimelineItems(conversation);
+  const conversationItemKeyOccurrences = new Map<string, number>();
+  const conversationRenderScope = sessionHandoffSourceChatId || "chat";
   const [goalActionBusy, setGoalActionBusy] = useState(false);
   const [goalActionError, setGoalActionError] = useState("");
   const [goalLocalTick, setGoalLocalTick] = useState(0);
@@ -357,13 +366,13 @@ export function ChatWorkspace({
           <div className="mx-auto max-w-3xl">
             {pendingAgentQuestions.length ? (
               <div className="mb-3">
-                <AgentQuestionCard questions={pendingAgentQuestions} onAnswerQuestion={onAnswerQuestion} />
+                <AgentQuestionCard questions={pendingAgentQuestions} onAnswerQuestion={onAnswerQuestion} onStopContinuation={onStopQuestionContinuation} />
               </div>
             ) : null}
             {queueControls}
             <CompactionStatus state={compaction} onCancel={onCancelCompaction} />
             {activeGoalBar}
-            {approvalComposer || composer(false)}
+            {approvalComposer || (waitingForQuestion ? null : composer(false))}
           </div>
         </div>
       </div>
@@ -418,7 +427,7 @@ export function ChatWorkspace({
               ? matchPathToSkillRuntimeOperation(item.response, runtimeRuns)
               : null;
             return (
-              <div key={item.id} data-conversation-item-id={item.id}>
+              <div key={conversationItemRenderKey(item, conversationRenderScope, conversationItemKeyOccurrences)} data-conversation-item-id={item.id}>
                 <ConversationCard
                 item={item}
                 approval={approval}
@@ -468,7 +477,7 @@ export function ChatWorkspace({
         <div className="mx-auto max-w-3xl">
           {pendingAgentQuestions.length ? (
             <div className="mb-3">
-              <AgentQuestionCard questions={pendingAgentQuestions} onAnswerQuestion={onAnswerQuestion} />
+              <AgentQuestionCard questions={pendingAgentQuestions} onAnswerQuestion={onAnswerQuestion} onStopContinuation={onStopQuestionContinuation} />
             </div>
           ) : null}
           {queueControls}
@@ -485,7 +494,7 @@ export function ChatWorkspace({
             </div>
           ) : null}
           {activeGoalBar}
-          {approvalComposer || composer(true)}
+          {approvalComposer || (waitingForQuestion ? null : composer(true))}
         </div>
       </div>
     </div>
