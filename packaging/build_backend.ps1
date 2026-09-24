@@ -43,7 +43,7 @@ foreach ($module in $excludeModules) {
 # Ship the same complete first-party source used for .vsk export. The backend
 # projects it for new profiles without weakening community package trust.
 $bundledGuide = Join-Path $repoRoot "examples\skill-packages\vrcforge-first-run-guide"
-$bundledManifest = Get-Content -LiteralPath (Join-Path $bundledGuide "manifest.json") -Raw | ConvertFrom-Json
+$bundledManifest = Get-Content -LiteralPath (Join-Path $bundledGuide "manifest.json") -Raw -Encoding UTF8 | ConvertFrom-Json
 $bundledGuideFiles = @("manifest.json") + @($bundledManifest.entrypoints.PSObject.Properties.Value)
 foreach ($relativePath in $bundledGuideFiles) {
     if (-not (Test-Path -LiteralPath (Join-Path $bundledGuide $relativePath) -PathType Leaf)) {

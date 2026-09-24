@@ -250,3 +250,13 @@ Regression: `tests/test_unity_status_service.py`,
 `tests/test_unity_mcp_tool_registry_runtime.py`,
 `tests/test_user_tool_commands_runtime.py`, `tests/test_user_unity_tool_gateway.py`,
 `tests/test_user_unity_tool_service.py` and `tests/test_skill_packages.py`.
+
+### Build-time manifest encoding
+
+- Read bundled package manifests as UTF-8 explicitly. Windows PowerShell must
+  parse non-ASCII package names from UTF-8 files without a byte-order mark,
+  independent of the machine's legacy code page.
+- Exercise the manifest-reading statement used by the packaging script;
+  parsing the same fixture through Python alone does not cover this boundary.
+
+Regression: `tests/test_bundled_skill_delivery.py`.

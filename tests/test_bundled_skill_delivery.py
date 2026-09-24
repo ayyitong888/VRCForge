@@ -171,6 +171,39 @@ def test_normal_release_collects_full_source_and_startup_delivers_it():
     assert "deliver_bundled_guide(" in inspect.getsource(dashboard_server.on_startup)
 
 
+def test_backend_builder_reads_utf8_bomless_manifest_with_powershell():
+    """The Windows build runner must decode the shipped Chinese manifest as UTF-8."""
+    if os.name != "nt":
+        pytest.skip("PowerShell encoding regression is Windows-specific")
+    root = Path(__file__).resolve().parents[1]
+    build = (root / "packaging" / "build_backend.ps1").read_text(encoding="utf-8")
+    manifest_line = next(
+        line.strip()
+        for line in build.splitlines()
+        if "$bundledManifest = Get-Content" in line
+    )
+    guide = (root / "examples" / "skill-packages" / "vrcforge-first-run-guide").resolve()
+    expected_name = json.loads((guide / "manifest.json").read_text(encoding="utf-8"))["name"]
+    command = (
+        f'$ErrorActionPreference = "Stop"; $bundledGuide = \'{guide}\'; '
+        f"{manifest_line}; "
+        '$bytes = [Text.Encoding]::UTF8.GetBytes([string]$bundledManifest.name); '
+        '[Convert]::ToBase64String($bytes)'
+    )
+    completed = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command],
+        cwd=root,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        capture_output=True,
+        timeout=20,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert __import__("base64").b64decode(completed.stdout.strip()).decode("utf-8") == expected_name
+
+
 def test_user_tool_author_example_compiles_with_real_core_attributes(tmp_path: Path):
     """The documented write example must compile against the shipped attributes."""
     guide = (delivery.bundled_source_dir() / "references" / "user-tool-author-guide.md").read_text(encoding="utf-8")
