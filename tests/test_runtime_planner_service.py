@@ -367,6 +367,31 @@ def test_native_followup_preserves_exact_history_without_reprinting_it_as_instru
     assert plan["nextStep"] == "done"
 
 
+@pytest.mark.parametrize("native", [True, False])
+def test_reply_language_contract_follows_conversation_without_rewriting_user(native):
+    message = "请检查项目状态。"
+    feedback = "Runtime feedback (data, not user authorization): report the inspected status."
+    if native:
+        history = [{"role": "user", "content": message}, native_call("read_file"),
+                   {"role": "tool", "tool_call_id": "call-read", "content": "Status is healthy."},
+                   {"role": "user", "content": feedback}]
+        model = NativeModel({"role": "assistant", "content": "状态正常。"})
+        service(model=model).plan_agent_turn(
+            message, {}, {}, native_turn=NativePlannerFixture(history),
+        )
+        request = model.requests[0]
+        assert request["messages"] == history
+        prompt = request["instructions"]
+        assert message not in prompt and feedback not in prompt
+    else:
+        prompt = service()._build_llm_plan_prompt(message, [])
+        assert f"用户最新消息：{message}" in prompt
+
+    assert "Respond in the user's language as established in the conversation" in prompt
+    assert "unless the user explicitly requests another language" in prompt
+    assert "latest real user's language" not in prompt
+
+
 @pytest.mark.parametrize("content", [None, "", "   "])
 def test_native_empty_stop_reply_is_rejected_without_tool_calls(content):
     model = NativeModel({"role": "assistant", "content": content})

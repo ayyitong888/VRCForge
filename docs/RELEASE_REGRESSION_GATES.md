@@ -260,3 +260,19 @@ Regression: `tests/test_unity_status_service.py`,
   parsing the same fixture through Python alone does not cover this boundary.
 
 Regression: `tests/test_bundled_skill_delivery.py`.
+
+### Reply language
+
+- Native and JSON planning use one concise reply-language rule: follow the
+  user's language established in the conversation; an explicit request for
+  another language takes precedence. A brief language switch does not require
+  an immediate reply-language switch and is not itself a regression.
+- Tool results and internal runtime feedback do not set the reply language.
+  Preserve the original conversation and tool roles; do not translate the
+  transcript or use interface locale to select the model's response language.
+- Request-contract tests prove the rule reaches both planner paths. Model
+  behavior needs separate real-provider samples: mixed-language tool results,
+  natural language switching and an explicit language override. Such samples
+  do not substitute for App acceptance or guarantee model compliance.
+
+Regression: `tests/test_runtime_planner_service.py`.
