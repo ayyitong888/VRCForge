@@ -6170,7 +6170,8 @@ class AgentGateway:
         else:
             task_loop = AgentTaskLoop(
                 message,
-                exposure_layer=EXPOSURE_LAYER_EXECUTION,
+                exposure_layer=EXPOSURE_LAYER_PLANNING if params.get("planMode") is True else EXPOSURE_LAYER_EXECUTION,
+                plan_mode=params.get("planMode") is True,
                 session_id=session_id,
                 turn_id=turn_id,
                 client_turn_id=client_turn_id,
@@ -6453,7 +6454,8 @@ class AgentGateway:
                     if required_memory_tool:
                         task_loop.require_action(kind="write", tool=required_memory_tool)
         tool_calls_used = task_loop.tool_calls_used if continuation_context else 0
-        runtime_exposure_layer = task_loop.exposure_layer
+        runtime_exposure_layer = EXPOSURE_LAYER_PLANNING if task_loop.plan_mode else task_loop.exposure_layer
+        params["planMode"] = task_loop.plan_mode
         remaining_action: dict[str, Any] | None = None
         runtime_compaction: dict[str, Any] | None = None
         runtime_compaction_attempted = False
@@ -6482,6 +6484,8 @@ class AgentGateway:
 
         def enter_runtime_execution() -> bool:
             nonlocal runtime_exposure_layer
+            if task_loop.plan_mode:
+                return False
             if runtime_exposure_layer != EXPOSURE_LAYER_PLANNING:
                 return False
             runtime_exposure_layer = EXPOSURE_LAYER_EXECUTION
@@ -6586,7 +6590,7 @@ class AgentGateway:
             })
             return planner_argument_failures >= RUNTIME_PLANNER_ARGUMENT_MAX_ATTEMPTS
 
-        if bool(params.get("_computerUseRequested")) and not self._runtime_session_state.desktop_bootstrap_completed(
+        if not task_loop.plan_mode and bool(params.get("_computerUseRequested")) and not self._runtime_session_state.desktop_bootstrap_completed(
             session_id
         ):
             bootstrap_tool = "vrcforge_agent_desktop_action"
@@ -6816,6 +6820,7 @@ class AgentGateway:
             # Keep the caller's observation immutable while exposing only the
             # runtime-owned explicit model-turn budget to the planner.
             planner_observe = dict(observe) if isinstance(observe, dict) else {}
+            planner_observe["planMode"] = task_loop.plan_mode
             max_model_turns = task_loop.budget_policy.max_model_turns
             if max_model_turns is None:
                 planner_observe.pop("modelTurnBudget", None)
@@ -6859,6 +6864,28 @@ class AgentGateway:
             last_plan = plan
             if first_plan is None:
                 first_plan = plan
+
+            # Explicit Plan is a user-owned read-only boundary, independent of
+            # global permission settings and model-proposed phase transitions.
+            plan_tool_name = str(plan.get("writeTool") or plan.get("skillTool") or "").strip()
+            plan_tool = self._tools.get(plan_tool_name)
+            if task_loop.plan_mode and (
+                plan.get("enterExecution")
+                or plan.get("writeNeeded")
+                or plan.get("shellNeeded")
+                or plan.get("shellCommand")
+                or plan_tool_name in self._write_handlers
+                or (plan_tool is not None and plan_tool.write)
+                or plan_tool_name == "vrcforge_delegate_subagent"
+                or (plan.get("skillNeeded") and plan_tool is None)
+            ):
+                last_plan = {
+                    "summary": "Plan mode permits read-only inspection only.",
+                    "reply": "Plan mode cannot execute changes or Shell commands. Turn off Plan to execute.",
+                    "nextStep": "plan_mode_blocked",
+                    "continueLoop": False,
+                }
+                break
 
             # A user steer is accepted only for this exact active turn. Drain
             # after the current model boundary and before any newly planned
@@ -8003,6 +8030,7 @@ class AgentGateway:
         first_plan = first_plan or last_plan or {}
         # 单步（含纯回复/未连接）保持与历史一致的顶层 plan 形状；多步才综合成 loop 计划。
         terminal_override = last_plan.get("scopeDenied") is True or str(last_plan.get("nextStep") or "") in {
+            "plan_mode_blocked",
             "cancelled",
             "context_compaction_required",
             "loop_suppressed",
@@ -8264,6 +8292,7 @@ class AgentGateway:
         if context_usage:
             payload["contextUsage"] = context_usage
         payload["exposureLayer"] = runtime_exposure_layer
+        payload["planMode"] = task_loop.plan_mode
         if runtime_compaction:
             payload["contextCompaction"] = runtime_compaction
         if shell_payload is not None:
@@ -8319,7 +8348,7 @@ class AgentGateway:
             target_client_turn_id=str(params.get("targetClientTurnId") or params.get("target_client_turn_id") or ""),
             message=str(params.get("message") or ""),
             attachments=params.get("attachments") if isinstance(params.get("attachments"), list) else [],
-            envelope={"provider": params.get("provider"), "model": params.get("model"), "projectPath": params.get("projectPath"), "projectRoot": params.get("projectRoot"), "projectType": params.get("projectType"), "providerLabel": params.get("providerLabel")},
+            envelope={"provider": params.get("provider"), "model": params.get("model"), "projectPath": params.get("projectPath"), "projectRoot": params.get("projectRoot"), "projectType": params.get("projectType"), "providerLabel": params.get("providerLabel"), "planMode": params.get("planMode") is True},
         )
 
     def claim_runtime_followups(self, *, session_id: str = "", owner_id: str = "", limit: int = 8, queue_id: str = "") -> list[dict[str, Any]]:

@@ -690,6 +690,7 @@ def approval_task_context(
         },
         "continueAfterApproval": seed.get("continueAfterApproval") is True,
         "approvalRevisionUsed": seed.get("approvalRevisionUsed") is True,
+        "planMode": seed.get("planMode") is True,
         "exposureLayer": (
             "execution"
             if _status(seed.get("exposureLayer")) == "execution"
@@ -1200,6 +1201,7 @@ class AgentTaskLoop:
     model_turns_used: int = 0
     budget_policy: AgentBudgetPolicy = field(default_factory=AgentBudgetPolicy)
     exposure_layer: str = "planning"
+    plan_mode: bool = False
     approval_revision_used: bool = False
     history: list[dict[str, Any]] = field(default_factory=list)
     _actions: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -1262,6 +1264,7 @@ class AgentTaskLoop:
             model_turns_used=max(0, min(int(context.get("modelTurnsUsed") or 0), 4096)),
             budget_policy=freeze_agent_budget_policy(context.get("budgetPolicy")),
             exposure_layer=str(context.get("exposureLayer") or "execution"),
+            plan_mode=context.get("planMode") is True,
             approval_revision_used=context.get("approvalRevisionUsed") is True,
             history=_bounded_history(context.get("history")),
         )
@@ -1376,6 +1379,7 @@ class AgentTaskLoop:
                 "normalToolCallLimit": None,
             },
             "exposureLayer": exposure_layer or self.exposure_layer,
+            "planMode": self.plan_mode,
             # These are completion obligations, not a conversational preview.
             # Dropping older entries lets approval resume forget unresolved
             # failures or missing verification. The pending snapshot owner

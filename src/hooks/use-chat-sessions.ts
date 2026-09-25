@@ -752,6 +752,7 @@ function normalizeStoredChatSnapshot(values: unknown[]): { chats: ChatThread[]; 
       createdAt: typeof chat.createdAt === "string" ? chat.createdAt : "",
       updatedAt: typeof chat.updatedAt === "string" ? chat.updatedAt : "",
       agentName: typeof chat.agentName === "string" ? chat.agentName : "",
+      planMode: chat.planMode === true,
       pinned: chat.pinned === true,
       archived: chat.archived === true,
       revision: normalizeChatRevision(chat.revision),

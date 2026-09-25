@@ -754,9 +754,13 @@ def test_internal_tool_block_observation_keeps_compact_indices_without_schemas()
         }
     )
 
-    assert "loadedBlocks=core" in observation
-    assert "toolBlockTree=1:core(loaded) | 5:diagnostics_build(expand)" in observation
-    assert "5.1:diagnostics_build/compile_logs[vrcforge_get_compile_errors,vrcforge_unity_status]" in observation
+    directory = json.loads(observation.split("; toolBlockDirectory=", 1)[1])
+    assert directory["loadedBlocks"] == ["core"]
+    assert directory["tree"]["children"] == [
+        {"index": "1", "name": "core", "loaded": True},
+        {"index": "5", "name": "diagnostics_build", "expandable": True},
+    ]
+    assert directory["blocks"][0]["toolNames"] == ["vrcforge_get_compile_errors", "vrcforge_unity_status"]
     assert "skill_tool=load_internal_tool_block" in observation
     assert "skill_params={\"block\":\"<exact block name>\"}" in observation
     assert "privateSchema" not in observation
@@ -802,12 +806,15 @@ def test_canonical_nested_tool_directory_reaches_the_actual_model_observation() 
         "tool": "vrcforge_list_internal_tool_blocks", "status": "executed", "result": result,
     })
 
+    directory = json.loads(observation.split("; toolBlockDirectory=", 1)[1])
+    directory_leaves = {leaf["name"]: leaf for block in directory["blocks"] for leaf in block["children"]}
     for leaf in leaves:
-        assert f"{leaf['block']}[{leaf['name']}]" in observation
+        assert leaf["name"] in directory_leaves[leaf["block"]]["toolNames"]
+    assert directory["blocks"] == result["blocks"]
     assert "None:" not in observation
     assert "skill_tool=load_internal_tool_block" in observation
     assert "inputSchema" not in observation
-    assert len(observation) <= 8_000
+    assert directory["tree"]["childrenRef"] == "blocks"
 
 
 def test_parent_tool_block_failure_observation_preserves_exact_leaf_load_actions() -> None:

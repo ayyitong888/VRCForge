@@ -1752,6 +1752,8 @@ class RuntimePlannerService:
             native_turn: NativeRuntimeTurn | None = None,
         ) -> dict[str, object]:
             loop_state = loop_state or []
+            if params.get("planMode") is True:
+                observe = {**observe, "planMode": True}
             if isinstance(params.get("_internalToolSelections"), Mapping):
                 observe = {**observe, "internalToolSelections": deepcopy(params["_internalToolSelections"])}
             planner_label = str(params.get("_plannerAttemptLabel") or "").strip()
@@ -3036,84 +3038,46 @@ class RuntimePlannerService:
                     log_evidence = planner_log_read_evidence(result)
                     if log_evidence:
                         fields.append("logReadEvidence=" + json.dumps(log_evidence, ensure_ascii=False, separators=(",", ":")))
+            directory_json = ""
             if tool_name == "vrcforge_list_internal_tool_blocks" and isinstance(result, dict):
                 fields.append("toolBlockState=snapshot at this action; later load/unload actions may change it")
-                loaded_blocks = result.get("loadedBlocks")
-                if isinstance(loaded_blocks, list) and loaded_blocks:
+                # Preserve the complete public directory. The selected tree is
+                # often an exact copy of blocks; reference only exact copies,
+                # retaining every unique selected-leaf tool field.
+                directory = {key: deepcopy(result[key]) for key in (
+                    "ok", "schema", "loadedBlocks", "internalToolSelections", "blocks", "tree",
+                ) if key in result}
+                blocks = directory.get("blocks")
+                tree = directory.get("tree")
+                if isinstance(blocks, list) and isinstance(tree, dict):
+                    if tree.get("children") == blocks:
+                        tree.pop("children")
+                        tree["childrenRef"] = "blocks"
+                    else:
+                        for index, block in enumerate(blocks):
+                            if tree == block:
+                                directory["tree"] = {"selectedBlockRef": f"blocks/{index}"}
+                                break
+                def sanitize_directory(value):
+                    if isinstance(value, dict):
+                        return {key: sanitize_directory(item) for key, item in value.items()}
+                    if isinstance(value, list):
+                        return [sanitize_directory(item) for item in value]
+                    if isinstance(value, str):
+                        # Sanitize values before serialization so redaction
+                        # cannot consume JSON delimiters; do not trim metadata.
+                        return sanitize_planner_observation_text(
+                            value, 2**63 - 1, preserve_whitespace=True,
+                        )
+                    return value
+                directory_json = json.dumps(sanitize_directory(redact_sensitive(directory)), ensure_ascii=False, separators=(",", ":"))
+                if not native_contract:
                     fields.append(
-                        "loadedBlocks="
-                        + sanitize_planner_observation_text(
-                            " | ".join(map(str, loaded_blocks[:12])),
-                            240,
-                        )
+                        "toolBlockLoadSyntax=action=skill;"
+                        "skill_tool=load_internal_tool_block;"
+                        "skill_params={\"block\":\"<exact block name>\"}"
                     )
-                tree = ensure_dict(result.get("tree"))
-                children = tree.get("children")
-                tools = tree.get("tools")
-                nodes = children if isinstance(children, list) else tools if isinstance(tools, list) else []
-                if nodes:
-                    node_labels = []
-                    for node in nodes[:20]:
-                        if not isinstance(node, dict):
-                            continue
-                        node_name = str(node.get("name") or "").strip()
-                        node_index = str(node.get("index") or "").strip()
-                        label = f"{node_index}:{node_name}" if node_index else node_name
-                        if node.get("expandable") is True:
-                            label += "(expand)"
-                        elif node.get("loaded") is True:
-                            label += "(loaded)"
-                        node_labels.append(label)
-                    if node_labels:
-                        fields.append(
-                            "toolBlockTree="
-                            + sanitize_planner_observation_text(
-                                " | ".join(node_labels),
-                                420,
-                            )
-                        )
-                blocks = result.get("blocks")
-                if isinstance(blocks, list) and blocks:
-                    directory_labels = []
-                    directory_blocks = []
-                    for parent in blocks[:20]:
-                        if not isinstance(parent, dict):
-                            continue
-                        children = parent.get("children")
-                        if isinstance(children, list) and children:
-                            directory_blocks.extend(children)
-                        else:
-                            directory_blocks.append(parent)
-                    for block in directory_blocks:
-                        if not isinstance(block, dict):
-                            continue
-                        block_name = str(block.get("name") or "").strip()
-                        block_index = str(block.get("index") or "").strip()
-                        tool_names = block.get("toolNames")
-                        names = (
-                            [str(item).strip() for item in tool_names if str(item).strip()]
-                            if isinstance(tool_names, list)
-                            else []
-                        )
-                        label = f"{block_index}:{block_name}" if block_index else block_name
-                        if names:
-                            label += "[" + ",".join(names[:80]) + "]"
-                        directory_labels.append(label)
-                    if directory_labels:
-                        fields.append(
-                            "toolBlockDirectory="
-                            + sanitize_planner_observation_text(
-                                " | ".join(directory_labels),
-                                RUNTIME_PLANNER_TOOL_INDEX_OBSERVATION_MAX_CHARS - 200,
-                            )
-                        )
-                        if not native_contract:
-                            fields.append(
-                                "toolBlockLoadSyntax=action=skill;"
-                                "skill_tool=load_internal_tool_block;"
-                                "skill_params={\"block\":\"<exact block name>\"}"
-                            )
-                        fields.append("toolBlockSelection=Supply optional tools=[<exact directory tool names>] to load only the needed tools; the directory remains complete.")
+                fields.append("toolBlockSelection=Supply optional tools=[<exact directory tool names>] to load only the needed tools; the directory remains complete.")
             outcome = ensure_dict(step.get("outcome"))
             if outcome:
                 fields.append(
@@ -3437,6 +3401,8 @@ class RuntimePlannerService:
                     return summarize_text("; ".join(fields), observation_limit) + "; structuredEvidence=" + json.dumps(
                         structured_evidence, ensure_ascii=False, separators=(",", ":"),
                     ) + continuation_text
+            if directory_json:
+                return summarize_text("; ".join(fields), observation_limit) + "; toolBlockDirectory=" + directory_json
             return summarize_text("; ".join(fields), observation_limit)
 
     @staticmethod
@@ -3453,6 +3419,8 @@ class RuntimePlannerService:
         selections = ensure_dict(observe.get("internalToolSelections"))
         selected = []
         for tool in catalog.visible_tools:
+            if observe.get("planMode") is True and (tool.write or tool.runtime_name == "vrcforge_delegate_subagent"):
+                continue
             if selected_blocks is not None and tool.block not in selected_blocks:
                 continue
             selection = selections.get(tool.block)
@@ -3471,8 +3439,9 @@ class RuntimePlannerService:
         exposure_layer = normalize_exposure_layer(exposure_layer)
         catalog = self._catalog.read(exposure_layer, project_context_active=project_context_active)
         blocks, selected = self._select_plan_tools(catalog, internal_tool_blocks, observe)
-        control_actions = ["reply", "shell", "correct"]
-        if exposure_layer == EXPOSURE_LAYER_PLANNING:
+        explicit_plan = observe.get("planMode") is True
+        control_actions = ["reply", "correct"] if explicit_plan else ["reply", "shell", "correct"]
+        if exposure_layer == EXPOSURE_LAYER_PLANNING and not explicit_plan:
             control_actions.append("enter_execution")
         control_schema = {
             "type": "object", "additionalProperties": False, "required": ["action"],
@@ -3506,6 +3475,9 @@ class RuntimePlannerService:
             "parameters": deepcopy(dict(tool.input_schema)),
         }} for tool in [*selected, control]]
         state = {"exposureLayer": exposure_layer, "projectContextActive": project_context_active}
+        if explicit_plan:
+            state["planMode"] = True
+            state["modeConstraint"] = "Read-only Plan. Only the user can switch to execution. Shell commands are unavailable."
         if project_context_active and isinstance(project_path, str) and project_path.strip():
             state["projectPath"] = project_path.strip()
         if blocks is not None:
@@ -3560,7 +3532,7 @@ class RuntimePlannerService:
         name = str(function.get("name") or "")
         exact_matches = [tool for tool in tools if tool.name == name]
         tool = exact_matches[0] if len(exact_matches) == 1 else None
-        kind = "write" if tool and tool.write else "skill"
+        kind = "control" if name == "vrcforge_runtime_action" else "write" if tool and tool.write else "skill"
         raw = function.get("arguments")
 
         def reject(code, summary):
@@ -3809,6 +3781,7 @@ class RuntimePlannerService:
             )
             prompt = (
                 f"{runtime_scope_instruction}\n"
+                + ("User-selected Plan is read-only: do not enter execution, request writes, or use Shell. Only the user can turn off Plan.\n" if observe.get("planMode") is True else "")
                 + budget_instruction
                 + (
                     "loaded internal tool blocks: "

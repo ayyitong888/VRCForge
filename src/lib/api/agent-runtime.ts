@@ -190,7 +190,7 @@ export async function sendAgentMessage(
   sessionId?: string,
   history?: ChatHistoryEntry[],
   agentName?: string,
-  options: { signal?: AbortSignal; attachments?: AgentMessageAttachment[]; chatId?: string; projectPath?: string; projectType?: "general" | "unity"; provider?: string; providerLabel?: string; model?: string; contextLimit?: number; maxAgenticTurns?: number; clientTurnId?: string; goalDeliveryId?: string; computerUseRequested?: boolean; computerUseGrantId?: string; computerUseVisualTheme?: "light" | "dark"; computerUseVisualAccent?: string; followupQueueId?: string; followupLaneId?: string } = {},
+  options: { planMode?: boolean; signal?: AbortSignal; attachments?: AgentMessageAttachment[]; chatId?: string; projectPath?: string; projectType?: "general" | "unity"; provider?: string; providerLabel?: string; model?: string; contextLimit?: number; maxAgenticTurns?: number; clientTurnId?: string; goalDeliveryId?: string; computerUseRequested?: boolean; computerUseGrantId?: string; computerUseVisualTheme?: "light" | "dark"; computerUseVisualAccent?: string; followupQueueId?: string; followupLaneId?: string } = {},
 ): Promise<AgentRuntimeResponse> {
   const request = {
     agentName: agentName || "desktop-agent",
@@ -208,6 +208,7 @@ export async function sendAgentMessage(
     model: options.model || undefined,
     contextLimit: options.contextLimit && options.contextLimit > 0 ? Math.floor(options.contextLimit) : undefined,
     maxAgenticTurns: options.maxAgenticTurns && options.maxAgenticTurns > 0 ? Math.floor(options.maxAgenticTurns) : undefined,
+    planMode: options.planMode === true,
     computerUseRequested: Boolean(options.computerUseRequested),
     computerUseGrantId: options.computerUseGrantId,
     computerUseVisualTheme: options.computerUseVisualTheme,
@@ -237,6 +238,7 @@ export async function sendAgentMessage(
       model: request.model,
       contextLimit: request.contextLimit,
       maxAgenticTurns: request.maxAgenticTurns,
+      planMode: request.planMode,
       computerUseRequested: request.computerUseRequested,
       computerUseGrantId: request.computerUseGrantId,
       computerUseVisualTheme: request.computerUseVisualTheme,
@@ -326,6 +328,7 @@ export async function recordAgentRunQueued(
     laneId?: string;
     clientTurnId: string;
     targetClientTurnId?: string;
+    planMode?: boolean;
     message?: string;
     attachments?: AgentMessageAttachment[];
     provider?: string;

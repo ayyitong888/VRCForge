@@ -193,6 +193,11 @@
     "taskRequired": "/desktop の後に VRCForge に実行させる内容を入力してください。"
   },
   "composerAction": {
+    "plan": "プランモード",
+    "planDesc": "読み取り専用で調査し、変更せずに計画を立てます。",
+    "planEnabledDesc": "読み取り専用の計画モードがオンです。クリックでオフにします。",
+    "planDisable": "プランモードをオフにする",
+    "planPlaceholder": "計画したい内容を入力…",
     "addContext": "コンテキストを追加",
     "attach": "ファイルを追加",
     "attachDesc": "画像またはプロジェクトファイルをこのターンに追加します。",

@@ -57,7 +57,7 @@ export type CompactedAttachmentReference = {
   truncated?: boolean;
 };
 
-export type ComposerActionId = "attach" | "screenshot" | "annotation" | "browser" | "desktop";
+export type ComposerActionId = "attach" | "screenshot" | "annotation" | "browser" | "desktop" | "plan";
 
 export type ComposerAction = {
   id: ComposerActionId;
@@ -151,7 +151,7 @@ export type ChatTimelineEvent = {
 };
 
 export type ConversationItem =
-  | { id: string; type: "user"; text: string; attachments?: ChatAttachment[]; queuedFrom?: boolean; queueStatus?: "steering" | "queued" | "waiting_for_resources" | "delivery_unverified" | "paused" | "cancelled"; clientTurnId?: string; queueEnvelope?: { provider?: string; providerLabel?: string; model?: string; contextLimit?: number; projectPath?: string; projectType?: ProjectType; sessionId?: string; laneId?: string; computerUseRequested?: boolean; computerUseVisualTheme?: "light" | "dark"; computerUseVisualAccent?: string; queueId?: string; sequence?: number }; createdAt?: string }
+  | { id: string; type: "user"; text: string; planMode?: boolean; attachments?: ChatAttachment[]; queuedFrom?: boolean; queueStatus?: "steering" | "queued" | "waiting_for_resources" | "delivery_unverified" | "paused" | "cancelled"; clientTurnId?: string; queueEnvelope?: { planMode?: boolean; provider?: string; providerLabel?: string; model?: string; contextLimit?: number; projectPath?: string; projectType?: ProjectType; sessionId?: string; laneId?: string; computerUseRequested?: boolean; computerUseVisualTheme?: "light" | "dark"; computerUseVisualAccent?: string; queueId?: string; sequence?: number }; createdAt?: string }
   | { id: string; type: "streaming"; clientTurnId: string; text: string; phase?: AgentRuntimePhase; timeline?: ChatTimelineEvent[]; providerLastActivityAt?: string; providerLabel?: string; model?: string; createdAt?: string }
   | { id: string; type: "agent"; response: AgentRuntimeResponse; timeline?: ChatTimelineEvent[]; elapsedSeconds?: number; providerLabel?: string; model?: string; createdAt?: string }
   | { id: string; type: "result"; approvalId: string; result?: AgentShellResult; error?: string; createdAt?: string }
@@ -174,6 +174,7 @@ export type ConversationItem =
   | { id: string; type: "handoff_card"; cardId: string; handoffId: string; kind: string; payloadDigest: string; sourceChatId?: string; targetChatId?: string; sourceRevision?: number; targetRevision?: number; summary?: Record<string, unknown>; status?: string };
 
 export type ChatThread = {
+  planMode?: boolean;
   id: string;
   sessionId: string;
   title: string;

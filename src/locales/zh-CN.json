@@ -193,6 +193,11 @@
     "taskRequired": "请在 /desktop 后说明需要 VRCForge 完成的任务。"
   },
   "composerAction": {
+    "plan": "计划模式",
+    "planDesc": "只读检查并制定计划，不执行修改。",
+    "planEnabledDesc": "已开启，只读规划；点击关闭。",
+    "planDisable": "关闭计划模式",
+    "planPlaceholder": "描述你想制定的计划…",
     "addContext": "添加上下文",
     "attach": "添加文件",
     "attachDesc": "把图片或项目文件加入本轮对话。",

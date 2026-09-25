@@ -49,6 +49,7 @@ export const MAX_BACKGROUND_TURNS = 12;
 export const MAX_BACKGROUND_TURNS_PER_SCOPE = 4;
 
 export type QueuedTurn = {
+  planMode?: boolean;
   id: string;
   text: string;
   attachments: ChatAttachment[];
@@ -76,6 +77,7 @@ export type QueuedTurn = {
 };
 
 export type CurrentTurn = {
+  planMode?: boolean;
   clientTurnId?: string;
   sessionId?: string;
   text: string;
@@ -208,7 +210,7 @@ export function useChatRunController({
       if (item.queueStatus === "delivery_unverified") continue;
       if (!["queued", "waiting_for_resources", "paused"].includes(item.queueStatus || "")) continue;
       const env = item.queueEnvelope;
-      restored.push({ id: item.clientTurnId, text: item.text, attachments: item.attachments || [], provider: env.provider || "", providerLabel: env.providerLabel || env.provider || "", model: env.model || "", contextLimit: env.contextLimit, chatId: chat.id, sessionId: env.sessionId || chat.sessionId, projectPath: env.projectPath || chat.projectPath, projectType: env.projectType || chat.projectType, computerUseRequested: env.computerUseRequested, computerUseVisualTheme: env.computerUseVisualTheme, computerUseVisualAccent: env.computerUseVisualAccent, queuedFrom: true, queueId: env.queueId, queueLaneId: env.laneId || chat.id, queueSequence: env.sequence, queueStatus: item.queueStatus as QueuedTurn["queueStatus"] });
+      restored.push({ planMode: item.planMode === true, id: item.clientTurnId, text: item.text, attachments: item.attachments || [], provider: env.provider || "", providerLabel: env.providerLabel || env.provider || "", model: env.model || "", contextLimit: env.contextLimit, chatId: chat.id, sessionId: env.sessionId || chat.sessionId, projectPath: env.projectPath || chat.projectPath, projectType: env.projectType || chat.projectType, computerUseRequested: env.computerUseRequested, computerUseVisualTheme: env.computerUseVisualTheme, computerUseVisualAccent: env.computerUseVisualAccent, queuedFrom: true, queueId: env.queueId, queueLaneId: env.laneId || chat.id, queueSequence: env.sequence, queueStatus: item.queueStatus as QueuedTurn["queueStatus"] });
     }
     restored.sort((a, b) => (a.queueSequence ?? Number.MAX_SAFE_INTEGER) - (b.queueSequence ?? Number.MAX_SAFE_INTEGER) || a.id.localeCompare(b.id));
     queueRef.current = restored;
@@ -250,6 +252,7 @@ export function useChatRunController({
         sessionId: head.sessionId,
         laneId: head.queueLaneId || head.chatId,
         clientTurnId: head.id,
+        planMode: head.planMode === true,
         message: head.text,
         attachments: serializeChatAttachments(head.attachments),
         provider: head.provider,
@@ -398,11 +401,12 @@ export function useChatRunController({
               id: `user-${turn.id}`,
               type: "user",
               text: turn.text,
+              planMode: turn.planMode === true,
               attachments: storedAttachments,
               queuedFrom: true,
               queueStatus: "steering",
               clientTurnId: turn.id,
-               queueEnvelope: { provider: turn.provider, providerLabel: turn.providerLabel, model: turn.model, contextLimit: turn.contextLimit, projectPath: queuedTurn.projectPath, projectType: queuedTurn.projectType, sessionId: queuedTurn.sessionId, laneId: queuedTurn.queueLaneId, computerUseRequested: turn.computerUseRequested, computerUseVisualTheme: turn.computerUseVisualTheme, computerUseVisualAccent: turn.computerUseVisualAccent },
+               queueEnvelope: { planMode: turn.planMode === true, provider: turn.provider, providerLabel: turn.providerLabel, model: turn.model, contextLimit: turn.contextLimit, projectPath: queuedTurn.projectPath, projectType: queuedTurn.projectType, sessionId: queuedTurn.sessionId, laneId: queuedTurn.queueLaneId, computerUseRequested: turn.computerUseRequested, computerUseVisualTheme: turn.computerUseVisualTheme, computerUseVisualAccent: turn.computerUseVisualAccent },
               createdAt: new Date().toISOString(),
             }],
           };
@@ -426,7 +430,9 @@ export function useChatRunController({
         }
       }
       steerIntentRef.current.set(turn.id, queuedTurn);
-      const targetClientTurnId = sendingRef.current ? currentTurnRef.current?.clientTurnId : undefined;
+      const targetClientTurnId = sendingRef.current
+        && (turn.planMode === true) === (currentTurnRef.current?.planMode === true)
+        ? currentTurnRef.current?.clientTurnId : undefined;
       const dispatch = queueDispatchTailRef.current
         .catch(() => undefined)
         .then(async () => {
@@ -436,6 +442,7 @@ export function useChatRunController({
             laneId: queuedTurn.queueLaneId,
             clientTurnId: turn.id,
             targetClientTurnId,
+            planMode: turn.planMode === true,
             message: turn.text,
             attachments: serializeChatAttachments(turn.attachments),
             provider: turn.provider,
@@ -470,6 +477,7 @@ export function useChatRunController({
            sessionId: queuedTurn.sessionId,
            laneId: queuedTurn.queueLaneId,
            clientTurnId: turn.id,
+           planMode: turn.planMode === true,
            message: turn.text,
            attachments: serializeChatAttachments(turn.attachments),
            provider: turn.provider,
@@ -638,6 +646,7 @@ export function useChatRunController({
         clientTurnId: turn.id,
         sessionId: turn.sessionId || getChatById(chatId)?.sessionId,
         text: turn.text,
+        planMode: turn.planMode === true,
         startedAt,
         providerLabel: turn.providerLabel,
         model: turn.model,
@@ -696,6 +705,7 @@ export function useChatRunController({
         id: turn.goalDelivery?.userItemId || `user-${turn.id}`,
         type: "user",
         text: turn.text,
+        planMode: turn.planMode === true,
         attachments: turn.attachments,
         queuedFrom: Boolean(turn.queuedFrom),
         queueStatus: turn.queueId ? "queued" : undefined,
@@ -769,6 +779,7 @@ export function useChatRunController({
       runtimeRequestStarted = true;
       const response = await sendAgentMessage(targetEndpoint, messageForModel, chatSessionId || undefined, history, chatAgentName, {
         signal: abortController.signal,
+        planMode: turn.planMode === true,
         attachments: serializeChatAttachments(requestAttachments),
         chatId,
         projectPath: chat?.projectPath || activeRuntimeProjectPath || undefined,

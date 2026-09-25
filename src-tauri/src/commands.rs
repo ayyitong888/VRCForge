@@ -139,6 +139,8 @@ pub(crate) struct DesktopAgentMessageRequest {
     context_limit: Option<u64>,
     #[serde(alias = "max_agentic_turns")]
     max_agentic_turns: Option<u64>,
+    #[serde(default)]
+    plan_mode: bool,
     client_turn_id: Option<String>,
     goal_delivery_id: Option<String>,
     #[serde(default)]
@@ -182,6 +184,8 @@ pub(crate) struct DesktopAgentTurnResponseRequest {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DesktopAgentRunQueuedRequest {
+    #[serde(default)]
+    plan_mode: bool,
     session_id: Option<String>,
     lane_id: Option<String>,
     client_turn_id: String,
@@ -840,6 +844,7 @@ pub async fn send_agent_message(
             "model": request.model,
             "contextLimit": request.context_limit,
             "maxAgenticTurns": request.max_agentic_turns,
+            "planMode": request.plan_mode,
             "computerUseRequested": request.computer_use_requested,
             "computerUseGrantId": request.computer_use_grant_id,
             "computerUseVisualTheme": request.computer_use_visual_theme,
@@ -891,6 +896,16 @@ mod agent_message_transport_tests {
     fn foreground_request_keeps_background_budget_absent() {
         let request = request_with(serde_json::json!({"message": "inspect the project"}));
         assert_eq!(request.max_agentic_turns, None);
+        assert!(!request.plan_mode);
+    }
+
+    #[test]
+    fn plan_mode_requires_explicit_boolean_selection() {
+        let request = request_with(serde_json::json!({"message": "plan the change", "planMode": true}));
+        assert!(request.plan_mode);
+        assert!(serde_json::from_value::<DesktopAgentMessageRequest>(
+            serde_json::json!({"message": "inspect", "planMode": "true"})
+        ).is_err());
     }
 }
 
@@ -942,6 +957,7 @@ pub fn record_agent_run_queued(
             "laneId": request.lane_id,
             "clientTurnId": request.client_turn_id,
             "targetClientTurnId": request.target_client_turn_id,
+            "planMode": request.plan_mode,
             "message": request.message,
             "attachments": request.attachments.unwrap_or_default(),
             "provider": request.provider,

@@ -501,6 +501,7 @@ class AgentSessionRequest(BaseModel):
 
 
 class AgentRuntimeMessageRequest(BaseModel):
+    plan_mode: bool = Field(default=False, alias="planMode", strict=True)
     agent_name: str = "desktop-agent"
     session_id: str | None = None
     chat_id: str | None = Field(default=None, alias="chatId")
@@ -554,6 +555,7 @@ class ComputerUseTurnGrantRequest(BaseModel):
 
 
 class AgentRuntimeQueueRequest(BaseModel):
+    plan_mode: bool = Field(default=False, alias="planMode", strict=True)
     session_id: str | None = Field(default=None, alias="sessionId", min_length=1, max_length=180)
     lane_id: str | None = Field(default=None, alias="laneId", min_length=1, max_length=180)
     client_turn_id: str = Field(alias="clientTurnId", min_length=1, max_length=180)

@@ -312,3 +312,21 @@ permission: supervised writes remain pending until approved and must not
 invoke Unity before approval. Continuations retain their recorded exposure.
 
 Regression: `tests/test_agent_loop_p0.py` and `tests/test_native_runtime_gateway.py`.
+
+
+## Explicit user-selected Plan mode
+
+- Plan is off by default and independent from approval policy. Only explicit selection locks a task to read-only planning; the model cannot leave that mode itself.
+- Preserve the selected mode through questions, queued input and retries. Different-mode queued input must not become a steer for the current task.
+- Verify no write handler or Shell/delegated execution runs in Plan even under full permissions. Normal execution must still use its original approval rules.
+- Check the plus-menu toggle, visible exit badge and per-chat isolation in the actual App separately from component-handler and transport unit tests.
+
+Regression: `tests/test_explicit_plan_mode.py`, `tests/test_explicit_plan_mode_ui.mjs`, Rust `agent_message_transport_tests`.
+# Explicit Plan queued replay
+
+- Tool discovery observations must preserve complete public directory metadata and description tails in both native provider messages and legacy prompts, including directories beyond former item/character limits. Only exact repeated tree content may become a reference to the retained blocks. Keep secret redaction and private-schema exclusion. Regression: `tests/test_tool_directory_observation_integrity.py`.
+
+- Native runtime control rejections (including invalid correction arguments) retain kind=control. A subsequent valid final response may recover the rejected control proposal; real tool failures and task requirements must still block unsupported completion. Regression: `test_plan_can_finish_after_rejected_control_correction` plus native gateway failure-retention cases.
+
+- A persisted queued turn owns its selected Plan mode. After process restart, claiming and replaying it must retain that mode even if the replay request omits the field or carries the current composer's different mode.
+- Regression: `tests/test_explicit_plan_mode.py::test_queued_replay_uses_persisted_plan_mode` covers saved Plan with absent/false replay input and saved execution with true replay input; the durable queue is reopened before dispatch.

@@ -52,6 +52,8 @@ export function ChatWorkspace({
   onResumeQueue,
   onCancelQueue,
   onSwitchMode,
+  planMode = false,
+  onPlanModeChange,
   commands,
   actions,
   onAction,
@@ -128,6 +130,8 @@ export function ChatWorkspace({
   onStop?: () => void;
   onResumeQueue?: () => void;
   onCancelQueue?: () => void;
+  planMode?: boolean;
+  onPlanModeChange?: (enabled: boolean) => void;
   onSwitchMode: (mode: PermissionState["executionMode"]) => void;
   commands: Array<{ name: string; title: string }>;
   actions: ComposerAction[];
@@ -249,6 +253,8 @@ export function ChatWorkspace({
       onSubmit={onSubmit}
       onStop={onStop}
       onSwitchMode={onSwitchMode}
+      planMode={planMode}
+      onPlanModeChange={onPlanModeChange}
       commands={commands}
       actions={actions}
       onAction={onAction}

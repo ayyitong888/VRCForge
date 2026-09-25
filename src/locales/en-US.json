@@ -193,6 +193,11 @@
     "taskRequired": "Describe what VRCForge should do after /desktop."
   },
   "composerAction": {
+    "plan": "Plan mode",
+    "planDesc": "Inspect and plan without making changes.",
+    "planEnabledDesc": "Read-only planning is on. Click to turn off.",
+    "planDisable": "Turn off plan mode",
+    "planPlaceholder": "Describe what you want to plan…",
     "addContext": "Add context",
     "attach": "Attach file",
     "attachDesc": "Add images or project files to this turn.",

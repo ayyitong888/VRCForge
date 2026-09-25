@@ -2710,6 +2710,9 @@ async def app_agent_runtime_message(runtime_request: AgentRuntimeMessageRequest)
         if not claimed or claimed[0].get("clientTurnId") != runtime_request.client_turn_id:
             raise HTTPException(status_code=409, detail={"code": "followup_queue_not_ready"})
         followup_claim_token = str(claimed[0].get("claimToken") or "")
+        # Replay retains the user's mode when this input was queued, including
+        # after restart; a new composer's default cannot change that task.
+        runtime_params["planMode"] = claimed[0].get("planMode") is True
     try:
         if runtime_request.computer_use_requested:
             AGENT_GATEWAY.desktop.require_computer_use_enabled()
@@ -2826,6 +2829,7 @@ def agent_runtime_request_payload(
         "model": runtime_request.model,
         "_requestedContextLimit": runtime_request.context_limit,
         "maxAgenticTurns": runtime_request.max_agentic_turns,
+        "planMode": runtime_request.plan_mode,
         "history": runtime_request.history,
         "_computerUseRequested": runtime_request.computer_use_requested,
         "_computerUseGrantId": runtime_request.computer_use_grant_id,
@@ -2969,6 +2973,7 @@ async def app_agent_runtime_queue(queue_request: AgentRuntimeQueueRequest) -> di
             "targetClientTurnId": queue_request.target_client_turn_id,
             "message": queue_request.message, "attachments": queue_request.attachments,
             "provider": queue_request.provider, "providerLabel": queue_request.provider_label,
+            "planMode": queue_request.plan_mode,
             "model": queue_request.model, "projectPath": queue_request.project_path, "projectRoot": queue_request.project_root,
             "projectType": queue_request.project_type or ("unity" if (queue_request.project_path or queue_request.project_root) else "general"),
         })

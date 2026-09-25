@@ -1,4 +1,4 @@
-import { Archive, Camera, Check, ChevronDown, Globe, MessageSquare, MousePointer2, Paperclip, Pencil, Plus, Send, Shield, Square, Target, X } from "lucide-react";
+import { Archive, Camera, Check, ChevronDown, ClipboardList, Globe, MessageSquare, MousePointer2, Paperclip, Pencil, Plus, Send, Shield, Square, Target, X } from "lucide-react";
 import { getCurrentWebview, type DragDropEvent } from "@tauri-apps/api/webview";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { type ClipboardEvent, type DragEvent, type FormEvent, type ReactNode, useEffect, useRef, useState } from "react";
@@ -25,6 +25,8 @@ function composerActionIcon(action: ComposerActionId): ReactNode {
       return <Globe className="h-4 w-4" />;
     case "desktop":
       return <MousePointer2 className="h-4 w-4" />;
+    case "plan":
+      return <ClipboardList className="h-4 w-4" />;
     default:
       return <Plus className="h-4 w-4" />;
   }
@@ -43,6 +45,8 @@ export function Composer({
   onSubmit,
   onStop,
   onSwitchMode,
+  planMode = false,
+  onPlanModeChange,
   commands = [],
   actions = [],
   onAction,
@@ -69,6 +73,8 @@ export function Composer({
   onSubmit: (event?: FormEvent) => void;
   onStop?: () => void;
   onSwitchMode: (mode: PermissionState["executionMode"]) => void;
+  planMode?: boolean;
+  onPlanModeChange?: (enabled: boolean) => void;
   commands?: Array<{ name: string; title: string }>;
   actions?: ComposerAction[];
   onAction?: (action: ComposerActionId) => void | Promise<void>;
@@ -99,7 +105,11 @@ export function Composer({
   const currentModeVisual = permissionVisualState(permission, currentMode);
   const canSubmit = !disabledReason && (input.trim().length > 0 || attachments.length > 0);
   const availableActions: ComposerAction[] = actions.length ? actions : [{ id: "attach", label: t("composerAction.attach"), description: t("composerAction.attachDesc") }];
-  const commandActions: ComposerSlashCommand[] = availableActions.map((action) => ({
+  const commandActions: ComposerSlashCommand[] = [...availableActions, ...(onPlanModeChange && !editing ? [{
+    id: "plan" as const,
+    label: t("composerAction.plan"),
+    description: t(planMode ? "composerAction.planEnabledDesc" : "composerAction.planDesc"),
+  }] : [])].map((action) => ({
     name: action.id,
     title: action.disabled ? action.disabledReason || action.description : action.description,
     action,
@@ -249,6 +259,7 @@ export function Composer({
               type="button"
               data-composer-slash-command={command.name}
               data-composer-action={command.action?.id}
+              aria-pressed={command.action?.id === "plan" ? planMode : undefined}
               data-composer-palette-item
               disabled={Boolean(command.action?.disabled)}
               className={cn("flex w-full min-w-0 items-center gap-3 rounded-lg px-3 py-2 text-left transition-colors hover:bg-muted", command.action?.disabled ? "opacity-60" : "", index === paletteIndex ? "bg-muted" : "")}
@@ -256,6 +267,12 @@ export function Composer({
               onClick={() => {
                 setActionMenuOpen(false);
                 if (command.action) {
+                  if (command.action.id === "plan") {
+                    onPlanModeChange?.(!planMode);
+                    setPaletteDismissed(true);
+                    if (input.startsWith("/plan")) setInput("");
+                    return;
+                  }
                   setInput("");
                   if (command.action.id === "attach" && !command.action.disabled) {
                     fileInputRef.current?.click();
@@ -268,6 +285,7 @@ export function Composer({
               }}
             >
               <span className="shrink-0 text-muted-foreground">{command.action ? composerActionIcon(command.action.id) : <MessageSquare className="h-4 w-4" />}</span>
+              {command.action?.id === "plan" && planMode ? <Check className="h-4 w-4 shrink-0 text-primary" /> : null}
               <span className="grid min-w-0 flex-1 grid-cols-[minmax(0,auto)_minmax(0,1fr)] items-center gap-3"><span className="truncate text-sm font-medium">{slashMatches.length && !actionMenuOpen ? `/${command.name}` : (command.action?.label || command.name)}</span><span className="truncate text-right text-xs text-muted-foreground">{command.title}</span></span>
             </button>
           ))}
@@ -278,7 +296,7 @@ export function Composer({
           value={input}
           onChange={(event) => { setPaletteDismissed(false); setInput(event.target.value); }}
           className="min-h-[76px] w-full resize-none bg-transparent px-1 text-base outline-none placeholder:text-muted-foreground"
-          placeholder={disabledReason || t("chat.inputPlaceholder")}
+          placeholder={disabledReason || t(planMode ? "composerAction.planPlaceholder" : "chat.inputPlaceholder")}
           disabled={Boolean(disabledReason)}
           onKeyDown={(event) => {
             if (paletteOpen && (event.key === "ArrowDown" || event.key === "ArrowUp")) {
@@ -300,6 +318,12 @@ export function Composer({
                 event.preventDefault();
                 if (command.action) {
                   setActionMenuOpen(false);
+                  if (command.action.id === "plan") {
+                    onPlanModeChange?.(!planMode);
+                    setPaletteDismissed(true);
+                    if (input.startsWith("/plan")) setInput("");
+                    return;
+                  }
                   setInput("");
                   if (command.action.id === "attach") fileInputRef.current?.click();
                   else onAction?.(command.action.id);
@@ -340,6 +364,20 @@ export function Composer({
               <Plus className="h-4 w-4" />
             </button>
             {actionMenuOpen ? <div className="fixed inset-0 z-20" onClick={() => setActionMenuOpen(false)} /> : null}
+            {planMode ? (
+              <button
+                type="button"
+                data-composer-plan-mode
+                aria-pressed="true"
+                title={t("composerAction.planDisable")}
+                className="flex h-8 shrink-0 items-center gap-1.5 rounded-md bg-primary/10 px-2 text-sm text-primary"
+                onClick={() => onPlanModeChange?.(false)}
+              >
+                <ClipboardList className="h-4 w-4" />
+                <span>{t("composerAction.plan")}</span>
+                <X className="h-3.5 w-3.5" />
+              </button>
+            ) : null}
             <div className="relative">
               <button
                 type="button"

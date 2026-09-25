@@ -2811,6 +2811,7 @@ export default function App() {
     const turn: QueuedTurn = {
       id: `edit-${Date.now()}-${Math.random().toString(16).slice(2)}`,
       text: nextText,
+      planMode: item.planMode === true,
       attachments: nextAttachments,
       providerLabel: providerSnapshot.providerLabel,
       provider: providerSnapshot.provider,
@@ -2868,6 +2869,7 @@ export default function App() {
     const turn: QueuedTurn = {
       id: `retry-${Date.now()}-${Math.random().toString(16).slice(2)}`,
       text: userItem.text,
+      planMode: userItem.planMode === true,
       attachments: cloneChatAttachments(userItem.attachments || []),
       providerLabel: providerSnapshot.providerLabel,
       provider: providerSnapshot.provider,
@@ -3165,6 +3167,7 @@ export default function App() {
     const turnContextLimit = resolveContextLimit(providerSnapshot.provider, providerSnapshot.model, currentModelInfo, apiConfig?.contextWindow);
     const turn: QueuedTurn = {
       id: nextClientTurnId,
+      planMode: activeChat?.planMode === true,
       text: message,
       attachments,
       providerLabel: providerSnapshot.providerLabel,
@@ -4176,6 +4179,11 @@ export default function App() {
               onCancelQueue={() => void cancelQueuedTurns()}
               onSwitchMode={switchMode}
               commands={slashCommands}
+              planMode={activeChat?.planMode === true}
+              onPlanModeChange={(planMode) => {
+                const chatId = ensureActiveChat();
+                updateChat(chatId, (chat) => ({ ...chat, planMode }));
+              }}
               actions={composerActions}
               onAction={runExplicitWorkspaceAction}
               disabledReason={chatDisabledReason}
