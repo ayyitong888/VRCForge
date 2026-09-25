@@ -637,6 +637,54 @@ class AgentLoopP0Tests(unittest.TestCase):
         with patch.object(planner, "plan_agent_turn", side_effect=provider_plan):
             yield
 
+    def test_normal_app_turn_starts_execution_but_write_waits_for_real_approval(self) -> None:
+        gateway = self.gateway
+        project = self._unity_project()
+        exposures = []
+
+        def plan_write(_message, _params, _observe, *_args, **kwargs):
+            exposures.append(kwargs["exposure_layer"])
+            return {
+                "planner": "llm",
+                "writeNeeded": True,
+                "writeTool": "vrcforge_create_gameobject",
+                "writeParams": {
+                    "name": "ApprovalBoundaryProbe",
+                    "parentPath": "",
+                    "projectPath": str(project),
+                    "executionTarget": self._fixture_execution_target(project),
+                },
+                "continueLoop": False,
+                "nextStep": "call_tool",
+            }
+
+        with patch.object(
+            gateway.runtime_planner, "plan_agent_turn", side_effect=plan_write
+        ), patch("dashboard_server.invoke_unity_mcp") as invoke_unity:
+            with TestClient(dashboard_server.app) as client:
+                response = client.post(
+                    "/api/app/agent/message",
+                    json={
+                        "message": "Create ApprovalBoundaryProbe at the scene root.",
+                        "projectPath": str(project),
+                    },
+                )
+            invoke_unity.assert_not_called()
+
+        self.assertEqual(response.status_code, 200)
+        result = response.json()
+        self.assertEqual(result["write"]["status"], "approval_pending")
+        approval = gateway._approvals[result["approval_id"]]
+        self.assertEqual(approval["status"], "pending")
+        self.assertEqual(approval["targetTool"], "vrcforge_create_gameobject")
+        self.assertEqual(approval["arguments"]["name"], "ApprovalBoundaryProbe")
+        self.assertEqual(approval["taskContext"]["exposureLayer"], "execution")
+        self.assertEqual(exposures, ["execution"])
+        self.assertEqual(
+            [(step["kind"], step["status"]) for step in result["steps"]],
+            [("write", "approval_pending")],
+        )
+
     @provider_plan_fixture
     def test_single_model_autoresolve_creates_real_approval_and_dispatches_static_write(self) -> None:
         gateway = self.gateway
@@ -671,13 +719,11 @@ class AgentLoopP0Tests(unittest.TestCase):
         self.assertTrue(payload["ok"])
 
         steps = payload.get("steps") or []
-        self.assertEqual(len(steps), 3, f"expected scan+execution-phase+write, got {steps}")
+        self.assertEqual(len(steps), 2, f"expected scan+write, got {steps}")
         self.assertEqual(steps[0]["kind"], "skill")
         self.assertEqual(steps[0]["tool"], "vrcforge_list_avatars")
-        self.assertEqual(steps[1]["kind"], "phase")
-        self.assertEqual(steps[1]["status"], "entered_execution")
-        self.assertEqual(steps[2]["kind"], "write")
-        self.assertEqual(steps[2]["tool"], "vrcforge_create_gameobject")
+        self.assertEqual(steps[1]["kind"], "write")
+        self.assertEqual(steps[1]["tool"], "vrcforge_create_gameobject")
 
         self.assertIn("write", payload)
         self.assertEqual(payload["write"]["status"], "approval_pending")
@@ -691,7 +737,7 @@ class AgentLoopP0Tests(unittest.TestCase):
         self.assertEqual(approval["arguments"]["projectPath"], str(project))
 
         self.assertTrue(payload["plan"].get("multiStep"))
-        self.assertEqual(payload["plan"].get("stepCount"), 3)
+        self.assertEqual(payload["plan"].get("stepCount"), 2)
 
         applied_result = dashboard_server.McpResult(
             exit_code=0,
@@ -753,11 +799,9 @@ class AgentLoopP0Tests(unittest.TestCase):
         payload = response.json()
         self.assertTrue(payload["ok"])
         steps = payload.get("steps") or []
-        self.assertEqual(len(steps), 2)
-        self.assertEqual(steps[0]["kind"], "phase")
-        self.assertEqual(steps[0]["status"], "entered_execution")
-        self.assertEqual(steps[1]["kind"], "write")
-        self.assertEqual(steps[1]["tool"], "vrcforge_create_gameobject")
+        self.assertEqual(len(steps), 1)
+        self.assertEqual(steps[0]["kind"], "write")
+        self.assertEqual(steps[0]["tool"], "vrcforge_create_gameobject")
         self.assertEqual(payload["plan"].get("resolvedTarget"), "scene_root")
 
         approval_id = payload["approval_id"]
@@ -3323,16 +3367,6 @@ class AgentLoopP0Tests(unittest.TestCase):
                 SimpleNamespace(
                     text=json.dumps(
                         {
-                            "action": "enter_execution",
-                            "summary": "The task requires supervised capture.",
-                        }
-                    ),
-                    usage={},
-                    reasoning={},
-                ),
-                SimpleNamespace(
-                    text=json.dumps(
-                        {
                             "action": "skill",
                             "skill_tool": "capture_multi_screenshot",
                             "skill_params": {"angles": angles},
@@ -3384,9 +3418,9 @@ class AgentLoopP0Tests(unittest.TestCase):
             )
 
         execute_skill.assert_not_called()
-        self.assertEqual(len(prompts), 3)
-        self.assertIn("The selected tool is a supervised write", prompts[2])
-        self.assertIn("planner_validation_", prompts[2])
+        self.assertEqual(len(prompts), 2)
+        self.assertIn("The selected tool is a supervised write", prompts[1])
+        self.assertIn("planner_validation_", prompts[1])
         self.assertEqual(result["plan"]["nextStep"], "needs_user_action", result)
         self.assertEqual(result["write"]["status"], "approval_pending")
         approval_id = result["write"]["approvalId"]
@@ -3399,12 +3433,12 @@ class AgentLoopP0Tests(unittest.TestCase):
         self.assertEqual(approval["status"], "pending")
         self.assertEqual(
             [step["kind"] for step in result["steps"]],
-            ["phase", "planner_validation", "write"],
+            ["planner_validation", "write"],
         )
-        self.assertEqual(result["steps"][1]["status"], "failed")
+        self.assertEqual(result["steps"][0]["status"], "failed")
 
     @provider_plan_fixture
-    def test_provider_multi_angle_capture_enters_execution_and_requests_write_approval(self) -> None:
+    def test_provider_multi_angle_capture_requests_write_approval(self) -> None:
         gateway = self.gateway
         project = self._unity_project()
 
@@ -3440,7 +3474,7 @@ class AgentLoopP0Tests(unittest.TestCase):
         self.assertFalse(approval["taskContext"]["continueAfterApproval"])
         self.assertEqual(
             [(step["kind"], step["status"]) for step in result["steps"]],
-            [("phase", "entered_execution"), ("write", "approval_pending")],
+            [("write", "approval_pending")],
         )
 
     def test_approved_multi_capture_runs_bound_visual_audit_without_replaying_write(self) -> None:
@@ -3471,17 +3505,12 @@ class AgentLoopP0Tests(unittest.TestCase):
             planner_prompts.append(str(prompt))
             if len(planner_prompts) == 1:
                 payload = {
-                    "action": "enter_execution",
-                    "summary": "Enter execution to request the supervised capture.",
-                }
-            elif len(planner_prompts) == 2:
-                payload = {
                     "action": "write",
                     "write_tool": "capture_multi_screenshot",
                     "write_params": capture_arguments,
                     "summary": "Capture the approved fixed-angle views.",
                 }
-            elif len(planner_prompts) == 3:
+            elif len(planner_prompts) == 2:
                 payload = {
                     "action": "skill",
                     "skill_tool": "vision_audit_multi",
@@ -3643,9 +3672,9 @@ class AgentLoopP0Tests(unittest.TestCase):
                     execution,
                 )
 
-        self.assertEqual(request_model.call_count, 4)
-        self.assertIn("captureReceipt=managed-visual-receipt", planner_prompts[2])
-        self.assertIn("vrcforge_vision_audit_multi", planner_prompts[3])
+        self.assertEqual(request_model.call_count, 3)
+        self.assertIn("captureReceipt=managed-visual-receipt", planner_prompts[1])
+        self.assertIn("vrcforge_vision_audit_multi", planner_prompts[2])
         execute_skill.assert_called_once()
         self.assertIsNotNone(continuation)
         self.assertEqual(
@@ -3691,7 +3720,7 @@ class AgentLoopP0Tests(unittest.TestCase):
         receipt = authority.issue(continuation)
         journey = authority.verify(receipt)
         self.assertEqual(journey["taskId"], initial["task"]["taskId"])
-        self.assertEqual(journey["providerRequestCount"], 4)
+        self.assertEqual(journey["providerRequestCount"], 3)
         self.assertEqual(journey["resultRefeedCount"], 2)
 
     def test_permanent_visual_provider_rejection_refeeds_route_and_discards_images(self) -> None:
@@ -3706,11 +3735,6 @@ class AgentLoopP0Tests(unittest.TestCase):
         def plan_visual_failure(prompt):
             planner_prompts.append(str(prompt))
             if len(planner_prompts) == 1:
-                payload = {
-                    "action": "enter_execution",
-                    "summary": "Enter execution to request the supervised capture.",
-                }
-            elif len(planner_prompts) == 2:
                 payload = {
                     "action": "write",
                     "write_tool": "capture_multi_screenshot",
@@ -3856,8 +3880,8 @@ class AgentLoopP0Tests(unittest.TestCase):
                     execution,
                 )
 
-        self.assertEqual(request_model.call_count, 3)
-        self.assertIn("captureReceipt=managed-rejected-visual-receipt", planner_prompts[2])
+        self.assertEqual(request_model.call_count, 2)
+        self.assertIn("captureReceipt=managed-rejected-visual-receipt", planner_prompts[1])
         execute_skill.assert_called_once()
         self.assertIsNotNone(continuation)
         self.assertEqual(continuation["plan"]["nextStep"], "needs_user_action", continuation)
@@ -4020,7 +4044,7 @@ class AgentLoopP0Tests(unittest.TestCase):
         self.assertEqual(result["steps"][0]["kind"], "planner_validation")
         self.assertEqual(result["steps"][0]["tool"], "vrcforge_scan_materials")
 
-    def test_hidden_write_misreported_as_skill_gets_one_execution_layer_correction(self) -> None:
+    def test_write_misreported_as_skill_gets_one_action_kind_correction(self) -> None:
         gateway = self.gateway
         project = self._unity_project()
         model_tool_name = next(
@@ -4084,7 +4108,6 @@ class AgentLoopP0Tests(unittest.TestCase):
             [(step["kind"], step["status"]) for step in result["steps"]],
             [
                 ("planner_validation", "failed"),
-                ("phase", "entered_execution"),
                 ("write", "approval_pending"),
             ],
         )

@@ -67,6 +67,37 @@ def run(gateway, tmp_path, **params):
                                     "maxAgenticTurns": 5, **params})
 
 
+def run_planning_continuation(gateway, tmp_path):
+    """Exercise a saved planning layer without changing ordinary turn defaults."""
+    params = {"message": "Read this file", "sessionId": "native-session",
+              "clientTurnId": "native-turn", "projectRoot": str(tmp_path),
+              "maxAgenticTurns": 5}
+    context = {"objective": params["message"], "sessionId": "native-session",
+               "clientTurnId": "native-turn", "projectRoot": str(tmp_path),
+               "exposureLayer": "planning"}
+    with gateway.runtime_planner.bind_turn(params):
+        return gateway._runtime_message_impl(
+            params, task_continuation={"context": context, "completion": {"status": "completed"}},
+        )
+
+
+def test_native_default_exposes_write_immediately_and_preserves_approval(tmp_path):
+    from tests.test_native_permission_modes import _set_mode, _write_gateway_for_mode
+
+    gateway, model, invoked = _write_gateway_for_mode(tmp_path, [
+        call("write-1", "fixture_write", {"projectRoot": str(tmp_path / "UnityProject"), "value": "x"}),
+    ])
+    _set_mode(gateway, "approval")
+    result = run(gateway, tmp_path, message="Write the fixture")
+
+    assert "fixture_write" in {item["function"]["name"] for item in model.requests[0]["tools"]}
+    assert len(model.requests) == 1
+    assert result["exposureLayer"] == "execution"
+    assert result["write"]["status"] == "approval_pending"
+    assert not invoked
+    assert not any(step.get("tool") == "exposure_layer" for step in result["steps"])
+
+
 def test_native_gateway_pairs_actual_tool_result_and_keeps_receipt_private(tmp_path):
     gateway, model, invoked = setup_gateway(tmp_path, [call("read-1", "vrcforge_read_text_file", {"path": "a.txt"}), finish])
     result = run(gateway, tmp_path)
@@ -111,10 +142,11 @@ def test_native_gateway_settles_execution_phase_before_replanning(tmp_path):
     gateway, model, invoked = setup_gateway(tmp_path, [
         call("phase", "vrcforge_runtime_action", {"action": "enter_execution"}),
         {"role": "assistant", "content": "Ready"}])
-    run(gateway, tmp_path)
+    run_planning_continuation(gateway, tmp_path)
     assert not invoked
     assert model.requests[1]["messages"][-1]["tool_call_id"] == "phase"
     assert "entered_execution" in model.requests[1]["messages"][-1]["content"]
+
 
 
 def test_native_control_validation_recovers_on_valid_control_then_tool(tmp_path):
@@ -124,7 +156,7 @@ def test_native_control_validation_recovers_on_valid_control_then_tool(tmp_path)
     valid = call("good-control", "vrcforge_runtime_action", {"action": "enter_execution"})
     gateway, model, invoked = setup_gateway(tmp_path, [invalid, valid,
         call("read-1", "vrcforge_read_text_file", {"path": "a.txt"}), finish])
-    result = run(gateway, tmp_path)
+    result = run_planning_continuation(gateway, tmp_path)
     assert len(invoked) == 1
     assert len(model.requests) == 4
     assert result["plan"]["nextStep"] == "done", result
@@ -238,7 +270,6 @@ def test_native_read_observation_notfound_create_verified_then_targeted_read_fin
     )
     model.replies = iter([
         call("wrong-tool", "unity_agent_message", {"message": "not advertised here"}),
-        call("phase", "vrcforge_runtime_action", {"action": "enter_execution"}),
         call("read-before", "vrcforge_get_gameobject", {"gameObjectPath": "HarnessAutoCheck"}),
         call("create", "fixture_write", {"projectRoot": str(tmp_path / "UnityProject"), "value": "create"}),
         call("read-target", "vrcforge_get_gameobject", {

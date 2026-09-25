@@ -302,3 +302,13 @@ Regression: `tests/test_bundled_skill_delivery.py`.
 
 Regression: `tests/test_agent_shell_service.py`,
 `tests/test_avatar_tuning_state_service.py` and existing skill/sub-agent UI checks.
+
+
+## Normal task execution exposure
+
+Normal App tasks must expose execution tools on the first provider request,
+without requiring a model-generated phase transition. Visibility is not
+permission: supervised writes remain pending until approved and must not
+invoke Unity before approval. Continuations retain their recorded exposure.
+
+Regression: `tests/test_agent_loop_p0.py` and `tests/test_native_runtime_gateway.py`.

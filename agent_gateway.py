@@ -6170,6 +6170,7 @@ class AgentGateway:
         else:
             task_loop = AgentTaskLoop(
                 message,
+                exposure_layer=EXPOSURE_LAYER_EXECUTION,
                 session_id=session_id,
                 turn_id=turn_id,
                 client_turn_id=client_turn_id,
@@ -6452,9 +6453,7 @@ class AgentGateway:
                     if required_memory_tool:
                         task_loop.require_action(kind="write", tool=required_memory_tool)
         tool_calls_used = task_loop.tool_calls_used if continuation_context else 0
-        runtime_exposure_layer = (
-            task_loop.exposure_layer if continuation_context else EXPOSURE_LAYER_PLANNING
-        )
+        runtime_exposure_layer = task_loop.exposure_layer
         remaining_action: dict[str, Any] | None = None
         runtime_compaction: dict[str, Any] | None = None
         runtime_compaction_attempted = False
