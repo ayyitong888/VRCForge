@@ -191,6 +191,16 @@ class PackageSecurityError(SkillPackageError):
     pass
 
 
+class PackageDisabledError(PackageSecurityError):
+    """The installed package is disabled in the package store registry."""
+
+    code = "disabled"
+
+    def __init__(self, package_id: str):
+        self.package_id = package_id
+        super().__init__(f"Skill package is not enabled: {package_id}.")
+
+
 class PackageIntegrityError(SkillPackageError):
     pass
 
@@ -1279,8 +1289,10 @@ class SkillPackageService:
         normalized = self._normalize_installed_skill_id(skill_id)
         registry = self.load_registry()
         entry = self._find_installed_entry(normalized, registry)
-        if entry is None or not bool(entry.get("enabled", True)):
-            raise PackageSecurityError(f"Skill package is not enabled: {normalized}.")
+        if entry is None:
+            raise PackageSecurityError(f"Skill package is not installed: {normalized}.")
+        if not bool(entry.get("enabled", True)):
+            raise PackageDisabledError(normalized)
         governance = self._evaluate_installed_governance(entry, registry)
         if not governance.get("enableAllowed", False):
             raise PackageSecurityError(self._format_governance_block("use", governance))

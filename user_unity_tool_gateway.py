@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
-from skill_packages import SkillPackageError
+from skill_packages import PackageDisabledError, SkillPackageError
 from user_unity_tool_service import UserUnityToolService
 
 
@@ -51,8 +51,17 @@ def list_user_tools(arguments: dict[str, Any], service: UserUnityToolService,
                 raise ValueError("The compiled project package differs from the installed package.")
         except (SkillPackageError, ValueError) as exc:
             package.update(available=False, status="unavailable")
-            package["reasons"] = [*package.get("reasons", []), str(exc)]
-            package["tools"] = [dict(tool, available=False) for tool in package.get("tools", [])]
+            if isinstance(exc, PackageDisabledError):
+                package["coreEnabled"] = package.get("enabled")
+                package["enabled"] = False
+                package["disabledBy"] = "vrcforge_package_store"
+                package["reasons"] = [*package.get("reasons", []), exc.code]
+                package["tools"] = [dict(tool, available=False,
+                                         coreReason=tool.get("reason"), reason=exc.code)
+                                     for tool in package.get("tools", [])]
+            else:
+                package["reasons"] = [*package.get("reasons", []), str(exc)]
+                package["tools"] = [dict(tool, available=False) for tool in package.get("tools", [])]
         packages.append(package)
     try:
         baseline = service.repair_baseline(project)

@@ -401,3 +401,10 @@ Regression: `tests/test_planner_tool_description_integrity.py`, `tests/test_plan
 - Initial continuation and subsequent result pages must name a tool advertised by the planner catalog, in native and legacy observations and with or without project context.
 - Project only the continuation hint; retain the internal reader name, result reference, arguments, content and ownership checks unchanged. Do not mutate stored results.
 - Regression coverage: `tests/test_result_reader_planner_boundary.py`, alongside the existing result-reader and tool-result contract tests.
+
+
+### Disabled user-tool package metadata
+
+- A package disabled in the installed store must report effective enabled=false and unavailable tools with a disabled reason; retain original Core state separately for diagnosis.
+- Missing packages must not be mislabeled as disabled. Reenabling restores ordinary metadata without changing project files or source catalog objects.
+- Native and legacy model observations must preserve this distinction. Invocation remains blocked before dispatch. Coverage: `tests/test_package_disabled_contract.py` and existing user-tool gateway/service tests.
