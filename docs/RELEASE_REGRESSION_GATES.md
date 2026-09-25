@@ -408,3 +408,10 @@ Regression: `tests/test_planner_tool_description_integrity.py`, `tests/test_plan
 - A package disabled in the installed store must report effective enabled=false and unavailable tools with a disabled reason; retain original Core state separately for diagnosis.
 - Missing packages must not be mislabeled as disabled. Reenabling restores ordinary metadata without changing project files or source catalog objects.
 - Native and legacy model observations must preserve this distinction. Invocation remains blocked before dispatch. Coverage: `tests/test_package_disabled_contract.py` and existing user-tool gateway/service tests.
+
+
+### Capability-package discovery semantics
+
+- Root, child and leaf discovery must describe installed VRCForge .vsk package state and enablement while retaining Unity assets, prefabs, packages, dependencies/imports and asset/package inventory semantics.
+- Descriptions come from canonical routing metadata; root/child views must not include a global tool inventory. Full leaf tool metadata and approval boundaries remain unchanged.
+- Coverage: `tests/test_native_progressive_directory.py` and `tests/test_internal_tool_blocks.py`. Model selection and cost improvements require separate live evidence.

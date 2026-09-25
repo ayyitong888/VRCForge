@@ -189,3 +189,36 @@ def test_actual_native_requests_browse_load_and_execute_without_global_directory
     assert after[:len(before)] == before
     assert after[-1]["function"]["name"] == "read_text_file"
     assert gateway.runtime_sessions.internal_tool_selections("native-session")[leaf] is None
+
+
+@pytest.mark.parametrize('selector', [None, 'project_environment', 'project_environment/assets_packages'])
+def test_package_discovery_describes_app_capabilities_and_unity_without_global_inventory(catalog_leaves, selector):
+    result = project(raw_directory(catalog_leaves, selector))
+    if selector is None:
+        assert len(result['blocks']) == 6
+        row = next(row for row in result['blocks'] if row['name'] == 'project_environment')
+        assert not row.get('children') and not row.get('toolNames')
+        assert row['expandArguments'] == {'block': 'project_environment'}
+    elif selector == 'project_environment':
+        assert {row['name'] for row in result['blocks']} == {
+            'project_environment/assets_packages', 'project_environment/files', 'project_environment/shell'}
+        row = next(row for row in result['blocks'] if row['name'].endswith('/assets_packages'))
+        assert not row.get('children') and not row.get('toolNames')
+        assert row['expandArguments'] == {'block': 'project_environment/assets_packages'}
+    else:
+        assert result['blocks'] == []
+        row = result['tree']
+        raw = raw_directory(catalog_leaves, selector)
+        assert row['tools'] == raw['tree']['tools']
+        assert row['tools']
+    description = row['description']
+    assert 'installed VRCForge .vsk capability package state' in description
+    assert 'enablement' in description
+    assert 'Unity' in description and 'assets' in description and 'dependencies' in description
+    assert 'packages, dependencies' in description
+    assert 'asset/package inventory' in description
+    if selector is not None:
+        assert 'prefabs, packages, dependencies, imports' in description
+    assert 'Do not use when:' in description
+    assert 'Planning: read, inspect, and preview only' in description
+    assert 'Execution: approved' in description
