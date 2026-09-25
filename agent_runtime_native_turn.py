@@ -63,6 +63,14 @@ class NativeRuntimeTurn:
                 ),
             )
             cancelled.append(call_id)
+        if cancelled:
+            # Stopping a waiting question also stops later proposals in its same
+            # receipt, but cannot touch calls from a newer unrelated turn.
+            pending = state._native_pending(snapshot) & state._native_pending(restored)
+            for call_id in sorted(pending - set(cancelled)):
+                state.settle_native_call(session_id, binding=binding, call_id=call_id,
+                    content=json.dumps({"status": "not_executed", "reason": "question_cancelled", "observations": []}))
+                cancelled.append(call_id)
         return cancelled
 
     def __init__(
@@ -89,6 +97,8 @@ class NativeRuntimeTurn:
         self._loop_state = loop_state
         self._native_decision: dict[str, Any] | None = None
         self._native_steers: list[str] = []
+        self._queued_calls: list[dict[str, Any]] = []
+        self.admitted_tool_names: set[str] | None = None
         self.compaction_attempted = False
         self.compaction: dict[str, Any] | None = None
         state = self._state
@@ -110,6 +120,19 @@ class NativeRuntimeTurn:
             if not pending_ids:
                 raise ValueError("Native continuation has already been settled.")
             if pending_ids:
+                # The first still-pending call is the only dispatched action;
+                # later calls remain proposals in the immutable assistant receipt.
+                pending_calls = [call for item in restored["messages"]
+                                 for call in item.get("tool_calls", []) if call["id"] in pending_ids]
+                active_id = pending_calls[0]["id"]
+                self._queued_calls = copy.deepcopy(pending_calls[1:])
+                admitted_names = continuation_context.get("_nativeAdmittedToolNames", [])
+                if not isinstance(admitted_names, list) or any(not isinstance(name, str) or not name for name in admitted_names):
+                    raise ValueError("Invalid native receipt tool scope.")
+                self.admitted_tool_names = set(admitted_names)
+                if self._queued_calls and not self.admitted_tool_names:
+                    raise ValueError("Native continuation tool scope is missing.")
+                pending_ids = {active_id}
                 resumed_result = {
                     "status": continuation_completion.get("status") or "completed",
                     "observations": [
@@ -163,19 +186,36 @@ class NativeRuntimeTurn:
                 expected_snapshot=expected_snapshot, summary=summary,
             )
 
-    def admit(self, receipt: dict[str, Any]) -> None:
-        """Record one provider assistant receipt and its tool-call cursor."""
+    def admit(self, receipt: dict[str, Any], *, tool_names: Iterable[str] = ()) -> None:
+        """Record one provider receipt; execution remains serial in the existing dispatcher."""
         if not self._binding:
             return
-        self._state.append_native_assistant(
-            self._session_id,
-            binding=self._binding,
-            message=receipt,
-        )
-        self._native_decision = {
-            "ids": [call["id"] for call in receipt.get("tool_calls", []) or []],
-            "cursor": len(self._loop_state),
-        }
+        self._state.append_native_assistant(self._session_id, binding=self._binding, message=receipt)
+        self._queued_calls = copy.deepcopy(receipt.get("tool_calls") or [])
+        self.admitted_tool_names = set(tool_names)
+        self._native_decision = None if self._queued_calls else {"ids": [], "cursor": len(self._loop_state)}
+
+    @property
+    def has_queued_calls(self) -> bool:
+        return bool(self._queued_calls)
+
+    def next_receipt(self) -> dict[str, Any]:
+        if self._native_decision is not None or not self._queued_calls:
+            raise ValueError("Native call cannot dispatch before its predecessor settles.")
+        call = self._queued_calls.pop(0)
+        self._native_decision = {"ids": [call["id"]], "cursor": len(self._loop_state)}
+        return {"role": "assistant", "content": None, "tool_calls": [copy.deepcopy(call)]}
+
+    def reject_queued_receipt(self) -> None:
+        """Bind one whole-receipt admission failure to every unexecuted call."""
+        self._native_decision = {"ids": [call["id"] for call in self._queued_calls], "cursor": len(self._loop_state)}
+        self._queued_calls.clear()
+
+    def _settle_unexecuted(self, reason: str) -> None:
+        for call in self._queued_calls:
+            self._state.settle_native_call(self._session_id, binding=self._binding, call_id=call["id"],
+                content=json.dumps({"status": "not_executed", "reason": reason, "observations": []}))
+        self._queued_calls.clear()
 
     def settle(self, terminal: Mapping[str, Any] | None = None) -> None:
         """Settle native calls only after all canonical observations are final."""
@@ -215,7 +255,7 @@ class NativeRuntimeTurn:
                 return False
 
             waiting = any(is_waiting(item) for item in observations if isinstance(item, Mapping))
-            if waiting:
+            if waiting and (terminal or {}).get("nextStep") not in {"cancelled", "interrupted"}:
                 return
             result: dict[str, Any] = {
                 "observations": [
@@ -251,6 +291,10 @@ class NativeRuntimeTurn:
                     ),
                 )
             self._native_decision = None
+        if terminal is not None:
+            self._settle_unexecuted(str(terminal.get("nextStep") or "terminal"))
+        if self._queued_calls:
+            return
         for steer in self._native_steers:
             self._state.append_native_user(
                 self._session_id,
@@ -263,9 +307,12 @@ class NativeRuntimeTurn:
         """Queue accepted steer messages for the next native provider request."""
         if not self._binding:
             return
+        accepted = list(items)
+        if any(str(item.get("message") or "") for item in accepted):
+            self._settle_unexecuted("user_steer")
         self._native_steers.extend(
             str(item.get("message") or "")
-            for item in items
+            for item in accepted
             if str(item.get("message") or "")
         )
 
@@ -278,6 +325,7 @@ class NativeRuntimeTurn:
             )
             if snapshot is not None:
                 seed["_nativeConversation"] = snapshot
+                seed["_nativeAdmittedToolNames"] = sorted(self.admitted_tool_names or ())
         return seed
 
     def messages(self) -> list[dict[str, Any]]:

@@ -301,15 +301,22 @@ def test_native_action_payload_rejects_ambiguous_exact_catalog_names() -> None:
     assert rejection["issues"][0]["code"] == "tool_not_visible"
 
 
-def test_native_multiple_calls_are_all_retained_but_none_selected_for_execution():
+def test_native_multiple_calls_are_retained_and_selected_one_at_a_time():
     message = native_call("read_file")
     message["tool_calls"].extend(native_call("read_file", call_id="call-two")["tool_calls"])
     model = NativeModel(message)
-    plan = service(model=model).plan_agent_turn(
-        "inspect", {}, {}, native_turn=NativePlannerFixture([{"role": "user", "content": "inspect"}]),
+    native = NativePlannerFixture([{"role": "user", "content": "inspect"}])
+    planner = service(model=model)
+    plan = planner.plan_agent_turn(
+        "inspect", {}, {}, native_turn=native,
     )
-    assert plan["nativeCallIds"] == ["call-read", "call-two"]
-    assert plan["argumentValidation"]["issues"][0]["code"] == "parallel_calls_unsupported"
+    assert plan["nativeCallIds"] == ["call-read"]
+    assert native.has_queued_calls
+    second = planner.plan_agent_turn("inspect", {}, {}, native_turn=native)
+    assert second["nativeCallIds"] == ["call-two"]
+    assert len(model.requests) == 1
+    assert not native.has_queued_calls
+    assert native.messages()[-1] == message
     assert not plan.get("skillNeeded") and not plan.get("writeNeeded")
 
 

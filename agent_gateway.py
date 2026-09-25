@@ -6703,7 +6703,7 @@ class AgentGateway:
                 tool_calls_used=tool_calls_used,
                 remaining_action=remaining_action,
             )
-            if budget_decision.get("paused"):
+            if budget_decision.get("paused") and not (native_binding and native_turn.has_queued_calls):
                 cap_reached = True
                 last_plan = {
                     "summary": "Runtime paused at a bounded budget.",
@@ -6831,6 +6831,15 @@ class AgentGateway:
                     "remainingModelTurns": max(0, max_model_turns - task_loop.model_turns_used),
                 }
             native_turn.settle()
+            queued_native_action = bool(native_binding and native_turn.has_queued_calls)
+            # Steer may discard the queue after the first budget check. A fresh
+            # provider request must still obey the original model-turn cap.
+            if not queued_native_action and budget_decision.get("paused"):
+                cap_reached = True
+                last_plan = {"summary": "Runtime paused at a bounded budget.",
+                             "reply": "Runtime paused before the next model request; the task is not complete.",
+                             "planner": "runtime", **budget_decision}
+                break
             plan = self.runtime_planner.plan_agent_turn(
                 message,
                 params,
@@ -6844,7 +6853,8 @@ class AgentGateway:
             )
             if native_binding and native_turn.compaction is not None:
                 runtime_compaction = native_turn.compaction
-            task_loop.model_turns_used += 1
+            if not queued_native_action:
+                task_loop.model_turns_used += 1
             if continuation_shutdown_guard:
                 self._ensure_runtime_continuation_accepting()
             iterations += 1

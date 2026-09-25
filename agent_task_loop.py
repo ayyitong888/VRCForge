@@ -737,6 +737,9 @@ def approval_task_context(
         # Private continuation state is frozen outside the normal task-loop
         # projection so later provider/history mutation cannot rewrite it.
         context["_nativeConversation"] = copy.deepcopy(native_conversation)
+        native_names = seed.get("_nativeAdmittedToolNames")
+        if isinstance(native_names, list):
+            context["_nativeAdmittedToolNames"] = copy.deepcopy(native_names)
     return context
 
 

@@ -9,6 +9,8 @@ class NativePlannerFixture:
         self.compaction = None
         self.compaction_attempted = False
         self._tool_order = []
+        self._queued_calls = []
+        self.admitted_tool_names = set()
 
     def order_tools(self, definitions):
         by_name = {item["function"]["name"]: item for item in definitions}
@@ -25,7 +27,19 @@ class NativePlannerFixture:
     def cancelled(self):
         return False
 
-    def admit(self, message):
+    @property
+    def has_queued_calls(self):
+        return bool(self._queued_calls)
+
+    def next_receipt(self):
+        return {"role": "assistant", "content": "", "tool_calls": [self._queued_calls.pop(0)]}
+
+    def reject_queued_receipt(self):
+        self._queued_calls.clear()
+
+    def admit(self, message, *, tool_names=()):
         self._messages.append(deepcopy(message))
+        self._queued_calls = deepcopy(message.get("tool_calls") or [])
+        self.admitted_tool_names = set(tool_names)
         if self._sink:
             self._sink(message)

@@ -2044,13 +2044,14 @@ class RuntimePlannerService:
             native_call_ids: list[str] = []
             try:
                 native = native_turn is not None
+                queued_receipt = native_turn.next_receipt() if native and native_turn.has_queued_calls else None
                 native_request, native_tools = self._build_native_plan_request(
                     native_turn.messages() if native_turn is not None else [], observe=observe, exposure_layer=exposure_layer,
                     project_context_active=project_context_active, project_path=project_path,
                     internal_tool_blocks=internal_tool_blocks,
                     global_instructions=global_instructions, project_instructions=project_instructions,
                 ) if native else ({}, [])
-                if native:
+                if native and queued_receipt is None:
                     native_request, native_guard = self.maybe_compact_native_context(
                         native_request, native_turn, context_usage=context_usage,
                     )
@@ -2079,26 +2080,57 @@ class RuntimePlannerService:
                     project_instructions=project_instructions,
                 )
                 for format_attempt in range(1 if native else 2):
-                    raw_response = model_port.plan_native(native_request) if native else model_port.plan(prompt)
+                    raw_response = (
+                        PlannerModelResult("", assistant_message=queued_receipt, finish_reason="tool_calls")
+                        if queued_receipt is not None else
+                        model_port.plan_native(native_request) if native else model_port.plan(prompt)
+                    )
                     provider_reasoning = dict(raw_response.reasoning)
                     if reasoning_trace is not None:
                         reasoning_trace.clear()
                         reasoning_trace.update(provider_reasoning)
                     planner_label = raw_response.planner_label.strip() or str(planner_label or "").strip()
                     response_text, provider_usage = normalize_llm_plan_result(raw_response)
-                    self.record_context_usage(context_usage if context_usage is not None else {}, prompt, history, provider_usage)
+                    if queued_receipt is None:
+                        self.record_context_usage(context_usage if context_usage is not None else {}, prompt, history, provider_usage)
                     parse_diagnostics: dict[str, object] = {}
                     if native:
                         receipt = deepcopy(dict(raw_response.assistant_message))
                         if raw_response.finish_reason not in {"stop", "tool_calls"} or receipt.get("role") != "assistant":
                             raise ValueError("Incomplete native assistant response cannot be admitted.")
                         calls = receipt.get("tool_calls") or []
-                        if not isinstance(calls, list) or any(not isinstance(call, dict) for call in calls):
+                        if not isinstance(calls, list) or any(not isinstance(call, dict) or not isinstance(call.get("function"), dict) for call in calls):
                             raise ValueError("Invalid native tool call envelope.")
                         native_call_ids = [call.get("id") for call in calls]
                         if any(not isinstance(item, str) or not item.strip() for item in native_call_ids) or len(set(native_call_ids)) != len(native_call_ids):
                             raise ValueError("Native tool call IDs must be nonempty and unique.")
-                        native_turn.admit(receipt)
+                        if queued_receipt is None:
+                            native_turn.admit(receipt, tool_names=[tool.name for tool in native_tools])
+                            by_name = {tool.name: tool for tool in native_tools}
+                            write_count = sum(bool(by_name.get(call.get("function", {}).get("name"))
+                                                   and by_name[call["function"]["name"]].write) for call in calls)
+                            # A bounded proposal queue, never concurrent side-effect dispatch.
+                            # Control envelopes are not ordinary read tools; keep their existing single-call contract.
+                            if write_count > 1 or (len(calls) > 1 and any(
+                                call.get("function", {}).get("name") == "vrcforge_runtime_action" for call in calls
+                            )):
+                                native_turn.reject_queued_receipt()
+                                rejection = {"kind": "control", "tool": "native_batch", "arguments": None,
+                                    "summary": "A receipt supports at most one write; control actions require their own response. No call was executed.",
+                                    "issues": [{"path": "tool_calls", "code": "native_batch_not_admitted"}]}
+                                return self._planner_argument_error_plan(
+                                    base={"planner": "llm", "nativeCallIds": native_call_ids,
+                                          "skillNeeded": False, "writeNeeded": False, "shellNeeded": False},
+                                    action_kind="control", tool_name="native_batch", arguments=None,
+                                    validation=rejection, phase=phase,
+                                )
+                            if calls:
+                                receipt = native_turn.next_receipt()
+                                native_call_ids = [receipt["tool_calls"][0]["id"]]
+                        # Re-read current authority for every dispatch, but never grant a tool
+                        # absent from this receipt's original advertised scope.
+                        native_tools = [tool for tool in native_tools
+                                        if tool.name in (native_turn.admitted_tool_names or set())]
                         payload, rejection = self._native_action_payload(
                             receipt, native_tools, catalog=self._catalog.read(
                                 exposure_layer, project_context_active=project_context_active,

@@ -120,11 +120,9 @@ def test_native_gateway_pairs_actual_tool_result_and_keeps_receipt_private(tmp_p
     assert "private-fixture-replay" not in json.dumps(gateway._runtime_session_state.get_session("native-session"))
 
 
-@pytest.mark.parametrize("kind", ["hidden", "invalid", "parallel"])
+@pytest.mark.parametrize("kind", ["hidden", "invalid"])
 def test_native_gateway_rejects_every_call_without_dispatch(tmp_path, kind):
     receipt = call("bad-1", "not_advertised" if kind == "hidden" else "vrcforge_read_text_file", {})
-    if kind == "parallel":
-        receipt["tool_calls"] += call("bad-2", "vrcforge_read_text_file", {"path": "b.txt"})["tool_calls"]
     gateway, model, invoked = setup_gateway(tmp_path, [receipt, {"role": "assistant", "content": "Cannot proceed"}])
     run(gateway, tmp_path)
     assert not invoked

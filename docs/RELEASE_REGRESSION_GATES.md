@@ -339,3 +339,13 @@ Regression: `tests/test_explicit_plan_mode.py`, `tests/test_explicit_plan_mode_u
 - Redact before chunking; preserve ownership, private-field and exact-identity checks, including escaped JSON pointer segments.
 
 Regression: `tests/test_result_reader_long_scalar.py`, `tests/test_agent_tool_result_reader.py`, `tests/test_result_reader_completion_recovery.py`.
+
+### Native multi-call ownership
+
+- Multiple reads from one assistant response must receive separate results by call ID without an extra model request between dispatches. Execution remains serial through the existing dispatcher.
+- A response may propose at most one write; approval and post-approval authority checks remain unchanged. Resume must not replay completed reads or attach the write result to another call.
+- Loading a tool cannot authorize a name that was absent from the original response's advertised set. Recheck current permissions before each queued dispatch.
+- Stop, terminal scope denial and user steering must settle remaining proposals without executing them. Questions suspend the queue until answered; cancelling a question also closes remaining proposals.
+- Queued dispatch is not another model turn. Clearing a queue must not bypass an explicit model-turn budget.
+
+Regression: `tests/test_native_multi_call_admission.py`.
