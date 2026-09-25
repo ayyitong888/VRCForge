@@ -13,7 +13,7 @@ import json
 import re
 from typing import Any, Callable, Iterator, Mapping
 
-from planner_structured_tool_evidence import _private_or_opaque, project_structured_tool_evidence
+from planner_structured_tool_evidence import _identity_key, _private_or_opaque, project_structured_tool_evidence
 
 TOOL_NAME = "vrcforge_read_tool_result"
 PAGE_SCHEMA = "vrcforge.tool_result_page.v1"
@@ -32,6 +32,8 @@ INPUT_SCHEMA = {
                    "description": "Zero-based item or field offset within the selected collection; at most its returned count. Use nextRequest to continue."},
         "limit": {"type": "integer", "minimum": 1, "maximum": 20, "default": 6,
                   "description": "Maximum items in this page (1 through 20). The character budget may return fewer; follow nextRequest when hasMore is true."},
+        "textOffset": {"type": "integer", "minimum": 0,
+                       "description": "Only for an exact text field with offset=0: character offset in its sanitized text, independent of item offset/limit. Copy nextRequest to retrieve remaining text."},
     },
 }
 # Existing owner-validated channels must not gain a generic raw-result escape.
@@ -89,7 +91,7 @@ def _pointer(parent: str, name: object) -> str:
 def page_next_request_arguments(page: Mapping[str, Any]) -> dict[str, Any] | None:
     """Recognize the bounded reader continuation before generic log summarization.
 
-    Only these four scalar fields may bypass path shortening. Page content and
+    Only the validated reader cursor fields may bypass path shortening. Page content and
     unrelated arguments retain the existing recursive redaction behavior.
     """
     request = page.get("nextRequest")
@@ -99,7 +101,8 @@ def page_next_request_arguments(page: Mapping[str, Any]) -> dict[str, Any] | Non
             or request.get("tool") != TOOL_NAME):
         return None
     args = request.get("arguments")
-    if not isinstance(args, dict) or set(args) != set(INPUT_SCHEMA["properties"]):
+    required = {"resultRef", "jsonPointer", "offset", "limit"}
+    if not isinstance(args, dict) or not required <= set(args) or set(args) - required - {"textOffset"}:
         return None
     ref, pointer = args.get("resultRef"), args.get("jsonPointer")
     if (not isinstance(ref, str) or re.fullmatch(r"result_[0-9a-f]{32}", ref) is None
@@ -108,8 +111,19 @@ def page_next_request_arguments(page: Mapping[str, Any]) -> dict[str, Any] | Non
             or re.fullmatch(INPUT_SCHEMA["properties"]["jsonPointer"]["pattern"], pointer) is None):
         return None
     offset, limit, current, count = args.get("offset"), args.get("limit"), page.get("offset"), page.get("totalItems")
-    if (any(type(value) is not int for value in (offset, limit, current, count))
-            or not 0 <= current < offset < count or not 1 <= limit <= 20):
+    if any(type(value) is not int for value in (offset, limit, current, count)) or not 1 <= limit <= 20:
+        return None
+    if "textOffset" in args:
+        start, following, total = page.get("textOffset"), args["textOffset"], page.get("textTotalChars")
+        if (any(type(value) is not int for value in (start, following, total))
+                or not 0 <= start < following < total or offset != 0 or current != 0 or count != 1):
+            return None
+        items = page.get("items")
+        if (not isinstance(items, list) or len(items) != 1 or not isinstance(items[0], dict)
+                or not isinstance(items[0].get("value"), str) or items[0].get("jsonPointer") != pointer
+                or following != start + len(items[0]["value"])):
+            return None
+    elif not 0 <= current < offset < count:
         return None
     return dict(args)
 
@@ -207,8 +221,8 @@ def read_tool_result(params: Mapping[str, Any], *, sanitize: Callable[[object, i
     context = _CONTEXT.get()
     if context is None or not context.session_id or not context.turn_id:
         raise PermissionError("Result reads require the owning active runtime turn")
-    if set(params) - {"resultRef", "jsonPointer", "offset", "limit"}:
-        raise ValueError("Result reader accepts only resultRef, jsonPointer, offset and limit")
+    if set(params) - set(INPUT_SCHEMA["properties"]):
+        raise ValueError("Result reader accepts only resultRef, jsonPointer, offset, limit and textOffset")
     ref = params.get("resultRef")
     step = next((row for row in context.steps if isinstance(ref, str)
                  and row.get("resultRead", {}).get("resultRef") == ref
@@ -223,6 +237,10 @@ def read_tool_result(params: Mapping[str, Any], *, sanitize: Callable[[object, i
     members = list(value.items()) if isinstance(value, dict) else list(enumerate(value)) if isinstance(value, list) else [(None, value)]
     if offset > len(members):
         raise ValueError("offset is outside the retained result")
+    field_name = pointer.rsplit("/", 1)[-1].replace("~1", "/").replace("~0", "~")
+    scalar_text = isinstance(value, str) and not _identity_key(field_name)
+    if "textOffset" in params and (not scalar_text or offset != 0):
+        raise ValueError("textOffset requires an exact non-identity text field with offset=0")
     page: dict[str, Any] = {"schema": PAGE_SCHEMA, "ok": True, "authority": "untrusted_tool_output",
                            "resultRef": ref, "sourceStep": step["index"], "sourceTool": step["tool"],
                            "jsonPointer": pointer, "offset": offset, "totalItems": len(members),
@@ -237,6 +255,42 @@ def read_tool_result(params: Mapping[str, Any], *, sanitize: Callable[[object, i
             "hasMore=false only completes this retained page, not source resolution or search coverage. "
             "If constraints are truncated, inspect the parent scopes before claiming resolution."
         )
+    if scalar_text and offset == 0:
+        # Sanitize the entire retained string before slicing: a secret must not
+        # straddle chunks and escape the normal redactor. Cursors address this
+        # deterministic sanitized text, not raw-source or collection offsets.
+        text = sanitize(value, max(1, len(value) * 4 + 100))
+        start = params.get("textOffset", 0)
+        if type(start) is not int or not 0 <= start <= len(text):
+            raise ValueError("textOffset is outside the sanitized text")
+
+        def text_page(end: int) -> dict[str, Any]:
+            more = end < len(text)
+            candidate = {**page, "textOffset": start, "textTotalChars": len(text),
+                         "items": [{"jsonPointer": pointer, "value": text[start:end],
+                                    "truncated": more, "redactedFields": 0}],
+                         "returnedItems": 1, "hasMore": more, "previewTruncated": more}
+            if more:
+                candidate["nextRequest"] = {"tool": TOOL_NAME, "arguments": {
+                    "resultRef": ref, "jsonPointer": pointer, "offset": 0,
+                    "limit": limit, "textOffset": end}}
+            return candidate
+
+        if len(text) - start <= MAX_PAGE_CHARS:
+            complete = text_page(len(text))
+            if _size(complete) <= MAX_PAGE_CHARS:
+                return complete
+        low, high = start, min(len(text), start + MAX_PAGE_CHARS)
+        while low < high:
+            middle = (low + high + 1) // 2
+            if _size(text_page(middle)) <= MAX_PAGE_CHARS:
+                low = middle
+            else:
+                high = middle - 1
+        result = text_page(low)
+        if _size(result) > MAX_PAGE_CHARS or low == start < len(text):
+            raise ValueError("Text page metadata exceeds the page budget; select a narrower field")
+        return result
     cursor = offset
     for key, child in members[offset:]:
         if len(page["items"]) >= limit:

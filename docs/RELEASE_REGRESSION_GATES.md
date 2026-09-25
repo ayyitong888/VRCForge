@@ -330,3 +330,12 @@ Regression: `tests/test_explicit_plan_mode.py`, `tests/test_explicit_plan_mode_u
 
 - A persisted queued turn owns its selected Plan mode. After process restart, claiming and replaying it must retain that mode even if the replay request omits the field or carries the current composer's different mode.
 - Regression: `tests/test_explicit_plan_mode.py::test_queued_replay_uses_persisted_plan_mode` covers saved Plan with absent/false replay input and saved execution with true replay input; the durable queue is reopened before dispatch.
+
+### Retained text continuation
+
+- Selecting an exact non-identity text field must return all sanitized text that fits the page, not another shortened preview.
+- Oversized text must expose a progressing `textOffset` continuation and reconstruct the complete sanitized value within the existing serialized page budget.
+- Collection `offset` and `limit` retain item semantics. Existing collection continuations remain valid.
+- Redact before chunking; preserve ownership, private-field and exact-identity checks, including escaped JSON pointer segments.
+
+Regression: `tests/test_result_reader_long_scalar.py`, `tests/test_agent_tool_result_reader.py`, `tests/test_result_reader_completion_recovery.py`.
