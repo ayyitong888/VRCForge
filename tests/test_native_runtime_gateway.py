@@ -156,6 +156,35 @@ def test_native_gateway_settles_execution_phase_before_replanning(tmp_path):
 
 
 
+def test_native_action_contract_explains_supervised_execution_boundary(tmp_path):
+    gateway, model, invoked = setup_gateway(tmp_path, [
+        call("phase", "vrcforge_runtime_action", {"action": "enter_execution"}),
+        {"role": "assistant", "content": "Ready"},
+    ])
+
+    result = run_planning_continuation(gateway, tmp_path)
+    action = next(
+        item["function"] for item in model.requests[0]["tools"]
+        if item["function"]["name"] == "vrcforge_runtime_action"
+    )
+    description = action["description"]
+    assert "When to use" in description and "When NOT to use" in description
+    action_description = action["parameters"]["properties"]["action"]["description"]
+    assert "enter_execution" in action_description
+    assert "requested change" in action_description
+    assert "performs no write" in action_description
+    assert "does not bypass approval" in action_description
+    assert "reply ends the turn" in action_description
+    assert "shell runs an authorized host command" in action_description
+    assert "correct resubmits a failed action with corrected arguments" in action_description
+    assert "enter_execution" in action["parameters"]["properties"]["action"]["enum"]
+    assert not invoked
+    assert model.requests[1]["messages"][-2]["tool_call_id"] == "phase"
+    assert "entered_execution" in model.requests[1]["messages"][-2]["content"]
+    assert json.loads(model.requests[1]["messages"][-1]["content"].split(": ", 1)[1])["exposureLayer"] == "execution"
+    assert len(model.requests) >= 2
+
+
 def test_native_control_validation_recovers_on_valid_control_then_tool(tmp_path):
     invalid = call("bad-control", "vrcforge_runtime_action", {
         "action": "enter_execution", "unexpected": True,

@@ -380,3 +380,10 @@ Regression: `tests/test_planner_tool_description_integrity.py`, `tests/test_plan
 - Missing/non-array replacement arguments or a nonempty list with no valid titled items fail before any progress event is written. Explicit empty lists remain supported; preserve existing aliases, precedence and mixed-entry filtering.
 - Invalid replacement requests leave existing progress unchanged. Updating or deleting items retains existing session/project scope enforcement.
 - Regression checks: `tests/test_progress_tool_contract.py` and existing progress HTTP tests in `tests/test_dashboard_server.py`. These checks establish contract correctness, not measured provider cost savings.
+
+
+## Mode-specific runtime control descriptions
+
+- Runtime control descriptions and action-schema explanations derive from the same allowed action enum. Explicit Plan describes reply/correct only; execution does not tell the model to enter execution again.
+- Remove obsolete unconditional enter-execution instructions while retaining host permission and approval enforcement. Control tools never authorize Unity writes by themselves.
+- Regression checks: `tests/test_native_control_description.py` and `tests/test_native_runtime_gateway.py`; native and explicit Plan behavior must retain existing authorization boundaries.
