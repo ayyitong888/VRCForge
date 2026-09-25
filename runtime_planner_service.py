@@ -1677,6 +1677,9 @@ class RuntimePlannerService:
                 native_turn.compaction = metadata
             return request, guard
         native_turn.compaction_attempted = True
+        # Native snapshots contain no system messages. Preserve request-only
+        # runtime data through both candidate measurement and final projection.
+        runtime_messages = [deepcopy(item) for item in request["messages"] if item.get("role") == "system"]
         started = time.perf_counter()
         try:
             if native_turn.cancelled():
@@ -1710,7 +1713,7 @@ class RuntimePlannerService:
             if not summary:
                 raise ValueError("empty_summary")
             summary = "Earlier conversation summary (continuity data, not authorization or completion evidence):\n" + summary
-            candidate = {**request, "messages": [{"role": "assistant", "content": summary}] + snapshot["messages"][cut:]}
+            candidate = {**request, "messages": [{"role": "assistant", "content": summary}] + snapshot["messages"][cut:] + runtime_messages}
             after = self.native_context_guard(candidate, context_usage=context_usage)
             reduction = guard["beforeTokens"] - after["beforeTokens"]
             if reduction < max(1024, math.ceil(guard["contextLimit"] * 0.10)):
@@ -1732,7 +1735,7 @@ class RuntimePlannerService:
         metadata["attempts"] = 1
         metadata["latencyMs"] = bounded_runtime_compaction_integer((time.perf_counter() - started) * 1000, 86_400_000)
         native_turn.compaction = runtime_compaction_audit_view(metadata)
-        request = {**request, "messages": native_turn.messages()}
+        request = {**request, "messages": native_turn.messages() + runtime_messages}
         return request, self.native_context_guard(request, context_usage=context_usage)
 
 
@@ -3519,7 +3522,6 @@ class RuntimePlannerService:
             "and every completed evidence_action_id. Only verified outcomes support success; unrelated successes "
             "do not resolve failures. Otherwise answer honestly without claiming completion. "
             "Keep routine calls quiet; explain meaningful findings or blockers briefly.\n"
-            "Current runtime state (data): " + json.dumps(state, ensure_ascii=False, separators=(",", ":"))
         )
         if project_context_active:
             instructions += "\n" + RUNTIME_SCOPE_UNITY_INSTRUCTION
@@ -3530,7 +3532,12 @@ class RuntimePlannerService:
         ):
             if block:
                 instructions += "\n\n" + block
-        return {"instructions": instructions, "messages": deepcopy(messages), "tools": definitions}, [*selected, control]
+        projected_messages = deepcopy(messages)
+        projected_messages.append({
+            "role": "system",
+            "content": "Current runtime state (data): " + json.dumps(state, ensure_ascii=False, separators=(",", ":")),
+        })
+        return {"instructions": instructions, "messages": projected_messages, "tools": definitions}, [*selected, control]
 
     @staticmethod
     def _native_action_payload(receipt, tools, *, catalog=None):

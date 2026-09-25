@@ -61,7 +61,8 @@ def test_native_compaction_reuses_port_and_preserves_current_receipts():
     assert "PRIVATE_REASONING_SENTINEL" not in json.dumps(compactor.calls)
     grouped = [entry["text"] for entry in compactor.calls[0][0] if "read-old" in entry["text"]]
     assert len(grouped) == 1 and "readback-old" in grouped[0] and "fixture.txt" in grouped[0]
-    assert model.requests[0]["messages"][1:] == suffix
+    assert model.requests[0]["messages"][1:-1] == suffix
+    assert model.requests[0]["messages"][-1]["role"] == "system"
     assert state.native_conversation("s", binding="b")["activeTurnStart"] == 1
     assert turn.compaction["applied"] is True and turn.compaction["afterTokens"] < turn.compaction["beforeTokens"]
     assert "summary" not in turn.compaction and "PRIVATE_REASONING_SENTINEL" not in json.dumps(turn.compaction)
@@ -111,11 +112,11 @@ def test_native_current_turn_overflow_keeps_exact_history_without_compactor_call
 
 
 def test_native_gateway_hydrates_visible_history_once(tmp_path):
-    from tests.test_native_runtime_gateway import run, setup_gateway
+    from tests.test_native_runtime_gateway import budgeted_request_history, run, setup_gateway
     gateway, model, _ = setup_gateway(tmp_path, [{"role": "assistant", "content": "Understood"}] * 2)
     history = [{"role": "user", "text": "Earlier request"}, {"role": "agent", "text": "Earlier answer"}]
     run(gateway, tmp_path, message="Now continue", history=history)
-    assert model.requests[0]["messages"] == [
+    assert budgeted_request_history(model.requests[0]) == [
         {"role": "user", "content": "Earlier request"}, {"role": "assistant", "content": "Earlier answer"},
         {"role": "user", "content": "Now continue"}]
     run(gateway, tmp_path, message="Next", clientTurnId="next-turn", history=history)

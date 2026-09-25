@@ -49,6 +49,14 @@ def finish(request):
             "satisfied": True, "evidence_action_ids": list(dict.fromkeys(evidence))}})
 
 
+def budgeted_request_history(request):
+    messages = request["messages"]
+    assert messages[-1]["role"] == "system"
+    assert "modelTurnBudget" in json.loads(messages[-1]["content"].split(": ", 1)[1])
+    assert all(message["role"] != "system" for message in messages[:-1])
+    return messages[:-1]
+
+
 def setup_gateway(tmp_path, replies):
     gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
     invoked = []
@@ -102,7 +110,7 @@ def test_native_gateway_pairs_actual_tool_result_and_keeps_receipt_private(tmp_p
     gateway, model, invoked = setup_gateway(tmp_path, [call("read-1", "vrcforge_read_text_file", {"path": "a.txt"}), finish])
     result = run(gateway, tmp_path)
     assert len(invoked) == 1
-    messages = model.requests[1]["messages"]
+    messages = budgeted_request_history(model.requests[1])
     assert [m["role"] for m in messages] == ["user", "assistant", "tool"]
     assert messages[1]["reasoning_content"] == "private-fixture-replay"
     assert messages[2]["tool_call_id"] == "read-1"
@@ -144,8 +152,9 @@ def test_native_gateway_settles_execution_phase_before_replanning(tmp_path):
         {"role": "assistant", "content": "Ready"}])
     run_planning_continuation(gateway, tmp_path)
     assert not invoked
-    assert model.requests[1]["messages"][-1]["tool_call_id"] == "phase"
-    assert "entered_execution" in model.requests[1]["messages"][-1]["content"]
+    assert model.requests[1]["messages"][-2]["tool_call_id"] == "phase"
+    assert "entered_execution" in model.requests[1]["messages"][-2]["content"]
+    assert json.loads(model.requests[1]["messages"][-1]["content"].split(": ", 1)[1])["exposureLayer"] == "execution"
 
 
 
@@ -227,7 +236,7 @@ def test_native_gateway_user_control_discards_proposal_before_execution(tmp_path
         assert result["plan"]["nextStep"] == "cancelled"
         assert "cancelled" in tool_result["content"]
     else:
-        assert model.requests[1]["messages"][-1] == {"role": "user", "content": "Stop reading; just reply"}
+        assert budgeted_request_history(model.requests[1])[-1] == {"role": "user", "content": "Stop reading; just reply"}
 
 
 def test_native_gateway_failure_reaches_model_without_success_claim(tmp_path):
@@ -236,7 +245,7 @@ def test_native_gateway_failure_reaches_model_without_success_claim(tmp_path):
     gateway.register_tool("vrcforge_read_text_file", "When to use: read. When NOT to use: write.", "plan/preview",
                           lambda args: {"ok": False, "error": "fixture-read-failed"})
     result = run(gateway, tmp_path)
-    assert "fixture-read-failed" in model.requests[1]["messages"][-1]["content"]
+    assert "fixture-read-failed" in budgeted_request_history(model.requests[1])[-1]["content"]
     assert result["plan"]["nextStep"] != "done"
 
 
@@ -300,8 +309,8 @@ def test_native_gateway_completion_rejection_is_returned_to_same_call(tmp_path):
               "completion_claim": {"satisfied": True, "evidence_action_ids": []}}), finish])
     result = run(gateway, tmp_path)
     assert len(invoked) == 1
-    assert model.requests[2]["messages"][-1]["tool_call_id"] == "unbound"
-    assert "requiredEvidenceActionIds" in model.requests[2]["messages"][-1]["content"]
+    assert budgeted_request_history(model.requests[2])[-1]["tool_call_id"] == "unbound"
+    assert "requiredEvidenceActionIds" in budgeted_request_history(model.requests[2])[-1]["content"]
     assert result["plan"]["nextStep"] == "done"
 
 
@@ -320,7 +329,7 @@ def test_native_tool_time_steer_reaches_immediate_next_request(tmp_path):
         return {"text": "fixture-body"}
     gateway.register_tool("vrcforge_read_text_file", "When to use: read. When NOT to use: write.", "plan/preview", read)
     run(gateway, tmp_path)
-    assert model.requests[1]["messages"][-1] == {"role": "user", "content": "Change direction now"}
+    assert budgeted_request_history(model.requests[1])[-1] == {"role": "user", "content": "Change direction now"}
 
 
 def test_native_dispatch_exception_does_not_leave_orphan_call(tmp_path, monkeypatch):
