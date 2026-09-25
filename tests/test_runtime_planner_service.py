@@ -1192,11 +1192,9 @@ def test_model_prompt_keeps_all_trigger_sections_for_long_tool_descriptions() ->
 
     prompt = service(catalog=catalog)._build_llm_plan_prompt("inspect", [])
 
-    tool_line = next(line for line in prompt.splitlines() if "vrcforge_long_contract" in line)
-    assert "When to use:" in tool_line
-    assert "When NOT to use:" in tool_line
-    assert "Negative example:" in tool_line
-    assert len(tool_line) < 500
+    assert "When to use: " + "use-detail " * 40 in prompt
+    assert "When NOT to use: " + "avoid-detail " * 40 in prompt
+    assert "Negative example: " + ("negative-detail " * 40).rstrip() in prompt
 
 
 def test_model_prompt_includes_bounded_input_contract_for_high_confusion_tool() -> None:
@@ -2985,8 +2983,8 @@ def test_schema_projection_preserves_literal_data_and_named_definitions():
     }
     projected = bounded_planner_tool_schema(schema)
     assert projected["properties"] == schema["properties"]
-    assert projected["$defs"] == {"description": {"type": "string"}}
-    assert "description" not in projected
+    assert projected["$defs"] == schema["$defs"]
+    assert projected["description"] == "annotation"
 
 
 def test_schema_projection_keeps_absent_or_invalid_schema_compatibility():

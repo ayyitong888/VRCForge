@@ -349,3 +349,10 @@ Regression: `tests/test_result_reader_long_scalar.py`, `tests/test_agent_tool_re
 - Queued dispatch is not another model turn. Clearing a queue must not bypass an explicit model-turn budget.
 
 Regression: `tests/test_native_multi_call_admission.py`.
+
+### Complete planner tool contracts
+
+- Native and legacy planner lanes must preserve every registered tool-description section and nested schema description, including description tails and fields beyond former count limits.
+- Literal schema constraints remain unchanged; preserve existing private-schema exclusions without introducing description-length budgets.
+
+Regression: `tests/test_planner_tool_description_integrity.py`, `tests/test_planner_schema_description_integrity.py`.

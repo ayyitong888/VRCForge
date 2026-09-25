@@ -191,41 +191,37 @@ def _contract_shallow_schema(input_contract: tuple[str, ...]) -> dict[str, objec
     }
 
 
-def _project_planner_schema(value: object, *, property_schema: bool = False, description_budget: list[int] | None = None) -> object:
-    """Keep constraints and bounded parameter semantics without bulk annotations."""
-    if description_budget is None:
-        description_budget = [24]
-
+def _project_planner_schema(value: object, *, property_schema: bool = False) -> object:
+    """Keep schema constraints and every description without bulk annotations."""
     if isinstance(value, Mapping):
         projected: dict[str, object] = {}
         for raw_key, raw_value in value.items():
             key = str(raw_key)
             if key in _PLANNER_SCHEMA_ANNOTATION_KEYS:
-                if key == "description" and property_schema and isinstance(raw_value, str) and description_budget[0] > 0:
-                    projected[key] = summarize_text(raw_value, 240)
-                    description_budget[0] -= 1
+                if key == "description" and isinstance(raw_value, str):
+                    projected[key] = raw_value
                 continue
             if key in {"properties", "patternProperties", "$defs", "definitions", "dependentSchemas"} and isinstance(raw_value, Mapping):
                 projected[key] = {
-                    str(property_name): _project_planner_schema(property_schema, property_schema=key in {"properties", "patternProperties"}, description_budget=description_budget)
+                    str(property_name): _project_planner_schema(property_schema, property_schema=key in {"properties", "patternProperties"})
                     for property_name, property_schema in raw_value.items()
                 }
             elif key == "dependencies" and isinstance(raw_value, Mapping):
                 projected[key] = {
-                    str(name): _project_planner_schema(dependency, description_budget=description_budget)
+                    str(name): _project_planner_schema(dependency)
                     if isinstance(dependency, Mapping) else deepcopy(dependency)
                     for name, dependency in raw_value.items()
                 }
             elif key in {"allOf", "anyOf", "oneOf", "prefixItems"} and isinstance(raw_value, list):
-                projected[key] = [_project_planner_schema(item, description_budget=description_budget) for item in raw_value]
+                projected[key] = [_project_planner_schema(item) for item in raw_value]
             elif key == "items" and isinstance(raw_value, list):
-                projected[key] = [_project_planner_schema(item, description_budget=description_budget) for item in raw_value]
+                projected[key] = [_project_planner_schema(item) for item in raw_value]
             elif key in {
                 "additionalProperties", "additionalItems", "items", "contains",
                 "not", "if", "then", "else", "propertyNames",
                 "unevaluatedProperties", "unevaluatedItems", "contentSchema",
             }:
-                projected[key] = _project_planner_schema(raw_value, description_budget=description_budget)
+                projected[key] = _project_planner_schema(raw_value)
             else:
                 # Literal data (including const/enum/default) is not a schema.
                 projected[key] = deepcopy(raw_value)
@@ -1077,22 +1073,9 @@ def normalize_exposure_layer(value: object) -> str:
     return layer
 
 def planner_tool_usage_description(name: str, summary: str, *, write: bool) -> str:
-    """Keep all three trigger sections visible while bounding prompt growth."""
+    """Preserve the complete registered usage contract in every planner lane."""
 
-    contract = tool_usage_description(name, summary, write=write)
-    labels = ("When to use:", "When NOT to use:", "Negative example:")
-    sections: list[str] = []
-    for index, label in enumerate(labels):
-        start = contract.find(label)
-        if start < 0:
-            continue
-        content_start = start + len(label)
-        next_starts = [contract.find(next_label, content_start) for next_label in labels[index + 1 :]]
-        next_starts = [position for position in next_starts if position >= 0]
-        end = min(next_starts) if next_starts else len(contract)
-        content = summarize_text(contract[content_start:end].strip(), 110)
-        sections.append(f"{label} {content}")
-    return " | ".join(sections)
+    return tool_usage_description(name, summary, write=write)
 
 def summarize_params(value: object) -> dict[str, object]:
     if isinstance(value, dict):
