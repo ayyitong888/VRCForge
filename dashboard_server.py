@@ -105,6 +105,7 @@ from internal_tool_blocks import (
     build_internal_tool_block_tree,
     canonical_tool_owner,
     internal_tool_block_for_name,
+    project_internal_tool_block_level,
     resolve_internal_tool_block_selector,
 )
 from agent_completion_verifier import UnityConsoleCompletionVerifier
@@ -15625,6 +15626,8 @@ def _internal_tool_block_leaves(
         project_context_active=project_context_active,
     )
     for tool in catalog.visible_tools:
+        if getattr(tool, "runtime_name", "") == "vrcforge_list_internal_tool_blocks":
+            continue
         if tool.name in seen:
             continue
         seen.add(tool.name)
@@ -15665,21 +15668,14 @@ def build_internal_tool_block_inventory(params: dict[str, Any]) -> dict[str, Any
 def load_internal_tool_block(params: dict[str, Any]) -> dict[str, Any]:
     session_id = str(params.get("sessionId") or params.get("session_id") or "").strip()
     selector = params.get("block") or params.get("index")
+    branch = str(selector or "").strip().casefold()
+    if not branch or branch in CANONICAL_TOOL_BLOCKS:
+        if params.get("tools") is not None:
+            return {"ok": False, "status": "failed", "errorCode": "internal_tool_selection_invalid", "error": "Select a leaf before specifying tools.", "mutationStarted": False}
+        return project_internal_tool_block_level(build_internal_tool_block_inventory({**params, "block": branch}))
     block = resolve_internal_tool_block_selector(selector)
     if not block:
-        reason = f"Unknown or branch-only internal tool block: {selector or 'missing'}"
-        branch = str(selector or "").strip().casefold()
-        branch_spec = CANONICAL_TOOL_BLOCKS.get(branch)
-        available_children = [
-            {
-                "name": f"{branch}/{leaf}",
-                "loadCall": {
-                    "skill_tool": "load_internal_tool_block",
-                    "skill_params": {"block": f"{branch}/{leaf}"},
-                },
-            }
-            for leaf in (branch_spec or {}).get("children", ())
-        ]
+        reason = f"Unknown internal tool block: {selector or 'missing'}"
         response = {
             "ok": False,
             "status": "failed",
@@ -15693,21 +15689,9 @@ def load_internal_tool_block(params: dict[str, Any]) -> dict[str, Any]:
             "committed": False,
             "commitState": "not_started",
         }
-        if available_children:
-            response["availableChildren"] = available_children
-            response["nextActions"] = [
-                "Parent categories cannot be loaded; choose one exact child loadCall from availableChildren."
-            ]
-            response["nextActions"].extend(
-                f"Call load_internal_tool_block with block={child['name']}"
-                for child in available_children
-            )
-        else:
-            response["nextActions"] = [
-                "Call list_internal_tool_blocks and copy an exact leaf name from its children, "
-                "then call load_internal_tool_block with that name as block; "
-                "parent categories cannot be loaded."
-            ]
+        response["nextActions"] = [
+            "Call load_internal_tool_block with no block to browse root categories, then copy a returned selector."
+        ]
         return response
     requested_tools = params.get("tools")
     if requested_tools is not None:
@@ -25265,13 +25249,13 @@ def register_agent_gateway_tools() -> None:
     )
     AGENT_GATEWAY.register_tool(
         "vrcforge_list_internal_tool_blocks",
-        "When to use: inspect the compact indexed internal Agent tool tree; the root returns every leaf block's tool names without schemas, and block='unity' narrows it to Unity leaves. When NOT to use: do not use this external MCP; the external Unity catalogue has separate controls. Negative example: do not assume listing a block loads its tool schemas.",
+        "When to use: discover available internal Agent tools by browsing categories. Expand a returned node with its exact block selector to read the next level; inspect a leaf for its complete tool names before loading needed tools. When NOT to use: do not use this external MCP; the external Unity catalogue has separate controls. Negative example: do not assume listing a block loads its tool schemas.",
         "read/debug",
         lambda params: build_internal_tool_block_inventory(params or {}),
     )
     AGENT_GATEWAY.register_tool(
         "vrcforge_load_internal_tool_block",
-        "When to use: load one indexed internal Agent leaf block into this session when its tools are needed; use the model-facing load_internal_tool_block name and copy the exact block name into skill_params.block. When NOT to use: do not load the Unity parent branch or an external MCP block. Negative example: pass block='unity/diagnostics' or index '8.9', never block='unity', a vrcforge_-prefixed runtime name, or an invented block_index field.",
+        "When to use: discover and load internal Agent tools through one tree. Omit block to see root categories; pass a returned category in block to see its next level; pass a leaf in block to load its tools into this session. New tools become callable on the next turn. Optionally supply exact tools from that leaf to load a subset. When NOT to use: do not use for external MCP or assume discovery executes a tool. Negative example: do not pass a runtime tool name or invent a block_index field; tools selection requires a leaf.",
         "plan/preview",
         lambda params: load_internal_tool_block(params or {}),
     )
@@ -25352,8 +25336,8 @@ def register_agent_gateway_tools() -> None:
     AGENT_GATEWAY.register_tool(
         "vrcforge_unity_tools",
         "When to use: diagnose which commands are registered in Unity Core. "
-        "When NOT to use: discover Agent-callable tools or select a task tool; use list_internal_tool_blocks "
-        "and load_internal_tool_block. Returned vrc_* names are Core diagnostics, not callable Agent names.",
+        "When NOT to use: discover Agent-callable tools or select a task tool; use load_internal_tool_block "
+        "to browse and load them. Returned vrc_* names are Core diagnostics, not callable Agent names.",
         "read/debug",
         lambda params: UNITY_STATUS.build_unity_tools_snapshot(
             load_dashboard_settings(build_agent_connection_request(params))

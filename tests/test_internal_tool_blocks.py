@@ -42,7 +42,7 @@ def test_canonical_leaf_core_and_legacy_aliases_remain_loadable() -> None:
     assert resolve_internal_tool_block_selector("materials") == "appearance/materials_shaders"
 
 
-def test_dashboard_parent_load_rejects_without_touching_session_state(monkeypatch) -> None:
+def test_dashboard_parent_load_browses_direct_children_without_touching_session_state(monkeypatch) -> None:
     calls = []
 
     def sentinel(*args, **kwargs):
@@ -51,35 +51,72 @@ def test_dashboard_parent_load_rejects_without_touching_session_state(monkeypatc
 
     monkeypatch.setattr(
         type(dashboard_server.AGENT_GATEWAY.runtime_sessions),
-        "load_internal_tool_block",
+        "load_internal_tool_block_selected",
         sentinel,
     )
     for parent in CANONICAL_TOOL_BLOCKS:
         result = dashboard_server.load_internal_tool_block(
             {"sessionId": "internal-block-regression", "block": parent}
         )
-        assert result["ok"] is False
-        assert result["status"] == "failed"
-        assert result["errorCode"] == "internal_tool_block_selector_invalid"
-        assert result["toolRoutingStarted"] is False
+        assert result["ok"] is True
+        assert result.get("status") != "loaded"
         normalized = normalize_agent_tool_result(
             result, fallback_summary="load_internal_tool_block", write=False
         )
-        assert normalized["status"] == "failed"
+        assert normalized["status"] == "ok"
         expected_children = [f"{parent}/{leaf}" for leaf in CANONICAL_TOOL_BLOCKS[parent]["children"]]
-        assert [child["name"] for child in result["availableChildren"]] == expected_children
-        assert all(
-            child["loadCall"] == {
-                "skill_tool": "load_internal_tool_block",
-                "skill_params": {"block": child["name"]},
-            }
-            for child in result["availableChildren"]
-        )
-        assert all(
-            f"block={child['name']}" in " ".join(result["nextActions"])
-            for child in result["availableChildren"]
-        )
+        assert [child["name"] for child in result["blocks"]] == expected_children
+        for child in result["blocks"]:
+            assert child["description"]
+            assert not child.get("children")
+            assert not child.get("toolNames")
+            assert child["expandArguments"] == {"block": child["name"]}
     assert calls == []
+
+
+def test_dashboard_empty_load_browses_roots_without_loading(monkeypatch) -> None:
+    def forbidden(*args, **kwargs):
+        raise AssertionError("root browsing must not change loaded tools")
+    monkeypatch.setattr(type(dashboard_server.AGENT_GATEWAY.runtime_sessions),
+                        "load_internal_tool_block_selected", forbidden)
+    result = dashboard_server.load_internal_tool_block({})
+    assert result["ok"] is True
+    assert result.get("status") != "loaded"
+    assert [entry["name"] for entry in result["blocks"]] == list(CANONICAL_TOOL_BLOCKS)
+    for entry in result["blocks"]:
+        assert entry["description"]
+        assert entry["expandArguments"] == {"block": entry["name"]}
+        assert not entry.get("children")
+        assert not entry.get("toolNames")
+
+
+def test_dashboard_leaf_load_still_mutates_only_requested_session() -> None:
+    state = dashboard_server.AGENT_GATEWAY.runtime_sessions
+    session = "single-entry-leaf-regression"
+    state.discard_session(session)
+    try:
+        result = dashboard_server.load_internal_tool_block({
+            "sessionId": session, "block": "research/web_research", "exposureLayer": "execution",
+        })
+        assert result["ok"] is True
+        assert result["status"] == "loaded"
+        assert state.internal_tool_blocks(session) == frozenset({"core", "research/web_research"})
+        assert state.internal_tool_selections(session) == {"research/web_research": None}
+    finally:
+        state.discard_session(session)
+
+
+def test_dashboard_unknown_load_remains_rejected_without_state_mutation(monkeypatch) -> None:
+    def forbidden(*args, **kwargs):
+        raise AssertionError("invalid selection must not mutate load state")
+    monkeypatch.setattr(type(dashboard_server.AGENT_GATEWAY.runtime_sessions),
+                        "load_internal_tool_block_selected", forbidden)
+    for selector in ("not-a-category", "research/not-a-leaf", "research/web_research/extra"):
+        result = dashboard_server.load_internal_tool_block({"sessionId": "invalid-load", "block": selector})
+        assert result["ok"] is False
+        assert result["status"] == "failed"
+        assert result["errorCode"] == "internal_tool_block_selector_invalid"
+        assert result["mutationStarted"] is False
 
 
 def test_internal_index_tree_is_independent_and_unity_is_nested() -> None:
@@ -534,3 +571,19 @@ def test_cross_block_selection_reports_authoritative_owner_for_retry() -> None:
     assert result["mutationStarted"] is False
     assert result["expectedBlock"] == "avatar_structure/hierarchy_components"
     assert "block=avatar_structure/hierarchy_components" in result["nextActions"][0]
+
+
+def test_diagnostic_description_does_not_route_to_hidden_discovery_entry():
+    planner = dashboard_server.AGENT_GATEWAY._runtime_planner
+    catalog = planner._catalog.read("execution", project_context_active=True)
+    tool = next(t for t in catalog.visible_tools if t.runtime_name == "vrcforge_unity_tools")
+    assert "load_internal_tool_block" in tool.description
+    assert "list_internal_tool_blocks" not in tool.description
+
+
+
+def test_legacy_navigation_uses_same_loader_for_browsing_and_loading():
+    planner = dashboard_server.AGENT_GATEWAY._runtime_planner
+    prompt = planner._build_llm_plan_prompt("Inspect only", [], exposure_layer="execution", project_context_active=True, internal_tool_blocks=["core"])
+    assert "再用独立的工具块加载工具" not in prompt
+    assert "同一个加载工具" in prompt

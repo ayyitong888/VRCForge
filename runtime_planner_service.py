@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     from agent_runtime_native_turn import NativeRuntimeTurn
 
 from tool_usage_contract import tool_usage_description
+from internal_tool_blocks import project_internal_tool_block_level
 
 from planner_schema_sharing import _shared_planner_schema_defs, _planner_schema_without_shared_defs
 from project_instruction_context import (
@@ -108,7 +109,7 @@ _PLANNER_SCHEMA_ANNOTATION_KEYS = frozenset({"description", "title", "examples"}
 
 _HIGH_CONFUSION_TOOL_INPUT_CONTRACTS: dict[str, tuple[str, ...]] = {
     "vrcforge_list_internal_tool_blocks": ("block?:string",),
-    "vrcforge_load_internal_tool_block": ("block:string", "tools?:array"),
+    "vrcforge_load_internal_tool_block": ("block?:string", "tools?:array"),
     "vrcforge_unload_internal_tool_block": ("block:string",),
     "vrcforge_exit_skill": ("name:string", "reason:string"),
     "vrcforge_list_directory": ("path:string", "projectPath?:string", "maxDepth?:integer", "maxCount?:integer"),
@@ -254,7 +255,7 @@ def planner_tool_input_schema(name: str) -> dict[str, object]:
         return deepcopy(MEMORY_TOOL_SCHEMAS[name])
     if name == "vrcforge_load_internal_tool_block":
         return {
-            "type": "object", "required": ["block"], "additionalProperties": False,
+            "type": "object", "required": [], "additionalProperties": False,
             "properties": {
                 "block": {"type": "string", "minLength": 1},
                 "tools": {
@@ -2962,6 +2963,7 @@ class RuntimePlannerService:
             read_evidence = planner_read_output_evidence(tool_name, result) if isinstance(result, dict) else {}
             if (
                 tool_name in {"vrcforge_load_internal_tool_block", "vrcforge_unload_internal_tool_block"}
+                and not (isinstance(result, dict) and result.get("schema") == "vrcforge.internal_tool_blocks.v1")
                 and isinstance(result, dict) and result.get("ok") is True
                 and step.get("status") not in {"failed", "error", "rejected"}
                 and ensure_dict(step.get("outcome")).get("status") not in {"failed", "needs_user_action"}
@@ -3040,7 +3042,9 @@ class RuntimePlannerService:
                     if log_evidence:
                         fields.append("logReadEvidence=" + json.dumps(log_evidence, ensure_ascii=False, separators=(",", ":")))
             directory_json = ""
-            if tool_name == "vrcforge_list_internal_tool_blocks" and isinstance(result, dict):
+            if isinstance(result, dict) and (tool_name == "vrcforge_list_internal_tool_blocks" or (
+                tool_name == "vrcforge_load_internal_tool_block" and result.get("schema") == "vrcforge.internal_tool_blocks.v1"
+            )):
                 fields.append("toolBlockState=snapshot at this action; later load/unload actions may change it")
                 # Preserve the complete public directory. The selected tree is
                 # often an exact copy of blocks; reference only exact copies,
@@ -3048,6 +3052,8 @@ class RuntimePlannerService:
                 directory = {key: deepcopy(result[key]) for key in (
                     "ok", "schema", "loadedBlocks", "internalToolSelections", "blocks", "tree",
                 ) if key in result}
+                if step.get("status") not in {"failed", "error", "rejected"}:
+                    directory = project_internal_tool_block_level(directory)
                 blocks = directory.get("blocks")
                 tree = directory.get("tree")
                 if isinstance(blocks, list) and isinstance(tree, dict):
@@ -3078,7 +3084,7 @@ class RuntimePlannerService:
                         "skill_tool=load_internal_tool_block;"
                         "skill_params={\"block\":\"<exact block name>\"}"
                     )
-                fields.append("toolBlockSelection=Supply optional tools=[<exact directory tool names>] to load only the needed tools; the directory remains complete.")
+                fields.append("toolBlockSelection=Use the same loader with a returned category to browse its children, or a leaf to load its tools. Optional tools selects exact names from that leaf.")
             outcome = ensure_dict(step.get("outcome"))
             if outcome:
                 fields.append(
@@ -3420,6 +3426,10 @@ class RuntimePlannerService:
         selections = ensure_dict(observe.get("internalToolSelections"))
         selected = []
         for tool in catalog.visible_tools:
+            if tool.runtime_name == "vrcforge_list_internal_tool_blocks" and any(
+                candidate.runtime_name == "vrcforge_load_internal_tool_block" for candidate in catalog.visible_tools
+            ):
+                continue
             if observe.get("planMode") is True and (tool.write or tool.runtime_name == "vrcforge_delegate_subagent"):
                 continue
             if selected_blocks is not None and tool.block not in selected_blocks:
@@ -3563,7 +3573,8 @@ class RuntimePlannerService:
                 summary += " Use the advertised function name " + known.name + " with its current input schema."
             elif known and loader:
                 recipe = {"name": loader.name, "arguments": {"block": known.block, "tools": [known.name]}}
-            elif directory:
+            elif loader or directory:
+                directory = loader or directory
                 recipe = {"name": directory.name, "arguments": {}}
             if recipe:
                 suffix = " Next call: " + json.dumps(recipe, ensure_ascii=False, separators=(",", ":"))
@@ -3807,8 +3818,7 @@ class RuntimePlannerService:
                 f"当前工具曝光层是 {exposure_layer}；planning 层只能使用读/检查工具，执行类工具必须先进入 execution 层；Unity 项目写入按当前权限模式走审批或全权限自动执行；"
                 "如果『已执行步骤』里某个工具刚刚已经给出了你需要的结果，不要重复调用同一个工具——改为基于结果继续下一步或 reply 收尾；"
                 "诊断 VRCForge 自身启动、连接或历史日志时，先发现并加载相应的只读诊断工具块，再按可见工具的实际说明读取证据。"
-                "如果所需诊断工具（例如 know_yourself 或日志读取工具）尚未列在当前工具目录，先用目录中可见的工具块查询工具发现所属块，再用独立的工具块加载工具加载它；不可直接调用未列出的工具，也不要用普通 Shell 代替这条诊断路径。"
-                "发现工具块、加载工具块和读取诊断分别是独立动作；每次只选择当前目录中准确列出的工具名并遵守其 schema。一般工程外任务和用户明确要求的 Shell 操作仍可使用普通 Shell。"
+                "所需诊断工具尚未可见时，用同一个加载工具导航：省略 block 看根层，传分类看下一层，传叶节点加载工具；之后调用已曝光的工具。不可调用未列出的工具或用普通 Shell 代替这条诊断路径。一般工程外任务和用户明确要求的 Shell 操作仍可使用普通 Shell。"
                 # VRCForge 自纠回环：失败要读错误、修正后重试或换路，绝不假装成功。
                 "如果『已执行步骤』里某一步失败或报错（status 是 failed/error，或结果里带 error/异常/traceback）："
                 "权限或授权范围拒绝不能靠换工具、cwd 或相对路径绕过；授权范围不变时停止并说明限制，建议 Quick Chat 明示目标路径或切换已授权工程。"

@@ -397,6 +397,38 @@ def build_internal_tool_block_tree(
     return {"ok": True, "schema": "vrcforge.internal_tool_blocks.v1", "loadedBlocks": sorted(loaded), "blocks": children, "tree": tree}
 
 
+def project_internal_tool_block_level(directory: dict[str, Any]) -> dict[str, Any]:
+    """Show one canonical navigation level; full tool metadata stays at its leaf."""
+    tree = directory.get("tree")
+    roots = directory.get("blocks")
+    if (directory.get("ok") is not True
+        or directory.get("schema") != "vrcforge.internal_tool_blocks.v1"
+        or not isinstance(tree, dict) or not isinstance(roots, list)
+        or [node.get("id") for node in roots if isinstance(node, dict)] != list(CANONICAL_TOOL_BLOCKS)):
+        return directory
+    name = tree.get("name")
+    if not isinstance(name, str):
+        return directory
+    if name == "internal" and tree.get("children") == roots:
+        nodes = roots
+    elif name in CANONICAL_TOOL_BLOCKS and isinstance(tree.get("children"), list):
+        nodes = tree["children"]
+    elif name in CANONICAL_TOOL_LEAVES and isinstance(tree.get("tools"), list):
+        return {**directory, "blocks": [], "view": "selected_leaf"}
+    else:
+        return directory
+    rows = []
+    for node in nodes:
+        if not isinstance(node, dict) or not node.get("id"):
+            return directory
+        row = {key: value for key, value in node.items() if key not in ("children", "toolNames", "loadCall")}
+        row["expandArguments"] = {"block": node["id"]}
+        rows.append(row)
+    selected = {key: value for key, value in tree.items() if key != "children"}
+    selected["childrenRef"] = "blocks"
+    return {**directory, "blocks": rows, "tree": selected, "view": "next_level"}
+
+
 __all__ = [
     "INTERNAL_DEFAULT_TOOL_BLOCK",
     "INTERNAL_GENERAL_TOOL_NAMES",

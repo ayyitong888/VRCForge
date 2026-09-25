@@ -807,17 +807,21 @@ def test_canonical_nested_tool_directory_reaches_the_actual_model_observation() 
     })
 
     directory = json.loads(observation.split("; toolBlockDirectory=", 1)[1])
-    directory_leaves = {leaf["name"]: leaf for block in directory["blocks"] for leaf in block["children"]}
+    assert [row["name"] for row in directory["blocks"]] == [row["name"] for row in result["blocks"]]
+    assert all("children" not in row and "toolNames" not in row for row in directory["blocks"])
     for leaf in leaves:
-        assert leaf["name"] in directory_leaves[leaf["block"]]["toolNames"]
-    assert directory["blocks"] == result["blocks"]
+        selected = build_internal_tool_block_tree(selector=leaf["block"], loaded_blocks={"core"}, leaves=leaves)
+        text = service()._llm_loop_step_observation({"tool": "vrcforge_list_internal_tool_blocks", "status": "executed", "result": selected})
+        payload = json.loads(text.split("; toolBlockDirectory=", 1)[1])
+        assert payload["blocks"] == []
+        assert leaf["name"] in {tool["name"] for tool in payload["tree"]["tools"]}
     assert "None:" not in observation
     assert "skill_tool=load_internal_tool_block" in observation
     assert "inputSchema" not in observation
     assert directory["tree"]["childrenRef"] == "blocks"
 
 
-def test_parent_tool_block_failure_observation_preserves_exact_leaf_load_actions() -> None:
+def test_parent_tool_block_observation_preserves_exact_leaf_load_actions() -> None:
     import dashboard_server
     from agent_tool_result_contract import normalize_agent_tool_result
 
@@ -828,15 +832,17 @@ def test_parent_tool_block_failure_observation_preserves_exact_leaf_load_actions
         result, fallback_summary="load_internal_tool_block", write=False
     )
     observation = service()._llm_loop_step_observation(
-        {"tool": "vrcforge_load_internal_tool_block", "outcome": outcome}
+        {"tool": "vrcforge_load_internal_tool_block", "outcome": outcome, "result": result, "status": "executed"}
     )
+    directory = json.loads(observation.split("; toolBlockDirectory=", 1)[1])
+    assert result["ok"] is True
     for leaf in (
         "diagnostics_build/compile_logs",
         "diagnostics_build/validation_performance",
         "diagnostics_build/checkpoints_history",
         "diagnostics_build/build_runtime",
     ):
-        assert f"block={leaf}" in observation
+        assert {"block": leaf} in [row["expandArguments"] for row in directory["blocks"]]
     assert len(observation) <= 8_000
 
 

@@ -48,9 +48,11 @@ def test_directory_preserves_unique_selected_leaf_metadata_and_nonmatching_tree(
     }])
     assert projected(original)["tree"] == original["tree"]
     original["tree"] = copy.deepcopy(original["blocks"][0])
-    assert projected(original)["tree"] == {"selectedBlockRef": "blocks/0"}
+    expected = {key: value for key, value in original["tree"].items() if key != "children"}
+    assert projected(original)["tree"] == {**expected, "childrenRef": "blocks"}
     original["tree"]["description"] += " Unique selection detail."
-    assert projected(original)["tree"] == original["tree"]
+    expected["description"] = original["tree"]["description"]
+    assert projected(original)["tree"] == {**expected, "childrenRef": "blocks"}
 
 
 def test_directory_excludes_private_schema_and_redacts_secrets():

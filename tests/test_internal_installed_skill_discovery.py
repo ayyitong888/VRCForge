@@ -138,7 +138,7 @@ def test_readable_metadata_does_not_enable_general_mode_package_execution(instal
 
 
 @pytest.mark.parametrize("name,arguments", [
-    ("vrcforge_list_internal_tool_blocks", {}),
+    ("vrcforge_load_internal_tool_block", {}),
     ("vrcforge_load_internal_tool_block", {"block": "project_environment/files"}),
 ])
 def test_shared_skill_runtime_names_route_through_registered_internal_alias(installed_guide, name, arguments):
@@ -195,7 +195,7 @@ def test_activated_bundled_guide_allows_its_readonly_discovery_and_support_reads
     loop = AgentTaskLoop("Follow the connection guide")
     loop.activate_skill_policy(name=SKILL_NAME, allowed_tools=loaded["result"]["allowedTools"], disallowed_tools=[])
     for name, arguments in (
-        ("vrcforge_list_internal_tool_blocks", {}),
+        ("vrcforge_load_internal_tool_block", {}),
         ("vrcforge_load_internal_tool_block", {"block": "project_environment/files"}),
         ("vrcforge_read_installed_skill", {"name": SKILL_NAME, "file": "references/repair-guide.md"}),
     ):
@@ -223,3 +223,17 @@ def test_observe_summary_keeps_installed_guides_after_large_builtin_catalogue():
     assert summary["skills"][0]["name"] == SKILL_NAME
     assert summary["skills"][0]["description"] == "Connection repair"
     assert summary["truncated"] and summary["shownCount"] == 80
+
+
+def test_bundled_guide_does_not_reintroduce_hidden_directory_entry(installed_guide):
+    _app, gateway = installed_guide
+    loaded = gateway.runtime_skills.execute(SKILL_NAME, {}, "test")
+    assert loaded["ok"]
+    assert "vrcforge_load_internal_tool_block" in loaded["result"]["allowedTools"]
+    assert "vrcforge_list_internal_tool_blocks" not in loaded["result"]["allowedTools"]
+
+
+def test_previous_directory_handler_remains_directly_callable(installed_guide):
+    _app, gateway = installed_guide
+    result = gateway.runtime_skills.execute("vrcforge_list_internal_tool_blocks", {"sessionId": "old-directory-compat"}, "test")
+    assert result["ok"]

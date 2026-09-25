@@ -11,7 +11,7 @@ def catalog_tools():
     return (
         PlannerTool("list_internal_tool_blocks", "Discover.", "read", runtime_name="vrcforge_list_internal_tool_blocks"),
         PlannerTool("load_internal_tool_block", "Load.", "read", runtime_name="vrcforge_load_internal_tool_block",
-                    input_schema={"type": "object", "properties": {"block": {"type": "string"}, "tools": {"type": "array", "items": {"type": "string"}}}, "required": ["block"]}),
+                    input_schema={"type": "object", "properties": {"block": {"type": "string"}, "tools": {"type": "array", "items": {"type": "string"}}}}),
         PlannerTool("read_text_file", "Read.", "read", runtime_name="vrcforge_read_text_file", block="files"),
     )
 
@@ -23,6 +23,8 @@ def test_rejected_native_call_gets_current_recipe_then_loads_and_runs(tmp_path, 
     load_calls = []
 
     def load(args):
+        if not args.get("block"):
+            return {"ok": True, "blocks": [{"name": "files", "toolNames": ["read_text_file"]}]}
         assert args["block"] == "files" and args["tools"] == ["read_text_file"]
         load_calls.append(args)
         blocks = gateway.runtime_sessions.load_internal_tool_block_selected(args["sessionId"], args["block"], args["tools"])
@@ -41,8 +43,9 @@ def test_rejected_native_call_gets_current_recipe_then_loads_and_runs(tmp_path, 
         recipe = json.loads(data["admissionError"].split("Next call: ", 1)[1])
         advertised = {entry["function"]["name"] for entry in request["tools"]}
         assert recipe["name"] in advertised
+        assert "list_internal_tool_blocks" not in advertised
         if attempted == "vrc_not_a_registered_alias":
-            assert recipe == {"name": "list_internal_tool_blocks", "arguments": {}}
+            assert recipe == {"name": "load_internal_tool_block", "arguments": {}}
         else:
             assert recipe == {"name": "load_internal_tool_block", "arguments": {"block": "files", "tools": ["read_text_file"]}}
         return call("recovery", recipe["name"], recipe["arguments"])
@@ -67,10 +70,21 @@ def test_recovery_does_not_reveal_planning_hidden_or_user_disabled_tools():
         payload, rejection = RuntimePlannerService._native_action_payload(native_call(name), [directory, loader], catalog=catalog)
         assert payload is None
         recipe = json.loads(rejection["summary"].split("Next call: ", 1)[1])
-        assert recipe == {"name": directory.name, "arguments": {}}
+        assert recipe == {"name": loader.name, "arguments": {}}
 
 
 def test_recovery_never_invents_a_missing_loader():
     _, _, read = catalog_tools()
     payload, rejection = RuntimePlannerService._native_action_payload(native_call(read.name), [], catalog=PlannerCatalogSnapshot(visible_tools=(read,)))
     assert payload is None and "Next call:" not in rejection["summary"]
+
+
+def test_custom_list_only_catalog_retains_directory_recovery():
+    directory, _, read = catalog_tools()
+    catalog = PlannerCatalogSnapshot(visible_tools=(directory, read), routable_tools=(directory, read))
+    _, selected = RuntimePlannerService._select_plan_tools(catalog, ["core"], {})
+    assert selected == [directory]
+    payload, rejection = RuntimePlannerService._native_action_payload(native_call("unknown"), selected, catalog=catalog)
+    assert payload is None
+    recipe = json.loads(rejection["summary"].split("Next call: ", 1)[1])
+    assert recipe == {"name": directory.name, "arguments": {}}
