@@ -387,3 +387,10 @@ Regression: `tests/test_planner_tool_description_integrity.py`, `tests/test_plan
 - Runtime control descriptions and action-schema explanations derive from the same allowed action enum. Explicit Plan describes reply/correct only; execution does not tell the model to enter execution again.
 - Remove obsolete unconditional enter-execution instructions while retaining host permission and approval enforcement. Control tools never authorize Unity writes by themselves.
 - Regression checks: `tests/test_native_control_description.py` and `tests/test_native_runtime_gateway.py`; native and explicit Plan behavior must retain existing authorization boundaries.
+
+
+## Native multi-call instruction alignment
+
+- Native guidance allows independent already-advertised reads together, at most one write per response, and runtime control actions alone. It must not retain contradictory one-tool-only guidance or promise parallel execution.
+- Keep current admission/approval checks, serial dispatch, dependent-discovery boundaries, Stop and steering behavior unchanged.
+- Regression checks: `tests/test_native_batch_instruction.py`, `tests/test_native_multi_call_admission.py`, and `tests/test_native_control_description.py`. Prompt correctness does not establish model selection or cost improvement without a separate live sample.
