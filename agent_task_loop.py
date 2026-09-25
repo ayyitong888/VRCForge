@@ -1038,6 +1038,7 @@ def prepare_shell_task_continuation(
         return None
     success = bool(
         _status(event.get("status")) == "finished"
+        and type(event.get("exitCode")) is int
         and event.get("exitCode") == 0
         and event.get("timedOut") is not True
         and event.get("cancelled") is not True
@@ -1087,6 +1088,17 @@ def prepare_shell_task_continuation(
         else f"shell:{shell_session_id}"
     )[:240]
     prepared["taskContinuation"]["source"] = "shell_process_finished"
+    if (
+        _status(event.get("status")) == "finished"
+        and type(event.get("exitCode")) is int
+        and event["exitCode"] != 0
+        and event.get("timedOut") is not True
+        and event.get("cancelled") is not True
+        and event.get("terminationFailed") is not True
+    ):
+        # A normally exited command failure is evidence for model correction,
+        # not an approval failure. Keep cancellation and unsafe process states terminal.
+        prepared["taskContinuation"]["terminalPlan"] = None
     return prepared
 
 

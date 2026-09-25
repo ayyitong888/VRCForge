@@ -415,3 +415,10 @@ Regression: `tests/test_planner_tool_description_integrity.py`, `tests/test_plan
 - Root, child and leaf discovery must describe installed VRCForge .vsk package state and enablement while retaining Unity assets, prefabs, packages, dependencies/imports and asset/package inventory semantics.
 - Descriptions come from canonical routing metadata; root/child views must not include a global tool inventory. Full leaf tool metadata and approval boundaries remain unchanged.
 - Coverage: `tests/test_native_progressive_directory.py` and `tests/test_internal_tool_blocks.py`. Model selection and cost improvements require separate live evidence.
+
+
+### Background command failure recovery
+
+- A normally finished background command with a nonzero integer exit code must return its failed result to the planner exactly once, preserving the original call identity without rerunning the process.
+- Keep cancellation, timeout, termination failure, unknown process states and invalid exit codes terminal; a host Stop must prevent model restart. Successful completion and approval rejection behavior remain unchanged.
+- Coverage: `tests/test_native_shell_failure_recovery.py`, existing native async continuation tests and task-loop approval tests. Live repair completion and cost savings require separate evidence.
