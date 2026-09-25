@@ -1051,3 +1051,50 @@ for _general_read_tool, _general_read_properties in {
         'required': ['path', 'query'] if _general_read_tool == 'vrcforge_search_text' else ['path'],
         'properties': _general_read_properties,
     }
+
+
+# Session TODO mutations are ordinary runtime tools, not Unity asset writes.
+_PROGRESS_TITLE_FIELDS = {
+    name: {"type": "string", "minLength": 1, "pattern": r"\S", "description": description}
+    for name, description in {
+        "title": "Visible TODO title.", "step": "Compatibility alias for title.",
+        "content": "Compatibility alias for title.",
+    }.items()
+}
+_PROGRESS_ITEM_PROPERTIES = {
+    **_PROGRESS_TITLE_FIELDS,
+    "progressId": {"type": "string", "minLength": 1, "pattern": r"\S", "description": "Exact ID of the TODO item."},
+    "id": {"type": "string", "minLength": 1, "pattern": r"\S", "description": "Compatibility alias for progressId."},
+    "summary": {"type": "string", "description": "Optional progress detail."},
+    "description": {"type": "string", "description": "Compatibility alias for summary."},
+    "status": {"type": "string", "enum": ["pending", "in_progress", "running", "completed", "cancelled", "blocked", "deleted"]},
+    "order": {"type": "integer", "description": "Display order of the item."},
+    "owner": {"type": "string", "description": "Display owner label; does not grant authority."},
+}
+_PROGRESS_ITEM_SCHEMA = {
+    "type": "object", "additionalProperties": True, "properties": _PROGRESS_ITEM_PROPERTIES,
+    "anyOf": [{"required": [name]} for name in _PROGRESS_TITLE_FIELDS],
+}
+UNITY_READ_TOOL_INPUT_SCHEMAS.update({
+    "vrcforge_progress_replace": {
+        "type": "object", "additionalProperties": True,
+        "properties": {name: {"type": "array", "items": _PROGRESS_ITEM_SCHEMA,
+            "description": "Complete replacement TODO list. Explicit [] clears the current scoped list."}
+            for name in ("items", "plan")},
+        "anyOf": [{"required": ["items"]}, {"required": ["plan"]}],
+    },
+    "vrcforge_progress_create": {
+        **_PROGRESS_ITEM_SCHEMA,
+        "properties": {name: schema for name, schema in _PROGRESS_ITEM_PROPERTIES.items() if name not in {"progressId", "id"}},
+    },
+    "vrcforge_progress_update": {
+        "type": "object", "additionalProperties": True,
+        "properties": {name: schema for name, schema in _PROGRESS_ITEM_PROPERTIES.items() if name not in {"step", "content"}},
+        "anyOf": [{"required": ["progressId"]}, {"required": ["id"]}],
+    },
+    "vrcforge_progress_delete": {
+        "type": "object", "additionalProperties": True,
+        "properties": {name: _PROGRESS_ITEM_PROPERTIES[name] for name in ("progressId", "id")},
+        "anyOf": [{"required": ["progressId"]}, {"required": ["id"]}],
+    },
+})

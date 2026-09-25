@@ -372,3 +372,11 @@ Regression: `tests/test_planner_tool_description_integrity.py`, `tests/test_plan
 - The host binds the complete completed-action ledger. Model references may be omitted or a subset, but every supplied reference must identify a completed action; foreign or unexecuted references fail. The original model claim is not rewritten.
 - Native final replies must not require an extra model request solely to copy all action IDs. Preserve exact-set behavior for non-model completion paths.
 - Regression checks: `tests/test_agent_task_loop.py` and `tests/test_native_runtime_gateway.py`, including invalid-reference recovery and approval continuations.
+
+
+## TODO tool input contracts
+
+- Replace/create/update/delete advertise actual title, list and identity inputs through the shared schema in both project profiles and planning/execution layers. Creation does not promise a caller-selected ID.
+- Missing/non-array replacement arguments or a nonempty list with no valid titled items fail before any progress event is written. Explicit empty lists remain supported; preserve existing aliases, precedence and mixed-entry filtering.
+- Invalid replacement requests leave existing progress unchanged. Updating or deleting items retains existing session/project scope enforcement.
+- Regression checks: `tests/test_progress_tool_contract.py` and existing progress HTTP tests in `tests/test_dashboard_server.py`. These checks establish contract correctness, not measured provider cost savings.

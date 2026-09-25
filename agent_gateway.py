@@ -8728,7 +8728,11 @@ class AgentGateway:
 
     def replace_agent_progress(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         params = params or {}
-        raw_items = ensure_list(params.get("items") or params.get("plan"))
+        raw_items = params.get("items") or params.get("plan")
+        if raw_items is None and params.get("items") == []:
+            raw_items = []
+        if not isinstance(raw_items, list):
+            raise AgentGatewayError("Progress replacement requires an items or plan array; use [] to clear explicitly.", status_code=400)
         project_root = str(params.get("projectRoot") or params.get("project_root") or params.get("projectPath") or "").strip()
         session_id = str(params.get("sessionId") or params.get("session_id") or "").strip()
         normalized_items: list[dict[str, Any]] = []
@@ -8751,6 +8755,8 @@ class AgentGateway:
                     "owner": summarize_text(str(item.get("owner") or "agent"), 80),
                 }
             )
+        if raw_items and not normalized_items:
+            raise AgentGatewayError("Nonempty progress replacement must contain at least one titled item; use [] to clear explicitly.", status_code=400)
         event = {
             "event": "progress_replaced",
             "projectRoot": project_root,

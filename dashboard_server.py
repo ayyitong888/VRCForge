@@ -25207,19 +25207,19 @@ def register_agent_gateway_tools() -> None:
     )
     AGENT_GATEWAY.register_tool(
         "vrcforge_progress_replace",
-        "Replace the complete user-visible TODO list shown in the upper-right workspace rail when a multi-step task needs a fresh plan.",
+        "When to use: replace the complete user-visible TODO list shown in the upper-right workspace rail when a multi-step task needs a fresh plan. Pass items (or plan) as an array; explicit [] clears the scoped list. When NOT to use: updating only one item, or clearing progress without intending to replace the list.",
         "plan/preview",
         lambda params: AGENT_GATEWAY.replace_agent_progress(params or {}),
     )
     AGENT_GATEWAY.register_tool(
         "vrcforge_progress_create",
-        "Create one user-visible TODO item in the upper-right workspace rail without replacing the existing list.",
+        "When to use: create one user-visible TODO item in the upper-right workspace rail without replacing the existing list; supply title (or step/content). When NOT to use: replacing the entire plan or duplicating an existing TODO item.",
         "plan/preview",
         lambda params: AGENT_GATEWAY.create_agent_progress(params or {}),
     )
     AGENT_GATEWAY.register_tool(
         "vrcforge_progress_update",
-        "Update one user-visible TODO item's title, summary, order, or status in the upper-right workspace rail as the task changes.",
+        "When to use: update one user-visible TODO item's title, summary, order, or status in the upper-right workspace rail as the task changes; identify it with progressId (or id). When NOT to use: creating a new item or guessing an unknown item ID.",
         "plan/preview",
         lambda params: AGENT_GATEWAY.update_agent_progress(
             str(ensure_dict(params or {}).get("progressId") or ensure_dict(params or {}).get("id") or ""),
@@ -25228,7 +25228,7 @@ def register_agent_gateway_tools() -> None:
     )
     AGENT_GATEWAY.register_tool(
         "vrcforge_progress_delete",
-        "Delete one obsolete user-visible TODO item from the upper-right workspace rail.",
+        "When to use: delete one obsolete user-visible TODO item from the upper-right workspace rail using its exact progressId (or id). When NOT to use: marking a completed item or replacing the whole plan.",
         "plan/preview",
         lambda params: AGENT_GATEWAY.delete_agent_progress(
             str(ensure_dict(params or {}).get("progressId") or ensure_dict(params or {}).get("id") or ""),
