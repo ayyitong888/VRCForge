@@ -394,3 +394,10 @@ Regression: `tests/test_planner_tool_description_integrity.py`, `tests/test_plan
 - Native guidance allows independent already-advertised reads together, at most one write per response, and runtime control actions alone. It must not retain contradictory one-tool-only guidance or promise parallel execution.
 - Keep current admission/approval checks, serial dispatch, dependent-discovery boundaries, Stop and steering behavior unchanged.
 - Regression checks: `tests/test_native_batch_instruction.py`, `tests/test_native_multi_call_admission.py`, and `tests/test_native_control_description.py`. Prompt correctness does not establish model selection or cost improvement without a separate live sample.
+
+
+### Retained-result continuation tool names
+
+- Initial continuation and subsequent result pages must name a tool advertised by the planner catalog, in native and legacy observations and with or without project context.
+- Project only the continuation hint; retain the internal reader name, result reference, arguments, content and ownership checks unchanged. Do not mutate stored results.
+- Regression coverage: `tests/test_result_reader_planner_boundary.py`, alongside the existing result-reader and tool-result contract tests.

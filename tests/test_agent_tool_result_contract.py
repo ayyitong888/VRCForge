@@ -404,7 +404,7 @@ def test_unknown_commit_facts_are_shared_and_forbid_blind_retry() -> None:
     assert "Read back the exact target state" in internal["nextAction"]
     assert internal["recovery"]["required"] is True
     observation = RuntimePlannerService._llm_loop_step_observation(
-        object(),
+        None,
         {
             "tool": "vrcforge_fixture_write",
             "status": internal["status"],
@@ -501,7 +501,7 @@ def test_internal_planner_observation_keeps_domain_cause_and_commit_facts() -> N
     )
     bounded = _bounded_outcome(outcome)
     observation = RuntimePlannerService._llm_loop_step_observation(
-        object(),
+        None,
         {
             "tool": "vrcforge_avatar_upload_readiness",
             "status": outcome["status"],

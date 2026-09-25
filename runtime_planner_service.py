@@ -1593,6 +1593,31 @@ class RuntimePlannerService:
                 "outcome": {"status": sanitize_planner_observation_text(ensure_dict(step.get("outcome")).get("status"), 80)},
                 "observation": self._llm_loop_step_observation(dict(step), native_contract=True)}
 
+    def _planner_result_read_step(self, step: dict[str, object]) -> dict[str, object]:
+        """Use the catalog's common read-tool name only in continuation hints."""
+        from agent_tool_result_reader import PAGE_SCHEMA, TOOL_NAME
+
+        containers = {"resultRead": step.get("resultRead")}
+        result = step.get("result")
+        if isinstance(result, Mapping) and result.get("schema") == PAGE_SCHEMA:
+            containers["result"] = result
+        continuations = {
+            key: value for key, value in containers.items()
+            if isinstance(value, Mapping) and isinstance(value.get("nextRequest"), Mapping)
+            and value["nextRequest"].get("tool") == TOOL_NAME
+        }
+        if not continuations:
+            return step
+        # The result reader belongs to the common read-only catalog in both
+        # project profiles and exposure layers; this does not load any tool.
+        tool = resolve_catalog_tool(self._catalog.read(EXPOSURE_LAYER_PLANNING).visible_tools, TOOL_NAME)
+        if tool is None or tool.name == TOOL_NAME:
+            return step
+        projected = dict(step)
+        for key, value in continuations.items():
+            projected[key] = {**value, "nextRequest": {**value["nextRequest"], "tool": tool.name}}
+        return projected
+
     def native_context_guard(
         self,
         request: Mapping[str, object],
@@ -2947,6 +2972,8 @@ class RuntimePlannerService:
         allowed_multi_capture_receipt: str | None = None,
         native_contract: bool = False,
     ) -> str:
+            if self is not None:
+                step = self._planner_result_read_step(step)
             result = step.get("result")
             fields: list[str] = []
             canonical_outcome: dict[str, object] = {}
