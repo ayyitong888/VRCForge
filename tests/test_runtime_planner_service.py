@@ -218,7 +218,8 @@ def test_native_request_uses_actual_visible_schemas_without_duplicate_prompt_tra
         native_turn=NativePlannerFixture(transcript, accepted.append),
     )
     request = model.requests[0]
-    assert request["messages"] == transcript
+    assert request["messages"][:-1] == transcript
+    assert request["messages"][-1]["role"] == "system"
     definitions = {item["function"]["name"]: item["function"] for item in request["tools"]}
     assert set(definitions) == {"read_file", "vrcforge_runtime_action"}
     assert definitions["read_file"]["parameters"] == dict(read.input_schema)
@@ -360,7 +361,8 @@ def test_native_followup_preserves_exact_history_without_reprinting_it_as_instru
     plan = service(model=model).plan_agent_turn(
         "read-marker", {}, {}, native_turn=NativePlannerFixture(history),
     )
-    assert model.requests[0]["messages"] == history
+    assert model.requests[0]["messages"][:-1] == history
+    assert model.requests[0]["messages"][-1]["role"] == "system"
     assert "result-marker" not in model.requests[0]["instructions"]
     assert "synthetic-private-replay" not in model.requests[0]["instructions"]
     assert plan["completionClaim"] == {"satisfied": False}
@@ -380,7 +382,8 @@ def test_reply_language_contract_follows_conversation_without_rewriting_user(nat
             message, {}, {}, native_turn=NativePlannerFixture(history),
         )
         request = model.requests[0]
-        assert request["messages"] == history
+        assert request["messages"][:-1] == history
+        assert request["messages"][-1]["role"] == "system"
         prompt = request["instructions"]
         assert message not in prompt and feedback not in prompt
     else:
