@@ -141,6 +141,13 @@ class NativeRuntimeTurn:
     def snapshot(self) -> dict[str, Any]:
         return self._state.native_conversation(self._session_id, binding=self._binding) or {}
 
+    def order_tools(self, definitions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Order only this request's authorized definitions using private session state."""
+        names = [item["function"]["name"] for item in definitions]
+        order = self._state.order_native_tools(self._session_id, binding=self._binding, visible_names=names)
+        by_name = dict(zip(names, definitions))
+        return [by_name[name] for name in order]
+
     def cancelled(self) -> bool:
         return self._state.cancel_requested(
             session_id=self._session_id, turn_id=self._turn_id, client_turn_id=self._client_turn_id,

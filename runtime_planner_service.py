@@ -2065,6 +2065,7 @@ class RuntimePlannerService:
                         })
                         blocked_plan["plannerFailure"]["retryable"] = False
                         return blocked_plan
+                    native_request["tools"] = native_turn.order_tools(native_request["tools"])
                 # Count the complete request, including schemas and history. Never log it.
                 prompt = json.dumps(native_request, ensure_ascii=False, separators=(",", ":")) if native else self._build_llm_plan_prompt(
                     self._message_with_runtime_context(message, observe), history, loop_state or [],

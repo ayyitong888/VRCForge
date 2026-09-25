@@ -157,8 +157,13 @@ class AgentRuntimeSessionState:
     def _validate_native_snapshot(
         cls, snapshot: dict[str, Any], *, binding: str,
     ) -> dict[str, Any]:
-        if not isinstance(snapshot, dict) or set(snapshot) != {"binding", "turnId", "messages", "activeTurnStart"}:
+        required = {"binding", "turnId", "messages", "activeTurnStart"}
+        if not isinstance(snapshot, dict) or not required <= set(snapshot) or set(snapshot) - required - {"toolOrder"}:
             raise ValueError("native snapshot fields are invalid")
+        if "toolOrder" in snapshot:
+            order = snapshot["toolOrder"]
+            if not isinstance(order, list) or any(not isinstance(name, str) or not name.strip() for name in order) or len(set(order)) != len(order):
+                raise ValueError("native tool order is invalid")
         if snapshot["binding"] != binding:
             raise ValueError("native snapshot binding mismatch")
         cls._native_required(snapshot["binding"], "binding")
@@ -211,6 +216,8 @@ class AgentRuntimeSessionState:
             "messages": normalized_messages,
             "activeTurnStart": active_turn_start,
         }
+        if "toolOrder" in snapshot:
+            normalized["toolOrder"] = list(snapshot["toolOrder"])
         if normalized_messages[active_turn_start].get("role") != "user":
             raise ValueError("native active turn must begin with user message")
         cls._native_size_ok(normalized)
@@ -273,6 +280,23 @@ class AgentRuntimeSessionState:
                 return None
             return copy.deepcopy(snapshot)
 
+    def order_native_tools(self, session_id: str, *, binding: str, visible_names: list[str]) -> list[str]:
+        """Retain visible prior order; append newly exposed names, never permissions."""
+        if any(not isinstance(name, str) or not name.strip() for name in visible_names) or len(set(visible_names)) != len(visible_names):
+            raise ValueError("native visible tool names are invalid")
+        with self._ports.shared_state_lock:
+            current = self._native_conversations.get(session_id)
+            if current is None or current["binding"] != binding:
+                raise ValueError("native conversation binding mismatch")
+            visible = set(visible_names)
+            order = [name for name in current.get("toolOrder", []) if name in visible]
+            retained = set(order)
+            order.extend(name for name in visible_names if name not in retained)
+            candidate = {**current, "toolOrder": order}
+            self._native_size_ok(candidate)
+            self._native_conversations[session_id] = candidate
+            return list(order)
+
     def restore_native_conversation(
         self, session_id: str, *, binding: str, snapshot: dict[str, Any],
     ) -> dict[str, Any]:
@@ -331,6 +355,8 @@ class AgentRuntimeSessionState:
                 "messages": [{"role": "assistant", "content": summary}] + copy.deepcopy(current["messages"][cut:]),
                 "activeTurnStart": 1,
             }
+            if "toolOrder" in current:
+                candidate["toolOrder"] = list(current["toolOrder"])
             normalized = self._validate_native_snapshot(candidate, binding=binding)
             self._native_conversations[session_id] = normalized
             return copy.deepcopy(normalized)

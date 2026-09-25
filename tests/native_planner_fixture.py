@@ -8,6 +8,13 @@ class NativePlannerFixture:
         self._sink = sink
         self.compaction = None
         self.compaction_attempted = False
+        self._tool_order = []
+
+    def order_tools(self, definitions):
+        by_name = {item["function"]["name"]: item for item in definitions}
+        self._tool_order = [name for name in self._tool_order if name in by_name]
+        self._tool_order.extend(name for name in by_name if name not in self._tool_order)
+        return [by_name[name] for name in self._tool_order]
 
     def messages(self):
         return deepcopy(self._messages)
