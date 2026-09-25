@@ -478,6 +478,8 @@ export type AgentContextUsage = {
   peakInputTokens?: number;
   peakTotalTokens?: number;
   cacheReadTokens?: number;
+  cacheUsageComplete?: boolean;
+  cacheUsageRequestCount?: number;
   requestCount?: number;
   sentHistoryEntryCount?: number;
   sentHistoryCharacterCount?: number;

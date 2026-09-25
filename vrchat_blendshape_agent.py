@@ -2977,6 +2977,11 @@ def extract_llm_token_usage(response: Any, settings: Settings, source: str = "")
             "cacheReadTokens",
         ),
     )
+    if cache_read_tokens is None:
+        for details_key in ("prompt_tokens_details", "input_tokens_details"):
+            cache_read_tokens = first_usage_int(get_value(usage, details_key), ("cached_tokens",))
+            if cache_read_tokens is not None:
+                break
     if total_tokens is None and input_tokens is not None and output_tokens is not None:
         total_tokens = input_tokens + output_tokens
 

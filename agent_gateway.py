@@ -6229,6 +6229,7 @@ class AgentGateway:
                     **merged,
                     "exact": False,
                     "unavailableReason": "prior_provider_usage_missing",
+                    "cacheUsageComplete": False,
                 }
             return merged
 
@@ -8027,6 +8028,7 @@ class AgentGateway:
                         **merged_provider_usage,
                         "exact": False,
                         "unavailableReason": "prior_provider_usage_missing",
+                        "cacheUsageComplete": False,
                     }
                 context_usage.update(merged_provider_usage)
                 for token_key in ("inputTokens", "outputTokens", "totalTokens"):

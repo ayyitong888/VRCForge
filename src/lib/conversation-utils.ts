@@ -84,6 +84,19 @@ export function buildContextUsageFromRuntime(
     return undefined;
   }
   const contextLimit = resolveContextLimit(provider, model, modelInfo, userContextWindow);
+  // Cache counters are cumulative across requests; context occupancy uses the peak.
+  const cacheInput = numberOrNull(usage.inputTokens);
+  const cacheRead = numberOrNull(usage.cacheReadTokens);
+  const cacheRequests = numberOrNull(usage.cacheUsageRequestCount);
+  const requests = numberOrNull(usage.requestCount);
+  const cacheComplete = usage.exact === true && usage.cacheUsageComplete === true
+    && requests !== null && requests > 0 && Number.isInteger(requests) && cacheRequests === requests
+    && cacheInput !== null && cacheInput > 0 && cacheRead !== null && cacheRead <= cacheInput;
+  const cacheUsage: Pick<ContextUsage, "cacheHitRatio" | "cacheUsageStatus"> = {
+    cacheHitRatio: cacheComplete ? cacheRead / cacheInput : undefined,
+    cacheUsageStatus: cacheComplete ? "complete"
+      : usage.cacheUsageComplete !== undefined || cacheRead !== null ? "incomplete" : "unknown",
+  };
   const limit = contextLimit.known ? contextLimit.limit : CONTEXT_TOKEN_LIMIT_DISPLAY_ESTIMATE;
   const resolvedInput = resolveContextInputTokens(usage);
   const legacyTotal = numberOrNull(usage.totalTokens);
@@ -91,6 +104,7 @@ export function buildContextUsageFromRuntime(
   const inputTokenSource = resolvedInput?.source ?? (legacyTotal !== null ? "legacy_total" : undefined);
   if (!usage.exact || used === null) {
     return {
+      ...cacheUsage,
       used: 0,
       limit,
       limitKnown: contextLimit.known,
@@ -109,6 +123,7 @@ export function buildContextUsageFromRuntime(
   const percent = Math.round(ratio * 100);
   const limitLabel = contextLimit.known ? formatCount(limit) : t("chat.contextLimitUnknown");
   return {
+    ...cacheUsage,
     used,
     limit,
     limitKnown: contextLimit.known,

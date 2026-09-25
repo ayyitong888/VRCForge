@@ -356,3 +356,11 @@ Regression: `tests/test_native_multi_call_admission.py`.
 - Literal schema constraints remain unchanged; preserve existing private-schema exclusions without introducing description-length budgets.
 
 Regression: `tests/test_planner_tool_description_integrity.py`, `tests/test_planner_schema_description_integrity.py`.
+
+
+## Provider cache usage accounting
+
+- Extract nested provider cache counters without overriding an explicit top-level zero. Missing counters must remain unknown.
+- Preserve usage and cache coverage across approval continuations; partial or historical data must not yield a complete hit rate.
+- Context Usage computes hit rate from cumulative cached input divided by cumulative input, independently of peak context occupancy. Invalid counts or incomplete request coverage show unknown/incomplete instead of a percentage.
+- Regression checks: `tests/test_cache_usage_accounting.py` and `tests/test_context_cache_usage_ui.mjs`. Source checks do not replace live UI acceptance or prove cost savings.

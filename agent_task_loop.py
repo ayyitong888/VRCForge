@@ -107,6 +107,15 @@ def _bounded_provider_usage(value: Any) -> dict[str, Any]:
         return {}
     if result.get("exact") is not True:
         result["exact"] = False
+    if "cacheUsageComplete" in value or "cacheUsageRequestCount" in value:
+        count = value.get("cacheUsageRequestCount")
+        result["cacheUsageRequestCount"] = count if isinstance(count, int) and not isinstance(count, bool) and count >= 0 else 0
+        result["cacheUsageComplete"] = (
+            value.get("cacheUsageComplete") is True
+            and result["cacheUsageRequestCount"] > 0
+            and result.get("exact") is True
+            and "inputTokens" in result and "cacheReadTokens" in result
+        )
     return result
 
 
@@ -124,6 +133,8 @@ def merge_provider_usage(
             **{key: previous[key] for key in ("inputTokens", "outputTokens", "totalTokens", "cacheReadTokens") if key in previous},
             "exact": False,
             "unavailableReason": "provider_usage_missing",
+            **({"cacheUsageComplete": False, "cacheUsageRequestCount": previous.get("cacheUsageRequestCount", 0)}
+               if "cacheUsageComplete" in previous else {}),
         }
     primary_keys = ("inputTokens", "outputTokens", "totalTokens")
     complete = all(key in previous and key in latest for key in primary_keys)
@@ -143,6 +154,9 @@ def merge_provider_usage(
             merged[key] = latest[key]
     if not merged["exact"]:
         merged["unavailableReason"] = "provider_usage_incomplete"
+    if "cacheUsageComplete" in previous or "cacheUsageComplete" in latest:
+        merged["cacheUsageRequestCount"] = previous.get("cacheUsageRequestCount", 0) + latest.get("cacheUsageRequestCount", 0)
+        merged["cacheUsageComplete"] = previous.get("cacheUsageComplete") is True and latest.get("cacheUsageComplete") is True
     return merged
 
 

@@ -2610,7 +2610,8 @@ class RuntimePlannerService:
                         "cumulativeInputTokens": 0,
                         "cumulativeOutputTokens": 0,
                         "cumulativeTotalTokens": 0,
-                        "cacheReadTokens": 0,
+                        "cacheUsageComplete": True,
+                        "cacheUsageRequestCount": 0,
                         "promptCharacterCount": 0,
                     }
                 )
@@ -2651,6 +2652,9 @@ class RuntimePlannerService:
             output_tokens = usage_int(usage.get("outputTokens"))
             total_tokens = usage_int(usage.get("totalTokens"))
             cache_read_tokens = usage_int(usage.get("cacheReadTokens"))
+            cache_reported = exact and input_tokens is not None and cache_read_tokens is not None
+            current["cacheUsageRequestCount"] = int(current.get("cacheUsageRequestCount") or 0) + int(cache_reported)
+            current["cacheUsageComplete"] = current.get("cacheUsageComplete") is True and cache_reported
             if total_tokens is None and input_tokens is not None and output_tokens is not None:
                 total_tokens = input_tokens + output_tokens
 

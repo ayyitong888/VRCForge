@@ -84,6 +84,8 @@ export type ContextUsage = {
   peakInputTokens?: number;
   lastInputTokens?: number;
   cumulativeInputTokens?: number;
+  cacheHitRatio?: number;
+  cacheUsageStatus?: "complete" | "incomplete" | "unknown";
   ratio: number;
   label: string;
   title: string;

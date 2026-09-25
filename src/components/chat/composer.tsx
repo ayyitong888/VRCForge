@@ -505,7 +505,14 @@ export function ContextUsageMeter({ usage, className = "" }: { usage: ContextUsa
   const tooltipDetail = knownRatio
     ? i18n.t("chat.contextMeterTokenDetail", { used: formatCount(usage.used), limit: formatCount(usage.limit) })
     : "";
-  const nativeTitle = tooltipDetail ? `${tooltipTitle}\n${tooltipDetail}` : tooltipTitle;
+  const cacheRatio = usage.cacheHitRatio;
+  const cacheKnown = usage.cacheUsageStatus === "complete" && typeof cacheRatio === "number"
+    && Number.isFinite(cacheRatio) && cacheRatio >= 0 && cacheRatio <= 1;
+  const cacheDetail = cacheKnown
+    ? i18n.t("chat.contextCacheHitRate", { percent: Number((cacheRatio * 100).toFixed(2)) })
+    : i18n.t(usage.cacheUsageStatus === "incomplete" || usage.cacheUsageStatus === "complete"
+      ? "chat.contextCacheHitRateIncomplete" : "chat.contextCacheHitRateUnknown");
+  const nativeTitle = [tooltipTitle, tooltipDetail, cacheDetail].filter(Boolean).join("\n");
   return (
     <div
       className={cn("group relative flex h-8 w-8 shrink-0 items-center justify-center rounded-full", className)}
@@ -547,6 +554,7 @@ export function ContextUsageMeter({ usage, className = "" }: { usage: ContextUsa
         <div className="font-medium">{i18n.t("chat.contextMeterTitle")}</div>
         <div className="mt-1 text-muted-foreground">{tooltipTitle}</div>
         {tooltipDetail ? <div className="mt-1 text-muted-foreground">{tooltipDetail}</div> : null}
+        <div className="mt-1 text-muted-foreground" data-context-cache-hit-rate>{cacheDetail}</div>
       </div>
     </div>
   );
