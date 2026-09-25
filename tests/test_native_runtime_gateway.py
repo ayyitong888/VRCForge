@@ -301,10 +301,26 @@ def test_native_read_observation_notfound_create_verified_then_targeted_read_fin
     assert any(item.get("value") == "create" for item in invoked if isinstance(item, dict))
 
 
+def test_native_gateway_host_binds_completion_without_model_copying_ids(tmp_path):
+    gateway, model, invoked = setup_gateway(tmp_path, [
+        call("read-1", "vrcforge_read_text_file", {"path": "a.txt"}),
+        call("final", "vrcforge_runtime_action", {"action": "reply", "reply": "Checked",
+             "completion_claim": {"satisfied": True}}),
+    ])
+    result = run(gateway, tmp_path)
+    assert len(invoked) == 1
+    assert len(model.requests) == 2
+    assert result["plan"]["nextStep"] == "done"
+    assert result["plan"]["completionClaim"] == {"satisfied": True}
+    expected = [a["actionId"] for a in result["plan"]["task"]["actions"] if a["status"] == "completed"]
+    assert expected
+    assert result["plan"]["taskCompletion"]["evidenceActionIds"] == expected
+
+
 def test_native_gateway_completion_rejection_is_returned_to_same_call(tmp_path):
     gateway, model, invoked = setup_gateway(tmp_path, [call("read-1", "vrcforge_read_text_file", {"path": "a.txt"}),
         call("unbound", "vrcforge_runtime_action", {"action": "reply", "reply": "Incorrect success",
-              "completion_claim": {"satisfied": True, "evidence_action_ids": []}}), finish])
+              "completion_claim": {"satisfied": True, "evidence_action_ids": ["not-executed"]}}), finish])
     result = run(gateway, tmp_path)
     assert len(invoked) == 1
     assert budgeted_request_history(model.requests[2])[-1]["tool_call_id"] == "unbound"

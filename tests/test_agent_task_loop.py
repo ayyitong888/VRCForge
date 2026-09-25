@@ -428,7 +428,32 @@ def test_sub_agent_continuation_rejects_a_seed_for_a_different_parent_session() 
     assert prepared is None
 
 
-def test_llm_completion_requires_exact_completed_action_evidence() -> None:
+@pytest.mark.parametrize('reference', ['omitted', 'empty', 'subset', 'all'])
+def test_llm_completion_binds_full_ledger_without_rewriting_model_claim(reference) -> None:
+    loop = AgentTaskLoop('inspect', session_id='current')
+    ids = [loop.record_action(kind='skill', tool='read', arguments={'path': str(n)},
+        raw_result={'ok': True}, outcome=ok_outcome())['actionId'] for n in range(2)]
+    claim = {'satisfied': True}
+    if reference != 'omitted':
+        claim['evidenceActionIds'] = ids if reference == 'all' else ids[:1] if reference == 'subset' else []
+    result = loop.gate_terminal({'planner': 'llm', 'nextStep': 'done', 'completionClaim': claim})
+    assert result['nextStep'] == 'done'
+    assert result['taskCompletion']['evidenceActionIds'] == ids
+    assert result['completionClaim'] == claim
+
+
+def test_llm_completion_rejects_other_task_evidence_and_false_claim() -> None:
+    loops = [AgentTaskLoop('inspect', session_id=session) for session in ('current', 'other')]
+    ids = [loop.record_action(kind='skill', tool='read', arguments={'path': str(n)},
+        raw_result={'ok': True}, outcome=ok_outcome())['actionId'] for n, loop in enumerate(loops)]
+    assert ids[0] != ids[1]
+    for claim in ({'satisfied': True, 'evidenceActionIds': [ids[1]]}, {'satisfied': False}, {}):
+        result = loops[0].gate_terminal({'planner': 'llm', 'nextStep': 'done', 'completionClaim': claim})
+        assert result['nextStep'] == 'completion_unverified'
+        assert 'taskCompletion' not in result
+
+
+def test_llm_completion_requires_satisfied_and_valid_references() -> None:
     loop = AgentTaskLoop("inspect materials")
     action = loop.record_action(
         kind="skill",

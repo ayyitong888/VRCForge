@@ -364,3 +364,11 @@ Regression: `tests/test_planner_tool_description_integrity.py`, `tests/test_plan
 - Preserve usage and cache coverage across approval continuations; partial or historical data must not yield a complete hit rate.
 - Context Usage computes hit rate from cumulative cached input divided by cumulative input, independently of peak context occupancy. Invalid counts or incomplete request coverage show unknown/incomplete instead of a percentage.
 - Regression checks: `tests/test_cache_usage_accounting.py` and `tests/test_context_cache_usage_ui.mjs`. Source checks do not replace live UI acceptance or prove cost savings.
+
+
+## Host-bound completion evidence
+
+- Successful model completion still requires an explicit satisfied claim and all existing host failure, pending, running and verification gates.
+- The host binds the complete completed-action ledger. Model references may be omitted or a subset, but every supplied reference must identify a completed action; foreign or unexecuted references fail. The original model claim is not rewritten.
+- Native final replies must not require an extra model request solely to copy all action IDs. Preserve exact-set behavior for non-model completion paths.
+- Regression checks: `tests/test_agent_task_loop.py` and `tests/test_native_runtime_gateway.py`, including invalid-reference recovery and approval continuations.

@@ -1939,13 +1939,13 @@ class AgentTaskLoop:
                 raw_ids = claim.get("evidenceActionIds") or claim.get("evidence_action_ids")
                 if isinstance(raw_ids, list):
                     evidence_ids = [str(item).strip() for item in raw_ids if str(item).strip()]
-            if not satisfied or set(evidence_ids) != set(completed_ids):
+            if not satisfied or not set(evidence_ids).issubset(completed_ids):
                 gated.update(
                     {
                         "summary": "The final completion claim was not bound to the executed actions.",
                         "reply": (
                             "The tool actions returned, but I cannot honestly mark the task complete "
-                            "because the final claim did not cite the exact completed action evidence."
+                            "because the final claim did not confirm success or cited uncompleted action evidence."
                         ),
                         "continueLoop": False,
                         "nextStep": "completion_unverified",
