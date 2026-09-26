@@ -452,3 +452,9 @@ Regression: `tests/test_planner_tool_description_integrity.py`, `tests/test_plan
 - A later genuine pending approval must remain the current user-action boundary even when an older failed tool receipt remains unresolved. Match the pending payload, approval identity and target; ordinary error text must not manufacture an approval.
 - Retain earlier failed evidence, completion requirements, explicit denial and cancellation precedence. Waiting for approval is never proof of successful completion.
 - Approval continuation must settle the intended action once without replaying its write. Regression: `tests/test_pending_approval_completion_boundary.py` and existing task-loop approval/completion tests.
+
+
+### Pending approval preserves summarized loop metadata
+
+- Apply the current approval boundary to the final summarized plan; retain multi-step metadata and cleared execution flags. Do not replace the whole plan with an intermediate step.
+- Keep the existing multi-step approval regression and pending-after-failure regression passing together: `tests/test_agent_loop_p0.py` and `tests/test_pending_approval_completion_boundary.py`.

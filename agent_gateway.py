@@ -6468,7 +6468,7 @@ class AgentGateway:
         runtime_compaction_usage_checkpoint: dict[str, Any] | None = None
         unresolved_completion_outcomes: dict[tuple[str, str], dict[str, Any]] = {}
         unresolved_completion_action_keys: dict[str, tuple[str, str]] = {}
-        pending_approval_plan: dict[str, Any] | None = None
+        pending_approval_outcome: dict[str, Any] | None = None
         if continuation_context and str(continuation_completion.get("status") or "").casefold() == "completed":
             completed_requested_action_id = str(
                 continuation_context.get("requestedActionId") or ""
@@ -7831,12 +7831,7 @@ class AgentGateway:
                 # Older failures remain in the task ledger and must not replace
                 # a real pending approval merely because they were recorded first.
                 pending_outcome = ensure_dict(step_payload.get("outcome"))
-                pending_approval_plan = completion_gate_plan(plan, pending_outcome)
-                if pending_approval_plan is not None:
-                    pending_approval_plan["completionGate"] = {
-                        **ensure_dict(pending_approval_plan.get("completionGate")),
-                        "reason": "approval_pending",
-                    }
+                pending_approval_outcome = pending_outcome
             step_failure_class = runtime_step_failure_class(step_payload)
             step_outcome = ensure_dict(step_payload.get("outcome"))
             step_outcome_status = str(step_outcome.get("status") or "").strip()
@@ -8137,7 +8132,7 @@ class AgentGateway:
             )
         }
         if (
-            pending_approval_plan is not None
+            pending_approval_outcome is not None
             and not pending_question_boundary
             and not top_plan.get("scopeDenied")
             and terminal_status not in {
@@ -8147,7 +8142,13 @@ class AgentGateway:
                 "paused",
             }
         ):
-            top_plan = pending_approval_plan
+            gated_pending = completion_gate_plan(top_plan, pending_approval_outcome)
+            if gated_pending is not None:
+                gated_pending["completionGate"] = {
+                    **ensure_dict(gated_pending.get("completionGate")),
+                    "reason": "approval_pending",
+                }
+                top_plan = gated_pending
         elif blocking_completion_outcomes and not pending_question_boundary and not top_plan.get("scopeDenied") and terminal_status not in {
             "cancelled",
             "context_compaction_required",
