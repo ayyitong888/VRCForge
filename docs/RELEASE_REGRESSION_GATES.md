@@ -458,3 +458,10 @@ Regression: `tests/test_planner_tool_description_integrity.py`, `tests/test_plan
 
 - Apply the current approval boundary to the final summarized plan; retain multi-step metadata and cleared execution flags. Do not replace the whole plan with an intermediate step.
 - Keep the existing multi-step approval regression and pending-after-failure regression passing together: `tests/test_agent_loop_p0.py` and `tests/test_pending_approval_completion_boundary.py`.
+
+
+### Resident Skill exit and stable runtime context
+
+- Keep the exit tool resident with unchanged complete schema, description and definition order. An inactive exit is a successful no-op, never task-completion evidence; active exits still require the exact name.
+- Append host-owned Skill state after existing runtime context; preserve stable instructions, tools and history prefixes. Other unresolved failures must still block completion.
+- Regression: `tests/test_exit_skill_resident_noop.py` and the existing task-loop Skill checks.

@@ -1681,7 +1681,11 @@ class AgentTaskLoop:
 
     def exit_skill(self, *, name: str, reason: str) -> dict[str, Any]:
         active = str(self._skill_policy.get("name") or "")
-        if not active or name != active:
+        if not active:
+            return {"ok": True, "skillScopeStatus": "inactive", "name": "",
+                    "reason": _bounded_text(reason, 600), "completionVerified": False,
+                    "message": "当前没有激活的Skill，无需退出，可继续收尾。"}
+        if name != active:
             raise ValueError("The exact active Skill name is required.")
         reason = _bounded_text(reason, 600)
         if not reason:

@@ -6823,6 +6823,8 @@ class AgentGateway:
             # runtime-owned explicit model-turn budget to the planner.
             planner_observe = dict(observe) if isinstance(observe, dict) else {}
             planner_observe["planMode"] = task_loop.plan_mode
+            # Host-owned current scope, including activation/exit and approval resume.
+            planner_observe["skillPolicy"] = task_loop.planner_projection()["skillPolicy"]
             max_model_turns = task_loop.budget_policy.max_model_turns
             if max_model_turns is None:
                 planner_observe.pop("modelTurnBudget", None)
