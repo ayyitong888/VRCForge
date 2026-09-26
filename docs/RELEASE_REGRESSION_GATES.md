@@ -429,3 +429,10 @@ Regression: `tests/test_planner_tool_description_integrity.py`, `tests/test_plan
 - Installed package listings must prioritize installed state and governance in model observations; registry and audit history stay available in the retained result reader.
 - Keep the existing untrusted-data envelope, redaction and observation budget. Large installed collections must retain a targeted continuation; error-only responses retain their diagnostics.
 - Verify the raw result is unchanged, audit remains readable in its owning context, and both canonical and native aliases preserve the contract.
+
+
+### User-defined tool directory routing
+
+- Diagnostic root and compile/log leaf descriptions must advertise their existing user-defined Unity tool discovery and invocation capabilities.
+- Directory wording must distinguish read-only planning from approved invocation; tool membership, write gating and approval enforcement stay unchanged.
+- Regression: `tests/test_internal_tool_blocks_user_unity_routing.py`. Natural task completion and provider wait behavior require separate live evidence.
