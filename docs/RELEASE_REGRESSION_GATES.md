@@ -445,3 +445,10 @@ Regression: `tests/test_planner_tool_description_integrity.py`, `tests/test_plan
 - Root and leaf descriptions must both expose installed Skills, explicitly activated desktop actions, attachment inspection/import and execution-target/property reads; approval and activation boundaries remain authoritative.
 - Compare all visible registered tools against directory reachability independently for planning/execution and project/non-project profiles. Do not derive the expected inventory from the tree under test.
 - Coverage: `tests/test_tool_directory_routing_contract.py`. Running-backend directory/load evidence and repeated natural task acceptance are separate requirements.
+
+
+### Pending approval after a recoverable failure
+
+- A later genuine pending approval must remain the current user-action boundary even when an older failed tool receipt remains unresolved. Match the pending payload, approval identity and target; ordinary error text must not manufacture an approval.
+- Retain earlier failed evidence, completion requirements, explicit denial and cancellation precedence. Waiting for approval is never proof of successful completion.
+- Approval continuation must settle the intended action once without replaying its write. Regression: `tests/test_pending_approval_completion_boundary.py` and existing task-loop approval/completion tests.
