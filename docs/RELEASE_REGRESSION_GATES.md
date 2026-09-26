@@ -436,3 +436,12 @@ Regression: `tests/test_planner_tool_description_integrity.py`, `tests/test_plan
 - Diagnostic root and compile/log leaf descriptions must advertise their existing user-defined Unity tool discovery and invocation capabilities.
 - Directory wording must distinguish read-only planning from approved invocation; tool membership, write gating and approval enforcement stay unchanged.
 - Regression: `tests/test_internal_tool_blocks_user_unity_routing.py`. Natural task completion and provider wait behavior require separate live evidence.
+
+
+### Complete tool directory ownership
+
+- Directory ownership must match the runtime catalog. Core-resident tools remain available without being advertised under a conflicting lazy leaf.
+- Build/upload, scene lifecycle, play mode, performance and behavior operations must route by their actual operation contract rather than incidental name substrings.
+- Root and leaf descriptions must both expose installed Skills, explicitly activated desktop actions, attachment inspection/import and execution-target/property reads; approval and activation boundaries remain authoritative.
+- Compare all visible registered tools against directory reachability independently for planning/execution and project/non-project profiles. Do not derive the expected inventory from the tree under test.
+- Coverage: `tests/test_tool_directory_routing_contract.py`. Running-backend directory/load evidence and repeated natural task acceptance are separate requirements.
