@@ -1380,6 +1380,9 @@ def planner_safe_tool_result_fields(result: dict[str, object]) -> dict[str, obje
     return projected
 
 
+_SKILL_PACKAGE_LIST_TOOLS = frozenset({"list_skill_packages", "vrcforge_list_skill_packages"})
+
+
 _PLANNER_COMPILE_FACT_KEYS = (
     "isCompiling",
     "captureComplete",
@@ -3444,13 +3447,28 @@ class RuntimePlannerService:
                 "vrcforge_web_search",
                 "shell", "unity_shell", "vrcforge_execute_shell",
             }:
+                evidence_result = result
+                if tool_name in _SKILL_PACKAGE_LIST_TOOLS and isinstance(result.get("installed"), list):
+                    evidence_result = {
+                        key: value for key, value in result.items()
+                        if key not in {"registry", "audit"}
+                    }
                 structured_evidence = project_structured_tool_evidence(
-                    result, sanitize_text=sanitize_planner_observation_text,
+                    evidence_result, sanitize_text=sanitize_planner_observation_text,
                 )
                 if structured_evidence:
                     # Appending domain data must not shorten the pre-existing
                     # canonical failure/recovery evidence allowance.
                     continuation = step.get("resultRead")
+                    if (tool_name in _SKILL_PACKAGE_LIST_TOOLS
+                            and isinstance(result.get("installed"), list)
+                            and isinstance(continuation, dict)):
+                        continuation = deepcopy(continuation)
+                        next_request = continuation.get("nextRequest")
+                        if isinstance(next_request, dict):
+                            arguments = next_request.get("arguments")
+                            if isinstance(arguments, dict):
+                                arguments["jsonPointer"] = "/installed"
                     continuation_text = ""
                     if isinstance(continuation, dict) and isinstance(continuation.get("resultRef"), str):
                         continuation_text = "; resultContinuation=" + json.dumps(continuation, ensure_ascii=False, separators=(",", ":"))

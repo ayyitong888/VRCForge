@@ -422,3 +422,10 @@ Regression: `tests/test_planner_tool_description_integrity.py`, `tests/test_plan
 - A normally finished background command with a nonzero integer exit code must return its failed result to the planner exactly once, preserving the original call identity without rerunning the process.
 - Keep cancellation, timeout, termination failure, unknown process states and invalid exit codes terminal; a host Stop must prevent model restart. Successful completion and approval rejection behavior remain unchanged.
 - Coverage: `tests/test_native_shell_failure_recovery.py`, existing native async continuation tests and task-loop approval tests. Live repair completion and cost savings require separate evidence.
+
+
+### Installed package observation
+
+- Installed package listings must prioritize installed state and governance in model observations; registry and audit history stay available in the retained result reader.
+- Keep the existing untrusted-data envelope, redaction and observation budget. Large installed collections must retain a targeted continuation; error-only responses retain their diagnostics.
+- Verify the raw result is unchanged, audit remains readable in its owning context, and both canonical and native aliases preserve the contract.

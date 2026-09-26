@@ -11,6 +11,7 @@ import pytest
 
 import agent_gateway
 from tests.native_planner_fixture import NativePlannerFixture
+from agent_tool_result_reader import bind_tool_result_context, read_tool_result, result_continuation
 from runtime_planner_service import (
     EXPOSURE_LAYER_EXECUTION,
     EXPOSURE_LAYER_PLANNING,
@@ -21,6 +22,7 @@ from runtime_planner_service import (
     PlannerTool,
     PlannerTurnMetadata,
     RuntimePlannerService,
+    sanitize_planner_observation_text,
     latest_loop_step_needs_model_correction,
     parse_llm_plan_response,
     planner_tool_input_schema,
@@ -587,6 +589,88 @@ def test_model_observation_includes_bounded_canonical_tool_outcome() -> None:
     assert "nextActions=Wait for compilation" in observation
     assert "retryable=True" in observation
     assert "privateDump" not in observation
+
+
+def test_skill_package_observation_prioritizes_installed_state_and_keeps_audit_reader() -> None:
+    raw = {
+        "registry": {"governance": {"mode": "safe"}, "audit": [{"event": "audit-secret"}] * 40},
+        "governance": {"mode": "safe", "source": "registry", "apiKey": "SECRET_PACKAGE_KEY",
+                       "path": "C:/Private/package-registry.json"},
+        "installed": [{"id": "pkg.alpha", "version": "1.2.3", "enabled": True,
+                       "execution": "read_only", "entrypoint": "alpha.main"}],
+        "audit": [{"event": "audit-secret"}] * 40,
+    }
+    original = copy.deepcopy(raw)
+    step = {
+        "tool": "vrcforge_list_skill_packages",
+        "status": "executed",
+        "result": raw,
+        "resultRead": {"resultRef": "result_" + "a" * 32,
+                        "nextRequest": {"tool": "vrcforge_read_tool_result",
+                                         "arguments": {"resultRef": "result_" + "a" * 32,
+                                                       "jsonPointer": "", "offset": 0}}},
+    }
+    observation = service()._llm_loop_step_observation(step)
+
+    assert "pkg.alpha" in observation
+    assert "audit-secret" not in observation
+    assert "SECRET_PACKAGE_KEY" not in observation
+    assert "C:/Private/package-registry.json" not in observation
+    assert '"jsonPointer":"/installed"' in observation
+    assert raw["audit"]
+    assert step["resultRead"]["nextRequest"]["arguments"]["jsonPointer"] == ""
+    assert raw == original
+
+
+def test_skill_package_observation_keeps_audit_readable_through_owned_reader() -> None:
+    raw = {"installed": [{"id": "pkg.alpha", "enabled": True}],
+           "governance": {"mode": "safe"}, "audit": [{"event": "audit-row"}]}
+    step = {"index": 0, "actionId": "package-list", "tool": "list_skill_packages",
+            "status": "executed", "result": raw}
+    step["resultRead"] = result_continuation("session", "turn", "project", step, sanitize_planner_observation_text)
+
+    with bind_tool_result_context("session", "turn", "project", [step]):
+        page = read_tool_result({"resultRef": step["resultRead"]["resultRef"],
+                                 "jsonPointer": "/audit", "offset": 0, "limit": 1},
+                                sanitize=sanitize_planner_observation_text)
+    assert page["items"][0]["value"] == {"event": "audit-row"}
+    observation = service()._llm_loop_step_observation(step)
+    assert '"jsonPointer":"/installed"' in observation
+    assert step["resultRead"]["nextRequest"]["arguments"]["jsonPointer"] == ""
+
+
+def test_skill_package_observation_native_alias_uses_same_installed_projection() -> None:
+    observation = service()._llm_loop_step_observation(
+        {"tool": "list_skill_packages", "status": "executed",
+         "result": {"installed": [{"id": "pkg.native", "enabled": True}],
+                    "governance": {"mode": "safe"}, "audit": [{"event": "native-audit"}]}},
+        native_contract=True,
+    )
+    assert "pkg.native" in observation
+    assert "native-audit" not in observation
+
+
+def test_skill_package_observation_large_installed_uses_targeted_reader_continuation() -> None:
+    installed = [{"id": f"pkg.{index}", "description": "x" * 1800} for index in range(12)]
+    raw = {"installed": installed, "governance": {"mode": "safe"}, "audit": [{"event": "audit-row"}]}
+    step = {"index": 0, "actionId": "package-large", "tool": "vrcforge_list_skill_packages",
+            "status": "executed", "result": raw}
+    step["resultRead"] = result_continuation("session", "turn", "project", step, sanitize_planner_observation_text)
+    original_pointer = step["resultRead"]["nextRequest"]["arguments"]["jsonPointer"]
+    observation = service()._llm_loop_step_observation(step)
+    assert '"jsonPointer":"/installed"' in observation
+    assert '"offset":0' in observation
+    assert step["resultRead"]["nextRequest"]["arguments"]["jsonPointer"] == original_pointer == ""
+
+
+def test_skill_package_error_without_installed_keeps_generic_observation_path() -> None:
+    observation = service()._llm_loop_step_observation(
+        {"tool": "vrcforge_list_skill_packages", "status": "failed",
+         "result": {"ok": False, "error": {"code": "registry_unavailable"},
+                    "audit": [{"event": "error-audit"}]}},
+    )
+    assert "registry_unavailable" in observation
+    assert "error-audit" in observation
 
 
 def test_model_observation_preserves_compile_snapshot_from_structured_wrapper() -> None:
