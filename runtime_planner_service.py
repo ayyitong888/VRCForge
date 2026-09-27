@@ -105,7 +105,6 @@ RECURSIVE_SENSITIVE_FIELDS = frozenset(
     }
 )
 _PLANNER_TOOL_SCHEMA_MAX_PROPERTIES = 24
-_PLANNER_TOOL_SCHEMA_MAX_ISSUES = 8
 _PLANNER_SCHEMA_ANNOTATION_KEYS = frozenset({"description", "title", "examples"})
 
 _HIGH_CONFUSION_TOOL_INPUT_CONTRACTS: dict[str, tuple[str, ...]] = {
@@ -329,8 +328,7 @@ def _planner_child_path(parent: str, child: str) -> str:
 def _append_planner_schema_issue(
     issues: list[dict[str, str]], path: str, code: str, expected: str
 ) -> None:
-    if len(issues) < _PLANNER_TOOL_SCHEMA_MAX_ISSUES:
-        issues.append({"path": path or "$", "code": code, "expected": expected})
+    issues.append({"path": path or "$", "code": code, "expected": expected})
 
 
 def _validate_planner_schema_node(
@@ -339,8 +337,6 @@ def _validate_planner_schema_node(
     path: str,
     issues: list[dict[str, str]],
 ) -> None:
-    if len(issues) >= _PLANNER_TOOL_SCHEMA_MAX_ISSUES:
-        return
     declared_type = schema.get("type")
     if isinstance(declared_type, list):
         supported_types = {"string", "boolean", "integer", "number", "object", "array", "null"}
@@ -371,7 +367,7 @@ def _validate_planner_schema_node(
         _append_planner_schema_issue(issues, path, "enum", "one of the declared values")
         return
     if "const" in schema and value != schema.get("const"):
-        _append_planner_schema_issue(issues, path, "const", str(schema.get("const"))[:120])
+        _append_planner_schema_issue(issues, path, "const", str(schema.get("const")))
         return
 
     if value_type in {"integer", "number"}:
@@ -391,7 +387,7 @@ def _validate_planner_schema_node(
             _append_planner_schema_issue(issues, path, "max_length", str(int(maximum)))
         pattern = schema.get("pattern")
         if isinstance(pattern, str) and re.search(pattern, value) is None:
-            _append_planner_schema_issue(issues, path, "pattern", pattern[:120])
+            _append_planner_schema_issue(issues, path, "pattern", pattern)
     elif value_type == "array":
         minimum = schema.get("minItems")
         maximum = schema.get("maxItems")
@@ -403,8 +399,6 @@ def _validate_planner_schema_node(
         if isinstance(item_schema, Mapping):
             for index, item in enumerate(value):
                 _validate_planner_schema_node(item_schema, item, f"{path}[{index}]", issues)
-                if len(issues) >= _PLANNER_TOOL_SCHEMA_MAX_ISSUES:
-                    break
     elif value_type == "object":
         properties = schema.get("properties")
         property_map = properties if isinstance(properties, Mapping) else {}
@@ -418,7 +412,7 @@ def _validate_planner_schema_node(
         for raw_name, raw_value in value.items():
             name = str(raw_name)
             raw_spec = property_map.get(name)
-            child_path = _planner_child_path(path, name[:120])
+            child_path = _planner_child_path(path, name)
             if not isinstance(raw_spec, Mapping):
                 if schema.get("additionalProperties") is False:
                     _append_planner_schema_issue(
@@ -426,8 +420,6 @@ def _validate_planner_schema_node(
                     )
                 continue
             _validate_planner_schema_node(raw_spec, raw_value, child_path, issues)
-            if len(issues) >= _PLANNER_TOOL_SCHEMA_MAX_ISSUES:
-                break
 
     for branch_keyword in ("oneOf", "anyOf"):
         raw_branches = schema.get(branch_keyword)
@@ -1977,15 +1969,15 @@ class RuntimePlannerService:
                 "argumentValidation": {
                     "ok": False,
                     "code": "planner_invalid_response",
-                    "actionKind": str(action_kind or "")[:32],
-                    "tool": str(tool_name or "")[:160],
+                    "actionKind": str(action_kind or ""),
+                    "tool": str(tool_name or ""),
                     "actionId": planner_argument_validation_id(
                         action_kind,
                         tool_name,
                         arguments,
                     ),
-                    "summary": str(validation.get("summary") or "")[:600],
-                    "issues": list(validation.get("issues") or [])[:_PLANNER_TOOL_SCHEMA_MAX_ISSUES],
+                    "summary": str(validation.get("summary") or ""),
+                    "issues": list(validation.get("issues") or []),
                 },
                 "plannerFailure": {
                     "code": "planner_invalid_response",
@@ -2660,7 +2652,7 @@ class RuntimePlannerService:
                                 f"action={corrected_action}, use the exact tool name "
                                 f"{corrected_tool.name}, and satisfy its registered argument schema."
                             ),
-                            "issues": issues[:_PLANNER_TOOL_SCHEMA_MAX_ISSUES],
+                            "issues": issues,
                         },
                         phase=phase,
                     )

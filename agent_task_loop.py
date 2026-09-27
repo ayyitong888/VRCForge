@@ -70,7 +70,7 @@ def _status(value: Any) -> str:
     return str(value or "").strip().casefold().replace("-", "_")
 
 
-def _bounded_text(value: Any, limit: int) -> str:
+def _bounded_text(value: Any, limit: int | None) -> str:
     return str(value or "").strip()[:limit]
 
 
@@ -640,7 +640,7 @@ def approval_task_context(
 ) -> dict[str, Any] | None:
     if not isinstance(seed, Mapping) or seed.get("schema") != TASK_LOOP_SCHEMA:
         return None
-    objective = _bounded_text(seed.get("objective"), 600)
+    objective = _bounded_text(seed.get("objective"), None)
     if not objective:
         return None
     seeded_tool = _bounded_text(seed.get("requestedTool"), 160)
@@ -786,7 +786,7 @@ def approval_completion(
         "schema": TASK_LOOP_SCHEMA,
         "taskId": _bounded_text(context.get("taskId"), 80),
         "status": task_status,
-        "objective": _bounded_text(context.get("objective"), 600),
+        "objective": _bounded_text(context.get("objective"), None),
         "actionId": _bounded_text(context.get("actionId"), 80),
         "tool": tool,
         "outcome": verified,
@@ -802,7 +802,7 @@ def rejected_approval_completion(
         "schema": TASK_LOOP_SCHEMA,
         "taskId": _bounded_text(context.get("taskId"), 80),
         "status": "needs_user_action",
-        "objective": _bounded_text(context.get("objective"), 600),
+        "objective": _bounded_text(context.get("objective"), None),
         "actionId": _bounded_text(context.get("actionId"), 80),
         "tool": _bounded_text(context.get("tool"), 160),
         "outcome": {
@@ -825,7 +825,7 @@ def revision_requested_approval_completion(
         "schema": TASK_LOOP_SCHEMA,
         "taskId": _bounded_text(context.get("taskId"), 80),
         "status": "needs_user_action",
-        "objective": _bounded_text(context.get("objective"), 600),
+        "objective": _bounded_text(context.get("objective"), None),
         "actionId": _bounded_text(context.get("actionId"), 80),
         "tool": _bounded_text(context.get("tool"), 160),
         "outcome": {
@@ -875,7 +875,7 @@ def prepare_approval_task_continuation(
         else f"{continuation_marker}:{approval_id}"
     )[:240]
     params: dict[str, Any] = {
-        "message": _bounded_text(context.get("objective"), 600),
+        "message": _bounded_text(context.get("objective"), None),
         "session_id": _bounded_text(context.get("sessionId"), 180),
         "clientTurnId": continuation_client_turn_id,
         "projectRoot": _bounded_text(context.get("projectRoot"), 600),
@@ -1246,7 +1246,7 @@ class AgentTaskLoop:
     _result_reader_targets: dict[str, tuple[str, str, int]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        self.objective = _bounded_text(self.objective, 600)
+        self.objective = _bounded_text(self.objective, None)
         self.task_id = _bounded_text(self.task_id, 80) or canonical_task_id(
             self.session_id,
             self.client_turn_id,
@@ -1272,7 +1272,7 @@ class AgentTaskLoop:
         execution: Mapping[str, Any] | None = None,
     ) -> AgentTaskLoop:
         loop = cls(
-            _bounded_text(context.get("objective"), 600),
+            _bounded_text(context.get("objective"), None),
             session_id=_bounded_text(context.get("sessionId"), 180),
             turn_id=_bounded_text(context.get("turnId"), 180),
             client_turn_id=_bounded_text(context.get("clientTurnId"), 180),
@@ -1378,7 +1378,7 @@ class AgentTaskLoop:
         return {
             "schema": TASK_LOOP_SCHEMA,
             "taskId": self.task_id,
-            "objective": _bounded_text(self.objective, 600),
+            "objective": _bounded_text(self.objective, None),
             "sessionId": _bounded_text(self.session_id, 180),
             "turnId": _bounded_text(self.turn_id, 180),
             "clientTurnId": _bounded_text(self.client_turn_id, 180),
@@ -1710,7 +1710,7 @@ class AgentTaskLoop:
         return {
             "schema": TASK_LOOP_SCHEMA,
             "taskId": self.task_id,
-            "objective": _bounded_text(self.objective, 600),
+            "objective": _bounded_text(self.objective, None),
             "actions": actions,
             "requirements": [dict(item) for item in self._requirements.values()],
             "skillPolicy": dict(self._skill_policy),
