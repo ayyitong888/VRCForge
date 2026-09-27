@@ -3103,6 +3103,31 @@ class RuntimePlannerService:
             native_contract=native_contract,
         )
 
+    @staticmethod
+    def model_source_completeness(step: Mapping[str, object]) -> list[dict[str, object]]:
+        """Keep producer coverage facts ahead of data, separate from page cursors.
+
+        Missing flags are unknown, not evidence of completeness. Only declared
+        boolean/integer control fields leave this boundary; arbitrary summary
+        content still goes through the ordinary owner projection and reader.
+        """
+        result = step.get("result")
+        if not isinstance(result, Mapping):
+            return []
+        scopes = [("", result)] + [
+            ("/" + name, result[name])
+            for name in ("summary", "recognitionCoverage", "coverage")
+            if isinstance(result.get(name), Mapping)
+        ]
+        keys = ("truncated", "captureComplete", "menuTraversalComplete",
+                "candidateEnumerationComplete", "generalTopologyComplete",
+                "missingMatchProvesAbsence", "hasMore", "itemCount", "totalItems",
+                "skipped_resource_limit")
+        return [{"jsonPointer": pointer, "facts": facts}
+                for pointer, fields in scopes
+                if (facts := {key: fields[key] for key in keys
+                              if type(fields.get(key)) in (bool, int)})]
+
     def complete_model_information(
         self,
         step: dict[str, object],
@@ -3114,6 +3139,10 @@ class RuntimePlannerService:
                 step = self._planner_result_read_step(step)
             result = step.get("result")
             fields: list[str] = []
+            source_completeness = RuntimePlannerService.model_source_completeness(step)
+            if source_completeness:
+                fields.append("sourceCompleteness=" + json.dumps(
+                    source_completeness, ensure_ascii=False, separators=(",", ":")))
             causal_fields: list[str] = []
             canonical_outcome: dict[str, object] = {}
             if isinstance(result, Mapping) and result.get("code") == "planner_invalid_response":

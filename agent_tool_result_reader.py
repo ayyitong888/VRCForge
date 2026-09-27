@@ -137,6 +137,44 @@ def _safe_key(name: object, value: object, sanitize: Callable[[object, int], str
     return isinstance(name, str) and not _private_or_opaque(name, value) and sanitize(name, 100) == name
 
 
+def page_item_request_arguments(page: Mapping[str, Any], row: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Recognize an exact child expansion; execution still requires owner binding."""
+    if (page.get("schema") != PAGE_SCHEMA or page.get("authority") != "untrusted_tool_output"
+            or page.get("ok") is not True or not isinstance(page.get("items"), list)
+            or row not in page["items"] or row.get("expandable") is not True
+            or row.get("truncated") is not True or "value" in row
+            or row.get("type") not in {"object", "array", "string"}):
+        return None
+    request = row.get("nextRequest")
+    if (not isinstance(request, dict) or set(request) != {"tool", "arguments"}
+            or request.get("tool") != TOOL_NAME or not isinstance(request.get("arguments"), dict)):
+        return None
+    args = request["arguments"]
+    required = {"resultRef", "source", "jsonPointer", "offset", "limit"}
+    if set(args) != required | ({"textOffset"} if row["type"] == "string" else set()):
+        return None
+    ref, source, pointer, parent = args["resultRef"], args["source"], args["jsonPointer"], page.get("jsonPointer")
+    if (not isinstance(ref, str) or re.fullmatch(r"result_[0-9a-f]{32}", ref) is None
+            or ref != page.get("resultRef") or source not in {"result", "owner_model"}
+            or source != page.get("source", "result") or pointer != row.get("jsonPointer")):
+        return None
+    for path in (pointer, parent):
+        if (not isinstance(path, str) or len(path) > 1024
+                or re.fullmatch(INPUT_SCHEMA["properties"]["jsonPointer"]["pattern"], path) is None):
+            return None
+    if pointer == parent:
+        if row["type"] != "string" or page.get("totalItems") != 1:
+            return None
+    elif not pointer.startswith(parent + "/") or "/" in pointer[len(parent) + 1:]:
+        return None
+    if (type(args["offset"]) is not int or args["offset"] != 0
+            or type(args["limit"]) is not int or not 1 <= args["limit"] <= 20):
+        return None
+    if row["type"] == "string" and (type(args["textOffset"]) is not int or args["textOffset"] != 0):
+        return None
+    return dict(args)
+
+
 def collection_manifest(value: object, sanitize: Callable[[object, int], str], parent: str = "") -> list[dict[str, Any]]:
     if isinstance(value, list):
         return [{"jsonPointer": parent, "type": "array", "count": len(value)}]
@@ -313,13 +351,21 @@ def read_tool_result(params: Mapping[str, Any], *, sanitize: Callable[[object, i
     if offset > len(members):
         raise ValueError("offset is outside the retained result")
     field_name = pointer.rsplit("/", 1)[-1].replace("~1", "/").replace("~0", "~")
-    scalar_text = isinstance(value, str) and not _identity_key(field_name)
+    scalar_text = isinstance(value, str)
+    if scalar_text and _identity_key(field_name):
+        # Identity pages are coordinates into a complete safe value, never a
+        # shortened/redacted identity that could be mistaken for a real target.
+        scalar_text = sanitize(value, max(1, len(value) * 4 + 100)) == value
     if "textOffset" in params and (not scalar_text or offset != 0):
-        raise ValueError("textOffset requires an exact non-identity text field with offset=0")
+        raise ValueError("textOffset requires an exact safe text field with offset=0")
     page: dict[str, Any] = {"schema": PAGE_SCHEMA, "ok": True, "authority": "untrusted_tool_output",
                            "resultRef": ref, "source": source, "sourceStep": step["index"], "sourceTool": step["tool"],
                            "jsonPointer": pointer, "offset": offset, "totalItems": len(members),
                            "items": [], "redactedFields": 0, "hasMore": False, "previewTruncated": False}
+    if source == "owner_model" and isinstance(root, dict) and isinstance(root.get("sourceCompleteness"), list):
+        # These facts were filtered by the owner before retention. They apply
+        # to every page, even when the source summary is far beyond this slice.
+        page["sourceCompleteness"] = root["sourceCompleteness"]
     constraints, constraints_truncated = _source_constraints(root, pointer, sanitize)
     if constraints or constraints_truncated:
         page["sourceConstraints"] = constraints
@@ -381,28 +427,38 @@ def read_tool_result(params: Mapping[str, Any], *, sanitize: Callable[[object, i
         # Wrapping a scalar under its original key preserves the exact-identity
         # and sensitive-value rules of the existing structured evidence channel.
         wrapper_key = str(key) if isinstance(value, dict) else pointer.rsplit("/", 1)[-1] if pointer else "value"
-        evidence = project_structured_tool_evidence({wrapper_key: child}, sanitize_text=sanitize, max_chars=1500)
+        evidence = project_structured_tool_evidence(
+            {wrapper_key: child}, sanitize_text=sanitize, mode="runtimecomplete")
         safe = evidence["data"]
-        row = {"jsonPointer": child_pointer, "truncated": evidence["truncated"],
+        row = {"jsonPointer": child_pointer, "truncated": False,
                "redactedFields": evidence["redactedFields"]}
         if wrapper_key in safe:
             row["value"] = safe[wrapper_key]
-        if evidence["truncated"]:
-            wrapper_pointer = _pointer("", wrapper_key)
-            row["incompleteFields"] = [
-                {**field, "jsonPointer": child_pointer + field["jsonPointer"][len(wrapper_pointer):]}
-                for field in evidence.get("incompleteFields", [])
-                if field["jsonPointer"] == wrapper_pointer or field["jsonPointer"].startswith(wrapper_pointer + "/")
-            ]
-            row["incompleteFieldsTruncated"] = evidence.get("incompleteFieldsTruncated", False)
         if isinstance(child, (dict, list)):
             row["type"] = "object" if isinstance(child, dict) else "array"
             row["count"] = len(child)
-            # The exact pointer can always be selected again to page its fields.
-            row["expandable"] = True
+        next_collection = {"tool": TOOL_NAME, "arguments": {
+            "resultRef": ref, "source": source, "jsonPointer": pointer, "offset": cursor + 1, "limit": limit}}
+        single = {**page, "items": [row], "returnedItems": 1, "nextRequest": next_collection}
+        if _size(single) > MAX_PAGE_CHARS and "value" in row:
+            # No cut preview: retain the complete value in the same owning
+            # step, and return only an executable expansion into that value.
+            projected = row.pop("value")
+            row.update({"expandable": True, "truncated": True,
+                        "type": "object" if isinstance(projected, dict) else "array" if isinstance(projected, list) else "string",
+                        "nextRequest": {"tool": TOOL_NAME, "arguments": {
+                            "resultRef": ref, "source": source, "jsonPointer": child_pointer,
+                            "offset": 0, "limit": limit}}})
+            if isinstance(projected, str):
+                row["textTotalChars"] = len(projected)
+                row["nextRequest"]["arguments"]["textOffset"] = 0
+            if len(child_pointer) > 1024 or child_pointer.count("/") > 32:
+                raise ValueError("Result expansion exceeds the existing JSON pointer bounds")
         candidate = {**page, "items": [*page["items"], row], "returnedItems": len(page["items"]) + 1,
-                     "nextRequest": {"tool": TOOL_NAME, "arguments": {"resultRef": ref, "source": source, "jsonPointer": pointer, "offset": cursor + 1, "limit": limit}}}
+                     "nextRequest": next_collection}
         if _size(candidate) > MAX_PAGE_CHARS:
+            if not page["items"]:
+                raise ValueError("Result page metadata exceeds the page budget; select a narrower field")
             break
         page["items"].append(row)
         cursor += 1
@@ -410,7 +466,7 @@ def read_tool_result(params: Mapping[str, Any], *, sanitize: Callable[[object, i
     if page["hasMore"]:
         page["nextRequest"] = {"tool": TOOL_NAME, "arguments": {"resultRef": ref, "source": source, "jsonPointer": pointer, "offset": cursor, "limit": limit}}
     page["returnedItems"] = len(page["items"])
-    # hasMore describes this page only, not completeness of nested previews.
+    # hasMore covers siblings; expandable rows carry their own exact requests.
     page["previewTruncated"] = any(row["truncated"] for row in page["items"])
     assert _size(page) <= MAX_PAGE_CHARS
     return page

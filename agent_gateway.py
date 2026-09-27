@@ -38,7 +38,7 @@ from typing import TYPE_CHECKING, Any, Callable, Iterator, Mapping, Sequence
 
 from agent_memory_store import AgentMemoryStore
 from agent_memory_tools import MEMORY_TOOL_NAMES, MEMORY_WRITE_TOOLS, bind_memory_tool_context, safe_memory_record, requested_memory_tool
-from agent_tool_result_reader import TOOL_NAME as RESULT_READER_TOOL, bind_tool_result_context, page_next_request_arguments, read_tool_result, result_continuation, retain_model_information
+from agent_tool_result_reader import TOOL_NAME as RESULT_READER_TOOL, bind_tool_result_context, page_item_request_arguments, page_next_request_arguments, read_tool_result, result_continuation, retain_model_information
 from know_yourself_skill import bind_know_yourself_caller
 import agent_command_safety as command_safety
 import runtime_planner_service as planner_policy
@@ -7842,7 +7842,7 @@ class AgentGateway:
                     session_id, turn_id, project_root, steps[-1],
                     {"text": self.runtime_planner.complete_model_information(
                         loop_state[-1], native_contract=bool(native_binding),
-                    )},
+                    ), "sourceCompleteness": self.runtime_planner.model_source_completeness(loop_state[-1])},
                     planner_policy.sanitize_planner_observation_text,
                 )
                 steps[-1].update(model_information)
@@ -10636,6 +10636,15 @@ def redact_sensitive(value: Any) -> Any:
             result["nextRequest"]["arguments"] = {
                 key: redact_sensitive(item) for key, item in reader_arguments.items()
             }
+        if isinstance(value.get("items"), list):
+            for index, row in enumerate(value["items"]):
+                if not isinstance(row, dict):
+                    continue
+                arguments = page_item_request_arguments(value, row)
+                if arguments is not None:
+                    result["items"][index]["nextRequest"]["arguments"] = {
+                        key: redact_sensitive(item) for key, item in arguments.items()
+                    }
         return result
     if isinstance(value, list):
         return [redact_sensitive(item) for item in value]
