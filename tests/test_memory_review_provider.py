@@ -109,6 +109,21 @@ def test_generate_content_config_uses_bounded_output_and_instruction(provider: s
     }
 
 
+def test_long_system_instruction_keeps_tail_in_openai_and_gemini_payloads() -> None:
+    instruction = "S" * 4_500 + "\nSYSTEM_INSTRUCTION_SENTINEL"
+    settings = make_settings("openai", "gpt-4o")
+    settings.llm_system_instruction = instruction
+
+    openai_payload = build_openai_compatible_request_payload(settings, "evidence")
+    assert openai_payload["messages"][0]["content"].endswith("SYSTEM_INSTRUCTION_SENTINEL")
+
+    settings.llm_provider = "gemini"
+    settings.llm_model = "gemini-2.5-flash"
+    config = build_gemini_generate_config(settings, _FakeGenerateTypes)
+    assert config is not None
+    assert config.kwargs["system_instruction"].endswith("SYSTEM_INSTRUCTION_SENTINEL")
+
+
 def test_optional_overrides_leave_default_provider_payloads_unchanged() -> None:
     openai_settings = make_settings("openai", "gpt-4o")
     openai_payload = build_openai_compatible_request_payload(openai_settings, "hello")

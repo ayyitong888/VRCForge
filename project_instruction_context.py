@@ -5,7 +5,6 @@ from pathlib import Path
 
 
 MAX_PROJECT_INSTRUCTIONS_BYTES = 64 * 1024
-MAX_INSTRUCTION_PROMPT_CHARS = 32_000
 
 
 @dataclass(frozen=True)
@@ -47,11 +46,11 @@ def load_project_instructions(project_root: object) -> ProjectInstructionSnapsho
 
 
 def _instruction_prompt_block(content: str, *, preamble: str, tag: str) -> str:
-    """Render a bounded instruction body while keeping each scope's policy."""
-    bounded = str(content or "").strip()[:MAX_INSTRUCTION_PROMPT_CHARS]
-    if not bounded:
+    """Render the complete allowed instruction body while keeping its policy."""
+    normalized = str(content or "").strip()
+    if not normalized:
         return ""
-    return f"{preamble}\n<{tag}>\n{bounded}\n</{tag}>"
+    return f"{preamble}\n<{tag}>\n{normalized}\n</{tag}>"
 
 
 def project_instruction_prompt_block(content: str) -> str:

@@ -533,7 +533,7 @@ def build_vision_analysis_prompt(message: str, images: Sequence[dict[str, Any]])
         "Answer in the same language as the user request below.",
     ]
     if user_context:
-        lines.append(f"\nUser request (for context): {user_context[:2000]}")
+        lines.append(f"\nUser request (for context): {user_context}")
     return "\n".join(lines)
 
 

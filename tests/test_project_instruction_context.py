@@ -38,3 +38,23 @@ def test_prompt_block_keeps_project_rules_below_runtime_and_current_user_intent(
     global_block = global_instruction_prompt_block("- Reply concisely.")
     assert "Global user instructions" in global_block
     assert "never authorize a write" in global_block
+
+
+def test_loaded_instruction_tail_reaches_prompt_without_the_old_32000_char_cut(tmp_path) -> None:
+    content = "A" * 31_990 + "\nTAIL_RULE_MUST_REACH_THE_MODEL"
+    (tmp_path / "AGENTS.md").write_text(content, encoding="utf-8")
+
+    snapshot = load_project_instructions(tmp_path)
+    block = project_instruction_prompt_block(snapshot.content)
+
+    assert snapshot.status == "loaded"
+    assert snapshot.content.endswith("TAIL_RULE_MUST_REACH_THE_MODEL")
+    assert block.endswith("TAIL_RULE_MUST_REACH_THE_MODEL\n</project_instructions>")
+
+
+def test_global_prompt_builder_keeps_full_content_over_project_loader_limit() -> None:
+    content = "x" * (MAX_PROJECT_INSTRUCTIONS_BYTES + 1) + "\nGLOBAL_TAIL_MUST_REACH_THE_MODEL"
+
+    block = global_instruction_prompt_block(content)
+
+    assert block.endswith("GLOBAL_TAIL_MUST_REACH_THE_MODEL\n</global_user_instructions>")

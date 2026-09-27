@@ -1579,7 +1579,7 @@ def _deepseek_documented_effort(level: str) -> str:
 
 
 def llm_system_instruction(settings: Settings) -> str:
-    return str(settings.llm_system_instruction or DEFAULT_LLM_SYSTEM_INSTRUCTION).strip()[:4000]
+    return str(settings.llm_system_instruction or DEFAULT_LLM_SYSTEM_INSTRUCTION).strip()
 
 
 def llm_max_output_tokens(settings: Settings) -> int | None:
@@ -2256,7 +2256,7 @@ def build_gemini_generate_config(settings: Settings, types_module: Any) -> Any |
     if output_limit is not None:
         config["max_output_tokens"] = output_limit
     if system_instruction:
-        config["system_instruction"] = system_instruction[:4000]
+        config["system_instruction"] = system_instruction
     return types_module.GenerateContentConfig(**config)
 
 

@@ -78,7 +78,7 @@ def test_reader_is_fresh_core_read_in_both_contexts_and_layers():
             catalog = dashboard_server._RuntimePlannerCatalog().read(layer, project_context_active=project)
             tool = next(item for item in catalog.visible_tools if item.runtime_name == TOOL_NAME)
             assert tool.block == "core" and not tool.write
-            assert set(tool.input_schema["properties"]) - {"promptSkillProvenance"} == {"resultRef", "jsonPointer", "offset", "limit", "textOffset"}
+            assert set(tool.input_schema["properties"]) - {"promptSkillProvenance"} == {"resultRef", "source", "jsonPointer", "offset", "limit", "textOffset"}
             prompt = dashboard_server.AGENT_GATEWAY.runtime_planner._build_llm_plan_prompt(
                 "Read omitted data", [], exposure_layer=layer, project_context_active=project, internal_tool_blocks=["core"])
             assert "- read_tool_result" in prompt

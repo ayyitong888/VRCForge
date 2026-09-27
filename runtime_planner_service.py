@@ -1162,7 +1162,7 @@ def _planner_tool_observation_candidates(value: dict[object, object]) -> list[tu
     ordered = [preferred[key] for key in _PLANNER_TOOL_OBSERVATION_FIELD_ORDER if key in preferred]
     return ordered + counts
 
-def sanitize_planner_observation_text(value: object, limit: int = RUNTIME_PLANNER_TOOL_OBSERVATION_TEXT_MAX_CHARS, *, preserve_whitespace: bool = False, preserve_urls: bool = False, preserve_paths: bool = False) -> str:
+def sanitize_planner_observation_text(value: object, limit: int | None = RUNTIME_PLANNER_TOOL_OBSERVATION_TEXT_MAX_CHARS, *, preserve_whitespace: bool = False, preserve_urls: bool = False, preserve_paths: bool = False) -> str:
     """Make a short, model-visible tool summary safe even when a tool mislabeled it.
 
     This is intentionally stricter than UI/audit redaction: planning observations
@@ -1184,7 +1184,23 @@ def sanitize_planner_observation_text(value: object, limit: int = RUNTIME_PLANNE
             parts[index] = _PLANNER_TOOL_OBSERVATION_WINDOWS_PATH_PATTERN.sub("<path redacted>", parts[index])
             parts[index] = _PLANNER_TOOL_OBSERVATION_UNIX_PATH_PATTERN.sub("<path redacted>", parts[index])
     text = "".join(parts)
+    if limit is None:
+        return text if preserve_whitespace else " ".join(text.split())
     return text[:limit] if preserve_whitespace else summarize_text(text, limit)
+
+
+def _sanitize_complete_planner_value(value: object) -> object:
+    """Redact complete causal evidence before serializing, keeping valid JSON."""
+    if isinstance(value, tuple):
+        value = redact_sensitive(list(value))
+    if isinstance(value, dict):
+        return {sanitize_planner_observation_text(key, None): _sanitize_complete_planner_value(item)
+                for key, item in value.items()}
+    if isinstance(value, list):
+        return [_sanitize_complete_planner_value(item) for item in value]
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    return sanitize_planner_observation_text(value, None, preserve_whitespace=True)
 
 
 def planner_read_output_evidence(tool: str, result: dict[str, object]) -> dict[str, object]:
@@ -1194,22 +1210,12 @@ def planner_read_output_evidence(tool: str, result: dict[str, object]) -> dict[s
         "sourceTruncated": result.get("truncated") is True,
         "truncated": result.get("truncated") is True,
     }
-    # Budget escaped JSON characters, so quote/control-heavy data cannot expand
-    # beyond the observation allowance. Leave room for provenance and metadata.
-    remaining = 4400
     omitted_chars = 0
     web_evidence = tool in {"vrcforge_web_fetch", "vrcforge_web_search"}
 
     def content(value: object, limit: int = 4000) -> str:
-        nonlocal remaining, omitted_chars
         original = str(value or "")
-        text = sanitize_planner_observation_text(original, len(original), preserve_whitespace=True, preserve_urls=web_evidence)
-        kept = text[:limit]
-        while len(json.dumps(kept, ensure_ascii=False)) > remaining and kept:
-            kept = kept[:len(kept) // 2]
-        remaining = max(0, remaining - len(json.dumps(kept, ensure_ascii=False)))
-        omitted_chars += len(text) - len(kept)
-        return kept
+        return sanitize_planner_observation_text(original, None, preserve_whitespace=True, preserve_urls=web_evidence)
 
     # Preserve the complete asset-relative identity without exposing the host
     # prefix. This is a lexical locator relation, not proof of Avatar binding.
@@ -1218,7 +1224,7 @@ def planner_read_output_evidence(tool: str, result: dict[str, object]) -> dict[s
     asset_prefix = result_root[:asset_segment.start() + len(asset_segment.group(1))] if asset_segment else ""
 
     def source(value: object, root: object = "") -> str:
-        nonlocal remaining, omitted_chars
+        nonlocal omitted_chars
         path = str(value or "").replace("\\", "/")
         base = str(root or "").replace("\\", "/").rstrip("/")
         if asset_segment and path.casefold().startswith(asset_prefix.casefold() + "assets"):
@@ -1235,24 +1241,18 @@ def planner_read_output_evidence(tool: str, result: dict[str, object]) -> dict[s
         safe = _PLANNER_TOOL_OBSERVATION_SECRET_PATTERN.sub(r"\1=<redacted>", safe)
         safe = _PLANNER_TOOL_OBSERVATION_KNOWN_TOKEN_PATTERN.sub("<redacted>", safe)
         safe = _PLANNER_TOOL_OBSERVATION_JWT_PATTERN.sub("<redacted>", safe)
-        size = len(json.dumps(path, ensure_ascii=False))
-        if safe != path or len(path) > 1000 or size > remaining:
+        if safe != path:
             omitted_chars += len(path)
             return ""
-        remaining -= size
         return path
 
     def web_url(value: object) -> str:
-        nonlocal remaining, omitted_chars
+        nonlocal omitted_chars
         original = str(value or "")
-        safe = sanitize_planner_observation_text(original, len(original), preserve_whitespace=True, preserve_urls=True)
-        size = len(json.dumps(safe, ensure_ascii=False))
-        # A cut URL is a different address. Omit it instead of fabricating a
-        # navigable prefix when the bounded observation cannot carry it.
-        if not re.fullmatch(r'https?://[^\s<>"\']+', safe, flags=re.IGNORECASE) or size > min(1000, remaining):
+        safe = sanitize_planner_observation_text(original, None, preserve_whitespace=True, preserve_urls=True)
+        if not re.fullmatch(r'https?://[^\s<>"\']+', safe, flags=re.IGNORECASE):
             omitted_chars += len(original)
             return ""
-        remaining -= size
         return safe
 
     if tool == "vrcforge_web_fetch" and isinstance(result.get("text"), str):
@@ -1262,12 +1262,11 @@ def planner_read_output_evidence(tool: str, result: dict[str, object]) -> dict[s
     elif tool == "vrcforge_web_search" and isinstance(result.get("results"), list):
         rows = result["results"]
         items = []
-        for row in rows[:10]:
-            if not isinstance(row, dict) or remaining < 500:
-                break
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
             items.append({"url": web_url(row.get("url")), "title": content(row.get("title"), 200),
                           "snippet": content(row.get("snippet"), 500)})
-            remaining = max(0, remaining - 100)
         evidence.update({"results": items, "returnedItems": len(rows), "omittedItems": len(rows) - len(items),
                          "continuation": "Narrow web_search.query to retrieve omitted results; use web_fetch on an intact returned URL to inspect the source. Snippets alone may not support the requested conclusion."})
     elif tool == "vrcforge_read_text_file" and isinstance(result.get("text"), str):
@@ -1282,9 +1281,9 @@ def planner_read_output_evidence(tool: str, result: dict[str, object]) -> dict[s
         if not isinstance(rows, list):
             return {}
         items = []
-        for row in rows[:12]:
-            if not isinstance(row, dict) or remaining < 500:
-                break
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
             item: dict[str, object] = {"source": source(row.get("path") or row.get("name"), result.get("path"))}
             if isinstance(row.get("line"), int):
                 item["line"] = row["line"]
@@ -1292,7 +1291,6 @@ def planner_read_output_evidence(tool: str, result: dict[str, object]) -> dict[s
                 item["text"] = content(row["text"], 600)
             if row.get("type") in {"file", "directory"}:
                 item["type"] = row["type"]
-            remaining = max(0, remaining - 220)
             items.append(item)
         evidence.update({"source": source(result.get("path")), "items": items,
                          "relativeTo": "path_prefix_before_Assets" if asset_segment else "exact_tool_call_path",
@@ -1322,9 +1320,6 @@ def planner_read_output_evidence(tool: str, result: dict[str, object]) -> dict[s
     else:
         return {}
     evidence["omittedChars"] = omitted_chars
-    while isinstance(evidence.get("items"), list) and len(json.dumps(evidence, ensure_ascii=False)) > 6000:
-        evidence["items"].pop()
-        evidence["omittedItems"] += 1
     evidence["truncated"] = bool(evidence["sourceTruncated"] or omitted_chars or evidence.get("omittedItems"))
     if not evidence["truncated"]:
         evidence["continuation"] = ""
@@ -1423,12 +1418,25 @@ def _planner_compile_facts(result: object) -> dict[str, object]:
                     facts[key] = value
             elif key == "capturedAt":
                 if isinstance(value, str):
-                    facts[key] = value[:80]
+                    facts[key] = sanitize_planner_observation_text(value, None)
             elif isinstance(value, bool):
                 facts[key] = value
         if facts:
             try:
-                diagnostics = _normalize_diagnostics(data)
+                diagnostics = []
+                for severity, collection in (("error", "errors"), ("warning", "warnings")):
+                    rows = data.get(collection)
+                    for row in rows if isinstance(rows, list) else []:
+                        if not isinstance(row, Mapping):
+                            continue
+                        # Keep verifier IDs unchanged, while exposing the full
+                        # same approved fields through the model page outlet.
+                        normalized = _normalize_diagnostics({collection: [row]})
+                        if normalized:
+                            diagnostic = normalized[0]
+                            for field in ("assembly", "file", "message"):
+                                diagnostic[field] = sanitize_planner_observation_text(row.get(field) or "", None)
+                            diagnostics.append(diagnostic)
             except (TypeError, ValueError, OverflowError):
                 diagnostics = []
             if diagnostics:
@@ -1444,7 +1452,7 @@ def format_planner_tool_observation(value: object, limit: int = 130) -> str:
     return sanitize_planner_observation_text(text, limit)
 
 def planner_log_read_evidence(result: dict[str, object]) -> dict[str, object]:
-    """Keep usable log evidence bounded, with explicit continuation for omitted entries."""
+    """Validate complete log evidence before the common model page outlet."""
     source = result.get("source")
     if source not in ("disk", "memory"):
         return {}
@@ -1459,9 +1467,6 @@ def planner_log_read_evidence(result: dict[str, object]) -> dict[str, object]:
             r"vrcforge_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}_\d+\.log", value
         ) is not None
 
-    def encoded_size() -> int:
-        return len(json.dumps(evidence, ensure_ascii=False, separators=(",", ":")))
-
     filename = result.get("file")
     if retained_name(filename):
         evidence["file"] = filename
@@ -1469,14 +1474,10 @@ def planner_log_read_evidence(result: dict[str, object]) -> dict[str, object]:
     if isinstance(files, list):
         selected_files: list[str] = []
         evidence["files"] = selected_files
-        # Keep newest retained names when the listing cannot fit in the observation.
         for name in reversed(files):
             if not retained_name(name):
                 continue
             selected_files.insert(0, name)
-            if encoded_size() > 3200:
-                selected_files.pop(0)
-                break
         evidence["omittedFileCount"] = len(files) - len(selected_files)
         evidence["observationTruncated"] = len(selected_files) != len(files)
 
@@ -1488,15 +1489,12 @@ def planner_log_read_evidence(result: dict[str, object]) -> dict[str, object]:
         disk_offset = offset if type(offset) is int and offset >= 0 else None
         for index, entry in enumerate(logs):
             raw = json.dumps(redact_sensitive(entry), ensure_ascii=False, default=str)
-            safe = sanitize_planner_observation_text(raw, max(1000, len(raw) * 2))
+            safe = sanitize_planner_observation_text(raw, None)
             selected_logs.append({
                 "index": (disk_offset or 0) + index,
-                "text": summarize_text(safe, 800),
-                "textTruncated": len(safe) > 800,
+                "text": safe,
+                "textTruncated": False,
             })
-            if encoded_size() > 3200:
-                selected_logs.pop()
-                break
         omitted = len(logs) - len(selected_logs)
         evidence["omittedLogCount"] = omitted
         evidence["observationTruncated"] = bool(omitted) or any(
@@ -1600,7 +1598,7 @@ class RuntimePlannerService:
         """Use the catalog's common read-tool name only in continuation hints."""
         from agent_tool_result_reader import PAGE_SCHEMA, TOOL_NAME
 
-        containers = {"resultRead": step.get("resultRead")}
+        containers = {"resultRead": step.get("resultRead"), "modelInformationRead": step.get("modelInformationRead")}
         result = step.get("result")
         if isinstance(result, Mapping) and result.get("schema") == PAGE_SCHEMA:
             containers["result"] = result
@@ -1619,6 +1617,9 @@ class RuntimePlannerService:
         projected = dict(step)
         for key, value in continuations.items():
             projected[key] = {**value, "nextRequest": {**value["nextRequest"], "tool": tool.name}}
+            page = value.get("page")
+            if isinstance(page, Mapping) and isinstance(page.get("nextRequest"), Mapping):
+                projected[key]["page"] = {**page, "nextRequest": {**page["nextRequest"], "tool": tool.name}}
         return projected
 
     def native_context_guard(
@@ -2973,7 +2974,37 @@ class RuntimePlannerService:
                         lines.append(f"- [{goal.get('status')}] {summarize_text(str(goal.get('title')), 240)} {summarize_text(str(goal.get('summary') or ''), 360)}")
             return "\n".join(lines)
 
-    def _llm_loop_step_observation(
+    def _llm_loop_step_observation(self, step: dict[str, object], *,
+                                   allowed_multi_capture_receipt: str | None = None,
+                                   native_contract: bool = False) -> str:
+        if self is not None:
+            step = self._planner_result_read_step(step)
+        retained = ensure_dict(step.get("modelInformation"))
+        descriptor = ensure_dict(step.get("modelInformationRead"))
+        page = ensure_dict(descriptor.get("page"))
+        payload = ensure_dict(retained.get("payload"))
+        if (retained.get("retainedBy") == "agent_tool_result_reader"
+                and step.get("tool") != "vrcforge_capture_multi_screenshot"
+                and descriptor.get("source") == "owner_model"
+                and isinstance(payload.get("text"), str)
+                and page.get("ok") is True):
+            if page.get("hasMore") is not True:
+                return payload["text"]
+            # Control facts remain directly available, independent of paging
+            # supporting evidence. Raw/private result fields are not promoted.
+            control_step = {key: step[key] for key in ("kind", "status", "actionId", "supersededBy", "outcome") if key in step}
+            control_step["tool"] = "model_information_control"
+            control = RuntimePlannerService.complete_model_information(self, control_step, native_contract=native_contract)
+            continuation = {key: value for key, value in descriptor.items() if key != "page"}
+            if isinstance(page.get("nextRequest"), dict):
+                continuation["nextRequest"] = page["nextRequest"]
+            return control + "; modelInformationPage=" + json.dumps(page, ensure_ascii=False, separators=(",", ":")) + "; modelInformationContinuation=" + json.dumps(continuation, ensure_ascii=False, separators=(",", ":"))
+        return RuntimePlannerService.complete_model_information(
+            self, step, allowed_multi_capture_receipt=allowed_multi_capture_receipt,
+            native_contract=native_contract,
+        )
+
+    def complete_model_information(
         self,
         step: dict[str, object],
         *,
@@ -2984,12 +3015,13 @@ class RuntimePlannerService:
                 step = self._planner_result_read_step(step)
             result = step.get("result")
             fields: list[str] = []
+            causal_fields: list[str] = []
             canonical_outcome: dict[str, object] = {}
             if isinstance(result, Mapping) and result.get("code") == "planner_invalid_response":
                 issues = result.get("issues")
                 if isinstance(issues, list):
                     issue_text = []
-                    for issue in issues[:8]:
+                    for issue in issues:
                         if not isinstance(issue, Mapping):
                             continue
                         path = str(issue.get("path") or "").strip()
@@ -3000,20 +3032,20 @@ class RuntimePlannerService:
                     if issue_text:
                         fields.append(
                             "argumentValidationIssues="
-                            + sanitize_planner_observation_text(" | ".join(issue_text), 480)
+                            + sanitize_planner_observation_text(" | ".join(issue_text), None)
                         )
             action_id = str(step.get("actionId") or "").strip()
             if action_id:
-                fields.append("actionId=" + sanitize_planner_observation_text(action_id, 80))
+                fields.append("actionId=" + sanitize_planner_observation_text(action_id, None))
             superseded_by = (
                 str(step.get("supersededBy") or "").strip()
                 if step.get("status") == "superseded" else ""
             )
             if superseded_by:
-                fields.append("supersededBy=" + sanitize_planner_observation_text(superseded_by, 80))
+                fields.append("supersededBy=" + sanitize_planner_observation_text(superseded_by, None))
             tool_name = str(step.get("tool") or "").strip()
             if tool_name == "vrcforge_ask_user" and isinstance(result, dict) and "answer" in result:
-                fields.append("userAnswer=" + json.dumps({key: sanitize_planner_observation_text(result.get(key), 4000)
+                fields.append("userAnswer=" + json.dumps({key: sanitize_planner_observation_text(result.get(key), None)
                                                           for key in ("questionId", "answer")}, ensure_ascii=False))
                 return "; ".join(fields)
             compile_evidence = {}
@@ -3029,13 +3061,13 @@ class RuntimePlannerService:
                 for key in ("status", "block", "selectionMode"):
                     value = result.get(key)
                     if isinstance(value, str):
-                        safe = sanitize_planner_observation_text(value, 200)
+                        safe = sanitize_planner_observation_text(value, None)
                         if safe == value:
                             receipt[key] = value
                 loaded = result.get("loadedBlocks")
                 if isinstance(loaded, list):
-                    names = [name for name in loaded[:64] if isinstance(name, str)
-                             and sanitize_planner_observation_text(name, 200) == name]
+                    names = [name for name in loaded if isinstance(name, str)
+                             and sanitize_planner_observation_text(name, None) == name]
                     receipt["loadedBlocks"] = names
                     if len(names) != len(loaded):
                         receipt["omittedBlocks"] = len(loaded) - len(names)
@@ -3044,8 +3076,8 @@ class RuntimePlannerService:
                     if selected is None:
                         receipt["selectedTools"] = None
                     elif isinstance(selected, list):
-                        names = [name for name in selected[:128] if isinstance(name, str)
-                                 and sanitize_planner_observation_text(name, 200) == name]
+                        names = [name for name in selected if isinstance(name, str)
+                                 and sanitize_planner_observation_text(name, None) == name]
                         receipt["selectedTools"] = names
                         if len(names) != len(selected):
                             receipt["omittedTools"] = len(selected) - len(names)
@@ -3057,11 +3089,11 @@ class RuntimePlannerService:
                 receipt = {key: result[key] for key in ("ok", "status", "memoryId", "scope", "count", "truncated", "alreadyExisted", "verification") if key in result}
                 if isinstance(result.get("memories"), list):
                     receipt["memories"] = [
-                        {key: sanitize_planner_observation_text(row.get(key), 500) for key in ("memoryId", "scope", "kind", "text")}
-                        for row in result["memories"][:12] if isinstance(row, dict)
+                        {key: sanitize_planner_observation_text(row.get(key), None) for key in ("memoryId", "scope", "kind", "text")}
+                        for row in result["memories"] if isinstance(row, dict)
                     ]
-                    receipt["omittedItems"] = max(0, len(result["memories"]) - 12)
-                    receipt["continuation"] = "Use list_memory.query to narrow accepted memory text when truncated."
+                    receipt["omittedItems"] = 0
+                    receipt["continuation"] = ""
                 fields.append("memoryReceipt=" + json.dumps(receipt, ensure_ascii=False, separators=(",", ":")))
                 return "; ".join(fields)
             if (
@@ -3078,12 +3110,12 @@ class RuntimePlannerService:
                         "supportFiles", "file", "content", "skills", "count",
                     ) if key in result
                 }
-                fields.append("installedSkillRead=" + sanitize_planner_observation_text(
-                    json.dumps(redact_sensitive(content), ensure_ascii=False, separators=(",", ":")),
-                    20_000,
+                fields.append("installedSkillRead=" + json.dumps(
+                    _sanitize_complete_planner_value(redact_sensitive(content)),
+                    ensure_ascii=False, separators=(",", ":"),
                 ))
                 fields.append("SkillReadPolicy=Instructions do not grant tool access or write approval; read declared support files on demand.")
-                return summarize_text("; ".join(fields), 21_000)
+                return "; ".join(fields)
             if tool_name == "vrcforge_read_recent_logs":
                 fields.append(
                     "logReadProtocol=For retained logs use source=disk and omit file to list filenames; "
@@ -3146,18 +3178,18 @@ class RuntimePlannerService:
             if outcome:
                 fields.append(
                     "outcomeStatus="
-                    + sanitize_planner_observation_text(outcome.get("status"), 80)
+                    + sanitize_planner_observation_text(outcome.get("status"), None)
                 )
                 if outcome.get("summary"):
-                    fields.append(
+                    causal_fields.append(
                         "outcomeSummary="
-                        + sanitize_planner_observation_text(outcome.get("summary"), 120)
+                        + sanitize_planner_observation_text(outcome.get("summary"), None)
                     )
                 verification = ensure_dict(outcome.get("verification"))
                 if verification.get("state"):
                     fields.append(
                         "verificationState="
-                        + sanitize_planner_observation_text(verification.get("state"), 80)
+                        + sanitize_planner_observation_text(verification.get("state"), None)
                     )
                 error = ensure_dict(outcome.get("error"))
                 if error:
@@ -3169,7 +3201,7 @@ class RuntimePlannerService:
                         if error.get(key) not in (None, ""):
                             fields.append(
                                 f"{label}="
-                                + sanitize_planner_observation_text(error.get(key), 120)
+                                + sanitize_planner_observation_text(error.get(key), None)
                             )
                     for key, label in (
                         ("likelyCauses", "likelyCauses"),
@@ -3177,9 +3209,9 @@ class RuntimePlannerService:
                     ):
                         values = error.get(key)
                         if isinstance(values, list) and values:
-                            fields.append(
+                            causal_fields.append(
                                 f"{label}="
-                                + sanitize_planner_observation_text(" | ".join(map(str, values[:6])), 480)
+                                + sanitize_planner_observation_text(" | ".join(map(str, values)), None)
                             )
                 diagnostics = ensure_dict(outcome.get("diagnostics"))
                 source_error = ensure_dict(diagnostics.get("sourceError"))
@@ -3197,7 +3229,7 @@ class RuntimePlannerService:
                         if source_error.get(key) not in (None, ""):
                             fields.append(
                                 f"{label}="
-                                + sanitize_planner_observation_text(source_error.get(key), 120)
+                                + sanitize_planner_observation_text(source_error.get(key), None)
                             )
                 for key in (
                     "success",
@@ -3227,18 +3259,15 @@ class RuntimePlannerService:
                     "temporaryCleanupRequired",
                 ):
                     if key in outcome:
-                        canonical_outcome[key] = redact_sensitive(outcome[key])
+                        canonical_outcome[key] = _sanitize_complete_planner_value(redact_sensitive(outcome[key]))
                 if canonical_outcome:
-                    fields.append(
+                    causal_fields.append(
                         "canonicalOutcome="
-                        + sanitize_planner_observation_text(
-                            json.dumps(
-                                canonical_outcome,
-                                ensure_ascii=False,
-                                separators=(",", ":"),
-                                default=str,
-                            ),
-                            RUNTIME_PLANNER_CAUSAL_OBSERVATION_MAX_CHARS - 400,
+                        + json.dumps(
+                            canonical_outcome,
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                            default=str,
                         )
                     )
                 if (
@@ -3251,21 +3280,21 @@ class RuntimePlannerService:
                     fields.append(
                         "failedActionCorrection=retry_with_corrected_arguments;"
                         "correction_for_action_id="
-                        + sanitize_planner_observation_text(action_id, 80)
+                        + sanitize_planner_observation_text(action_id, None)
                     )
             skill_context = ensure_dict(step.get("skillContext"))
             if skill_context:
                 fields.append(
                     "skillContextName="
-                    + sanitize_planner_observation_text(skill_context.get("name"), 160)
+                    + sanitize_planner_observation_text(skill_context.get("name"), None)
                 )
                 allowed_tools = skill_context.get("allowedTools")
                 if isinstance(allowed_tools, list) and allowed_tools:
                     fields.append(
                         "skillAllowedTools="
                         + sanitize_planner_observation_text(
-                            " | ".join(map(str, allowed_tools[:32])),
-                            1000,
+                            " | ".join(map(str, allowed_tools)),
+                            None,
                         )
                     )
                 disallowed_tools = skill_context.get("disallowedTools")
@@ -3273,8 +3302,8 @@ class RuntimePlannerService:
                     fields.append(
                         "skillDisallowedTools="
                         + sanitize_planner_observation_text(
-                            " | ".join(map(str, disallowed_tools[:32])),
-                            1000,
+                            " | ".join(map(str, disallowed_tools)),
+                            None,
                         )
                     )
                 if skill_context.get("instructions"):
@@ -3282,7 +3311,7 @@ class RuntimePlannerService:
                         "skillInstructions="
                         + sanitize_planner_observation_text(
                             skill_context.get("instructions"),
-                            6000,
+                            None,
                         )
                     )
             if str(step.get("tool") or "") == "vrcforge_agent_desktop_action":
@@ -3294,11 +3323,11 @@ class RuntimePlannerService:
                     vision_status = str(vision.get("status") or "unknown")
                     fields.append(f"desktopVisionStatus={vision_status}")
                     if vision_status == "analyzed":
-                        fields.append("desktopVision=" + summarize_text(str(vision.get("text") or ""), 4000))
+                        fields.append("desktopVision=" + sanitize_planner_observation_text(str(vision.get("text") or ""), None))
                     else:
                         fields.append(
                             "desktopVisionUnavailable="
-                            + summarize_text(str(vision.get("reason") or vision.get("error") or "pixels were not analyzed"), 300)
+                            + sanitize_planner_observation_text(str(vision.get("reason") or vision.get("error") or "pixels were not analyzed"), None)
                         )
             if isinstance(result, dict):
                 if str(step.get("tool") or "") == "vrcforge_capture_multi_screenshot":
@@ -3309,7 +3338,7 @@ class RuntimePlannerService:
                     ):
                         fields.append(
                             "captureReceipt="
-                            + sanitize_planner_observation_text(capture_receipt, 256)
+                            + sanitize_planner_observation_text(capture_receipt, None)
                         )
                     capture_evidence_id = str(
                         result.get("captureEvidenceId") or ""
@@ -3318,7 +3347,7 @@ class RuntimePlannerService:
                         fields.append(
                             "captureEvidenceId="
                             + sanitize_planner_observation_text(
-                                capture_evidence_id, 160
+                                capture_evidence_id, None
                             )
                         )
                     angles = result.get("angles")
@@ -3326,7 +3355,7 @@ class RuntimePlannerService:
                         fields.append(
                             "captureAngles="
                             + sanitize_planner_observation_text(
-                                " | ".join(map(str, angles[:4])), 160
+                                " | ".join(map(str, angles)), None
                             )
                         )
                 if (
@@ -3338,7 +3367,7 @@ class RuntimePlannerService:
                     if retry_receipt:
                         fields.append(
                             "visualRetryCaptureReceipt="
-                            + sanitize_planner_observation_text(retry_receipt, 256)
+                            + sanitize_planner_observation_text(retry_receipt, None)
                         )
                         fields.append("visualRetryImagesRetained=true")
                 planner_evidence = result.get("plannerEvidence")
@@ -3353,7 +3382,7 @@ class RuntimePlannerService:
                                 separators=(",", ":"),
                                 default=str,
                             ),
-                            1600,
+                            None,
                         )
                     )
                 for key in (
@@ -3371,26 +3400,23 @@ class RuntimePlannerService:
                 ):
                     value = result.get(key)
                     if value not in (None, ""):
-                        fields.append(f"{key}={sanitize_planner_observation_text(value, 120)}")
+                        fields.append(f"{key}={sanitize_planner_observation_text(value, None)}")
                 for key in ("error", "reason"):
                     value = result.get(key)
                     if value not in (None, ""):
-                        fields.append(f"{key}={sanitize_planner_observation_text(value, 180)}")
+                        fields.append(f"{key}={sanitize_planner_observation_text(value, None)}")
                 for key, value in planner_safe_tool_result_fields(result).items():
-                    fields.append(f"{key}={format_planner_tool_observation(value, 130)}")
+                    fields.append(f"{key}={format_planner_tool_observation(value, None)}")
                 if tool_name == "vrcforge_get_compile_errors":
                     compile_facts = _planner_compile_facts(result)
                     if compile_facts:
                         diagnostics = compile_facts.pop("diagnostics", None)
                         if diagnostics:
-                            compile_evidence = project_structured_tool_evidence(
-                                {"diagnostics": diagnostics},
-                                sanitize_text=sanitize_planner_observation_text,
-                                max_chars=2000,
-                            )
+                            compile_evidence = {"authority": "untrusted_tool_output", "truncated": False,
+                                                "data": {"diagnostics": diagnostics}}
                         fields.append(
                             "compileSnapshot="
-                            + format_planner_tool_observation(compile_facts, 360)
+                            + format_planner_tool_observation(compile_facts, None)
                         )
             elif result is not None:
                 fields.append("result=available")
@@ -3401,6 +3427,13 @@ class RuntimePlannerService:
                 if canonical_outcome or tool_name == "vrcforge_read_recent_logs"
                 else RUNTIME_PLANNER_TOOL_OBSERVATION_MAX_CHARS
             )
+            def observation_prefix(limit: int) -> str:
+                # Recovery instructions have no separate reader. Preserve them
+                # outside preview bounds; the native context guard still admits
+                # or rejects the complete request before any provider call.
+                preview = "; ".join(fields)
+                return "; ".join(part for part in (preview, "; ".join(causal_fields)) if part)
+
             if read_evidence:
                 executed_input = ""
                 if tool_name in {"shell", "unity_shell"} and isinstance(step.get("executedInput"), dict):
@@ -3416,17 +3449,17 @@ class RuntimePlannerService:
                     executed_input = "; executedInput=" + json.dumps(receipt, ensure_ascii=False, separators=(",", ":"))
                 # Keep normal status/error semantics, then append intact JSON
                 # rather than truncating a serialized evidence object mid-field.
-                return summarize_text("; ".join(fields), 1000) + executed_input + "; readEvidence=" + json.dumps(
+                return observation_prefix(1000) + executed_input + "; readEvidence=" + json.dumps(
                     read_evidence, ensure_ascii=False, separators=(",", ":"),
                 )
             if tool_name == "vrcforge_read_tool_result" and isinstance(result, dict):
                 from agent_tool_result_reader import MAX_PAGE_CHARS, PAGE_SCHEMA
                 page_text = json.dumps(result, ensure_ascii=False, separators=(",", ":"))
                 if result.get("schema") == PAGE_SCHEMA and len(page_text) <= MAX_PAGE_CHARS:
-                    return summarize_text("; ".join(fields), observation_limit) + "; retainedResultPage=" + page_text
-                return summarize_text("; ".join(fields), observation_limit)
+                    return observation_prefix(observation_limit) + "; retainedResultPage=" + page_text
+                return observation_prefix(observation_limit)
             if compile_evidence:
-                return summarize_text("; ".join(fields), observation_limit) + "; compileDiagnostics=" + json.dumps(
+                return observation_prefix(observation_limit) + "; compileDiagnostics=" + json.dumps(
                     compile_evidence, ensure_ascii=False, separators=(",", ":"),
                 )
             if isinstance(result, dict) and tool_name not in {
@@ -3460,6 +3493,7 @@ class RuntimePlannerService:
                     }
                 structured_evidence = project_structured_tool_evidence(
                     evidence_result, sanitize_text=sanitize_planner_observation_text,
+                    mode="runtimecomplete",
                 )
                 if structured_evidence:
                     # Appending domain data must not shorten the pre-existing
@@ -3477,12 +3511,12 @@ class RuntimePlannerService:
                     continuation_text = ""
                     if isinstance(continuation, dict) and isinstance(continuation.get("resultRef"), str):
                         continuation_text = "; resultContinuation=" + json.dumps(continuation, ensure_ascii=False, separators=(",", ":"))
-                    return summarize_text("; ".join(fields), observation_limit) + "; structuredEvidence=" + json.dumps(
+                    return observation_prefix(observation_limit) + "; structuredEvidence=" + json.dumps(
                         structured_evidence, ensure_ascii=False, separators=(",", ":"),
                     ) + continuation_text
             if directory_json:
-                return summarize_text("; ".join(fields), observation_limit) + "; toolBlockDirectory=" + directory_json
-            return summarize_text("; ".join(fields), observation_limit)
+                return observation_prefix(observation_limit) + "; toolBlockDirectory=" + directory_json
+            return observation_prefix(observation_limit)
 
     @staticmethod
     def _select_plan_tools(catalog, internal_tool_blocks, observe):

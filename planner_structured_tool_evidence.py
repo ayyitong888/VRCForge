@@ -70,8 +70,9 @@ def project_structured_tool_evidence(
     *,
     sanitize_text: Callable[[object, int], str],
     max_chars: int = 6000,
+    mode: str = "bounded",
 ) -> dict[str, Any]:
-    """Keep useful structured data within a complete serialized JSON budget.
+    """Project untrusted structured data in bounded or owner-complete mode.
 
     Omission counters count fields/subtrees or list items at the point omitted;
     they do not claim an exhaustive count of all descendants. Source pagination
@@ -79,10 +80,16 @@ def project_structured_tool_evidence(
     """
     if not isinstance(result, (Mapping, list)):
         return {}
+    if mode not in {"bounded", "runtimecomplete"}:
+        raise ValueError("mode must be 'bounded' or 'runtimecomplete'")
     if type(max_chars) is not int or not 1500 <= max_chars <= 12000:
         raise ValueError("max_chars must be an integer between 1500 and 12000")
+    complete = mode == "runtimecomplete"
     stats = {"omittedFields": 0, "omittedItems": 0, "omittedChars": 0, "redactedFields": 0}
     source_truncated = False
+
+    def fits(value: object, budget: int | None) -> bool:
+        return complete or (budget is not None and _size(value) <= budget)
 
     def priority(item: tuple[object, object]) -> tuple[int, str]:
         name, value = item
@@ -98,23 +105,23 @@ def project_structured_tool_evidence(
     def visit(value: object, budget: int, depth: int, *, exact_strings: bool = False,
               exact_namespace: bool = False) -> object:
         nonlocal source_truncated
-        if budget < 8:
+        if not complete and budget < 8:
             return _ABSENT
         if value is None or isinstance(value, bool) or type(value) is int:
-            return value if _size(value) <= budget else _ABSENT
+            return value if fits(value, budget) else _ABSENT
         if isinstance(value, float):
-            return value if math.isfinite(value) and _size(value) <= budget else _ABSENT
+            return value if math.isfinite(value) and fits(value, budget) else _ABSENT
         if isinstance(value, str):
             if exact_namespace:
                 # Execution namespaces are protocol identities, not arbitrary
                 # filesystem paths. Preserve only the namespaced form after
                 # the normal redactor has explicitly allowed the path; all
                 # other values fail closed and disappear from the projection.
-                if not value.startswith("vrcforge:") or len(value) > 12000 or _size(value) > budget:
+                if not value.startswith("vrcforge:") or (not complete and (len(value) > 12000 or not fits(value, budget))):
                     stats["omittedChars"] += len(value)
                     return _ABSENT
                 try:
-                    safe = sanitize_text(value, max(1, len(value)), preserve_paths=True)
+                    safe = sanitize_text(value, None if complete else max(1, len(value)), preserve_paths=True)
                 except TypeError:
                     return _ABSENT
                 if safe != value:
@@ -124,34 +131,42 @@ def project_structured_tool_evidence(
             if exact_strings:
                 # A shortened/redacted target is not a usable target. Omit it
                 # wholly, including list items and continuation selectors.
-                if len(value) > 12000 or _size(value) > budget:
+                if not complete and (len(value) > 12000 or not fits(value, budget)):
                     stats["omittedChars"] += len(value)
                     return _ABSENT
-                safe = sanitize_text(value, max(1, len(value)))
+                safe = sanitize_text(value, None if complete else max(1, len(value)))
                 if safe != value:
                     stats["omittedChars"] += len(value)
                     return _ABSENT
                 return value
-            # Never send an unlimited string to the sanitizer or model.
+            if complete:
+                return sanitize_text(value, None)
             text = sanitize_text(value[:12000], 12000)
             kept = text[:500]
             while kept and _size(kept) > budget:
                 kept = kept[:max(0, len(kept) - max(1, (_size(kept) - budget + 1) // 2))]
             stats["omittedChars"] += max(0, len(text) - len(kept)) + max(0, len(value) - 12000)
             return kept
-        if not isinstance(value, (Mapping, list)) or depth >= 8:
+        if not isinstance(value, (Mapping, list)) or (not complete and depth >= 8):
             return _ABSENT
         if isinstance(value, list):
             selected: list[object] = []
-            for index, item in enumerate(value[:6]):
-                available = budget - _size(selected) - 2
-                projected = visit(item, min(1800, available), depth + 1, exact_strings=exact_strings)
-                if projected is _ABSENT or _size([*selected, projected]) > budget:
+            items = value if complete else value[:6]
+            for index, item in enumerate(items):
+                available = None if complete else budget - _size(selected) - 2
+                projected = visit(item, 1800 if complete else min(1800, available), depth + 1, exact_strings=exact_strings)
+                if projected is _ABSENT:
+                    if complete:
+                        continue
+                    stats["omittedItems"] += len(value) - index
+                    break
+                if not complete and _size([*selected, projected]) > budget:
                     stats["omittedItems"] += len(value) - index
                     break
                 selected.append(projected)
             else:
-                stats["omittedItems"] += max(0, len(value) - 6)
+                if not complete:
+                    stats["omittedItems"] += max(0, len(value) - 6)
             return selected
         selected_dict: dict[str, object] = {}
         entries = sorted(value.items(), key=priority)
@@ -163,16 +178,16 @@ def project_structured_tool_evidence(
             if ((normalized.endswith("truncated") or normalized == "hasmore") and item is True
                     or normalized.endswith("enumerationcomplete") and item is False):
                 source_truncated = True
-            if len(selected_dict) >= 24:
+            if not complete and len(selected_dict) >= 24:
                 stats["omittedFields"] += 1
                 continue
             # Field names are also external data and must remain bounded/safe.
-            safe_name = sanitize_text(str(name), 100)
+            safe_name = sanitize_text(str(name), None if complete else 100)
             if safe_name != str(name):
                 stats["omittedFields"] += 1
                 continue
-            available = budget - _size(selected_dict) - _size(safe_name) - 3
-            if isinstance(item, (Mapping, list)):
+            available = None if complete else budget - _size(selected_dict) - _size(safe_name) - 3
+            if isinstance(item, (Mapping, list)) and not complete:
                 # A large first collection must not hide all later domains
                 # (for example clips swallowing layers, parameters and paging).
                 siblings = sum(
@@ -190,13 +205,13 @@ def project_structured_tool_evidence(
             # A partially projected request is not a safe continuation request.
             if whole_request and tuple(stats.values()) != previous_omissions:
                 projected = _ABSENT
-            if projected is _ABSENT or _size({**selected_dict, safe_name: projected}) > budget:
+            if projected is _ABSENT or (not complete and _size({**selected_dict, safe_name: projected}) > budget):
                 stats["omittedFields"] += 1
                 continue
             selected_dict[safe_name] = projected
         return selected_dict
 
-    data = visit(result, max_chars - 800, 0)
+    data = visit(result, None if complete else max_chars - 800, 0)
     truncated = any(stats[key] for key in ("omittedFields", "omittedItems", "omittedChars"))
     evidence = {
         "authority": "untrusted_tool_output",
@@ -254,5 +269,6 @@ def project_structured_tool_evidence(
                     evidence["incompleteFieldsTruncated"] = True
 
         describe(result, evidence["data"], "")
-    assert _size(evidence) <= max_chars
+    if not complete:
+        assert _size(evidence) <= max_chars
     return evidence

@@ -75,21 +75,22 @@ def test_web_evidence_bounds_redaction_and_honest_continuation(web_adapters):
     assert "C:\\private\\file.txt" not in prompt
     assert "/private/file.txt" not in prompt
     assert "https://example.org/next" in evidence["text"]
-    assert len(json.dumps(evidence, ensure_ascii=False)) <= 6000
-    assert evidence["truncated"] is True
-    assert evidence["omittedChars"] > 0
-    assert "no offset" in evidence["continuation"]
+    assert len(json.dumps(evidence, ensure_ascii=False)) > 6000
+    assert evidence["omittedChars"] == 0
+    assert evidence["truncated"] == evidence["sourceTruncated"]
+    if evidence["sourceTruncated"]:
+        assert "no offset" in evidence["continuation"]
 
 
 def test_search_projection_reports_omitted_results(web_adapters):
     html = ''.join(f'<a class="result__a" href="https://example.org/{i}">Guide {i}</a><a class="result__snippet">' + 'detail ' * 200 + '</a>' for i in range(10))
     result, _, evidence = projected(web_adapters, "web_search", html, {"query": "setup", "maxResults": 10})
     assert len(result["results"]) == 10
-    assert evidence["truncated"] is True
+    assert evidence["truncated"] is False
     assert evidence["returnedItems"] == 10
     assert evidence["omittedItems"] == 10 - len(evidence["results"])
-    assert evidence["continuation"]
-    assert len(json.dumps(evidence, ensure_ascii=False)) <= 6000
+    assert evidence["omittedItems"] == 0
+    assert evidence["continuation"] == ""
 
 
 def test_web_projection_never_emits_a_cut_url_or_url_credentials():
@@ -97,8 +98,8 @@ def test_web_projection_never_emits_a_cut_url_or_url_credentials():
         "url": "https://example.org/" + "long" * 500,
         "text": "Visit https://alice:PRIVATE_CREDENTIAL_832@example.org/docs and https://example.org/?api_key=PRIVATE_KEY_921",
     })
-    assert evidence["url"] == ""
-    assert evidence["truncated"] is True
+    assert evidence["url"] == "https://example.org/" + "long" * 500
+    assert evidence["truncated"] is False
     serialized = json.dumps(evidence)
     assert "PRIVATE_CREDENTIAL_832" not in serialized
     assert "PRIVATE_KEY_921" not in serialized

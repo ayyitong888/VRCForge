@@ -34,6 +34,8 @@ INPUT_SCHEMA = {
                   "description": "Maximum items in this page (1 through 20). The character budget may return fewer; follow nextRequest when hasMore is true."},
         "textOffset": {"type": "integer", "minimum": 0,
                        "description": "Only for an exact text field with offset=0: character offset in its sanitized text, independent of item offset/limit. Copy nextRequest to retrieve remaining text."},
+        "source": {"type": "string", "enum": ["result", "owner_model"], "default": "result",
+                   "description": "Use owner_model only with the owner-validated model payload attached to this exact current-turn step."},
     },
 }
 # Existing owner-validated channels must not gain a generic raw-result escape.
@@ -102,7 +104,10 @@ def page_next_request_arguments(page: Mapping[str, Any]) -> dict[str, Any] | Non
         return None
     args = request.get("arguments")
     required = {"resultRef", "jsonPointer", "offset", "limit"}
-    if not isinstance(args, dict) or not required <= set(args) or set(args) - required - {"textOffset"}:
+    if not isinstance(args, dict) or not required <= set(args) or set(args) - required - {"textOffset", "source"}:
+        return None
+    source = args.get("source", "result")
+    if source not in ("result", "owner_model") or source != page.get("source", "result"):
         return None
     ref, pointer = args.get("resultRef"), args.get("jsonPointer")
     if (not isinstance(ref, str) or re.fullmatch(r"result_[0-9a-f]{32}", ref) is None
@@ -155,6 +160,62 @@ def result_continuation(session_id: str, turn_id: str, project_root: str, step: 
             "collections": collection_manifest(step["result"], sanitize),
             "nextRequest": {"tool": TOOL_NAME, "arguments": {"resultRef": ref, "jsonPointer": "", "offset": 0}},
             "instructions": "Read retained data by jsonPointer and offset without rerunning its tool. Collection counts are exact; offsets are zero-based. Root pages reveal further fields. References expire when this turn ends."}
+
+
+def model_payload_continuation(session_id: str, turn_id: str, project_root: str,
+                               step: Mapping[str, Any], payload: object,
+                               sanitize: Callable[[object, int], str], *,
+                               authority: str = "untrusted_tool_output") -> dict[str, Any]:
+    """Describe an owner-validated model payload without creating another store.
+
+    The gateway must attach this descriptor to the same step that owns ``resultRead``
+    and retain the payload in that step for the lifetime of the bound ContextVar.
+    This helper deliberately accepts a payload supplied by the owner only; the
+    reader never accepts an arbitrary payload or field name from model arguments.
+    """
+    # Restricted tools keep their raw result inaccessible; an owner may still
+    # publish a separately projected dict/list for model reading.
+    if not isinstance(payload, (dict, list, str)):
+        return {}
+    ref = result_reference(session_id, turn_id, project_root, step)
+    return {"resultRef": ref, "source": "owner_model", "scope": "current_turn",
+            "sourceStep": step["index"], "authority": authority,
+            "collections": collection_manifest(payload, sanitize),
+            "nextRequest": {"tool": TOOL_NAME, "arguments": {
+                "resultRef": ref, "source": "owner_model", "jsonPointer": "", "offset": 0}},
+            "instructions": "Read the owner-validated model payload by jsonPointer and offset. References expire when this turn ends."}
+
+
+def retain_model_information(session_id: str, turn_id: str, project_root: str,
+                             step: Mapping[str, Any], payload: object,
+                             sanitize: Callable[[object, int], str], *,
+                             authority: str = "untrusted_tool_output") -> dict[str, Any]:
+    """Return the step attachments for an owner-approved model payload.
+
+    The caller owns the authorization decision. This function only packages the
+    payload into the existing step lifetime; it creates no store or transport.
+    The gateway should merge the returned mapping into both step and loop_state.
+    """
+    if not authority or not isinstance(payload, (dict, list, str)):
+        return {}
+    descriptor = model_payload_continuation(session_id, turn_id, project_root, step, payload, sanitize,
+                                             authority=authority)
+    if not descriptor:
+        return {}
+    model_information = {"authority": authority, "retainedBy": "agent_tool_result_reader", "payload": payload}
+    # Generate only the first bounded page through the existing reader engine.
+    # The temporary context contains this step alone and is discarded before
+    # returning; no second store or alternate pagination implementation exists.
+    probe_step = {**dict(step), "modelInformation": model_information,
+                  "modelInformationRead": descriptor}
+    pointer = "/text" if isinstance(payload, dict) and isinstance(payload.get("text"), str) else ""
+    with bind_tool_result_context(session_id, turn_id, project_root, [probe_step]):
+        first_page = read_tool_result({
+            "resultRef": descriptor["resultRef"], "source": "owner_model",
+            "jsonPointer": pointer, "offset": 0, "limit": 6,
+        }, sanitize=sanitize)
+    return {"modelInformation": model_information,
+            "modelInformationRead": {**descriptor, "page": first_page}}
 
 
 def _select(root: object, pointer: str, sanitize: Callable[[object, int], str]) -> object:
@@ -222,15 +283,29 @@ def read_tool_result(params: Mapping[str, Any], *, sanitize: Callable[[object, i
     if context is None or not context.session_id or not context.turn_id:
         raise PermissionError("Result reads require the owning active runtime turn")
     if set(params) - set(INPUT_SCHEMA["properties"]):
-        raise ValueError("Result reader accepts only resultRef, jsonPointer, offset, limit and textOffset")
+        raise ValueError("Result reader accepts only resultRef, source, jsonPointer, offset, limit and textOffset")
+    source = params.get("source", "result")
+    if source not in ("result", "owner_model"):
+        raise ValueError("source must be result or owner_model")
     ref = params.get("resultRef")
+    descriptor_key = "modelInformationRead" if source == "owner_model" else "resultRead"
     step = next((row for row in context.steps if isinstance(ref, str)
-                 and row.get("resultRead", {}).get("resultRef") == ref
+                 and row.get(descriptor_key, {}).get("resultRef") == ref
                  and result_reference(context.session_id, context.turn_id, context.project_root, row) == ref), None)
-    if step is None or not eligible_result(str(step.get("tool") or ""), step.get("result")):
+    if step is None or (source == "result" and not eligible_result(str(step.get("tool") or ""), step.get("result"))):
         raise PermissionError("Result reference is unavailable in this runtime turn")
+    if source == "owner_model":
+        model = step.get("modelInformation")
+        if (not isinstance(model, Mapping)
+                or model.get("retainedBy") != "agent_tool_result_reader"
+                or not isinstance(model.get("authority"), str) or not model.get("authority")
+                or not isinstance(model.get("payload"), (dict, list, str))):
+            raise PermissionError("Owner-validated model payload is unavailable in this runtime turn")
+        root = model["payload"]
+    else:
+        root = step["result"]
     pointer = params.get("jsonPointer", "")
-    value = _select(step["result"], pointer, sanitize)
+    value = _select(root, pointer, sanitize)
     offset, limit = params.get("offset", 0), params.get("limit", 6)
     if type(offset) is not int or offset < 0 or type(limit) is not int or not 1 <= limit <= 20:
         raise ValueError("offset must be nonnegative and limit must be between 1 and 20")
@@ -242,10 +317,10 @@ def read_tool_result(params: Mapping[str, Any], *, sanitize: Callable[[object, i
     if "textOffset" in params and (not scalar_text or offset != 0):
         raise ValueError("textOffset requires an exact non-identity text field with offset=0")
     page: dict[str, Any] = {"schema": PAGE_SCHEMA, "ok": True, "authority": "untrusted_tool_output",
-                           "resultRef": ref, "sourceStep": step["index"], "sourceTool": step["tool"],
+                           "resultRef": ref, "source": source, "sourceStep": step["index"], "sourceTool": step["tool"],
                            "jsonPointer": pointer, "offset": offset, "totalItems": len(members),
                            "items": [], "redactedFields": 0, "hasMore": False, "previewTruncated": False}
-    constraints, constraints_truncated = _source_constraints(step["result"], pointer, sanitize)
+    constraints, constraints_truncated = _source_constraints(root, pointer, sanitize)
     if constraints or constraints_truncated:
         page["sourceConstraints"] = constraints
         page["sourceConstraintsTruncated"] = constraints_truncated
@@ -259,7 +334,10 @@ def read_tool_result(params: Mapping[str, Any], *, sanitize: Callable[[object, i
         # Sanitize the entire retained string before slicing: a secret must not
         # straddle chunks and escape the normal redactor. Cursors address this
         # deterministic sanitized text, not raw-source or collection offsets.
-        text = sanitize(value, max(1, len(value) * 4 + 100))
+        # Owner projection is already complete and safety-filtered before it is
+        # retained. Re-sanitizing serialized JSON would reinterpret escapes or
+        # whitespace; raw-result reads keep the historical sanitizer.
+        text = value if source == "owner_model" else sanitize(value, max(1, len(value) * 4 + 100))
         start = params.get("textOffset", 0)
         if type(start) is not int or not 0 <= start <= len(text):
             raise ValueError("textOffset is outside the sanitized text")
@@ -272,7 +350,7 @@ def read_tool_result(params: Mapping[str, Any], *, sanitize: Callable[[object, i
                          "returnedItems": 1, "hasMore": more, "previewTruncated": more}
             if more:
                 candidate["nextRequest"] = {"tool": TOOL_NAME, "arguments": {
-                    "resultRef": ref, "jsonPointer": pointer, "offset": 0,
+                    "resultRef": ref, "source": source, "jsonPointer": pointer, "offset": 0,
                     "limit": limit, "textOffset": end}}
             return candidate
 
@@ -323,14 +401,14 @@ def read_tool_result(params: Mapping[str, Any], *, sanitize: Callable[[object, i
             # The exact pointer can always be selected again to page its fields.
             row["expandable"] = True
         candidate = {**page, "items": [*page["items"], row], "returnedItems": len(page["items"]) + 1,
-                     "nextRequest": {"tool": TOOL_NAME, "arguments": {"resultRef": ref, "jsonPointer": pointer, "offset": cursor + 1, "limit": limit}}}
+                     "nextRequest": {"tool": TOOL_NAME, "arguments": {"resultRef": ref, "source": source, "jsonPointer": pointer, "offset": cursor + 1, "limit": limit}}}
         if _size(candidate) > MAX_PAGE_CHARS:
             break
         page["items"].append(row)
         cursor += 1
     page["hasMore"] = cursor < len(members)
     if page["hasMore"]:
-        page["nextRequest"] = {"tool": TOOL_NAME, "arguments": {"resultRef": ref, "jsonPointer": pointer, "offset": cursor, "limit": limit}}
+        page["nextRequest"] = {"tool": TOOL_NAME, "arguments": {"resultRef": ref, "source": source, "jsonPointer": pointer, "offset": cursor, "limit": limit}}
     page["returnedItems"] = len(page["items"])
     # hasMore describes this page only, not completeness of nested previews.
     page["previewTruncated"] = any(row["truncated"] for row in page["items"])

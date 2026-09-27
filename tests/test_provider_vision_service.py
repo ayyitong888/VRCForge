@@ -434,13 +434,13 @@ def test_provider_vision_pure_contracts_are_bounded_and_unchanged() -> None:
         split_image_data_url("data:image/png;base64,%%%")
 
     prompt = build_vision_analysis_prompt(
-        "x" * 2500,
+        "x" * 2500 + "\nVISION_CONTEXT_SENTINEL",
         [{"name": f"image-{index}.png"} for index in range(10)],
     )
     assert "image-7.png" in prompt
     assert "image-8.png" not in prompt
-    assert "x" * 2000 in prompt
-    assert "x" * 2001 not in prompt
+    assert "x" * 2500 in prompt
+    assert "VISION_CONTEXT_SENTINEL" in prompt
 
     assert extract_openai_usage(
         types.SimpleNamespace(

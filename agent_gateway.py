@@ -38,7 +38,7 @@ from typing import TYPE_CHECKING, Any, Callable, Iterator, Mapping, Sequence
 
 from agent_memory_store import AgentMemoryStore
 from agent_memory_tools import MEMORY_TOOL_NAMES, MEMORY_WRITE_TOOLS, bind_memory_tool_context, safe_memory_record, requested_memory_tool
-from agent_tool_result_reader import TOOL_NAME as RESULT_READER_TOOL, bind_tool_result_context, page_next_request_arguments, read_tool_result, result_continuation
+from agent_tool_result_reader import TOOL_NAME as RESULT_READER_TOOL, bind_tool_result_context, page_next_request_arguments, read_tool_result, result_continuation, retain_model_information
 from know_yourself_skill import bind_know_yourself_caller
 import agent_command_safety as command_safety
 import runtime_planner_service as planner_policy
@@ -7082,11 +7082,9 @@ class AgentGateway:
             ):
                 completed_action_ids = task_loop.completed_action_ids()
                 correction_summary = (
-                    "The terminal reply was not bound to the completed action evidence. "
-                    "Reassess whether more read-only inspection is needed. If the task is "
-                    "actually complete, return completion_claim with satisfied=true and "
-                    "evidence_action_ids exactly equal to: "
-                    + ", ".join(completed_action_ids)
+                    "If complete: action=reply, completion_claim.satisfied=true; omit optional "
+                    "evidence_action_ids. Otherwise inspect/report incomplete. "
+                    "action=correct retries failed tools only. Host binds IDs."
                 )
                 loop_state.append(
                     {
@@ -7097,7 +7095,7 @@ class AgentGateway:
                             "status": "needs_correction",
                             "summary": correction_summary,
                             "nextAction": {
-                                "kind": "correct_completion_claim",
+                                "kind": "reply_completion_claim",
                                 "requiredEvidenceActionIds": completed_action_ids,
                             },
                             "verification": {
@@ -7644,7 +7642,7 @@ class AgentGateway:
                     )
                     loop_step["skillContext"] = {
                         "name": str(loaded_skill.get("name") or step_tool)[:160],
-                        "instructions": str(loaded_skill.get("instructions") or "")[:6000],
+                        "instructions": str(loaded_skill.get("instructions") or ""),
                         "allowedTools": active_skill_policy.get("allowedTools") or [],
                         "disallowedTools": active_skill_policy.get("disallowedTools") or [],
                     }
@@ -7771,6 +7769,23 @@ class AgentGateway:
                 steps[-1]["outcome"] = step_timeline_outcome
             if step_payload.get("error"):
                 steps[-1]["error"] = str(step_payload.get("error"))
+
+            # Retain the owner's complete model projection in the existing turn,
+            # independently of raw-result eligibility. Both planner paths receive
+            # the same scoped pages; no new store or filesystem access is granted.
+            if step_tool not in {
+                RESULT_READER_TOOL, "vrcforge_capture_screenshot",
+                "vrcforge_capture_multi_screenshot", "vrcforge_capture_multi_view",
+            } and loop_state:
+                model_information = retain_model_information(
+                    session_id, turn_id, project_root, steps[-1],
+                    {"text": self.runtime_planner.complete_model_information(
+                        loop_state[-1], native_contract=bool(native_binding),
+                    )},
+                    planner_policy.sanitize_planner_observation_text,
+                )
+                steps[-1].update(model_information)
+                loop_state[-1].update(model_information)
 
             result_outcome = ensure_dict(step_payload.get("outcome"))
             result_summary = str(

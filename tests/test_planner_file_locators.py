@@ -30,7 +30,8 @@ def test_file_locator_is_omitted_instead_of_shortened_or_secret_redacted():
             {"path": "D:/private/root/password=fixture-secret.txt"},
         ],
     })
-    assert all(not row.get("source") for row in evidence["items"])
+    assert evidence["items"][0]["source"] == "long" * 400 + ".txt"
+    assert not evidence["items"][1].get("source")
     assert "fixture-secret" not in json.dumps(evidence)
     assert evidence["truncated"] and evidence["omittedChars"] > 0
 
@@ -43,12 +44,12 @@ def test_single_file_search_locator_is_same_exact_call_target():
     assert evidence["items"][0]["source"] == "."
 
 
-def test_parameter_descriptions_have_per_tool_count_and_text_bounds():
+def test_parameter_descriptions_keep_complete_callable_schema():
     from runtime_planner_service import bounded_planner_tool_schema
     schema = bounded_planner_tool_schema({"type": "object", "description": "bulk root prose", "properties": {
         f"field{i}": {"type": "string", "description": "semantic " * 100} for i in range(35)
     }})
     descriptions = [v["description"] for v in schema["properties"].values() if "description" in v]
-    assert len(descriptions) == 24
-    assert max(map(len, descriptions)) <= 240
-    assert "description" not in schema
+    assert len(descriptions) == 35
+    assert all(description == "semantic " * 100 for description in descriptions)
+    assert schema["description"] == "bulk root prose"
