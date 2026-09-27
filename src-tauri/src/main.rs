@@ -25,6 +25,7 @@ use tungstenite::http::HeaderValue;
 
 mod approval_notification_windows;
 mod backend;
+mod chat_snapshot_paging;
 #[cfg(windows)]
 mod capture_helper;
 mod commands;

@@ -195,6 +195,7 @@ from background_goal_runtime import (
     ProviderPreflightCache,
     RuntimeLaneBudget,
 )
+from chat_snapshot_transport import snapshot_response as chat_snapshot_response
 from chat_transcript_archive import (
     DOCUMENT_VERSIONS as CHAT_DOCUMENT_VERSIONS,
     blob_path as chat_archive_blob_path,
@@ -4633,7 +4634,7 @@ def read_chat_transcripts(request: Request) -> dict[str, Any]:
             )
             if project_recovery:
                 recoveries.append(project_recovery)
-        return {
+        return chat_snapshot_response({
             "ok": True,
             "path": str(app_path),
             "exists": app_path.exists(),
@@ -4642,7 +4643,7 @@ def read_chat_transcripts(request: Request) -> dict[str, Any]:
             "sources": sources,
             "recoveries": recoveries,
             "writeBlocked": any(item.get("status") != "recovered" for item in recoveries),
-        }
+        }, request.query_params)
 
 
 @app.post("/api/app/chats")

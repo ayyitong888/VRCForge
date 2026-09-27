@@ -1,6 +1,7 @@
 #![allow(unused_imports)]
 
 use crate::backend::*;
+use crate::chat_snapshot_paging::{ChatSnapshotAssembler, ChatSnapshotPage};
 use crate::event_bridge::*;
 use crate::sanitize::*;
 use hmac::{Hmac, Mac};
@@ -3169,18 +3170,46 @@ pub async fn fetch_chats(request: DesktopChatListRequest) -> Result<serde_json::
                 ));
             }
         }
-        let suffix = if query.is_empty() {
-            String::new()
-        } else {
-            format!("?{}", query.join("&"))
-        };
-        backend_json_request(
-            "GET",
-            format!("/api/app/chats{suffix}"),
-            None,
-            request.timeout_ms,
-        )
-        .map(sanitize_webview_response)
+        let timeout = bounded_backend_request_timeout(request.timeout_ms, 60_000);
+        let deadline = Instant::now()
+            .checked_add(timeout)
+            .ok_or_else(|| "chat snapshot timeout is invalid".to_string())?;
+        let mut assembler = ChatSnapshotAssembler::new();
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining < Duration::from_secs(1) {
+                return Err("chat snapshot request timed out".to_string());
+            }
+            let (offset, digest) = assembler.next_request()?;
+            let mut page_query = query.clone();
+            page_query.push("snapshotPage=1".to_string());
+            page_query.push(format!("textOffset={offset}"));
+            if !digest.is_empty() {
+                page_query.push(format!(
+                    "snapshotDigest={}",
+                    percent_encode_query_component(&digest)
+                ));
+            }
+            let response = backend_json_request(
+                "GET",
+                format!("/api/app/chats?{}", page_query.join("&")),
+                None,
+                Some(remaining.as_millis().max(1) as u64),
+            )?;
+            if Instant::now() >= deadline {
+                return Err("chat snapshot request timed out".to_string());
+            }
+            let page: ChatSnapshotPage = serde_json::from_value(response)
+                .map_err(|error| format!("chat snapshot page is invalid: {error}"))?;
+            if assembler.append_page(page)? {
+                break;
+            }
+        }
+        let chats = assembler.finish()?;
+        if Instant::now() >= deadline {
+            return Err("chat snapshot request timed out".to_string());
+        }
+        Ok(sanitize_webview_response(chats))
     })
     .await
 }
