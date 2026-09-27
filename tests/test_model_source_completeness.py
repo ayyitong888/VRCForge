@@ -23,6 +23,37 @@ def test_source_metadata_does_not_infer_completion_or_expose_arbitrary_fields():
     assert RuntimePlannerService.model_source_completeness({"result": {"items": []}}) == []
 
 
+def test_binding_source_paging_is_visible_before_large_body():
+    # Shape and counts from the real selected-binding response: only 16 of 20
+    # matches were returned, despite successful transport of this response.
+    step = {"result": {
+        "bindings": [{"path": "object" * 5000}],
+        "summary": {"matchedBindingCount": 20, "returnedBindingCount": 16},
+        "paging": {"bindingOffset": 0, "nextBindingOffset": 16,
+                   "keyDetailsOmitted": False, "allSelectedDetailsReturned": False,
+                   "token": "private", "nextRequest": {"secret": "private"}},
+    }}
+    text = RuntimePlannerService.complete_model_information(None, step)
+    receipt = json.loads(text.split('; ', 1)[0].split('=', 1)[1])
+    assert receipt == [
+        {"jsonPointer": "/summary", "facts": {"matchedBindingCount": 20, "returnedBindingCount": 16}},
+        {"jsonPointer": "/paging", "facts": {
+            "keyDetailsOmitted": False, "allSelectedDetailsReturned": False,
+            "bindingOffset": 0, "nextBindingOffset": 16}},
+    ]
+
+
+def test_binding_last_page_preserves_explicit_null_without_inventing_completion():
+    facts = RuntimePlannerService.model_source_completeness({"result": {"paging": {
+        "bindingOffset": 16, "nextBindingOffset": None,
+        "allSelectedDetailsReturned": False, "nextClipOffset": "invalid",
+    }}})
+    assert facts == [{"jsonPointer": "/paging", "facts": {
+        "allSelectedDetailsReturned": False, "bindingOffset": 16,
+        "nextBindingOffset": None,
+    }}]
+
+
 def test_every_page_carries_producer_limits_independently_of_page_completion():
     step = {"index": 0, "tool": "fixture_scan", "result": {
         "summary": {"truncated": True, "itemCount": 2000}}}

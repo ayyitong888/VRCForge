@@ -3140,7 +3140,7 @@ class RuntimePlannerService:
         """Keep producer coverage facts ahead of data, separate from page cursors.
 
         Missing flags are unknown, not evidence of completeness. Only declared
-        boolean/integer control fields leave this boundary; arbitrary summary
+        boolean/integer control fields and explicit null next offsets leave this boundary; arbitrary summary
         content still goes through the ordinary owner projection and reader.
         """
         result = step.get("result")
@@ -3148,17 +3148,22 @@ class RuntimePlannerService:
             return []
         scopes = [("", result)] + [
             ("/" + name, result[name])
-            for name in ("summary", "recognitionCoverage", "coverage")
+            for name in ("summary", "recognitionCoverage", "coverage", "paging")
             if isinstance(result.get(name), Mapping)
         ]
         keys = ("truncated", "captureComplete", "menuTraversalComplete",
                 "candidateEnumerationComplete", "generalTopologyComplete",
                 "missingMatchProvesAbsence", "hasMore", "itemCount", "totalItems",
-                "skipped_resource_limit")
+                "skipped_resource_limit", "totalDiscoveredClips", "scannedClipCount",
+                "totalBindingCount", "matchedBindingCount", "returnedBindingCount",
+                "returnedKeyCount", "keyDetailsOmitted", "allSelectedDetailsReturned",
+                "clipOffset", "bindingOffset", "nextBindingOffset", "nextClipOffset")
+        nullable_offsets = ("nextBindingOffset", "nextClipOffset")
         return [{"jsonPointer": pointer, "facts": facts}
                 for pointer, fields in scopes
                 if (facts := {key: fields[key] for key in keys
-                              if type(fields.get(key)) in (bool, int)})]
+                              if type(fields.get(key)) in (bool, int)
+                              or (key in nullable_offsets and key in fields and fields[key] is None)})]
 
     def complete_model_information(
         self,
