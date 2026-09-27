@@ -1504,10 +1504,10 @@ class AgentShellService:
                 "startedAt": started_at,
                 "finishedAt": self._process.utc_now(),
                 "durationSeconds": round(duration, 3),
-                "stdout": truncate_text(stdout),
-                "stderr": truncate_text(stderr),
-                "stdoutTruncated": len(stdout or "") > 12000,
-                "stderrTruncated": len(stderr or "") > 12000,
+                "stdout": stdout or "",
+                "stderr": stderr or "",
+                "stdoutTruncated": False,
+                "stderrTruncated": False,
             }
         finally:
             if process is not None:
@@ -1685,12 +1685,6 @@ def command_hash(command: str) -> str:
 
 def stable_hash(value: str) -> str:
     return hashlib.sha256(str(value).encode("utf-8", errors="replace")).hexdigest()
-
-
-def truncate_text(text: str, limit: int = 12000) -> str:
-    if len(text or "") <= limit:
-        return text or ""
-    return (text or "")[:limit] + "\n[truncated]"
 
 
 def summarize_shell_result(result: dict[str, Any]) -> dict[str, Any]:

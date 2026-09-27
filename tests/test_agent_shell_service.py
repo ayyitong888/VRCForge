@@ -109,11 +109,13 @@ class FakeApprovals:
 class FakeProcess:
     _next_pid = 9000
 
-    def __init__(self, *, blocking: bool = False) -> None:
+    def __init__(self, *, blocking: bool = False, stdout: str = "fixture stdout", stderr: str = "") -> None:
         type(self)._next_pid += 1
         self.pid = type(self)._next_pid
         self.returncode: int | None = None
         self.blocking = blocking
+        self.stdout = stdout
+        self.stderr = stderr
         self.killed = False
         self.communicate_calls = 0
 
@@ -129,7 +131,7 @@ class FakeProcess:
             time.sleep(0.005)
             raise subprocess.TimeoutExpired("fixture", timeout or 0)
         self.returncode = 0
-        return "fixture stdout", ""
+        return self.stdout, self.stderr
 
     def kill(self) -> None:
         self.killed = True
@@ -151,6 +153,8 @@ class FakeProcessOwner:
         }
     )
     spawn_calls: list[dict[str, Any]] = field(default_factory=list)
+    stdout: str = "fixture stdout"
+    stderr: str = ""
 
     def ports(self) -> ShellProcessPorts:
         return ShellProcessPorts(
@@ -167,7 +171,7 @@ class FakeProcessOwner:
         self.spawn_entered.set()
         if self.block_spawn:
             assert self.release_spawn.wait(timeout=2)
-        process = FakeProcess(blocking=self.blocking)
+        process = FakeProcess(blocking=self.blocking, stdout=self.stdout, stderr=self.stderr)
         self.processes.append(process)
         self.spawned.set()
         return process
@@ -484,6 +488,21 @@ def test_temporary_chat_host_writes_run_without_approval(tmp_path: Path) -> None
     assert "VRCFORGE_APP_SESSION_TOKEN" not in child_environment
     assert "OPENAI_API_KEY" not in child_environment
     assert audits[-1]["event"] == "shell_executed"
+
+
+def test_direct_shell_keeps_complete_collected_output_for_owner_projection(tmp_path: Path) -> None:
+    stdout = "stdout-head-" + ("x" * 12_500) + "-stdout-tail"
+    stderr = "stderr-head-" + ("y" * 12_500) + "-stderr-tail"
+    processes = FakeProcessOwner(stdout=stdout, stderr=stderr)
+    shell, _approvals, _processes, _audits = service(tmp_path, processes=processes)
+
+    result = shell.execute({"command": "Get-ChildItem"})
+
+    assert result["status"] == "executed"
+    assert result["result"]["stdout"] == stdout
+    assert result["result"]["stderr"] == stderr
+    assert result["result"]["stdoutTruncated"] is False
+    assert result["result"]["stderrTruncated"] is False
 
 
 def test_environment_path_into_unity_project_is_protected_before_spawn(tmp_path: Path) -> None:
