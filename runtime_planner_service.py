@@ -2625,7 +2625,12 @@ class RuntimePlannerService:
             provider_usage: dict[str, object] | None,
         ) -> None:
             usage = ensure_dict(provider_usage)
-            if not current:
+            # Guard metadata may precede the first provider receipt. Only usage
+            # counters identify an accumulator that has already been started.
+            if not any(key in current for key in (
+                "requestCount", "inputTokens", "outputTokens", "totalTokens",
+                "cumulativeInputTokens", "cumulativeOutputTokens", "cumulativeTotalTokens",
+            )):
                 current.update(
                     {
                         "schema": CONTEXT_USAGE_SCHEMA,
