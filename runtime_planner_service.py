@@ -3094,6 +3094,14 @@ class RuntimePlannerService:
             }
             control_step["tool"] = "model_information_control"
             control = RuntimePlannerService.complete_model_information(self, control_step, native_contract=native_contract)
+            # Structured navigation must not be buried at the tail of the
+            # serialized text it is meant to avoid reading sequentially.
+            from agent_tool_result_reader import eligible_result
+            result_read = step.get("resultRead")
+            if (eligible_result(str(step.get("tool") or ""), step.get("result"))
+                    and isinstance(result_read, dict) and isinstance(result_read.get("resultRef"), str)):
+                control += "; resultContinuation=" + json.dumps(
+                    result_read, ensure_ascii=False, separators=(",", ":"))
             continuation = {key: value for key, value in descriptor.items() if key != "page"}
             if isinstance(page.get("nextRequest"), dict):
                 continuation["nextRequest"] = page["nextRequest"]
