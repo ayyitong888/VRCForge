@@ -3599,11 +3599,12 @@ class RuntimePlannerService:
                 if tool_name in {"shell", "unity_shell"} and isinstance(step.get("executedInput"), dict):
                     # These are the already submitted action inputs, not paths
                     # discovered in untrusted output. Keep target identity while
-                    # applying the same credential redaction and a fixed bound.
+                    # applying credential redaction. The shared owner-model
+                    # outlet pages the complete receipt; do not cut its source.
                     inputs = step["executedInput"]
                     receipt = {
-                        key: sanitize_planner_observation_text(inputs[key], limit, preserve_whitespace=True, preserve_paths=True)
-                        for key, limit in (("command", 1800), ("cwd", 400))
+                        key: sanitize_planner_observation_text(inputs[key], None, preserve_whitespace=True, preserve_paths=True)
+                        for key in ("command", "cwd")
                         if isinstance(inputs.get(key), str)
                     }
                     executed_input = "; executedInput=" + json.dumps(receipt, ensure_ascii=False, separators=(",", ":"))
