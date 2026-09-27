@@ -107,5 +107,5 @@ def test_control_resolution_is_explicit_without_relabeling_candidate_lists():
     assert confirmed["candidateCount"] == 2
     assert candidate["resolutionStatus"] == "ambiguous"
     assert candidate["candidateCount"] == 2
-    assert candidate["fxStateName"] == ""
+    assert candidate["fxStateName"] is None
     assert snapshot == before

@@ -214,8 +214,21 @@ class WardrobeArtifactReadPorts:
     scan_wardrobe: Callable[[dict[str, Any]], dict[str, Any]]
 
 
+_UNPROVEN_WARDROBE_STATE_FIELDS = (
+    "writeDefaults",
+    "isStripOrDefaultCandidate",
+    "onObjects",
+    "offObjects",
+    "clipPath",
+    "fxStateName",
+    "fxStatePath",
+    "fxTransitionType",
+    "fxSourceStateName",
+)
+
+
 def _decorate_wardrobe_controls(item: dict[str, Any]) -> dict[str, Any]:
-    """Add per-control resolution metadata without changing Core fields."""
+    """Add resolution metadata and null only unproven copied state aggregates."""
     evidence = item.get("animatorEvidence")
     evidence = evidence if isinstance(evidence, dict) else {}
     ambiguous_values = set(evidence.get("ambiguousDestinationValues") or [])
@@ -242,6 +255,10 @@ def _decorate_wardrobe_controls(item: dict[str, Any]) -> dict[str, Any]:
             status = "resolved"
         else:
             status = "unresolved"
+        if status in {"ambiguous", "unresolved"}:
+            for field in _UNPROVEN_WARDROBE_STATE_FIELDS:
+                if field in control:
+                    control[field] = None
         control["resolutionStatus"] = status
         decorated.append(control)
     result = dict(item)
