@@ -18,6 +18,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Mapping, Sequence
 
+from chat_transcript_archive import REF_FIELD, is_archived_item
+
 
 SESSION_STORE_INTEGRITY_SCHEMA = "vrcforge.session_store_integrity.v1"
 
@@ -1045,6 +1047,10 @@ def is_valid_chat_record(value: Any) -> bool:
     for item in items:
         if not isinstance(item, dict):
             return False
+        if REF_FIELD in item:
+            if not is_archived_item(item) or item[REF_FIELD].get("chatId") != value.get("id"):
+                return False
+            continue
         item_id = item.get("id")
         item_type = item.get("type")
         if not isinstance(item_id, str) or not item_id.strip():

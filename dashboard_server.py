@@ -195,6 +195,12 @@ from background_goal_runtime import (
     ProviderPreflightCache,
     RuntimeLaneBudget,
 )
+from chat_transcript_archive import (
+    DOCUMENT_VERSIONS as CHAT_DOCUMENT_VERSIONS,
+    blob_path as chat_archive_blob_path,
+    decode_chats as decode_archived_chats,
+    encode_chats as encode_archived_chats,
+)
 from chat_attachment_vault import (
     ARCHIVE_MAX_BYTES,
     INSPECTION_SCHEMA as CHAT_ATTACHMENT_INSPECTION_SCHEMA,
@@ -4356,7 +4362,7 @@ def chat_store_target(path: Path, *, scope: str, project_path: str = "") -> Sess
             required_list_field="chats",
             required_list_item_kind="chat",
             document_version_field="version",
-            known_document_versions=(1,),
+            known_document_versions=CHAT_DOCUMENT_VERSIONS,
             guard_root=project_root,
             max_bytes=CHAT_TRANSCRIPTS_MAX_BYTES,
             max_list_items=CHAT_TRANSCRIPTS_MAX_CHATS,
@@ -4369,7 +4375,7 @@ def chat_store_target(path: Path, *, scope: str, project_path: str = "") -> Sess
         required_list_field="chats",
         required_list_item_kind="chat",
         document_version_field="version",
-        known_document_versions=(1,),
+        known_document_versions=CHAT_DOCUMENT_VERSIONS,
         guard_root=path.parent,
         max_bytes=CHAT_TRANSCRIPTS_MAX_BYTES,
         max_list_items=CHAT_TRANSCRIPTS_MAX_CHATS,
@@ -4453,9 +4459,17 @@ def load_chat_transcript_file(
         marker = {**scan, "status": "unsupported", "reason": "invalid_record_shape"}
         source["status"] = "unsupported"
         return [], source, chat_recovery_marker(marker, scope=scope)
+    try:
+        complete_chats = decode_archived_chats(payload["chats"], target.path)
+        if any(not is_valid_chat_record(chat) for chat in complete_chats):
+            raise ValueError("Invalid archived chat record")
+    except (OSError, ValueError):
+        marker = {**scan, "status": "needs_repair", "reason": "chat_archive_unavailable"}
+        source["status"] = "needs_repair"
+        return [], source, chat_recovery_marker(marker, scope=scope)
     chats = [
         sanitized
-        for item in payload["chats"]
+        for item in complete_chats
         if isinstance(item, dict)
         for sanitized in [sanitize_chat_transcript(item)]
         if not is_empty_chat_transcript(sanitized)
@@ -4898,17 +4912,23 @@ def write_chat_transcripts_storage(
             group["chats"].append(chat)
         else:
             app_chats.append(chat)
+    app_path = chat_transcripts_path()
+    archive_writes: dict[Path, bytes] = {}
+
+    def archive_document(records: list[dict[str, Any]], path: Path, **fields: Any) -> str:
+        packed, blobs = encode_archived_chats(records)
+        for digest, blob in blobs.items():
+            archive_writes[chat_archive_blob_path(path, digest)] = blob["data"]
+        return json.dumps({"version": 2 if blobs else 1, **fields, "chats": packed},
+                          ensure_ascii=False, allow_nan=False)
+
     try:
-        serialized = json.dumps({"version": 1, "chats": app_chats}, ensure_ascii=False, allow_nan=False)
+        serialized = archive_document(app_chats, app_path)
         if len(serialized.encode("utf-8")) > CHAT_TRANSCRIPTS_MAX_BYTES:
             raise HTTPException(status_code=413, detail="会话记录超过单个存储源的 16MB 上限，请删除旧会话后重试。")
         project_serialized: list[tuple[Path, str, int]] = []
         for group in project_groups.values():
-            payload = json.dumps(
-                {"version": 1, "scope": "project", "chats": group["chats"]},
-                ensure_ascii=False,
-                allow_nan=False,
-            )
+            payload = archive_document(group["chats"], group["path"], scope="project")
             if len(payload.encode("utf-8")) > CHAT_TRANSCRIPTS_MAX_BYTES:
                 raise HTTPException(status_code=413, detail="会话记录超过单个存储源的 16MB 上限，请删除旧会话后重试。")
             project_serialized.append((group["path"], payload, len(group["chats"])))
@@ -4917,7 +4937,6 @@ def write_chat_transcripts_storage(
             status_code=422,
             detail="Chat storage rejected a non-JSON or excessively nested value; no data was written.",
         ) from exc
-    app_path = chat_transcripts_path()
     with CHAT_TRANSCRIPTS_LOCK:
         revisions = _chat_source_revision_map(request)
         stale_project_sources: dict[str, tuple[str, Path]] = {}
@@ -4978,6 +4997,7 @@ def write_chat_transcripts_storage(
 
         index_path = chat_project_index_path()
         mutation_paths = [
+            *archive_writes,
             app_path,
             *[path for path, _payload, _count in project_serialized],
             *[path for _project_path, path in stale_project_files],
@@ -4987,6 +5007,14 @@ def write_chat_transcripts_storage(
         parent_existence: dict[Path, bool] = {}
         try:
             storage_snapshot, parent_existence = snapshot_chat_storage_files(mutation_paths)
+            # Immutable blobs belong to this transcript source and its backups.
+            # Save before references; the existing transaction rolls back both.
+            for path, data in archive_writes.items():
+                previous = storage_snapshot[path]
+                if previous is not None and previous != data:
+                    raise OSError("Chat evidence archive integrity conflict")
+                if previous is None:
+                    atomic_write_bytes(path, data)
             atomic_write_text(app_path, serialized)
             for path, payload, _count in project_serialized:
                 atomic_write_text(path, payload)
@@ -8435,7 +8463,7 @@ def _session_store_targets(context: dict[str, Any]) -> list[SessionStoreTarget]:
             required_list_field="chats",
             required_list_item_kind="chat",
             document_version_field="version",
-            known_document_versions=(1,),
+            known_document_versions=CHAT_DOCUMENT_VERSIONS,
             guard_root=chat_transcripts_path().parent,
             max_bytes=CHAT_TRANSCRIPTS_MAX_BYTES,
             max_list_items=CHAT_TRANSCRIPTS_MAX_CHATS,
@@ -8530,7 +8558,7 @@ def _session_store_targets(context: dict[str, Any]) -> list[SessionStoreTarget]:
                 required_list_field="chats",
                 required_list_item_kind="chat",
                 document_version_field="version",
-                known_document_versions=(1,),
+                known_document_versions=CHAT_DOCUMENT_VERSIONS,
                 guard_root=project_root,
                 max_bytes=CHAT_TRANSCRIPTS_MAX_BYTES,
                 max_list_items=CHAT_TRANSCRIPTS_MAX_CHATS,
@@ -8757,7 +8785,7 @@ def project_chat_repair_target(project_root: Path) -> SessionStoreTarget:
         required_list_field="chats",
         required_list_item_kind="chat",
         document_version_field="version",
-        known_document_versions=(1,),
+        known_document_versions=CHAT_DOCUMENT_VERSIONS,
         guard_root=project_root,
         max_bytes=CHAT_TRANSCRIPTS_MAX_BYTES,
         max_list_items=CHAT_TRANSCRIPTS_MAX_CHATS,
