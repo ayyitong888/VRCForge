@@ -311,14 +311,22 @@ def canonical_result_facts(
             or facts.get("checkpointRecoveryRequired") is True
             or facts.get("temporaryCleanupRequired") is True
         )
+        automatic_unknown_recovery = recovery in (
+            {"required": True, "reason": "Commit state is unknown; preserve the current state."},
+            {"required": True, "reason": (
+                "Commit state is unknown; preserve the current state and read back "
+                "the exact target before any retry."
+            )},
+        )
         if not explicit_recovery and (
-            not isinstance(recovery, Mapping)
-            or recovery.get("required") is True
+            not isinstance(recovery, Mapping) or automatic_unknown_recovery
         ):
             facts["recovery"] = {
                 "required": False,
                 "reason": "No mutation started.",
             }
+        if facts.get("nextAction") == "Read back the exact target state before retrying the write.":
+            facts.pop("nextAction")
     raw_commit_known = _first_present(expanded_sources, "commitStateKnown")
     if isinstance(raw_commit_known, bool):
         facts["commitStateKnown"] = raw_commit_known
@@ -713,6 +721,17 @@ def build_external_tool_error(
             if resolved_mutation_bool is False and resolved_committed_bool is False
             else "unknown"
         )
+    if (
+        operation_kind == "read"
+        and mutation_started is False
+        and committed is False
+        and resolved_commit_state == "unknown"
+    ):
+        # The registered read boundary knows this attempt cannot mutate. A
+        # mixed-capability Core tool's earlier unknown wrapper is not stronger
+        # evidence than these explicit facts. Do not infer reads for writes or
+        # unknown operations, or erase a known committed/partial result.
+        resolved_commit_state = "not_started"
 
     source_console = _first_present(sources, "console")
     source_console = source_console if isinstance(source_console, Mapping) else {}
