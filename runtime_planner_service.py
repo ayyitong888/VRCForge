@@ -1271,7 +1271,7 @@ def planner_read_output_evidence(tool: str, result: dict[str, object]) -> dict[s
                          "continuation": "Narrow web_search.query to retrieve omitted results; use web_fetch on an intact returned URL to inspect the source. Snippets alone may not support the requested conclusion."})
     elif tool == "vrcforge_read_text_file" and isinstance(result.get("text"), str):
         evidence.update({"source": source(result.get("path")), "text": content(result["text"]),
-                         "continuation": "Use search_text on the same exact file path to locate relevant line numbers, then read_text_file with startLine/endLine (1-based, inclusive). Narrow that range if truncated; endLine describes the selected range, not proof that every selected character survived output limits. maxBytes still bounds the readable file prefix. Do not widen to the parent directory."})
+                         "continuation": "Use search_text on the same exact file path to locate relevant line numbers, then read_text_file with startLine/endLine (1-based, inclusive). Follow the current-turn result reader to recover paged text. maxBytes is a whole-file resource limit; a resource-limit failure provides no file content. Do not widen to the parent directory."})
         for field in ("startLine", "endLine"):
             if type(result.get(field)) is int:
                 evidence[field] = result[field]
@@ -1297,6 +1297,9 @@ def planner_read_output_evidence(tool: str, result: dict[str, object]) -> dict[s
                          "locatorInstructions": "Resolve item.source against relativeTo, never against the display source basename. A dot means the exact input file. Empty source means the locator was omitted; do not guess it.",
                          "returnedItems": len(rows), "omittedItems": len(rows) - len(items),
                          "continuation": "If truncated, narrow the path/pattern/query; inspect an exact returned relative file with read_text_file or search_text."})
+        for field in ("skipped_binary", "skipped_resource_limit"):
+            if type(result.get(field)) is int:
+                evidence[field] = result[field]
     elif tool in {"shell", "unity_shell", "vrcforge_execute_shell"}:
         if isinstance(result.get("readEvidence"), dict):
             # The gateway assembles this from raw output before its durable

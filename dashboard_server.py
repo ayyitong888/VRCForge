@@ -80,6 +80,7 @@ from app_update_service import AppUpdateService
 from agent_command_safety import normalize_filesystem_path
 from general_agent_tools import (
     GENERAL_AGENT_WEB_TOOL_METADATA,
+    MAX_READ_BYTES as GENERAL_MAX_READ_BYTES,
     find_files as general_find_files,
     list_directory as general_list_directory,
     read_text_file as general_read_text_file,
@@ -24963,7 +24964,7 @@ def register_agent_gateway_tools() -> None:
         result = general_read_text_file(
             raw.get("path", ""),
             allowed_roots=allowed_roots if isinstance(allowed_roots, list) else [],
-            max_bytes=bounded_int(raw.get("maxBytes", raw.get("max_bytes", 1_048_576)), 1_048_576, 131_072),
+            max_bytes=bounded_int(raw.get("maxBytes", raw.get("max_bytes", GENERAL_MAX_READ_BYTES)), GENERAL_MAX_READ_BYTES, GENERAL_MAX_READ_BYTES),
             start_line=raw.get("startLine"),
             end_line=raw.get("endLine"),
             max_output_chars=(
@@ -25092,7 +25093,7 @@ def register_agent_gateway_tools() -> None:
     )
     AGENT_GATEWAY.register_tool(
         "vrcforge_read_text_file",
-        "when-to-use: read a bounded UTF-8 text file as local evidence during read-only planning. Use optional startLine/endLine (1-based, inclusive) to inspect a section beyond the initial preview, including lines found by search_text. Narrow the range if the output is truncated; maxBytes still bounds the readable file prefix. when-NOT-to-use: do not use for binary files, writes, secrets, or Unity project changes. Negative example: do not repeat the same truncated prefix when you need later lines.",
+        "when-to-use: read an authorized UTF-8 text file as local evidence. The complete file is decoded and redacted before optional startLine/endLine selection (1-based, inclusive). Large model results use the shared result reader. maxBytes is a resource limit (default and maximum 4 MiB): oversized files fail explicitly, never return a partial prefix. maxOutputChars does not discard source text. when-NOT-to-use: do not use for binary files, writes, secrets, or Unity project changes. Negative example: do not treat a resource-limit failure as proof of file contents.",
         "read/debug",
         general_read_text_file_tool,
     )

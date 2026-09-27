@@ -31,7 +31,8 @@ def test_read_text_file_rejects_binary_and_bounds_bytes(tmp_path: Path) -> None:
     binary = tmp_path / "binary.bin"
     binary.write_bytes(b"a\x00b")
 
-    assert read_text_file(text, allowed_roots=[tmp_path], max_bytes=4)["text"] == "abcd"
+    with pytest.raises(ValueError, match="complete file read exceeds"):
+        read_text_file(text, allowed_roots=[tmp_path], max_bytes=4)
     with pytest.raises(ValueError, match="binary"):
         read_text_file(binary, allowed_roots=[tmp_path])
     with pytest.raises(FileNotFoundError):
@@ -88,7 +89,10 @@ def test_search_exact_file_retains_bounds_redaction_and_pattern(tmp_path: Path) 
     assert "fixture-secret" not in str(result)
     assert "[REDACTED]" in result["matches"][0]["text"]
     assert search_text(target, "needle", allowed_roots=[target], max_count=1)["truncated"] is True
-    assert search_text(target, "needle", allowed_roots=[target], max_file_bytes=4)["truncated"] is True
+    bounded = search_text(target, "needle", allowed_roots=[target], max_file_bytes=4)
+    assert bounded["matches"] == [] and bounded["skipped_binary"] == 0
+    assert bounded["skipped_resource_limit"] == 1
+    assert bounded["truncated"] is True
     assert search_text(target, "needle", allowed_roots=[target], pattern="*.py")["matches"] == []
     with pytest.raises(ValueError, match="max_depth"):
         search_text(target, "needle", allowed_roots=[target], max_depth=-1)

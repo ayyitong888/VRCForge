@@ -1030,9 +1030,9 @@ for _general_read_tool, _general_read_properties in {
     'vrcforge_read_text_file': {
         'path': {'type': 'string', 'description': 'Project-relative UTF-8 text file path under projectPath.'},
         'projectPath': {'type': 'string', 'description': 'Absolute existing source workspace root; required for external MCP calls.'},
-        'maxBytes': {'type': 'integer'}, 'maxOutputChars': {'type': 'integer'},
+        'maxBytes': {'type': 'integer', 'minimum': 1, 'maximum': 4194304, 'description': 'Whole-file resource limit in bytes, default 4194304. Oversized files fail without returning a partial prefix.'}, 'maxOutputChars': {'type': 'integer', 'description': 'Does not truncate source text; model output is paged by the shared result reader.'},
         'startLine': {'type': 'integer', 'minimum': 1, 'description': 'First line to read, 1-based and inclusive; defaults to 1.'},
-        'endLine': {'type': 'integer', 'minimum': 1, 'description': 'Last line to read, inclusive; must be at least startLine. Omit to read through the bounded file prefix.'},
+        'endLine': {'type': 'integer', 'minimum': 1, 'description': 'Last line to read, inclusive; must be at least startLine. Omit to read through the complete file after whole-file validation and redaction.'},
     },
     'vrcforge_find_files': {
         'path': {'type': 'string', 'description': 'Project-relative directory path under projectPath.'},

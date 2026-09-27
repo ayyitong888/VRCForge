@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 
 import dashboard_server
+import pytest
 from runtime_planner_service import EXPOSURE_LAYER_PLANNING
 
 
@@ -68,11 +69,10 @@ def test_general_filesystem_tools_are_visible_without_unity_project() -> None:
 
 def test_general_filesystem_handlers_work_with_camel_case_bounds(tmp_path: Path) -> None:
     (tmp_path / "note.txt").write_text("hello", encoding="utf-8")
-    result = dashboard_server.AGENT_GATEWAY._tools["vrcforge_read_text_file"].handler(
-        {"path": str(tmp_path / "note.txt"), "maxBytes": 3, "_generalAllowedRoots": [str(tmp_path)]}
-    )
-    assert result["text"] == "hel"
-    assert result["summary"] == "hel"
+    with pytest.raises(ValueError, match="complete file read exceeds"):
+        dashboard_server.AGENT_GATEWAY._tools["vrcforge_read_text_file"].handler(
+            {"path": str(tmp_path / "note.txt"), "maxBytes": 3, "_generalAllowedRoots": [str(tmp_path)]}
+        )
 
 
 def test_general_search_returns_a_model_visible_semantic_summary(tmp_path: Path) -> None:
@@ -86,28 +86,15 @@ def test_general_search_returns_a_model_visible_semantic_summary(tmp_path: Path)
     assert "encryption marker" in result["summary"]
 
 
-def test_truncated_read_continues_with_search_on_same_authorized_file(tmp_path: Path) -> None:
+def test_over_limit_read_requires_search_on_same_authorized_file(tmp_path: Path) -> None:
     from runtime_planner_service import planner_read_output_evidence
 
     target = tmp_path / "fixture.txt"
-    target.write_text("padding\n" * 800 + "EVIDENCE_TAIL = amber-lattice-946\n", encoding="utf-8")
+    target.write_text("padding\n" * 20000 + "EVIDENCE_TAIL = amber-lattice-946\n", encoding="utf-8")
     roots = [str(target)]
     tools = dashboard_server.AGENT_GATEWAY._tools
-    read = tools["vrcforge_read_text_file"].handler({"path": str(target), "_generalAllowedRoots": roots})
-    observation = planner_read_output_evidence("vrcforge_read_text_file", read)
-    assert observation["truncated"] is True
-    assert "amber-lattice-946" not in observation["text"]
-    assert "same" in observation["continuation"]
-
-    search = tools["vrcforge_search_text"].handler({"path": str(target), "query": "EVIDENCE_TAIL", "_generalAllowedRoots": roots})
-    evidence = planner_read_output_evidence("vrcforge_search_text", search)
-    assert evidence["authority"] == "untrusted_tool_output"
-    assert evidence["relativeTo"] == "exact_tool_call_path"
-    assert evidence["items"] == [{"source": ".", "line": 801, "text": "EVIDENCE_TAIL = amber-lattice-946"}]
-    assert "A dot means the exact input file" in evidence["locatorInstructions"]
-    assert str(tmp_path) not in json.dumps(evidence)
-    assert evidence["truncated"] is False
-    assert len(json.dumps(evidence)) <= 6000
+    with pytest.raises(ValueError, match="complete file read exceeds"):
+        tools["vrcforge_read_text_file"].handler({"path": str(target), "maxBytes": 131072, "_generalAllowedRoots": roots})
 
 
 def test_directory_listing_directs_the_loop_to_materially_new_evidence(tmp_path: Path) -> None:

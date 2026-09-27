@@ -27,6 +27,10 @@ WEB_MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 WEB_MAX_REDIRECTS = 3
 WEB_MAX_SEARCH_RESULTS = 10
 
+
+class FileReadLimitError(ValueError):
+    """The authorized file exceeds the requested complete-read byte limit."""
+
 WEB_FETCH_TOOL_NAME = "web_fetch"
 WEB_SEARCH_TOOL_NAME = "web_search"
 GENERAL_AGENT_WEB_TOOL_METADATA = {
@@ -368,8 +372,10 @@ def read_text_file(
         raise PermissionError(f"sensitive credential file is not readable by the General Agent: {file_path.name}")
     with file_path.open("rb") as handle:
         data = handle.read(max_bytes + 1)
-    truncated = len(data) > max_bytes
-    data = data[:max_bytes]
+    if len(data) > max_bytes:
+        raise FileReadLimitError(
+            f"complete file read exceeds max_bytes resource limit ({max_bytes} bytes): {file_path}"
+        )
     if b"\x00" in data:
         raise ValueError(f"binary file rejected: {file_path}")
     try:
@@ -389,10 +395,7 @@ def read_text_file(
         end = min(len(lines), end_line if end_line is not None else len(lines))
         text = "".join(lines[start - 1:end])
         line_range = {"startLine": start, "endLine": end}
-    if max_output_chars is not None and len(text) > max_output_chars:
-        text = text[:max_output_chars]
-        truncated = True
-    return {"path": str(file_path), "text": text, "truncated": truncated, "bytes": len(data), "redacted": redacted, **line_range}
+    return {"path": str(file_path), "text": text, "truncated": False, "bytes": len(data), "redacted": redacted, **line_range}
 
 
 def _iter_files(root: Path, max_depth: int) -> Iterator[Path]:
@@ -472,10 +475,15 @@ def search_text(
     matches: list[dict[str, Any]] = []
     needle = query if case_sensitive else query.casefold()
     skipped_binary = 0
+    skipped_resource_limit = 0
     truncated = files["truncated"]
     for item in files["files"]:
         try:
             payload = read_text_file(item["path"], allowed_roots=allowed_roots, max_bytes=max_file_bytes)
+        except FileReadLimitError:
+            skipped_resource_limit += 1
+            truncated = True
+            continue
         except (PermissionError, ValueError):
             skipped_binary += 1
             continue
@@ -485,9 +493,9 @@ def search_text(
             if needle not in haystack:
                 continue
             if len(matches) >= max_count:
-                return {"path": str(target), "matches": matches, "truncated": True, "skipped_binary": skipped_binary}
+                return {"path": str(target), "matches": matches, "truncated": True, "skipped_binary": skipped_binary, "skipped_resource_limit": skipped_resource_limit}
             matches.append({"path": item["path"], "line": number, "text": line[:MAX_MATCH_LINE_CHARS]})
-    return {"path": str(target), "matches": matches, "truncated": truncated, "skipped_binary": skipped_binary}
+    return {"path": str(target), "matches": matches, "truncated": truncated, "skipped_binary": skipped_binary, "skipped_resource_limit": skipped_resource_limit}
 
 
 def _web_timeout(value: float) -> float:
@@ -611,6 +619,6 @@ def web_search(
 
 
 __all__ = [
-    "extract_explicit_local_roots", "list_directory", "read_text_file", "find_files", "search_text",
+    "FileReadLimitError", "extract_explicit_local_roots", "list_directory", "read_text_file", "find_files", "search_text",
     "web_fetch", "web_search", "WEB_FETCH_TOOL_NAME", "WEB_SEARCH_TOOL_NAME", "GENERAL_AGENT_WEB_TOOL_METADATA",
 ]
