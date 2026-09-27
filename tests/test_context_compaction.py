@@ -47,7 +47,7 @@ class ContextCompactionTests(unittest.TestCase):
         self.assertIsInstance(raised.exception, CancelledError)
         self.assertEqual(calls, 1)
 
-    def test_full_and_fitted_boundaries_preserve_goal_and_latest_pair(self) -> None:
+    def test_full_and_paged_boundaries_preserve_every_entry(self) -> None:
         history = [
             {"role": "user", "text": "original goal " + "g" * 40},
             {"role": "assistant", "text": "first answer " + "a" * 40},
@@ -77,11 +77,11 @@ class ContextCompactionTests(unittest.TestCase):
 
         self.assertEqual(full["fidelity"], "full")
         self.assertEqual(exact["fidelity"], "full")
-        self.assertEqual(fitted["fidelity"], "fitted")
-        retained = _prompt_entries(prompts[-1])
-        self.assertEqual(retained[0], {"role": "user", "text": history[0]["text"]})
-        self.assertEqual(retained[-2:], history[-2:])
-        self.assertLess(fitted["retainedEntryCount"], fitted["entryCount"])
+        self.assertEqual(fitted["fidelity"], "paged")
+        retained = [entry for prompt in prompts[1:] for entry in _prompt_entries(prompt)]
+        self.assertEqual(retained, history)
+        self.assertEqual(fitted["retainedEntryCount"], fitted["entryCount"])
+        self.assertTrue(fitted["completeness"]["summarizerInputComplete"])
 
     def test_redacts_paths_secrets_and_avatar_ids_before_provider(self) -> None:
         raw_secret = "sk-proj-supersecret123456"
@@ -269,7 +269,7 @@ class ContextCompactionTests(unittest.TestCase):
 
         self.assertFalse(provider_called)
         self.assertEqual(result["fidelity"], "fallback")
-        self.assertEqual(result["fallbackReason"], "input_oversize")
+        self.assertEqual(result["fallbackReason"], "provider_call_budget")
         self.assertLessEqual(len(result["summary"]), 1_000)
 
     def test_standalone_phase_is_supported_for_manual_command(self) -> None:
@@ -280,7 +280,7 @@ class ContextCompactionTests(unittest.TestCase):
 
         self.assertEqual(result["phase"], "standalone")
 
-    def test_fitted_provider_input_keeps_goal_and_latest_stateful_block(self) -> None:
+    def test_paged_provider_input_keeps_goal_middle_and_latest_stateful_block(self) -> None:
         history = [
             {"role": "user", "text": "Goal: preserve the approved release path."},
             {"role": "assistant", "text": "Older discussion can be fitted out."},
@@ -298,14 +298,10 @@ class ContextCompactionTests(unittest.TestCase):
             target_tokens=int(full["estimatedInputTokens"]) - 1,
         )
 
-        retained = _prompt_entries(prompts[0])
-        self.assertEqual(fitted["fidelity"], "fitted")
-        self.assertEqual(retained[0]["text"], history[0]["text"])
-        self.assertEqual([entry["text"] for entry in retained[-5:]], [item["text"] for item in history[-5:]])
-        self.assertIn("approval-42", prompts[0])
-        self.assertIn("checkpoint-42", prompts[0])
-        self.assertIn("task-42", prompts[0])
-        self.assertLess(fitted["retainedEntryCount"], fitted["entryCount"])
+        retained = [entry for prompt in prompts for entry in _prompt_entries(prompt)]
+        self.assertEqual(fitted["fidelity"], "paged")
+        self.assertEqual(retained, history)
+        self.assertEqual(fitted["retainedEntryCount"], fitted["entryCount"])
 
     def test_oversized_tool_output_uses_inline_digest_and_explicit_source_recovery(self) -> None:
         tool_payload = "result-value-" * 4_000
@@ -328,7 +324,7 @@ class ContextCompactionTests(unittest.TestCase):
 
         self.assertFalse(provider_called)
         self.assertEqual(result["fidelity"], "fallback")
-        self.assertEqual(result["fallbackReason"], "input_oversize")
+        self.assertEqual(result["fallbackReason"], "provider_call_budget")
         self.assertIn("Goal: validate the install safely.", result["summary"])
         self.assertNotIn(tool_payload[:128], result["summary"])
         self.assertNotIn(tool_payload[:128], inline)

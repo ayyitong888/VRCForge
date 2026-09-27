@@ -28,19 +28,20 @@ def test_complete_validated_summary_survives_inline_budget():
     assert "nextRequest" not in result["recovery"]
 
 
-def test_fitted_out_middle_source_is_complete_in_recovery():
+def test_over_call_budget_source_is_complete_in_recovery_without_sampling():
     history = [{"role": "user", "text": "Original goal"},
         {"role": "assistant", "text": "middle detail " * 1500 + TAIL},
         {"role": "user", "text": "Latest question"}, {"role": "assistant", "text": "Latest answer"}]
     prompts = []
     result = compact_context(history, summarizer=lambda prompt: prompts.append(prompt) or "Fitted summary", target_tokens=100)
-    assert TAIL not in prompts[0]
+    assert prompts == []
     assert result["recovery"]["sourceEntries"] == history
     assert result["recovery"]["sourceDigest"] == result["sourceDigest"]
-    assert result["retainedEntryCount"] == 3 and result["entryCount"] == 4
+    assert result["retainedEntryCount"] == 0 and result["entryCount"] == 4
     assert result["completeness"] == {"inlineSummaryComplete": True,
         "sourceRecoveryComplete": True, "summarizerInputComplete": False}
-    assert result["fidelity"] == "fitted"
+    assert result["fidelity"] == "fallback"
+    assert result["fallbackReason"] == "provider_call_budget"
 
 
 def test_fallback_keeps_all_sanitized_source_without_provider_or_store():
@@ -51,7 +52,7 @@ def test_fallback_keeps_all_sanitized_source_without_provider_or_store():
     assert "PRIVATE_INPUT_SECRET" not in json.dumps(result)
     assert recovery["summary"] == result["summary"]
     assert recovery["summarySource"] == "fallback"
-    assert result["fallbackReason"] == "input_oversize"
+    assert result["fallbackReason"] == "provider_call_budget"
     assert result["providerAttempts"] == 0 and result["targetTokens"] == 64
     assert len(result["summary"]) <= 1000
     assert result["completeness"]["sourceRecoveryComplete"] is True

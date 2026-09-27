@@ -866,6 +866,8 @@ def estimate_runtime_context_tokens(text: str) -> int:
 
 def classify_runtime_compaction_failure(exc: Exception) -> str:
     message = str(exc or "").casefold()
+    if "incomplete_summarizer_input" in message:
+        return "incomplete_input"
     if "empty_summary" in message or "schema" in message or "privacy" in message:
         return "schema_privacy"
     if any(marker in message for marker in ("no_reduction", "insufficient_reduction", "still_over_threshold")):
@@ -1766,10 +1768,14 @@ class RuntimePlannerService:
                     entries.append({"role": "user" if safe["role"] == "user" else "agent", "text": safe["content"]})
             if pending:
                 raise ValueError("native completed prefix contains pending calls")
+            metadata["attempts"] = 1
             result = dict(self._compactor.compact(tuple(entries), {
                 "trigger": "auto", "phase": "mid_turn", "targetTokens": guard["targetAfterTokens"],
                 "realContextLimit": guard["contextLimit"],
             }))
+            metadata["attempts"] = bounded_runtime_compaction_integer(result.get("providerAttempts"), 16)
+            if ensure_dict(result.get("completeness")).get("summarizerInputComplete") is False:
+                raise ValueError("incomplete_summarizer_input")
             summary = str(result.get("summary") or "").strip()
             if not summary:
                 raise ValueError("empty_summary")
@@ -1799,7 +1805,8 @@ class RuntimePlannerService:
                 _reset_compacted_context_usage(context_usage, str(result.get("summaryDigest") or summary))
         except Exception as exc:  # noqa: BLE001 - keep the existing transcript on provider/CAS failure.
             metadata["failureClass"] = "cancelled" if native_turn.cancelled() else classify_runtime_compaction_failure(exc)
-        metadata["attempts"] = 1
+        if metadata.get("attempts") is None:
+            metadata["attempts"] = 1
         metadata["latencyMs"] = bounded_runtime_compaction_integer((time.perf_counter() - started) * 1000, 86_400_000)
         native_turn.compaction = runtime_compaction_audit_view(metadata)
         if metadata.get("applied") and "recovery" in metadata:
@@ -2863,6 +2870,7 @@ class RuntimePlannerService:
                 metadata["blocked"] = projected_tokens >= hard_limit_tokens
                 return history, metadata, bool(metadata["blocked"])
             compaction_started = time.perf_counter()
+            metadata["attempts"] = 1
             try:
                 result = dict(compact_port.compact(
                     tuple(dict(entry) for entry in history),
@@ -2876,6 +2884,9 @@ class RuntimePlannerService:
                         "realContextLimit": context_limit,
                     },
                 ))
+                metadata["attempts"] = bounded_runtime_compaction_integer(result.get("providerAttempts"), 16)
+                if ensure_dict(result.get("completeness")).get("summarizerInputComplete") is False:
+                    raise ValueError("incomplete_summarizer_input")
                 recovery = normalize_compaction_recovery(result["recovery"]) if "recovery" in result else None
                 summary = str(ensure_dict(result).get("summary") or "").strip()
                 if not summary:
@@ -2928,7 +2939,8 @@ class RuntimePlannerService:
                 return replacement_history, metadata, False
             except Exception as exc:  # noqa: BLE001 - host/provider failures are classified and bounded.
                 metadata["failureClass"] = classify_runtime_compaction_failure(exc)
-                metadata["attempts"] = 1
+                if metadata.get("attempts") is None:
+                    metadata["attempts"] = 1
                 metadata["latencyMs"] = bounded_runtime_compaction_integer(
                     (time.perf_counter() - compaction_started) * 1000,
                     24 * 60 * 60 * 1000,
