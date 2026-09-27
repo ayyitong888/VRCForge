@@ -56,7 +56,7 @@ CANONICAL_TOOL_LEAVES: dict[str, dict[str, Any]] = {
     "diagnostics_build/validation_performance": {"title": "Validation & Performance", "routing": _routing(("validate an Avatar, inspect performance, compare screenshots, inspect an attached image/archive, or verify a completed operation",), ("unverified mutation, package installation, or web research",), ("validation findings, visual evidence, performance analysis, managed attachment inspection, and approved project-materialization evidence",), "read-only validation and previews", "approved validation, managed capture, or project-materialization writes")},
     "diagnostics_build/checkpoints_history": {"title": "Checkpoints & History", "routing": _routing(("create or inspect recovery evidence, checkpoints, operation history, or receipts",), ("automatic rollback without approval or ordinary editing",), ("checkpoints, history, receipts, and explicit recovery",), "read history and preview recovery", "approved checkpoint or restore actions only")},
     "diagnostics_build/build_runtime": {"title": "Build & Runtime", "routing": _routing(("build, export, upload, enter play mode or runtime tests, or inspect their results",), ("ordinary authoring before validation or planning-mode execution",), ("build/runtime previews, play-mode control, execution, and receipts",), "build and runtime previews only", "approved build, export, upload, play-mode, or runtime actions")},
-    "research/web_research": {"title": "Documentation & Web Research", "routing": _routing(("find official documentation, current compatibility notes, tutorials, or cited community evidence",), ("local installed state, project files, shell commands, or Unity mutation",), ("read-only external sources with URLs and provenance; web reads remain resident core tools",), "read-only search and retrieval", "read-only search and retrieval")},
+    "research/web_research": {"title": "Documentation & Web Research", "routing": _routing(("find official documentation, current compatibility notes, tutorials, or cited community evidence",), ("local installed state, project files, shell commands, or Unity mutation",), ("read-only external sources with URLs and provenance; web reads are lazy-loaded through this leaf",), "read-only search and retrieval", "read-only search and retrieval")},
 }
 
 CANONICAL_TOOL_BLOCK_ALIASES = {
@@ -227,8 +227,6 @@ _CORE_TOOLS = frozenset(
         "vrcforge_read_tool_result",
         "vrcforge_find_files",
         "vrcforge_search_text",
-        "vrcforge_web_fetch",
-        "vrcforge_web_search",
         "vrcforge_get_goal",
         "vrcforge_create_goal",
         "vrcforge_update_goal",
