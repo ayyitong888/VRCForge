@@ -5,7 +5,7 @@ param(
     [string]$UnityPackagePath = "",
     [string]$PayloadDownloadUrl = "",
     [string]$UvDownloadUrl = "https://github.com/astral-sh/uv/releases/download/0.9.17/uv-x86_64-pc-windows-msvc.zip",
-    [string]$UvDownloadSha256 = "",
+    [string]$UvDownloadSha256 = "ebc76197bf3e1a58f9dac6f70f49b0ebd3e6907ab35289ce228bce5ba8a3f201",
     [switch]$AllowDirty,
     [switch]$AllowUnpushed,
     [switch]$AllowVersionMismatch,

@@ -14,8 +14,9 @@ $buffersUrl = "https://www.nuget.org/api/v2/package/System.Buffers/4.5.1"
 $buffersHash = "c30b3dd2c7e2f4cee4b823d692fd42118309b42ab1f5007f923d329a5b0d6b12"
 try {
     New-Item -ItemType Directory -Force -Path $work | Out-Null
-    $litePackage = Join-Path $work "LiteDB.nupkg"
-    $buffersPackage = Join-Path $work "System.Buffers.nupkg"
+    # NuGet packages are ZIP archives; Windows PowerShell requires the .zip suffix.
+    $litePackage = Join-Path $work "LiteDB.zip"
+    $buffersPackage = Join-Path $work "System.Buffers.zip"
     Invoke-WebRequest -Uri $liteUrl -OutFile $litePackage
     Invoke-WebRequest -Uri $buffersUrl -OutFile $buffersPackage
     if ((Get-FileHash $litePackage -Algorithm SHA256).Hash.ToLowerInvariant() -cne $liteHash) { throw "LiteDB package hash mismatch." }
