@@ -307,7 +307,7 @@ class ContextCompactionTests(unittest.TestCase):
         self.assertIn("task-42", prompts[0])
         self.assertLess(fitted["retainedEntryCount"], fitted["entryCount"])
 
-    def test_oversized_tool_output_uses_digest_fallback_without_provider_or_raw_payload(self) -> None:
+    def test_oversized_tool_output_uses_inline_digest_and_explicit_source_recovery(self) -> None:
         tool_payload = "result-value-" * 4_000
         provider_called = False
 
@@ -324,14 +324,17 @@ class ContextCompactionTests(unittest.TestCase):
             summarizer=should_not_run,
             target_tokens=128,
         )
-        serialized = json.dumps(result, ensure_ascii=False)
+        inline = json.dumps({key: value for key, value in result.items() if key != "recovery"}, ensure_ascii=False)
 
         self.assertFalse(provider_called)
         self.assertEqual(result["fidelity"], "fallback")
         self.assertEqual(result["fallbackReason"], "input_oversize")
         self.assertIn("Goal: validate the install safely.", result["summary"])
         self.assertNotIn(tool_payload[:128], result["summary"])
-        self.assertNotIn(tool_payload[:128], serialized)
+        self.assertNotIn(tool_payload[:128], inline)
+        self.assertEqual(result["recovery"]["sourceEntries"][1], {"role": "tool", "text": tool_payload})
+        self.assertEqual(result["recovery"]["authority"], "historical_context_data")
+        self.assertTrue(result["completeness"]["sourceRecoveryComplete"])
         self.assertIn("entry omitted", result["summary"])
 
     def test_provider_retry_success_reports_stable_metadata_and_no_raw_input(self) -> None:

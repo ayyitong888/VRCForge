@@ -589,6 +589,8 @@ def compact_context(
     attempts = 0
     fallback_reason = "provider_unavailable"
     summary = ""
+    complete_summary = ""
+    summary_source = "fallback"
     fidelity = "fallback"
     input_over_budget = estimated_tokens > budget
     if input_over_budget:
@@ -629,6 +631,10 @@ def compact_context(
                     summary = ""
                     fallback_reason = "sensitive_provider_output"
                     break
+                # Only validated, privacy-safe output may enter recovery.
+                # Keep the complete candidate separate from its inline budget.
+                complete_summary = candidate
+                summary_source = "provider"
                 fidelity = input_fidelity
                 fallback_reason = ""
                 break
@@ -647,6 +653,7 @@ def compact_context(
             normalized_language,
             summary_max_chars,
         )
+        complete_summary = summary
 
     result: dict[str, Any] = {
         "ok": True,
@@ -656,6 +663,23 @@ def compact_context(
         "retainedEntryCount": len(retained),
         "sourceDigest": computed_source_digest,
         "summaryDigest": hashlib.sha256(summary.encode("utf-8")).hexdigest(),
+        "completeness": {
+            "inlineSummaryComplete": summary == complete_summary,
+            "sourceRecoveryComplete": True,
+            "summarizerInputComplete": attempts > 0 and input_fidelity == "full",
+        },
+        # Data returned to the existing caller, not a store or a reader promise.
+        # Source completeness means all accepted, normalized, redacted entries;
+        # it does not mean the fitted summarizer saw every source entry.
+        "recovery": {
+            "schema": "vrcforge.context_compaction_recovery.v1",
+            "authority": "historical_context_data",
+            "sourceEntries": entries,
+            "sourceDigest": computed_source_digest,
+            "summary": complete_summary,
+            "summaryDigest": hashlib.sha256(complete_summary.encode("utf-8")).hexdigest(),
+            "summarySource": summary_source,
+        },
         "clientDigestMatched": client_digest_matched,
         "fidelity": fidelity,
         "redactions": redactor.report.as_dict(),
