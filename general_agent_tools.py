@@ -347,10 +347,7 @@ def list_directory(
     max_count = _limit(max_count, "max_count", MAX_COUNT)
     root = _directory(path, allowed_roots)
     def walk(directory: Path, depth: int) -> Iterator[dict[str, Any]]:
-        try:
-            children = sorted(directory.iterdir(), key=lambda item: (item.name.casefold(), item.name))
-        except OSError:
-            return
+        children = sorted(directory.iterdir(), key=lambda item: (item.name.casefold(), item.name))
         for child in children:
             if _is_link_or_junction(child):
                 kind = "other"
@@ -425,10 +422,7 @@ def read_text_file(
 
 def _iter_files(root: Path, max_depth: int) -> Iterator[Path]:
     def walk(directory: Path, depth: int) -> Iterator[Path]:
-        try:
-            children = sorted(directory.iterdir(), key=lambda item: (item.name.casefold(), item.name))
-        except OSError:
-            return
+        children = sorted(directory.iterdir(), key=lambda item: (item.name.casefold(), item.name))
         for child in children:
             if _is_link_or_junction(child):
                 continue
