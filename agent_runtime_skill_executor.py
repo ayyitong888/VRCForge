@@ -119,6 +119,7 @@ class AgentRuntimeSkillExecutor:
                 "tool": tool_name,
                 "error": f"Unknown skill: {tool_name}",
             }
+            return payload
         user_activated_tool = bool(
             tool.requires_user_activation and self._ports.computer_use_model_invocable(config)
         )
