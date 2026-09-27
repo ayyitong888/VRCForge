@@ -316,6 +316,40 @@ def _source_constraints(root: object, pointer: str, sanitize: Callable[[object, 
     return rows, False
 
 
+def _inline_object_fields(row: Mapping[str, Any], projected: Mapping[str, Any], *,
+                          child_pointer: str, ref: str, source: str, limit: int,
+                          page: Mapping[str, Any], next_collection: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Keep complete shallow metadata visible when an object needs expansion.
+
+    Nested values retain their exact reader cursor.  The projection is all-or-
+    nothing: if the enriched row cannot fit, callers keep the historical
+    expandable skeleton instead of presenting an incomplete object value.
+    """
+    immediate: dict[str, Any] = {}
+    children: list[dict[str, Any]] = []
+    for name, value in projected.items():
+        pointer = _pointer(child_pointer, name)
+        if (len(pointer) > 1024 or pointer.count("/") > 32
+                or re.fullmatch(INPUT_SCHEMA["properties"]["jsonPointer"]["pattern"], pointer) is None):
+            return None
+        if isinstance(value, (dict, list)):
+            child = {"jsonPointer": pointer,
+                     "type": "array" if isinstance(value, list) else "object",
+                     "count": len(value),
+                     "nextRequest": {"tool": TOOL_NAME, "arguments": {
+                         "resultRef": ref, "source": source, "jsonPointer": pointer,
+                         "offset": 0, "limit": limit}}}
+            children.append(child)
+        else:
+            immediate[str(name)] = value
+    enriched = {**dict(row), "expandable": True, "truncated": True,
+                "immediateFields": immediate, "childReferences": children}
+    enriched.pop("value", None)
+    candidate = {**dict(page), "items": [enriched], "returnedItems": 1,
+                 "nextRequest": dict(next_collection)}
+    return enriched if _size(candidate) <= MAX_PAGE_CHARS else None
+
+
 def read_tool_result(params: Mapping[str, Any], *, sanitize: Callable[[object, int], str]) -> dict[str, Any]:
     context = _CONTEXT.get()
     if context is None or not context.session_id or not context.turn_id:
@@ -454,6 +488,12 @@ def read_tool_result(params: Mapping[str, Any], *, sanitize: Callable[[object, i
                 row["nextRequest"]["arguments"]["textOffset"] = 0
             if len(child_pointer) > 1024 or child_pointer.count("/") > 32:
                 raise ValueError("Result expansion exceeds the existing JSON pointer bounds")
+            if isinstance(projected, dict):
+                enriched = _inline_object_fields(row, projected, child_pointer=child_pointer,
+                                                 ref=ref, source=source, limit=limit, page=page,
+                                                 next_collection=next_collection)
+                if enriched is not None:
+                    row = enriched
         candidate = {**page, "items": [*page["items"], row], "returnedItems": len(page["items"]) + 1,
                      "nextRequest": next_collection}
         if _size(candidate) > MAX_PAGE_CHARS:
