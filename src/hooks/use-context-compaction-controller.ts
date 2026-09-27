@@ -20,6 +20,7 @@ import {
   evaluateCompactionBudget,
   fingerprintCompactionSource,
   invalidateCompactedWindowUsage,
+  mergeCompactionRecovery,
   resolveContextLimit,
   type ContextCompactionBudgetDecision,
 } from "../lib/context-compaction";
@@ -243,6 +244,10 @@ export function useContextCompactionController({
         entryCount: payload.entryCount ?? history.length,
         beforeTokens,
         contextLimit: contextLimit.known ? contextLimit.limit : undefined,
+        compactionRecovery: mergeCompactionRecovery(
+          ...snapshotItems.map((item) => (item.type === "agent" || item.type === "compact") ? item.compactionRecovery : undefined),
+          payload.recovery,
+        ),
         createdAt: new Date().toISOString(),
       });
       const replacementHistory = buildChatHistory(replacementItems, t);

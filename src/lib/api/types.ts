@@ -1,5 +1,16 @@
 export type ExecutionMode = "approval" | "auto" | "roslyn_full_auto";
 
+/** Complete, redacted source retained by context compaction for later model turns. */
+export type CompactionRecoveryEntry = {
+  schema?: string;
+  authority?: string;
+  sourceEntries: Array<{ role: string; text: string }>;
+  sourceDigest: string;
+  summary?: string;
+  summaryDigest?: string;
+  summarySource?: string;
+};
+
 export type PermissionState = {
   executionMode: ExecutionMode;
   perActionApproval: boolean;
@@ -602,6 +613,7 @@ export type AgentRuntimeResponse = {
     suppressionReason?: string;
     blocked?: boolean;
     target?: "native_history" | string;
+    recovery?: CompactionRecoveryEntry | CompactionRecoveryEntry[];
   };
   attachments?: AgentMessageAttachment[];
   write?: {

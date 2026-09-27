@@ -129,6 +129,7 @@ pub(crate) struct DesktopAgentMessageRequest {
     session_id: Option<String>,
     chat_id: Option<String>,
     history: Option<Vec<serde_json::Value>>,
+    compaction_recovery: Option<Vec<serde_json::Value>>,
     agent_name: Option<String>,
     attachments: Option<Vec<serde_json::Value>>,
     project_path: Option<String>,
@@ -836,6 +837,7 @@ pub async fn send_agent_message(
             "goalDeliveryId": request.goal_delivery_id,
             "message": request.message,
             "history": request.history.unwrap_or_default(),
+            "compactionRecovery": request.compaction_recovery.unwrap_or_default(),
             "attachments": request.attachments.unwrap_or_default(),
             "projectPath": request.project_path,
             "projectType": request.project_type,
@@ -897,6 +899,17 @@ mod agent_message_transport_tests {
         let request = request_with(serde_json::json!({"message": "inspect the project"}));
         assert_eq!(request.max_agentic_turns, None);
         assert!(!request.plan_mode);
+    }
+
+    #[test]
+    fn recovery_archive_preserves_long_text_separately_from_history() {
+        let text = format!("{}TAIL", "original fact ".repeat(2500));
+        let archive = serde_json::json!({"sourceEntries": [{"role": "user", "text": text}]});
+        let request = request_with(serde_json::json!({
+            "message": "recall", "compactionRecovery": [archive.clone()]
+        }));
+        assert_eq!(request.compaction_recovery, Some(vec![archive]));
+        assert!(request.history.is_none());
     }
 
     #[test]

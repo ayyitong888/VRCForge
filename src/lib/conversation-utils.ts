@@ -14,9 +14,11 @@ import {
   normalizeContextProvider,
   resolveContextInputTokens,
   resolveContextLimit,
+  mergeCompactionRecovery,
 } from "./context-compaction";
 import { subAgentAdoptedHistoryText } from "./subagent-merge";
 import { formatCount } from "./utils";
+import type { CompactionRecoveryEntry } from "./api/types";
 
 const CONTEXT_TOKEN_LIMIT_DISPLAY_ESTIMATE = 128000;
 export const MAX_ATTACHMENT_PAYLOAD_BYTES = 4 * 1024 * 1024;
@@ -185,6 +187,13 @@ export function buildChatHistory(items: ConversationItem[], t: TFunction): ChatH
     }
   }
   return history;
+}
+
+/** Recovery is sent through its dedicated request field, never ordinary history. */
+export function collectCompactionRecovery(items: ConversationItem[]): CompactionRecoveryEntry[] {
+  return mergeCompactionRecovery(...items.map((item) => (
+    (item.type === "agent" || item.type === "compact") ? item.compactionRecovery : undefined
+  )));
 }
 
 export function visibleAgentDialogueText(response: AgentRuntimeResponse): string {

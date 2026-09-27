@@ -1,4 +1,4 @@
-import type { AgentContextUsage, AgentRuntimeResponse, AgentShellResult, SubAgentTask } from "./api";
+import type { AgentContextUsage, AgentRuntimeResponse, AgentShellResult, CompactionRecoveryEntry, SubAgentTask } from "./api";
 import type { AgentRuntimePhase } from "./chat-streaming";
 
 export const SELECTED_TEXT_ATTACHMENT_NAME = "Selected text";
@@ -155,7 +155,7 @@ export type ChatTimelineEvent = {
 export type ConversationItem =
   | { id: string; type: "user"; text: string; planMode?: boolean; attachments?: ChatAttachment[]; queuedFrom?: boolean; queueStatus?: "steering" | "queued" | "waiting_for_resources" | "delivery_unverified" | "paused" | "cancelled"; clientTurnId?: string; queueEnvelope?: { planMode?: boolean; provider?: string; providerLabel?: string; model?: string; contextLimit?: number; projectPath?: string; projectType?: ProjectType; sessionId?: string; laneId?: string; computerUseRequested?: boolean; computerUseVisualTheme?: "light" | "dark"; computerUseVisualAccent?: string; queueId?: string; sequence?: number }; createdAt?: string }
   | { id: string; type: "streaming"; clientTurnId: string; text: string; phase?: AgentRuntimePhase; timeline?: ChatTimelineEvent[]; providerLastActivityAt?: string; providerLabel?: string; model?: string; createdAt?: string }
-  | { id: string; type: "agent"; response: AgentRuntimeResponse; timeline?: ChatTimelineEvent[]; elapsedSeconds?: number; providerLabel?: string; model?: string; createdAt?: string }
+  | { id: string; type: "agent"; response: AgentRuntimeResponse; timeline?: ChatTimelineEvent[]; compactionRecovery?: CompactionRecoveryEntry[]; elapsedSeconds?: number; providerLabel?: string; model?: string; createdAt?: string }
   | { id: string; type: "result"; approvalId: string; result?: AgentShellResult; error?: string; createdAt?: string }
   | { id: string; type: "timeline_event"; event: ChatTimelineEvent; createdAt?: string }
   | {
@@ -171,7 +171,7 @@ export type ConversationItem =
       createdAt?: string;
     }
   | { id: string; type: "error"; text: string; createdAt?: string }
-  | { id: string; type: "compact"; text: string; detail?: string; status?: "running" | "completed"; entryCount?: number; beforeTokens?: number; afterTokens?: number; contextLimit?: number; createdAt?: string }
+  | { id: string; type: "compact"; text: string; detail?: string; status?: "running" | "completed"; compactionRecovery?: CompactionRecoveryEntry[]; entryCount?: number; beforeTokens?: number; afterTokens?: number; contextLimit?: number; createdAt?: string }
   | { id: string; type: "subagent"; task: SubAgentTask }
   | { id: string; type: "handoff_card"; cardId: string; handoffId: string; kind: string; payloadDigest: string; sourceChatId?: string; targetChatId?: string; sourceRevision?: number; targetRevision?: number; summary?: Record<string, unknown>; status?: string };
 

@@ -6,6 +6,7 @@ import threading
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from typing import Any
+from context_compaction import normalize_compaction_recovery
 
 
 @dataclass(frozen=True)
@@ -158,7 +159,7 @@ class AgentRuntimeSessionState:
         cls, snapshot: dict[str, Any], *, binding: str,
     ) -> dict[str, Any]:
         required = {"binding", "turnId", "messages", "activeTurnStart"}
-        if not isinstance(snapshot, dict) or not required <= set(snapshot) or set(snapshot) - required - {"toolOrder"}:
+        if not isinstance(snapshot, dict) or not required <= set(snapshot) or set(snapshot) - required - {"toolOrder", "compactionRecovery"}:
             raise ValueError("native snapshot fields are invalid")
         if "toolOrder" in snapshot:
             order = snapshot["toolOrder"]
@@ -218,10 +219,32 @@ class AgentRuntimeSessionState:
         }
         if "toolOrder" in snapshot:
             normalized["toolOrder"] = list(snapshot["toolOrder"])
+        if "compactionRecovery" in snapshot:
+            normalized["compactionRecovery"] = cls._merge_native_recoveries([], snapshot["compactionRecovery"])
         if normalized_messages[active_turn_start].get("role") != "user":
             raise ValueError("native active turn must begin with user message")
         cls._native_size_ok(normalized)
         return normalized
+
+    @staticmethod
+    def _merge_native_recoveries(existing: list[dict[str, Any]], incoming: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if not isinstance(incoming, list):
+            raise ValueError("native compaction recovery must be a list")
+        result = copy.deepcopy(existing)
+        for value in incoming:
+            normalized = normalize_compaction_recovery(value)
+            if normalized not in result:
+                result.append(normalized)
+        return result
+
+    def add_native_recoveries(self, session_id: str, *, binding: str, recoveries: list[dict[str, Any]]) -> None:
+        with self._ports.shared_state_lock:
+            current = self._native_conversations.get(session_id)
+            if current is None or current["binding"] != binding:
+                raise ValueError("native conversation binding mismatch")
+            candidate = {**current, "compactionRecovery": self._merge_native_recoveries(current.get("compactionRecovery", []), recoveries)}
+            self._native_size_ok(candidate)
+            self._native_conversations[session_id] = candidate
 
     def begin_native_turn(
         self, session_id: str, *, binding: str, turn_id: str, message: str,
@@ -312,22 +335,29 @@ class AgentRuntimeSessionState:
                 raise ValueError("native conversation binding mismatch")
             current_messages = existing["messages"]
             incoming_messages = normalized["messages"]
+            recoveries = self._merge_native_recoveries(existing.get("compactionRecovery", []), normalized.get("compactionRecovery", []))
+            def restored(candidate: dict[str, Any]) -> dict[str, Any]:
+                candidate = copy.deepcopy(candidate)
+                if recoveries or "compactionRecovery" in candidate:
+                    candidate["compactionRecovery"] = copy.deepcopy(recoveries)
+                self._native_size_ok(candidate)
+                self._native_conversations[session_id] = candidate
+                return copy.deepcopy(candidate)
             if incoming_messages == current_messages and normalized["turnId"] == existing["turnId"]:
-                return copy.deepcopy(existing)
+                return restored(existing)
             if (
                 normalized["turnId"] == existing["turnId"]
                 and existing["activeTurnStart"] <= normalized["activeTurnStart"]
                 and existing["messages"][existing["activeTurnStart"]:]
                 == incoming_messages[normalized["activeTurnStart"]:]
             ):
-                return copy.deepcopy(existing)
+                return restored(existing)
             if len(incoming_messages) >= len(current_messages) and incoming_messages[:len(current_messages)] == current_messages:
                 if len(incoming_messages) == len(current_messages):
                     raise ValueError("native snapshot conflicts with current turn")
-                self._native_conversations[session_id] = normalized
-                return copy.deepcopy(normalized)
+                return restored(normalized)
             if len(current_messages) >= len(incoming_messages) and current_messages[:len(incoming_messages)] == incoming_messages:
-                return copy.deepcopy(existing)
+                return restored(existing)
             raise ValueError("native snapshot conflicts with current conversation")
 
     def replace_native_completed_prefix(
@@ -337,6 +367,7 @@ class AgentRuntimeSessionState:
         binding: str,
         expected_snapshot: dict[str, Any],
         summary: str,
+        recovery: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         session_id = self._native_required(session_id, "session id")
         binding = self._native_required(binding, "binding")
@@ -357,6 +388,9 @@ class AgentRuntimeSessionState:
             }
             if "toolOrder" in current:
                 candidate["toolOrder"] = list(current["toolOrder"])
+            if recovery is not None or "compactionRecovery" in current:
+                candidate["compactionRecovery"] = self._merge_native_recoveries(
+                    current.get("compactionRecovery", []), [recovery] if recovery is not None else [])
             normalized = self._validate_native_snapshot(candidate, binding=binding)
             self._native_conversations[session_id] = normalized
             return copy.deepcopy(normalized)

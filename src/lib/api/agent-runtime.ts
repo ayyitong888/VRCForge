@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { hasTauriInternals, invokeTauriWithAbort, requestJson } from "./http";
 import { ApiError } from "./http";
-import type { AgentApproval, AgentApprovalExecution, AgentDesktopAction, AgentGoal, AgentGoalBackgroundAcknowledgement, AgentGoalBackgroundState, AgentGoalDelivery, AgentMemory, AgentMessageAttachment, AgentProgress, AgentQuestion, AgentRuntimeContinuation, AgentRuntimeResponse, AgentRuntimeRun, AgentRuntimeRunLedger, AgentTurnResponseRecovery, DesktopBridgeStatus, DesktopRuntimeSnapshot } from "./types";
+import type { AgentApproval, AgentApprovalExecution, AgentDesktopAction, AgentGoal, AgentGoalBackgroundAcknowledgement, AgentGoalBackgroundState, AgentGoalDelivery, AgentMemory, AgentMessageAttachment, AgentProgress, AgentQuestion, AgentRuntimeContinuation, AgentRuntimeResponse, AgentRuntimeRun, AgentRuntimeRunLedger, AgentTurnResponseRecovery, CompactionRecoveryEntry, DesktopBridgeStatus, DesktopRuntimeSnapshot } from "./types";
 
 /** Finite model-turn budget required for unattended/background delivery. */
 export const DEFAULT_BACKGROUND_MAX_AGENTIC_TURNS = 25;
@@ -64,6 +64,7 @@ export type AgentHistoryCompactionDetails = {
   providerAttempts?: number;
   failureClass?: string;
   fallbackReason?: string;
+  recovery?: CompactionRecoveryEntry | CompactionRecoveryEntry[];
 };
 
 export type CompactAgentHistoryResponse = AgentHistoryCompactionDetails & {
@@ -190,7 +191,7 @@ export async function sendAgentMessage(
   sessionId?: string,
   history?: ChatHistoryEntry[],
   agentName?: string,
-  options: { planMode?: boolean; signal?: AbortSignal; attachments?: AgentMessageAttachment[]; chatId?: string; projectPath?: string; projectType?: "general" | "unity"; provider?: string; providerLabel?: string; model?: string; contextLimit?: number; maxAgenticTurns?: number; clientTurnId?: string; goalDeliveryId?: string; computerUseRequested?: boolean; computerUseGrantId?: string; computerUseVisualTheme?: "light" | "dark"; computerUseVisualAccent?: string; followupQueueId?: string; followupLaneId?: string } = {},
+  options: { planMode?: boolean; signal?: AbortSignal; attachments?: AgentMessageAttachment[]; compactionRecovery?: CompactionRecoveryEntry[]; chatId?: string; projectPath?: string; projectType?: "general" | "unity"; provider?: string; providerLabel?: string; model?: string; contextLimit?: number; maxAgenticTurns?: number; clientTurnId?: string; goalDeliveryId?: string; computerUseRequested?: boolean; computerUseGrantId?: string; computerUseVisualTheme?: "light" | "dark"; computerUseVisualAccent?: string; followupQueueId?: string; followupLaneId?: string } = {},
 ): Promise<AgentRuntimeResponse> {
   const request = {
     agentName: agentName || "desktop-agent",
@@ -201,6 +202,7 @@ export async function sendAgentMessage(
     message,
     history: history ?? [],
     attachments: options.attachments ?? [],
+    compactionRecovery: options.compactionRecovery ?? [],
     projectPath: options.projectPath || undefined,
     projectType: options.projectType || (options.projectPath ? "unity" : "general"),
     provider: options.provider || undefined,
@@ -231,6 +233,7 @@ export async function sendAgentMessage(
       message: request.message,
       history: request.history,
       attachments: request.attachments,
+      compactionRecovery: request.compactionRecovery,
       projectPath: request.projectPath,
       projectType: request.projectType,
       provider: request.provider,

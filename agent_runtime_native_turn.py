@@ -10,7 +10,7 @@ from __future__ import annotations
 import copy
 import json
 from collections.abc import Iterable, Mapping
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 if TYPE_CHECKING:
     from agent_runtime_session_state import AgentRuntimeSessionState
@@ -87,6 +87,7 @@ class NativeRuntimeTurn:
         continuation_observation: Mapping[str, Any] | None,
         initial_history: list[dict[str, Any]] | None = None,
         client_turn_id: str = "",
+        retain_recovery: Callable[[dict[str, Any]], str] | None = None,
     ) -> None:
         self._state = owner
         self._planner = planner
@@ -101,6 +102,8 @@ class NativeRuntimeTurn:
         self.admitted_tool_names: set[str] | None = None
         self.compaction_attempted = False
         self.compaction: dict[str, Any] | None = None
+        # The gateway owns reader scope and lifecycle; the turn owns no store.
+        self.retain_recovery = retain_recovery
         state = self._state
         continuation_context = continuation_context or {}
         continuation_completion = continuation_completion or {}
@@ -164,6 +167,15 @@ class NativeRuntimeTurn:
     def snapshot(self) -> dict[str, Any]:
         return self._state.native_conversation(self._session_id, binding=self._binding) or {}
 
+    def recoveries(self) -> list[dict[str, Any]]:
+        return self.snapshot().get("compactionRecovery", [])
+
+    def add_recoveries(self, recoveries: list[dict[str, Any]]) -> None:
+        # Legacy turns borrow this adapter without initializing native storage.
+        if not self._binding:
+            return
+        self._state.add_native_recoveries(self._session_id, binding=self._binding, recoveries=recoveries)
+
     def order_tools(self, definitions: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Order only this request's authorized definitions using private session state."""
         names = [item["function"]["name"] for item in definitions]
@@ -176,14 +188,15 @@ class NativeRuntimeTurn:
             session_id=self._session_id, turn_id=self._turn_id, client_turn_id=self._client_turn_id,
         )
 
-    def replace_completed_prefix(self, expected_snapshot: dict[str, Any], summary: str) -> None:
+    def replace_completed_prefix(self, expected_snapshot: dict[str, Any], summary: str,
+                                 *, recovery: dict[str, Any] | None = None) -> None:
         # Check Stop and compare-and-replace under the same existing state lock.
         with self._state.shared_state_lock:
             if self.cancelled():
                 raise ValueError("native compaction cancelled")
             self._state.replace_native_completed_prefix(
                 self._session_id, binding=self._binding,
-                expected_snapshot=expected_snapshot, summary=summary,
+                expected_snapshot=expected_snapshot, summary=summary, recovery=recovery,
             )
 
     def admit(self, receipt: dict[str, Any], *, tool_names: Iterable[str] = ()) -> None:

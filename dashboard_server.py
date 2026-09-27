@@ -2833,6 +2833,7 @@ def agent_runtime_request_payload(
         "maxAgenticTurns": runtime_request.max_agentic_turns,
         "planMode": runtime_request.plan_mode,
         "history": runtime_request.history,
+        "compactionRecovery": runtime_request.compaction_recovery,
         "_computerUseRequested": runtime_request.computer_use_requested,
         "_computerUseGrantId": runtime_request.computer_use_grant_id,
         "_computerUseVisualTheme": runtime_request.computer_use_visual_theme,

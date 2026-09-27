@@ -1,4 +1,34 @@
 import type { ConversationItem } from "./chat-types";
+import type { CompactionRecoveryEntry } from "./api/types";
+
+export function normalizeCompactionRecovery(value: unknown): CompactionRecoveryEntry[] {
+  const candidates = Array.isArray(value) ? value : value ? [value] : [];
+  return candidates.filter((entry): entry is CompactionRecoveryEntry => {
+    if (!entry || typeof entry !== "object") return false;
+    const item = entry as Record<string, unknown>;
+    return typeof item.sourceDigest === "string"
+      && Array.isArray(item.sourceEntries)
+      && item.sourceEntries.every((source) => (
+        Boolean(source) && typeof source === "object"
+        && typeof (source as Record<string, unknown>).role === "string"
+        && typeof (source as Record<string, unknown>).text === "string"
+      ));
+  });
+}
+
+export function mergeCompactionRecovery(...values: unknown[]): CompactionRecoveryEntry[] {
+  const merged: CompactionRecoveryEntry[] = [];
+  const seen = new Set<string>();
+  for (const value of values) {
+    for (const entry of normalizeCompactionRecovery(value)) {
+      const key = `${entry.sourceDigest}\u0000${entry.summaryDigest || ""}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      merged.push(entry);
+    }
+  }
+  return merged;
+}
 
 export const CONTEXT_COMPACTION_PREFIRE_RATIO = 0.75;
 export const CONTEXT_AUTO_COMPACT_RATIO = 0.85;

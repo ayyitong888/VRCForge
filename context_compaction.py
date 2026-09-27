@@ -10,6 +10,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 
 COMPACTION_SCHEMA = "vrcforge.context_compaction.v1"
+COMPACTION_RECOVERY_SCHEMA = "vrcforge.context_compaction_recovery.v1"
 DEFAULT_TARGET_TOKENS = 12_000
 MAX_INPUT_BUDGET_TOKENS = 64_000
 MAX_SUMMARY_CHARS = 6_000
@@ -206,6 +207,78 @@ def _canonical_digest(value: Any) -> str:
         separators=(",", ":"),
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def normalize_compaction_recovery(value: Any) -> dict[str, Any]:
+    """Validate and copy complete, privacy-safe compaction recovery data.
+
+    Recovery is historical model context, so this boundary accepts only the
+    fields emitted by :func:`compact_context`.  It deliberately does not
+    truncate or silently accept structural changes: text is passed through
+    the existing privacy scanner, and supplied digests must cover that safe
+    payload.
+    """
+
+    if not isinstance(value, Mapping):
+        raise ValueError("compaction recovery must be an object")
+    required = {
+        "schema",
+        "authority",
+        "sourceEntries",
+        "sourceDigest",
+        "summary",
+        "summaryDigest",
+        "summarySource",
+    }
+    if set(value) != required:
+        raise ValueError("compaction recovery fields are invalid")
+    if value.get("schema") != COMPACTION_RECOVERY_SCHEMA:
+        raise ValueError("compaction recovery schema is invalid")
+    if value.get("authority") != "historical_context_data":
+        raise ValueError("compaction recovery authority is invalid")
+    summary_source = value.get("summarySource")
+    if not isinstance(summary_source, str) or summary_source not in {"provider", "fallback"}:
+        raise ValueError("compaction recovery summarySource is invalid")
+
+    raw_entries = value.get("sourceEntries")
+    if not isinstance(raw_entries, list) or not raw_entries:
+        raise ValueError("compaction recovery sourceEntries must be a non-empty list")
+    entries: list[dict[str, str]] = []
+    for raw_entry in raw_entries:
+        if not isinstance(raw_entry, Mapping) or set(raw_entry) != {"role", "text"}:
+            raise ValueError("compaction recovery source entry fields are invalid")
+        role = raw_entry.get("role")
+        text = raw_entry.get("text")
+        if not isinstance(role, str) or role not in {"user", "assistant", "system", "tool"}:
+            raise ValueError("compaction recovery source role is invalid")
+        if not isinstance(text, str) or not text:
+            raise ValueError("compaction recovery source text is invalid")
+        safe_text, _report = redact_context_text(text, limit=None)
+        entries.append({"role": role, "text": safe_text})
+
+    summary = value.get("summary")
+    if not isinstance(summary, str) or not summary:
+        raise ValueError("compaction recovery summary is invalid")
+    safe_summary, _summary_report = redact_context_text(summary, limit=None)
+
+    source_digest = value.get("sourceDigest")
+    summary_digest = value.get("summaryDigest")
+    if not isinstance(source_digest, str) or source_digest != _canonical_digest(entries):
+        raise ValueError("compaction recovery sourceDigest does not match sourceEntries")
+    if not isinstance(summary_digest, str) or summary_digest != hashlib.sha256(
+        safe_summary.encode("utf-8")
+    ).hexdigest():
+        raise ValueError("compaction recovery summaryDigest does not match summary")
+
+    return {
+        "schema": COMPACTION_RECOVERY_SCHEMA,
+        "authority": "historical_context_data",
+        "sourceEntries": entries,
+        "sourceDigest": source_digest,
+        "summary": safe_summary,
+        "summaryDigest": summary_digest,
+        "summarySource": summary_source,
+    }
 
 
 def _normalize_entries(
@@ -672,7 +745,7 @@ def compact_context(
         # Source completeness means all accepted, normalized, redacted entries;
         # it does not mean the fitted summarizer saw every source entry.
         "recovery": {
-            "schema": "vrcforge.context_compaction_recovery.v1",
+            "schema": COMPACTION_RECOVERY_SCHEMA,
             "authority": "historical_context_data",
             "sourceEntries": entries,
             "sourceDigest": computed_source_digest,

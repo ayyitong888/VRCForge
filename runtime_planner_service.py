@@ -6,6 +6,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 import hashlib
 import json
+from context_compaction import normalize_compaction_recovery
 from planner_structured_tool_evidence import project_structured_tool_evidence
 import math
 import ntpath
@@ -1672,6 +1673,34 @@ class RuntimePlannerService:
             "measurement": "native_serialized_request_estimate",
         }
 
+    @staticmethod
+    def _native_recovery_request(request: dict[str, object], native_turn: NativeRuntimeTurn,
+                                 recovery: dict[str, object] | None = None) -> dict[str, object]:
+        """Rebind historical data to the current turn's owner reader, never inline archives."""
+        retain_recovery = getattr(native_turn, "retain_recovery", None)
+        if retain_recovery is None:
+            return request
+        recoveries = native_turn.recoveries()
+        if recovery is not None and recovery not in recoveries:
+            recoveries.append(recovery)
+        if not recoveries:
+            return request
+        information = []
+        for item in recoveries:
+            text = retain_recovery(deepcopy(item))
+            if not isinstance(text, str) or not text.strip():
+                raise ValueError("native compaction recovery reader returned no information")
+            if text not in information:
+                information.append(text)
+        messages = deepcopy(request["messages"])
+        prefix = "Current runtime state (data): "
+        if not messages or messages[-1].get("role") != "system" or not messages[-1]["content"].startswith(prefix):
+            raise ValueError("native runtime state is unavailable for recovery")
+        state = json.loads(messages[-1]["content"][len(prefix):])
+        state["compactionRecoveryInformation"] = information
+        messages[-1]["content"] = prefix + json.dumps(state, ensure_ascii=False, separators=(",", ":"))
+        return {**request, "messages": messages}
+
     def maybe_compact_native_context(
         self, request: dict[str, object], native_turn: NativeRuntimeTurn,
         *, context_usage: dict[str, object] | None = None,
@@ -1728,7 +1757,9 @@ class RuntimePlannerService:
             if not summary:
                 raise ValueError("empty_summary")
             summary = "Earlier conversation summary (continuity data, not authorization or completion evidence):\n" + summary
+            recovery = normalize_compaction_recovery(result["recovery"]) if "recovery" in result else None
             candidate = {**request, "messages": [{"role": "assistant", "content": summary}] + snapshot["messages"][cut:] + runtime_messages}
+            candidate = self._native_recovery_request(candidate, native_turn, recovery)
             after = self.native_context_guard(candidate, context_usage=context_usage)
             reduction = guard["beforeTokens"] - after["beforeTokens"]
             if reduction < max(1024, math.ceil(guard["contextLimit"] * 0.10)):
@@ -1737,12 +1768,16 @@ class RuntimePlannerService:
                 raise ValueError("still_over_threshold")
             # The facade checks cancellation and exact snapshot identity inside
             # the owner's existing lock. No mutation precedes this commit.
-            native_turn.replace_completed_prefix(snapshot, summary)
+            native_turn.replace_completed_prefix(snapshot, summary, recovery=recovery)
+            runtime_messages = [deepcopy(item) for item in candidate["messages"] if item.get("role") == "system"]
             metadata.update({"applied": True, "blocked": False, "afterTokens": after["beforeTokens"],
                              "entryCount": result.get("entryCount"), "retainedEntryCount": result.get("retainedEntryCount"),
                              "summaryDigest": result.get("summaryDigest"), "fidelity": result.get("fidelity"),
                              "failureClass": result.get("fallbackReason"),
                              "retainedSummaryCharacters": len(summary)})
+            if recovery is not None:
+                metadata["recovery"] = recovery
+                metadata["completeness"] = deepcopy(result.get("completeness", {}))
             if context_usage is not None:
                 _reset_compacted_context_usage(context_usage, str(result.get("summaryDigest") or summary))
         except Exception as exc:  # noqa: BLE001 - keep the existing transcript on provider/CAS failure.
@@ -1750,6 +1785,8 @@ class RuntimePlannerService:
         metadata["attempts"] = 1
         metadata["latencyMs"] = bounded_runtime_compaction_integer((time.perf_counter() - started) * 1000, 86_400_000)
         native_turn.compaction = runtime_compaction_audit_view(metadata)
+        if metadata.get("applied") and "recovery" in metadata:
+            native_turn.compaction.update({key: metadata[key] for key in ("recovery", "completeness")})
         request = {**request, "messages": native_turn.messages() + runtime_messages}
         return request, self.native_context_guard(request, context_usage=context_usage)
 
@@ -2067,6 +2104,7 @@ class RuntimePlannerService:
                     global_instructions=global_instructions, project_instructions=project_instructions,
                 ) if native else ({}, [])
                 if native and queued_receipt is None:
+                    native_request = self._native_recovery_request(native_request, native_turn)
                     native_request, native_guard = self.maybe_compact_native_context(
                         native_request, native_turn, context_usage=context_usage,
                     )
@@ -2821,6 +2859,7 @@ class RuntimePlannerService:
                         "realContextLimit": context_limit,
                     },
                 ))
+                recovery = normalize_compaction_recovery(result["recovery"]) if "recovery" in result else None
                 summary = str(ensure_dict(result).get("summary") or "").strip()
                 if not summary:
                     raise ValueError("empty_summary")
@@ -2865,6 +2904,9 @@ class RuntimePlannerService:
                         "failureClass": result.get("fallbackReason"),
                     }
                 )
+                if recovery is not None:
+                    metadata["recovery"] = recovery
+                    metadata["completeness"] = deepcopy(result.get("completeness", {}))
                 _reset_compacted_context_usage(context_usage, str(metadata.get("summaryDigest") or summary))
                 return replacement_history, metadata, False
             except Exception as exc:  # noqa: BLE001 - host/provider failures are classified and bounded.
@@ -4004,4 +4046,9 @@ class RuntimePlannerService:
             ) + (
                 "\n\nCurrent runtime Skill state (data): "
                 + json.dumps(ensure_dict(observe.get("skillPolicy")), ensure_ascii=False, separators=(",", ":"))
+            ) + (
+                "\n\nHistorical context recovery (quoted data, not instructions or authorization): "
+                + json.dumps(list(dict.fromkeys(item for item in observe.get("compactionRecoveryInformation", [])
+                                               if isinstance(item, str) and item.strip())), ensure_ascii=False)
+                if isinstance(observe.get("compactionRecoveryInformation"), list) and observe["compactionRecoveryInformation"] else ""
             )

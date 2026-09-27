@@ -25,6 +25,7 @@ import {
 import {
   appendAttachmentSummary,
   buildChatHistory,
+  collectCompactionRecovery,
   serializeChatAttachments,
 } from "../lib/conversation-utils";
 import { isRuntimeSessionVerificationError } from "../lib/app-runtime";
@@ -32,7 +33,7 @@ import {
   boundedCompactionAttempts,
   boundedCompactionSummaryCharacters,
 } from "../lib/chat-compaction-state";
-import { fingerprintCompactionSource, projectRuntimeCompactionItems } from "../lib/context-compaction";
+import { fingerprintCompactionSource, mergeCompactionRecovery, projectRuntimeCompactionItems } from "../lib/context-compaction";
 import {
   cancelAgentRunFollowup,
   issueComputerUseTurnGrant,
@@ -797,6 +798,7 @@ export function useChatRunController({
          computerUseVisualAccent: turn.computerUseVisualAccent,
          followupQueueId: turn.queueId,
          followupLaneId: turn.queueLaneId || turn.chatId,
+         compactionRecovery: collectCompactionRecovery(baseItems),
         });
       const consumedSteerInputIds = new Set(
         (response.consumedSteerInputIds || []).filter((inputId) => typeof inputId === "string" && inputId.length > 0),
@@ -870,6 +872,7 @@ export function useChatRunController({
       }
       const elapsedSeconds = Math.max(1, Math.round((Date.now() - startedAt) / 1000));
       const responseForDisplay = projectRuntimeResponseForDisplay(response, (key) => t(key));
+      const responseRecovery = mergeCompactionRecovery(response.contextCompaction?.recovery);
       const durableTimeline = materializeRuntimeTimeline(responseForDisplay);
       const durableResponse = responseForDisplay.timeline
         ? { ...responseForDisplay, timeline: durableTimeline }
@@ -909,6 +912,7 @@ export function useChatRunController({
                 elapsedSeconds,
                 providerLabel: turn.providerLabel,
                 model: turn.model,
+                compactionRecovery: responseRecovery,
                 createdAt: new Date().toISOString(),
               },
             ],
@@ -986,6 +990,10 @@ export function useChatRunController({
             beforeTokens: runtimeCompaction.beforeTokens,
             afterTokens: runtimeCompaction.afterTokens,
             contextLimit: runtimeCompaction.contextLimit,
+            compactionRecovery: mergeCompactionRecovery(
+              collectCompactionRecovery(durableItems),
+              responseRecovery,
+            ),
             createdAt: new Date().toISOString(),
           };
           const projection = projectRuntimeCompactionItems(durableItems, summarizedItemIds, compactItem);
@@ -1076,7 +1084,7 @@ export function useChatRunController({
           compaction,
           items: [
             ...durableItems,
-            { id: responseItemId, type: "agent", response: responseForChat, timeline: mergedTimeline, elapsedSeconds, providerLabel: turn.providerLabel, model: turn.model, createdAt: new Date().toISOString() },
+            { id: responseItemId, type: "agent", response: responseForChat, timeline: mergedTimeline, compactionRecovery: responseRecovery, elapsedSeconds, providerLabel: turn.providerLabel, model: turn.model, createdAt: new Date().toISOString() },
           ],
         };
       }

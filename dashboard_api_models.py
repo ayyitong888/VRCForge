@@ -523,6 +523,7 @@ class AgentRuntimeMessageRequest(BaseModel):
     context_limit: int | None = Field(default=None, alias="contextLimit", gt=0, le=10_000_000)
     max_agentic_turns: int | None = Field(default=None, alias="maxAgenticTurns", ge=1, le=4096)
     history: list[dict[str, Any]] = Field(default_factory=list)
+    compaction_recovery: list[dict[str, Any]] = Field(default_factory=list, alias="compactionRecovery")
     computer_use_requested: bool = Field(default=False, alias="computerUseRequested")
     computer_use_grant_id: str | None = Field(default=None, alias="computerUseGrantId")
     computer_use_visual_theme: str | None = Field(default=None, alias="computerUseVisualTheme")
