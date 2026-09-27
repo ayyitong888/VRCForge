@@ -10,6 +10,7 @@ import re
 import secrets
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -511,6 +512,8 @@ class _ShellSession:
     termination_failed: bool = False
     done: threading.Event = field(default_factory=threading.Event)
     reader_done: threading.Event = field(default_factory=threading.Event)
+    output_spool: Any = None
+    output_spool_failed: bool = False
 
 
 class ShellProcessSupervisor:
@@ -571,6 +574,10 @@ class ShellProcessSupervisor:
                 raise
             except (OSError, RuntimeError) as exc:
                 raise ShellSessionError("Shell process could not be started.", 503) from exc
+            try:
+                output_spool = tempfile.TemporaryFile(mode="w+b")
+            except OSError:
+                output_spool = None
             session = _ShellSession(
                 session_id=f"shell-{uuid.uuid4().hex}",
                 owner_id=owner,
@@ -586,6 +593,8 @@ class ShellProcessSupervisor:
                 last_output_monotonic=self._ports.monotonic(),
                 completion_context=dict(completion_context or {}),
                 on_finished=on_finished or (lambda _event: None),
+                output_spool=output_spool,
+                output_spool_failed=output_spool is None,
             )
             with self._lock:
                 if not self._accepting:
@@ -599,10 +608,16 @@ class ShellProcessSupervisor:
                     process.activate()
                 except ShellSessionError:
                     self._sessions.pop(session.session_id, None)
+                    if session.output_spool is not None:
+                        session.output_spool.close()
+                        session.output_spool = None
                     registered = False
                     raise
                 except (OSError, RuntimeError) as exc:
                     self._sessions.pop(session.session_id, None)
+                    if session.output_spool is not None:
+                        session.output_spool.close()
+                        session.output_spool = None
                     registered = False
                     raise ShellSessionError(
                         "Shell process could not be activated inside its lifecycle owner.", 503
@@ -612,6 +627,8 @@ class ShellProcessSupervisor:
                 self._dispose_unregistered_process(process, job_owner)
             elif process is None and job_owner is not None:
                 job_owner.close()
+            if session is not None and not registered:
+                self._close_output_spool_locked(session)
             with self._lock:
                 self._pending_spawns -= 1
         assert session is not None
@@ -737,6 +754,7 @@ class ShellProcessSupervisor:
                 self._sessions.pop(session_id, None)
             session.job_owner.close()
             session.process.close()
+            self._close_output_spool_locked(session)
             return {"ok": True, "action": action, "cleared": True, "sessionId": session_id}
         if action == "remove":
             removed_running = False
@@ -753,6 +771,7 @@ class ShellProcessSupervisor:
                 self._sessions.pop(session_id, None)
             session.job_owner.close()
             session.process.close()
+            self._close_output_spool_locked(session)
             return {
                 "ok": True,
                 "action": action,
@@ -807,6 +826,8 @@ class ShellProcessSupervisor:
             pending_spawns = self._pending_spawns
         for session in sessions:
             session.job_owner.close()
+            with self._lock:
+                self._close_output_spool_locked(session)
         pending = sum(1 for session in running if self._session_is_alive(session)) + pending_spawns
         return len(running) + initial_pending_spawns, terminated, pending
 
@@ -839,6 +860,7 @@ class ShellProcessSupervisor:
     def _terminal_result(self, session_id: str, owner: str) -> dict[str, Any]:
         session = self._owned_session(session_id, owner)
         with self._lock:
+            output = self._source_text_locked(session)
             return {
                 "ok": session.status == "finished" and session.exit_code == 0,
                 "command": session.command,
@@ -854,9 +876,10 @@ class ShellProcessSupervisor:
                     (session.finished_monotonic or self._ports.monotonic()) - session.started_monotonic,
                     3,
                 ),
-                "stdout": session.output,
+                "stdout": output,
                 "stderr": "",
-                "stdoutTruncated": session.output_truncated,
+                "stdoutTruncated": session.output_spool_failed,
+                "sourceTruncated": session.output_spool_failed,
                 "stderrTruncated": False,
                 "sessionId": session.session_id,
             }
@@ -867,6 +890,7 @@ class ShellProcessSupervisor:
             return self._snapshot_locked(session, include_output=False)
 
     def _snapshot_locked(self, session: _ShellSession, *, include_output: bool) -> dict[str, Any]:
+        source_start = session.output_base if session.output_spool_failed else 0
         payload = {
             "sessionId": session.session_id,
             "pid": session.process.pid,
@@ -880,9 +904,11 @@ class ShellProcessSupervisor:
             "terminationFailed": session.termination_failed,
             "startedAt": session.started_at,
             "finishedAt": session.finished_at,
-            "cursorStart": session.output_base,
+            "cursorStart": source_start,
             "cursorEnd": session.output_end,
-            "outputTruncated": session.output_truncated,
+            "outputTruncated": session.output_spool_failed,
+            "sourceTruncated": session.output_spool_failed,
+            "sourceCursorEnd": session.output_end,
             "waitingForInput": bool(
                 session.pty
                 and self._session_is_alive(session)
@@ -905,20 +931,30 @@ class ShellProcessSupervisor:
     ) -> dict[str, Any]:
         session = self._owned_session(session_id, owner)
         with self._lock:
-            start = session.output_base if full else max(cursor, session.output_base)
-            offset = max(0, start - session.output_base)
-            available = session.output[offset:]
-            if len(available) > limit:
-                available = available[-limit:]
-                start = session.output_end - len(available)
+            source = self._source_text_locked(session)
+            source_start = session.output_base if session.output_spool_failed else 0
+            source_end = source_start + len(source)
+            start = source_start if full else max(cursor, source_start)
+            available = source[start - source_start:]
+            if limit is not None:
+                available = available[:limit]
+            next_cursor = start + len(available)
             return {
                 "ok": True,
                 "action": "log" if full else "poll",
                 "session": self._snapshot_locked(session, include_output=False),
                 "output": available,
-                "cursor": session.output_end,
+                "cursor": next_cursor,
                 "fromCursor": start,
-                "cursorExpired": cursor < session.output_base,
+                "hasMore": next_cursor < source_end,
+                "sourceCursorEnd": source_end,
+                "sourceTruncated": session.output_spool_failed,
+                "cursorExpired": session.output_spool_failed and cursor < source_start,
+                **(
+                    {"nextRequest": {"action": "poll", "sessionId": session.session_id,
+                                     "cursor": next_cursor, "limit": limit}}
+                    if next_cursor < source_end else {}
+                ),
             }
 
     def _read_line_payload(
@@ -931,7 +967,7 @@ class ShellProcessSupervisor:
     ) -> dict[str, Any]:
         session = self._owned_session(session_id, owner)
         with self._lock:
-            lines = session.output.splitlines(keepends=True)
+            lines = self._source_text_locked(session).splitlines(keepends=True)
             start = max(0, offset if offset >= 0 else len(lines) + offset)
             selected = lines[start:] if limit is None else lines[start : start + limit]
             return {
@@ -944,6 +980,7 @@ class ShellProcessSupervisor:
                 "lineCount": len(lines),
                 "hasMore": start + len(selected) < len(lines),
                 "cursor": session.output_end,
+                "sourceCursorEnd": session.output_end,
             }
 
     def _wait_for_activity(
@@ -1051,6 +1088,7 @@ class ShellProcessSupervisor:
                 session.finished_at = self._ports.utc_now()
                 session.finished_monotonic = self._ports.monotonic()
                 session.done.set()
+                output = self._source_text_locked(session)
                 completion_event = {
                     **session.completion_context,
                     "shellSessionId": session.session_id,
@@ -1067,9 +1105,10 @@ class ShellProcessSupervisor:
                         "timedOut": session.timed_out,
                         "cancelled": session.killed,
                         "terminationFailed": session.termination_failed,
-                        "stdout": session.output,
+                        "stdout": output,
                         "stderr": "",
-                        "stdoutTruncated": session.output_truncated,
+                        "stdoutTruncated": session.output_spool_failed,
+                        "sourceTruncated": session.output_spool_failed,
                         "stderrTruncated": False,
                         "sessionId": session.session_id,
                     },
@@ -1121,6 +1160,12 @@ class ShellProcessSupervisor:
             session.process.terminate()
 
     def _append_output_locked(self, session: _ShellSession, chunk: str) -> None:
+        if session.output_spool is not None and not session.output_spool_failed:
+            try:
+                session.output_spool.write(chunk.encode("utf-8"))
+                session.output_spool.flush()
+            except (OSError, ValueError):
+                session.output_spool_failed = True
         session.output += chunk
         session.output_end += len(chunk)
         session.last_output_monotonic = self._ports.monotonic()
@@ -1142,6 +1187,30 @@ class ShellProcessSupervisor:
                     item.output_truncated = True
                     excess -= removed
 
+    @staticmethod
+    def _source_text_locked(session: _ShellSession) -> str:
+        if session.output_spool is None or session.output_spool_failed:
+            return session.output
+        try:
+            session.output_spool.seek(0)
+            return session.output_spool.read().decode("utf-8", errors="replace")
+        except (OSError, ValueError):
+            session.output_spool_failed = True
+            return session.output
+
+    @staticmethod
+    def _close_output_spool_locked(session: _ShellSession) -> None:
+        spool = session.output_spool
+        session.output_spool = None
+        # A terminal session may still be inspected after shutdown; the
+        # remaining ring must not be advertised as its complete source.
+        session.output_spool_failed = True
+        if spool is not None:
+            try:
+                spool.close()
+            except (OSError, ValueError):
+                session.output_spool_failed = True
+
     def _prune_locked(self) -> None:
         now = self._ports.monotonic()
         expired = [
@@ -1154,6 +1223,7 @@ class ShellProcessSupervisor:
             session = self._sessions.pop(session_id)
             session.job_owner.close()
             session.process.close()
+            self._close_output_spool_locked(session)
 
     def _evict_finished_for_capacity_locked(self) -> None:
         while len(self._sessions) + self._pending_spawns >= SHELL_SESSION_COUNT_LIMIT:
@@ -1168,6 +1238,7 @@ class ShellProcessSupervisor:
             self._sessions.pop(session.session_id, None)
             session.job_owner.close()
             session.process.close()
+            self._close_output_spool_locked(session)
 
 
 def normalize_shell_owner(value: str) -> str:

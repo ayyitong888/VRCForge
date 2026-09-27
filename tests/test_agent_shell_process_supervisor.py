@@ -205,6 +205,135 @@ def test_background_process_sessions_are_owner_scoped_and_interactive(tmp_path: 
     assert process.closed is True
 
 
+def test_background_output_before_ring_limit_remains_readable_from_session_source(tmp_path: Path) -> None:
+    process = FakeManagedProcess(pid=4243)
+    supervisor = ShellProcessSupervisor(
+        ShellSessionPorts(
+            spawn_pipe=lambda _argv, _cwd, _env: process,
+            spawn_pty=lambda _argv, _cwd, _env: process,
+            create_job_owner=FakeJobOwner,
+        )
+    )
+    started = supervisor.execute(
+        command="fixture",
+        argv=["fixture.exe"],
+        cwd=tmp_path,
+        environment={"PATH": "fixture"},
+        owner_id="agent-a",
+        background=True,
+        yield_ms=0,
+        timeout_seconds=0,
+        pty=False,
+    )
+    payload = "head-" + ("x" * 205_000) + "-tail\n"
+    process.feed(payload)
+    wait_until(
+        lambda: supervisor.control(
+            {"action": "poll", "sessionId": started["sessionId"], "cursor": 0, "limit": 1},
+            owner_id="agent-a",
+        )["session"]["cursorEnd"] == len(payload)
+    )
+    pieces: list[str] = []
+    cursor = 0
+    while True:
+        page = supervisor.control(
+            {"action": "poll", "sessionId": started["sessionId"], "cursor": cursor, "limit": 30_000},
+            owner_id="agent-a",
+        )
+        pieces.append(page["output"])
+        assert page["cursorExpired"] is False
+        if not page["hasMore"]:
+            assert page["session"]["outputTruncated"] is False
+            break
+        cursor = page["cursor"]
+    assert "".join(pieces) == payload
+    spool = supervisor._sessions[started["sessionId"]].output_spool
+    supervisor.shutdown(grace_seconds=0.1)
+    assert spool.closed
+    after_close = supervisor.control(
+        {"action": "poll", "sessionId": started["sessionId"], "cursor": 0, "limit": 100},
+        owner_id="agent-a",
+    )
+    assert after_close["sourceTruncated"] is True
+    assert after_close["cursorExpired"] is True
+    supervisor.control({"action": "remove", "sessionId": started["sessionId"]}, owner_id="agent-a")
+
+
+def test_spool_creation_failure_is_reported_as_incomplete_ring_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def unavailable(*_args, **_kwargs):
+        raise OSError("fixture spool unavailable")
+
+    monkeypatch.setattr(shell_process_module.tempfile, "TemporaryFile", unavailable)
+    process = FakeManagedProcess(pid=4244)
+    supervisor = ShellProcessSupervisor(
+        ShellSessionPorts(
+            spawn_pipe=lambda _argv, _cwd, _env: process,
+            spawn_pty=lambda _argv, _cwd, _env: process,
+            create_job_owner=FakeJobOwner,
+        )
+    )
+    started = supervisor.execute(
+        command="fixture",
+        argv=["fixture.exe"],
+        cwd=tmp_path,
+        environment={"PATH": "fixture"},
+        owner_id="agent-a",
+        background=True,
+        yield_ms=0,
+        timeout_seconds=0,
+        pty=False,
+    )
+    payload = "fallback-head-" + ("z" * 205_000) + "-fallback-tail\n"
+    process.feed(payload)
+    wait_until(
+        lambda: supervisor.control(
+            {"action": "poll", "sessionId": started["sessionId"], "cursor": 0},
+            owner_id="agent-a",
+        )["session"]["cursorEnd"] == len(payload)
+    )
+    first = supervisor.control(
+        {"action": "poll", "sessionId": started["sessionId"], "cursor": 0, "limit": 30_000},
+        owner_id="agent-a",
+    )
+    source_start = first["session"]["cursorStart"]
+    source_end = first["session"]["sourceCursorEnd"]
+    assert source_start > 0
+    assert first["cursorExpired"] is True
+    assert first["fromCursor"] == source_start
+    assert first["sourceTruncated"] is True
+    assert first["session"]["sourceTruncated"] is True
+    assert first["output"] == payload[source_start : source_start + 30_000]
+
+    pieces = [first["output"]]
+    cursor = first["cursor"]
+    while first["hasMore"]:
+        next_request = first.get("nextRequest")
+        assert next_request == {
+            "action": "poll",
+            "sessionId": started["sessionId"],
+            "cursor": cursor,
+            "limit": 30_000,
+        }
+        first = supervisor.control(
+            next_request,
+            owner_id="agent-a",
+        )
+        assert first["fromCursor"] == cursor
+        pieces.append(first["output"])
+        cursor = first["cursor"]
+    assert cursor == source_end
+    assert "".join(pieces) == payload[source_start:]
+    offset_page = supervisor.control(
+        {"action": "poll", "sessionId": started["sessionId"], "cursor": source_start + 1_000, "limit": 100},
+        owner_id="agent-a",
+    )
+    assert offset_page["fromCursor"] == source_start + 1_000
+    assert offset_page["output"] == payload[source_start + 1_000 : source_start + 1_100]
+    supervisor.control({"action": "remove", "sessionId": started["sessionId"]}, owner_id="agent-a")
+
+
 def test_poll_waits_for_new_output_and_log_supports_line_offsets(tmp_path: Path) -> None:
     process = FakeManagedProcess(pid=4250)
     supervisor = ShellProcessSupervisor(
