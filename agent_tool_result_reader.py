@@ -336,6 +336,8 @@ def _inline_object_fields(row: Mapping[str, Any], projected: Mapping[str, Any], 
             child = {"jsonPointer": pointer,
                      "type": "array" if isinstance(value, list) else "object",
                      "count": len(value),
+                     "expandable": True,
+                     "truncated": True,
                      "nextRequest": {"tool": TOOL_NAME, "arguments": {
                          "resultRef": ref, "source": source, "jsonPointer": pointer,
                          "offset": 0, "limit": limit}}}

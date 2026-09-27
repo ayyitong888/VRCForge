@@ -10653,6 +10653,23 @@ def redact_sensitive(value: Any) -> Any:
                     result["items"][index]["nextRequest"]["arguments"] = {
                         key: redact_sensitive(item) for key, item in arguments.items()
                     }
+                children = row.get("childReferences")
+                if arguments is not None and isinstance(children, list):
+                    child_page = {
+                        **value,
+                        "items": children,
+                        "jsonPointer": row.get("jsonPointer"),
+                        "totalItems": 1,
+                    }
+                    for child_index, child in enumerate(children):
+                        if not isinstance(child, dict):
+                            continue
+                        arguments = page_item_request_arguments(child_page, child)
+                        if arguments is None:
+                            continue
+                        result["items"][index]["childReferences"][child_index]["nextRequest"]["arguments"] = {
+                            key: redact_sensitive(item) for key, item in arguments.items()
+                        }
         return result
     if isinstance(value, list):
         return [redact_sensitive(item) for item in value]
