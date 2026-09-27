@@ -1263,7 +1263,32 @@ def planner_read_output_evidence(tool: str, result: dict[str, object]) -> dict[s
             items.append({"url": web_url(row.get("url")), "title": content(row.get("title"), 200),
                           "snippet": content(row.get("snippet"), 500)})
         evidence.update({"results": items, "returnedItems": len(rows), "omittedItems": len(rows) - len(items),
-                         "continuation": "Narrow web_search.query to retrieve omitted results; use web_fetch on an intact returned URL to inspect the source. Snippets alone may not support the requested conclusion."})
+                         "continuation": "Follow nextRequest with its unchanged snapshotDigest to retrieve the next result page; a changed snapshot requires restarting at offset 0. Use web_fetch on an intact returned URL to inspect the source. Snippets alone may not support the requested conclusion."})
+        for field in ("offset", "nextOffset", "totalCount"):
+            if type(result.get(field)) is int and result[field] >= 0:
+                evidence[field] = result[field]
+            elif field == "nextOffset" and field in result and result[field] is None:
+                evidence[field] = None
+        if isinstance(result.get("hasMore"), bool):
+            evidence["hasMore"] = result["hasMore"]
+        digest = result.get("snapshotDigest")
+        if isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest):
+            evidence["snapshotDigest"] = digest
+        request = result.get("nextRequest")
+        if evidence.get("hasMore") is True and isinstance(request, dict):
+            query = request.get("query")
+            max_results = request.get("maxResults")
+            offset = request.get("offset")
+            request_digest = request.get("snapshotDigest")
+            safe_query = sanitize_planner_observation_text(query, None, preserve_urls=True) if isinstance(query, str) else ""
+            if (safe_query == query and type(max_results) is int and 1 <= max_results <= 10
+                    and type(offset) is int and offset >= 0
+                    and isinstance(request_digest, str)
+                    and re.fullmatch(r"[0-9a-f]{64}", request_digest)
+                    and request_digest == evidence.get("snapshotDigest")):
+                evidence["nextRequest"] = {"tool": tool, "arguments": {
+                    "query": safe_query, "maxResults": max_results,
+                    "offset": offset, "snapshotDigest": request_digest}}
     elif tool == "vrcforge_read_text_file" and isinstance(result.get("text"), str):
         evidence.update({"source": source(result.get("path")), "text": content(result["text"]),
                          "continuation": "Follow nextRequest for remaining source text. The current-turn result reader recovers the current page without rerunning its tool. Source changes reject the old snapshotDigest; restart at textOffset 0 without the digest. startLine/endLine are original 1-based inclusive line numbers. Do not widen to the parent directory."})
