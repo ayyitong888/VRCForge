@@ -2184,11 +2184,20 @@ class RuntimePlannerService:
                     project_instructions=project_instructions,
                 )
                 for format_attempt in range(1 if native else 2):
-                    raw_response = (
-                        PlannerModelResult("", assistant_message=queued_receipt, finish_reason="tool_calls")
-                        if queued_receipt is not None else
-                        model_port.plan_native(native_request) if native else model_port.plan(prompt)
-                    )
+                    try:
+                        raw_response = (
+                            PlannerModelResult("", assistant_message=queued_receipt, finish_reason="tool_calls")
+                            if queued_receipt is not None else
+                            model_port.plan_native(native_request) if native else model_port.plan(prompt)
+                        )
+                    except Exception:
+                        # A failed provider call is one unknown logical model
+                        # receipt. Preserve measured token totals, but do not
+                        # infer SDK transport retries or count queued receipts
+                        # that never made an external call.
+                        if queued_receipt is None and context_usage is not None:
+                            self.record_context_usage(context_usage, prompt, history, None)
+                        raise
                     provider_reasoning = dict(raw_response.reasoning)
                     if reasoning_trace is not None:
                         reasoning_trace.clear()
