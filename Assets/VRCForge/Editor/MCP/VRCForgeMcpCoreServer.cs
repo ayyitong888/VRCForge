@@ -1149,9 +1149,18 @@ namespace VRCForge.Editor
             }
             if (string.Equals(toolName, "vrc_scan_avatar_items", StringComparison.Ordinal))
             {
-                return HasExactKeys(arguments, "avatarPath", "outputPath", "maxItems", "refreshAssets")
+                var baseRead = HasExactKeys(arguments, "avatarPath", "outputPath", "maxItems", "refreshAssets")
+                    || HasExactKeys(arguments, "avatarPath", "outputPath", "maxItems", "refreshAssets", "offset")
+                    || HasExactKeys(arguments, "avatarPath", "outputPath", "maxItems", "refreshAssets", "expectedSnapshotDigest")
+                    || HasExactKeys(arguments, "avatarPath", "outputPath", "maxItems", "refreshAssets", "offset", "expectedSnapshotDigest");
+                return baseRead
                     && HasString(arguments, "avatarPath") && HasEmptyOutputPath(arguments)
                     && HasBoundedInteger(arguments, "maxItems", 1, 2000)
+                    && (arguments["offset"] == null || HasBoundedInteger(arguments, "offset", 0, int.MaxValue))
+                    && (arguments["expectedSnapshotDigest"] == null
+                        || (HasString(arguments, "expectedSnapshotDigest")
+                            && arguments["expectedSnapshotDigest"].Value<string>().Length == 64
+                            && arguments["expectedSnapshotDigest"].Value<string>().All(Uri.IsHexDigit)))
                     && HasFalseBoolean(arguments, "refreshAssets");
             }
             if (string.Equals(toolName, "vrc_scan_fx_animator", StringComparison.Ordinal))

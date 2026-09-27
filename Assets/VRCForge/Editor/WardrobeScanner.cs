@@ -572,6 +572,17 @@ namespace VRCForge.Editor
                 foreach (var value in values)
                 {
                     var toggle = togglesForParam.FirstOrDefault(item => item.value == value);
+                    var menuEntries = togglesForParam
+                        .Where(item => item.value == value)
+                        .Select(item => new
+                        {
+                            menuName = item.menuName ?? "",
+                            menuPath = item.menuPath ?? "",
+                            parameterName = item.parameterName ?? "",
+                            value = item.value,
+                            controlType = item.controlType ?? ""
+                        })
+                        .ToList();
                     var equalsForValue = equalsForParam.Where(item => item.value == value).ToList();
                     var destinationPaths = equalsForValue
                         .Select(item => item.destinationStatePath ?? "")
@@ -618,6 +629,7 @@ namespace VRCForge.Editor
                         value,
                         menuName = toggle?.menuName ?? "",
                         menuPath = toggle?.menuPath ?? "",
+                        menuEntries,
                         inMenu = toggle != null,
                         fxStateName = state?.name ?? (equals?.stateName ?? ""),
                         fxStatePath = state?.statePath ?? (equals?.destinationStatePath ?? ""),

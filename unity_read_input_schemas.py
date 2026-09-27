@@ -233,6 +233,8 @@ UNITY_READ_TOOL_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
             "avatarPath": {"type": "string", "description": "Optional exact avatar root hierarchy path; omit to scan all scene avatar roots."},
             "outputPath": {"type": "string", "description": "Optional asset-relative or absolute JSON output path; empty skips artifact writing."},
             "maxItems": {"type": "integer", "minimum": 1, "maximum": 2000, "default": 2000},
+            "offset": {"type": "integer", "minimum": 0, "maximum": 2147483647, "default": 0, "description": "Zero-based page offset; continue with nextOffset from the preceding result."},
+            "expectedSnapshotDigest": {"type": "string", "pattern": "^[0-9a-fA-F]{64}$", "description": "SHA256 digest from the preceding page; rejects a changed avatar snapshot."},
             "refreshAssets": {"type": "boolean", "default": False},
         },
     },

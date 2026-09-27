@@ -39,6 +39,12 @@ namespace VRCForge.Editor
             [VRCForgeInput("Maximum number of hierarchy items to return.", IsRequired = false)]
             public int? maxItems { get; set; } = 500;
 
+            [VRCForgeInput("Zero-based page offset. Continue with paging.nextOffset.", IsRequired = false)]
+            public int? offset { get; set; } = 0;
+
+            [VRCForgeInput("SHA256 digest from the preceding page; rejects a changed avatar snapshot.", IsRequired = false)]
+            public string expectedSnapshotDigest { get; set; }
+
             [VRCForgeInput("Refresh the Unity AssetDatabase after writing JSON.", IsRequired = false)]
             public bool? refreshAssets { get; set; } = true;
         }
@@ -46,7 +52,7 @@ namespace VRCForge.Editor
         [MenuItem("VRCForge/Scan Avatar Items")]
         public static void ScanAvatarItemsFromMenu()
         {
-            var payload = BuildAvatarItemsPayload("", 500);
+            var payload = BuildAvatarItemsPayload("", 500, 0, null, null);
             var absolutePath = WriteJson(DefaultOutputPath, payload, true, out _, out _);
             Debug.Log($"[{ScanAvatarItemsToolName}] Avatar item scan complete: {absolutePath}");
         }
@@ -59,7 +65,8 @@ namespace VRCForge.Editor
             try
             {
                 var maxItems = Mathf.Clamp(parameters.maxItems ?? 500, 1, 2000);
-                var payload = BuildAvatarItemsPayload(parameters.avatarPath ?? "", maxItems);
+                var offset = Math.Max(parameters.offset ?? 0, 0);
+                var payload = BuildAvatarItemsPayload(parameters.avatarPath ?? "", maxItems, offset, parameters.expectedSnapshotDigest, @params);
                 var requestedPath = parameters.outputPath ?? "";
                 if (!string.IsNullOrWhiteSpace(requestedPath))
                 {
@@ -81,12 +88,11 @@ namespace VRCForge.Editor
             }
         }
 
-        private static AvatarItemsPayload BuildAvatarItemsPayload(string avatarPath, int maxItems)
+        private static AvatarItemsPayload BuildAvatarItemsPayload(string avatarPath, int maxItems, int offset, string expectedSnapshotDigest, JObject requestArguments)
         {
             var normalizedAvatarPath = NormalizePath(avatarPath);
             var avatars = ResolveAvatarRoots(normalizedAvatarPath);
             var items = new List<AvatarItem>();
-            var totalItemCount = 0;
             var sceneNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
             foreach (var avatarRoot in avatars.OrderBy(GetTransformPath))
@@ -97,9 +103,7 @@ namespace VRCForge.Editor
                     .Where(item => item != null)
                     .OrderBy(item => GetTransformPath(item))
                     .ToList();
-                totalItemCount += transforms.Count;
-
-                foreach (var transform in transforms.Take(maxItems))
+                foreach (var transform in transforms)
                 {
                     var renderers = transform.GetComponentsInChildren<Renderer>(true)
                         .Where(IsSceneObject)
@@ -110,7 +114,6 @@ namespace VRCForge.Editor
                         .Where(value => !string.IsNullOrWhiteSpace(value))
                         .Distinct(StringComparer.OrdinalIgnoreCase)
                         .OrderBy(value => value)
-                        .Take(12)
                         .ToList();
                     var materialNames = renderers
                         .SelectMany(renderer => renderer.sharedMaterials ?? Array.Empty<Material>())
@@ -119,7 +122,6 @@ namespace VRCForge.Editor
                         .Where(value => !string.IsNullOrWhiteSpace(value))
                         .Distinct(StringComparer.OrdinalIgnoreCase)
                         .OrderBy(value => value)
-                        .Take(16)
                         .ToList();
                     var shaderNames = renderers
                         .SelectMany(renderer => renderer.sharedMaterials ?? Array.Empty<Material>())
@@ -128,7 +130,6 @@ namespace VRCForge.Editor
                         .Where(value => !string.IsNullOrWhiteSpace(value))
                         .Distinct(StringComparer.OrdinalIgnoreCase)
                         .OrderBy(value => value)
-                        .Take(12)
                         .ToList();
                     var objectPath = GetTransformPath(transform);
                     var relativePath = GetRelativePath(avatarRoot, transform);
@@ -171,11 +172,30 @@ namespace VRCForge.Editor
                 }
             }
 
-            var limited = items
+            var orderedItems = items
                 .OrderBy(item => item.avatar_path, StringComparer.OrdinalIgnoreCase)
                 .ThenBy(item => item.object_path, StringComparer.OrdinalIgnoreCase)
-                .Take(maxItems)
                 .ToList();
+            var snapshotDigest = ComputeSnapshotDigest(orderedItems);
+            if (!string.IsNullOrWhiteSpace(expectedSnapshotDigest)
+                && !string.Equals(expectedSnapshotDigest, snapshotDigest, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException("Avatar item snapshot changed; restart the scan from offset 0 before continuing.");
+            }
+
+            var page = PageItems(orderedItems, offset, maxItems);
+            var nextOffset = offset + page.Count;
+            var hasMore = nextOffset < orderedItems.Count;
+            var nextRequest = hasMore ? (requestArguments ?? new JObject()).DeepClone() as JObject : null;
+            if (nextRequest != null)
+            {
+                nextRequest["avatarPath"] = normalizedAvatarPath;
+                nextRequest["outputPath"] = "";
+                nextRequest["maxItems"] = maxItems;
+                nextRequest["refreshAssets"] = false;
+                nextRequest["offset"] = nextOffset;
+                nextRequest["expectedSnapshotDigest"] = snapshotDigest;
+            }
 
             return new AvatarItemsPayload
             {
@@ -186,16 +206,46 @@ namespace VRCForge.Editor
                 unity_project = Directory.GetParent(Application.dataPath)?.Name ?? "UnknownProject",
                 requested_avatar_path = normalizedAvatarPath,
                 scenes = sceneNames.OrderBy(name => name).ToList(),
-                items = limited,
+                items = page,
+                snapshotDigest = snapshotDigest,
+                offset = offset,
+                maxItems = maxItems,
+                totalCount = orderedItems.Count,
+                hasMore = hasMore,
+                nextOffset = hasMore ? (int?)nextOffset : null,
+                nextRequest = nextRequest,
+                paging = new JObject
+                {
+                    ["offset"] = offset,
+                    ["maxItems"] = maxItems,
+                    ["totalCount"] = orderedItems.Count,
+                    ["hasMore"] = hasMore,
+                    ["nextOffset"] = hasMore ? new JValue(nextOffset) : JValue.CreateNull(),
+                    ["nextRequest"] = nextRequest
+                },
                 summary = new AvatarItemsSummary
                 {
                     avatarCount = avatars.Count,
-                    itemCount = limited.Count,
-                    rendererBackedItemCount = limited.Count(item => item.renderer_count > 0),
-                    wardrobeCandidateCount = limited.Count(item => item.wardrobe_related),
-                    truncated = totalItemCount > limited.Count
+                    itemCount = page.Count,
+                    rendererBackedItemCount = page.Count(item => item.renderer_count > 0),
+                    wardrobeCandidateCount = page.Count(item => item.wardrobe_related),
+                    truncated = hasMore
                 }
             };
+        }
+
+        private static string ComputeSnapshotDigest(List<AvatarItem> items)
+        {
+            using (var hash = SHA256.Create())
+            {
+                var canonical = JsonConvert.SerializeObject(items, Formatting.None);
+                return BitConverter.ToString(hash.ComputeHash(Encoding.UTF8.GetBytes(canonical))).Replace("-", "").ToLowerInvariant();
+            }
+        }
+
+        private static List<AvatarItem> PageItems(List<AvatarItem> orderedItems, int offset, int maxItems)
+        {
+            return orderedItems.Skip(offset).Take(maxItems).ToList();
         }
 
         private static List<Transform> ResolveAvatarRoots(string normalizedAvatarPath)
@@ -477,6 +527,14 @@ namespace VRCForge.Editor
             public string requested_avatar_path;
             public List<string> scenes;
             public List<AvatarItem> items;
+            public string snapshotDigest;
+            public int offset;
+            public int maxItems;
+            public int totalCount;
+            public bool hasMore;
+            public int? nextOffset;
+            public JObject nextRequest;
+            public JObject paging;
             public AvatarItemsSummary summary;
             public string outputPath;
             public string absoluteOutputPath;
