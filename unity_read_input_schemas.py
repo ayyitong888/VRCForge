@@ -1030,7 +1030,10 @@ for _general_read_tool, _general_read_properties in {
     'vrcforge_read_text_file': {
         'path': {'type': 'string', 'description': 'Project-relative UTF-8 text file path under projectPath.'},
         'projectPath': {'type': 'string', 'description': 'Absolute existing source workspace root; required for external MCP calls.'},
-        'maxBytes': {'type': 'integer', 'minimum': 1, 'maximum': 4194304, 'description': 'Whole-file resource limit in bytes, default 4194304. Oversized files fail without returning a partial prefix.'}, 'maxOutputChars': {'type': 'integer', 'description': 'Does not truncate source text; model output is paged by the shared result reader.'},
+        'maxBytes': {'type': 'integer', 'minimum': 1, 'maximum': 4194304, 'description': 'Inline file threshold in bytes, default 4194304. Larger files use complete-source validation and paged sanitized text.'}, 'maxOutputChars': {'type': 'integer', 'description': 'Does not truncate source text; model output is paged by the shared result reader.'},
+        'textOffset': {'type': 'integer', 'minimum': 0, 'description': 'Character offset in sanitized text within the selected line range. Copy nextRequest to continue.'},
+        'pageChars': {'type': 'integer', 'minimum': 1, 'maximum': 1000000, 'description': 'Source page size in characters, default 32000. Large pages also use the shared model result reader.'},
+        'snapshotDigest': {'type': 'string', 'description': 'Copy from nextRequest. Changed source rejects the continuation; restart from textOffset 0 without this digest.'},
         'startLine': {'type': 'integer', 'minimum': 1, 'description': 'First line to read, 1-based and inclusive; defaults to 1.'},
         'endLine': {'type': 'integer', 'minimum': 1, 'description': 'Last line to read, inclusive; must be at least startLine. Omit to read through the complete file after whole-file validation and redaction.'},
     },

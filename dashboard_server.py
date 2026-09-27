@@ -24984,12 +24984,22 @@ def register_agent_gateway_tools() -> None:
             max_bytes=bounded_int(raw.get("maxBytes", raw.get("max_bytes", GENERAL_MAX_READ_BYTES)), GENERAL_MAX_READ_BYTES, GENERAL_MAX_READ_BYTES),
             start_line=raw.get("startLine"),
             end_line=raw.get("endLine"),
+            text_offset=raw.get("textOffset"),
+            page_chars=raw.get("pageChars", 32_000),
+            snapshot_digest=raw.get("snapshotDigest"),
+            enable_source_paging=True,
             max_output_chars=(
                 bounded_int(raw["maxOutputChars"], 32_000, 32_000)
                 if raw.get("maxOutputChars") is not None
                 else None
             ),
         )
+        if result.get("hasMore") is True:
+            arguments = {key: value for key, value in raw.items() if key in {
+                "path", "projectPath", "startLine", "endLine", "maxBytes", "pageChars",
+            }}
+            arguments.update(textOffset=result["nextTextOffset"], snapshotDigest=result["snapshotDigest"])
+            result["nextRequest"] = {"tool": "vrcforge_read_text_file", "arguments": arguments}
         result["summary"] = str(result.get("text") or "")
         return result
 
@@ -25114,7 +25124,7 @@ def register_agent_gateway_tools() -> None:
     )
     AGENT_GATEWAY.register_tool(
         "vrcforge_read_text_file",
-        "when-to-use: read an authorized UTF-8 text file as local evidence. The complete file is decoded and redacted before optional startLine/endLine selection (1-based, inclusive). Large model results use the shared result reader. maxBytes is a resource limit (default and maximum 4 MiB): oversized files fail explicitly, never return a partial prefix. maxOutputChars does not discard source text. when-NOT-to-use: do not use for binary files, writes, secrets, or Unity project changes. Negative example: do not treat a resource-limit failure as proof of file contents.",
+        "when-to-use: read an authorized UTF-8 text file as local evidence. The complete file is decoded and redacted before optional startLine/endLine selection (1-based, inclusive). Large model results use the shared result reader. maxBytes is the inline threshold (default and maximum 4 MiB). Larger files return sanitized source pages after complete validation; follow nextRequest, preserving snapshotDigest. Source changes invalidate continuation. maxOutputChars does not discard source text. when-NOT-to-use: do not use for binary files, writes, secrets, or Unity project changes. Negative example: do not treat a resource-limit failure as proof of file contents.",
         "read/debug",
         general_read_text_file_tool,
     )

@@ -380,6 +380,10 @@ def read_text_file(
     max_output_chars: int | None = None,
     start_line: int | None = None,
     end_line: int | None = None,
+    text_offset: int | None = None,
+    page_chars: int = 32_000,
+    snapshot_digest: str | None = None,
+    enable_source_paging: bool = False,
 ) -> dict[str, Any]:
     """Read UTF-8 text only; reject binary data and bound bytes/output."""
     if max_file_bytes is not None:
@@ -392,9 +396,21 @@ def read_text_file(
         raise IsADirectoryError(str(file_path))
     if _sensitive_file(file_path):
         raise PermissionError(f"sensitive credential file is not readable by the General Agent: {file_path.name}")
+    if enable_source_paging:
+        if type(page_chars) is not int or not 1 <= page_chars <= MAX_OUTPUT_CHARS:
+            raise ValueError("page_chars must be between 1 and 1000000")
+        if text_offset is not None or snapshot_digest is not None or file_path.stat().st_size > max_bytes:
+            from general_text_stream import read_source_page
+            return read_source_page(file_path, text_offset=0 if text_offset is None else text_offset,
+                                    page_chars=page_chars, snapshot_digest=snapshot_digest,
+                                    start_line=start_line, end_line=end_line)
     with file_path.open("rb") as handle:
         data = handle.read(max_bytes + 1)
     if len(data) > max_bytes:
+        if enable_source_paging:
+            from general_text_stream import read_source_page
+            return read_source_page(file_path, text_offset=0, page_chars=page_chars,
+                                    snapshot_digest=snapshot_digest, start_line=start_line, end_line=end_line)
         raise FileReadLimitError(
             f"complete file read exceeds max_bytes resource limit ({max_bytes} bytes): {file_path}"
         )

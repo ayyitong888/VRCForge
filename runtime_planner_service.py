@@ -1264,10 +1264,21 @@ def planner_read_output_evidence(tool: str, result: dict[str, object]) -> dict[s
                          "continuation": "Narrow web_search.query to retrieve omitted results; use web_fetch on an intact returned URL to inspect the source. Snippets alone may not support the requested conclusion."})
     elif tool == "vrcforge_read_text_file" and isinstance(result.get("text"), str):
         evidence.update({"source": source(result.get("path")), "text": content(result["text"]),
-                         "continuation": "Use search_text on the same exact file path to locate relevant line numbers, then read_text_file with startLine/endLine (1-based, inclusive). Follow the current-turn result reader to recover paged text. maxBytes is a whole-file resource limit; a resource-limit failure provides no file content. Do not widen to the parent directory."})
-        for field in ("startLine", "endLine"):
+                         "continuation": "Follow nextRequest for remaining source text. The current-turn result reader recovers the current page without rerunning its tool. Source changes reject the old snapshotDigest; restart at textOffset 0 without the digest. startLine/endLine are original 1-based inclusive line numbers. Do not widen to the parent directory."})
+        for field in ("startLine", "endLine", "textOffset", "nextTextOffset", "totalChars"):
             if type(result.get(field)) is int:
                 evidence[field] = result[field]
+        if isinstance(result.get("hasMore"), bool):
+            evidence["hasMore"] = result["hasMore"]
+        if isinstance(result.get("snapshotDigest"), str):
+            evidence["snapshotDigest"] = result["snapshotDigest"]
+        request = result.get("nextRequest")
+        if isinstance(request, dict) and request.get("tool") == tool and isinstance(request.get("arguments"), dict):
+            evidence["nextRequest"] = {"tool": tool, "arguments": {
+                key: value for key, value in request["arguments"].items() if key in {
+                    "path", "projectPath", "startLine", "endLine", "maxBytes", "pageChars", "textOffset", "snapshotDigest",
+                }
+            }}
     elif tool in {"vrcforge_search_text", "vrcforge_find_files", "vrcforge_list_directory"}:
         key = {"vrcforge_search_text": "matches", "vrcforge_find_files": "files", "vrcforge_list_directory": "entries"}[tool]
         rows = result.get(key)
