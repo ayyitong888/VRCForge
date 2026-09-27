@@ -74,22 +74,25 @@ def _bounded_text(value: Any, limit: int) -> str:
     return str(value or "").strip()[:limit]
 
 
-def _bounded_history(value: Any) -> list[dict[str, str]]:
+def _approval_history(value: Any) -> list[dict[str, str]]:
+    """Preserve the accepted textual conversation for approval resumption.
+
+    Approval state is a durable continuation boundary.  Its history must not
+    silently become a preview. Keep only the established role/text shape, retaining
+    every accepted entry and its complete text; model context admission still
+    applies when the resumed turn is sent to a provider.
+    """
     if not isinstance(value, list):
         return []
-    bounded: list[dict[str, str]] = []
-    remaining = 12_000
-    for item in reversed(value[-20:]):
-        if not isinstance(item, Mapping) or remaining <= 0:
+    preserved: list[dict[str, str]] = []
+    for item in value:
+        if not isinstance(item, Mapping):
             continue
-        role = _bounded_text(item.get("role"), 32)
-        text = _bounded_text(item.get("text") or item.get("content"), min(2_000, remaining))
-        if not role or not text:
-            continue
-        bounded.append({"role": role, "text": text})
-        remaining -= len(text)
-    bounded.reverse()
-    return bounded
+        role = str(item.get("role") or "").strip()
+        text = str(item.get("text") or item.get("content") or "").strip()
+        if role and text:
+            preserved.append({"role": role, "text": text})
+    return preserved
 
 
 def _bounded_provider_usage(value: Any) -> dict[str, Any]:
@@ -724,7 +727,7 @@ def approval_task_context(
         ],
         "skillPolicy": _bounded_skill_policy(seed.get("skillPolicy")),
         "skillContext": _bounded_skill_context(seed.get("skillContext")),
-        "history": _bounded_history(seed.get("history")),
+        "history": _approval_history(seed.get("history")),
         "requestedArguments": requested_arguments,
         "requestedActionId": requested_action_id,
         "actionId": requested_action_id,
@@ -880,7 +883,7 @@ def prepare_approval_task_continuation(
         "providerLabel": _bounded_text(context.get("providerLabel"), 160),
         "model": _bounded_text(context.get("model"), 160),
         "_requestedContextLimit": context.get("contextLimit"),
-        "history": _bounded_history(context.get("history")),
+        "history": _approval_history(context.get("history")),
     }
     task_status = _status(completion.get("status"))
     terminal_plan: dict[str, Any] | None = None
@@ -1295,7 +1298,7 @@ class AgentTaskLoop:
             exposure_layer=str(context.get("exposureLayer") or "execution"),
             plan_mode=context.get("planMode") is True,
             approval_revision_used=context.get("approvalRevisionUsed") is True,
-            history=_bounded_history(context.get("history")),
+            history=_approval_history(context.get("history")),
         )
         for item in list(context.get("priorActions") or []):
             if isinstance(item, Mapping) and (bounded := _bounded_action(item)) is not None:
@@ -1420,7 +1423,7 @@ class AgentTaskLoop:
             ),
             "skillPolicy": dict(self._skill_policy),
             "skillContext": dict(self._skill_context),
-            "history": _bounded_history(self.history),
+            "history": _approval_history(self.history),
             "requestedTool": effective_tool,
             "requestedKind": effective_kind,
             "requestedArguments": effective_arguments,

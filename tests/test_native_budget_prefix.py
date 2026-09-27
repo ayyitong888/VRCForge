@@ -96,8 +96,8 @@ def test_entire_runtime_state_changes_only_tail_and_keeps_tool_authority():
         assert 'Current runtime state (data)' not in request['instructions']
         state(request)
     assert state(loaded)['loadedToolBlocks'] == ['core', 'domain']
-    assert 'installedSkillGuides' not in state(loaded)
-    assert state(skill_enabled)['installedSkillGuides']['items'] == [{'name': 'guide', 'title': 'Guide', 'description': 'Complete guidance'}]
+    assert 'runtimeContextInformation' not in state(loaded)
+    assert '"items":[{"name":"guide","title":"Guide","description":"Complete guidance"}]' in state(skill_enabled)['runtimeContextInformation']
     assert state(changed)['shellExecutor'] == shell_data
     assert state(changed)['projectPath'] == 'C:/other'
     assert state(plan)['exposureLayer'] == 'planning'

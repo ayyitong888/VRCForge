@@ -50,3 +50,51 @@ def test_gateway_keeps_complete_projection_available_through_scoped_reader():
     finally:
         gateway._tools.pop(name, None)
         fixture.tearDown()
+
+
+def test_gateway_context_pages_are_turn_owned_without_fake_tool_actions():
+    fixture = _Fixture("test_loaded_skill_policy_blocks_disallowed_tool_then_allows_real_evidence")
+    fixture.setUp()
+    gateway = fixture.gateway
+    observe = gateway.runtime_observe
+    tail = "COMPLETE_CONTEXT_LAST_FACT"
+    parts = []
+    original = []
+
+    def observe_context(*args, **kwargs):
+        result = observe(*args, **kwargs)
+        result["memory"] = {"items": [{"scope": "user", "kind": "fact",
+                                      "text": "accepted contextual fact " * 1400 + tail}]}
+        return result
+
+    def plan(*args, **kwargs):
+        state = kwargs.get("loop_state") or []
+        context = args[2]
+        text = context["modelContextInformation"]["payload"]["text"]
+        assert tail in text
+        if not state:
+            original.append(text)
+            request = context["modelContextInformationRead"]["nextRequest"]
+            request = {**request, "arguments": {**request["arguments"], "jsonPointer": "/text"}}
+        else:
+            assert text == original[0]
+            page = state[-1]["result"]
+            parts.append(page["items"][0]["value"])
+            if not page["hasMore"]:
+                assert "".join(parts) == original[0]
+                return {"planner": "llm", "reply": "Read the complete context.", "nextStep": "done",
+                        "completionClaim": {"satisfied": True,
+                                            "evidenceActionIds": [row["actionId"] for row in state]}}
+            request = page["nextRequest"]
+        return {"planner": "llm", "skillNeeded": True, "skillTool": request["tool"],
+                "skillParams": request["arguments"], "continueLoop": True, "nextStep": "call_skill"}
+
+    try:
+        with patch.object(gateway, "runtime_observe", side_effect=observe_context), \
+                patch.object(gateway.runtime_planner, "plan_agent_turn", side_effect=plan):
+            response = gateway.runtime_message({"message": "Inspect my context", "session_id": "context-information"})
+        assert response["plan"]["nextStep"] == "done"
+        assert len(parts) > 1
+        assert all(step["tool"] == TOOL_NAME for step in response["steps"])
+    finally:
+        fixture.tearDown()

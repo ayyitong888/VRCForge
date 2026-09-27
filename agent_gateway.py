@@ -6302,6 +6302,27 @@ class AgentGateway:
         steps: list[dict[str, Any]] = (
             task_loop.historical_steps() if continuation_context else []
         )
+        # Context belongs to this invocation, not to a synthetic executed tool.
+        # Keep it stable across model rounds and dispose it with the turn. Its
+        # content identity prevents a resumed turn from reusing a stale cursor.
+        model_context_steps: list[dict[str, Any]] = []
+        context_information = self.runtime_planner.complete_runtime_context_information(
+            observe,
+            exposure_layer=EXPOSURE_LAYER_PLANNING if task_loop.plan_mode else task_loop.exposure_layer,
+            project_context_active=project_context_active,
+        )
+        if context_information:
+            context_step = {
+                "index": -1, "tool": "runtime_context_information",
+                "actionId": "runtime-context:" + hashlib.sha256(context_information.encode("utf-8")).hexdigest()[:16],
+            }
+            context_step.update(retain_model_information(
+                session_id, turn_id, project_root, context_step, {"text": context_information},
+                planner_policy.sanitize_planner_observation_text,
+            ))
+            model_context_steps.append(context_step)
+            observe["modelContextInformation"] = context_step["modelInformation"]
+            observe["modelContextInformationRead"] = context_step["modelInformationRead"]
         def is_native_read_observation(tool_name: str, *, has_requirement: bool) -> bool:
             if not native_binding or has_requirement:
                 return False
@@ -7613,7 +7634,7 @@ class AgentGateway:
                 }:
                     step_params.setdefault("exposureLayer", runtime_exposure_layer)
                 with self._bind_runtime_skill_scope(task_loop), (bind_memory_tool_context(project_root, memory_request_text, tuple(memory_user_texts)) if step_tool in MEMORY_TOOL_NAMES else nullcontext()), (
-                    bind_tool_result_context(session_id, turn_id, project_root, steps) if step_tool == RESULT_READER_TOOL else nullcontext()
+                    bind_tool_result_context(session_id, turn_id, project_root, [*model_context_steps, *steps]) if step_tool == RESULT_READER_TOOL else nullcontext()
                 ):
                     step_payload = self._runtime_skill_executor.execute(
                         step_tool,
