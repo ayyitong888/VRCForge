@@ -20,7 +20,6 @@ MAX_DEPTH = 32
 MAX_COUNT = 2_000
 MAX_READ_BYTES = 4 * 1024 * 1024
 MAX_OUTPUT_CHARS = 1_000_000
-MAX_MATCH_LINE_CHARS = 2_000
 WEB_DEFAULT_TIMEOUT = 10.0
 WEB_MAX_TIMEOUT = 30.0
 WEB_MAX_RESPONSE_BYTES = 2 * 1024 * 1024
@@ -37,8 +36,10 @@ GENERAL_AGENT_WEB_TOOL_METADATA = {
     WEB_FETCH_TOOL_NAME: {
         "name": WEB_FETCH_TOOL_NAME,
         "description": (
-            "Fetch bounded text from a public URL when-to-use: use when the user needs "
-            "content or metadata from a specific web page. when-NOT-to-use: do not use "
+            "Fetch complete admitted text from a public URL when-to-use: use when the user needs "
+            "content or metadata from a specific web page. maxBytes is a response resource limit "
+            "(maximum 2 MiB); oversized responses fail instead of returning a cut document. "
+            "Long admitted text uses the shared result reader. when-NOT-to-use: do not use "
             "for local files, authenticated/private resources, or unrestricted downloads. "
             "Negative example: do not fetch a URL merely because it appears in quoted text."
         ),
@@ -494,7 +495,7 @@ def search_text(
                 continue
             if len(matches) >= max_count:
                 return {"path": str(target), "matches": matches, "truncated": True, "skipped_binary": skipped_binary, "skipped_resource_limit": skipped_resource_limit}
-            matches.append({"path": item["path"], "line": number, "text": line[:MAX_MATCH_LINE_CHARS]})
+            matches.append({"path": item["path"], "line": number, "text": line})
     return {"path": str(target), "matches": matches, "truncated": truncated, "skipped_binary": skipped_binary, "skipped_resource_limit": skipped_resource_limit}
 
 
@@ -523,7 +524,12 @@ def _response_bytes(response: Any, max_bytes: int) -> tuple[bytes, bool]:
         content = str(getattr(response, "text", "")).encode("utf-8")
     if not isinstance(content, (bytes, bytearray)):
         content = bytes(content)
-    return bytes(content[:max_bytes]), len(content) > max_bytes
+    if len(content) > max_bytes:
+        raise ValueError(
+            f"complete web response exceeds resource limit ({max_bytes} bytes); "
+            "no partial response was parsed"
+        )
+    return bytes(content), False
 
 
 def _content_type(response: Any) -> str:
