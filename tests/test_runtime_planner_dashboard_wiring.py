@@ -318,8 +318,9 @@ def test_compactor_uses_injected_model_owner_and_propagates_cancellation() -> No
     binding = dashboard_server._RuntimePlannerProviderTurnBinding()
 
     class CancelledModel:
-        def plan(self, prompt: str):
+        def plan(self, prompt: str, *, _deadline=None, _usage_callback=None):
             assert prompt == "compact prompt"
+            assert isinstance(_deadline, float)
             raise dashboard_server.RuntimePlannerProviderCancelledError("cancelled")
 
     compactor = dashboard_server._RuntimePlannerCompactor(binding, CancelledModel())

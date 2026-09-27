@@ -58,7 +58,8 @@ def test_native_compaction_reuses_port_and_preserves_current_receipts():
 
     assert result["nextStep"] == "done"
     assert len(compactor.calls) == 1
-    assert "PRIVATE_REASONING_SENTINEL" not in json.dumps(compactor.calls)
+    # The port also carries a private host usage callback; only history is model data.
+    assert "PRIVATE_REASONING_SENTINEL" not in json.dumps([history for history, _metadata in compactor.calls])
     grouped = [entry["text"] for entry in compactor.calls[0][0] if "read-old" in entry["text"]]
     assert len(grouped) == 1 and "readback-old" in grouped[0] and "fixture.txt" in grouped[0]
     assert model.requests[0]["messages"][1:-1] == suffix

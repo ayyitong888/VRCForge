@@ -6536,8 +6536,16 @@ class AgentGateway:
         def discard_runtime_compaction_for_cancel() -> None:
             nonlocal runtime_compaction
             if runtime_compaction_usage_checkpoint is not None:
-                context_usage.clear()
-                context_usage.update(runtime_compaction_usage_checkpoint)
+                # Cancellation restores the prompt window, never already billed
+                # compaction requests (including attempts with unknown usage).
+                for key in ("lastInputTokens", "lastOutputTokens", "lastTotalTokens",
+                            "peakInputTokens", "peakTotalTokens", "lastPromptCharacterCount",
+                            "lastPromptEstimatedTokens", "lastUsageExact", "preCompactionPeakInputTokens",
+                            "compactionCount", "windowId"):
+                    if key in runtime_compaction_usage_checkpoint:
+                        context_usage[key] = runtime_compaction_usage_checkpoint[key]
+                    else:
+                        context_usage.pop(key, None)
             if runtime_compaction is not None:
                 runtime_compaction = planner_policy.runtime_compaction_cancelled_view(runtime_compaction)
 

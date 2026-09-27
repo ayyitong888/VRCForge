@@ -1561,7 +1561,7 @@ def _reset_compacted_context_usage(usage: dict[str, object], summary_digest: str
     if peak is not None:
         usage["preCompactionPeakInputTokens"] = peak
     for key in ("lastInputTokens", "lastOutputTokens", "lastTotalTokens", "peakInputTokens",
-                "peakTotalTokens", "lastPromptCharacterCount", "lastPromptEstimatedTokens"):
+                "peakTotalTokens", "lastPromptCharacterCount", "lastPromptEstimatedTokens", "lastUsageExact"):
         usage.pop(key, None)
     usage["compactionCount"] = int(usage.get("compactionCount") or 0) + 1
     usage["windowId"] = hashlib.sha256(f"{summary_digest}:{time.time_ns()}".encode()).hexdigest()[:16]
@@ -1665,7 +1665,7 @@ class RuntimePlannerService:
         usage = context_usage or {}
         last_input_tokens = usage_int(usage.get("lastInputTokens"))
         previous_prompt_tokens = usage_int(usage.get("lastPromptEstimatedTokens"))
-        usage_exact = bool(usage.get("exact"))
+        usage_exact = bool(usage.get("lastUsageExact", usage.get("exact")))
         provider_overhead = (
             max(0, last_input_tokens - previous_prompt_tokens)
             if usage_exact and last_input_tokens is not None and previous_prompt_tokens is not None
@@ -1772,6 +1772,8 @@ class RuntimePlannerService:
             result = dict(self._compactor.compact(tuple(entries), {
                 "trigger": "auto", "phase": "mid_turn", "targetTokens": guard["targetAfterTokens"],
                 "realContextLimit": guard["contextLimit"],
+                "_recordUsage": lambda prompt, usage: self.record_context_usage(
+                    context_usage if context_usage is not None else {}, prompt, [], usage, update_window=False),
             }))
             metadata["attempts"] = bounded_runtime_compaction_integer(result.get("providerAttempts"), 16)
             if ensure_dict(result.get("completeness")).get("summarizerInputComplete") is False:
@@ -2689,8 +2691,11 @@ class RuntimePlannerService:
             prompt: str,
             history: list[dict[str, object]],
             provider_usage: dict[str, object] | None,
+            *, update_window: bool = True,
         ) -> None:
             usage = ensure_dict(provider_usage)
+            if not update_window and "lastInputTokens" in current and "lastUsageExact" not in current:
+                current["lastUsageExact"] = bool(current.get("exact"))
             # Guard metadata may precede the first provider receipt. Only usage
             # counters identify an accumulator that has already been started.
             if not any(key in current for key in (
@@ -2730,16 +2735,18 @@ class RuntimePlannerService:
 
             current["requestCount"] = int(current.get("requestCount") or 0) + 1
             current["promptCharacterCount"] = int(current.get("promptCharacterCount") or 0) + len(prompt)
-            current["lastPromptCharacterCount"] = len(prompt)
-            current["lastPromptEstimatedTokens"] = estimate_runtime_context_tokens(prompt)
-            current["sentHistoryEntryCount"] = sum(
-                1 for entry in history if isinstance(entry, dict) and str(entry.get("text") or "").strip()
-            )
-            current["sentHistoryCharacterCount"] = sum(
-                len(str(entry.get("text") or ""))
-                for entry in history
-                if isinstance(entry, dict) and str(entry.get("text") or "").strip()
-            )
+            if update_window:
+                current["lastPromptCharacterCount"] = len(prompt)
+                current["lastPromptEstimatedTokens"] = estimate_runtime_context_tokens(prompt)
+                current["lastUsageExact"] = bool(usage.get("exact"))
+                current["sentHistoryEntryCount"] = sum(
+                    1 for entry in history if isinstance(entry, dict) and str(entry.get("text") or "").strip()
+                )
+                current["sentHistoryCharacterCount"] = sum(
+                    len(str(entry.get("text") or ""))
+                    for entry in history
+                    if isinstance(entry, dict) and str(entry.get("text") or "").strip()
+                )
 
             for key in ("provider", "providerLabel", "model"):
                 value = str(usage.get(key) or "").strip()
@@ -2767,19 +2774,22 @@ class RuntimePlannerService:
                     cumulative_input_tokens = int(current.get("cumulativeInputTokens") or 0) + input_tokens
                     current["inputTokens"] = cumulative_input_tokens
                     current["cumulativeInputTokens"] = cumulative_input_tokens
-                    current["lastInputTokens"] = input_tokens
-                    current["peakInputTokens"] = max(int(current.get("peakInputTokens") or 0), input_tokens)
+                    if update_window:
+                        current["lastInputTokens"] = input_tokens
+                        current["peakInputTokens"] = max(int(current.get("peakInputTokens") or 0), input_tokens)
                 if output_tokens is not None:
                     cumulative_output_tokens = int(current.get("cumulativeOutputTokens") or 0) + output_tokens
                     current["outputTokens"] = cumulative_output_tokens
                     current["cumulativeOutputTokens"] = cumulative_output_tokens
-                    current["lastOutputTokens"] = output_tokens
+                    if update_window:
+                        current["lastOutputTokens"] = output_tokens
                 if total_tokens is not None:
                     cumulative_total_tokens = int(current.get("cumulativeTotalTokens") or 0) + total_tokens
                     current["totalTokens"] = cumulative_total_tokens
                     current["cumulativeTotalTokens"] = cumulative_total_tokens
-                    current["lastTotalTokens"] = total_tokens
-                    current["peakTotalTokens"] = max(int(current.get("peakTotalTokens") or 0), total_tokens)
+                    if update_window:
+                        current["lastTotalTokens"] = total_tokens
+                        current["peakTotalTokens"] = max(int(current.get("peakTotalTokens") or 0), total_tokens)
                 if cache_read_tokens is not None:
                     current["cacheReadTokens"] = int(current.get("cacheReadTokens") or 0) + cache_read_tokens
             else:
@@ -2814,7 +2824,7 @@ class RuntimePlannerService:
                 return history, None, False
             last_input_tokens = usage_int(context_usage.get("lastInputTokens"))
             previous_prompt_tokens = usage_int(context_usage.get("lastPromptEstimatedTokens"))
-            usage_exact = bool(context_usage.get("exact"))
+            usage_exact = bool(context_usage.get("lastUsageExact", context_usage.get("exact")))
 
             project_instructions = load_project_instructions(
                 params.get("projectRoot") or params.get("projectPath")
@@ -2882,6 +2892,8 @@ class RuntimePlannerService:
                         "model": str(params.get("model") or ""),
                         "targetTokens": target_tokens,
                         "realContextLimit": context_limit,
+                        "_recordUsage": lambda prompt, usage: self.record_context_usage(
+                            context_usage, prompt, [], usage, update_window=False),
                     },
                 ))
                 metadata["attempts"] = bounded_runtime_compaction_integer(result.get("providerAttempts"), 16)

@@ -15214,7 +15214,9 @@ class _RuntimePlannerModel:
         """Run one isolated, tool-free approval inference under the Provider owner."""
         return self.plan(prompt, _review=True)
 
-    def plan(self, prompt: str, *, native_request: Mapping[str, object] | None = None, _review: bool = False) -> PlannerModelResult:
+    def plan(self, prompt: str, *, native_request: Mapping[str, object] | None = None, _review: bool = False,
+             _deadline: float | None = None,
+             _usage_callback: Callable[[Mapping[str, object]], None] | None = None) -> PlannerModelResult:
         config = self._turn.current_config()
         if provider_requires_api_key(config.provider) and not config.api_key:
             raise PlannerProviderNotConfiguredError("LLM API key is not configured.")
@@ -15225,6 +15227,11 @@ class _RuntimePlannerModel:
         )
         stream_state = {"firstByteAt": None, "lastActivityAt": time.monotonic()}
         context = AGENT_GATEWAY.runtime_sessions.stream_context()
+        if _deadline is not None:
+            if self._runtime_cancel_requested(context):
+                raise RuntimePlannerProviderCancelledError("Compaction was cancelled before provider admission.")
+            if time.monotonic() >= _deadline:
+                raise RuntimePlannerProviderTimeoutError("compaction", 0.0)
         # A format correction can call the model again without another gateway
         # loop iteration. Start every call with the existing transient-text reset.
         if context.get("clientTurnId"):
@@ -15331,50 +15338,63 @@ class _RuntimePlannerModel:
                 raise
 
         started_at = time.monotonic()
-        while not owner.done.wait(self._POLL_SECONDS):
-            elapsed = time.monotonic() - started_at
-            first_byte_timeout = self._FIRST_BYTE_TIMEOUT_SECONDS
-            if (
-                first_byte_timeout is not None
-                and first_byte_timeout > 0
-                and stream_state["firstByteAt"] is None
-                and elapsed >= first_byte_timeout
-            ):
-                owner.cancellation.set()
-                owner.done.wait(self._CANCEL_JOIN_SECONDS)
-                raise RuntimePlannerProviderTimeoutError("first_byte", first_byte_timeout)
-            if time.monotonic() - stream_state["lastActivityAt"] >= self._IDLE_TIMEOUT_SECONDS:
-                owner.cancellation.set()
-                owner.done.wait(self._CANCEL_JOIN_SECONDS)
-                raise RuntimePlannerProviderTimeoutError("idle", self._IDLE_TIMEOUT_SECONDS)
-            overall_timeout = self._REVIEW_TIMEOUT_SECONDS if _review else self._OVERALL_TIMEOUT_SECONDS
-            if overall_timeout is not None and overall_timeout > 0 and elapsed >= overall_timeout:
-                owner.cancellation.set()
-                owner.done.wait(self._CANCEL_JOIN_SECONDS)
-                raise RuntimePlannerProviderTimeoutError("overall", overall_timeout)
-            if self._runtime_cancel_requested(context):
-                owner.cancellation.set()
-                owner.done.wait(self._CANCEL_JOIN_SECONDS)
+        try:
+            while not owner.done.wait(self._POLL_SECONDS):
+                elapsed = time.monotonic() - started_at
+                if _deadline is not None and time.monotonic() >= _deadline:
+                    owner.cancellation.set()
+                    owner.done.wait(self._CANCEL_JOIN_SECONDS)
+                    raise RuntimePlannerProviderTimeoutError("compaction", max(0.0, _deadline - started_at))
+                first_byte_timeout = self._FIRST_BYTE_TIMEOUT_SECONDS
+                if (
+                    first_byte_timeout is not None
+                    and first_byte_timeout > 0
+                    and stream_state["firstByteAt"] is None
+                    and elapsed >= first_byte_timeout
+                ):
+                    owner.cancellation.set()
+                    owner.done.wait(self._CANCEL_JOIN_SECONDS)
+                    raise RuntimePlannerProviderTimeoutError("first_byte", first_byte_timeout)
+                if time.monotonic() - stream_state["lastActivityAt"] >= self._IDLE_TIMEOUT_SECONDS:
+                    owner.cancellation.set()
+                    owner.done.wait(self._CANCEL_JOIN_SECONDS)
+                    raise RuntimePlannerProviderTimeoutError("idle", self._IDLE_TIMEOUT_SECONDS)
+                overall_timeout = self._REVIEW_TIMEOUT_SECONDS if _review else self._OVERALL_TIMEOUT_SECONDS
+                if overall_timeout is not None and overall_timeout > 0 and elapsed >= overall_timeout:
+                    owner.cancellation.set()
+                    owner.done.wait(self._CANCEL_JOIN_SECONDS)
+                    raise RuntimePlannerProviderTimeoutError("overall", overall_timeout)
+                if self._runtime_cancel_requested(context):
+                    owner.cancellation.set()
+                    owner.done.wait(self._CANCEL_JOIN_SECONDS)
+                    raise RuntimePlannerProviderCancelledError(
+                        "Provider planning was cancelled by the runtime turn owner."
+                    )
+            if owner.cancellation.is_set() or self._runtime_cancel_requested(context):
                 raise RuntimePlannerProviderCancelledError(
                     "Provider planning was cancelled by the runtime turn owner."
                 )
-        if owner.cancellation.is_set() or self._runtime_cancel_requested(context):
-            raise RuntimePlannerProviderCancelledError(
-                "Provider planning was cancelled by the runtime turn owner."
+            if _deadline is not None and time.monotonic() >= _deadline:
+                raise RuntimePlannerProviderTimeoutError("compaction", max(0.0, _deadline - started_at))
+            if owner.error is not None:
+                if isinstance(owner.error, Exception):
+                    raise owner.error
+                raise RuntimeError("Provider planning failed outside the Exception hierarchy.")
+            response = owner.response
+            return PlannerModelResult(
+                text=response.text,
+                usage=dict(response.usage or {}),
+                reasoning=dict(response.reasoning or {}),
+                planner_label=planner_label,
+                assistant_message=dict(response.assistant_message or {}) if native_request is not None else {},
+                finish_reason=response.finish_reason if native_request is not None else "",
             )
-        if owner.error is not None:
-            if isinstance(owner.error, Exception):
-                raise owner.error
-            raise RuntimeError("Provider planning failed outside the Exception hierarchy.")
-        response = owner.response
-        return PlannerModelResult(
-            text=response.text,
-            usage=dict(response.usage or {}),
-            reasoning=dict(response.reasoning or {}),
-            planner_label=planner_label,
-            assistant_message=dict(response.assistant_message or {}) if native_request is not None else {},
-            finish_reason=response.finish_reason if native_request is not None else "",
-        )
+        finally:
+            if _usage_callback is not None:
+                # A completed receipt remains billable even when Stop wins the
+                # final admission check. Missing/late receipts are unknown, not zero.
+                _usage_callback(dict(owner.response.usage or {}) if owner.response is not None else {
+                    "exact": False, "unavailableReason": "provider_receipt_unavailable"})
 
 
 def mcp_trigger_selection_config_binding(config: ProviderApiConfig) -> tuple[str, str, str, str]:
@@ -15453,6 +15473,8 @@ def verify_mcp_trigger_selection_receipt(
 
 
 class _RuntimePlannerCompactor:
+    _TOTAL_TIMEOUT_SECONDS = 300.0
+
     def __init__(self, turn: _RuntimePlannerProviderTurnBinding, model: "_RuntimePlannerModel") -> None:
         self._turn = turn
         self._model = model
@@ -15463,10 +15485,25 @@ class _RuntimePlannerCompactor:
         metadata: Mapping[str, object],
     ) -> Mapping[str, object]:
         config = self._turn.current_config()
+        deadline = time.monotonic() + self._TOTAL_TIMEOUT_SECONDS
+        record_usage = metadata.get("_recordUsage")
+        deadline_exceeded = False
         summarizer: Callable[[str], Any] | None = None
         if not provider_requires_api_key(config.provider) or str(config.api_key or "").strip():
-            summarizer = lambda prompt: self._model.plan(prompt).text
-        return compact_context(
+            def summarize(prompt: str) -> str:
+                nonlocal deadline_exceeded
+                try:
+                    return self._model.plan(prompt, _deadline=deadline,
+                        _usage_callback=(lambda usage: record_usage(prompt, dict(usage))) if callable(record_usage) else None).text
+                except RuntimePlannerProviderTimeoutError as exc:
+                    if exc.phase != "compaction":
+                        raise
+                    deadline_exceeded = True
+                    # Non-transient wording prevents the shared data layer from
+                    # retrying an already exhausted whole-compaction deadline.
+                    raise RuntimeError("compaction deadline exceeded") from exc
+            summarizer = summarize
+        result = compact_context(
             [dict(entry) for entry in history],
             summarizer=summarizer,
             trigger="auto",
@@ -15477,6 +15514,9 @@ class _RuntimePlannerCompactor:
             target_tokens=metadata.get("targetTokens"),
             real_context_limit=metadata.get("realContextLimit"),
         )
+        if deadline_exceeded:
+            result["fallbackReason"] = "compaction_deadline"
+        return result
 
 
 def _runtime_planner_tool(tool: Any, projection: Any) -> PlannerTool:
