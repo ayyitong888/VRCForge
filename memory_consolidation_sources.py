@@ -208,9 +208,9 @@ def _redact_url(match: re.Match[str]) -> str:
     return f"{parsed.scheme.casefold()}://{host}/[REDACTED_URL]" + trailing
 
 
-def redact_memory_text(value: Any, *, limit: int = MAX_SOURCE_TEXT_CHARS) -> tuple[str, dict[str, int]]:
-    if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
-        raise ValueError("limit must be a positive integer")
+def redact_memory_text(value: Any, *, limit: int | None = MAX_SOURCE_TEXT_CHARS) -> tuple[str, dict[str, int]]:
+    if limit is not None and (isinstance(limit, bool) or not isinstance(limit, int) or limit < 1):
+        raise ValueError("limit must be a positive integer or None")
     raw = str(value or "")
     url_count = len(_URL_PATTERN.findall(raw))
     text = _URL_PATTERN.sub(_redact_url, raw)
@@ -218,7 +218,7 @@ def redact_memory_text(value: Any, *, limit: int = MAX_SOURCE_TEXT_CHARS) -> tup
     text = text.replace("\x00", "")
     text = "\n".join(_WHITESPACE_PATTERN.sub(" ", line).strip() for line in text.splitlines())
     text = "\n".join(line for line in text.splitlines() if line).strip()
-    if len(text) > limit:
+    if limit is not None and len(text) > limit:
         text = text[: max(0, limit - 1)].rstrip() + "…"
     report["urls"] = url_count
     report["total"] = int(report.get("total", 0)) + url_count
@@ -279,7 +279,10 @@ def _build_projection(
         field="sourceRevision",
         limit=MAX_SOURCE_REVISION_CHARS,
     )
-    redacted_text, _report = redact_memory_text(source.get(text_field))
+    # Admission defines source identity, not a display preview. Retain the full
+    # safe source so downstream request pagination can reach its tail and a
+    # tail-only edit cannot reuse the digest of a different source.
+    redacted_text, _report = redact_memory_text(source.get(text_field), limit=None)
     if not redacted_text:
         raise SourceAdmissionError("Eligible source text is empty after redaction.")
     source_digest = _canonical_json_digest(
