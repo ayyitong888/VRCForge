@@ -24946,7 +24946,15 @@ def register_agent_gateway_tools() -> None:
             ensure_ascii=False,
             separators=(",", ":"),
         )
-        result["notice"] = "Directory listing is complete. Do not repeat it through Shell dir/ls/Get-ChildItem; continue with find_files, search_text, or read_text_file when more evidence is needed."
+        result["notice"] = (
+            "Directory listing is incomplete because the entry limit was reached. "
+            "Do not infer that unlisted entries are absent; inspect narrower paths with "
+            "list_directory or find_files for additional evidence."
+            if result.get("truncated") else
+            "Directory listing is complete within the requested depth. Do not repeat it through "
+            "Shell dir/ls/Get-ChildItem; continue with find_files, search_text, or read_text_file "
+            "when more evidence is needed."
+        )
         return result
 
     def general_read_text_file_tool(params: object) -> dict[str, Any]:
