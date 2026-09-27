@@ -69,7 +69,8 @@ def test_dashboard_parent_load_browses_direct_children_without_touching_session_
         for child in result["blocks"]:
             assert child["description"]
             assert not child.get("children")
-            assert not child.get("toolNames")
+            assert isinstance(child.get("toolNames"), list)
+            assert all(isinstance(name, str) and name for name in child["toolNames"])
             assert child["expandArguments"] == {"block": child["name"]}
     assert calls == []
 

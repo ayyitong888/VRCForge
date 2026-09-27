@@ -472,3 +472,10 @@ Regression: `tests/test_planner_tool_description_integrity.py`, `tests/test_plan
 - Keep retained-result pages bounded while allowing medium lists to fit in one page. Preserve exact pointers, source constraints, redaction and raw retained data.
 - Larger pages must survive planner observation intact; long-text fixtures must exceed the configured page size so continuation validation remains exercised.
 - Regression: `tests/test_agent_tool_result_reader.py`, `tests/test_result_reader_long_scalar.py`, `tests/test_result_reader_planner_boundary.py`, `tests/test_result_reader_completion_recovery.py`.
+
+
+### Selected-category tool-name discovery
+
+- Root navigation must not emit a global tool-name directory. Expanding a selected category must retain the exact names of tools in its immediate leaf groups so callers can request a subset without first loading every schema.
+- Browsing never loads tools; preserve whole-group and exact-subset loading, complete definitions and append-only exposure.
+- Regression: `tests/test_tool_leaf_name_discovery.py`, `tests/test_internal_tool_blocks.py`, `tests/test_exact_tool_loading_review.py`.

@@ -445,10 +445,14 @@ def project_internal_tool_block_level(directory: dict[str, Any]) -> dict[str, An
     else:
         return directory
     rows = []
+    expose_leaf_names = name in CANONICAL_TOOL_BLOCKS
     for node in nodes:
         if not isinstance(node, dict) or not node.get("id"):
             return directory
-        row = {key: value for key, value in node.items() if key not in ("children", "toolNames", "loadCall")}
+        hidden_keys = {"children", "loadCall"}
+        if not expose_leaf_names:
+            hidden_keys.add("toolNames")
+        row = {key: value for key, value in node.items() if key not in hidden_keys}
         row["expandArguments"] = {"block": node["id"]}
         rows.append(row)
     selected = {key: value for key, value in tree.items() if key != "children"}
