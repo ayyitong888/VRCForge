@@ -51,7 +51,7 @@ GENERAL_AGENT_WEB_TOOL_METADATA = {
         "name": WEB_SEARCH_TOOL_NAME,
         "description": (
             "Search the public web and return normalized results when-to-use: use when "
-            "the user needs discovery by topic or keywords. when-NOT-to-use: do not use "
+            "the user needs discovery by topic or keywords. maxResults is a page size; follow nextRequest to read remaining admitted results. Keep snapshotDigest; changed results require restarting at offset 0. when-NOT-to-use: do not use "
             "for private data, authenticated search, or a known URL (use web_fetch). "
             "Negative example: do not search when the user asked only for a local file check."
         ),
@@ -619,6 +619,8 @@ def web_search(
     client: _HttpClient | None = None,
     timeout: float = WEB_DEFAULT_TIMEOUT,
     max_results: int = 5,
+    offset: int = 0,
+    snapshot_digest: str | None = None,
 ) -> dict[str, Any]:
     """Search DuckDuckGo's public HTML endpoint without credentials."""
     if not isinstance(query, str) or not query.strip():
@@ -642,8 +644,12 @@ def web_search(
         raw, truncated = _response_bytes(response, WEB_MAX_RESPONSE_BYTES)
         parser = _WebPageParser()
         parser.feed(raw.decode("utf-8", errors="replace"))
-        results = parser.results[:max_results]
-        return {"query": query.strip(), "results": results, "truncated": truncated or len(parser.results) > max_results}
+        results, page = _result_page(parser.results, offset=offset, max_count=max_results,
+                                     snapshot_digest=snapshot_digest, scope={"query": query.strip()})
+        next_request = {"query": query.strip(), "maxResults": max_results,
+                        "offset": page["nextOffset"], "snapshotDigest": page["snapshotDigest"]} if page["hasMore"] else None
+        return {"query": query.strip(), "results": results, "truncated": truncated or page["hasMore"],
+                **page, "nextRequest": next_request}
     finally:
         if owned:
             http.close()  # type: ignore[attr-defined]

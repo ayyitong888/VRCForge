@@ -123,7 +123,7 @@ _HIGH_CONFUSION_TOOL_INPUT_CONTRACTS: dict[str, tuple[str, ...]] = {
     "vrcforge_move_path": ("source:string", "destination:string", "overwrite?:boolean"),
     "vrcforge_apply_patch": ("path:string", "patch:string"),
     "vrcforge_web_fetch": ("url:string", "timeout?:number", "maxBytes?:integer"),
-    "vrcforge_web_search": ("query:string", "timeout?:number", "maxResults?:integer"),
+    "vrcforge_web_search": ("query:string", "timeout?:number", "maxResults?:integer", "offset?:integer", "snapshotDigest?:string"),
     "vrcforge_get_goal": (),
     "vrcforge_create_goal": ("objective:string", "summary?:string"),
     "vrcforge_update_goal": ("status:string", "reason:string"),

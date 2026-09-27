@@ -25140,6 +25140,8 @@ def register_agent_gateway_tools() -> None:
             str(raw.get("query") or ""),
             timeout=float(raw.get("timeout") or 10.0),
             max_results=bounded_int(raw.get("maxResults", raw.get("max_results", 5)), 5, 10),
+            offset=raw.get("offset", 0),
+            snapshot_digest=raw.get("snapshotDigest"),
         )
         result["summary"] = json.dumps(result.get("results") or [], ensure_ascii=False, separators=(",", ":"))
         return result
