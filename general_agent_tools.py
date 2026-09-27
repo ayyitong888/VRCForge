@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import os
 import re
+import hashlib
+import json
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Protocol
@@ -304,30 +306,52 @@ def extract_explicit_local_roots(message: object, *, max_roots: int = 8) -> list
     return roots
 
 
+def _result_page(rows: Iterable[dict[str, Any]], *, offset: int, max_count: int,
+                 snapshot_digest: str | None, scope: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Traverse the full authorized result while retaining only this page, with no store."""
+    if type(offset) is not int or offset < 0:
+        raise ValueError("offset must be a non-negative integer")
+    if snapshot_digest is not None and (not isinstance(snapshot_digest, str) or
+            re.fullmatch(r"[0-9a-f]{64}", snapshot_digest) is None):
+        raise ValueError("snapshot_digest must be a SHA-256 digest")
+    digest = hashlib.sha256()
+    page = []
+    total = 0
+    for row in rows:
+        digest.update(json.dumps(row, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+        digest.update(b"\n")
+        if offset <= total < offset + max_count:
+            page.append(row)
+        total += 1
+    # Scope may include traversal diagnostics populated by the exhausted iterator.
+    digest.update(json.dumps(scope, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+    actual_digest = digest.hexdigest()
+    if snapshot_digest is not None and snapshot_digest != actual_digest:
+        raise ValueError("result snapshot changed; restart pagination at offset 0")
+    has_more = offset + len(page) < total
+    return page, {"offset": offset, "nextOffset": offset + len(page) if has_more and page else None,
+                  "hasMore": has_more, "totalCount": total, "snapshotDigest": actual_digest}
+
+
 def list_directory(
     path: str | Path,
     *,
     allowed_roots: Iterable[str | Path],
     max_depth: int = 1,
     max_count: int = 200,
+    offset: int = 0,
+    snapshot_digest: str | None = None,
 ) -> dict[str, Any]:
     """List entries below *path*, bounded by depth and total entry count."""
     max_depth = _limit(max_depth, "max_depth", MAX_DEPTH)
     max_count = _limit(max_count, "max_count", MAX_COUNT)
     root = _directory(path, allowed_roots)
-    entries: list[dict[str, Any]] = []
-    truncated = False
-
-    def walk(directory: Path, depth: int) -> None:
-        nonlocal truncated
+    def walk(directory: Path, depth: int) -> Iterator[dict[str, Any]]:
         try:
             children = sorted(directory.iterdir(), key=lambda item: (item.name.casefold(), item.name))
         except OSError:
             return
         for child in children:
-            if len(entries) >= max_count:
-                truncated = True
-                return
             if _is_link_or_junction(child):
                 kind = "other"
             elif child.name.casefold() == ".vrcforge":
@@ -340,14 +364,14 @@ def list_directory(
                     item["size"] = child.stat().st_size
                 except OSError:
                     pass
-            entries.append(item)
+            yield item
             if kind == "directory" and depth + 1 < max_depth:
-                walk(child, depth + 1)
-                if truncated:
-                    return
+                yield from walk(child, depth + 1)
 
-    walk(root, 0)
-    return {"path": str(root), "entries": entries, "truncated": truncated}
+    entries, page = _result_page(walk(root, 0), offset=offset, max_count=max_count,
+                                snapshot_digest=snapshot_digest,
+                                scope={"tool": "list_directory", "path": str(root), "maxDepth": max_depth})
+    return {"path": str(root), "entries": entries, "truncated": page["hasMore"], **page}
 
 
 def read_text_file(
@@ -425,21 +449,18 @@ def find_files(
     pattern: str = "*",
     max_depth: int = 8,
     max_count: int = 200,
+    offset: int = 0,
+    snapshot_digest: str | None = None,
 ) -> dict[str, Any]:
     """Find regular files matching a pathlib glob pattern."""
     max_depth = _limit(max_depth, "max_depth", MAX_DEPTH)
     max_count = _limit(max_count, "max_count", MAX_COUNT)
     root = _directory(path, allowed_roots)
-    files: list[dict[str, Any]] = []
-    truncated = False
-    for candidate in _iter_files(root, max_depth):
-        if not candidate.match(pattern):
-            continue
-        if len(files) >= max_count:
-            truncated = True
-            break
-        files.append({"path": str(candidate), "name": candidate.name})
-    return {"path": str(root), "files": files, "truncated": truncated}
+    rows = ({"path": str(candidate), "name": candidate.name} for candidate in _iter_files(root, max_depth)
+            if candidate.match(pattern))
+    files, page = _result_page(rows, offset=offset, max_count=max_count, snapshot_digest=snapshot_digest,
+                              scope={"tool": "find_files", "path": str(root), "pattern": pattern, "maxDepth": max_depth})
+    return {"path": str(root), "files": files, "truncated": page["hasMore"], **page}
 
 
 def search_text(
@@ -452,6 +473,8 @@ def search_text(
     max_count: int = 200,
     max_file_bytes: int = 1_048_576,
     case_sensitive: bool = True,
+    offset: int = 0,
+    snapshot_digest: str | None = None,
 ) -> dict[str, Any]:
     """Search an authorized UTF-8 file or directory and return bounded line matches."""
     if not isinstance(query, str) or not query:
@@ -464,39 +487,31 @@ def search_text(
     if target.is_file():
         # A user may authorize only this file. Never expand that grant to its
         # parent directory merely to continue a truncated read.
-        files = {"files": [{"path": str(target)}] if target.match(pattern) else [], "truncated": False}
+        files = iter([target] if target.match(pattern) else [])
     else:
-        files = find_files(
-            target,
-            allowed_roots=allowed_roots,
-            pattern=pattern,
-            max_depth=max_depth,
-            max_count=min(MAX_COUNT, max_count * 10 + 1),
-        )
-    matches: list[dict[str, Any]] = []
+        files = (candidate for candidate in _iter_files(target, max_depth) if candidate.match(pattern))
     needle = query if case_sensitive else query.casefold()
-    skipped_binary = 0
-    skipped_resource_limit = 0
-    truncated = files["truncated"]
-    for item in files["files"]:
-        try:
-            payload = read_text_file(item["path"], allowed_roots=allowed_roots, max_bytes=max_file_bytes)
-        except FileReadLimitError:
-            skipped_resource_limit += 1
-            truncated = True
-            continue
-        except (PermissionError, ValueError):
-            skipped_binary += 1
-            continue
-        truncated = truncated or payload["truncated"]
-        for number, line in enumerate(payload["text"].splitlines(), 1):
-            haystack = line if case_sensitive else line.casefold()
-            if needle not in haystack:
+    skipped = {"skipped_binary": 0, "skipped_resource_limit": 0}
+    def rows() -> Iterator[dict[str, Any]]:
+        for candidate in files:
+            try:
+                payload = read_text_file(candidate, allowed_roots=allowed_roots, max_bytes=max_file_bytes)
+            except FileReadLimitError:
+                skipped["skipped_resource_limit"] += 1
                 continue
-            if len(matches) >= max_count:
-                return {"path": str(target), "matches": matches, "truncated": True, "skipped_binary": skipped_binary, "skipped_resource_limit": skipped_resource_limit}
-            matches.append({"path": item["path"], "line": number, "text": line})
-    return {"path": str(target), "matches": matches, "truncated": truncated, "skipped_binary": skipped_binary, "skipped_resource_limit": skipped_resource_limit}
+            except (PermissionError, ValueError):
+                skipped["skipped_binary"] += 1
+                continue
+            for number, line in enumerate(payload["text"].splitlines(), 1):
+                haystack = line if case_sensitive else line.casefold()
+                if needle in haystack:
+                    yield {"path": str(candidate), "line": number, "text": line}
+    matches, page = _result_page(rows(), offset=offset, max_count=max_count, snapshot_digest=snapshot_digest,
+                                scope={"tool": "search_text", "path": str(target), "pattern": pattern,
+                                       "query": query, "caseSensitive": case_sensitive, "maxDepth": max_depth,
+                                       "maxFileBytes": max_file_bytes, "skipped": skipped})
+    return {"path": str(target), "matches": matches,
+            "truncated": page["hasMore"] or skipped["skipped_resource_limit"] > 0, **skipped, **page}
 
 
 def _web_timeout(value: float) -> float:

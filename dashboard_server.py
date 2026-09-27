@@ -24934,6 +24934,21 @@ def register_agent_gateway_tools() -> None:
         except (TypeError, ValueError):
             return default
 
+    def general_read_continuation(result: dict[str, Any], tool: str, raw: dict[str, Any]) -> None:
+        if result.get("nextOffset") is None:
+            return
+        # Replay only public read parameters. Authorization roots are injected
+        # afresh by the caller boundary, never included in a model cursor.
+        names = {"path", "projectPath", "pattern", "query", "maxDepth", "max_depth",
+                 "maxCount", "max_count", "maxFileBytes", "max_file_bytes", "caseSensitive", "case_sensitive"}
+        arguments = {key: value for key, value in raw.items() if key in names}
+        for legacy, canonical in (("max_depth", "maxDepth"), ("max_count", "maxCount"),
+                                  ("max_file_bytes", "maxFileBytes"), ("case_sensitive", "caseSensitive")):
+            if legacy in arguments:
+                arguments.setdefault(canonical, arguments.pop(legacy))
+        arguments.update(offset=result["nextOffset"], snapshotDigest=result["snapshotDigest"])
+        result["nextRequest"] = {"tool": tool, "arguments": arguments}
+
     def general_list_directory_tool(params: object) -> dict[str, Any]:
         raw = general_params(params)
         allowed_roots = raw.pop("_generalAllowedRoots", [])
@@ -24942,7 +24957,9 @@ def register_agent_gateway_tools() -> None:
             allowed_roots=allowed_roots if isinstance(allowed_roots, list) else [],
             max_depth=bounded_int(raw.get("maxDepth", raw.get("max_depth", 1)), 1, 8),
             max_count=bounded_int(raw.get("maxCount", raw.get("max_count", 200)), 200, 200),
+            offset=raw.get("offset", 0), snapshot_digest=raw.get("snapshotDigest"),
         )
+        general_read_continuation(result, "vrcforge_list_directory", raw)
         result["summary"] = json.dumps(
             [{key: entry[key] for key in ("name", "type", "size") if key in entry} for entry in result.get("entries", [])],
             ensure_ascii=False,
@@ -24950,8 +24967,7 @@ def register_agent_gateway_tools() -> None:
         )
         result["notice"] = (
             "Directory listing is incomplete because the entry limit was reached. "
-            "Do not infer that unlisted entries are absent; inspect narrower paths with "
-            "list_directory or find_files for additional evidence."
+            "Do not infer that unlisted entries are absent; follow nextRequest for the next page."
             if result.get("truncated") else
             "Directory listing is complete within the requested depth. Do not repeat it through "
             "Shell dir/ls/Get-ChildItem; continue with find_files, search_text, or read_text_file "
@@ -24986,7 +25002,9 @@ def register_agent_gateway_tools() -> None:
             pattern=str(raw.get("pattern", "*")),
             max_depth=bounded_int(raw.get("maxDepth", raw.get("max_depth", 8)), 8, 8),
             max_count=bounded_int(raw.get("maxCount", raw.get("max_count", 200)), 200, 200),
+            offset=raw.get("offset", 0), snapshot_digest=raw.get("snapshotDigest"),
         )
+        general_read_continuation(result, "vrcforge_find_files", raw)
         root = Path(str(result.get("path") or "."))
         result["summary"] = json.dumps(
             [
@@ -25012,9 +25030,11 @@ def register_agent_gateway_tools() -> None:
             pattern=str(raw.get("pattern", "*")),
             max_depth=bounded_int(raw.get("maxDepth", raw.get("max_depth", 8)), 8, 8),
             max_count=bounded_int(raw.get("maxCount", raw.get("max_count", 200)), 200, 200),
-            max_file_bytes=bounded_int(raw.get("maxFileBytes", raw.get("max_file_bytes", 1_048_576)), 1_048_576, 131_072),
+            max_file_bytes=bounded_int(raw.get("maxFileBytes", raw.get("max_file_bytes", 1_048_576)), 1_048_576, GENERAL_MAX_READ_BYTES),
             case_sensitive=bool(case_sensitive),
+            offset=raw.get("offset", 0), snapshot_digest=raw.get("snapshotDigest"),
         )
+        general_read_continuation(result, "vrcforge_search_text", raw)
         result["summary"] = json.dumps(
             [
                 {"file": Path(str(item.get("path") or "")).name, "line": item.get("line"), "text": item.get("text")}

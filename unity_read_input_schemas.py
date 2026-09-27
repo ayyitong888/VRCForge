@@ -1046,6 +1046,11 @@ for _general_read_tool, _general_read_properties in {
         'maxCount': {'type': 'integer'}, 'maxFileBytes': {'type': 'integer'}, 'caseSensitive': {'type': 'boolean'},
     },
 }.items():
+    if _general_read_tool != 'vrcforge_read_text_file':
+        _general_read_properties.update({
+            'offset': {'type': 'integer', 'minimum': 0, 'description': 'Result offset from nextRequest; default 0.'},
+            'snapshotDigest': {'type': 'string', 'description': 'Use the digest returned by the previous page. Changed results reject continuation; restart at offset 0.'},
+        })
     UNITY_READ_TOOL_INPUT_SCHEMAS[_general_read_tool] = {
         'type': 'object', 'additionalProperties': False,
         'required': ['path', 'query'] if _general_read_tool == 'vrcforge_search_text' else ['path'],

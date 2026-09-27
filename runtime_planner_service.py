@@ -1297,7 +1297,21 @@ def planner_read_output_evidence(tool: str, result: dict[str, object]) -> dict[s
                          "relativeTo": "path_prefix_before_Assets" if asset_segment else "exact_tool_call_path",
                          "locatorInstructions": "Resolve item.source against relativeTo, never against the display source basename. A dot means the exact input file. Empty source means the locator was omitted; do not guess it.",
                          "returnedItems": len(rows), "omittedItems": len(rows) - len(items),
-                         "continuation": "If truncated, narrow the path/pattern/query; inspect an exact returned relative file with read_text_file or search_text."})
+                         "continuation": "Follow nextRequest to continue source results. Changed results reject the old snapshotDigest; restart from offset 0. Resource-limit skips remain unverified even after the final page."})
+        for field in ("offset", "nextOffset", "totalCount"):
+            if type(result.get(field)) is int or (field == "nextOffset" and field in result and result[field] is None):
+                evidence[field] = result[field]
+        if isinstance(result.get("hasMore"), bool):
+            evidence["hasMore"] = result["hasMore"]
+        if isinstance(result.get("snapshotDigest"), str):
+            evidence["snapshotDigest"] = result["snapshotDigest"]
+        request = result.get("nextRequest")
+        if isinstance(request, dict) and request.get("tool") == tool and isinstance(request.get("arguments"), dict):
+            allowed = {"path", "projectPath", "pattern", "query", "maxDepth", "max_depth", "maxCount", "max_count",
+                       "maxFileBytes", "max_file_bytes", "caseSensitive", "case_sensitive", "offset", "snapshotDigest"}
+            evidence["nextRequest"] = {"tool": tool, "arguments": {
+                key: value for key, value in request["arguments"].items()
+                if key in allowed and isinstance(value, (str, int, bool))}}
         for field in ("skipped_binary", "skipped_resource_limit"):
             if type(result.get(field)) is int:
                 evidence[field] = result[field]
