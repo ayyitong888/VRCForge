@@ -652,6 +652,10 @@ try {
 
     $dotnetExe = Resolve-DotNetExe
     $pythonExe = Resolve-PythonExe
+    & $pythonExe .\packaging\check_core_product_version.py --repo-root $repoRoot --version $Version
+    if ($LASTEXITCODE -ne 0) {
+        throw "Core product version consistency gate failed. No release payload was built."
+    }
     & $dotnetExe run `
         --project .\packaging\VRCForge.CSharpSyntaxGate\VRCForge.CSharpSyntaxGate.csproj `
         --configuration Release `

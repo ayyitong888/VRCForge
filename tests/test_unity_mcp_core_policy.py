@@ -314,8 +314,9 @@ def test_pre_handshake_core_info_reports_compiled_identity_and_compile_snapshot(
 
 
 def test_core_and_backend_handshake_identity_matches_the_product_version() -> None:
-    # The Unity Core has its own compiled compatibility version.  The desktop
-    # package version may advance independently between core rebuilds.
+    # Product identity follows the release. Tool-contract revisions remain
+    # independent and must never be mistaken for the product version.
+    assert PRODUCT_VERSION == (ROOT / "VERSION").read_text(encoding="utf-8-sig").strip()
     assert len(PRODUCT_VERSION.split(".")) == 3
     assert all(part.isdigit() for part in PRODUCT_VERSION.split("."))
     assert f'internal const string CoreIdentity = "{CORE_IDENTITY}";' in CONTRACT
