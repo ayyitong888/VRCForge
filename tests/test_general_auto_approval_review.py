@@ -34,7 +34,7 @@ def test_dashboard_auto_review_uses_bound_provider_and_tool_free_request(monkeyp
     )
 
     assert decision == "allow_auto"
-    assert "PRIVATE_CONTENT" not in str(observed["prompt"])
+    assert "PRIVATE_CONTENT" in str(observed["prompt"])
     assert "No external capabilities" in str(observed["prompt"])
 
 

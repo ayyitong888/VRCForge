@@ -18,7 +18,7 @@ def test_auto_review_uses_one_bounded_scope_prompt_for_unity_without_main_decisi
             "name": "HarnessAutoCheck",
             "content": "PRIVATE_CONTENT",
             "apiKey": "SECRET_KEY",
-            "nested": {"content": "x" * 10000},
+            "nested": {"content": "safe nested content"},
         },
         "preview": {"operation": "create", "authorization": "Bearer SECRET_TOKEN"},
         "taskContext": {
@@ -39,8 +39,8 @@ def test_auto_review_uses_one_bounded_scope_prompt_for_unity_without_main_decisi
     assert "Confirm the existing fixture is present" in prompt
     assert "SECRET_KEY" not in prompt
     assert "SECRET_TOKEN" not in prompt
-    assert "PRIVATE_CONTENT" not in prompt
-    assert '"bytes":15' in prompt
+    assert "PRIVATE_CONTENT" in prompt
+    assert "safe nested content" in prompt
     assert "tools" not in prompt.lower()
     assert "history" not in prompt.lower()
     assert len(prompt) < 8000

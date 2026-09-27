@@ -4,23 +4,20 @@ import json
 from typing import Any, Callable
 
 from runtime_planner_service import redact_sensitive
+from context_compaction import redact_context_text
 
 
 _AUTO_REVIEW_PROMPT_MAX_CHARS = 7_000
 _AUTO_REVIEW_PAYLOAD_MAX_CHARS = 7_000
-_PAYLOAD_VALUE_KEYS = frozenset({"body", "content", "data", "patch", "payload", "script"})
 
 
 def _review_value(value: Any) -> Any:
+    """Retain mutation content after the existing complete-text privacy filter."""
     if isinstance(value, dict):
-        return {
-            str(key): (
-                {"type": "string", "bytes": len(value_item.encode("utf-8"))}
-                if str(key).casefold() in _PAYLOAD_VALUE_KEYS and isinstance(value_item, str)
-                else _review_value(value_item)
-            )
-            for key, value_item in value.items()
-        }
+        return {key: (redact_context_text(item)[0]
+                      if key.casefold() in {"body", "content", "data", "patch", "payload", "script"}
+                      and isinstance(item, str) else _review_value(item))
+                for key, item in value.items()}
     if isinstance(value, list):
         return [_review_value(item) for item in value]
     return value
@@ -53,9 +50,9 @@ def review_auto_approval(
         "objective": task_context.get("objective") or task_context.get("userObjective") or "",
     }).get("objective") or ""
     evidence = {
-        "approvalId": str(record.get("id") or record.get("approvalId") or "")[:180],
-        "tool": str(record.get("targetTool") or record.get("tool") or "")[:180],
-        "risk": str(record.get("riskLevel") or "")[:80],
+        "approvalId": str(record.get("id") or record.get("approvalId") or ""),
+        "tool": str(record.get("targetTool") or record.get("tool") or ""),
+        "risk": str(record.get("riskLevel") or ""),
         "arguments": _review_value(redact_sensitive(record.get("arguments") if isinstance(record.get("arguments"), dict) else {})),
         "preview": _review_value(redact_sensitive(record.get("preview") if isinstance(record.get("preview"), dict) else {})),
         "userObjective": str(objective),
