@@ -17,7 +17,7 @@ from planner_structured_tool_evidence import _identity_key, _private_or_opaque, 
 
 TOOL_NAME = "vrcforge_read_tool_result"
 PAGE_SCHEMA = "vrcforge.tool_result_page.v1"
-MAX_PAGE_CHARS = 6000
+MAX_PAGE_CHARS = 12000
 INPUT_SCHEMA = {
     "type": "object",
     "required": ["resultRef"],

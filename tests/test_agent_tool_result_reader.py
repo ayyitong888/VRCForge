@@ -6,7 +6,7 @@ import pytest
 from runtime_planner_service import RuntimePlannerService
 from runtime_planner_service import sanitize_planner_observation_text as sanitize
 from agent_tool_result_reader import (
-    TOOL_NAME, bind_tool_result_context, read_tool_result, result_continuation, result_reference,
+    MAX_PAGE_CHARS, TOOL_NAME, bind_tool_result_context, read_tool_result, result_continuation, result_reference,
 )
 
 
@@ -138,7 +138,7 @@ def test_bounded_pages_advance_without_dropping_rows_and_nested_target_is_exact(
         pointers = []
         while True:
             page = read(step, jsonPointer="/rows", offset=offset, limit=20)
-            assert len(json.dumps(page, ensure_ascii=False, separators=(",", ":"))) <= 6000
+            assert len(json.dumps(page, ensure_ascii=False, separators=(",", ":"))) <= MAX_PAGE_CHARS
             pointers.extend(row["jsonPointer"] for row in page["items"])
             if not page["hasMore"]:
                 break
@@ -151,6 +151,49 @@ def test_bounded_pages_advance_without_dropping_rows_and_nested_target_is_exact(
         exact = read(step, jsonPointer="/layers/0/states/27/name")
         assert exact["items"][0].get("value") == long_name
     assert pointers == [f"/rows/{i}" for i in range(28)]
+
+
+def test_default_12000_page_keeps_medium_candidate_list_and_source_unchanged():
+    import hashlib
+    from copy import deepcopy
+    import agent_tool_result_reader as reader
+
+    result = {
+        "recognitionCoverage": {"candidateEnumerationComplete": False},
+        "groups": [{"classification": "candidate", "rows": [
+            {"name": f"Item{i}", "description": "x" * 300, "value": i} for i in range(12)
+        ]}],
+    }
+    original = deepcopy(result)
+    before = hashlib.sha256(json.dumps(result, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+    step = retained(result, tool="vrcforge_scan_wardrobe")
+
+    def collect_pages():
+        pages = []
+        offset = 0
+        while True:
+            page = read(step, jsonPointer="/groups/0/rows", offset=offset, limit=20)
+            pages.append(page)
+            if not page["hasMore"]:
+                return pages
+            offset = page["nextRequest"]["arguments"]["offset"]
+
+    with bind_tool_result_context("session", "turn", "project", [step]):
+        with patch.object(reader, "MAX_PAGE_CHARS", 6000):
+            old_pages = collect_pages()
+        page = collect_pages()[0]
+    after = hashlib.sha256(json.dumps(result, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+    assert page["hasMore"] is False
+    assert page["returnedItems"] == 12
+    assert [row["jsonPointer"] for row in page["items"]] == [f"/groups/0/rows/{i}" for i in range(12)]
+    facts = {row["jsonPointer"]: row["facts"] for row in page["sourceConstraints"]}
+    assert facts["/groups/0"] == {"classification": "candidate"}
+    assert facts["/recognitionCoverage"] == {"candidateEnumerationComplete": False}
+    assert len(json.dumps(page, ensure_ascii=False, separators=(",", ":"))) <= MAX_PAGE_CHARS
+    assert len(json.dumps(page, ensure_ascii=False, separators=(",", ":"))) < sum(
+        len(json.dumps(old, ensure_ascii=False, separators=(",", ":"))) for old in old_pages
+    )
+    assert result == original and before == after
 
 
 def test_json_pointer_escaping_and_no_owner_argument_override():
@@ -257,4 +300,4 @@ def test_ancestor_constraints_are_scoped_bounded_and_redacted():
     rendered = json.dumps(page)
     assert "privateEvidence" not in rendered and "SECRET" not in rendered
     assert not any(row["jsonPointer"].endswith("/other") for row in page["sourceConstraints"])
-    assert len(json.dumps(page, ensure_ascii=False, separators=(",", ":"))) <= 6000
+    assert len(json.dumps(page, ensure_ascii=False, separators=(",", ":"))) <= MAX_PAGE_CHARS

@@ -465,3 +465,10 @@ Regression: `tests/test_planner_tool_description_integrity.py`, `tests/test_plan
 - Keep the exit tool resident with unchanged complete schema, description and definition order. An inactive exit is a successful no-op, never task-completion evidence; active exits still require the exact name.
 - Append host-owned Skill state after existing runtime context; preserve stable instructions, tools and history prefixes. Other unresolved failures must still block completion.
 - Regression: `tests/test_exit_skill_resident_noop.py` and the existing task-loop Skill checks.
+
+
+### Bounded retained-result page capacity
+
+- Keep retained-result pages bounded while allowing medium lists to fit in one page. Preserve exact pointers, source constraints, redaction and raw retained data.
+- Larger pages must survive planner observation intact; long-text fixtures must exceed the configured page size so continuation validation remains exercised.
+- Regression: `tests/test_agent_tool_result_reader.py`, `tests/test_result_reader_long_scalar.py`, `tests/test_result_reader_planner_boundary.py`, `tests/test_result_reader_completion_recovery.py`.

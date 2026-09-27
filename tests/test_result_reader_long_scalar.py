@@ -107,7 +107,7 @@ def test_text_cursor_rejects_invalid_or_collection_coordinates(arguments):
 
 def test_text_continuation_rejects_forged_progress_and_preserves_identity_rules():
     from copy import deepcopy
-    step = retained_step('D' * 10000)
+    step = retained_step('D' * (MAX_PAGE_CHARS * 2))
     with bind_tool_result_context("owner", "turn", "project", [step]):
         page = read(step)
         assert page_next_request_arguments(page)
@@ -124,7 +124,7 @@ def test_text_continuation_rejects_forged_progress_and_preserves_identity_rules(
 
 def test_long_text_continuation_survives_planner_observation():
     from runtime_planner_service import RuntimePlannerService
-    step = retained_step('D' * 10000)
+    step = retained_step('D' * (MAX_PAGE_CHARS * 2))
     with bind_tool_result_context("owner", "turn", "project", [step]):
         page = read(step)
     observation = RuntimePlannerService._llm_loop_step_observation(None, {
