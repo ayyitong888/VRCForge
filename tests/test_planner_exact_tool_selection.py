@@ -6,7 +6,7 @@ from test_runtime_planner_service import FakeCatalog, FakeModel, service
 
 def test_load_schema_exposes_optional_unique_exact_tool_names():
     schema = planner_tool_input_schema("vrcforge_load_internal_tool_block")
-    assert schema["required"] == ["block"]
+    assert schema["required"] == []  # Omitting block browses root categories.
     assert schema["properties"]["tools"] == {
         "type": "array", "items": {"type": "string", "minLength": 1},
         "minItems": 1, "uniqueItems": True,

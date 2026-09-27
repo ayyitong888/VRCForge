@@ -3,7 +3,7 @@ import json
 import pytest
 
 from runtime_planner_service import PlannerCatalogSnapshot, PlannerTool, RuntimePlannerService
-from tests.test_native_runtime_gateway import call, finish, run, setup_gateway
+from tests.test_native_runtime_gateway import budgeted_request_history, call, finish, run, setup_gateway
 from tests.test_runtime_planner_service import FakeCatalog, native_call
 
 
@@ -37,7 +37,7 @@ def test_rejected_native_call_gets_current_recipe_then_loads_and_runs(tmp_path, 
 
     def recover(request):
         assert not invoked and not load_calls
-        paired = request["messages"][-1]
+        paired = budgeted_request_history(request)[-1]
         assert paired["role"] == "tool" and paired["tool_call_id"] == "rejected"
         data = json.loads(paired["content"])["observations"][0]
         recipe = json.loads(data["admissionError"].split("Next call: ", 1)[1])
