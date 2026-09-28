@@ -15,7 +15,7 @@ def build(planner, messages, budget=None):
     )[0]
 
 
-def test_only_runtime_budget_changes_and_native_history_is_not_mutated():
+def test_runtime_budget_is_host_only_and_native_request_is_unchanged():
     _, planner, _, _ = fixture(prior=False)
     history = [{'role': 'user', 'content': 'Inspect'}, {'role': 'assistant', 'content': None,
         'tool_calls': [{'id': 'read1', 'type': 'function', 'function': {'name': 'read', 'arguments': '{}'}}]},
@@ -24,6 +24,7 @@ def test_only_runtime_budget_changes_and_native_history_is_not_mutated():
     one = {'maxModelTurns': 36, 'modelTurnsUsed': 1, 'remainingModelTurns': 35}
     two = {'maxModelTurns': 36, 'modelTurnsUsed': 2, 'remainingModelTurns': 34}
     a, b, unlimited = build(planner, history, one), build(planner, history, two), build(planner, history)
+    assert a == b == unlimited
     for key in ('instructions', 'tools'):
         assert json.dumps(a[key], ensure_ascii=False) == json.dumps(b[key], ensure_ascii=False)
         assert a[key] == unlimited[key]
@@ -36,16 +37,17 @@ def test_only_runtime_budget_changes_and_native_history_is_not_mutated():
         assert len(request['messages']) == len(before) + 1
         assert request['messages'][-1]['role'] == 'system'
         state = json.loads(request['messages'][-1]['content'].split(': ', 1)[1])
-        assert state['modelTurnBudget'] == budget
+        assert 'modelTurnBudget' not in state
         assert state['loadedToolBlocks'] == ['core']
     assert history == before
 
 
 @pytest.mark.parametrize('success', [True, False])
-def test_compaction_retains_request_only_budget_and_guard_counts_it(success):
+def test_compaction_retains_runtime_state_without_budget_and_guard_counts_it(success):
     state, planner, _, turn = fixture(Compactor(summary='short summary' if success else ''))
     budget = {'maxModelTurns': 36, 'modelTurnsUsed': 12, 'remainingModelTurns': 24}
     request = build(planner, turn.messages(), budget)
+    assert 'modelTurnBudget' not in json.dumps(request)
     assert request['messages'][-1]['role'] == 'system'
     with planner.bind_turn({}):
         result, guard = planner.maybe_compact_native_context(request, turn)

@@ -49,6 +49,9 @@ RUNTIME_SCOPE_UNITY_INSTRUCTION = (
     "For questions about the current scene, component bindings, or Avatar behavior, prefer the dedicated read-only inspection tools; "
     "if they are not exposed, discover and load the relevant tool block first. "
     "Use scene/component evidence to identify the active binding: filenames do not prove current bindings. "
+    "A retained result or child reference is not evidence you have read: follow the supplied reader continuation for claims needing those fields, or state the limit. "
+    "Do not recast ambiguous or analysis-required findings as normal or safe without resolving the relevant evidence. "
+    "Distinguish configured behavior from observed runtime effects; do not generalize sampled transitions, objects, or clip lengths to every case. "
     "Explicit file-content or file-location tasks should still use the filesystem readers."
 )
 RUNTIME_SCOPE_GENERAL_INSTRUCTION = (
@@ -109,7 +112,7 @@ _PLANNER_SCHEMA_ANNOTATION_KEYS = frozenset({"description", "title", "examples"}
 
 _HIGH_CONFUSION_TOOL_INPUT_CONTRACTS: dict[str, tuple[str, ...]] = {
     "vrcforge_list_internal_tool_blocks": ("block?:string",),
-    "vrcforge_load_internal_tool_block": ("block?:string", "tools?:array"),
+    "vrcforge_load_internal_tool_block": ("block?:string", "tools:array"),
     "vrcforge_unload_internal_tool_block": ("block:string",),
     "vrcforge_exit_skill": ("name:string", "reason:string"),
     "vrcforge_list_directory": ("path:string", "projectPath?:string", "maxDepth?:integer", "maxCount?:integer"),
@@ -251,15 +254,20 @@ def planner_tool_input_schema(name: str) -> dict[str, object]:
         return deepcopy(MEMORY_TOOL_SCHEMAS[name])
     if name == "vrcforge_load_internal_tool_block":
         return {
-            "type": "object", "required": [], "additionalProperties": False,
+            "type": "object", "required": ["tools"], "additionalProperties": False,
             "properties": {
                 "block": {"type": "string", "minLength": 1},
                 "tools": {
                     "type": "array", "items": {"type": "string", "minLength": 1},
-                    "minItems": 1, "uniqueItems": True,
-                    "description": "Optional exact tool names from this block's directory. Load only tools needed next; omit to load the whole block.",
+                    "uniqueItems": True,
+                    "description": "Required. [] browses without loading unless allTools is explicitly true; a non-empty list loads only these exact names from the leaf. No wildcard or implicit whole-block load.",
                 },
+                "allTools": {"type": "boolean", "default": False,
+                             "description": "Explicitly request ALL tools in the current leaf. Use true only when all tools in that leaf are wanted, with tools:[]; never expands parent categories or other leaves."},
             },
+            "examples": [{"tools": []}, {"block": "project_environment/files", "tools": []},
+                         {"block": "project_environment/files", "tools": ["read_installed_skill"]},
+                         {"block": "project_environment/files", "tools": [], "allTools": True}],
         }
     return bounded_planner_tool_schema(
         _contract_shallow_schema(planner_tool_input_contract(name))
@@ -3124,7 +3132,8 @@ class RuntimePlannerService:
                                            ensure_ascii=False, separators=(",", ":")))
                     reader = resolve_catalog_tool((*catalog.visible_tools, *catalog.routable_tools), "vrcforge_read_installed_skill")
                     if reader is not None:
-                        lines.append(f"To read a selected guide, load its existing read-tool block {reader.block} if needed, then call {reader.name} with the exact Skill name. Read declared support files with that tool and an exact file argument. Reading does not enter execution or authorize writes.")
+                        recipe = json.dumps({"block": reader.block, "tools": [reader.name]}, ensure_ascii=False, separators=(",", ":"))
+                        lines.append(f"To read a selected guide, load only its reader if needed with load_internal_tool_block arguments {recipe}, then call {reader.name} with the exact Skill name before choosing further workflow tools. Read declared support files with that tool and an exact file argument. Reading does not enter execution or authorize writes.")
             return sanitize_planner_observation_text("\n".join(lines), None, preserve_whitespace=True, preserve_urls=True)
 
     def _llm_loop_step_observation(self, step: dict[str, object], *,
@@ -3370,9 +3379,9 @@ class RuntimePlannerService:
                     fields.append(
                         "toolBlockLoadSyntax=action=skill;"
                         "skill_tool=load_internal_tool_block;"
-                        "skill_params={\"block\":\"<exact block name>\"}"
+                        "skill_params={\"block\":\"<exact leaf name>\",\"tools\":[\"<exact tool name>\"]}"
                     )
-                fields.append("toolBlockSelection=Use the same loader with a returned category to browse its children, or a leaf to load its tools. Optional tools selects exact names from that leaf.")
+                fields.append('toolBlockSelection=tools is required: {"tools":[]} browses roots; block plus tools=[] browses a category or leaf without loading definitions. To load use, for example, {"block":"project_environment/files","tools":["read_installed_skill"]}. Copy exact names from toolNames; no wildcard or implicit whole-block load. Only if ALL tools in this leaf are wanted, explicitly use {"block":"project_environment/files","tools":[],"allTools":true}; never expands other leaves.')
             outcome = ensure_dict(step.get("outcome"))
             if outcome:
                 fields.append(
@@ -3809,8 +3818,6 @@ class RuntimePlannerService:
             state["projectPath"] = project_path.strip()
         if blocks is not None:
             state["loadedToolBlocks"] = sorted(blocks)
-        if isinstance(observe.get("modelTurnBudget"), Mapping):
-            state["modelTurnBudget"] = dict(observe["modelTurnBudget"])
         shell = ensure_dict(observe.get("shellExecutor"))
         if shell:
             state["shellExecutor"] = {key: shell[key] for key in (
@@ -3893,7 +3900,7 @@ class RuntimePlannerService:
                 recipe = {"name": loader.name, "arguments": {"block": known.block, "tools": [known.name]}}
             elif loader or directory:
                 directory = loader or directory
-                recipe = {"name": directory.name, "arguments": {}}
+                recipe = {"name": directory.name, "arguments": {"tools": []} if loader else {}}
             if recipe:
                 suffix = " Next call: " + json.dumps(recipe, ensure_ascii=False, separators=(",", ":"))
                 if len(summary + suffix) <= 600:
@@ -4011,31 +4018,14 @@ class RuntimePlannerService:
                     line += f" -> {observation_text}"
                 step_lines.append(line)
             steps_block = "\n".join(step_lines) if step_lines else "（本轮尚未执行任何工具）"
-            model_turn_budget = observe.get("modelTurnBudget")
-            budget_instruction = ""
-            if isinstance(model_turn_budget, Mapping):
-                remaining = model_turn_budget.get("remainingModelTurns")
-                maximum = model_turn_budget.get("maxModelTurns")
-                used = model_turn_budget.get("modelTurnsUsed")
-                if isinstance(remaining, int) and isinstance(maximum, int) and isinstance(used, int):
-                    budget_instruction = (
-                        f"Runtime-owned model-turn budget: {remaining} remaining "
-                        f"({used} used of {maximum}), including this decision; the configured limit is unchanged.\n"
-                    )
-                    if remaining <= 1:
-                        budget_instruction += (
-                            "If evidence is incomplete before the last decision ends, use an honest reply with "
-                            '"completion_claim":{"satisfied":false}'
-                            " and state what remains unverified.\n"
-                        )
             runtime_scope_instruction = build_runtime_scope_instruction(project_context_active)
             if selected_blocks is not None:
                 runtime_scope_instruction += (
                     "\nCurrent loaded tool blocks: "
                     + sanitize_planner_observation_text(json.dumps(sorted(selected_blocks), ensure_ascii=False, separators=(",", ":")), 8_000)
                     + "\nEarlier list/load/unload receipts are historical snapshots; this current state and the visible tool catalog govern the next call."
-                    + "\nLoad only the exact tools needed next by passing optional tools=[<exact directory names>] with the block. "
-                    "The discovery directory lists all available tools; omit tools only when the whole block is needed."
+                    + "\nLoad only the exact tools needed next by passing required tools=[<exact directory names>] with the block. "
+                    "Use tools=[] to browse without loading; omitting tools is invalid."
                 )
                 if tool_selections:
                     runtime_scope_instruction += "\nCurrent tool selections (null means whole block): " + sanitize_planner_observation_text(
@@ -4090,7 +4080,6 @@ class RuntimePlannerService:
             prompt = (
                 f"{runtime_scope_instruction}\n"
                 + ("User-selected Plan is read-only: do not enter execution, request writes, or use Shell. Only the user can turn off Plan.\n" if observe.get("planMode") is True else "")
-                + budget_instruction
                 + (
                     "loaded internal tool blocks: "
                     + ", ".join(sorted(selected_blocks))
@@ -4114,7 +4103,7 @@ class RuntimePlannerService:
                 f"当前工具曝光层是 {exposure_layer}；planning 层只能使用读/检查工具，执行类工具必须先进入 execution 层；Unity 项目写入按当前权限模式走审批或全权限自动执行；"
                 "如果『已执行步骤』里某个工具刚刚已经给出了你需要的结果，不要重复调用同一个工具——改为基于结果继续下一步或 reply 收尾；"
                 "诊断 VRCForge 自身启动、连接或历史日志时，先发现并加载相应的只读诊断工具块，再按可见工具的实际说明读取证据。"
-                "所需诊断工具尚未可见时，用同一个加载工具导航：省略 block 看根层，传分类看下一层，传叶节点加载工具；之后调用已曝光的工具。不可调用未列出的工具或用普通 Shell 代替这条诊断路径。一般工程外任务和用户明确要求的 Shell 操作仍可使用普通 Shell。"
+                "所需诊断工具尚未可见时，用同一个加载工具导航：tools 必填；tools=[] 时省略 block 看根层、传分类或叶节点只看目录；加载时传叶节点和具名 tools 名单，之后调用已曝光的工具。不可调用未列出的工具或用普通 Shell 代替这条诊断路径。一般工程外任务和用户明确要求的 Shell 操作仍可使用普通 Shell。"
                 # VRCForge 自纠回环：失败要读错误、修正后重试或换路，绝不假装成功。
                 "如果『已执行步骤』里某一步失败或报错（status 是 failed/error，或结果里带 error/异常/traceback）："
                 "权限或授权范围拒绝不能靠换工具、cwd 或相对路径绕过；授权范围不变时停止并说明限制，建议 Quick Chat 明示目标路径或切换已授权工程。"

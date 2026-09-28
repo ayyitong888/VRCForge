@@ -55,7 +55,7 @@ def test_recognition_tools_remain_within_signed_skill_allowlist() -> None:
 def test_authoring_contract_is_scoped_and_does_not_migrate_existing_topology() -> None:
     contract = json.loads(WORKFLOW.read_text(encoding="utf-8"))["communityWardrobeContract"]
     scope = contract["applicability"]
-    assert scope["appliesTo"] == "user_approved_new_or_repaired_fixed_value_int_wardrobe_authoring"
+    assert scope["appliesTo"] == "user_approved_authoring_design"
     assert scope["recognitionMode"] == "read_existing_any_supported_parameter_or_topology"
     assert scope["preserveExistingBoolFloatBlendTree"] is True
     assert scope["noImplicitMigrationToInt"] is True

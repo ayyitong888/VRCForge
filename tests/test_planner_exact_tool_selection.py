@@ -6,11 +6,11 @@ from test_runtime_planner_service import FakeCatalog, FakeModel, service
 
 def test_load_schema_exposes_optional_unique_exact_tool_names():
     schema = planner_tool_input_schema("vrcforge_load_internal_tool_block")
-    assert schema["required"] == []  # Omitting block browses root categories.
+    assert schema["required"] == ["tools"]  # tools=[] browses; omission is invalid.
     assert schema["properties"]["tools"] == {
         "type": "array", "items": {"type": "string", "minLength": 1},
-        "minItems": 1, "uniqueItems": True,
-        "description": "Optional exact tool names from this block's directory. Load only tools needed next; omit to load the whole block.",
+        "uniqueItems": True,
+        "description": "Required. [] browses without loading unless allTools is explicitly true; a non-empty list loads only these exact names from the leaf. No wildcard or implicit whole-block load.",
     }
 
 

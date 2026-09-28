@@ -90,7 +90,7 @@ def test_web_tools_are_discovered_and_loaded_through_runtime_catalog(
         assert not web_names.intersection(before), "Web definitions must not remain resident in core"
         assert "load_internal_tool_block" in before
 
-        roots = host.load_internal_tool_block(params)
+        roots = host.load_internal_tool_block({**params, "tools": []})
         assert roots["ok"] is True
         research = next(row for row in roots["blocks"] if row["id"] == "research")
         branch = host.load_internal_tool_block({**params, **research["expandArguments"]})
@@ -110,7 +110,7 @@ def test_web_tools_are_discovered_and_loaded_through_runtime_catalog(
         assert all(subset[name] == definition for name, definition in before.items())
         assert_definition_prefix(before, subset)
 
-        whole = host.load_internal_tool_block({**params, **leaf["expandArguments"]})
+        whole = host.load_internal_tool_block({**params, **leaf["expandArguments"], "tools": leaf["toolNames"]})
         assert whole["ok"] is True and whole["status"] == "loaded"
         after = request_tools()
         assert set(after) - set(before) == web_names
@@ -152,7 +152,7 @@ def test_native_send_appends_across_real_leaves_and_later_whole_leaf_load(monkey
         stages = [
             ("research/web_research", ["web_fetch"]),
             ("behavior/parameters_menus_layers", ["unity_scan_parameters", "unity_scan_wardrobe"]),
-            ("research/web_research", None),
+            ("research/web_research", ["web_fetch", "web_search"]),
         ]
         for block, selected in stages:
             arguments = {**params, "block": block}

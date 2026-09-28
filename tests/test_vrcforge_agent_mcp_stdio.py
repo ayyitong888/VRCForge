@@ -307,7 +307,7 @@ def test_stdio_bridge_exposes_writes_only_in_execution_layer(monkeypatch) -> Non
             "params": {
                 "_meta": meta,
                 "name": "vrcforge_load_tool_block",
-                "arguments": {"block": "avatar"},
+                "arguments": {"block": "avatar", "allTools": True},
             },
         }
     )
@@ -325,9 +325,31 @@ def test_stdio_bridge_exposes_writes_only_in_execution_layer(monkeypatch) -> Non
             "params": {"_meta": meta, "exposureLayer": "execution"},
         }
     )
+    execution_loaded, execution_load_status = router.handle(
+        {
+            "jsonrpc": "2.0",
+            "id": 21,
+            "method": "tools/call",
+            "params": {
+                "_meta": meta,
+                "name": "vrcforge_load_tool_block",
+                "arguments": {"block": "avatar", "allTools": True},
+            },
+        }
+    )
+    execution, execution_status = router.handle(
+        {
+            "jsonrpc": "2.0",
+            "id": 22,
+            "method": "tools/list",
+            "params": {"_meta": meta, "exposureLayer": "execution"},
+        }
+    )
 
     assert planning_status == 200
     assert execution_status == 200
+    assert execution_load_status == 200
+    assert execution_loaded["result"]["structuredContent"]["catalogGeneration"] == 2
     planning_names = {tool["name"] for tool in planning["result"]["tools"]}
     execution_names = {tool["name"] for tool in execution["result"]["tools"]}
     assert "vrcforge_request_apply" not in planning_names
@@ -337,7 +359,8 @@ def test_stdio_bridge_exposes_writes_only_in_execution_layer(monkeypatch) -> Non
     assert "vrcforge_invoke_loaded_write_tool" not in planning_names
     assert "vrcforge_invoke_loaded_write_tool" in execution_names
     assert "vrcforge_invoke_loaded_read_tool" in planning_names
-    assert planning["result"]["catalogGeneration"] == execution["result"]["catalogGeneration"] == 1
+    assert planning["result"]["catalogGeneration"] == 1
+    assert execution["result"]["catalogGeneration"] == 2
     for tool in execution["result"]["tools"]:
         assert "When to use:" in tool["description"]
         assert "When NOT to use:" in tool["description"]
@@ -595,7 +618,7 @@ def test_stdio_bridge_loads_external_unity_tool_blocks_on_demand(monkeypatch) ->
             "params": {
                 "_meta": meta,
                 "name": "vrcforge_load_tool_block",
-                "arguments": {"block": "avatar_structure/mesh_shape_data"},
+                "arguments": {"block": "avatar_structure/mesh_shape_data", "allTools": True},
             },
         }
     )
@@ -635,7 +658,7 @@ def test_stdio_bridge_loads_external_unity_tool_blocks_on_demand(monkeypatch) ->
         {
             "jsonrpc": "2.0", "id": 27, "method": "tools/call",
             "params": {"_meta": meta, "name": "vrcforge_load_tool_block",
-                       "arguments": {"block": "1.3"}},
+                       "arguments": {"block": "1.3", "allTools": True}},
         }
     )
     assert repeated["result"]["structuredContent"]["changed"] is False
@@ -731,7 +754,7 @@ def test_stdio_bridge_loads_external_unity_tool_blocks_on_demand(monkeypatch) ->
             "params": {
                 "_meta": meta,
                 "name": "vrcforge_load_tool_block",
-                "arguments": {"block": "skills"},
+                "arguments": {"block": "skills", "allTools": True},
             },
         }
     )
@@ -871,7 +894,7 @@ def test_load_notifies_and_activation_fallback_survives_host_without_relist(monk
     router = captured["router"]
     meta = {"io.modelcontextprotocol/protocolVersion": PROTOCOL_VERSION, "io.modelcontextprotocol/clientCapabilities": {}, "io.modelcontextprotocol/clientInfo": {"name": "blackbox", "version": "1"}}
     before, _ = router.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {"_meta": meta}})
-    loaded, _ = router.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"_meta": meta, "name": "vrcforge_load_tool_block", "arguments": {"block": "materials"}}})
+    loaded, _ = router.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"_meta": meta, "name": "vrcforge_load_tool_block", "arguments": {"block": "materials", "allTools": True}}})
     assert router.drain_notifications() == [{"jsonrpc": "2.0", "method": "notifications/tools/list_changed"}]
     after, _ = router.handle({"jsonrpc": "2.0", "id": 3, "method": "tools/list", "params": {"_meta": meta}})
     assert "vrcforge_scan_materials" in {tool["name"] for tool in after["result"]["tools"]}
@@ -901,7 +924,7 @@ def test_activated_dispatch_forwards_top_level_prompt_skill_provenance(monkeypat
     module.run_stdio_server(bridge, protocol_profile="vrcforge-2026")
     router = captured["router"]
     meta = {"io.modelcontextprotocol/protocolVersion": PROTOCOL_VERSION, "io.modelcontextprotocol/clientCapabilities": {}, "io.modelcontextprotocol/clientInfo": {"name": "blackbox", "version": "1"}}
-    loaded, _ = router.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"_meta": meta, "name": "vrcforge_load_tool_block", "arguments": {"block": "materials"}}})
+    loaded, _ = router.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"_meta": meta, "name": "vrcforge_load_tool_block", "arguments": {"block": "materials", "allTools": True}}})
     handle = loaded["result"]["structuredContent"]["activationHandle"]
     provenance = {"contentHash": "a" * 64, "supportContentHash": "b" * 64}
     dispatched, _ = router.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"_meta": meta, "name": "vrcforge_invoke_loaded_read_tool", "arguments": {"activationHandle": handle, "toolName": "vrcforge_scan_materials", "arguments": {}, "promptSkillProvenance": provenance}}})
@@ -930,7 +953,7 @@ def test_activated_dispatch_rejects_conflicting_prompt_skill_provenance(monkeypa
     module.run_stdio_server(bridge, protocol_profile="vrcforge-2026")
     router = captured["router"]
     meta = {"io.modelcontextprotocol/protocolVersion": PROTOCOL_VERSION, "io.modelcontextprotocol/clientCapabilities": {}, "io.modelcontextprotocol/clientInfo": {"name": "blackbox", "version": "1"}}
-    loaded, _ = router.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"_meta": meta, "name": "vrcforge_load_tool_block", "arguments": {"block": "materials"}}})
+    loaded, _ = router.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"_meta": meta, "name": "vrcforge_load_tool_block", "arguments": {"block": "materials", "allTools": True}}})
     handle = loaded["result"]["structuredContent"]["activationHandle"]
     dispatched, _ = router.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"_meta": meta, "name": "vrcforge_invoke_loaded_read_tool", "arguments": {"activationHandle": handle, "toolName": "vrcforge_scan_materials", "arguments": {"promptSkillProvenance": {"contentHash": "nested"}}, "promptSkillProvenance": {"contentHash": "outer"}}}})
     result = dispatched["result"]["structuredContent"]

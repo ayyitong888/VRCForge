@@ -56,7 +56,7 @@ def test_dashboard_parent_load_browses_direct_children_without_touching_session_
     )
     for parent in CANONICAL_TOOL_BLOCKS:
         result = dashboard_server.load_internal_tool_block(
-            {"sessionId": "internal-block-regression", "block": parent}
+            {"sessionId": "internal-block-regression", "block": parent, "tools": []}
         )
         assert result["ok"] is True
         assert result.get("status") != "loaded"
@@ -71,7 +71,7 @@ def test_dashboard_parent_load_browses_direct_children_without_touching_session_
             assert not child.get("children")
             assert isinstance(child.get("toolNames"), list)
             assert all(isinstance(name, str) and name for name in child["toolNames"])
-            assert child["expandArguments"] == {"block": child["name"]}
+            assert child["expandArguments"] == {"block": child["name"], "tools": []}
     assert calls == []
 
 
@@ -80,13 +80,13 @@ def test_dashboard_empty_load_browses_roots_without_loading(monkeypatch) -> None
         raise AssertionError("root browsing must not change loaded tools")
     monkeypatch.setattr(type(dashboard_server.AGENT_GATEWAY.runtime_sessions),
                         "load_internal_tool_block_selected", forbidden)
-    result = dashboard_server.load_internal_tool_block({})
+    result = dashboard_server.load_internal_tool_block({"tools": []})
     assert result["ok"] is True
     assert result.get("status") != "loaded"
     assert [entry["name"] for entry in result["blocks"]] == list(CANONICAL_TOOL_BLOCKS)
     for entry in result["blocks"]:
         assert entry["description"]
-        assert entry["expandArguments"] == {"block": entry["name"]}
+        assert entry["expandArguments"] == {"block": entry["name"], "tools": []}
         assert not entry.get("children")
         assert not entry.get("toolNames")
 
@@ -97,12 +97,12 @@ def test_dashboard_leaf_load_still_mutates_only_requested_session() -> None:
     state.discard_session(session)
     try:
         result = dashboard_server.load_internal_tool_block({
-            "sessionId": session, "block": "research/web_research", "exposureLayer": "execution",
+            "sessionId": session, "block": "research/web_research", "exposureLayer": "execution", "tools": ["web_fetch", "web_search"],
         })
         assert result["ok"] is True
         assert result["status"] == "loaded"
         assert state.internal_tool_blocks(session) == frozenset({"core", "research/web_research"})
-        assert state.internal_tool_selections(session) == {"research/web_research": None}
+        assert state.internal_tool_selections(session) == {"research/web_research": ["web_fetch", "web_search"]}
     finally:
         state.discard_session(session)
 
@@ -113,7 +113,7 @@ def test_dashboard_unknown_load_remains_rejected_without_state_mutation(monkeypa
     monkeypatch.setattr(type(dashboard_server.AGENT_GATEWAY.runtime_sessions),
                         "load_internal_tool_block_selected", forbidden)
     for selector in ("not-a-category", "research/not-a-leaf", "research/web_research/extra"):
-        result = dashboard_server.load_internal_tool_block({"sessionId": "invalid-load", "block": selector})
+        result = dashboard_server.load_internal_tool_block({"sessionId": "invalid-load", "block": selector, "tools": []})
         assert result["ok"] is False
         assert result["status"] == "failed"
         assert result["errorCode"] == "internal_tool_block_selector_invalid"
@@ -138,7 +138,7 @@ def test_internal_index_tree_is_independent_and_unity_is_nested() -> None:
     assert files["toolNames"] == ["vrcforge_read_text_file"]
     assert files["loadCall"] == {
         "skill_tool": "load_internal_tool_block",
-        "skill_params": {"block": "project_environment/files"},
+        "skill_params": {"block": "project_environment/files", "tools": ["vrcforge_read_text_file"]},
     }
     assert any("vrcforge_get_compile_errors" in child["toolNames"] for child in directory["diagnostics_build"]["children"])
     assert "inputSchema" not in str(root)
@@ -546,7 +546,7 @@ def test_registered_loaded_block_exposes_every_advertised_tool_schema():
         for leaf in branch["children"]:
             if not leaf["toolNames"]:
                 continue
-            prompt = planner._build_llm_plan_prompt("Inspect only", [], exposure_layer="planning", project_context_active=True, internal_tool_blocks=[leaf["name"]])
+            prompt = planner._build_llm_plan_prompt("Inspect only", [], observe={"skillPolicy": {"name": "schema-coverage-fixture"}}, exposure_layer="planning", project_context_active=True, internal_tool_blocks=[leaf["name"]])
             for name in leaf["toolNames"]:
                 tool = next(t for t in catalog.visible_tools if t.name == name)
                 if not tool.requires_user_activation:
@@ -580,7 +580,6 @@ def test_diagnostic_description_does_not_route_to_hidden_discovery_entry():
     tool = next(t for t in catalog.visible_tools if t.runtime_name == "vrcforge_unity_tools")
     assert "load_internal_tool_block" in tool.description
     assert "list_internal_tool_blocks" not in tool.description
-
 
 
 def test_legacy_navigation_uses_same_loader_for_browsing_and_loading():

@@ -302,11 +302,22 @@ class WardrobeArtifactReadService:
         # The Core scanner proves one pattern; its misses do not classify other topologies.
         result = _decorate_wardrobe_groups(payload)
         result.setdefault("recognitionCoverage", {
-            "automaticPattern": "int_menu_any_state_equals_object_activation",
+            "automaticPattern": "int_menu_equals_transition_object_activation",
             "generalTopologyComplete": False,
             "missingMatchProvesAbsence": False,
             "analysisRequired": True,
             "candidateEnumerationComplete": False,
+            "candidateSemantics": {
+                "grouping": "parent_control_value_equals_parameter",
+                "ordering": "unordered_matches_not_playback_sequence",
+                "completeTransitionConditionsIncluded": False,
+                "clipAssociation": "destination_state_motion_not_transition_duration",
+                "animatorEvidenceScope": {
+                    "fxTransitionCount": "equals_matches_for_this_parameter_in_first_matching_layer",
+                    "fxStateCount": "distinct_resolved_destination_states_of_those_matches",
+                    "isWholeLayerInventory": False,
+                },
+            },
             "candidateParameters": list(dict.fromkeys(
                 item["parameterName"]
                 for group in ("wardrobes", "wardrobeCandidates", "looseControls")

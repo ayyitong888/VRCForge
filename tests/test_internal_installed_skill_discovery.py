@@ -43,6 +43,7 @@ def test_general_planning_provider_receives_compact_guide_metadata(installed_gui
     assert "连接引导与日常排障" in prompts[0]
     assert "read_installed_skill" in prompts[0]
     assert "project_environment/files" in prompts[0]
+    assert '{"block":"project_environment/files","tools":["read_installed_skill"]}' in prompts[0]
     assert "# Purpose and triggering" not in prompts[0]  # Full instructions stay lazy.
     snapshot = app._RuntimePlannerCatalog().read("planning", project_context_active=False)
     names = {tool.runtime_name for tool in snapshot.visible_tools}
@@ -138,8 +139,8 @@ def test_readable_metadata_does_not_enable_general_mode_package_execution(instal
 
 
 @pytest.mark.parametrize("name,arguments", [
-    ("vrcforge_load_internal_tool_block", {}),
-    ("vrcforge_load_internal_tool_block", {"block": "project_environment/files"}),
+    ("vrcforge_load_internal_tool_block", {"tools": []}),
+    ("vrcforge_load_internal_tool_block", {"block": "project_environment/files", "tools": ["read_installed_skill"]}),
 ])
 def test_shared_skill_runtime_names_route_through_registered_internal_alias(installed_guide, name, arguments):
     app, gateway = installed_guide
@@ -195,8 +196,8 @@ def test_activated_bundled_guide_allows_its_readonly_discovery_and_support_reads
     loop = AgentTaskLoop("Follow the connection guide")
     loop.activate_skill_policy(name=SKILL_NAME, allowed_tools=loaded["result"]["allowedTools"], disallowed_tools=[])
     for name, arguments in (
-        ("vrcforge_load_internal_tool_block", {}),
-        ("vrcforge_load_internal_tool_block", {"block": "project_environment/files"}),
+        ("vrcforge_load_internal_tool_block", {"tools": []}),
+        ("vrcforge_load_internal_tool_block", {"block": "project_environment/files", "tools": ["read_installed_skill"]}),
         ("vrcforge_read_installed_skill", {"name": SKILL_NAME, "file": "references/repair-guide.md"}),
     ):
         planner = RuntimePlannerService(

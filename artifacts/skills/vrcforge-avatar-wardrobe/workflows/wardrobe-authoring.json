@@ -1,114 +1,498 @@
 {
   "schema": "vrcforge.skill-package.workflow.v1",
+  "newBuildDefaults": {
+    "requiresExplicitFromScratchRequest": true,
+    "requiresVerifiedNoExistingWardrobeInScope": true,
+    "excludedOperations": ["inspect_existing", "extend_existing", "repair_existing", "delete_existing"],
+    "ambiguousScopeAction": "ask_before_selecting_branch",
+    "emptyOrFailedReadDoesNotProveAbsence": true,
+    "userRequirementsOverrideDefaults": true,
+    "approvalBeforeWrites": true,
+    "design": {
+      "selector": {"name": "衣柜", "type": "Int", "saved": true, "synced": true, "default": 0},
+      "valueMapSource": "current_user_approved_design_not_project_fixture",
+      "fx": {"transitionSource": "AnyState", "condition": "selector_equals_approved_value", "durationSeconds": 0, "hasExitTime": false, "canTransitionToSelf": false, "writeDefaultsMustBeExplicitInPreview": true},
+      "animation": {"fullMutualExclusionMatrixRequired": true, "stableStatePolicy": "selected_on_other_outfits_off", "instantKeyframeTimeSeconds": 0, "partsAndMorphsRequireFitEvidence": true, "animatedTransitionsRequireUserConfirmedTimeline": true},
+      "menu": {"root": "user_approved_location", "suggestedCategories": ["衣服", "头发", "配饰"]},
+      "oneOutfitAtATime": true,
+      "perOutfitReadbackAndRuntimeAcceptance": true
+    }
+  },
   "mode": "approval_required",
   "selfContained": true,
   "requiresOtherSkills": [],
-  "scope": ["outfit_mount", "wardrobe", "expression_parameters", "fx_animator", "animation_curves", "morph_compensation", "conditional_head_object_fit", "expression_menu", "replacement_cleanup", "runtime_acceptance"],
+  "scope": [
+    "outfit_mount",
+    "wardrobe",
+    "expression_parameters",
+    "fx_animator",
+    "animation_curves",
+    "morph_compensation",
+    "conditional_head_object_fit",
+    "expression_menu",
+    "replacement_cleanup",
+    "runtime_acceptance"
+  ],
   "uncertaintyPolicy": {
-    "whenUnclear": ["skeleton", "modular_avatar", "wardrobe_value_map", "expression_menu", "parameters", "fx_animator", "animation_matrix", "morph_value", "head_fit_necessity", "asset_license", "reference_closure"],
-    "consult": ["mature_community_guides", "asset_author_instructions", "official_documentation"],
-    "onInsufficientEvidence": {"after": "allowed_read_paths_or_actual_capability_or_task_budget_exhausted", "capabilityGap": true, "ready": false, "action": "stop_and_report_before_writes"},
-    "mustNot": ["guess", "invent_tools", "claim_unverified_support", "use_unauthorized_assets", "infer_morph_values_from_names_alone"]
+    "whenUnclear": [
+      "skeleton",
+      "modular_avatar",
+      "wardrobe_value_map",
+      "expression_menu",
+      "parameters",
+      "fx_animator",
+      "animation_matrix",
+      "morph_value",
+      "head_fit_necessity",
+      "asset_license",
+      "reference_closure"
+    ],
+    "consult": [
+      "mature_community_guides",
+      "asset_author_instructions",
+      "official_documentation"
+    ],
+    "onInsufficientEvidence": {
+      "after": "allowed_read_paths_or_actual_capability_or_task_budget_exhausted",
+      "capabilityGap": true,
+      "ready": false,
+      "action": "stop_and_report_before_writes"
+    },
+    "mustNot": [
+      "guess",
+      "invent_tools",
+      "claim_unverified_support",
+      "use_unauthorized_assets",
+      "infer_morph_values_from_names_alone"
+    ]
   },
   "recognitionLoop": {
     "mode": "read_only_before_authoring",
-    "termination": {"queue": "finite_discovered_candidates_and_pages", "unchangedEvidence": "do_not_revisit_same_visited_key", "unattendedRun": "caller_must_declare_finite_time_or_call_budget", "recognitionOnly": "return_evidence_without_entering_authoring"},
+    "termination": {
+      "queue": "finite_discovered_candidates_and_pages",
+      "unchangedEvidence": "do_not_revisit_same_visited_key",
+      "unattendedRun": "caller_must_declare_finite_time_or_call_budget",
+      "recognitionOnly": "answer_requested_scope_without_entering_authoring"
+    },
     "assumeAnyState": false,
     "assumeParameterNameOrType": false,
-    "visitedKey": ["identityScope", "controller", "layer", "stateMachinePath", "resourceHash"],
-    "pageCursor": "independent_per_read_source",
-    "readOrder": ["parameters", "menuBindings", "entryExit", "anyState", "ordinaryTransitions", "andConditions", "childStateMachines", "blendTrees", "drivers", "crossLayerDependencies", "clipBindings", "visibleEffects"],
-    "stages": [
-      {"name": "enter", "action": "bind_identity_resource_and_session_context", "readOnly": true},
-      {"name": "read", "action": "read_one_candidate_page_or_state_machine_scope", "readOnly": true},
-      {"name": "analyze", "action": "reconcile_parameters_conditions_dependencies_and_clip_effects", "readOnly": true},
-      {"name": "judge", "outputs": ["confirmed", "rejected", "undetermined"], "readOnly": true},
-      {"name": "exit", "action": "persist_local_frame_evidence_and_reason", "readOnly": true},
-      {"name": "next", "action": "continue_unvisited_candidate_or_page", "readOnly": true}
+    "visitedKey": [
+      "identityScope",
+      "controller",
+      "layer",
+      "stateMachinePath",
+      "resourceHash"
     ],
-    "evidenceOutputs": ["confirmed", "rejected", "undetermined", "visited", "nextPageCursor", "completeness"],
-    "identityReadiness": {"beforeDomainReads": ["bind", "structuredContent.result.executionTarget", "resources.identityLockUri", "operationReceiptUri", "prompts/get(identityLockUri, sessionContextUri)"], "requiredContextStatus": "ready_for_planning", "preserveFullExecutionTargetJson": true, "preserveTargetAndProvenanceOnAlternative": true, "onReadRejection": "choose_allowed_read_alternative_preserving_target_and_provenance"},
+    "pageCursor": "independent_per_read_source",
+    "stages": [
+      {
+        "name": "enter",
+        "action": "bind_identity_resource_and_session_context",
+        "readOnly": true
+      },
+      {
+        "name": "read",
+        "action": "read_one_candidate_page_or_state_machine_scope",
+        "readOnly": true
+      },
+      {
+        "name": "analyze",
+        "action": "reconcile_parameters_conditions_dependencies_and_clip_effects",
+        "readOnly": true
+      },
+      {
+        "name": "judge",
+        "outputs": [
+          "confirmed",
+          "rejected",
+          "undetermined"
+        ],
+        "readOnly": true
+      },
+      {
+        "name": "exit",
+        "action": "persist_local_frame_evidence_and_reason",
+        "readOnly": true
+      },
+      {
+        "name": "next",
+        "action": "continue_unvisited_candidate_or_page",
+        "readOnly": true
+      }
+    ],
+    "evidenceOutputs": [
+      "confirmed",
+      "rejected",
+      "undetermined",
+      "visited",
+      "nextPageCursor",
+      "completeness"
+    ],
+    "identityReadiness": {
+      "beforeDomainReads": [
+        "bind",
+        "structuredContent.result.executionTarget",
+        "resources.identityLockUri",
+        "operationReceiptUri",
+        "prompts/get(identityLockUri, sessionContextUri)"
+      ],
+      "requiredContextStatus": "ready_for_planning",
+      "preserveFullExecutionTargetJson": true,
+      "preserveTargetAndProvenanceOnAlternative": true,
+      "onReadRejection": "choose_allowed_read_alternative_preserving_target_and_provenance"
+    },
     "identityBinding": "same_absolute_projectPath_and_ExecutionTarget_per_call",
-    "pagination": "require_complete_pages_and_next_cursor",
+    "pagination": "follow_needed_pages_and_report_unread_scope",
     "cyclePolicy": "mark_undetermined_with_reason_and_continue_other_candidates",
     "localMissDoesNotEndGlobalScan": true,
     "anyStateIsOnlyAClue": true,
-    "budgetExhaustion": {"persistQueueAndEvidence": true, "capabilityGap": true, "ready": false, "action": "stop_and_report"},
+    "budgetExhaustion": {
+      "persistQueueAndEvidence": true,
+      "capabilityGap": true,
+      "ready": false,
+      "action": "stop_and_report"
+    },
     "scanWardrobeIsOptionalClue": true,
     "confirmationRequiresFxAndClipEvidence": true,
-    "missingFxStructureFieldsRemainUndetermined": ["entryExit", "blendTreeStructure", "drivers"],
-    "writesAllowed": false
+    "missingFxStructureFieldsRemainUndetermined": [
+      "entryExit",
+      "blendTreeStructure",
+      "drivers"
+    ],
+    "writesAllowed": false,
+    "relevantEvidence": [
+      "parameters",
+      "menuBindings",
+      "transitions",
+      "conditions",
+      "referencedMotions",
+      "clipBindings",
+      "runtimeObservations"
+    ],
+    "confirmationScope": "claims_about_animation_effects_only"
   },
   "communityWardrobeContract": {
     "applicability": {
-      "appliesTo": "user_approved_new_or_repaired_fixed_value_int_wardrobe_authoring",
+      "appliesTo": "user_approved_authoring_design",
       "recognitionMode": "read_existing_any_supported_parameter_or_topology",
       "preserveExistingBoolFloatBlendTree": true,
       "noImplicitMigrationToInt": true
     },
-    "projectBinding": {"everyToolCallRequiresAbsoluteProjectPath": true, "projectPathMustRemainConstant": true},
-    "outfitAttachment": "ModularAvatarSetupOutfit",
-    "requiredSetupResult": "ModularAvatarMergeArmature",
-    "selector": {"name": "衣柜", "type": "Int", "saved": true, "synced": true, "default": 0, "fixedValueRequiredOnEveryOutfitWrite": true, "automaticMaxPlusOneForbidden": true, "preserveApprovedValuesAndAliases": true},
-    "fx": {"modeSelection": {"existingVerified": "preserve_exact_readback", "newBasic": "instant_default", "userAnimated": "preserve_sequence_and_reverse"}, "existingVerifiedMustPreserve": true, "newBasicInstantDefaultsOnly": true, "userAnimatedSequenceMayUseCurrentProgressAndReverse": true, "readbackRequiredFields": ["source", "destination", "conditions", "durationSeconds", "hasExitTime", "exitTime", "canTransitionToSelf", "writeDefaults"], "newBasicDefaults": {"transitionSource": "AnyState", "condition": "衣柜 == selected_value", "durationSeconds": 0, "hasExitTime": false, "canTransitionToSelf": false, "writeDefaults": true}, "modifyOnlyWithConflictEvidence": true, "mustNotNormalizeWorkingTopologyToIdleOrBase": true, "newTopologyMustMatchUserConfirmedReference": true, "removeOnlyTransitionsStatesOrLayersWithProvenConflict": true, "unrelatedLayersPreservedUnlessExplicitlyProvenObsolete": true},
+    "projectBinding": {
+      "everyToolCallRequiresAbsoluteProjectPath": true,
+      "projectPathMustRemainConstant": true
+    },
+    "outfitAttachment": "select_tool_compatible_with_approved_design",
+    "selector": {
+      "source": "observed_evidence_and_explicit_user_approved_changes",
+      "explicitApprovedArgumentsRequired": true,
+      "preserveApprovedValuesAndAliases": true
+    },
+    "fx": {
+      "existingVerifiedMustPreserve": true,
+      "readbackRequiredFields": [
+        "source",
+        "destination",
+        "conditions",
+        "durationSeconds",
+        "hasExitTime",
+        "exitTime",
+        "canTransitionToSelf",
+        "writeDefaults"
+      ],
+      "newTopologyMustMatchUserConfirmedReference": true,
+      "modifyOnlyWithConflictEvidence": true,
+      "unrelatedLayersPreservedUnlessExplicitlyProvenObsolete": true
+    },
     "animation": {
-      "keyframePolicy": {"newBasicDefaultTimeSeconds": 0, "existingOrUserAnimated": "preserve_source_timeline", "reverseSequence": "optional_when_user_confirmed"},
-      "fullMutualExclusionMatrixRequired": true,
-      "verifyEveryApprovedStableValue": true,
+      "expectedEffectsSource": "observed_evidence_and_explicit_user_approved_changes",
       "repairStableValueOnlyWhenEvidenceDiffers": true,
       "transitionClipPolicy": {
         "preserveSourceTimeline": true,
-        "allowOldAndNewOverlap": true,
-        "reverseFromCurrentProgress": true,
-        "stableStateMutualExclusionOnly": true
+        "changesRequireExplicitApproval": true
       },
-      "outfitRootRule": "selected_on_every_other_outfit_root_off",
-      "explicitDesignedParts": ["default_shoes", "socks", "underwear", "tie", "bracelet", "other_authored_parts"],
-      "inspectExistingAndCandidateOutfitAnimationMorphsFirst": true,
-      "morphInventoryScope": ["current_avatar_body_renderers", "current_outfit_renderers", "existing_animation_bindings", "candidate_animation_bindings"],
-      "morphEvidenceRequired": ["existing_animation", "body_and_outfit_renderer_morph_scan", "asset_author_instruction", "outfit_style_and_heel_height", "observed_penetration_or_pose_need"],
-      "bodyBaselinePolicy": "preserve_current_accepted_body_baseline_except_inside_an_outfit_that_cannot_fit_it",
-      "pairedMorphCurvesRequired": ["apply_needed_body_or_clothing_morphs_in_target_outfit", "reset_or_restore_body_and_clothing_morphs_in_other_outfits"],
-      "mustNotForceEveryOutfitToMaximumBodyMorph": true,
-      "mustNotHardcodeMorphValue100": true,
-      "projectExamplesOnly": {"manuka": ["Breast_big", "Breast_big_PLUS", "Foot_heel", "Foot_heel_high"]},
-      "projectExamplesAreNotRequiredFields": true,
-      "deleteStaleBindingsNotInApprovedMatrix": true,
-      "writeDefaultsMustNotSubstituteForMatrix": true,
-      "visualAcceptanceAfterMorphChange": ["body_no_penetration", "outfit_no_penetration", "heel_and_pose_alignment_correct"],
-      "rendererPropertyBlock": {"scope": "renderer_wide", "identityFields": ["rendererPath", "rendererComponentIndex", "materialIndex", "sharedMaterial.assetGuid"], "oneCurvePerRendererProperty": true, "mustNotDuplicateCurvesPerMaterialSlot": true}
+      "bindingIdentityRequired": true,
+      "noUnapprovedBindingDeletion": true,
+      "morphValuesRequireEvidence": true,
+      "rendererPropertyBlock": {
+        "scope": "renderer_wide",
+        "identityFields": [
+          "rendererPath",
+          "rendererComponentIndex",
+          "materialIndex",
+          "sharedMaterial.assetGuid"
+        ],
+        "oneCurvePerRendererProperty": true,
+        "mustNotDuplicateCurvesPerMaterialSlot": true
+      }
     },
-    "protectedSystems": {"preserveAllUserConfiguredPhysics": true, "targetProjectExamples": ["Marshmallow PB 2.x"], "preserveVendorPhysBonesConstraintsAndColliders": true},
+    "protectedSystems": {
+      "preserveAllUserConfiguredPhysics": true,
+      "preserveVendorPhysBonesConstraintsAndColliders": true
+    },
     "headObjects": {
-      "detectBeforeAuthoring": true,
-      "refitOnlyWhen": ["head_or_neck_transplant_detected", "current_head_skeleton_differs_from_original_fit_target", "current_head_surface_differs_from_original_fit_target", "visual_offset_or_penetration_observed"],
-      "preserveWhen": ["complete_model_original_fit_is_valid", "existing_outfit_fit_has_no_mismatch_or_visual_defect"],
-      "fitImportedObjectLocallyOnly": true,
-      "projectExampleOnly": {"targetHead": "Sapphy Head"},
-      "requiredViewsWhenRefit": ["front", "left_90", "right_90", "back", "bottom", "perspective_closeup"],
-      "dynamicBoneInheritanceRequiredWhenRefit": true
+      "refitOnlyWithMismatchEvidenceAndApproval": true,
+      "fitImportedObjectLocallyOnly": true
     },
-    "menu": {"preserveUserApprovedRootStructure": true, "targetProjectRootControls": ["面捕", "原模型菜单"], "targetProjectWardrobeParent": "原模型菜单", "categories": ["衣服", "头发", "配饰"], "maximumControlsPerPageIncludingNextPage": 8, "pageLabel": "下一页", "doNotMigrate": ["FT2 hair content"], "preserveOriginalModelContent": true, "preserveIconsLabelsLanguagesAndApprovedAliases": true},
-    "runtimeEvidence": {"completeFramesRequired": true, "stateResourcePageChainRequired": true, "stateIdentityFields": ["jobId", "frameIndex", "sampleIndex", "unityFrame", "stateSetHash", "states"], "selectionMustReportCountsAndIdentity": true, "observationLifecycle": {"requiresFiniteDurationAndFrameBudget": true, "pendingAction": "read_original_job_id_without_restart", "completedDoesNotMeanVisualAcceptance": true, "cleanup": "restore_user_approved_play_state_and_read_back"}},
-    "perOutfitGate": {"oneOutfitAtATime": true, "requiredBeforeNext": ["menu_readback", "parameter_readback", "fx_readback", "animation_matrix_readback", "morph_binding_readback", "runtime_state_readback", "static_acceptance", "dynamic_acceptance", "penetration_acceptance"]},
-    "replacementCleanup": {"fixedValueReuseRequiresExactOldBindingRemovalFirst": true, "legacyFxLayerDeletionByExactNameOnly": true, "legacySceneObjectRequiresCompleteInboundClosure": true, "disableBeforeDelete": true, "deleteRequiresSeparateApproval": true, "neverDeleteSourceAvatarOrSourceAsset": true}
+    "menu": {
+      "preserveUserApprovedRootStructure": true,
+      "designSource": "observed_evidence_and_explicit_user_approved_changes",
+      "preserveOriginalModelContent": true,
+      "preserveIconsLabelsLanguagesAndApprovedAliases": true
+    },
+    "runtimeEvidence": {
+      "completeFramesRequired": true,
+      "stateResourcePageChainRequired": true,
+      "stateIdentityFields": [
+        "jobId",
+        "frameIndex",
+        "sampleIndex",
+        "unityFrame",
+        "stateSetHash",
+        "states"
+      ],
+      "selectionMustReportCountsAndIdentity": true,
+      "observationLifecycle": {
+        "requiresFiniteDurationAndFrameBudget": true,
+        "pendingAction": "read_original_job_id_without_restart",
+        "completedDoesNotMeanVisualAcceptance": true,
+        "cleanup": "restore_user_approved_play_state_and_read_back"
+      }
+    },
+    "perOutfitGate": {
+      "scope": "actual_approved_change_and_affected_dependencies",
+      "independentReadbackRequired": true
+    },
+    "replacementCleanup": {
+      "legacyFxLayerDeletionByExactNameOnly": true,
+      "legacySceneObjectRequiresCompleteInboundClosure": true,
+      "deleteRequiresSeparateApproval": true,
+      "neverDeleteSourceAvatarOrSourceAsset": true
+    }
   },
   "steps": [
-    {"name": "recognize_existing_controller_layers_and_state_machines_before_authoring", "tool": "vrcforge_read_avatar_descriptor", "tools": ["vrcforge_list_avatars", "vrcforge_list_execution_targets", "vrcforge_bind_execution_target", "vrcforge_read_avatar_descriptor", "vrcforge_get_gameobject", "vrcforge_get_property", "vrcforge_scan_avatar_controls", "vrcforge_scan_parameters", "vrcforge_scan_fx_animator", "vrcforge_scan_animation_bindings", "vrcforge_scan_blendshapes", "vrcforge_get_runtime_observation"], "writes": false, "boundedRecognitionLoop": true, "continueOnLocalUndetermined": true, "scanWardrobeIsOptionalClue": true, "confirmationRequiresFxAndClipEvidence": true, "missingFxStructureFieldsRemainUndetermined": ["entryExit", "blendTreeStructure", "drivers"]},
-    {"name": "bind_one_project_avatar_and_inventory_complete_contract", "tool": "vrcforge_list_avatars", "tools": ["vrcforge_list_execution_targets", "vrcforge_bind_execution_target", "vrcforge_read_avatar_descriptor", "vrcforge_get_gameobject", "vrcforge_scan_wardrobe", "vrcforge_scan_avatar_controls", "vrcforge_scan_parameters", "vrcforge_scan_fx_animator", "vrcforge_scan_animation_bindings", "vrcforge_scan_blendshapes", "vrcforge_scan_modular_avatar", "vrcforge_inspect_skinned_mesh_bone_usage"], "writes": false},
-    {"name": "freeze_approved_value_object_part_and_evidence_derived_morph_matrix", "tool": "vrcforge_scan_animation_bindings", "tools": ["vrcforge_scan_blendshapes", "vrcforge_get_property", "vrcforge_inspect_skinned_mesh_deformation"], "writes": false},
-    {"name": "install_exactly_one_outfit_without_automatic_wardrobe_value_assignment", "tool": "vrcforge_preview_setup_outfit", "tools": ["vrcforge_setup_outfit", "vrcforge_preview_add_outfit", "vrcforge_add_outfit"], "writes": true, "runtimePermissionGateRequired": true, "runtimeApprovalRequired": true},
-    {"name": "ensure_exact_saved_synced_wardrobe_int_and_preserve_or_reproduce_confirmed_fx_topology", "tool": "vrcforge_preview_ensure_expression_parameter", "tools": ["vrcforge_ensure_expression_parameter", "vrcforge_preview_manage_expression_parameters", "vrcforge_manage_expression_parameters", "vrcforge_preview_manage_fx_animator", "vrcforge_manage_fx_animator"], "writes": true, "runtimePermissionGateRequired": true, "runtimeApprovalRequired": true},
-    {"name": "free_and_reuse_exact_value_when_replacing_then_bind_one_outfit", "tool": "vrcforge_preview_manage_wardrobe", "tools": ["vrcforge_manage_wardrobe", "vrcforge_preview_add_wardrobe_outfit", "vrcforge_add_wardrobe_outfit"], "writes": true, "runtimePermissionGateRequired": true, "runtimeApprovalRequired": true},
-    {"name": "verify_approved_clips_and_repair_only_evidence_differences_then_author_conditional_fx", "tool": "vrcforge_preview_write_animation_curve", "tools": ["vrcforge_write_animation_curve", "vrcforge_preview_ensure_animator_state", "vrcforge_ensure_animator_state", "vrcforge_preview_manage_fx_animator", "vrcforge_manage_fx_animator"], "writes": true, "runtimePermissionGateRequired": true, "runtimeApprovalRequired": true},
-    {"name": "conditionally_refit_head_face_or_neck_attached_objects_only_after_mismatch_evidence", "tool": "vrcforge_get_property", "tools": ["vrcforge_set_property", "vrcforge_inspect_skinned_mesh_deformation"], "writes": true, "runtimePermissionGateRequired": true, "runtimeApprovalRequired": true, "conditional": "head_or_neck_transplant_or_fit_target_mismatch_or_visual_offset_or_penetration"},
-    {"name": "place_fixed_value_control_under_user_approved_menu_category", "tool": "vrcforge_preview_ensure_expression_menu_control", "tools": ["vrcforge_ensure_expression_menu_control", "vrcforge_preview_manage_expression_menu", "vrcforge_manage_expression_menu"], "writes": true, "runtimePermissionGateRequired": true, "runtimeApprovalRequired": true},
-    {"name": "start_user_approved_bounded_runtime_observation_after_gm_ready", "tool": "vrcforge_gesture_manager_enter_play_mode", "tools": ["vrcforge_gesture_manager_set_parameter", "vrcforge_start_runtime_observation"], "writes": true, "runtimePermissionGateRequired": true, "runtimeApprovalRequired": true, "conditional": "user_approved_runtime_plan_and_exact_identity_and_gm_ready"},
-    {"name": "read_back_and_accept_this_outfit_before_any_next_outfit", "tool": "vrcforge_scan_wardrobe", "tools": ["vrcforge_scan_avatar_controls", "vrcforge_scan_parameters", "vrcforge_scan_fx_animator", "vrcforge_scan_animation_bindings", "vrcforge_scan_blendshapes", "vrcforge_inspect_skinned_mesh_deformation", "vrcforge_get_runtime_observation", "vrcforge_gesture_manager_status", "vrcforge_run_validation_report", "vrcforge_build_test_readiness"], "writes": false},
-    {"name": "restore_user_approved_play_state_after_runtime_observation", "tool": "vrcforge_set_play_mode", "tools": ["vrcforge_gesture_manager_status"], "writes": true, "runtimePermissionGateRequired": true, "runtimeApprovalRequired": true, "conditional": "workflow_owned_play_change_or_explicit_user_play_target"},
-    {"name": "remove_proven_legacy_layers_and_scene_instance_only_after_replacement_acceptance", "tool": "vrcforge_scan_inbound_reference_closure", "tools": ["vrcforge_preview_manage_fx_animator", "vrcforge_manage_fx_animator", "vrcforge_set_gameobject_active", "vrcforge_delete_gameobject", "vrcforge_scan_fx_animator", "vrcforge_get_gameobject"], "writes": true, "runtimePermissionGateRequired": true, "runtimeApprovalRequired": true, "conditional": "user_explicitly_requested_replacement_cleanup_and_reference_closure_is_complete"}
+    {
+      "name": "inspect_relevant_existing_evidence",
+      "tool": "vrcforge_read_avatar_descriptor",
+      "tools": [
+        "vrcforge_list_avatars",
+        "vrcforge_list_execution_targets",
+        "vrcforge_bind_execution_target",
+        "vrcforge_read_avatar_descriptor",
+        "vrcforge_get_gameobject",
+        "vrcforge_get_property",
+        "vrcforge_scan_avatar_controls",
+        "vrcforge_scan_parameters",
+        "vrcforge_scan_fx_animator",
+        "vrcforge_scan_animation_bindings",
+        "vrcforge_scan_blendshapes",
+        "vrcforge_get_runtime_observation"
+      ],
+      "writes": false,
+      "boundedRecognitionLoop": true,
+      "continueOnLocalUndetermined": true,
+      "scanWardrobeIsOptionalClue": true,
+      "confirmationRequiresFxAndClipEvidence": true,
+      "missingFxStructureFieldsRemainUndetermined": [
+        "entryExit",
+        "blendTreeStructure",
+        "drivers"
+      ],
+      "optional": true
+    },
+    {
+      "name": "inspect_affected_scope",
+      "tool": "vrcforge_list_avatars",
+      "tools": [
+        "vrcforge_list_execution_targets",
+        "vrcforge_bind_execution_target",
+        "vrcforge_read_avatar_descriptor",
+        "vrcforge_get_gameobject",
+        "vrcforge_scan_wardrobe",
+        "vrcforge_scan_avatar_controls",
+        "vrcforge_scan_parameters",
+        "vrcforge_scan_fx_animator",
+        "vrcforge_scan_animation_bindings",
+        "vrcforge_scan_blendshapes",
+        "vrcforge_scan_modular_avatar",
+        "vrcforge_inspect_skinned_mesh_bone_usage"
+      ],
+      "writes": false,
+      "optional": true
+    },
+    {
+      "name": "inspect_animation_or_morph_evidence_when_relevant",
+      "tool": "vrcforge_scan_animation_bindings",
+      "tools": [
+        "vrcforge_scan_blendshapes",
+        "vrcforge_get_property",
+        "vrcforge_inspect_skinned_mesh_deformation"
+      ],
+      "writes": false,
+      "optional": true
+    },
+    {
+      "name": "install_using_compatible_tool_when_requested",
+      "tool": "vrcforge_preview_setup_outfit",
+      "tools": [
+        "vrcforge_setup_outfit",
+        "vrcforge_preview_add_outfit",
+        "vrcforge_add_outfit"
+      ],
+      "writes": true,
+      "runtimePermissionGateRequired": true,
+      "runtimeApprovalRequired": true,
+      "optional": true
+    },
+    {
+      "name": "edit_approved_parameters_or_fx",
+      "tool": "vrcforge_preview_ensure_expression_parameter",
+      "tools": [
+        "vrcforge_ensure_expression_parameter",
+        "vrcforge_preview_manage_expression_parameters",
+        "vrcforge_manage_expression_parameters",
+        "vrcforge_preview_manage_fx_animator",
+        "vrcforge_manage_fx_animator"
+      ],
+      "writes": true,
+      "runtimePermissionGateRequired": true,
+      "runtimeApprovalRequired": true,
+      "optional": true
+    },
+    {
+      "name": "edit_approved_wardrobe_mapping",
+      "tool": "vrcforge_preview_manage_wardrobe",
+      "tools": [
+        "vrcforge_manage_wardrobe",
+        "vrcforge_preview_add_wardrobe_outfit",
+        "vrcforge_add_wardrobe_outfit"
+      ],
+      "writes": true,
+      "runtimePermissionGateRequired": true,
+      "runtimeApprovalRequired": true,
+      "optional": true
+    },
+    {
+      "name": "edit_only_approved_animation_differences",
+      "tool": "vrcforge_preview_write_animation_curve",
+      "tools": [
+        "vrcforge_write_animation_curve",
+        "vrcforge_preview_ensure_animator_state",
+        "vrcforge_ensure_animator_state",
+        "vrcforge_preview_manage_fx_animator",
+        "vrcforge_manage_fx_animator"
+      ],
+      "writes": true,
+      "runtimePermissionGateRequired": true,
+      "runtimeApprovalRequired": true,
+      "optional": true
+    },
+    {
+      "name": "refit_only_with_evidence_and_approval",
+      "tool": "vrcforge_get_property",
+      "tools": [
+        "vrcforge_set_property",
+        "vrcforge_inspect_skinned_mesh_deformation"
+      ],
+      "writes": true,
+      "runtimePermissionGateRequired": true,
+      "runtimeApprovalRequired": true,
+      "conditional": "head_or_neck_transplant_or_fit_target_mismatch_or_visual_offset_or_penetration",
+      "optional": true
+    },
+    {
+      "name": "edit_approved_menu_controls",
+      "tool": "vrcforge_preview_ensure_expression_menu_control",
+      "tools": [
+        "vrcforge_ensure_expression_menu_control",
+        "vrcforge_preview_manage_expression_menu",
+        "vrcforge_manage_expression_menu"
+      ],
+      "writes": true,
+      "runtimePermissionGateRequired": true,
+      "runtimeApprovalRequired": true,
+      "optional": true
+    },
+    {
+      "name": "start_user_approved_bounded_runtime_observation_after_gm_ready",
+      "tool": "vrcforge_gesture_manager_enter_play_mode",
+      "tools": [
+        "vrcforge_gesture_manager_set_parameter",
+        "vrcforge_start_runtime_observation"
+      ],
+      "writes": true,
+      "runtimePermissionGateRequired": true,
+      "runtimeApprovalRequired": true,
+      "conditional": "user_approved_runtime_plan_and_exact_identity_and_gm_ready",
+      "optional": true
+    },
+    {
+      "name": "read_relevant_results_and_runtime_evidence",
+      "tool": "vrcforge_scan_wardrobe",
+      "tools": [
+        "vrcforge_scan_avatar_controls",
+        "vrcforge_scan_parameters",
+        "vrcforge_scan_fx_animator",
+        "vrcforge_scan_animation_bindings",
+        "vrcforge_scan_blendshapes",
+        "vrcforge_inspect_skinned_mesh_deformation",
+        "vrcforge_get_runtime_observation",
+        "vrcforge_gesture_manager_status",
+        "vrcforge_run_validation_report",
+        "vrcforge_build_test_readiness"
+      ],
+      "writes": false,
+      "optional": true
+    },
+    {
+      "name": "restore_user_approved_play_state_after_runtime_observation",
+      "tool": "vrcforge_set_play_mode",
+      "tools": [
+        "vrcforge_gesture_manager_status"
+      ],
+      "writes": true,
+      "runtimePermissionGateRequired": true,
+      "runtimeApprovalRequired": true,
+      "conditional": "workflow_owned_play_change_or_explicit_user_play_target",
+      "optional": true
+    },
+    {
+      "name": "cleanup_exact_authorized_targets",
+      "tool": "vrcforge_scan_inbound_reference_closure",
+      "tools": [
+        "vrcforge_preview_manage_fx_animator",
+        "vrcforge_manage_fx_animator",
+        "vrcforge_set_gameobject_active",
+        "vrcforge_delete_gameobject",
+        "vrcforge_scan_fx_animator",
+        "vrcforge_get_gameobject"
+      ],
+      "writes": true,
+      "runtimePermissionGateRequired": true,
+      "runtimeApprovalRequired": true,
+      "conditional": "user_explicitly_requested_replacement_cleanup_and_reference_closure_is_complete",
+      "optional": true
+    }
   ],
-  "approval": {"required": true, "owner": "runtime_supervision_layer", "scope": "one_exact_preview_bound_write_through_current_permission_policy"},
-  "checkpoint": {"required": true, "boundaries": ["before_outfit_install", "before_fixed_value_reuse", "before_each_clip_matrix_change", "before_proven_fx_conflict_change", "before_menu_change", "before_conditional_head_object_refit", "before_legacy_cleanup"]},
-  "rollback": {"required": true, "requiresSeparateApproval": true}
+  "approval": {
+    "required": true,
+    "owner": "runtime_supervision_layer",
+    "scope": "one_exact_preview_bound_write_through_current_permission_policy"
+  },
+  "checkpoint": {
+    "required": true,
+    "boundaries": [
+      "before_each_approved_write"
+    ]
+  },
+  "rollback": {
+    "required": true,
+    "requiresSeparateApproval": true
+  },
+  "selectionPolicy": {
+    "kind": "capability_catalog_not_mandatory_sequence",
+    "scope": "user_request_and_observed_evidence",
+    "expectedBehavior": "observed_evidence_and_explicit_user_approved_changes",
+    "presetProjectDesign": false
+  }
 }

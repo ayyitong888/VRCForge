@@ -6369,7 +6369,10 @@ class AgentGateway:
                 and not observed_tool.advanced
                 and not observed_tool.requires_user_activation
                 and not self._write_handlers.get(observed_tool.name)
-                and self._external_mcp_read_tool_block(observed_tool, self.ensure_config())
+                and (
+                    observed_tool.name == RESULT_READER_TOOL
+                    or self._external_mcp_read_tool_block(observed_tool, self.ensure_config())
+                )
             )
         timeline: list[dict[str, Any]] = []
         params["_runtimeFailureProgress"] = {"steps": steps, "timeline": timeline, "contextUsage": context_usage, "_nativeTurn": native_turn}
@@ -6888,21 +6891,15 @@ class AgentGateway:
                 turn_id=turn_id,
                 client_turn_id=client_turn_id,
             )
-            # Keep the caller's observation immutable while exposing only the
-            # runtime-owned explicit model-turn budget to the planner.
+            # Keep the caller's observation immutable; publish current authority
+            # and capabilities without host-owned budget counters.
             planner_observe = dict(observe) if isinstance(observe, dict) else {}
             planner_observe["planMode"] = task_loop.plan_mode
             # Host-owned current scope, including activation/exit and approval resume.
             planner_observe["skillPolicy"] = task_loop.planner_projection()["skillPolicy"]
-            max_model_turns = task_loop.budget_policy.max_model_turns
-            if max_model_turns is None:
-                planner_observe.pop("modelTurnBudget", None)
-            else:
-                planner_observe["modelTurnBudget"] = {
-                    "maxModelTurns": max_model_turns,
-                    "modelTurnsUsed": task_loop.model_turns_used,
-                    "remainingModelTurns": max(0, max_model_turns - task_loop.model_turns_used),
-                }
+            # Budget enforcement and the terminal user notice belong to the host,
+            # not to model context. Also discard any caller-supplied counter.
+            planner_observe.pop("modelTurnBudget", None)
             native_turn.settle()
             queued_native_action = bool(native_binding and native_turn.has_queued_calls)
             # Steer may discard the queue after the first budget check. A fresh
@@ -8167,8 +8164,8 @@ class AgentGateway:
             top_plan["reason"] = "model_turn_budget_exhausted"
             base_reply = str(top_plan.get("reply") or "").rstrip()
             notice = (
-                f"（已到本轮显式配置的 {task_loop.budget_policy.max_model_turns} 次模型轮次上限，先停下来汇报：上面是这一轮做到的部分。"
-                "需要的话再说一声，我接着往下做。）"
+                f"（已暂停：达到本轮显式配置的 {task_loop.budget_policy.max_model_turns} 次模型轮次上限，任务尚未完成。"
+                "已有进展和会话记录已保留；可在当前聊天发送“继续”接着处理。）"
             )
             top_plan["reply"] = f"{base_reply}\n\n{notice}".strip() if base_reply else notice
         pending_question = find_current_pending_question(steps)

@@ -15740,8 +15740,12 @@ def load_internal_tool_block(params: dict[str, Any]) -> dict[str, Any]:
     session_id = str(params.get("sessionId") or params.get("session_id") or "").strip()
     selector = params.get("block") or params.get("index")
     branch = str(selector or "").strip().casefold()
+    requested_tools = params.get("tools")
+    all_tools = params.get("allTools", False)
+    if not isinstance(requested_tools, list) or not isinstance(all_tools, bool) or (all_tools and requested_tools):
+        return {"ok": False, "status": "failed", "errorCode": "internal_tool_selection_invalid", "error": "tools is required: use [] to browse, or exact names to load. To explicitly request ALL tools in one leaf, use tools:[] and allTools:true. allTools must be boolean and cannot be combined with non-empty tools.", "mutationStarted": False}
     if not branch or branch in CANONICAL_TOOL_BLOCKS:
-        if params.get("tools") is not None:
+        if requested_tools or all_tools:
             return {"ok": False, "status": "failed", "errorCode": "internal_tool_selection_invalid", "error": "Select a leaf before specifying tools.", "mutationStarted": False}
         return project_internal_tool_block_level(build_internal_tool_block_inventory({**params, "block": branch}))
     block = resolve_internal_tool_block_selector(selector)
@@ -15764,7 +15768,16 @@ def load_internal_tool_block(params: dict[str, Any]) -> dict[str, Any]:
             "Call load_internal_tool_block with no block to browse root categories, then copy a returned selector."
         ]
         return response
-    requested_tools = params.get("tools")
+    if all_tools:
+        requested_tools = [
+            str(item["name"]) for item in _internal_tool_block_leaves(
+                normalize_exposure_layer(params.get("exposureLayer")),
+                project_context_active=params.get("projectContextActive") is True,
+            ) if item.get("block") == block
+        ]
+    if not requested_tools:
+        # Directory navigation must not silently enlarge the next model request.
+        return project_internal_tool_block_level(build_internal_tool_block_inventory({**params, "block": block}))
     if requested_tools is not None:
         if not isinstance(requested_tools, list) or not requested_tools:
             return {"ok": False, "status": "failed", "errorCode": "internal_tool_selection_invalid", "error": "tools must be a non-empty array of exact tool names", "mutationStarted": False}
@@ -25366,7 +25379,7 @@ def register_agent_gateway_tools() -> None:
     )
     AGENT_GATEWAY.register_tool(
         "vrcforge_load_internal_tool_block",
-        "When to use: discover and load internal Agent tools through one tree. Omit block to see root categories; pass a returned category in block to see its next level; pass a leaf in block to load its tools into this session. New tools become callable on the next turn. Optionally supply exact tools from that leaf to load a subset. When NOT to use: do not use for external MCP or assume discovery executes a tool. Negative example: do not pass a runtime tool name or invent a block_index field; tools selection requires a leaf.",
+            'When to use: discover and load internal Agent tools through one tree. tools is REQUIRED. Browse roots with {"tools":[]}; browse a category or leaf with {"block":"project_environment/files","tools":[]}, without loading definitions. Load only needed exact names, e.g. {"block":"project_environment/files","tools":["read_installed_skill"]}. New tools become callable on the next turn. Explicitly request ALL tools in the current leaf with {"block":"project_environment/files","tools":[],"allTools":true}; this never expands other leaves. When NOT to use: do not use for external MCP or assume discovery executes a tool. Negative example: do not omit tools, use a wildcard, combine allTools:true with non-empty tools, or load a whole authoring leaf just to read one Skill. Do not pass a runtime tool name as block or invent block_index.',
         "plan/preview",
         lambda params: load_internal_tool_block(params or {}),
     )
@@ -25480,7 +25493,7 @@ def register_agent_gateway_tools() -> None:
     AGENT_GATEWAY.register_tool("vrcforge_scan_fx_animator", "Scan FX animator layers, states, and parameters for an avatar.", "read/debug", scan_fx_animator_sync)
     AGENT_GATEWAY.register_tool("vrcforge_scan_animation_bindings", "Scan animation clip bindings for an avatar or animator controller.", "read/debug", scan_animation_bindings_sync)
     AGENT_GATEWAY.register_tool("vrcforge_scan_avatar_controls", "Scan expression menu controls and linked parameters for an avatar.", "read/debug", WARDROBE_OUTFIT_WORKFLOWS.scan_avatar_controls)
-    AGENT_GATEWAY.register_tool("vrcforge_scan_wardrobe", "Detect int-exclusive wardrobe(s) by reconciling an expression Int parameter, menu toggle values, FX Any-State Equals transitions, per-clip object on/off toggles, and Write Defaults.", "read/debug", WARDROBE_OUTFIT_WORKFLOWS.scan_wardrobe)
+    AGENT_GATEWAY.register_tool("vrcforge_scan_wardrobe", "When to use: Inspect Int wardrobe patterns across menu values, FX AnyState and ordinary-state Equals transitions, clip object toggles, and Write Defaults. Multiple or unresolved destinations remain ambiguous and require further FX/clip reads. When NOT to use: Do not infer complete topology or live switching effects from this scan alone. Negative example: an ambiguous candidate is not a verified safe switching sequence.", "read/debug", WARDROBE_OUTFIT_WORKFLOWS.scan_wardrobe)
     AGENT_GATEWAY.register_tool(
         "vrcforge_scan_parameters",
         (

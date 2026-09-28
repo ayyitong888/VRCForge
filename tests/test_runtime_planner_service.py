@@ -101,7 +101,7 @@ def test_completion_prompt_separates_success_claim_from_honest_failure_reply() -
     assert '"completion_claim":{"satisfied":false}' in prompt
 
 
-def test_prompt_surfaces_only_runtime_owned_remaining_model_turns() -> None:
+def test_prompt_does_not_surface_host_owned_remaining_model_turns() -> None:
     prompt = service()._build_llm_plan_prompt(
         "继续诊断",
         [],
@@ -113,7 +113,8 @@ def test_prompt_surfaces_only_runtime_owned_remaining_model_turns() -> None:
             }
         },
     )
-    assert "Runtime-owned model-turn budget: 1 remaining (1 used of 2), including this decision" in prompt
+    assert prompt == service()._build_llm_plan_prompt("继续诊断", [], observe={})
+    assert "Runtime-owned model-turn budget" not in prompt
     assert '"completion_claim":{"satisfied":false}' in prompt
 
 
@@ -856,7 +857,7 @@ def test_internal_tool_block_observation_keeps_compact_indices_without_schemas()
     ]
     assert directory["blocks"][0]["toolNames"] == ["vrcforge_get_compile_errors", "vrcforge_unity_status"]
     assert "skill_tool=load_internal_tool_block" in observation
-    assert "skill_params={\"block\":\"<exact block name>\"}" in observation
+    assert 'skill_params={"block":"<exact leaf name>","tools":["<exact tool name>"]}' in observation
     assert "privateSchema" not in observation
     assert len(observation) <= 8_000
 
@@ -920,7 +921,7 @@ def test_parent_tool_block_observation_preserves_exact_leaf_load_actions() -> No
     from agent_tool_result_contract import normalize_agent_tool_result
 
     result = dashboard_server.load_internal_tool_block(
-        {"sessionId": "planner-parent-block-regression", "block": "diagnostics_build"}
+        {"sessionId": "planner-parent-block-regression", "block": "diagnostics_build", "tools": []}
     )
     outcome = normalize_agent_tool_result(
         result, fallback_summary="load_internal_tool_block", write=False
@@ -936,7 +937,7 @@ def test_parent_tool_block_observation_preserves_exact_leaf_load_actions() -> No
         "diagnostics_build/checkpoints_history",
         "diagnostics_build/build_runtime",
     ):
-        assert {"block": leaf} in [row["expandArguments"] for row in directory["blocks"]]
+        assert {"block": leaf, "tools": []} in [row["expandArguments"] for row in directory["blocks"]]
     assert len(observation) <= 8_000
 
 

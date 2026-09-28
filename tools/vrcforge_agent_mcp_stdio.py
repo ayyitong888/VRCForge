@@ -597,7 +597,7 @@ class VRCForgeBridge:
             "io.modelcontextprotocol/clientCapabilities": {},
             "io.modelcontextprotocol/clientInfo": {
                 "name": "vrcforge-agent-stdio-bridge",
-                "version": "1.8.7",
+                "version": "1.8.8",
             },
         }
         if method in {"tools/call", "tools/list", "prompts/get"}:
@@ -846,9 +846,9 @@ def run_stdio_server(
             {
                 "name": "vrcforge_load_tool_block",
                 "description": (
-                    "When to use: Load one needed leaf, optionally choosing exact toolNames from its index. Selected full schemas are returned for hosts that do not refresh tools/list.\n"
-                    "When NOT to use: Load unrelated blocks or approve writes.\n"
-                    "Negative example: Loading optimization to read compile errors."
+                    'When to use: Browse one current directory with {"block":"avatar_structure/mesh_shape_data"} or {"block":"avatar_structure/mesh_shape_data","toolNames":[]}; this returns directory and tool names only, without loading tool definitions. Load selected exact names with toolNames:["vrcforge_scan_blendshapes"]. Set "allTools":true to load ALL tools in this leaf, for example {"block":"avatar_structure/mesh_shape_data","allTools":true}; this never loads the whole directory tree. Full schemas are returned for hosts that do not refresh tools/list.\n'
+                    "When NOT to use: Load unrelated blocks, use allTools on a parent directory, or treat loading as write approval.\n"
+                    "Negative example: Do not omit names to load a leaf or use allTools to expand every leaf."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -856,9 +856,11 @@ def run_stdio_server(
                     "required": ["block"],
                     "properties": {
                         "block": {"type": "string", "enum": block_enum},
-                        "toolNames": {"type": "array", "minItems": 1, "maxItems": 32, "uniqueItems": True,
+                        "toolNames": {"type": "array", "minItems": 0, "maxItems": 32, "uniqueItems": True,
                                       "items": {"type": "string", "minLength": 1},
-                                      "description": "Exact names from this leaf's index. Adds displayed tools; omit to display the whole leaf. Unload first to narrow an already loaded selection. This does not change call permissions."},
+                                      "description": "Omit or pass [] to browse directory and tool names only; no tool definitions are loaded. A non-empty array loads only those exact names. Use allTools:true to load every Tool in one leaf."},
+                        "allTools": {"type": "boolean", "default": False,
+                                     "description": "Set true only to load ALL tools in this leaf. This does not load parent or sibling directories and does not change call permissions."},
                     },
                 },
             },
@@ -1103,7 +1105,7 @@ def run_stdio_server(
             "catalogGeneration": tool_list_revision,
             "selectedBlock": selected_block,
             "selectionHint": (
-                "Default tools/list shows startup controls and displayed leaf tools. Select a matching leaf: tree.tools[].name gives exact names for load_tool_block toolNames. Omit toolNames to display the whole leaf. Selected full schemas and activationHandle support hosts without tools/list refresh. Existing direct calls retain their original permissions. tools/list _meta io.vrcforge/toolNames or resultMode=full also remain available."
+                'Default tools/list shows startup controls and displayed leaf tools. Browse one directory with load_tool_block {"block":"avatar_structure/mesh_shape_data"} or toolNames:[]. Use tree.tools[].name for exact named loads. Omit toolNames or pass [] to browse directory and tool names only; this does not load tool definitions. Set allTools:true only to load every Tool in one leaf. It never expands a whole directory tree. Selected full schemas and activationHandle support hosts without tools/list refresh. Existing direct calls retain their original permissions. tools/list _meta io.vrcforge/toolNames or resultMode=full also remain available.'
             ),
             "tree": tree,
         }
@@ -1376,7 +1378,33 @@ def run_stdio_server(
                     details={"selector": selector},
                     loadedBlocks=sorted(loaded_blocks),
                 )
-            if block in CANONICAL_TOOL_BLOCKS:
+            is_load = tool_name == "vrcforge_load_tool_block"
+            all_tools = arguments.get("allTools", False) if is_load else False
+            if is_load and type(all_tools) is not bool:
+                return external_rejection(
+                    status="invalid_tool_selection",
+                    error="allTools must be a boolean when supplied.",
+                    error_code="external_tool_selection_invalid",
+                    failure_layer="external_tool_discovery",
+                    failure_phase="block_selection",
+                    operation_kind="discovery",
+                    loadedBlocks=sorted(loaded_blocks),
+                )
+            supplied_names = is_load and "toolNames" in arguments
+            selected_names = arguments.get("toolNames") if supplied_names else None
+            nonempty_names = isinstance(selected_names, list) and bool(selected_names)
+            if is_load and all_tools and supplied_names and selected_names != []:
+                return external_rejection(
+                    status="invalid_tool_selection",
+                    error="allTools:true only allows toolNames to be omitted or an empty array.",
+                    error_code="external_tool_selection_invalid",
+                    failure_layer="external_tool_discovery",
+                    failure_phase="block_selection",
+                    operation_kind="discovery",
+                    loadedBlocks=sorted(loaded_blocks),
+                )
+            browse = is_load and not all_tools and (not supplied_names or selected_names == [])
+            if block in CANONICAL_TOOL_BLOCKS and not browse:
                 return external_rejection(
                     status="tool_leaf_required",
                     error="A first-level category is routing-only; select and load one second-level Tool leaf.",
@@ -1388,9 +1416,32 @@ def run_stdio_server(
                     loadedBlocks=sorted(loaded_blocks),
                 )
             targets = (block,)
-            selected_names = None
-            if tool_name == "vrcforge_load_tool_block" and "toolNames" in arguments:
-                selected_names = arguments["toolNames"]
+            if browse:
+                inventory = block_inventory(block)
+                if inventory.get("ok") is False:
+                    return inventory
+                return {
+                    **inventory,
+                    "ok": True,
+                    "status": "browsed",
+                    "block": block,
+                    "changed": False,
+                    "toolListChanged": False,
+                    "toolListRevision": tool_list_revision,
+                    "catalogGeneration": tool_list_revision,
+                    "loadedBlocks": sorted(loaded_blocks),
+                }
+            if is_load and all_tools:
+                try:
+                    manifest = bridge.manifest(requested_layer["value"], ["*"], None)
+                except (ExternalMcpBridgeError, ExternalHttpBridgeError):
+                    raise
+                selected_names = [
+                    str(item.get("name") or "") for item in manifest.get("tools", [])
+                    if isinstance(item, Mapping) and item_owner(item) == block
+                    and str(item.get("name") or "") not in HIDDEN_EXTERNAL_TOOLS
+                ]
+            if is_load and supplied_names and not all_tools:
                 valid = (
                     isinstance(selected_names, list) and 1 <= len(selected_names) <= 32
                     and all(isinstance(name, str) and name and name == name.strip() for name in selected_names)
@@ -1423,7 +1474,7 @@ def run_stdio_server(
                         error_code="external_tool_selection_invalid", failure_layer="external_tool_discovery",
                         failure_phase="block_selection", operation_kind="discovery", loadedBlocks=sorted(loaded_blocks),
                     )
-            if tool_name == "vrcforge_load_tool_block":
+            if is_load:
                 was_loaded = block in loaded_blocks
                 previous = displayed_tools.get(block)
                 selection = (set(selected_names) if not was_loaded else None if previous is None else previous | set(selected_names)) if selected_names is not None else None
@@ -1538,7 +1589,7 @@ def run_stdio_server(
         lambda: list_tools({"exposureLayer": requested_layer["value"]}),
         call_tool,
         server_name=DEFAULT_SERVER_NAME,
-        server_version="1.8.7",
+        server_version="1.8.8",
         tool_list_revision=lambda: tool_list_revision,
         tool_call_catalogue=lambda: list_tools({"exposureLayer": requested_layer["value"]}),
         tool_call_catalogue_for_call=lambda name, params: list_tools({
@@ -1561,7 +1612,7 @@ def run_stdio_server(
         list_tools,
         call_tool,
         server_name=DEFAULT_SERVER_NAME,
-        server_version="1.8.7",
+        server_version="1.8.8",
         tool_list_revision=lambda: tool_list_revision,
         tool_call_catalogue=lambda params: list_tools({"exposureLayer": requested_layer["value"], "_lookupToolNames": [str(params.get("name") or "")]}) if isinstance(params, Mapping) and params.get("name") else list_tools({"exposureLayer": requested_layer["value"]}),
         resource_list=list_resources,

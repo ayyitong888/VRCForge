@@ -52,7 +52,7 @@ def finish(request):
 def budgeted_request_history(request):
     messages = request["messages"]
     assert messages[-1]["role"] == "system"
-    assert "modelTurnBudget" in json.loads(messages[-1]["content"].split(": ", 1)[1])
+    assert "modelTurnBudget" not in json.loads(messages[-1]["content"].split(": ", 1)[1])
     assert all(message["role"] != "system" for message in messages[:-1])
     return messages[:-1]
 
@@ -153,7 +153,6 @@ def test_native_gateway_settles_execution_phase_before_replanning(tmp_path):
     assert model.requests[1]["messages"][-2]["tool_call_id"] == "phase"
     assert "entered_execution" in model.requests[1]["messages"][-2]["content"]
     assert json.loads(model.requests[1]["messages"][-1]["content"].split(": ", 1)[1])["exposureLayer"] == "execution"
-
 
 
 def test_native_action_contract_explains_supervised_execution_boundary(tmp_path):

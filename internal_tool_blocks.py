@@ -409,7 +409,7 @@ def build_internal_tool_block_tree(
                     "description": canonical_tool_block_description(f"{root_id}/{leaf}"),
                     "loaded": f"{root_id}/{leaf}" in loaded,
                     "toolNames": [str(item.get("name")) for item in sorted(canonical_leaves[f"{root_id}/{leaf}"], key=lambda v: str(v.get("name") or ""))],
-                    "loadCall": {"skill_tool": "load_internal_tool_block", "skill_params": {"block": f"{root_id}/{leaf}"}},
+                    "loadCall": {"skill_tool": "load_internal_tool_block", "skill_params": {"block": f"{root_id}/{leaf}", "tools": [str(item.get("name")) for item in sorted(canonical_leaves[f"{root_id}/{leaf}"], key=lambda v: str(v.get("name") or ""))]}},
                 }
                 for leaf in spec["children"]
             ],
@@ -419,6 +419,8 @@ def build_internal_tool_block_tree(
         tree = next(item for item in children if item["name"] == selected)
     if selected in canonical_leaves:
         tree = {"index": selected, "name": selected, "depth": 2, "loaded": selected in loaded, "description": canonical_tool_block_description(selected), "tools": [{"index": f"{selected}.{i}", **item} for i, item in enumerate(sorted(canonical_leaves[selected], key=lambda v: str(v.get("name") or "")), 1)]}
+    if selected == INTERNAL_DEFAULT_TOOL_BLOCK:
+        tree = {"name": selected, "loaded": True, "tools": [item for item in leaf_items if item.get("block") == selected]}
     return {"ok": True, "schema": "vrcforge.internal_tool_blocks.v1", "loadedBlocks": sorted(loaded), "blocks": children, "tree": tree}
 
 
@@ -438,7 +440,7 @@ def project_internal_tool_block_level(directory: dict[str, Any]) -> dict[str, An
         nodes = roots
     elif name in CANONICAL_TOOL_BLOCKS and isinstance(tree.get("children"), list):
         nodes = tree["children"]
-    elif name in CANONICAL_TOOL_LEAVES and isinstance(tree.get("tools"), list):
+    elif name in (*CANONICAL_TOOL_LEAVES, INTERNAL_DEFAULT_TOOL_BLOCK) and isinstance(tree.get("tools"), list):
         return {**directory, "blocks": [], "view": "selected_leaf"}
     else:
         return directory
@@ -451,7 +453,7 @@ def project_internal_tool_block_level(directory: dict[str, Any]) -> dict[str, An
         if not expose_leaf_names:
             hidden_keys.add("toolNames")
         row = {key: value for key, value in node.items() if key not in hidden_keys}
-        row["expandArguments"] = {"block": node["id"]}
+        row["expandArguments"] = {"block": node["id"], "tools": []}
         rows.append(row)
     selected = {key: value for key, value in tree.items() if key != "children"}
     selected["childrenRef"] = "blocks"
