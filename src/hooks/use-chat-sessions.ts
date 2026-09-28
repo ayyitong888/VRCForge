@@ -20,6 +20,8 @@ import {
   cacheChatContextUsageFast,
   cacheChatTimestampsFast,
   filterPersistableChats,
+  formatChatSidebarTime,
+  groupSidebarChats,
   isStoredChat,
   normalizeChatContextUsage,
   stripSupersededStreamingItems,
@@ -27,7 +29,7 @@ import {
 } from "../lib/chat-thread";
 import type { ChatThread, ConversationItem, ProjectType } from "../lib/chat-types";
 import { normalizeProjectPathKey } from "../lib/project-path";
-import { buildChatSidebarView, chatLatestAgentMarker } from "../lib/sidebar-view";
+import { chatLatestAgentMarker, chatSidebarActivity, type SidebarChatActivity } from "../lib/sidebar-view";
 
 type InitialChatState = {
   chats: ChatThread[];
@@ -118,12 +120,38 @@ export function useChatSessions({
   const chatPersistenceBlockedRef = useRef(false);
   const chatStorageRecoveryBlockedRef = useRef(false);
   const chatDeletedIdsRef = useRef<Set<string>>(new Set());
+  const chatSidebarActivityCacheRef = useRef(new WeakMap<ChatThread, SidebarChatActivity | null>());
 
   const activeChat = chats.find((chat) => chat.id === activeChatId) || null;
-  const chatSidebar = useMemo(
-    () => buildChatSidebarView(chats, i18n.language, normalizeProjectPathKey, Date.now(), activeView === "chat" ? activeChatId : ""),
-    [chats, i18n.language, activeChatId, activeView],
-  );
+  const chatSidebarBase = useMemo(() => {
+    const activityByChat = new Map<string, SidebarChatActivity>();
+    for (const chat of chats) {
+      if (!chatSidebarActivityCacheRef.current.has(chat)) {
+        chatSidebarActivityCacheRef.current.set(chat, chatSidebarActivity(chat) || null);
+      }
+      const activity = chatSidebarActivityCacheRef.current.get(chat);
+      if (activity) {
+        activityByChat.set(chat.id, activity);
+      }
+    }
+    return {
+      ...groupSidebarChats(chats, normalizeProjectPathKey),
+      activityByChat,
+    };
+  }, [chats, i18n.language]);
+  const chatSidebarTimes = useMemo(() => {
+    const nowMs = Date.now();
+    return new Map(chats.map((chat) => [chat.id, formatChatSidebarTime(chat, nowMs, i18n.language)] as const));
+  }, [activeChatId, activeView, chats, i18n.language]);
+  const chatSidebar = useMemo(() => {
+    const visibleChatId = activeView === "chat" ? activeChatId : "";
+    let activityByChat = chatSidebarBase.activityByChat;
+    if (visibleChatId && activityByChat.get(visibleChatId) === "completed") {
+      activityByChat = new Map(activityByChat);
+      activityByChat.delete(visibleChatId);
+    }
+    return { ...chatSidebarBase, times: chatSidebarTimes, activityByChat };
+  }, [activeChatId, activeView, chatSidebarBase, chatSidebarTimes]);
 
   useEffect(() => {
     if (activeView !== "chat" || !activeChatId) return;

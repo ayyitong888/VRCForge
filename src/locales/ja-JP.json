@@ -1,4 +1,20 @@
 {
+  "vskOpen": {
+    "title": "スキルパッケージをインポートしますか？",
+    "description": "以下のパッケージ情報を確認してください。確認するまでインポートも実行もされません。",
+    "name": "名前", "version": "バージョン", "author": "作成者", "path": "パッケージの場所", "details": "パッケージの詳細", "notProvided": "未提供", "signature": "署名", "signerTrust": "署名者の信頼状態", "signerTrustUnknown": "情報なし",
+    "signerFingerprint": "署名者の識別フィンガープリント", "officialPublisher": "確認済み発行元", "unknownPermission": "{{permission}}（認識できない権限）",
+    "signatureStatus": { "signed": "署名済み", "dev": "開発ビルド" },
+    "signerTrustStatus": { "trusted": "信頼済み", "untrusted": "未信頼", "revoked": "失効", "unsigned_dev": "未署名の開発ビルド" },
+    "permission": {
+      "read_project": "プロジェクトを読む", "read_assets": "アセットを読む", "read_package": "パッケージを読む", "analyze_logs": "ログを分析", "build_index": "インデックスを作成",
+      "unity_scan_scene": "Unityシーンを確認", "unity_modify_materials": "マテリアルを変更", "unity_modify_prefab": "Prefabを変更", "unity_modify_components": "コンポーネントを変更", "unity_run_validation": "検証を実行",
+      "write_project_files": "プロジェクトファイルを書き込む", "delete_files": "ファイルを削除", "execute_shell": "シェルコマンドを実行", "run_editor_script": "エディタースクリプトを実行", "network_access": "ネットワークにアクセス", "read_env": "環境変数を読む", "write_outside_project": "プロジェクト外に書き込む"
+    },
+    "permissions": "要求される権限",
+    "checking": "パッケージを確認中…", "invalid": "パッケージの検証に失敗しました。",
+    "confirm": "インポートを確認", "importing": "インポート中…", "imported": "スキルパッケージをインポートしました。"
+  },
   "sidebar": {
     "tempChat": "一時チャット",
     "newProject": "新規プロジェクト",

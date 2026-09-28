@@ -199,7 +199,7 @@ def install() -> dict[str, object]:
     service.designate_official_signer(
         pair.fingerprint,
         reason="Explicitly designated by the VRCForge project developer",
-        publisher="VRCForge",
+        publisher="ayyitong888",
     )
     existing = {
         str(item["id"]): item

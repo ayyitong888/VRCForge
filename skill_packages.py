@@ -2199,7 +2199,7 @@ class SkillPackageService:
         preview: ImportPreview,
         registry: Mapping[str, Any],
     ) -> dict[str, Any]:
-        return self._build_governance_decision(
+        governance = self._build_governance_decision(
             registry=registry,
             skill_id=str(preview.manifest["id"]),
             signature_status=preview.signature_status,
@@ -2208,6 +2208,25 @@ class SkillPackageService:
             package_sha256=preview.package_sha256,
             lock_sha256=preview.lock_sha256,
         )
+        policy = self._normalize_governance(registry.get("governance"))
+        signature_verified = governance["signatureVerified"]
+        signer = (
+            self._normalize_signer_fingerprint(str(preview.signer_fingerprint or ""))
+            if signature_verified
+            else ""
+        )
+        designation = policy["official_signers"].get(signer)
+        official = bool(
+            designation is not None
+            and signature_verified
+            and governance["signerTrustStatus"] == "trusted"
+            and signer not in policy["revoked_signers"]
+        )
+        governance["official"] = official
+        governance["officialPublisher"] = (
+            str(designation.get("publisher") or "") if official else None
+        )
+        return governance
 
     def _evaluate_installed_governance(
         self,

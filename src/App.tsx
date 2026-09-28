@@ -61,6 +61,7 @@ import { ProjectIndexPanel } from "./components/project/project-index-panel";
 import { ProjectPickerModal } from "./components/project/project-picker-modal";
 import type { ProjectType } from "./lib/chat-types";
 import { SkillsWorkspace } from "./components/skills/skills-workspace";
+import { VskOpenDialog } from "./components/skills/vsk-open-dialog";
 import { SubAgentPanel } from "./components/subagents/sub-agent-panel";
 import { type UserAttachmentSource } from "./components/runtime/project-workbench-sections";
 import { useApprovalExecution } from "./hooks/use-approval-execution";
@@ -4511,6 +4512,8 @@ export default function App() {
         }}
         onDismiss={() => setAppUpdatePrompt(null)}
       />
+
+      <VskOpenDialog ready={runtimeConnected} onPreflight={preflightVskPackage} onImport={importVskPackage} />
 
     </main>
   );

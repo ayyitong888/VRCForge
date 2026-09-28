@@ -43,6 +43,7 @@ mod primitive_evidence_controller_launcher_windows;
 mod restart_manager_windows;
 mod sanitize;
 mod theme_background;
+mod vsk_open;
 
 use approval_notification_windows::*;
 use backend::*;
@@ -52,6 +53,7 @@ use event_bridge::*;
 use restart_manager_windows::*;
 use sanitize::*;
 use theme_background::*;
+use vsk_open::PendingVskPaths;
 
 const WEBVIEW2_ACCESSIBILITY_ARG: &str = "--force-renderer-accessibility";
 
@@ -92,6 +94,11 @@ fn start_managed_backend_early(app: &tauri::AppHandle) -> Result<bool, String> {
     Ok(started)
 }
 
+#[tauri::command]
+fn take_pending_vsk_paths(state: State<'_, PendingVskPaths>) -> Vec<String> {
+    state.take()
+}
+
 fn main() {
     #[cfg(windows)]
     if let Some(exit_code) = capture_helper::try_run_from_args() {
@@ -111,10 +118,28 @@ fn main() {
         Some(frame) => BackendState::with_primitive_live_bootstrap(Some(frame)),
         None => BackendState::new(),
     };
-    tauri::Builder::default()
+    let vsk_paths = PendingVskPaths::default();
+    let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    vsk_paths.enqueue_args(env::args().skip(1), &cwd);
+    let builder = tauri::Builder::default();
+    // Plugin owns its session-local window/mutex until App exit. Window messages
+    // are not import authorization: untrusted paths only open a confirmation UI;
+    // the actual import still uses the authenticated backend package checks.
+    #[cfg(windows)]
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, cwd| {
+            let pending = app.state::<PendingVskPaths>();
+            pending.enqueue_args(args.into_iter().skip(1), Path::new(&cwd));
+            if let Some(window) = app.get_webview_window("main") {
+                restore_main_window(&window);
+            }
+            let _ = app.emit(vsk_open::EVENT_NAME, ());
+        }));
+    builder
         .plugin(tauri_plugin_notification::init())
         .manage(backend_state)
+        .manage(vsk_paths)
         .setup(|app| {
+            let _ = app.emit(vsk_open::EVENT_NAME, ());
             start_managed_backend_early(app.handle()).map_err(std::io::Error::other)?;
             if let Some(window) = app.get_webview_window("main") {
                 #[cfg(windows)]
@@ -180,6 +205,7 @@ fn main() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            take_pending_vsk_paths,
             acknowledge_sub_agent_handoff,
             acknowledge_agent_goal_background_state,
             abort_chat_attachment_upload,

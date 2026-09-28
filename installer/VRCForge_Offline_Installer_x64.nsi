@@ -64,6 +64,7 @@ OutFile "${OUTFILE}"
 InstallDir "$PROGRAMFILES64\${INSTALL_LEAF}"
 RequestExecutionLevel admin
 SetCompressor /SOLID lzma
+!include "VRCForge_VskAssociation.nsh"
 BrandingText "VRCForge ${VERSION}"
 
 ; ---------- Modern UI ----------
@@ -342,6 +343,9 @@ Section "Install"
   !endif
 
   WriteUninstaller "$INSTDIR\Uninstall.exe"
+  !ifndef VRCFORGE_SMOKE_BUILD
+    Call VrcForgeRegisterVskAssociation
+  !endif
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${UNINSTALL_KEY}" "DisplayName" "VRCForge"
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${UNINSTALL_KEY}" "DisplayVersion" "${VERSION}"
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${UNINSTALL_KEY}" "Publisher" "VRCForge"
@@ -379,6 +383,9 @@ Section "Uninstall"
   Delete "$SMPROGRAMS\${START_MENU_GROUP}\VRCForge をアンインストール.lnk"
   RMDir "$SMPROGRAMS\${START_MENU_GROUP}"
   Call un.ClearUserDataIfRequested
+  !ifndef VRCFORGE_SMOKE_BUILD
+    Call un.VrcForgeRemoveVskAssociation
+  !endif
   RMDir /r "$INSTDIR"
   DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${UNINSTALL_KEY}"
   !ifndef VRCFORGE_SMOKE_BUILD

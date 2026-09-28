@@ -507,7 +507,7 @@ function buildAgentTimelineRowsFromSteps({
               <OutputBlock label={t("shell.output")} value={stepShellResult.stdout} />
               {stepShellResult.stderr ? <OutputBlock label={t("shell.errorOutput")} value={stepShellResult.stderr} danger /> : null}
             </>
-          ) : stepResult !== undefined ? <OutputBlock label={t("skills.data")} value={formatPayload(stepResult)} /> : null}
+          ) : stepResult !== undefined ? <PayloadOutputBlock label={t("skills.data")} value={stepResult} /> : null}
           {step.error || detailedShell?.error ? <DataLine label={t("skills.error")} value={step.error || detailedShell?.error || ""} /> : null}
           {step.summary ? <DataLine label={t("agent.stepSummary")} value={step.summary} /> : null}
         </RunRow>,
@@ -524,7 +524,7 @@ function buildAgentTimelineRowsFromSteps({
           <DataLine label={t("skills.tool")} value={stepSkillTool} mono />
           {detailedSkill?.category ? <DataLine label={t("skills.category")} value={detailedSkill.category} /> : null}
           {step.error || detailedSkill?.error ? <DataLine label={t("skills.error")} value={step.error || detailedSkill?.error || ""} /> : null}
-          {stepResult !== undefined ? <OutputBlock label={t("skills.data")} value={formatPayload(stepResult)} /> : null}
+          {stepResult !== undefined ? <PayloadOutputBlock label={t("skills.data")} value={stepResult} /> : null}
           {step.summary ? <DataLine label={t("agent.stepSummary")} value={step.summary} /> : null}
         </RunRow>,
       );
@@ -539,8 +539,8 @@ function buildAgentTimelineRowsFromSteps({
         <RunRow key={rowKey} icon="plan" title={stepWriteTool} statusTone={detailedWrite?.ok ? "ok" : stepStatusTone(status)} statusLabel={status}>
           <DataLine label="Tool" value={stepWriteTool} mono />
           {detailedWrite?.approvalId ? <DataLine label="Approval" value={detailedWrite.approvalId} mono /> : null}
-          {detailedWrite?.paramsSummary ? <DataLine label={t("skills.data")} value={formatPayload(detailedWrite.paramsSummary)} /> : null}
-          {stepResult !== undefined ? <OutputBlock label={t("skills.data")} value={formatPayload(stepResult)} /> : null}
+          {detailedWrite?.paramsSummary ? <PayloadDataLine label={t("skills.data")} value={detailedWrite.paramsSummary} /> : null}
+          {stepResult !== undefined ? <PayloadOutputBlock label={t("skills.data")} value={stepResult} /> : null}
           {step.error || detailedWrite?.error ? <DataLine label={t("skills.error")} value={step.error || detailedWrite?.error || ""} /> : null}
           {step.summary ? <DataLine label={t("agent.stepSummary")} value={step.summary} /> : null}
         </RunRow>,
@@ -576,7 +576,7 @@ function buildAgentTimelineRowsFromSteps({
             ? String((result as { status?: string }).status)
             : "result"}
         >
-          {typeof result === "string" ? <OutputBlock label={t("agent.stepSummary")} value={result} /> : <OutputBlock label={t("agent.stepSummary")} value={formatPayload(result)} />}
+          <PayloadOutputBlock label={t("agent.stepSummary")} value={result} />
           {step.summary ? <DataLine label={t("agent.stepSummary")} value={step.summary} /> : null}
         </RunRow>,
       );
@@ -757,7 +757,7 @@ function buildLegacyAgentTimelineRows({
         <DataLine label={t("skills.tool")} value={skill.tool || "-"} mono />
         {skill.category ? <DataLine label={t("skills.category")} value={skill.category} /> : null}
         {skill.error ? <DataLine label={t("skills.error")} value={skill.error} /> : null}
-        {skill.result !== undefined ? <OutputBlock label={t("skills.data")} value={formatPayload(skill.result)} /> : null}
+        {skill.result !== undefined ? <PayloadOutputBlock label={t("skills.data")} value={skill.result} /> : null}
       </RunRow>,
     );
   }
@@ -793,8 +793,8 @@ function buildLegacyAgentTimelineRows({
       >
         <DataLine label="Tool" value={write.tool || "-"} mono />
         {write.approvalId ? <DataLine label="Approval" value={write.approvalId} mono /> : null}
-        {write.paramsSummary ? <DataLine label={t("skills.data")} value={formatPayload(write.paramsSummary)} /> : null}
-        {write.result ? <OutputBlock label={t("skills.data")} value={formatPayload(write.result)} /> : null}
+        {write.paramsSummary ? <PayloadDataLine label={t("skills.data")} value={write.paramsSummary} /> : null}
+        {write.result ? <PayloadOutputBlock label={t("skills.data")} value={write.result} /> : null}
         {write.error ? <DataLine label={t("skills.error")} value={write.error} /> : null}
       </RunRow>,
     );
@@ -1098,6 +1098,16 @@ function asAgentShellResult(value: unknown): AgentShellResult | undefined {
     && typeof candidate.stderr === "string"
     ? candidate as AgentShellResult
     : undefined;
+}
+
+// Keep serialization inside mounted detail components. Folded rows do not need
+// a formatted copy of potentially large tool results on every parent render.
+function PayloadOutputBlock({ label, value }: { label: string; value: unknown }) {
+  return <OutputBlock label={label} value={formatPayload(value)} />;
+}
+
+function PayloadDataLine({ label, value }: { label: string; value: unknown }) {
+  return <DataLine label={label} value={formatPayload(value)} />;
 }
 
 export function formatPayload(value: unknown): string {

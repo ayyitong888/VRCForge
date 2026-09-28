@@ -1,4 +1,20 @@
 {
+  "vskOpen": {
+    "title": "是否导入技能包？",
+    "description": "请核对以下技能包信息。点击确认前不会导入，也不会运行技能。",
+    "name": "名称", "version": "版本", "author": "作者", "path": "文件位置", "details": "详细信息", "notProvided": "未提供", "signature": "签名", "signerTrust": "签名者信任状态", "signerTrustUnknown": "未提供",
+    "signerFingerprint": "签名者身份指纹", "officialPublisher": "已核验发布者", "unknownPermission": "{{permission}}（未知权限标识）",
+    "signatureStatus": { "signed": "已签名", "dev": "开发版本" },
+    "signerTrustStatus": { "trusted": "可信", "untrusted": "不可信", "revoked": "已撤销", "unsigned_dev": "未签名的开发版本" },
+    "permission": {
+      "read_project": "读取项目", "read_assets": "读取资源", "read_package": "读取软件包", "analyze_logs": "分析日志", "build_index": "建立索引",
+      "unity_scan_scene": "检查 Unity 场景", "unity_modify_materials": "修改材质", "unity_modify_prefab": "修改预制件", "unity_modify_components": "修改组件", "unity_run_validation": "运行验证",
+      "write_project_files": "写入项目文件", "delete_files": "删除文件", "execute_shell": "执行 Shell 命令", "run_editor_script": "运行编辑器脚本", "network_access": "访问网络", "read_env": "读取环境变量", "write_outside_project": "写入项目目录之外"
+    },
+    "permissions": "请求的权限",
+    "checking": "正在检查技能包…", "invalid": "技能包未通过检查。",
+    "confirm": "确认导入", "importing": "正在导入…", "imported": "技能包已导入。"
+  },
   "sidebar": {
     "tempChat": "临时对话",
     "newProject": "新项目",

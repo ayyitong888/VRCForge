@@ -1,4 +1,20 @@
 {
+  "vskOpen": {
+    "title": "是否匯入技能套件？",
+    "description": "請核對以下技能套件資訊。按下確認前不會匯入，也不會執行技能。",
+    "name": "名稱", "version": "版本", "author": "作者", "path": "檔案位置", "details": "詳細資訊", "notProvided": "未提供", "signature": "簽章", "signerTrust": "簽署者信任狀態", "signerTrustUnknown": "未提供",
+    "signerFingerprint": "簽署者身分指紋", "officialPublisher": "已驗證發行者", "unknownPermission": "{{permission}}（未知權限識別碼）",
+    "signatureStatus": { "signed": "已簽章", "dev": "開發版本" },
+    "signerTrustStatus": { "trusted": "可信任", "untrusted": "不受信任", "revoked": "已撤銷", "unsigned_dev": "未簽章的開發版本" },
+    "permission": {
+      "read_project": "讀取專案", "read_assets": "讀取資產", "read_package": "讀取套件", "analyze_logs": "分析記錄", "build_index": "建立索引",
+      "unity_scan_scene": "檢查 Unity 場景", "unity_modify_materials": "修改材質", "unity_modify_prefab": "修改預製物", "unity_modify_components": "修改元件", "unity_run_validation": "執行驗證",
+      "write_project_files": "寫入專案檔案", "delete_files": "刪除檔案", "execute_shell": "執行 Shell 命令", "run_editor_script": "執行編輯器指令碼", "network_access": "存取網路", "read_env": "讀取環境變數", "write_outside_project": "寫入專案目錄以外"
+    },
+    "permissions": "要求的權限",
+    "checking": "正在檢查技能套件…", "invalid": "技能套件未通過檢查。",
+    "confirm": "確認匯入", "importing": "正在匯入…", "imported": "技能套件已匯入。"
+  },
   "sidebar": {
     "tempChat": "臨時對話",
     "newProject": "新專案",

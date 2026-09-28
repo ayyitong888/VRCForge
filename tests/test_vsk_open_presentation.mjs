@@ -1,0 +1,10 @@
+import assert from "node:assert/strict";
+import { build } from "esbuild";
+const result=await build({entryPoints:['src/lib/vsk-open-presentation.ts'],bundle:true,write:false,platform:'node',format:'esm'});
+const {displayVskPath,vskPreviewIdentity}=await import('data:text/javascript;base64,'+Buffer.from(result.outputFiles[0].text).toString('base64'));
+assert.equal(displayVskPath(String.raw`\\?\D:\技能 包\衣柜.vsk`),String.raw`D:\技能 包\衣柜.vsk`);
+assert.equal(displayVskPath(String.raw`D:\普通\衣柜.vsk`),String.raw`D:\普通\衣柜.vsk`);
+assert.equal(displayVskPath(String.raw`\\?\UNC\server\folder\a.vsk`),String.raw`\\server\folder\a.vsk`);
+assert.deepEqual(vskPreviewIdentity({manifest:{name:'wardrobe',version:'1.1.9'},signature_status:'signed'}),{name:'wardrobe',version:'1.1.9'});
+assert.deepEqual(vskPreviewIdentity({manifest:{name:{}},name:'safe',version:'1.0'}),{name:'safe',version:'1.0'});
+console.log('PASS: display-only Windows path cleanup and actual preflight manifest identity.');

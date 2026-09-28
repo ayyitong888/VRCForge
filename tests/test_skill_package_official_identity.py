@@ -176,3 +176,96 @@ def test_unsigned_package_with_spoofed_official_author_is_never_official(
     assert installed["official"] is False
     assert installed["officialPublisher"] is None
     assert installed["verified"] is False
+
+
+def test_preview_governance_does_not_treat_spoofed_author_as_official(tmp_path: Path) -> None:
+    service = SkillPackageService(tmp_path / "store", vrcforge_version="1.7.9")
+    signer = service.generate_signing_keypair()
+    service.trust_signer(signer.fingerprint, reason="Trusted, not official")
+    package = service.export_release(
+        skill_source(tmp_path, author="ayyitong888"),
+        tmp_path / "spoofed-author.vsk",
+        signer.private_key_pem,
+    ).package_path
+
+    governance = service.preflight_import(package).as_dict()["governance"]
+
+    assert governance["signatureVerified"] is True
+    assert governance["signerTrustStatus"] == "trusted"
+    assert governance["official"] is False
+    assert governance["officialPublisher"] is None
+    assert governance["importAllowed"] is True
+
+
+def test_preview_governance_requires_explicit_official_designation(tmp_path: Path) -> None:
+    service = SkillPackageService(tmp_path / "store", vrcforge_version="1.7.9")
+    signer = service.generate_signing_keypair()
+    service.trust_signer(signer.fingerprint, reason="Trusted community signer")
+    package = service.export_release(
+        skill_source(tmp_path, author="VRCForge"),
+        tmp_path / "trusted-only.vsk",
+        signer.private_key_pem,
+    ).package_path
+
+    governance = service.preflight_import(package).as_dict()["governance"]
+
+    assert governance["signerTrustStatus"] == "trusted"
+    assert governance["official"] is False
+    assert governance["officialPublisher"] is None
+    assert governance["importAllowed"] is True
+
+
+def test_preview_governance_hides_publisher_for_revoked_signer(tmp_path: Path) -> None:
+    service, signer, package = signed_install(tmp_path, official=True, author="Any author")
+    service.revoke_signer(signer.fingerprint, reason="Compromised")
+
+    governance = service.preflight_import(package).as_dict()["governance"]
+
+    assert governance["signatureVerified"] is True
+    assert governance["signerTrustStatus"] == "revoked"
+    assert governance["official"] is False
+    assert governance["officialPublisher"] is None
+    assert governance["importAllowed"] is False
+
+
+def test_preview_governance_exposes_explicit_designated_publisher(tmp_path: Path) -> None:
+    service = SkillPackageService(tmp_path / "store", vrcforge_version="1.7.9")
+    signer = service.generate_signing_keypair()
+    service.designate_official_signer(
+        signer.fingerprint,
+        reason="Explicit official release signer",
+        publisher="ayyitong888",
+    )
+    package = service.export_release(
+        skill_source(tmp_path, author="Unrelated manifest author"),
+        tmp_path / "designated.vsk",
+        signer.private_key_pem,
+    ).package_path
+
+    governance = service.preflight_import(package).as_dict()["governance"]
+
+    assert governance["signatureVerified"] is True
+    assert governance["signerTrustStatus"] == "trusted"
+    assert governance["official"] is True
+    assert governance["officialPublisher"] == "ayyitong888"
+    assert governance["importAllowed"] is True
+
+
+def test_signed_display_name_change_preserves_installed_author_identity(tmp_path: Path) -> None:
+    service, signer, _ = signed_install(tmp_path, official=True, author="VRCForge")
+    service.designate_official_signer(signer.fingerprint, publisher="ayyitong888")
+    manifest_path = tmp_path / "source" / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest.update(version="1.0.1", author_display_name="ayyitong888")
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    package = service.export_release(
+        tmp_path / "source", tmp_path / "display-name-upgrade.vsk", signer.private_key_pem,
+    ).package_path
+
+    preview = service.preflight_import(package)
+
+    assert preview.manifest["author"] == "VRCForge"
+    assert preview.manifest["author_display_name"] == "ayyitong888"
+    assert preview.signer_fingerprint == signer.fingerprint
+    assert preview.governance["officialPublisher"] == "ayyitong888"
+    assert preview.governance["importAllowed"] is True

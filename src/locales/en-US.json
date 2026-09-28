@@ -1,4 +1,20 @@
 {
+  "vskOpen": {
+    "title": "Import this Skill package?",
+    "description": "Review the package details below. Nothing is imported or run until you confirm.",
+    "name": "Name", "version": "Version", "author": "Author", "path": "Package location", "details": "Package details", "notProvided": "Not provided", "signature": "Signature", "signerTrust": "Signer trust", "signerTrustUnknown": "Not provided",
+    "signerFingerprint": "Signer identity fingerprint", "officialPublisher": "Verified publisher", "unknownPermission": "{{permission}} (unrecognized permission)",
+    "signatureStatus": { "signed": "Signed", "dev": "Development build" },
+    "signerTrustStatus": { "trusted": "Trusted", "untrusted": "Not trusted", "revoked": "Revoked", "unsigned_dev": "Unsigned development build" },
+    "permission": {
+      "read_project": "Read project", "read_assets": "Read assets", "read_package": "Read package", "analyze_logs": "Analyze logs", "build_index": "Build index",
+      "unity_scan_scene": "Inspect Unity scene", "unity_modify_materials": "Modify materials", "unity_modify_prefab": "Modify prefabs", "unity_modify_components": "Modify components", "unity_run_validation": "Run validation",
+      "write_project_files": "Write project files", "delete_files": "Delete files", "execute_shell": "Run shell commands", "run_editor_script": "Run editor scripts", "network_access": "Access the network", "read_env": "Read environment variables", "write_outside_project": "Write outside the project"
+    },
+    "permissions": "Requested permissions",
+    "checking": "Checking package…", "invalid": "Package verification failed.",
+    "confirm": "Confirm import", "importing": "Importing…", "imported": "Skill package imported."
+  },
   "sidebar": {
     "tempChat": "Quick Chat",
     "newProject": "New Project",
