@@ -15796,24 +15796,22 @@ def load_internal_tool_block(params: dict[str, Any]) -> dict[str, Any]:
                 "errorCode": "internal_tool_selection_invalid",
                 "error": f"Unknown or cross-block tool: {invalid_name}",
                 "mutationStarted": False,
+                # Always report the authoritative owner block so a typo (empty
+                # string) is distinguishable from a valid tool owned by
+                # another leaf.
+                "expectedBlock": expected_block,
             }
-            # Keep the exact-block permission boundary, but return enough
-            # routing evidence for the planner to correct a model-selected
-            # block on its next turn.  The previous response gave no way to
-            # distinguish a typo from a valid tool owned by another leaf.
             if expected_block:
-                response["expectedBlock"] = expected_block
+                # Keep the exact-block permission boundary, but return enough
+                # routing evidence for the planner to correct a model-selected
+                # block on its next turn.
                 response["data"] = {
                     "expectedBlock": expected_block,
                     "tool": invalid_name,
                     "requestedTools": list(requested_tools),
                 }
                 response["nextActions"] = [
-                    f"Retry with block={expected_block} and the exact tool name {invalid_name}."
-                ]
-            else:
-                response["nextActions"] = [
-                    "List internal tool blocks and choose an exact visible tool name before retrying."
+                    f"Retry load_internal_tool_block with block={expected_block} and the exact requested tools."
                 ]
             return response
     loaded = AGENT_GATEWAY.runtime_sessions.load_internal_tool_block_selected(session_id, block, requested_tools)

@@ -302,7 +302,7 @@ class AgentLoopP0Tests(unittest.TestCase):
         )
         self.assertEqual(result["steps"][0]["result"]["expectedBlock"], "avatar_structure/hierarchy_components")
         self.assertGreaterEqual(len(planner_prompts), 2)
-        self.assertIn("Retry with block=avatar_structure/hierarchy_components", planner_prompts[1])
+        self.assertIn("Retry load_internal_tool_block with block=avatar_structure/hierarchy_components", planner_prompts[1])
         self.assertNotEqual(result["plan"].get("nextStep"), "tool_failed")
 
     def test_failed_loader_then_correct_subset_then_question_keeps_question_pending(self) -> None:
@@ -480,7 +480,7 @@ class AgentLoopP0Tests(unittest.TestCase):
 
         first = result["steps"][0]
         self.assertEqual(first["outcome"]["status"], "failed")
-        self.assertNotIn("expectedBlock", first["result"])
+        self.assertEqual(first["result"].get("expectedBlock"), "")
         self.assertEqual(len(result["steps"]), 1)
 
     def _fixture_execution_target(self, project_root: str | Path) -> dict[str, object]:
