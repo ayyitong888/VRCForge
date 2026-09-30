@@ -3619,3 +3619,72 @@ pub(crate) fn try_ensure_agent_notes_file(user_data: &Path) -> Result<PathBuf, S
         .map_err(|error| format!("unable to create {}: {error}", path.display()))?;
     Ok(path)
 }
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopChatIdRequest {
+    chat_id: String,
+    timeout_ms: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopDataRootUpdateRequest {
+    path: String,
+    timeout_ms: Option<u64>,
+}
+
+/// DELETE /api/app/agent/chats/{chatId} - permanently delete a chat's native
+/// runtime history. chatId is the runtime session id echoed by the agent run.
+#[tauri::command]
+pub async fn delete_chat_permanently(
+    request: DesktopChatIdRequest,
+) -> Result<serde_json::Value, String> {
+    blocking_backend_json_request(move || {
+        backend_json_request(
+            "DELETE",
+            format!(
+                "/api/app/agent/chats/{}",
+                percent_encode_query_component(&request.chat_id)
+            ),
+            None,
+            request.timeout_ms.or(Some(30_000)),
+        )
+        .map(sanitize_webview_response)
+    })
+    .await
+}
+
+/// GET /api/app/settings/data-root - read the current user data root.
+#[tauri::command]
+pub async fn fetch_data_root(
+    request: DesktopTimeoutRequest,
+) -> Result<serde_json::Value, String> {
+    blocking_backend_json_request(move || {
+        backend_json_request(
+            "GET",
+            "/api/app/settings/data-root".to_string(),
+            None,
+            request.timeout_ms,
+        )
+        .map(sanitize_webview_response)
+    })
+    .await
+}
+
+/// POST /api/app/settings/data-root - migrate the user data root to a new path.
+#[tauri::command]
+pub async fn update_data_root(
+    request: DesktopDataRootUpdateRequest,
+) -> Result<serde_json::Value, String> {
+    blocking_backend_json_request(move || {
+        backend_json_request(
+            "POST",
+            "/api/app/settings/data-root".to_string(),
+            Some(serde_json::json!({ "path": request.path })),
+            request.timeout_ms.or(Some(120_000)),
+        )
+        .map(sanitize_webview_response)
+    })
+    .await
+}
