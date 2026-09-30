@@ -154,7 +154,7 @@ assert.equal(tauriConfig.identifier, "app.vrcforge.agentic");
 assert.match(backend, /join\("VRCForge"\)\.join\("agentic-app"\)/);
 for (const installer of [offlineInstaller, webInstaller]) {
   assert.match(installer, /!define USER_DATA_RELATIVE "VRCForge\\agentic-app"/);
-  assert.match(installer, /\$\{If\} \$ClearUserData == \$\{BST_CHECKED\}[\s\S]*RMDir \/r "\$UserDataRoot"/);
+  assert.match(installer, /\$\{If\} \$ClearUserData == \$\{BST_CHECKED\}[\s\S]*RMDir \/r "\$DataDir"/);
   assert.match(installer, /\$\{NSD_SetState\} \$ClearUserDataCheckbox \$\{BST_UNCHECKED\}/);
 }
 
