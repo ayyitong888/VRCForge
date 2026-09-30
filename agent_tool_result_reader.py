@@ -24,7 +24,7 @@ INPUT_SCHEMA = {
     "additionalProperties": False,
     "properties": {
         "resultRef": {"type": "string", "pattern": "^result_[0-9a-f]{32}$",
-                      "description": "Exact current-turn resultRef from resultContinuation; never guess or reuse another turn's reference."},
+                      "description": "Exact current-turn resultRef from resultContinuation; never guess or reuse another turn's reference. resultRef values are valid only within the turn that produced the result; in later turns rely on the conversation history instead of re-reading old results."},
         "jsonPointer": {"type": "string", "maxLength": 1024, "default": "",
                         "pattern": r"^(?:/(?:[^~/]|~[01])*){0,32}$",
                         "description": "RFC6901 pointer: empty string selects root; otherwise keep the leading slash, e.g. /parameters or /layers/0/states. Escape a key's slash as ~1 and tilde as ~0. Copy exact pointers from returned rows."},
