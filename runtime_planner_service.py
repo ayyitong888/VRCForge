@@ -3805,11 +3805,13 @@ class RuntimePlannerService:
         )
         if any(tool.name == control.name for tool in selected):
             raise ValueError("Native runtime control name conflicts with the catalog.")
+        resident_selected = [tool for tool in selected if tool.block == "core"]
+        deferred_selected = [tool for tool in selected if tool.block != "core"]
         definitions = [{"type": "function", "function": {
             "name": tool.name,
             "description": planner_tool_usage_description(tool.name, tool.description, write=tool.write),
             "parameters": deepcopy(dict(tool.input_schema)),
-        }} for tool in [*selected, control]]
+        }} for tool in [*resident_selected, control, *deferred_selected]]
         state = {"exposureLayer": exposure_layer, "projectContextActive": project_context_active}
         if explicit_plan:
             state["planMode"] = True
