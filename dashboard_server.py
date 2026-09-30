@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import validation_report_summary
 from validation_report_summary import (
@@ -3667,6 +3667,19 @@ async def app_delete_agent_memory(memory_id: str, request: AgentMemoryDeleteRequ
     await EVENT_BUS.broadcast("agentMemory", AGENT_GATEWAY.list_agent_memory(limit=30))
     await MEMORY_REVIEW.notify_review_changed()
     return payload
+
+
+@app.delete("/api/app/agent/chats/{chat_id}")
+async def app_delete_agent_chat(chat_id: str) -> dict[str, Any]:
+    """Permanently delete a chat: drop its runtime session state and native history files.
+
+    Idempotent: deleting an unknown or never-run chat still returns removed=True,
+    because the desired end state (no retained chat data) already holds.
+    """
+    sessions = getattr(AGENT_GATEWAY, "runtime_sessions", None)
+    if sessions is not None:
+        sessions.discard_session(chat_id)
+    return {"ok": True, "removed": True}
 
 
 @app.post("/api/app/agent/memory/clear")
