@@ -31,6 +31,44 @@ def default_user_data_root() -> Path:
     return default_runtime_root()
 
 
+def _read_registry_data_dir() -> str | None:
+    """Read the configured data dir from HKCU\\Software\\VRCForge\\DataDir.
+
+    Returns None on any read failure (missing key/value, wrong type, blank).
+    """
+    try:
+        import winreg
+    except ImportError:  # pragma: no cover - VRCForge targets Windows
+        return None
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\VRCForge") as key:
+            value, _ = winreg.QueryValueEx(key, "DataDir")
+    except OSError:
+        return None
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
+def is_under_program_files(path: Path) -> bool:
+    """True when `path` lies under %ProgramFiles% or %ProgramFiles(x86)%.
+
+    Case-insensitive prefix containment via pathlib relative_to.
+    """
+    target = path.resolve()
+    for env_name in ("ProgramFiles", "ProgramFiles(x86)"):
+        raw = os.environ.get(env_name, "").strip()
+        if not raw:
+            continue
+        base = Path(raw).expanduser().resolve()
+        try:
+            target.relative_to(base)
+        except ValueError:
+            continue
+        return True
+    return False
+
+
 ROOT_DIR = resolve_runtime_path("VRCFORGE_APP_DIR", default_runtime_root())
 PORTABLE_MODE = bool(getattr(sys, "frozen", False)) or any(
     os.environ.get(name, "").strip()
@@ -51,3 +89,46 @@ RUNTIME_SETTINGS_PATH = resolve_runtime_path(
     "VRCFORGE_SETTINGS_PATH",
     CONFIG_DIR / "settings.json" if PORTABLE_MODE else ROOT_DIR / DEFAULT_SETTINGS_PATH,
 )
+
+
+def _default_data_dir() -> Path:
+    if is_under_program_files(ROOT_DIR):
+        return default_user_data_root()
+    return ROOT_DIR / "data"
+
+
+def resolve_data_dir() -> Path:
+    """Resolve the configurable data root.
+
+    Order: VRCFORGE_DATA_DIR env var > HKCU DataDir registry value (skipped in
+    portable mode) > default rule (under Program Files -> LOCALAPPDATA, else
+    <app dir>/data). Never falls inside Program Files by default.
+    """
+    value = os.environ.get("VRCFORGE_DATA_DIR", "").strip()
+    if value:
+        return Path(value).expanduser().resolve()
+    if not PORTABLE_MODE:
+        registry_value = _read_registry_data_dir()
+        if registry_value:
+            return Path(registry_value).expanduser().resolve()
+    return _default_data_dir()
+
+
+DATA_DIR = resolve_data_dir()
+
+
+def data_dir_writable() -> bool:
+    """Whether DATA_DIR is writable.
+
+    Checks DATA_DIR itself when it exists, otherwise the nearest existing
+    parent. Uses os.access only - never probes by writing a file.
+    """
+    target = DATA_DIR
+    if target.exists():
+        return os.access(target, os.W_OK)
+    parent = target.parent
+    while not parent.exists():
+        if parent.parent == parent:
+            return False
+        parent = parent.parent
+    return os.access(parent, os.W_OK)
