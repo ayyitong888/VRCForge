@@ -550,7 +550,19 @@
     "supportBundleExported": "已匯出去識別化支援包：{{path}}",
     "turnOn": "開啟",
     "turnOff": "關閉",
-    "exportBundle": "匯出包"
+    "exportBundle": "匯出包",
+    "dataRootTitle": "資料目錄",
+    "dataRootDesc": "聊天、審批、檢查點與日誌等個人資料的存放位置。修改後會一次性遷移舊資料，未知檔案保留原處，重新啟動應用後生效。",
+    "dataRootWritable": "可寫入",
+    "dataRootNotWritable": "不可寫入",
+    "dataRootProgramFilesWarning": "目前資料目錄位於 Program Files 內。VRCForge 不會修改該目錄權限，請改選其他位置。",
+    "dataRootPlaceholder": "輸入新的資料目錄絕對路徑…",
+    "dataRootReload": "重新整理",
+    "dataRootLoadFailed": "無法讀取資料目錄資訊。",
+    "dataRootSaveSuccess": "資料目錄已更新。",
+    "dataRootSaveFailed": "無法更新資料目錄。",
+    "dataRootMigratedCount": "已遷移 {{count}} 個項目。",
+    "dataRootRestartRequired": "重新啟動應用後生效。"
   },
   "vision": {
     "notConfigured": "未設定",
@@ -735,7 +747,8 @@
     "slashMemory": "儲存明確記憶",
     "slashDelegate": "把範圍明確的唯讀工作委派給子 agent",
     "latestMessageActionOnly": "只能修改最新一則訊息。",
-    "contextUsageCached": "快取上下文：{{value}}"
+    "contextUsageCached": "快取上下文：{{value}}",
+    "deletePermanentlyFailed": "刪除聊天失敗，已恢復聊天。"
   },
   "agent": {
     "modeLabel": {

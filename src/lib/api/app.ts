@@ -410,3 +410,59 @@ export async function testProviderCapability(
     body: JSON.stringify(request),
   });
 }
+
+export type DataRootInfo = {
+  path: string;
+  writable: boolean;
+  inProgramFiles: boolean;
+  migrated: boolean;
+};
+
+export type DataRootUpdateResult = {
+  ok: boolean;
+  errors: string[];
+  migrated: string[];
+};
+
+export async function fetchDataRoot(endpoint: string): Promise<DataRootInfo> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort<DataRootInfo>("fetch_data_root", {
+      request: { timeoutMs: 30000 },
+    });
+  }
+  return requestJson<DataRootInfo>(`${endpoint}/api/app/settings/data-root`);
+}
+
+export async function updateDataRoot(endpoint: string, path: string): Promise<DataRootUpdateResult> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort<DataRootUpdateResult>("update_data_root", {
+      request: { path, timeoutMs: 120000 },
+    });
+  }
+  return requestJson<DataRootUpdateResult>(`${endpoint}/api/app/settings/data-root`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ path }),
+    timeoutMs: 120000,
+  });
+}
+
+/**
+ * Permanently delete a chat's native runtime history. The backend keys its
+ * runtime sessions by the session id echoed from the agent run (chat.sessionId),
+ * so the path parameter must be the runtime session id — not the client chat id.
+ */
+export async function deleteChatPermanentlyApi(
+  endpoint: string,
+  chatId: string,
+): Promise<{ ok: boolean; removed?: boolean }> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort<{ ok: boolean; removed?: boolean }>("delete_chat_permanently", {
+      request: { chatId, timeoutMs: 30000 },
+    });
+  }
+  return requestJson<{ ok: boolean; removed?: boolean }>(
+    `${endpoint}/api/app/agent/chats/${encodeURIComponent(chatId)}`,
+    { method: "DELETE", timeoutMs: 30000 },
+  );
+}

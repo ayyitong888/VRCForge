@@ -550,7 +550,19 @@
     "supportBundleExported": "匿名化済みサポートバンドルを書き出しました：{{path}}",
     "turnOn": "オン",
     "turnOff": "オフ",
-    "exportBundle": "バンドルを書き出す"
+    "exportBundle": "バンドルを書き出す",
+    "dataRootTitle": "データディレクトリ",
+    "dataRootDesc": "チャット・承認・チェックポイント・ログなどの個人データの保存場所です。変更すると古いデータを一度だけ移行し、未知のファイルはそのまま残し、アプリの再起動後に反映されます。",
+    "dataRootWritable": "書き込み可能",
+    "dataRootNotWritable": "書き込み不可",
+    "dataRootProgramFilesWarning": "現在のデータディレクトリは Program Files 内にあります。VRCForge はこのディレクトリの権限を変更しないため、別の場所を選択してください。",
+    "dataRootPlaceholder": "新しいデータディレクトリの絶対パスを入力…",
+    "dataRootReload": "更新",
+    "dataRootLoadFailed": "データディレクトリの情報を読み込めません。",
+    "dataRootSaveSuccess": "データディレクトリを更新しました。",
+    "dataRootSaveFailed": "データディレクトリを更新できません。",
+    "dataRootMigratedCount": "{{count}} 件を移行しました。",
+    "dataRootRestartRequired": "アプリを再起動すると反映されます。"
   },
   "vision": {
     "notConfigured": "未設定",
@@ -735,7 +747,8 @@
     "slashMemory": "明示的なメモリを保存",
     "slashDelegate": "範囲を限定した読み取り専用作業をサブ agent に委任",
     "latestMessageActionOnly": "変更できるのは最新のメッセージだけです。",
-    "contextUsageCached": "キャッシュ済みコンテキスト: {{value}}"
+    "contextUsageCached": "キャッシュ済みコンテキスト: {{value}}",
+    "deletePermanentlyFailed": "チャットの削除に失敗しました。チャットは復元されました。"
   },
   "agent": {
     "modeLabel": {

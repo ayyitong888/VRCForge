@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { fetchChats, saveChats, type ChatRecoveryMarker, type ChatSourceRevision, type StoredChats } from "../lib/api";
+import { deleteChatPermanentlyApi } from "../lib/api/app";
 import { ApiError } from "../lib/api/http";
 import { TEMP_CHATS_COLLAPSE_KEY, type ActiveView } from "../lib/app-view";
 import { normalizeAttachmentPayloadVault, normalizeCompactedAttachmentReferences } from "../lib/attachment-payloads";
@@ -655,6 +656,8 @@ export function useChatSessions({
   }
 
   function deleteChatPermanently(chatId: string) {
+    const removedSnapshot = chatsRef.current.find((chat) => chat.id === chatId) || null;
+    const removedIndex = removedSnapshot ? chatsRef.current.indexOf(removedSnapshot) : -1;
     chatDeletedIdsRef.current.add(chatId);
     markChatsDirty();
     const next = chatsRef.current.filter((chat) => chat.id !== chatId);
@@ -665,6 +668,29 @@ export function useChatSessions({
     }
     setDeleteTargetId("");
     setChatMenu(null);
+    // The backend's runtime sessions are keyed by the session id echoed from
+    // the agent run (chat.sessionId), not by the client chat id. A chat that
+    // never ran has no runtime session and no native history to discard.
+    const runtimeSessionId = String(removedSnapshot?.sessionId || "").trim();
+    if (runtimeSessionId) {
+      void deleteChatPermanentlyApi(endpoint, runtimeSessionId)
+        .then((result) => {
+          if (result.ok !== true) {
+            throw new ApiError(t("chat.deletePermanentlyFailed"), 0);
+          }
+        })
+        .catch((cause: unknown) => {
+          if (removedSnapshot && removedIndex >= 0 && !chatsRef.current.some((chat) => chat.id === chatId)) {
+            chatDeletedIdsRef.current.delete(chatId);
+            const restored = [...chatsRef.current];
+            restored.splice(Math.min(removedIndex, restored.length), 0, removedSnapshot);
+            chatsRef.current = restored;
+            setChats(restored);
+            markChatsDirty();
+          }
+          setError(chatSaveErrorMessage(cause, t("chat.deletePermanentlyFailed")));
+        });
+    }
   }
 
   function bindProject(projectPath: string, projectType: ProjectType = "unity") {

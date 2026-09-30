@@ -550,7 +550,19 @@
     "supportBundleExported": "已导出脱敏支持包：{{path}}",
     "turnOn": "开启",
     "turnOff": "关闭",
-    "exportBundle": "导出包"
+    "exportBundle": "导出包",
+    "dataRootTitle": "数据目录",
+    "dataRootDesc": "聊天、审批、检查点与日志等个人数据的存放位置。修改后会一次性迁移旧数据，未知文件保留原处，重启应用后生效。",
+    "dataRootWritable": "可写",
+    "dataRootNotWritable": "不可写",
+    "dataRootProgramFilesWarning": "当前数据目录位于 Program Files 内。VRCForge 不会修改该目录权限，请改选其他位置。",
+    "dataRootPlaceholder": "输入新的数据目录绝对路径…",
+    "dataRootReload": "刷新",
+    "dataRootLoadFailed": "无法读取数据目录信息。",
+    "dataRootSaveSuccess": "数据目录已更新。",
+    "dataRootSaveFailed": "无法更新数据目录。",
+    "dataRootMigratedCount": "已迁移 {{count}} 个条目。",
+    "dataRootRestartRequired": "重启应用后生效。"
   },
   "vision": {
     "notConfigured": "未配置",
@@ -735,7 +747,8 @@
     "slashMemory": "保存显式记忆",
     "slashDelegate": "把范围明确的只读工作委派给子 agent",
     "latestMessageActionOnly": "只能修改最新一条消息。",
-    "contextUsageCached": "缓存上下文：{{value}}"
+    "contextUsageCached": "缓存上下文：{{value}}",
+    "deletePermanentlyFailed": "删除聊天失败，已恢复聊天。"
   },
   "agent": {
     "modeLabel": {

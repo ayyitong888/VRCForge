@@ -30,6 +30,7 @@ import { MemoryReviewSettings } from "./memory-review-settings";
 import { ProviderSetup, VisionProfileSetup } from "./provider-settings";
 import { ThemeCustomizationPanel } from "./theme-customization-panel";
 import type { ThemeCustomization } from "../../lib/theme-customization";
+import { DataRootSettingsPanel } from "./data-root-settings-panel";
 
 type SettingsWorkspaceProps = {
   activeSection: SettingsSection;
@@ -533,6 +534,12 @@ export function SettingsWorkspace({
             onDeleteSelected={onDeleteCheckpointArchives}
             onRelocate={onRelocateCheckpointArchives}
           />
+        </section>
+        ) : null}
+
+        {visibleSection === "storage" ? (
+        <section className="pb-6">
+          <DataRootSettingsPanel endpoint={endpoint} />
         </section>
         ) : null}
 

@@ -550,7 +550,19 @@
     "supportBundleExported": "Redacted support bundle exported: {{path}}",
     "turnOn": "Turn on",
     "turnOff": "Turn off",
-    "exportBundle": "Export Bundle"
+    "exportBundle": "Export Bundle",
+    "dataRootTitle": "Data directory",
+    "dataRootDesc": "Where personal data such as chats, approvals, checkpoints and logs is stored. Changing it migrates old data once, keeps unknown files in place, and takes effect after a restart.",
+    "dataRootWritable": "Writable",
+    "dataRootNotWritable": "Not writable",
+    "dataRootProgramFilesWarning": "The current data directory is inside Program Files. VRCForge will not change that folder's permissions; choose a different location.",
+    "dataRootPlaceholder": "Enter an absolute path for the data directory…",
+    "dataRootReload": "Refresh",
+    "dataRootLoadFailed": "Failed to load the data directory info.",
+    "dataRootSaveSuccess": "Data directory updated.",
+    "dataRootSaveFailed": "Failed to update the data directory.",
+    "dataRootMigratedCount": "Migrated {{count}} items.",
+    "dataRootRestartRequired": "Restart the app for the change to take effect."
   },
   "vision": {
     "notConfigured": "Not configured",
@@ -735,7 +747,8 @@
     "slashMemory": "Save explicit memory",
     "slashDelegate": "Delegate scoped read-only work to a sub-agent",
     "latestMessageActionOnly": "Only the latest message can be changed.",
-    "contextUsageCached": "Cached context: {{value}}"
+    "contextUsageCached": "Cached context: {{value}}",
+    "deletePermanentlyFailed": "Failed to delete the chat. It has been restored."
   },
   "agent": {
     "modeLabel": {
