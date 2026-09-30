@@ -50,6 +50,24 @@ def _read_registry_data_dir() -> str | None:
     return None
 
 
+def write_registry_data_dir(value: str) -> None:
+    """Persist the configured data dir to HKCU\\Software\\VRCForge\\DataDir.
+
+    Any failure (winreg unavailable, registry policy, I/O error) is silently
+    swallowed: callers never crash on registry problems and tests can inject a
+    substitute through monkeypatching.
+    """
+    try:
+        import winreg
+    except ImportError:  # pragma: no cover - VRCForge targets Windows
+        return
+    try:
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, r"Software\VRCForge") as key:
+            winreg.SetValueEx(key, "DataDir", 0, winreg.REG_SZ, value)
+    except OSError:
+        return
+
+
 def is_under_program_files(path: Path) -> bool:
     """True when `path` lies under %ProgramFiles% or %ProgramFiles(x86)%.
 

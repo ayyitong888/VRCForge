@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import validation_report_summary
 from validation_report_summary import (
@@ -663,12 +663,13 @@ from unity_mcp_core_client import (
 )
 from unity_mcp_tool_contract import EXPECTED_TOOL_NAMES
 from unity_status_service import UnityStatusPorts, UnityStatusService
+import data_root_migration
 import vrcforge_runtime_paths as runtime_paths
 
 
 DASHBOARD_DIR = runtime_paths.resolve_runtime_path("VRCFORGE_DASHBOARD_DIR", runtime_paths.ROOT_DIR / "dashboard")
-LOG_DIR = runtime_paths.resolve_runtime_path("VRCFORGE_LOG_DIR", runtime_paths.USER_DATA_DIR / "logs") if runtime_paths.PORTABLE_MODE else runtime_paths.ROOT_DIR / "artifacts" / "dashboard"
-ARTIFACTS_DIR = runtime_paths.resolve_runtime_path("VRCFORGE_ARTIFACTS_DIR", runtime_paths.USER_DATA_DIR / "artifacts") if runtime_paths.PORTABLE_MODE else runtime_paths.ROOT_DIR / "artifacts"
+LOG_DIR = runtime_paths.resolve_runtime_path("VRCFORGE_LOG_DIR", runtime_paths.DATA_DIR / "logs")
+ARTIFACTS_DIR = runtime_paths.resolve_runtime_path("VRCFORGE_ARTIFACTS_DIR", runtime_paths.DATA_DIR / "artifacts")
 DASHBOARD_ARTIFACTS_DIR = ARTIFACTS_DIR / "dashboard"
 PARAMETER_SNAPSHOT_DIR = DASHBOARD_ARTIFACTS_DIR / "parameter_snapshots"
 TUNING_HISTORY_PATH = DASHBOARD_ARTIFACTS_DIR / "tuning_history.json"
@@ -688,7 +689,7 @@ AGENT_GATEWAY_AUDIT_DIR = DASHBOARD_ARTIFACTS_DIR / "agent_gateway"
 DIAGNOSTICS_CONFIG_PATH = runtime_paths.CONFIG_DIR / "diagnostics.json"
 INTERACTION_LOG_PATH = LOG_DIR / "interactions.jsonl"
 SUPPORT_BUNDLE_DIR = DASHBOARD_ARTIFACTS_DIR / "support-bundles"
-PROJECT_MEMORY_INDEX_DIR = runtime_paths.USER_DATA_DIR / "project-indexes"
+PROJECT_MEMORY_INDEX_DIR = runtime_paths.DATA_DIR / "project-indexes"
 SUB_AGENT_TASK_DIR = DASHBOARD_ARTIFACTS_DIR / "sub-agents"
 
 
@@ -2032,6 +2033,9 @@ async def on_startup() -> None:
     AGENT_GATEWAY.shell.start()
     BACKGROUND_GOAL_COORDINATOR.start()
     PROJECT_SNAPSHOT_SELECTION.load_project_snapshot_cache()
+    # One-shot legacy data-root migration: marker-guarded inside the module,
+    # and any failure is logged without blocking startup.
+    await asyncio.to_thread(migrate_legacy_runtime_data_on_startup)
     await asyncio.to_thread(DIAGNOSTIC_LOGGER.cleanup)
     await asyncio.to_thread(reconcile_diagnostic_trace_policy)
     await emit_safety_posture_snapshot("startup")
@@ -2700,6 +2704,111 @@ def update_agentic_app_advanced_settings_guarded(request: AdvancedSettingsReques
                 essential=True,
             )
         return payload
+
+
+class DataRootUpdateRequest(BaseModel):
+    path: str = Field(default="", max_length=4096)
+
+    model_config = {"populate_by_name": True}
+
+
+def migrate_legacy_runtime_data_on_startup() -> dict[str, Any] | None:
+    """One-shot legacy data-root migration entry for the startup path.
+
+    The migration itself is marker-guarded and therefore idempotent; any
+    failure is logged with emit_log and never raised, so startup cannot
+    crash. Returns the migration report on success, None on failure.
+    """
+    try:
+        report = data_root_migration.migrate_legacy_runtime_data(
+            runtime_paths.default_user_data_root(),
+            runtime_paths.DATA_DIR,
+        )
+    except Exception as exc:  # noqa: BLE001 - migration must never block startup.
+        emit_log("error", "data-root", "Legacy data root migration failed.", {"error": str(exc)})
+        return None
+    emit_log(
+        "info",
+        "data-root",
+        "Legacy data root migration checked.",
+        {
+            "alreadyMigrated": report.get("alreadyMigrated"),
+            "moved": report.get("moved"),
+            "skipped": report.get("skipped"),
+            "preserved": report.get("preserved"),
+        },
+    )
+    return report
+
+
+def data_root_status_payload() -> dict[str, Any]:
+    return {
+        "path": str(runtime_paths.DATA_DIR),
+        "writable": runtime_paths.data_dir_writable(),
+        "inProgramFiles": runtime_paths.is_under_program_files(runtime_paths.DATA_DIR),
+    }
+
+
+def data_root_target_writable(target: Path) -> bool:
+    """Target itself when it exists, otherwise the nearest existing parent."""
+    probe = target if target.exists() else target.parent
+    while not probe.exists():
+        if probe.parent == probe:
+            return False
+        probe = probe.parent
+    return os.access(probe, os.W_OK)
+
+
+def data_root_update_errors(raw_path: str) -> list[str]:
+    errors: list[str] = []
+    value = (raw_path or "").strip()
+    if not value:
+        return ["data root path is required"]
+    target = Path(value).expanduser()
+    if not target.is_absolute():
+        errors.append("data root path must be absolute")
+        return errors
+    if runtime_paths.is_under_program_files(target):
+        errors.append("data root must not be under Program Files")
+    if target.exists() and not target.is_dir():
+        errors.append("data root path is not a directory")
+    if not errors and not data_root_target_writable(target):
+        errors.append("data root directory is not writable")
+    return errors
+
+
+@app.get("/api/app/settings/data-root")
+def read_agentic_app_data_root() -> dict[str, Any]:
+    payload = data_root_status_payload()
+    payload["migrated"] = (runtime_paths.DATA_DIR / data_root_migration.MARKER_NAME).exists()
+    return payload
+
+
+@app.post("/api/app/settings/data-root")
+async def update_agentic_app_data_root(request: DataRootUpdateRequest) -> dict[str, Any]:
+    errors = data_root_update_errors(request.path)
+    if errors:
+        return {"ok": False, "errors": errors}
+    target = Path(request.path.strip()).expanduser()
+    try:
+        report = await asyncio.to_thread(
+            data_root_migration.migrate_legacy_runtime_data,
+            runtime_paths.DATA_DIR,
+            target,
+        )
+    except Exception as exc:  # noqa: BLE001 - keep the 200 + ok:false frontend contract.
+        emit_log("error", "data-root", "Data root migration failed.", {"target": str(target), "error": str(exc)})
+        return {"ok": False, "errors": ["data root migration failed"]}
+    # This run keeps using the current DATA_DIR; the registry pointer is
+    # written so the next process start picks the new root up.
+    runtime_paths.write_registry_data_dir(str(target))
+    emit_log(
+        "info",
+        "data-root",
+        "Data root updated; restart to apply.",
+        {"target": str(target), "moved": report.get("moved"), "skipped": report.get("skipped")},
+    )
+    return {"ok": True, "errors": [], "migrated": list(report.get("moved") or [])}
 
 
 @app.post("/api/app/agent/message")
@@ -9083,7 +9192,9 @@ def _merge_registered_doctor_checks(checks: list[dict[str, Any]]) -> list[dict[s
 @app.get("/api/app/doctor")
 def read_agentic_app_doctor() -> dict[str, Any]:
     try:
-        return DOCTOR_READINESS_REPORT.build_app_doctor_report()
+        report = DOCTOR_READINESS_REPORT.build_app_doctor_report()
+        report["dataRoot"] = data_root_status_payload()
+        return report
     except Exception as exc:  # noqa: BLE001 - doctor must not break first-run desktop startup.
         checks = [
             _doctor_check(
@@ -9118,6 +9229,7 @@ def read_agentic_app_doctor() -> dict[str, Any]:
                 "configured": bool(DASHBOARD_STATE.selected_project_path),
                 "label": _redact_local_path(DASHBOARD_STATE.selected_project_path),
             },
+            "dataRoot": data_root_status_payload(),
             "checks": checks,
         }
 
