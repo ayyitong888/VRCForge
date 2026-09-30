@@ -59,7 +59,9 @@ Var TrustedPowerShellPath
 Var HelperStatePath
 Var HelperPayloadPath
 Var HelperSourcePath
-Var UserDataRoot
+Var DataDir
+Var DataDirDialog
+Var DataDirBrowseButton
 
 Name "VRCForge ${VERSION} x64 Web Installer"
 OutFile "${OUTFILE}"
@@ -82,6 +84,7 @@ BrandingText "VRCForge ${VERSION}"
 
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_LICENSE "..\LICENSE"
+Page custom DataDirPage DataDirPageLeave
 !insertmacro MUI_PAGE_INSTFILES
 !insertmacro MUI_PAGE_FINISH
 
@@ -119,18 +122,18 @@ LangString ClearUserDataTitle ${LANG_SIMPCHINESE} "卸载数据"
 LangString ClearUserDataTitle ${LANG_TRADCHINESE} "解除安裝資料"
 LangString ClearUserDataTitle ${LANG_JAPANESE} "アンインストール データ"
 LangString ClearUserDataTitle ${LANG_ENGLISH} "Uninstall Data"
-LangString ClearUserDataText ${LANG_SIMPCHINESE} "默认仅卸载程序文件，并保留设置、对话、检查点和项目历史。"
-LangString ClearUserDataText ${LANG_TRADCHINESE} "預設僅解除安裝程式檔案，並保留設定、對話、檢查點與專案歷史。"
-LangString ClearUserDataText ${LANG_JAPANESE} "既定ではプログラムファイルのみを削除し、設定・チャット・チェックポイント・プロジェクト履歴は保持します。"
-LangString ClearUserDataText ${LANG_ENGLISH} "By default, setup removes only program files and keeps settings, chats, checkpoints, and project history."
-LangString ClearUserDataCheckboxText ${LANG_SIMPCHINESE} "清除用户数据和历史对话"
-LangString ClearUserDataCheckboxText ${LANG_TRADCHINESE} "清除使用者資料與歷史對話"
-LangString ClearUserDataCheckboxText ${LANG_JAPANESE} "ユーザーデータとチャット履歴を削除する"
-LangString ClearUserDataCheckboxText ${LANG_ENGLISH} "Clear user data and chat history"
-LangString UninstallKeptUserData ${LANG_SIMPCHINESE} "VRCForge 程序文件已移除。用户数据仍保留在 $LOCALAPPDATA\${USER_DATA_RELATIVE}。"
-LangString UninstallKeptUserData ${LANG_TRADCHINESE} "VRCForge 程式檔案已移除。使用者資料仍保留在 $LOCALAPPDATA\${USER_DATA_RELATIVE}。"
-LangString UninstallKeptUserData ${LANG_JAPANESE} "VRCForge のプログラムファイルを削除しました。ユーザーデータは $LOCALAPPDATA\${USER_DATA_RELATIVE} に保持されています。"
-LangString UninstallKeptUserData ${LANG_ENGLISH} "VRCForge program files were removed. User data remains in $LOCALAPPDATA\${USER_DATA_RELATIVE}."
+LangString ClearUserDataText ${LANG_SIMPCHINESE} "默认仅卸载程序文件，并保留个人数据（对话、审批、检查点与日志）。个人数据位于 $DataDir。勾选下方选项可同时删除个人数据。"
+LangString ClearUserDataText ${LANG_TRADCHINESE} "預設僅解除安裝程式檔案，並保留個人資料（對話、審批、檢查點與日誌）。個人資料位於 $DataDir。勾選下方選項可同時刪除個人資料。"
+LangString ClearUserDataText ${LANG_JAPANESE} "既定ではプログラムファイルのみを削除し、個人データ（チャット・承認・チェックポイント・ログ）は保持します。個人データの場所: $DataDir。下のオプションをオンにすると個人データも削除されます。"
+LangString ClearUserDataText ${LANG_ENGLISH} "By default, setup removes only program files and keeps your personal data (chats, approvals, checkpoints, and logs). Personal data location: $DataDir. Check the option below to also delete personal data."
+LangString ClearUserDataCheckboxText ${LANG_SIMPCHINESE} "同时删除个人数据"
+LangString ClearUserDataCheckboxText ${LANG_TRADCHINESE} "同時刪除個人資料"
+LangString ClearUserDataCheckboxText ${LANG_JAPANESE} "個人データも削除する"
+LangString ClearUserDataCheckboxText ${LANG_ENGLISH} "Also delete personal data"
+LangString UninstallKeptUserData ${LANG_SIMPCHINESE} "VRCForge 程序文件已移除。个人数据仍保留在 $DataDir，可随时重新安装继续使用。"
+LangString UninstallKeptUserData ${LANG_TRADCHINESE} "VRCForge 程式檔案已移除。個人資料仍保留在 $DataDir，可隨時重新安裝繼續使用。"
+LangString UninstallKeptUserData ${LANG_JAPANESE} "VRCForge のプログラムファイルを削除しました。個人データは $DataDir に保持されています。いつでも再インストールして使い続けられます。"
+LangString UninstallKeptUserData ${LANG_ENGLISH} "VRCForge program files were removed. Your personal data remains in $DataDir; reinstall anytime to keep using it."
 LangString UninstallClearedUserData ${LANG_SIMPCHINESE} "VRCForge 程序文件、用户数据和已知项目中的历史对话已移除。"
 LangString UninstallClearedUserData ${LANG_TRADCHINESE} "VRCForge 程式檔案、使用者資料以及已知專案中的歷史對話已移除。"
 LangString UninstallClearedUserData ${LANG_JAPANESE} "VRCForge のプログラムファイル、ユーザーデータ、既知プロジェクトのチャット履歴を削除しました。"
@@ -151,6 +154,34 @@ LangString ActivationFailedText ${LANG_SIMPCHINESE} "无法正常退出正在运
 LangString ActivationFailedText ${LANG_TRADCHINESE} "無法正常結束正在執行的 VRCForge，或無法安全啟用新版本。原安裝保持不變；請手動結束 VRCForge 後重試。"
 LangString ActivationFailedText ${LANG_JAPANESE} "実行中の VRCForge を正常終了できないか、新しいバージョンを安全に有効化できませんでした。以前のインストールは保持されています。VRCForge を手動で終了して再試行してください。"
 LangString ActivationFailedText ${LANG_ENGLISH} "The running VRCForge could not close normally, or the new version could not be activated safely. The prior installation was preserved; close VRCForge manually and retry."
+LangString DataDirPageTitle ${LANG_SIMPCHINESE} "数据目录"
+LangString DataDirPageTitle ${LANG_TRADCHINESE} "資料目錄"
+LangString DataDirPageTitle ${LANG_JAPANESE} "データ ディレクトリ"
+LangString DataDirPageTitle ${LANG_ENGLISH} "Data Directory"
+LangString DataDirPageSubtitle ${LANG_SIMPCHINESE} "选择 VRCForge 个人数据的存放位置。"
+LangString DataDirPageSubtitle ${LANG_TRADCHINESE} "選擇 VRCForge 個人資料的存放位置。"
+LangString DataDirPageSubtitle ${LANG_JAPANESE} "VRCForge の個人データの保存場所を選択します。"
+LangString DataDirPageSubtitle ${LANG_ENGLISH} "Choose where VRCForge keeps your personal data."
+LangString DataDirPageText ${LANG_SIMPCHINESE} "对话、审批记录、检查点与日志将保存在所选目录下。程序文件与个人数据分开存放，卸载时默认保留个人数据。"
+LangString DataDirPageText ${LANG_TRADCHINESE} "對話、審批記錄、檢查點與日誌將保存在所選目錄下。程式檔案與個人資料分開存放，解除安裝時預設保留個人資料。"
+LangString DataDirPageText ${LANG_JAPANESE} "チャット、承認記録、チェックポイント、ログは選択したフォルダーに保存されます。プログラムファイルと個人データは分離され、アンインストール時は既定で個人データを保持します。"
+LangString DataDirPageText ${LANG_ENGLISH} "Chats, approval records, checkpoints, and logs are stored in the selected folder. Program files and personal data are kept separate; uninstalling keeps your personal data by default."
+LangString DataDirDefaultNote ${LANG_SIMPCHINESE} "默认位置："
+LangString DataDirDefaultNote ${LANG_TRADCHINESE} "預設位置："
+LangString DataDirDefaultNote ${LANG_JAPANESE} "既定の場所: "
+LangString DataDirDefaultNote ${LANG_ENGLISH} "Default location: "
+LangString DataDirReuseNote ${LANG_SIMPCHINESE} "检测到现有数据根，将直接复用："
+LangString DataDirReuseNote ${LANG_TRADCHINESE} "偵測到現有資料根，將直接沿用："
+LangString DataDirReuseNote ${LANG_JAPANESE} "既存のデータルートを検出しました。そのまま使用します: "
+LangString DataDirReuseNote ${LANG_ENGLISH} "Existing data root detected; it will be reused: "
+LangString DataDirBrowseButton ${LANG_SIMPCHINESE} "浏览..."
+LangString DataDirBrowseButton ${LANG_TRADCHINESE} "瀏覽..."
+LangString DataDirBrowseButton ${LANG_JAPANESE} "参照..."
+LangString DataDirBrowseButton ${LANG_ENGLISH} "Browse..."
+LangString DataDirBrowseTitle ${LANG_SIMPCHINESE} "选择数据目录"
+LangString DataDirBrowseTitle ${LANG_TRADCHINESE} "選擇資料目錄"
+LangString DataDirBrowseTitle ${LANG_JAPANESE} "データ ディレクトリの選択"
+LangString DataDirBrowseTitle ${LANG_ENGLISH} "Choose Data Directory"
 LangString DownloadingText ${LANG_SIMPCHINESE} "正在下载 VRCForge Windows x64 组件..."
 LangString DownloadingText ${LANG_TRADCHINESE} "正在下載 VRCForge Windows x64 元件..."
 LangString DownloadingText ${LANG_JAPANESE} "VRCForge Windows x64 ペイロードをダウンロードしています..."
@@ -176,6 +207,48 @@ LangString ExtractFailedText ${LANG_TRADCHINESE} "解壓縮 VRCForge 元件失�
 LangString ExtractFailedText ${LANG_JAPANESE} "VRCForge ペイロードの展開に失敗しました。エラーコード: $0"
 LangString ExtractFailedText ${LANG_ENGLISH} "Failed to extract VRCForge payload. Error code: $0"
 
+; Data directory default rule. The personal-data root never lands under
+; Program Files: an install directory outside Program Files keeps data in
+; <install dir>\data, otherwise it falls back to LocalAppData. No icacls and
+; no Program Files ACL changes are used for the data root.
+Function ComputeDefaultDataDir
+  StrCpy $DataDir "$INSTDIR\data"
+  StrCmp $INSTDIR "$PROGRAMFILES64" data_dir_fallback
+  StrCmp $INSTDIR "$PROGRAMFILES" data_dir_fallback
+  StrLen $1 "$PROGRAMFILES64"
+  IntOp $1 $1 + 1
+  StrCpy $0 $INSTDIR $1
+  StrCmp $0 "$PROGRAMFILES64\" 0 +2
+    Goto data_dir_fallback
+  StrLen $1 "$PROGRAMFILES"
+  IntOp $1 $1 + 1
+  StrCpy $0 $INSTDIR $1
+  StrCmp $0 "$PROGRAMFILES\" 0 +2
+    Goto data_dir_fallback
+  Return
+data_dir_fallback:
+  StrCpy $DataDir "$LOCALAPPDATA\${USER_DATA_RELATIVE}"
+FunctionEnd
+
+Function un.ComputeDefaultDataDir
+  StrCpy $DataDir "$INSTDIR\data"
+  StrCmp $INSTDIR "$PROGRAMFILES64" un_data_dir_fallback
+  StrCmp $INSTDIR "$PROGRAMFILES" un_data_dir_fallback
+  StrLen $1 "$PROGRAMFILES64"
+  IntOp $1 $1 + 1
+  StrCpy $0 $INSTDIR $1
+  StrCmp $0 "$PROGRAMFILES64\" 0 +2
+    Goto un_data_dir_fallback
+  StrLen $1 "$PROGRAMFILES"
+  IntOp $1 $1 + 1
+  StrCpy $0 $INSTDIR $1
+  StrCmp $0 "$PROGRAMFILES\" 0 +2
+    Goto un_data_dir_fallback
+  Return
+un_data_dir_fallback:
+  StrCpy $DataDir "$LOCALAPPDATA\${USER_DATA_RELATIVE}"
+FunctionEnd
+
 Function .onInit
   ; Set only this installer's child-process environment; the change ends with this process.
   System::Call 'kernel32::SetEnvironmentVariable(t "PSModulePath", t "$WINDIR\System32\WindowsPowerShell\v1.0\Modules") i .r0'
@@ -193,6 +266,16 @@ Function un.onInit
     Abort
   ; Reuse the language chosen at install time instead of asking again.
   !insertmacro MUI_UNGETLANGUAGE
+  ; Resolve the data root now so the options page and the uninstall can show
+  ; it: the recorded pointer wins, then the default rule (install directory
+  ; outside Program Files -> <install dir>\data, otherwise LocalAppData).
+  StrCpy $DataDir ""
+  !ifndef VRCFORGE_SMOKE_BUILD
+    ReadRegStr $DataDir HKCU "Software\VRCForge" "DataDir"
+  !endif
+  ${If} $DataDir == ""
+    Call un.ComputeDefaultDataDir
+  ${EndIf}
 FunctionEnd
 
 !macro DefineProtectedHelperFunctions Prefix
@@ -261,15 +344,63 @@ FunctionEnd
 !insertmacro DefineProtectedHelperFunctions ""
 !insertmacro DefineProtectedHelperFunctions "un."
 
+Function DataDirPage
+  StrCpy $R1 ""
+  !ifndef VRCFORGE_SMOKE_BUILD
+    ReadRegStr $R0 HKCU "Software\VRCForge" "DataDir"
+    ${If} $R0 != ""
+      ${If} ${FileExists} "$R0\*.*"
+        StrCpy $DataDir $R0
+        StrCpy $R1 "1"
+      ${EndIf}
+    ${EndIf}
+  !endif
+  ${If} $R1 != "1"
+    Call ComputeDefaultDataDir
+  ${EndIf}
+  !insertmacro MUI_HEADER_TEXT "$(DataDirPageTitle)" "$(DataDirPageSubtitle)"
+  nsDialogs::Create 1018
+  Pop $0
+  ${NSD_CreateLabel} 0 0 100% 40u "$(DataDirPageText)"
+  Pop $1
+  ${If} $R1 == "1"
+    StrCpy $2 "$(DataDirReuseNote) $DataDir"
+  ${Else}
+    StrCpy $2 "$(DataDirDefaultNote) $DataDir"
+  ${EndIf}
+  ${NSD_CreateLabel} 0 44u 100% 12u $2
+  Pop $1
+  ${NSD_CreateDirRequest} 0 62u 200u 14u $DataDir
+  Pop $DataDirDialog
+  ${NSD_CreateBrowseButton} 205u 61u 50u 14u "$(DataDirBrowseButton)"
+  Pop $DataDirBrowseButton
+  ${NSD_OnClick} $DataDirBrowseButton DataDirBrowseClick
+  nsDialogs::Show
+FunctionEnd
+
+Function DataDirBrowseClick
+  Pop $9 ; browse button hwnd
+  ${NSD_GetText} $DataDirDialog $0
+  nsDialogs::SelectFolderDialog "$(DataDirBrowseTitle)" $0
+  Pop $0
+  ${If} $0 != "error"
+    ${NSD_SetText} $DataDirDialog $0
+  ${EndIf}
+FunctionEnd
+
+Function DataDirPageLeave
+  ${NSD_GetText} $DataDirDialog $DataDir
+FunctionEnd
+
 Function un.UserDataOptionsPage
   IfSilent 0 +2
     Abort
   !insertmacro MUI_HEADER_TEXT "$(ClearUserDataTitle)" "$(ClearUserDataText)"
   nsDialogs::Create 1018
   Pop $0
-  ${NSD_CreateLabel} 0 0 100% 32u "$(ClearUserDataText)"
+  ${NSD_CreateLabel} 0 0 100% 40u "$(ClearUserDataText)"
   Pop $1
-  ${NSD_CreateCheckbox} 0 44u 100% 12u "$(ClearUserDataCheckboxText)"
+  ${NSD_CreateCheckbox} 0 48u 100% 12u "$(ClearUserDataCheckboxText)"
   Pop $ClearUserDataCheckbox
   ${NSD_SetState} $ClearUserDataCheckbox ${BST_UNCHECKED}
   nsDialogs::Show
@@ -283,14 +414,17 @@ Function un.ClearUserDataIfRequested
   ${If} $ClearUserData == ${BST_CHECKED}
     DetailPrint "$(ClearingUserDataText)"
     ${If} ${FileExists} "$INSTDIR\backend\vrcforge_backend.exe"
-      nsExec::ExecToLog '"$INSTDIR\backend\vrcforge_backend.exe" --cleanup-user-data --cleanup-user-data-root "$UserDataRoot"'
+      nsExec::ExecToLog '"$INSTDIR\backend\vrcforge_backend.exe" --cleanup-user-data --cleanup-user-data-root "$DataDir"'
       Pop $0
       ${If} $0 != 0
-        RMDir /r "$UserDataRoot"
+        RMDir /r "$DataDir"
       ${EndIf}
     ${Else}
-      RMDir /r "$UserDataRoot"
+      RMDir /r "$DataDir"
     ${EndIf}
+    !ifndef VRCFORGE_SMOKE_BUILD
+      DeleteRegValue HKCU "Software\VRCForge" "DataDir"
+    !endif
   ${EndIf}
 FunctionEnd
 
@@ -382,11 +516,29 @@ Section "Install"
     SetErrorLevel 2
     Abort
   ${EndIf}
-  StrCpy $UserDataRoot "$LOCALAPPDATA\${USER_DATA_RELATIVE}"
-  CreateDirectory "$UserDataRoot\config"
-  CreateDirectory "$UserDataRoot\logs"
-  CreateDirectory "$UserDataRoot\artifacts"
-  CreateDirectory "$UserDataRoot\backups"
+  ; Data root: reuse the recorded pointer when its directory still exists,
+  ; otherwise create the structure under the chosen/default root.
+  StrCpy $R0 ""
+  !ifndef VRCFORGE_SMOKE_BUILD
+    ReadRegStr $R0 HKCU "Software\VRCForge" "DataDir"
+  !endif
+  ${If} $R0 != ""
+    ${If} ${FileExists} "$R0\*.*"
+      StrCpy $DataDir $R0
+      Goto data_dir_resolved
+    ${EndIf}
+  ${EndIf}
+  ${If} $DataDir == ""
+    Call ComputeDefaultDataDir
+  ${EndIf}
+  CreateDirectory "$DataDir\config"
+  CreateDirectory "$DataDir\logs"
+  CreateDirectory "$DataDir\artifacts"
+  CreateDirectory "$DataDir\backups"
+data_dir_resolved:
+  !ifndef VRCFORGE_SMOKE_BUILD
+    WriteRegStr HKCU "Software\VRCForge" "DataDir" "$DataDir"
+  !endif
 
   CreateDirectory "$SMPROGRAMS\${START_MENU_GROUP}"
   SetOutPath "$INSTDIR"
@@ -421,7 +573,8 @@ Section "Uninstall"
     MessageBox MB_ICONSTOP "The uninstall directory does not match this installer identity." /SD IDOK
     Abort
   ${EndIf}
-  StrCpy $UserDataRoot "$LOCALAPPDATA\${USER_DATA_RELATIVE}"
+  ; $DataDir was already resolved in un.onInit from the recorded DataDir
+  ; pointer, with the default rule as fallback.
   StrCpy $TrustedPowerShellPath "$WINDIR\Sysnative\WindowsPowerShell\v1.0\powershell.exe"
   ${IfNot} ${FileExists} "$TrustedPowerShellPath"
     StrCpy $TrustedPowerShellPath "$SYSDIR\WindowsPowerShell\v1.0\powershell.exe"

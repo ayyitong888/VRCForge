@@ -497,3 +497,69 @@ def test_dry_run_rejects_an_unscoped_or_mismatched_smoke_target(tmp_path, monkey
     assert report["summary"]["status"] == "failed"
     assert report["steps"][-1]["name"] == "installer_smoke.error"
     assert "exact isolated smoke identity" in report["steps"][-1]["error"]
+
+
+NSI_OFFLINE_PATH = REPO_ROOT / "installer" / "VRCForge_Offline_Installer_x64.nsi"
+NSI_WEB_PATH = REPO_ROOT / "installer" / "VRCForge_Web_Installer_x64.nsi"
+FOUR_LANGS = ("${LANG_SIMPCHINESE}", "${LANG_TRADCHINESE}", "${LANG_JAPANESE}", "${LANG_ENGLISH}")
+
+
+def nsi_sources():
+    return [
+        NSI_OFFLINE_PATH.read_text(encoding="utf-8"),
+        NSI_WEB_PATH.read_text(encoding="utf-8"),
+    ]
+
+
+def test_installer_sources_record_and_reuse_the_configurable_data_root():
+    for source in nsi_sources():
+        assert 'WriteRegStr HKCU "Software\\VRCForge" "DataDir" "$DataDir"' in source
+        assert 'ReadRegStr $R0 HKCU "Software\\VRCForge" "DataDir"' in source
+        assert 'ReadRegStr $DataDir HKCU "Software\\VRCForge" "DataDir"' in source
+        assert "Goto data_dir_resolved" in source
+        for subdir in ("config", "logs", "artifacts", "backups"):
+            assert f'CreateDirectory "$DataDir\\{subdir}"' in source
+
+
+def test_installer_sources_prefill_the_default_data_root_rule():
+    for source in nsi_sources():
+        assert 'StrCpy $DataDir "$INSTDIR\\data"' in source
+        assert 'StrCpy $DataDir "$LOCALAPPDATA\\${USER_DATA_RELATIVE}"' in source
+        assert 'StrCmp $0 "$PROGRAMFILES64\\"' in source
+        assert 'StrCmp $0 "$PROGRAMFILES\\"' in source
+        assert 'StrCmp $INSTDIR "$PROGRAMFILES64" data_dir_fallback' in source
+
+
+def test_installer_sources_expose_four_language_data_directory_page():
+    for source in nsi_sources():
+        assert "Page custom DataDirPage DataDirPageLeave" in source
+        assert "${NSD_CreateDirRequest}" in source
+        assert "${NSD_CreateBrowseButton}" in source
+        assert "nsDialogs::SelectFolderDialog" in source
+        for lang in FOUR_LANGS:
+            for key in (
+                "DataDirPageTitle",
+                "DataDirPageSubtitle",
+                "DataDirPageText",
+                "DataDirDefaultNote",
+                "DataDirReuseNote",
+                "DataDirBrowseButton",
+                "DataDirBrowseTitle",
+            ):
+                assert f"LangString {key} {lang}" in source
+
+
+def test_installer_sources_uninstall_deletes_data_root_only_when_checked():
+    for source in nsi_sources():
+        assert 'DeleteRegValue HKCU "Software\\VRCForge" "DataDir"' in source
+        assert "${NSD_SetState} $ClearUserDataCheckbox ${BST_UNCHECKED}" in source
+        assert 'RMDir /r "$DataDir"' in source
+        for text in ("同时删除个人数据", "同時刪除個人資料", "個人データも削除する", "Also delete personal data"):
+            assert text in source
+
+
+def test_installer_sources_uninstall_kept_message_names_the_preserved_root():
+    for source in nsi_sources():
+        for lang in FOUR_LANGS:
+            assert f"LangString UninstallKeptUserData {lang}" in source
+        assert "Your personal data remains in $DataDir" in source

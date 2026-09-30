@@ -15674,8 +15674,10 @@ namespace VRCForge.Editor
         for source in (offline_nsis, web_nsis):
             self.assertIn('!define INSTALL_LEAF "VRCForge"', source)
             self.assertIn('!define USER_DATA_RELATIVE "VRCForge\\agentic-app"', source)
-            self.assertIn('StrCpy $UserDataRoot "$LOCALAPPDATA\\${USER_DATA_RELATIVE}"', source)
-            self.assertIn('CreateDirectory "$UserDataRoot\\config"', source)
+            self.assertIn('StrCpy $DataDir "$INSTDIR\\data"', source)
+            self.assertIn('StrCpy $DataDir "$LOCALAPPDATA\\${USER_DATA_RELATIVE}"', source)
+            self.assertIn('WriteRegStr HKCU "Software\\VRCForge" "DataDir" "$DataDir"', source)
+            self.assertIn('CreateDirectory "$DataDir\\config"', source)
         self.assertIn("nsDialogs.nsh", offline_nsis)
         self.assertIn("nsDialogs.nsh", web_nsis)
         self.assertIn("MUI_UNGETLANGUAGE", offline_nsis)
@@ -15692,8 +15694,8 @@ namespace VRCForge.Editor
         ):
             self.assertIn(shortcut_name, offline_nsis)
             self.assertIn(shortcut_name, web_nsis)
-        self.assertIn("清除用户数据和历史对话", offline_nsis)
-        self.assertIn("Clear user data and chat history", web_nsis)
+        self.assertIn("同时删除个人数据", offline_nsis)
+        self.assertIn("Also delete personal data", web_nsis)
         self.assertIn("--cleanup-user-data", offline_nsis)
         self.assertIn("--cleanup-user-data", web_nsis)
         self.assertNotIn("powershell -NoProfile", offline_nsis)
