@@ -9,8 +9,11 @@ def test_instructions_promote_early_batch_loading_and_turn_scoped_result_refs():
     request, _ = build(planner, "execution", False, {}, ["core"])
     instructions = request["instructions"]
 
-    assert "one or two load calls" in instructions
-    assert "invalidates the provider cache prefix for the entire conversation" in instructions
+    assert "batch independent loader calls in one response" in instructions
+    assert "one exact owner leaf" in instructions
+    assert "include foreseeable verification tools" in instructions
+    assert "discovery without loading does not change definitions" in instructions
+    assert "can reduce reuse of the conversation cache prefix" in instructions
     assert "Avoid loading new tools in the middle or end of a task" in instructions
     assert "Use available results before repeating work" in instructions
     assert "resultRef values are valid only within the turn that produced the result" in instructions
