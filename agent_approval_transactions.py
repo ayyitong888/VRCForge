@@ -10,8 +10,8 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from contextlib import AbstractContextManager
-from typing import Any, Callable, Mapping
+from contextlib import AbstractContextManager, contextmanager, nullcontext
+from typing import Any, Callable, Iterator, Mapping
 
 from agent_command_safety import is_path_within, looks_like_absolute_path, normalize_filesystem_path
 from agent_task_loop import TASK_APPROVAL_CONTEXT_SCHEMA, approval_completion, approval_task_context
@@ -85,6 +85,10 @@ from execution_target import (
     validate_runtime_execution_target,
 )
 from mcp_tool_descriptor import identity_scope
+
+
+def _noop_scan_invalidation(_project_root: str, _reason: str) -> None:
+    return None
 
 
 PATCH_SET_SCHEMA = "vrcforge.modular_patch_set.v1"
@@ -632,6 +636,7 @@ class ApprovalTransactionPorts:
     read_user_constraints: Callable[[], UserConstraintsSnapshot]
     roslyn_available: Callable[[AgentGatewayConfig | None], bool]
     save_config: Callable[[AgentGatewayConfig], None]
+    invalidate_scan_results: Callable[[str, str], None] = _noop_scan_invalidation
 
 
 class AgentApprovalTransactionService:
@@ -679,6 +684,16 @@ class AgentApprovalTransactionService:
         # set operations; it is never split per file or per Agent surface.
         self._receipt_registry: dict[str, dict[str, Any]] = {}
         self._restore_pending_approvals()
+
+    @contextmanager
+    def _scan_mutation(self, project_root: Any, reason: str) -> Iterator[None]:
+        root = str(project_root or "").strip()
+        callback = self._ports.invalidate_scan_results
+        callback(root, f"{reason}:starting")
+        try:
+            yield
+        finally:
+            callback(root, f"{reason}:finished")
 
     def validate_patch_set(self, value: Any) -> dict[str, Any]:
         return validate_modular_patch_set(value)
@@ -2391,7 +2406,10 @@ class AgentApprovalTransactionService:
         handler_arguments = dict(arguments)
         handler_arguments.pop("_vrcforge_approved_execution", None)
         if not write_handler.requires_approved_execution_context:
-            result = write_handler.handler(handler_arguments)
+            with self._scan_mutation(
+                extract_project_root(handler_arguments), target_tool
+            ):
+                result = write_handler.handler(handler_arguments)
             observation_pending = (
                 target_tool == "vrcforge_start_runtime_observation"
                 and isinstance(result, Mapping)
@@ -2468,7 +2486,8 @@ class AgentApprovalTransactionService:
         )
         try:
             with bind_approved_unity_execution(execution_plan):
-                result = write_handler.handler(handler_arguments)
+                with self._scan_mutation(project_root, target_tool):
+                    result = write_handler.handler(handler_arguments)
         finally:
             if not execution_plan.consumed:
                 execution_plan.burn()
@@ -2563,15 +2582,16 @@ class AgentApprovalTransactionService:
             else None
         )
         if dedicated_checkpoint_prepare is not None:
-            try:
-                prepare_result = ensure_dict(
-                    dedicated_checkpoint_prepare(project_root, {**dict(arguments), "_checkpointTargetTool": target_tool})
-                )
-            except Exception:  # noqa: BLE001 - dedicated preflight details stay internal.
-                prepare_result = {
-                    "ok": False,
-                    "error": "The dedicated checkpoint preflight failed.",
-                }
+            with self._scan_mutation(project_root, target_tool):
+                try:
+                    prepare_result = ensure_dict(
+                        dedicated_checkpoint_prepare(project_root, {**dict(arguments), "_checkpointTargetTool": target_tool})
+                    )
+                except Exception:  # noqa: BLE001 - dedicated preflight details stay internal.
+                    prepare_result = {
+                        "ok": False,
+                        "error": "The dedicated checkpoint preflight failed.",
+                    }
             record["unityPrepare"] = prepare_result
             if not prepare_result.get("ok"):
                 record.update(
@@ -2595,10 +2615,11 @@ class AgentApprovalTransactionService:
                     "archiveScopeReason", "full_project_prepared_scope_not_proven"
                 )
         elif self._checkpoint_prepare_handler is not None:
-            try:
-                prepare_result = ensure_dict(self._checkpoint_prepare_handler(project_root))
-            except Exception as exc:  # noqa: BLE001
-                prepare_result = {"ok": False, "error": str(exc)}
+            with self._scan_mutation(project_root, target_tool):
+                try:
+                    prepare_result = ensure_dict(self._checkpoint_prepare_handler(project_root))
+                except Exception as exc:  # noqa: BLE001
+                    prepare_result = {"ok": False, "error": str(exc)}
             record["unityPrepare"] = prepare_result
             if not prepare_result.get("ok"):
                 warning = str(prepare_result.get("error") or "Unity could not prepare a rollback checkpoint.")
@@ -3600,7 +3621,10 @@ class AgentApprovalTransactionService:
         execution_target = handler_arguments.pop("executionTarget", None)
         if not write_handler.requires_approved_execution_context:
             with bind_operation_context(operation_id, execution_target if isinstance(execution_target, Mapping) else None):
-                return write_handler.handler(handler_arguments)
+                with (nullcontext() if arguments.get("preview") is True else self._scan_mutation(
+                    extract_project_root(handler_arguments), target_tool
+                )):
+                    return write_handler.handler(handler_arguments)
 
         project_root = extract_project_root(handler_arguments)
         if project_root is None or not project_root.is_dir():
@@ -3687,7 +3711,10 @@ class AgentApprovalTransactionService:
         try:
             with bind_approved_unity_execution(execution_plan):
                 with bind_operation_context(operation_id, execution_target if isinstance(execution_target, Mapping) else None):
-                    result = write_handler.handler(handler_arguments)
+                    with (nullcontext() if arguments.get("preview") is True else self._scan_mutation(
+                        project_root, target_tool
+                    )):
+                        result = write_handler.handler(handler_arguments)
         finally:
             if not execution_plan.consumed:
                 execution_plan.burn()

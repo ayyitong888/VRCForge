@@ -12,11 +12,11 @@ import tempfile
 import time
 import zipfile
 import zlib
-from contextlib import AbstractContextManager
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 from agent_command_safety import (
     is_path_within,
@@ -53,6 +53,10 @@ from agent_gateway import (
     redact_sensitive,
     utc_now_iso,
 )
+
+
+def _noop_scan_invalidation(_project_root: str, _reason: str) -> None:
+    return None
 
 
 # Unity projects commonly contain payloads that are already compressed. Storing
@@ -122,6 +126,7 @@ class CheckpointRecoveryPorts:
     recent_audit_logs: Callable[..., list[dict[str, Any]]]
     run_git: Callable[..., dict[str, Any]]
     ensure_jsonl_append_boundary_locked: Callable[[Path], None]
+    invalidate_scan_results: Callable[[str, str], None] = _noop_scan_invalidation
 
 
 class AgentCheckpointRecoveryService:
@@ -157,6 +162,16 @@ class AgentCheckpointRecoveryService:
         self._checkpoint_project_root_resolver: Callable[[], str] | None = None
         self._checkpoint_restore_prepare_handler: Callable[[Path], dict[str, Any]] | None = None
         self._checkpoint_restore_handler: Callable[[Path, dict[str, Any]], dict[str, Any]] | None = None
+
+    @contextmanager
+    def _scan_mutation(self, project_root: Any, reason: str) -> Iterator[None]:
+        root = str(project_root or "").strip()
+        callback = self._ports.invalidate_scan_results
+        callback(root, f"{reason}:starting")
+        try:
+            yield
+        finally:
+            callback(root, f"{reason}:finished")
 
     @property
     def project_chat_checkpoint_lock(self) -> AbstractContextManager[object]:
@@ -1209,16 +1224,24 @@ class AgentCheckpointRecoveryService:
         if not available.get("ok"):
             return available
         local_state_restore = checkpoint.get("strategy") in {"local_state_archive", "project_chat_archive"}
+        if (not local_state_restore and self._checkpoint_restore_prepare_handler is not None
+                and self._checkpoint_restore_handler is None):
+            return {
+                "ok": False,
+                "checkpoint": checkpoint,
+                "status": "restore_prepare_failed",
+                "error": "Unity restore preparation is configured without a matching reload handler.",
+            }
+        with self._scan_mutation(checkpoint.get("projectRoot"), "vrcforge_restore_checkpoint"):
+            return self._execute_checkpoint_restore(checkpoint, params)
+
+    def _execute_checkpoint_restore(
+        self, checkpoint: dict[str, Any], params: dict[str, Any]
+    ) -> dict[str, Any]:
+        local_state_restore = checkpoint.get("strategy") in {"local_state_archive", "project_chat_archive"}
         project_root = Path(str(checkpoint.get("projectRoot") or ""))
         restore_prepare: dict[str, Any] = {}
         if not local_state_restore and self._checkpoint_restore_prepare_handler is not None:
-            if self._checkpoint_restore_handler is None:
-                return {
-                    "ok": False,
-                    "checkpoint": checkpoint,
-                    "status": "restore_prepare_failed",
-                    "error": "Unity restore preparation is configured without a matching reload handler.",
-                }
             try:
                 restore_prepare = ensure_dict(
                     self._checkpoint_restore_prepare_handler(project_root)

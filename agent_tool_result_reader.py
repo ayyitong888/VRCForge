@@ -1,4 +1,4 @@
-"""Read bounded pages of already executed structured results in one runtime turn.
+"""Read bounded pages of owner-retained structured results.
 
 Authority and borrowed steps are gateway-bound for a callback's lifetime. This
 module owns no raw-result store, files, processes, transport or Unity capability.
@@ -24,7 +24,7 @@ INPUT_SCHEMA = {
     "additionalProperties": False,
     "properties": {
         "resultRef": {"type": "string", "pattern": "^result_[0-9a-f]{32}$",
-                      "description": "Exact current-turn resultRef from resultContinuation; never guess or reuse another turn's reference. resultRef values are valid only within the turn that produced the result; in later turns rely on the conversation history instead of re-reading old results."},
+                      "description": "Copy the exact resultRef from resultContinuation. Honor its scope and freshness; an expired owned reference returns needs_rescan with a reason and scope, never fresh data. Never guess another session's reference."},
         "jsonPointer": {"type": "string", "maxLength": 1024, "default": "",
                         "pattern": r"^(?:/(?:[^~/]|~[01])*){0,32}$",
                         "description": "RFC6901 pointer: empty string selects root; otherwise keep the leading slash, e.g. /parameters or /layers/0/states. Escape a key's slash as ~1 and tilde as ~0. Copy exact pointers from returned rows."},
@@ -35,7 +35,7 @@ INPUT_SCHEMA = {
         "textOffset": {"type": "integer", "minimum": 0,
                        "description": "Only for an exact text field with offset=0: character offset in its sanitized text, independent of item offset/limit. Copy nextRequest to retrieve remaining text."},
         "source": {"type": "string", "enum": ["result", "owner_model"], "default": "result",
-                   "description": "Use owner_model only with the owner-validated model payload attached to this exact current-turn step."},
+                   "description": "Use owner_model only with the owner-validated model payload attached to this exact result reference."},
     },
 }
 # Existing owner-validated channels must not gain a generic raw-result escape.
@@ -58,6 +58,7 @@ class ResultReadContext:
     turn_id: str
     project_root: str
     steps: tuple[Mapping[str, Any], ...]
+    snapshot_lookup: Callable[[str, str, str, str], dict[str, Any] | None] | None = None
 
 
 _CONTEXT: ContextVar[ResultReadContext | None] = ContextVar("tool_result_read_context", default=None)
@@ -65,8 +66,9 @@ _CONTEXT: ContextVar[ResultReadContext | None] = ContextVar("tool_result_read_co
 
 @contextmanager
 def bind_tool_result_context(session_id: str, turn_id: str, project_root: str,
-                             steps: list[dict[str, Any]]) -> Iterator[None]:
-    token = _CONTEXT.set(ResultReadContext(session_id, turn_id, project_root, tuple(steps)))
+                             steps: list[dict[str, Any]], *,
+                             snapshot_lookup: Callable[[str, str, str, str], dict[str, Any] | None] | None = None) -> Iterator[None]:
+    token = _CONTEXT.set(ResultReadContext(session_id, turn_id, project_root, tuple(steps), snapshot_lookup))
     try:
         yield
     finally:
@@ -75,6 +77,45 @@ def bind_tool_result_context(session_id: str, turn_id: str, project_root: str,
 
 def eligible_result(tool: str, result: object) -> bool:
     return tool not in _RESTRICTED and isinstance(result, (dict, list))
+
+
+def is_scan_tool(tool: str) -> bool:
+    return tool.startswith("vrcforge_scan_") or tool == "vrcforge_read_avatar_descriptor"
+
+
+def scan_result_summary(step: Mapping[str, Any], sanitize: Callable[[object, int], str]) -> dict[str, Any] | None:
+    """Project new owner-captured scans; never rewrite earlier native history."""
+    result, snapshot = step.get("result"), step.get("scanSnapshot")
+    if not isinstance(snapshot, Mapping) or not is_scan_tool(str(step.get("tool") or "")) or not eligible_result(str(step.get("tool") or ""), result):
+        return None
+    fields: dict[str, Any] = {}
+    if isinstance(result, dict):
+        for key, value in result.items():
+            if isinstance(value, (dict, list)) or not _safe_key(key, value, sanitize):
+                continue
+            projected = project_structured_tool_evidence({key: value}, sanitize_text=sanitize, mode="runtimecomplete")["data"]
+            if _size({**fields, **projected}) <= 1200:
+                fields.update(projected)
+    constraints, truncated = _source_constraints(result, "", sanitize)
+    scope = snapshot.get("scanScope", {})
+    safe_scope = project_structured_tool_evidence(scope, sanitize_text=sanitize, max_chars=1500)
+    scope_preview = sanitize(json.dumps(safe_scope.get("data", {}), ensure_ascii=False, separators=(",", ":")), 800)
+    model_payload = step.get("modelInformation", {}).get("payload", {})
+    completeness = model_payload.get("sourceCompleteness", []) if isinstance(model_payload, Mapping) else []
+    # Only the owner's bounded coverage facts belong in the summary, not its
+    # retained evidence text or the first large text page.
+    if _size(completeness) > 1600:
+        completeness = [{"facts": {"coverageDetailsOmitted": True}}]
+    return {"authority": "untrusted_tool_output", "fields": fields,
+            "capturedAt": snapshot.get("capturedAt"), "persisted": snapshot.get("persisted") is True,
+            "scope": snapshot.get("scope", "current_turn"), "freshness": "unverified",
+            "expired": snapshot.get("expired") is True,
+            "status": "needs_rescan" if snapshot.get("expired") is True else "snapshot",
+            "reason": sanitize(snapshot.get("reason", ""), 160),
+            "scanScopePreview": scope_preview, "detailsOmitted": True,
+            "sourceCompleteness": completeness, "sourceConstraints": constraints,
+            "sourceConstraintsTruncated": truncated,
+            "interpretation": "Summary only; missing details are not evidence of absence. Page the exact reference. Paging completion is not scan completeness or freshness verification."}
 
 
 def result_reference(session_id: str, turn_id: str, project_root: str, step: Mapping[str, Any]) -> str:
@@ -366,6 +407,19 @@ def read_tool_result(params: Mapping[str, Any], *, sanitize: Callable[[object, i
     step = next((row for row in context.steps if isinstance(ref, str)
                  and row.get(descriptor_key, {}).get("resultRef") == ref
                  and result_reference(context.session_id, context.turn_id, context.project_root, row) == ref), None)
+    if context.snapshot_lookup is not None and isinstance(ref, str):
+        saved = context.snapshot_lookup(context.session_id, context.turn_id, context.project_root, ref)
+        if saved is not None and saved.get("expired") is True:
+            scope = project_structured_tool_evidence(
+                saved.get("rescanScope", {}), sanitize_text=sanitize, max_chars=2500)
+            return {"schema": PAGE_SCHEMA, "ok": True, "authority": "untrusted_tool_output",
+                    "status": "needs_rescan", "expired": True, "freshness": "unverified",
+                    "resultRef": ref, "source": source, "items": [], "hasMore": False,
+                    "reason": saved["reason"], "capturedAt": saved.get("capturedAt"),
+                    "rescanScope": scope.get("data", {}), "rescanScopeTruncated": scope.get("truncated", False),
+                    "interpretation": "Historical content is unchanged; this reference cannot prove current state. Rescan the returned scope before using it as current evidence."}
+        if saved is not None:
+            step = saved.get("step")
     if step is None or (source == "result" and not eligible_result(str(step.get("tool") or ""), step.get("result"))):
         raise PermissionError("Result reference is unavailable in this runtime turn")
     if source == "owner_model":

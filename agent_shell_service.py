@@ -12,7 +12,7 @@ import threading
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
@@ -24,10 +24,12 @@ from agent_command_safety import (
     tokenize_command,
 )
 from agent_shell_process_supervisor import (
+    ManagedShellProcess,
     ShellProcessSupervisor,
     ShellSessionError,
     ShellSessionPorts,
     build_shell_environment,
+    default_shell_session_ports,
     normalize_shell_environment_overrides,
     shell_control_input_text,
 )
@@ -111,6 +113,13 @@ class ShellProcessPorts:
 
 @dataclass(frozen=True, slots=True)
 class AgentShellPorts:
+    """Shell owner ports; scan invalidation uses empty project for unknown scope.
+
+    Each attempted spawn pairs starting/finished notifications. The parent
+    expires all snapshots at both boundaries and keeps mutation pending between
+    them, including while a background session has yielded to its caller.
+    """
+
     approvals: ShellApprovalPorts
     append_audit: Callable[[dict[str, Any]], None]
     permission_audit_context: Callable[[], dict[str, Any]]
@@ -122,6 +131,7 @@ class AgentShellPorts:
         status,
     )
     session_finished: Callable[[dict[str, Any]], None] = lambda _event: None
+    invalidate_scan_results: Callable[[str, str], None] = lambda _project, _reason: None
 
 
 @dataclass(frozen=True, slots=True)
@@ -161,9 +171,31 @@ class AgentShellService:
         self._next_admission_id = 0
         self._thread_admission = threading.local()
         self._accepting = True
-        self._sessions = ShellProcessSupervisor(session_ports)
+        owned_session_ports = session_ports or default_shell_session_ports()
+        self._sessions = ShellProcessSupervisor(
+            replace(
+                owned_session_ports,
+                spawn_pipe=lambda argv, cwd, env: self._spawn_session_process(
+                    owned_session_ports.spawn_pipe, argv, cwd, env
+                ),
+                spawn_pty=lambda argv, cwd, env: self._spawn_session_process(
+                    owned_session_ports.spawn_pty, argv, cwd, env
+                ),
+            )
+        )
         self._session_input_buffers: dict[str, str] = {}
         self._project_path_guard: Callable[[], Any] | None = None
+
+    def _spawn_session_process(
+        self,
+        spawn: Callable[[list[str], Path, dict[str, str]], ManagedShellProcess],
+        argv: list[str],
+        cwd: Path,
+        environment: dict[str, str],
+    ) -> ManagedShellProcess:
+        self._ports.invalidate_scan_results("", "shell:starting")
+        self._thread_admission.scan_spawn_attempted = True
+        return spawn(argv, cwd, environment)
 
     def bind_project_path_guard(self, provider: Callable[[], Any]) -> None:
         """Bind the cooperative registered-project guard used by shared Shell."""
@@ -693,9 +725,23 @@ class AgentShellService:
             completion_lock = threading.Lock()
             pending_completion: dict[str, Any] | None = None
             completion_owner = "undecided"
+            scan_mutation_finished = False
+            worker_state = vars(self._thread_admission)
+            previous_spawn_attempt = worker_state.get("scan_spawn_attempted", False)
+            worker_state["scan_spawn_attempted"] = False
+
+            def finish_scan_mutation() -> None:
+                nonlocal scan_mutation_finished
+                with completion_lock:
+                    if scan_mutation_finished:
+                        return
+                    scan_mutation_finished = True
+                self._ports.invalidate_scan_results("", "shell:finished")
 
             def session_finished(event: dict[str, Any]) -> None:
                 nonlocal pending_completion
+                if str(event.get("status") or "") != "termination_failed":
+                    finish_scan_mutation()
                 with completion_lock:
                     if completion_owner == "undecided":
                         pending_completion = dict(event)
@@ -779,7 +825,15 @@ class AgentShellService:
                     }
                 return execution
             except ShellSessionError as exc:
+                if worker_state["scan_spawn_attempted"]:
+                    finish_scan_mutation()
                 self._raise(exc.detail, exc.status_code)
+            except BaseException:
+                if worker_state["scan_spawn_attempted"]:
+                    finish_scan_mutation()
+                raise
+            finally:
+                worker_state["scan_spawn_attempted"] = previous_spawn_attempt
         result = self._run_command(
             command,
             cwd,
@@ -1410,6 +1464,7 @@ class AgentShellService:
         process: ShellProcess | None = None
         communicated = False
         cleanup_complete = False
+        scan_spawn_attempted = False
         try:
             started = self._process.monotonic()
             started_at = self._process.utc_now()
@@ -1446,6 +1501,8 @@ class AgentShellService:
                 if os.name == "nt" and hasattr(subprocess, "CREATE_NO_WINDOW")
                 else 0
             )
+            self._ports.invalidate_scan_results("", "shell:starting")
+            scan_spawn_attempted = True
             process = self._process.spawn(
                 process_args,
                 cwd=str(cwd),
@@ -1517,6 +1574,8 @@ class AgentShellService:
                 if not cleanup_complete:
                     cleanup_complete = self._terminate_and_reap(process)
             self._release_process(admission_id, process, cleanup_complete=cleanup_complete)
+            if scan_spawn_attempted and (process is None or cleanup_complete):
+                self._ports.invalidate_scan_results("", "shell:finished")
 
     @contextmanager
     def _execution_admission(self) -> Iterator[int]:

@@ -5,7 +5,7 @@ import json
 import threading
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, replace
-from typing import Any
+from typing import Any, Callable
 from context_compaction import normalize_compaction_recovery
 from agent_native_history_store import NativeHistoryStore
 
@@ -20,6 +20,7 @@ class AgentRuntimeSessionStatePorts:
 
     shared_state_lock: AbstractContextManager[Any]
     native_history_store: NativeHistoryStore | None = None
+    discard_result_snapshots: Callable[[str], None] | None = None
 
 
 class AgentRuntimeSessionState:
@@ -122,6 +123,8 @@ class AgentRuntimeSessionState:
 
     def discard_session(self, session_id: str) -> None:
         with self._ports.shared_state_lock:
+            if self._ports.discard_result_snapshots:
+                self._ports.discard_result_snapshots(session_id)
             if self._ports.native_history_store:
                 self._ports.native_history_store.delete(session_id)
             self._native_loaded.discard(session_id)

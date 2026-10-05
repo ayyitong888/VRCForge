@@ -3180,6 +3180,14 @@ class RuntimePlannerService:
                                    native_contract: bool = False) -> str:
         if self is not None:
             step = self._planner_result_read_step(step)
+        from agent_tool_result_reader import scan_result_summary
+        scan_summary = scan_result_summary(step, sanitize_planner_observation_text)
+        if scan_summary is not None:
+            scan_summary["sourceCompleteness"] = RuntimePlannerService.model_source_completeness(step) + scan_summary["sourceCompleteness"]
+            control = {key: step[key] for key in ("kind", "status", "actionId") if key in step}
+            return (json.dumps(control, ensure_ascii=False, separators=(",", ":"))
+                    + "; scanSummary=" + json.dumps(scan_summary, ensure_ascii=False, separators=(",", ":"))
+                    + "; resultContinuation=" + json.dumps(step.get("resultRead", {}), ensure_ascii=False, separators=(",", ":")))
         retained = ensure_dict(step.get("modelInformation"))
         descriptor = ensure_dict(step.get("modelInformationRead"))
         page = ensure_dict(descriptor.get("page"))

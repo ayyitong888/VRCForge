@@ -38,7 +38,8 @@ from typing import TYPE_CHECKING, Any, Callable, Iterator, Mapping, Sequence
 
 from agent_memory_store import AgentMemoryStore
 from agent_memory_tools import MEMORY_TOOL_NAMES, MEMORY_WRITE_TOOLS, bind_memory_tool_context, safe_memory_record, requested_memory_tool
-from agent_tool_result_reader import TOOL_NAME as RESULT_READER_TOOL, bind_tool_result_context, page_item_request_arguments, page_next_request_arguments, read_tool_result, result_continuation, retain_model_information
+from agent_tool_result_reader import TOOL_NAME as RESULT_READER_TOOL, bind_tool_result_context, is_scan_tool, page_item_request_arguments, page_next_request_arguments, read_tool_result, result_continuation, retain_model_information
+from agent_scan_result_store import ScanResultStore
 from know_yourself_skill import bind_know_yourself_caller
 import agent_command_safety as command_safety
 import runtime_planner_service as planner_policy
@@ -2085,6 +2086,9 @@ class AgentGateway:
         self._skill_package_write_lock_bound = skill_package_write_lock is not None
         self._skill_package_write_lock = skill_package_write_lock or nullcontext()
         self._lock = threading.RLock()
+        # Private, authenticated session/project-owned snapshots. Finite DB
+        # handles belong to this gateway; permanent chat deletion removes data.
+        self._scan_results = ScanResultStore(self.audit_dir / "scan-results", self._lock)
         self._execution_target_bindings = ExecutionTargetBindingRegistry(lock=self._lock)
         # One process-owned registry backs the internal Agent and both MCP
         # protocol projections. Files live under the existing local audit
@@ -2121,7 +2125,8 @@ class AgentGateway:
         )
         self._runtime_session_state = AgentRuntimeSessionState(
             AgentRuntimeSessionStatePorts(shared_state_lock=self._lock,
-                native_history_store=NativeHistoryStore(self.audit_dir / "native-history"))
+                native_history_store=NativeHistoryStore(self.audit_dir / "native-history"),
+                discard_result_snapshots=lambda session_id: self._scan_results.delete(session_id))
         )
         self._runtime_followup_queue = AgentRuntimeFollowupQueue(
             FollowupQueuePorts(path=self.audit_dir / "runtime-followups.json", lock=self._lock)
@@ -2303,6 +2308,7 @@ class AgentGateway:
                 recent_audit_logs=lambda limit=100: self.approval_transactions.recent_audit_logs(limit),
                 run_git=self._run_git,
                 ensure_jsonl_append_boundary_locked=self._ensure_jsonl_append_boundary_locked,
+                invalidate_scan_results=self._invalidate_scan_results,
             )
         )
         from agent_approval_transactions import (
@@ -2360,6 +2366,7 @@ class AgentGateway:
                 read_user_constraints=self.read_user_constraints,
                 roslyn_available=self.roslyn_available,
                 save_config=self.save_config,
+                invalidate_scan_results=self._invalidate_scan_results,
             ),
             ApprovalGoalPorts(
                 deny_approval=self._goal.deny_agent_goal_approval,
@@ -2514,6 +2521,7 @@ class AgentGateway:
                 is_unity_project_root=self._is_unity_project_root,
                 error_factory=lambda detail, status: AgentGatewayError(detail, status_code=status),
                 session_finished=shell_session_finished,
+                invalidate_scan_results=self._invalidate_scan_results,
             ),
             process_ports=shell_process_ports,
             session_ports=shell_session_ports,
@@ -2685,7 +2693,7 @@ class AgentGateway:
 
         self.register_tool(
             RESULT_READER_TOOL,
-            "When to use: read omitted structured data from an already executed tool in this turn using its exact resultRef, jsonPointer and zero-based offset; collection counts identify valid offsets. When NOT to use: do not read another turn/project, files, opaque capture output, credentials, or rerun a mutation. Negative example: guessing an old resultRef cannot grant access. References expire at turn end.",
+            "When to use: read retained structured data using its exact resultRef, jsonPointer and zero-based offset; honor returned scope and freshness. Owned expired references return needs_rescan with reason and scope. When NOT to use: do not read another session/project, files, opaque capture output, credentials, or rerun a mutation. Negative example: guessing an old resultRef cannot grant access. Legacy Unity references remain current_turn only.",
             "read/debug",
             lambda params: read_tool_result(params, sanitize=planner_policy.sanitize_planner_observation_text),
         )
@@ -3146,9 +3154,21 @@ class AgentGateway:
         with self._lock:
             self.config_path = config_path
             self.audit_dir = audit_dir
+            self._scan_results = ScanResultStore(audit_dir / "scan-results", self._lock)
             self._approvals.clear()
             self._runtime_session_state.configure_native_store(NativeHistoryStore(audit_dir / "native-history"))
             self._desktop.configure_paths(audit_dir)
+
+    def _invalidate_scan_results(self, project_root: str, reason: str) -> None:
+        # A cannot prove Unity's dependency closure. Any project mutation is
+        # conservative; an unknown-scope Shell mutation invalidates all projects.
+        name, _, phase = reason.rpartition(":")
+        if phase == "starting":
+            self._scan_results.begin_mutation(project_root, name)
+        elif phase == "finished":
+            self._scan_results.end_mutation(project_root, name)
+        else:
+            self._scan_results.invalidate(project_root, None, reason)
 
     def _signal_background_activity(self, reason: str) -> None:
         callback = self._background_activity_started
@@ -7578,6 +7598,7 @@ class AgentGateway:
                 )
             else:  # skill
                 step_tool = str(plan.get("skillTool") or "")
+                scan_generation = self._scan_results.generation(project_root) if is_scan_tool(step_tool) and project_root else None
                 step_params = dict(execution_arguments)
                 action_arguments = dict(execution_arguments)
                 if step_tool in {
@@ -7682,7 +7703,7 @@ class AgentGateway:
                 }:
                     step_params.setdefault("exposureLayer", runtime_exposure_layer)
                 with self._bind_runtime_skill_scope(task_loop), (bind_memory_tool_context(project_root, memory_request_text, tuple(memory_user_texts)) if step_tool in MEMORY_TOOL_NAMES else nullcontext()), (
-                    bind_tool_result_context(session_id, turn_id, project_root, [*model_context_steps, *steps]) if step_tool == RESULT_READER_TOOL else nullcontext()
+                    bind_tool_result_context(session_id, turn_id, project_root, [*model_context_steps, *steps], snapshot_lookup=self._scan_results.lookup if project_root else None) if step_tool == RESULT_READER_TOOL else nullcontext()
                 ):
                     step_payload = self._runtime_skill_executor.execute(
                         step_tool,
@@ -7824,6 +7845,7 @@ class AgentGateway:
                     "actionId": task_action["actionId"],
                 }
             )
+            retained_result: dict[str, Any] = {}
             if step_payload.get("result") is not None:
                 steps[-1]["result"] = step_payload.get("result")
                 retained_result = result_continuation(
@@ -7855,6 +7877,22 @@ class AgentGateway:
                 )
                 steps[-1].update(model_information)
                 loop_state[-1].update(model_information)
+
+            scan_tool = self._tools.get(step_tool)
+            if (retained_result and is_scan_tool(step_tool) and scan_tool is not None
+                    and not scan_tool.write and step_payload.get("status") == "executed"):
+                try:
+                    scan_snapshot = self._scan_results.capture(
+                        session_id, turn_id, project_root, steps[-1], execution_arguments,
+                        expected_generation=scan_generation,
+                    )
+                except (OSError, ValueError) as exc:
+                    # A failed local capture must not discard a successful read.
+                    # It grants no durable freshness or cross-turn authority.
+                    scan_snapshot = {"persisted": False, "scope": "current_turn", "freshness": "unverified",
+                                     "storageError": type(exc).__name__, "scanScope": {"tool": step_tool, "dependencyCoverage": "unverified"}}
+                steps[-1]["scanSnapshot"] = scan_snapshot
+                loop_state[-1]["scanSnapshot"] = scan_snapshot
 
             result_outcome = ensure_dict(step_payload.get("outcome"))
             result_summary = str(
