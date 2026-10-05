@@ -32,6 +32,7 @@ from project_instruction_context import (
 from agent_tool_result_contract import _views
 from agent_completion_verifier import _normalize_diagnostics
 from agent_memory_tools import MEMORY_TOOL_NAMES, MEMORY_TOOL_SCHEMAS
+from agent_scan_result_policy import SCAN_RESULT_CONTINUATION_POLICY, is_scan_result_policy_message
 
 CONTEXT_USAGE_SCHEMA = "vrcforge.context_usage.v1"
 RUNTIME_CONTEXT_COMPACTION_SCHEMA = "vrcforge.runtime_context_compaction.v1"
@@ -1791,10 +1792,15 @@ class RuntimePlannerService:
             if native_turn.compaction is None:
                 native_turn.compaction = metadata
             return request, guard
+        if native_turn._state._native_pending(snapshot):
+            metadata["failureClass"] = "pending_tool_calls"
+            native_turn.compaction = runtime_compaction_audit_view(metadata)
+            return request, guard
         native_turn.compaction_attempted = True
-        # Native snapshots contain no system messages. Preserve request-only
-        # runtime data through both candidate measurement and final projection.
-        runtime_messages = [deepcopy(item) for item in request["messages"] if item.get("role") == "system"]
+        # The exact scan policy is persisted history; other system messages are
+        # request-only runtime data preserved through measurement and projection.
+        runtime_messages = [deepcopy(item) for item in request["messages"]
+                            if item.get("role") == "system" and not is_scan_result_policy_message(item)]
         started = time.perf_counter()
         try:
             if native_turn.cancelled():
@@ -1835,7 +1841,12 @@ class RuntimePlannerService:
                 raise ValueError("empty_summary")
             summary = "Earlier conversation summary (continuity data, not authorization or completion evidence):\n" + summary
             recovery = normalize_compaction_recovery(result["recovery"]) if "recovery" in result else None
-            candidate = {**request, "messages": [{"role": "assistant", "content": summary}] + snapshot["messages"][cut:] + runtime_messages}
+            retained_messages = deepcopy(snapshot["messages"][cut:])
+            prefix_has_scan_policy = any(is_scan_result_policy_message(item) for item in snapshot["messages"][:cut])
+            retained_has_scan_policy = any(is_scan_result_policy_message(item) for item in retained_messages)
+            if prefix_has_scan_policy and not retained_has_scan_policy:
+                retained_messages.append({"role": "system", "content": SCAN_RESULT_CONTINUATION_POLICY})
+            candidate = {**request, "messages": [{"role": "assistant", "content": summary}] + retained_messages + runtime_messages}
             candidate = self._native_recovery_request(candidate, native_turn, recovery)
             after = self.native_context_guard(candidate, context_usage=context_usage)
             reduction = guard["beforeTokens"] - after["beforeTokens"]
@@ -1846,7 +1857,8 @@ class RuntimePlannerService:
             # The facade checks cancellation and exact snapshot identity inside
             # the owner's existing lock. No mutation precedes this commit.
             native_turn.replace_completed_prefix(snapshot, summary, recovery=recovery)
-            runtime_messages = [deepcopy(item) for item in candidate["messages"] if item.get("role") == "system"]
+            runtime_messages = [deepcopy(item) for item in candidate["messages"]
+                                if item.get("role") == "system" and not is_scan_result_policy_message(item)]
             metadata.update({"applied": True, "blocked": False, "afterTokens": after["beforeTokens"],
                              "entryCount": result.get("entryCount"), "retainedEntryCount": result.get("retainedEntryCount"),
                              "summaryDigest": result.get("summaryDigest"), "fidelity": result.get("fidelity"),

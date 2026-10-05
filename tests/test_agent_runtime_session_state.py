@@ -8,6 +8,7 @@ import pytest
 
 from agent_gateway import AgentGateway
 from agent_runtime_session_state import AgentRuntimeSessionState, AgentRuntimeSessionStatePorts
+from agent_scan_result_policy import SCAN_RESULT_CONTINUATION_POLICY
 
 
 def make_state() -> tuple[AgentRuntimeSessionState, threading.RLock]:
@@ -649,6 +650,54 @@ def test_native_completed_prefix_replace_is_atomic_cas_and_preserves_current_suf
     assert state.native_conversation("s", binding="b") == replaced
 
 
+def test_native_compaction_tail_restores_exact_prefix_policy_in_same_save_and_is_atomic_on_save_failure() -> None:
+    class FailingStore:
+        fail = False
+
+        def load(self, session_id, binding):
+            return None
+
+        def save(self, session_id, snapshot, selections):
+            if self.fail:
+                raise OSError("disk unavailable")
+
+    state, _lock = make_state()
+    state.begin_native_turn("s", binding="b", turn_id="t", message="old")
+    state.append_native_scan_result_policy_once("s", binding="b", message={
+        "role": "system", "content": SCAN_RESULT_CONTINUATION_POLICY,
+    })
+    state.begin_native_turn("s", binding="b", turn_id="t2", message="current")
+    source = state.native_conversation("s", binding="b")
+    compacted = state.replace_native_completed_prefix(
+        "s", binding="b", expected_snapshot=source, summary="summary",
+    )
+    policy = {"role": "system", "content": SCAN_RESULT_CONTINUATION_POLICY}
+    assert compacted["messages"].count(policy) == 1
+    assert compacted["messages"][-1] == policy and compacted["activeTurnStart"] == 1
+    state.begin_native_turn("s", binding="b", turn_id="t3", message="next turn")
+    next_source = state.native_conversation("s", binding="b")
+    next_compacted = state.replace_native_completed_prefix(
+        "s", binding="b", expected_snapshot=next_source, summary="summary again",
+    )
+    assert next_compacted["messages"].count(policy) == 1
+    assert next_compacted["activeTurnStart"] == 1
+
+    failing_store = FailingStore()
+    failed_state = AgentRuntimeSessionState(AgentRuntimeSessionStatePorts(
+        shared_state_lock=threading.RLock(), native_history_store=failing_store,
+    ))
+    failed_state.begin_native_turn("s", binding="b", turn_id="t", message="old")
+    failed_state.append_native_scan_result_policy_once("s", binding="b", message=policy)
+    failed_state.begin_native_turn("s", binding="b", turn_id="t2", message="current")
+    before = failed_state.native_conversation("s", binding="b")
+    failing_store.fail = True
+    with pytest.raises(OSError, match="disk unavailable"):
+        failed_state.replace_native_completed_prefix(
+            "s", binding="b", expected_snapshot=before, summary="summary",
+        )
+    assert failed_state.native_conversation("s", binding="b") == before
+
+
 def test_native_prefix_cas_preserves_pending_current_suffix_and_rejects_invalid_boundary() -> None:
     state, _lock = make_state()
     state.begin_native_turn(
@@ -656,6 +705,9 @@ def test_native_prefix_cas_preserves_pending_current_suffix_and_rejects_invalid_
             {"role": "user", "text": "old"}, {"role": "agent", "text": "answer"}
         ]
     )
+    state.append_native_scan_result_policy_once("s", binding="b", message={
+        "role": "system", "content": SCAN_RESULT_CONTINUATION_POLICY,
+    })
     state.append_native_assistant(
         "s", binding="b", message={"role": "assistant", "content": None, "tool_calls": [
             {"id": "pending", "type": "function", "function": {"name": "f", "arguments": "raw"}},
@@ -667,6 +719,7 @@ def test_native_prefix_cas_preserves_pending_current_suffix_and_rejects_invalid_
     )
     assert replaced["messages"][1:] == source["messages"][source["activeTurnStart"]:]
     assert state._native_pending(replaced) == {"pending"}
+    assert replaced["messages"].count({"role": "system", "content": SCAN_RESULT_CONTINUATION_POLICY}) == 1
     invalid = dict(replaced)
     invalid["activeTurnStart"] = 2
     with pytest.raises(ValueError, match="active turn"):

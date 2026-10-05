@@ -446,10 +446,19 @@ class AgentRuntimeSessionState:
             cut = current["activeTurnStart"]
             if cut <= 0 or self._native_pending({"messages": current["messages"][:cut]}):
                 raise ValueError("native completed prefix is unavailable")
+            retained_messages = copy.deepcopy(current["messages"][cut:])
+            prefix_has_scan_policy = any(
+                is_scan_result_policy_message(message) for message in current["messages"][:cut]
+            )
+            retained_has_scan_policy = any(
+                is_scan_result_policy_message(message) for message in retained_messages
+            )
+            if prefix_has_scan_policy and not retained_has_scan_policy:
+                retained_messages.append({"role": "system", "content": SCAN_RESULT_CONTINUATION_POLICY})
             candidate = {
                 "binding": binding,
                 "turnId": current["turnId"],
-                "messages": [{"role": "assistant", "content": summary}] + copy.deepcopy(current["messages"][cut:]),
+                "messages": [{"role": "assistant", "content": summary}] + retained_messages,
                 "activeTurnStart": 1,
             }
             if "toolOrder" in current:
