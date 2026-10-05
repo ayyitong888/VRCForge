@@ -342,6 +342,36 @@ namespace VRCForge.Editor
                 ["changedAssetPaths"] = new JArray() };
         }
 
+        private static JObject DiagnosticObjectState(string value)
+        {
+            if (value == null) return null;
+            var parts = value.Split(':');
+            if (parts.Length != 3 || !long.TryParse(parts[0], out var revision) || !int.TryParse(parts[1], out var dirty))
+                throw new InvalidDataException("diagnostic_object_state_unavailable");
+            return new JObject { ["contentHash"] = parts[2], ["dirtyCount"] = dirty, ["revision"] = revision };
+        }
+
+        private static JArray ObjectDiagnostics(Scope saved, Scope current)
+        {
+            var rows = new JArray();
+            foreach (var id in saved.objects.Keys.Union(current.objects.Keys).OrderBy(value => value, StringComparer.Ordinal).Take(MaxObjects * 2))
+            {
+                saved.objects.TryGetValue(id, out var before);
+                current.objects.TryGetValue(id, out var after);
+                var oldState = DiagnosticObjectState(before);
+                var newState = DiagnosticObjectState(after);
+                var target = Resolve(id);
+                var classification = oldState == null ? "added" : newState == null ? "missing"
+                    : !JToken.DeepEquals(oldState["contentHash"], newState["contentHash"]) ? "content_changed"
+                    : !JToken.DeepEquals(oldState["dirtyCount"], newState["dirtyCount"]) ? "dirty_count_only"
+                    : !JToken.DeepEquals(oldState["revision"], newState["revision"]) ? "revision_only" : "unchanged";
+                rows.Add(new JObject { ["objectId"] = id, ["assetPath"] = target == null ? "" : AssetDatabase.GetAssetPath(target),
+                    ["objectType"] = target == null ? "" : target.GetType().FullName,
+                    ["old"] = oldState, ["new"] = newState, ["classification"] = classification });
+            }
+            return rows;
+        }
+
         internal static JObject Capture(JObject parameters)
         {
             try
@@ -385,6 +415,12 @@ namespace VRCForge.Editor
                     .Where(path => path.StartsWith("Assets/", StringComparison.Ordinal));
                 var result = Receipt(same, same ? "" : "scope_content_or_revision_changed");
                 result["changedAssetPaths"] = new JArray(changed.Where(path => path.StartsWith("Assets/", StringComparison.Ordinal)).Union(memoryPaths));
+                if ((bool?)parameters?["includeDiagnostics"] == true)
+                {
+                    // Diagnostics project the existing comparison only; failure cannot alter validity.
+                    try { result["objectDiagnostics"] = ObjectDiagnostics(saved, current); }
+                    catch (Exception exception) { result["diagnosticsError"] = exception.GetType().Name; }
+                }
                 return result;
             }
             catch (Exception exception) { return Receipt(false, exception.Message); }
@@ -423,6 +459,7 @@ namespace VRCForge.Editor
         public class Parameters
         {
             [VRCForgeInput("Exact opaque scope token.")] public string token { get; set; }
+            [VRCForgeInput("Include bounded read-only per-object comparison details.", IsRequired = false)] public bool includeDiagnostics { get; set; }
         }
         public static object HandleCommand(JObject parameters)
         {
