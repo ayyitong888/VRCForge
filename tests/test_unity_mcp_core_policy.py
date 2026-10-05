@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import re
 from pathlib import Path
+from unity_mcp_core_client import SCAN_SCOPE_TOOL_NAMES
 
 from unity_mcp_tool_contract import (
     CORE_IDENTITY,
@@ -637,8 +638,8 @@ def test_uninstall_menu_stops_core_clears_only_owned_preference_and_removes_prod
 
 
 def test_core_has_a_fixed_current_tool_contract_and_never_rediscoveres_at_invoke_time() -> None:
-    assert f"ToolCount = {EXPECTED_TOOL_COUNT}" in CONTRACT
-    assert CONTRACT.count('{ "vrc_') == EXPECTED_TOOL_COUNT
+    assert f"ToolCount = {EXPECTED_TOOL_COUNT + len(SCAN_SCOPE_TOOL_NAMES)}" in CONTRACT
+    assert CONTRACT.count('{ "vrc_') == EXPECTED_TOOL_COUNT + len(SCAN_SCOPE_TOOL_NAMES)
     assert "SnapshotExact" in SERVER
     assert "var registry = VRCForgeToolRegistry.DiscoverLoadedAssemblies();" not in SERVER
     assert "ApprovedAppCoreTools" in SERVER
@@ -685,8 +686,8 @@ def test_csharp_contract_exactly_matches_the_current_owned_tool_declarations() -
             source,
         ):
             declared[match.group(1)] = f"{namespace.group(1)}.{match.group(2)}"
-    assert len(contract) == EXPECTED_TOOL_COUNT
-    assert set(contract) == EXPECTED_TOOL_NAMES
+    assert len(contract) == EXPECTED_TOOL_COUNT + len(SCAN_SCOPE_TOOL_NAMES)
+    assert set(contract) == EXPECTED_TOOL_NAMES | SCAN_SCOPE_TOOL_NAMES
     assert contract == declared
 
 
@@ -758,7 +759,7 @@ def test_csharp_and_python_contracts_pin_the_same_exact_read_only_tools() -> Non
     ]
     csharp_read_only = set(re.findall(r'"(vrc_[^"]+)"', read_only_block))
 
-    assert csharp_read_only == READ_ONLY_TOOL_NAMES
+    assert csharp_read_only == READ_ONLY_TOOL_NAMES | SCAN_SCOPE_TOOL_NAMES
     assert "ExpectedReadOnlyNames.Contains(descriptor.Name)" in CONTRACT
     assert "!readOnly.SetEquals(expectedReadOnly)" in SERVER
 

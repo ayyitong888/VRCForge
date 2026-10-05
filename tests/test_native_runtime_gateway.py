@@ -61,7 +61,10 @@ def budgeted_request_history(request):
     messages = request["messages"]
     assert messages[-1]["role"] == "system"
     assert "modelTurnBudget" not in json.loads(messages[-1]["content"].split(": ", 1)[1])
-    assert all(message["role"] != "system" for message in messages[:-1])
+    from agent_scan_result_policy import is_scan_result_policy_message
+    policies = [message for message in messages[:-1] if message.get("role") == "system"]
+    assert len(policies) <= 1
+    assert all(is_scan_result_policy_message(message) for message in policies)
     return messages[:-1]
 
 

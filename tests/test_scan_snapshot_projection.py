@@ -1,5 +1,8 @@
 import copy
 import json
+import uuid
+
+import pytest
 
 from agent_tool_result_reader import bind_tool_result_context, read_tool_result, result_continuation
 from runtime_planner_service import RuntimePlannerService, sanitize_planner_observation_text as sanitize
@@ -83,3 +86,46 @@ def test_scan_that_raced_a_write_is_not_presented_as_usable_summary():
     text = RuntimePlannerService._llm_loop_step_observation(None, step)
     assert '"expired":true' in text and '"status":"needs_rescan"' in text
     assert "mutation_during_scan" in text
+
+
+def test_validated_scan_new_observation_overrides_turn_only_descriptor_without_rewriting_source():
+    step = scan_step()
+    step["actionId"] = uuid.uuid4().hex
+    step["scanSnapshot"].update(scope="validated_scope", freshness="validated")
+    step["scanSnapshot"]["scanScope"].update(schema="vrcforge.scan_scope.v1", dependencyCoverage="complete")
+    before = copy.deepcopy(step)
+    text = RuntimePlannerService._llm_loop_step_observation(None, step, native_contract=True)
+    summary, _ = json.JSONDecoder().raw_decode(text.split("scanSummary=", 1)[1])
+    continuation = json.loads(text.split("resultContinuation=", 1)[1])
+    assert summary["scope"] == continuation["scope"] == "validated_scope"
+    assert summary["freshness"] == continuation["freshness"] == "validated_on_read"
+    assert "across turns" in continuation["instructions"]
+    assert "this turn ends" not in continuation["instructions"]
+    assert step == before and step["resultRead"]["scope"] == "current_turn"
+
+
+@pytest.mark.parametrize("patch", [
+    {"persisted": False}, {"freshness": "unverified"}, {"expired": True},
+    {"reason": "scope_invalid"}, {"scanScope": {"dependencyCoverage": "unverified"}},
+])
+def test_incomplete_or_expired_scope_metadata_cannot_promote_cross_turn_descriptor(patch):
+    from agent_tool_result_reader import scan_result_continuation
+    step = scan_step()
+    step["scanSnapshot"].update(scope="validated_scope", freshness="validated")
+    step["scanSnapshot"].update(patch)
+    assert scan_result_continuation(step) == step["resultRead"]
+
+
+def test_expired_page_forwards_bounded_changed_asset_hints_without_rewriting_history():
+    step = scan_step()
+    before = copy.deepcopy(step)
+    changed_path = "Assets/" + uuid.uuid4().hex + ".anim"
+    lookup = lambda *args: {"expired": True, "reason": "scope_content_or_revision_changed",
+                           "changedAssetPaths": [changed_path],
+                           "rescanScope": {"tool": step["tool"], "assetPaths": [changed_path]}}
+    with bind_tool_result_context("session", "later", "project", [], snapshot_lookup=lookup):
+        page = read_tool_result({"resultRef": step["resultRead"]["resultRef"]}, sanitize=sanitize)
+    assert page["status"] == "needs_rescan" and page["freshness"] == "unverified"
+    assert page["changedAssetPaths"] == [changed_path]
+    assert page["changedAssetPathsTruncated"] is False
+    assert step == before

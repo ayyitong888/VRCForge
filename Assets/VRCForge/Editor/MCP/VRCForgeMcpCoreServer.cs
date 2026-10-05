@@ -2384,6 +2384,7 @@ namespace VRCForge.Editor
                 ["projectId"] = ComputeProjectId(GetProjectRoot()),
                 ["projectIdSource"] = "normalized_project_path_sha256",
                 ["compileSnapshot"] = CompileErrorMonitor.ReadCoreInfoSnapshot(30),
+                ["scanScope"] = ScanScopeJournal.Capabilities(),
             };
         }
 

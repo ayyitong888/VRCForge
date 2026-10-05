@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from contextvars import ContextVar
+from copy import deepcopy
 from dataclasses import dataclass
 import hashlib
 import json
@@ -83,6 +84,28 @@ def is_scan_tool(tool: str) -> bool:
     return tool.startswith("vrcforge_scan_") or tool == "vrcforge_read_avatar_descriptor"
 
 
+def _validated_scan_snapshot(step: Mapping[str, Any]) -> bool:
+    snapshot = step.get("scanSnapshot")
+    if not is_scan_tool(str(step.get("tool") or "")) or not isinstance(snapshot, Mapping):
+        return False
+    scope = snapshot.get("scanScope")
+    return (snapshot.get("persisted") is True and snapshot.get("scope") == "validated_scope"
+            and snapshot.get("freshness") == "validated" and snapshot.get("expired") is not True
+            and not snapshot.get("reason") and isinstance(scope, Mapping)
+            and scope.get("schema") == "vrcforge.scan_scope.v1"
+            and scope.get("dependencyCoverage") == "complete")
+
+
+def scan_result_continuation(step: Mapping[str, Any]) -> dict[str, Any]:
+    """Project only the new observation; retained descriptors stay byte-exact."""
+    descriptor = deepcopy(step.get("resultRead", {}))
+    if isinstance(descriptor, dict) and descriptor and _validated_scan_snapshot(step):
+        descriptor.update(scope="validated_scope", freshness="validated_on_read", instructions=(
+            "Owned scan references may be paged across turns; the host revalidates scope on every read. "
+            "Expired replies require a targeted rescan; inability to verify is not validity."))
+    return descriptor if isinstance(descriptor, dict) else {}
+
+
 def scan_result_summary(step: Mapping[str, Any], sanitize: Callable[[object, int], str]) -> dict[str, Any] | None:
     """Project new owner-captured scans; never rewrite earlier native history."""
     result, snapshot = step.get("result"), step.get("scanSnapshot")
@@ -108,7 +131,8 @@ def scan_result_summary(step: Mapping[str, Any], sanitize: Callable[[object, int
         completeness = [{"facts": {"coverageDetailsOmitted": True}}]
     return {"authority": "untrusted_tool_output", "fields": fields,
             "capturedAt": snapshot.get("capturedAt"), "persisted": snapshot.get("persisted") is True,
-            "scope": snapshot.get("scope", "current_turn"), "freshness": "unverified",
+            "scope": "validated_scope" if _validated_scan_snapshot(step) else "current_turn",
+            "freshness": "validated_on_read" if _validated_scan_snapshot(step) else "unverified",
             "expired": snapshot.get("expired") is True,
             "status": "needs_rescan" if snapshot.get("expired") is True else "snapshot",
             "reason": sanitize(snapshot.get("reason", ""), 160),
@@ -412,12 +436,16 @@ def read_tool_result(params: Mapping[str, Any], *, sanitize: Callable[[object, i
         if saved is not None and saved.get("expired") is True:
             scope = project_structured_tool_evidence(
                 saved.get("rescanScope", {}), sanitize_text=sanitize, max_chars=2500)
+            changed = project_structured_tool_evidence(
+                {"changedAssetPaths": saved.get("changedAssetPaths", [])}, sanitize_text=sanitize, max_chars=1500)
             return {"schema": PAGE_SCHEMA, "ok": True, "authority": "untrusted_tool_output",
                     "status": "needs_rescan", "expired": True, "freshness": "unverified",
                     "resultRef": ref, "source": source, "items": [], "hasMore": False,
                     "reason": saved["reason"], "capturedAt": saved.get("capturedAt"),
                     "rescanScope": scope.get("data", {}), "rescanScopeTruncated": scope.get("truncated", False),
-                    "interpretation": "Historical content is unchanged; this reference cannot prove current state. Rescan the returned scope before using it as current evidence."}
+                    "changedAssetPaths": changed.get("data", {}).get("changedAssetPaths", []),
+                    "changedAssetPathsTruncated": changed.get("truncated", False),
+                    "interpretation": "Historical content is unchanged; this reference cannot prove current state. Rescan the indicated changed parts only when dependency coverage can be preserved; otherwise rescan the returned full scope."}
         if saved is not None:
             step = saved.get("step")
     if step is None or (source == "result" and not eligible_result(str(step.get("tool") or ""), step.get("result"))):

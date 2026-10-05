@@ -46,6 +46,7 @@ MAX_RESPONSE_FRAME_BYTES = 8 * 1024 * 1024
 DEFAULT_TIMEOUT_SECONDS = 5.0
 PROJECT_CORE_MAX_CONCURRENT = 3
 PROJECT_CORE_BUSY_WAIT_SECONDS = 0.25
+SCAN_SCOPE_TOOL_NAMES = frozenset({"vrc_capture_scan_scope", "vrc_validate_scan_scope"})
 _ACTIVE_CALL_AUDIT_CAPTURE: ContextVar[list[dict[str, Any]] | None] = ContextVar(
     "vrcforge_unity_mcp_call_audit_capture",
     default=None,
@@ -334,9 +335,11 @@ class UnityMcpCoreClient:
             raise UnityMcpCoreError("Unity MCP Core returned an invalid tools list.")
         names = [tool.get("name") for tool in tools]
         expected_names = PLANNING_TOOL_NAMES if exposure_layer == "planning" else self._expected_tool_names
-        if len(tools) != len(expected_names) or not all(isinstance(name, str) and name for name in names):
+        if not all(isinstance(name, str) and name for name in names):
             raise UnityMcpCoreError("Unity MCP Core returned an invalid tools list.")
-        if len(set(names)) != len(expected_names) or set(names) != expected_names:
+        returned_names = set(names)
+        if len(set(names)) != len(names) \
+                or returned_names not in (expected_names, expected_names | SCAN_SCOPE_TOOL_NAMES):
             raise UnityMcpCoreError("Unity MCP Core tool contract does not match the packaged VRCForge tools.")
         for tool in tools:
             name = tool["name"]
@@ -347,7 +350,7 @@ class UnityMcpCoreClient:
             if not isinstance(input_schema, dict) or input_schema.get("type") != "object" \
                     or not isinstance(annotations, dict) or not isinstance(metadata, dict):
                 raise UnityMcpCoreError("Unity MCP Core tool metadata is invalid.")
-            is_read_only = name in READ_ONLY_TOOL_NAMES
+            is_read_only = name in READ_ONLY_TOOL_NAMES or name in SCAN_SCOPE_TOOL_NAMES
             if annotations.get("readOnlyHint") is not (True if is_read_only else None) \
                     or annotations.get("destructiveHint") is not (None if is_read_only else True) \
                     or metadata.get("permission") != ("ReadOnly" if is_read_only else "RequiresApproval") \
@@ -360,7 +363,9 @@ class UnityMcpCoreClient:
                     or "When NOT to use:" not in description \
                     or "Negative example:" not in description:
                 raise UnityMcpCoreError("Unity MCP Core tool permissions do not match the packaged VRCForge tools.")
-        return tools
+        # The optional Core capability is for backend freshness checks only; keep
+        # the fixed model and catalog tool surface unchanged.
+        return [tool for tool in tools if tool["name"] not in SCAN_SCOPE_TOOL_NAMES]
 
     def call_tool(self, name: str, arguments: dict[str, Any] | None = None,
                   *, execution_context: dict[str, Any] | None = None) -> dict[str, Any]:

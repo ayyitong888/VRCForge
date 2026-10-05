@@ -16,11 +16,13 @@ namespace VRCForge.Editor
         internal const string HandshakeProtocol = "vrcforge.core-handshake.v1";
         internal const string ProductVersion = "1.8.8";
         internal const string ToolContractVersion = "160";
-        internal const int ToolCount = 97;
+        internal const int ToolCount = 99;
 
         private static readonly Dictionary<string, string> ExpectedTypes =
             new Dictionary<string, string>(StringComparer.Ordinal)
             {
+                { "vrc_capture_scan_scope", "VRCForge.Editor.CaptureScanScopeTool" },
+                { "vrc_validate_scan_scope", "VRCForge.Editor.ValidateScanScopeTool" },
                 { "vrc_add_component", "VRCForge.Editor.AddComponentTool" },
                 { "vrc_add_modular_avatar_component", "VRCForge.Editor.MAComponentWriter" },
                 { "vrc_add_outfit_part", "VRCForge.Editor.WardrobeOutfitPartWriter" },
@@ -123,6 +125,8 @@ namespace VRCForge.Editor
         private static readonly HashSet<string> ExpectedReadOnlyNames =
             new HashSet<string>(StringComparer.Ordinal)
             {
+                "vrc_capture_scan_scope",
+                "vrc_validate_scan_scope",
                 "vrc_find_assets",
                 "vrc_get_asset_info",
                 "vrc_get_compile_errors",

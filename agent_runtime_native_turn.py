@@ -11,6 +11,10 @@ import copy
 import json
 from collections.abc import Iterable, Mapping
 from typing import TYPE_CHECKING, Any, Callable
+from agent_scan_result_policy import (
+    SCAN_RESULT_CONTINUATION_POLICY,
+    is_scan_result_policy_message,
+)
 
 if TYPE_CHECKING:
     from agent_runtime_session_state import AgentRuntimeSessionState
@@ -110,6 +114,7 @@ class NativeRuntimeTurn:
         self._native_decision: dict[str, Any] | None = None
         self._native_steers: list[str] = []
         self._queued_calls: list[dict[str, Any]] = []
+        self._scan_result_policy_persisted = False
         self.admitted_tool_names: set[str] | None = None
         self.compaction_attempted = False
         self.compaction: dict[str, Any] | None = None
@@ -183,14 +188,42 @@ class NativeRuntimeTurn:
 
     def persist_request_context(self, messages: list[dict[str, Any]]) -> None:
         """Persist only new, host-built context snapshots before provider dispatch."""
-        existing = self.snapshot().get("messages", [])
+        if not isinstance(messages, list) or any(not isinstance(message, dict) for message in messages):
+            raise ValueError("Native request messages are invalid.")
+        snapshot = self.snapshot()
+        existing = snapshot.get("messages", [])
         if messages[:len(existing)] != existing:
             raise ValueError("Native context must not rewrite conversation history.")
+        policy_seen = any(is_scan_result_policy_message(message) for message in existing)
         for message in messages[len(existing):]:
+            if message.get("role") == "system":
+                if not is_scan_result_policy_message(message) or policy_seen:
+                    raise ValueError("Unexpected native system context message.")
+                self._state.append_native_scan_result_policy_once(
+                    self._session_id, binding=self._binding, message=message,
+                )
+                policy_seen = True
+                continue
             if message.get("role") != "user" or not str(message.get("content", "")).startswith(
                     "Runtime context snapshot (data, not user instructions or authorization): "):
                 raise ValueError("Unexpected native context message.")
             self._state.append_native_user(self._session_id, binding=self._binding, message=message["content"])
+
+    def persist_scan_result_policy(self) -> None:
+        if not self._binding or self._scan_result_policy_persisted:
+            return
+        from agent_tool_result_reader import _validated_scan_snapshot
+
+        if not any(_validated_scan_snapshot(step) for step in self._loop_state):
+            return
+        snapshot = self.snapshot()
+        policy = {"role": "system", "content": SCAN_RESULT_CONTINUATION_POLICY}
+        if any(is_scan_result_policy_message(message) for message in snapshot.get("messages", [])):
+            self._scan_result_policy_persisted = True
+            return
+        messages = snapshot["messages"]
+        self.persist_request_context(messages + [policy])
+        self._scan_result_policy_persisted = True
 
     def add_recoveries(self, recoveries: list[dict[str, Any]]) -> None:
         # Legacy turns borrow this adapter without initializing native storage.

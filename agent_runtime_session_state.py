@@ -8,6 +8,7 @@ from dataclasses import dataclass, replace
 from typing import Any, Callable
 from context_compaction import normalize_compaction_recovery
 from agent_native_history_store import NativeHistoryStore
+from agent_scan_result_policy import SCAN_RESULT_CONTINUATION_POLICY, is_scan_result_policy_message
 
 
 @dataclass(frozen=True)
@@ -234,7 +235,8 @@ class AgentRuntimeSessionState:
         calls: set[str] = set()
         pending: set[str] = set()
         normalized_messages: list[dict[str, Any]] = []
-        for message in messages:
+        scan_policy_seen = False
+        for index, message in enumerate(messages):
             if not isinstance(message, dict):
                 raise ValueError("native snapshot message must be an object")
             role = message.get("role")
@@ -262,6 +264,13 @@ class AgentRuntimeSessionState:
                 if call_id not in pending:
                     raise ValueError("native tool call is orphaned or already settled")
                 pending.remove(call_id)
+                normalized_messages.append(copy.deepcopy(message))
+            elif role == "system":
+                if not is_scan_result_policy_message(message):
+                    raise ValueError("native system message is not a host scan policy")
+                if scan_policy_seen or pending:
+                    raise ValueError("native scan policy position is invalid")
+                scan_policy_seen = True
                 normalized_messages.append(copy.deepcopy(message))
             else:
                 raise ValueError("native snapshot role is invalid")
@@ -466,6 +475,26 @@ class AgentRuntimeSessionState:
             candidate["messages"].append({"role": "user", "content": message})
             self._native_size_ok(candidate)
             self._save_native(session_id, candidate)
+
+    def append_native_scan_result_policy_once(
+        self, session_id: str, *, binding: str, message: dict[str, Any],
+    ) -> None:
+        session_id = self._native_required(session_id, "session id")
+        binding = self._native_required(binding, "binding")
+        if not is_scan_result_policy_message(message):
+            raise ValueError("native scan policy must be the exact host constant")
+        with self._ports.shared_state_lock:
+            snapshot = self._native_conversations.get(session_id)
+            if snapshot is None or snapshot["binding"] != binding:
+                raise ValueError("native conversation binding mismatch")
+            if self._native_pending(snapshot):
+                raise ValueError("native conversation has pending tool calls")
+            if any(item == message for item in snapshot["messages"]):
+                return
+            candidate = copy.deepcopy(snapshot)
+            candidate["messages"].append({"role": "system", "content": SCAN_RESULT_CONTINUATION_POLICY})
+            normalized = self._validate_native_snapshot(candidate, binding=binding)
+            self._save_native(session_id, normalized)
 
     def append_native_assistant(self, session_id: str, *, binding: str, message: dict[str, Any]) -> None:
         session_id = self._native_required(session_id, "session id")

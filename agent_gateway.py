@@ -3160,8 +3160,7 @@ class AgentGateway:
             self._desktop.configure_paths(audit_dir)
 
     def _invalidate_scan_results(self, project_root: str, reason: str) -> None:
-        # A cannot prove Unity's dependency closure. Any project mutation is
-        # conservative; an unknown-scope Shell mutation invalidates all projects.
+        # Unknown-scope writes invalidate all project snapshots.
         name, _, phase = reason.rpartition(":")
         if phase == "starting":
             self._scan_results.begin_mutation(project_root, name)
@@ -7598,7 +7597,7 @@ class AgentGateway:
                 )
             else:  # skill
                 step_tool = str(plan.get("skillTool") or "")
-                scan_generation = self._scan_results.generation(project_root) if is_scan_tool(step_tool) and project_root else None
+                scan_generation = self._scan_results.start(project_root, step_tool, execution_arguments) if is_scan_tool(step_tool) and project_root else None
                 step_params = dict(execution_arguments)
                 action_arguments = dict(execution_arguments)
                 if step_tool in {

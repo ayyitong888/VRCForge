@@ -66,6 +66,7 @@
     { "path": "Assets/VRCForge/Editor/Generic/UnityGameObjectCrud.cs", "guid": "9840237206a64e8bb7360a086df0aaec" },
     { "path": "Assets/VRCForge/Editor/MAComponentWriter.cs", "guid": "ad341c384a27432196bced52fe633371" },
     { "path": "Assets/VRCForge/Editor/MCP", "guid": "a055757da9876c09de19d3114140ccd1" },
+    { "path": "Assets/VRCForge/Editor/MCP/ScanScopeJournal.cs", "guid": "cf9cb638ce8f135118b5ee8bdf011028" },
     { "path": "Assets/VRCForge/Editor/MCP/VRCForgeMcpCoreServer.cs", "guid": "40f6f15bd08c7e74538a468c7950365e" },
     { "path": "Assets/VRCForge/Editor/MCP/VRCForgeMcpPeerProcessVerifier.cs", "guid": "8c4c159a62cab9589b8c71dd2e0fdfd5" },
     { "path": "Assets/VRCForge/Editor/MCP/VRCForgeMcpSourceMigration.cs", "guid": "50e025b801d71f294fd27e0836495946" },
