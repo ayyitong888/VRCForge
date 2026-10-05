@@ -15945,6 +15945,7 @@ def load_internal_tool_block(params: dict[str, Any]) -> dict[str, Any]:
         "ok": True,
         "status": "loaded",
         "block": block,
+        "exposureLayer": normalize_exposure_layer(params.get("exposureLayer")),
         "loadedBlocks": sorted(loaded),
         "selectionMode": "whole" if selections.get(block) is None else "subset",
         "selectedTools": selections.get(block),

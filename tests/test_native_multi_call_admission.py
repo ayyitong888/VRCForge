@@ -93,7 +93,7 @@ def test_single_write_still_requires_the_existing_real_approval_owner(tmp_path):
 
 
 @pytest.mark.parametrize("stateful_name,arguments", [
-    ("vrcforge_load_internal_tool_block", {"block": "diagnostics_build/compile_logs"}),
+    ("vrcforge_load_internal_tool_block", {"block": "diagnostics_build/compile_logs", "tools": []}),
     ("vrcforge_ask_user", {"question": "Continue?"}),
 ])
 def test_write_false_stateful_calls_remain_serial_not_parallel(tmp_path, stateful_name, arguments):
@@ -176,7 +176,7 @@ def test_stop_after_first_read_settles_remaining_call_without_dispatch(tmp_path)
 
 
 def test_loader_cannot_authorize_a_previously_unadvertised_same_receipt_call(tmp_path):
-    receipt = _receipt(call("load", "vrcforge_load_internal_tool_block", {}),
+    receipt = _receipt(call("load", "vrcforge_load_internal_tool_block", {"tools": []}),
                        call("guess", "fixture_late_read", {}))
     gateway, model, _ = setup_gateway(tmp_path, [receipt, {"role": "assistant", "content": "Not completed"}])
     late = []

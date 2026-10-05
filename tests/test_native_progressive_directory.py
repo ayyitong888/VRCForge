@@ -163,7 +163,8 @@ def test_actual_native_requests_browse_load_and_execute_without_global_directory
     gateway.register_tool("vrcforge_load_internal_tool_block", "When to use: browse or load. When NOT to use: write.", "read/debug", d.load_internal_tool_block)
     gateway._runtime_planner._catalog = FakeCatalog(planning=PlannerCatalogSnapshot(visible_tools=tools, routable_tools=tools))
     selectors = [leaf] if direct_leaf else [None, "project_environment", leaf]
-    replies = [call(f"browse-{i}", "load_internal_tool_block", {"block": selector} if selector else {})
+    replies = [call(f"browse-{i}", "load_internal_tool_block",
+                   {"block": selector, "tools": ["read_text_file"] if selector == leaf else []} if selector else {"tools": []})
                for i, selector in enumerate(selectors)]
     replies += [call("read", "read_text_file", {"path": "fixture.txt"}), finish]
     model.replies = iter(replies)
@@ -174,6 +175,7 @@ def test_actual_native_requests_browse_load_and_execute_without_global_directory
         names = {t["function"]["name"] for t in request["tools"]}
         assert "load_internal_tool_block" in names
         assert "list_internal_tool_blocks" not in names
+        assert request["tools"] == model.requests[0]["tools"]
     for i, selector in enumerate(selectors[:-1]):
         message = next(m for m in model.requests[i+1]["messages"] if m.get("tool_call_id") == f"browse-{i}")
         observation = json.loads(message["content"])["observations"][0]["observation"]
@@ -186,9 +188,12 @@ def test_actual_native_requests_browse_load_and_execute_without_global_directory
     before = model.requests[len(selectors)-1]["tools"]
     after = model.requests[len(selectors)]["tools"]
     assert all(t["function"]["name"] != "read_text_file" for t in before)
-    assert after[:len(before)] == before
-    assert after[-1]["function"]["name"] == "read_text_file"
-    assert gateway.runtime_sessions.internal_tool_selections("native-session")[leaf] is None
+    assert after == before
+    loaded = next(m for m in model.requests[len(selectors)]["messages"]
+                  if m.get("tool_call_id") == f"browse-{len(selectors)-1}")
+    definitions = json.loads(loaded["content"])["observations"][0]["loadedToolDefinitions"]
+    assert [tool["name"] for tool in definitions] == ["read_text_file"]
+    assert gateway.runtime_sessions.internal_tool_selections("native-session")[leaf] == ["read_text_file"]
 
 
 @pytest.mark.parametrize('selector', [None, 'project_environment', 'project_environment/assets_packages'])

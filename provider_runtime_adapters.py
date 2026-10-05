@@ -16,6 +16,10 @@ from model_provider_adapters import validate_provider_api_key
 from provider_protocol_negotiation import DEEPSEEK_FLASH_MODELS, DEEPSEEK_PRO_MODEL
 
 
+class ProviderTokenLimitError(RuntimeError):
+    """An explicit provider token boundary, not a complete assistant receipt."""
+
+
 class ModelProviderAdapter(Protocol):
     """Narrow provider runtime contract; callers retain planning authority."""
 

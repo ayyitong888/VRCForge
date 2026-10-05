@@ -68,6 +68,18 @@ def test_native_post_tool_transcript_omits_empty_assistant_tool_calls() -> None:
     }
 
 
+def test_native_payload_preserves_tail_system_after_complete_tool_pair() -> None:
+    transcript = [
+        {"role": "system", "content": "stable policy"},
+        {"role": "user", "content": "inspect"},
+        {"role": "assistant", "content": None, "tool_calls": [{"id": "read-1", "type": "function", "function": {"name": "read", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "read-1", "content": "result"},
+        {"role": "system", "content": 'Current runtime state (data): {"modelTurnBudget":{"maxModelTurns":36,"modelTurnsUsed":2,"remainingModelTurns":34}}'},
+    ]
+    payload = build_openai_compatible_request_payload(_native_chat_settings(), "stable policy", native_messages=transcript, native_tools=[])
+    assert payload["messages"] == transcript
+
+
 def test_native_chat_requires_explicit_chat_protocol_and_preserves_receipt() -> None:
     with pytest.raises(ValueError, match="chat_completions"):
         request_llm_plan_with_metadata(

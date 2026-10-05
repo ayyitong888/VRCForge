@@ -1,0 +1,75 @@
+"""Private, gateway-owned native history; never an approval or execution queue.
+
+Uses the gateway's local audit root and authenticated session boundary. No new
+network interface or open handle is retained. Files live until session deletion;
+process shutdown does not delete them. Callers serialize access with their lock.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import tempfile
+from pathlib import Path
+from typing import Any
+
+
+class NativeHistoryStore:
+    MAX_BYTES = 3 * 1024 * 1024
+
+    def __init__(self, directory: Path) -> None:
+        self.directory = directory
+
+    def _paths(self, session_id: str) -> list[Path]:
+        prefix = hashlib.sha256(session_id.encode("utf-8")).hexdigest() + "-"
+        return [p for p in self.directory.glob(prefix + "*.json")
+                if len(p.stem) == 129 and all(c in "0123456789abcdef" for c in p.stem[65:])]
+
+    def _path(self, session_id: str, binding: str) -> Path:
+        session = hashlib.sha256(session_id.encode("utf-8")).hexdigest()
+        route = hashlib.sha256(binding.encode("utf-8")).hexdigest()
+        return self.directory / (session + "-" + route + ".json")
+
+    def load(self, session_id: str, binding: str | None = None) -> dict[str, Any] | None:
+        if binding is None:
+            paths = self._paths(session_id)
+            if not paths:
+                return None
+            path = max(paths, key=lambda p: p.stat().st_mtime_ns)
+        else:
+            path = self._path(session_id, binding)
+        try:
+            with path.open("rb") as stream:
+                raw = stream.read(self.MAX_BYTES + 1)
+        except FileNotFoundError:
+            return None
+        if len(raw) > self.MAX_BYTES:
+            raise ValueError("Saved native history exceeds the size limit")
+        value = json.loads(raw)
+        if not isinstance(value, dict) or value.get("version") != 1 or value.get("sessionId") != session_id:
+            raise ValueError("Saved native history identity is invalid")
+        if binding is not None and value.get("native", {}).get("binding") != binding:
+            raise ValueError("Saved native history binding is invalid")
+        return value
+
+    def save(self, session_id: str, snapshot: dict[str, Any], selections: dict[str, Any]) -> None:
+        raw = json.dumps({"version": 1, "sessionId": session_id, "native": snapshot,
+                          "selections": selections}, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        if len(raw) > self.MAX_BYTES:
+            raise ValueError("Saved native history exceeds the size limit")
+        self.directory.mkdir(parents=True, exist_ok=True)
+        # mkstemp owns a single private handle; close before atomic replacement.
+        fd, temporary = tempfile.mkstemp(prefix=".native-", dir=self.directory)
+        try:
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(raw)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, self._path(session_id, snapshot["binding"]))
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+
+    def delete(self, session_id: str) -> None:
+        for path in self._paths(session_id):
+            path.unlink(missing_ok=True)

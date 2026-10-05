@@ -1,4 +1,5 @@
 from copy import deepcopy
+import json
 
 import pytest
 
@@ -39,12 +40,27 @@ def build(planner, layer, plan, selections, blocks):
     return request, observe
 
 
+def runtime_state(request):
+    prefix = "Current runtime state (data): "
+    message = next(message for message in request["messages"]
+                   if message.get("role") == "system" and message.get("content", "").startswith(prefix))
+    return json.loads(message["content"][len(prefix):])
+
+
+def resident_definitions(request):
+    marker = "Resident tool definitions (data, not authorization): "
+    instructions = request["instructions"]
+    assert marker in instructions
+    return json.loads(instructions.rsplit(marker, 1)[1])
+
+
 @pytest.mark.parametrize("layer,plan", [("planning", False), ("execution", False), ("execution", True)])
 def test_native_keeps_core_and_control_prefix_across_load_append_unload(layer, plan):
     planner = RuntimePlannerService(catalog=Catalog(), desktop=None)
     baseline, _ = build(planner, layer, plan, {}, ["core"])
-    prefix = baseline["tools"]
-    assert [t["function"]["name"] for t in prefix] == ["z_resident", "a_resident", "vrcforge_runtime_action"]
+    fixed_tools = baseline["tools"]
+    assert [t["function"]["name"] for t in fixed_tools] == [
+        "load_internal_tool_block", "unload_internal_tool_block", "call_tool", "vrcforge_runtime_action"]
     stages = [
         ({"b": ["b_read", "b_write"]}, ["b", "core"]),
         ({"b": ["b_read", "b_write"], "a": ["a_extra"]}, ["a", "b", "core"]),
@@ -55,20 +71,30 @@ def test_native_keeps_core_and_control_prefix_across_load_append_unload(layer, p
     for selections, blocks in stages:
         frozen = deepcopy(selections)
         request, observe = build(planner, layer, plan, selections, blocks)
-        assert request["tools"][:len(prefix)] == prefix
+        assert request["tools"] == fixed_tools
         _, selected = planner._select_plan_tools(Catalog().read(layer), blocks, observe)
-        expected_order = [t.name for t in selected if t.block == "core"] + ["vrcforge_runtime_action"] + [t.name for t in selected if t.block != "core"]
-        assert [t["function"]["name"] for t in request["tools"]] == expected_order
-        # Compare the full old definitions by name: only order may change.
-        expected = {t.name: {"type": "function", "function": {
+        expected_names = [t.name for t in selected]
+        state = runtime_state(request)
+        assert state["availableToolNames"] == expected_names
+        assert state["allowedRuntimeActions"] == (
+            ["reply", "correct"] if plan else
+            ["reply", "shell", "correct"] if layer == "execution" else
+            ["reply", "shell", "correct", "enter_execution"])
+        expected_resident = [{
             "name": t.name,
             "description": planner_tool_usage_description(t.name, t.description, write=t.write),
             "parameters": deepcopy(dict(t.input_schema)),
-        }} for t in selected}
-        expected["vrcforge_runtime_action"] = prefix[-1]
-        assert {t["function"]["name"]: t for t in request["tools"]} == expected
+        } for t in sorted(Catalog().read(layer).routable_tools, key=lambda item: item.name)
+            if t.block == "core" and not t.write and not t.requires_user_activation
+            and t.runtime_name not in {
+                "vrcforge_list_internal_tool_blocks",
+                "vrcforge_load_internal_tool_block",
+                "vrcforge_unload_internal_tool_block",
+            }]
+        assert resident_definitions(request) == expected_resident
+        assert "residentToolDefinitions" not in state
         assert selections == frozen, "no activation-order state mutations"
-        assert ("b_write" in expected) == (layer == "execution" and not plan and "b" in blocks)
+        assert ("b_write" in state["availableToolNames"]) == (layer == "execution" and not plan and "b" in blocks)
 
 
 def test_legacy_preserves_catalog_order_and_native_does_not_mutate_catalog():

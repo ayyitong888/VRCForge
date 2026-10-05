@@ -27,6 +27,7 @@ from provider_runtime_adapters import (
     DeepSeekResponsesAdapter,
     OpenAIResponsesAdapter,
     ProviderRuntimeRequest,
+    ProviderTokenLimitError,
 )
 from approved_unity_execution import (
     ApprovedUnityExecutionError,
@@ -2427,6 +2428,8 @@ def request_openai_compatible_plan_with_metadata(
                 if native_mode:
                     if cancel_event is not None and cancel_event.is_set():
                         raise RuntimeError("Native Chat stream cancelled.")
+                    if native_finish_reason == "length":
+                        raise ProviderTokenLimitError("Native Chat stream reached a token limit (finish_reason=length).")
                     if native_finish_reason not in {"stop", "tool_calls"} or (native_finish_reason == "tool_calls" and not native_tool_calls):
                         raise RuntimeError("Native Chat stream ended without a complete assistant receipt.")
                     return _native_chat_response(
@@ -2490,6 +2493,8 @@ def request_openai_compatible_plan_with_metadata(
                 raise RuntimeError("Native Chat request cancelled.")
             choice = response_choices[0] if response_choices else {}
             finish_reason = str(get_value(choice, "finish_reason") or "")
+            if finish_reason == "length":
+                raise ProviderTokenLimitError("Native Chat response reached a token limit (finish_reason=length).")
             if finish_reason not in {"stop", "tool_calls"}:
                 raise RuntimeError("Native Chat response did not terminate with stop or tool_calls.")
             return _native_chat_response(settings, response, source="openai-compatible")
@@ -2498,6 +2503,8 @@ def request_openai_compatible_plan_with_metadata(
             reasoning=extract_llm_reasoning_trace(response, settings, source="openai-compatible"),
             usage=extract_llm_token_usage(response, settings, source="openai-compatible"),
         )
+    except ProviderTokenLimitError:
+        raise
     except Exception as exc:  # noqa: BLE001
         if image_paths:
             raise RuntimeError(format_multimodal_error(exc, settings, True, provider_display_name(settings.llm_provider))) from exc

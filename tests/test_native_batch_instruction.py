@@ -1,6 +1,7 @@
 """Native request guidance matches the existing serial multi-call admission contract."""
 
 import pytest
+import json
 
 from runtime_planner_service import PlannerCatalogSnapshot, RuntimePlannerService
 
@@ -22,7 +23,7 @@ def test_native_instruction_allows_independent_reads_with_single_write_and_contr
     )
     instructions = request["instructions"]
     assert "Call one advertised tool at a time" not in instructions
-    assert "independent advertised read tools together" in instructions
+    assert "independent read tools together" in instructions
     assert "at most one write per response" in instructions
     assert "runtime control actions alone" in instructions
     assert "parallel execution" not in instructions
@@ -31,7 +32,9 @@ def test_native_instruction_allows_independent_reads_with_single_write_and_contr
     control = next(tool["function"] for tool in request["tools"]
                    if tool["function"]["name"] == "vrcforge_runtime_action")
     assert "action" in control["parameters"]["required"]
-    assert control["parameters"]["properties"]["action"]["enum"] == (
+    assert control["parameters"]["properties"]["action"]["enum"] == ["reply", "shell", "correct", "enter_execution"]
+    state = json.loads(request["messages"][-1]["content"].split(": ", 1)[1])
+    assert state["allowedRuntimeActions"] == (
         ["reply", "correct"] if plan_mode else
         ["reply", "shell", "correct", "enter_execution"] if layer == "planning" else
         ["reply", "shell", "correct"]

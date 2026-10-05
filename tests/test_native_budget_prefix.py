@@ -80,7 +80,7 @@ def test_entire_runtime_state_changes_only_tail_and_keeps_tool_authority():
             project_context_active=True, project_path=path, internal_tool_blocks=blocks,
             global_instructions='constant global', project_instructions='constant project')[0]
     def state(request):
-        assert request['messages'][:-1] == history
+        assert request['messages'][:len(history)] == history
         assert request['messages'][-1]['role'] == 'system'
         return json.loads(request['messages'][-1]['content'].split(': ', 1)[1])
     def tools(request):
@@ -95,16 +95,20 @@ def test_entire_runtime_state_changes_only_tail_and_keeps_tool_authority():
     unloaded = make(['core'])
     for request in (loaded, skill_enabled, changed, plan, unloaded):
         assert request['instructions'] == base['instructions']
+        assert request['tools'] == base['tools']
         assert 'Current runtime state (data)' not in request['instructions']
         state(request)
     assert state(loaded)['loadedToolBlocks'] == ['core', 'domain']
     assert 'runtimeContextInformation' not in state(loaded)
-    assert '"items":[{"name":"guide","title":"Guide","description":"Complete guidance"}]' in state(skill_enabled)['runtimeContextInformation']
+    assert 'runtimeContextInformation' not in state(skill_enabled)
+    context = json.loads(skill_enabled['messages'][-2]['content'].split(': ', 1)[1])
+    assert '"items":[{"name":"guide","title":"Guide","description":"Complete guidance"}]' in context['runtimeContextInformation']
     assert state(changed)['shellExecutor'] == shell_data
     assert state(changed)['projectPath'] == 'C:/other'
     assert state(plan)['exposureLayer'] == 'planning'
     assert state(plan)['planMode'] is True and 'Only the user' in state(plan)['modeConstraint']
-    assert tools(loaded) == {'inspect', 'change', 'vrcforge_runtime_action'}
-    assert tools(plan) == {'inspect', 'vrcforge_runtime_action'}
-    assert tools(unloaded) == tools(base) == {'vrcforge_runtime_action'}
+    assert state(loaded)['availableToolNames'] == ['inspect', 'change']
+    assert state(plan)['availableToolNames'] == ['inspect']
+    assert state(unloaded)['availableToolNames'] == []
+    assert tools(unloaded) == tools(base) == {'load_internal_tool_block', 'unload_internal_tool_block', 'call_tool', 'vrcforge_runtime_action'}
     assert state(unloaded)['loadedToolBlocks'] == ['core']

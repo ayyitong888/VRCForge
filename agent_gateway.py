@@ -83,6 +83,7 @@ from optimization_service import (
 )
 from path_to_skill_controller import PATH_TO_SKILL_PREVIEW_INPUT_SCHEMA, PATH_TO_SKILL_WRITE_INPUT_SCHEMA
 from agent_runtime_session_state import AgentRuntimeSessionState, AgentRuntimeSessionStatePorts
+from agent_native_history_store import NativeHistoryStore
 from agent_runtime_native_turn import NativeRuntimeTurn
 from agent_runtime_followup_queue import AgentRuntimeFollowupQueue, FollowupQueuePorts
 from agent_runtime_run_ledger import AgentRuntimeRunLedger, AgentRuntimeRunLedgerPorts
@@ -2119,7 +2120,8 @@ class AgentGateway:
             "vrcforge_runtime_skill_scope", default=None,
         )
         self._runtime_session_state = AgentRuntimeSessionState(
-            AgentRuntimeSessionStatePorts(shared_state_lock=self._lock)
+            AgentRuntimeSessionStatePorts(shared_state_lock=self._lock,
+                native_history_store=NativeHistoryStore(self.audit_dir / "native-history"))
         )
         self._runtime_followup_queue = AgentRuntimeFollowupQueue(
             FollowupQueuePorts(path=self.audit_dir / "runtime-followups.json", lock=self._lock)
@@ -3145,7 +3147,7 @@ class AgentGateway:
             self.config_path = config_path
             self.audit_dir = audit_dir
             self._approvals.clear()
-            self._runtime_session_state.clear()
+            self._runtime_session_state.configure_native_store(NativeHistoryStore(audit_dir / "native-history"))
             self._desktop.configure_paths(audit_dir)
 
     def _signal_background_activity(self, reason: str) -> None:
@@ -6293,6 +6295,7 @@ class AgentGateway:
                 native_binding, message, loop_state, continuation_context,
                 continuation_completion, continuation_observation,
                 initial_history=history, client_turn_id=client_turn_id,
+                project_context_active=project_context_active,
             )
         except ValueError as exc:
             raise AgentGatewayError(str(exc), status_code=409) from exc

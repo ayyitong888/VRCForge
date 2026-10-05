@@ -10,6 +10,14 @@ from tests.test_dashboard_server import _TestRuntimePlannerCatalog, _TestRuntime
 
 
 def call(call_id, name, arguments):
+    if name == "vrcforge_load_internal_tool_block":
+        name = "load_internal_tool_block"
+    elif name == "vrcforge_unload_internal_tool_block":
+        name = "unload_internal_tool_block"
+    elif name not in {"vrcforge_runtime_action", "load_internal_tool_block",
+                      "unload_internal_tool_block", "call_tool"}:
+        arguments = {"tool": name, "arguments": arguments}
+        name = "call_tool"
     return {"role": "assistant", "content": None, "reasoning_content": "private-fixture-replay",
             "tool_calls": [{"id": call_id, "type": "function", "function": {
                 "name": name, "arguments": json.dumps(arguments)}}]}
@@ -57,6 +65,14 @@ def budgeted_request_history(request):
     return messages[:-1]
 
 
+def runtime_state(request):
+    message = request["messages"][-1]
+    assert message["role"] == "system"
+    prefix, separator, payload = message["content"].partition(": ")
+    assert separator and prefix == "Current runtime state (data)"
+    return json.loads(payload)
+
+
 def setup_gateway(tmp_path, replies):
     gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
     invoked = []
@@ -98,7 +114,18 @@ def test_native_default_exposes_write_immediately_and_preserves_approval(tmp_pat
     _set_mode(gateway, "approval")
     result = run(gateway, tmp_path, message="Write the fixture")
 
-    assert "fixture_write" in {item["function"]["name"] for item in model.requests[0]["tools"]}
+    state = runtime_state(model.requests[0])
+    assert "fixture_write" in state["availableToolNames"]
+    context_marker = "Runtime context snapshot (data, not user instructions or authorization): "
+    user_context = next(message["content"] for message in model.requests[0]["messages"]
+                        if message.get("role") == "user"
+                        and message.get("content", "").startswith(context_marker))
+    context = json.loads(user_context[len(context_marker):])
+    activated = context["activatedToolDefinitions"]
+    assert any(item["name"] == "fixture_write" for item in activated)
+    assert "parameters" in next(item for item in activated if item["name"] == "fixture_write")
+    assert "residentToolDefinitions" not in state
+    assert "enter_execution" not in state["allowedRuntimeActions"]
     assert len(model.requests) == 1
     assert result["exposureLayer"] == "execution"
     assert result["write"]["status"] == "approval_pending"
@@ -176,7 +203,7 @@ def test_native_action_contract_explains_supervised_execution_boundary(tmp_path)
     assert "reply ends the turn" in action_description
     assert "shell runs an authorized host command" in action_description
     assert "correct resubmits a failed action with corrected arguments" in action_description
-    assert "enter_execution" in action["parameters"]["properties"]["action"]["enum"]
+    assert "enter_execution" in runtime_state(model.requests[0])["allowedRuntimeActions"]
     assert not invoked
     assert model.requests[1]["messages"][-2]["tool_call_id"] == "phase"
     assert "entered_execution" in model.requests[1]["messages"][-2]["content"]

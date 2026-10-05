@@ -4,21 +4,22 @@ import copy
 import json
 import threading
 from contextlib import AbstractContextManager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 from context_compaction import normalize_compaction_recovery
+from agent_native_history_store import NativeHistoryStore
 
 
 @dataclass(frozen=True)
 class AgentRuntimeSessionStatePorts:
     """Capabilities required by the in-memory runtime-session state owner.
 
-    The owner has no filesystem, network, provider, approval, or execution
-    capability. Its lifetime is the containing AgentGateway instance, and it
-    borrows that gateway's re-entrant state lock.
+    Optional storage is scoped to gateway-owned native history only, never
+    approvals or execution. Lifetime and re-entrant lock belong to the gateway.
     """
 
     shared_state_lock: AbstractContextManager[Any]
+    native_history_store: NativeHistoryStore | None = None
 
 
 class AgentRuntimeSessionState:
@@ -39,6 +40,7 @@ class AgentRuntimeSessionState:
         "_steer_seen_ids",
         "_native_conversations",
         "_stream_context",
+        "_native_loaded",
     )
 
     def __init__(self, ports: AgentRuntimeSessionStatePorts) -> None:
@@ -52,10 +54,53 @@ class AgentRuntimeSessionState:
         self._steer_seen_ids: dict[tuple[str, str], set[str]] = {}
         self._native_conversations: dict[str, dict[str, Any]] = {}
         self._stream_context = threading.local()
+        self._native_loaded: set[str] = set()
+
+    def _load_native(self, session_id: str, binding: str | None = None) -> None:
+        current = self._native_conversations.get(session_id)
+        if session_id in self._native_loaded and (binding is None or (current is not None and current["binding"] == binding)):
+            return
+        store = self._ports.native_history_store
+        saved = store.load(session_id, binding) if store else None
+        if saved is not None:
+            native = saved.get("native")
+            if not isinstance(native, dict):
+                raise ValueError("Saved native history is invalid")
+            normalized = self._validate_native_snapshot(native, binding=native.get("binding"))
+            selections = saved.get("selections")
+            if not isinstance(selections, dict) or any(
+                not isinstance(block, str) or not block or
+                (names is not None and (not isinstance(names, list) or any(not isinstance(n, str) or not n for n in names)))
+                for block, names in selections.items()
+            ):
+                raise ValueError("Saved native tool selections are invalid")
+            self._native_conversations[session_id] = normalized
+            session = self._sessions.setdefault(session_id, {"id": session_id, "turns": []})
+            session["internalToolBlocks"] = sorted({"core", *selections})
+            session["internalToolSelections"] = copy.deepcopy(selections)
+        self._native_loaded.add(session_id)
+
+    def _save_native(self, session_id: str, candidate: dict[str, Any]) -> None:
+        store = self._ports.native_history_store
+        if store:
+            selections = (self._sessions.get(session_id) or {}).get("internalToolSelections") or {}
+            store.save(session_id, candidate, {k: sorted(v) if v is not None else None for k, v in selections.items()})
+        self._native_conversations[session_id] = candidate
+        self._native_loaded.add(session_id)
+
+    def _save_native_selection(self, session_id: str) -> None:
+        current = self._native_conversations.get(session_id)
+        if current is not None:
+            self._save_native(session_id, current)
 
     @property
     def shared_state_lock(self) -> AbstractContextManager[Any]:
         return self._ports.shared_state_lock
+
+    def configure_native_store(self, store: NativeHistoryStore) -> None:
+        with self._ports.shared_state_lock:
+            self.clear()
+            self._ports = replace(self._ports, native_history_store=store)
 
     def clear(self) -> None:
         with self._ports.shared_state_lock:
@@ -67,6 +112,9 @@ class AgentRuntimeSessionState:
             self._steer_mailboxes.clear()
             self._steer_seen_ids.clear()
             self._native_conversations.clear()
+            self._native_loaded.clear()
+
+
 
     def session_count(self) -> int:
         with self._ports.shared_state_lock:
@@ -74,6 +122,9 @@ class AgentRuntimeSessionState:
 
     def discard_session(self, session_id: str) -> None:
         with self._ports.shared_state_lock:
+            if self._ports.native_history_store:
+                self._ports.native_history_store.delete(session_id)
+            self._native_loaded.discard(session_id)
             self._sessions.pop(session_id, None)
             self._native_conversations.pop(session_id, None)
             for key in {key for key in (*self._active_turns.keys(), *self._finalizing_turns) if key[0] == session_id}:
@@ -244,7 +295,7 @@ class AgentRuntimeSessionState:
                 raise ValueError("native conversation binding mismatch")
             candidate = {**current, "compactionRecovery": self._merge_native_recoveries(current.get("compactionRecovery", []), recoveries)}
             self._native_size_ok(candidate)
-            self._native_conversations[session_id] = candidate
+            self._save_native(session_id, candidate)
 
     def begin_native_turn(
         self, session_id: str, *, binding: str, turn_id: str, message: str,
@@ -255,6 +306,7 @@ class AgentRuntimeSessionState:
         turn_id = self._native_required(turn_id, "turn id")
         message = self._native_required(message, "message")
         with self._ports.shared_state_lock:
+            self._load_native(session_id, binding)
             existing = self._native_conversations.get(session_id)
             if existing is not None:
                 pending = self._native_pending(existing)
@@ -268,7 +320,7 @@ class AgentRuntimeSessionState:
                     candidate["activeTurnStart"] = len(candidate["messages"])
                     candidate["messages"].append({"role": "user", "content": message})
                     self._native_size_ok(candidate)
-                    self._native_conversations[session_id] = candidate
+                    self._save_native(session_id, candidate)
                     return copy.deepcopy(candidate)
             history_messages: list[dict[str, Any]] = []
             for item in initial_history or []:
@@ -291,13 +343,14 @@ class AgentRuntimeSessionState:
                 "activeTurnStart": len(history_messages),
             }
             self._native_size_ok(candidate)
-            self._native_conversations[session_id] = candidate
+            self._save_native(session_id, candidate)
             return copy.deepcopy(candidate)
 
     def native_conversation(self, session_id: str, *, binding: str) -> dict[str, Any] | None:
         session_id = self._native_required(session_id, "session id")
         binding = self._native_required(binding, "binding")
         with self._ports.shared_state_lock:
+            self._load_native(session_id, binding)
             snapshot = self._native_conversations.get(session_id)
             if snapshot is None or snapshot["binding"] != binding:
                 return None
@@ -317,7 +370,7 @@ class AgentRuntimeSessionState:
             order.extend(name for name in visible_names if name not in retained)
             candidate = {**current, "toolOrder": order}
             self._native_size_ok(candidate)
-            self._native_conversations[session_id] = candidate
+            self._save_native(session_id, candidate)
             return list(order)
 
     def restore_native_conversation(
@@ -327,9 +380,10 @@ class AgentRuntimeSessionState:
         binding = self._native_required(binding, "binding")
         normalized = self._validate_native_snapshot(snapshot, binding=binding)
         with self._ports.shared_state_lock:
+            self._load_native(session_id, binding)
             existing = self._native_conversations.get(session_id)
             if existing is None:
-                self._native_conversations[session_id] = normalized
+                self._save_native(session_id, normalized)
                 return copy.deepcopy(normalized)
             if existing["binding"] != binding:
                 raise ValueError("native conversation binding mismatch")
@@ -341,7 +395,7 @@ class AgentRuntimeSessionState:
                 if recoveries or "compactionRecovery" in candidate:
                     candidate["compactionRecovery"] = copy.deepcopy(recoveries)
                 self._native_size_ok(candidate)
-                self._native_conversations[session_id] = candidate
+                self._save_native(session_id, candidate)
                 return copy.deepcopy(candidate)
             if incoming_messages == current_messages and normalized["turnId"] == existing["turnId"]:
                 return restored(existing)
@@ -392,7 +446,7 @@ class AgentRuntimeSessionState:
                 candidate["compactionRecovery"] = self._merge_native_recoveries(
                     current.get("compactionRecovery", []), [recovery] if recovery is not None else [])
             normalized = self._validate_native_snapshot(candidate, binding=binding)
-            self._native_conversations[session_id] = normalized
+            self._save_native(session_id, normalized)
             return copy.deepcopy(normalized)
 
     def append_native_user(self, session_id: str, *, binding: str, message: str) -> None:
@@ -408,7 +462,7 @@ class AgentRuntimeSessionState:
             candidate = copy.deepcopy(snapshot)
             candidate["messages"].append({"role": "user", "content": message})
             self._native_size_ok(candidate)
-            self._native_conversations[session_id] = candidate
+            self._save_native(session_id, candidate)
 
     def append_native_assistant(self, session_id: str, *, binding: str, message: dict[str, Any]) -> None:
         session_id = self._native_required(session_id, "session id")
@@ -426,7 +480,7 @@ class AgentRuntimeSessionState:
             candidate = copy.deepcopy(snapshot)
             candidate["messages"].append(normalized)
             self._native_size_ok(candidate)
-            self._native_conversations[session_id] = candidate
+            self._save_native(session_id, candidate)
 
     def settle_native_call(self, session_id: str, *, binding: str, call_id: str, content: str) -> None:
         session_id = self._native_required(session_id, "session id")
@@ -447,10 +501,11 @@ class AgentRuntimeSessionState:
             candidate = copy.deepcopy(snapshot)
             candidate["messages"].append({"role": "tool", "tool_call_id": call_id, "content": content})
             self._native_size_ok(candidate)
-            self._native_conversations[session_id] = candidate
+            self._save_native(session_id, candidate)
 
     def internal_tool_blocks(self, session_id: str) -> frozenset[str]:
         with self._ports.shared_state_lock:
+            self._load_native(str(session_id or "").strip())
             session = self._sessions.get(str(session_id or "").strip())
             blocks = session.get("internalToolBlocks", []) if session else []
             return frozenset({"core", *(str(item) for item in blocks if str(item))})
@@ -466,6 +521,7 @@ class AgentRuntimeSessionState:
         if not session_id or not block:
             return frozenset({"core"})
         with self._ports.shared_state_lock:
+            self._load_native(session_id)
             session = self._sessions.setdefault(
                 session_id,
                 {"id": session_id, "createdAt": "", "updatedAt": "", "turns": []},
@@ -482,10 +538,12 @@ class AgentRuntimeSessionState:
                 selections[block] = set(selections[block] or set()) | set(tools)
             # A previously whole-loaded block is monotonic: a later subset
             # request cannot hide tools already exposed in this session.
+            self._save_native_selection(session_id)
             return frozenset(blocks)
 
     def internal_tool_selections(self, session_id: str) -> dict[str, list[str] | None]:
         with self._ports.shared_state_lock:
+            self._load_native(session_id)
             session = self._sessions.get(str(session_id or "").strip()) or {}
             return {
                 block: (sorted(value) if value is not None else None)
@@ -498,6 +556,7 @@ class AgentRuntimeSessionState:
         if not session_id:
             return frozenset({"core"})
         with self._ports.shared_state_lock:
+            self._load_native(session_id)
             session = self._sessions.get(session_id)
             blocks = {"core", *(str(item) for item in (session or {}).get("internalToolBlocks", []))}
             if block != "core":
@@ -506,6 +565,7 @@ class AgentRuntimeSessionState:
                     (session.get("internalToolSelections") or {}).pop(block, None)
             if session is not None:
                 session["internalToolBlocks"] = sorted(blocks)
+                self._save_native_selection(session_id)
             return frozenset(blocks)
 
     def append_turn(self, session_id: str, *, now: str, updated_at: str, turn: dict[str, Any]) -> None:
@@ -528,6 +588,7 @@ class AgentRuntimeSessionState:
         if not session_id:
             return 0
         with self._ports.shared_state_lock:
+            self._load_native(session_id)
             session = self._sessions.get(session_id)
             if session and session.get("turns"):
                 return 0
@@ -551,6 +612,7 @@ class AgentRuntimeSessionState:
             if not turns:
                 return 0
             self._sessions[session_id] = {
+                **(session or {}),
                 "id": session_id,
                 "createdAt": now,
                 "updatedAt": now,

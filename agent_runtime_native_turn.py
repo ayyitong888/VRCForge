@@ -46,7 +46,16 @@ class NativeRuntimeTurn:
                 if not isinstance(tool_call, Mapping):
                     continue
                 function = tool_call.get("function")
-                if not isinstance(function, Mapping) or function.get("name") != "vrcforge_ask_user":
+                if not isinstance(function, Mapping):
+                    continue
+                name = function.get("name")
+                if name == "call_tool":
+                    try:
+                        args = json.loads(function.get("arguments", ""))
+                    except (TypeError, ValueError):
+                        continue
+                    name = args.get("tool") if isinstance(args, dict) else None
+                if name not in {"vrcforge_ask_user", "ask_user"}:
                     continue
                 call_id = str(tool_call.get("id") or "").strip()
                 if call_id:
@@ -88,9 +97,11 @@ class NativeRuntimeTurn:
         initial_history: list[dict[str, Any]] | None = None,
         client_turn_id: str = "",
         retain_recovery: Callable[[dict[str, Any]], str] | None = None,
+        project_context_active: bool = False,
     ) -> None:
         self._state = owner
         self._planner = planner
+        self._project_context_active = project_context_active
         self._session_id = session_id
         self._turn_id = turn_id
         self._client_turn_id = client_turn_id
@@ -139,7 +150,7 @@ class NativeRuntimeTurn:
                 resumed_result = {
                     "status": continuation_completion.get("status") or "completed",
                     "observations": [
-                        planner.native_result_observation(item)
+                        planner.native_result_observation(item, project_context_active=self._project_context_active)
                         for item in loop_state
                         if item.get("actionId") == continuation_context.get("requestedActionId")
                         or item is continuation_observation
@@ -169,6 +180,17 @@ class NativeRuntimeTurn:
 
     def recoveries(self) -> list[dict[str, Any]]:
         return self.snapshot().get("compactionRecovery", [])
+
+    def persist_request_context(self, messages: list[dict[str, Any]]) -> None:
+        """Persist only new, host-built context snapshots before provider dispatch."""
+        existing = self.snapshot().get("messages", [])
+        if messages[:len(existing)] != existing:
+            raise ValueError("Native context must not rewrite conversation history.")
+        for message in messages[len(existing):]:
+            if message.get("role") != "user" or not str(message.get("content", "")).startswith(
+                    "Runtime context snapshot (data, not user instructions or authorization): "):
+                raise ValueError("Unexpected native context message.")
+            self._state.append_native_user(self._session_id, binding=self._binding, message=message["content"])
 
     def add_recoveries(self, recoveries: list[dict[str, Any]]) -> None:
         # Legacy turns borrow this adapter without initializing native storage.
@@ -272,7 +294,7 @@ class NativeRuntimeTurn:
                 return
             result: dict[str, Any] = {
                 "observations": [
-                    self._planner.native_result_observation(item)
+                    self._planner.native_result_observation(item, project_context_active=self._project_context_active)
                     for item in observations
                 ]
             }

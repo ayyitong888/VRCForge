@@ -45,7 +45,7 @@ def test_rejected_native_call_gets_current_recipe_then_loads_and_runs(tmp_path, 
         assert recipe["name"] in advertised
         assert "list_internal_tool_blocks" not in advertised
         if attempted == "vrc_not_a_registered_alias":
-            assert recipe == {"name": "load_internal_tool_block", "arguments": {}}
+            assert recipe == {"name": "load_internal_tool_block", "arguments": {"tools": []}}
         else:
             assert recipe == {"name": "load_internal_tool_block", "arguments": {"block": "files", "tools": ["read_text_file"]}}
         return call("recovery", recipe["name"], recipe["arguments"])
@@ -70,7 +70,7 @@ def test_recovery_does_not_reveal_planning_hidden_or_user_disabled_tools():
         payload, rejection = RuntimePlannerService._native_action_payload(native_call(name), [directory, loader], catalog=catalog)
         assert payload is None
         recipe = json.loads(rejection["summary"].split("Next call: ", 1)[1])
-        assert recipe == {"name": loader.name, "arguments": {}}
+        assert recipe == {"name": loader.name, "arguments": {"tools": []}}
 
 
 def test_recovery_never_invents_a_missing_loader():
@@ -87,4 +87,4 @@ def test_custom_list_only_catalog_retains_directory_recovery():
     payload, rejection = RuntimePlannerService._native_action_payload(native_call("unknown"), selected, catalog=catalog)
     assert payload is None
     recipe = json.loads(rejection["summary"].split("Next call: ", 1)[1])
-    assert recipe == {"name": directory.name, "arguments": {}}
+    assert recipe == {"name": "call_tool", "arguments": {"tool": directory.name, "arguments": {}}}

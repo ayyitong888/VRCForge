@@ -7442,7 +7442,7 @@ class DashboardServerTests(unittest.TestCase):
         self.assertIn("attempting", payload["plan"]["reply"])
         self.assertIsNot(payload["plan"].get("completionSatisfied"), True)
 
-    def test_planner_observes_runtime_owned_remaining_model_turn_budget(self) -> None:
+    def test_planner_does_not_observe_host_owned_model_turn_budget(self) -> None:
         def run(max_turns: int | None) -> list[dict[str, object]]:
             with tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
@@ -7496,7 +7496,8 @@ class DashboardServerTests(unittest.TestCase):
                 return observed
 
         bounded = run(2)
-        assert [item["modelTurnBudget"]["remainingModelTurns"] for item in bounded] == [2, 1]
+        assert len(bounded) == 2
+        assert all("modelTurnBudget" not in item for item in bounded)
         assert all(item["callerField"] == "preserved" for item in bounded)
         unlimited = run(None)
         assert all("modelTurnBudget" not in item for item in unlimited)
