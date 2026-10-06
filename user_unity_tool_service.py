@@ -20,7 +20,7 @@ from prepared_file_imports import (
     copy_approved_file_create_new,
     prepare_project_asset_target,
 )
-from skill_packages import SkillPackageService
+from skill_packages import PackageIntegrityError, SkillPackageService
 
 SCHEMA = "vrcforge.user_unity_tools.v1"
 RECORD_SCHEMA = "vrcforge.user_unity_tool_install.v1"
@@ -34,6 +34,17 @@ def _sha(data: bytes) -> str:
 
 def _json_bytes(value: Any) -> bytes:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+class RepairBaselineMismatch(ValueError):
+    """A verified repair's source baseline changed; not proof of a broken fix."""
+
+    code = "baseline_mismatch"
+
+    def __init__(self, expected: str, observed: str) -> None:
+        super().__init__("core source tree baseline mismatch.")
+        self.expected = expected.lower()
+        self.observed = observed.lower()
 
 
 class UserUnityToolService:
@@ -69,12 +80,12 @@ class UserUnityToolService:
             if not isinstance(repair, dict) or not re.fullmatch(r"[0-9a-fA-F]{64}", str(repair.get("coreSourceTreeSha256") or "")):
                 raise ValueError("repair baseline coreSourceTreeSha256 is invalid.")
             if str(repair["coreSourceTreeSha256"]).lower() != actual.lower():
-                raise ValueError("core source tree baseline mismatch.")
+                raise RepairBaselineMismatch(str(repair["coreSourceTreeSha256"]), actual)
 
     def _read_verified_entrypoint(self, metadata: dict[str, Any], relative: str) -> bytes:
         current, payload = self.package_service.verified_installed_entrypoint_bytes(metadata["manifest"]["id"], relative)
         if any(current.get(key) != metadata.get(key) for key in ("package_sha256", "lock_sha256")):
-            raise ValueError("Installed package changed while reading its verified contents.")
+            raise PackageIntegrityError("Installed package changed while reading its verified contents.")
         return payload
 
     def verified_descriptor(self, package_id: str, project_root: str | os.PathLike[str]) -> tuple[dict[str, Any], dict[str, Any]]:

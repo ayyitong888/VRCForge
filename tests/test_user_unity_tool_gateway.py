@@ -5,7 +5,7 @@ import json
 
 import pytest
 import dashboard_server as dashboard
-from skill_packages import PackageSecurityError
+from skill_packages import PackageDisabledError, PackageSecurityError
 from agent_gateway import AgentGateway
 from user_unity_tool_gateway import execution_plan, invoke_user_tool, list_user_tools
 from vrchat_blendshape_agent import McpResult
@@ -86,6 +86,30 @@ def test_unknown_package_filter_does_not_claim_the_project_catalog_is_empty():
     from unity_tool_schema_projection import canonical_unity_read_tool_input_schema
     schema = canonical_unity_read_tool_input_schema("vrcforge_list_user_unity_tools")
     assert "exact" in schema["properties"]["packageId"]["description"]
+
+
+def test_package_enablement_owner_survives_model_observation_projection():
+    packages = _verified_store()
+    packages.verified_installed_entrypoint_bytes.side_effect = PackageDisabledError("disabled")
+    core = Mock(return_value={"schema": "vrcforge.user-tools.v1", "tools": [{
+        "packageId": "user.test", "packageDigest": "digest", "available": True,
+        "enabled": True, "status": "ready",
+        "tools": [{"toolId": "user.echo", "available": True, "reason": "ready"}],
+    }]})
+    result = list_user_tools({"projectPath": "project"}, UserUnityToolService(packages), core)
+    step = {"tool": "vrcforge_list_user_unity_tools", "status": "executed",
+            "result": result, "outcome": {"status": "ok"}}
+    planner = dashboard.AGENT_GATEWAY.runtime_planner
+    for observation in (
+        planner.native_result_observation(step)["observation"],
+        planner._llm_loop_step_observation(step),
+    ):
+        data, _ = json.JSONDecoder().raw_decode(observation.split("structuredEvidence=", 1)[1])
+        package = data["data"]["tools"][0]
+        assert package["disabledBy"] == "vrcforge_package_store"
+        assert package["enabled"] is False
+        assert package["coreEnabled"] is True
+        assert package["tools"][0]["coreReason"] == "ready"
 
 
 def test_empty_catalog_exposes_real_disk_baseline_for_authoring(tmp_path):
