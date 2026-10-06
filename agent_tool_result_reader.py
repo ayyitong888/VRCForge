@@ -90,10 +90,11 @@ def _validated_scan_snapshot(step: Mapping[str, Any]) -> bool:
         return False
     scope = snapshot.get("scanScope")
     return (snapshot.get("persisted") is True and snapshot.get("scope") == "validated_scope"
-            and snapshot.get("freshness") == "validated" and snapshot.get("expired") is not True
+            and snapshot.get("freshness") in {"validated", "validated_on_read"} and snapshot.get("expired") is not True
             and not snapshot.get("reason") and isinstance(scope, Mapping)
-            and scope.get("schema") == "vrcforge.scan_scope.v1"
-            and scope.get("dependencyCoverage") == "complete")
+            and ((scope.get("schema") == "vrcforge.scan_scope.v1" and scope.get("dependencyCoverage") == "complete")
+                 or (scope.get("schema") == "vrcforge.scan_result_equivalence.v1"
+                     and scope.get("validation") == "observable_result_on_read")))
 
 
 def scan_result_continuation(step: Mapping[str, Any]) -> dict[str, Any]:
@@ -438,7 +439,7 @@ def read_tool_result(params: Mapping[str, Any], *, sanitize: Callable[[object, i
                 saved.get("rescanScope", {}), sanitize_text=sanitize, max_chars=2500)
             changed = project_structured_tool_evidence(
                 {"changedAssetPaths": saved.get("changedAssetPaths", [])}, sanitize_text=sanitize, max_chars=1500)
-            return {"schema": PAGE_SCHEMA, "ok": True, "authority": "untrusted_tool_output",
+            reply = {"schema": PAGE_SCHEMA, "ok": True, "authority": "untrusted_tool_output",
                     "status": "needs_rescan", "expired": True, "freshness": "unverified",
                     "resultRef": ref, "source": source, "items": [], "hasMore": False,
                     "reason": saved["reason"], "capturedAt": saved.get("capturedAt"),
@@ -446,6 +447,14 @@ def read_tool_result(params: Mapping[str, Any], *, sanitize: Callable[[object, i
                     "changedAssetPaths": changed.get("data", {}).get("changedAssetPaths", []),
                     "changedAssetPathsTruncated": changed.get("truncated", False),
                     "interpretation": "Historical content is unchanged; this reference cannot prove current state. Rescan the indicated changed parts only when dependency coverage can be preserved; otherwise rescan the returned full scope."}
+            replacement = saved.get("replacement")
+            if isinstance(replacement, dict) and isinstance(replacement.get("step"), dict):
+                fresh = replacement["step"]
+                reply.update(status="replaced", replacementRef=replacement["resultRef"],
+                             replacementSummary=scan_result_summary(fresh, sanitize),
+                             nextRequest={"tool": TOOL_NAME, "arguments": {"resultRef": replacement["resultRef"]}},
+                             interpretation="Historical content is unchanged. The host already rescanned; page the replacement reference without invoking the scan tool.")
+            return reply
         if saved is not None:
             step = saved.get("step")
     if step is None or (source == "result" and not eligible_result(str(step.get("tool") or ""), step.get("result"))):

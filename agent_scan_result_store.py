@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from agent_scan_scope_client import AgentScanScopeClient, SCAN_SCOPE_SCHEMA
+from agent_scan_rescan import WHITELIST, ScanRescanVerifier, comparison_metadata, eligible
 from agent_tool_result_reader import result_reference
 
 _PROCESS_BOOT_ID = uuid.uuid4().hex
@@ -178,6 +179,7 @@ class ScanResultStore:
         self._path = Path(root) / "scan-results.sqlite3"
         self._lock = shared_lock if shared_lock is not None else threading.RLock()
         self._boot_id = _PROCESS_BOOT_ID
+        self._rescan = ScanRescanVerifier(self)
 
     @contextmanager
     def _connection(self, *, create: bool = False):
@@ -196,6 +198,7 @@ class ScanResultStore:
             connection.execute("CREATE TABLE IF NOT EXISTS scan_scope_proofs (token TEXT PRIMARY KEY, project TEXT NOT NULL, generation INTEGER NOT NULL, proof TEXT NOT NULL, size INTEGER NOT NULL)")
             connection.execute("CREATE TABLE IF NOT EXISTS scan_scope_links (ref TEXT PRIMARY KEY REFERENCES snapshots(ref) ON DELETE CASCADE, token TEXT NOT NULL REFERENCES scan_scope_proofs(token))")
             connection.execute("CREATE TABLE IF NOT EXISTS scan_scope_expiries (ref TEXT PRIMARY KEY REFERENCES snapshots(ref) ON DELETE CASCADE, reason TEXT NOT NULL, changed_paths TEXT NOT NULL)")
+            connection.execute("CREATE TABLE IF NOT EXISTS scan_rescan_checks (session TEXT NOT NULL, turn TEXT NOT NULL, ref TEXT NOT NULL REFERENCES snapshots(ref) ON DELETE CASCADE, generation INTEGER NOT NULL, result TEXT NOT NULL, PRIMARY KEY(session, turn, ref))")
             yield connection
             connection.commit()
         except BaseException:
@@ -323,13 +326,18 @@ class ScanResultStore:
         project = _project(project_root)
         if not isinstance(tool, str) or not tool or len(tool) > 160 or not isinstance(arguments, dict):
             raise ValueError("Scan tool and arguments must be valid JSON inputs.")
-        with self._lock:
-            if not self._path.is_file():
-                generation_before, pending_before = 0, False
-            else:
-                with self._connection() as connection:
-                    generation_before = self._generation(connection, project)
-                    pending_before = self._pending(connection, project)
+        try:
+            with self._lock:
+                if not self._path.is_file():
+                    generation_before, pending_before = 0, False
+                else:
+                    with self._connection() as connection:
+                        generation_before = self._generation(connection, project)
+                        pending_before = self._pending(connection, project)
+        except (OSError, sqlite3.Error):
+            return {"generation": 0, "proof": {
+                "schema": SCAN_SCOPE_SCHEMA, "verified": False, "reason": "proof_store_unavailable",
+            }}
         proof = AgentScanScopeClient(project).capture(tool, arguments)
         if not isinstance(proof, dict) or proof.get("verified") is not True:
             if not isinstance(proof, dict):
@@ -376,6 +384,14 @@ class ScanResultStore:
 
     def capture(self, session_id: str, turn_id: str, project_root: str | Path, step: dict, arguments: dict,
                 *, expected_generation: int | dict | None = None) -> dict:
+        try:
+            return self._capture(session_id, turn_id, project_root, step, arguments,
+                                 expected_generation=expected_generation)
+        except sqlite3.Error as exc:
+            raise ValueError("Private scan snapshot storage is unavailable.") from exc
+
+    def _capture(self, session_id: str, turn_id: str, project_root: str | Path, step: dict, arguments: dict,
+                 *, expected_generation: int | dict | None = None) -> dict:
         session_id, turn_id, project = _owner(session_id), _owner(turn_id), _project(project_root)
         if not isinstance(step, dict) or not isinstance(arguments, dict):
             raise ValueError("Step and owner-supplied arguments must be JSON objects.")
@@ -394,6 +410,7 @@ class ScanResultStore:
             raise ValueError("Scan snapshot exceeds the private store size limit.")
         scope = _json(declared_scope)
         proof = None
+        proof_validated = False
         validation_changed_paths = None
         with self._lock, self._connection(create=True) as connection:
             reason = "mutation_in_progress" if self._pending(connection, project) else ""
@@ -406,7 +423,12 @@ class ScanResultStore:
                     proof = None
                     paths = declared_scope["assetPaths"]
             if len(paths) > MAX_ASSET_PATHS:
-                raise ValueError("Scan snapshot exceeds the private store path limit.")
+                if not eligible(step, arguments):
+                    raise ValueError("Scan snapshot exceeds the private store path limit.")
+                # Preserve every result byte and declared path. No partial
+                # fingerprint set may grant the Core fast path; use comparison.
+                paths, proof = [], None
+                reason = reason or "fingerprint_path_budget_exceeded"
             old = connection.execute("SELECT * FROM snapshots WHERE ref=?", (ref,)).fetchone()
             if old is not None:
                 if (old["raw"], old["scope"]) != (raw, scope):
@@ -467,6 +489,7 @@ class ScanResultStore:
                     row = connection.execute(
                         "SELECT s.*, v.reason FROM snapshots s JOIN validity v USING(ref) WHERE ref=?", (ref,)
                     ).fetchone()
+                    proof_validated = not validation_reason
             elif validation.get("valid") is False:
                 validation_reason = str(validation.get("reason") or "scope_invalid")[:160]
                 validation_changed_paths = validation.get("changedAssetPaths")
@@ -484,10 +507,27 @@ class ScanResultStore:
             linked_proof = self._proof_for_ref(connection, ref)
             if validation_changed_paths is None:
                 validation_changed_paths = self._scope_expiry_paths(connection, ref)
-            metadata = self._metadata(row, row["reason"], linked_proof, validation_changed_paths)
+            metadata = self._metadata(
+                row, row["reason"], linked_proof if proof_validated else None, validation_changed_paths
+            )
+        if eligible(step, arguments) and row["reason"] not in {"mutation_in_progress", "mutation_during_scan"}:
+            return comparison_metadata(metadata)
+        if step.get("tool") not in WHITELIST or (isinstance(step.get("result"), dict)
+                                                and step["result"].get("ok") is True):
+            metadata.update(scope="current_turn", freshness="unverified")
         return metadata
 
     def lookup(self, session_id: str, turn_id: str, project_root: str | Path, result_ref: str) -> dict | None:
+        session_id, turn_id, project = _owner(session_id), _owner(turn_id), _project(project_root)
+        if not self._path.is_file():
+            return None
+        try:
+            return self._rescan.lookup(session_id, turn_id, project, result_ref, self._lookup_scope)
+        except (OSError, sqlite3.Error, ValueError):
+            return {"expired": True, "reason": "comparison_store_unavailable", "rescanScope": {}}
+
+    def _lookup_scope(self, session_id: str, turn_id: str, project_root: str | Path, result_ref: str,
+                      *, require_proof: bool = False) -> dict | None:
         session_id, turn_id, project = _owner(session_id), _owner(turn_id), _project(project_root)
         if not self._path.is_file():
             return None
@@ -568,6 +608,8 @@ class ScanResultStore:
                 if reason != "mutation_in_progress":
                     self._expire(connection, result_ref, reason)
                 return self._expiry(latest, reason, proof)
+        if require_proof:
+            result["scopeValidated"] = True
         return result
 
     @staticmethod
