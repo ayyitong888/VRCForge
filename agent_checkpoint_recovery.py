@@ -53,6 +53,7 @@ from agent_gateway import (
     redact_sensitive,
     utc_now_iso,
 )
+from checkpoint_storage_baseline import measure_checkpoint_storage, verify_duplicate_candidates
 
 
 def _noop_scan_invalidation(_project_root: str, _reason: str) -> None:
@@ -435,6 +436,29 @@ class AgentCheckpointRecoveryService:
         """Read measured quota only; no connector discovery or checkpoint ledger projection."""
         with self._ports.state.checkpoint_storage_lock:
             return self._checkpoint_archive_quota(self._ports.ensure_config(), self._checkpoint_archive_files())
+
+    def checkpoint_storage_baseline(self) -> dict[str, Any]:
+        """Measure ZIP storage metadata without changing checkpoint behavior."""
+
+        with self._ports.state.checkpoint_storage_lock:
+            return measure_checkpoint_storage(
+                self._ports.checkpoint_store_dir(),
+                self._ports.checkpoint_log_path(),
+            )
+
+    def checkpoint_duplicate_verification(
+        self,
+        max_read_bytes: int,
+        cancel_check: Callable[[], bool] | None = None,
+    ) -> dict[str, Any]:
+        """Verify duplicate candidates with bounded, cancellable streaming reads."""
+
+        with self._ports.state.checkpoint_storage_lock:
+            return verify_duplicate_candidates(
+                self._ports.checkpoint_store_dir(),
+                max_read_bytes=max_read_bytes,
+                cancel_check=cancel_check,
+            )
 
     def _checkpoint_archive_quota(self, config: AgentGatewayConfig, archives: list[dict[str, Any]]) -> dict[str, Any]:
         total_bytes = sum(item["sizeBytes"] for item in archives)
