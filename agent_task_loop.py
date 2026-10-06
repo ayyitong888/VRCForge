@@ -1587,7 +1587,7 @@ class AgentTaskLoop:
                     and previous_branch.get("tool") == tool
                     and previous_branch.get("status") == "failed"
                     and (previous_error.get("code") or previous_outcome.get("errorCode"))
-                    == "internal_tool_selection_invalid"
+                    in {"internal_tool_selection_invalid", "internal_tool_block_selector_invalid"}
                 ):
                     previous_branch["status"] = "superseded"
                     previous_branch["supersededBy"] = action_id
