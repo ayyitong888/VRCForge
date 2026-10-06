@@ -37,20 +37,12 @@
     ]
   },
   "communityContract": {
-    "rootOrder": [
-      "FacialTracking",
-      "换装",
-      "R18"
-    ],
-    "wardrobeCategoryOrder": [
-      "衣服",
-      "头发",
-      "配饰"
-    ],
+    "scopeComesFromUserRequestAndCurrentAvatar": true,
+    "doNotAssumeUniversalRootOrCategoryOrder": true,
+    "localReadDoesNotRequireFullMenuTreeExpansion": true,
     "maximumControlsPerPageIncludingNextPage": 8,
-    "pageLabel": "下一页",
-    "navigationSubmenuIsNotAnOutfitSelector": true,
-    "preserveOriginalLanguagesSpellingsIconsAliasesAndUnexposedParameters": true
+    "preserveOutOfScopeStructureAndFields": true,
+    "parameterMustMatchControlAndAnimatorType": true
   },
   "steps": [
     {
@@ -58,12 +50,29 @@
       "tool": "vrcforge_list_avatars",
       "tools": [
         "vrcforge_read_avatar_descriptor",
-        "vrcforge_scan_avatar_controls",
-        "vrcforge_scan_parameters",
-        "vrcforge_scan_fx_animator",
-        "vrcforge_scan_inbound_reference_closure"
+        "vrcforge_get_asset_info"
       ],
+      "scope": "descriptor_and_only_the_requested_menu_or_parameter_assets; do_not_expand_unrelated_menu_branches",
       "writes": false
+    },
+    {
+      "name": "discover_only_the_requested_menu_branch_when_asset_path_is_unknown",
+      "when": "descriptor and exact serialized menu references do not identify the user-requested branch",
+      "tool": "vrcforge_scan_avatar_controls",
+      "tools": [],
+      "arguments": "projectPath and exact avatarPath; use returned menuPath only to locate the requested target and do not expand unrelated findings into scope",
+      "writes": false
+    },
+    {
+      "name": "ensure_expression_parameter_only_when_required_by_requested_control",
+      "when": "the requested control needs a missing or explicitly changed parameter; derive its exact name, type and behavior from project evidence and user intent, present them in preview, and write only after that design is approved",
+      "tool": "vrcforge_preview_ensure_expression_parameter",
+      "tools": [
+        "vrcforge_ensure_expression_parameter"
+      ],
+      "writes": true,
+      "runtimePermissionGateRequired": true,
+      "runtimeApprovalRequired": true
     },
     {
       "name": "manage_expression_menu_through_current_permission_policy",
@@ -86,11 +95,18 @@
       "runtimeApprovalRequired": true
     },
     {
-      "name": "read_back_exact_scope_without_unrelated_changes",
-      "tool": "vrcforge_run_validation_report",
+      "name": "read_back_exact_requested_controls_and_parameters",
+      "tool": "vrcforge_get_asset_info",
       "tools": [
+        "vrcforge_get_asset_info",
+        "vrcforge_scan_avatar_controls",
+        "vrcforge_scan_parameters",
+        "vrcforge_run_validation_report",
         "vrcforge_build_test_readiness"
       ],
+      "scope": "requested_menu_paths_and_associated_parameters_only",
+      "readMode": "Exact assetPath or GUID with includeText=true; require sourceComplete for serialized-field claims; if source is binary/unreadable, use avatarPath-scoped read-only scanners for requested control/parameter values and mark unavailable fields (such as icons) unverified.",
+      "verify": ["control_name_type_parameter_value_icon_submenu_reference", "parameter_type_default_saved_synced", "only_approved_delta"],
       "writes": false
     }
   ],
@@ -107,4 +123,3 @@
     "requiresSeparateApproval": true
   }
 }
-

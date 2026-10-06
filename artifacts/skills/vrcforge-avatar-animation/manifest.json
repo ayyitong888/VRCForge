@@ -2,9 +2,9 @@
   "id": "com.vrcforge.skills.avatar_animation",
   "name": "VRChat 动画与体型补偿",
   "skill_name": "vrcforge-avatar-animation",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "author": "VRCForge",
-  "description": "Author or repair one proven VRChat outfit, hair or accessory AnimationClip and its FX state, object-activation curves and body/heel BlendShape compensation without replacing unrelated controllers or assuming an OFF clip.",
+  "description": "Author or repair one evidence-backed VRChat outfit, hair or accessory animation while preserving authored timelines and changing only the exact user-approved FX, object or body/heel BlendShape behavior.",
   "min_vrcforge_version": "1.7.9",
   "execution": "agentic",
   "permissions": [

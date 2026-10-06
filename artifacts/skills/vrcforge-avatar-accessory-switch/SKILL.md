@@ -1,7 +1,7 @@
 ---
 name: vrcforge-avatar-accessory-switch
 title: VRChat 饰品安装与开关
-description: Install or configure one independent VRChat accessory with its proven Bone Proxy or existing constraint attachment, dedicated Bool, FX state, activation animation and expression-menu toggle; preserve the exact accessory subtree and existing sources.
+description: Install or maintain one VRChat accessory switch using the user's confirmed design for new work and preserving existing Avatar parameters, menu paths, animation timing and proven attachment structure.
 permission-mode: approval_required
 risk-level: high
 entrypoint-tool: vrcforge_list_avatars
@@ -46,7 +46,7 @@ support-files:
 
 ## 什么时候使用
 
-给目标 Avatar 安装或调整一个用户明确指定的饰品，并制作该饰品独立开关；与跨 Avatar 提取/移植现有配件不同。
+给目标 Avatar 安装或调整一个用户明确指定的饰品开关；新建时采用用户确认的参数、菜单和动画设计，维护已有 Avatar 时按现场证据保留既有设计。与跨 Avatar 提取/移植现有配件不同。
 
 ## 什么时候不使用
 
@@ -56,5 +56,5 @@ support-files:
 
 对应技术或作者资产行为拿不准时，先查成熟 VRChat 社区教程、资产作者说明和官方文档；证据或现有精确原子不足时停止并返回 `capabilityGap=true`，不得猜测、虚构工具、复制未授权资产或修改任务范围外的 Avatar。
 
-详细步骤见 [操作说明](references/workflow.md) 和受签名保护的 [社区操作指引](workflows/accessory-switch.json)；由 Agent 根据现场证据选择适用路线与真实原子工具。
+详细步骤见 [操作说明](references/workflow.md) 和受签名保护的 [社区操作指引](workflows/accessory-switch.json)；不对已有饰品套用固定 Bool、菜单路径或动画时序，由 Agent 根据现场证据选择适用路线与真实原子工具。
 每项写入通过用户当前配置的权限策略、现有监督通道、精确 preview 和检查点；回滚需要单独确认。

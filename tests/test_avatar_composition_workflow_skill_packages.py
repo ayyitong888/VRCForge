@@ -263,13 +263,13 @@ def test_head_vsk_has_two_branches_and_exact_static_dynamic_neck_views() -> None
 
     closure = workflow["headRendererConsumerClosureContract"]
     assert closure["requiredBeforeOldHeadRemoval"] is True
-    assert {
-        "descriptorVisemeSkinnedMesh",
-        "descriptorLipSync",
-        "allExpectedVisemeBindings",
-        "allExpectedExpressionBindings",
-        "allExpectedGestureBindings",
-    } <= set(closure["activeRenderer"]["requiredTargets"])
+    assert closure["multipleActiveRenderersAllowed"] is True
+    assert closure["bindingResolution"] == "each_binding_to_its_actual_active_renderer"
+    assert set(closure["lipSyncModeContract"]) >= {
+        "viseme_blend_shape", "jaw_flap_blend_shape", "jaw_flap_bone", "viseme_parameter_only"
+    }
+    assert closure["lipSyncModeContract"]["default"]["autoDetectByDefault"] is False
+    assert closure["activeRenderer"]["expressionAndGestureBindingsResolveIndividuallyToActualActiveRenderer"] is True
     assert closure["inactiveOrDonorRenderer"] == {
         "mayRemainDescriptorTarget": False,
         "mayRemainSoleAnimatorTarget": False,
@@ -282,10 +282,9 @@ def test_head_vsk_has_two_branches_and_exact_static_dynamic_neck_views() -> None
         if step["name"] == "verify_active_head_renderer_consumer_closure"
     )
     assert {
-        "descriptor_viseme_skinned_mesh_and_lipsync_target_active_renderer",
-        "all_expected_viseme_gesture_expression_bindings_target_active_renderer",
-        "no_inactive_or_donor_descriptor_target",
-        "no_inactive_or_donor_sole_animator_target",
+        "resolved_lip_sync_mode_specific_target_readback",
+        "each_expected_viseme_gesture_expression_binding_resolves_to_its_actual_active_renderer",
+        "no_inactive_or_donor_sole_required_consumer",
     } <= set(renderer_step["required"])
     assert "parameter_menu_controller_blendshape_closure" in renderer_step["faceTrackedRequired"]
 
@@ -312,8 +311,8 @@ def test_part_vsk_requires_target_dependency_source_and_motion_readback() -> Non
         "gesture_manager_motion",
         "target_dependency_readback",
         "source_unchanged_readback",
-        "complete_pose_sweep",
-        "unobstructed_five_views",
+        "selected_route_pose_acceptance",
+        "selected_route_required_views",
         "cat_ear_aabb_skin_matrix_diagnostics_when_present",
     } == set(workflow["acceptanceRequires"])
 
@@ -341,19 +340,21 @@ def test_56_sol_packages_require_projection_skinning_and_capability_gap_contract
     assert set(workflow["rigAndShapeContract"]["required"]) >= {"bindposeReadback", "localWeightTransfer", "blendShapeOrder", "arkitNames"}
     assert workflow["physboneAbContract"]["restoreFailure"]["ready"] is False
     assert set(workflow["skinningContract"]["informational"]) >= {"nullBoneCount", "unusedBoundBoneCount"}
-    assert workflow["poseSweep"][:5] == ["Rest", "AFK", "Upright", "VelocityZ", "AngularY"]
+    if case["slug"] == "vrcforge-avatar-part-transplant":
+        assert workflow["poseSweep"]["routeScoped"] is True
+        assert "actual_attachment_angles" in workflow["poseSweep"]["rigid"]
+        assert workflow["poseSweep"]["bodyFaceExtremes"].startswith("only_when_relevant")
+    else:
+        assert workflow["poseSweep"][:5] == ["Rest", "AFK", "Upright", "VelocityZ", "AngularY"]
     assert len(workflow["pitfallMatrix"]) == 5
     assert {
         "symptom", "rootCause", "check", "forbidden", "reversibleFix", "dynamicAcceptance",
     } <= set(workflow["pitfallMatrix"][0])
-    assert workflow["acceptanceViewContract"] == {
-        "count": 5,
-        "requiredAngles": ["front", "side_left", "side_right", "back", "bottom"],
-        "unobstructed": True,
-        "requiresReturnedRotation": True,
-        "basis": "orthogonal",
-        "obliqueViewsCountTowardsAcceptance": False,
-    }
+    if case["slug"] == "vrcforge-avatar-part-transplant":
+        assert workflow["acceptanceViewContract"]["routeScoped"] is True
+        assert workflow["acceptanceViewContract"]["bottomWhen"] == ["underside_dependent_part", "cat_ear_strict_profile"]
+    else:
+        assert "bottom" in workflow["acceptanceViewContract"]["requiredAngles"]
     views = workflow["acceptanceViews"]
     if isinstance(views, list):
         assert len(views) == 5
@@ -370,6 +371,9 @@ def test_56_sol_packages_require_projection_skinning_and_capability_gap_contract
     assert set(workflow["singleSlotRemapContract"]["predictedMetricGate"]["required"]) == {"current", "target", "donorChainBaseline"}
     assert "materially closer" in workflow["singleSlotRemapContract"]["predictedMetricGate"]["executeOnlyWhen"]
     assert workflow["dynamicAcceptance"]["poses"] == ["Rest", "AFK", "Upright", "VelocityZ", "AngularY"]
+    if case["slug"] == "vrcforge-avatar-part-transplant":
+        assert workflow["dynamicAcceptance"]["routeScoped"] is True
+        assert workflow["dynamicAcceptance"]["bodyFaceExtremesOnlyWhenRelevantOrExplicitlySelected"] is True
     assert workflow["dynamicAcceptance"]["unobstructed"] is True
     assert workflow["dynamicAcceptance"]["orthogonalBasis"] is True
     assert workflow["dynamicAcceptance"]["obliqueAuxiliaryViewsCountTowardsAcceptance"] is False
@@ -380,7 +384,10 @@ def test_56_sol_packages_require_projection_skinning_and_capability_gap_contract
         "restoreAfterSweep": True,
         "blockIfRestoreReadbackFails": True,
     }
-    assert {"complete_pose_sweep", "unobstructed_five_views"} <= set(workflow["acceptanceRequires"])
+    if case["slug"] == "vrcforge-avatar-part-transplant":
+        assert {"selected_route_pose_acceptance", "selected_route_required_views"} <= set(workflow["acceptanceRequires"])
+    else:
+        assert {"complete_pose_sweep", "unobstructed_five_views"} <= set(workflow["acceptanceRequires"])
     isolation = next(step for step in workflow["steps"] if step["name"] == "cat_ear_physbone_ab_isolation")
     assert isolation["conditional"] == "cat_ears"
     assert isolation["sequence"] == [
