@@ -117,6 +117,9 @@ separate and must not be inferred from test counts.
 - Native history preserves the provider's required reasoning and continuation
   fields. Omit empty assistant `tool_calls` arrays, but retain real calls,
   result IDs and provider state. Legacy responses need no native-only fields.
+- An explicit model-turn budget pauses the same session without discarding its
+  native calls, results or private reasoning. Continuing with the same provider
+  binding appends the user's message and must not replay a successful handler.
 - Import visible legacy conversation history once. Keep durable private replay
   in the session owner; public approvals, questions, sessions, observations and
   sub-agent summaries must not expose it. Public redaction must not mutate it.
@@ -133,10 +136,20 @@ separate and must not be inferred from test counts.
 - Provider requests and compaction share cancellation, deadline and shutdown
   ownership. Thinking-only events count as activity; cleanup failures must not
   replace the primary error. Stop closes the owned request and remains terminal.
+- Live acceptance must distinguish a gap between tool results from provider
+  inactivity. Record phase and activity timing for the exact session and turn,
+  including zero-activity waits; exclude message bodies and credentials. Open
+  observation before the request and close it on completion, error or deadline.
+  Activity alone is not evidence of task success or model capability.
+- Decision probes with synthetic history must validate every recorded tool
+  argument against its advertised schema before calling the provider. Label
+  reconstructed history and reduced catalogs explicitly; they do not establish
+  full-task acceptance or reproduce unavailable private provider history.
 - Exact configured DeepSeek model names and thinking settings reach the selected
   transport unchanged. Metadata and adapters share the supported model set.
 
 Regression: `tests/test_native_runtime_gateway.py`,
+`tests/test_native_budget_resume.py`,
 `tests/test_native_runtime_continuations.py`,
 `tests/test_native_async_continuations.py`,
 `tests/test_native_context_compaction.py`, `tests/test_native_context_guard.py`,
@@ -162,6 +175,22 @@ Regression: `tests/test_native_runtime_gateway.py`,
   and task evidence. Exiting a Skill does not complete the original task.
 - Native internal execution must reject unsupported preview requests before
   approval or handler invocation; the external read-only preview path remains.
+- The native control action schema explains that `enter_execution` exposes
+  supervised write tools but performs no write and bypasses no approval. A
+  phase change settles its original tool-call ID and replans without invoking
+  a write handler. Test this at the provider request boundary; a successful
+  decision with a reduced catalog is not full natural-task acceptance.
+- When planning requests a registered write that is hidden by the planning
+  exposure layer, return the typed `execution_mode_required` failure with the
+  exact block, `requiredExposureLayer=execution`, and an `enter_execution`
+  retry path. Do not expose its write schema, execute it, or widen permissions.
+  Unknown and cross-block names remain `internal_tool_selection_invalid`.
+- This rejected selection is a no-mutation outcome: preserve
+  `mutationStarted=false` and `commitState=not_started`; canonical result
+  projection must not invent recovery work. After entering execution, the
+  explicit `project_environment/assets_packages` load may expose the approved
+  write path. Route-only fixtures do not prove a natural-model repair or a
+  successful repair-cost sample.
 - Bounded source reads support inclusive line ranges and preserve line numbers
   during redaction. Report truncation and preserve existing access boundaries.
 
@@ -277,7 +306,145 @@ Regression: `tests/test_bundled_skill_delivery.py`.
 
 Regression: `tests/test_runtime_planner_service.py`.
 
+### MCP current-context age
+
+- Prompt admission rejects identity/captured context at the 300-second boundary;
+  this does not expire historical resources/read or revoke execution permissions.
+- Explicit recapture can renew live state by publishing a new revision. Historical
+  operation/checkpoint evidence retries remain idempotent, and catalogue listing
+  cannot renew an identity via only-if-absent publication.
+- Verify the real Prompt/router/registry path rejects expired references and
+  accepts newly captured context while old resource content remains readable.
+
+Regression: `tests/test_mcp_resource_context_expiry.py`.
+
+### Resource session isolation and deliberate sharing
+
+- Interleaved sessions must not overwrite each other's current identity,
+  discover each other's private current resources, or reuse each other's cursor.
+- Explicit authenticated history reads remain available across sessions and
+  cannot promote the shared resource into current Prompt context.
+- Server-issued HTTP contexts, automatic STDIO negotiation and accepted runtime
+  sessions must use the same registry boundary. Thread hops inherit the context;
+  nested calls and exceptions restore it. Unscoped requests have no shared current
+  identity. Catalogs and projectless General capability remain available.
+- Unknown, ended and credential-mismatched sessions fail without replaying calls.
+  Session lifetime and current-context TTL do not expire historical evidence.
+- Runtime-state paging must generate and validate its page URIs in the same
+  context as publication, with repeat reads and repeated projection preserved.
+- After a confirmed unknown/expired-session rejection, clear only the stale
+  bridge session. Do not replay the rejected tool; the next independent request
+  may negotiate a new session. Ordinary tool-not-found errors must not do this.
+
+Regression: `tests/test_mcp_resource_session_context.py`,
+`tests/test_gateway_resource_session_context.py`, `tests/test_mcp_request_sessions.py`.
+
+### Manual-adjustment runtime handoff
+
+- A verified committed prepare receipt must stop planning at
+  `await_user_instruction` while retaining the successful prepare outcome.
+- Late continuations cannot bypass the barrier with another handoff's
+  finalize/abort receipt, including after the original handoff was closed.
+- Failure to stop owned background work must block manual adjustment and
+  must not report that the user can safely start dragging. Retry the original
+  owner, then obtain a fresh verified preview before planning can resume.
+- Exercise the production approval-resume entry point as well as direct
+  runtime tool completion. Scripted receipts and cancellation requests do not
+  prove live Unity readback or actual background-task termination.
+
+- The managed execution envelope's nested `payload` must preserve the verified
+  handoff receipt through approval resume. An outer failure or nonzero process
+  exit must never expose a nested success as a committed handoff.
+
+Regression: `tests/test_user_adjustment_runtime_boundary.py`,
+`tests/test_user_adjustment_transport_receipt.py`.
+
 ### User-tool authoring descriptor parity
+
+- Update compatibility must retain the existing availability decision and preserve
+  user package bytes. Classify baseline drift from typed hash evidence and Core
+  conflicts from fixed reason codes, never from translated error text.
+- Compatibility does not establish repair effectiveness or upstream absorption.
+  Absorption requires the original failure regression to pass against the exact
+  official build with the local repair disabled; version changes alone are not proof.
+- Reopening the same package store under a newer App version must retain package
+  identity and enabled state. Source integration coverage is not installer/Core
+  import acceptance.
+- A compiled Core installation stamp must not override the package store's
+  disabled state. A disabled package stays unavailable and dispatches no Core
+  invocation; re-enabling must restore the ordinary valid package path.
+- The effective App-facing catalog must expose one consistent state: a package
+  with a disabled store entry reports `enabled=false` and `available=false`,
+  and each child tool reports `available=false` with the structured
+  `reason="disabled"`. Preserve the Core catalog's original state only in
+  explicit `coreEnabled` and `coreReason` fields; do not leave the Core
+  `enabled=true` or child `reason="ready"` values in the effective fields.
+- A typed package-store disablement must preserve the structured source field
+  `disabledBy="vrcforge_package_store"` through native and legacy observation
+  projections. Core-only validation failures, missing entries, integrity or
+  signature failures, and other generic errors must not claim App package-store
+  disablement or synthesize `disabledBy`.
+- A missing package-store entry remains a generic security failure and must
+  not be inferred as `disabled`. A real disabled-store write must prevent
+  dispatch, while re-enabling must restore the ordinary available/ready path.
+- Validate the disabled-to-enabled round trip against the deployed Gateway;
+  bind the live result to its source and deployed bytecode hashes.
+
+Regression: `tests/test_user_tool_repair_compatibility.py`,
+`tests/test_user_unity_tool_gateway.py`.
+
+### Repair cost evidence
+
+- Bind model usage, elapsed time, and terminal reason to the same runtime task.
+  Approval and background Shell continuations may report cumulative task usage;
+  do not sum those inherited totals with their original provider receipts.
+  Deduplicate copied action history by action ID. Missing usage stays unknown
+  rather than becoming zero.
+- Count a successful repair only after the requested repair and independent
+  readback succeed. A bounded stop, denied operation, manual restoration, or a
+  later unrelated successful turn is not a successful repair cost sample.
+
+### Complete model-facing tool descriptions
+
+- Treat missing or truncated callable-tool instructions as a release blocker.
+- Preserve the complete registered usage description in both native function
+  schemas and legacy planner prompts, including positive conditions, exclusions
+  and negative examples. Do not enforce character caps on these instructions.
+- Control context growth through the existing tool selection/loading boundary;
+  never remove repair conditions or permission limits from a loaded tool.
+- Verify the descriptions actually received at the model request boundary, with
+  long tails and the real Core installation contract, not just section labels.
+- Preserve every input-schema description, including root, parameter, nested
+  array, named-definition and composition-branch instructions. Do not cap either
+  their length or the number of descriptions retained.
+
+Regression: `tests/test_planner_tool_description_integrity.py`,
+`tests/test_planner_schema_description_integrity.py`,
+`tests/test_tool_usage_contract.py`, `tests/test_runtime_planner_service.py`.
+
+### Tool discovery and continuation names
+
+- Internal Agent registry names must match the existing planner catalog's
+  callable names. External Gateway/MCP registry names remain unchanged.
+- Runtime-owned project and exposure scope override model-supplied registry
+  parameters. Registry entries, counts, categories and digest describe the
+  same filtered view; tools outside the active profile are not advertised.
+- Initial retained-result hints and subsequent page hints use the advertised
+  result-reader name in native and legacy observations. Projection leaves the
+  original receipt, arguments, result reference and isolation intact.
+- Acceptance drivers must wait for owned background work before declaring a
+  missing approval. A driver cancellation is not proof of model incapability.
+- Continuation probes must send the client's durable visible chat history, as
+  `buildChatHistory()` and `sendAgentMessage()` do. A session ID or the new
+  process's session snapshot alone does not reconstruct that history after a
+  backend restart. Compare the probe payload with the actual frontend history
+  projection; reject a context-free continuation before making a model call.
+  Such a malformed probe is not evidence of a product or model failure.
+
+Regression: `tests/test_runtime_registry_profile_binding.py`,
+`tests/test_runtime_planner_dashboard_wiring.py`,
+`tests/test_result_reader_planner_boundary.py`,
+`tests/test_agent_tool_result_reader.py`.
 
 - Compile the documented C# example and execute its descriptor-generation
   snippet against the actual tool registry. Compare the complete generated
@@ -303,15 +470,44 @@ Regression: `tests/test_bundled_skill_delivery.py`.
 Regression: `tests/test_agent_shell_service.py`,
 `tests/test_avatar_tuning_state_service.py` and existing skill/sub-agent UI checks.
 
+### Masked texture edits and precise importer checkpoints
+
+- Reject colored or incorrectly sized PNG masks. Preview must not write, and a
+  changed mask must invalidate approval. Preserve protected pixels, source alpha,
+  source bytes, and existing targets; verify saved output independently.
+- Texture importer checkpoint scope includes the exact texture and its meta.
+  Restore those bytes without reverting unrelated assets or changing user Git
+  state. Keep broader checkpoint scope where safe output cleanup is not bound.
+
+Regression: `tests/test_texture_patch_mask_runtime.py`,
+`tests/test_texture_patch_cleanup_runtime.py`,
+`tests/test_checkpoint_archive_file_dates.py`,
+`tests/test_checkpoint_git_user_state.py`.
+
+### Reviewed support feedback and complete export publication
+
+- Typed desktop IPC preserves already-redacted review text without weakening the
+  general response sanitizer. Omitted export options serialize to false/200,
+  never null for strict backend bool/int fields.
+- Reading a bundle never checks the user's review confirmation. Editing input
+  or refreshing a bundle invalidates the draft and any older pending response.
+- Mark excerpts truncated at both input-byte and displayed-character limits.
+- Publish a support ZIP only after it closes successfully; concurrent previews
+  cannot see partial ZIPs. Failed export removes only its owned temporary file.
+- Opening the feedback page must not submit text or attach a bundle.
+
+Regression: `tests/test_support_feedback.py`, `tests/test_diagnostic_logging.py`,
+`tests/test_settings_diagnostics_ui.mjs`, and Rust support projection/export body
+tests. Desktop acceptance must exercise the actual export button and typed IPC.
+
 
 ## Normal task execution exposure
 
-Normal App tasks must expose execution tools on the first provider request,
-without requiring a model-generated phase transition. Visibility is not
-permission: supervised writes remain pending until approved and must not
-invoke Unity before approval. Continuations retain their recorded exposure.
+- A normal App task exposes execution tools on its first provider request without a model-generated phase transition. Tool visibility does not authorize dispatch: supervised writes still produce pending approvals and do not invoke Unity before approval.
+- Continuations retain their recorded exposure layer. Explicit planning-layer tests must opt into that layer, not rely on the normal chat default.
+- For cost measurement across approval continuations, use the final exact provider-backed task total once when available; excluding all continuation totals undercounts real calls. Never add cumulative totals to their predecessors.
 
-Regression: `tests/test_agent_loop_p0.py` and `tests/test_native_runtime_gateway.py`.
+Regression: `tests/test_agent_loop_p0.py::AgentLoopP0Tests::test_normal_app_turn_starts_execution_but_write_waits_for_real_approval`, `tests/test_native_runtime_gateway.py`.
 
 
 ## Explicit user-selected Plan mode
@@ -324,12 +520,23 @@ Regression: `tests/test_agent_loop_p0.py` and `tests/test_native_runtime_gateway
 Regression: `tests/test_explicit_plan_mode.py`, `tests/test_explicit_plan_mode_ui.mjs`, Rust `agent_message_transport_tests`.
 # Explicit Plan queued replay
 
-- Tool discovery observations must preserve complete public directory metadata and description tails in both native provider messages and legacy prompts, including directories beyond former item/character limits. Only exact repeated tree content may become a reference to the retained blocks. Keep secret redaction and private-schema exclusion. Regression: `tests/test_tool_directory_observation_integrity.py`.
+- Tool discovery observations must preserve complete metadata and description tails for the selected navigation level in both native provider messages and legacy prompts. Default canonical discovery returns roots only; category expansion returns direct children without the global tree. Every tool remains reachable, with complete definitions after loading. Unknown custom directories retain their metadata. Keep secret redaction and private-schema exclusion. Regression: `tests/test_tool_directory_observation_integrity.py`.
 
 - Native runtime control rejections (including invalid correction arguments) retain kind=control. A subsequent valid final response may recover the rejected control proposal; real tool failures and task requirements must still block unsupported completion. Regression: `test_plan_can_finish_after_rejected_control_correction` plus native gateway failure-retention cases.
 
 - A persisted queued turn owns its selected Plan mode. After process restart, claiming and replaying it must retain that mode even if the replay request omits the field or carries the current composer's different mode.
 - Regression: `tests/test_explicit_plan_mode.py::test_queued_replay_uses_persisted_plan_mode` covers saved Plan with absent/false replay input and saved execution with true replay input; the durable queue is reopened before dispatch.
+
+## Unified progressive tool loading
+
+- A single model-visible loader browses roots when block is omitted, expands categories without loading, and loads exact leaf tools. Do not reject a valid category or expose competing list/load operations to the model. Keep existing list integrations callable.
+- Optional tool selection requires a leaf; invalid and cross-block names remain rejected and Plan/write approval boundaries remain intact.
+- Native provider system and the complete tools array stay fixed across interleaved block loads. Loaded definitions remain in their original loader result in history, and the fixed dispatcher executes them. Preserve full definitions and saved ordering across approval resume/compaction; revoked tools remain unavailable.
+- Regression: `tests/test_internal_tool_blocks.py`, `tests/test_native_progressive_directory.py`, `tests/test_native_tool_discovery_recovery.py`, `tests/test_native_session_tool_order.py`. Provider acceptance must be reported separately from offline gateway tests.
+
+- Exposed diagnostic tool descriptions and legacy navigation prompts must refer to the same visible loader; never direct the model to a hidden discovery entry. Regression: `test_diagnostic_description_does_not_route_to_hidden_discovery_entry`, `test_legacy_navigation_uses_same_loader_for_browsing_and_loading`.
+
+- Bundled Skill allowed-tool metadata must not reintroduce hidden internal discovery names through model-visible Skill reads or activation. Keep the unified loader allowed and preserve existing direct compatibility handlers. Regression: `test_bundled_guide_does_not_reintroduce_hidden_directory_entry`, `test_previous_directory_handler_remains_directly_callable`.
 
 ### Retained text continuation
 

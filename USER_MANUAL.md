@@ -297,6 +297,31 @@ separate approval.
   for troubleshooting; they are diagnostic provenance, not an authorization
   or operating-system identity boundary.
 
+## Masked texture edits
+
+The texture patch tool can use an optional same-size grayscale PNG mask from
+the Unity project's `Assets` folder. White pixels receive the requested color,
+black or transparent pixels stay unchanged, and gray pixels blend proportionally.
+The source texture's alpha is preserved. Colored masks and mismatched sizes are
+rejected.
+
+Preview the edit first, then approve it to write a new PNG. The source is never
+overwritten. Changing the source, mask, or edit settings invalidates the preview;
+preview again before approving. The result reports the actual changed pixel count
+and bounds after reading the saved output back.
+
+## Reviewing a support report
+
+In Settings diagnostics, describe the problem and generate a local redacted
+preview. You can also preview the newest support bundle; long member excerpts
+are marked as truncated, so inspect the full bundle before sharing it. Reading
+the preview does not mark the bundle as reviewed. Confirm review yourself, copy
+the draft, and manually attach the intended bundle on the feedback page.
+VRCForge does not upload the report or attachment automatically.
+
+Japanese setup, troubleshooting, and support boundaries are described in
+[日本語サポートガイド](docs/SUPPORT_JA.md).
+
 ## Privacy Boundary
 
 VRCForge keeps avatar assets local by default. API key values, gateway token
