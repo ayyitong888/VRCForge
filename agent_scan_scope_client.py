@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import re
+import hashlib
 import uuid
 from pathlib import Path
 from typing import Any
 
 from unity_mcp_core_client import UnityMcpCoreClient
+from agent_scan_scope_budget import scope_request
 
 
 SCAN_SCOPE_SCHEMA = "vrcforge.scan_scope.v1"
@@ -55,6 +57,8 @@ class AgentScanScopeClient:
 
     def __init__(self, project_root: str | Path) -> None:
         self._project_root = Path(project_root)
+        self.capture_budget = None
+        self._core_info = None
 
     @staticmethod
     def _has_capability(info: Any) -> bool:
@@ -70,7 +74,8 @@ class AgentScanScopeClient:
 
     def _client_with_capability(self) -> UnityMcpCoreClient | None:
         client = UnityMcpCoreClient(self._project_root, timeout_seconds=CORE_TIMEOUT_SECONDS)
-        if not self._has_capability(client.core_info()):
+        self._core_info = client.core_info()
+        if not self._has_capability(self._core_info):
             return None
         return client
 
@@ -83,7 +88,56 @@ class AgentScanScopeClient:
             client = self._client_with_capability()
             if client is None:
                 return {"schema": SCAN_SCOPE_SCHEMA, "verified": False, "reason": "capability_unavailable"}
-            request = {"scanTool": scan_tool, "arguments": arguments}
+            request = scope_request(scan_tool, arguments)
+            if self.capture_budget is not None:
+                info = {**self._core_info, "captureRootIdentity": self._capture_identity(client, request)}
+                return self.capture_budget.capture(self._project_root, info, request,
+                                                   lambda: self._capture_request(client, request))
+            return self._capture_request(client, request)
+        except Exception as exc:
+            code = getattr(exc, "cause_code", None)
+            return {"schema": SCAN_SCOPE_SCHEMA, "verified": False,
+                    "reason": _reason(code, "core_unavailable")}
+
+    def _capture_identity(self, client, request):
+        args = request["arguments"]
+        paths = [args[name] for name in ("assetPath", "controllerPath", "clipPath") if args.get(name)]
+        if isinstance(args.get("clipPaths"), list):
+            paths.extend(args["clipPaths"])
+        identities = []
+        root = self._project_root.resolve()
+        for path in sorted(set(paths)):
+            if _asset_path(path) is None:
+                return None
+            metadata = (root / (path + ".meta")).resolve()
+            if not metadata.is_relative_to(root) or not metadata.is_file() or metadata.stat().st_size > 65536:
+                return None
+            identities.append(["asset", path, hashlib.sha256(metadata.read_bytes()).hexdigest()])
+        if not paths or request["scanTool"] == "vrcforge_scan_animation_bindings" and args.get("avatarPath"):
+            envelope = client.call_tool("vrc_get_execution_targets", {"scope": "avatar"})
+            structured = envelope.get("structuredContent", {})
+            if structured.get("success") is not True or not isinstance(structured.get("data"), dict):
+                return None
+            data = structured["data"]
+            targets = data.get("targets", [data] if isinstance(data.get("avatar"), dict) else [])
+            if not isinstance(targets, list):
+                return None
+            selector = args.get("avatarPath", "")
+            matches = [target for target in targets if isinstance(target, dict)
+                       and isinstance(target.get("avatar"), dict) and (not selector or selector in
+                       (target["avatar"].get("exactHierarchyPath"), target["avatar"].get("name")))]
+            if len(matches) != 1:
+                return None
+            target = matches[0]
+            scene = target.get("scene", {}).get("guid")
+            avatar = target["avatar"].get("globalObjectId")
+            if not isinstance(scene, str) or not scene or not isinstance(avatar, str) or not avatar:
+                return None
+            identities.append(["avatar", scene, avatar])
+        return identities
+
+    def _capture_request(self, client, request):
+        try:
             result = client.call_tool(CAPTURE_SCAN_SCOPE_TOOL, request)
         except Exception as exc:
             code = getattr(exc, "cause_code", None)

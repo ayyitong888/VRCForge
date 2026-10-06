@@ -15,6 +15,7 @@ from typing import Any, Iterable
 
 from agent_scan_scope_client import AgentScanScopeClient, SCAN_SCOPE_SCHEMA
 from agent_scan_rescan import WHITELIST, ScanRescanVerifier, comparison_metadata, eligible
+from agent_scan_scope_budget import ScopeCaptureBudget
 from agent_tool_result_reader import result_reference
 
 _PROCESS_BOOT_ID = uuid.uuid4().hex
@@ -179,6 +180,7 @@ class ScanResultStore:
         self._path = Path(root) / "scan-results.sqlite3"
         self._lock = shared_lock if shared_lock is not None else threading.RLock()
         self._boot_id = _PROCESS_BOOT_ID
+        self._capture_budget = ScopeCaptureBudget()
         self._rescan = ScanRescanVerifier(self)
 
     @contextmanager
@@ -338,7 +340,9 @@ class ScanResultStore:
             return {"generation": 0, "proof": {
                 "schema": SCAN_SCOPE_SCHEMA, "verified": False, "reason": "proof_store_unavailable",
             }}
-        proof = AgentScanScopeClient(project).capture(tool, arguments)
+        client = AgentScanScopeClient(project)
+        client.capture_budget = self._capture_budget
+        proof = client.capture(tool, arguments)
         if not isinstance(proof, dict) or proof.get("verified") is not True:
             if not isinstance(proof, dict):
                 proof = {"schema": SCAN_SCOPE_SCHEMA, "verified": False, "reason": "scope_unverified"}
