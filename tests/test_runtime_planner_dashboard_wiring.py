@@ -10,6 +10,7 @@ import pytest
 from test_runtime_planner_service import service
 
 import dashboard_server
+from agent_task_loop import AgentTaskLoop
 from provider_configuration_service import ProviderApiConfig
 from runtime_planner_service import (
     EXPOSURE_LAYER_EXECUTION,
@@ -582,6 +583,37 @@ def test_no_project_catalog_exposes_only_general_agent_capabilities() -> None:
     # bound; this does not expose builtin workflows or executable Unity tools.
     assert all(skill.source == "user" and skill.skill_type == "package" for skill in planning.skills)
     assert all(skill.source == "user" and skill.skill_type == "package" for skill in execution.skills)
+
+
+def test_app_planner_tool_registry_uses_profiled_model_names() -> None:
+    with dashboard_server.AGENT_GATEWAY._bind_runtime_skill_scope(AgentTaskLoop("Inspect tool registry")):
+        handler = dashboard_server.AGENT_GATEWAY._tools["vrcforge_tool_registry"].handler
+        registries = [handler({
+            "exposureLayer": exposure,
+            "projectContextActive": project_active,
+        }) for project_active in (False, True) for exposure in ("planning", "execution")]
+    for registry in registries:
+        assert "list_skill_packages" in {item["name"] for item in registry["tools"]}
+        assert "vrcforge_list_skill_packages" not in {item["name"] for item in registry["tools"]}
+        assert registry["nameScope"] == "app_planner"
+        assert registry["count"] == len(registry["tools"])
+        assert all("runtimeName" in item for item in registry["tools"])
+        assert all(not item["name"].startswith("vrcforge_") for item in registry["tools"])
+        entries = {item["runtimeName"]: item for item in registry["tools"]}
+        assert entries["vrcforge_list_skill_packages"]["name"] == "list_skill_packages"
+        assert entries["vrcforge_tool_registry"]["name"] == "tool_registry"
+        assert entries["vrcforge_list_skill_packages"]["modelInvocable"] is True
+
+
+def test_external_tool_registry_keeps_internal_names() -> None:
+    handler = dashboard_server.AGENT_GATEWAY._tools["vrcforge_tool_registry"].handler
+    registry = handler({
+        "exposureLayer": "planning",
+        "_appPlannerProjection": True,
+    })
+    entries = {item["name"]: item for item in registry["tools"]}
+    assert "vrcforge_list_skill_packages" in entries
+    assert "list_skill_packages" not in entries
 
 
 def test_internal_indexed_catalog_loads_per_session_without_leaking_to_external_mcp() -> None:

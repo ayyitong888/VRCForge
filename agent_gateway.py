@@ -101,6 +101,10 @@ from agent_task_loop import (
 )
 from agent_tool_result_contract import completion_gate_plan, normalize_agent_tool_result
 from context_compaction import normalize_compaction_recovery
+from stage1_atomic_writes import (
+    user_adjustment_receipt, user_adjustment_fresh_read_request,
+    validate_user_adjustment_fresh_read,
+)
 from external_tool_result_contract import (
     build_external_tool_error,
     external_exception_details,
@@ -140,7 +144,7 @@ from mcp_tool_descriptor import (
     identity_scope,
     standardize_tool_descriptor,
 )
-from mcp_resource_registry import McpResourceError, McpResourceRegistry
+from mcp_resource_registry import McpResourceError, McpResourceRegistry, scoped_base_uri
 from mcp_prompt_registry import McpPromptRegistry
 from operation_context import bind_operation_context
 
@@ -2118,6 +2122,12 @@ class AgentGateway:
             "vrcforge_tool_owner",
             default="",
         )
+        # Session context selects current resources, never project permissions.
+        # HTTP binds a server-issued owner; runtime binds its accepted session.
+        self._mcp_resource_context = (
+            self._mcp_resources.context if self._mcp_resources is not None
+            else contextvars.ContextVar("vrcforge_resource_session", default=None)
+        )
         # One Gateway-owned, call-scoped runtime reference. No network caller
         # can supply it; the binding is reset after each synchronous dispatch.
         self._runtime_skill_scope: contextvars.ContextVar[AgentTaskLoop | None] = contextvars.ContextVar(
@@ -3532,6 +3542,16 @@ class AgentGateway:
             "hierarchyPathIsIdentity": False,
         }
 
+    @contextmanager
+    def resource_context(self, context_id: str):
+        if not isinstance(context_id, str) or not context_id:
+            raise ValueError("A resource session context is required")
+        token = self._mcp_resource_context.set(context_id)
+        try:
+            yield
+        finally:
+            self._mcp_resource_context.reset(token)
+
     def _sync_mcp_resource_catalogue(self) -> None:
         """Publish shared registry metadata without touching Unity state."""
 
@@ -3560,16 +3580,17 @@ class AgentGateway:
             source_mode="gateway_registry",
             refresh_rule="Republish when the canonical Gateway Tool registry changes.",
         )
-        with self._lock:
-            project_roots = sorted(self._external_mcp_project_paths)
+        context_id = self._mcp_resource_context.get()
+        if context_id is None:
+            return
         self._mcp_resources.publish(
             base_uri="vrcforge://session/current/identity",
             name="Current MCP session identity lock",
             description="Truthful Gateway identity-binding state. Exact Unity identity appears only after an explicitly targeted Tool call.",
             resource_type="session_identity_lock",
             data={
-                "status": "unbound" if not project_roots else "project_scope_observed",
-                "observedProjectRoots": project_roots,
+                "status": "unbound",
+                "observedProjectRoots": [],
                 "exactExecutionTarget": None,
                 "note": "This summary is not write authority; writes require the exact ExecutionTarget envelope.",
             },
@@ -3582,14 +3603,19 @@ class AgentGateway:
             source_mode="gateway_session",
             refresh_rule="Updated after explicit identity-bound Tool activity.",
             only_if_absent=True,
+            context_id=context_id,
         )
 
     def _validate_mcp_prompt_resource(self, uri, expected_type, expected_identity=None):
+        context_id = self._mcp_resource_context.get()
+        if context_id is None:
+            raise McpResourceError("Current Prompt context requires a resource session; historical resources remain readable")
         resource = self._mcp_resources.validate_reference(
             uri, expected_type=expected_type or None, expected_identity=expected_identity,
+            context_id=context_id,
         )
         if expected_type == "session_identity_lock":
-            if resource["canonicalUri"] != "vrcforge://session/current/identity":
+            if resource["canonicalUri"] != scoped_base_uri("vrcforge://session/current/identity", context_id):
                 raise McpResourceError("Prompt requires this Gateway's current identity lock")
             data = resource["data"]
             if data.get("status") != "bound":
@@ -3607,12 +3633,18 @@ class AgentGateway:
         return self._mcp_resources.list(
             cursor=str(params.get("cursor") or ""),
             page_size=int(params.get("pageSize") or 100),
+            context_id=self._mcp_resource_context.get() or "unbound:no-current-context",
         )
 
     def list_mcp_resource_templates(self, _params: Mapping[str, Any] | None = None) -> dict[str, Any]:
         return {"resourceTemplates": self._mcp_resources.templates()}
 
     def read_mcp_resource(self, uri: str) -> dict[str, Any]:
+        if uri == "vrcforge://session/current/identity":
+            context_id = self._mcp_resource_context.get()
+            if context_id is None:
+                raise McpResourceError("Current identity requires a resource session")
+            uri = scoped_base_uri(uri, context_id)
         return self._mcp_resources.read(uri)
 
     def list_mcp_prompts(self, params: Mapping[str, Any] | None = None) -> dict[str, Any]:
@@ -3730,7 +3762,9 @@ class AgentGateway:
                 },
                 "identity": identity, "source_mode": source_mode,
                 "refresh_rule": "Replaced only by a later explicit identity-bound Tool operation."})
-        records = self._mcp_resources.publish_many(entries)
+        records = self._mcp_resources.publish_many(
+            entries, context_id=self._mcp_resource_context.get() or f"transient:{secrets.token_urlsafe(24)}",
+        )
         receipt = records[0]
         if target is not None:
             identity_resource = records[identity_entry_index]
@@ -5919,6 +5953,7 @@ class AgentGateway:
         response_payload: dict[str, Any] | None = None
         turn_raised = False
         recovery_failure: dict[str, Any] | None = None
+        resource_token = self._mcp_resource_context.set(self._mcp_resource_context.get())
         try:
             response_payload = self._runtime_message_impl_body(
                 owned_params,
@@ -6003,6 +6038,7 @@ class AgentGateway:
                     pass
             raise
         finally:
+            self._mcp_resource_context.reset(resource_token)
             owned_params.pop("_runtimeFailureProgress", None)
             owned_params.pop("_runtimeTurnStarted", None)
             owned_params.pop("_runtimeTurnRecorded", None)
@@ -6108,6 +6144,55 @@ class AgentGateway:
                         client_turn_id=resolved_client_turn_id,
                     )
 
+    @staticmethod
+    def _user_adjustment_wait_plan(reason: str = "") -> dict[str, Any]:
+        reply = reason or "The adjustment proxy is ready. Finish the manual adjustment, then send a new message."
+        return {"planner": "runtime", "summary": reply, "reply": reply,
+                "continueLoop": False, "nextStep": "await_user_instruction",
+                "completionClaim": {"satisfied": False},
+                "completionGate": {"status": "awaiting_user", "reason": "user_adjustment_handoff"}}
+
+    def _user_adjustment_stop_plan(self, cancellation: dict[str, Any]) -> dict[str, Any]:
+        if (cancellation.get("subAgentCancelPartialFailure") or cancellation.get("failedSubAgentTaskIds")
+                or cancellation.get("subAgentLookupFailed")):
+            plan = self._user_adjustment_wait_plan(
+                "Background work could not be confirmed stopped. Do not start manual adjustment yet; retry after resolving the stop failure."
+            )
+            plan["completionGate"]["reason"] = "user_adjustment_stop_unconfirmed"
+            return plan
+        return self._user_adjustment_wait_plan()
+
+    def _accept_user_adjustment_receipt(
+        self, payload: Any, arguments: dict[str, Any], *, session_id: str,
+        project_root: str, turn_id: str, client_turn_id: str,
+    ) -> dict[str, Any] | None:
+        receipt = user_adjustment_receipt(payload)
+        if receipt is None or os.path.normcase(os.path.abspath(str(receipt["projectPath"]))) != os.path.normcase(os.path.abspath(project_root)):
+            return None
+        previous = self._runtime_session_state.user_adjustment(session_id, project_root)
+        if receipt["operation"] != "user_adjustment_prepare":
+            nested_arguments = ensure_dict(arguments.get("arguments")) or arguments
+            if previous and previous["receipt"]["handoffId"] == nested_arguments.get("handoffId"):
+                self._runtime_session_state.set_user_adjustment(session_id, project_root, {**previous, "closed": True})
+            return None
+        if receipt.get("status") != "awaiting_user" or receipt.get("commitState") != "committed":
+            return None
+        # Publish the barrier before cancellation callbacks can deliver late completions.
+        self._runtime_session_state.set_user_adjustment(session_id, project_root, {
+            "receipt": receipt, "arguments": arguments, "turnId": turn_id,
+            "clientTurnId": client_turn_id, "closed": False,
+        })
+        cancellation = self.request_runtime_cancel({"sessionId": session_id, "turnId": turn_id,
+            "clientTurnId": client_turn_id, "reason": "user_adjustment_handoff"})
+        handoff = self._runtime_session_state.user_adjustment(session_id, project_root)
+        self._runtime_session_state.set_user_adjustment(session_id, project_root, {**handoff, "cancellation": cancellation})
+        self._runtime_session_state.consume_cancel_request(session_id=session_id,
+            turn_id=turn_id, client_turn_id=client_turn_id)
+        plan = self._user_adjustment_stop_plan(cancellation)
+        plan["handoffId"] = receipt["handoffId"]
+        plan["handoffCancellation"] = cancellation
+        return plan
+
     def _runtime_message_impl_body(
         self,
         params: dict[str, Any] | None = None,
@@ -6142,6 +6227,7 @@ class AgentGateway:
                 status_code=409,
             )
         goal_delivery_id = str(params.get("goal_delivery_id") or params.get("goalDeliveryId") or "").strip()
+        self._mcp_resource_context.set(f"runtime:{session_id}")
         chat_id = str(params.get("chat_id") or params.get("chatId") or "").strip()
         self._desktop.bind_runtime_identity(
             session_id=session_id,
@@ -6217,13 +6303,64 @@ class AgentGateway:
                     or getattr(self.ensure_config(), "advanced_settings", None)
                 ),
             )
-        observe = self.runtime_observe(session_id=session_id, project_root=project_root)
+        handoff_terminal = self._accept_user_adjustment_receipt(
+            ensure_dict(task_continuation).get("execution"),
+            ensure_dict(continuation_context.get("requestedArguments")),
+            session_id=session_id, project_root=project_root,
+            turn_id=task_loop.turn_id or turn_id, client_turn_id=task_loop.client_turn_id or client_turn_id,
+        )
+        handoff = self._runtime_session_state.user_adjustment(session_id, project_root)
+        fresh_handoff = None
+        if handoff and handoff_terminal is None:
+            stale_continuation = bool(task_continuation) and (
+                not handoff.get("closed") or
+                (continuation_context.get("clientTurnId") and continuation_context.get("clientTurnId") == handoff.get("clientTurnId"))
+            )
+            # A completed finalize/abort may settle its own approval continuation.
+            completed_handoff = user_adjustment_receipt(ensure_dict(task_continuation).get("execution"))
+            completed_arguments = ensure_dict(continuation_context.get("requestedArguments"))
+            completed_arguments = ensure_dict(completed_arguments.get("arguments")) or completed_arguments
+            completed_current_handoff = bool(
+                handoff.get("closed") and completed_handoff
+                and completed_handoff["operation"] != "user_adjustment_prepare"
+                and completed_arguments.get("handoffId") == handoff["receipt"]["handoffId"]
+            )
+            if stale_continuation and not completed_current_handoff:
+                handoff_terminal = self._user_adjustment_stop_plan(ensure_dict(handoff.get("cancellation")))
+            elif not task_continuation and not handoff.get("closed"):
+                try:
+                    cancellation = ensure_dict(handoff.get("cancellation"))
+                    if self._user_adjustment_stop_plan(cancellation)["completionGate"]["reason"] == "user_adjustment_stop_unconfirmed":
+                        cancellation = self.request_runtime_cancel({"sessionId": session_id,
+                            "turnId": handoff["turnId"], "clientTurnId": handoff["clientTurnId"],
+                            "reason": "user_adjustment_handoff"})
+                        self._runtime_session_state.consume_cancel_request(session_id=session_id,
+                            turn_id=handoff["turnId"], client_turn_id=handoff["clientTurnId"])
+                        self._runtime_session_state.set_user_adjustment(session_id, project_root, {**handoff, "cancellation": cancellation})
+                        stop_plan = self._user_adjustment_stop_plan(cancellation)
+                        if stop_plan["completionGate"]["reason"] == "user_adjustment_stop_unconfirmed":
+                            handoff_terminal = stop_plan
+                            raise ValueError(stop_plan["reply"])
+                    request = user_adjustment_fresh_read_request(handoff["receipt"], handoff["arguments"])
+                    handler = self._write_handlers.get("vrcforge_user_adjustment_handoff")
+                    if handler is None or handler.request_preparer is None:
+                        raise ValueError("The handoff fresh-read handler is unavailable.")
+                    _, preview = handler.request_preparer(request, None)
+                    fresh_handoff = validate_user_adjustment_fresh_read(handoff["receipt"], preview)
+                    self.append_audit({"event": "user_adjustment_fresh_read", "sessionId": session_id,
+                                       "projectRoot": project_root, "handoffId": handoff["receipt"]["handoffId"], "status": "verified"})
+                except Exception as exc:
+                    if handoff_terminal is None:
+                        handoff_terminal = self._user_adjustment_wait_plan("The handoff could not be freshly verified: " + str(exc))
+        observe = {} if handoff_terminal else self.runtime_observe(session_id=session_id, project_root=project_root)
+        if fresh_handoff is not None:
+            observe["userAdjustmentFreshRead"] = fresh_handoff
         if attachments:
             observe["turn"] = {"attachments": attachments}
         # 图片附件 → 视觉委托：一轮最多分析一次，结果（或诚实提示）注入本轮。
         vision_payload: dict[str, Any] | None = None
         image_attachments = runtime_image_attachments(attachments)
-        if image_attachments:
+        if image_attachments and not handoff_terminal:
             vision_payload = self._run_vision_analysis(message, image_attachments)
             if (
                 str(vision_payload.get("status") or "") == "error"
@@ -6683,7 +6820,7 @@ class AgentGateway:
             })
             return planner_argument_failures >= RUNTIME_PLANNER_ARGUMENT_MAX_ATTEMPTS
 
-        if not task_loop.plan_mode and bool(params.get("_computerUseRequested")) and not self._runtime_session_state.desktop_bootstrap_completed(
+        if not task_loop.plan_mode and not handoff_terminal and bool(params.get("_computerUseRequested")) and not self._runtime_session_state.desktop_bootstrap_completed(
             session_id
         ):
             bootstrap_tool = "vrcforge_agent_desktop_action"
@@ -6787,6 +6924,9 @@ class AgentGateway:
         # telemetry only; normal turns end at the model's final response.
         for step_index in count():
             native_turn.settle()
+            if handoff_terminal is not None:
+                last_plan = handoff_terminal
+                break
             params["_internalToolBlocks"] = sorted(
                 self._runtime_session_state.internal_tool_blocks(session_id)
             )
@@ -7701,7 +7841,12 @@ class AgentGateway:
                     "vrcforge_skill_check",
                     "vrcforge_tool_registry",
                 }:
-                    step_params.setdefault("exposureLayer", runtime_exposure_layer)
+                    if step_tool == "vrcforge_tool_registry":
+                        # Bind the profile from the owned runtime, never from model input.
+                        step_params["exposureLayer"] = runtime_exposure_layer
+                        step_params["projectContextActive"] = project_context_active
+                    else:
+                        step_params.setdefault("exposureLayer", runtime_exposure_layer)
                 with self._bind_runtime_skill_scope(task_loop), (bind_memory_tool_context(project_root, memory_request_text, tuple(memory_user_texts)) if step_tool in MEMORY_TOOL_NAMES else nullcontext()), (
                     bind_tool_result_context(session_id, turn_id, project_root, [*model_context_steps, *steps], snapshot_lookup=self._scan_results.lookup if project_root else None) if step_tool == RESULT_READER_TOOL else nullcontext()
                 ):
@@ -7915,6 +8060,14 @@ class AgentGateway:
                 tool=step_tool,
                 action_id=planned_action_id,
             )
+
+            handoff_terminal = self._accept_user_adjustment_receipt(
+                step_payload, ensure_dict(execution_arguments), session_id=session_id,
+                project_root=project_root, turn_id=turn_id, client_turn_id=client_turn_id,
+            )
+            if handoff_terminal is not None:
+                last_plan = handoff_terminal
+                break
 
             if (
                 str(plan.get("planner") or "").strip().casefold() != "llm"
@@ -8188,7 +8341,7 @@ class AgentGateway:
                 )
         first_plan = first_plan or last_plan or {}
         # 单步（含纯回复/未连接）保持与历史一致的顶层 plan 形状；多步才综合成 loop 计划。
-        terminal_override = last_plan.get("scopeDenied") is True or str(last_plan.get("nextStep") or "") in {
+        terminal_override = handoff_terminal is not None or last_plan.get("scopeDenied") is True or str(last_plan.get("nextStep") or "") in {
             "plan_mode_blocked",
             "cancelled",
             "context_compaction_required",
@@ -8302,7 +8455,9 @@ class AgentGateway:
             turn_id=turn_id,
             client_turn_id=client_turn_id,
         )
-        if isinstance(top_plan, dict):
+        if handoff_terminal is not None:
+            top_plan = {**handoff_terminal, "task": task_loop.snapshot("await_user_instruction")}
+        elif isinstance(top_plan, dict):
             top_plan = task_loop.gate_terminal(top_plan)
         native_turn.settle(top_plan)
 
@@ -9828,6 +9983,7 @@ def create_agent_mcp_app(
         router,
         bearer_validator=validate_bearer,
         route_path="/mcp",
+        request_context=lambda context_id: gateway.resource_context(f"external:{context_id}"),
     )
 
 

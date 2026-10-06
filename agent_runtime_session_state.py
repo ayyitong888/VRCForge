@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import threading
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, replace
@@ -41,6 +42,7 @@ class AgentRuntimeSessionState:
         "_steer_seen_ids",
         "_native_conversations",
         "_stream_context",
+        "_user_adjustments",
         "_native_loaded",
     )
 
@@ -55,6 +57,7 @@ class AgentRuntimeSessionState:
         self._steer_seen_ids: dict[tuple[str, str], set[str]] = {}
         self._native_conversations: dict[str, dict[str, Any]] = {}
         self._stream_context = threading.local()
+        self._user_adjustments: dict[tuple[str, str], dict[str, Any]] = {}
         self._native_loaded: set[str] = set()
 
     def _load_native(self, session_id: str, binding: str | None = None) -> None:
@@ -114,8 +117,15 @@ class AgentRuntimeSessionState:
             self._steer_seen_ids.clear()
             self._native_conversations.clear()
             self._native_loaded.clear()
+            self._user_adjustments.clear()
 
+    def user_adjustment(self, session_id: str, project_root: str) -> dict[str, Any] | None:
+        with self._ports.shared_state_lock:
+            return copy.deepcopy(self._user_adjustments.get((session_id, os.path.normcase(os.path.abspath(project_root)))))
 
+    def set_user_adjustment(self, session_id: str, project_root: str, value: dict[str, Any]) -> None:
+        with self._ports.shared_state_lock:
+            self._user_adjustments[(session_id, os.path.normcase(os.path.abspath(project_root)))] = copy.deepcopy(value)
 
     def session_count(self) -> int:
         with self._ports.shared_state_lock:
@@ -130,6 +140,8 @@ class AgentRuntimeSessionState:
             self._native_loaded.discard(session_id)
             self._sessions.pop(session_id, None)
             self._native_conversations.pop(session_id, None)
+            for key in [key for key in self._user_adjustments if key[0] == session_id]:
+                self._user_adjustments.pop(key, None)
             for key in {key for key in (*self._active_turns.keys(), *self._finalizing_turns) if key[0] == session_id}:
                 self._active_turns.pop(key, None)
                 self._finalizing_turns.discard(key)

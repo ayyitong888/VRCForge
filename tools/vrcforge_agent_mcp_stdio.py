@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import secrets
@@ -17,7 +18,7 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from agent_mcp_2026 import PROTOCOL_VERSION, Mcp2026Router, run_stdio_loop
+from agent_mcp_2026 import HTTP_SESSION_IDLE_SECONDS, PROTOCOL_VERSION, Mcp2026Router, run_stdio_loop
 from agent_mcp_standard import McpStandardRouter, run_negotiated_stdio_loop, run_standard_stdio_loop
 from mcp_tool_descriptor import standardize_tool_descriptor
 from external_mcp_result_projection import project_tool
@@ -260,6 +261,10 @@ class VRCForgeBridge:
         self.start_runtime = start_runtime
         # Notification revisions only; never used for authorization or identity.
         self._response_list_revisions: dict[str, Any] | None = None
+        # One authenticated HTTP context per bridge process; never project authority.
+        self._mcp_session_id = ""
+        self._mcp_session_owner = ""
+        self._mcp_session_last_used = 0.0
 
     def preflight(self) -> dict[str, Any]:
         config_path = self.resolve_config_path()
@@ -591,6 +596,12 @@ class VRCForgeBridge:
         *,
         token: str,
     ) -> dict[str, Any]:
+        owner = hashlib.sha256(token.encode("utf-8")).hexdigest()
+        if self._mcp_session_owner != owner or time.monotonic() - self._mcp_session_last_used >= HTTP_SESSION_IDLE_SECONDS:
+            self._mcp_session_id = ""
+            self._mcp_session_owner = owner
+        if method != "server/discover" and not self._mcp_session_id:
+            self._mcp_request("server/discover", {}, token=token)
         request_id = f"stdio-{time.time_ns()}"
         meta = {
             "io.modelcontextprotocol/protocolVersion": PROTOCOL_VERSION,
@@ -624,19 +635,42 @@ class VRCForgeBridge:
         }
         if method == "tools/call":
             extra_headers["Mcp-Name"] = str(params.get("name") or "")
-        response = self.request_json(
-            "POST",
-            "/mcp",
-            token=token,
-            payload=payload,
-            allow_http_error=False,
-            extra_headers=extra_headers,
-            timeout_seconds=(
-                self.tool_call_timeout_seconds
-                if method == "tools/call"
-                else self.timeout_seconds
-            ),
-        )
+        if self._mcp_session_id:
+            extra_headers["Mcp-Session-Id"] = self._mcp_session_id
+        response_headers: dict[str, str] = {}
+        try:
+            response = self.request_json(
+                "POST",
+                "/mcp",
+                token=token,
+                payload=payload,
+                allow_http_error=False,
+                extra_headers=extra_headers,
+                response_headers=response_headers,
+                timeout_seconds=(
+                    self.tool_call_timeout_seconds
+                    if method == "tools/call"
+                    else self.timeout_seconds
+                ),
+            )
+        except ExternalHttpBridgeError as exc:
+            error = exc.raw_result.get("error")
+            error = error if isinstance(error, Mapping) else {}
+            data = error.get("data")
+            data = data if isinstance(data, Mapping) else {}
+            if (exc.status_code == 404 and exc.raw_result.get("jsonrpc") == "2.0"
+                    and error.get("code") == -32000
+                    and error.get("message") == "Unknown or expired MCP session"
+                    and data.get("schema") == "vrcforge.external_tool_error.v1"
+                    and data.get("failureLayer") == "external_mcp_protocol"
+                    and data.get("failurePhase") == "protocol_request_validation"
+                    and data.get("toolRoutingStarted") is False
+                    and data.get("mutationStarted") is False):
+                # Invalidate only the rejected context. Surface this failure;
+                # the next request rediscovers, never replay this tool call.
+                self._mcp_session_id = ""
+                self._mcp_session_last_used = 0.0
+            raise
         if not isinstance(response, dict):
             raise RuntimeError("VRCForge MCP returned a non-object response.")
         if isinstance(response.get("error"), dict):
@@ -648,6 +682,12 @@ class VRCForgeBridge:
         result = response.get("result")
         if not isinstance(result, dict):
             raise RuntimeError("VRCForge MCP response did not contain a result object.")
+        if method == "server/discover":
+            session_id = str(response_headers.get("Mcp-Session-Id") or "").strip()
+            if not session_id:
+                raise RuntimeError("VRCForge MCP discovery did not issue a session header.")
+            self._mcp_session_id = session_id
+        self._mcp_session_last_used = time.monotonic()
         if method == "tools/call":
             result_meta = result.get("_meta")
             revisions = result_meta.get("io.vrcforge/listRevisions") if isinstance(result_meta, Mapping) else None
@@ -746,6 +786,7 @@ class VRCForgeBridge:
         allow_http_error: bool = True,
         extra_headers: dict[str, str] | None = None,
         timeout_seconds: float | None = None,
+        response_headers: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         url = f"{self.base_url}{path}"
         body = None if payload is None else json.dumps(payload).encode("utf-8")
@@ -765,6 +806,10 @@ class VRCForgeBridge:
                 request,
                 timeout=self.timeout_seconds if timeout_seconds is None else timeout_seconds,
             ) as response:  # noqa: S310 - loopback-only URL.
+                if response_headers is not None:
+                    session_id = response.headers.get("Mcp-Session-Id")
+                    if session_id:
+                        response_headers["Mcp-Session-Id"] = session_id
                 text = response.read().decode("utf-8", errors="replace")
         except urllib.error.HTTPError as exc:
             text = exc.read().decode("utf-8", errors="replace")

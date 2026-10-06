@@ -17,6 +17,7 @@ import sqlite3
 import threading
 import time
 from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -26,6 +27,26 @@ from backend_owner_lease import BackendOwnerLease
 
 RESOURCE_SCHEMA = "vrcforge.resource.v1"
 RESOURCE_MIME_TYPE = "application/vnd.vrcforge.resource+json"
+
+# Admission to current Prompt context only; immutable history never expires.
+CURRENT_CONTEXT_TTL_SECONDS = 300
+CURRENT_CONTEXT_TYPES = frozenset({
+    "session_identity_lock", "unity_snapshot", "control_graph", "gm_runtime",
+    "operation_receipt", "checkpoint_diff",
+})
+RECAPTURABLE_CONTEXT_TYPES = CURRENT_CONTEXT_TYPES - {"operation_receipt", "checkpoint_diff"}
+
+
+def _context_expired(record: Mapping[str, Any]) -> bool:
+    if record.get("resourceType") not in CURRENT_CONTEXT_TYPES:
+        return False
+    try:
+        captured = datetime.fromisoformat(record["capturedAt"])
+        if captured.tzinfo is None:
+            return True
+        return (datetime.now(timezone.utc) - captured).total_seconds() >= CURRENT_CONTEXT_TTL_SECONDS
+    except (KeyError, TypeError, ValueError):
+        return True
 
 
 RESOURCE_TEMPLATES: tuple[dict[str, Any], ...] = (
@@ -112,6 +133,18 @@ def _base_uri(uri: str) -> str:
     return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query, doseq=True), parts.fragment))
 
 
+def scoped_base_uri(base_uri: str, context_id: str | None) -> str:
+    """Partition current context; this is not an authentication credential."""
+    if context_id is None:
+        return base_uri
+    if not isinstance(context_id, str) or not context_id:
+        raise McpResourceError("context_id must be a non-empty string")
+    parts = urlsplit(base_uri)
+    query = parse_qs(parts.query, keep_blank_values=True)
+    query["context"] = [context_id]
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query, doseq=True), parts.fragment))
+
+
 class McpResourceError(ValueError):
     pass
 
@@ -124,6 +157,9 @@ class McpResourceRegistry:
         self._lock = lock or threading.RLock()
         self._disk_lease = BackendOwnerLease(self.store_dir / "registry.lock")
         self._connection = None
+        # Bound by the authenticated Gateway/runtime boundary and inherited by
+        # asyncio.to_thread; producers do not derive it from Tool arguments.
+        self.context: ContextVar[str | None] = ContextVar("mcp_resource_context", default=None)
         # Construction does not open a database or inspect legacy history.
 
     @property
@@ -133,6 +169,7 @@ class McpResourceRegistry:
 
     def revision_uri(self, base_uri: str, revision: int) -> str:
         """Build an immutable handle in this database's persistent namespace."""
+        base_uri = scoped_base_uri(base_uri, self.context.get())
         with self._transaction() as connection:
             epoch = connection.execute("SELECT epoch FROM metadata").fetchone()[0]
             return _revision_uri(base_uri, revision, epoch)
@@ -154,26 +191,29 @@ class McpResourceRegistry:
         stale: bool = False,
         stale_reason: str = "",
         only_if_absent: bool = False,
+        context_id: str | None = None,
     ) -> dict[str, Any]:
         return self.publish_many([{
             "base_uri": base_uri, "name": name, "resource_type": resource_type,
             "data": data, "identity": identity, "source_mode": source_mode,
             "refresh_rule": refresh_rule, "description": description, "stale": stale,
             "stale_reason": stale_reason, "only_if_absent": only_if_absent,
-        }])[0]
+        }], context_id=context_id)[0]
 
-    def publish_many(self, entries: Sequence[Mapping[str, Any]], *, validate_records=None) -> list[dict[str, Any]]:
+    def publish_many(self, entries: Sequence[Mapping[str, Any]], *, validate_records=None, context_id: str | None = None) -> list[dict[str, Any]]:
         """Publish a validated finite batch in one SQLite transaction.
 
         Only affected revisions are read or written. A failure, including domain
         validation or commit, rolls back the entire batch and revision counters.
         """
+        if context_id is None:
+            context_id = self.context.get()
         prepared = _json_clone(list(entries))
         if not prepared:
             return []
         with self._transaction(write=True) as connection:
             before = connection.total_changes
-            records = [self._publish_staged(**entry) for entry in prepared]
+            records = [self._publish_staged(**entry, context_id=context_id) for entry in prepared]
             if validate_records is not None:
                 validate_records(records)
             if connection.total_changes != before:
@@ -194,11 +234,15 @@ class McpResourceRegistry:
         stale: bool = False,
         stale_reason: str = "",
         only_if_absent: bool = False,
+        context_id: str | None = None,
     ) -> dict[str, Any]:
         if not base_uri.startswith("vrcforge://") or {"revision", "store"}.intersection(parse_qs(urlsplit(base_uri).query, keep_blank_values=True)):
             raise McpResourceError("base_uri must be a revision-free vrcforge:// URI")
         if not name.strip() or not resource_type.strip():
             raise McpResourceError("name and resource_type are required")
+        if resource_type == "tool_catalog":
+            context_id = None
+        base_uri = scoped_base_uri(base_uri, context_id)
         cloned_data = _json_clone(data)
         cloned_identity = _json_clone(identity or {})
         captured_at = datetime.now(timezone.utc).isoformat()
@@ -208,7 +252,11 @@ class McpResourceRegistry:
         latest = json.loads(row[0]) if row else None
         if latest and only_if_absent:
             return latest
-        if latest and latest.get("contentHash") == payload_hash and bool(latest.get("stale")) == stale:
+        renew_context = (
+            latest is not None and resource_type in RECAPTURABLE_CONTEXT_TYPES
+            and _context_expired(latest)
+        )
+        if latest and latest.get("contentHash") == payload_hash and bool(latest.get("stale")) == stale and not renew_context:
             return latest
         revision = int(latest.get("revision", 0) if latest else 0) + 1
         epoch = connection.execute("SELECT epoch FROM metadata").fetchone()[0]
@@ -230,17 +278,26 @@ class McpResourceRegistry:
             "staleReason": stale_reason if stale else "",
             "refreshRule": refresh_rule,
             "data": cloned_data,
+            **({"contextId": context_id} if context_id is not None else {}),
         }
         connection.execute("INSERT INTO records(uri,payload) VALUES (?,?)", (uri, json.dumps(envelope, ensure_ascii=False, separators=(",", ":"), allow_nan=False)))
         connection.execute("INSERT INTO latest(base_uri,uri) VALUES (?,?) ON CONFLICT(base_uri) DO UPDATE SET uri=excluded.uri", (base_uri, uri))
         connection.execute("UPDATE metadata SET generation=generation+1")
         return _json_clone(envelope)
 
-    def list(self, *, cursor: str = "", page_size: int = 100) -> dict[str, Any]:
+    def list(self, *, cursor: str = "", page_size: int = 100, context_id: str | None = None) -> dict[str, Any]:
+        if context_id is None:
+            context_id = self.context.get()
         if page_size < 1 or page_size > 500:
             raise McpResourceError("page_size must be between 1 and 500")
+        cursor_prefix = ""
+        if context_id is not None:
+            scoped_base_uri("vrcforge://context", context_id)
+            cursor_prefix = f"context:{_content_hash(context_id)}:"
+            if cursor and not cursor.startswith(cursor_prefix):
+                raise McpResourceError("cursor belongs to a different context")
         try:
-            offset = int(cursor or "0")
+            offset = int(cursor[len(cursor_prefix):] if cursor else "0")
         except ValueError as exc:
             raise McpResourceError("cursor must be a non-negative integer") from exc
         if offset < 0:
@@ -248,7 +305,12 @@ class McpResourceRegistry:
         with self._transaction() as connection:
             # Newly published immutable receipts come first so list-first hosts
             # can discover the operation they just invoked without old pages.
-            rows = connection.execute("SELECT r.payload FROM latest l JOIN records r ON r.uri=l.uri ORDER BY r.rowid DESC LIMIT ? OFFSET ?", (page_size + 1, offset)).fetchall()
+            predicate = ""
+            parameters: tuple[Any, ...] = (page_size + 1, offset)
+            if context_id is not None:
+                predicate = " WHERE (json_extract(r.payload,'$.contextId')=? OR json_extract(r.payload,'$.resourceType')='tool_catalog')"
+                parameters = (context_id, *parameters)
+            rows = connection.execute("SELECT r.payload FROM latest l JOIN records r ON r.uri=l.uri" + predicate + " ORDER BY r.rowid DESC LIMIT ? OFFSET ?", parameters).fetchall()
             page = [json.loads(row[0]) for row in rows[:page_size]]
             next_offset = offset + len(page)
             resources = [
@@ -270,7 +332,7 @@ class McpResourceRegistry:
             return {
                 "resources": resources,
                 "resourceGeneration": int(connection.execute("SELECT generation FROM metadata").fetchone()[0]),
-                **({"nextCursor": str(next_offset)} if len(rows) > page_size else {}),
+                **({"nextCursor": cursor_prefix + str(next_offset)} if len(rows) > page_size else {}),
             }
 
     def read(self, uri: str) -> dict[str, Any]:
@@ -314,8 +376,11 @@ class McpResourceRegistry:
         *,
         expected_type: str | None = None,
         expected_identity: Mapping[str, Any] | None = None,
+        context_id: str | None = None,
     ) -> dict[str, Any]:
         """Validate an exact, immutable Resource reference for a Prompt context."""
+        if context_id is None:
+            context_id = self.context.get()
         if not isinstance(uri, str) or not uri.startswith("vrcforge://"):
             raise McpResourceError("Resource reference must be a vrcforge:// URI")
         parts = urlsplit(uri)
@@ -328,6 +393,8 @@ class McpResourceRegistry:
             if row is None:
                 raise McpResourceError("Resource reference is unknown or stale; legacy or retired handles require explicit recapture")
             selected = json.loads(row[0])
+            if context_id is not None and selected.get("resourceType") != "tool_catalog" and selected.get("contextId") != context_id:
+                raise McpResourceError("Resource reference belongs to a different context; historical reads remain available")
             if expected_type == "session_identity_lock":
                 latest = connection.execute("SELECT uri FROM latest WHERE base_uri=?", (_base_uri(uri),)).fetchone()
                 if latest is None or latest[0] != uri:
@@ -336,6 +403,11 @@ class McpResourceRegistry:
             raise McpResourceError("Resource reference has the wrong resource type")
         if selected.get("stale"):
             raise McpResourceError("Resource reference is stale")
+        if _context_expired(selected):
+            raise McpResourceError(
+                "Resource context expired; explicitly recapture with a read Tool. "
+                "The immutable revision remains readable as historical evidence."
+            )
         if expected_identity:
             actual = selected.get("identity")
             if not isinstance(actual, Mapping) or any(

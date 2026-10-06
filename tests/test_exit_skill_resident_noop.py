@@ -65,3 +65,4 @@ def test_unresolved_failure_still_blocks_done_after_inactive_noop():
     gated = loop.gate_terminal({"nextStep": "done", "reply": "done",
         "completionClaim": {"satisfied": True}})
     assert gated["nextStep"] != "done"
+

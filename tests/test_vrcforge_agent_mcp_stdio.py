@@ -821,6 +821,9 @@ def test_bridge_uses_http_mcp_for_manifest_and_tool_calls(monkeypatch, tmp_path:
     def fake_request(method, path, **kwargs):
         calls.append({"method": method, "path": path, **kwargs})
         rpc_method = kwargs["payload"]["method"]
+        if rpc_method == "server/discover":
+            kwargs["response_headers"]["Mcp-Session-Id"] = "fixture-session"
+            return {"result": {"supportedVersions": [module.PROTOCOL_VERSION]}}
         if rpc_method == "tools/list":
             return {"result": {"tools": [{"name": "vrcforge_create_gameobject"}]}}
         return {"result": {"structuredContent": {"ok": True, "status": "executed"}}}
@@ -829,12 +832,14 @@ def test_bridge_uses_http_mcp_for_manifest_and_tool_calls(monkeypatch, tmp_path:
 
     assert bridge.manifest("execution")["tools"][0]["name"] == "vrcforge_create_gameobject"
     assert bridge.call_tool("vrcforge_create_gameobject", {"name": "External"})["status"] == "executed"
-    assert [call["path"] for call in calls] == ["/mcp", "/mcp"]
-    assert calls[0]["extra_headers"]["Mcp-Method"] == "tools/list"
-    assert calls[1]["extra_headers"]["Mcp-Method"] == "tools/call"
-    assert calls[1]["extra_headers"]["Mcp-Name"] == "vrcforge_create_gameobject"
+    assert [call["path"] for call in calls] == ["/mcp", "/mcp", "/mcp"]
+    assert calls[0]["extra_headers"]["Mcp-Method"] == "server/discover"
+    assert calls[1]["extra_headers"]["Mcp-Method"] == "tools/list"
+    assert calls[2]["extra_headers"]["Mcp-Method"] == "tools/call"
+    assert calls[2]["extra_headers"]["Mcp-Name"] == "vrcforge_create_gameobject"
+    assert calls[2]["extra_headers"]["Mcp-Session-Id"] == "fixture-session"
     assert calls[0]["timeout_seconds"] == 0.1
-    assert calls[1]["timeout_seconds"] == 360.0
+    assert calls[2]["timeout_seconds"] == 360.0
 
 
 def test_tool_transport_timeout_is_structured_and_never_safe_to_blind_retry(
@@ -973,6 +978,8 @@ def test_prompt_internal_http_hop_preserves_full_body_for_outer_presentation(mon
     bridge = module.VRCForgeBridge(base_url="http://127.0.0.1:8757", config_path=tmp_path / "unused.json", timeout_seconds=0.1, start_runtime=False)
     monkeypatch.setattr(bridge, "require_token", lambda: "fixture-token")
     def request_json(*args, **kwargs):
+        if kwargs["payload"]["method"] == "server/discover":
+            kwargs["response_headers"]["Mcp-Session-Id"] = "fixture-session"
         return backend.handle(kwargs["payload"])[0]
     monkeypatch.setattr(bridge, "request_json", request_json)
     result = bridge.get_prompt("fixture")

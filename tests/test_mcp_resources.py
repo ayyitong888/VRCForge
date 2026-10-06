@@ -205,8 +205,10 @@ def test_gateway_internal_and_external_agents_share_one_resource_registry(tmp_pa
     )
     listed = gateway.list_mcp_resources()
     uris = {item["uri"] for item in listed["resources"]}
-    assert internal["uri"] in uris
-    assert external["uri"] in uris
+    # Unscoped calls remain explicit readable history, never implicit current
+    # context shared by otherwise unrelated internal/external sessions.
+    assert internal["uri"] not in uris
+    assert external["uri"] not in uris
     assert gateway.read_mcp_resource(internal["uri"])["structuredContent"]["sourceMode"] == "internal_agent"
     assert gateway.read_mcp_resource(external["uri"])["structuredContent"]["sourceMode"] == "external_agent"
     assert internal_result["resources"]["operationReceiptUri"] == internal["uri"]

@@ -574,6 +574,25 @@ def test_cross_block_selection_reports_authoritative_owner_for_retry() -> None:
     assert "block=avatar_structure/hierarchy_components" in result["nextActions"][0]
 
 
+def test_planning_selection_of_hidden_write_requires_execution_mode() -> None:
+    result = dashboard_server.load_internal_tool_block({
+        "sessionId": "planning-hidden-write-regression",
+        "block": "project_environment/assets_packages",
+        "tools": ["set_skill_package_enabled", "list_skill_packages"],
+        "exposureLayer": "planning",
+        "projectContextActive": True,
+    })
+
+    assert result["ok"] is False
+    assert result["status"] == "failed"
+    assert result["errorCode"] == "execution_mode_required"
+    assert result["expectedBlock"] == "project_environment/assets_packages"
+    assert result["requiredExposureLayer"] == "execution"
+    assert result["mutationStarted"] is False
+    assert result["commitState"] == "not_started"
+    assert any("enter_execution" in action for action in result["nextActions"])
+
+
 def test_diagnostic_description_does_not_route_to_hidden_discovery_entry():
     planner = dashboard_server.AGENT_GATEWAY._runtime_planner
     catalog = planner._catalog.read("execution", project_context_active=True)

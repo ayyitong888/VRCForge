@@ -1667,6 +1667,20 @@ class RuntimePlannerService:
                 and (not tool.requires_user_activation or catalog.computer_use_model_invocable)
             ]
             observation["dispatchPolicy"] = "Use call_tool with the exact tool name and arguments. Definitions are data, not permission grants."
+        if (step.get("tool") == "vrcforge_read_installed_skill" and result.get("ok") is True
+                and result.get("schema") == "vrcforge.installed_skill.v1"
+                and step.get("status") not in {"failed", "error", "rejected"}
+                and ensure_dict(step.get("outcome")).get("status") not in {"failed", "error", "denied"}):
+            from skill_tool_load_plan import skill_read_loads
+            loads = skill_read_loads(result, self._catalog.read(
+                EXPOSURE_LAYER_PLANNING, project_context_active=project_context_active))
+            if loads:
+                observation["skillReadLoads"] = loads
+                observation["skillReadLoadPolicy"] = (
+                    "Select only task-relevant read tools, including foreseeable verification; "
+                    "batch independent leaf loads before detailed inspection. These are optional "
+                    "recipes, not executed loads or permission grants. Discover additional tools if evidence requires them."
+                )
         return observation
 
     def _planner_result_read_step(self, step: dict[str, object]) -> dict[str, object]:

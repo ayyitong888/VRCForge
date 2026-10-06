@@ -55,6 +55,36 @@ def receipt(states=None):
             "states":states or [{"controllerIndex":0,"layerIndex":i,"stateHash":1} for i in range(20)]}]}
 
 
+def test_context_bound_state_page_links_survive_history_read(tmp_path):
+    from runtime_state_resources import project_receipt
+
+    registry = McpResourceRegistry(tmp_path / "store")
+    raw = receipt()
+    token = registry.context.set("runtime-session")
+    try:
+        projected = project_receipt(registry, raw, {})
+        uri = projected["frames"][0]["statesResourceUri"]
+        rows = []
+        pages = 0
+        while uri:
+            envelope = json.loads(registry.read(uri)["contents"][0]["text"])
+            assert envelope["contextId"] == "runtime-session"
+            rows.extend(envelope["data"]["states"])
+            uri = envelope["data"]["nextUri"]
+            pages += 1
+        assert pages > 1
+        assert rows == raw["frames"][0]["states"]
+        generation = registry.generation
+        assert project_receipt(registry, raw, {}) == projected
+        assert registry.generation == generation
+    finally:
+        registry.context.reset(token)
+    reopened = McpResourceRegistry(tmp_path / "store")
+    first_uri = projected["frames"][0]["statesResourceUri"]
+    first = json.loads(reopened.read(first_uri)["contents"][0]["text"])
+    assert reopened.read(first["data"]["nextUri"])
+
+
 def test_byte_bound_offsets_unknown_drift_and_restart(tmp_path):
     from runtime_state_resources import project_receipt
     registry=McpResourceRegistry(tmp_path/"store")

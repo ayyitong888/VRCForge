@@ -113,14 +113,15 @@ def test_animation_binding_schema_exposes_exact_optional_execution_target():
 )
 def test_unbound_derived_resources_share_unknown_identity_state(tmp_path, tool_name, resource_type):
     gateway = AgentGateway(tmp_path / "config/gateway.json", tmp_path / "audit")
-    result = {"ok": True, "status": "ok", "operationId": f"{resource_type}-unbound"}
-    gateway.publish_mcp_tool_result_resource(tool_name, {}, result, source_mode="test")
+    with gateway.resource_context("fixture-session"):
+        result = {"ok": True, "status": "ok", "operationId": f"{resource_type}-unbound"}
+        gateway.publish_mcp_tool_result_resource(tool_name, {}, result, source_mode="test")
 
-    listed = gateway.list_mcp_resources()["resources"]
-    derived = next(item for item in listed if item["_meta"]["resourceType"] == resource_type)
-    assert derived["_meta"]["stale"] is True
-    with pytest.raises(McpResourceError, match="stale"):
-        gateway._mcp_resources.validate_reference(derived["uri"], expected_type=resource_type)
+        listed = gateway.list_mcp_resources()["resources"]
+        derived = next(item for item in listed if item["_meta"]["resourceType"] == resource_type)
+        assert derived["_meta"]["stale"] is True
+        with pytest.raises(McpResourceError, match="stale"):
+            gateway._mcp_resources.validate_reference(derived["uri"], expected_type=resource_type)
 
 
 def test_optional_read_binding_does_not_replace_domain_owned_write_preparation(tmp_path, monkeypatch):
