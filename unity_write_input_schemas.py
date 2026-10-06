@@ -328,6 +328,7 @@ EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
             "projectPath": _PROJECT_PATH_PROPERTY,
             "sourceTexturePath": {"type": "string", "pattern": "^Assets/.*\\.png$"},
             "targetTexturePath": {"type": "string", "pattern": "^Assets/.*\\.png$", "description": "Create-new output; it and its .meta must be absent."},
+            "maskTexturePath": {"type": "string", "pattern": "^Assets/.*\\.png$", "description": "Optional same-size grayscale PNG. Black/transparent protects, white applies; gray and alpha scale opacity. Bottom-left pixel origin; source alpha is preserved."},
             "region": {"type": "array", "minItems": 4, "maxItems": 4, "items": {"type": "integer", "minimum": 0}, "description": "Exact [x,y,width,height] pixel rectangle; width and height must be positive."},
             "protectedRegions": {"type": "array", "maxItems": 128, "items": {"type": "array", "minItems": 4, "maxItems": 4, "items": {"type": "integer", "minimum": 0}}},
             "red": {"type": "integer", "minimum": 0, "maximum": 255},

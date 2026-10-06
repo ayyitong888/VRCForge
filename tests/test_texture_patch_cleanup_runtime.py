@@ -22,6 +22,7 @@ def test_texture_patch_failure_reports_verified_absence_or_unknown(tmp_path):
     # Both signatures are real revisions; no synthetic old implementation.
     marker = "private static bool CleanupTarget(" if "private static bool CleanupTarget(" in raw else "private static void CleanupTarget("
     cleanup = method(raw, marker)
+    ownership = method(raw, "private static bool FileMatchesSha256(") if "private static bool FileMatchesSha256(" in raw else ""
     program = r'''
 using System;
 using System.Collections.Generic;
@@ -56,9 +57,12 @@ static class VRCForgeToolResult {
 }
 class Probe {
     const string ResultSchema="vrcforge.texture_patch.v1";
+    static string ComputeSha256(string path) { File.GetAttributes(path); return "owned"; }
+    // OWNERSHIP
     // CLEANUP
     static object Run(bool mutationStarted) {
         string sourceTexturePath="Assets/Source.png",targetTexturePath="Assets/Output.png",targetFilePath="Output.png";
+        string createdTargetHash="owned",createdMetaHash="owned";
         try { throw new InvalidOperationException("original pixel readback failed"); }
         // CATCH
     public static void Main() {
@@ -76,7 +80,7 @@ class Probe {
         }
     }
 }
-'''.replace("// CLEANUP", cleanup).replace("// CATCH", catch)
+'''.replace("// OWNERSHIP", ownership).replace("// CLEANUP", cleanup).replace("// CATCH", catch)
     dotnet = shutil.which("dotnet")
     base = Path(os.environ.get("ProgramFiles", "C:/Program Files")) / "dotnet"
     compilers = sorted((base / "sdk").glob("*/Roslyn/bincore/csc.dll"))

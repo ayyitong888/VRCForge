@@ -13,7 +13,7 @@ namespace VRCForge.Editor
 {
     [VRCForgeCommand(
         toolId: "vrc_texture_patch",
-        Summary = "Preview or apply a single rectangle patch to one existing project PNG to one new absent project PNG."
+        Summary = "when-to-use: preview or apply a rectangular or grayscale-mask RGB patch from an existing project PNG to a new PNG. when-NOT-to-use: never overwrite an asset, change source alpha, or generate image content."
     )]
     public static class TexturePatchTool
     {
@@ -28,6 +28,8 @@ namespace VRCForge.Editor
             public string sourceTexturePath { get; set; } = "";
             [VRCForgeInput("Required output PNG path under Assets that must be absent before apply.", IsRequired = true)]
             public string targetTexturePath { get; set; } = "";
+            [VRCForgeInput("Optional same-size grayscale PNG under Assets. Black/transparent protects; white applies; gray and mask alpha scale opacity. Coordinates start at bottom-left.", IsRequired = false)]
+            public string maskTexturePath { get; set; } = "";
             [VRCForgeInput("Patch mode preview flag.", IsRequired = false)]
             public bool? preview { get; set; } = false;
             [VRCForgeInput("Patch rectangle: [x, y, width, height].", IsRequired = true)]
@@ -68,6 +70,8 @@ namespace VRCForge.Editor
             string targetTexturePath = string.Empty;
             string sourceFilePath = string.Empty;
             string targetFilePath = string.Empty;
+            string createdTargetHash = string.Empty;
+            string createdMetaHash = string.Empty;
             bool mutationStarted = false;
 
             try
@@ -97,6 +101,21 @@ namespace VRCForge.Editor
                 }
 
                 var sourceHash = ComputeSha256(sourceFilePath);
+                var maskTexturePath = string.Empty;
+                var maskFileHash = string.Empty;
+                Color32[] maskPixels = null;
+                if (parameters["maskTexturePath"] != null)
+                {
+                    maskTexturePath = ReadRequiredAssetPath(parameters, "maskTexturePath", false);
+                    var maskFilePath = ResolveAssetAbsolutePath(maskTexturePath);
+                    EnsureExistingSourcePng(maskTexturePath, maskFilePath);
+                    // Decode and hash one captured byte array, never two potentially different reads.
+                    var maskBytes = File.ReadAllBytes(maskFilePath);
+                    maskPixels = ReadPngPixels(maskBytes, out var maskWidth, out var maskHeight);
+                    ValidateMask(maskPixels, maskWidth, maskHeight, sourceWidth, sourceHeight);
+                    using (var sha256 = SHA256.Create())
+                        maskFileHash = Hex(sha256.ComputeHash(maskBytes));
+                }
                 var sourceGuid = AssetDatabase.AssetPathToGUID(sourceTexturePath) ?? string.Empty;
                 if (sourceGuid.Length != 0)
                 {
@@ -135,7 +154,10 @@ namespace VRCForge.Editor
                     Opacity = (float)opacity,
                     FeatherPixels = featherPixels,
                     ProjectPath = CurrentProjectPath(),
-                    SourcePixels = sourcePixels
+                    SourcePixels = sourcePixels,
+                    MaskTexturePath = maskTexturePath,
+                    MaskFileHash = maskFileHash,
+                    MaskPixels = maskPixels
                 };
 
                 request.PreviewDigest = ComputePreviewDigest(request);
@@ -149,9 +171,12 @@ namespace VRCForge.Editor
                     request.Patch,
                     request.Opacity,
                     request.FeatherPixels,
+                    request.MaskPixels,
                     out var changedPixelCountForPreview);
+                MeasurePixelChanges(sourcePixels, patchedPixelsForPreview, sourceWidth,
+                    out request.ChangedPixelCount, out request.ChangedBounds, out request.ChangedPixelMaskHash);
                 var wouldChange = changedPixelCountForPreview > 0;
-                var wouldPatchPixels = CountPatchPixels(sourceWidth, sourceHeight, request.Region, request.ProtectedRegions);
+                var wouldPatchPixels = CountPatchPixels(sourceWidth, sourceHeight, request.Region, request.ProtectedRegions, request.MaskPixels);
                 if (wouldPatchPixels == 0)
                 {
                     throw new InvalidOperationException("The requested patch has no target pixels.");
@@ -210,12 +235,19 @@ namespace VRCForge.Editor
                 // visually identical.  The new asset is still the mutation.
                 {
                     var outputBytes = BuildPatchedPngBytes(sourceWidth, sourceHeight, patchedPixels);
-                    mutationStarted = true;
-                    File.WriteAllBytes(request.TargetFilePath, outputBytes);
+                    using (var sha256 = SHA256.Create())
+                        createdTargetHash = Hex(sha256.ComputeHash(outputBytes));
+                    using (var output = new FileStream(request.TargetFilePath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                    {
+                        mutationStarted = true;
+                        output.Write(outputBytes, 0, outputBytes.Length);
+                    }
 
                     AssetDatabase.ImportAsset(
                         request.TargetTexturePath,
                         ImportAssetOptions.ForceSynchronousImport | ImportAssetOptions.ForceUpdate);
+                    var metaPath = request.TargetFilePath + ".meta";
+                    if (File.Exists(metaPath)) createdMetaHash = ComputeSha256(metaPath);
 
                     var readbackPixels = ReadPngPixels(request.TargetFilePath, out var reloadedWidth, out var reloadedHeight);
                     if (reloadedWidth != request.SourceWidth || reloadedHeight != request.SourceHeight)
@@ -226,6 +258,8 @@ namespace VRCForge.Editor
                     var outsideAndProtectedPixelsUnchanged = false;
                     var alphaUnchanged = false;
                     VerifyReadback(request, patchedPixels, sourcePixels, sourceWidth, sourceHeight, readbackPixels, out outsideAndProtectedPixelsUnchanged, out alphaUnchanged);
+                    MeasurePixelChanges(sourcePixels, readbackPixels, sourceWidth,
+                        out var changedPixelCount, out var changedBounds, out var changedPixelMaskHash);
 
                     var targetHash = ComputeSha256(request.TargetFilePath);
                     return VRCForgeToolResult.Completed(
@@ -239,12 +273,18 @@ namespace VRCForge.Editor
                             verified = true,
                             changed = true,
                             wouldChange,
+                            changedPixelCount,
+                            changedBounds,
+                            changedPixelMaskHash,
+                            pixelOrder = "bottom-left; x increases first; changed mask hashes one 0/1 byte per pixel",
                             saved = true,
                             persistedReadback = true,
                             projectPath = request.ProjectPath,
                             sourceTexturePath = request.SourceTexturePath,
                             sourceTextureGuid = request.SourceGuid,
                             sourceFileHash = request.SourceFileHash,
+                            maskTexturePath = request.MaskTexturePath,
+                            maskFileHash = request.MaskFileHash,
                             sourceWidth = request.SourceWidth,
                             sourceHeight = request.SourceHeight,
                             targetTexturePath = request.TargetTexturePath,
@@ -279,7 +319,7 @@ namespace VRCForge.Editor
             {
                 if (mutationStarted)
                 {
-                    var restored = CleanupTarget(targetTexturePath, targetFilePath, out var cleanupError);
+                    var restored = CleanupTarget(targetTexturePath, targetFilePath, createdTargetHash, createdMetaHash, out var cleanupError);
 
                     return VRCForgeToolResult.FailedWithCode(
                         "vrc_texture_patch_failed_after_mutation",
@@ -324,12 +364,18 @@ namespace VRCForge.Editor
                 verified = true,
                 changed = wouldChange,
                 wouldChange,
+                changedPixelCount = request.ChangedPixelCount,
+                changedBounds = request.ChangedBounds,
+                changedPixelMaskHash = request.ChangedPixelMaskHash,
+                pixelOrder = "bottom-left; x increases first; changed mask hashes one 0/1 byte per pixel",
                 saved = false,
                 persistedReadback = false,
                 projectPath = request.ProjectPath,
                 sourceTexturePath = request.SourceTexturePath,
                 sourceTextureGuid = request.SourceGuid,
                 sourceFileHash = request.SourceFileHash,
+                maskTexturePath = request.MaskTexturePath,
+                maskFileHash = request.MaskFileHash,
                 sourceWidth = request.SourceWidth,
                 sourceHeight = request.SourceHeight,
                 targetTexturePath = request.TargetTexturePath,
@@ -369,7 +415,11 @@ namespace VRCForge.Editor
 
         private static Color32[] ReadPngPixels(string absolutePngPath, out int width, out int height)
         {
-            var bytes = File.ReadAllBytes(absolutePngPath);
+            return ReadPngPixels(File.ReadAllBytes(absolutePngPath), out width, out height);
+        }
+
+        private static Color32[] ReadPngPixels(byte[] bytes, out int width, out int height)
+        {
             var texture = new Texture2D(2, 2, TextureFormat.RGBA32, false, false);
             try
             {
@@ -412,6 +462,7 @@ namespace VRCForge.Editor
             PatchColor color,
             float opacity,
             int featherPixels,
+            Color32[] maskPixels,
             out int changedCount)
         {
             var output = (Color32[])source.Clone();
@@ -441,7 +492,7 @@ namespace VRCForge.Editor
                     var featherScale = feather <= 0
                         ? 1f
                         : Math.Min(1f, (distance + 1f) / (float)feather);
-                    var applyAlpha = patchAlpha * featherScale;
+                    var applyAlpha = patchAlpha * featherScale * MaskCoverage(maskPixels, index);
                     if (applyAlpha <= 0f)
                     {
                         continue;
@@ -464,6 +515,43 @@ namespace VRCForge.Editor
             }
 
             return output;
+        }
+
+        private static void ValidateMask(Color32[] maskPixels, int width, int height, int sourceWidth, int sourceHeight)
+        {
+            if (width != sourceWidth || height != sourceHeight || maskPixels.Length != sourceWidth * sourceHeight)
+                throw new InvalidOperationException("The mask PNG dimensions must exactly match the source.");
+            if (maskPixels.Any(pixel => pixel.r != pixel.g || pixel.r != pixel.b))
+                throw new InvalidOperationException("The mask PNG must be grayscale; black protects and white applies.");
+        }
+
+        private static float MaskCoverage(Color32[] maskPixels, int index)
+        {
+            return maskPixels == null ? 1f : (maskPixels[index].r / 255f) * (maskPixels[index].a / 255f);
+        }
+
+        private static void MeasurePixelChanges(Color32[] before, Color32[] after, int width,
+            out int changedPixelCount, out int[] changedBounds, out string changedPixelMaskHash)
+        {
+            var changed = new byte[before.Length];
+            changedPixelCount = 0;
+            var minX = width;
+            var minY = before.Length / width;
+            var maxX = -1;
+            var maxY = -1;
+            for (var index = 0; index < before.Length; index++)
+            {
+                if (ColorsEqual(before[index], after[index])) continue;
+                changed[index] = 1;
+                changedPixelCount++;
+                minX = Math.Min(minX, index % width);
+                maxX = Math.Max(maxX, index % width);
+                minY = Math.Min(minY, index / width);
+                maxY = Math.Max(maxY, index / width);
+            }
+            changedBounds = changedPixelCount == 0 ? null : new[] { minX, minY, maxX - minX + 1, maxY - minY + 1 };
+            using (var sha256 = SHA256.Create())
+                changedPixelMaskHash = Hex(sha256.ComputeHash(changed));
         }
 
         private static bool[] BuildProtectedMask(int width, int height, Rectangle[] protectedRegions)
@@ -525,7 +613,7 @@ namespace VRCForge.Editor
                     }
 
                     var isOutsidePatch = x < request.Region.X || x > lastX || y < request.Region.Y || y > lastY;
-                    if (isOutsidePatch || protectedMask[index])
+                    if (isOutsidePatch || protectedMask[index] || MaskCoverage(request.MaskPixels, index) == 0f)
                     {
                         if (!ColorsEqual(readbackPixels[index], sourcePixels[index]))
                         {
@@ -548,7 +636,7 @@ namespace VRCForge.Editor
             }
         }
 
-        private static int CountPatchPixels(int width, int height, Rectangle area, Rectangle[] protectedRegions)
+        private static int CountPatchPixels(int width, int height, Rectangle area, Rectangle[] protectedRegions, Color32[] maskPixels)
         {
             var patchedArea = area.Width * area.Height;
             if (patchedArea <= 0)
@@ -556,7 +644,7 @@ namespace VRCForge.Editor
                 return 0;
             }
 
-            if (protectedRegions == null || protectedRegions.Length == 0)
+            if ((protectedRegions == null || protectedRegions.Length == 0) && maskPixels == null)
             {
                 return patchedArea;
             }
@@ -570,7 +658,7 @@ namespace VRCForge.Editor
                 var rowOffset = y * width;
                 for (var x = area.X; x <= lastX; x++)
                 {
-                    if (protectedMask[rowOffset + x])
+                    if (protectedMask[rowOffset + x] || MaskCoverage(maskPixels, rowOffset + x) == 0f)
                     {
                         protectedInside++;
                     }
@@ -580,7 +668,7 @@ namespace VRCForge.Editor
             return Math.Max(patchedArea - protectedInside, 0);
         }
 
-        private static bool CleanupTarget(string targetPath, string targetFullPath, out string cleanupError)
+        private static bool CleanupTarget(string targetPath, string targetFullPath, string targetHash, string metaHash, out string cleanupError)
         {
             cleanupError = string.Empty;
             if (string.IsNullOrEmpty(targetPath) || string.IsNullOrEmpty(targetFullPath))
@@ -588,34 +676,21 @@ namespace VRCForge.Editor
                 cleanupError = "Cleanup target identity is unavailable.";
                 return false;
             }
+            var metaPath = targetFullPath + ".meta";
             try
             {
-                if (!string.IsNullOrEmpty(targetPath) && AssetDatabase.LoadAssetAtPath<UnityEngine.Object>(targetPath) != null)
-                {
-                    if (!AssetDatabase.DeleteAsset(targetPath))
-                        cleanupError = "AssetDatabase.DeleteAsset returned false. ";
-                }
+                var targetOwned = FileMatchesSha256(targetFullPath, targetHash);
+                var metaOwned = !File.Exists(metaPath) || FileMatchesSha256(metaPath, metaHash);
+                if (!targetOwned) cleanupError += "Target ownership could not be verified. ";
+                if (!metaOwned) cleanupError += "Metadata ownership could not be verified. ";
+                if (targetOwned && metaOwned && AssetDatabase.LoadAssetAtPath<UnityEngine.Object>(targetPath) != null
+                    && !AssetDatabase.DeleteAsset(targetPath)) cleanupError += "AssetDatabase.DeleteAsset returned false. ";
+                if (targetOwned && File.Exists(targetFullPath) && FileMatchesSha256(targetFullPath, targetHash)) File.Delete(targetFullPath);
+                if (!string.IsNullOrEmpty(metaHash) && File.Exists(metaPath) && FileMatchesSha256(metaPath, metaHash)) File.Delete(metaPath);
             }
             catch (Exception exception)
             {
-                cleanupError += "Asset cleanup: " + exception.Message + " ";
-            }
-
-            try
-            {
-                if (File.Exists(targetFullPath))
-                {
-                    File.Delete(targetFullPath);
-                }
-                var metaPath = targetFullPath + ".meta";
-                if (File.Exists(metaPath))
-                {
-                    File.Delete(metaPath);
-                }
-            }
-            catch (Exception exception)
-            {
-                cleanupError += "File cleanup: " + exception.Message + " ";
+                cleanupError += "Owned-file cleanup: " + exception.Message + " ";
             }
 
             try
@@ -642,6 +717,12 @@ namespace VRCForge.Editor
                 cleanupError += "Cleanup verification: " + exception.Message;
             }
             return false;
+        }
+
+        private static bool FileMatchesSha256(string path, string expectedHash)
+        {
+            return !string.IsNullOrEmpty(expectedHash) && File.Exists(path)
+                && string.Equals(ComputeSha256(path), expectedHash, StringComparison.OrdinalIgnoreCase);
         }
 
         private static string ComputePreviewDigest(PatchRequest request)
@@ -672,6 +753,11 @@ namespace VRCForge.Editor
             AppendDigestField(frame, request.Opacity.ToString("R", CultureInfo.InvariantCulture));
             AppendDigestField(frame, request.FeatherPixels.ToString(CultureInfo.InvariantCulture));
             AppendDigestField(frame, request.ProjectPath);
+            if (request.MaskPixels != null)
+            {
+                AppendDigestField(frame, request.MaskTexturePath);
+                AppendDigestField(frame, request.MaskFileHash);
+            }
             using (var sha256 = SHA256.Create())
             {
                 return Hex(sha256.ComputeHash(Encoding.UTF8.GetBytes(frame.ToString())));
@@ -1098,6 +1184,12 @@ namespace VRCForge.Editor
             internal string PreviewDigest = string.Empty;
             internal string ProjectPath = string.Empty;
             internal Color32[] SourcePixels;
+            internal string MaskTexturePath = string.Empty;
+            internal string MaskFileHash = string.Empty;
+            internal Color32[] MaskPixels;
+            internal int ChangedPixelCount;
+            internal int[] ChangedBounds;
+            internal string ChangedPixelMaskHash;
         }
 
         private sealed class Rectangle
