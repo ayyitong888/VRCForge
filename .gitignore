@@ -27,6 +27,7 @@ agent_gateway.json
 app-session-token
 chat-projects.json
 chat-transcripts.json
+/data/
 .__wtest
 docs/*
 !docs/COMPATIBILITY_MATRIX.md
@@ -34,6 +35,7 @@ docs/*
 !docs/RELEASE_NOTES_1.5.0.md
 !docs/RELEASE_NOTES_1.5.1.md
 !docs/PRODUCT_REGRESSION_CONTRACT.md
+!docs/SUPPORT_JA.md
 
 AGENTS.md
 CLAUDE.md

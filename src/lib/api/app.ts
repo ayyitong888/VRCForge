@@ -1,5 +1,5 @@
 import { hasTauriInternals, invokeTauriWithAbort, requestJson } from "./http";
-import type { AdvancedSettingsState, ApiConfig, AppBootstrap, AppHealth, AppSessionHandshake, DeveloperOptionsChallenge, DiagnosticLogLevel, DiagnosticsStatus, DoctorFixMode, DoctorFixResult, DoctorReport, PermissionState, ProjectSelectionState, ProjectSnapshot, ProviderApiType, ProviderCapabilityKey, ProviderModelInfo, SupportBundleResult, UnityMcpRepairResult, UnityReadinessRefresh, VisionConfig, WorkspaceDiffSummary } from "./types";
+import type { AdvancedSettingsState, ApiConfig, AppBootstrap, AppHealth, AppSessionHandshake, DeveloperOptionsChallenge, DiagnosticLogLevel, DiagnosticsStatus, DoctorFixMode, DoctorFixResult, DoctorReport, PermissionState, ProjectSelectionState, ProjectSnapshot, ProviderApiType, ProviderCapabilityKey, ProviderModelInfo, SupportBundlePreview, SupportBundleResult, SupportFeedbackPreview, UnityMcpRepairResult, UnityReadinessRefresh, VisionConfig, WorkspaceDiffSummary } from "./types";
 
 export async function fetchBootstrap(
   endpoint: string,
@@ -163,6 +163,43 @@ export async function exportSupportBundle(endpoint: string, request: { includeFu
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(request),
   });
+}
+
+export async function previewSupportFeedback(
+  endpoint: string,
+  request: { summary?: string; steps?: string; expected?: string; actual?: string; supportBundleAvailable?: boolean },
+): Promise<SupportFeedbackPreview> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort<SupportFeedbackPreview>("preview_support_feedback", {
+      request: { body: request, timeoutMs: 30_000 },
+    });
+  }
+  return requestJson<SupportFeedbackPreview>(`${endpoint}/api/app/support-feedback/preview`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(request),
+  });
+}
+
+export async function previewLatestSupportBundle(endpoint: string): Promise<SupportBundlePreview> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort<SupportBundlePreview>("preview_support_bundle", {
+      request: { timeoutMs: 30_000 },
+    });
+  }
+  return requestJson<SupportBundlePreview>(`${endpoint}/api/app/support-feedback/bundle-preview`);
+}
+
+export async function openSupportFeedbackPage(): Promise<void> {
+  if (hasTauriInternals()) {
+    await invokeTauriWithAbort<void>("open_support_feedback_url", {});
+    return;
+  }
+  const anchor = document.createElement("a");
+  anchor.href = "https://github.com/ayyitong888/VRCForge/issues/new?template=bug_report.yml";
+  anchor.target = "_blank";
+  anchor.rel = "noopener noreferrer";
+  anchor.click();
 }
 
 export async function updatePermission(

@@ -377,6 +377,13 @@ pub(crate) struct DesktopSupportBundleRequest {
     timeout_ms: Option<u64>,
 }
 
+pub(crate) fn support_bundle_body(request: &DesktopSupportBundleRequest) -> serde_json::Value {
+    serde_json::json!({
+        "includeFullPaths": request.include_full_paths.unwrap_or(false),
+        "logLimit": request.log_limit.unwrap_or(200),
+    })
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DesktopProjectPrefsRequest {
@@ -1629,10 +1636,7 @@ pub async fn export_support_bundle(
         backend_json_request(
             "POST",
             "/api/app/support-bundle".to_string(),
-            Some(serde_json::json!({
-                "includeFullPaths": request.include_full_paths,
-                "logLimit": request.log_limit,
-            })),
+            Some(support_bundle_body(&request)),
             request.timeout_ms.or(Some(120_000)),
         )
         .map(sanitize_webview_response)
@@ -2211,6 +2215,56 @@ pub async fn request_unity_tool_install(
         .map(sanitize_webview_response)
     })
     .await
+}
+
+#[tauri::command]
+pub async fn preview_support_feedback(
+    request: DesktopJsonBodyRequest,
+) -> Result<serde_json::Value, String> {
+    blocking_backend_json_request(move || {
+        backend_json_request(
+            "POST",
+            "/api/app/support-feedback/preview".to_string(),
+            Some(request.body),
+            request.timeout_ms.or(Some(30_000)),
+        )
+        .map(sanitize_support_feedback_response)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn preview_support_bundle(
+    request: DesktopTimeoutRequest,
+) -> Result<serde_json::Value, String> {
+    blocking_backend_json_request(move || {
+        backend_json_request(
+            "GET",
+            "/api/app/support-feedback/bundle-preview".to_string(),
+            None,
+            request.timeout_ms.or(Some(30_000)),
+        )
+        .map(sanitize_support_feedback_response)
+    })
+    .await
+}
+
+#[tauri::command]
+pub fn open_support_feedback_url() -> Result<(), String> {
+    const URL: &str = "https://github.com/ayyitong888/VRCForge/issues/new?template=bug_report.yml";
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::UI::Shell::ShellExecuteW;
+        let wide_url = URL.encode_utf16().chain(std::iter::once(0)).collect::<Vec<_>>();
+        let result = unsafe { ShellExecuteW(std::ptr::null_mut(), std::ptr::null(), wide_url.as_ptr(), std::ptr::null(), std::ptr::null(), 1) };
+        if result as isize <= 32 { return Err("Unable to open the VRCForge feedback page.".to_string()); }
+        return Ok(());
+    }
+    #[cfg(not(windows))]
+    {
+        let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
+        Command::new(opener).arg(URL).spawn().map(|_| ()).map_err(|_| "Unable to open the VRCForge feedback page.".to_string())
+    }
 }
 
 #[tauri::command]
@@ -2940,7 +2994,8 @@ pub async fn mutate_agent_memory_review_candidate(
 mod memory_review_transport_tests {
     use super::{
         bounded_memory_review_run_timeout, memory_review_candidate_path, memory_review_query,
-        DesktopMemoryReviewCandidateRequest, DesktopMemoryReviewQueryRequest,
+        support_bundle_body, DesktopMemoryReviewCandidateRequest, DesktopMemoryReviewQueryRequest,
+        DesktopSupportBundleRequest,
     };
 
     #[test]
@@ -3006,6 +3061,18 @@ mod memory_review_transport_tests {
         assert_eq!(bounded_memory_review_run_timeout(Some(999_999)), 999_999);
         assert_eq!(bounded_memory_review_run_timeout(Some(45_000)), 45_000);
         assert_eq!(bounded_memory_review_run_timeout(Some(1)), 1_000);
+    }
+
+    #[test]
+    fn support_bundle_body_defaults_optional_wire_fields_for_existing_ui_calls() {
+        let request: DesktopSupportBundleRequest = serde_json::from_value(serde_json::json!({
+            "logLimit": 200
+        }))
+        .expect("existing support export request should deserialize");
+        assert_eq!(
+            support_bundle_body(&request),
+            serde_json::json!({"includeFullPaths": false, "logLimit": 200})
+        );
     }
 
     #[test]

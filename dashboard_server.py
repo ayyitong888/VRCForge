@@ -285,6 +285,7 @@ from diagnostic_logging import (
     parse_log_line as parse_diagnostic_log_line,
     parse_log_timestamp as parse_diagnostic_log_timestamp,
 )
+from support_feedback import build_support_feedback_preview, preview_latest_support_bundle
 from diagnostic_privacy import DiagnosticPrivacy
 from diagnostic_safety import (
     TRACE_REQUIRES_DEVELOPER_OPTIONS,
@@ -982,6 +983,7 @@ from dashboard_api_models import (
     VisionConfigRequest,
     DiagnosticsConfigRequest,
     SupportBundleRequest,
+    SupportFeedbackPreviewRequest,
     AvatarSceneScanRequest,
     AvatarBlendshapeListRequest,
     ManualBlendshapeItem,
@@ -7944,7 +7946,8 @@ def write_support_bundle_text_member(bundle: zipfile.ZipFile, name: str, lines: 
 def build_support_bundle(request: SupportBundleRequest) -> dict[str, Any]:
     SUPPORT_BUNDLE_DIR.mkdir(parents=True, exist_ok=True)
     generated_at = datetime.now(timezone.utc)
-    bundle_path = SUPPORT_BUNDLE_DIR / f"vrcforge-support-{generated_at.strftime('%Y%m%d-%H%M%S')}.zip"
+    bundle_path = SUPPORT_BUNDLE_DIR / f"vrcforge-support-{generated_at.strftime('%Y%m%d-%H%M%S-%f')}-{secrets.token_hex(3)}.zip"
+    temporary_path: Path | None = None
     log_limit = max(1, min(int(request.log_limit), 500))
     metadata = {
         "schema": "vrcforge.support-bundle.v1",
@@ -7979,17 +7982,33 @@ def build_support_bundle(request: SupportBundleRequest) -> dict[str, Any]:
     diagnostics = diagnostics_state()
     diagnostics.pop("identities", None)
     safety_posture = diagnostics.get("safetyPosture") or safety_posture_state()
-    with zipfile.ZipFile(bundle_path, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
-        write_support_bundle_member(bundle, "metadata.json", metadata, request.include_full_paths)
-        write_support_bundle_member(bundle, "bootstrap.json", bootstrap, request.include_full_paths)
-        write_support_bundle_member(bundle, "doctor.json", doctor, request.include_full_paths)
-        write_support_bundle_member(bundle, "diagnostics.json", diagnostics, request.include_full_paths)
-        write_support_bundle_member(bundle, "safety-posture.json", safety_posture, request.include_full_paths)
-        write_support_bundle_text_member(bundle, "diagnostic-log.txt", DIAGNOSTIC_LOGGER.tail_lines(log_limit))
-        write_support_bundle_member(bundle, "agent-audit.json", AGENT_GATEWAY.approval_transactions.recent_audit_logs(limit=log_limit), request.include_full_paths)
-        write_support_bundle_member(bundle, "sub-agent-events.json", SUB_AGENT_COLLABORATION.recent_events(limit=log_limit), request.include_full_paths)
-        write_support_bundle_member(bundle, "sub-agent-tasks.json", SUB_AGENT_COLLABORATION.list_tasks(include_events=False, limit=log_limit), request.include_full_paths)
-        write_support_bundle_member(bundle, "checkpoints.json", checkpoints, request.include_full_paths)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=".vrcforge-support-",
+        suffix=".tmp",
+        dir=str(SUPPORT_BUNDLE_DIR),
+    )
+    os.close(descriptor)
+    temporary_path = Path(temporary_name)
+    try:
+        with zipfile.ZipFile(temporary_path, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
+            write_support_bundle_member(bundle, "metadata.json", metadata, request.include_full_paths)
+            write_support_bundle_member(bundle, "bootstrap.json", bootstrap, request.include_full_paths)
+            write_support_bundle_member(bundle, "doctor.json", doctor, request.include_full_paths)
+            write_support_bundle_member(bundle, "diagnostics.json", diagnostics, request.include_full_paths)
+            write_support_bundle_member(bundle, "safety-posture.json", safety_posture, request.include_full_paths)
+            write_support_bundle_text_member(bundle, "diagnostic-log.txt", DIAGNOSTIC_LOGGER.tail_lines(log_limit))
+            write_support_bundle_member(bundle, "agent-audit.json", AGENT_GATEWAY.approval_transactions.recent_audit_logs(limit=log_limit), request.include_full_paths)
+            write_support_bundle_member(bundle, "sub-agent-events.json", SUB_AGENT_COLLABORATION.recent_events(limit=log_limit), request.include_full_paths)
+            write_support_bundle_member(bundle, "sub-agent-tasks.json", SUB_AGENT_COLLABORATION.list_tasks(include_events=False, limit=log_limit), request.include_full_paths)
+            write_support_bundle_member(bundle, "checkpoints.json", checkpoints, request.include_full_paths)
+        os.replace(temporary_path, bundle_path)
+        temporary_path = None
+    finally:
+        if temporary_path is not None:
+            try:
+                temporary_path.unlink()
+            except FileNotFoundError:
+                pass
     emit_log(
         "success",
         "diagnostics",
@@ -9361,6 +9380,26 @@ def update_app_diagnostics_guarded(request: DiagnosticsConfigRequest) -> dict[st
 @app.post("/api/app/support-bundle")
 def create_app_support_bundle(request: SupportBundleRequest) -> dict[str, Any]:
     return build_support_bundle(request)
+
+
+@app.post("/api/app/support-feedback/preview")
+def preview_app_support_feedback(request: SupportFeedbackPreviewRequest) -> dict[str, Any]:
+    """Build a redacted local draft; this route performs no external submission."""
+
+    return build_support_feedback_preview(
+        request.model_dump(by_alias=True),
+        redact=lambda value: redact_support_payload(value),
+    )
+
+
+@app.get("/api/app/support-feedback/bundle-preview")
+def preview_app_support_bundle() -> dict[str, Any]:
+    """Return bounded, redacted excerpts from the newest local support bundle."""
+
+    return preview_latest_support_bundle(
+        SUPPORT_BUNDLE_DIR,
+        redact=lambda value: redact_support_payload(value),
+    )
 
 
 @app.get("/api/app/tools/registry")

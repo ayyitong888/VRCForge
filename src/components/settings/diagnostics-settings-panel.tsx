@@ -5,6 +5,7 @@ import type { DiagnosticIdentitySummary, DiagnosticLogLevel, DiagnosticsStatus }
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { availableDiagnosticLogLevels, normalizeDiagnosticLogLevel } from "./diagnostic-log-levels";
+import { SupportFeedbackPanel } from "./support-feedback-panel";
 
 function logLevelLabelKey(level: DiagnosticLogLevel) {
   return `settings.logLevel${level[0].toUpperCase()}${level.slice(1)}`;
@@ -78,6 +79,7 @@ export function DiagnosticIdentityMap({ status }: { status: DiagnosticsStatus | 
 }
 
 export function DiagnosticsSettingsPanel({
+  endpoint,
   developerOptionsEnabled,
   status,
   message,
@@ -87,6 +89,7 @@ export function DiagnosticsSettingsPanel({
   onOpenLogsFolder,
   onCreateSupportBundle,
 }: {
+  endpoint: string;
   developerOptionsEnabled: boolean;
   status: DiagnosticsStatus | null;
   message: string;
@@ -212,6 +215,7 @@ export function DiagnosticsSettingsPanel({
           </span>
         </div>
       </div>
+      <SupportFeedbackPanel endpoint={endpoint} />
 
     </div>
   );

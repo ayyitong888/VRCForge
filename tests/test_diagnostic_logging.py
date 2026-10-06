@@ -1446,6 +1446,28 @@ def test_support_bundle_forces_redaction_and_excludes_identity_mapping() -> None
         assert identity_aliases_after == identity_aliases_before
 
 
+def test_support_bundle_failure_cleans_private_temp_without_publishing_partial_zip() -> None:
+    with TemporaryDirectory() as temp_dir:
+        support_dir = Path(temp_dir) / "support-bundles"
+        with (
+            patch.object(dashboard_server, "SUPPORT_BUNDLE_DIR", support_dir),
+            patch.object(dashboard_server, "build_agentic_app_bootstrap_payload", return_value={}),
+            patch.object(dashboard_server, "read_agentic_app_doctor", return_value={}),
+            patch.object(dashboard_server, "diagnostics_state", return_value={}),
+            patch.object(dashboard_server, "safety_posture_state", return_value={}),
+            patch.object(dashboard_server, "DIAGNOSTIC_LOGGER", SimpleNamespace(log_level="info", tail_lines=lambda _limit: [])),
+            patch.object(dashboard_server, "write_support_bundle_member", side_effect=RuntimeError("injected ZIP failure")),
+            patch.object(dashboard_server, "emit_log"),
+            patch.object(type(dashboard_server.AGENT_GATEWAY.checkpoint_recovery), "list_checkpoints", return_value={}),
+            patch.object(type(dashboard_server.AGENT_GATEWAY.approval_transactions), "recent_audit_logs", return_value=[]),
+            patch.object(dashboard_server, "SUB_AGENT_COLLABORATION", SimpleNamespace(recent_events=lambda **_kwargs: [], list_tasks=lambda **_kwargs: {})),
+        ):
+            with pytest.raises(RuntimeError, match="injected ZIP failure"):
+                dashboard_server.build_support_bundle(dashboard_server.SupportBundleRequest())
+        assert not list(support_dir.glob("vrcforge-support-*.zip"))
+        assert not list(support_dir.glob(".vrcforge-support-*.tmp"))
+
+
 def test_recent_unity_error_reads_new_text_parser_and_safe_memory() -> None:
     with TemporaryDirectory() as temp_dir:
         root = Path(temp_dir)

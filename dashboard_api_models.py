@@ -142,6 +142,16 @@ class SupportBundleRequest(BaseModel):
     log_limit: int = Field(default=200, alias="logLimit", ge=1, le=500)
 
 
+class SupportFeedbackPreviewRequest(BaseModel):
+    summary: str = Field(default="", max_length=4000)
+    steps: str = Field(default="", max_length=4000)
+    expected: str = Field(default="", max_length=4000)
+    actual: str = Field(default="", max_length=4000)
+    support_bundle_available: bool = Field(default=False, alias="supportBundleAvailable")
+
+    model_config = {"populate_by_name": True}
+
+
 class AvatarSceneScanRequest(ConnectionRequest):
     pass
 

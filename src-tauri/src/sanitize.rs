@@ -78,6 +78,33 @@ pub(crate) fn sanitize_webview_response(mut value: serde_json::Value) -> serde_j
     value
 }
 
+/// Preserve backend-redacted support prose so users can review it in the UI.
+pub(crate) fn sanitize_support_feedback_response(mut value: serde_json::Value) -> serde_json::Value {
+    fn visit(value: &mut serde_json::Value, preserve_text: bool) {
+        match value {
+            serde_json::Value::Object(object) => {
+                for key in ["api_key", "apiKey", "authorization", "Authorization", "configPath", "backupPath"] {
+                    object.remove(key);
+                }
+                for (key, child) in object.iter_mut() {
+                    visit(child, matches!(key.as_str(), "text" | "preview"));
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    visit(item, preserve_text);
+                }
+            }
+            serde_json::Value::String(text) if !preserve_text => {
+                *text = sanitize_text_for_webview(text);
+            }
+            _ => {}
+        }
+    }
+    visit(&mut value, false);
+    value
+}
+
 pub(crate) fn sanitize_memory_review_response(mut value: serde_json::Value) -> serde_json::Value {
     remove_secret_response_fields_with_memory_candidate_mode(&mut value, true);
     value
@@ -321,7 +348,8 @@ pub(crate) fn provider_config_body(
 #[cfg(test)]
 mod memory_review_sanitizer_tests {
     use super::{
-        sanitize_memory_review_response, sanitize_text_for_webview, sanitize_webview_response,
+        sanitize_memory_review_response, sanitize_support_feedback_response,
+        sanitize_text_for_webview, sanitize_webview_response,
     };
 
     #[test]
@@ -421,6 +449,20 @@ mod memory_review_sanitizer_tests {
         let sanitized = sanitize_webview_response(serde_json::json!({
             "detail": "Remember API_KEY variable naming."
         }));
+        assert_eq!(sanitized["detail"], "[redacted]");
+    }
+
+    #[test]
+    fn support_feedback_projection_preserves_backend_redacted_review_text() {
+        let sanitized = sanitize_support_feedback_response(serde_json::json!({
+            "text": "What happened:\napi_key=[REDACTED]\nBearer [REDACTED]",
+            "preview": "member api_key=[REDACTED]",
+            "api_key": "must-not-cross",
+            "detail": "api_key=private-value",
+        }));
+        assert_eq!(sanitized["text"], "What happened:\napi_key=[REDACTED]\nBearer [REDACTED]");
+        assert_eq!(sanitized["preview"], "member api_key=[REDACTED]");
+        assert!(sanitized.get("api_key").is_none());
         assert_eq!(sanitized["detail"], "[redacted]");
     }
 }
