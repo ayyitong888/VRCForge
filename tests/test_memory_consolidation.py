@@ -2063,8 +2063,10 @@ def test_durable_source_cursor_rotates_batches_and_skips_one_oversized_source(tm
             {"candidates": []},
         )[1],
     )
-    assert seen == ["b"]
-    assert skipped["selection"]["skippedOversizedCount"] == 1
+    assert seen == ["a"]
+    assert skipped["selection"]["page"]["sourceId"] == "a"
+    assert skipped["selection"]["page"]["hasMore"] is True
+    assert skipped["selection"]["skippedOversizedCount"] == 0
 
 
 def test_candidate_commit_before_cursor_crash_retries_without_duplicate_card(
@@ -2325,13 +2327,16 @@ def test_pure_provider_validation_has_no_write_and_commit_binds_trusted_run_attr
         },
         expected_revision=0,
     )
-    request, selected = service.build_provider_request([source], source.scope, configured["inputCharCap"])
+    request, selected, selection = service.build_provider_request_with_selection(
+        [source], source.scope, configured["inputCharCap"]
+    )
     assert request["tools"] == []
     incomplete_usage = service.validate_provider_result(
         {"candidates": [], "usage": {"input_tokens": 500}},
         sources=selected,
         scope=source.scope,
         pricing={"inputPerMillion": 2.0, "outputPerMillion": 8.0},
+        batch_digest=selection["batchDigest"],
     )
     assert incomplete_usage["usage"]["costUnavailableReason"] == "usage_incomplete"
     provider_result = {
@@ -2350,6 +2355,7 @@ def test_pure_provider_validation_has_no_write_and_commit_binds_trusted_run_attr
         sources=selected,
         scope=source.scope,
         pricing={"inputPerMillion": 2.0, "outputPerMillion": 8.0, "currency": "USD"},
+        batch_digest=selection["batchDigest"],
     )
     assert validated["usage"]["costUsd"] == pytest.approx(0.0018)
     started = service.begin_provider_run(

@@ -598,6 +598,86 @@ def _source_cursor_token(source: SourceProjection) -> str:
     return f"srccur_{digest[:32]}"
 
 
+def _provider_page_source(
+    source: SourceProjection,
+    text: str,
+    *,
+    offset: int,
+    total_chars: int,
+) -> dict[str, Any]:
+    page_digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    return {
+        **source.as_provider_dict(),
+        "text": text,
+        "textDisposition": "quoted_untrusted_data",
+        "pageOffset": offset,
+        "pageLength": len(text),
+        "pageDigest": page_digest,
+        "pageTotalChars": total_chars,
+        "pageHasMore": offset + len(text) < total_chars,
+    }
+
+
+def _fit_provider_page(
+    source: SourceProjection,
+    *,
+    offset: int,
+    input_char_cap: int,
+    base_payload: Mapping[str, Any],
+) -> tuple[dict[str, Any], int] | None:
+    remaining = source.text[offset:]
+    if not remaining:
+        return None
+    low, high = 1, len(remaining)
+    best: tuple[dict[str, Any], int] | None = None
+    while low <= high:
+        size = (low + high) // 2
+        page = _provider_page_source(
+            source,
+            remaining[:size],
+            offset=offset,
+            total_chars=len(source.text),
+        )
+        candidate = {**base_payload, "sources": [page]}
+        encoded_size = len(json.dumps(candidate, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+        if encoded_size <= input_char_cap:
+            best = (candidate, size)
+            low = size + 1
+        else:
+            high = size - 1
+    return best
+
+
+def _provider_batch_digest(
+    scope: MemoryScope,
+    sources: Sequence[SourceProjection],
+    cursor_state: Mapping[str, Any] | None = None,
+) -> str:
+    state = cursor_state if isinstance(cursor_state, Mapping) else {}
+    normalized_sources = _normalize_source_inventory(sources)
+    return _canonical_digest({
+        "scope": scope.scope_key,
+        "sourceBindings": [source.reference() for source in normalized_sources],
+        "pageSourceId": str(state.get("pageSourceId") or ""),
+        "pageSourceDigest": str(state.get("pageSourceDigest") or ""),
+        "pageOffset": int(state.get("pageOffset") or 0),
+    })
+
+
+def _provider_payload_digest(
+    scope: MemoryScope,
+    sources: Sequence[SourceProjection],
+    payload: Mapping[str, Any],
+    input_char_cap: int,
+) -> str:
+    return _canonical_digest({
+        "scope": scope.scope_key,
+        "sourceBindings": [source.reference() for source in _normalize_source_inventory(sources)],
+        "inputCharCap": input_char_cap,
+        "payload": payload,
+    })
+
+
 def _build_provider_batch(
     sources: Sequence[SourceProjection],
     scope: MemoryScope,
@@ -605,6 +685,7 @@ def _build_provider_batch(
     *,
     policy_version: str,
     cursor: str = "",
+    cursor_state: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, Any], list[SourceProjection], dict[str, Any]]:
     if isinstance(input_char_cap, bool) or not isinstance(input_char_cap, int) or not (1_000 <= input_char_cap <= 1_000_000):
         raise MemoryConsolidationError("inputCharCap is out of range.")
@@ -613,10 +694,24 @@ def _build_provider_batch(
     if any(source.scope.scope_key != scope.scope_key for source in ordered):
         raise MemoryConsolidationError("Provider request sources cross the resolved Memory scope.")
     tokens = [_source_cursor_token(source) for source in ordered]
+    cursor_state = cursor_state if isinstance(cursor_state, Mapping) else {}
+    page_source_id = str(cursor_state.get("pageSourceId") or "")
+    page_source_digest = str(cursor_state.get("pageSourceDigest") or "")
+    page_offset = cursor_state.get("pageOffset", 0)
+    if isinstance(page_offset, bool) or not isinstance(page_offset, int) or page_offset < 0:
+        page_offset = 0
     start = 0
     if cursor in tokens:
         start = (tokens.index(cursor) + 1) % len(ordered)
     rotated = ordered[start:] + ordered[:start]
+    if page_source_id and page_source_digest:
+        page_source = next(
+            (source for source in ordered
+             if source.source_id == page_source_id and source.source_digest == page_source_digest),
+            None,
+        )
+        if page_source is not None and page_offset < len(page_source.text):
+            rotated = [page_source, *[source for source in rotated if source is not page_source]]
     payload: dict[str, Any] = {
         "schema": "vrcforge.memory_review_request.v1",
         "policyVersion": normalized_policy,
@@ -636,6 +731,7 @@ def _build_provider_batch(
     skipped_oversized = 0
     excluded_sensitive = 0
     next_cursor = cursor if cursor in tokens else ""
+    page_selection: dict[str, Any] | None = None
     for source in rotated:
         if _fact_is_instruction_sensitive(source.text):
             excluded_sensitive += 1
@@ -656,11 +752,35 @@ def _build_provider_batch(
         single_payload = {**payload, "sources": [provider_source]}
         single_serialized = json.dumps(single_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         if len(single_serialized) > input_char_cap:
-            skipped_oversized += 1
+            if selected:
+                break
+            offset = page_offset if source.source_id == page_source_id and source.source_digest == page_source_digest else 0
+            page_result = _fit_provider_page(
+                source,
+                offset=offset,
+                input_char_cap=input_char_cap,
+                base_payload=payload,
+            )
+            if page_result is None:
+                skipped_oversized += 1
+                next_cursor = _source_cursor_token(source)
+                continue
+            payload, page_size = page_result
+            selected.append(source)
+            next_offset = offset + page_size
+            page_selection = {
+                "sourceId": source.source_id,
+                "sourceDigest": source.source_digest,
+                "offset": offset,
+                "nextOffset": next_offset,
+                "length": page_size,
+                "pageDigest": payload["sources"][0]["pageDigest"],
+                "hasMore": next_offset < len(source.text),
+            }
             next_cursor = _source_cursor_token(source)
-            continue
+            break
         break
-    return payload, selected, {
+    selection = {
         "cursor": next_cursor,
         "skippedOversizedCount": skipped_oversized,
         "excludedReasonCounts": (
@@ -669,6 +789,14 @@ def _build_provider_batch(
             else {}
         ),
     }
+    if page_selection is not None:
+        selection["page"] = page_selection
+        if page_selection["hasMore"]:
+            selection["pageSourceId"] = page_selection["sourceId"]
+            selection["pageSourceDigest"] = page_selection["sourceDigest"]
+            selection["pageOffset"] = page_selection["nextOffset"]
+    selection["batchDigest"] = _provider_payload_digest(scope, selected, payload, input_char_cap)
+    return payload, selected, selection
 
 
 def build_provider_request(
@@ -678,14 +806,16 @@ def build_provider_request(
     *,
     policy_version: str = MEMORY_REVIEW_POLICY_VERSION,
     cursor: str = "",
+    cursor_state: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, Any], list[SourceProjection]]:
-    """Build one deterministic whole-source request without truncating JSON."""
+    """Build one deterministic safe-source request, paging oversized text."""
     payload, selected, _selection = _build_provider_batch(
         sources,
         scope,
         input_char_cap,
         policy_version=policy_version,
         cursor=cursor,
+        cursor_state=cursor_state,
     )
     return payload, selected
 
@@ -1173,10 +1303,13 @@ class MemoryReviewStore:
                 or (scope_key.startswith("project:") and len(scope_key) == 72)
             ) or not isinstance(raw_cursor, dict):
                 raise StoreCorruptionError("Memory Review source cursor scope is invalid.")
-            if any(str(key) not in {"cursor", "skippedOversizedCount", "updatedAt"} for key in raw_cursor):
+            if any(str(key) not in {"cursor", "skippedOversizedCount", "updatedAt", "pageSourceId", "pageSourceDigest", "pageOffset"} for key in raw_cursor):
                 raise StoreCorruptionError("Memory Review source cursor contains unsupported fields.")
             cursor = str(raw_cursor.get("cursor") or "")
             skipped = raw_cursor.get("skippedOversizedCount", 0)
+            page_source_id = str(raw_cursor.get("pageSourceId") or "")
+            page_source_digest = str(raw_cursor.get("pageSourceDigest") or "")
+            page_offset = raw_cursor.get("pageOffset", 0)
             updated_at = _bounded_timestamp(raw_cursor.get("updatedAt"), fallback="")
             if (
                 cursor
@@ -1185,12 +1318,15 @@ class MemoryReviewStore:
                     or len(cursor) != 39
                     or any(character not in "0123456789abcdef" for character in cursor[7:])
                 )
-            ) or isinstance(skipped, bool) or not isinstance(skipped, int) or not (0 <= skipped <= 1_000_000) or not updated_at:
+            ) or isinstance(skipped, bool) or not isinstance(skipped, int) or not (0 <= skipped <= 1_000_000) or not updated_at or bool(page_source_id) != bool(page_source_digest) or (page_offset and not page_source_id) or (page_source_digest and (len(page_source_digest) != 64 or any(character not in "0123456789abcdef" for character in page_source_digest))) or isinstance(page_offset, bool) or not isinstance(page_offset, int) or not (0 <= page_offset <= 100_000_000):
                 raise StoreCorruptionError("Memory Review source cursor is invalid.")
             payload["sourceCursors"][scope_key] = {
                 "cursor": cursor,
                 "skippedOversizedCount": skipped,
                 "updatedAt": updated_at,
+                "pageSourceId": page_source_id,
+                "pageSourceDigest": page_source_digest,
+                "pageOffset": page_offset,
             }
         try:
             payload["candidates"] = [self._validate_loaded_candidate(item) for item in payload["candidates"]]
@@ -2461,6 +2597,13 @@ class MemoryReviewStore:
             cursor = state.get("sourceCursors", {}).get(normalized_scope, {})
             return str(cursor.get("cursor") or "") if isinstance(cursor, dict) else ""
 
+    def source_cursor_record(self, scope_key: str) -> dict[str, Any]:
+        normalized_scope = _bounded_identifier(scope_key, field="scopeKey", limit=96)
+        with self._lock:
+            state = self._load()
+            cursor = state.get("sourceCursors", {}).get(normalized_scope, {})
+            return copy.deepcopy(cursor) if isinstance(cursor, dict) else {}
+
     def record_source_cursor(
         self,
         *,
@@ -2468,6 +2611,9 @@ class MemoryReviewStore:
         cursor: str,
         skipped_oversized_count: int,
         expected_revision: int,
+        page_source_id: str = "",
+        page_source_digest: str = "",
+        page_offset: int = 0,
     ) -> dict[str, Any]:
         normalized_scope = _bounded_identifier(scope_key, field="scopeKey", limit=96)
         if not (
@@ -2488,17 +2634,36 @@ class MemoryReviewStore:
             or not (0 <= skipped_oversized_count <= 1_000_000)
         ):
             raise MemoryConsolidationError("Source cursor skip count is invalid.")
+        normalized_page_source_id = _bounded_identifier(page_source_id, field="pageSourceId", limit=160) if page_source_id else ""
+        normalized_page_source_digest = str(page_source_digest or "").strip().casefold()
+        if normalized_page_source_digest and (
+            len(normalized_page_source_digest) != 64
+            or any(character not in "0123456789abcdef" for character in normalized_page_source_digest)
+        ):
+            raise MemoryConsolidationError("Source cursor page digest is invalid.")
+        if bool(normalized_page_source_id) != bool(normalized_page_source_digest):
+            raise MemoryConsolidationError("Source cursor page identity is incomplete.")
+        if page_offset and not normalized_page_source_id:
+            raise MemoryConsolidationError("Source cursor page offset has no source identity.")
+        if isinstance(page_offset, bool) or not isinstance(page_offset, int) or not (0 <= page_offset <= 100_000_000):
+            raise MemoryConsolidationError("Source cursor page offset is invalid.")
         with self._lock:
             state = self._load()
             current = state.get("sourceCursors", {}).get(normalized_scope)
             requested = {
                 "cursor": normalized_cursor,
                 "skippedOversizedCount": skipped_oversized_count,
+                "pageSourceId": normalized_page_source_id,
+                "pageSourceDigest": normalized_page_source_digest,
+                "pageOffset": page_offset,
             }
             self._assert_revision(state, expected_revision)
             if isinstance(current, dict) and {
                 "cursor": current.get("cursor") or "",
                 "skippedOversizedCount": current.get("skippedOversizedCount") or 0,
+                "pageSourceId": current.get("pageSourceId") or "",
+                "pageSourceDigest": current.get("pageSourceDigest") or "",
+                "pageOffset": current.get("pageOffset") or 0,
             } == requested:
                 return {"revision": state["revision"], "cursor": copy.deepcopy(current)}
             record = {**requested, "updatedAt": _utc_now_iso()}
@@ -3767,12 +3932,14 @@ class MemoryConsolidator:
         scope: MemoryScope,
         input_char_cap: int,
     ) -> tuple[dict[str, Any], list[SourceProjection]]:
+        cursor_state = self.store.source_cursor_record(scope.scope_key)
         return build_provider_request(
             sources,
             scope,
             input_char_cap,
             policy_version=self.policy_version,
-            cursor=self.store.source_cursor(scope.scope_key),
+            cursor=cursor_state.get("cursor", ""),
+            cursor_state=cursor_state,
         )
 
     def build_provider_request_with_selection(
@@ -3781,12 +3948,14 @@ class MemoryConsolidator:
         scope: MemoryScope,
         input_char_cap: int,
     ) -> tuple[dict[str, Any], list[SourceProjection], dict[str, Any]]:
+        cursor_state = self.store.source_cursor_record(scope.scope_key)
         return _build_provider_batch(
             sources,
             scope,
             input_char_cap,
             policy_version=self.policy_version,
-            cursor=self.store.source_cursor(scope.scope_key),
+            cursor=cursor_state.get("cursor", ""),
+            cursor_state=cursor_state,
         )
 
     def validate_provider_result(
@@ -3799,6 +3968,7 @@ class MemoryConsolidator:
         pricing: Mapping[str, Any] | None = None,
         attempts: int = 1,
         cost_upper_bound_usd: float | None = None,
+        batch_digest: str | None = None,
     ) -> dict[str, Any]:
         """Purely validate one provider result before any candidate-store write."""
 
@@ -3839,6 +4009,9 @@ class MemoryConsolidator:
             "scopeKind": scope.kind,
             "scopeKey": scope.scope_key,
             "sourceBindings": [source.reference() for source in selected_sources],
+            "batchDigest": str(batch_digest or _provider_batch_digest(
+                scope, selected_sources, self.store.source_cursor_record(scope.scope_key)
+            )),
             "candidates": candidates,
             "usage": usage,
         }
@@ -3849,12 +4022,14 @@ class MemoryConsolidator:
         value: Mapping[str, Any],
         sources: Sequence[SourceProjection],
         scope: MemoryScope,
+        expected_batch_digest: str | None = None,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         if not isinstance(value, Mapping) or set(value) != {
             "schema",
             "scopeKind",
             "scopeKey",
             "sourceBindings",
+            "batchDigest",
             "candidates",
             "usage",
             "validationDigest",
@@ -3874,6 +4049,8 @@ class MemoryConsolidator:
         actual_bindings = _normalize_references(value.get("sourceBindings") or [])
         if actual_bindings != expected_bindings:
             raise MemoryConsolidationError("Validated provider result sources changed before commit.")
+        if not expected_batch_digest or value.get("batchDigest") != expected_batch_digest:
+            raise MemoryConsolidationError("Validated provider result page changed before commit.")
         raw_candidates = value.get("candidates")
         if not isinstance(raw_candidates, list) or len(raw_candidates) > MAX_PROVIDER_BATCH:
             raise MemoryConsolidationError("Validated provider candidate batch is invalid.")
@@ -3969,12 +4146,14 @@ class MemoryConsolidator:
         working_revision = int(pre_provider_snapshot["revision"])
 
         scope = resolved_scope
+        cursor_state = self.store.source_cursor_record(scope.scope_key)
         payload, selected_sources, selection = _build_provider_batch(
             valid_sources,
             scope,
             input_char_cap,
             policy_version=self.policy_version,
-            cursor=self.store.source_cursor(scope.scope_key),
+            cursor=str(cursor_state.get("cursor") or ""),
+            cursor_state=cursor_state,
         )
         if not selected_sources:
             cursor_result = self.store.record_source_cursor(
@@ -3982,6 +4161,9 @@ class MemoryConsolidator:
                 cursor=str(selection.get("cursor") or ""),
                 skipped_oversized_count=int(selection.get("skippedOversizedCount") or 0),
                 expected_revision=working_revision,
+                page_source_id=str(selection.get("pageSourceId") or ""),
+                page_source_digest=str(selection.get("pageSourceDigest") or ""),
+                page_offset=int(selection.get("pageOffset") or 0),
             )
             return {
                 "mode": normalized_mode,
@@ -3998,14 +4180,21 @@ class MemoryConsolidator:
                 validated_result,
                 selected_sources,
                 scope,
+                expected_batch_digest=str(selection.get("batchDigest") or ""),
             )
         else:
             raw_response = provider(payload)  # type: ignore[misc]
-            validated = self.validate_provider_result(raw_response, selected_sources, scope)
+            validated = self.validate_provider_result(
+                raw_response,
+                selected_sources,
+                scope,
+                batch_digest=str(selection.get("batchDigest") or ""),
+            )
             candidates, run_usage = self._read_validated_provider_result(
                 validated,
                 selected_sources,
                 scope,
+                expected_batch_digest=str(selection.get("batchDigest") or ""),
             )
         snapshot = self.store.upsert_candidates(
             candidates,
@@ -4025,6 +4214,9 @@ class MemoryConsolidator:
             cursor=str(selection.get("cursor") or ""),
             skipped_oversized_count=int(selection.get("skippedOversizedCount") or 0),
             expected_revision=int(snapshot["revision"]),
+            page_source_id=str(selection.get("pageSourceId") or ""),
+            page_source_digest=str(selection.get("pageSourceDigest") or ""),
+            page_offset=int(selection.get("pageOffset") or 0),
         )
         candidate_count = len({str(candidate.get("candidateId") or "") for candidate in candidates})
         return {
@@ -5353,6 +5545,7 @@ class MemoryConsolidationService:
         pricing: Mapping[str, Any] | None = None,
         attempts: int = 1,
         cost_upper_bound_usd: float | None = None,
+        batch_digest: str | None = None,
     ) -> dict[str, Any]:
         """Validate provider JSON and privacy without mutating durable state."""
 
@@ -5364,6 +5557,7 @@ class MemoryConsolidationService:
             pricing=pricing,
             attempts=attempts,
             cost_upper_bound_usd=cost_upper_bound_usd,
+            batch_digest=batch_digest,
         )
 
     def assert_provider_run_current(self, run_id: str, *, user_requested: bool = False) -> None:
@@ -5485,7 +5679,7 @@ class MemoryConsolidationService:
                 raise MemoryConsolidationError("Review source inventory does not match its run scope.")
             if validated_result is not None and provider_result is not None:
                 raise MemoryConsolidationError("Review run received two provider result forms.")
-            _request, selected_sources = self.consolidator.build_provider_request(
+            _request, selected_sources, selection = self.consolidator.build_provider_request_with_selection(
                 sources,
                 run_scope,
                 input_char_cap,
@@ -5500,6 +5694,7 @@ class MemoryConsolidationService:
                     scope=run_scope,
                     cost_usd=cost_usd,
                     pricing=pricing,
+                    batch_digest=str(selection.get("batchDigest") or ""),
                 )
             elif cost_usd is not None or pricing is not None:
                 raise MemoryConsolidationError("Validated review results already bind their cost.")
