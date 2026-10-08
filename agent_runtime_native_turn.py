@@ -114,6 +114,7 @@ class NativeRuntimeTurn:
         self._native_decision: dict[str, Any] | None = None
         self._native_steers: list[str] = []
         self._queued_calls: list[dict[str, Any]] = []
+        self._argument_failure_counted = False
         self._scan_result_policy_persisted = False
         self.admitted_tool_names: set[str] | None = None
         self.compaction_attempted = False
@@ -261,9 +262,19 @@ class NativeRuntimeTurn:
         if not self._binding:
             return
         self._state.append_native_assistant(self._session_id, binding=self._binding, message=receipt)
+        self._argument_failure_counted = False
         self._queued_calls = copy.deepcopy(receipt.get("tool_calls") or [])
         self.admitted_tool_names = set(tool_names)
         self._native_decision = None if self._queued_calls else {"ids": [], "cursor": len(self._loop_state)}
+
+    def count_argument_failure(self, previous: int) -> int:
+        """Charge one correction attempt per provider response, not queued call."""
+        if not self._binding:
+            return previous + 1
+        if self._argument_failure_counted:
+            return max(1, previous)
+        self._argument_failure_counted = True
+        return previous + 1
 
     @property
     def has_queued_calls(self) -> bool:

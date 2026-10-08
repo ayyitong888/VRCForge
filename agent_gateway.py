@@ -6608,7 +6608,7 @@ class AgentGateway:
             validation: dict[str, Any],
         ) -> bool:
             nonlocal planner_argument_failures, unresolved_planner_argument_failure
-            planner_argument_failures += 1
+            planner_argument_failures = native_turn.count_argument_failure(planner_argument_failures)
             issues = redact_sensitive([
                 {
                     "path": summarize_text(str(item.get("path") or ""), 120),
