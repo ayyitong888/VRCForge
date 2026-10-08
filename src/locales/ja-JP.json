@@ -1873,6 +1873,28 @@
     "sending": "送信中…",
     "send": "送信"
   },
+  "chatgptOAuth": {
+    "title": "ChatGPT サブスクリプション",
+    "account": "アカウント",
+    "noAccounts": "アカウントがありません",
+    "continue": "ChatGPT で続行",
+    "addAnotherAccount": "別のアカウントを追加",
+    "pending": "サインイン待機中",
+    "relogin": "再ログイン",
+    "logout": "ログアウト",
+    "logoutNotConfirmed": "ローカルではログアウトしましたが、リモートでのログアウトを確認できませんでした。",
+    "cancel": "サインインをキャンセル",
+    "loadModels": "モデルを読み込む",
+    "refreshStatus": "状態を更新",
+    "model": "モデル",
+    "noModels": "このアカウントのモデルが見つかりませんでした。",
+    "activeModel": "使用中のモデル: {{model}}",
+    "activeAccountModel": "{{account}} · {{model}}",
+    "disconnectedActiveAccountModel": "未接続: {{account}} · {{model}}",
+    "activate": "このモデルを使用",
+    "activated": "ChatGPT モデルを有効にしました。",
+    "chooseApiProvider": "API プロバイダーを選択"
+  },
   "appUpdate": {
     "dialogTitle": "VRCForge の更新があります",
     "dialogBody": "VRCForge {{version}} を GitHub Releases で確認できます。",

@@ -29,6 +29,7 @@ from provider_runtime_adapters import (
     ProviderRuntimeRequest,
     ProviderTokenLimitError,
 )
+from chatgpt_responses_adapter import ChatGPTResponsesAdapter
 from approved_unity_execution import (
     ApprovedUnityExecutionError,
     ApprovedUnityExecutionPlan,
@@ -44,6 +45,7 @@ DEFAULT_MIN_CONFIDENCE = 0.65
 DEFAULT_MVP_EXPORT_PATH = Path("examples/mvp_blendshapes_export.json")
 DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
 DEFAULT_OPENAI_MODEL = "gpt-4.1-mini"
+DEFAULT_CHATGPT_MODEL = ""
 DEFAULT_DEEPSEEK_MODEL = "deepseek-auto"
 DEFAULT_OPENROUTER_MODEL = "openai/gpt-4.1-mini"
 DEFAULT_ANTHROPIC_MODEL = "claude-opus-4-6"
@@ -51,6 +53,7 @@ DEFAULT_OLLAMA_MODEL = "llama3.2"
 DEFAULT_VERTEX_AI_MODEL = "gemini-2.5-flash"
 DEFAULT_GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
 DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
+DEFAULT_CHATGPT_BASE_URL = DEFAULT_OPENAI_BASE_URL
 DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434/v1"
@@ -65,6 +68,7 @@ SUPPORTED_LLM_PROVIDERS = (
     "gemini",
     "deepseek",
     "openai",
+    "chatgpt",
     "openrouter",
     "anthropic",
     "ollama",
@@ -449,17 +453,21 @@ def build_llm_settings(
         or DEFAULT_LLM_PROVIDER
     )
     defaults = get_provider_defaults(provider)
-    api_key_env = str(
-        override.get("api_key_env")
-        or llm_settings.get("api_key_env")
-        or legacy_gemini_settings.get("api_key_env")
-        or default_api_key_env_for_provider(provider)
-    ).strip()
-    api_key = str(
-        override.get("api_key")
-        or llm_settings.get("api_key")
-        or os.environ.get(api_key_env, "")
-    ).strip()
+    if provider == "chatgpt":
+        api_key_env = ""
+        api_key = str(override.get("api_key") or llm_settings.get("api_key") or "").strip()
+    else:
+        api_key_env = str(
+            override.get("api_key_env")
+            or llm_settings.get("api_key_env")
+            or legacy_gemini_settings.get("api_key_env")
+            or default_api_key_env_for_provider(provider)
+        ).strip()
+        api_key = str(
+            override.get("api_key")
+            or llm_settings.get("api_key")
+            or os.environ.get(api_key_env, "")
+        ).strip()
     base_url_value = (
         override.get("base_url")
         if "base_url" in override
@@ -496,6 +504,7 @@ def get_provider_defaults(provider: str) -> dict[str, str]:
         "gemini": {"model": DEFAULT_GEMINI_MODEL, "base_url": DEFAULT_GEMINI_BASE_URL},
         "deepseek": {"model": DEFAULT_DEEPSEEK_MODEL, "base_url": DEFAULT_DEEPSEEK_BASE_URL},
         "openai": {"model": DEFAULT_OPENAI_MODEL, "base_url": DEFAULT_OPENAI_BASE_URL},
+        "chatgpt": {"model": DEFAULT_CHATGPT_MODEL, "base_url": DEFAULT_CHATGPT_BASE_URL},
         "openrouter": {"model": DEFAULT_OPENROUTER_MODEL, "base_url": DEFAULT_OPENROUTER_BASE_URL},
         "anthropic": {"model": DEFAULT_ANTHROPIC_MODEL, "base_url": ""},
         "ollama": {"model": DEFAULT_OLLAMA_MODEL, "base_url": DEFAULT_OLLAMA_BASE_URL},
@@ -510,6 +519,7 @@ def default_api_key_env_for_provider(provider: str) -> str:
         "gemini": "GEMINI_API_KEY",
         "deepseek": "DEEPSEEK_API_KEY",
         "openai": "OPENAI_API_KEY",
+        "chatgpt": "",
         "openrouter": "OPENROUTER_API_KEY",
         "anthropic": "ANTHROPIC_API_KEY",
         "ollama": "OLLAMA_API_KEY",
@@ -532,6 +542,8 @@ def normalize_base_url(base_url: Any, provider: str, default_base_url: str) -> s
     normalized = normalize_provider_name(provider)
     if normalized in {"anthropic", "gemini"}:
         return ""
+    if normalized == "chatgpt":
+        return DEFAULT_CHATGPT_BASE_URL
 
     resolved = str(base_url if base_url is not None else default_base_url).strip()
     if normalized == "vertexai":
@@ -1420,14 +1432,21 @@ def request_llm_plan_with_metadata(
     native_messages: Sequence[Mapping[str, Any]] | None = None,
     native_tools: Sequence[Mapping[str, Any]] | None = None,
 ) -> LlmPlanResponse:
-    if native_messages is not None or native_tools is not None:
-        if str(getattr(settings, "llm_api_type", "") or "").strip().lower() != "chat_completions":
-            raise ValueError("Native messages/tools require an explicit chat_completions protocol.")
-    image_paths = normalize_reference_image_paths(reference_image_path, reference_image_paths)
     provider = normalize_provider_name(settings.llm_provider)
-    requested_api_type, _resolved_api_type = normalize_provider_api_type(
+    requested_api_type, resolved_api_type = normalize_provider_api_type(
         provider, settings.llm_model, getattr(settings, "llm_api_type", None)
     )
+    if native_messages is not None or native_tools is not None:
+        native_chat_route = requested_api_type == "chat_completions"
+        native_chatgpt_route = provider == "chatgpt" and resolved_api_type == "responses"
+        if not (native_chat_route or native_chatgpt_route):
+            raise ValueError("Native messages/tools require an explicit chat_completions protocol or ChatGPT Responses.")
+        if not native_chatgpt_route and any(
+            isinstance(message, Mapping) and "responses_output" in message
+            for message in (native_messages or ())
+        ):
+            raise ValueError("ChatGPT Responses history cannot be sent through a legacy chat route.")
+    image_paths = normalize_reference_image_paths(reference_image_path, reference_image_paths)
     def dispatch(
         candidate: ProviderProtocolCandidate,
         candidate_stream_callback: Callable[[str], None] | None,
@@ -1478,6 +1497,8 @@ def _request_llm_protocol_with_metadata(
             stream_callback=stream_callback,
             cancel_event=cancel_event,
             stream_activity_callback=stream_activity_callback,
+            native_messages=native_messages,
+            native_tools=native_tools,
         )
     if api_type == "generate_content":
         if normalize_provider_name(settings.llm_provider) == "vertexai":
@@ -1511,10 +1532,68 @@ def request_responses_plan_with_metadata(
     client_factory: Callable[..., Any] | None = None,
     cancel_event: Any | None = None,
     stream_activity_callback: Callable[[dict[str, Any]], None] | None = None,
+    native_messages: Sequence[Mapping[str, Any]] | None = None,
+    native_tools: Sequence[Mapping[str, Any]] | None = None,
 ) -> LlmPlanResponse:
     """Use one configured Responses endpoint without executing returned calls."""
 
     image_paths = normalize_reference_image_paths(reference_image_paths=reference_image_paths)
+    if normalize_provider_name(settings.llm_provider) == "chatgpt":
+        adapter = ChatGPTResponsesAdapter(
+            api_key=settings.llm_api_key,
+            base_url=settings.llm_base_url,
+            client_factory=client_factory,
+        )
+        source = "chatgpt-responses"
+        if native_messages is not None or native_tools is not None:
+            if image_paths:
+                raise RuntimeError("ChatGPT native Responses requests do not accept local reference image paths.")
+            native_response = adapter.send_native_request(
+                model=settings.llm_model,
+                messages=native_messages or (),
+                tools=native_tools or (),
+                stream_callback=stream_callback,
+                cancel_event=cancel_event,
+                stream_activity_callback=stream_activity_callback,
+            )
+            parsed = _native_chat_response(
+                settings,
+                {
+                    "choices": [{
+                        "message": native_response.assistant_message,
+                        "finish_reason": native_response.finish_reason,
+                    }],
+                    "usage": native_response.usage,
+                },
+                source=source,
+            )
+            parsed.reasoning = extract_llm_reasoning_trace(
+                {"output": [{"type": "reasoning", "summary": summary} for summary in native_response.reasoning_summary]},
+                settings,
+                source=source,
+            )
+            return parsed
+        response = adapter.send_request(
+            ProviderRuntimeRequest(
+                model=settings.llm_model,
+                prompt=prompt,
+                instructions=llm_system_instruction(settings),
+                reference_image_paths=tuple(str(path) for path in image_paths),
+                stream_callback=stream_callback,
+                mode="planner",
+                cancel_event=cancel_event,
+                stream_activity_callback=stream_activity_callback,
+            )
+        )
+        reasoning = extract_llm_reasoning_trace(
+            {"output": [{"type": "reasoning", "summary": summary} for summary in response.reasoning_summary]},
+            settings,
+            source=source,
+        )
+        usage = extract_llm_token_usage({"usage": response.usage}, settings, source=source)
+        return LlmPlanResponse(text=response.text, reasoning=reasoning, usage=usage)
+    if native_messages is not None or native_tools is not None:
+        raise ValueError("Native Responses history requires the ChatGPT Responses adapter.")
     adapter_type = (
         DeepSeekResponsesAdapter
         if normalize_provider_name(settings.llm_provider) == "deepseek"
@@ -2310,6 +2389,11 @@ def request_openai_compatible_plan_with_metadata(
     if native_mode:
         if str(getattr(settings, "llm_api_type", "") or "").strip().lower() != "chat_completions":
             raise ValueError("Native messages/tools require an explicit chat_completions protocol.")
+        if normalize_provider_name(settings.llm_provider) != "chatgpt" and any(
+            isinstance(message, Mapping) and "responses_output" in message
+            for message in (native_messages or ())
+        ):
+            raise ValueError("ChatGPT Responses history cannot be sent through a legacy chat route.")
     validate_provider_api_key(settings.llm_api_key)
     if not settings.llm_base_url:
         provider_name = provider_display_name(settings.llm_provider)
@@ -2795,6 +2879,9 @@ def _native_chat_response(settings: Settings, response: Any, *, source: str) -> 
     reasoning_content = get_value(message, "reasoning_content")
     if reasoning_content is not None:
         receipt["reasoning_content"] = reasoning_content
+    responses_output = get_value(message, "responses_output")
+    if source == "chatgpt-responses" and responses_output is not None:
+        receipt["responses_output"] = responses_output
     return LlmPlanResponse(
         text=extract_openai_message_text(response),
         reasoning=extract_llm_reasoning_trace({"choices": [{"message": {}}]}, settings, source=source),
@@ -3174,6 +3261,7 @@ def provider_display_name(provider: str) -> str:
         "gemini": "Google AI Studio",
         "deepseek": "DeepSeek",
         "openai": "OpenAI",
+        "chatgpt": "ChatGPT",
         "openrouter": "OpenRouter",
         "anthropic": "Anthropic",
         "ollama": "Ollama",

@@ -379,6 +379,7 @@ from memory_review_dashboard_adapter import (
 from memory_consolidation_sources import MemoryScope, project_scope_key
 from memory_review_composition import MemoryReviewComposition, MemoryReviewCompositionPorts, build_memory_review_composition
 from memory_review_host import build_memory_review_router
+from chatgpt_oauth_routes import build_chatgpt_oauth_router
 from memory_review_provider import invoke_memory_provider
 from memory_review_runtime import MemoryReviewIdleGate, MemoryReviewRuntimeCoordinator
 from optimization_service import (
@@ -9622,6 +9623,16 @@ async def update_api_config(request: ApiConfigRequest) -> dict[str, Any]:
         },
     )
     return payload
+
+
+app.include_router(build_chatgpt_oauth_router(
+    authorize=lambda request: authenticate_app_request(request),
+    current_config=PROVIDER_CONFIGURATION.current_api_config,
+    activate=lambda config: update_api_config(ApiConfigRequest(
+        provider=config.provider, api_key=config.api_key, base_url=config.base_url,
+        model=config.model, api_type=config.api_type,
+    )),
+))
 
 
 @app.post("/api/config/vision")

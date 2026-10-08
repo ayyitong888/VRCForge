@@ -21,6 +21,7 @@ _API_TYPE_ERROR = "The selected provider API type is not supported for this mode
 
 API_TYPES = frozenset({"auto", "chat_completions", "responses", "generate_content", "messages"})
 _LEGACY_API_TYPES = {
+    "chatgpt": "responses",
     "deepseek": "chat_completions",
     "openai": "chat_completions",
     "openrouter": "chat_completions",
@@ -31,6 +32,7 @@ _LEGACY_API_TYPES = {
     "anthropic": "messages",
 }
 _FIXED_PROVIDER_TYPES = {
+    "chatgpt": "responses",
     "gemini": "generate_content",
     "vertexai": "generate_content",
     "anthropic": "messages",

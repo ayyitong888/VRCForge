@@ -9,6 +9,8 @@ export type ProviderCapability = {
 
 export function defaultModelForProvider(provider: string): string {
   switch (provider) {
+    case "chatgpt":
+      return "";
     case "anthropic":
       return "claude-opus-4-6";
     case "deepseek":
@@ -31,6 +33,8 @@ export function defaultModelForProvider(provider: string): string {
 
 export function providerDisplayName(provider: string): string {
   switch (provider) {
+    case "chatgpt":
+      return "ChatGPT";
     case "anthropic":
       return "Anthropic";
     case "deepseek":
@@ -68,7 +72,7 @@ export function defaultBaseUrlForProvider(provider: string): string {
 }
 
 export function providerNeedsApiKey(provider: string): boolean {
-  return provider !== "ollama" && provider !== "vertexai";
+  return provider !== "ollama" && provider !== "vertexai" && provider !== "chatgpt";
 }
 
 export function providerCapabilities(capabilities?: readonly string[], capabilitySource?: string): ProviderCapability[] {

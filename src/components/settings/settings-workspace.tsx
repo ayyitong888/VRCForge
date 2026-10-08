@@ -1,6 +1,7 @@
 import { version as appVersion } from "../../../package.json";
-import { Check, Eye, Globe, Loader2, RefreshCw } from "lucide-react";
+import { Check, Eye, Globe, Loader2, RefreshCw, Settings2 } from "lucide-react";
 import type { FormEvent } from "react";
+import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { SUPPORTED_LOCALES } from "../../i18n";
 import type { SettingsSection } from "../../lib/app-view";
@@ -31,6 +32,7 @@ import { ProviderSetup, VisionProfileSetup } from "./provider-settings";
 import { ThemeCustomizationPanel } from "./theme-customization-panel";
 import type { ThemeCustomization } from "../../lib/theme-customization";
 import { DataRootSettingsPanel } from "./data-root-settings-panel";
+import { ChatGptOAuthSettings } from "./chatgpt-oauth-settings";
 
 type SettingsWorkspaceProps = {
   activeSection: SettingsSection;
@@ -232,6 +234,7 @@ export function SettingsWorkspace({
   onSaveNotes,
 }: SettingsWorkspaceProps) {
   const { t } = useTranslation();
+  const [showChatGptProviderPicker, setShowChatGptProviderPicker] = useState(false);
   const currentPermissionVisual = permissionVisualState(permission);
   const visionKeySaved = hasSavedProviderKey(visionProvider, visionConfig);
   const visibleSection: SettingsSection = activeSection === "developer" && !developerOptionsEnabled ? "general" : activeSection;
@@ -387,37 +390,57 @@ export function SettingsWorkspace({
           <h2 className="text-base font-semibold">{t("settings.modelProvider")}</h2>
           <p className="mt-1 text-sm text-muted-foreground">{t("settings.providerDesc")}</p>
           <div className="mt-4">
-            <ProviderSetup
-              provider={apiProvider}
-              apiKey={apiKey}
-              baseUrl={apiBaseUrl}
-              model={apiModel}
-              apiType={apiType}
-              contextWindow={apiContextWindow}
-              modelCapabilities={selectedModelCapabilities}
-              capabilitySource={selectedModelCapabilitySource}
-              thinkingLevel={apiThinkingLevel}
-              reasoningVariants={reasoningVariants}
-              saving={savingApiConfig}
-              models={modelOptions}
-              loadingModels={loadingModels}
-              modelsError={modelsError}
-              testingProvider={testingProvider}
-              providerTestMessage={providerTestMessage}
+            <ChatGptOAuthSettings
+              endpoint={endpoint}
               runtimeConnected={runtimeConnected}
-              keySaved={apiKeySaved}
-              onLoadModels={onLoadModels}
-              onTestProvider={onProviderTest}
-              onProviderChange={onProviderChange}
-              onApiKeyChange={onApiKeyChange}
-              onBaseUrlChange={onApiBaseUrlChange}
-              onModelChange={onApiModelChange}
-              onDeepSeekAutoNegotiationChange={onDeepSeekAutoNegotiationChange}
-              onApiTypeChange={onApiTypeChange}
-              onContextWindowChange={onApiContextWindowChange}
-              onThinkingLevelChange={onApiThinkingLevelChange}
-              onSubmit={onSaveApiProvider}
+              apiProvider={apiProvider}
+              apiModel={apiModel}
+              savingApiConfig={savingApiConfig}
             />
+          </div>
+          <div className="mt-4">
+            {apiProvider === "chatgpt" && !showChatGptProviderPicker ? (
+              <Button type="button" variant="outline" onClick={() => setShowChatGptProviderPicker(true)}>
+                <Settings2 className="h-4 w-4" />
+                {t("chatgptOAuth.chooseApiProvider")}
+              </Button>
+            ) : (
+              <ProviderSetup
+                provider={apiProvider}
+                apiKey={apiKey}
+                baseUrl={apiBaseUrl}
+                model={apiModel}
+                apiType={apiType}
+                contextWindow={apiContextWindow}
+                modelCapabilities={selectedModelCapabilities}
+                capabilitySource={selectedModelCapabilitySource}
+                thinkingLevel={apiThinkingLevel}
+                reasoningVariants={reasoningVariants}
+                saving={savingApiConfig}
+                models={modelOptions}
+                loadingModels={loadingModels}
+                modelsError={modelsError}
+                testingProvider={testingProvider}
+                providerTestMessage={providerTestMessage}
+                runtimeConnected={runtimeConnected}
+                keySaved={apiKeySaved}
+                providerPickerOnly={apiProvider === "chatgpt"}
+                onLoadModels={onLoadModels}
+                onTestProvider={onProviderTest}
+                onProviderChange={(value) => {
+                  onProviderChange(value);
+                  setShowChatGptProviderPicker(value === "chatgpt");
+                }}
+                onApiKeyChange={onApiKeyChange}
+                onBaseUrlChange={onApiBaseUrlChange}
+                onModelChange={onApiModelChange}
+                onDeepSeekAutoNegotiationChange={onDeepSeekAutoNegotiationChange}
+                onApiTypeChange={onApiTypeChange}
+                onContextWindowChange={onApiContextWindowChange}
+                onThinkingLevelChange={onApiThinkingLevelChange}
+                onSubmit={onSaveApiProvider}
+              />
+            )}
           </div>
           <div className="mt-10 flex min-w-0 items-center gap-2">
             <h2 className="text-base font-semibold">

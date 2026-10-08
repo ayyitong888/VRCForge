@@ -184,7 +184,7 @@ class AgentRuntimeSessionState:
     def _validate_native_assistant(cls, message: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(message, dict):
             raise ValueError("native assistant message must be an object")
-        allowed = {"role", "content", "tool_calls", "reasoning_content"}
+        allowed = {"role", "content", "tool_calls", "reasoning_content", "responses_output"}
         if set(message) - allowed:
             raise ValueError("native assistant message has unsupported fields")
         if message.get("role") != "assistant":
@@ -210,6 +210,80 @@ class AgentRuntimeSessionState:
             cls._native_required(call["function"]["name"], "function name")
             if not isinstance(call["function"]["arguments"], str):
                 raise ValueError("native function arguments must be raw string")
+        if "responses_output" in message:
+            responses_output = message["responses_output"]
+            if not isinstance(responses_output, list) or not responses_output or len(responses_output) > 256:
+                raise ValueError("native Responses output items are invalid")
+            response_calls: list[tuple[str, str, str]] = []
+            output_text: list[str] = []
+            for item in responses_output:
+                if not isinstance(item, dict) or not isinstance(item.get("type"), str):
+                    raise ValueError("native Responses output item is invalid")
+                item_type = item["type"]
+                if item_type == "reasoning":
+                    item_allowed = {"id", "type", "summary", "encrypted_content", "content", "status", "created_by"}
+                    if set(item) - item_allowed or not isinstance(item.get("encrypted_content"), str):
+                        raise ValueError("native Responses encrypted reasoning item is invalid")
+                    if "summary" in item and not isinstance(item["summary"], list):
+                        raise ValueError("native Responses reasoning summary is invalid")
+                    if "content" in item and not isinstance(item["content"], list):
+                        raise ValueError("native Responses reasoning content is invalid")
+                elif item_type == "message":
+                    item_allowed = {"id", "type", "role", "content", "status", "created_by", "phase", "metadata"}
+                    if set(item) - item_allowed or item.get("role") != "assistant" or not isinstance(item.get("content"), list):
+                        raise ValueError("native Responses assistant output item is invalid")
+                    if "phase" in item and item["phase"] not in {"commentary", "final_answer"}:
+                        raise ValueError("native Responses assistant phase is invalid")
+                    if "metadata" in item and not isinstance(item["metadata"], dict):
+                        raise ValueError("native Responses assistant metadata is invalid")
+                    for content_item in item["content"]:
+                        if not isinstance(content_item, dict) or content_item.get("type") not in {"output_text", "refusal"}:
+                            raise ValueError("native Responses assistant content item is invalid")
+                        content_type = content_item["type"]
+                        if content_type == "output_text":
+                            if set(content_item) - {"type", "text", "annotations", "logprobs"}:
+                                raise ValueError("native Responses output text fields are invalid")
+                            if "annotations" in content_item and not isinstance(content_item["annotations"], list):
+                                raise ValueError("native Responses output annotations are invalid")
+                            if "logprobs" in content_item and not isinstance(content_item["logprobs"], list):
+                                raise ValueError("native Responses output logprobs are invalid")
+                            text = content_item.get("text")
+                        else:
+                            if set(content_item) - {"type", "refusal"}:
+                                raise ValueError("native Responses refusal fields are invalid")
+                            text = content_item.get("refusal")
+                        if not isinstance(text, str):
+                            raise ValueError("native Responses assistant content text is invalid")
+                        output_text.append(text)
+                elif item_type == "function_call":
+                    item_allowed = {"id", "type", "call_id", "name", "arguments", "namespace", "status", "created_by"}
+                    if set(item) - item_allowed or item.get("namespace") != "vrcforge":
+                        raise ValueError("native Responses function call namespace or fields are invalid")
+                    call_id = cls._native_required(item.get("call_id"), "Responses call id")
+                    name = cls._native_required(item.get("name"), "Responses function name")
+                    arguments = item.get("arguments")
+                    if not isinstance(arguments, str) or any(existing[0] == call_id for existing in response_calls):
+                        raise ValueError("native Responses function call is invalid")
+                    response_calls.append((call_id, name, arguments))
+                else:
+                    raise ValueError("native Responses output item type is unsupported")
+                for key in ("id", "status", "created_by"):
+                    if key in item and not isinstance(item[key], str):
+                        raise ValueError("native Responses output item metadata is invalid")
+            expected_calls = [
+                (call["id"], call["function"]["name"], call["function"]["arguments"])
+                for call in calls
+            ]
+            if response_calls != expected_calls:
+                raise ValueError("native Responses output calls do not match the assistant receipt")
+            if "content" in message and "".join(output_text) != (message["content"] or ""):
+                raise ValueError("native Responses output text does not match the assistant receipt")
+            try:
+                serialized = json.dumps(responses_output, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+            except (TypeError, ValueError) as exc:
+                raise ValueError("native Responses output items are not JSON-safe") from exc
+            if len(serialized.encode("utf-8")) > cls.MAX_NATIVE_CONVERSATION_BYTES:
+                raise ValueError("native Responses output items exceed the size limit")
         return normalized
 
     @classmethod

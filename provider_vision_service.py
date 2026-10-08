@@ -333,6 +333,19 @@ class ProviderVisionSdkRunner:
         if not decoded:
             raise RuntimeError("No image payloads to analyze.")
 
+        if config.provider == "chatgpt":
+            from chatgpt_responses_adapter import ChatGPTResponsesAdapter
+            from provider_runtime_adapters import ProviderRuntimeRequest
+
+            adapter = ChatGPTResponsesAdapter(api_key=config.api_key, base_url=config.base_url)
+            response = adapter.send_content(
+                ProviderRuntimeRequest(model=config.model, prompt=prompt, instructions="", mode="probe"),
+                [{"type": "input_text", "text": prompt}, *[
+                    {"type": "input_image", "image_url": f"data:{mime};base64,{payload}"}
+                    for mime, payload in decoded
+                ]],
+            )
+            return response.text, response.usage
         if config.provider in {"gemini", "vertexai"}:
             return self._run_google(config, prompt, decoded)
         if config.provider == "anthropic":

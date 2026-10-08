@@ -72,6 +72,10 @@ class ProviderModelCatalogService:
         return enriched
 
     def fetch_provider_models(self, config: ProviderApiConfig) -> list[dict[str, Any]]:
+        if config.provider == "chatgpt":
+            from chatgpt_oauth_service import get_chatgpt_auth_service
+
+            return get_chatgpt_auth_service().models(config.api_key)
         self._policy.validate_provider_api_key(config.api_key)
         if self._policy.provider_requires_api_key(config.provider) and not config.api_key.strip():
             raise RuntimeError(

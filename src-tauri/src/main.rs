@@ -26,6 +26,7 @@ use tungstenite::http::HeaderValue;
 mod approval_notification_windows;
 mod backend;
 mod chat_snapshot_paging;
+mod chatgpt_oauth;
 #[cfg(windows)]
 mod capture_helper;
 mod commands;
@@ -47,6 +48,10 @@ mod vsk_open;
 
 use approval_notification_windows::*;
 use backend::*;
+use chatgpt_oauth::{
+    chatgpt_oauth_activate, chatgpt_oauth_cancel, chatgpt_oauth_login, chatgpt_oauth_logout,
+    chatgpt_oauth_models, chatgpt_oauth_status,
+};
 use commands::*;
 use event_bridge::*;
 #[cfg(windows)]
@@ -229,6 +234,12 @@ fn main() {
             authorize_theme_background,
             cancel_agent_desktop_action,
             cancel_agent_memory_review,
+            chatgpt_oauth_activate,
+            chatgpt_oauth_cancel,
+            chatgpt_oauth_login,
+            chatgpt_oauth_logout,
+            chatgpt_oauth_models,
+            chatgpt_oauth_status,
             compact_agent_history,
             consume_session_handoff_context,
             create_adjustment_checkpoint,

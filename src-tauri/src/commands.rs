@@ -1320,12 +1320,17 @@ fn validate_app_release_url(raw: &str) -> Result<String, String> {
 #[tauri::command]
 pub fn open_app_release_url(request: DesktopOpenAppReleaseUrlRequest) -> Result<(), String> {
     let release_url = validate_app_release_url(&request.release_url)?;
+    open_validated_external_url(&release_url, "GitHub Releases")
+}
 
+// Callers must validate the complete URL first. The fixed platform opener receives only that URL;
+// its short-lived dispatcher is owned by the invoking desktop session, while the browser remains user-owned.
+pub(crate) fn open_validated_external_url(url: &str, target: &str) -> Result<(), String> {
     #[cfg(windows)]
     {
         use windows_sys::Win32::UI::Shell::ShellExecuteW;
 
-        let wide_url = release_url
+        let wide_url = url
             .encode_utf16()
             .chain(std::iter::once(0))
             .collect::<Vec<_>>();
@@ -1340,7 +1345,7 @@ pub fn open_app_release_url(request: DesktopOpenAppReleaseUrlRequest) -> Result<
             )
         };
         if result as isize <= 32 {
-            return Err("Unable to open GitHub Releases in the default browser.".to_string());
+            return Err(format!("Unable to open {target} in the default browser."));
         }
         return Ok(());
     }
@@ -1353,9 +1358,9 @@ pub fn open_app_release_url(request: DesktopOpenAppReleaseUrlRequest) -> Result<
             "xdg-open"
         };
         Command::new(opener)
-            .arg(release_url)
+            .arg(url)
             .spawn()
-            .map_err(|error| format!("Unable to open GitHub Releases: {error}"))?;
+            .map_err(|error| format!("Unable to open {target}: {error}"))?;
         Ok(())
     }
 }

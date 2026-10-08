@@ -27,6 +27,7 @@ type ProviderSetupProps = {
   providerTestMessage: string;
   runtimeConnected: boolean;
   keySaved?: boolean;
+  providerPickerOnly?: boolean;
   onLoadModels: () => void;
   onTestProvider: (capability: "text" | "structured" | "vision") => void;
   onProviderChange: (value: string) => void;
@@ -79,6 +80,7 @@ export function ProviderSetup({
   providerTestMessage,
   runtimeConnected,
   keySaved = false,
+  providerPickerOnly = false,
   onLoadModels,
   onTestProvider,
   onProviderChange,
@@ -112,6 +114,30 @@ export function ProviderSetup({
     ? Math.min(sliderMax, contextWindowK)
     : Math.min(sliderMax, Math.max(4, Math.ceil((detectedContextWindow || 128_000) / 1000)));
 
+  if (providerPickerOnly) {
+    return (
+      <div className="rounded-2xl border border-border bg-card p-5 shadow-composer">
+        <SettingsFieldLabel label={i18n.t("provider.apiProvider")} onboardingTarget="connection">
+          <select
+            value={provider}
+            onChange={(event) => onProviderChange(event.target.value)}
+            className="h-10 w-full rounded-md border border-border bg-background px-3 text-sm outline-none focus:border-primary"
+          >
+            <option value="gemini">Google AI Studio</option>
+            <option value="anthropic">Anthropic</option>
+            <option value="openai">OpenAI</option>
+            <option value="deepseek">DeepSeek</option>
+            <option value="openrouter">OpenRouter</option>
+            <option value="ollama">Ollama</option>
+            <option value="vertexai">Vertex AI</option>
+            <option value="custom">{i18n.t("provider.customEndpoint")}</option>
+            <option value="chatgpt">ChatGPT</option>
+          </select>
+        </SettingsFieldLabel>
+      </div>
+    );
+  }
+
   return (
     <form onSubmit={onSubmit} className="rounded-2xl border border-border bg-card p-5 shadow-composer">
       <div className="grid gap-4">
@@ -129,6 +155,7 @@ export function ProviderSetup({
             <option value="ollama">Ollama</option>
             <option value="vertexai">Vertex AI</option>
             <option value="custom">{i18n.t("provider.customEndpoint")}</option>
+            <option value="chatgpt">ChatGPT</option>
           </select>
           <div className="mt-2 flex flex-wrap gap-1.5">
             {capabilities.map((capability) => (

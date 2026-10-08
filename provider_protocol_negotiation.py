@@ -47,6 +47,11 @@ def provider_protocol_candidates(
     model_id = str(model).strip()
     requested = str(requested_api_type or "auto").strip().lower()
 
+    if provider_id == "chatgpt":
+        if requested not in {"auto", "responses"}:
+            raise ValueError("ChatGPT plan usage requires Responses.")
+        return (ProviderProtocolCandidate(provider_id, model_id, "responses"),)
+
     if requested != "auto":
         return (ProviderProtocolCandidate(provider_id, model_id, requested),)
 
@@ -89,6 +94,8 @@ def supported_provider_api_types(provider: str, model: str) -> tuple[str, ...]:
 
     provider_id = str(provider).strip().lower()
     model_id = str(model).strip()
+    if provider_id == "chatgpt":
+        return ("responses",)
     if provider_id == "custom":
         return ("responses", "chat_completions", "messages", "generate_content")
     if provider_id == "openai":

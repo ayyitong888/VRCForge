@@ -1,6 +1,7 @@
 export * from "./api/types";
 export * from "./api/http";
 export * from "./api/app";
+export * from "./api/chatgpt-oauth";
 export * from "./api/connectors";
 export * from "./api/skill-packages";
 export * from "./api/notes-chats";

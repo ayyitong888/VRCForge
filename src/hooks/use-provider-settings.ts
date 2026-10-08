@@ -92,7 +92,7 @@ export function useProviderSettings({
 
   useEffect(() => {
     let cancelled = false;
-    if (!runtimeConnected || !endpoint || !apiProvider || !apiModel.trim()) {
+    if (!runtimeConnected || !endpoint || !apiProvider || apiProvider === "chatgpt" || !apiModel.trim()) {
       setReasoningVariants(null);
       return () => {
         cancelled = true;
@@ -159,6 +159,7 @@ export function useProviderSettings({
     if (
       normalizedContextWindow === null
       || !apiProvider
+      || apiProvider === "chatgpt"
       || !apiModel
       || (providerNeedsApiKey(apiProvider) && !apiKey.trim() && !apiKeySaved)
     ) {

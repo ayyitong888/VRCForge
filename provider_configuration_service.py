@@ -67,7 +67,11 @@ class ProviderApiConfig:
     def native_binding(self) -> str:
         """Return the private replay binding for an explicitly native route."""
 
-        if self.api_type != "chat_completions":
+        if self.provider == "chatgpt" and self.api_type == "responses":
+            credential_fingerprint_field = "accountIdFingerprint"
+        elif self.api_type == "chat_completions":
+            credential_fingerprint_field = "apiKeyFingerprint"
+        else:
             return ""
         key_fingerprint = hashlib.sha256(self.api_key.encode("utf-8")).hexdigest()
         payload = {
@@ -76,7 +80,7 @@ class ProviderApiConfig:
             "model": self.model,
             "apiType": self.api_type,
             "thinkingLevel": self.thinking_level,
-            "apiKeyFingerprint": key_fingerprint,
+            credential_fingerprint_field: key_fingerprint,
         }
         return hashlib.sha256(
             json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")

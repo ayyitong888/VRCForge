@@ -1873,6 +1873,28 @@
     "sending": "正在傳送…",
     "send": "傳送"
   },
+  "chatgptOAuth": {
+    "title": "ChatGPT 訂閱",
+    "account": "帳戶",
+    "noAccounts": "尚無帳戶",
+    "continue": "繼續使用 ChatGPT",
+    "addAnotherAccount": "新增其他帳戶",
+    "pending": "等待登入",
+    "relogin": "重新登入",
+    "logout": "登出",
+    "logoutNotConfirmed": "本機已登出，但無法確認遠端登出狀態。",
+    "cancel": "取消登入",
+    "loadModels": "載入模型",
+    "refreshStatus": "重新整理狀態",
+    "model": "模型",
+    "noModels": "此帳戶未傳回可用模型。",
+    "activeModel": "目前模型：{{model}}",
+    "activeAccountModel": "{{account}} · {{model}}",
+    "disconnectedActiveAccountModel": "未連線：{{account}} · {{model}}",
+    "activate": "使用此模型",
+    "activated": "已啟用 ChatGPT 模型。",
+    "chooseApiProvider": "選擇 API 提供者"
+  },
   "appUpdate": {
     "dialogTitle": "VRCForge 有可用更新",
     "dialogBody": "可前往 GitHub Releases 查看 VRCForge {{version}}。",

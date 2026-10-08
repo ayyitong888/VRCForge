@@ -1873,6 +1873,28 @@
     "sending": "Sending…",
     "send": "Send"
   },
+  "chatgptOAuth": {
+    "title": "ChatGPT subscription",
+    "account": "Account",
+    "noAccounts": "No accounts yet",
+    "continue": "Continue with ChatGPT",
+    "addAnotherAccount": "Add another account",
+    "pending": "Sign-in pending",
+    "relogin": "Sign in again",
+    "logout": "Sign out",
+    "logoutNotConfirmed": "Local sign-out completed, but remote sign-out was not confirmed.",
+    "cancel": "Cancel sign-in",
+    "loadModels": "Load models",
+    "refreshStatus": "Refresh status",
+    "model": "Model",
+    "noModels": "No models were returned for this account.",
+    "activeModel": "Active model: {{model}}",
+    "activeAccountModel": "{{account}} · {{model}}",
+    "disconnectedActiveAccountModel": "Disconnected: {{account}} · {{model}}",
+    "activate": "Use this model",
+    "activated": "ChatGPT model activated.",
+    "chooseApiProvider": "Choose API provider"
+  },
   "appUpdate": {
     "dialogTitle": "VRCForge update available",
     "dialogBody": "VRCForge {{version}} is ready on GitHub Releases.",

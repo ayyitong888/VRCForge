@@ -322,7 +322,12 @@ class ProviderTextProbeRunner:
             config.api_type,
         )
         if resolved_api_type == "responses":
-            adapter = self._sdk.responses_adapter(config.api_key, config.base_url)
+            if config.provider == "chatgpt":
+                from chatgpt_responses_adapter import ChatGPTResponsesAdapter
+
+                adapter = ChatGPTResponsesAdapter(api_key=config.api_key, base_url=config.base_url)
+            else:
+                adapter = self._sdk.responses_adapter(config.api_key, config.base_url)
             response = adapter.send_request(
                 self._policy.runtime_request_factory(
                     model=config.model,
