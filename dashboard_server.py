@@ -379,7 +379,7 @@ from memory_review_dashboard_adapter import (
 from memory_consolidation_sources import MemoryScope, project_scope_key
 from memory_review_composition import MemoryReviewComposition, MemoryReviewCompositionPorts, build_memory_review_composition
 from memory_review_host import build_memory_review_router
-from chatgpt_oauth_routes import build_chatgpt_oauth_router
+from chatgpt_integration.routes import build_chatgpt_oauth_router
 from memory_review_provider import invoke_memory_provider
 from memory_review_runtime import MemoryReviewIdleGate, MemoryReviewRuntimeCoordinator
 from optimization_service import (

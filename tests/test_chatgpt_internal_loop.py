@@ -5,7 +5,7 @@ import json
 from types import SimpleNamespace
 
 from agent_gateway import AgentGateway
-from chatgpt_responses_adapter import ChatGPTResponsesAdapter
+from chatgpt_integration.adapter import ChatGPTResponsesAdapter
 from runtime_planner_service import PlannerModelResult, RuntimePlannerService
 from tests.test_dashboard_server import _TestRuntimePlannerCatalog, _TestRuntimePlannerDesktop
 from tests.test_native_runtime_gateway import NativeTurn, call, finish, run

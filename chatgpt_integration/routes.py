@@ -39,7 +39,7 @@ def build_chatgpt_oauth_router(
         nonlocal service
         if service is None:
             if service_factory is None:
-                from chatgpt_oauth_service import get_chatgpt_auth_service
+                from .service import get_chatgpt_auth_service
 
                 service = get_chatgpt_auth_service()
             else:
@@ -104,7 +104,7 @@ def build_chatgpt_oauth_router(
     @router.on_event("shutdown")
     async def close() -> None:
         if service_factory is None:
-            from chatgpt_oauth_service import close_chatgpt_auth_service
+            from .service import close_chatgpt_auth_service
 
             await asyncio.to_thread(close_chatgpt_auth_service)
         elif service is not None:

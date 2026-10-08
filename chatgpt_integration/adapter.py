@@ -157,7 +157,7 @@ class ChatGPTResponsesAdapter:
             token = self._access_token_provider(self._account_id)
         else:
             try:
-                from chatgpt_oauth_service import get_chatgpt_auth_service
+                from .service import get_chatgpt_auth_service
             except ImportError as exc:
                 raise RuntimeError("The ChatGPT sign-in service is unavailable.") from exc
             token = get_chatgpt_auth_service().access_token(self._account_id)

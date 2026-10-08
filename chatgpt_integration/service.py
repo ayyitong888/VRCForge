@@ -19,7 +19,7 @@ from urllib.parse import parse_qs, urlencode, urlsplit
 import httpx
 import jwt
 
-from chatgpt_oauth_storage import ChatGPTAuthStorage, OAuthStorageError
+from .storage import ChatGPTAuthStorage, OAuthStorageError
 
 
 _AUTH_ORIGIN = "https://auth.openai.com"

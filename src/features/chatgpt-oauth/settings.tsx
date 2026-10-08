@@ -10,9 +10,9 @@ import {
   logoutChatGptOAuthAccount,
   type ChatGptOAuthModel,
   type ChatGptOAuthStatus,
-} from "../../lib/api/chatgpt-oauth";
-import { Badge } from "../ui/badge";
-import { Button } from "../ui/button";
+} from "./api";
+import { Badge } from "../../components/ui/badge";
+import { Button } from "../../components/ui/button";
 
 const STATUS_POLL_INTERVAL_MS = 2000;
 const STATUS_POLL_LIMIT_MS = 5 * 60 * 1000;

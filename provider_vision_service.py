@@ -334,7 +334,7 @@ class ProviderVisionSdkRunner:
             raise RuntimeError("No image payloads to analyze.")
 
         if config.provider == "chatgpt":
-            from chatgpt_responses_adapter import ChatGPTResponsesAdapter
+            from chatgpt_integration.adapter import ChatGPTResponsesAdapter
             from provider_runtime_adapters import ProviderRuntimeRequest
 
             adapter = ChatGPTResponsesAdapter(api_key=config.api_key, base_url=config.base_url)

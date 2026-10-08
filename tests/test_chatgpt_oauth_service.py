@@ -16,8 +16,8 @@ import httpx
 import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
 
-import chatgpt_oauth_service as oauth_service_module
-from chatgpt_oauth_service import (
+from chatgpt_integration import service as oauth_service_module
+from chatgpt_integration.service import (
     ChatGPTAuthError,
     ChatGPTAuthService,
     close_chatgpt_auth_service,
@@ -27,7 +27,7 @@ from chatgpt_oauth_service import (
     _RESOURCE,
     _TOKEN_URL,
 )
-from chatgpt_oauth_storage import ChatGPTAuthStorage
+from chatgpt_integration.storage import ChatGPTAuthStorage
 
 
 _GRANTED_SCOPES = "openid profile email offline_access resource.invoke chatgpt.tokens.use.direct"

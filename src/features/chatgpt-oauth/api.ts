@@ -1,4 +1,4 @@
-import { hasTauriInternals, invokeTauriWithAbort, requestJson } from "./http";
+import { hasTauriInternals, invokeTauriWithAbort, requestJson } from "../../lib/api/http";
 
 export type ChatGptOAuthAccount = {
   id: string;

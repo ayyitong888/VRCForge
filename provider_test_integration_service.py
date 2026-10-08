@@ -323,7 +323,7 @@ class ProviderTextProbeRunner:
         )
         if resolved_api_type == "responses":
             if config.provider == "chatgpt":
-                from chatgpt_responses_adapter import ChatGPTResponsesAdapter
+                from chatgpt_integration.adapter import ChatGPTResponsesAdapter
 
                 adapter = ChatGPTResponsesAdapter(api_key=config.api_key, base_url=config.base_url)
             else:

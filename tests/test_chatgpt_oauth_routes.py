@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
-from chatgpt_oauth_routes import build_chatgpt_oauth_router
+from chatgpt_integration.routes import build_chatgpt_oauth_router
 from model_provider_adapters import normalize_provider_api_type
 from provider_protocol_negotiation import provider_protocol_candidates
 

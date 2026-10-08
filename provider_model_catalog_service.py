@@ -73,7 +73,7 @@ class ProviderModelCatalogService:
 
     def fetch_provider_models(self, config: ProviderApiConfig) -> list[dict[str, Any]]:
         if config.provider == "chatgpt":
-            from chatgpt_oauth_service import get_chatgpt_auth_service
+            from chatgpt_integration.service import get_chatgpt_auth_service
 
             return get_chatgpt_auth_service().models(config.api_key)
         self._policy.validate_provider_api_key(config.api_key)

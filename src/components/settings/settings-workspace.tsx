@@ -32,7 +32,7 @@ import { ProviderSetup, VisionProfileSetup } from "./provider-settings";
 import { ThemeCustomizationPanel } from "./theme-customization-panel";
 import type { ThemeCustomization } from "../../lib/theme-customization";
 import { DataRootSettingsPanel } from "./data-root-settings-panel";
-import { ChatGptOAuthSettings } from "./chatgpt-oauth-settings";
+import { ChatGptOAuthSettings } from "../../features/chatgpt-oauth/settings";
 
 type SettingsWorkspaceProps = {
   activeSection: SettingsSection;

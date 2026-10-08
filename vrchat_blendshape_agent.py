@@ -29,7 +29,7 @@ from provider_runtime_adapters import (
     ProviderRuntimeRequest,
     ProviderTokenLimitError,
 )
-from chatgpt_responses_adapter import ChatGPTResponsesAdapter
+from chatgpt_integration.adapter import ChatGPTResponsesAdapter
 from approved_unity_execution import (
     ApprovedUnityExecutionError,
     ApprovedUnityExecutionPlan,

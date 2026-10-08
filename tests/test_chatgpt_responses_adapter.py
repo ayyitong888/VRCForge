@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from agent_runtime_session_state import AgentRuntimeSessionState
-from chatgpt_responses_adapter import (
+from chatgpt_integration.adapter import (
     CHATGPT_RESPONSES_BASE_URL,
     ChatGPTResponsesAdapter,
     build_responses_input,

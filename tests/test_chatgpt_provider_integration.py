@@ -10,7 +10,7 @@ from provider_vision_service import ProviderVisionSdkRunner, VisionModelConfig
 
 
 def test_model_catalog_uses_selected_oauth_account(monkeypatch):
-    import chatgpt_oauth_service
+    from chatgpt_integration import service as chatgpt_oauth_service
 
     calls = []
     monkeypatch.setattr(chatgpt_oauth_service, "get_chatgpt_auth_service", lambda: SimpleNamespace(
@@ -23,7 +23,7 @@ def test_model_catalog_uses_selected_oauth_account(monkeypatch):
 
 
 def test_text_probe_uses_oauth_adapter_not_generic_key_sdk(monkeypatch):
-    import chatgpt_responses_adapter
+    from chatgpt_integration import adapter as chatgpt_responses_adapter
 
     seen = []
 
@@ -48,7 +48,7 @@ def test_text_probe_uses_oauth_adapter_not_generic_key_sdk(monkeypatch):
 
 
 def test_vision_uses_validated_images_and_oauth_adapter(monkeypatch):
-    import chatgpt_responses_adapter
+    from chatgpt_integration import adapter as chatgpt_responses_adapter
 
     seen = []
 
