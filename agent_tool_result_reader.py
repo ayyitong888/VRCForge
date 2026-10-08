@@ -102,8 +102,11 @@ def scan_result_continuation(step: Mapping[str, Any]) -> dict[str, Any]:
     descriptor = deepcopy(step.get("resultRead", {}))
     if isinstance(descriptor, dict) and descriptor and _validated_scan_snapshot(step):
         descriptor.update(scope="validated_scope", freshness="validated_on_read", instructions=(
-            "Owned scan references may be paged across turns; the host revalidates scope on every read. "
-            "Expired replies require a targeted rescan; inability to verify is not validity."))
+            "Owned references may be read across turns. For the same target and scan parameters, read this reference "
+            "before rescanning, including after Play "
+            "or domain reload. The host verifies Core scope or the complete observable business result. "
+            "Page replacementRef if supplied; the host already rescanned. Otherwise rescan the expired scope "
+            "as needed. Failure to verify is not validity. Use the loaded reader name via call_tool."))
     return descriptor if isinstance(descriptor, dict) else {}
 
 

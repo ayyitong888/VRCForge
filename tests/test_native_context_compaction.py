@@ -7,7 +7,7 @@ import pytest
 from agent_runtime_native_turn import NativeRuntimeTurn
 from agent_native_history_store import NativeHistoryStore
 from agent_runtime_session_state import AgentRuntimeSessionState, AgentRuntimeSessionStatePorts
-from agent_scan_result_policy import SCAN_RESULT_CONTINUATION_POLICY, is_scan_result_policy_message
+from agent_scan_result_policy import SCAN_RESULT_CONTINUATION_POLICY_V2 as SCAN_RESULT_CONTINUATION_POLICY, is_scan_result_policy_message
 from runtime_planner_service import PlannerTurnMetadata, RuntimePlannerService
 from tests.test_native_context_guard import _Catalog, _Desktop, _NativeModel, _Turn
 

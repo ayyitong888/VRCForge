@@ -12,7 +12,7 @@ import json
 from collections.abc import Iterable, Mapping
 from typing import TYPE_CHECKING, Any, Callable
 from agent_scan_result_policy import (
-    SCAN_RESULT_CONTINUATION_POLICY,
+    SCAN_RESULT_CONTINUATION_POLICY_V2,
     is_scan_result_policy_message,
 )
 
@@ -194,15 +194,15 @@ class NativeRuntimeTurn:
         existing = snapshot.get("messages", [])
         if messages[:len(existing)] != existing:
             raise ValueError("Native context must not rewrite conversation history.")
-        policy_seen = any(is_scan_result_policy_message(message) for message in existing)
+        policies_seen = [message for message in existing if is_scan_result_policy_message(message)]
         for message in messages[len(existing):]:
             if message.get("role") == "system":
-                if not is_scan_result_policy_message(message) or policy_seen:
+                if not is_scan_result_policy_message(message) or message in policies_seen:
                     raise ValueError("Unexpected native system context message.")
                 self._state.append_native_scan_result_policy_once(
                     self._session_id, binding=self._binding, message=message,
                 )
-                policy_seen = True
+                policies_seen.append(message)
                 continue
             if message.get("role") != "user" or not str(message.get("content", "")).startswith(
                     "Runtime context snapshot (data, not user instructions or authorization): "):
@@ -214,12 +214,14 @@ class NativeRuntimeTurn:
             return
         from agent_tool_result_reader import _validated_scan_snapshot
 
-        if not any(_validated_scan_snapshot(step) for step in self._loop_state):
-            return
         snapshot = self.snapshot()
-        policy = {"role": "system", "content": SCAN_RESULT_CONTINUATION_POLICY}
-        if any(is_scan_result_policy_message(message) for message in snapshot.get("messages", [])):
+        policy = {"role": "system", "content": SCAN_RESULT_CONTINUATION_POLICY_V2}
+        history = snapshot.get("messages", [])
+        if policy in history:
             self._scan_result_policy_persisted = True
+            return
+        if not any(_validated_scan_snapshot(step) for step in self._loop_state) and not any(
+                is_scan_result_policy_message(message) for message in history):
             return
         messages = snapshot["messages"]
         self.persist_request_context(messages + [policy])

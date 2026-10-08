@@ -8,7 +8,10 @@ from dataclasses import dataclass, replace
 from typing import Any, Callable
 from context_compaction import normalize_compaction_recovery
 from agent_native_history_store import NativeHistoryStore
-from agent_scan_result_policy import SCAN_RESULT_CONTINUATION_POLICY, is_scan_result_policy_message
+from agent_scan_result_policy import (
+    SCAN_RESULT_CONTINUATION_POLICY, SCAN_RESULT_CONTINUATION_POLICY_V2,
+    is_scan_result_policy_message, restored_scan_result_policy,
+)
 
 
 @dataclass(frozen=True)
@@ -235,7 +238,7 @@ class AgentRuntimeSessionState:
         calls: set[str] = set()
         pending: set[str] = set()
         normalized_messages: list[dict[str, Any]] = []
-        scan_policy_seen = False
+        scan_policies_seen: set[str] = set()
         for index, message in enumerate(messages):
             if not isinstance(message, dict):
                 raise ValueError("native snapshot message must be an object")
@@ -268,9 +271,11 @@ class AgentRuntimeSessionState:
             elif role == "system":
                 if not is_scan_result_policy_message(message):
                     raise ValueError("native system message is not a host scan policy")
-                if scan_policy_seen or pending:
+                if message["content"] in scan_policies_seen or pending or (
+                        message["content"] == SCAN_RESULT_CONTINUATION_POLICY
+                        and SCAN_RESULT_CONTINUATION_POLICY_V2 in scan_policies_seen):
                     raise ValueError("native scan policy position is invalid")
-                scan_policy_seen = True
+                scan_policies_seen.add(message["content"])
                 normalized_messages.append(copy.deepcopy(message))
             else:
                 raise ValueError("native snapshot role is invalid")
@@ -447,14 +452,7 @@ class AgentRuntimeSessionState:
             if cut <= 0 or self._native_pending({"messages": current["messages"][:cut]}):
                 raise ValueError("native completed prefix is unavailable")
             retained_messages = copy.deepcopy(current["messages"][cut:])
-            prefix_has_scan_policy = any(
-                is_scan_result_policy_message(message) for message in current["messages"][:cut]
-            )
-            retained_has_scan_policy = any(
-                is_scan_result_policy_message(message) for message in retained_messages
-            )
-            if prefix_has_scan_policy and not retained_has_scan_policy:
-                retained_messages.append({"role": "system", "content": SCAN_RESULT_CONTINUATION_POLICY})
+            retained_messages.extend(restored_scan_result_policy(current["messages"], retained_messages))
             candidate = {
                 "binding": binding,
                 "turnId": current["turnId"],
@@ -501,7 +499,7 @@ class AgentRuntimeSessionState:
             if any(item == message for item in snapshot["messages"]):
                 return
             candidate = copy.deepcopy(snapshot)
-            candidate["messages"].append({"role": "system", "content": SCAN_RESULT_CONTINUATION_POLICY})
+            candidate["messages"].append(copy.deepcopy(message))
             normalized = self._validate_native_snapshot(candidate, binding=binding)
             self._save_native(session_id, normalized)
 

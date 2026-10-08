@@ -54,6 +54,8 @@ def test_successful_load_returns_full_schema_in_native_observation():
     assert [d["name"] for d in definitions] == ["read_one"]
     assert definitions[0]["parameters"] == dict(Catalog().read("planning").visible_tools[-1].input_schema)
     assert "When NOT to use" in definitions[0]["description"]
+    assert "function.name must be exactly call_tool" in observed["dispatchPolicy"]
+    assert "never a native function name" in observed["dispatchPolicy"]
     denied = deepcopy(step)
     denied["result"]["ok"] = False
     assert "loadedToolDefinitions" not in planner.native_result_observation(denied)
@@ -68,6 +70,18 @@ def test_dispatch_uses_current_loaded_scope_and_rejects_direct_dynamic_call():
     assert payload["skill_tool"] == "read_one" and payload["skill_params"] == {"path": "x"}
     assert planner._native_action_payload(dispatch("read_one", {"path": "x"}), unloaded)[1]
     assert planner._native_action_payload(call("raw", "read_one", {"path": "x"}), loaded)[1]
+
+
+def test_direct_reader_name_with_dispatch_envelope_is_not_an_alias():
+    reader = PlannerTool("read_tool_result", "Read retained result", "read")
+    _, loaded = build(RuntimePlannerService(catalog=Catalog(), desktop=None))
+    loaded = [*loaded, reader]
+    arguments = {"tool": "read_tool_result", "arguments": {"resultRef": "result_" + "a" * 32}}
+    payload, rejection = RuntimePlannerService._native_action_payload(
+        call("wrong", "read_tool_result", arguments), loaded)
+    assert payload is None and rejection["issues"][0]["code"] == "tool_not_visible"
+    payload, rejection = RuntimePlannerService._native_action_payload(call("right", "call_tool", arguments), loaded)
+    assert rejection is None and payload["skill_tool"] == "read_tool_result"
 
 
 @pytest.mark.parametrize("name,args", [("call_tool", {}), ("vrcforge_runtime_action", {}), ("missing", {}),
