@@ -1,13 +1,15 @@
 """Store-owned suppression of unavailable scope captures, never validity proof.
 
-Memory is bounded to 128 hashed scope keys and lasts only as long as its store.
-Keys include the exact project and fresh Core instance; no shared global state,
-external interface, process, asset write or retained credential is introduced.
+Memory and private timeout records are bounded to 128 hashed scope keys.
+Keys include the exact project and fresh Core instance. Connections are owned
+by one budget operation; no external interface, asset write or credential.
 """
+from contextlib import contextmanager
 from copy import deepcopy
 import hashlib
 import json
 from pathlib import Path
+import sqlite3
 import threading
 
 
@@ -26,10 +28,58 @@ def scope_request(tool, arguments):
     return {"scanTool": tool, "arguments": args}
 
 
+def capture_admission_reason(request):
+    """Avoid unbounded scene capture before it can enter Core's uncancellable queue."""
+    args = request["arguments"]
+    asset_roots = any(args.get(name) for name in ("assetPath", "controllerPath", "clipPath", "clipPaths"))
+    if args.get("includeAllProjectClips") or not asset_roots or (
+            request["scanTool"] == "vrcforge_scan_animation_bindings" and args.get("avatarPath")):
+        return "scope_capture_unbounded"
+    return None
+
+
 class ScopeCaptureBudget:
-    def __init__(self):
+    def __init__(self, path=None):
         self._lock = threading.RLock()
         self._unavailable = {}
+        self._path = Path(path) if path is not None else None
+
+    @contextmanager
+    def _connection(self, create=False):
+        if create:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+        connection = sqlite3.connect(self._path, timeout=0.1)
+        try:
+            if create:
+                connection.execute("CREATE TABLE IF NOT EXISTS capture_failures (cache_key TEXT PRIMARY KEY, reason TEXT NOT NULL)")
+            yield connection
+            connection.commit()
+        finally:
+            connection.close()
+
+    @staticmethod
+    def _cache_key(key):
+        return hashlib.sha256(json.dumps(key, separators=(",", ":")).encode()).hexdigest()
+
+    def _stored_timeout(self, key):
+        try:
+            if self._path is not None and self._path.is_file():
+                with self._connection() as connection:
+                    row = connection.execute("SELECT reason FROM capture_failures WHERE cache_key=?", (self._cache_key(key),)).fetchone()
+                    return "unity_core_timeout" if row and row[0] == "unity_core_timeout" else None
+        except (OSError, sqlite3.Error):
+            pass
+        return None
+
+    def _remember_timeout(self, key, reason):
+        if self._path is None or reason != "unity_core_timeout":
+            return
+        try:
+            with self._connection(create=True) as connection:
+                connection.execute("INSERT OR REPLACE INTO capture_failures VALUES (?, ?)", (self._cache_key(key), reason))
+                connection.execute("DELETE FROM capture_failures WHERE cache_key NOT IN (SELECT cache_key FROM capture_failures ORDER BY rowid DESC LIMIT 128)")
+        except (OSError, sqlite3.Error):
+            pass
 
     @staticmethod
     def _key(project, info, request):
@@ -55,12 +105,14 @@ class ScopeCaptureBudget:
             return {"schema": "vrcforge.scan_scope.v1", "verified": False,
                     "reason": "scope_capture_identity_unavailable"}
         with self._lock:
-            if key in self._unavailable:
+            reason = self._unavailable.get(key) or self._stored_timeout(key)
+            if reason:
                 return {"schema": "vrcforge.scan_scope.v1", "verified": False,
-                        "reason": "capture_suppressed:" + self._unavailable[key]}
+                        "reason": "capture_suppressed:" + reason}
             result = operation()
             if result.get("verified") is not True:
                 if len(self._unavailable) >= 128:
                     self._unavailable.pop(next(iter(self._unavailable)))
                 self._unavailable[key] = str(result.get("reason", "scope_unavailable"))[:120]
+                self._remember_timeout(key, self._unavailable[key])
             return result

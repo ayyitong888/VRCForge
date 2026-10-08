@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from unity_mcp_core_client import UnityMcpCoreClient
-from agent_scan_scope_budget import scope_request
+from agent_scan_scope_budget import capture_admission_reason, scope_request
 
 
 SCAN_SCOPE_SCHEMA = "vrcforge.scan_scope.v1"
@@ -85,10 +85,14 @@ class AgentScanScopeClient:
                 return {"schema": SCAN_SCOPE_SCHEMA, "verified": False, "reason": "invalid_scan_request"}
             if scan_tool not in SCOPED_SCAN_TOOLS:
                 return {"schema": SCAN_SCOPE_SCHEMA, "verified": False, "reason": "scan_scope_undeclared"}
+            request = scope_request(scan_tool, arguments)
+            if self.capture_budget is not None:
+                reason = capture_admission_reason(request)
+                if reason:
+                    return {"schema": SCAN_SCOPE_SCHEMA, "verified": False, "reason": reason}
             client = self._client_with_capability()
             if client is None:
                 return {"schema": SCAN_SCOPE_SCHEMA, "verified": False, "reason": "capability_unavailable"}
-            request = scope_request(scan_tool, arguments)
             if self.capture_budget is not None:
                 info = {**self._core_info, "captureRootIdentity": self._capture_identity(client, request)}
                 return self.capture_budget.capture(self._project_root, info, request,

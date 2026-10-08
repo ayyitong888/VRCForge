@@ -180,7 +180,7 @@ class ScanResultStore:
         self._path = Path(root) / "scan-results.sqlite3"
         self._lock = shared_lock if shared_lock is not None else threading.RLock()
         self._boot_id = _PROCESS_BOOT_ID
-        self._capture_budget = ScopeCaptureBudget()
+        self._capture_budget = ScopeCaptureBudget(Path(root) / "scope-capture-budget.sqlite3")
         self._rescan = ScanRescanVerifier(self)
 
     @contextmanager

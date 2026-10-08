@@ -5,6 +5,8 @@ from agent_scan_result_store import ScanResultStore
 
 
 def setup_core(monkeypatch):
+    # These tests isolate negative-budget ownership; admission has its own suite.
+    monkeypatch.setattr(scope, "capture_admission_reason", lambda _request: None)
     state = {"instance": uuid.uuid4().hex, "calls": [], "fail": True, "available": True,
              "targets": {}, "single_target": False}
 
