@@ -1433,6 +1433,9 @@ def request_llm_plan_with_metadata(
     native_tools: Sequence[Mapping[str, Any]] | None = None,
 ) -> LlmPlanResponse:
     provider = normalize_provider_name(settings.llm_provider)
+    if provider != "chatgpt" and (native_messages is not None or native_tools is not None):
+        if str(getattr(settings, "llm_api_type", "") or "").strip().lower() != "chat_completions":
+            raise ValueError("Native messages/tools require an explicit chat_completions protocol.")
     requested_api_type, resolved_api_type = normalize_provider_api_type(
         provider, settings.llm_model, getattr(settings, "llm_api_type", None)
     )

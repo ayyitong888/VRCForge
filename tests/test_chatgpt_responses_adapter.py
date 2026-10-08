@@ -336,3 +336,17 @@ def test_responses_history_cannot_be_sent_through_legacy_chat_route(monkeypatch)
             native_messages=[{"role": "assistant", "content": None, "responses_output": []}],
             native_tools=[],
         )
+
+
+@pytest.mark.parametrize("api_type", [None, "", "auto"])
+@pytest.mark.parametrize("native_field", ["native_messages", "native_tools"])
+def test_legacy_native_protocol_must_be_explicit_before_negotiation(monkeypatch, api_type, native_field):
+    import vrchat_blendshape_agent
+
+    def unexpected_negotiation(**kwargs):
+        pytest.fail("An unspecified native protocol must not reach provider negotiation")
+
+    monkeypatch.setattr(vrchat_blendshape_agent, "execute_provider_protocol_negotiation", unexpected_negotiation)
+    settings = SimpleNamespace(llm_provider="custom", llm_model="fixture-model", llm_api_type=api_type)
+    with pytest.raises(ValueError, match="explicit chat_completions"):
+        request_llm_plan_with_metadata(settings, "continue", **{native_field: []})
