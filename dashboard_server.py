@@ -2723,7 +2723,9 @@ def migrate_legacy_runtime_data_on_startup() -> dict[str, Any] | None:
     """
     try:
         report = data_root_migration.migrate_legacy_runtime_data(
-            runtime_paths.default_user_data_root(),
+            runtime_paths.resolve_runtime_path(
+                "VRCFORGE_USER_DATA_DIR", runtime_paths.default_user_data_root()
+            ),
             runtime_paths.DATA_DIR,
         )
     except Exception as exc:  # noqa: BLE001 - migration must never block startup.
