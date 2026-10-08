@@ -469,6 +469,7 @@ from wardrobe_outfit_workflow_service import (
     WardrobeOutfitWorkflowError,
     WardrobeOutfitWorkflowPorts,
     WardrobeOutfitWorkflowService,
+    build_avatar_item_scan_arguments,
     build_add_outfit_part_request as build_owned_add_outfit_part_request,
     build_add_modular_avatar_component_request as build_owned_add_modular_avatar_component_request,
     build_add_wardrobe_outfit_request as build_owned_add_wardrobe_outfit_request,
@@ -26809,12 +26810,7 @@ WARDROBE_ARTIFACT_READ = WardrobeArtifactReadService(
             params,
             "vrc_scan_avatar_items",
             "avatar_items",
-            {
-                "maxItems": int(
-                    params.get("max_items") or params.get("maxItems") or 2000
-                ),
-                "refreshAssets": False,
-            },
+            build_avatar_item_scan_arguments(params),
             "avatar item scan",
         ),
         scan_avatar_controls=lambda params: scan_avatar_controls_direct(

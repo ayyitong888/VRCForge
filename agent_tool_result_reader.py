@@ -431,6 +431,7 @@ def read_tool_result(params: Mapping[str, Any], *, sanitize: Callable[[object, i
     if source not in ("result", "owner_model"):
         raise ValueError("source must be result or owner_model")
     ref = params.get("resultRef")
+    host_verification = None
     descriptor_key = "modelInformationRead" if source == "owner_model" else "resultRead"
     step = next((row for row in context.steps if isinstance(ref, str)
                  and row.get(descriptor_key, {}).get("resultRef") == ref
@@ -460,6 +461,8 @@ def read_tool_result(params: Mapping[str, Any], *, sanitize: Callable[[object, i
             return reply
         if saved is not None:
             step = saved.get("step")
+            if saved.get("verification") in ("current_turn", "core_scope", "observable_result"):
+                host_verification = saved["verification"]
     if step is None or (source == "result" and not eligible_result(str(step.get("tool") or ""), step.get("result"))):
         raise PermissionError("Result reference is unavailable in this runtime turn")
     if source == "owner_model":
@@ -492,6 +495,9 @@ def read_tool_result(params: Mapping[str, Any], *, sanitize: Callable[[object, i
                            "resultRef": ref, "source": source, "sourceStep": step["index"], "sourceTool": step["tool"],
                            "jsonPointer": pointer, "offset": offset, "totalItems": len(members),
                            "items": [], "redactedFields": 0, "hasMore": False, "previewTruncated": False}
+    if source == "result" and host_verification is not None:
+        page.update(freshness="captured_this_turn" if host_verification == "current_turn" else "verified_on_read",
+                    verification=host_verification, verificationAuthority="host_scan_result_store", expired=False)
     if source == "owner_model" and isinstance(root, dict) and isinstance(root.get("sourceCompleteness"), list):
         # These facts were filtered by the owner before retention. They apply
         # to every page, even when the source summary is far beyond this slice.

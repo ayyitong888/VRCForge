@@ -15,7 +15,9 @@ import threading
 import uuid
 
 from unity_mcp_core_client import UnityMcpCoreClient
-from wardrobe_outfit_workflow_service import WardrobeArtifactReadPorts, WardrobeArtifactReadService
+from wardrobe_outfit_workflow_service import (
+    WardrobeArtifactReadPorts, WardrobeArtifactReadService, build_avatar_item_scan_arguments,
+)
 
 RESCAN_SCHEMA = "vrcforge.scan_result_equivalence.v1"
 WHITELIST = frozenset({
@@ -43,7 +45,7 @@ def normalized_arguments(tool: str, arguments: dict) -> dict:
                  or arguments.get("avatar_path") or arguments.get("avatarPath") or "").strip()
     result = {"avatarPath": avatar, "outputPath": ""}
     if tool == "vrcforge_scan_avatar_items":
-        result.update(maxItems=int(_alias(arguments, "max_items", "maxItems", 2000) or 2000), refreshAssets=False)
+        result.update(build_avatar_item_scan_arguments(arguments))
     if tool in {"vrcforge_scan_fx_animator", "vrcforge_scan_animation_bindings"}:
         result.update(controllerPath=str(_alias(arguments, "controller_path", "controllerPath", "") or "").strip(), refreshAssets=False)
     if tool == "vrcforge_scan_animation_bindings":
@@ -61,7 +63,8 @@ def normalized_arguments(tool: str, arguments: dict) -> dict:
                       maxClips=int(_alias(arguments, "max_clips", "maxClips", 300) or 300),
                       maxKeysPerBinding=int(_alias(arguments, "max_keys_per_binding", "maxKeysPerBinding", 256)))
         result.update({name: deepcopy(arguments[name]) for name in _SELECTION if name in arguments})
-    if not avatar and not result.get("controllerPath") and not result.get("clipPaths"):
+    # Avatar-items defines an empty selector as all loaded scene avatar roots.
+    if tool != "vrcforge_scan_avatar_items" and not avatar and not result.get("controllerPath") and not result.get("clipPaths"):
         raise ValueError("An exact scan target is required for comparison.")
     return result
 
@@ -81,8 +84,19 @@ def business_digest(payload: dict) -> str:
 
 def eligible(step: dict, arguments: dict) -> bool:
     try:
-        normalized_arguments(step["tool"], arguments)
-        business_digest(step["result"])
+        normalized = normalized_arguments(step["tool"], arguments)
+        payload = step["result"]
+        business_digest(payload)
+        if step["tool"] == "vrcforge_scan_avatar_items" and not normalized["avatarPath"]:
+            scenes = payload.get("scenes")
+            if (payload.get("type") != "avatar_items_snapshot"
+                    or payload.get("requested_avatar_path") != ""
+                    or not isinstance(scenes, list) or not scenes
+                    or not all(isinstance(scene, str) and scene.strip() for scene in scenes)
+                    or not isinstance(payload.get("items"), list)
+                    or not isinstance(payload.get("snapshotDigest"), str)
+                    or not re.fullmatch(r"[0-9a-fA-F]{64}", payload["snapshotDigest"])):
+                return False
         return True
     except (KeyError, TypeError, ValueError):
         return False
@@ -237,6 +251,8 @@ class ScanRescanVerifier:
             except Exception:
                 return {"reason": "comparison_unavailable"}
         try:
+            if not eligible({**step, "result": fresh}, arguments):
+                return {"reason": "comparison_unavailable"}
             digest = business_digest(fresh)
             if not digest_mismatch and digest == business_digest(step["result"]):
                 return {"reuse": True, "verification": "observable_result"}

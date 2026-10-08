@@ -214,6 +214,15 @@ class WardrobeArtifactReadPorts:
     scan_wardrobe: Callable[[dict[str, Any]], dict[str, Any]]
 
 
+def build_avatar_item_scan_arguments(params: dict[str, Any]) -> dict[str, Any]:
+    result = {"maxItems": int(params.get("max_items") or params.get("maxItems") or 2000),
+              "refreshAssets": False}
+    for name in ("offset", "expectedSnapshotDigest"):
+        if name in params:
+            result[name] = params[name]
+    return result
+
+
 _UNPROVEN_WARDROBE_STATE_FIELDS = (
     "writeDefaults",
     "isStripOrDefaultCandidate",
