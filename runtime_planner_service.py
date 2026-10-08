@@ -2241,13 +2241,13 @@ class RuntimePlannerService:
                             if queued_receipt is not None else
                             model_port.plan_native(native_request) if native else model_port.plan(prompt)
                         )
-                    except Exception:
-                        # A failed provider call is one unknown logical model
-                        # receipt. Preserve measured token totals, but do not
-                        # infer SDK transport retries or count queued receipts
-                        # that never made an external call.
+                    except Exception as exc:
+                        # Parsing can fail after the provider reports usage.
+                        # Count this receipt once; missing usage stays unknown.
                         if queued_receipt is None and context_usage is not None:
-                            self.record_context_usage(context_usage, prompt, history, None)
+                            measured = getattr(exc, "provider_usage", None)
+                            self.record_context_usage(context_usage, prompt, history,
+                                                      dict(measured) if isinstance(measured, Mapping) else None)
                         raise
                     provider_reasoning = dict(raw_response.reasoning)
                     if reasoning_trace is not None:

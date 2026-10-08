@@ -29,7 +29,7 @@ from provider_runtime_adapters import (
     ProviderRuntimeRequest,
     ProviderTokenLimitError,
 )
-from chatgpt_integration.adapter import ChatGPTResponsesAdapter
+from chatgpt_integration.adapter import ChatGPTResponseError, ChatGPTResponsesAdapter
 from approved_unity_execution import (
     ApprovedUnityExecutionError,
     ApprovedUnityExecutionPlan,
@@ -1472,13 +1472,17 @@ def request_llm_plan_with_metadata(
             native_tools,
         )
 
-    return execute_provider_protocol_negotiation(
-        provider=provider,
-        model=settings.llm_model,
-        requested_api_type=requested_api_type,
-        dispatch=dispatch,
-        stream_callback=stream_callback,
-    )
+    try:
+        return execute_provider_protocol_negotiation(
+            provider=provider,
+            model=settings.llm_model,
+            requested_api_type=requested_api_type,
+            dispatch=dispatch,
+            stream_callback=stream_callback,
+        )
+    except ChatGPTResponseError as exc:
+        exc.provider_usage = extract_llm_token_usage({"usage": exc.usage}, settings, source="chatgpt-responses")
+        raise
 
 
 def _request_llm_protocol_with_metadata(

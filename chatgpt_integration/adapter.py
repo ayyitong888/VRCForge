@@ -21,6 +21,14 @@ CHATGPT_RESPONSES_BASE_URL = "https://api.openai.com/v1"
 _NAMESPACE = "vrcforge"
 
 
+class ChatGPTResponseError(RuntimeError):
+    """Response failure with numeric usage, never raw response or credentials."""
+
+    def __init__(self, message: str, response: Any) -> None:
+        super().__init__(message)
+        self.usage = _normalized_usage(response)
+
+
 @dataclass(frozen=True)
 class ChatGPTNativeResponse:
     text: str
@@ -112,10 +120,13 @@ class ChatGPTResponsesAdapter:
             stream_callback=request.stream_callback,
             activity_callback=request.stream_activity_callback,
         )
-        return self._planner_parser.parse_response(
-            response,
-            planner_mode=request.mode == "planner",
-        )
+        try:
+            return self._planner_parser.parse_response(
+                response,
+                planner_mode=request.mode == "planner",
+            )
+        except (ValueError, RuntimeError) as exc:
+            raise ChatGPTResponseError(str(exc), response) from exc
 
     def send_native_request(
         self,
@@ -143,7 +154,10 @@ class ChatGPTResponsesAdapter:
             stream_callback=stream_callback,
             activity_callback=stream_activity_callback,
         )
-        return _parse_native_response(response, tools)
+        try:
+            return _parse_native_response(response, tools)
+        except (ValueError, RuntimeError) as exc:
+            raise ChatGPTResponseError(str(exc), response) from exc
 
     @staticmethod
     def _require_model(model: str) -> str:
@@ -217,6 +231,8 @@ class ChatGPTResponsesAdapter:
 
         watcher: threading.Thread | None = None
         stream: Any = None
+        completed_items: dict[int, dict[str, Any]] = {}
+        terminal_response: Any = None
         if cancel_event is not None:
             def close_on_cancel() -> None:
                 while not watcher_stop.wait(0.05):
@@ -238,6 +254,8 @@ class ChatGPTResponsesAdapter:
                 if cancel_event is not None and cancel_event.is_set():
                     raise RuntimeError("ChatGPT Responses request cancelled.")
                 event_type = str(_value(event, "type") or "")
+                if event_type in {"response.completed", "response.failed", "response.incomplete"}:
+                    terminal_response = _value(event, "response")
                 if "reasoning" in event_type or "summary" in event_type:
                     if activity_callback is not None:
                         activity_callback({"kind": "reasoning_activity"})
@@ -249,6 +267,14 @@ class ChatGPTResponsesAdapter:
                         stream_callback(delta)
                 elif event_type in {"response.output_item.added", "response.output_item.done"}:
                     item = _value(event, "item")
+                    if event_type == "response.output_item.done":
+                        index = _value(event, "output_index")
+                        if type(index) is not int or index < 0 or item is None:
+                            raise RuntimeError("ChatGPT Responses output item index is invalid.")
+                        final_item = _model_mapping(item)
+                        if index in completed_items and completed_items[index] != final_item:
+                            raise RuntimeError("ChatGPT Responses output item changed after completion.")
+                        completed_items[index] = final_item
                     item_type = str(_value(item, "type") or "")
                     if item_type == "function_call" and activity_callback is not None:
                         activity_callback({"kind": "tool_call_activity"})
@@ -259,11 +285,25 @@ class ChatGPTResponsesAdapter:
                     status = str(_value(response, "status") or "completed").lower()
                     if status != "completed":
                         raise RuntimeError("ChatGPT Responses stream did not complete successfully.")
-                    return response
+                    result = _model_mapping(response)
+                    output = result.get("output")
+                    if not isinstance(output, list):
+                        raise RuntimeError("ChatGPT Responses returned an invalid output list.")
+                    if output:
+                        if any(index >= len(output) or output[index] != item
+                               for index, item in completed_items.items()):
+                            raise RuntimeError("ChatGPT Responses terminal output disagrees with completed items.")
+                    elif completed_items:
+                        if sorted(completed_items) != list(range(len(completed_items))):
+                            raise RuntimeError("ChatGPT Responses completed output has missing items.")
+                        result["output"] = [completed_items[index] for index in range(len(completed_items))]
+                    return result
             raise RuntimeError("ChatGPT Responses stream ended before response.completed.")
-        except Exception:
+        except Exception as exc:
             if cancel_event is not None and cancel_event.is_set():
                 raise RuntimeError("ChatGPT Responses request cancelled.") from None
+            if terminal_response is not None and isinstance(exc, (ValueError, RuntimeError)):
+                raise ChatGPTResponseError(str(exc), terminal_response) from exc
             raise
         finally:
             watcher_stop.set()
