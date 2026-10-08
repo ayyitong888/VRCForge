@@ -3297,7 +3297,10 @@ class AgentApprovalTransactionService:
         if isinstance(preview, dict):
             preview_root = project_root or extract_project_root(preview)
             if preview_root:
-                for key, value in iter_param_leaf_values(preview):
+                # Only this host-generated top-level projection is lossy.
+                # Owner arguments and genuine/nested preview paths stay intact.
+                path_preview = {key: value for key, value in preview.items() if key != "paramsSummary"}
+                for key, value in iter_param_leaf_values(path_preview):
                     key_lower = key.lower()
                     if not any(marker in key_lower for marker in WRITE_PATH_KEY_MARKERS):
                         continue
