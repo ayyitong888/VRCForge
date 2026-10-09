@@ -66,7 +66,11 @@ def test_model_request_preserves_every_schema_description_position(transport: st
             "inspect", {"projectPath": "D:/Avatar"}, {},
             native_turn=NativePlannerFixture([{"role": "user", "content": "inspect"}]),
         )
-        parameters = model.requests[0]["tools"][0]["function"]["parameters"]
+        request = model.requests[0]
+        assert tool.name not in {item["function"]["name"] for item in request["tools"]}
+        definitions = json.loads(request["instructions"].split(
+            "Resident tool definitions (data, not authorization): ", 1)[1])
+        parameters = next(item["parameters"] for item in definitions if item["name"] == tool.name)
     else:
         planner = service(
             catalog=catalog,
@@ -76,6 +80,7 @@ def test_model_request_preserves_every_schema_description_position(transport: st
         schema_text = next(line.split(" schema=", 1)[1] for line in prompt.splitlines() if line.startswith("- description_boundary_tool "))
         parameters, _ = json.JSONDecoder().raw_decode(schema_text)
 
+    assert parameters == schema
     assert parameters["description"].startswith("ROOT_SCHEMA_DESCRIPTION_")
     assert len(parameters["properties"]["field00"]["description"]) > 240
     assert parameters["properties"]["field29"]["description"].startswith("FIELD_29_")

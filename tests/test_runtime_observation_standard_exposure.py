@@ -39,7 +39,8 @@ def test_standard_router_loads_runtime_observation_in_gm_leaf(tmp_path, monkeypa
         status, start = "vrcforge_get_runtime_observation", "vrcforge_start_runtime_observation"
         assert {status, start}.isdisjoint({x["name"] for x in rpc("tools/list", {})["tools"]})
         rpc("tools/call", {"name": "vrcforge_load_tool_block",
-                           "arguments": {"block": "behavior/interaction_generated_systems"}})
+                           "arguments": {"block": "behavior/interaction_generated_systems",
+                                         "toolNames": [status, start] if layer == "execution" else [status]}})
         result = rpc("tools/list", {})
         catalogue = {x["name"]: x for x in result["tools"]}
         assert status in catalogue

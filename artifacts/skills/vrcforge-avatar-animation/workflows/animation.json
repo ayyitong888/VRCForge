@@ -38,9 +38,10 @@
     ]
   },
   "communityContract": {
-    "keyframeTimeSeconds": 0,
+    "preserveExistingTimelineUnlessApprovedOtherwise": true,
+    "timeZeroOnlyForApprovedStaticDesign": true,
+    "offMotionDecision": "inspect_write_defaults_recovery_curves_and_evidence; modify_only_if_explicitly_approved",
     "deriveExactEnableDisableUnchangedSets": true,
-    "preserveExistingEmptyOffMotion": true,
     "writeOnlyVerifiedBodyHeelOrClothingBindings": true,
     "preserveAdjacentOutfitHairAndAccessoryBehavior": true
   },
@@ -61,6 +62,7 @@
     },
     {
       "name": "ensure_animator_state_through_current_permission_policy",
+      "when": "a new or changed FX state is required by the exact approved request",
       "tool": "vrcforge_preview_ensure_animator_state",
       "tools": [
         "vrcforge_ensure_animator_state"
@@ -71,6 +73,7 @@
     },
     {
       "name": "write_animation_curve_through_current_permission_policy",
+      "when": "an exact approved curve change is required; preserve existing key times, and use time zero only for a newly designed static value",
       "tool": "vrcforge_preview_write_animation_curve",
       "tools": [
         "vrcforge_write_animation_curve"
@@ -80,12 +83,30 @@
       "runtimeApprovalRequired": true
     },
     {
-      "name": "read_back_exact_scope_without_unrelated_changes",
-      "tool": "vrcforge_run_validation_report",
+      "name": "adjust_existing_fx_only_when_exactly_required_and_approved",
+      "when": "an existing layer, transition, motion or condition must change to implement the approved behavior",
+      "tool": "vrcforge_preview_manage_fx_animator",
       "tools": [
+        "vrcforge_manage_fx_animator"
+      ],
+      "writes": true,
+      "runtimePermissionGateRequired": true,
+      "runtimeApprovalRequired": true
+    },
+    {
+      "name": "read_back_exact_approved_animation_delta",
+      "tool": "vrcforge_scan_fx_animator",
+      "tools": [
+        "vrcforge_scan_fx_animator",
+        "vrcforge_scan_animation_bindings",
+        "vrcforge_scan_blendshapes",
+        "vrcforge_get_gameobject",
+        "vrcforge_run_validation_report",
         "vrcforge_build_test_readiness"
       ],
-      "writes": false
+      "scope": "only_affected_states_clips_bindings_objects_and_blendshapes",
+      "writes": false,
+      "buildAndRuntimeBoundary": "validation_and_readiness_are_not_an_actual_unity_build_or_runtime_test"
     }
   ],
   "approval": {
@@ -101,4 +122,3 @@
     "requiresSeparateApproval": true
   }
 }
-

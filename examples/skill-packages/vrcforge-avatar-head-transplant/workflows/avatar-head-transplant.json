@@ -32,7 +32,8 @@
       "classification": "full_head_transplant_not_rigid_or_independent_accessory_or_clothing_part_route",
       "mergeArmatureScope": "full_head_community_route_only_does_not_authorize_setup_outfit_for_rigid_or_independent_accessories",
       "method": "unity_first_modular_avatar_merge_armature_replace_object_and_layered_neck_seam_resolution",
-      "steps": ["match_overall_head_body_scale_in_unity", "place_head_prefab_under_target_avatar", "ma_setup_outfit_then_merge_armature", "match_bone_names_to_integration_target_when_needed", "ma_replace_object_head_face_reference_to_target_old_face_path", "mark_original_target_head_face_mesh_editor_only", "inspect_visible_neck_geometry_and_attachment_motion_without_hair_or_collar", "preserve_user_selected_body_material_and_texture", "match_shader_probe_anchor_and_shadow_lighting", "identify_exact_visible_head_renderer_material_slot_and_neck_uv_region", "assign_only_approved_preauthored_head_local_seam_texture_when_required", "reconfigure_eye_bone_lipsync_visemes_eyelids_and_viewpoint", "repair_fx_animation_paths", "verify_active_renderer_consumer_closure"],
+      "steps": ["match_overall_head_body_scale_in_unity", "place_head_prefab_under_target_avatar", "ma_setup_outfit_then_merge_armature", "match_bone_names_to_integration_target_when_needed", "conditionally_use_ma_replace_object_when_existing_head_face_object_paths_must_be_replaced", "mark_original_target_head_face_mesh_editor_only", "inspect_visible_neck_geometry_and_attachment_motion_without_hair_or_collar", "preserve_user_selected_body_material_and_texture", "match_shader_probe_anchor_and_shadow_lighting", "identify_exact_visible_head_renderer_material_slot_and_neck_uv_region", "assign_only_approved_preauthored_head_local_seam_texture_when_required", "reconfigure_eye_bone_lipsync_visemes_eyelids_and_viewpoint", "repair_fx_animation_paths", "verify_active_renderer_consumer_closure"],
+      "maReplaceObject": {"communityBasis": "Kesera2 2025 Modular Avatar head-replacement route recommends ReplaceObject", "requiredWhen": ["replacing_existing_object_at_referenced_path", "existing_animation_or_component_references_require_object_path_replacement"], "notRequiredWhen": ["selected_route_does_not_replace_an_existing_referenced_object", "references_are_repaired_by_another_verified_route"], "manualOrCapabilityGapWhenNoExactAtom": true},
       "visualAcceptance": {"poses": ["Rest", "AFK"], "minimumViews": ["front", "back", "side_left", "side_right"], "sameFramingPairs": true, "pass": "no_visible_neck_gap_floating_geometry_or_abrupt_skin_color_step", "onFail": "classify_geometry_weight_lighting_or_local_texture_failure_and_fix_only_that_layer"},
       "legacyConcealmentRequiresExplicitUserChoice": ["verified_head_mesh_overlap", "mesh_hole_shrinker", "color_matched_primitive"],
       "forbidden": ["csharp_mesh_vertex_manipulation", "programmatic_neck_ring_diameter_matching", "camera_occlusion_as_acceptance"],
@@ -71,6 +72,9 @@
   ],
   "sizeMismatchPriority": ["measure_attachment_space", "first_fit_imported_whole_head_or_accessory_installContainer_with_uniform_scale_and_position_in_unity", "keep_swayChainRoot_and_every_descendant_bone_Rest_localScale_one", "diagnose_used_bone_bindpose_and_skin_matrix_metrics", "needsDccRerig_only_for_real_neck_aperture_mesh_shape_or_donor_specific_weights", "never_scale_target_body_or_armature"],
   "skinningContract": {
+    "requiredRoutes": ["same_skeleton_smr", "foreign_skeleton_smr"],
+    "notApplicableRoutes": ["rigid", "independent_skeleton_physbone", "animator_menu"],
+    "notApplicableContract": "weighted_smr_bones_rootBone_bindposes_and_remap_safety_only; independent_physbone_smr_still_requires_nonzero_used_bone_chain_closure_without_cross_skeleton_remap_or_bindpose_diagnostics",
     "required": ["renderer.bones", "renderer.rootBone", "renderer.bindposes", "allUsedBonesResolved", "allUsedBindposesResolved", "noOutOfRangeWeights", "mixedChainClosure", "safeForWeightedRemap"],
     "informational": ["nullBoneCount", "unusedBoundBoneCount"],
     "rejectIf": ["truncated_scan", "unresolved_used_bone", "unresolved_used_bindpose", "no_out_of_range_weights_false", "mixed_chain_closure_false", "safe_for_weighted_remap_false"],
@@ -262,9 +266,19 @@
   },
   "headRendererConsumerClosureContract": {
     "requiredBeforeOldHeadRemoval": true,
+    "multipleActiveRenderersAllowed": true,
+    "bindingResolution": "each_binding_to_its_actual_active_renderer",
+    "lipSyncModeContract": {
+      "default": {"first": "read_back_current_resolved_mode_without_mutation", "ifStillDefault": "request_approval_before_SDK_Auto_Detect_or_explicit_mode_change_then_read_back", "autoDetectByDefault": false, "onUnresolved": {"capabilityGap": true, "ready": false}},
+      "viseme_blend_shape": {"requiredReadback": ["lipSyncMode", "visemeSkinnedMesh", "visemeBlendShapeBindings"]},
+      "jaw_flap_blend_shape": {"requiredReadback": ["lipSyncMode", "jawFlapBlendShapeRenderer", "jawFlapBlendShapeName"], "onMissingReadback": {"capabilityGap": true, "ready": false}},
+      "jaw_flap_bone": {"requiredReadback": ["lipSyncMode", "jawBone"], "onMissingReadback": {"capabilityGap": true, "ready": false}},
+      "viseme_parameter_only": {"requiredReadback": ["lipSyncMode", "renderer", "rendererParameterConsumerClosure"], "onMissingReadback": {"capabilityGap": true, "ready": false}}
+    },
     "activeRenderer": {
       "activeInHierarchy": true,
-      "requiredTargets": ["descriptorVisemeSkinnedMesh", "descriptorLipSync", "allExpectedVisemeBindings", "allExpectedExpressionBindings", "allExpectedGestureBindings"],
+      "requiredTargetsByLipSyncMode": {"viseme_blend_shape": ["descriptorVisemeSkinnedMesh", "visemeBlendShapeBindings"], "jaw_flap_blend_shape": ["jawFlapBlendShapeRenderer", "jawFlapBlendShapeName"], "jaw_flap_bone": ["jawBone"], "viseme_parameter_only": ["rendererParameterConsumerClosure"]},
+      "expressionAndGestureBindingsResolveIndividuallyToActualActiveRenderer": true,
       "bindingSetComparison": "exact_expected_source_or_accepted_baseline_paths_remapped_to_active_renderer",
       "blendShapeNamesMustResolve": true
     },
@@ -348,7 +362,7 @@
       "tool": "vrcforge_read_avatar_descriptor",
       "tools": ["vrcforge_read_avatar_descriptor", "vrcforge_get_gameobject", "vrcforge_scan_blendshapes", "vrcforge_scan_animation_bindings", "vrcforge_scan_avatar_controls", "vrcforge_scan_parameters", "vrcforge_scan_fx_animator", "vrcforge_scan_inbound_reference_closure"],
       "writes": false,
-      "required": ["active_renderer_path_and_active_state", "descriptor_viseme_skinned_mesh_and_lipsync_target_active_renderer", "all_expected_viseme_gesture_expression_bindings_target_active_renderer", "no_inactive_or_donor_descriptor_target", "no_inactive_or_donor_sole_animator_target"],
+      "required": ["active_renderer_paths_and_active_states", "resolved_lip_sync_mode_specific_target_readback", "each_expected_viseme_gesture_expression_binding_resolves_to_its_actual_active_renderer", "no_inactive_or_donor_sole_required_consumer"],
       "faceTrackedRequired": ["parameter_menu_controller_blendshape_closure", "every_controller_blendshape_exists_on_active_renderer", "zero_inactive_or_donor_only_face_consumers"]
     },
     {

@@ -69,10 +69,12 @@ def test_general_filesystem_tools_are_visible_without_unity_project() -> None:
 
 def test_general_filesystem_handlers_work_with_camel_case_bounds(tmp_path: Path) -> None:
     (tmp_path / "note.txt").write_text("hello", encoding="utf-8")
-    with pytest.raises(ValueError, match="complete file read exceeds"):
-        dashboard_server.AGENT_GATEWAY._tools["vrcforge_read_text_file"].handler(
-            {"path": str(tmp_path / "note.txt"), "maxBytes": 3, "_generalAllowedRoots": [str(tmp_path)]}
-        )
+    result = dashboard_server.AGENT_GATEWAY._tools["vrcforge_read_text_file"].handler(
+        {"path": str(tmp_path / "note.txt"), "maxBytes": 3, "pageChars": 3,
+         "_generalAllowedRoots": [str(tmp_path)]}
+    )
+    assert result["text"] == "hel"
+    assert result["hasMore"] is True and result["nextTextOffset"] == 3
 
 
 def test_general_search_returns_a_model_visible_semantic_summary(tmp_path: Path) -> None:
@@ -86,15 +88,33 @@ def test_general_search_returns_a_model_visible_semantic_summary(tmp_path: Path)
     assert "encryption marker" in result["summary"]
 
 
-def test_over_limit_read_requires_search_on_same_authorized_file(tmp_path: Path) -> None:
+def test_over_inline_limit_read_pages_complete_same_authorized_file(tmp_path: Path) -> None:
     from runtime_planner_service import planner_read_output_evidence
 
     target = tmp_path / "fixture.txt"
-    target.write_text("padding\n" * 20000 + "EVIDENCE_TAIL = amber-lattice-946\n", encoding="utf-8")
+    content = "padding\n" * 20000 + "EVIDENCE_TAIL = amber-lattice-946\n"
+    target.write_text(content, encoding="utf-8", newline="\n")
     roots = [str(target)]
     tools = dashboard_server.AGENT_GATEWAY._tools
-    with pytest.raises(ValueError, match="complete file read exceeds"):
-        tools["vrcforge_read_text_file"].handler({"path": str(target), "maxBytes": 131072, "_generalAllowedRoots": roots})
+    parts, offset, digest = [], 0, None
+    while True:
+        result = tools["vrcforge_read_text_file"].handler({"path": str(target), "maxBytes": 131072,
+            "textOffset": offset, "pageChars": 32000, "snapshotDigest": digest, "_generalAllowedRoots": roots})
+        evidence = planner_read_output_evidence("vrcforge_read_text_file", result)
+        assert evidence["text"] == result["text"]
+        parts.append(result["text"])
+        if digest is not None:
+            assert result["snapshotDigest"] == digest
+        digest = result["snapshotDigest"]
+        if not result["hasMore"]:
+            break
+        assert result["nextTextOffset"] > offset
+        offset = result["nextTextOffset"]
+    assert "".join(parts) == content
+    denied = tmp_path / "not-authorized.txt"
+    denied.write_text("must not read", encoding="utf-8")
+    with pytest.raises(PermissionError):
+        tools["vrcforge_read_text_file"].handler({"path": str(denied), "_generalAllowedRoots": roots})
 
 
 def test_directory_listing_directs_the_loop_to_materially_new_evidence(tmp_path: Path) -> None:

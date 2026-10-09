@@ -10,6 +10,7 @@ import pytest
 from test_runtime_planner_service import service
 
 import dashboard_server
+from agent_task_loop import AgentTaskLoop
 from provider_configuration_service import ProviderApiConfig
 from runtime_planner_service import (
     EXPOSURE_LAYER_EXECUTION,
@@ -586,6 +587,37 @@ def test_no_project_catalog_exposes_only_general_agent_capabilities() -> None:
     assert all(skill.source == "user" and skill.skill_type == "package" for skill in execution.skills)
 
 
+def test_app_planner_tool_registry_uses_profiled_model_names() -> None:
+    with dashboard_server.AGENT_GATEWAY._bind_runtime_skill_scope(AgentTaskLoop("Inspect tool registry")):
+        handler = dashboard_server.AGENT_GATEWAY._tools["vrcforge_tool_registry"].handler
+        registries = [handler({
+            "exposureLayer": exposure,
+            "projectContextActive": project_active,
+        }) for project_active in (False, True) for exposure in ("planning", "execution")]
+    for registry in registries:
+        assert "list_skill_packages" in {item["name"] for item in registry["tools"]}
+        assert "vrcforge_list_skill_packages" not in {item["name"] for item in registry["tools"]}
+        assert registry["nameScope"] == "app_planner"
+        assert registry["count"] == len(registry["tools"])
+        assert all("runtimeName" in item for item in registry["tools"])
+        assert all(not item["name"].startswith("vrcforge_") for item in registry["tools"])
+        entries = {item["runtimeName"]: item for item in registry["tools"]}
+        assert entries["vrcforge_list_skill_packages"]["name"] == "list_skill_packages"
+        assert entries["vrcforge_tool_registry"]["name"] == "tool_registry"
+        assert entries["vrcforge_list_skill_packages"]["modelInvocable"] is True
+
+
+def test_external_tool_registry_keeps_internal_names() -> None:
+    handler = dashboard_server.AGENT_GATEWAY._tools["vrcforge_tool_registry"].handler
+    registry = handler({
+        "exposureLayer": "planning",
+        "_appPlannerProjection": True,
+    })
+    entries = {item["name"]: item for item in registry["tools"]}
+    assert "vrcforge_list_skill_packages" in entries
+    assert "list_skill_packages" not in entries
+
+
 def test_internal_indexed_catalog_loads_per_session_without_leaking_to_external_mcp() -> None:
     session_id = "internal-tree-regression"
     root = dashboard_server.build_internal_tool_block_inventory(
@@ -679,7 +711,9 @@ def test_no_project_planner_prompt_is_general_and_omits_unity_tools() -> None:
     assert "a top-level directory listing alone is not sufficient evidence" in prompt
     assert "a reply is invalid after only a top-level directory listing" in prompt
     assert "know_yourself" in prompt
-    assert '"completion_claim":{"satisfied":true,"evidence_action_ids"' in prompt
+    assert '"completion_claim":{"satisfied":true}' in prompt
+    assert "The host binds the full completed-action evidence" in prompt
+    assert "Optional evidence_action_ids must reference completed actions" in prompt
     assert "avatar_encryption_scan" not in prompt
     assert "scan_project_index" not in prompt
     assert "unity_status" not in prompt
@@ -727,7 +761,7 @@ def test_connection_help_prompt_requires_know_yourself_before_generic_tools() ->
     assert "诊断 VRCForge 自身启动、连接或历史日志时" in prompt
     assert "know_yourself" in prompt
     assert "先发现并加载相应的只读诊断工具块" in prompt
-    assert "不可直接调用未列出的工具，也不要用普通 Shell 代替这条诊断路径" in prompt
+    assert "不可调用未列出的工具或用普通 Shell 代替这条诊断路径" in prompt
 
 
 def test_no_project_planner_rejects_unity_tool_while_project_turn_keeps_it() -> None:

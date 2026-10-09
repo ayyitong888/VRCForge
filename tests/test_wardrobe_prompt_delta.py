@@ -24,16 +24,18 @@ def test_wardrobe_prompt_declares_identity_target_discovery_and_binding_tools():
 
 def test_wardrobe_sequence_preserves_saved_clips_and_repairs_only_evidence_differences():
     text = WORKFLOW.read_text(encoding="utf-8")
-    section = text.split("## 8. 最短安全调用序列", 1)[1]
+    section = text.split("## 通用写入约束", 1)[1].split("## 运行观察的生命周期", 1)[0]
 
     assert "全量重写所有已批准 clip 矩阵" not in section
     assert "220" not in text
-    assert "按 scope、变更范围和证据 freshness 复用" in section
-    assert "仅对陈旧或受影响范围补扫" in section
-    assert "回读并验证全部已批准 clip 的完整矩阵" in section
+    assert "只修证据证明与批准目标不符的内容" in section
+    assert "修改后回读真实结果，与批准差异比较" in section
+    assert "验证范围包含实际受影响的依赖，而不是固定服装矩阵" in section
     assert "220" not in section
-    assert "保留已有正确稳定态与过渡时间线" in section
-    assert "只对回读与已批准矩阵存在的证据差异做 preview/修补" in section
-    assert "仅新建基础衣柜的瞬时稳定态写新建的完整互斥矩阵" in section
-    assert "过渡和用户动画保留源时间线并验证" in section
-    assert "当前套完整矩阵、静态/动态/穿模验收" in section
+    assert "保留正确行为与源时间线" in section
+    assert "执行权限与精确 preview 批准缺一不可" in section
+    assert "引用发生变化时旧证据不能直接当作新证据" in text
+    creation = text.split("## 从零新建默认方案", 1)[1]
+    assert "检查、扩展、修复不进入此分支" in creation
+    assert "不能把瞬时矩阵强写到过渡过程" in creation
+    assert "再逐套独立回读、运行观察和视觉验收" in creation

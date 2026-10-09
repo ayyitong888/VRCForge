@@ -39,7 +39,7 @@ def test_native_default_directory_contains_only_six_complete_root_entries(catalo
             assert row[field] == expected[field]
         assert not row.get('children')
         assert not row.get('toolNames')
-        assert row['expandArguments'] == {'block': row['id']}
+        assert row['expandArguments'] == {'block': row['id'], 'tools': []}
         # The returned exact selector must navigate the real existing directory.
         assert raw_directory(catalog_leaves, row['name'])['tree']['name'] == row['name']
     assert not result['tree'].get('children')
@@ -59,8 +59,8 @@ def test_native_selected_root_contains_only_its_direct_complete_leaves(catalog_l
             if key in ('toolNames', 'loadCall'):
                 continue
             assert row[key] == value
-        assert row['expandArguments'] == {'block': row['id']}
-        assert not row.get('toolNames')
+        assert row['expandArguments'] == {'block': row['id'], 'tools': []}
+        assert row['toolNames'] == original['toolNames']
         if row.get('loadCall'):
             assert 'skill_params' not in row['loadCall']
             assert row['loadCall']['arguments']['block'] == row['id']
@@ -116,7 +116,17 @@ def test_both_planner_lanes_browse_one_level_and_raw_public_result_remains_compl
     before = deepcopy(raw)
     legacy = project(raw, native=False)
     assert legacy == project(raw, native=True)
-    assert all(not row.get('children') and not row.get('toolNames') for row in legacy['blocks'])
+    if selector is None:
+        assert all(not row.get('children') and not row.get('toolNames') for row in legacy['blocks'])
+    elif selector in CANONICAL_TOOL_BLOCKS:
+        expected = raw['tree']['children']
+        assert [row['name'] for row in legacy['blocks']] == [row['name'] for row in expected]
+        for row, original in zip(legacy['blocks'], expected):
+            assert row['description'] == original['description']
+            assert row['toolNames'] == original['toolNames']
+            assert row['expandArguments'] == {'block': row['id'], 'tools': []}
+    else:
+        assert legacy['blocks'] == []
     assert len(raw['blocks']) == 6
     assert all(root['children'] for root in raw['blocks'])
     assert raw == before
@@ -145,7 +155,7 @@ def test_unknown_directory_shape_retains_unique_fields():
 @pytest.mark.parametrize("direct_leaf", [False, True])
 def test_actual_native_requests_browse_load_and_execute_without_global_directory(tmp_path, monkeypatch, direct_leaf):
     import dashboard_server as d
-    from runtime_planner_service import PlannerCatalogSnapshot, PlannerTool
+    from runtime_planner_service import PlannerCatalogSnapshot, PlannerTool, planner_tool_usage_description
     from tests.test_runtime_planner_service import FakeCatalog
     from tests.test_native_runtime_gateway import setup_gateway, call, finish, run
     gateway, model, invoked = setup_gateway(tmp_path, [])
@@ -180,11 +190,14 @@ def test_actual_native_requests_browse_load_and_execute_without_global_directory
         message = next(m for m in model.requests[i+1]["messages"] if m.get("tool_call_id") == f"browse-{i}")
         observation = json.loads(message["content"])["observations"][0]["observation"]
         payload = json.loads(observation.split("; toolBlockDirectory=", 1)[1])
-        assert all(not row.get("children") and not row.get("toolNames") for row in payload["blocks"])
+        assert "loadedToolDefinitions" not in json.loads(message["content"])["observations"][0]
         if selector:
             assert all(row["name"].startswith(selector + "/") for row in payload["blocks"])
+            assert all(row["expandArguments"] == {"block": row["id"], "tools": []}
+                       for row in payload["blocks"])
         else:
             assert len(payload["blocks"]) == 6
+            assert all(not row.get("toolNames") for row in payload["blocks"])
     before = model.requests[len(selectors)-1]["tools"]
     after = model.requests[len(selectors)]["tools"]
     assert all(t["function"]["name"] != "read_text_file" for t in before)
@@ -193,23 +206,29 @@ def test_actual_native_requests_browse_load_and_execute_without_global_directory
                   if m.get("tool_call_id") == f"browse-{len(selectors)-1}")
     definitions = json.loads(loaded["content"])["observations"][0]["loadedToolDefinitions"]
     assert [tool["name"] for tool in definitions] == ["read_text_file"]
+    assert definitions[0]["description"] == planner_tool_usage_description(
+        "read_text_file", "Read.", write=False)
+    assert definitions[0]["parameters"] == next(tool.input_schema for tool in tools
+                                                  if tool.name == "read_text_file")
     assert gateway.runtime_sessions.internal_tool_selections("native-session")[leaf] == ["read_text_file"]
 
 
 @pytest.mark.parametrize('selector', [None, 'project_environment', 'project_environment/assets_packages'])
 def test_package_discovery_describes_app_capabilities_and_unity_without_global_inventory(catalog_leaves, selector):
-    result = project(raw_directory(catalog_leaves, selector))
+    raw = raw_directory(catalog_leaves, selector)
+    result = project(raw)
     if selector is None:
         assert len(result['blocks']) == 6
         row = next(row for row in result['blocks'] if row['name'] == 'project_environment')
         assert not row.get('children') and not row.get('toolNames')
-        assert row['expandArguments'] == {'block': 'project_environment'}
+        assert row['expandArguments'] == {'block': 'project_environment', 'tools': []}
     elif selector == 'project_environment':
         assert {row['name'] for row in result['blocks']} == {
             'project_environment/assets_packages', 'project_environment/files', 'project_environment/shell'}
         row = next(row for row in result['blocks'] if row['name'].endswith('/assets_packages'))
-        assert not row.get('children') and not row.get('toolNames')
-        assert row['expandArguments'] == {'block': 'project_environment/assets_packages'}
+        assert row['toolNames'] == next(item['toolNames'] for item in raw['tree']['children']
+                                        if item['id'] == row['id'])
+        assert row['expandArguments'] == {'block': 'project_environment/assets_packages', 'tools': []}
     else:
         assert result['blocks'] == []
         row = result['tree']

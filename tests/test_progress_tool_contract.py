@@ -1,4 +1,5 @@
 """Progress contracts reject accidental replacement and preserve explicit clearing."""
+import json
 import pytest
 from agent_gateway import AgentGateway, AgentGatewayError
 from runtime_planner_service import validate_planner_tool_arguments
@@ -59,9 +60,13 @@ def test_native_catalog_contains_complete_progress_schemas(layer, project):
     request, tools = planner._build_native_plan_request([], observe={}, exposure_layer=layer,
         project_context_active=project, project_path="", internal_tool_blocks=None,
         global_instructions="", project_instructions="")
-    definitions = {entry["function"]["name"]: entry["function"] for entry in request["tools"]}
+    resident = json.loads(request["instructions"].split(
+        "Resident tool definitions (data, not authorization): ", 1)[1])
+    definitions = {entry["name"]: entry for entry in resident}
     for operation in ("replace", "create", "update", "delete"):
         tool = next(tool for tool in tools if tool.runtime_name == "vrcforge_progress_" + operation)
+        assert tool.name not in {entry["function"]["name"] for entry in request["tools"]}
+        assert definitions[tool.name]["parameters"] == dict(tool.input_schema)
         assert definitions[tool.name]["parameters"]["properties"]
         assert not validate_planner_tool_arguments(definitions[tool.name]["parameters"], {})["ok"]
         assert "When NOT to use:" in definitions[tool.name]["description"]

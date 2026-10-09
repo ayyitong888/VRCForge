@@ -17,6 +17,43 @@ EVENT_SOURCE_PATHS = (
     Path(__file__).parents[1] / "memory_review_composition.py",
 )
 
+REVIEWED_ROUTES = (
+    ("/api/app/settings/data-root", "GET", "read_agentic_app_data_root"),
+    ("/api/app/settings/data-root", "POST", "update_agentic_app_data_root"),
+    ("/api/app/agent/chats/{chat_id}", "DELETE", "app_delete_agent_chat"),
+    ("/api/app/support-feedback/preview", "POST", "preview_app_support_feedback"),
+    ("/api/app/support-feedback/bundle-preview", "GET", "preview_app_support_bundle"),
+    ("/api/chatgpt/status", "GET", "status"),
+    ("/api/chatgpt/login", "POST", "login"),
+    ("/api/chatgpt/cancel", "POST", "cancel"),
+    ("/api/chatgpt/logout", "POST", "logout"),
+    ("/api/chatgpt/models", "POST", "models"),
+    ("/api/chatgpt/activate", "POST", "select"),
+)
+REVIEWED_PATHS = {path for path, _, _ in REVIEWED_ROUTES}
+
+
+def _without_reviewed_openapi_additions(openapi: dict) -> dict:
+    # Freeze the reviewed additions separately; every old field must still
+    # match the original baseline, not a freshly regenerated whole-app hash.
+    paths = {path: openapi["paths"].pop(path) for path in sorted(REVIEWED_PATHS)}
+    assert _canonical_sha256(paths) == "4bdca7b01091b2e36819b6e49492abdb371dde70bc1b7a3f324d97a813afe03a"
+    schemas = openapi["components"]["schemas"]
+    additions = {
+        "schemas": {name: schemas.pop(name) for name in (
+            "ChatGPTAccountRequest", "ChatGPTActivationRequest", "DataRootUpdateRequest", "SupportFeedbackPreviewRequest",
+        )},
+        "fields": {},
+    }
+    for name, fields in (
+        ("AgentRuntimeMessageRequest", ("planMode", "compactionRecovery")),
+        ("AgentRuntimeQueueRequest", ("planMode",)),
+    ):
+        assert not set(fields).intersection(schemas[name].get("required", []))
+        additions["fields"][name] = {field: schemas[name]["properties"].pop(field) for field in fields}
+    assert _canonical_sha256(additions) == "336a6aad82863216a9cdb29108172dc6598f3c8f6b8216d78430421638262d23"
+    return openapi
+
 
 def _canonical_sha256(payload: object) -> str:
     encoded = json.dumps(
@@ -75,6 +112,11 @@ def test_route_table_contract_matches_the_entry_baseline() -> None:
     contract = json.loads(CONTRACT_PATH.read_text(encoding="utf-8"))
     assert contract["schema"] == "vrcforge.dashboard_composition_contract.v1"
     manifest = _route_manifest()
+    assert [item for item in manifest if item["path"] in REVIEWED_PATHS] == [
+        {"kind": "APIRoute", "name": name, "path": path, "methods": [method]}
+        for path, method, name in REVIEWED_ROUTES
+    ]
+    manifest = [item for item in manifest if item["path"] not in REVIEWED_PATHS]
     route_kinds = Counter(str(item["kind"]) for item in manifest)
     method_counts = Counter(
         method
@@ -93,6 +135,7 @@ def test_openapi_contract_matches_the_entry_baseline() -> None:
     contract = json.loads(CONTRACT_PATH.read_text(encoding="utf-8"))
     openapi = copy.deepcopy(dashboard_server.app.openapi())
     openapi.setdefault("info", {})["version"] = "<runtime-version>"
+    openapi = _without_reviewed_openapi_additions(openapi)
     schemas = openapi.get("components", {}).get("schemas", {})
     assert len(openapi.get("paths", {})) == contract["openApi"]["pathCount"]
     assert len(schemas) == contract["openApi"]["schemaCount"]
@@ -104,6 +147,7 @@ def test_openapi_contract_matches_the_entry_baseline() -> None:
 def test_shader_material_scan_paging_is_optional_and_preserves_prior_openapi() -> None:
     openapi = copy.deepcopy(dashboard_server.app.openapi())
     openapi["info"]["version"] = "<runtime-version>"
+    openapi = _without_reviewed_openapi_additions(openapi)
     schema = openapi["components"]["schemas"]["ShaderMaterialScanRequest"]
     assert schema.get("required", []) == []
     properties = schema["properties"]

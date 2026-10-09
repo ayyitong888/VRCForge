@@ -33,21 +33,23 @@ def _publish(gateway, target, operation="read-1"):
 
 def test_resource_listing_does_not_replace_verified_identity(tmp_path, monkeypatch):
     gateway, _ = _gateway(tmp_path, monkeypatch)
-    handles = _publish(gateway, _target(tmp_path / "project"))
-    gateway.list_mcp_resources()
-    current = gateway.read_mcp_resource("vrcforge://session/current/identity")["structuredContent"]
-    assert current["uri"] == handles["identityLockUri"]
-    assert current["data"]["status"] == "bound"
+    with gateway.resource_context("fixture-session"):
+        handles = _publish(gateway, _target(tmp_path / "project"))
+        gateway.list_mcp_resources()
+        current = gateway.read_mcp_resource("vrcforge://session/current/identity")["structuredContent"]
+        assert current["uri"] == handles["identityLockUri"]
+        assert current["data"]["status"] == "bound"
 
 
 def test_rejected_arguments_cannot_publish_verified_identity(tmp_path, monkeypatch):
     gateway, _ = _gateway(tmp_path, monkeypatch)
-    result = {"ok": False, "operationId": "rejected", "error": "identity drifted"}
-    gateway.publish_mcp_tool_result_resource("vrcforge_get_property", {"executionTarget": _target(tmp_path)},
-                                             result, source_mode="test_fixture")
-    assert "identityLockUri" not in result["resources"]
-    gateway.list_mcp_resources()
-    assert gateway.read_mcp_resource("vrcforge://session/current/identity")["structuredContent"]["data"]["status"] == "unbound"
+    with gateway.resource_context("fixture-session"):
+        result = {"ok": False, "operationId": "rejected", "error": "identity drifted"}
+        gateway.publish_mcp_tool_result_resource("vrcforge_get_property", {"executionTarget": _target(tmp_path)},
+                                                 result, source_mode="test_fixture")
+        assert "identityLockUri" not in result["resources"]
+        gateway.list_mcp_resources()
+        assert gateway.read_mcp_resource("vrcforge://session/current/identity")["structuredContent"]["data"]["status"] == "unbound"
 
 
 @pytest.mark.parametrize("failure", [{"status": "failed"}, {"success": False}, {"isError": True}, {"outcome": {"status": "failed"}}])
@@ -60,15 +62,16 @@ def test_each_canonical_failure_shape_cannot_bind_identity(tmp_path, monkeypatch
 
 def test_gateway_prompt_requires_current_bound_identity_and_matching_context(tmp_path, monkeypatch):
     gateway, _ = _gateway(tmp_path, monkeypatch)
-    target = _target(tmp_path / "project")
-    handles = _publish(gateway, target)
-    arguments = {"identityLockUri": handles["identityLockUri"], "sessionContextUri": handles["operationReceiptUri"]}
-    assert gateway.get_mcp_prompt("fixture-workflow", arguments)["structuredContent"]["context"]["status"] == "ready_for_planning"
-    _publish(gateway, _target(tmp_path / "project", pid=456), "read-2")
-    with pytest.raises((McpResourceError, McpPromptError)):
-        gateway.get_mcp_prompt("fixture-workflow", arguments)
-    # Historical reads stay available even though a Prompt cannot use the old current lock.
-    assert gateway.read_mcp_resource(handles["operationReceiptUri"])["structuredContent"]["data"]["operationId"] == "read-1"
+    with gateway.resource_context("fixture-session"):
+        target = _target(tmp_path / "project")
+        handles = _publish(gateway, target)
+        arguments = {"identityLockUri": handles["identityLockUri"], "sessionContextUri": handles["operationReceiptUri"]}
+        assert gateway.get_mcp_prompt("fixture-workflow", arguments)["structuredContent"]["context"]["status"] == "ready_for_planning"
+        _publish(gateway, _target(tmp_path / "project", pid=456), "read-2")
+        with pytest.raises((McpResourceError, McpPromptError)):
+            gateway.get_mcp_prompt("fixture-workflow", arguments)
+        # Historical reads stay available even though a Prompt cannot use the old current lock.
+        assert gateway.read_mcp_resource(handles["operationReceiptUri"])["structuredContent"]["data"]["operationId"] == "read-1"
 
 
 def test_another_session_resource_pair_cannot_self_authorize(tmp_path, monkeypatch):

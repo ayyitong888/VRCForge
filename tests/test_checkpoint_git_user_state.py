@@ -74,3 +74,48 @@ def test_checkpoint_preserves_git_user_state_and_captures_worktree(tmp_path, sta
         assert (project / "Assets" / "new.txt").read_bytes() == b"untracked\n"
         assert deleted_asset.exists() is (state != "deleted")
         assert user_state() == before
+
+
+def test_scoped_texture_import_restore_preserves_unrelated_git_state(tmp_path):
+    repo = tmp_path / "repo"
+    project = repo / "Unity"
+    texture = project / "Assets" / "Body.png"
+    unrelated = project / "Assets" / "unrelated.asset"
+    texture.parent.mkdir(parents=True)
+    texture.write_bytes(b"texture-before")
+    texture.with_name(texture.name + ".meta").write_text("guid: texture\n", encoding="utf-8")
+    unrelated.write_bytes(b"unrelated-before")
+    unrelated.with_name(unrelated.name + ".meta").write_text("guid: unrelated\n", encoding="utf-8")
+
+    def git(*args):
+        return subprocess.run(
+            ["git", "--no-optional-locks", *args], cwd=repo,
+            check=True, capture_output=True, timeout=30,
+        ).stdout
+
+    repo.mkdir(exist_ok=True)
+    git("init")
+    git("add", ".")
+    git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "baseline")
+    unrelated.write_bytes(b"unrelated-dirty")
+    before_status = git("status", "--porcelain")
+    before_index = (repo / ".git" / "index").read_bytes()
+
+    gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
+    checkpoint = gateway.checkpoint_recovery._create_archive_checkpoint(
+        project,
+        {
+            "id": "ckpt_texture_git_scope",
+            "projectRoot": str(project),
+            "status": "unavailable",
+            "targetTool": "vrcforge_set_texture_import_settings",
+            "archiveFiles": ["Assets/Body.png"],
+        },
+    )
+    texture.write_bytes(b"texture-after")
+    restored = gateway.checkpoint_recovery._restore_archive_checkpoint(checkpoint)
+    assert restored["ok"] is True
+    assert texture.read_bytes() == b"texture-before"
+    assert unrelated.read_bytes() == b"unrelated-dirty"
+    assert git("status", "--porcelain") == before_status
+    assert (repo / ".git" / "index").read_bytes() == before_index

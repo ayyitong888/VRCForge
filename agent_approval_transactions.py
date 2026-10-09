@@ -145,6 +145,11 @@ def _checkpoint_archive_files_for_write(target_tool: str, arguments: Mapping[str
         if not isinstance(asset_path, str) or not asset_path:
             return []
         paths.add(asset_path)
+    elif target_tool == "vrcforge_set_texture_import_settings":
+        texture_path = nested.get("textureAssetPath")
+        if not isinstance(texture_path, str) or not texture_path:
+            return []
+        paths.add(texture_path)
     if not paths:
         return []
     valid = [

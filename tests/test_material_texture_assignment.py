@@ -213,7 +213,7 @@ def test_material_texture_tool_is_shared_supervised_and_execution_only() -> None
     assert tool.block == "appearance/textures_visual_properties"
     assert "vrcforge_preview_material_texture_assignment" in gateway._tools
     assert "vrc_set_material_texture" in dashboard_server.REQUIRED_VRCFORGE_UNITY_TOOLS
-    assert unity_mcp_tool_contract.TOOL_CONTRACT_VERSION == "160"
+    assert unity_mcp_tool_contract.TOOL_CONTRACT_VERSION == "161"
     assert unity_mcp_tool_contract.EXPECTED_TOOL_COUNT == 97
 
 

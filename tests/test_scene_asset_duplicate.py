@@ -20,7 +20,7 @@ from scene_asset_duplicate import (
     compute_preview_digest,
     validate_apply_result,
 )
-from unity_mcp_tool_contract import EXPECTED_TOOL_COUNT
+from unity_mcp_tool_contract import EXPECTED_TOOL_COUNT, EXPECTED_TOOL_NAMES
 
 
 def preview_payload(*, open_copy: bool = True) -> dict:
@@ -271,7 +271,10 @@ def test_core_contract_gateway_and_package_manifest_register_scene_duplicate() -
         encoding="utf-8"
     )
 
-    assert f"internal const int ToolCount = {EXPECTED_TOOL_COUNT};" in contract
+    internal_reads = {"vrc_capture_scan_scope", "vrc_validate_scan_scope"}
+    assert internal_reads.isdisjoint(EXPECTED_TOOL_NAMES)
+    assert all(f'{{ "{name}",' in contract for name in internal_reads)
+    assert f"internal const int ToolCount = {EXPECTED_TOOL_COUNT + len(internal_reads)};" in contract
     assert '{ "vrc_duplicate_scene_asset", "VRCForge.Editor.SceneAssetDuplicateTool" }' in contract
     assert '"vrc_duplicate_scene_asset",' in server
     assert '"vrcforge_preview_scene_asset_duplicate"' in dashboard

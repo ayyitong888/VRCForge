@@ -145,6 +145,7 @@ from agent_gateway import (
     redact_background_goal_persistence,
     redact_sensitive,
     summarize_text,
+    stable_hash,
 )
 from agent_skill_registry import USER_SKILL_MANIFEST_MAX_BYTES
 from external_installed_skill_registry import ExternalInstalledSkillRegistryService
@@ -285,6 +286,7 @@ from diagnostic_logging import (
     parse_log_line as parse_diagnostic_log_line,
     parse_log_timestamp as parse_diagnostic_log_timestamp,
 )
+from support_feedback import build_support_feedback_preview, preview_latest_support_bundle
 from diagnostic_privacy import DiagnosticPrivacy
 from diagnostic_safety import (
     TRACE_REQUIRES_DEVELOPER_OPTIONS,
@@ -985,6 +987,7 @@ from dashboard_api_models import (
     VisionConfigRequest,
     DiagnosticsConfigRequest,
     SupportBundleRequest,
+    SupportFeedbackPreviewRequest,
     AvatarSceneScanRequest,
     AvatarBlendshapeListRequest,
     ManualBlendshapeItem,
@@ -7949,7 +7952,8 @@ def write_support_bundle_text_member(bundle: zipfile.ZipFile, name: str, lines: 
 def build_support_bundle(request: SupportBundleRequest) -> dict[str, Any]:
     SUPPORT_BUNDLE_DIR.mkdir(parents=True, exist_ok=True)
     generated_at = datetime.now(timezone.utc)
-    bundle_path = SUPPORT_BUNDLE_DIR / f"vrcforge-support-{generated_at.strftime('%Y%m%d-%H%M%S')}.zip"
+    bundle_path = SUPPORT_BUNDLE_DIR / f"vrcforge-support-{generated_at.strftime('%Y%m%d-%H%M%S-%f')}-{secrets.token_hex(3)}.zip"
+    temporary_path: Path | None = None
     log_limit = max(1, min(int(request.log_limit), 500))
     metadata = {
         "schema": "vrcforge.support-bundle.v1",
@@ -7984,17 +7988,33 @@ def build_support_bundle(request: SupportBundleRequest) -> dict[str, Any]:
     diagnostics = diagnostics_state()
     diagnostics.pop("identities", None)
     safety_posture = diagnostics.get("safetyPosture") or safety_posture_state()
-    with zipfile.ZipFile(bundle_path, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
-        write_support_bundle_member(bundle, "metadata.json", metadata, request.include_full_paths)
-        write_support_bundle_member(bundle, "bootstrap.json", bootstrap, request.include_full_paths)
-        write_support_bundle_member(bundle, "doctor.json", doctor, request.include_full_paths)
-        write_support_bundle_member(bundle, "diagnostics.json", diagnostics, request.include_full_paths)
-        write_support_bundle_member(bundle, "safety-posture.json", safety_posture, request.include_full_paths)
-        write_support_bundle_text_member(bundle, "diagnostic-log.txt", DIAGNOSTIC_LOGGER.tail_lines(log_limit))
-        write_support_bundle_member(bundle, "agent-audit.json", AGENT_GATEWAY.approval_transactions.recent_audit_logs(limit=log_limit), request.include_full_paths)
-        write_support_bundle_member(bundle, "sub-agent-events.json", SUB_AGENT_COLLABORATION.recent_events(limit=log_limit), request.include_full_paths)
-        write_support_bundle_member(bundle, "sub-agent-tasks.json", SUB_AGENT_COLLABORATION.list_tasks(include_events=False, limit=log_limit), request.include_full_paths)
-        write_support_bundle_member(bundle, "checkpoints.json", checkpoints, request.include_full_paths)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=".vrcforge-support-",
+        suffix=".tmp",
+        dir=str(SUPPORT_BUNDLE_DIR),
+    )
+    os.close(descriptor)
+    temporary_path = Path(temporary_name)
+    try:
+        with zipfile.ZipFile(temporary_path, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
+            write_support_bundle_member(bundle, "metadata.json", metadata, request.include_full_paths)
+            write_support_bundle_member(bundle, "bootstrap.json", bootstrap, request.include_full_paths)
+            write_support_bundle_member(bundle, "doctor.json", doctor, request.include_full_paths)
+            write_support_bundle_member(bundle, "diagnostics.json", diagnostics, request.include_full_paths)
+            write_support_bundle_member(bundle, "safety-posture.json", safety_posture, request.include_full_paths)
+            write_support_bundle_text_member(bundle, "diagnostic-log.txt", DIAGNOSTIC_LOGGER.tail_lines(log_limit))
+            write_support_bundle_member(bundle, "agent-audit.json", AGENT_GATEWAY.approval_transactions.recent_audit_logs(limit=log_limit), request.include_full_paths)
+            write_support_bundle_member(bundle, "sub-agent-events.json", SUB_AGENT_COLLABORATION.recent_events(limit=log_limit), request.include_full_paths)
+            write_support_bundle_member(bundle, "sub-agent-tasks.json", SUB_AGENT_COLLABORATION.list_tasks(include_events=False, limit=log_limit), request.include_full_paths)
+            write_support_bundle_member(bundle, "checkpoints.json", checkpoints, request.include_full_paths)
+        os.replace(temporary_path, bundle_path)
+        temporary_path = None
+    finally:
+        if temporary_path is not None:
+            try:
+                temporary_path.unlink()
+            except FileNotFoundError:
+                pass
     emit_log(
         "success",
         "diagnostics",
@@ -9366,6 +9386,26 @@ def update_app_diagnostics_guarded(request: DiagnosticsConfigRequest) -> dict[st
 @app.post("/api/app/support-bundle")
 def create_app_support_bundle(request: SupportBundleRequest) -> dict[str, Any]:
     return build_support_bundle(request)
+
+
+@app.post("/api/app/support-feedback/preview")
+def preview_app_support_feedback(request: SupportFeedbackPreviewRequest) -> dict[str, Any]:
+    """Build a redacted local draft; this route performs no external submission."""
+
+    return build_support_feedback_preview(
+        request.model_dump(by_alias=True),
+        redact=lambda value: redact_support_payload(value),
+    )
+
+
+@app.get("/api/app/support-feedback/bundle-preview")
+def preview_app_support_bundle() -> dict[str, Any]:
+    """Return bounded, redacted excerpts from the newest local support bundle."""
+
+    return preview_latest_support_bundle(
+        SUPPORT_BUNDLE_DIR,
+        redact=lambda value: redact_support_payload(value),
+    )
 
 
 @app.get("/api/app/tools/registry")
@@ -15946,11 +15986,44 @@ def load_internal_tool_block(params: dict[str, Any]) -> dict[str, Any]:
                 # string) is distinguishable from a valid tool owned by
                 # another leaf.
                 "expectedBlock": expected_block,
+                "commitState": "not_started",
             }
+            if exposure_layer != RUNTIME_PLANNER_EXECUTION_LAYER:
+                routable_catalog = _RuntimePlannerCatalog().read(
+                    exposure_layer,
+                    project_context_active=params.get("projectContextActive") is True,
+                )
+                hidden_write = next(
+                    (
+                        tool for tool in routable_catalog.routable_tools
+                        if tool.name == invalid_name
+                        and tool.write
+                        and tool.block == block
+                    ),
+                    None,
+                )
+                if hidden_write is not None:
+                    return {
+                        "ok": False,
+                        "status": "failed",
+                        "errorCode": "execution_mode_required",
+                        "error": f"Tool {invalid_name} is a write tool and requires execution mode.",
+                        "tool": invalid_name,
+                        "expectedBlock": block,
+                        "requiredExposureLayer": RUNTIME_PLANNER_EXECUTION_LAYER,
+                        "requestedTools": list(requested_tools),
+                        "nextActions": [
+                            "Enter execution with action=enter_execution, then retry "
+                            f"load_internal_tool_block with block={block} and the exact requested tools.",
+                        ],
+                        "mutationStarted": False,
+                        "commitState": "not_started",
+                    }
             if expected_block:
                 # Keep the exact-block permission boundary, but return enough
                 # routing evidence for the planner to correct a model-selected
-                # block on its next turn.
+                # block on its next turn.  The previous response gave no way to
+                # distinguish a typo from a valid tool owned by another leaf.
                 response["data"] = {
                     "expectedBlock": expected_block,
                     "tool": invalid_name,
@@ -16096,6 +16169,48 @@ class _RuntimePlannerCatalog:
                 gateway_config
             ),
         )
+
+
+def _build_app_planner_tool_registry(params: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    """Return planner aliases only for the trusted internal App planner path."""
+
+    arguments = ensure_dict(params or {})
+    exposure_layer = normalize_exposure_layer(arguments.get("exposureLayer"))
+    registry = AGENT_GATEWAY.build_tool_registry(exposure_layer=exposure_layer)
+    if AGENT_GATEWAY._runtime_skill_scope.get() is None:
+        return registry
+    catalog = _RuntimePlannerCatalog().read(
+        exposure_layer,
+        project_context_active=arguments.get("projectContextActive") is True,
+    )
+    aliases = {
+        tool.runtime_name: tool.name
+        for tool in (*catalog.visible_tools, *catalog.routable_tools)
+    }
+    projected = dict(registry)
+    projected_tools = []
+    for entry in registry.get("tools", []):
+        item = dict(entry)
+        runtime_name = str(item.get("name") or "")
+        planner_name = aliases.get(runtime_name)
+        if not planner_name:
+            continue
+        item["runtimeName"] = runtime_name
+        item["name"] = planner_name
+        item["plannerName"] = planner_name
+        projected_tools.append(item)
+    projected["tools"] = projected_tools
+    projected["count"] = len(projected_tools)
+    projected["definitionCount"] = len(projected_tools)
+    projected["activeCount"] = len(projected_tools)
+    projected["categories"] = sorted({str(item.get("category") or "misc") for item in projected_tools})
+    canonical_names = [str(item.get("canonicalName") or item["name"]) for item in projected_tools]
+    projected["duplicateCanonicalNameCount"] = len(canonical_names) - len(set(canonical_names))
+    projected["registryDigest"] = stable_hash(json.dumps(
+        projected_tools, ensure_ascii=True, sort_keys=True, separators=(",", ":")
+    ))
+    projected["nameScope"] = "app_planner"
+    return projected
 
 
 class _RuntimePlannerDesktopObservation:
@@ -25133,7 +25248,7 @@ def register_agent_gateway_tools() -> None:
     )
     AGENT_GATEWAY.register_tool(
         "vrcforge_list_user_unity_tools",
-        "when-to-use: discover compiled user tools and their current availability in the selected Unity project. when-NOT-to-use: listing ordinary Skills or assuming an installed package has compiled successfully.",
+        "when-to-use: discover compiled user tools and their effective availability after VRCForge package checks. disabledBy=vrcforge_package_store identifies the App's package enablement switch; coreEnabled/coreReason retain the original Unity Core state. when-NOT-to-use: listing ordinary Skills or treating compilation as permission to invoke a disabled package.",
         "read/debug",
         lambda args: list_user_tools(args, user_tool_service(), lambda name, payload: extract_tool_result_payload(invoke_user_core(args, name, payload))),
     )
@@ -25552,9 +25667,9 @@ def register_agent_gateway_tools() -> None:
         "read/debug",
         EXTERNAL_INSTALLED_SKILL_REGISTRY.read_installed_skill,
     )
-    AGENT_GATEWAY.register_tool("vrcforge_tool_registry", "List standardized VRCForge tool metadata for Desktop, MCP, and CLI surfaces.", "read/debug", lambda params: AGENT_GATEWAY.build_tool_registry(exposure_layer=normalize_exposure_layer(ensure_dict(params).get("exposureLayer"))))
+    AGENT_GATEWAY.register_tool("vrcforge_tool_registry", "List standardized VRCForge tool metadata for Desktop, MCP, and CLI surfaces.", "read/debug", _build_app_planner_tool_registry)
     AGENT_GATEWAY.register_tool("vrcforge_external_agent_connectors", "Generate loopback MCP connector templates for external coding agents without exposing plaintext tokens.", "read/debug", connector_bundle_sync)
-    AGENT_GATEWAY.register_tool("vrcforge_list_skill_packages", "List installed community .vsk skill packages.", "read/debug", list_skill_packages_sync)
+    AGENT_GATEWAY.register_tool("vrcforge_list_skill_packages", "Inspect .vsk packages installed in VRCForge and their App-level enabled state, independently of Unity Core's compiled catalog.", "read/debug", list_skill_packages_sync)
     AGENT_GATEWAY.register_tool("vrcforge_preflight_skill_package", "When to use: inspect and verify one existing local .vsk Skill package before import. When NOT to use: do not treat preflight as proof that the package was installed. Negative example: use import, not preflight, when the requested outcome is an installed Skill.", "plan/preview", preflight_skill_package_sync)
     AGENT_GATEWAY.register_tool(
         "vrcforge_preview_path_to_skill",
@@ -26072,7 +26187,7 @@ def register_agent_gateway_tools() -> None:
         "medium",
         PATH_TO_SKILL_WRITE.write,
     )
-    register_write_handler("vrcforge_set_skill_package_enabled", "Enable or disable an installed .vsk skill package and its projected user skill.", "medium", SKILL_PACKAGE_CONTROLLER.set_enabled)
+    register_write_handler("vrcforge_set_skill_package_enabled", "Enable or disable an installed .vsk package in VRCForge's package store and its projected user skill. This changes App enablement, not Unity manifests or compiled Core.", "medium", SKILL_PACKAGE_CONTROLLER.set_enabled)
     register_write_handler("vrcforge_uninstall_skill_package", "Uninstall an installed .vsk skill package and optionally remove its projected user skill.", "medium", SKILL_PACKAGE_CONTROLLER.uninstall)
     register_write_handler(
         "vrcforge_repair_project_chat_store",

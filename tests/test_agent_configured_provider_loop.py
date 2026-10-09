@@ -79,7 +79,10 @@ def _planner_loopback(
         else:
             name = str(response.get("skill_tool") or "")
             arguments = response.get("skill_params") or {}
-        return name, arguments if isinstance(arguments, dict) else {}
+        arguments = arguments if isinstance(arguments, dict) else {}
+        if name in {"load_internal_tool_block", "unload_internal_tool_block"}:
+            return name, arguments
+        return "call_tool", {"tool": name, "arguments": arguments}
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, _format: str, *_args: object) -> None:
@@ -274,6 +277,12 @@ def test_persisted_provider_shape_drives_real_multiturn_loop_to_finish(tmp_path)
     assert all(record["path"] == "/v1/chat/completions" for record in records)
     assert all(record["authorization"] == "Bearer fixture-loop-key" for record in records)
     assert all(record["body"]["model"] == "loop-model" for record in records)
+    tools = records[0]["body"]["tools"]
+    assert {tool["function"]["name"] for tool in tools} == {
+        "call_tool", "load_internal_tool_block", "unload_internal_tool_block",
+        "vrcforge_runtime_action",
+    }
+    assert all(record["body"]["tools"] == tools for record in records)
     assert "vrcforge_read_text_file completed" in json.dumps(records[1]["body"]["messages"])
     assert "vrcforge_read_text_file completed" in json.dumps(records[2]["body"]["messages"])
     assert result["contextUsage"]["cumulativeInputTokens"] == 33

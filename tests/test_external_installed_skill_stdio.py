@@ -127,7 +127,10 @@ def test_installed_skill_stdio_branch_loads_only_when_requested(
         assert inventory["tree"]["name"] == "project_environment/files"
         assert inventory["tree"]["loaded"] is False
 
-        legacy = call(3, "vrcforge_load_tool_block", {"block": "skills"})
+        browsed = call(20, "vrcforge_load_tool_block", {"block": "skills"})
+        assert browsed["loadedBlocks"] == ["core"]
+        assert installed_tools.isdisjoint({item["name"] for item in rpc(21, "tools/list", {})["tools"]})
+        legacy = call(3, "vrcforge_load_tool_block", {"block": "skills", "toolNames": sorted(installed_tools)})
         assert legacy["block"] == "project_environment/files"
         assert legacy["loadedBlocks"] == ["core", "project_environment/files"]
         assert legacy["activation"]["blocks"] == ["project_environment/files"]
@@ -137,7 +140,7 @@ def test_installed_skill_stdio_branch_loads_only_when_requested(
         }
         assert installed_tools <= visible_after_alias_load
 
-        loaded = call(5, "vrcforge_load_tool_block", {"block": "skills"})
+        loaded = call(5, "vrcforge_load_tool_block", {"block": "skills", "toolNames": sorted(installed_tools)})
         assert loaded["block"] == "project_environment/files"
         assert loaded["loadedBlocks"] == ["core", "project_environment/files"]
         after = {item["name"] for item in rpc(6, "tools/list", {})["tools"]}

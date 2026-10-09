@@ -148,6 +148,9 @@
     "mustNot": ["collapse_tool_error_to_false", "drop_failed_step", "drop_handler_diagnostics", "replace_specific_cause_with_generic_failure", "continue_after_failed_write"]
   },
   "skinningContract": {
+    "requiredRoutes": ["same_skeleton_smr", "foreign_skeleton_smr"],
+    "notApplicableRoutes": ["rigid", "independent_skeleton_physbone", "animator_menu"],
+    "notApplicableContract": "weighted_smr_remap_and_bindpose_diagnostics_only; independent_physbone_smr_still_requires_actual_nonzero_used_bone_chain_and_renderer_reference_closure_without_cross_skeleton_remap",
     "required": ["renderer.bones", "renderer.rootBone", "renderer.bindposes", "allUsedBonesResolved", "allUsedBindposesResolved", "noOutOfRangeWeights", "mixedChainClosure", "safeForWeightedRemap"],
     "informational": ["nullBoneCount", "unusedBoundBoneCount"],
     "rejectIf": ["truncated_scan", "unresolved_used_bone", "unresolved_used_bindpose", "no_out_of_range_weights_false", "mixed_chain_closure_false", "safe_for_weighted_remap_false"],
@@ -221,7 +224,7 @@
     "views": ["front", "side_left", "side_right", "back", "bottom"],
     "unobstructedCloseRootView": true
   },
-  "poseSweep": ["Rest", "AFK", "Upright", "VelocityZ", "AngularY", "body-size-min", "body-size-max", "face-tracking-min", "face-tracking-max"],
+  "poseSweep": {"routeScoped": true, "rigid": ["actual_attachment_angles", "motion_only_if_attachment_moves_in_selected_use"], "same_skeleton_smr": ["Rest", "AFK", "relevant_weighted_fit_and_motion_poses"], "foreign_skeleton_smr": ["Rest", "AFK", "relevant_weighted_fit_and_motion_poses"], "independent_skeleton_physbone": ["Rest", "AFK", "HeadDown", "HeadTurnLeft", "HeadTurnRight", "motion_and_collision"], "animator_menu": ["selected_controls_and_parameters"], "bodyFaceExtremes": "only_when_relevant_to_selected_weighted_route_or_explicitly_requested"},
   "pitfallMatrix": [
     {"symptom": "floating_or_exploding_mesh", "rootCause": "wrong_parent_or_bindpose_or_mixed_chain", "check": "weights_bones_rootBone_bindposes", "forbidden": "scale_target_body_or_accept_build", "reversibleFix": "disable_staged_copy_restore_checkpoint_remap_chain", "dynamicAcceptance": "full_pose_sweep_no_detachment"},
     {"symptom": "motion_only_attachment_seam", "rootCause": "wrong_target_chain_or_transform", "check": "weighted_target_and_world_local_readback", "forbidden": "trust_transform_receipt_only", "reversibleFix": "disable_staged_copy_restore_checkpoint_refit", "dynamicAcceptance": "five_views_rest_and_motion"},
@@ -245,6 +248,9 @@
     "communityRouteOverride": "no_predicted_skin_matrix_comparison_or_remap_by_default_requires_separate_authorization"
   },
   "dynamicAcceptance": {
+    "routeScoped": true,
+    "mandatoryPoseSetsByRoute": {"rigid": ["actual_attachment_motion_if_any"], "same_skeleton_smr": ["Rest", "AFK", "relevant_weighted_fit_motion"], "foreign_skeleton_smr": ["Rest", "AFK", "relevant_weighted_fit_motion"], "independent_skeleton_physbone": ["Rest", "AFK", "relevant_physbone_motion_and_collision"], "animator_menu": ["selected_control_states"]},
+    "bodyFaceExtremesOnlyWhenRelevantOrExplicitlySelected": true,
     "poses": ["Rest", "AFK", "Upright", "VelocityZ", "AngularY"],
     "optionalExtremes": ["body-size-min", "body-size-max", "face-tracking-min", "face-tracking-max"],
     "views": ["front", "side_left", "side_right", "back", "bottom"],
@@ -456,16 +462,17 @@
     ],
     "undersideDependent": {"angle": "bottom", "rotation": [-90, 0, 0]}
   },
-  "acceptanceViewContract": {"count": 5, "requiredAngles": ["front", "side_left", "side_right", "back", "bottom"], "unobstructed": true, "requiresReturnedRotation": true, "basis": "orthogonal", "obliqueViewsCountTowardsAcceptance": false},
+  "acceptanceViewContract": {"routeScoped": true, "rigid": "minimum_angles_needed_to_verify_actual_attachment", "same_skeleton_smr": ["front", "side_left", "side_right", "back"], "foreign_skeleton_smr": ["front", "side_left", "side_right", "back"], "independent_skeleton_physbone": ["front", "side_left", "side_right", "back"], "bottomWhen": ["underside_dependent_part", "cat_ear_strict_profile"], "strictCatEarProfile": "see_catEarDeformationDiagnosticsContract", "unobstructed": true, "requiresReturnedRotation": true, "basis": "orthogonal", "obliqueViewsCountTowardsAcceptance": false},
   "acceptanceRequires": [
     "static_attachment_pixels",
     "gesture_manager_motion",
     "target_dependency_readback",
     "source_unchanged_readback",
     "cat_ear_aabb_skin_matrix_diagnostics_when_present",
-    "complete_pose_sweep",
-    "unobstructed_five_views"
+    "selected_route_pose_acceptance",
+    "selected_route_required_views"
   ],
+  "acceptanceRequirementsByRoute": {"rigid": ["static_attachment_pixels", "target_bone_and_local_trs_readback", "actual_motion_if_any"], "same_skeleton_smr": ["weighted_fit_deformation_and_relevant_pose_sweep", "route_appropriate_views"], "foreign_skeleton_smr": ["weighted_fit_deformation_and_relevant_pose_sweep", "route_appropriate_views"], "independent_skeleton_physbone": ["reference_closure", "physbone_motion_and_collision", "strict_cat_ear_profile_when_cat_ears_or_explicitly_selected"], "animator_menu": ["selected_controls_and_parameter_readback"]},
   "approval": {
     "required": true,
     "owner": "runtime_supervision_layer",

@@ -10,13 +10,13 @@ import unity_read_input_schemas
 import unity_shared_input_schemas
 
 
-def test_read_schemas_keep_single_owner_and_reviewed_revision_160_contract() -> None:
+def test_read_schemas_keep_single_owner_and_reviewed_paging_progress_contract() -> None:
     schemas = unity_read_input_schemas.UNITY_READ_TOOL_INPUT_SCHEMAS
     assert agent_gateway.UNITY_READ_TOOL_INPUT_SCHEMAS is schemas
-    # Revision 160 includes the reviewed reader additions and shader paging,
-    # removes ignored output options, and requires explicit copy destinations.
+    # Includes avatar/text/search paging, summary-first animation bindings and
+    # scoped progress schemas in addition to the original reviewed readers.
     encoded = json.dumps(schemas, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
-    assert hashlib.sha256(encoded).hexdigest() == "dea6c63d3cdef2040aa54d616fdd4839e2a309d8fef5fafd694291586a3e361b"
+    assert hashlib.sha256(encoded).hexdigest() == "8e731bcf0e530c386bf516750681035e1d3253504f68d9047afe56255d2c794c"
     assert schemas["vrcforge_preview_texture_import_settings"] is unity_shared_input_schemas.TEXTURE_IMPORT_SETTINGS_PUBLIC_INPUT_SCHEMA
     assert schemas["vrcforge_preview_manage_fx_animator"] is unity_shared_input_schemas.MANAGE_FX_ANIMATOR_PUBLIC_INPUT_SCHEMA
 

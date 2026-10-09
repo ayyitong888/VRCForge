@@ -8,7 +8,7 @@ import pytest
 
 import dashboard_server as host
 from agent_runtime_native_turn import NativeRuntimeTurn
-from runtime_planner_service import PlannerModelResult, RuntimePlannerService
+from runtime_planner_service import PlannerModelResult, RuntimePlannerService, planner_tool_usage_description
 
 
 class CapturingNativeModel:
@@ -41,9 +41,13 @@ def native_request_tools(planner, model, state, session_id, owner, *, exposure_l
     return {item["function"]["name"]: item for item in model.requests[-1]["tools"]}
 
 
-def assert_definition_prefix(previous, current):
-    # Dict equality ignores order; compare full ordered definitions at the send boundary.
-    assert list(current.values())[:len(previous)] == list(previous.values())
+def call_tool_receipt(name, arguments):
+    import json
+
+    return {"tool_calls": [{"id": "call-1", "function": {
+        "name": "call_tool",
+        "arguments": json.dumps({"tool": name, "arguments": arguments}),
+    }}]}
 
 
 @pytest.mark.parametrize("project_context_active", [False, True], ids=["general", "unity"])
@@ -79,6 +83,15 @@ def test_web_tools_are_discovered_and_loaded_through_runtime_catalog(
             exposure_layer=exposure_layer, project_context_active=project_context_active,
         )
 
+    def selected_native_tools():
+        _, tools = planner._build_native_plan_request(
+            [], observe={"internalToolSelections": state.internal_tool_selections(session_id)},
+            exposure_layer=exposure_layer, project_context_active=project_context_active,
+            project_path=None, internal_tool_blocks=state.internal_tool_blocks(session_id),
+            global_instructions="", project_instructions="",
+        )
+        return tools
+
     try:
         registered = {
             tool.name: tool for tool in catalog.read(
@@ -104,23 +117,47 @@ def test_web_tools_are_discovered_and_loaded_through_runtime_catalog(
         })
         assert selected["ok"] is True and selected["status"] == "loaded"
         subset = request_tools()
-        assert set(subset) - set(before) == {"web_fetch"}
-        assert "web_search" not in subset
-        assert subset["web_fetch"]["function"]["parameters"] == dict(registered["web_fetch"].input_schema)
-        assert all(subset[name] == definition for name, definition in before.items())
-        assert_definition_prefix(before, subset)
+        assert list(subset.items()) == list(before.items())
+
+        loaded_observation = planner.native_result_observation({
+            "tool": "vrcforge_load_internal_tool_block", "status": "completed",
+            "result": selected, "outcome": {"status": "succeeded"},
+        }, project_context_active=project_context_active)
+        definitions = loaded_observation["loadedToolDefinitions"]
+        assert [item["name"] for item in definitions] == ["web_fetch"]
+        assert definitions[0]["description"] == planner_tool_usage_description(
+            "web_fetch", registered["web_fetch"].description, write=False)
+        assert definitions[0]["parameters"] == dict(registered["web_fetch"].input_schema)
+
+        native_tools = selected_native_tools()
+        _, rejection = planner._native_action_payload(call_tool_receipt("web_fetch", {"url": "https://example.invalid"}), native_tools)
+        assert rejection is None
+        _, rejection = planner._native_action_payload(call_tool_receipt("web_search", {"query": "offline"}), native_tools)
+        assert rejection and rejection["issues"][0]["code"] == "tool_not_visible"
 
         whole = host.load_internal_tool_block({**params, **leaf["expandArguments"], "tools": leaf["toolNames"]})
         assert whole["ok"] is True and whole["status"] == "loaded"
         after = request_tools()
-        assert set(after) - set(before) == web_names
-        assert after["web_fetch"] == subset["web_fetch"]
-        assert after["web_search"]["function"]["parameters"] == dict(registered["web_search"].input_schema)
-        assert all(after[name] == definition for name, definition in before.items())
-        assert_definition_prefix(subset, after)
+        assert list(after.items()) == list(before.items())
+
+        whole_observation = planner.native_result_observation({
+            "tool": "vrcforge_load_internal_tool_block", "status": "completed",
+            "result": whole, "outcome": {"status": "succeeded"},
+        }, project_context_active=project_context_active)
+        whole_definitions = whole_observation["loadedToolDefinitions"]
+        assert [item["name"] for item in whole_definitions] == ["web_fetch", "web_search"]
+        for item in whole_definitions:
+            assert item["description"] == planner_tool_usage_description(
+                item["name"], registered[item["name"]].description, write=False)
+        assert {item["name"]: item["parameters"] for item in whole_definitions} == {
+            name: dict(registered[name].input_schema) for name in ("web_fetch", "web_search")
+        }
 
         host.unload_internal_tool_block({**params, **leaf["expandArguments"]})
         assert request_tools() == before
+        native_tools = selected_native_tools()
+        _, rejection = planner._native_action_payload(call_tool_receipt("web_fetch", {"url": "https://example.invalid"}), native_tools)
+        assert rejection and rejection["issues"][0]["code"] == "tool_not_visible"
     finally:
         state.discard_session(session_id)
 
@@ -147,8 +184,9 @@ def test_native_send_appends_across_real_leaves_and_later_whole_leaf_load(monkey
 
     try:
         before = request_tools()
-        # Load two different real leaves, then expand the first leaf. New members
-        # must append after the other leaf, not merely after the resident core.
+        fixed_order = list(before.items())
+        # Load two different real leaves, then expand the first leaf. The native
+        # transport definitions remain fixed; load receipts carry tool schemas.
         stages = [
             ("research/web_research", ["web_fetch"]),
             ("behavior/parameters_menus_layers", ["unity_scan_parameters", "unity_scan_wardrobe"]),
@@ -161,9 +199,6 @@ def test_native_send_appends_across_real_leaves_and_later_whole_leaf_load(monkey
             result = host.load_internal_tool_block(arguments)
             assert result["ok"] is True and result["status"] == "loaded"
             current = request_tools()
-            assert_definition_prefix(before, current)
-            assert len(current) > len(before)
-            before = current
-        assert list(before)[-1] == "web_search"
+            assert list(current.items()) == fixed_order
     finally:
         state.discard_session(session_id)

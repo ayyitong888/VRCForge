@@ -9,21 +9,25 @@ from internal_tool_blocks import internal_tool_block_for_name
 from runtime_planner_service import PlannerCatalogSnapshot, RuntimePlannerService
 
 
-def prompt(*, observe=None, active=False, catalog=None):
+def prompt(*, observe=None, active=False, catalog=None, blocks=None):
     service = RuntimePlannerService(catalog=catalog or app._RuntimePlannerCatalog(), desktop=object())
     return service._build_llm_plan_prompt(
         "Read https://example.org/reference and quote its first two rules", [],
-        observe=observe, internal_tool_blocks=["core"], project_context_active=active,
+        observe=observe, internal_tool_blocks=blocks or ["core"], project_context_active=active,
     )
 
 
-def test_fresh_general_planner_has_basic_web_reads_without_loading():
+def test_general_planner_exposes_web_reads_only_after_loading_owner_leaf():
     text = prompt()
+    assert "- web_fetch runtimeAlias=" not in text
+    assert "- web_search runtimeAlias=" not in text
+    assert "Prefer web_fetch" not in text
+    text = prompt(blocks=["core", "research/web_research"])
     assert "- web_fetch runtimeAlias=vrcforge_web_fetch schema=" in text
     assert "- web_search runtimeAlias=vrcforge_web_search schema=" in text
     assert "Prefer web_fetch for reading a supplied public URL" in text
-    assert internal_tool_block_for_name("vrcforge_web_fetch", "general") == "core"
-    assert internal_tool_block_for_name("vrcforge_web_search", "general") == "core"
+    assert internal_tool_block_for_name("vrcforge_web_fetch", "general") == "research/web_research"
+    assert internal_tool_block_for_name("vrcforge_web_search", "general") == "research/web_research"
 
 
 def test_basic_web_exposure_does_not_make_unity_writes_core_or_planning_visible():

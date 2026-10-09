@@ -71,13 +71,21 @@ target Avatar. First inspect whether the retained donor head has a complete
 face-tracking contract. Read [references/workflow.md](references/workflow.md)
 before planning or requesting any write.
 
-Identify the one active final head renderer before choosing a branch. Read back
-`Descriptor.VisemeSkinnedMesh`, lipsync mode, renderer active state, and the
-complete expected viseme/gesture/expression animation-binding set. The active
-renderer must be the actual viseme/lipsync target and every expected binding
-must resolve to its path. An inactive old/donor renderer may remain recoverable
-during staging, but it must not remain a Descriptor target, the Animator's sole
-target, or the only path satisfying any expected expression binding.
+Resolve lip sync mode first. Read back the current resolved mode without
+mutation. If it remains Default, ask approval before SDK Auto Detect or an
+explicit mode change; unresolved means capability gap. Viseme Blend Shape
+requires `VisemeSkinnedMesh`; Jaw Flap Blend Shape
+requires its actual Jaw renderer and shape; Jaw Flap Bone requires its actual
+JawBone target; Viseme Parameter Only requires its parameter consumer. Read each available
+target and binding against its actual active renderer; multiple active head
+renderers are valid when every expected expression/gesture binding resolves.
+If a required JawBone or binding cannot be read, report `capabilityGap=true`
+and `ready=false`, never a pass. This is mode-specific acceptance, not a single-
+renderer rule. Keep old/donor paths recoverable during staging.
+
+Keep Modular Avatar ReplaceObject as a community-supported head-replacement
+option, applying it conditionally when the selected route replaces an existing
+referenced object path; do not require it for unrelated routes.
 
 This workflow requires VRCForge 1.7.9 or newer because true named `Bottom`
 capture and the causal result contract are hard acceptance gates. On an older
@@ -165,10 +173,10 @@ specific handler cause with a generic workflow failure. Do not retry a write
 while commit state is unknown. A Build & Test result cannot override a visible
 neck gap or a missing dynamic control.
 
-The 5.6-sol contract requires route classification (`rigid`, same/foreign
-skeleton SMR, independent-skeleton PhysBone, or Animator/Menu), mandatory
-`allUsedBonesResolved`, `allUsedBindposesResolved`, `noOutOfRangeWeights`,
-`mixedChainClosure`, and `safeForWeightedRemap` checks. `nullBoneCount` and
+The VRCForge project acceptance profile requires route classification (`rigid`, same/foreign
+skeleton SMR, independent-skeleton PhysBone, or Animator/Menu); weighted-bone,
+bindpose, weight, mixed-chain, and remap safety checks apply only to same/foreign
+weighted-SMR routes. `nullBoneCount` and
 other unweighted null slots are informational and must not block. Outside the
 default community route, and only after separate matrix authorization, a
 single-slot remap may compare predicted skinning metrics against the donor-chain
@@ -202,3 +210,5 @@ drift, pose-dependent gap/seam size, sudden AABB inflation/collapse/translation,
 non-finite vertex, or unexplained skin-matrix scale/translation jump is reported
 as an authorized diagnostic anomaly, not visual pass/fail evidence; do not
 "repair matrices" as a normal user step.
+
+This VRCForge project acceptance profile is not a VRChat or Unity standard.

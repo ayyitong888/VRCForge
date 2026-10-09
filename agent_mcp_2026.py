@@ -10,10 +10,14 @@ approval policy remain owned by the gateway that mounts this transport.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
 import json
 import math
 import sys
+import secrets
+import time
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Mapping, Sequence, TextIO
 from urllib.parse import urlsplit
@@ -31,6 +35,8 @@ CLIENT_CAPABILITIES_META_KEY = "io.modelcontextprotocol/clientCapabilities"
 CLIENT_INFO_META_KEY = "io.modelcontextprotocol/clientInfo"
 DEFAULT_MAX_BODY_BYTES = 1_048_576
 DEFAULT_MAX_STDIO_LINE_BYTES = 1_048_576
+HTTP_SESSION_IDLE_SECONDS = 15 * 60
+HTTP_MAX_SESSIONS = 256
 
 HEADER_MISMATCH = -32020
 MISSING_REQUIRED_CLIENT_CAPABILITY = -32021
@@ -843,12 +849,17 @@ def create_asgi_app(
     bearer_validator: BearerValidator | None = None,
     max_body_bytes: int = DEFAULT_MAX_BODY_BYTES,
     route_path: str = "/",
+    request_context: Callable[[str], AbstractContextManager[Any]] | None = None,
 ):
-    """Create a POST-only, loopback-origin-checked Starlette endpoint.
+    """Create the VRCForge 2026 extension's loopback HTTP endpoint.
 
     When a bearer validator is supplied, the endpoint requires a single
     ``Authorization: Bearer <token>`` credential and delegates validation to
-    it.  The caller owns token issuance, permissions, and lifecycle.
+    it. The caller owns token issuance and permissions. server/discover issues
+    an opaque request-context session, not a project authorization. Sessions
+    belong to this app instance and the authenticated bearer, expire after
+    fifteen idle minutes, and may be explicitly closed with DELETE. This is
+    not the standard MCP initialize/Streamable HTTP lifecycle.
     """
     if max_body_bytes <= 0:
         raise ValueError("max_body_bytes must be positive")
@@ -856,22 +867,28 @@ def create_asgi_app(
         raise ValueError("route_path must be an absolute path without a trailing slash")
     try:
         from starlette.requests import Request
-        from starlette.responses import JSONResponse
+        from starlette.responses import JSONResponse, Response
         from starlette.routing import Route
         from starlette.applications import Starlette
     except ImportError as exc:  # pragma: no cover - package environment error
         raise RuntimeError("Starlette is required for the MCP HTTP transport") from exc
 
+    # Access stays on the ASGI event loop. Active requests are not idle and
+    # cannot be reclaimed while their callback is still running.
+    sessions: dict[str, dict[str, Any]] = {}
+
     async def endpoint(request: Request):
-        if request.method != "POST":
+        deleting = request.method == "DELETE" and bool(request.headers.get("Mcp-Session-Id"))
+        if request.method != "POST" and not deleting:
             return JSONResponse(_error(None, -32601, "Only POST is supported"), status_code=405, headers={"Allow": "POST"})
         try:
             host = _single_header(request, "Host")
             origin = _single_header(request, "Origin", required=False)
             accept = ",".join(_request_header_values(request, "Accept"))
-            protocol_version = _single_header(request, "MCP-Protocol-Version")
-            content_type = _single_header(request, "Content-Type")
-            method_header = _single_header(request, "Mcp-Method")
+            protocol_version = _single_header(request, "MCP-Protocol-Version", required=not deleting)
+            content_type = _single_header(request, "Content-Type", required=not deleting)
+            method_header = _single_header(request, "Mcp-Method", required=not deleting)
+            session_id = _single_header(request, "Mcp-Session-Id", required=False)
             content_length_values = _request_header_values(request, "Content-Length")
             if len(content_length_values) > 1:
                 raise Mcp2026Error(HEADER_MISMATCH, "Content-Length must appear at most once", 400)
@@ -882,6 +899,29 @@ def create_asgi_app(
             return JSONResponse(_error(None, -32600, "MCP endpoint host must be loopback"), status_code=403)
         if origin and not _origin_is_loopback(origin):
             return JSONResponse(_error(None, -32600, "Origin must be a loopback origin"), status_code=403)
+        token = ""
+        if bearer_validator is not None:
+            authorization_values = _request_header_values(request, "Authorization")
+            authorization = authorization_values[0] if len(authorization_values) == 1 else ""
+            parts = authorization.split(" ")
+            token = parts[1] if len(parts) == 2 and parts[0].lower() == "bearer" else ""
+            if not token or any(character.isspace() for character in token) or not await _resolve(bearer_validator(token)):
+                payload = _error(None, -32000, "Bearer authentication failed")
+                return JSONResponse(payload, status_code=401, headers={"WWW-Authenticate": "Bearer"})
+        owner = hashlib.sha256(token.encode("utf-8")).hexdigest()
+        now = time.monotonic()
+        for expired in [key for key, state in sessions.items()
+                        if not state["active"] and now - state["lastUsed"] >= HTTP_SESSION_IDLE_SECONDS]:
+            sessions.pop(expired, None)
+        if session_id:
+            state = sessions.get(session_id)
+            if state is None:
+                return JSONResponse(_error(None, -32000, "Unknown or expired MCP session"), status_code=404)
+            if not secrets.compare_digest(state["owner"], owner):
+                return JSONResponse(_error(None, -32000, "MCP session belongs to another credential"), status_code=403)
+        if deleting:
+            sessions.pop(session_id, None)
+            return Response(status_code=204)
         if not (_header_has_media_type(accept, "application/json") and _header_has_media_type(accept, "text/event-stream")):
             payload, status = _transport_error("Accept must include application/json and text/event-stream")
             return JSONResponse(payload, status_code=status)
@@ -899,14 +939,6 @@ def create_asgi_app(
             except ValueError:
                 payload, status = _transport_error("Content-Length must be an integer")
                 return JSONResponse(payload, status_code=status)
-        if bearer_validator is not None:
-            authorization_values = _request_header_values(request, "Authorization")
-            authorization = authorization_values[0] if len(authorization_values) == 1 else ""
-            parts = authorization.split(" ")
-            token = parts[1] if len(parts) == 2 and parts[0].lower() == "bearer" else ""
-            if not token or any(character.isspace() for character in token) or not await _resolve(bearer_validator(token)):
-                payload = _error(None, -32000, "Bearer authentication failed")
-                return JSONResponse(payload, status_code=401, headers={"WWW-Authenticate": "Bearer"})
         chunks: list[bytes] = []
         size = 0
         async for chunk in request.stream():
@@ -937,11 +969,32 @@ def create_asgi_app(
         elif name_values:
             payload, status = _transport_error("Mcp-Name is only valid for tools/call")
             return JSONResponse(payload, status_code=status)
-        payload, status = await router.handle_async(message)
-        return JSONResponse(payload, status_code=status)
+        created = method == "server/discover" and not session_id
+        if created and len(sessions) >= HTTP_MAX_SESSIONS:
+            return JSONResponse(_error(message.get("id"), -32000, "MCP session capacity reached"), status_code=503)
+        context_id = session_id or secrets.token_urlsafe(32)
+        if created:
+            sessions[context_id] = {"owner": owner, "lastUsed": now, "active": 0}
+        state = sessions.get(context_id)
+        if state is not None:
+            state["active"] += 1
+        try:
+            with request_context(context_id) if request_context is not None else nullcontext():
+                payload, status = await router.handle_async(message)
+        except BaseException:
+            if created:
+                sessions.pop(context_id, None)
+            raise
+        finally:
+            if state is not None:
+                state["active"] -= 1
+                state["lastUsed"] = time.monotonic()
+        if created and (status >= 400 or "error" in payload):
+            sessions.pop(context_id, None)
+        response_headers = {"Mcp-Session-Id": context_id} if context_id in sessions else {}
+        return JSONResponse(payload, status_code=status, headers=response_headers)
 
-    # Let Starlette produce the strict ``Allow: POST`` response for every
-    # non-POST method before the endpoint is entered.
+    # DELETE only closes a previously authenticated extension session.
     return Starlette(routes=[Route(route_path, endpoint, methods=["GET", "POST", "DELETE", "HEAD", "OPTIONS"])])
 
 

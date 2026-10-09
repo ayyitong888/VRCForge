@@ -66,8 +66,14 @@ def test_retained_context_reaches_native_and_legacy_and_all_pages_restore_it():
     request, _ = runtime._build_native_plan_request([{"role": "user", "content": user_message}], observe=observe,
         exposure_layer="planning", project_context_active=False, project_path="", internal_tool_blocks=None,
         global_instructions="", project_instructions="")
-    assert request["messages"][0]["content"] == user_message
-    assert "modelInformationPage=" in request["messages"][-1]["content"]
+    native_messages = request["messages"]
+    assert native_messages[0] == {"role": "user", "content": user_message}
+    context_snapshots = [item for item in native_messages if item.get("role") == "user"
+                         and "modelInformationPage=" in item.get("content", "")]
+    assert len(context_snapshots) == 1
+    assert native_messages.index(context_snapshots[0]) > 0
+    assert native_messages[-1]["role"] == "system"
+    assert native_messages[-1]["content"].startswith("Current runtime state (data): ")
     prompt = runtime._build_llm_plan_prompt(user_message, [], observe=observe)
     assert message in prompt
     page = row["modelInformationRead"]["page"]

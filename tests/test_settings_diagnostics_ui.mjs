@@ -50,6 +50,7 @@ const [workspace, panel, control, dialog, controller, api, app] = await Promise.
   read("src/lib/api/app.ts"),
   read("src/App.tsx"),
 ]);
+const feedback = await read("src/components/settings/support-feedback-panel.tsx");
 
 assert.ok(workspace.includes("<DiagnosticsSettingsPanel"));
 assert.ok(
@@ -82,6 +83,9 @@ assert.ok(panel.includes("const level = availableLevels[nextIndex]"));
 assert.ok(panel.includes("data-vrcforge-log-level={effectiveSelectedLevel}"));
 assert.ok(panel.includes("data-vrcforge-open-logs"));
 assert.ok(panel.includes("data-vrcforge-export-support"));
+assert.match(feedback, /const requestSequence = \+\+previewRequestSequence\.current;/);
+assert.match(feedback, /setPreview\(""\);[\s\S]*setBundleReady\(false\);/);
+assert.match(feedback, /if \(requestSequence !== previewRequestSequence\.current\) return;/);
 assert.ok(!panel.includes('t("settings.logRedaction")'));
 assert.ok(!panel.includes('t("settings.logRetention")'));
 assert.ok(!panel.includes("retentionDays"));

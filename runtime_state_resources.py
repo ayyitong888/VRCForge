@@ -39,8 +39,8 @@ def read_state_page(envelope):
     data = envelope["data"]
     if envelope.get("contentHash") != _hash({"identity": envelope["identity"], "data": data}):
         raise ValueError("Captured state resource content or identity changed.")
-    from mcp_resource_registry import _base_uri
-    base = _uri(data["jobId"], data["frameIndex"], data["offset"])
+    from mcp_resource_registry import _base_uri, scoped_base_uri
+    base = scoped_base_uri(_uri(data["jobId"], data["frameIndex"], data["offset"]), envelope.get("contextId"))
     query = parse_qs(urlsplit(envelope["uri"]).query, keep_blank_values=True)
     stores = query.get("store", [])
     if (_base_uri(envelope["uri"]) != base or query.get("revision") != ["1"]

@@ -2116,7 +2116,7 @@ class AgentLoopP0Tests(unittest.TestCase):
         self.assertEqual(correction["status"], "needs_correction")
         self.assertIn(
             result["task"]["actions"][0]["actionId"],
-            correction["outcome"]["summary"],
+            correction["outcome"]["nextAction"]["requiredEvidenceActionIds"],
         )
         self.assertEqual(result["plan"]["nextStep"], "done", result)
         self.assertEqual(result["plan"]["taskCompletion"]["status"], "completed")
@@ -2132,11 +2132,10 @@ class AgentLoopP0Tests(unittest.TestCase):
                 plan = {"action": "reply", "reply": "UNACCEPTED_DRAFT"}
             else:
                 self.assertIn("runtime_completion_gate", prompt)
-                self.assertIn("correct_completion_claim", prompt)
-                ids = list(dict.fromkeys(re.findall(r"action_[a-f0-9]+", prompt)))
-                self.assertTrue(ids)
+                self.assertIn("completion_claim.satisfied=true", prompt)
+                self.assertIn("Host binds IDs", prompt)
                 plan = {"action": "reply", "reply": "ACCEPTED_FINAL", "completion_claim": {
-                    "satisfied": True, "evidence_action_ids": ids,
+                    "satisfied": True,
                 }}
             text = json.dumps(plan)
             stream_callback(text)
@@ -2159,6 +2158,8 @@ class AgentLoopP0Tests(unittest.TestCase):
         self.assertEqual(len(prompts), 3, result)
         self.assertEqual(result["plan"]["reply"], "ACCEPTED_FINAL")
         self.assertEqual(result["plan"]["taskCompletion"]["status"], "completed")
+        self.assertEqual(result["plan"]["taskCompletion"]["evidenceActionIds"],
+                         [result["task"]["actions"][0]["actionId"]])
         assistant_events = [item for item in result["timeline"] if item.get("kind") == "assistant"]
         self.assertEqual(len(assistant_events), 1, result["timeline"])
         published = [payload["timelineEvent"] for kind, payload in events
@@ -4207,7 +4208,16 @@ class AgentLoopP0Tests(unittest.TestCase):
         self.assertEqual(executed, [valid_arguments])
         self.assertEqual(len(prompts), 3)
         self.assertIn("planner_invalid_response", prompts[1])
-        self.assertIn("materials scanned", prompts[2])
+        scan_step = next(step for step in result["steps"] if step["tool"] == "vrcforge_scan_materials")
+        self.assertIn("scanSummary=", prompts[2])
+        self.assertIn(scan_step["resultRead"]["resultRef"], prompts[2])
+        from agent_tool_result_reader import bind_tool_result_context, read_tool_result
+        from runtime_planner_service import sanitize_planner_observation_text
+        with bind_tool_result_context(result["sessionId"], result["turnId"], str(project), result["steps"]):
+            page = read_tool_result({"resultRef": scan_step["resultRead"]["resultRef"],
+                                     "jsonPointer": "/materials"}, sanitize=sanitize_planner_observation_text)
+        self.assertEqual(page["items"], [])
+        self.assertFalse(page["hasMore"])
         self.assertEqual(result["plan"]["nextStep"], "done")
         self.assertEqual(
             result["plan"]["taskCompletion"]["evidenceActionIds"],

@@ -66,10 +66,16 @@ def test_selected_manifest_preserves_internal_protocol_metadata(monkeypatch, tmp
     payloads=[]
     def request_json(*args,**kwargs):
         payloads.append(kwargs['payload'])
+        if kwargs['payload']['method'] == 'server/discover':
+            assert 'Mcp-Session-Id' not in kwargs['extra_headers']
+            kwargs['response_headers']['Mcp-Session-Id'] = 'fixture-session'
+            return {'result': {}}
+        assert kwargs['extra_headers']['Mcp-Session-Id'] == 'fixture-session'
         return {'result':{'tools':[]}}
     monkeypatch.setattr(bridge,'request_json',request_json)
     bridge.manifest('execution',['*'],['vrcforge_get_asset_info'])
-    meta=payloads[0]['params']['_meta']
+    assert [payload['method'] for payload in payloads] == ['server/discover', 'tools/list']
+    meta=payloads[1]['params']['_meta']
     assert meta['io.vrcforge/toolNames']==['vrcforge_get_asset_info']
     assert meta['io.modelcontextprotocol/protocolVersion']==PROTOCOL_VERSION
     assert meta['io.modelcontextprotocol/clientCapabilities']=={}

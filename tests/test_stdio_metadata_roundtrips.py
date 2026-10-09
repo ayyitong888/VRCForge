@@ -21,6 +21,7 @@ def session(monkeypatch, tmp_path, request):
                                  timeout_seconds=.1, start_runtime=False)
     calls, routers = [], []
     state = {"visible": True, "authenticated": True, "resources": 1, "prompts": "1"}
+    session_id = "fixture-mcp-session"
     descriptor = {"name": TOOL, "description": "When to use: inspect. When NOT to use: edit.",
                   "inputSchema": {"type": "object"},
                   "_meta": {"toolBlock": BLOCK, "permission": "ReadOnly"}}
@@ -33,6 +34,12 @@ def session(monkeypatch, tmp_path, request):
         calls.append((request["method"], copy.deepcopy(params)))
         assert kwargs["token"] == "fixture-token"
         assert method == "POST" and path == "/mcp"
+        if request["method"] == "server/discover":
+            assert "Mcp-Session-Id" not in kwargs["extra_headers"]
+            kwargs["response_headers"]["Mcp-Session-Id"] = session_id
+            result = {"protocolVersion": stdio.PROTOCOL_VERSION, "capabilities": {}}
+            return {"jsonrpc": "2.0", "id": request["id"], "result": result}
+        assert kwargs["extra_headers"]["Mcp-Session-Id"] == session_id
         if not state["authenticated"]:
             raise stdio.ExternalHttpBridgeError(status_code=401, path=path, body="denied")
         if state.get("fault") == "offline":
@@ -67,6 +74,7 @@ def session(monkeypatch, tmp_path, request):
     loaded = request("tools/call", {"name": "vrcforge_load_tool_block",
                                     "arguments": {"block": BLOCK, "toolNames": [TOOL]}})
     assert not loaded.get("error")
+    assert sum(method == "server/discover" for method, _ in calls) == 1
     calls.clear()
     router.drain_notifications()
     return request, calls, state, router, payload, bridge

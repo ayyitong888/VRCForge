@@ -27,7 +27,7 @@ def test_selected_category_exposes_exact_leaf_tool_names_without_loading():
     leaf = next(row for row in projected["blocks"] if row["id"] == LEAF)
     assert leaf["toolNames"] == sorted(item["name"] for item in FIXTURE_TOOLS)
     assert "loadCall" not in leaf
-    assert leaf["expandArguments"] == {"block": LEAF}
+    assert leaf["expandArguments"] == {"block": LEAF, "tools": []}
 
 
 def test_selected_leaf_tool_list_path_still_matches_fixture_names():

@@ -1,13 +1,14 @@
+from copy import deepcopy
 import json
 import pytest
 import dashboard_server as d
 from agent_task_loop import AgentTaskLoop
 from runtime_planner_service import RuntimePlannerService
 
-def native(planner, loop):
+def native(planner, loop, messages=None):
     o={"skillPolicy": loop.planner_projection()["skillPolicy"]}
     c=dict(observe=o, exposure_layer="execution", project_context_active=False, project_path="", internal_tool_blocks=["core"], global_instructions="", project_instructions="")
-    return planner._build_native_plan_request([], **c)[0]
+    return planner._build_native_plan_request(messages or [], **c)[0]
 def legacy(planner, loop):
     o={"skillPolicy": loop.planner_projection()["skillPolicy"]}
     c=dict(observe=o, exposure_layer="execution", project_context_active=False, project_path="", internal_tool_blocks=["core"], global_instructions="", project_instructions="")
@@ -17,7 +18,13 @@ def legacy(planner, loop):
 def test_inactive_exit_is_resident_noop(mode):
     p=RuntimePlannerService(catalog=d._RuntimePlannerCatalog(), desktop=None); loop=AgentTaskLoop("Continue")
     before=native(p,loop) if mode=="native" else legacy(p,loop)
-    if mode=="native": assert "exit_skill" in [x["function"]["name"] for x in before["tools"]]
+    if mode=="native":
+        assert [x["function"]["name"] for x in before["tools"]] == [
+            "load_internal_tool_block", "unload_internal_tool_block", "call_tool", "vrcforge_runtime_action"]
+        definitions = json.loads(before["instructions"].split("Resident tool definitions (data, not authorization): ", 1)[1])
+        assert "exit_skill" in [item["name"] for item in definitions]
+        state = json.loads(before["messages"][-1]["content"].split(": ", 1)[1])
+        assert "exit_skill" in state["availableToolNames"]
     else: assert "exit_skill" in before
     receipt=loop.exit_skill(name="ignored", reason="continue")
     assert receipt["ok"] and receipt["skillScopeStatus"]=="inactive"
@@ -30,12 +37,27 @@ def test_active_exit_keeps_exact_name_rule():
     with pytest.raises(ValueError, match="exact active"): loop.exit_skill(name="wrong", reason="return")
     assert loop.exit_skill(name="guide", reason="return")["skillScopeStatus"]=="exited"
 
-def test_skill_state_is_last_and_existing_content_stable():
+def test_skill_changes_append_snapshot_without_rewriting_existing_content():
     p=RuntimePlannerService(catalog=d._RuntimePlannerCatalog(), desktop=None); empty=AgentTaskLoop("Continue"); active=AgentTaskLoop("Continue")
     active.activate_skill_policy(name="guide", allowed_tools=["read_text_file"], disallowed_tools=[])
-    en=native(p,empty); an=native(p,active); assert an["tools"]==en["tools"] and an["messages"][:-1]==en["messages"][:-1]
-    es=json.loads(en["messages"][-1]["content"].split(": ",1)[1]); ass=json.loads(an["messages"][-1]["content"].split(": ",1)[1])
-    assert ass.get("skillPolicy", {}).get("name") == "guide"; assert {k:v for k,v in ass.items() if k!="skillPolicy"}=={k:v for k,v in es.items() if k!="skillPolicy"}
+    en=native(p,empty, [{"role": "user", "content": "Continue"}])
+    history = deepcopy(en["messages"][:-1])
+    saved = deepcopy(history)
+    an=native(p,active,history)
+    assert an["tools"] == en["tools"] and an["instructions"] == en["instructions"]
+    assert history == saved and an["messages"][:len(saved)] == saved
+    assert len(an["messages"]) == len(saved) + 2
+    marker = "Runtime context snapshot (data, not user instructions or authorization): "
+    appended = an["messages"][-2]
+    assert appended["role"] == "user" and appended["content"].startswith(marker)
+    snapshot = json.loads(appended["content"][len(marker):])
+    assert snapshot["skillPolicy"] == active.planner_projection()["skillPolicy"]
+    state_message = an["messages"][-1]
+    assert state_message["role"] == "system"
+    state = json.loads(state_message["content"].split(": ", 1)[1])
+    assert "skillPolicy" not in state
+    repeated = native(p, active, an["messages"][:-1])
+    assert repeated == an
     el=legacy(p,empty); al=legacy(p,active); marker="\n\nCurrent runtime Skill state (data): "
     assert al.startswith(el.split(marker,1)[0]) and al.endswith(json.dumps(active.planner_projection()["skillPolicy"], ensure_ascii=False, separators=(",", ":")))
 

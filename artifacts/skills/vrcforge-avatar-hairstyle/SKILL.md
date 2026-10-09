@@ -1,7 +1,7 @@
 ---
 name: vrcforge-avatar-hairstyle
 title: VRChat 发型切换
-description: Create one complete VRChat hairstyle switch including verified head attachment, the existing fewer-than-eight Bool or eight-or-more shared-Int convention, FX states, animation curves, expression-menu controls and separately authorized migration.
+description: Create or maintain one VRChat hairstyle switch using the user's confirmed selector convention for new designs and preserving existing Avatar parameters, menu paths and animation timing.
 permission-mode: approval_required
 risk-level: high
 entrypoint-tool: vrcforge_list_avatars
@@ -41,7 +41,7 @@ support-files:
 
 ## 什么时候使用
 
-新增、调整或检查一个独立发型切换，并根据包含默认发型的总数选择既有 Bool 或 Int 习惯。
+新增、调整或检查一个独立发型切换。新建方案遵循用户确认的个人选择器习惯；维护已有 Avatar 时按现场证据保留其参数、菜单路径、动画时序和选项行为。
 
 ## 什么时候不使用
 
@@ -51,5 +51,5 @@ support-files:
 
 对应技术或作者资产行为拿不准时，先查成熟 VRChat 社区教程、资产作者说明和官方文档；证据或现有精确原子不足时停止并返回 `capabilityGap=true`，不得猜测、虚构工具、复制未授权资产或修改任务范围外的 Avatar。
 
-详细步骤见 [操作说明](references/workflow.md) 和受签名保护的 [社区操作指引](workflows/hairstyle.json)；由 Agent 根据现场证据选择适用路线与真实原子工具。
+详细步骤见 [操作说明](references/workflow.md) 和受签名保护的 [社区操作指引](workflows/hairstyle.json)；社区的 Bool/Int 数量建议仅用于用户确认的新建习惯，不是平台强制规则，也不授权迁移已有结构。由 Agent 根据现场证据选择适用路线与真实原子工具。
 每项写入通过用户当前配置的权限策略、现有监督通道、精确 preview 和检查点；回滚需要单独确认。

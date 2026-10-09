@@ -3,7 +3,7 @@
 ![VRCForge — AI Agent + MCP for VRChat Avatar Editing](docs/assets/vrcforge-atelier-banner.png)
 
 [![Stable](https://img.shields.io/github/v/release/ayyitong888/VRCForge?label=stable&style=flat-square)](https://github.com/ayyitong888/VRCForge/releases/latest)
-![Current version](https://img.shields.io/badge/current-v1.8.6-d9487c?style=flat-square)
+![Current version](https://img.shields.io/badge/current-v1.8.8-d9487c?style=flat-square)
 [![License GPL-3.0-only](https://img.shields.io/badge/license-GPL--3.0--only-64748b?style=flat-square)](LICENSE)
 ![Platform Windows x64](https://img.shields.io/badge/platform-Windows%20x64-0ea5e9?style=flat-square)
 [![GitHub Stars](https://img.shields.io/github/stars/ayyitong888/VRCForge?style=social)](https://github.com/ayyitong888/VRCForge/stargazers)
@@ -31,10 +31,10 @@ project, so verify the result in your own project.
 
 > Back up your Unity / VRChat Avatar project before using any asset-writing feature.
 
-The current source targets v1.8.6, which has not been formally published. The latest stable release is [v1.8.5](https://github.com/ayyitong888/VRCForge/releases/tag/v1.8.5).
+The current source targets v1.8.8, which has not been formally published. The latest public release is [v1.8.7](https://github.com/ayyitong888/VRCForge/releases/tag/v1.8.7); see its release notes for build eligibility limitations.
 Get matching installers and Unity packages from that same Release.
 
-**[Download VRCForge v1.8.5](https://github.com/ayyitong888/VRCForge/releases/tag/v1.8.5)** · [Read the Release Notes](docs/RELEASE_NOTES_1.8.5.md)
+**[Download VRCForge v1.8.7](https://github.com/ayyitong888/VRCForge/releases/tag/v1.8.7)** · [Read the Release Notes](docs/RELEASE_NOTES_1.8.7.md)
 
 ## What VRCForge can do
 
@@ -85,7 +85,7 @@ Inspect → Plan → Check permissions → Apply → Read back and inspect → R
 Download these files from the
 [latest Release](https://github.com/ayyitong888/VRCForge/releases/latest):
 
-- For 1.8.6, use `VRCForge_Web_Installer_x64.exe`, or `VRCForge_Offline_Installer_x64.exe` for an offline install.
+- Use the selected release's `VRCForge_Web_Installer_x64.exe`, or `VRCForge_Offline_Installer_x64.exe` for an offline install.
 - `VRCForge.unitypackage`
 
 Then connect in three steps:
@@ -158,7 +158,7 @@ confirm and execute in the terminal through the same backend approval and recove
 ## Documentation
 
 - [User Manual / 使用手册](USER_MANUAL.md)
-- [v1.8.6 release notes](docs/RELEASE_NOTES_1.8.6.md)
+- [v1.8.8 candidate release notes](docs/RELEASE_NOTES_1.8.8.md)
 - [v1.7.10 stable release notes](docs/RELEASE_NOTES_1.7.10.md)
 - [Compatibility matrix](docs/COMPATIBILITY_MATRIX.md)
 - [Product regression contract](docs/PRODUCT_REGRESSION_CONTRACT.md)

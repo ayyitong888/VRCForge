@@ -6,6 +6,7 @@ import type { AgentDesktopAction, AgentProgress, WorkspaceDiffSummary } from "..
 import type { ProjectType } from "../../lib/chat-types";
 import { cn } from "../../lib/utils";
 import { AgentTodoPanel } from "./agent-todo-panel";
+import { CoreVersionNotice } from "./core-version-notice";
 import { RuntimeInfoRow, StatusDot } from "./runtime-sidebar-ui";
 import { ProjectWorkbenchSections, type UserAttachmentSource } from "./project-workbench-sections";
 
@@ -123,6 +124,7 @@ export function RightRuntimeSidebar({
         </button>
       </div>
 
+      {workspaceProjectType === "unity" ? <CoreVersionNotice detail={unityToolsComponent?.detail} /> : null}
       <div className="app-scrollbar min-h-0 flex-1 overflow-y-auto px-3 py-3">
         {projectWorkspace ? (
           <ProjectWorkbenchSections

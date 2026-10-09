@@ -7,7 +7,7 @@
     "accessory_attachment",
     "bone_proxy",
     "existing_constraint_preservation",
-    "accessory_bool_selector",
+    "accessory_selector",
     "fx_animator",
     "animation_curves",
     "expression_menu"
@@ -47,11 +47,14 @@
       "existing_modular_avatar_constraint",
       "proven_weighted_bone"
     ],
-    "selector": "one_saved_synced_bool_per_accessory",
+    "newDesignSelector": "user_confirmed_parameter_type_and_sync_design",
+    "existingProjectDesign": "preserve_observed_parameters_menu_paths_and_animation_timing",
+    "newDesign": "use_user_confirmed_selector_menu_path_and_animation_timing",
+    "automaticMigration": false,
     "preserveSourceOrderWeightsOffsetsWorldPoseAndDynamicChain": true,
     "doNotSubstituteAttachmentRoute": true,
     "doNotCreateUnsupportedModularAvatarConstraint": true,
-    "menuCategory": "换装 / 配饰"
+    "animationTiming": "preserve_existing_or_use_user_confirmed_new_design"
   },
   "steps": [
     {
@@ -78,6 +81,7 @@
         "vrcforge_add_modular_avatar_component"
       ],
       "writes": true,
+      "conditional": "only_if_requested_attachment_change_requires_it_after_inspection",
       "runtimePermissionGateRequired": true,
       "runtimeApprovalRequired": true
     },
@@ -88,6 +92,7 @@
         "vrcforge_ensure_expression_parameter"
       ],
       "writes": true,
+      "conditional": "only_if_requested_parameter_change_requires_it_after_inspection",
       "runtimePermissionGateRequired": true,
       "runtimeApprovalRequired": true
     },
@@ -98,6 +103,7 @@
         "vrcforge_ensure_animator_state"
       ],
       "writes": true,
+      "conditional": "only_if_requested_fx_change_requires_it_after_inspection",
       "runtimePermissionGateRequired": true,
       "runtimeApprovalRequired": true
     },
@@ -108,6 +114,7 @@
         "vrcforge_write_animation_curve"
       ],
       "writes": true,
+      "conditional": "only_if_requested_animation_change_requires_it_after_inspection",
       "runtimePermissionGateRequired": true,
       "runtimeApprovalRequired": true
     },
@@ -118,6 +125,7 @@
         "vrcforge_ensure_expression_menu_control"
       ],
       "writes": true,
+      "conditional": "only_if_requested_menu_change_requires_it_after_inspection",
       "runtimePermissionGateRequired": true,
       "runtimeApprovalRequired": true
     },
@@ -143,4 +151,3 @@
     "requiresSeparateApproval": true
   }
 }
-

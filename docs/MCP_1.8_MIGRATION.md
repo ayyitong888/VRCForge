@@ -48,6 +48,18 @@ Resource revisions remain readable as historical evidence, while a Prompt's
 current identity lock must use its latest revision. `resources/read` retrieves
 captured data and never silently scans or modifies Unity.
 
+Current Prompt context admission has a 300-second window from `capturedAt` for
+identity locks and the accepted captured-state/receipt types. This is a product
+policy, not a guarantee of current Unity state or an execution authorization TTL.
+Expired references are rejected by `prompts/get` with an explicit recapture
+instruction; `resources/read` continues to return the original historical record.
+An already returned Prompt is not retroactively revoked by this check.
+
+Explicitly capturing the same identity or live state after expiry creates a new
+immutable revision. Merely listing resources does not renew identity. Retrying
+publication of the same operation receipt or checkpoint diff does not renew its
+age: capture a new operation when current context is required.
+
 ## Prompt provenance and support files
 
 `prompts/list` returns discovery metadata without reading support-file bodies.
@@ -87,3 +99,24 @@ For the protocol's message formats, see the official
 and [Prompts](https://modelcontextprotocol.io/specification/2025-11-25/server/prompts)
 specifications. VRCForge's identity, provenance and receipt requirements are
 application contracts layered on those messages.
+# Resource session context
+
+Current resource discovery, identity locks and Prompt admission are scoped to
+one session. Tool catalogs remain shared. An authenticated caller may still
+read an explicitly supplied historical resource URI from another session; that
+read does not change the current identity, approvals or execution target.
+
+The VRCForge 2026 HTTP extension issues `Mcp-Session-Id` on `server/discover`.
+Send it on subsequent requests to retain current context. This is an extension
+of that endpoint, not standard MCP Streamable HTTP initialization. Each request
+still requires the existing Bearer credential; the session ID is not a project
+permission. Sessions belong to the server process, expire after 15 idle minutes,
+and may be ended with authenticated `DELETE /mcp`. Restarted/expired/unknown
+sessions are rejected, without replaying a tool call. Up to 256 sessions are
+retained; active requests are not reclaimed as idle.
+
+The bundled STDIO bridge negotiates and sends this header automatically.
+Headerless requests retain tool calls and explicit history reads, using a
+request-local context rather than a shared current identity. Internal runtime
+turns and continuations use their accepted runtime session. A fresh session
+must explicitly capture its own current identity before using a bound Prompt.

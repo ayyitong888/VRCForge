@@ -8,7 +8,7 @@ import pytest
 
 import agent_gateway
 import dashboard_server
-from unity_mcp_tool_contract import EXPECTED_TOOL_COUNT
+from unity_mcp_tool_contract import EXPECTED_TOOL_COUNT, EXPECTED_TOOL_NAMES
 
 from project_asset_copy import (
     ANCHOR_ROOT,
@@ -270,7 +270,10 @@ def test_core_and_external_registry_include_only_the_atomic_copy_surface() -> No
     })
     tool = (root / "Assets/VRCForge/Editor/Generic/DuplicateProjectAssetTool.cs").read_text(encoding="utf-8")
 
-    assert f'internal const int ToolCount = {EXPECTED_TOOL_COUNT};' in contract
+    internal_reads = {"vrc_capture_scan_scope", "vrc_validate_scan_scope"}
+    assert internal_reads.isdisjoint(EXPECTED_TOOL_NAMES)
+    assert all(f'{{ "{name}",' in contract for name in internal_reads)
+    assert f'internal const int ToolCount = {EXPECTED_TOOL_COUNT + len(internal_reads)};' in contract
     assert f'{{ "{TOOL_NAME}", "VRCForge.Editor.DuplicateProjectAssetTool" }}' in contract
     assert f'"{TOOL_NAME}",' in server
     assert '"vrcforge_duplicate_project_asset"' in dashboard

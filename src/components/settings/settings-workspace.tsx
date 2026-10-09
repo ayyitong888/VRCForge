@@ -305,7 +305,8 @@ export function SettingsWorkspace({
             </section>
 
             <section className="mt-10">
-              <DiagnosticsSettingsPanel
+                <DiagnosticsSettingsPanel
+                endpoint={endpoint}
                 developerOptionsEnabled={developerOptionsEnabled}
                 status={diagnosticsStatus}
                 message={diagnosticsMessage}

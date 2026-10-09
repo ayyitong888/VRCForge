@@ -149,7 +149,15 @@ def test_native_loop_rejects_omission_then_loads_only_corrected_names(tmp_path, 
         definitions = {item['function']['name']: item['function'] for item in request['tools']}
         assert definitions['load_internal_tool_block']['parameters']['required'] == ['tools']
         assert 'unused_read' not in definitions
-        assert ('read_text_file' in definitions) == (i >= 3)
+        assert 'read_text_file' not in definitions
+        if i >= 3:
+            assert 'call_tool' in definitions
+    selected = next(m for m in model.requests[3]['messages']
+                    if m.get('tool_call_id') == 'selected')
+    loaded = json.loads(selected['content'])['observations'][0]['loadedToolDefinitions']
+    assert [tool['name'] for tool in loaded] == ['read_text_file']
+    assert loaded[0]['parameters'] == next(tool.input_schema for tool in tools
+                                            if tool.name == 'read_text_file')
     rejection = next(m for m in model.requests[1]['messages'] if m.get('tool_call_id') == 'missing')
     assert 'missing_required' in rejection['content']
     assert 'tools' in rejection['content']

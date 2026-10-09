@@ -149,17 +149,20 @@ Rollback is separately approved and never automatic. Keep tool-call success
 separate from domain readiness, preserve exact causal fields, and never retry
 an unknown-commit write before target readback.
 
-The 5.6-sol contract requires route classification (rigid, same/foreign
-skeleton SMR, independent skeleton + PhysBone, or Animator/Menu), mandatory
-`allUsedBonesResolved`/`allUsedBindposesResolved`/`noOutOfRangeWeights`/
-`mixedChainClosure`/`safeForWeightedRemap` checks. `nullBoneCount` and other
+The VRCForge project acceptance profile requires route classification (rigid, same/foreign
+skeleton SMR, independent skeleton + PhysBone, or Animator/Menu); weighted-bone,
+bindpose, weight, mixed-chain, and remap safety checks apply only to same/foreign
+weighted-SMR routes. `nullBoneCount` and other
 unweighted null slots are informational, not blockers. Outside the community
 route, and only after separate matrix authorization, a single-slot remap may
 compare predicted skinning metrics against the donor-chain baseline; execute
 only when the target is materially closer, otherwise return
-`needsDccRerig=true`, `ready=false`. Require an unobstructed
-Rest/AFK/Upright/VelocityZ/AngularY/body-extreme/
-face-extreme sweep across Front, both Sides, Back, and Bottom. Missing atoms
+`needsDccRerig=true`, `ready=false`. Acceptance is route-scoped: rigid parts
+verify their actual attachment and only relevant motion/angles; weighted-SMR
+parts verify poses/views that exercise their weighted fit; independent PhysBone
+parts use applicable motion checks. The strict cat-ear Rest/AFK, HeadDown/turn,
+same-framing five-view profile remains mandatory for cat ears or when explicitly
+selected. Do not impose unrelated body/face extremes on rigid parts. Missing atoms
 must return `capabilityGap` and, when appropriate, `needsDccRerig` with
 `ready=false`; never claim acceptance from a Build result.
 Record and read back the runtime baseline around every pose; restore it after
@@ -194,3 +197,5 @@ both Sides, Back, and Bottom. Ear-root drift, a gap/seam that grows or
 shrinks between poses, sudden AABB inflation/collapse/translation, non-finite
 vertices, or an unexplained skin-matrix scale/translation jump is reported as an
 authorized diagnostic anomaly, not visual pass/fail evidence.
+
+This VRCForge project acceptance profile is not a VRChat or Unity standard.

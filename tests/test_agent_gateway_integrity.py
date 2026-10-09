@@ -2506,7 +2506,7 @@ def test_runtime_memory_is_wrapped_as_quoted_data_not_runtime_authority(tmp_path
     gateway = _gateway(tmp_path)
     gateway.bind_runtime_planner(
         RuntimePlannerService(
-            catalog=SimpleNamespace(read=lambda _exposure_layer: PlannerCatalogSnapshot()),
+            catalog=SimpleNamespace(read=lambda _exposure_layer, *, project_context_active: PlannerCatalogSnapshot()),
             desktop=SimpleNamespace(summarize_action_result=lambda _result: ""),
         )
     )

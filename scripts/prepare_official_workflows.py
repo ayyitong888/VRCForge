@@ -131,7 +131,7 @@ def prepare() -> dict[str, object]:
         preview = service.inspect_package(output)
         if (
             preview.manifest["id"] != package_id
-            or preview.manifest["version"] != "1.0.1"
+            or preview.manifest["version"] != source_manifest["version"]
             or preview.manifest.get("execution") != "agentic"
             or preview.manifest.get("name") != PACKAGE_TITLES[package_id]
             or preview.signature_status != "signed"

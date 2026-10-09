@@ -804,6 +804,7 @@ class MemoryReviewHost:
         ):
             return await persist_preflight_deferral("config_changed", "schema")
         request_payload: dict[str, Any] | None = None
+        request_batch_digest = ""
         request_cost_upper = 0.0
         selected_sources: list[SourceProjection] = []
         selected_source_identity: set[tuple[str, str, str]] = set()
@@ -813,6 +814,7 @@ class MemoryReviewHost:
                 scope,
                 input_cap,
             )
+            request_batch_digest = str(selection.get("batchDigest") or "")
             if not selected_sources:
                 return await persist_preflight_deferral(
                     "input_oversized",
@@ -983,6 +985,7 @@ class MemoryReviewHost:
                 scope=scope,
                 pricing=pricing,
                 attempts=provider_attempts,
+                batch_digest=request_batch_digest,
                 cost_upper_bound_usd=(
                     request_cost_upper * provider_attempts
                     if request_cost_upper > 0 and provider_attempts > 1

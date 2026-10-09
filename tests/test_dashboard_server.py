@@ -3484,7 +3484,7 @@ class DashboardServerTests(unittest.TestCase):
             guard = UnityPathGuard([workspace_path], current_root=workspace_path)
             past = (datetime.now(timezone.utc) - timedelta(minutes=2)).isoformat()
             shell_command = "Set-Content -Path Assets/background-goal.txt -Value guarded -Encoding utf8"
-            responses = iter([PlannerModelResult(text=json.dumps({"action": "enter_execution"})), PlannerModelResult(text=json.dumps({"action": "write", "write_tool": "unity_shell", "write_params": {"command": shell_command, "cwd": str(workspace_path), "workspace_root": str(workspace_path), "projectRoot": str(workspace_path)}}))])
+            responses = iter([PlannerModelResult(text=json.dumps({"action": "write", "write_tool": "unity_shell", "write_params": {"command": shell_command, "cwd": str(workspace_path), "workspace_root": str(workspace_path), "projectRoot": str(workspace_path)}}))])
             with (
                 bind_test_unity_path_guard(guard),
                 use_test_runtime_planner(
@@ -6806,6 +6806,7 @@ class DashboardServerTests(unittest.TestCase):
         baseline_owners = dashboard_server._RUNTIME_PLANNER_MODEL.active_call_count()
         provider_calls = 0
         transport_closed = threading.Event()
+        timing = {}
 
         def fake_request(
             _settings,
@@ -6817,11 +6818,13 @@ class DashboardServerTests(unittest.TestCase):
         ) -> LlmPlanResponse:
             nonlocal provider_calls
             provider_calls += 1
+            timing["provider_started"] = time.monotonic()
             if stream_activity_callback is not None:
                 stream_activity_callback({"type": "provider_event"})
             while cancel_event is None or not cancel_event.is_set():
                 time.sleep(0.002)
             transport_closed.set()
+            timing["transport_closed"] = time.monotonic()
             raise dashboard_server.RuntimePlannerProviderCancelledError("fixture observed cancellation")
 
         started_at = time.monotonic()
@@ -6848,7 +6851,9 @@ class DashboardServerTests(unittest.TestCase):
         self.assertLess(
             elapsed,
             0.75,
-            "the bounded idle timeout and cancel join must terminate the silent Provider call within one Windows scheduling margin",
+            "the bounded idle timeout and cancel join must terminate the silent Provider call within one Windows scheduling margin; "
+            f"total={elapsed:.3f}s, preparation={timing.get('provider_started', started_at) - started_at:.3f}s, "
+            f"transport={timing.get('transport_closed', started_at) - timing.get('provider_started', started_at):.3f}s",
         )
         self.assertEqual(payload["plan"]["plannerFailure"]["code"], "provider_timeout")
         self.assertEqual(payload["plan"]["plannerFailure"]["transportPhase"], "idle")
@@ -6911,8 +6916,6 @@ class DashboardServerTests(unittest.TestCase):
                 nonlocal planner_calls
                 planner_calls += 1
                 if planner_calls == 1:
-                    return PlannerModelResult(text=json.dumps({"action": "enter_execution"}))
-                if planner_calls == 2:
                     return PlannerModelResult(
                         text=json.dumps(
                             {
@@ -6945,7 +6948,7 @@ class DashboardServerTests(unittest.TestCase):
             )
 
         self.assertEqual(calls, [write_tool])
-        self.assertEqual(planner_calls, 2)
+        self.assertEqual(planner_calls, 1)
         self.assertEqual(payload["plan"]["nextStep"], "cancelled")
         self.assertEqual(
             [step["tool"] for step in payload["steps"] if step["kind"] == "write"],
@@ -7173,7 +7176,6 @@ class DashboardServerTests(unittest.TestCase):
             gateway.save_config(config)
             responses = iter(
                 [
-                    PlannerModelResult(text=json.dumps({"action": "enter_execution"})),
                     PlannerModelResult(
                         text=json.dumps(
                             {
@@ -8485,8 +8487,10 @@ class DashboardServerTests(unittest.TestCase):
         self.assertNotIn("DO_NOT_SEND_DATA_URL", prompt)
         self.assertNotIn("DO_NOT_SEND_DATA", prompt)
         self.assertNotIn("discount", prompt)
-        self.assertLessEqual(prompt.count("X"), 600)
-        self.assertLessEqual(len(observation), RUNTIME_PLANNER_TOOL_OBSERVATION_MAX_CHARS)
+        self.assertLessEqual(max((len(run) for run in re.findall(r"X+", prompt)), default=0), 600)
+        self.assertTrue(observation.startswith("ok=True; summary="))
+        self.assertLessEqual(len(observation.removeprefix("ok=True; summary=")), RUNTIME_PLANNER_TOOL_OBSERVATION_MAX_CHARS)
+        self.assertNotIn("RAW_PAYLOAD_MARKER", observation)
 
     def test_agent_runtime_routes_read_skill_without_shell(self) -> None:
         tool = "vrcforge_unity_status"
@@ -8577,7 +8581,6 @@ class DashboardServerTests(unittest.TestCase):
         invocation_params = {"arguments": "Scene/Hero"}
         responses = iter(
             [
-                PlannerModelResult(text=json.dumps({"action": "enter_execution"})),
                 PlannerModelResult(
                     text=json.dumps(
                         {
@@ -8905,9 +8908,6 @@ class DashboardServerTests(unittest.TestCase):
                         )
                     ),
                     PlannerModelResult(
-                        text=json.dumps({"action": "enter_execution"})
-                    ),
-                    PlannerModelResult(
                         text=json.dumps(
                             {
                                 "action": "write",
@@ -8993,7 +8993,6 @@ class DashboardServerTests(unittest.TestCase):
             command = "Set-Content -Path Assets/revision.txt -Value hi -Encoding utf8"
             revised_command = "Set-Content -Path Assets/revision-v2.txt -Value hi -Encoding utf8"
             responses = iter([
-                PlannerModelResult(text=json.dumps({"action": "enter_execution"})),
                 PlannerModelResult(text=json.dumps({"action": "write", "write_tool": "unity_shell", "write_params": {"command": command, "cwd": str(project), "workspace_root": str(project), "projectRoot": str(project)}})),
                 PlannerModelResult(text=json.dumps({"action": "write", "write_tool": "unity_shell", "write_params": {"command": revised_command, "cwd": str(project), "workspace_root": str(project), "projectRoot": str(project)}})),
             ])
@@ -9080,7 +9079,7 @@ class DashboardServerTests(unittest.TestCase):
             target = project / "Assets" / "terminal.txt"
             guard = UnityPathGuard([project], current_root=project)
             command = "Set-Content -Path Assets/terminal.txt -Value hi -Encoding utf8"
-            responses = iter([PlannerModelResult(text=json.dumps({"action": "enter_execution"})), PlannerModelResult(text=json.dumps({"action": "write", "write_tool": "unity_shell", "write_params": {"command": command, "cwd": str(project), "workspace_root": str(project), "projectRoot": str(project)}}))])
+            responses = iter([PlannerModelResult(text=json.dumps({"action": "write", "write_tool": "unity_shell", "write_params": {"command": command, "cwd": str(project), "workspace_root": str(project), "projectRoot": str(project)}}))])
             with (
                 bind_test_unity_path_guard(guard),
                 use_test_runtime_planner(
@@ -15124,9 +15123,15 @@ class DashboardServerTests(unittest.TestCase):
             repo_root / "Assets" / "VRCForge" / "Editor" / "MCP" / "VRCForgeMcpToolContract.cs"
         ).read_text(encoding="utf-8-sig")
         contract_names = set(re.findall(r'\{\s*"(vrc_[a-z0-9_]+)"\s*,\s*"VRCForge\.', contract_text))
-        self.assertEqual(contract_names, set(dashboard_server.VRCFORGE_UNITY_TOOL_REGISTRY))
-        self.assertEqual(contract_names, EXPECTED_TOOL_NAMES)
-        self.assertEqual(len(contract_names), EXPECTED_TOOL_COUNT)
+        internal_reads = {"vrc_capture_scan_scope", "vrc_validate_scan_scope"}
+        public_names = set(dashboard_server.VRCFORGE_UNITY_TOOL_REGISTRY)
+        self.assertTrue(internal_reads.isdisjoint(public_names))
+        self.assertEqual(contract_names, public_names | internal_reads)
+        self.assertEqual(public_names, EXPECTED_TOOL_NAMES)
+        self.assertEqual(len(contract_names), EXPECTED_TOOL_COUNT + len(internal_reads))
+        for name in internal_reads:
+            self.assertNotIn(name, dashboard_server.AGENT_GATEWAY._tools)
+            self.assertNotIn(name, dashboard_server.AGENT_GATEWAY._write_handlers)
         # Installation completeness is not Agent exposure. User code remains
         # reachable only through the package-verified supervised wrappers.
         for name in ("vrc_list_user_tools", "vrc_invoke_user_tool"):

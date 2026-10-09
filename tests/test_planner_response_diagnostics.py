@@ -184,7 +184,11 @@ def test_cancellation_in_correction_uses_original_error_propagation_and_keeps_us
     with pytest.raises(RuntimePlannerProviderCancelledError):
         service(model=model)._llm_plan_agent_turn("continue", {}, [], context_usage=usage, propagate_provider_errors=True)
     assert len(model.prompts) == 2
-    assert usage["requestCount"] == 1
+    assert usage["requestCount"] == 2
+    assert usage["cumulativeTotalTokens"] == 13
+    assert usage["exact"] is False
+    assert usage["lastUsageExact"] is False
+    assert usage["unavailableReason"] == "provider_usage_missing"
 
 
 def test_provider_error_is_not_automatically_retried():
@@ -202,5 +206,8 @@ def test_timeout_during_correction_is_terminal_and_retains_first_usage():
     assert plan["nextStep"] == "planner_failed"
     assert plan["plannerFailure"]["code"] == "provider_timeout"
     assert plan["formatCorrection"]["attemptCount"] == 1
-    assert usage["requestCount"] == 1
+    assert usage["requestCount"] == 2
     assert usage["cumulativeTotalTokens"] == 13
+    assert usage["exact"] is False
+    assert usage["lastUsageExact"] is False
+    assert usage["unavailableReason"] == "provider_usage_missing"

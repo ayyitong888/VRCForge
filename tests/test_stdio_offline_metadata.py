@@ -28,6 +28,10 @@ def _router(monkeypatch, tmp_path):
         method = kwargs.get("payload", {}).get("method")
         if not online["value"]:
             raise urllib.error.URLError("offline fixture")
+        if method == "server/discover":
+            kwargs["response_headers"]["Mcp-Session-Id"] = "offline-recovery-session"
+            return {"result": {}}
+        assert kwargs["extra_headers"]["Mcp-Session-Id"] == "offline-recovery-session"
         if method == "tools/list":
             return {"result": {"tools": []}}
         if method == "resources/list":

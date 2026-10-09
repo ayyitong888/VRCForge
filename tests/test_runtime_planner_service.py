@@ -3091,7 +3091,19 @@ def test_owner_surface_has_no_dynamic_host_or_execution_authority() -> None:
         and item.value.id == "self"
     }
 
-    assert "getattr(" not in source
+    metadata_accesses = [
+        ast.unparse(item)
+        for item in ast.walk(tree)
+        if isinstance(item, ast.Call) and isinstance(item.func, ast.Name)
+        and item.func.id == "getattr"
+    ]
+    assert sorted(metadata_accesses) == sorted([
+        "getattr(native_turn, 'retain_recovery', None)",
+        "getattr(native_turn, 'persist_scan_result_policy', None)",
+        "getattr(exc, 'provider_usage', {})",
+        "getattr(exc, 'provider_usage', None)",
+        "getattr(self, '_catalog', None)",
+    ])
     assert "__getattr__" not in source
     assert "_impl" not in source
     assert "sys.modules" not in source

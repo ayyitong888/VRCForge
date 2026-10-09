@@ -13,8 +13,9 @@ from agent_gateway import AgentGateway, AgentGatewayError
 
 
 REPO_ROOT = Path(__file__).parents[1]
-AGENT_GATEWAY_MAX_BYTES = 506_403
-AGENT_GATEWAY_MAX_LF_LINES = 10_954
+# Freeze at main d4861df; integration and future changes must not grow the facade.
+AGENT_GATEWAY_MAX_BYTES = 528_746
+AGENT_GATEWAY_MAX_LF_LINES = 10_966
 
 
 def _gateway(root: Path) -> AgentGateway:

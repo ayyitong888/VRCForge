@@ -10,15 +10,15 @@ import unity_read_input_schemas
 import unity_write_input_schemas
 
 
-def test_write_schemas_keep_one_owner_and_reviewed_revision_160_contract() -> None:
+def test_write_schemas_keep_one_owner_and_reviewed_texture_mask_contract() -> None:
     schemas = unity_write_input_schemas.EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS
     assert agent_gateway.EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS is schemas
-    # Revision 160 includes reviewed writer schemas, explicit copy destinations,
-    # and the existing constraint params/arguments envelope. Relocation remains
+    # Adds the optional texture mask to reviewed writer schemas, explicit copy
+    # destinations and the constraint params/arguments envelope. Relocation remains
     # separately covered and excluded from this reviewed contract digest.
     existing = {name: schema for name, schema in schemas.items() if name != "vrcforge_relocate_generated_assets"}
     encoded = json.dumps(existing, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
-    assert hashlib.sha256(encoded).hexdigest() == "03ef055c1b772fc06689a89659611323ee60b5f44bc53c7d6355878efee88888"
+    assert hashlib.sha256(encoded).hexdigest() == "dd2626fb4540c7946116f67a8c02bd48e6d3ad39c50eae5a51aa5560ca223dd7"
     for name, schema in schemas.items():
         preview = "vrcforge_preview_" + name.removeprefix("vrcforge_")
         read = unity_read_input_schemas.UNITY_READ_TOOL_INPUT_SCHEMAS.get(preview)

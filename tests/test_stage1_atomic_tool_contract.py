@@ -184,7 +184,7 @@ def test_stage1_core_sources_keep_preview_nonmutating_and_identity_fail_closed()
     assert "overwrite is unsupported" in scene
     assert "expectedSceneSetupDigest" in scene and "expectedOpenSceneStateDigest" in scene
 
-    assert texture.index("if (preview)") < texture.index("File.WriteAllBytes")
+    assert texture.index("if (preview)") < texture.index("FileMode.CreateNew")
     assert "expectedSourceHash" in texture and "expectedPreviewDigest" in texture
     assert "outsideAndProtectedPixelsUnchanged = true" in texture
     assert "alphaUnchanged = true" in texture

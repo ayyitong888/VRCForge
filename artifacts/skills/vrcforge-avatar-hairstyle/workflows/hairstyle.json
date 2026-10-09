@@ -40,13 +40,17 @@
     ]
   },
   "communityContract": {
-    "optionCountIncludesDefault": true,
-    "lessThanEight": "one_saved_synced_bool_per_hairstyle",
-    "eightOrMore": "one_saved_synced_group_int",
-    "crossingThresholdRequiresSeparatelyAuthorizedMigration": true,
+    "newDesignSelectorConvention": "user_confirmed_personal_preference: fewer_than_8_total_mutually_exclusive_options_use_one_saved_synced_bool_per_option; 8_or_more_use_one_saved_synced_group_int",
+    "selectorThresholdIsPlatformRequirement": false,
+    "thresholdRecommendationSource": "https://vrc.school/docs/Avatars/Multi-Toggles/",
+    "thresholdRecommendationAppliesTo": "synced_memory_optimization_for_mutually_exclusive_multi_toggles_only",
+    "existingProjectDesign": "preserve_observed_parameters_menu_paths_and_animation_timing",
+    "newDesign": "use_user_confirmed_selector_menu_path_and_animation_timing",
+    "automaticMigration": false,
+    "explicitlyAuthorizedMigrationPath": "hair_int_migration",
+    "migrationRequiresSeparateExplicitApproval": true,
     "preserveIndependentLocalBonesAndPhysBones": true,
-    "preserveOriginalHairRestoreAndExistingOptionOrder": true,
-    "menuCategory": "换装 / 头发"
+    "preserveOriginalHairRestoreAndExistingOptionOrder": true
   },
   "steps": [
     {
@@ -70,6 +74,7 @@
         "vrcforge_add_modular_avatar_component"
       ],
       "writes": true,
+      "conditional": "only_if_requested_attachment_change_requires_it_after_inspection",
       "runtimePermissionGateRequired": true,
       "runtimeApprovalRequired": true
     },
@@ -80,6 +85,7 @@
         "vrcforge_manage_expression_parameters"
       ],
       "writes": true,
+      "conditional": "only_if_requested_parameter_change_requires_it_after_inspection",
       "runtimePermissionGateRequired": true,
       "runtimeApprovalRequired": true
     },
@@ -90,6 +96,7 @@
         "vrcforge_manage_fx_animator"
       ],
       "writes": true,
+      "conditional": "only_if_requested_fx_change_requires_it_after_inspection",
       "runtimePermissionGateRequired": true,
       "runtimeApprovalRequired": true
     },
@@ -100,6 +107,7 @@
         "vrcforge_write_animation_curve"
       ],
       "writes": true,
+      "conditional": "only_if_requested_animation_change_requires_it_after_inspection",
       "runtimePermissionGateRequired": true,
       "runtimeApprovalRequired": true
     },
@@ -110,6 +118,7 @@
         "vrcforge_manage_expression_menu"
       ],
       "writes": true,
+      "conditional": "only_if_requested_menu_change_requires_it_after_inspection",
       "runtimePermissionGateRequired": true,
       "runtimeApprovalRequired": true
     },
@@ -135,4 +144,3 @@
     "requiresSeparateApproval": true
   }
 }
-

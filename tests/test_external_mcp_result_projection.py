@@ -118,16 +118,23 @@ def test_catalog_deduplicates_only_exact_copies_and_full_restores_metadata():
 @pytest.mark.parametrize("method", ["tools/call", "tools/list"])
 def test_stdio_internal_hop_keeps_full_data_for_outer_presentation(monkeypatch, method):
     from tools.vrcforge_agent_mcp_stdio import VRCForgeBridge
-    bridge = VRCForgeBridge.__new__(VRCForgeBridge)
-    bridge.timeout_seconds = 30
-    bridge.tool_call_timeout_seconds = 120
+    bridge = VRCForgeBridge(
+        base_url="http://127.0.0.1:8757",
+        config_path=None,
+        timeout_seconds=30,
+        start_runtime=False,
+        tool_call_timeout_seconds=120,
+    )
     requests = []
     def send(*args, **kwargs):
         requests.append(kwargs["payload"])
+        if kwargs["payload"]["method"] == "server/discover":
+            kwargs["response_headers"]["Mcp-Session-Id"] = "projection-session"
         return {"jsonrpc": "2.0", "id": 1, "result": {"ok": True}}
     monkeypatch.setattr(bridge, "request_json", send)
     bridge._mcp_request(method, {"name": "fixture", "arguments": {}}, token="test")
-    meta = requests[0]["params"]["_meta"]
+    target_request = next(request for request in requests if request["method"] == method)
+    meta = target_request["params"]["_meta"]
     assert meta[MODE] == "full"
     assert meta["io.modelcontextprotocol/protocolVersion"] == PROTOCOL_VERSION
 
@@ -144,11 +151,20 @@ def test_actual_backend_router_bridge_and_outer_router_preserve_full_option(monk
         return deepcopy(raw)
     backend = Mcp2026Router(lambda *_: [{"name": "fixture", "write": True}], handler,
                             resource_read=lambda _: {"contents": []})
-    bridge = VRCForgeBridge.__new__(VRCForgeBridge)
-    bridge.timeout_seconds = 30
-    bridge.tool_call_timeout_seconds = 120
+    bridge = VRCForgeBridge(
+        base_url="http://127.0.0.1:8757",
+        config_path=None,
+        timeout_seconds=30,
+        start_runtime=False,
+        tool_call_timeout_seconds=120,
+    )
     monkeypatch.setattr(bridge, "require_token", lambda: "test")
-    monkeypatch.setattr(bridge, "request_json", lambda *_, **kwargs: backend.handle(kwargs["payload"])[0])
+    def send(*_, **kwargs):
+        response, _status = backend.handle(kwargs["payload"])
+        if kwargs["payload"]["method"] == "server/discover":
+            kwargs["response_headers"]["Mcp-Session-Id"] = "projection-session"
+        return response
+    monkeypatch.setattr(bridge, "request_json", send)
     inner = bridge.call_tool("fixture", {"value": 3})
     assert inner["result"] == raw["result"]
     outer, calls = protocol(transport, inner)

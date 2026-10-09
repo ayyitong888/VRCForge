@@ -1,5 +1,25 @@
 # VRCForge Product Regression Contract
 
+## CORE-VERSION-UPDATE-001: Actionable App/Core Version Mismatch
+
+- Preserve strict App/Core version matching. A mismatch never enables Unity execution.
+- Preserve the verified Core version through the status/readiness projection; do not
+  replace it with an empty value and a generic connection error.
+- Display both versions and the corrective action: older Core means importing the
+  matching Core package; older App means updating the App; unknown versions require
+  a matching release pair without guessing which side is newer.
+- Display the notice for normal users, in every supported locale, without requiring
+  Developer Options. Display strings must not govern runtime admission.
+- Surface non-version readiness failures with actionable guidance: compilation
+  errors, missing Core, connection failures, a busy editor and reload dialogs.
+  Do not mislabel an unknown failure as a version mismatch or suggest deleting
+  the project. Healthy readiness must not display a stale failure notice.
+- The Unity Core update menu performs one bounded, anonymous HTTPS check against the
+  official release endpoint. Closing the window or reloading the domain cancels it.
+  It must not import packages, write assets, save scenes, or downgrade automatically.
+- Source tests do not replace actual Unity compilation, loaded identity readback,
+  and release-package acceptance.
+
 This is the durable product-level no-regression contract for VRCForge. It
 covers user-visible features, Agent behavior, approvals, UI/UX, Providers,
 vision, persistence, latency, compatibility and release evidence. It is not a

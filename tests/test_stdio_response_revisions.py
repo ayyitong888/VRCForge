@@ -23,6 +23,11 @@ def test_authenticated_tool_response_revisions_preserve_notifications_without_re
     def request_json(*args,**kwargs):
         assert kwargs['token']=='fixture-token'
         methods.append(kwargs['payload']['method'])
+        if kwargs['payload']['method'] == 'server/discover':
+            assert 'Mcp-Session-Id' not in kwargs['extra_headers']
+            kwargs['response_headers']['Mcp-Session-Id'] = 'revision-session'
+        else:
+            assert kwargs['extra_headers']['Mcp-Session-Id'] == 'revision-session'
         # Test-owned worker runs the fake HTTP server loop; no network/files, joined here.
         with ThreadPoolExecutor(max_workers=1) as worker:
             return worker.submit(server.handle, kwargs['payload']).result()[0]
@@ -37,7 +42,7 @@ def test_authenticated_tool_response_revisions_preserve_notifications_without_re
         assert {x['method'] for x in outer.drain_notifications()}=={'notifications/resources/list_changed','notifications/prompts/list_changed'}
         assert bridge.resource_generation()==state['resources']
         assert bridge.prompt_generation()==state['prompts']
-    assert Counter(methods)=={'resources/list':1,'prompts/list':1,'tools/call':2}
+    assert Counter(methods)=={'server/discover':1,'resources/list':1,'prompts/list':1,'tools/call':2}
 
 
 @pytest.mark.parametrize('metadata',[None, {'resources':True,'prompts':'p'}, {'resources':-1,'prompts':'p'}, {'resources':1,'prompts':None}])
@@ -46,6 +51,10 @@ def test_absent_or_invalid_response_revisions_do_not_reuse_stale_values(monkeypa
     bridge._response_list_revisions={'resources':1,'prompts':'old'}
     monkeypatch.setattr(bridge,'require_token',lambda:'fixture-token')
     def response(*args,**kwargs):
+        if kwargs['payload']['method'] == 'server/discover':
+            kwargs['response_headers']['Mcp-Session-Id'] = 'revision-session'
+            return {'result': {}}
+        assert kwargs['extra_headers']['Mcp-Session-Id'] == 'revision-session'
         return {'result':{'structuredContent':{'ok':True},'_meta':{'io.vrcforge/listRevisions':metadata}}}
     monkeypatch.setattr(bridge,'request_json',response)
     bridge.call_tool('fixture_read',{})

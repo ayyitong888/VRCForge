@@ -264,6 +264,26 @@ export type SupportBundleResult = {
   redacted: boolean;
 };
 
+export type SupportFeedbackPreview = {
+  ok: boolean;
+  schema: string;
+  redacted: boolean;
+  reviewRequired: boolean;
+  externalSubmissionAuthorized: boolean;
+  supportBundleAvailable: boolean;
+  text: string;
+};
+
+export type SupportBundlePreview = {
+  ok: boolean;
+  schema: string;
+  available: boolean;
+  bundleName?: string;
+  bundleSha256?: string;
+  reviewRequired?: boolean;
+  members: Array<{ name: string; bytes: number; truncated?: boolean; preview: string }>;
+};
+
 export type AgentApproval = {
   id: string;
   status: string;
@@ -1021,6 +1041,12 @@ export type HealthComponent = {
 /** Canonical project-scoped Unity tool readiness projected by UnityStatusService. */
 export type UnityReadiness = {
   ready: boolean;
+  versionMismatch?: {
+    appVersion: string;
+    coreVersion: string;
+    relation: "core_older" | "app_older" | "unknown";
+    action: "update_core" | "update_app" | "reinstall_pair";
+  };
   blockerCode?: string;
   inspectionMode?: string | null;
   inspectionSkipped?: boolean;

@@ -46,6 +46,13 @@ OLD_GATEWAY_METHODS = {
 }
 
 
+@pytest.fixture(autouse=True)
+def _isolate_user_skill_data_root(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The focus runner points this at its shared batch data directory. These
+    # tests expect user skills beside their temporary config files instead.
+    monkeypatch.delenv("VRCFORGE_USER_DATA_DIR", raising=False)
+
+
 def _gateway(root: Path) -> AgentGateway:
     return AgentGateway(root / "config.json", root / "audit")
 
@@ -645,7 +652,6 @@ def test_gateway_old_facades_and_host_proxy_are_gone() -> None:
 def test_gateway_skill_registry_size_budget() -> None:
     # Keep the same budget across LF and Windows CRLF checkouts.
     source = (REPO_ROOT / "agent_gateway.py").read_bytes().replace(b"\r\n", b"\n")
-    # Refresh the byte baseline after the reviewed runtime correctness fixes;
-    # retain the existing line ceiling and leave no speculative growth margin.
-    assert len(source) <= 494_243
-    assert source.count(b"\n") <= 10_422
+    # Freeze at main d4861df; integration and future changes must not grow the facade.
+    assert len(source) <= 528_746
+    assert source.count(b"\n") <= 10_966

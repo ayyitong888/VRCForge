@@ -54,7 +54,7 @@ def test_disk_log_page_keeps_file_and_paging_facts_for_next_plan() -> None:
     assert evidence["truncated"] is True
 
 
-def test_disk_log_page_exposes_bounded_next_read_without_claiming_complete_history() -> None:
+def test_disk_log_page_preserves_all_entries_before_shared_paging_and_keeps_next_read() -> None:
     observation = _service()._llm_loop_step_observation(
         {
             "tool": "vrcforge_read_recent_logs",
@@ -71,8 +71,10 @@ def test_disk_log_page_exposes_bounded_next_read_without_claiming_complete_histo
         }
     )
     evidence = _evidence(observation)
-    assert evidence["observationTruncated"] is True
-    assert 0 < len(evidence["logs"]) < 500
+    assert evidence["observationTruncated"] is False
+    assert len(evidence["logs"]) == 500
+    assert evidence["omittedLogCount"] == 0
+    assert [entry["index"] for entry in evidence["logs"]] == list(range(100, 600))
     assert evidence["nextRead"]["source"] == "disk"
     assert evidence["nextRead"]["file"] == "vrcforge_2026-09-12_22-43-35_0.log"
     assert evidence["nextRead"]["offset"] == 100 + len(evidence["logs"])

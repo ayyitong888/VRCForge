@@ -92,7 +92,6 @@ def test_directory_descriptions_cover_confirmed_capabilities() -> None:
 
 def test_core_tools_remain_resident_but_are_not_claimed_by_lazy_leaves() -> None:
     core_names = [
-        "web_search",
         "read_text_file",
         "read_tool_result",
     ]
@@ -120,7 +119,8 @@ def test_core_tools_remain_resident_but_are_not_claimed_by_lazy_leaves() -> None
         "planning", project_context_active=True
     )
     actual = {tool.runtime_name: tool.block for tool in catalog.visible_tools}
-    assert actual["vrcforge_web_search"] == "core"
+    assert actual["vrcforge_web_search"] == "research/web_research"
+    assert internal_tool_block_for_name("vrcforge_web_search", "unity") == "research/web_research"
     assert actual["vrcforge_read_text_file"] == "core"
     assert "core reads remain resident" in canonical_tool_block_description("diagnostics_build")
     assert "Computer Use" in canonical_tool_block_description("project_environment")

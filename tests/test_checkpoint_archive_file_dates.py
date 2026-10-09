@@ -136,6 +136,10 @@ def test_material_checkpoint_scope_requires_canonical_asset_paths():
         "vrcforge_apply_shader_tuning",
         {"changes": [{"material_id": "mat-body", "semantic_property": "smoothness"}]},
     ) == []
+    assert _checkpoint_archive_files_for_write(
+        "vrcforge_set_texture_import_settings",
+        {"textureAssetPath": "Assets/Body.png"},
+    ) == ["Assets/Body.png"]
 
 
 @pytest.mark.parametrize(
@@ -232,3 +236,39 @@ def test_scoped_checkpoint_audit_does_not_claim_project_wide_coverage(tmp_path):
     assert "project_settings" not in audit["blockingGaps"]
     assert not gateway.checkpoint_recovery._checkpoint_touches_top_level(checkpoint, "Packages")
     assert not gateway.checkpoint_recovery._checkpoint_touches_top_level(checkpoint, "ProjectSettings")
+
+
+def test_texture_import_settings_scope_reduces_zip_cost_and_restores_only_texture(tmp_path):
+    gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
+    project = tmp_path / "Project"
+    texture = project / "Assets" / "Body.png"
+    unrelated = project / "Assets" / "unrelated.asset"
+    texture.parent.mkdir(parents=True)
+    texture.write_bytes(b"texture-before" * 100)
+    texture.with_name(texture.name + ".meta").write_text("guid: texture\n", encoding="utf-8")
+    unrelated.write_bytes(b"unrelated-before" * 100_000)
+
+    full = gateway.checkpoint_recovery._create_archive_checkpoint(
+        project,
+        {"id": "ckpt_texture_full", "projectRoot": str(project), "status": "unavailable"},
+    )
+    scoped = gateway.checkpoint_recovery._create_archive_checkpoint(
+        project,
+        {
+            "id": "ckpt_texture_scoped",
+            "projectRoot": str(project),
+            "status": "unavailable",
+            "targetTool": "vrcforge_set_texture_import_settings",
+            "archiveFiles": ["Assets/Body.png"],
+        },
+    )
+    assert scoped["checkpointScope"]["kind"] == "unity_project_files"
+    assert scoped["archiveFiles"] == ["Assets/Body.png", "Assets/Body.png.meta"]
+    assert scoped["archiveBytes"] < full["archiveBytes"]
+
+    texture.write_bytes(b"texture-after")
+    unrelated.write_bytes(b"unrelated-after")
+    restored = gateway.checkpoint_recovery._restore_archive_checkpoint(scoped)
+    assert restored["ok"] is True
+    assert texture.read_bytes() == b"texture-before" * 100
+    assert unrelated.read_bytes() == b"unrelated-after"

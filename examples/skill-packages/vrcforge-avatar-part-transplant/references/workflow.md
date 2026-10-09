@@ -334,7 +334,7 @@ Only then may local Build & Test run. It does not prove remote upload. Removing
 or cleaning the donor/old target part is a separate extraction workflow with a
 fresh complete closure scan and separate approval.
 
-## 6. 5.6-sol structural routes and failure matrix
+## 6. VRCForge project route checks and failure matrix
 
 Classify the part as `rigid`, `same_skeleton_smr`, `foreign_skeleton_smr`,
 `independent_skeleton_physbone`, or `animator_menu`. Rigid attachment is target
@@ -348,7 +348,7 @@ and a whole-Prefab `installContainer` uniform Unity fit; use DCC only for real m
 aperture/shape edits or retained donor-body weights, and never scale the target
 body/armature or the dynamic accessory's internal sway-chain root.
 
-Mandatory fields are `bones`, `rootBone`, `bindposes`, non-zero weight indices,
+For same/foreign weighted-SMR routes only, mandatory fields are `bones`, `rootBone`, `bindposes`, non-zero weight indices,
 bone/index count parity, and mixed-chain closure. Missing/truncated capability is
 `capabilityGap` + `ready=false`, not an empty closure. The free-camera contract
 may reference `angle`, `rotation`, `scope`, `returnedRotation`, `unobstructed`,

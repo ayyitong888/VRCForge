@@ -5,9 +5,9 @@ VRCForge 是一个面向 VRChat Avatar 编辑的本地桌面 Agent 工作区。
 
 This manual explains the public workflow and feature status without project-specific paths or private configuration details.
 
-Latest published stable release: `1.8.5`.
-Current source / target release: `1.8.6`.
-Manual version: `1.8.6` (`v1.8.6`). Download matching installers and Unity packages
+Latest published stable release: `1.8.7`.
+Current source / target release: `1.8.8`.
+Manual version: `1.8.8` (`v1.8.8`). Download matching installers and Unity packages
 from the [latest published release](https://github.com/ayyitong888/VRCForge/releases/latest).
 The 1.8.0 version keeps internal Agent and external MCP tool results
 causally equivalent, reports the exact reason when a successful inspection is
@@ -297,6 +297,31 @@ separate approval.
   for troubleshooting; they are diagnostic provenance, not an authorization
   or operating-system identity boundary.
 
+## Masked texture edits
+
+The texture patch tool can use an optional same-size grayscale PNG mask from
+the Unity project's `Assets` folder. White pixels receive the requested color,
+black or transparent pixels stay unchanged, and gray pixels blend proportionally.
+The source texture's alpha is preserved. Colored masks and mismatched sizes are
+rejected.
+
+Preview the edit first, then approve it to write a new PNG. The source is never
+overwritten. Changing the source, mask, or edit settings invalidates the preview;
+preview again before approving. The result reports the actual changed pixel count
+and bounds after reading the saved output back.
+
+## Reviewing a support report
+
+In Settings diagnostics, describe the problem and generate a local redacted
+preview. You can also preview the newest support bundle; long member excerpts
+are marked as truncated, so inspect the full bundle before sharing it. Reading
+the preview does not mark the bundle as reviewed. Confirm review yourself, copy
+the draft, and manually attach the intended bundle on the feedback page.
+VRCForge does not upload the report or attachment automatically.
+
+Japanese setup, troubleshooting, and support boundaries are described in
+[日本語サポートガイド](docs/SUPPORT_JA.md).
+
 ## Privacy Boundary
 
 VRCForge keeps avatar assets local by default. API key values, gateway token
@@ -315,7 +340,7 @@ alias key and identity map stay local and are never bundled.
 - VRChat SDK3 Avatar project
 - Windows x64 installer users do not need Python, Git, uv, or manual `pip install`
 - Source/debug users need Python, Node.js, Rust/Tauri tooling, and the package dependencies
-- The `v1.8.6` `VRCForge.unitypackage`, containing its VRCForge-owned MCP 2.0 Core (`2026-07-28`) and 97 advertised Unity tools
+- The matching `VRCForge.unitypackage`, containing its VRCForge-owned MCP 2.0 Core (`2026-07-28`)
 - An LLM provider account for AI-assisted features
 - Full dependency list: [DEPENDENCIES.md](DEPENDENCIES.md)
 
@@ -336,7 +361,7 @@ Preserve `%LOCALAPPDATA%\VRCForge\agentic-app`, configured API keys, user-owned
 - VRChat SDK3 Avatar 工程
 - Windows x64 安装器用户不需要 Python、Git、uv 或手动 `pip install`
 - 源码/调试用户需要 Python、Node.js、Rust/Tauri 工具链和项目依赖
-- `v1.8.6` 的 `VRCForge.unitypackage`，包含 VRCForge 自有 MCP 2.0 Core（`2026-07-28`）和 97 个声明的 Unity 工具
+- 配套版本的 `VRCForge.unitypackage`，包含 VRCForge 自有 MCP 2.0 Core（`2026-07-28`）
 - 用于 AI 辅助功能的模型服务账号
 - 完整依赖清单：[DEPENDENCIES.md](DEPENDENCIES.md)
 

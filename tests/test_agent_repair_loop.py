@@ -81,7 +81,6 @@ def test_configured_loop_pending_approval_then_independent_readback(tmp_path: Pa
     first_responses = [
         {"action": "skill", "skill_tool": "read_recent_logs", "skill_params": {"source": "memory", "limit": 5}, "continueLoop": True},
         {"action": "skill", "skill_tool": "unity_inspect_project_chat_store", "skill_params": {"projectPath": str(project)}, "continueLoop": True},
-        {"action": "enter_execution", "summary": "Request supervised repair approval.", "continueLoop": True},
         {"action": "write", "write_tool": "unity_repair_project_chat_store", "write_params": {"projectPath": str(project), "expectedDigest": digest, "storeId": target.store_id, "executionTarget": execution_target}, "continueLoop": True},
     ]
     with _provider_protocol_loopback("responses", first_responses, first_records) as base_url:
@@ -114,7 +113,7 @@ def test_configured_loop_pending_approval_then_independent_readback(tmp_path: Pa
                 readback = gateway.runtime_message({"message": "Read the repaired project chat store and report its health.", "provider": "custom", "model": "loop-model", "projectRoot": str(project), "session_id": "repair-readback", "client_turn_id": "repair-readback-turn", "maxAgenticTurns": 3})
     assert readback["plan"]["nextStep"] == "done", readback
     assert readback["steps"][0]["result"]["status"] == "missing"
-    assert len(first_records) == 4
+    assert len(first_records) == 3
     assert len(second_records) == 2
 
 
@@ -150,7 +149,6 @@ def test_configured_loop_recovers_interrupted_apply_after_human_confirmation(tmp
             {"action": "skill", "skill_tool": "read_recent_logs", "skill_params": {"source": "memory", "limit": 5}, "continueLoop": True},
             {"action": "skill", "skill_tool": "unity_list_interrupted_apply_recoveries", "skill_params": {}, "continueLoop": True},
             {"action": "skill", "skill_tool": "unity_preview_interrupted_apply_recovery", "skill_params": {"recoveryId": recovery["id"]}, "continueLoop": True},
-            {"action": "enter_execution", "summary": "Request confirmation of the inspected recovery.", "continueLoop": True},
             {"action": "write", "write_tool": "unity_resolve_interrupted_apply_recovery", "write_params": params, "continueLoop": True},
             {"action": "skill", "skill_tool": "unity_list_interrupted_apply_recoveries", "skill_params": {}, "continueLoop": True},
             {"action": "reply", "reply": "Independent state confirms recovery is resolved.", "continueLoop": False, "completion_claim": {"satisfied": True, "evidence_action_ids": [canonical_action_id("skill", "vrcforge_list_interrupted_apply_recoveries", {})]}},
@@ -172,4 +170,4 @@ def test_configured_loop_recovers_interrupted_apply_after_human_confirmation(tmp
         assert verified["plan"]["nextStep"] == "done", verified
         assert verified["steps"][0]["result"]["blockingWrites"] is False
         assert Path(checkpoint["archivePath"]).exists()
-        assert len(records) == 7
+        assert len(records) == 6

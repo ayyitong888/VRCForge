@@ -1,33 +1,21 @@
-"""Regression gate: the reader's model-facing copy must state resultRef turn scope.
-
-These tests pin the CACHE_HIT_FIX batch C guidance: resultRef values are valid
-only within the turn that produced the result. The copy may evolve, but it must
-never drop the turn-scope statement or gain wording that relaxes that boundary.
-"""
+"""Reader guidance preserves scope, freshness and session ownership boundaries."""
 import json
 
 from agent_tool_result_reader import INPUT_SCHEMA, TOOL_NAME
 
 REQUIRED_GUIDANCE = (
-    "resultRef values are valid only within the turn that produced the result; "
-    "in later turns rely on the conversation history instead of re-reading old results."
+    "Honor its scope and freshness; an expired owned reference returns needs_rescan "
+    "with a reason and scope, never fresh data."
 )
 
-# Wording that would signal a relaxed cross-turn/session boundary. None of these
-# may appear anywhere in the model-facing reader copy.
+# Never promise unconditional reuse. Validated-scope reuse remains host-checked.
 RELAXATION_PHRASES = (
-    "across turns",
-    "cross-turn",
-    "cross turn",
     "any turn",
     "all turns",
-    "previous turns",
-    "earlier turns",
-    "persist",
-    "survive",
-    "other sessions",
+    "any session",
+    "all sessions",
     "across sessions",
-    "reuse a later",
+    "without validation",
 )
 
 
@@ -35,7 +23,7 @@ def test_result_ref_description_states_turn_scope():
     description = INPUT_SCHEMA["properties"]["resultRef"]["description"]
     assert REQUIRED_GUIDANCE in description
     # The existing restrictive copy must remain intact.
-    assert "never guess or reuse another turn's reference" in description
+    assert "Never guess another session's reference" in description
 
 
 def test_projected_model_facing_schema_carries_turn_scope_guidance():

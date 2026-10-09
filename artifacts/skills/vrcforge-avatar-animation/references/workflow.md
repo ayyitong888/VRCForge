@@ -1,10 +1,10 @@
-# VRChat 动画与体型补偿：社区实际做法与固定步骤
+# VRChat 动画与体型补偿：按证据执行的步骤
 
 用户独立要求制作或修复服装/发型/饰品 AnimationClip、对象启停、胸型/袜子/尾巴/鞋跟等已证实的体型补偿时使用。
 
 ## 适用范围与禁止事项
 
-完整衣柜制作不需要另外安装本 Skill；不要凭猜测写 BlendShape、替换 controller、修改无关 menu、生成不存在的 OFF clip 或改变第三方物理。
+完整衣柜制作不需要另外安装本 Skill；不要凭猜测写 BlendShape、替换 controller、修改无关 menu，或改变第三方物理。不得一概强制保留既有空 OFF motion，也不得自动补建；按当前 Write Defaults、状态过渡、恢复曲线及现场证据判断，只能修改用户明确批准的目标。
 
 ## 拿不准时先查社区
 
@@ -12,23 +12,27 @@
 
 ## 1. 目标绑定与现状盘点
 
-读取当前 Descriptor 绑定的 FX controller，并扫描现有 FX state、transition、motion、AnimationClip binding、对象层级、Body renderer 和真实 BlendShape 名称。
+绑定用户指定的 Avatar 与实际 FX controller。读取相关 state、transition、motion、clip 及其真实 binding、目标对象和 Body renderer/BlendShape；只深入足以判定用户目标的路径，不把全项目或无关 controller 扫描当成前提。需要补证时使用现有只读扫描工具，并遵循其分页/精确选择器。
 
 ## 2. 真实结构和社区规则
 
-列出目标服装/发型/饰品精确的启用、关闭、保持不变对象；分清原服装、内衣、袜子、兽尾、胸型和高跟，未证明的补偿一律不写。
+按用户要求列出目标服装/发型/饰品精确的启用、关闭和保持不变对象；仅在本 Avatar/资产证据支持时区分原服装、内衣、袜子、兽尾、胸型和高跟。未证明的补偿一律不写。
 
 ## 3. 精确原子与适用条件
 
-需要 state 时使用 `vrcforge_preview_ensure_animator_state` / `vrcforge_ensure_animator_state`；仅在明确验证条件时精确调整现有 FX controller。
+需要 state 时先用 `vrcforge_preview_ensure_animator_state`，仅在用户批准 preview 后调用 `vrcforge_ensure_animator_state`。只有目标行为和条件由证据确定且用户批准时，才用 `vrcforge_preview_manage_fx_animator` / `vrcforge_manage_fx_animator` 精确调整现有 controller；不替换无关层或参数域。
 
 ## 4. 执行边界与读取结果
 
-每个属性调用 `vrcforge_preview_write_animation_curve` / `vrcforge_write_animation_curve`，关键帧保持 `time=0`，一次只处理一个精确绑定并沿用当前权限策略和检查点。
+既有 clip 按读到的真实 timeline 保留时间点与未获批准的曲线；不要将时间点归一化到 `0`。只有用户批准的新设计明确为静态值时，新建曲线才使用 `time=0`。每个精确 binding 先 preview，用户批准后再以 `vrcforge_write_animation_curve` 写入；目标状态、曲线恢复行为或 OFF motion 不确定时停止并询问，不推测。
 
 ## 5. 完整验收和停止条件
 
-保留原有空 OFF Motion、相邻服装的开关逻辑与其他参数域；写后回读 clip 路径、state motion、curve 值、对象/BlendShape 结果并验证 Avatar。
+写后重新扫描受影响的 FX state/transition/motion 与 AnimationClip binding/key 值，并读取目标对象/BlendShape；对照批准的精确 delta 和相邻行为。`vrcforge_run_validation_report` 与 `vrcforge_build_test_readiness` 仅提供验证/就绪证据，不会替代 Unity/VRChat 运行时测试或实际 SDK/NDMF 构建；需要这些结果时明确标记未验证，不能宣称已构建或运行验收。
 
 **每笔写入都遵守当前用户配置的权限策略，并绑定精确目标、preview、checkpoint 和写后回读；回滚必须单独确认。**
 
+## 参考资料
+
+- [VRC School：Write Defaults](https://vrc.school/docs/Unity-Animations/Write-Defaults/)
+- [VRC School：Dissolve Toggles](https://vrc.school/docs/Avatars/Dissolve-Toggles/)

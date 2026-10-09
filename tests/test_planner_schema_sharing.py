@@ -117,7 +117,11 @@ def test_registered_catalog_prompt_sharing_round_trips_every_selected_contract()
 
     for layer in ("planning", "execution"):
         catalog = dashboard_server._RuntimePlannerCatalog().read(layer, project_context_active=True)
-        schemas = [bounded_planner_tool_schema(tool.input_schema) for tool in catalog.visible_tools]
+        selected = [tool for tool in catalog.visible_tools
+                    if not (tool.requires_user_activation and not catalog.computer_use_model_invocable)
+                    and tool.runtime_name != "vrcforge_list_internal_tool_blocks"]
+        assert any(tool.runtime_name == "vrcforge_load_internal_tool_block" for tool in selected)
+        schemas = [bounded_planner_tool_schema(tool.input_schema) for tool in selected]
         originals = deepcopy(schemas)
         shared = _shared_planner_schema_defs(schemas)
         assert any(name.startswith("vrcforge.tool_property.") for name in shared)
@@ -140,9 +144,8 @@ def test_registered_catalog_prompt_sharing_round_trips_every_selected_contract()
         )
         emitted_defs, emitted = prompt_schemas(prompt)
         assert emitted_defs == shared
-        for tool, schema in zip(catalog.visible_tools, schemas):
-            if tool.requires_user_activation and not catalog.computer_use_model_invocable:
-                continue
+        assert set(emitted) == {tool.name for tool in selected}
+        for tool, schema in zip(selected, schemas):
             compact = _planner_schema_without_shared_defs(schema, shared)
             # The final prompt renderer must preserve generated references too.
             assert emitted[tool.name] == compact

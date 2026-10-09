@@ -32,6 +32,65 @@ class Stage1AtomicWriteError(ValueError):
     pass
 
 
+def user_adjustment_receipt(value: Any) -> dict[str, Any] | None:
+    """Read only the verified handoff domain receipt through known wire wrappers."""
+    pending = [value]
+    for _ in range(16):
+        if not pending:
+            break
+        current = pending.pop(0)
+        if not isinstance(current, dict):
+            continue
+        if (current.get("isError") is True or current.get("success") is False
+                or current.get("ok") is False or current.get("exitCode", 0) != 0):
+            return None
+        if current.get("schema") == STAGE1_TOOL_SCHEMAS[USER_ADJUSTMENT_HANDOFF_TOOL]:
+            if (current.get("ok") is True and current.get("verified") is True
+                    and current.get("preview") is False
+                    and (current.get("handoffId") or current.get("operation") != "user_adjustment_prepare")
+                    and current.get("projectPath")
+                    and current.get("operation") in {"user_adjustment_prepare", "user_adjustment_finalize", "user_adjustment_abort"}):
+                return deepcopy(current)
+            return None
+        pending.extend(current.get(key) for key in ("result", "structuredContent", "data", "rawResult", "payload") if isinstance(current.get(key), dict))
+    return None
+
+
+def user_adjustment_fresh_read_request(receipt: dict[str, Any], arguments: dict[str, Any]) -> dict[str, Any]:
+    """Reuse Core's non-mutating finalize preview for exact post-drag identity capture."""
+    nested = arguments.get("arguments") if isinstance(arguments.get("arguments"), dict) else arguments
+    readback = receipt.get("readback") or {}
+    mode = nested.get("mode")
+    if mode not in {"transform", "skinned_bone_proxy", "constraint_bound", "physbone_chain"}:
+        raise Stage1AtomicWriteError("The prepared handoff mode is unavailable; fresh read is required before continuing.")
+    return {"projectPath": receipt["projectPath"], "toolName": USER_ADJUSTMENT_HANDOFF_TOOL,
+            "arguments": {"action": "finalize", "mode": mode, "preview": True,
+                          "handoffId": receipt["handoffId"],
+                          "avatarGlobalObjectId": readback.get("avatarGlobalObjectId"),
+                          "targetGlobalObjectId": readback.get("targetGlobalObjectId")}}
+
+
+def validate_user_adjustment_fresh_read(receipt: dict[str, Any], preview: Any) -> dict[str, Any]:
+    if isinstance(preview, dict) and isinstance(preview.get("structuredContent"), dict):
+        preview = preview["structuredContent"]
+    data = _payload(preview)
+    # request_preparer has already verified the Core preview and returns the
+    # existing authoritative approval projection, not the raw Core response.
+    if not (data.get("schema") == "vrcforge.user_adjustment_handoff_approval.v1"
+            and data.get("operation") == "user_adjustment_finalize"
+            and data.get("requiresExplicitUserApproval") is True
+            and _DIGEST.fullmatch(str(data.get("previewDigest") or ""))
+            and _project_path(data.get("projectPath")) == _project_path(receipt.get("projectPath"))):
+        raise Stage1AtomicWriteError("The handoff fresh preview could not be verified.")
+    target = data.get("target") or {}
+    if target.get("handoffId") != receipt["handoffId"]:
+        raise Stage1AtomicWriteError("The handoff identity changed during fresh read.")
+    for key in ("avatarGlobalObjectId", "targetGlobalObjectId", "proxyGlobalObjectId", "sceneGuid", "scenePath"):
+        if not target.get(key) or target[key] != receipt.get("readback", {}).get(key):
+            raise Stage1AtomicWriteError("The handoff Scene or object identity changed during fresh read.")
+    return deepcopy(data)
+
+
 def build_wrapper_arguments(params: dict[str, Any], tool_name: str) -> dict[str, Any]:
     if tool_name not in STAGE1_TOOL_SCHEMAS:
         raise Stage1AtomicWriteError("Unknown Stage 1 atomic Unity tool.")

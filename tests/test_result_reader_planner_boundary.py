@@ -50,7 +50,7 @@ def test_observation_projects_catalog_name_without_mutating_retained_result(page
     observation = (service.native_result_observation(step)["observation"] if native
                    else service._llm_loop_step_observation(step))
     assert '"tool":"read_tool_result"' in observation
-    request, _ = service._build_native_plan_request(
+    request, selected = service._build_native_plan_request(
         [{"role": "tool", "tool_call_id": "read", "content": observation}],
         observe={}, exposure_layer="planning", project_context_active=project_active,
         project_path="", internal_tool_blocks=["core"], global_instructions="", project_instructions="",
@@ -58,6 +58,16 @@ def test_observation_projects_catalog_name_without_mutating_retained_result(page
     names = {item["function"]["name"] for item in request["tools"]}
     marker = "; retainedResultPage=" if page else "; resultContinuation="
     next_call = json.loads(request["messages"][0]["content"].split(marker)[1])["nextRequest"]
-    assert next_call["tool"] in names
+    assert names == {"call_tool", "load_internal_tool_block", "unload_internal_tool_block", "vrcforge_runtime_action"}
+    assert next_call["tool"] not in names
+    receipt = {"role": "assistant", "tool_calls": [{"id": "read-next", "type": "function",
+        "function": {"name": "call_tool", "arguments": json.dumps(next_call)}}]}
+    payload, rejection = service._native_action_payload(receipt, selected)
+    assert rejection is None
+    assert payload["skill_tool"] == next_call["tool"]
+    assert payload["skill_params"] == next_call["arguments"]
+    direct = deepcopy(receipt)
+    direct["tool_calls"][0]["function"] = {"name": next_call["tool"], "arguments": json.dumps(next_call["arguments"])}
+    assert service._native_action_payload(direct, selected)[1] is not None
     assert next_call["arguments"] == original["result" if page else "resultRead"]["nextRequest"]["arguments"]
     assert step == original

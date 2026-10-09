@@ -4,7 +4,7 @@ from agent_task_loop import AgentTaskLoop, approval_task_context
 from dashboard_api_models import AgentRuntimeMessageRequest
 from dashboard_server import agent_runtime_request_payload
 from tests.test_native_permission_modes import MODES, _set_mode, _write_gateway_for_mode
-from tests.test_native_runtime_gateway import call, run, setup_gateway, finish
+from tests.test_native_runtime_gateway import call, run, setup_gateway, finish, runtime_state
 
 
 def test_plan_request_defaults_to_execution_and_accepts_explicit_plan():
@@ -14,21 +14,28 @@ def test_plan_request_defaults_to_execution_and_accepts_explicit_plan():
 
 
 @pytest.mark.parametrize("mode", MODES)
-def test_explicit_plan_hides_writes_and_model_cannot_enter_execution(tmp_path, mode):
+@pytest.mark.parametrize("action", ["enter_execution", "shell"])
+def test_explicit_plan_hides_writes_and_model_cannot_enter_execution(tmp_path, mode, action):
     gateway, model, invoked = _write_gateway_for_mode(tmp_path, [
-        call("phase", "vrcforge_runtime_action", {"action": "enter_execution"}),
+        call("phase", "vrcforge_runtime_action", {
+            "action": action, "shell_command": "Set-Content bypass.txt bad",
+        }),
         {"role": "assistant", "content": "Here is the plan."},
     ])
     _set_mode(gateway, mode)
     result = run(gateway, tmp_path, planMode=True)
     assert result["exposureLayer"] == "planning"
     assert not invoked
+    assert not (tmp_path / "bypass.txt").exists()
+    assert len(model.requests) == 2
+    assert any("plan_mode_read_only" in message.get("content", "")
+               for message in model.requests[1]["messages"] if message["role"] == "tool")
     for request in model.requests:
+        assert request["tools"] == model.requests[0]["tools"]
         tools = {item["function"]["name"]: item["function"] for item in request["tools"]}
         assert "fixture_write" not in tools
-        actions = tools["vrcforge_runtime_action"]["parameters"]["properties"]["action"]["enum"]
-        assert "enter_execution" not in actions
-        assert "shell" not in actions
+        assert runtime_state(request)["allowedRuntimeActions"] == ["reply", "correct"]
+        assert runtime_state(request)["planMode"] is True
 
 
 def test_plan_lock_survives_continuation_context():

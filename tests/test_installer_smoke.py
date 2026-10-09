@@ -300,6 +300,13 @@ def test_admin_upgrade_path_preserves_user_data_after_uninstall(tmp_path, monkey
     monkeypatch.delenv("ProgramW6432", raising=False)
     monkeypatch.setattr(smoke, "is_admin", lambda: True)
     monkeypatch.setattr(smoke, "wait_for_health", lambda port, timeout, process=None: {"version": "0.9-test", "portableMode": True})
+    port_checks = []
+
+    def port_is_open(port):
+        port_checks.append(port)
+        return False
+
+    monkeypatch.setattr(smoke, "port_is_open", port_is_open)
 
     class FakeProcess:
         pid = 5678
@@ -356,7 +363,8 @@ def test_admin_upgrade_path_preserves_user_data_after_uninstall(tmp_path, monkey
         )
     )
 
-    assert report["ok"] is True
+    assert report["ok"] is True, str(report)
+    assert port_checks == [8791, 8791]
     assert report["summary"]["phases"] == {
         "install": "passed",
         "uninstall": "passed",

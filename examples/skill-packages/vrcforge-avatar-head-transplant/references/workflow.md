@@ -29,11 +29,15 @@ not guess or invent tools.
 2. Record the donor head mesh/renderers, donor Neck/Head chain, target
    Neck/Head chain, target body/wardrobe controls, current FX, Parameters, Menu,
    and every Modular Avatar or equivalent merge contributor.
-3. Identify the one renderer intended to be active in the final Avatar. Read
-   its exact path and active state, `Descriptor.VisemeSkinnedMesh`, lipsync mode,
-   and every expected viseme, gesture, and expression animation binding. Record
-   inactive/old/donor renderer paths separately; a binding count without exact
-   path resolution is not closure.
+3. Read back the current mode without mutation. If Default remains unresolved,
+   request approval before SDK Auto Detect or changing it; then read back its
+   concrete mode. Viseme Blend Shape requires
+   `VisemeSkinnedMesh`; Jaw Flap Blend Shape requires its actual renderer/shape;
+   Jaw Flap Bone requires readable `JawBone`; Viseme Parameter Only requires
+   its parameter consumer. Resolve each expected
+   expression/gesture binding to its actual active renderer; multiple active
+   renderers are valid. A required unreadable target is a capability gap, not a
+   pass.
 4. Scan non-zero renderer bone usage. A renderer bone-array slot existing does
    not prove a live vertex dependency; a zero-weight slot also does not by
    itself make its Transform safe to delete.
@@ -143,11 +147,10 @@ Treat the following as one transactionally staged contract:
    the smaller Parameters asset directly assigned on the Descriptor.
 4. Menu: every face control resolves to a final parameter and the body/wardrobe
    controls remain reachable.
-5. Active-renderer closure: `Descriptor.VisemeSkinnedMesh` and lipsync resolve to
-   the active renderer; every expected FX/controller binding resolves to an
-   existing BlendShape on it; every retained Parameter/Menu control reaches that
-   controller and renderer. Inactive/old/donor renderers have zero unique or
-   sole face consumers in the final target Avatar.
+5. Active-renderer closure: resolve the lip-sync target according to the selected
+   mode, and each expected FX/controller binding to its actual active renderer.
+   Every retained Parameter/Menu control must reach its intended consumer.
+   Inactive/old/donor paths must not be the sole required consumer.
 
 Face tracking does not replace gesture fallback. If a runtime disable flag
 blocks gestures, diagnose that FX condition instead of rewriting gesture
@@ -250,7 +253,7 @@ and repair only that layer. Concealment needs separate explicit user acceptance.
 Matrix or remote
 screenshot values cannot substitute for verified free-camera pixels.
 
-## 6. 5.6-sol structural routes and failure matrix
+## 6. VRCForge project route checks and failure matrix
 
 Select one route: `rigid`; `same_skeleton_smr` (weights, bones/rootBone,
 bindposes, and index parity); `foreign_skeleton_smr` (explicit minimal weighted
@@ -265,7 +268,7 @@ non-community route inspect bindpose/skin-matrix metrics; then set `needsDccReri
 an unreconciled real mesh aperture/shape or donor-specific weights. Never resize
 the target body or armature.
 
-The mandatory skinning contract reads back `bones`, `rootBone`, `bindposes`,
+For same/foreign weighted-SMR routes, the skinning contract reads back `bones`, `rootBone`, `bindposes`,
 non-zero weighted indices, bone/index count parity, and mixed-chain closure.
 Missing or truncated atoms produce `capabilityGap` and `ready=false`, never a
 pass. The free-camera owner may return `angle`, `rotation`, `scope`,

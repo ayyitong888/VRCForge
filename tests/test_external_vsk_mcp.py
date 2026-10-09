@@ -301,7 +301,9 @@ def test_external_vsk_roundtrip_crosses_stdio_and_reads_back_an_isolated_import(
             assert status == 200
             return response["result"]["structuredContent"]
 
-        loaded = call(1, "vrcforge_load_tool_block", {"block": "skills/vsk"})
+        loaded = call(1, "vrcforge_load_tool_block", {"block": "skills/vsk", "toolNames": [
+            "vrcforge_export_skill_package", "vrcforge_preflight_skill_package", "vrcforge_import_skill_package",
+        ]})
         assert loaded["loadedBlocks"] == ["core", "project_environment/files"]
         assert loaded["block"] == "project_environment/files"
         assert loaded["activation"]["blocks"] == ["project_environment/files"]

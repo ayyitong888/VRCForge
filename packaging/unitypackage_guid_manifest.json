@@ -44,6 +44,7 @@
     { "path": "Assets/VRCForge/Editor/ComponentFeatureWriterTool.cs", "guid": "c9874b94a265f001933eb547148ea9c0" },
     { "path": "Assets/VRCForge/Editor/ComponentTools.cs", "guid": "90166391211949a796e53983f9c032e8" },
     { "path": "Assets/VRCForge/Editor/ConsoleTools.cs", "guid": "c286dd9b198048e4a1dc0b2da7bbf4a9" },
+    { "path": "Assets/VRCForge/Editor/CoreUpdateWindow.cs", "guid": "042c945a17de359c1110cc52d0a5db53" },
     { "path": "Assets/VRCForge/Editor/ConstraintSourceTool.cs", "guid": "f5de9f11edd654f7466dc6cf57aacc39" },
     { "path": "Assets/VRCForge/Editor/DuplicateSceneObjectTool.cs", "guid": "a7bb9c1ac241e80d8dd62ad616dd1c12" },
     { "path": "Assets/VRCForge/Editor/EditorStateTools.cs", "guid": "53ee39f0485d4bd8ba153c3d04a176c8" },

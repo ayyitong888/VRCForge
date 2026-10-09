@@ -168,8 +168,6 @@ def test_real_runtime_memory_write_returns_receipt_and_exact_completion():
     def planner(*_args, **kwargs):
         observed.append(kwargs.get("loop_state", []).copy())
         if len(observed) == 1:
-            return {"planner": "llm", "enterExecution": True, "continueLoop": True, "nextStep": "enter_execution"}
-        if len(observed) == 2:
             return {"planner": "llm", "writeNeeded": True, "writeTool": "vrcforge_remember_memory", "writeParams": {"text": "请用中文回复"}, "continueLoop": True, "nextStep": "request_write"}
         return {"planner": "llm", "reply": "已记住", "nextStep": "done", "completionClaim": {"satisfied": True, "evidenceActionIds": [action_id]}}
 

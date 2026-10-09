@@ -33,9 +33,15 @@ def test_disabled_store_projects_effective_fields_preserving_core_and_reenable(t
     assert row["coreEnabled"] is True and row["reasons"] == ["disabled"]
     assert row["tools"][0]["reason"] == "disabled" and row["tools"][0]["coreReason"] == "ready"
     assert row["tools"][0]["available"] is False
+    report = row["repairCompatibility"]
+    assert report["schema"] == "vrcforge.user_tool_repair_compatibility.v1"
+    assert report["status"] == "unverified" and report["reasonCodes"] == ["disabled"]
     assert package == original
     service.package_service.set_enabled(package["packageId"], True)
-    assert catalog()["tools"][0] == original
+    reenabled = catalog()["tools"][0]
+    assert {key: reenabled[key] for key in original} == original
+    assert reenabled["repairCompatibility"]["schema"] == "vrcforge.user_tool_repair_compatibility.v1"
+    assert reenabled["repairCompatibility"]["status"] == "valid"
     assert {p.relative_to(project): p.read_bytes() for p in project.rglob("*") if p.is_file()} == before
 
 

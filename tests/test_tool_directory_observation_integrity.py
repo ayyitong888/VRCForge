@@ -75,10 +75,24 @@ def test_complete_directory_reaches_actual_native_model_request(tmp_path):
     gateway.register_tool("vrcforge_list_internal_tool_blocks",
         "When to use: discover tools. When NOT to use: execute them.", "plan/preview",
         lambda _: copy.deepcopy(original))
-    run(gateway, tmp_path)
+    result = run(gateway, tmp_path)
     tool_message = next(message for message in model.requests[1]["messages"] if message["role"] == "tool")
     observation = json.loads(tool_message["content"])["observations"][0]["observation"]
-    payload = json.loads(observation.split("; toolBlockDirectory=", 1)[1])
+    from agent_tool_result_reader import bind_tool_result_context, read_tool_result
+    from runtime_planner_service import sanitize_planner_observation_text
+    page, _ = json.JSONDecoder().raw_decode(observation.split("; modelInformationPage=", 1)[1])
+    assert page["hasMore"] is True
+    chunks = []
+    with bind_tool_result_context(result["sessionId"], result["turnId"], str(tmp_path), result["steps"]):
+        while True:
+            chunks.append(page["items"][0]["value"])
+            if not page["hasMore"]:
+                break
+            arguments = page["nextRequest"]["arguments"]
+            assert arguments["textOffset"] > page["textOffset"]
+            page = read_tool_result(arguments, sanitize=sanitize_planner_observation_text)
+    complete = "".join(chunks)
+    payload, _ = json.JSONDecoder().raw_decode(complete.split("; toolBlockDirectory=", 1)[1])
     assert payload["blocks"] == original["blocks"]
     assert payload["loadedBlocks"] == original["loadedBlocks"]
     assert payload["internalToolSelections"] == original["internalToolSelections"]

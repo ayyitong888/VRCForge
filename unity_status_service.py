@@ -4,9 +4,30 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from app_update_service import StableVersion
 from core_upgrade_readiness import compile_snapshot_is_fresh
 from unity_mcp_core_client import UnityMcpCoreClient, UnityMcpCoreError
 from unity_editor_window_probe import probe_unity_reload_dialog
+from unity_mcp_tool_contract import PRODUCT_VERSION
+
+
+def _version_mismatch_notice(error: UnityMcpCoreError) -> dict[str, str] | None:
+    if getattr(error, "cause_code", "") != "unity_core_version_mismatch":
+        return None
+    details = getattr(error, "details", None)
+    actual = details.get("actualVersion", "") if isinstance(details, dict) else ""
+    actual = actual[:80] if isinstance(actual, str) else ""
+    relation, action = "unknown", "reinstall_pair"
+    try:
+        core, app = StableVersion.parse(actual), StableVersion.parse(PRODUCT_VERSION)
+        if core < app:
+            relation, action = "core_older", "update_core"
+        elif core > app:
+            relation, action = "app_older", "update_app"
+    except ValueError:
+        pass
+    return {"appVersion": PRODUCT_VERSION, "coreVersion": actual,
+            "relation": relation, "action": action}
 
 
 @dataclass(frozen=True)
@@ -91,6 +112,8 @@ class UnityStatusService:
             "blockerCode": "" if all(checks.values()) else blocker,
             "inspectionMode": (status.get("tools") or {}).get("inspectionMode") if isinstance(status.get("tools"), dict) else None,
             "inspectionSkipped": (status.get("tools") or {}).get("inspectionSkipped") is True if isinstance(status.get("tools"), dict) else False,
+            **({"versionMismatch": dict(status["versionMismatch"])}
+               if blocker == "unity_core_version_mismatch" and isinstance(status.get("versionMismatch"), dict) else {}),
         }
 
     def build_vrcforge_mcp_core_unavailable_status(
@@ -238,6 +261,7 @@ class UnityStatusService:
             status["readiness"] = self.readiness(status)
             return status
         except UnityMcpCoreError as exc:
+            version_notice = _version_mismatch_notice(exc)
             status = {
                 "connected": False,
                 "executionReady": False,
@@ -271,6 +295,9 @@ class UnityStatusService:
                 "error": str(exc),
                 "causeCode": getattr(exc, "cause_code", "unity_core_contract_invalid"),
             }
+            if version_notice is not None:
+                status["versionMismatch"] = version_notice
+                status["coreVersion"] = version_notice["coreVersion"]
             status["readiness"] = self.readiness(status)
             return status
 

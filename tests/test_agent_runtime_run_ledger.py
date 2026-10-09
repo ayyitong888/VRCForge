@@ -14,7 +14,7 @@ import pytest
 from agent_gateway import AgentGateway
 from agent_runtime_run_ledger import AgentRuntimeRunLedger, AgentRuntimeRunLedgerPorts
 from agent_task_loop import AgentTaskLoop
-from runtime_planner_service import PlannerTurnMetadata, RuntimePlannerService
+from runtime_planner_service import PlannerCatalogSnapshot, PlannerTurnMetadata, RuntimePlannerService
 
 
 class LedgerError(RuntimeError):
@@ -501,10 +501,12 @@ def test_shutdown_during_continuation_planning_blocks_the_next_tool_and_interrup
         }
 
     planner = RuntimePlannerService(
-        catalog=SimpleNamespace(read=lambda _layer: SimpleNamespace()),
+        catalog=SimpleNamespace(
+            read=lambda _layer, *, project_context_active=True: PlannerCatalogSnapshot()
+        ),
         desktop=SimpleNamespace(summarize_action_result=lambda _value: ""),
         turn=SimpleNamespace(
-            bind=lambda _params: nullcontext(
+            bind=lambda *_args, **_kwargs: nullcontext(
                 PlannerTurnMetadata(verified_context_limit=None, planner_label="test")
             )
         ),
