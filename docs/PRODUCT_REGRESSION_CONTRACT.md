@@ -161,6 +161,16 @@ Each item ends with its version history in this exact form:
   persistence succeeds. Persistence failure/backpressure returns a bounded
   identity-only outcome and leaves the input visibly retryable; it never
   remains stuck as an apparently active steer.
+- During ordinary model inference, pending exact-turn steering signals only
+  that request's cancellation token. Replanning waits for the owned worker to
+  exit and consumes the input once at the existing model boundary. Whole-turn
+  Stop retains priority; approval review, compaction and executing tools are
+  not interrupted by this path. Known completed/error usage remains counted;
+  missing usage remains unknown. A stale proposal must never execute.
+- Candidate verification: `tests/test_runtime_provider_steering.py` covers
+  blocked inference, safe replanning, usage preservation, exact-turn isolation
+  and worker ownership. Its offline sub-500ms signal assertion is not a live
+  provider cancellation-latency or desktop UX acceptance claim.
 - Forbidden regression: no steer injection during a tool batch, write-scope
   widening, eight-message rejection, count-based dropping, attachment loss,
   reordered or concurrent execution within one chat lane, input existing only

@@ -943,6 +943,11 @@ class AgentRuntimeSessionState:
                 "queuedCount": len(mailbox),
             }
 
+    def steer_pending(self, *, session_id: str, client_turn_id: str) -> bool:
+        with self._ports.shared_state_lock:
+            key = (session_id, client_turn_id)
+            return key in self._active_turns and bool(self._steer_mailboxes.get(key))
+
     def drain_steer(self, *, session_id: str, client_turn_id: str) -> list[dict[str, Any]]:
         if not session_id or not client_turn_id:
             return []

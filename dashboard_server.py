@@ -589,6 +589,7 @@ from provider_vision_service import (
     VisionModelConfig,
     VisionProfileConfig,
 )
+from runtime_provider_steering import interrupt_for_steer
 from runtime_planner_service import (
     EXPOSURE_LAYER_EXECUTION as RUNTIME_PLANNER_EXECUTION_LAYER,
     PlannerCatalogSnapshot,
@@ -15480,6 +15481,9 @@ class _RuntimePlannerModel:
         started_at = time.monotonic()
         try:
             while not owner.done.wait(self._POLL_SECONDS):
+                interrupt_for_steer(owner, AGENT_GATEWAY.runtime_sessions, context,
+                                    enabled=not _review and _deadline is None,
+                                    join_seconds=self._CANCEL_JOIN_SECONDS)
                 elapsed = time.monotonic() - started_at
                 if _deadline is not None and time.monotonic() >= _deadline:
                     owner.cancellation.set()
@@ -15510,6 +15514,9 @@ class _RuntimePlannerModel:
                     raise RuntimePlannerProviderCancelledError(
                         "Provider planning was cancelled by the runtime turn owner."
                     )
+            interrupt_for_steer(owner, AGENT_GATEWAY.runtime_sessions, context,
+                                enabled=not _review and _deadline is None,
+                                join_seconds=0)
             if owner.cancellation.is_set() or self._runtime_cancel_requested(context):
                 raise RuntimePlannerProviderCancelledError(
                     "Provider planning was cancelled by the runtime turn owner."
