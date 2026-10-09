@@ -26,6 +26,14 @@ class NativeResponse:
     reasoning_summary: list[Any] = field(default_factory=list)
 
 
+class NativeToolRejection(RuntimeError):
+    """Complete, structurally valid receipt retained only for denial feedback."""
+
+    def __init__(self, receipt: NativeResponse) -> None:
+        super().__init__("Responses returned a tool that was not requested.")
+        self.receipt = receipt
+
+
 def build_responses_input(
     messages: Sequence[Mapping[str, Any]],
     namespace: str | None = "vrcforge",
@@ -140,6 +148,7 @@ def parse_native_response(
     response_items: list[dict[str, Any]] = []
     summaries: list[Any] = []
     seen_ids: set[str] = set()
+    unexposed = False
     for item in output:
         kind = str(_value(item, "type") or "")
         if kind == "reasoning":
@@ -172,7 +181,7 @@ def parse_native_response(
             if not _namespace_matches(item, namespace):
                 raise RuntimeError("Responses returned a tool call from an unexpected namespace.")
             if name not in allowed_names:
-                raise RuntimeError("Responses returned a tool that was not requested.")
+                unexposed = True
             seen_ids.add(call_id)
             response_items.append(_model_mapping(item))
             calls.append({
@@ -193,13 +202,16 @@ def parse_native_response(
     }
     if response_items:
         assistant_message["responses_output"] = response_items
-    return NativeResponse(
+    receipt = NativeResponse(
         text=text,
         assistant_message=assistant_message,
         finish_reason="tool_calls" if calls else "stop",
         usage=_normalized_usage(response),
         reasoning_summary=summaries,
     )
+    if unexposed:
+        raise NativeToolRejection(receipt)
+    return receipt
 
 
 def stream_response(

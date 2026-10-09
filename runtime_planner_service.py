@@ -2235,6 +2235,7 @@ class RuntimePlannerService:
                     project_instructions=project_instructions,
                 )
                 for format_attempt in range(1 if native else 2):
+                    rejected_native_batch = False
                     try:
                         raw_response = (
                             PlannerModelResult("", assistant_message=queued_receipt, finish_reason="tool_calls")
@@ -2242,13 +2243,22 @@ class RuntimePlannerService:
                             model_port.plan_native(native_request) if native else model_port.plan(prompt)
                         )
                     except Exception as exc:
+                        from provider_runtime_adapters import ProviderNativeToolRejection
+
+                        if native and queued_receipt is None and isinstance(exc, ProviderNativeToolRejection):
+                            rejected_native_batch = True
+                            raw_response = PlannerModelResult(
+                                "", usage=getattr(exc, "provider_usage", {}),
+                                assistant_message=exc.rejected_native_receipt, finish_reason="tool_calls",
+                            )
                         # Parsing can fail after the provider reports usage.
                         # Count this receipt once; missing usage stays unknown.
-                        if queued_receipt is None and context_usage is not None:
+                        elif queued_receipt is None and context_usage is not None:
                             measured = getattr(exc, "provider_usage", None)
                             self.record_context_usage(context_usage, prompt, history,
                                                       dict(measured) if isinstance(measured, Mapping) else None)
-                        raise
+                        if not rejected_native_batch:
+                            raise
                     provider_reasoning = dict(raw_response.reasoning)
                     if reasoning_trace is not None:
                         reasoning_trace.clear()
@@ -2270,6 +2280,17 @@ class RuntimePlannerService:
                             raise ValueError("Native tool call IDs must be nonempty and unique.")
                         if queued_receipt is None:
                             native_turn.admit(receipt, tool_names=[tool.name for tool in native_tools])
+                            if rejected_native_batch:
+                                native_turn.reject_queued_receipt()
+                                rejection = {"kind": "control", "tool": "native_batch", "arguments": None,
+                                    "summary": "This response called a tool not exposed in tools. No call in this response was executed. Use only the fixed tools; use call_tool for loaded tools, and wait for loader results before invoking newly loaded tools.",
+                                    "issues": [{"path": "tool_calls", "code": "tool_not_visible"}]}
+                                return self._planner_argument_error_plan(
+                                    base={"planner": "llm", "nativeCallIds": native_call_ids,
+                                          "skillNeeded": False, "writeNeeded": False, "shellNeeded": False},
+                                    action_kind="control", tool_name="native_batch", arguments=None,
+                                    validation=rejection, phase=phase,
+                                )
                             # Resolve the wrapped target before admission; the fixed
                             # transport itself is never evidence that a call is read-only.
                             proposals = [self._native_action_payload({"tool_calls": [call]}, native_tools)

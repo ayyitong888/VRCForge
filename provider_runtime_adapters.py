@@ -28,6 +28,14 @@ class ProviderResponseError(RuntimeError):
         self.usage = _usage(response)
 
 
+class ProviderNativeToolRejection(ProviderResponseError):
+    """Private rejected receipt, never a successful provider result."""
+
+    def __init__(self, response: Any, receipt: Mapping[str, Any]) -> None:
+        super().__init__("Responses returned a tool that was not requested.", response)
+        self.rejected_native_receipt = dict(receipt)
+
+
 class ModelProviderAdapter(Protocol):
     """Narrow provider runtime contract; callers retain planning authority."""
 
@@ -408,7 +416,7 @@ class DeepSeekResponsesAdapter(_ResponsesProtocolAdapter):
         max_output_tokens: int | None = None,
     ) -> Any:
         from responses_native_protocol import (
-            build_responses_input, flat_function_tools, parse_native_response, stream_response,
+            NativeToolRejection, build_responses_input, flat_function_tools, parse_native_response, stream_response,
         )
 
         self._validate_model(model)
@@ -438,6 +446,8 @@ class DeepSeekResponsesAdapter(_ResponsesProtocolAdapter):
             return parse_native_response(
                 response, tools, namespace=None, require_encrypted_reasoning=False,
             )
+        except NativeToolRejection as exc:
+            raise ProviderNativeToolRejection(response, exc.receipt.assistant_message) from exc
         except (ValueError, RuntimeError) as exc:
             raise ProviderResponseError(str(exc), response) from exc
 

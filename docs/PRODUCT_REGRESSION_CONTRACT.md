@@ -1056,6 +1056,17 @@ Each item ends with its version history in this exact form:
 
 ### PRV-008 - Preserve native DeepSeek Responses continuation
 
+- Rejected batch recovery: a complete, structurally valid DeepSeek Responses
+  receipt containing any unexposed tool is retained privately as a typed
+  rejection, not a successful provider result. The planner rejects every call
+  in that receipt, including advertised siblings, before dispatch. Paired
+  failure observations enter the existing per-receipt correction budget;
+  names are never remapped and the fixed tool list never expands. Other
+  malformed protocol data still fails immediately. Usage is counted once.
+- `tests/test_responses_rejected_batch_recovery.py` reproduces the mixed-batch
+  failure through the real adapter/parser and checks zero sibling execution,
+  valid correction, unchanged tools, private history and repeated-error stop.
+
 - Bug guarded: explicitly selected DeepSeek Responses must enter the native
   tool loop instead of being rejected by the provider binding gate or losing
   native receipts through planner-only conversion.
