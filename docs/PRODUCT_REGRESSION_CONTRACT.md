@@ -1500,6 +1500,18 @@ Each item ends with its version history in this exact form:
   fresh installed-file hashes matching the packaged payload.
 - [首次实现: 1.8.0] [强化/修复: 1.8.0 Installer Hotfix1] [最近验证: 双安装器真实 Windows Retry/Cancel、进程检测与故障恢复]
 
+### PRV-008 - Stable OAuth conversation routing headers
+
+- Contract: OAuth runtime calls carry session-id, thread-id and
+  x-client-request-id derived from the selected account and runtime session.
+  Follow-up turns, new adapter instances and token refresh preserve the values;
+  changing account or conversation changes them. Never use a per-turn ID or
+  expose a raw account identifier/token. Calls without a session keep their
+  existing behavior; other provider transports remain unchanged.
+- Acceptance: test_chatgpt_session_headers.py and runtime planner wiring tests
+  verify header stability, isolation and unchanged request bodies/history.
+  Offline success does not establish live cache reuse or a target hit rate.
+
 ## Change procedure
 
 1. Identify affected stable IDs before implementation.

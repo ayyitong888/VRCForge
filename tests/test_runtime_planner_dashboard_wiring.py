@@ -57,7 +57,8 @@ def fixture_config() -> ProviderApiConfig:
 
 
 @pytest.mark.parametrize("runtime_tail", [[], [{"role": "system", "content": 'Current runtime state (data): {"modelTurnBudget":{"maxModelTurns":36,"modelTurnsUsed":2,"remainingModelTurns":34}}'}]])
-def test_native_model_reuses_provider_owner_and_keeps_replay_out_of_ui(runtime_tail):
+@pytest.mark.parametrize("provider", ["custom", "chatgpt"])
+def test_native_model_reuses_provider_owner_and_keeps_replay_out_of_ui(runtime_tail, provider):
     binding = dashboard_server._RuntimePlannerProviderTurnBinding()
     model = dashboard_server._RuntimePlannerModel(binding)
     receipt = {"role": "assistant", "content": None, "reasoning_content": "synthetic-private-replay",
@@ -73,7 +74,7 @@ def test_native_model_reuses_provider_owner_and_keeps_replay_out_of_ui(runtime_t
     context = {"sessionId": "native-owner", "turnId": "turn-native", "clientTurnId": "client-native"}
     dashboard_server.AGENT_GATEWAY.runtime_sessions.set_stream_context(context)
     try:
-        with (patch.object(dashboard_server.PROVIDER_CONFIGURATION, "current_api_config", return_value=fixture_config()),
+        with (patch.object(dashboard_server.PROVIDER_CONFIGURATION, "current_api_config", return_value=replace(fixture_config(), provider=provider)),
               patch.object(dashboard_server.PROVIDER_TEXT_PROBE, "probe_settings", return_value=SimpleNamespace()),
               patch.object(dashboard_server, "request_llm_plan_with_metadata", side_effect=request),
               patch.object(dashboard_server.EVENT_BUS, "broadcast_from_sync", side_effect=lambda kind, payload: events.append(payload))):
@@ -81,6 +82,7 @@ def test_native_model_reuses_provider_owner_and_keeps_replay_out_of_ui(runtime_t
                 result = model.plan_native({"instructions": "short policy", "messages": [{"role": "user", "content": "read"}, *runtime_tail], "tools": []})
         assert calls[0][1]["native_messages"] == [{"role": "system", "content": "short policy"}, {"role": "user", "content": "read"}, *runtime_tail]
         assert calls[0][1]["native_tools"] == []
+        assert calls[0][1].get("session_id") == (context["sessionId"] if provider == "chatgpt" else None)
         assert result.assistant_message == receipt
         assert result.finish_reason == "tool_calls"
         assert model.active_call_count() == 0

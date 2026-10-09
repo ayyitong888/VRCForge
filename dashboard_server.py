@@ -15450,7 +15450,7 @@ class _RuntimePlannerModel:
                     stream_callback=stream_callback,
                     cancel_event=owner.cancellation,
                     stream_activity_callback=stream_activity_callback,
-                    **native_options,
+                    **native_options, **({"session_id": str(context.get("sessionId") or "")} if config.provider == "chatgpt" else {}),
                 )
             except BaseException as exc:  # noqa: BLE001 - re-raised on the owning runtime thread.
                 owner.error = exc

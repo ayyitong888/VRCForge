@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Sequence
 
@@ -55,6 +57,7 @@ class ChatGPTResponsesAdapter:
         base_url: str,
         client_factory: Callable[..., Any] | None = None,
         access_token_provider: Callable[[str], str] | None = None,
+        session_id: str = "",
     ) -> None:
         self._account_id = validate_provider_api_key(api_key)
         if not self._account_id:
@@ -63,6 +66,16 @@ class ChatGPTResponsesAdapter:
             raise ValueError("ChatGPT subscription requests require the official OpenAI API endpoint.")
         self._client_factory = client_factory
         self._access_token_provider = access_token_provider
+        self._session_headers: dict[str, str] = {}
+        if session_id:
+            # Stable across turns/token refresh, isolated by selected account.
+            identity = hashlib.sha256(json.dumps(
+                [self._account_id, session_id], ensure_ascii=True,
+                separators=(",", ":"),
+            ).encode("utf-8")).hexdigest()
+            self._session_headers = dict.fromkeys(
+                ("session-id", "thread-id", "x-client-request-id"), identity,
+            )
         # Reuse the existing planner action validator; this adapter owns only
         # the subscription transport and its input/output conversion.
         self._planner_parser = OpenAIResponsesAdapter(
@@ -221,6 +234,8 @@ class ChatGPTResponsesAdapter:
         if cancel_event is not None and cancel_event.is_set():
             raise RuntimeError("ChatGPT Responses request cancelled.")
         client = self._client()
+        if self._session_headers:
+            payload = {**payload, "extra_headers": dict(self._session_headers)}
         return _stream_native_response(
             client,
             payload,

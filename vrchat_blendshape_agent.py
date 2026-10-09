@@ -1432,6 +1432,7 @@ def request_llm_plan_with_metadata(
     stream_activity_callback: Callable[[dict[str, Any]], None] | None = None,
     native_messages: Sequence[Mapping[str, Any]] | None = None,
     native_tools: Sequence[Mapping[str, Any]] | None = None,
+    session_id: str = "",
 ) -> LlmPlanResponse:
     provider = normalize_provider_name(settings.llm_provider)
     if provider != "chatgpt" and (native_messages is not None or native_tools is not None):
@@ -1474,6 +1475,7 @@ def request_llm_plan_with_metadata(
             stream_activity_callback,
             native_messages,
             native_tools,
+            session_id,
         )
 
     try:
@@ -1499,6 +1501,7 @@ def _request_llm_protocol_with_metadata(
     stream_activity_callback: Callable[[dict[str, Any]], None] | None = None,
     native_messages: Sequence[Mapping[str, Any]] | None = None,
     native_tools: Sequence[Mapping[str, Any]] | None = None,
+    session_id: str = "",
 ) -> LlmPlanResponse:
     if api_type == "responses":
         return request_responses_plan_with_metadata(
@@ -1510,6 +1513,7 @@ def _request_llm_protocol_with_metadata(
             stream_activity_callback=stream_activity_callback,
             native_messages=native_messages,
             native_tools=native_tools,
+            session_id=session_id,
         )
     if api_type == "generate_content":
         if normalize_provider_name(settings.llm_provider) == "vertexai":
@@ -1545,6 +1549,7 @@ def request_responses_plan_with_metadata(
     stream_activity_callback: Callable[[dict[str, Any]], None] | None = None,
     native_messages: Sequence[Mapping[str, Any]] | None = None,
     native_tools: Sequence[Mapping[str, Any]] | None = None,
+    session_id: str = "",
 ) -> LlmPlanResponse:
     """Use one configured Responses endpoint without executing returned calls."""
 
@@ -1557,7 +1562,7 @@ def request_responses_plan_with_metadata(
             api_key=settings.llm_api_key,
             base_url=settings.llm_base_url,
             client_factory=client_factory,
-            **(_llm_sdk_retry_kwargs(settings) if provider == "deepseek" else {}),
+            **(_llm_sdk_retry_kwargs(settings) if provider == "deepseek" else {"session_id": session_id}),
         )
         source = f"{provider}-responses"
         if native_requested:
