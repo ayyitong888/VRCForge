@@ -20,6 +20,14 @@ class ProviderTokenLimitError(RuntimeError):
     """An explicit provider token boundary, not a complete assistant receipt."""
 
 
+class ProviderResponseError(RuntimeError):
+    """Rejected Responses receipt retaining usage, never its action or content."""
+
+    def __init__(self, message: str, response: Any) -> None:
+        super().__init__(message)
+        self.usage = _usage(response)
+
+
 class ModelProviderAdapter(Protocol):
     """Narrow provider runtime contract; callers retain planning authority."""
 
@@ -215,6 +223,12 @@ class _ResponsesProtocolAdapter(_ResponsesRequestBase):
             raise RuntimeError(f"{self._provider_label} requires a model.")
 
     def parse_response(self, response: Any, *, planner_mode: bool = True) -> ProviderRuntimeResponse:
+        try:
+            return self._parse_response(response, planner_mode=planner_mode)
+        except (ValueError, RuntimeError) as exc:
+            raise ProviderResponseError(str(exc), response) from exc
+
+    def _parse_response(self, response: Any, *, planner_mode: bool) -> ProviderRuntimeResponse:
         output = _as_list(_value(response, "output"))
         tool_calls = [item for item in output if str(_value(item, "type") or "") == "function_call"]
         if tool_calls:
@@ -405,9 +419,16 @@ def _summaries(output: list[Any]) -> list[Any]:
 def _usage(response: Any) -> dict[str, Any]:
     usage = _value(response, "usage") or {}
     output_details = _value(usage, "output_tokens_details") or {}
-    return {
+    normalized = {
         "input_tokens": _value(usage, "input_tokens"),
         "output_tokens": _value(usage, "output_tokens"),
         "total_tokens": _value(usage, "total_tokens"),
         "reasoning_tokens": _value(usage, "reasoning_tokens") or _value(output_details, "reasoning_tokens"),
     }
+    for key in ("prompt_tokens_details", "input_tokens_details", "output_tokens_details"):
+        details = _value(usage, key)
+        if isinstance(details, dict):
+            normalized[key] = dict(details)
+        elif callable(getattr(details, "model_dump", None)):
+            normalized[key] = details.model_dump(mode="json", exclude_none=True)
+    return normalized

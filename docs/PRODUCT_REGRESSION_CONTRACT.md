@@ -1077,6 +1077,11 @@ Each item ends with its version history in this exact form:
   terminal frames, final reasoning, conflicts, failure usage and runtime
   accounting. Live acceptance must separately prove model tool selection,
   execution/refeed, natural completion and cross-turn reuse after deployment.
+- Responses usage parity: `tests/test_responses_cache_usage.py` preserves
+  reported cache details for generic and DeepSeek Responses, streaming and
+  non-streaming, including SDK objects. Rejected complete tool receipts retain
+  usage through runtime error accounting without admitting the rejected action.
+  Missing cache details must remain missing, not become a measured zero.
 - [首次实现: 1.8.8 candidate] [强化/修复: 1.8.8 candidate] [最近验证: 1.8.8 candidate; offline and live tool loop/usage; cache performance not accepted]
 
 ### PRV-008 - Stable history and observable-result reuse

@@ -27,6 +27,7 @@ from provider_runtime_adapters import (
     DeepSeekResponsesAdapter,
     OpenAIResponsesAdapter,
     ProviderRuntimeRequest,
+    ProviderResponseError,
     ProviderTokenLimitError,
 )
 from chatgpt_integration.adapter import ChatGPTResponseError, ChatGPTResponsesAdapter
@@ -1480,8 +1481,8 @@ def request_llm_plan_with_metadata(
             dispatch=dispatch,
             stream_callback=stream_callback,
         )
-    except ChatGPTResponseError as exc:
-        exc.provider_usage = extract_llm_token_usage({"usage": exc.usage}, settings, source="chatgpt-responses")
+    except (ChatGPTResponseError, ProviderResponseError) as exc:
+        exc.provider_usage = extract_llm_token_usage({"usage": exc.usage}, settings, source=f"{provider}-responses")
         raise
 
 
