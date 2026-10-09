@@ -18,6 +18,18 @@ for (const locale of ["zh-CN", "zh-TW", "en-US", "ja-JP"]) {
     assert.equal(typeof text, "string", `missing ${locale}:${key}`);
     return text.replace(/\{\{(\w+)\}\}/g, (_, name) => String(values[name]));
   };
+  const healthExports = {};
+  const healthSource = readFileSync(new URL("../src/lib/runtime-workspace-view.ts", import.meta.url), "utf8");
+  new Function("exports", ts.transpileModule(healthSource, {
+    compilerOptions: { module: ts.ModuleKind.CommonJS },
+  }).outputText)(healthExports);
+  for (const [message, key] of [
+    ["VRCForge Unity tools are not ready.", "workspace.toolsNotReady"],
+    ["VRCForge Unity tools are ready.", "workspace.toolsReady"],
+    ["Selected Unity project is not connected.", "workspace.unityProjectNotOpen"],
+  ]) {
+    assert.equal(healthExports.localizeRuntimeHealthMessage(t, message), t(key));
+  }
   new Function("exports", "require", compiled)(exports, (id) =>
     id === "react-i18next" ? { useTranslation: () => ({ t }) } : require(id));
   const render = (detail) => renderToStaticMarkup(React.createElement(exports.CoreVersionNotice, { detail }));
@@ -28,6 +40,7 @@ for (const locale of ["zh-CN", "zh-TW", "en-US", "ja-JP"]) {
     ["unity_compile_errors", "compileErrors"],
     ["unity_core_package_incomplete", "missingCore"],
     ["unity_core_connection_failed", "connection"],
+    ["unity_core_unavailable", "connection"],
     ["unity_core_timeout", "connection"],
     ["unity_core_project_busy", "busy"],
     ["unity_project_not_selected", "selectProject"],

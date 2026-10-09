@@ -19,6 +19,13 @@
   It must not import packages, write assets, save scenes, or downgrade automatically.
 - Source tests do not replace actual Unity compilation, loaded identity readback,
   and release-package acceptance.
+- A missing connection descriptor is unavailable, not a corrupt contract. Malformed
+  descriptors remain invalid and must not grant execution or fall back to another project.
+- Both bootstrap and full health views must not claim Unity is connected or running
+  without evidence. Ready and unavailable tool messages must be localized in every
+  supported language; unavailable states retain actionable connection guidance.
+- Regression coverage: `test_core_discovery_guidance.py`,
+  `test_unity_status_service.py`, and `test_core_version_notice_ui.mjs`.
 
 This is the durable product-level no-regression contract for VRCForge. It
 covers user-visible features, Agent behavior, approvals, UI/UX, Providers,

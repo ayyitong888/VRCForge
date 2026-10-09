@@ -6,6 +6,7 @@ const connectionMessages: Record<string, string> = {
   unity_compile_errors: "compileErrors",
   unity_core_package_incomplete: "missingCore",
   unity_core_connection_failed: "connection",
+  unity_core_unavailable: "connection",
   unity_core_timeout: "connection",
   unity_core_project_busy: "busy",
   unity_project_not_selected: "selectProject",

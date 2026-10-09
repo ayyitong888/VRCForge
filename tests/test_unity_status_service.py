@@ -33,6 +33,22 @@ def make_service(*, selected_project: str = "", core_installed=lambda _project: 
     )
 
 
+def test_missing_bridge_propagates_to_bootstrap_without_claiming_connected(monkeypatch, tmp_path):
+    status = make_service(selected_project=str(tmp_path)).build_unity_status_snapshot()
+    assert status["connected"] is False
+    assert status["readiness"]["ready"] is False
+    assert status["readiness"]["blockerCode"] == "unity_core_unavailable"
+    monkeypatch.setattr(dashboard_server, "CURRENT_UNITY_STATUS", status)
+    monkeypatch.setattr(dashboard_server, "PROVIDER_CONFIGURATION", SimpleNamespace(serialize_app_api_config=lambda: {}))
+    monkeypatch.setattr(dashboard_server, "PROJECT_SNAPSHOT_SELECTION", SimpleNamespace(project_snapshot_payload=lambda **_: {}))
+    monkeypatch.setattr(dashboard_server, "serialize_dashboard_state", lambda: {})
+    monkeypatch.setattr(dashboard_server, "build_external_agent_connection_component", lambda: {"status": "unknown"})
+    components = dashboard_server.build_bootstrap_app_health(agent_health={})["components"]
+    assert components["vrcForgeUnityTools"]["message"] == "VRCForge Unity tools are not ready."
+    assert components["unityMcpInstance"]["message"] == "Selected Unity project is not connected."
+    assert components["unityMcpBridgeReachable"]["status"] == "warning"
+
+
 def test_core_inventory_is_diagnostic_not_an_agent_callable_catalog(monkeypatch, tmp_path):
     names = ["vrc_create_gameobject", *[f"vrc_diagnostic_{index}" for index in range(96)]]
 

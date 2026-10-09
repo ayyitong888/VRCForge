@@ -32,14 +32,17 @@ export function localizeRuntimeHealthMessage(t: TFunction, message?: string | nu
   if (normalized === "Unity instance is registered with MCP.") {
     return t("workspace.unityProjectOpen");
   }
-  if (normalized === "MCP server is reachable, but no Unity instance is registered.") {
+  if (normalized === "MCP server is reachable, but no Unity instance is registered." || normalized === "Selected Unity project is not connected.") {
     return t("workspace.unityProjectNotOpen");
   }
   if (normalized === "Unity instance status is refreshing.") {
     return t("workspace.unityProjectChecking");
   }
-  if (normalized === "VRCForge Unity tools are registered.") {
+  if (normalized === "VRCForge Unity tools are registered." || normalized === "VRCForge Unity tools are ready.") {
     return t("workspace.toolsReady");
+  }
+  if (normalized === "VRCForge Unity tools are not ready.") {
+    return t("workspace.toolsNotReady");
   }
   if (normalized === "VRCForge Unity tool status is refreshing.") {
     return t("workspace.toolsChecking");

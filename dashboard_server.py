@@ -7535,7 +7535,7 @@ def build_bootstrap_app_health(
         )
         components["unityMcpInstance"] = health_component(
             "ok" if unity_status.get("unityInstanceRegistered") else "warning",
-            "Unity instance is registered with MCP." if unity_status.get("unityInstanceRegistered") else "MCP server is reachable, but no Unity instance is registered.",
+            "Unity instance is registered with MCP." if unity_status.get("unityInstanceRegistered") else "Selected Unity project is not connected.",
             {
                 "activeInstance": unity_status.get("activeInstance"),
                 "activeInstanceCount": unity_status.get("activeInstanceCount"),
@@ -7547,7 +7547,7 @@ def build_bootstrap_app_health(
             "ok" if unity_readiness.get("ready") is True else "warning",
             "VRCForge Unity tools are ready."
             if unity_readiness.get("ready") is True
-            else "Unity MCP is connected, but VRCForge Unity tools are not ready.",
+            else "VRCForge Unity tools are not ready.",
             {
                 "coreVersion": unity_status.get("coreVersion"),
                 "coreVersionMatched": core_version_matched,
@@ -18715,7 +18715,7 @@ def build_health_components(
         )
     components["unityMcpInstance"] = health_component(
         "ok" if unity_status.get("unityInstanceRegistered") else "warning",
-        "Unity instance is registered with MCP." if unity_status.get("unityInstanceRegistered") else "MCP server is reachable, but no Unity instance is registered.",
+        "Unity instance is registered with MCP." if unity_status.get("unityInstanceRegistered") else "Selected Unity project is not connected.",
         {
             "activeInstance": unity_status.get("activeInstance"),
             "activeInstanceCount": unity_status.get("activeInstanceCount"),
@@ -18729,7 +18729,7 @@ def build_health_components(
         "ok" if unity_readiness.get("ready") is True else "warning",
         "VRCForge Unity tools are ready."
         if unity_readiness.get("ready") is True
-        else "Unity MCP is connected, but VRCForge Unity tools are not ready.",
+        else "VRCForge Unity tools are not ready.",
         {
             "readiness": unity_readiness,
             "totalTools": (unity_status.get("tools") or {}).get("totalTools"),

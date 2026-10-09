@@ -180,6 +180,8 @@ def _resolve_project_root(project_root: str | Path) -> Path:
 def _read_json_object(path: Path, label: str) -> dict[str, Any]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        raise UnityMcpCoreConnectionError(label + " is not available yet.") from None
     except (OSError, UnicodeError, json.JSONDecodeError):
         raise UnityMcpCoreError(label + " is unavailable or invalid.") from None
     if not isinstance(value, dict):
