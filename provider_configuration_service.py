@@ -69,7 +69,7 @@ class ProviderApiConfig:
 
         if self.provider == "chatgpt" and self.api_type == "responses":
             credential_fingerprint_field = "accountIdFingerprint"
-        elif self.api_type == "chat_completions":
+        elif self.api_type == "chat_completions" or (self.provider == "deepseek" and self.api_type == "responses"):
             credential_fingerprint_field = "apiKeyFingerprint"
         else:
             return ""

@@ -1435,17 +1435,20 @@ def request_llm_plan_with_metadata(
 ) -> LlmPlanResponse:
     provider = normalize_provider_name(settings.llm_provider)
     if provider != "chatgpt" and (native_messages is not None or native_tools is not None):
-        if str(getattr(settings, "llm_api_type", "") or "").strip().lower() != "chat_completions":
-            raise ValueError("Native messages/tools require an explicit chat_completions protocol.")
+        explicit_protocol = str(getattr(settings, "llm_api_type", "") or "").strip().lower()
+        if explicit_protocol != "chat_completions" and not (provider == "deepseek" and explicit_protocol == "responses"):
+            raise ValueError("Native messages/tools require an explicit chat_completions protocol or supported native Responses route.")
     requested_api_type, resolved_api_type = normalize_provider_api_type(
         provider, settings.llm_model, getattr(settings, "llm_api_type", None)
     )
     if native_messages is not None or native_tools is not None:
         native_chat_route = requested_api_type == "chat_completions"
-        native_chatgpt_route = provider == "chatgpt" and resolved_api_type == "responses"
-        if not (native_chat_route or native_chatgpt_route):
-            raise ValueError("Native messages/tools require an explicit chat_completions protocol or ChatGPT Responses.")
-        if not native_chatgpt_route and any(
+        native_responses_route = resolved_api_type == "responses" and (
+            provider == "chatgpt" or (provider == "deepseek" and requested_api_type == "responses")
+        )
+        if not (native_chat_route or native_responses_route):
+            raise ValueError("Native messages/tools require an explicit chat_completions protocol or supported native Responses route.")
+        if not native_responses_route and any(
             isinstance(message, Mapping) and "responses_output" in message
             for message in (native_messages or ())
         ):
@@ -1546,16 +1549,20 @@ def request_responses_plan_with_metadata(
     """Use one configured Responses endpoint without executing returned calls."""
 
     image_paths = normalize_reference_image_paths(reference_image_paths=reference_image_paths)
-    if normalize_provider_name(settings.llm_provider) == "chatgpt":
-        adapter = ChatGPTResponsesAdapter(
+    provider = normalize_provider_name(settings.llm_provider)
+    native_requested = native_messages is not None or native_tools is not None
+    if provider == "chatgpt" or (provider == "deepseek" and native_requested):
+        adapter_type = ChatGPTResponsesAdapter if provider == "chatgpt" else DeepSeekResponsesAdapter
+        adapter = adapter_type(
             api_key=settings.llm_api_key,
             base_url=settings.llm_base_url,
             client_factory=client_factory,
+            **(_llm_sdk_retry_kwargs(settings) if provider == "deepseek" else {}),
         )
-        source = "chatgpt-responses"
-        if native_messages is not None or native_tools is not None:
+        source = f"{provider}-responses"
+        if native_requested:
             if image_paths:
-                raise RuntimeError("ChatGPT native Responses requests do not accept local reference image paths.")
+                raise RuntimeError("Native Responses requests do not accept local reference image paths.")
             native_response = adapter.send_native_request(
                 model=settings.llm_model,
                 messages=native_messages or (),
@@ -1563,6 +1570,8 @@ def request_responses_plan_with_metadata(
                 stream_callback=stream_callback,
                 cancel_event=cancel_event,
                 stream_activity_callback=stream_activity_callback,
+                **({"reasoning_effort": _responses_reasoning_effort(settings),
+                    "max_output_tokens": llm_max_output_tokens(settings)} if provider == "deepseek" else {}),
             )
             parsed = _native_chat_response(
                 settings,
@@ -1601,7 +1610,7 @@ def request_responses_plan_with_metadata(
         usage = extract_llm_token_usage({"usage": response.usage}, settings, source=source)
         return LlmPlanResponse(text=response.text, reasoning=reasoning, usage=usage)
     if native_messages is not None or native_tools is not None:
-        raise ValueError("Native Responses history requires the ChatGPT Responses adapter.")
+        raise ValueError("Native Responses history requires a supported native Responses adapter.")
     adapter_type = (
         DeepSeekResponsesAdapter
         if normalize_provider_name(settings.llm_provider) == "deepseek"
@@ -2888,7 +2897,7 @@ def _native_chat_response(settings: Settings, response: Any, *, source: str) -> 
     if reasoning_content is not None:
         receipt["reasoning_content"] = reasoning_content
     responses_output = get_value(message, "responses_output")
-    if source == "chatgpt-responses" and responses_output is not None:
+    if source in {"chatgpt-responses", "deepseek-responses"} and responses_output is not None:
         receipt["responses_output"] = responses_output
     return LlmPlanResponse(
         text=extract_openai_message_text(response),

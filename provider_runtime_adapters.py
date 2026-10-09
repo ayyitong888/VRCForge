@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import threading
 from dataclasses import dataclass, field
-from typing import Any, Callable, Protocol
+from typing import Any, Callable, Mapping, Protocol, Sequence
 
 from model_provider_adapters import validate_provider_api_key
 from provider_protocol_negotiation import DEEPSEEK_FLASH_MODELS, DEEPSEEK_PRO_MODEL
@@ -394,6 +394,52 @@ class DeepSeekResponsesAdapter(_ResponsesProtocolAdapter):
     def _validate_model(self, model: str) -> None:
         if model not in DEEPSEEK_FLASH_MODELS and model != DEEPSEEK_PRO_MODEL:
             raise RuntimeError("DeepSeek Responses requires an exact recognized official model ID.")
+
+    def send_native_request(
+        self,
+        *,
+        model: str,
+        messages: Sequence[Mapping[str, Any]],
+        tools: Sequence[Mapping[str, Any]],
+        stream_callback: Callable[[str], None] | None = None,
+        cancel_event: Any | None = None,
+        stream_activity_callback: Callable[[dict[str, Any]], None] | None = None,
+        reasoning_effort: str = "",
+        max_output_tokens: int | None = None,
+    ) -> Any:
+        from responses_native_protocol import (
+            build_responses_input, flat_function_tools, parse_native_response, stream_response,
+        )
+
+        self._validate_model(model)
+        if cancel_event is not None and cancel_event.is_set():
+            raise RuntimeError("DeepSeek Responses request cancelled.")
+        payload: dict[str, Any] = {
+            "model": model,
+            "input": build_responses_input(
+                messages, namespace=None, require_encrypted_reasoning=False, system_role="system",
+            ),
+            "store": False,
+            "stream": True,
+        }
+        functions = flat_function_tools(tools)
+        if functions:
+            payload["tools"] = functions
+        if reasoning_effort:
+            payload["reasoning"] = {"effort": reasoning_effort}
+        if max_output_tokens is not None:
+            payload["max_output_tokens"] = max_output_tokens
+        response = stream_response(
+            self._client(), payload, cancel_event=cancel_event,
+            stream_callback=stream_callback, activity_callback=stream_activity_callback,
+            error_factory=ProviderResponseError, provider_label=self._provider_label,
+        )
+        try:
+            return parse_native_response(
+                response, tools, namespace=None, require_encrypted_reasoning=False,
+            )
+        except (ValueError, RuntimeError) as exc:
+            raise ProviderResponseError(str(exc), response) from exc
 
 
 def _value(item: Any, key: str) -> Any:

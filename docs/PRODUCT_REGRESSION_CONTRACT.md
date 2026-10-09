@@ -1054,6 +1054,27 @@ Each item ends with its version history in this exact form:
   tests do not establish real expired-token refresh or indefinite grant life.
 - [首次实现: 1.8.8 candidate] [强化/修复: 1.8.8 candidate] [最近验证: 1.8.8 candidate; live login/restart/model turns; expired refresh unverified]
 
+### PRV-008 - Preserve native DeepSeek Responses continuation
+
+- Bug guarded: explicitly selected DeepSeek Responses must enter the native
+  tool loop instead of being rejected by the provider binding gate or losing
+  native receipts through planner-only conversion.
+- Contract: bind native history to the selected provider, endpoint, model and
+  protocol. Replay complete output items and matching tool results across
+  turns and persisted-session restart. Preserve plain reasoning where the
+  provider supports it; keep the OAuth encrypted-reasoning requirement intact.
+  Existing system messages, tools and prior history remain stable on append.
+- Forbidden regression: automatic protocol fallback, importing the optional
+  OAuth integration from DeepSeek transport, accepting unadvertised tools,
+  executing partial streams, or treating missing usage as measured zero.
+- Acceptance: `tests/test_deepseek_native_runtime.py`,
+  `tests/test_deepseek_native_transport.py` and
+  `tests/test_native_responses_protocol.py` cover explicit routing, actual
+  history-store restart, typed SDK streaming with a mock transport, unchanged
+  request prefixes, cancellation and rejected-receipt usage. Live deployment,
+  real tool execution/refeed and warm-cache measurements are separate gates;
+  these offline tests do not establish provider cache performance.
+
 ### PRV-007 - Complete streamed output and honest usage
 
 - Bug fixed: completed output items were discarded when the terminal frame

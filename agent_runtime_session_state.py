@@ -222,11 +222,23 @@ class AgentRuntimeSessionState:
                 item_type = item["type"]
                 if item_type == "reasoning":
                     item_allowed = {"id", "type", "summary", "encrypted_content", "content", "status", "created_by"}
-                    if set(item) - item_allowed or not isinstance(item.get("encrypted_content"), str):
+                    encrypted = item.get("encrypted_content")
+                    content = item.get("content")
+                    if set(item) - item_allowed or (
+                        not isinstance(encrypted, str) and not isinstance(content, list)
+                    ):
+                        raise ValueError("native Responses encrypted reasoning item is invalid")
+                    if "encrypted_content" in item and not isinstance(encrypted, str):
                         raise ValueError("native Responses encrypted reasoning item is invalid")
                     if "summary" in item and not isinstance(item["summary"], list):
                         raise ValueError("native Responses reasoning summary is invalid")
                     if "content" in item and not isinstance(item["content"], list):
+                        raise ValueError("native Responses reasoning content is invalid")
+                    if encrypted is None and any(
+                        not isinstance(part, dict) or set(part) != {"type", "text"}
+                        or part.get("type") != "reasoning_text" or not isinstance(part.get("text"), str)
+                        for part in content
+                    ):
                         raise ValueError("native Responses reasoning content is invalid")
                 elif item_type == "message":
                     item_allowed = {"id", "type", "role", "content", "status", "created_by", "phase", "metadata"}
@@ -257,7 +269,7 @@ class AgentRuntimeSessionState:
                         output_text.append(text)
                 elif item_type == "function_call":
                     item_allowed = {"id", "type", "call_id", "name", "arguments", "namespace", "status", "created_by"}
-                    if set(item) - item_allowed or item.get("namespace") != "vrcforge":
+                    if set(item) - item_allowed or ("namespace" in item and item["namespace"] != "vrcforge"):
                         raise ValueError("native Responses function call namespace or fields are invalid")
                     call_id = cls._native_required(item.get("call_id"), "Responses call id")
                     name = cls._native_required(item.get("name"), "Responses function name")
