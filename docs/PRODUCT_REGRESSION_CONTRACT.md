@@ -1025,6 +1025,73 @@ Each item ends with its version history in this exact form:
   closure, watcher/worker cleanup and post-cancel capacity reuse.
 - [首次实现: 1.5.1] [强化/修复: 1.5.1] [最近验证: 1.5.1]
 
+### PRV-006 - Preserve OAuth login and clarify sign-in controls
+
+- Bug/UI regression guarded: ambiguous sign-in and pending-authorization
+  labels made the login action unclear. Source modularization must preserve
+  the already working account persistence and provider selection.
+
+- Contract: ChatGPT OAuth remains a provider integration, not a replacement
+  Agent loop. A normal App restart retains the selected account and model;
+  refresh rotates protected credentials without requiring another interactive
+  login while the grant remains valid. Sign-out is explicit. Hiding or moving
+  UI modules must not delete credentials or silently switch providers.
+- Forbidden regression: plaintext credential logging, treating an account ID
+  as an API key, changing the credential directory during source refactoring,
+  or ambiguous sign-in controls that conceal pending browser authorization.
+- Acceptance: OAuth service/storage/routes/provider tests, real login followed
+  by App/backend restart, and a real model turn after restart. Mock refresh
+  tests do not establish real expired-token refresh or indefinite grant life.
+- [首次实现: 1.8.8 candidate] [强化/修复: 1.8.8 candidate] [最近验证: 1.8.8 candidate; live login/restart/model turns; expired refresh unverified]
+
+### PRV-007 - Complete streamed output and honest usage
+
+- Bug fixed: completed output items were discarded when the terminal frame
+  contained an empty output array, causing a false empty-response failure.
+  The failure path also lost usage already reported by the provider.
+
+- Contract: preserve final `response.output_item.done` items in output-index
+  order, including encrypted reasoning needed for continuation. A successful
+  terminal frame may omit those items; it must not erase already completed
+  output. Require successful completion before admitting any tool call;
+  reject conflicting items, missing indices and failed/incomplete streams.
+- Contract: known input/output/cache usage survives response parsing failure
+  and is counted once. Missing usage stays unknown, not zero consumption or
+  zero-percent cache hits. Tool counts and elapsed time are separate metrics.
+  Cold starts are excluded from warm-cache measurements; cached/input ratios
+  do not prove how much uncached input was newly appended content.
+- Forbidden regression: terminal-only parsing, execution of partial tools,
+  permission bypass, duplicated output, fabricated usage, or logging secrets
+  and private reasoning for diagnostic convenience.
+- Acceptance: `tests/test_chatgpt_stream_completion.py` covers sparse/full
+  terminal frames, final reasoning, conflicts, failure usage and runtime
+  accounting. Live acceptance must separately prove model tool selection,
+  execution/refeed, natural completion and cross-turn reuse after deployment.
+- [首次实现: 1.8.8 candidate] [强化/修复: 1.8.8 candidate] [最近验证: 1.8.8 candidate; offline and live tool loop/usage; cache performance not accepted]
+
+### PRV-008 - Stable history and observable-result reuse
+
+- Regressions guarded: late tool loading changed the cached prefix;
+  compression dropped the result-reference policy; cross-turn follow-up
+  discarded reusable scan results. Each acceptance claim remains bounded
+  by its own provider and test evidence.
+
+- Contract: resident instructions and tools stay fixed; dynamically loaded
+  descriptions remain at their original tool-result position. Old history
+  and old scan results are not rewritten on follow-up or invalidation.
+  Compression restores the fixed result-reference policy once at the tail.
+- Contract: cross-turn reuse follows the approved tool whitelist and compares
+  the complete observable business result when scope validation is uncertain.
+  Failure, timeout, ambiguous targets and stale exports never prove validity.
+  Verification is read-only and does not overwrite the latest artifact.
+- Forbidden regression: comparing only a summary/page, removing semantic
+  fields to force equality, repeated verification of one reference in a turn,
+  or reporting zero model scans as zero backend/Unity scans.
+- Acceptance: history/policy, scan-rescan, paging and scope-budget tests;
+  live follow-up, backend restart, Play/domain reload and changed-result cases.
+  Offline replay is not live model-selection or cache-performance evidence.
+- [首次实现: 1.8.8 candidate] [强化/修复: 1.8.8 candidate] [最近验证: 1.8.8 candidate; provider-specific live evidence required]
+
 ## Latency and lifecycle contracts
 
 ### LAT-001 — Startup is a release-blocking hard gate
