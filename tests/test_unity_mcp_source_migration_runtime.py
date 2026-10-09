@@ -283,6 +283,11 @@ internal static class Program {
 
     public static int Main(string[] args) {
         var root = args[0];
+        if (args.Length > 1 && args[1] == "current") {
+            Invoke(root);
+            Console.WriteLine(String.Join("\n", UnityEngine.Debug.Warnings));
+            return 0;
+        }
         Directory.CreateDirectory(Path.Combine(root, "Assets"));
         if (args.Length > 1 && args[1] == "reparse") {
             ReparseCase(root);
@@ -402,3 +407,30 @@ def test_migration_reparse_path_preserves_external_sentinel_or_skips_when_unavai
         pytest.fail(f"unexpected symlink creation failure: {result.stdout.strip()}")
     assert result.returncode == 0, result.stdout + result.stderr
     assert "REPARSE_OK" in result.stdout
+
+
+@pytest.mark.parametrize("case", ["current", "crlf", "modified", "renamed", "unknown", "modified_meta"])
+def test_active_runtime_is_quiet_only_for_exact_unmodified_files(migration_harness, tmp_path, case):
+    root = tmp_path / "project"
+    relative = Path("Assets/VRCForge/Runtime/RuntimeObservationFramePump.cs")
+    asset = root / relative
+    asset.parent.mkdir(parents=True)
+    for suffix in ("", ".meta"):
+        content = Path(str(ROOT / relative) + suffix).read_bytes().replace(b"\r\n", b"\n")
+        if case == "crlf":
+            content = content.replace(b"\n", b"\r\n")
+        Path(str(asset) + suffix).write_bytes(content)
+    if case == "modified":
+        asset.write_bytes(asset.read_bytes() + b"\n// user edit\n")
+    elif case == "modified_meta":
+        meta = Path(str(asset) + ".meta")
+        meta.write_bytes(meta.read_bytes() + b"\nuserData: changed\n")
+    elif case == "renamed":
+        asset.rename(asset.with_name("UserRenamed.cs"))
+    elif case == "unknown":
+        (asset.parent / "UserFile.txt").write_text("keep me", encoding="utf-8")
+    before = {p.relative_to(root): p.read_bytes() for p in root.rglob("*") if p.is_file()}
+    result = _run_harness(migration_harness, root, "current")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert bool(result.stdout.strip()) == (case not in {"current", "crlf"}), result.stdout
+    assert {p.relative_to(root): p.read_bytes() for p in root.rglob("*") if p.is_file()} == before

@@ -1,5 +1,15 @@
 # VRCForge Product Regression Contract
 
+## CORE-MIGRATION-001: Preserve Current and User-Owned Runtime Files
+
+- A current shipped Runtime asset must not be reported as retired merely because
+  its directory was used by an old release. Suppress that warning only for its
+  exact path and known shipped content, including supported line endings.
+- Unknown, renamed or modified files and metadata remain preserved and reported.
+  Do not weaken exact-name/hash deletion checks or delete a non-empty folder.
+- Tests: `tests/test_unity_mcp_source_migration_runtime.py`.
+- Source/harness checks do not replace final Unity package import acceptance.
+
 ## CORE-VERSION-UPDATE-001: Actionable App/Core Version Mismatch
 
 - Preserve strict App/Core version matching. A mismatch never enables Unity execution.

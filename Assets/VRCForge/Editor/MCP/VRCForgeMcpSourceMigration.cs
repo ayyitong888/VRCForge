@@ -18,6 +18,19 @@ namespace VRCForge.Editor.MCP
     {
         private const string OwnedAssetRoot = "Assets/VRCForge";
 
+        // Runtime is shared with the current package. Only exact shipped bytes
+        // are quiet; unknown or edited files retain the migration warnings.
+        private static readonly IDictionary<string, ISet<string>> CurrentRuntimePaths =
+            new Dictionary<string, ISet<string>>(StringComparer.Ordinal)
+            {
+                ["Assets/VRCForge/Runtime/RuntimeObservationFramePump.cs"] = Digests(
+                    "75C9498B128AED264C3740FF9D027B0405C10348346E92AAA3E488D9CA200B89",
+                    "E1A32F1ED256B01D6D8EF3CA0A173A9E78219E4C991FC877A00C1C4BC5C8D038"),
+                ["Assets/VRCForge/Runtime/RuntimeObservationFramePump.cs.meta"] = Digests(
+                    "56DBFBC8B80D9FCDAD0D4E63DE505F77BDF802A217E5D93C4C8121030BAFD284",
+                    "FE2A6958C162BCB76479E5E0085E78A93EC47F1E84CA6B2044668CA62634B75B"),
+            };
+
         // Keys are SHA-256 digests of the exact, case-sensitive retired asset
         // paths. Keeping path identities as digests lets the release source
         // remove byte-verified VRCForge migration residue without redistributing
@@ -213,6 +226,12 @@ namespace VRCForge.Editor.MCP
                 }
                 if (Directory.EnumerateFileSystemEntries(fullDirectory).Any())
                 {
+                    if (directories.Length == 0 && files.Length == CurrentRuntimePaths.Count
+                        && files.All(path => IsCurrentRuntimeAsset(projectRoot,
+                            assetDirectory + "/" + Path.GetFileName(path))))
+                    {
+                        return;
+                    }
                     Debug.LogWarning($"[VRCForge] Preserved non-empty retired folder: {assetDirectory}");
                     return;
                 }
@@ -238,6 +257,13 @@ namespace VRCForge.Editor.MCP
             }
         }
 
+        private static bool IsCurrentRuntimeAsset(string projectRoot, string assetPath)
+        {
+            ISet<string> digests;
+            return CurrentRuntimePaths.TryGetValue(assetPath, out digests)
+                && digests.Contains(ComputeSha256(ResolveOwnedAsset(projectRoot, assetPath)));
+        }
+
         private static void TryRemoveMatchedAsset(
             string projectRoot,
             string assetPath,
@@ -246,6 +272,10 @@ namespace VRCForge.Editor.MCP
             try
             {
                 var fullPath = ResolveOwnedAsset(projectRoot, assetPath);
+                if (IsCurrentRuntimeAsset(projectRoot, assetPath))
+                {
+                    return;
+                }
                 ISet<string> allowedDigests;
                 if (!RetiredPaths.TryGetValue(ComputeTextSha256(assetPath), out allowedDigests))
                 {
