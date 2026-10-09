@@ -9,12 +9,14 @@ from typing import Any, Callable, Mapping, Sequence
 from model_provider_adapters import validate_provider_api_key
 from provider_runtime_adapters import (
     OpenAIResponsesAdapter,
+    ProviderNativeToolRejection,
     ProviderRuntimeRequest,
     ProviderRuntimeResponse,
     _TOOL_SCHEMA,
 )
 from responses_native_protocol import (
     NativeResponse,
+    NativeToolRejection,
     build_responses_input as _build_responses_input,
     _normalized_usage,
     parse_native_response as _parse_responses_native,
@@ -161,6 +163,8 @@ class ChatGPTResponsesAdapter:
         )
         try:
             return _parse_native_response(response, tools)
+        except NativeToolRejection as exc:
+            raise ProviderNativeToolRejection(response, exc.receipt.assistant_message) from exc
         except (ValueError, RuntimeError) as exc:
             raise ChatGPTResponseError(str(exc), response) from exc
 

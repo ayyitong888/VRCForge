@@ -1066,6 +1066,12 @@ Each item ends with its version history in this exact form:
 - `tests/test_responses_rejected_batch_recovery.py` reproduces the mixed-batch
   failure through the real adapter/parser and checks zero sibling execution,
   valid correction, unchanged tools, private history and repeated-error stop.
+- OAuth must preserve the same typed rejection path for complete, valid native
+  receipts containing unexposed tools. Do not collapse these into fatal generic
+  errors before the planner can apply its existing correction budget. Namespace
+  and encrypted-reasoning validation remain strict; no sibling may execute.
+  `tests/test_chatgpt_rejected_batch_recovery.py` guards correction, usage counted
+  once, repeated-denial stop and immediate failure for other protocol errors.
 
 - Bug guarded: explicitly selected DeepSeek Responses must enter the native
   tool loop instead of being rejected by the provider binding gate or losing
