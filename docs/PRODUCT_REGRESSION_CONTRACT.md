@@ -1,5 +1,13 @@
 # VRCForge Product Regression Contract
 
+## RELEASE-CLI-001: Preserve Opaque Authentication Arguments
+
+- Release verification must pass an opaque token as one `--token=value` argument.
+  A leading hyphen is valid token content, not a new command-line option.
+- Preserve token randomness and authentication; do not regenerate tokens to hide
+  parser failures or treat a malformed CLI response as a passing diagnostic.
+- Tests: `tests/test_release_evidence_smokes.py`.
+
 ## CORE-MIGRATION-001: Preserve Current and User-Owned Runtime Files
 
 - A current shipped Runtime asset must not be reported as retired merely because

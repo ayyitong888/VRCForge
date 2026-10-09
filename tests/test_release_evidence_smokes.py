@@ -1,12 +1,31 @@
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
 import zipfile
 from pathlib import Path
 
+import pytest
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+@pytest.mark.parametrize("token", ["normal-token", "-fixture-token", "--json", "_"])
+def test_packaged_cli_token_is_one_argument(token: str) -> None:
+    from tools.vrcforge_cli import build_parser
+
+    tree = ast.parse((REPO_ROOT / "scripts/smoke_packaged_backend.py").read_text(encoding="utf-8"))
+    call = next(node.value for node in ast.walk(tree)
+                if isinstance(node, ast.Assign)
+                and any(isinstance(target, ast.Name) and target.id == "cli_doctor" for target in node.targets))
+    command = eval(compile(ast.Expression(call.args[0]), "<cli-command>", "eval"),
+                   {"str": str, "backend_exe": "fixture.exe", "base_url": "http://127.0.0.1:1", "token": token})
+    args = build_parser().parse_args(command[2:])
+    assert args.token == token
+    assert args.json is True
+    assert args.command == "doctor"
 
 
 def load_script(name: str):
