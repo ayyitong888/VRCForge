@@ -11795,6 +11795,8 @@ class DashboardServerTests(unittest.TestCase):
             (project / "ProjectSettings").mkdir()
             existing = project / "Assets" / "existing.txt"
             existing.write_text("before", encoding="utf-8")
+            for name in ("Avatar.unity", "Lighting.unity"):
+                (project / "Assets" / name).write_text("saved scene", encoding="utf-8")
             (project / "Packages" / "manifest.json").write_text("{}", encoding="utf-8")
             (project / "ProjectSettings" / "ProjectVersion.txt").write_text(
                 "m_EditorVersion: 2022.3", encoding="utf-8"

@@ -1,5 +1,26 @@
 # VRCForge Product Regression Contract
 
+## CHECKPOINT-SCENE-001: Check Reload Targets Before Restoring Files
+
+- Before publishing an archive restore, verify that every scene the existing
+  reload policy will reopen survives the archive's exact-file or project scope.
+  Use recorded checkpoint topology when available; legacy records without that
+  topology use the authoritative scene list returned by restore preparation.
+- A missing reload target rejects the restore before replacing or deleting any
+  project file. Explain which scene is unavailable and ask the user to open a
+  saved scene included in the checkpoint. Never guess an alternative scene.
+- Preparation may already have closed clean scenes. A rejected restore must
+  reopen that exact prepared scene set, without saving, refreshing assets, or
+  substituting checkpoint topology. Reopen failures remain recovery-required.
+- Preserve successful topology rollback, scoped archive restores, dirty-scene
+  protection, explicit approval and archive integrity checks.
+- Tests: `tests/test_checkpoint_restore_scene_preflight.py` and the archive
+  restore ordering/topology tests in `tests/test_dashboard_server.py`.
+- Source tests do not replace real Editor rejection/readback and successful
+  historical restore acceptance. Unity reimport may upgrade legacy importer
+  metadata; report those differences rather than claiming byte-exact readback.
+- [First implemented: unreleased] [Last verified: local candidate]
+
 ## RELEASE-CLI-001: Preserve Opaque Authentication Arguments
 
 - Release verification must pass an opaque token as one `--token=value` argument.

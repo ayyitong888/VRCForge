@@ -1285,6 +1285,18 @@ class AgentCheckpointRecoveryService:
                 }
                 self._ports.append_audit({"event": "checkpoint_restore_prepare_failed", **payload})
                 return payload
+        checkpoint_prepare = ensure_dict(checkpoint.get("unityPrepare"))
+        original_scene_context: dict[str, Any] = {}
+        checkpoint_scenes = checkpoint_prepare.get("scenes")
+        if (
+            checkpoint_prepare.get("ok") is True
+            and isinstance(checkpoint_scenes, list)
+            and ("activeScenePath" in checkpoint_prepare or not checkpoint_scenes)
+        ):
+            original_scene_context = {
+                "scenes": ensure_string_list(checkpoint_scenes),
+                "activeScenePath": str(checkpoint_prepare.get("activeScenePath") or "").strip(),
+            }
         if local_state_restore:
             payload = (
                 self._restore_project_chat_checkpoint(checkpoint)
@@ -1299,7 +1311,15 @@ class AgentCheckpointRecoveryService:
                 )
             )
         elif checkpoint.get("strategy") == "archive":
-            payload = self._restore_archive_checkpoint(checkpoint)
+            reload_scenes = ensure_string_list(
+                {**restore_prepare, **original_scene_context}.get("scenes")
+            ) if self._checkpoint_restore_handler is not None else []
+            payload = self._archive_reload_scene_error(checkpoint, reload_scenes)
+            if payload is None:
+                payload = self._restore_archive_checkpoint(checkpoint)
+            else:
+                # No files changed: reopen the exact scenes closed by prepare, not older topology.
+                original_scene_context = {}
         else:
             git_root = Path(str(checkpoint["gitRoot"]))
             ref = str(checkpoint["checkpointRef"])
@@ -1336,23 +1356,6 @@ class AgentCheckpointRecoveryService:
             and (payload.get("ok") or restore_prepare.get("ok"))
         )
         if should_reload_unity:
-            checkpoint_prepare = ensure_dict(checkpoint.get("unityPrepare"))
-            original_scene_context: dict[str, Any] = {}
-            checkpoint_scenes = checkpoint_prepare.get("scenes")
-            if (
-                checkpoint_prepare.get("ok") is True
-                and isinstance(checkpoint_scenes, list)
-                and (
-                    "activeScenePath" in checkpoint_prepare
-                    or not checkpoint_scenes
-                )
-            ):
-                original_scene_context = {
-                    "scenes": ensure_string_list(checkpoint_scenes),
-                    "activeScenePath": str(
-                        checkpoint_prepare.get("activeScenePath") or ""
-                    ).strip(),
-                }
             reload_context = {
                 **restore_prepare,
                 **original_scene_context,
@@ -1951,6 +1954,36 @@ class AgentCheckpointRecoveryService:
             }
         except Exception as exc:  # noqa: BLE001
             return {"ok": False, "checkpoint": checkpoint, "error": str(exc)}
+
+    def _archive_reload_scene_error(
+        self, checkpoint: dict[str, Any], scenes: list[str]
+    ) -> dict[str, Any] | None:
+        if not scenes:
+            return None
+        try:
+            archive_path = self._resolve_checkpoint_archive_path(checkpoint, "archive")
+            with zipfile.ZipFile(archive_path) as archive:
+                members = {info.filename for info in archive.infolist() if not info.is_dir()}
+            files = set(ensure_string_list(checkpoint.get("archiveFiles")))
+            roots = set(ensure_string_list(checkpoint.get("pathspecs")))
+            project = Path(str(checkpoint["projectRoot"]))
+            missing = []
+            for scene in scenes:
+                covered = scene in files if files else PurePosixPath(scene).parts[0] in roots
+                if (covered and scene not in members) or (not covered and not (project / scene).is_file()):
+                    missing.append(scene)
+            if not missing:
+                return None
+            return {
+                "ok": False, "checkpoint": checkpoint, "status": "restore_preflight_failed",
+                "code": "checkpoint_scene_not_in_archive", "missingScenes": missing,
+                "error": "Restore stopped before changing project files: these scenes would be unavailable: "
+                    + ", ".join(missing)
+                    + ". Open a saved scene included in this checkpoint, then retry. No alternative scene was selected.",
+            }
+        except (OSError, ValueError, zipfile.BadZipFile) as exc:
+            return {"ok": False, "checkpoint": checkpoint, "status": "restore_preflight_failed",
+                    "error": f"Cannot verify checkpoint scene availability before restore: {exc}"}
 
     def _restore_archive_checkpoint(self, checkpoint: dict[str, Any]) -> dict[str, Any]:
         project_root = Path(str(checkpoint["projectRoot"])).resolve()
