@@ -36,6 +36,109 @@ def test_assets_package_json_is_detected_with_matching_package_identity(tmp_path
     assert result["source"] == "assets"
 
 
+def _real_package_detector() -> PackageDetectionService:
+    return PackageDetectionService(
+        PackageDetectionPorts(
+            path_exists=lambda path: path.exists(),
+            read_utf8_sig_text=lambda path: path.read_text(encoding="utf-8"),
+        )
+    )
+
+
+def test_packages_lock_detects_transitive_dependency_from_real_fixture(tmp_path: Path) -> None:
+    project = tmp_path / "Project"
+    packages = project / "Packages"
+    packages.mkdir(parents=True)
+    (packages / "manifest.json").write_text(
+        json.dumps({"dependencies": {"com.vrchat.avatars": "3.7.0"}}),
+        encoding="utf-8",
+    )
+    (packages / "packages-lock.json").write_text(
+        json.dumps(
+            {
+                "dependencies": {
+                    "com.unity.nuget.newtonsoft-json": {
+                        "version": "3.2.1",
+                        "depth": 1,
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = _real_package_detector().detect(
+        project, ["com.unity.nuget.newtonsoft-json"]
+    )
+
+    assert result["installed"] is True
+    assert result["packageId"] == "com.unity.nuget.newtonsoft-json"
+    assert result["version"] == "3.2.1"
+    assert result["source"] == "packages-lock"
+
+
+def test_package_detection_reports_real_missing_package(tmp_path: Path) -> None:
+    project = tmp_path / "Project"
+    packages = project / "Packages"
+    packages.mkdir(parents=True)
+    (packages / "manifest.json").write_text(
+        json.dumps({"dependencies": {"com.vrchat.avatars": "3.7.0"}}),
+        encoding="utf-8",
+    )
+    (packages / "packages-lock.json").write_text(
+        json.dumps({"dependencies": {"com.unity.ugui": {"version": "1.0.0"}}}),
+        encoding="utf-8",
+    )
+
+    result = _real_package_detector().detect(
+        project, ["com.unity.nuget.newtonsoft-json"]
+    )
+
+    assert result["installed"] is False
+    assert result["packageId"] == ""
+    assert result["source"] == ""
+
+
+def test_package_detection_preserves_embedded_vpm_and_upm_priority(tmp_path: Path) -> None:
+    project = tmp_path / "Project"
+    packages = project / "Packages"
+    embedded = packages / "com.example.package"
+    embedded.mkdir(parents=True)
+    (embedded / "package.json").write_text(
+        json.dumps({"name": "com.example.package", "version": "4.0.0"}),
+        encoding="utf-8",
+    )
+    (packages / "vpm-manifest.json").write_text(
+        json.dumps({"dependencies": {"com.example.package": "3.0.0"}}),
+        encoding="utf-8",
+    )
+    (packages / "manifest.json").write_text(
+        json.dumps({"dependencies": {"com.example.package": "2.0.0"}}),
+        encoding="utf-8",
+    )
+    (packages / "packages-lock.json").write_text(
+        json.dumps({"dependencies": {"com.example.package": {"version": "1.0.0"}}}),
+        encoding="utf-8",
+    )
+
+    result = _real_package_detector().detect(project, ["com.example.package"])
+
+    assert result["installed"] is True
+    assert result["version"] == "4.0.0"
+    assert result["source"] == "embedded"
+
+    (embedded / "package.json").unlink()
+    embedded.rmdir()
+    result = _real_package_detector().detect(project, ["com.example.package"])
+    assert result["version"] == "3.0.0"
+    assert result["source"] == "vpm"
+
+    (packages / "vpm-manifest.json").unlink()
+    result = _real_package_detector().detect(project, ["com.example.package"])
+    assert result["version"] == "2.0.0"
+    assert result["source"] == "upm"
+
+
 def _service(
     calls: list[tuple[Any, ...]],
     plan: dict[str, Any],

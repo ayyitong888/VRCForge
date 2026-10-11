@@ -14,6 +14,7 @@ Release candidate. Publication requires the release validation gates to pass.
 ## Unity Project Guidance
 
 - Check the selected project's VRChat SDK and Unity Newtonsoft Json package metadata when Core cannot connect. Show the missing prerequisite before directing users to a menu that compilation errors may have prevented from loading.
+- Recognize dependencies resolved through Unity's package lock file, so SDK-provided Newtonsoft is not incorrectly reported as missing.
 - Preserve a working Core connection even when package metadata is unavailable. Unreadable metadata is reported as unknown.
 - Importing into an empty Unity project now keeps a dependency setup menu available without compiling SDK-dependent tools. Install the VRChat Avatar SDK and its dependencies through VCC, ALCOM or vrc-get to enable the complete Core automatically. VRCForge does not install these dependencies itself.
 - Require the Avatar SDK specifically: a project with only VRChat Base no longer passes the Avatar dependency check.

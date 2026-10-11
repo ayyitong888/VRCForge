@@ -10,6 +10,8 @@ import json
 import re
 from pathlib import Path
 
+import dashboard_server
+
 
 ROOT = Path(__file__).resolve().parents[1]
 ASSETS = ROOT / "Assets" / "VRCForge"
@@ -58,6 +60,42 @@ def test_setup_compiles_without_the_core_or_external_packages():
     assert not assembly.get("precompiledReferences")
     assert not assembly.get("defineConstraints")
     assert list(setup.glob("*.cs")), "The independently importable setup menu is missing"
+
+
+def test_preflight_accepts_transitive_newtonsoft_from_packages_lock(tmp_path: Path):
+    project = tmp_path / "Project"
+    packages = project / "Packages"
+    packages.mkdir(parents=True)
+    (packages / "manifest.json").write_text(
+        json.dumps(
+            {
+                "dependencies": {
+                    "com.vrchat.avatars": "3.7.0",
+                    "com.vrchat.base": "3.7.0",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    (packages / "packages-lock.json").write_text(
+        json.dumps(
+            {
+                "dependencies": {
+                    "com.unity.nuget.newtonsoft-json": {
+                        "version": "3.2.1",
+                        "depth": 1,
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = dashboard_server.build_unity_dependency_preflight(project)
+
+    assert result["status"] == "ok"
+    assert result["ready"] is True
+    assert result["checks"]["newtonsoft"]["source"] == "packages-lock"
 
 
 def test_observation_frame_pump_remains_a_runtime_assembly():

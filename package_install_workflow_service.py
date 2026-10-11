@@ -336,9 +336,14 @@ class PackageDetectionService:
                 return info
         except OSError:
             pass
+        # Keep direct project declarations ahead of the resolved lock graph:
+        # embedded packages, VPM, and direct UPM state are authoritative when
+        # more than one source is present. The lock file is still needed for
+        # transitive packages that are absent from manifest.json.
         for manifest_name, source in (
             ("vpm-manifest.json", "vpm"),
             ("manifest.json", "upm"),
+            ("packages-lock.json", "packages-lock"),
         ):
             manifest_path = packages_dir / manifest_name
             if not self._ports.path_exists(manifest_path):
