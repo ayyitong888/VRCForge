@@ -26,6 +26,10 @@
   association and verified state; preserve other accounts and providers.
 - Keep a user-triggered removal path for previously signed-out local accounts.
   Never remove all disconnected accounts automatically.
+- Keep the model selector available when settings are reopened. Load the selected
+  connected account's catalog, preserve its active selection, and reject late
+  catalog responses after changing accounts. Loading or an empty catalog must
+  not remove the control. Keep account and model actions aligned at narrow widths.
 - Internal configured state is yellow. A successful text connection test with
   HTTP 200 and a successful result may become green; changing the provider,
   account, key, endpoint or model invalidates verification. Late responses for a
@@ -34,6 +38,7 @@
 - Tests: `test_chatgpt_oauth_service.py`, `test_chatgpt_oauth_routes.py`,
   `test_chatgpt_oauth_buttons_browser.mjs`,
   `test_chatgpt_oauth_logout_browser.mjs`,
+  `test_chatgpt_oauth_ui_browser.mjs`, `test_chatgpt_oauth_models_browser.mjs`,
   `test_provider_settings_verification_browser.mjs`, and
   `test_runtime_authorization_status_ui.mjs`. Controlled browser responses do not
   establish successful authorization or connectivity to a real provider.

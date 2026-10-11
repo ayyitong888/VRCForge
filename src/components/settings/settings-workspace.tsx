@@ -66,6 +66,7 @@ type SettingsWorkspaceProps = {
   modelsError: string;
   testingProvider: string;
   providerTestMessage: string;
+  providerTestPassed: boolean;
   visionConfig?: VisionConfig;
   visionProvider: string;
   visionApiKey: string;
@@ -167,6 +168,7 @@ export function SettingsWorkspace({
   modelsError,
   testingProvider,
   providerTestMessage,
+  providerTestPassed,
   visionConfig,
   visionProvider,
   visionApiKey,
@@ -401,6 +403,8 @@ export function SettingsWorkspace({
               savingApiConfig={savingApiConfig}
               testingProvider={testingProvider}
               providerTestMessage={providerTestMessage}
+              providerTestPassed={providerTestPassed}
+              developerOptionsEnabled={developerOptionsEnabled}
               onTestProvider={onProviderTest}
               onProviderConfigChanged={onProviderConfigChanged}
             />

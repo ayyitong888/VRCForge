@@ -127,7 +127,7 @@ try {
     assert.fail(`timed out: ${label}`);
   };
   await page.goto(`http://127.0.0.1:${server.address().port}/`);
-  await wait(async () => (await page.locator("select").inputValue()) === "current-account", "initial account selection");
+  await wait(async () => (await page.locator("select").first().inputValue()) === "current-account", "initial account selection");
 
   await page.getByRole("button", { name: "Sign in to ChatGPT" }).click();
   await wait(() => requests.length === 1, "ordinary login request");
@@ -147,7 +147,7 @@ try {
     window.__staleClick = new Promise((resolveClick) => {
       const panel = document.querySelector("[data-chatgpt-oauth-panel]");
       const clickBeforeSelectionEffect = () => {
-        const select = panel?.querySelector("select");
+        const select = panel?.querySelector("select:not([data-chatgpt-model-select])");
         const hasCurrentAccountOption = Array.from(select?.options || []).some((option) => option.value === "current-account");
         if (hasCurrentAccountOption || select?.options.length !== 1) return;
         const button = Array.from(panel.querySelectorAll("button")).find((item) => item.textContent?.includes("Sign in to ChatGPT"));

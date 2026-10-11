@@ -4099,6 +4099,7 @@ export default function App() {
               modelsError={modelsError}
               testingProvider={testingProvider}
               providerTestMessage={providerTestMessage}
+              providerTestPassed={providerTestPassed}
               visionConfig={visionConfig}
               visionProvider={visionProvider}
               visionApiKey={visionApiKey}

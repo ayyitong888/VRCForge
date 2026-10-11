@@ -25,6 +25,8 @@ type ChatGptOAuthSettingsProps = {
   savingApiConfig: boolean;
   testingProvider: string;
   providerTestMessage: string;
+  providerTestPassed: boolean;
+  developerOptionsEnabled: boolean;
   onTestProvider: (capability: "text" | "structured" | "vision") => void;
   onProviderConfigChanged: () => Promise<void> | void;
 };
@@ -37,6 +39,8 @@ export function ChatGptOAuthSettings({
   savingApiConfig,
   testingProvider,
   providerTestMessage,
+  providerTestPassed,
+  developerOptionsEnabled,
   onTestProvider,
   onProviderConfigChanged,
 }: ChatGptOAuthSettingsProps) {
@@ -44,6 +48,8 @@ export function ChatGptOAuthSettings({
   const [status, setStatus] = useState<ChatGptOAuthStatus | null>(null);
   const [selectedAccountId, setSelectedAccountId] = useState("");
   const [models, setModels] = useState<ChatGptOAuthModel[]>([]);
+  const [modelsAccountId, setModelsAccountId] = useState("");
+  const [modelLoadFailed, setModelLoadFailed] = useState(false);
   const [selectedModel, setSelectedModel] = useState("");
   const [busy, setBusy] = useState("");
   const [statusLoading, setStatusLoading] = useState(false);
@@ -55,6 +61,7 @@ export function ChatGptOAuthSettings({
   const pollStopAt = useRef(0);
   const modelGeneration = useRef(0);
   const modelController = useRef<AbortController | null>(null);
+  const modelLoadingAccountRef = useRef("");
   const selectedAccountRef = useRef(selectedAccountId);
   selectedAccountRef.current = selectedAccountId;
 
@@ -117,6 +124,9 @@ export function ChatGptOAuthSettings({
     modelController.current?.abort();
     modelController.current = null;
     setModels([]);
+    setModelsAccountId("");
+    setModelLoadFailed(false);
+    modelLoadingAccountRef.current = "";
     setSelectedModel("");
     setBusy((current) => current === "models" ? "" : current);
     return () => {
@@ -137,6 +147,8 @@ export function ChatGptOAuthSettings({
         modelController.current?.abort();
         modelController.current = null;
         setModels([]);
+        setModelsAccountId("");
+        setModelLoadFailed(false);
         setSelectedModel("");
         setBusy((current) => current === "models" ? "" : current);
       }
@@ -166,6 +178,22 @@ export function ChatGptOAuthSettings({
     : undefined;
   const activeModel = status?.activeModel || "";
   const active = Boolean(status?.activeAccountId && activeModel);
+  const activeConnectionVerified = Boolean(
+    active && apiProvider === "chatgpt" && providerTestPassed && activeAccount?.connected,
+  );
+
+  useEffect(() => {
+    const account = selectedAccount;
+    if (
+      !runtimeConnected
+      || !account?.connected
+      || modelsAccountId === account.id
+      || modelLoadingAccountRef.current === account.id
+    ) {
+      return;
+    }
+    void loadModels(account.id);
+  }, [modelsAccountId, runtimeConnected, selectedAccount?.connected, selectedAccount?.id]);
 
   function selectAccount(accountId: string) {
     modelGeneration.current += 1;
@@ -175,6 +203,8 @@ export function ChatGptOAuthSettings({
     selectedAccountRef.current = accountId;
     setSelectedAccountId(accountId);
     setModels([]);
+    setModelsAccountId("");
+    setModelLoadFailed(false);
     setSelectedModel("");
     setError("");
     setNotice("");
@@ -200,25 +230,35 @@ export function ChatGptOAuthSettings({
     }
   }
 
-  async function loadModels() {
-    if (!selectedAccount?.connected || busy || !runtimeConnected) {
+  async function loadModels(accountId = selectedAccount?.id || "") {
+    const account = status?.accounts.find((item) => item.id === accountId);
+    if (!account?.connected || busy || !runtimeConnected || modelLoadingAccountRef.current === accountId) {
       return;
     }
-    const accountId = selectedAccount.id;
     const generation = ++modelGeneration.current;
     const controller = new AbortController();
     modelController.current?.abort();
     modelController.current = controller;
+    modelLoadingAccountRef.current = accountId;
     setBusy("models");
     setError("");
     setNotice("");
+    setModelLoadFailed(false);
     try {
       const response = await fetchChatGptOAuthModels(endpoint, accountId, controller.signal);
       if (generation !== modelGeneration.current || selectedAccountRef.current !== accountId) {
         return;
       }
       setModels(response.models);
+      setModelsAccountId(accountId);
       setSelectedModel((current) => {
+        if (
+          status?.activeAccountId === accountId
+          && activeModel
+          && response.models.some((model) => model.id === activeModel)
+        ) {
+          return activeModel;
+        }
         if (response.models.some((model) => model.id === current)) {
           return current;
         }
@@ -229,15 +269,27 @@ export function ChatGptOAuthSettings({
       }
     } catch (cause) {
       if (generation === modelGeneration.current && !controller.signal.aborted) {
+        setModelLoadFailed(true);
         setError(cause instanceof Error ? cause.message : String(cause));
       }
     } finally {
+      if (modelLoadingAccountRef.current === accountId) {
+        modelLoadingAccountRef.current = "";
+      }
       if (generation === modelGeneration.current) {
         modelController.current = null;
         setBusy("");
       }
     }
   }
+
+  const displayedModels = modelsAccountId === selectedAccount?.id ? models : [];
+  const activeModelOption = activeAccount?.id === selectedAccount?.id
+    && activeModel
+    && !displayedModels.some((model) => model.id === activeModel)
+    ? { id: activeModel, name: activeModel }
+    : null;
+  const modelChoicesAvailable = displayedModels.length > 0 || Boolean(activeModelOption);
 
   async function logoutSelectedAccount() {
     if (!selectedAccount || busy || !runtimeConnected) {
@@ -267,23 +319,44 @@ export function ChatGptOAuthSettings({
 
   return (
     <section className="rounded-lg border border-border bg-card p-4" data-chatgpt-oauth-panel>
-      <div className="flex min-w-0 flex-wrap items-start justify-between gap-3">
-        <div className="min-w-0">
-          <h3 className="text-sm font-semibold">{t("chatgptOAuth.title")}</h3>
+      <div className="flex min-w-0 flex-wrap items-center gap-2">
+        <div className="min-w-0 flex-1 basis-40">
+          <h3 className="truncate text-sm font-semibold">{t("chatgptOAuth.title")}</h3>
         </div>
-        {active ? (
-          <Badge tone={activeAccount?.connected ? "ok" : "warn"}>
-            {activeAccount
-              ? activeAccount.connected
-                ? t("chatgptOAuth.activeAccountModel", { account: activeAccount.label || activeAccount.email || activeAccount.id, model: activeModel })
-                : t("chatgptOAuth.disconnectedActiveAccountModel", { account: activeAccount.label || activeAccount.email || activeAccount.id, model: activeModel })
-              : t("chatgptOAuth.activeAccountModel", { account: status?.activeAccountId, model: activeModel })}
-          </Badge>
-        ) : null}
-        {status?.pending ? (
-          <Badge tone="warn">{t("chatgptOAuth.pending")}</Badge>
-        ) : null}
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
+          {active ? (
+            <Badge data-chatgpt-active-badge tone={activeConnectionVerified ? "ok" : "warn"}>
+              {activeAccount
+                ? activeAccount.connected
+                  ? t("chatgptOAuth.activeAccountModel", { account: activeAccount.label || activeAccount.email || activeAccount.id, model: activeModel })
+                  : t("chatgptOAuth.disconnectedActiveAccountModel", { account: activeAccount.label || activeAccount.email || activeAccount.id, model: activeModel })
+                : t("chatgptOAuth.activeAccountModel", { account: status?.activeAccountId, model: activeModel })}
+            </Badge>
+          ) : null}
+          {status?.pending ? (
+            <Badge tone="warn">{t("chatgptOAuth.pending")}</Badge>
+          ) : null}
+          <Button
+            type="button"
+            variant="outline"
+            className="h-10 w-10 shrink-0 px-0"
+            data-chatgpt-refresh
+            aria-label={t("chatgptOAuth.refreshStatus")}
+            title={t("chatgptOAuth.refreshStatus")}
+            disabled={!runtimeConnected || statusLoading || Boolean(busy)}
+            onClick={() => setStatusRefresh((current) => current + 1)}
+          >
+            {statusLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+          </Button>
+        </div>
       </div>
+      {status?.pending ? (
+        <div className="mt-2 text-xs text-muted-foreground" role="status">
+          {activeConnectionVerified
+            ? t("chatgptOAuth.pendingWithCurrentAccount")
+            : t("chatgptOAuth.pendingDetails")}
+        </div>
+      ) : null}
 
       <div className="mt-4 grid gap-3">
         <label className="grid gap-1.5 text-xs font-medium text-foreground">
@@ -291,7 +364,7 @@ export function ChatGptOAuthSettings({
           <select
             value={selectedAccountId}
             onChange={(event) => selectAccount(event.target.value)}
-            disabled={!runtimeConnected || Boolean(busy)}
+            disabled={!runtimeConnected || Boolean(busy && busy !== "models")}
             className="h-10 w-full rounded-md border border-border bg-background px-3 text-sm font-normal outline-none focus:border-primary disabled:opacity-60"
           >
             {!status?.accounts.length ? <option value="">{t("chatgptOAuth.noAccounts")}</option> : null}
@@ -303,10 +376,11 @@ export function ChatGptOAuthSettings({
           </select>
         </label>
 
-        <div className="flex min-w-0 flex-wrap items-center gap-2">
+        <div className="grid min-w-0 gap-2 sm:grid-cols-2 md:grid-cols-3">
           <Button
             type="button"
             variant="outline"
+            className="w-full"
             disabled={!runtimeConnected || Boolean(busy) || Boolean(status?.pending) || savingApiConfig}
             onClick={() => void runAction(
               "login",
@@ -324,6 +398,7 @@ export function ChatGptOAuthSettings({
           <Button
             type="button"
             variant="outline"
+            className="w-full"
             disabled={!runtimeConnected || Boolean(busy) || Boolean(status?.pending) || savingApiConfig}
             onClick={() => void runAction(
               "login",
@@ -337,6 +412,7 @@ export function ChatGptOAuthSettings({
             <Button
               type="button"
               variant="outline"
+              className="w-full"
               disabled={Boolean(busy) || !runtimeConnected}
               onClick={() => void runAction("cancel", () => cancelChatGptOAuthLogin(endpoint))}
             >
@@ -347,6 +423,7 @@ export function ChatGptOAuthSettings({
             <Button
               type="button"
               variant="outline"
+              className="w-full"
               disabled={Boolean(busy) || !runtimeConnected}
               onClick={() => void logoutSelectedAccount()}
             >
@@ -354,9 +431,13 @@ export function ChatGptOAuthSettings({
               {selectedAccount.connected ? t("chatgptOAuth.logout") : t("chatgptOAuth.removeAccount")}
             </Button>
           ) : null}
+        </div>
+
+        <div className="grid min-w-0 gap-2 sm:grid-cols-2">
           <Button
             type="button"
             variant="outline"
+            className="w-full"
             disabled={!runtimeConnected || !selectedAccount?.connected || Boolean(busy)}
             onClick={() => void loadModels()}
           >
@@ -367,6 +448,7 @@ export function ChatGptOAuthSettings({
             <Button
               type="button"
               variant="outline"
+              className="w-full"
               disabled={!runtimeConnected || !active || Boolean(busy) || Boolean(testingProvider) || savingApiConfig}
               onClick={() => onTestProvider("text")}
             >
@@ -374,52 +456,60 @@ export function ChatGptOAuthSettings({
               {t("chatgptOAuth.testConnection")}
             </Button>
           ) : null}
+        </div>
+
+        <div className="grid min-w-0 gap-2 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
+          <label className="grid min-w-0 flex-1 gap-1.5 text-xs font-medium text-foreground">
+            {t("chatgptOAuth.model")}
+            <select
+              value={selectedModel}
+              onChange={(event) => setSelectedModel(event.target.value)}
+              disabled={Boolean(busy) || !modelChoicesAvailable}
+              data-chatgpt-model-select
+              className="h-10 w-full min-w-0 rounded-md border border-border bg-background px-3 text-sm font-normal outline-none focus:border-primary disabled:opacity-60"
+            >
+              {!modelChoicesAvailable ? (
+                <option value="">
+                  {busy === "models"
+                    ? t("chatgptOAuth.modelsLoading")
+                    : !selectedAccount
+                      ? t("chatgptOAuth.modelsNoAccount")
+                      : !selectedAccount.connected
+                        ? t("chatgptOAuth.modelsDisconnected")
+                        : modelLoadFailed
+                          ? t("chatgptOAuth.modelsLoadFailed")
+                          : t("chatgptOAuth.modelsNoResults")}
+                </option>
+              ) : null}
+              {activeModelOption ? <option value={activeModelOption.id}>{activeModelOption.name}</option> : null}
+              {displayedModels.map((model) => <option key={model.id} value={model.id}>{model.name || model.id}</option>)}
+            </select>
+          </label>
           <Button
             type="button"
-            variant="outline"
-            className="ml-auto"
-            aria-label={t("chatgptOAuth.refreshStatus")}
-            title={t("chatgptOAuth.refreshStatus")}
-            disabled={!runtimeConnected || statusLoading || Boolean(busy)}
-            onClick={() => setStatusRefresh((current) => current + 1)}
+            className="w-full sm:w-auto"
+            disabled={!runtimeConnected || !selectedAccount?.connected || !selectedModel || Boolean(busy) || savingApiConfig}
+            onClick={() => void runAction(
+              "activate",
+              async () => {
+                await activateChatGptOAuthModel(endpoint, selectedAccountId, selectedModel);
+                await onProviderConfigChanged();
+              },
+              t("chatgptOAuth.activated"),
+            )}
           >
-            {statusLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+            {busy === "activate" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
+            {t("chatgptOAuth.activate")}
           </Button>
         </div>
 
-        {models.length > 0 ? (
-          <div className="flex min-w-0 flex-wrap items-end gap-2">
-            <label className="grid min-w-0 flex-1 gap-1.5 text-xs font-medium text-foreground">
-              {t("chatgptOAuth.model")}
-              <select
-                value={selectedModel}
-                onChange={(event) => setSelectedModel(event.target.value)}
-                disabled={Boolean(busy)}
-                className="h-10 w-full min-w-0 rounded-md border border-border bg-background px-3 text-sm font-normal outline-none focus:border-primary disabled:opacity-60"
-              >
-                {models.map((model) => <option key={model.id} value={model.id}>{model.name || model.id}</option>)}
-              </select>
-            </label>
-            <Button
-              type="button"
-              disabled={!runtimeConnected || !selectedAccount?.connected || !selectedModel || Boolean(busy) || savingApiConfig}
-              onClick={() => void runAction(
-              "activate",
-                async () => {
-                  await activateChatGptOAuthModel(endpoint, selectedAccountId, selectedModel);
-                  await onProviderConfigChanged();
-                },
-                t("chatgptOAuth.activated"),
-              )}
-            >
-              {busy === "activate" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
-              {t("chatgptOAuth.activate")}
-            </Button>
+        {!runtimeConnected ? <div className="text-xs text-muted-foreground">{t("provider.coreDisconnectedModels")}</div> : null}
+        {apiProvider === "chatgpt" && providerTestMessage ? (
+          <div aria-live="polite" className="text-xs text-muted-foreground">
+            {providerTestPassed ? t("chatgptOAuth.testConnectionSucceeded") : t("chatgptOAuth.testConnectionNeedsRetest")}
+            {developerOptionsEnabled ? <span className="ml-1">{providerTestMessage}</span> : null}
           </div>
         ) : null}
-
-        {!runtimeConnected ? <div className="text-xs text-muted-foreground">{t("provider.coreDisconnectedModels")}</div> : null}
-        {apiProvider === "chatgpt" && providerTestMessage ? <div aria-live="polite" className="text-xs text-muted-foreground">{providerTestMessage}</div> : null}
         {error ? <div role="alert" className="text-xs text-destructive/80">{error}</div> : null}
         {notice ? <div aria-live="polite" className="text-xs text-muted-foreground">{notice}</div> : null}
       </div>

@@ -9,6 +9,7 @@ Release candidate. Publication requires the release validation gates to pass.
 - Allow five seconds of clock skew during identity-token validation, while retaining signature, issuer, audience, expiry and nonce checks. Show a specific safe validation error when sign-in fails.
 - Distinguish internal model connections from authenticated external Agent sessions. Saved internal configuration stays yellow until its connection test succeeds; changing the tested configuration invalidates that result.
 - Keep Unity connection readiness independent from model-provider connection status.
+- Keep the ChatGPT model selector visible and reload the selected account's catalog when reopening settings. Group account and model actions so controls remain aligned at narrow widths.
 
 ## Unity Project Guidance
 

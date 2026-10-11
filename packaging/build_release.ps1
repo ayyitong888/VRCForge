@@ -358,6 +358,21 @@ function Build-TauriDesktopApp {
         throw "npm ci failed."
     }
 
+    $nodeExe = Join-Path (Split-Path -Parent $npmExe) "node.exe"
+    foreach ($regression in @(
+        "test_chatgpt_oauth_buttons_browser.mjs",
+        "test_chatgpt_oauth_logout_browser.mjs",
+        "test_chatgpt_oauth_ui_browser.mjs",
+        "test_chatgpt_oauth_models_browser.mjs",
+        "test_provider_settings_verification_browser.mjs",
+        "test_runtime_authorization_status_ui.mjs"
+    )) {
+        & $nodeExe (Join-Path $repoRoot "tests\$regression")
+        if ($LASTEXITCODE -ne 0) {
+            throw "Account UI regression gate failed: $regression. Configure the existing Playwright test environment before packaging."
+        }
+    }
+
     Write-Host "Building Tauri desktop app..."
     & $npmExe run tauri:build
     if ($LASTEXITCODE -ne 0) {

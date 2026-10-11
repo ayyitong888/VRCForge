@@ -120,7 +120,7 @@ try {
     assert.fail(`timed out: ${label}`);
   };
   await page.goto(`http://127.0.0.1:${server.address().port}/`);
-  await wait(async () => (await page.locator("select").inputValue()) === "removed-account", "disconnected account selection");
+  await wait(async () => (await page.locator("select").first().inputValue()) === "removed-account", "disconnected account selection");
   assert.equal(await page.getByRole("button", { name: "Remove account" }).count(), beforeFix ? 0 : 1);
 
   if (beforeFix) {
@@ -129,7 +129,7 @@ try {
     await page.getByRole("button", { name: "Remove account" }).click();
     await wait(() => logoutRequests.length === 1, "remove-account request");
     assert.deepEqual(logoutRequests[0], { account_id: "removed-account" });
-    await wait(async () => (await page.locator("select").inputValue()) === "kept-account", "remaining account selection");
+    await wait(async () => (await page.locator("select").first().inputValue()) === "kept-account", "remaining account selection");
     assert.equal(await page.locator("option[value=removed-account]").count(), 0);
     assert.equal(await page.locator("option[value=kept-account]").count(), 1);
   }

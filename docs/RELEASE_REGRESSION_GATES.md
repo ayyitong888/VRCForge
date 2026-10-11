@@ -14,7 +14,8 @@ their release evidence supplement.
 ## Empty project, account and connection gates
 
 The release builder runs the optional-SDK assembly, Unity status and ChatGPT
-service/route regressions before building payloads. Any failure stops packaging.
+service/route regressions before building payloads, and the account/model UI and
+connection-verification regressions before compiling the desktop. Any failure stops packaging.
 The source gates must be supplemented with the following release evidence:
 
 | Scenario | Required result |
@@ -26,10 +27,16 @@ The source gates must be supplemented with the following release evidence:
 | Ordinary login and add-account login | Exercise both real authorization callbacks. Synthetic JWT and browser fixtures remain separately labelled. |
 | Sign out and remove a signed-out account | Only the selected account disappears; credentials, active association and verification clear while other accounts remain. |
 | Connection indicator | Saved configuration is yellow; a successful real text test becomes green; changing configuration or signing out invalidates it. |
+| Account and model controls | Buttons remain aligned at desktop and narrow widths. The model selector remains available after reopening settings; catalogs belong to the selected account and late responses cannot replace another account's models. |
 
-Run `test_chatgpt_oauth_buttons_browser.mjs`, `test_chatgpt_oauth_logout_browser.mjs` and
+The builder runs `test_chatgpt_oauth_buttons_browser.mjs`,
+`test_chatgpt_oauth_logout_browser.mjs`, `test_chatgpt_oauth_ui_browser.mjs`,
+`test_chatgpt_oauth_models_browser.mjs`, and
 `test_provider_settings_verification_browser.mjs` with the existing Playwright
 browser-test environment, together with the runtime authorization status tests.
+Playwright must be resolvable as `playwright` or through `VRCFORGE_PLAYWRIGHT_PATH`;
+the browser tests use the installed Edge channel by default and accept
+`VRCFORGE_BROWSER_CHANNEL` for an explicitly prepared test browser.
 Keep controlled HTTP results separate from real-provider evidence. Record missing
 interactive authorization as unverified rather than upgrading unit-test results.
 
