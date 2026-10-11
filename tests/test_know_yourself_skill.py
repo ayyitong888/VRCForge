@@ -18,6 +18,7 @@ REQUIRED_DOCTOR_IDS = (
     "unity.project_root",
     "unity.plugin",
     "package.vrchat_sdk",
+    "package.newtonsoft",
     "unity.mcp.package",
 )
 
@@ -269,6 +270,20 @@ def test_missing_required_sdk_blocks_before_editor_focus() -> None:
     assert report["nextAction"]["kind"] == "supervised_dependency_install"
     assert report["nextAction"]["approvalRequired"] is True
     assert "required_sdk_present" in report["gaps"]
+    assert "unity_editor_activation" not in report["gaps"]
+
+
+def test_missing_newtonsoft_blocks_with_dependency_action_before_editor_focus() -> None:
+    report = _report(
+        doctor=_doctor(**{"package.newtonsoft": "error"}),
+        unity=_unity(connected=False, registered=False, tools=False),
+    )
+
+    assert report["stage"] == "install_newtonsoft_dependency"
+    assert report["nextAction"]["kind"] == "supervised_dependency_install"
+    assert report["nextAction"]["approvalRequired"] is True
+    assert "Unity Newtonsoft Json" in report["message"]
+    assert "newtonsoft_dependency_present" in report["gaps"]
     assert "unity_editor_activation" not in report["gaps"]
 
 

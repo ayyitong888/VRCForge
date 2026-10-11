@@ -1,0 +1,10 @@
+{
+  "name": "VRCForge.Runtime",
+  "rootNamespace": "VRCForge",
+  "references": [],
+  "includePlatforms": [],
+  "excludePlatforms": [],
+  "allowUnsafeCode": false,
+  "autoReferenced": true,
+  "noEngineReferences": false
+}

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -21,7 +22,12 @@ METHODS = {
 }
 
 
-def make_service(*, selected_project: str = "", core_installed=lambda _project: True) -> UnityStatusService:
+def make_service(
+    *,
+    selected_project: str = "",
+    core_installed=lambda _project: True,
+    dependency_preflight=None,
+) -> UnityStatusService:
     return UnityStatusService(
         UnityStatusPorts(
             load_settings=lambda: SimpleNamespace(unity_mcp_timeout_seconds=10),
@@ -29,6 +35,7 @@ def make_service(*, selected_project: str = "", core_installed=lambda _project: 
             normalize_path=lambda value: str(Path(value)).replace("\\", "/") if value else "",
             core_installed=core_installed,
             required_tools=("vrc_alpha", "vrc_beta"),
+            dependency_preflight=dependency_preflight,
         )
     )
 
@@ -47,6 +54,264 @@ def test_missing_bridge_propagates_to_bootstrap_without_claiming_connected(monke
     assert components["vrcForgeUnityTools"]["message"] == "VRCForge Unity tools are not ready."
     assert components["unityMcpInstance"]["message"] == "Selected Unity project is not connected."
     assert components["unityMcpBridgeReachable"]["status"] == "warning"
+
+
+def test_missing_project_dependencies_block_before_core_connection(monkeypatch, tmp_path):
+    packages = tmp_path / "Packages"
+    packages.mkdir()
+    (packages / "manifest.json").write_text('{"dependencies": {}}', encoding="utf-8")
+    calls = []
+
+    def fake_core_installed(_project):
+        calls.append("core_installed")
+        return False
+
+    class UnexpectedCoreClient:
+        def __init__(self, *_args, **_kwargs):
+            raise AssertionError("dependency blocker must precede Core connection")
+
+    monkeypatch.setattr(unity_status_service, "UnityMcpCoreClient", UnexpectedCoreClient)
+
+    status = make_service(
+        core_installed=fake_core_installed,
+        dependency_preflight=lambda _project: {
+            "ready": False,
+            "status": "error",
+            "blockerCode": "unity_vrchat_sdk_missing",
+            "missing": ["vrchat_sdk", "newtonsoft"],
+            "message": "Install the VRChat Avatar SDK and Unity Newtonsoft Json before connecting.",
+        },
+    ).build_unity_status_snapshot(
+        SimpleNamespace(unity_mcp_timeout_seconds=5), tmp_path
+    )
+
+    assert calls == ["core_installed"]
+    assert status["connected"] is False
+    assert status["blockerCode"] == "unity_vrchat_sdk_missing"
+    assert status["dependencyPreflight"]["missing"] == ["vrchat_sdk", "newtonsoft"]
+
+
+def test_dashboard_unity_status_reports_dependency_blocker_before_core(monkeypatch, tmp_path):
+    packages = tmp_path / "Packages"
+    packages.mkdir()
+    (packages / "manifest.json").write_text('{"dependencies": {}}', encoding="utf-8")
+
+    class UnexpectedCoreClient:
+        def __init__(self, *_args, **_kwargs):
+            raise AssertionError("dependency blocker must precede Core connection")
+
+    monkeypatch.setattr(unity_status_service, "UnityMcpCoreClient", UnexpectedCoreClient)
+    status = dashboard_server.UNITY_STATUS.build_unity_status_snapshot(
+        SimpleNamespace(unity_mcp_timeout_seconds=5), tmp_path
+    )
+
+    assert status["blockerCode"] == "unity_vrchat_sdk_missing"
+    assert status["dependencyPreflight"]["missing"] == ["vrchat_sdk", "newtonsoft"]
+
+
+def test_healthy_core_path_is_not_blocked_by_package_metadata_only(monkeypatch, tmp_path):
+    calls = []
+
+    class FakeCoreClient:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def core_info(self):
+            calls.append("core_info")
+            return {"coreVersion": "1.8.8"}
+
+    monkeypatch.setattr(unity_status_service, "UnityMcpCoreClient", FakeCoreClient)
+    status = make_service(
+        dependency_preflight=lambda _project: {
+            "ready": False,
+            "status": "error",
+            "blockerCode": "unity_newtonsoft_missing",
+            "missing": ["newtonsoft"],
+            "message": "Required package metadata was not detected: Unity Newtonsoft Json.",
+        },
+    ).build_unity_status_snapshot(
+        SimpleNamespace(unity_mcp_timeout_seconds=5), tmp_path
+    )
+
+    assert calls == ["core_info"]
+    assert status["connected"] is True
+    assert status["readiness"]["ready"] is True
+    assert status["blockerCode"] == ""
+    assert status["dependencyPreflight"]["blockerCode"] == "unity_newtonsoft_missing"
+
+
+def test_core_failure_promotes_dependency_blocker_when_core_files_are_present(monkeypatch, tmp_path):
+    class FailingCoreClient:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def core_info(self):
+            raise UnityMcpCoreError("compile failed")
+
+    monkeypatch.setattr(unity_status_service, "UnityMcpCoreClient", FailingCoreClient)
+    status = make_service(
+        dependency_preflight=lambda _project: {
+            "ready": False,
+            "status": "error",
+            "blockerCode": "unity_newtonsoft_missing",
+            "missing": ["newtonsoft"],
+            "message": "Required package metadata was not detected: Unity Newtonsoft Json.",
+        },
+    ).build_unity_status_snapshot(
+        SimpleNamespace(unity_mcp_timeout_seconds=5), tmp_path
+    )
+
+    assert status["connected"] is False
+    assert status["blockerCode"] == "unity_newtonsoft_missing"
+    assert status["readiness"]["blockerCode"] == "unity_newtonsoft_missing"
+    assert status["causeCode"] == "unity_newtonsoft_missing"
+
+
+def test_bootstrap_surfaces_dependency_blocker_instead_of_bridge_only_message(monkeypatch):
+    monkeypatch.setattr(
+        dashboard_server,
+        "CURRENT_UNITY_STATUS",
+        {
+            "connected": False,
+            "executionReady": False,
+            "blockerCode": "unity_vrchat_sdk_missing",
+            "error": "Required package metadata was not detected: VRChat Avatar SDK, Unity Newtonsoft Json.",
+            "readiness": {"ready": False, "blockerCode": "unity_vrchat_sdk_missing"},
+            "dependencyPreflight": {
+                "ready": False,
+                "status": "error",
+                "blockerCode": "unity_vrchat_sdk_missing",
+                "missing": ["vrchat_sdk", "newtonsoft"],
+                "message": "Required package metadata was not detected: VRChat Avatar SDK, Unity Newtonsoft Json.",
+            },
+            "tools": {},
+        },
+    )
+    monkeypatch.setattr(dashboard_server, "PROVIDER_CONFIGURATION", SimpleNamespace(serialize_app_api_config=lambda: {}))
+    monkeypatch.setattr(dashboard_server, "PROJECT_SNAPSHOT_SELECTION", SimpleNamespace(project_snapshot_payload=lambda **_: {}))
+    monkeypatch.setattr(dashboard_server, "serialize_dashboard_state", lambda: {})
+    monkeypatch.setattr(dashboard_server, "build_external_agent_connection_component", lambda: {"status": "unknown"})
+
+    components = dashboard_server.build_bootstrap_app_health(agent_health={})["components"]
+
+    assert components["unityMcpBridgeReachable"]["status"] == "error"
+    assert "VRChat Avatar SDK" in components["unityMcpBridgeReachable"]["message"]
+    assert components["vrcForgeUnityTools"]["detail"]["dependencyPreflight"]["blockerCode"] == "unity_vrchat_sdk_missing"
+
+
+def test_dependency_preflight_does_not_call_missing_package_metadata_missing(tmp_path):
+    project = tmp_path / "Project"
+    (project / "Packages").mkdir(parents=True)
+
+    result = dashboard_server.build_unity_dependency_preflight(project)
+
+    assert result["status"] == "unknown"
+    assert result["ready"] is None
+    assert result["blockerCode"] == ""
+    assert result["missing"] == []
+    assert result["unknown"] == ["vrchat_sdk", "newtonsoft"]
+
+
+def test_dependency_preflight_does_not_call_unreadable_manifest_missing(tmp_path):
+    project = tmp_path / "Project"
+    packages = project / "Packages"
+    packages.mkdir(parents=True)
+    (packages / "manifest.json").write_text("{broken", encoding="utf-8")
+
+    result = dashboard_server.build_unity_dependency_preflight(project)
+
+    assert result["status"] == "unknown"
+    assert result["missing"] == []
+    assert result["unknown"] == ["vrchat_sdk", "newtonsoft"]
+
+
+def test_dependency_preflight_reports_known_missing_packages_and_dashboard_message(tmp_path):
+    project = tmp_path / "Project"
+    packages = project / "Packages"
+    packages.mkdir(parents=True)
+    (packages / "manifest.json").write_text('{"dependencies": {"com.unity.ugui": "1.0.0"}}', encoding="utf-8")
+
+    result = dashboard_server.build_unity_dependency_preflight(project)
+
+    assert result["status"] == "error"
+    assert result["ready"] is False
+    assert result["blockerCode"] == "unity_vrchat_sdk_missing"
+    assert result["missing"] == ["vrchat_sdk", "newtonsoft"]
+    assert result["checks"]["vrchatSdk"]["status"] == "missing"
+    assert result["checks"]["newtonsoft"]["status"] == "missing"
+
+
+def test_dependency_preflight_uses_newtonsoft_blocker_when_sdk_is_present(tmp_path):
+    project = tmp_path / "Project"
+    packages = project / "Packages"
+    packages.mkdir(parents=True)
+    (packages / "manifest.json").write_text(
+        '{"dependencies": {"com.vrchat.avatars": "3.7.0", "com.vrchat.base": "3.7.0"}}',
+        encoding="utf-8",
+    )
+
+    result = dashboard_server.build_unity_dependency_preflight(project)
+
+    assert result["blockerCode"] == "unity_newtonsoft_missing"
+    assert result["missing"] == ["newtonsoft"]
+    assert result["checks"]["vrchatSdk"]["status"] == "installed"
+
+
+def test_dependency_preflight_requires_base_with_avatar_sdk_before_ready(tmp_path):
+    project = tmp_path / "Project"
+    packages = project / "Packages"
+    packages.mkdir(parents=True)
+    manifest = {
+        "dependencies": {
+            "com.vrchat.avatars": "3.7.0",
+            "com.unity.nuget.newtonsoft-json": "3.0.2",
+        }
+    }
+    manifest_path = packages / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    before = dashboard_server.build_unity_dependency_preflight(project)
+    assert before["status"] == "error"
+    assert before["ready"] is False
+    assert before["blockerCode"] == "unity_vrchat_sdk_missing"
+    assert before["missing"] == ["vrchat_sdk"]
+    assert before["checks"]["vrchatSdk"]["installed"] is False
+
+    manifest["dependencies"]["com.vrchat.base"] = "3.7.0"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    after = dashboard_server.build_unity_dependency_preflight(project)
+    assert after["status"] == "ok"
+    assert after["ready"] is True
+    assert after["blockerCode"] == ""
+    assert after["missing"] == []
+    assert after["checks"]["vrchatSdk"]["installed"] is True
+
+
+def test_dependency_preflight_requires_avatar_sdk_when_only_base_sdk_is_present(tmp_path):
+    project = tmp_path / "Project"
+    packages = project / "Packages"
+    packages.mkdir(parents=True)
+    manifest = {
+        "dependencies": {
+            "com.vrchat.base": "3.7.0",
+            "com.unity.nuget.newtonsoft-json": "3.0.2",
+        }
+    }
+    manifest_path = packages / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    result = dashboard_server.build_unity_dependency_preflight(project)
+    assert result["status"] == "error"
+    assert result["ready"] is False
+    assert result["blockerCode"] == "unity_vrchat_sdk_missing"
+    assert result["checks"]["vrchatSdk"]["status"] == "missing"
+
+    manifest["dependencies"]["com.vrchat.avatars"] = "3.7.0"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    recovered = dashboard_server.build_unity_dependency_preflight(project)
+    assert recovered["status"] == "ok"
+    assert recovered["ready"] is True
+    assert recovered["checks"]["vrchatSdk"]["status"] == "installed"
 
 
 def test_core_inventory_is_diagnostic_not_an_agent_callable_catalog(monkeypatch, tmp_path):

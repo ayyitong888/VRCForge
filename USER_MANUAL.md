@@ -5,9 +5,9 @@ VRCForge 是一个面向 VRChat Avatar 编辑的本地桌面 Agent 工作区。
 
 This manual explains the public workflow and feature status without project-specific paths or private configuration details.
 
-Latest published stable release: `1.8.7`.
-Current source / target release: `1.8.8`.
-Manual version: `1.8.8` (`v1.8.8`). Download matching installers and Unity packages
+Latest published stable release: `1.8.8`.
+Current source / target release: `1.8.9`.
+Manual version: `1.8.9` (`v1.8.9`). Download matching installers and Unity packages
 from the [latest published release](https://github.com/ayyitong888/VRCForge/releases/latest).
 The 1.8.0 version keeps internal Agent and external MCP tool results
 causally equivalent, reports the exact reason when a successful inspection is
@@ -344,6 +344,13 @@ alias key and identity map stay local and are never bundled.
 - An LLM provider account for AI-assisted features
 - Full dependency list: [DEPENDENCIES.md](DEPENDENCIES.md)
 
+You can import VRCForge into an empty Unity project. If the Avatar SDK is
+missing, VRCForge shows its setup window while keeping the project compilable.
+Install the official VRChat Avatar SDK through VCC or ALCOM, including its
+dependencies, and wait for Unity to finish compiling. Reopen the check from
+`VRCForge > Setup > Check Dependencies` if needed. Avatar tools become available
+after the dependencies are installed.
+
 To uninstall the Unity integration, choose `VRCForge > Uninstall VRCForge...`
 inside the project and confirm. This stops the project-owned MCP Core, clears
 its versioned auto-connect EditorPrefs key, and removes `Assets/VRCForge`.
@@ -364,6 +371,11 @@ Preserve `%LOCALAPPDATA%\VRCForge\agentic-app`, configured API keys, user-owned
 - 配套版本的 `VRCForge.unitypackage`，包含 VRCForge 自有 MCP 2.0 Core（`2026-07-28`）
 - 用于 AI 辅助功能的模型服务账号
 - 完整依赖清单：[DEPENDENCIES.md](DEPENDENCIES.md)
+
+空 Unity 工程可以先导入 VRCForge。缺少 Avatar SDK 时，工程仍可正常编译，
+VRCForge 设置窗口会显示安装提示。通过 VCC 或 ALCOM 安装官方 VRChat Avatar SDK
+及其依赖，等待 Unity 编译完成后即可启用 Avatar 工具。可通过
+`VRCForge > Setup > Check Dependencies` 重新检查。
 
 ## Start / 启动
 

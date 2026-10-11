@@ -6,6 +6,49 @@ from pathlib import Path
 from typing import Any, Callable
 
 
+def _newtonsoft_preflight(components: dict[str, Any]) -> dict[str, Any]:
+    tools = components.get("vrcForgeUnityTools")
+    detail = tools.get("detail") if isinstance(tools, dict) else None
+    detail = detail if isinstance(detail, dict) else {}
+    preflight = detail.get("dependencyPreflight")
+    return preflight if isinstance(preflight, dict) else {}
+
+
+def _newtonsoft_status(components: dict[str, Any]) -> str:
+    preflight = _newtonsoft_preflight(components)
+    if not preflight:
+        return "unknown"
+    missing = preflight.get("missing") if isinstance(preflight.get("missing"), list) else []
+    tools = components.get("vrcForgeUnityTools")
+    detail = tools.get("detail") if isinstance(tools, dict) else None
+    detail = detail if isinstance(detail, dict) else {}
+    readiness = detail.get("readiness")
+    if preflight.get("ready") is False and "newtonsoft" in missing and not (
+        isinstance(readiness, dict) and readiness.get("ready") is True
+    ):
+        return "error"
+    if preflight.get("status") == "unknown":
+        return "unknown"
+    return "ok"
+
+
+def _newtonsoft_message(components: dict[str, Any]) -> str:
+    status = _newtonsoft_status(components)
+    if status == "error":
+        preflight = _newtonsoft_preflight(components)
+        return str(preflight.get("message") or "Unity Newtonsoft Json was not detected in the selected project.")
+    if status == "unknown":
+        return "Unity Newtonsoft Json status is unknown because dependency metadata is unavailable."
+    return "Unity Newtonsoft Json is available or not blocking the connected Core."
+
+
+def _newtonsoft_detail(components: dict[str, Any]) -> dict[str, Any]:
+    preflight = _newtonsoft_preflight(components)
+    checks = preflight.get("checks")
+    check = checks.get("newtonsoft") if isinstance(checks, dict) else None
+    return check if isinstance(check, dict) else preflight
+
+
 @dataclass(frozen=True)
 class DoctorReadinessReportPorts:
     """Frozen read/report dependencies owned by the Dashboard composition root."""
@@ -106,6 +149,15 @@ class DoctorReadinessReportService:
                 ["com.vrchat.avatars", "com.vrchat.base"],
                 "Avatar validation, expression menus, parameters, and VRChat build checks need the SDK packages.",
                 "Install the VRChat Avatar SDK through VCC, ALCOM, or vrc-get.",
+            ),
+            self._ports.doctor_check(
+                "package.newtonsoft",
+                "Unity Newtonsoft Json",
+                _newtonsoft_status(components),
+                _newtonsoft_message(components),
+                "VRCForge Core compilation can fail before connection when the supported Unity Newtonsoft Json package is absent.",
+                "Use a supported VCC Avatar project baseline that includes Unity Newtonsoft Json.",
+                _newtonsoft_detail(components),
             ),
             self._ports.package_doctor_check(
                 "package.modular_avatar", "Modular Avatar", selected_project,

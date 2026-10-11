@@ -140,6 +140,7 @@ import { asRecord, getHealthDetailNumber } from "./lib/runtime-parsing";
 import { isVrcForgeUnityToolsReady } from "./lib/unity-readiness";
 import { buildEmptyProjectState } from "./lib/sidebar-view";
 import { localizeRuntimeHealthMessage } from "./lib/runtime-workspace-view";
+import { resolveRuntimeAuthorizationStatus } from "./lib/runtime-authorization-status";
 import {
   parseApprovalNotificationAction,
   parseSubAgentReviewNotificationAction,
@@ -496,6 +497,7 @@ export default function App() {
     testingProvider,
     providerTestMessage,
     providerTestPassed,
+    providerTestPassedForPersistedConfig,
     providerReadyForOnboarding,
     visionProvider,
     visionApiKey,
@@ -1769,6 +1771,12 @@ export default function App() {
   const unityInstanceComponent = healthComponents.unityMcpInstance;
   const unityToolsComponent = healthComponents.vrcForgeUnityTools;
   const externalAgentComponent = healthComponents.externalAgentConnection;
+  const authorizationStatus = resolveRuntimeAuthorizationStatus({
+    runtimeConnected,
+    externalAgentComponent,
+    apiConfig,
+    providerTestPassed: providerTestPassedForPersistedConfig,
+  });
   const localizeHealthMessage = useCallback(
     (message?: string) => localizeRuntimeHealthMessage(t, message),
     [t],
@@ -4134,6 +4142,7 @@ export default function App() {
               onResetThemeCustomization={resetThemeCustomization}
               onLoadModels={() => void loadModels()}
               onProviderTest={(capability) => void runProviderTest(capability)}
+              onProviderConfigChanged={() => refresh(endpoint)}
               onProviderChange={handleProviderChange}
               onApiKeyChange={setApiKey}
               onApiBaseUrlChange={setApiBaseUrl}
@@ -4323,6 +4332,7 @@ export default function App() {
               unityInstanceComponent={unityInstanceComponent}
               unityToolsComponent={unityToolsComponent}
               externalAgentComponent={externalAgentComponent}
+              authorizationStatus={authorizationStatus}
               agentProgress={agentProgress}
               projectWorkspace={projectChatWorkspace}
               subAgentPanel={projectChatWorkspace ? subAgentActivityPanel : undefined}

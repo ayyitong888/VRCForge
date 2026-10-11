@@ -1,5 +1,43 @@
 # VRCForge Product Regression Contract
 
+## CORE-OPTIONAL-SDK-001: Keep Setup Available Before SDK Installation
+
+- Importing the complete Core package into a fresh Unity project without the
+  VRChat SDK or Newtonsoft must compile without errors and expose the Setup menu.
+- Keep Setup independent of Core and external dependencies. Enable the full
+  Editor assembly only when SDK Base, SDK Avatars and Unity Newtonsoft are all
+  registered. The runtime observation component remains a runtime assembly.
+- Installing those dependencies into that same project must enable Core without
+  importing VRCForge again. Validate a fresh SDK project and an official previous
+  release upgrade separately; bind results to the final package hash and live
+  compiled Core identity and public tool contract.
+- Metadata preflight is diagnostic, not evidence of a connected Core. Missing
+  Base or Avatars must produce installation guidance; unreadable metadata remains
+  unknown, and metadata alone must not disable a healthy authenticated Core.
+- Tests: `test_unity_optional_sdk_assemblies.py`, `test_unity_status_service.py`.
+  These fast tests do not replace the four actual Unity package scenarios.
+
+## ACCOUNT-CONNECTION-001: Reflect the Selected Account and Verified Connection
+
+- Ordinary login must not submit a selected account absent from the latest account
+  list. Adding another account starts a fresh authorization request.
+- Signing out removes only the selected local account and its credentials, even
+  when remote revocation cannot be confirmed. Clear its active model-provider
+  association and verified state; preserve other accounts and providers.
+- Keep a user-triggered removal path for previously signed-out local accounts.
+  Never remove all disconnected accounts automatically.
+- Internal configured state is yellow. A successful text connection test with
+  HTTP 200 and a successful result may become green; changing the provider,
+  account, key, endpoint or model invalidates verification. Late responses for a
+  prior configuration must not verify the current one. External Agent status is
+  based on authenticated external sessions and remains distinct from internal use.
+- Tests: `test_chatgpt_oauth_service.py`, `test_chatgpt_oauth_routes.py`,
+  `test_chatgpt_oauth_buttons_browser.mjs`,
+  `test_chatgpt_oauth_logout_browser.mjs`,
+  `test_provider_settings_verification_browser.mjs`, and
+  `test_runtime_authorization_status_ui.mjs`. Controlled browser responses do not
+  establish successful authorization or connectivity to a real provider.
+
 ## CHECKPOINT-SCENE-001: Check Reload Targets Before Restoring Files
 
 - Before publishing an archive restore, verify that every scene the existing

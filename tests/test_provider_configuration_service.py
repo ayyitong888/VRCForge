@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from dataclasses import dataclass, replace
 from pathlib import Path
 from threading import Event, RLock, Thread
@@ -134,6 +135,47 @@ def test_native_binding_is_explicit_stable_and_credential_bound() -> None:
         assert changed.native_binding() != config.native_binding()
 
 
+def test_clear_active_chatgpt_account_removes_only_matching_active_credential(tmp_path: Path) -> None:
+    path = tmp_path / "config.json"
+    owner = _owner(path, settings=FakeSettings(llm_provider="chatgpt", llm_api_key="account-1", llm_model="gpt-test"))
+    owner.save_api_config(ProviderApiConfig("chatgpt", "account-1", "https://api.openai.com/v1", "gpt-test", "responses"))
+    owner.save_vision_config(ProviderVisionConfig("chatgpt", "account-1", "https://api.openai.com/v1", "vision-test"))
+    owner.save_api_config(ProviderApiConfig("openai", "other-provider-key", "https://api.openai.com/v1", "other-model", "responses"))
+    owner.save_api_config(ProviderApiConfig("chatgpt", "account-1", "https://api.openai.com/v1", "gpt-test", "responses"))
+
+    assert owner.clear_active_chatgpt_account("other-account") is False
+    assert owner.current_api_config().api_key == "account-1"
+    assert owner.clear_active_chatgpt_account("account-1") is True
+    assert owner.current_api_config().provider == "chatgpt"
+    assert owner.current_api_config().api_key == ""
+    document = json.loads(path.read_text(encoding="utf-8"))
+    assert document["provider_keys"] == {"api": {"openai": "other-provider-key"}, "vision": {}}
+    reopened = _owner(path)
+    assert reopened.resolve_api_request(ApiRequest(provider="chatgpt")).api_key == ""
+    assert reopened.resolve_api_request(ApiRequest(provider="openai")).api_key == "other-provider-key"
+    projection = owner.serialize_api_config(include_secret=False)
+    assert projection["configured"] is False
+    assert projection["credentialFingerprint"] == ""
+
+
+def test_clear_chatgpt_account_reference_when_gemini_is_current(tmp_path: Path) -> None:
+    path = tmp_path / "config.json"
+    owner = _owner(path, settings=FakeSettings(llm_provider="gemini", llm_api_key="gemini-key", llm_model="gemini-model"))
+    owner.save_api_config(ProviderApiConfig("chatgpt", "stale-account", "https://api.openai.com/v1", "gpt-test", "responses"))
+    owner.save_vision_config(ProviderVisionConfig("chatgpt", "stale-account", "https://api.openai.com/v1", "vision-test"))
+    owner.save_api_config(ProviderApiConfig("gemini", "gemini-key", "https://generativelanguage.googleapis.com/v1beta", "gemini-model", "responses"))
+
+    assert owner.current_api_config().provider == "gemini"
+    assert owner.clear_active_chatgpt_account("stale-account") is True
+    document = json.loads(path.read_text(encoding="utf-8"))
+    assert document["provider_keys"] == {"api": {"gemini": "gemini-key"}, "vision": {}}
+    reopened = _owner(path, settings=FakeSettings(llm_provider="gemini", llm_api_key="gemini-key", llm_model="gemini-model"))
+    assert reopened.current_api_config().provider == "gemini"
+    assert reopened.current_api_config().api_key == "gemini-key"
+    assert reopened.resolve_api_request(ApiRequest(provider="chatgpt")).api_key == ""
+    assert reopened.resolve_api_request(ApiRequest(provider="gemini")).api_key == "gemini-key"
+
+
 @pytest.mark.parametrize("api_type", [None, "auto", "responses", "messages", "gemini"])
 def test_native_binding_requires_explicit_chat_completions(api_type: str | None) -> None:
     config = ProviderApiConfig("custom", "secret", "https://provider.example/v1", "model", api_type=api_type)
@@ -187,6 +229,7 @@ def test_configuration_loads_both_sections_and_safe_projection_drops_secrets(
     assert owner.current_vision_config().configured is True
     assert owner.serialize_api_config(include_secret=True)["api_key"] == "old-api-key"
     assert owner.serialize_api_config(include_secret=False)["api_key"] == "old-****-key"
+    assert owner.serialize_app_api_config()["credentialFingerprint"] == hashlib.sha256(b"old-api-key").hexdigest()
     assert "api_key" not in owner.serialize_app_api_config()
     assert "api_key" not in owner.serialize_app_vision_config()
     assert "old-api-key" not in json.dumps(owner.serialize_app_api_config())

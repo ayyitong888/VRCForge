@@ -30,7 +30,8 @@ assert.ok(menu.includes("HTMLInputElement") && menu.includes("HTMLTextAreaElemen
 assert.ok(menu.includes("event.preventDefault()"), "Browser-specific menu must remain suppressed");
 
 assert.ok(sidebar.includes('data-vrcforge-status="external-agent"'));
-assert.ok(sidebar.includes('t("workspace.externalAgent")'));
+assert.ok(sidebar.includes('"workspace.externalAgent"'), "External Agent remains an explicit label for external sessions");
+assert.ok(sidebar.includes("runtimeAuthorizationLabelKey"), "Connection label follows the resolved authorization source");
 
 for (const locale of [zhCN, zhTW, enUS, jaJP]) {
   for (const key of ["cut", "copy", "paste", "selectAll"]) {

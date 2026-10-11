@@ -121,7 +121,7 @@ def test_doctor_readiness_service_projects_existing_schema_from_fake_ports() -> 
     assert report["selectedUnityEnvironment"] == {"configured": True, "label": ".../Avatar"}
     assert [item["id"] for item in report["checks"]] == [
         "desktop.runtime", "backend.online", "unity.project_root", "unity.plugin", "unity.mcp.package",
-        "unity.mcp.bridge", "unity.mcp.instance", "unity.tools", "package.vrchat_sdk",
+        "unity.mcp.bridge", "unity.mcp.instance", "unity.tools", "package.vrchat_sdk", "package.newtonsoft",
         "package.modular_avatar", "package.vrcfury", "provider.configured", "provider.test",
         "provider.local_ollama", "agent.gateway", "skills.registry", "checkpoint.backend",
         "package.manager", "external.security_contract",
@@ -145,3 +145,52 @@ def test_provider_test_uses_configuration_owner_without_claiming_test_success():
         )).build_app_doctor_report()
         check = next(item for item in report["checks"] if item["id"] == "provider.test")
         assert check["status"] == expected
+
+
+def test_newtonsoft_projection_is_error_only_for_known_blocked_preflight():
+    ports = _ports(calls=[])
+    blocked_health = {
+        **ports.build_health(),
+        "components": {
+            **ports.build_health()["components"],
+            "vrcForgeUnityTools": {
+                "status": "warning",
+                "detail": {
+                    "readiness": {"ready": False},
+                    "dependencyPreflight": {
+                        "ready": False,
+                        "status": "error",
+                        "missing": ["newtonsoft"],
+                        "message": "Required package metadata was not detected: Unity Newtonsoft Json.",
+                    },
+                },
+            },
+        },
+    }
+    report = DoctorReadinessReportService(replace(ports, build_health=lambda: blocked_health)).build_app_doctor_report()
+    check = next(item for item in report["checks"] if item["id"] == "package.newtonsoft")
+    assert check["status"] == "error"
+    assert "Newtonsoft" in check["message"]
+
+    healthy_health = {
+        **blocked_health,
+        "components": {
+            **blocked_health["components"],
+            "vrcForgeUnityTools": {
+                "status": "ok",
+                "detail": {
+                    "readiness": {"ready": True},
+                    "dependencyPreflight": {
+                        "ready": False,
+                        "status": "error",
+                        "missing": ["newtonsoft"],
+                    },
+                },
+            },
+        },
+    }
+    healthy_report = DoctorReadinessReportService(
+        replace(ports, build_health=lambda: healthy_health)
+    ).build_app_doctor_report()
+    healthy_check = next(item for item in healthy_report["checks"] if item["id"] == "package.newtonsoft")
+    assert healthy_check["status"] == "ok"

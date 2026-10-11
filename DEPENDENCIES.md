@@ -57,7 +57,7 @@ Python/`uvx` 命令、MCP token 复制或手工配置 Core，并使用协议版�
 | Package | How to install | Required | 用途 |
 | --- | --- | --- | --- |
 | VRChat SDK - Avatars | Install through VRChat Creator Companion | Yes | Provides Avatar Descriptor, Expression Parameters, Expression Menu, VRChat avatar APIs, and the supported project baseline |
-| Unity Newtonsoft Json (`com.unity.nuget.newtonsoft-json`) | Already present in the supported VCC Avatar project baseline; the verified `v1.4.0` clean-import path does not fetch or edit it | Baseline | JSON parsing inside Unity editor tools |
+| Unity Newtonsoft Json (`com.unity.nuget.newtonsoft-json`) | Installed as a dependency of the official VRChat SDK Base package | Baseline | JSON parsing inside Unity editor tools |
 
 The `v1.4.0` release acceptance import was performed with network package
 resolution disabled and verified that `Packages/manifest.json` plus

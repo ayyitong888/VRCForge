@@ -14,6 +14,7 @@ from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 
 from provider_configuration_service import ProviderApiConfig
+from .service import ChatGPTAuthError
 
 
 class ChatGPTAccountRequest(BaseModel):
@@ -31,6 +32,7 @@ def build_chatgpt_oauth_router(
     activate: Callable[[ProviderApiConfig], Awaitable[dict[str, Any]]],
     service_factory: Callable[[], Any] | None = None,
     current_config: Callable[[], ProviderApiConfig] | None = None,
+    deactivate: Callable[[str], Awaitable[None]] | None = None,
 ) -> APIRouter:
     router = APIRouter(prefix="/api/chatgpt")
     service: Any = None
@@ -53,6 +55,11 @@ def build_chatgpt_oauth_router(
     async def call(method: str, *args: str) -> Any:
         try:
             return await asyncio.to_thread(getattr(owner(), method), *args)
+        except ChatGPTAuthError as exc:
+            # ChatGPTAuthError messages are deliberately fixed, credential-free
+            # diagnostics owned by the OAuth service. Preserve those messages;
+            # every other provider exception remains generic below.
+            raise HTTPException(400, str(exc)) from exc
         except Exception as exc:
             # Provider exceptions may carry response bodies or credential URLs.
             raise HTTPException(400, "ChatGPT connection operation failed. Check connection status or sign in again.") from exc
@@ -62,10 +69,16 @@ def build_chatgpt_oauth_router(
         check(request, response)
         payload = await call("status")
         config = current_config() if current_config is not None else None
+        active_account_id = (
+            config.api_key
+            if config and config.provider == "chatgpt"
+            and any(item.get("id") == config.api_key for item in payload.get("accounts", []))
+            else ""
+        )
         return {
             **payload,
-            "activeAccountId": config.api_key if config and config.provider == "chatgpt" else "",
-            "activeModel": config.model if config and config.provider == "chatgpt" else "",
+            "activeAccountId": active_account_id,
+            "activeModel": config.model if active_account_id else "",
         }
 
     @router.post("/login")
@@ -82,7 +95,16 @@ def build_chatgpt_oauth_router(
     @router.post("/logout")
     async def logout(body: ChatGPTAccountRequest, request: Request, response: Response) -> Any:
         check(request, response)
-        return await call("logout", body.account_id)
+        result = await call("logout", body.account_id)
+        if deactivate is not None and result.get("localCleared"):
+            try:
+                await deactivate(body.account_id)
+            except Exception as exc:
+                raise HTTPException(
+                    500,
+                    "ChatGPT sign-out cleared the account locally, but the active provider configuration could not be cleared.",
+                ) from exc
+        return result
 
     @router.post("/models")
     async def models(body: ChatGPTAccountRequest, request: Request, response: Response) -> Any:

@@ -72,12 +72,19 @@ export function useProviderSettings({
   const [providerTestMessage, setProviderTestMessage] = useState("");
   const [providerTestPassed, setProviderTestPassed] = useState(false);
   const [providerTestFingerprint, setProviderTestFingerprint] = useState("");
+  const [providerTestCredentialFingerprint, setProviderTestCredentialFingerprint] = useState("");
+  const [providerTestEndpoint, setProviderTestEndpoint] = useState("");
   const providerTestGeneration = useRef(0);
 
   useEffect(() => {
     if (!apiConfig) {
       return;
     }
+    // A probe must never outlive the persisted provider credentials it tested.
+    // Invalidate its generation before a late response can repopulate green
+    // state for a changed account or saved key.
+    providerTestGeneration.current += 1;
+    setTestingProvider("");
     setApiProvider(apiConfig.provider || "gemini");
     setApiBaseUrl(apiConfig.base_url || "");
     setApiModel(apiConfig.model || defaultModelForProvider(apiConfig.provider || "gemini"));
@@ -88,7 +95,21 @@ export function useProviderSettings({
     setModelOptionsScope(null);
     setProviderTestPassed(false);
     setProviderTestFingerprint("");
-  }, [apiConfig?.provider, apiConfig?.base_url, apiConfig?.model, apiConfig?.api_type, apiConfig?.apiType, apiConfig?.thinking_level, apiConfig?.contextWindow]);
+    setProviderTestCredentialFingerprint("");
+    setProviderTestEndpoint("");
+  }, [apiConfig?.provider, apiConfig?.base_url, apiConfig?.model, apiConfig?.api_type, apiConfig?.apiType, apiConfig?.thinking_level, apiConfig?.contextWindow, apiConfig?.credentialFingerprint, apiConfig?.apiKeyPresent, apiConfig?.configured]);
+
+  useEffect(() => {
+    // A probe belongs to one runtime endpoint. Reconnecting or switching the
+    // managed runtime invalidates its result before a late response can be
+    // displayed as current.
+    providerTestGeneration.current += 1;
+    setTestingProvider("");
+    setProviderTestPassed(false);
+    setProviderTestFingerprint("");
+    setProviderTestCredentialFingerprint("");
+    setProviderTestEndpoint("");
+  }, [endpoint, runtimeConnected]);
 
   useEffect(() => {
     let cancelled = false;
@@ -172,6 +193,10 @@ export function useProviderSettings({
       if (!targetEndpoint) {
         return;
       }
+      // A successful save changes the credential binding even when provider,
+      // model and endpoint stay identical. Require a fresh probe for the new
+      // persisted configuration.
+      invalidateProviderTest();
       await updateApiConfig(targetEndpoint, {
         provider: apiProvider,
         api_key: apiKey.trim(),
@@ -219,6 +244,8 @@ export function useProviderSettings({
     setTestingProvider("");
     setProviderTestPassed(false);
     setProviderTestFingerprint("");
+    setProviderTestCredentialFingerprint("");
+    setProviderTestEndpoint("");
   }
 
   function handleApiKeyChange(value: string) {
@@ -366,6 +393,10 @@ export function useProviderSettings({
       const passed = capability === "text" && Boolean(payload.ok);
       setProviderTestPassed(passed);
       setProviderTestFingerprint(passed ? providerFingerprint({ provider: apiProvider, baseUrl: apiBaseUrl, model: apiModel, apiType }) : "");
+      setProviderTestCredentialFingerprint(passed
+        ? payload.credentialFingerprint || (!apiKey.trim() ? apiConfig?.credentialFingerprint || "" : "")
+        : "");
+      setProviderTestEndpoint(passed ? targetEndpoint : "");
       if (!payload.ok && payload.status !== "skipped") {
         setModelsError(payload.message);
       }
@@ -404,8 +435,23 @@ export function useProviderSettings({
     modelsError,
     testingProvider,
     providerTestMessage,
-    providerTestPassed: providerTestPassed && providerTestFingerprint === providerFingerprint({ provider: apiProvider, baseUrl: apiBaseUrl, model: apiModel, apiType }),
-    providerReadyForOnboarding: providerTestPassed && persistedProviderConfigured && !apiKey.trim() && providerTestFingerprint === persistedProviderFingerprint,
+    providerTestPassed: providerTestPassed && providerTestFingerprint === providerFingerprint({ provider: apiProvider, baseUrl: apiBaseUrl, model: apiModel, apiType }) && providerTestEndpoint === endpoint,
+    providerTestPassedForPersistedConfig: providerTestPassed
+      && runtimeConnected
+      && persistedProviderConfigured
+      && !apiKey.trim()
+      && providerTestFingerprint === persistedProviderFingerprint
+      && providerTestEndpoint === endpoint
+      && apiConfig?.credentialFingerprint !== undefined
+      && providerTestCredentialFingerprint === apiConfig.credentialFingerprint,
+    providerReadyForOnboarding: providerTestPassed
+      && runtimeConnected
+      && persistedProviderConfigured
+      && !apiKey.trim()
+      && providerTestFingerprint === persistedProviderFingerprint
+      && providerTestEndpoint === endpoint
+      && apiConfig?.credentialFingerprint !== undefined
+      && providerTestCredentialFingerprint === apiConfig.credentialFingerprint,
     visionProvider,
     setVisionProvider,
     visionApiKey,

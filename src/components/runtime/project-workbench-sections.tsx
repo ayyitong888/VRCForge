@@ -6,6 +6,7 @@ import { formatAttachmentSize } from "../../lib/chat-format";
 import { formatCount } from "../../lib/utils";
 import type { AgentDesktopAction, AgentProgress, WorkspaceDiffSummary } from "../../lib/api";
 import type { ChatAttachment, ProjectType } from "../../lib/chat-types";
+import { runtimeAuthorizationLabelKey, runtimeAuthorizationMessageKey, type RuntimeAuthorizationStatus } from "../../lib/runtime-authorization-status";
 import { AgentTodoPanelEmbedded } from "./agent-todo-panel";
 import { RuntimeDiffFileRow, RuntimeInfoRow, RuntimeSection, StatusDot } from "./runtime-sidebar-ui";
 import {
@@ -123,6 +124,7 @@ export function ProjectWorkbenchSections({
   unityInstanceComponent,
   unityToolsComponent,
   externalAgentComponent,
+  authorizationStatus,
   runtimeConnected,
   localizeHealthMessage,
   agentProgress,
@@ -148,6 +150,7 @@ export function ProjectWorkbenchSections({
   unityInstanceComponent: ComponentStatus;
   unityToolsComponent: ComponentStatus;
   externalAgentComponent: ComponentStatus;
+  authorizationStatus: RuntimeAuthorizationStatus;
   runtimeConnected: boolean;
   localizeHealthMessage: (message?: string) => string;
   agentProgress: AgentProgress[];
@@ -343,9 +346,9 @@ export function ProjectWorkbenchSections({
                 <div data-vrcforge-status="external-agent">
                   <RuntimeInfoRow
                     icon={<Bot className="h-4 w-4" />}
-                    label={t("workspace.externalAgent")}
-                    value={componentValue(externalAgentComponent)}
-                    suffix={<StatusDot status={normalizedStatus(externalAgentComponent)} />}
+                    label={t(authorizationStatus.source === "external" ? "workspace.externalAgent" : runtimeAuthorizationLabelKey(authorizationStatus))}
+                    value={t(runtimeAuthorizationMessageKey(authorizationStatus))}
+                    suffix={<StatusDot status={authorizationStatus.status} />}
                   />
                 </div>
                 <div data-vrcforge-status="mcp-core">

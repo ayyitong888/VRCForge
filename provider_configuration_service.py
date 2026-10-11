@@ -201,7 +201,12 @@ class ProviderConfigurationService:
                 or self._policy.default_provider
             )
             defaults = self._policy.get_provider_defaults(provider)
-            api_key = str(section.get("api_key") or settings.llm_api_key).strip()
+            # A cleared ChatGPT account must stay cleared after a reload; do not
+            # rehydrate its explicit empty key from legacy runtime settings.
+            if section.get("provider") == "chatgpt" and "api_key" in section:
+                api_key = str(section.get("api_key") or "").strip()
+            else:
+                api_key = str(section.get("api_key") or settings.llm_api_key).strip()
             base_url = self._policy.normalize_base_url(
                 section.get("base_url"),
                 provider,
@@ -448,6 +453,33 @@ class ProviderConfigurationService:
     def save_api_config(self, config: ProviderApiConfig) -> None:
         self.save_config_document(api_config=config)
 
+    def clear_active_chatgpt_account(self, account_id: str) -> bool:
+        """Clear ChatGPT credential references that name account_id."""
+
+        with self._lock:
+            current = self.current_api_config()
+            vision = self.current_vision_config()
+            api_keys, vision_keys = self._load_provider_key_maps_locked()
+            has_reference = (
+                (current.provider == "chatgpt" and current.api_key == account_id)
+                or (vision.provider == "chatgpt" and vision.api_key == account_id)
+                or api_keys.get("chatgpt") == account_id
+                or vision_keys.get("chatgpt") == account_id
+            )
+            if not has_reference:
+                return False
+            api = current
+            if current.provider == "chatgpt" and current.api_key == account_id:
+                api = replace(current, api_key="")
+            if vision.provider == "chatgpt" and vision.api_key == account_id:
+                vision = replace(vision, api_key="")
+            self.save_config_document(
+                api_config=api,
+                vision_config=vision,
+                _clear_chatgpt_account_id=account_id,
+            )
+            return True
+
     def save_vision_config(self, config: ProviderVisionConfig) -> None:
         self.save_config_document(vision_config=config)
 
@@ -456,6 +488,7 @@ class ProviderConfigurationService:
         *,
         api_config: ProviderApiConfig | None = None,
         vision_config: ProviderVisionConfig | None = None,
+        _clear_chatgpt_account_id: str | None = None,
     ) -> None:
         """Persist both sections, then publish both in-memory values."""
 
@@ -474,6 +507,10 @@ class ProviderConfigurationService:
             ):
                 if config.provider and config.api_key.strip():
                     target[config.provider] = config.api_key.strip()
+            if _clear_chatgpt_account_id:
+                for target in (api_keys, vision_keys):
+                    if target.get("chatgpt") == _clear_chatgpt_account_id:
+                        target.pop("chatgpt", None)
             api_descriptor = self._policy.provider_config_descriptor(api)
             payload: dict[str, Any] = {
                 "api": {
@@ -533,11 +570,13 @@ class ProviderConfigurationService:
     def serialize_api_config(self, include_secret: bool) -> dict[str, Any]:
         config = self.current_api_config()
         requires_key = self._policy.provider_requires_api_key(config.provider)
+        credential_fingerprint = hashlib.sha256(config.api_key.encode("utf-8")).hexdigest() if config.api_key else ""
         return {
             "provider": config.provider,
             "providerLabel": self._policy.provider_display_name(config.provider),
             "api_key": config.api_key if include_secret else self.mask_secret(config.api_key),
             "apiKeyPresent": bool(config.api_key),
+            "credentialFingerprint": credential_fingerprint,
             "base_url": config.base_url,
             "model": config.model,
             **self._policy.provider_config_descriptor(config),

@@ -32,6 +32,7 @@ _SCOPES = "openid profile email offline_access resource.invoke chatgpt.tokens.us
 _CALLBACK_PATH = "/auth/callback"
 _CALLBACK_TTL_SECONDS = 300
 _HTTP_TIMEOUT_SECONDS = 5.0
+_JWT_CLOCK_LEEWAY_SECONDS = 5
 
 
 class ChatGPTAuthError(RuntimeError):
@@ -287,6 +288,9 @@ class ChatGPTAuthService:
                 for key in ("access_token", "refresh_token", "id_token", "token_type", "expires_at", "saved_at"):
                     account.pop(key, None)
                 account["scopes"] = []
+                store["accounts"] = [
+                    item for item in store["accounts"] if item.get("id") != account_id
+                ]
                 self._storage.save_unlocked(store)
         except OAuthStorageError:
             with self._state_lock:
@@ -619,7 +623,7 @@ class ChatGPTAuthService:
                 audience=client_id,
                 issuer=_AUTH_ORIGIN,
                 options={"require": ["exp", "iss", "aud", "sub"] + (["nonce"] if nonce is not None else [])},
-                leeway=0,
+                leeway=_JWT_CLOCK_LEEWAY_SECONDS,
             )
             subject = claims.get("sub")
             email = claims.get("email", "")
@@ -635,6 +639,20 @@ class ChatGPTAuthService:
             if isinstance(audience, list) and len(audience) > 1 and claims.get("azp") != client_id:
                 raise ChatGPTAuthError("The ChatGPT identity token audience is invalid.")
             return {"sub": subject, "email": email or "", "id_token": token}
+        except jwt.exceptions.ExpiredSignatureError:
+            raise ChatGPTAuthError("The ChatGPT identity token has expired.") from None
+        except jwt.exceptions.ImmatureSignatureError:
+            raise ChatGPTAuthError("The ChatGPT identity token time claim is invalid.") from None
+        except jwt.exceptions.InvalidIssuedAtError:
+            raise ChatGPTAuthError("The ChatGPT identity token time claim is invalid.") from None
+        except jwt.exceptions.MissingRequiredClaimError:
+            raise ChatGPTAuthError("The ChatGPT identity token is missing a required claim.") from None
+        except jwt.exceptions.InvalidSignatureError:
+            raise ChatGPTAuthError("The ChatGPT identity token signature is invalid.") from None
+        except jwt.exceptions.InvalidAudienceError:
+            raise ChatGPTAuthError("The ChatGPT identity token audience is invalid.") from None
+        except jwt.exceptions.InvalidIssuerError:
+            raise ChatGPTAuthError("The ChatGPT identity token issuer is invalid.") from None
         except ChatGPTAuthError:
             raise
         except Exception:

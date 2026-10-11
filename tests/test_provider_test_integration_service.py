@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -101,6 +102,7 @@ def test_provider_test_text_and_structured_results_preserve_envelope() -> None:
     assert text["ok"] is True
     assert text["status"] == "ok"
     assert text["responsePreview"] == "VRCForge provider test OK"
+    assert text["credentialFingerprint"] == hashlib.sha256(b"safe-key").hexdigest()
     assert structured["ok"] is True
     assert structured["status"] == "ok"
     assert probe.calls[0][2] is False

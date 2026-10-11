@@ -3,7 +3,7 @@
 ![VRCForge — AI Agent + MCP for VRChat Avatar Editing](docs/assets/vrcforge-atelier-banner.png)
 
 [![稳定版](https://img.shields.io/github/v/release/ayyitong888/VRCForge?label=稳定版&style=flat-square)](https://github.com/ayyitong888/VRCForge/releases/latest)
-![当前版本](https://img.shields.io/badge/当前版本-v1.8.8-d9487c?style=flat-square)
+![当前版本](https://img.shields.io/badge/当前版本-v1.8.9-d9487c?style=flat-square)
 [![许可证 GPL-3.0-only](https://img.shields.io/badge/许可证-GPL--3.0--only-64748b?style=flat-square)](LICENSE)
 ![平台 Windows x64](https://img.shields.io/badge/平台-Windows%20x64-0ea5e9?style=flat-square)
 [![GitHub Stars](https://img.shields.io/github/stars/ayyitong888/VRCForge?style=social)](https://github.com/ayyitong888/VRCForge/stargazers)
@@ -29,10 +29,10 @@ VRCForge 是给 VRChat Avatar 创作者使用的开源改模工具。你可以�
 
 > 使用任何会写入 Unity 资产的功能前，请先备份 Unity / VRChat Avatar 工程。
 
-当前源码目标为 v1.8.8，尚未正式发布。最新公开版为 [v1.8.7](https://github.com/ayyitong888/VRCForge/releases/tag/v1.8.7)，其构建资格限制见版本说明。
+当前源码目标为 v1.8.9，尚未正式发布。最新公开版为 [v1.8.8](https://github.com/ayyitong888/VRCForge/releases/tag/v1.8.8)，更新内容和下载见版本说明。
 安装与升级请获取同一 Release 的配套安装器与 Unity 包。
 
-**[下载 VRCForge v1.8.7](https://github.com/ayyitong888/VRCForge/releases/tag/v1.8.7)** · [查看 Release Notes](docs/RELEASE_NOTES_1.8.7.md)
+**[下载 VRCForge v1.8.8](https://github.com/ayyitong888/VRCForge/releases/tag/v1.8.8)** · [查看 Release Notes](docs/RELEASE_NOTES_1.8.8.md)
 
 ## VRCForge 能做什么
 
@@ -92,7 +92,7 @@ VRCForge 对 Unity 资产写入采用以下受监督流程：
 然后完成三步连接：
 
 1. 安装 VRCForge，但先不要启动 App。
-2. 在目标 Unity 2022.3 LTS / VRChat SDK3 Avatar 工程中完整导入 `VRCForge.unitypackage`，等待编译结束并出现 `[VRCForge MCP] Core Ready`。
+2. 在目标 Unity 2022.3 LTS 工程中完整导入 `VRCForge.unitypackage`。若尚未安装 VRChat Avatar SDK，VRCForge 设置窗口会提示缺失依赖；通过 VCC 或 ALCOM 安装 Avatar SDK 及其依赖后，等待编译结束并出现 `[VRCForge MCP] Core Ready`。可从 `VRCForge → Setup → Check Dependencies` 重新打开检查窗口。
 3. 启动 `VRCForge.exe`，选择该工程并连接。App 会发现工程内的 VRCForge Core，无需单独安装 MCP Server 或复制 MCP Token。
 
 升级旧版本前请阅读对应 [Release Notes](https://github.com/ayyitong888/VRCForge/releases)。
@@ -146,13 +146,13 @@ python tools\vrcforge_cli.py validation run --project C:\Path\To\UnityProject
 - VRCForge 可以在无 Provider 模式下完成部分只读检查；AI 对话、规划和视觉推理需要已配置的兼容 Provider。
 - 优化插件集成需要已安装的兼容版本；配置 AAO 等组件不等于已经完成其构建阶段优化。换头与部件移植工作流不能代替必要的网格接缝、权重或 UV 编辑。
 - Avatar 保护连接器提供检查、规划与预览；公开包不包含私有保护执行组件。
-- `v1.8.8` 的发布状态请以 Releases 页面为准；协议、源码测试或工具调用成功仍不能替代具体模型的视觉与恢复验收。
+- `v1.8.9` 的发布状态请以 Releases 页面为准；协议、源码测试或工具调用成功仍不能替代具体模型的视觉与恢复验收。
 - Quest/Android、第三方资产许可和付费依赖由具体 Avatar 与资源决定。
 
 ## 文档入口
 
 - [用户手册 / User Manual](USER_MANUAL.md)
-- [v1.8.8 候选版本说明](docs/RELEASE_NOTES_1.8.8.md)
+- [v1.8.9 候选版本说明](docs/RELEASE_NOTES_1.8.9.md)
 - [v1.7.10 稳定版说明](docs/RELEASE_NOTES_1.7.10.md)
 - [兼容性矩阵](docs/COMPATIBILITY_MATRIX.md)
 - [产品回归契约](docs/PRODUCT_REGRESSION_CONTRACT.md)

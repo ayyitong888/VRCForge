@@ -11,6 +11,8 @@ const connectionMessages: Record<string, string> = {
   unity_core_project_busy: "busy",
   unity_project_not_selected: "selectProject",
   unity_editor_reload_dialog: "reloadDialog",
+  unity_vrchat_sdk_missing: "vrchatSdkMissing",
+  unity_newtonsoft_missing: "newtonsoftMissing",
 };
 
 export function CoreVersionNotice({ detail }: { detail: unknown }) {

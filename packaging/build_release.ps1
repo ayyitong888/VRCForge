@@ -664,6 +664,16 @@ try {
     if ($LASTEXITCODE -ne 0) {
         throw "Unity C# syntax gate failed. No release payload was built."
     }
+    & $pythonExe -m pytest -q `
+        .\tests\test_unity_optional_sdk_assemblies.py `
+        .\tests\test_unity_status_service.py `
+        .\tests\test_chatgpt_oauth_service.py `
+        .\tests\test_chatgpt_oauth_routes.py `
+        .\tests\test_provider_configuration_service.py `
+        .\tests\test_provider_test_integration_service.py
+    if ($LASTEXITCODE -ne 0) {
+        throw "Unity dependency and ChatGPT account regression gate failed. No release payload was built."
+    }
     & $pythonExe .\packaging\check_one_five_seams.py --repo-root $repoRoot --version $Version
     if ($LASTEXITCODE -ne 0) {
         throw "Final 1.5 owner/facade seam gate failed. Retire every declared migration seam before packaging 1.5.0."

@@ -456,13 +456,14 @@ def test_import_migration_deletes_only_byte_verified_retired_owned_assets() -> N
         assert retired not in SOURCE_MIGRATION
     retired_folders = (
         "Assets/VRCForge/ThirdPartyNotices",
-        "Assets/VRCForge/Runtime",
         "Assets/VRCForge/Runtime/AvatarEncryption",
         "Assets/VRCForge/Generated",
     )
     for retired_folder in retired_folders:
         assert hashlib.sha256(retired_folder.encode("utf-8")).hexdigest().upper() in SOURCE_MIGRATION
         assert retired_folder not in SOURCE_MIGRATION
+    assert SOURCE_MIGRATION.count("Assets/VRCForge/Runtime/RuntimeObservationFramePump.cs") == 2
+    assert "CurrentRuntimePaths.TryGetValue(assetPath" in SOURCE_MIGRATION
     assert SOURCE_MIGRATION.count("8DFC78A36DF5A97080EA95B4B1C04125F4CB7ACC992ED6E0CF6E964780C5C8CC") == 2
     assert "RetiredPaths.TryGetValue(ComputeTextSha256(assetPath)" in SOURCE_MIGRATION
     assert "RetiredPaths.Values.Any(values => values.Contains(digest))" in SOURCE_MIGRATION

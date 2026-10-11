@@ -363,6 +363,8 @@ export type ProviderModelList = {
 
 export type ProviderTestResult = {
   ok: boolean;
+  /** Stable non-secret binding for the credential used by this probe. */
+  credentialFingerprint?: string;
   status: "ok" | "warning" | "error" | "skipped" | string;
   capability: "text" | "structured" | "vision" | string;
   provider: string;

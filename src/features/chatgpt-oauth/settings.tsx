@@ -23,6 +23,10 @@ type ChatGptOAuthSettingsProps = {
   apiProvider: string;
   apiModel: string;
   savingApiConfig: boolean;
+  testingProvider: string;
+  providerTestMessage: string;
+  onTestProvider: (capability: "text" | "structured" | "vision") => void;
+  onProviderConfigChanged: () => Promise<void> | void;
 };
 
 export function ChatGptOAuthSettings({
@@ -31,6 +35,10 @@ export function ChatGptOAuthSettings({
   apiProvider,
   apiModel,
   savingApiConfig,
+  testingProvider,
+  providerTestMessage,
+  onTestProvider,
+  onProviderConfigChanged,
 }: ChatGptOAuthSettingsProps) {
   const { t } = useTranslation();
   const [status, setStatus] = useState<ChatGptOAuthStatus | null>(null);
@@ -232,7 +240,7 @@ export function ChatGptOAuthSettings({
   }
 
   async function logoutSelectedAccount() {
-    if (!selectedAccount?.connected || busy || !runtimeConnected) {
+    if (!selectedAccount || busy || !runtimeConnected) {
       return;
     }
     setBusy("logout");
@@ -248,6 +256,7 @@ export function ChatGptOAuthSettings({
       if (!result.revoked) {
         setNotice(t("chatgptOAuth.logoutNotConfirmed"));
       }
+      await onProviderConfigChanged();
       setStatusRefresh((current) => current + 1);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -301,7 +310,12 @@ export function ChatGptOAuthSettings({
             disabled={!runtimeConnected || Boolean(busy) || Boolean(status?.pending) || savingApiConfig}
             onClick={() => void runAction(
               "login",
-              () => beginChatGptOAuthLogin(endpoint, selectedAccountId),
+              () => beginChatGptOAuthLogin(
+                endpoint,
+                status?.accounts.some((account) => account.id === selectedAccountId)
+                  ? selectedAccountId
+                  : "",
+              ),
             )}
           >
             {busy === "login" ? <Loader2 className="h-4 w-4 animate-spin" /> : <LogIn className="h-4 w-4" />}
@@ -329,7 +343,7 @@ export function ChatGptOAuthSettings({
               {t("chatgptOAuth.cancel")}
             </Button>
           ) : null}
-          {selectedAccount?.connected ? (
+          {selectedAccount ? (
             <Button
               type="button"
               variant="outline"
@@ -337,7 +351,7 @@ export function ChatGptOAuthSettings({
               onClick={() => void logoutSelectedAccount()}
             >
               {busy === "logout" ? <Loader2 className="h-4 w-4 animate-spin" /> : <LogOut className="h-4 w-4" />}
-              {t("chatgptOAuth.logout")}
+              {selectedAccount.connected ? t("chatgptOAuth.logout") : t("chatgptOAuth.removeAccount")}
             </Button>
           ) : null}
           <Button
@@ -349,6 +363,17 @@ export function ChatGptOAuthSettings({
             {busy === "models" ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
             {t("chatgptOAuth.loadModels")}
           </Button>
+          {apiProvider === "chatgpt" ? (
+            <Button
+              type="button"
+              variant="outline"
+              disabled={!runtimeConnected || !active || Boolean(busy) || Boolean(testingProvider) || savingApiConfig}
+              onClick={() => onTestProvider("text")}
+            >
+              {testingProvider === "text" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
+              {t("chatgptOAuth.testConnection")}
+            </Button>
+          ) : null}
           <Button
             type="button"
             variant="outline"
@@ -379,8 +404,11 @@ export function ChatGptOAuthSettings({
               type="button"
               disabled={!runtimeConnected || !selectedAccount?.connected || !selectedModel || Boolean(busy) || savingApiConfig}
               onClick={() => void runAction(
-                "activate",
-                () => activateChatGptOAuthModel(endpoint, selectedAccountId, selectedModel),
+              "activate",
+                async () => {
+                  await activateChatGptOAuthModel(endpoint, selectedAccountId, selectedModel);
+                  await onProviderConfigChanged();
+                },
                 t("chatgptOAuth.activated"),
               )}
             >
@@ -391,6 +419,7 @@ export function ChatGptOAuthSettings({
         ) : null}
 
         {!runtimeConnected ? <div className="text-xs text-muted-foreground">{t("provider.coreDisconnectedModels")}</div> : null}
+        {apiProvider === "chatgpt" && providerTestMessage ? <div aria-live="polite" className="text-xs text-muted-foreground">{providerTestMessage}</div> : null}
         {error ? <div role="alert" className="text-xs text-destructive/80">{error}</div> : null}
         {notice ? <div aria-live="polite" className="text-xs text-muted-foreground">{notice}</div> : null}
       </div>

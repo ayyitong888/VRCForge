@@ -668,6 +668,7 @@ from unity_mcp_core_client import (
 )
 from unity_mcp_tool_contract import EXPECTED_TOOL_NAMES
 from unity_status_service import UnityStatusPorts, UnityStatusService
+from unity_dependency_preflight import build_unity_dependency_preflight_report
 import data_root_migration
 import vrcforge_runtime_paths as runtime_paths
 
@@ -1378,6 +1379,7 @@ UNITY_STATUS = UnityStatusService(
         normalize_path=lambda value: normalize_path_string(value),
         core_installed=lambda project_root: vrcforge_mcp_core_installed(project_root),
         required_tools=tuple(REQUIRED_VRCFORGE_UNITY_TOOLS),
+        dependency_preflight=lambda project_root: build_unity_dependency_preflight(project_root),
     )
 )
 DOCTOR_READINESS_REPORT = DoctorReadinessReportService(
@@ -7528,9 +7530,20 @@ def build_bootstrap_app_health(
     if isinstance(unity_status, dict):
         connected = bool(unity_status.get("connected"))
         core_version_matched = bool(unity_status.get("coreVersionMatched"))
+        dependency_preflight = unity_status.get("dependencyPreflight")
+        dependency_blocked = (
+            not connected
+            and isinstance(dependency_preflight, dict)
+            and dependency_preflight.get("status") == "error"
+        )
+        bridge_message = (
+            str(dependency_preflight.get("message") or "Unity project dependencies are missing.")
+            if dependency_blocked
+            else "Unity MCP bridge is reachable." if connected else "Unity MCP bridge is not reachable."
+        )
         components["unityMcpBridgeReachable"] = health_component(
-            "ok" if connected else "warning",
-            "Unity MCP bridge is reachable." if connected else "Unity MCP bridge is not reachable.",
+            "error" if dependency_blocked else "ok" if connected else "warning",
+            bridge_message,
             unity_status if connected else unity_status.get("error") or unity_status,
         )
         components["unityMcpInstance"] = health_component(
@@ -7552,6 +7565,7 @@ def build_bootstrap_app_health(
                 "coreVersion": unity_status.get("coreVersion"),
                 "coreVersionMatched": core_version_matched,
                 "readiness": unity_readiness,
+                "dependencyPreflight": dependency_preflight,
                 "inspectionMode": (unity_status.get("tools") or {}).get("inspectionMode"),
             },
         )
@@ -8312,6 +8326,13 @@ def detect_unity_project_package(project_path: Path | None, package_ids: list[st
                 )
                 return info
     return info
+
+
+def build_unity_dependency_preflight(project_path: Path) -> dict[str, Any]:
+    return build_unity_dependency_preflight_report(
+        project_path,
+        detect_package=PACKAGE_DETECTION.detect,
+    )
 
 
 def _package_doctor_check(
@@ -9668,6 +9689,24 @@ async def update_api_config(request: ApiConfigRequest) -> dict[str, Any]:
     return payload
 
 
+async def deactivate_chatgpt_account(account_id: str) -> None:
+    if not PROVIDER_CONFIGURATION.clear_active_chatgpt_account(account_id):
+        return
+    payload = {
+        "configPath": str(CONFIG_PATH),
+        "apiConfig": PROVIDER_CONFIGURATION.serialize_api_config(include_secret=True),
+        "visionConfig": PROVIDER_CONFIGURATION.serialize_vision_config(include_secret=True),
+        "effective": PROVIDER_CONFIGURATION.build_effective_model_summary(),
+    }
+    await EVENT_BUS.broadcast("config", payload)
+    await emit_log_async(
+        "success",
+        "config",
+        "ChatGPT sign-out cleared the active provider configuration.",
+        {"provider": "chatgpt"},
+    )
+
+
 app.include_router(build_chatgpt_oauth_router(
     authorize=lambda request: authenticate_app_request(request),
     current_config=PROVIDER_CONFIGURATION.current_api_config,
@@ -9675,6 +9714,7 @@ app.include_router(build_chatgpt_oauth_router(
         provider=config.provider, api_key=config.api_key, base_url=config.base_url,
         model=config.model, api_type=config.api_type,
     )),
+    deactivate=deactivate_chatgpt_account,
 ))
 
 
@@ -18705,12 +18745,20 @@ def build_health_components(
         if unity_status_override is not None
         else CURRENT_UNITY_STATUS or UNITY_STATUS.build_unity_status_snapshot(settings)
     )
+    dependency_preflight = unity_status.get("dependencyPreflight") if isinstance(unity_status, dict) else None
+    dependency_blocked = (
+        not unity_status.get("connected")
+        and isinstance(dependency_preflight, dict)
+        and dependency_preflight.get("status") == "error"
+    )
     if unity_status.get("connected"):
         components["unityMcpBridgeReachable"] = health_component("ok", "Unity MCP bridge is reachable.", unity_status)
     else:
         components["unityMcpBridgeReachable"] = health_component(
-            "warning",
-            "Unity MCP bridge is not reachable.",
+            "error" if dependency_blocked else "warning",
+            str(dependency_preflight.get("message") or "Unity project dependencies are missing.")
+            if dependency_blocked
+            else "Unity MCP bridge is not reachable.",
             unity_status.get("error") or unity_status,
         )
     components["unityMcpInstance"] = health_component(
@@ -18735,6 +18783,7 @@ def build_health_components(
             "totalTools": (unity_status.get("tools") or {}).get("totalTools"),
             "vrcForgeToolsCount": (unity_status.get("tools") or {}).get("vrcForgeToolsCount"),
             "missingRequiredVrcForgeTools": missing_tools,
+            "dependencyPreflight": dependency_preflight,
         },
     )
 

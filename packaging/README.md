@@ -35,10 +35,13 @@ even if the same commit is pushed later. Rebuild strictly after pushing.
 
 The release builds `VRCForge.unitypackage` directly from the staged
 `Assets/VRCForge` tree. The package contains the VRCForge-owned project-scoped
-MCP Core, the fixed 97-tool registry, Editor lifecycle bootstrap, and the
+MCP Core, the fixed 97-tool public registry, Editor lifecycle bootstrap, and the
 generated desktop/backend trust binding. Users import this one package; no
 separate MCP server, Unity package dependency, manifest edit, Python command,
-or token copy is required.
+or token copy is required. In a project without the VRChat Avatar SDK, an
+independent setup assembly remains compilable and displays the missing
+dependencies. Installing the Avatar SDK and its dependencies enables the Core
+assembly automatically; VRCForge does not install the SDK itself.
 
 The App and Unity package use only protocol `2026-07-28` with newline JSON-RPC
 transport. Release acceptance must reject old protocol strings, legacy
@@ -66,11 +69,11 @@ installation. uv is licensed `MIT OR Apache-2.0`; preserve:
 
 ## Commands
 
-The current source / target package is `1.8.8` (`v1.8.8`); `1.8.7` remains the latest published stable package. See its release notes for build eligibility limitations. The release manifest binds the desktop, backend and paired Core package to the release source commit. The v1.7.10 tag and Release remain
+The current source / target package is `1.8.9` (`v1.8.9`); `1.8.8` remains the latest published stable package. See its release notes for build eligibility limitations. The release manifest binds the desktop, backend and paired Core package to the release source commit. The v1.7.10 tag and Release remain
 available as release history. Check the GitHub Releases page before preparing
 any later build. The Avatar
 Encryption / Anti-Rip addon remains a connector preview and is not bundled with
-the `v1.8.8` package. The public repo must not contain encryption
+the `v1.8.9` package. The public repo must not contain encryption
 implementation files; it may only expose connector/request interfaces for a
 separately installed private addon module. Profile docs must list Lite,
 Standard, and Paranoid, with Standard as the default recommendation and
@@ -83,12 +86,12 @@ with approval, checkpoint, rollback, and proof gates.
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File packaging\build_release.ps1 `
-  -Version 1.8.8 `
-  -PayloadDownloadUrl https://github.com/ayyitong888/VRCForge/releases/download/v1.8.8/VRCForge_Windows_x64_1.8.8.zip `
+  -Version 1.8.9 `
+  -PayloadDownloadUrl https://github.com/ayyitong888/VRCForge/releases/download/v1.8.9/VRCForge_Windows_x64_1.8.9.zip `
   -UvDownloadSha256 ebc76197bf3e1a58f9dac6f70f49b0ebd3e6907ab35289ce228bce5ba8a3f201
 
 powershell -NoProfile -ExecutionPolicy Bypass -File packaging\publish_release.ps1 `
-  -Version 1.8.8
+  -Version 1.8.9
 ```
 
 Publishing uploads the Unity package, Windows payload zip, offline installer,
@@ -231,7 +234,7 @@ deferred probes must later be refreshed against the exact published hashes.
 
 This gate checks current target-version public docs, the public golden-path wording,
 the privacy boundary, `docs/COMPATIBILITY_MATRIX.md`, and local evidence
-pointers when they exist in the checkout. For the current `1.8.8` target release,
+pointers when they exist in the checkout. For the current `1.8.9` target release,
 the gate also checks that public docs distinguish source/target from the latest published release,
 direct avatar-encryption writers are not exposed, and the public surface is
 only the private-addon connector request interface with explicit approval,

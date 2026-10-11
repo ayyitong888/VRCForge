@@ -11,6 +11,28 @@ The normative product rules live in
 [PRODUCT_REGRESSION_CONTRACT.md](PRODUCT_REGRESSION_CONTRACT.md). This page is
 their release evidence supplement.
 
+## Empty project, account and connection gates
+
+The release builder runs the optional-SDK assembly, Unity status and ChatGPT
+service/route regressions before building payloads. Any failure stops packaging.
+The source gates must be supplemented with the following release evidence:
+
+| Scenario | Required result |
+| --- | --- |
+| Fresh project with no SDK and no Newtonsoft | Final package imports with zero compilation errors; Setup menu opens and identifies missing dependencies. |
+| Install official SDK after that import | The same Core files remain unchanged; after registering Base, Avatars and Newtonsoft, live Core identity and the complete public tool contract are available without reimporting Core. |
+| Fresh official SDK project | Final package compiles and loads its expected identity and public tool contract. |
+| Upgrade from the previous official package | Record both package hashes; no GUID conflicts or broken references, and live identity and tool contract match the candidate. |
+| Ordinary login and add-account login | Exercise both real authorization callbacks. Synthetic JWT and browser fixtures remain separately labelled. |
+| Sign out and remove a signed-out account | Only the selected account disappears; credentials, active association and verification clear while other accounts remain. |
+| Connection indicator | Saved configuration is yellow; a successful real text test becomes green; changing configuration or signing out invalidates it. |
+
+Run `test_chatgpt_oauth_buttons_browser.mjs`, `test_chatgpt_oauth_logout_browser.mjs` and
+`test_provider_settings_verification_browser.mjs` with the existing Playwright
+browser-test environment, together with the runtime authorization status tests.
+Keep controlled HTTP results separate from real-provider evidence. Record missing
+interactive authorization as unverified rather than upgrading unit-test results.
+
 ## VRC tool audit classes
 
 These classes are the recurring failure surfaces found in the VRC tool audit:

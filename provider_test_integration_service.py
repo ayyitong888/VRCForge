@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
@@ -266,6 +267,7 @@ class ProviderTestIntegrationService:
                 else "Provider responded, but structured JSON did not validate."
             ),
             "responsePreview": text[:240],
+            "credentialFingerprint": hashlib.sha256(config.api_key.encode("utf-8")).hexdigest() if config.api_key else "",
         }
 
     def _structured_ok(self, text: str) -> bool:

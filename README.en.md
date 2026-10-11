@@ -3,7 +3,7 @@
 ![VRCForge — AI Agent + MCP for VRChat Avatar Editing](docs/assets/vrcforge-atelier-banner.png)
 
 [![Stable](https://img.shields.io/github/v/release/ayyitong888/VRCForge?label=stable&style=flat-square)](https://github.com/ayyitong888/VRCForge/releases/latest)
-![Current version](https://img.shields.io/badge/current-v1.8.8-d9487c?style=flat-square)
+![Current version](https://img.shields.io/badge/current-v1.8.9-d9487c?style=flat-square)
 [![License GPL-3.0-only](https://img.shields.io/badge/license-GPL--3.0--only-64748b?style=flat-square)](LICENSE)
 ![Platform Windows x64](https://img.shields.io/badge/platform-Windows%20x64-0ea5e9?style=flat-square)
 [![GitHub Stars](https://img.shields.io/github/stars/ayyitong888/VRCForge?style=social)](https://github.com/ayyitong888/VRCForge/stargazers)
@@ -31,10 +31,10 @@ project, so verify the result in your own project.
 
 > Back up your Unity / VRChat Avatar project before using any asset-writing feature.
 
-The current source targets v1.8.8, which has not been formally published. The latest public release is [v1.8.7](https://github.com/ayyitong888/VRCForge/releases/tag/v1.8.7); see its release notes for build eligibility limitations.
+The current source targets v1.8.9, which has not been formally published. The latest public release is [v1.8.8](https://github.com/ayyitong888/VRCForge/releases/tag/v1.8.8); see its release notes for build eligibility limitations.
 Get matching installers and Unity packages from that same Release.
 
-**[Download VRCForge v1.8.7](https://github.com/ayyitong888/VRCForge/releases/tag/v1.8.7)** · [Read the Release Notes](docs/RELEASE_NOTES_1.8.7.md)
+**[Download VRCForge v1.8.8](https://github.com/ayyitong888/VRCForge/releases/tag/v1.8.8)** · [Read the Release Notes](docs/RELEASE_NOTES_1.8.8.md)
 
 ## What VRCForge can do
 
@@ -91,7 +91,7 @@ Download these files from the
 Then connect in three steps:
 
 1. Install VRCForge, but leave the App closed.
-2. Open the target Unity 2022.3 LTS / VRChat SDK3 Avatar project, import all of `VRCForge.unitypackage`, and wait for compilation and `[VRCForge MCP] Core Ready`.
+2. Open the target Unity 2022.3 LTS project and import all of `VRCForge.unitypackage`. If the VRChat Avatar SDK is missing, the VRCForge setup window shows the required dependencies. Install the Avatar SDK and its dependencies through VCC or ALCOM, then wait for compilation and `[VRCForge MCP] Core Ready`. Reopen the dependency check through `VRCForge → Setup → Check Dependencies`.
 3. Start `VRCForge.exe`, select the project, and connect. The App discovers the project-owned VRCForge Core; no separate MCP Server install or MCP Token copy is required.
 
 Read the matching [Release Notes](https://github.com/ayyitong888/VRCForge/releases)
@@ -158,7 +158,7 @@ confirm and execute in the terminal through the same backend approval and recove
 ## Documentation
 
 - [User Manual / 使用手册](USER_MANUAL.md)
-- [v1.8.8 candidate release notes](docs/RELEASE_NOTES_1.8.8.md)
+- [v1.8.9 candidate release notes](docs/RELEASE_NOTES_1.8.9.md)
 - [v1.7.10 stable release notes](docs/RELEASE_NOTES_1.7.10.md)
 - [Compatibility matrix](docs/COMPATIBILITY_MATRIX.md)
 - [Product regression contract](docs/PRODUCT_REGRESSION_CONTRACT.md)

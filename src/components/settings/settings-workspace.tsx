@@ -101,6 +101,7 @@ type SettingsWorkspaceProps = {
   onResetThemeCustomization: () => void;
   onLoadModels: () => void;
   onProviderTest: (capability: "text" | "structured" | "vision") => void;
+  onProviderConfigChanged: () => Promise<void> | void;
   onProviderChange: (value: string) => void;
   onApiKeyChange: (value: string) => void;
   onApiBaseUrlChange: (value: string) => void;
@@ -201,6 +202,7 @@ export function SettingsWorkspace({
   onResetThemeCustomization,
   onLoadModels,
   onProviderTest,
+  onProviderConfigChanged,
   onProviderChange,
   onApiKeyChange,
   onApiBaseUrlChange,
@@ -397,6 +399,10 @@ export function SettingsWorkspace({
               apiProvider={apiProvider}
               apiModel={apiModel}
               savingApiConfig={savingApiConfig}
+              testingProvider={testingProvider}
+              providerTestMessage={providerTestMessage}
+              onTestProvider={onProviderTest}
+              onProviderConfigChanged={onProviderConfigChanged}
             />
           </div>
           <div className="mt-4">

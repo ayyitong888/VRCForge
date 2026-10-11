@@ -154,6 +154,8 @@ export type ApiConfig = {
   providerLabel?: string;
   api_key?: string;
   apiKeyPresent: boolean;
+  /** Stable non-secret binding for the saved account/key, when provided by the runtime. */
+  credentialFingerprint?: string;
   savedKeyProviders?: string[];
   base_url?: string;
   model?: string;

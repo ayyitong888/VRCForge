@@ -45,6 +45,8 @@ for (const locale of ["zh-CN", "zh-TW", "en-US", "ja-JP"]) {
     ["unity_core_project_busy", "busy"],
     ["unity_project_not_selected", "selectProject"],
     ["unity_editor_reload_dialog", "reloadDialog"],
+    ["unity_vrchat_sdk_missing", "vrchatSdkMissing"],
+    ["unity_newtonsoft_missing", "newtonsoftMissing"],
     ["future_unknown_error", "unknown"],
   ]) {
     const markup = render({ readiness: { ready: false, blockerCode } });

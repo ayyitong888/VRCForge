@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 
 import type { AgentDesktopAction, AgentProgress, WorkspaceDiffSummary } from "../../lib/api";
 import type { ProjectType } from "../../lib/chat-types";
+import { runtimeAuthorizationLabelKey, runtimeAuthorizationMessageKey, type RuntimeAuthorizationStatus } from "../../lib/runtime-authorization-status";
 import { cn } from "../../lib/utils";
 import { AgentTodoPanel } from "./agent-todo-panel";
 import { CoreVersionNotice } from "./core-version-notice";
@@ -32,6 +33,7 @@ export function RightRuntimeSidebar({
   unityInstanceComponent,
   unityToolsComponent,
   externalAgentComponent,
+  authorizationStatus,
   agentProgress,
   projectWorkspace,
   subAgentPanel,
@@ -61,6 +63,7 @@ export function RightRuntimeSidebar({
   unityInstanceComponent: ComponentStatus;
   unityToolsComponent: ComponentStatus;
   externalAgentComponent: ComponentStatus;
+  authorizationStatus: RuntimeAuthorizationStatus;
   agentProgress: AgentProgress[];
   projectWorkspace: boolean;
   subAgentPanel?: ReactNode;
@@ -137,6 +140,7 @@ export function RightRuntimeSidebar({
             unityInstanceComponent={unityInstanceComponent}
             unityToolsComponent={unityToolsComponent}
             externalAgentComponent={externalAgentComponent}
+            authorizationStatus={authorizationStatus}
             runtimeConnected={runtimeConnected}
             localizeHealthMessage={localizeHealthMessage}
             agentProgress={agentProgress}
@@ -176,9 +180,9 @@ export function RightRuntimeSidebar({
               <div data-vrcforge-status="external-agent">
                 <RuntimeInfoRow
                   icon={<Bot className="h-4 w-4" />}
-                  label={t("workspace.externalAgent")}
-                  value={componentValueFromMessage(externalAgentComponent, localizeHealthMessage, t("workspace.externalAgentWaiting"))}
-                  suffix={<StatusDot status={normalizedStatus(externalAgentComponent)} />}
+                  label={t(authorizationStatus.source === "external" ? "workspace.externalAgent" : runtimeAuthorizationLabelKey(authorizationStatus))}
+                  value={t(runtimeAuthorizationMessageKey(authorizationStatus))}
+                  suffix={<StatusDot status={authorizationStatus.status} />}
                 />
               </div>
               {workspaceProjectType === "unity" ? (

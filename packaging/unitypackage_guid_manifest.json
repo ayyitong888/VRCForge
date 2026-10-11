@@ -110,6 +110,12 @@
     { "path": "Assets/VRCForge/Editor/WardrobeSceneSaveScope.cs", "guid": "789fc2e331f27825f7c16aed282f3e52" },
     { "path": "Assets/VRCForge/Editor/RuntimeObservationTool.cs", "guid": "23a0e6670f584f808cba8dde56ade34d" },
     { "path": "Assets/VRCForge/Runtime", "guid": "5300c6a571304751ac6d0129dcff220e" },
-    { "path": "Assets/VRCForge/Runtime/RuntimeObservationFramePump.cs", "guid": "fadcc474b86e4d93a630da954846b45b" }
+    { "path": "Assets/VRCForge/Runtime/RuntimeObservationFramePump.cs", "guid": "fadcc474b86e4d93a630da954846b45b" },
+    { "path": "Assets/VRCForge/Runtime/VRCForge.Runtime.asmdef", "guid": "9bfd31344d33432f8d41f1bf50f054ab" },
+    { "path": "Assets/VRCForge/Setup", "guid": "341b5765717c400bbdf23fda43b9f428" },
+    { "path": "Assets/VRCForge/Setup/Editor", "guid": "6d5a8a8328844bbdb7f859fad4d1b5e3" },
+    { "path": "Assets/VRCForge/Setup/Editor/VRCForge.Setup.Editor.asmdef", "guid": "31085e2b2b6a445ead574171114d583f" },
+    { "path": "Assets/VRCForge/Setup/Editor/VRCForgeSetupWindow.cs", "guid": "62a1ba59ab5441bcbf4939ec80a5d415" },
+    { "path": "Assets/VRCForge/VRCForge.Editor.asmdef", "guid": "0a25312f89964e2ba752cf5a76763c0f" }
   ]
 }

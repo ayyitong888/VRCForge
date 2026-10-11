@@ -1,0 +1,12 @@
+{
+  "name": "VRCForge.Setup.Editor",
+  "rootNamespace": "VRCForge.Setup",
+  "references": [],
+  "includePlatforms": [
+    "Editor"
+  ],
+  "excludePlatforms": [],
+  "allowUnsafeCode": false,
+  "autoReferenced": true,
+  "noEngineReferences": false
+}

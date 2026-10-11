@@ -1,7 +1,9 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
+from types import SimpleNamespace
 
 from chatgpt_integration.routes import build_chatgpt_oauth_router
+from chatgpt_integration.service import ChatGPTAuthError
 from model_provider_adapters import normalize_provider_api_type
 from provider_protocol_negotiation import provider_protocol_candidates
 
@@ -29,14 +31,30 @@ class FakeAuth:
 
     def logout(self, account):
         self.calls.append(("logout", account))
-        return {"revoked": True}
+        return {"revoked": True, "localCleared": True}
 
     def close(self):
         self.calls.append("close")
 
 
-def setup_app():
-    auth = FakeAuth()
+class AuthErrorFake(FakeAuth):
+    def begin(self, account):
+        self.calls.append(("begin", account))
+        raise ChatGPTAuthError("The selected ChatGPT account was not found.")
+
+
+class AccountStatusFake(FakeAuth):
+    def status(self):
+        self.calls.append("status")
+        return {
+            "accounts": [{"id": "kept-account", "label": "Kept", "email": "", "connected": False}],
+            "pending": False,
+            "error": "",
+        }
+
+
+def setup_app(auth=None, deactivate=None, current_config=None):
+    auth = auth or FakeAuth()
     saved = []
 
     def authorize(request):
@@ -50,8 +68,38 @@ def setup_app():
     app = FastAPI()
     app.include_router(build_chatgpt_oauth_router(
         authorize=authorize, activate=activate, service_factory=lambda: auth,
+        deactivate=deactivate, current_config=current_config,
     ))
     return app, auth, saved
+
+
+def test_logout_deactivates_only_after_local_account_clear():
+    deactivated = []
+    app, auth, saved = setup_app(deactivate=lambda account: _record_deactivation(deactivated, account))
+    with TestClient(app, headers=HEADERS) as client:
+        response = client.post("/api/chatgpt/logout", json={"account_id": "account"})
+        assert response.status_code == 200
+        assert deactivated == ["account"]
+        assert auth.calls == [("logout", "account")]
+        assert saved == []
+
+
+async def _record_deactivation(target, account):
+    target.append(account)
+
+
+def test_status_does_not_advertise_removed_active_account():
+    app, auth, _ = setup_app(
+        auth=AccountStatusFake(),
+        current_config=lambda: SimpleNamespace(provider="chatgpt", api_key="removed-account", model="removed-model"),
+    )
+    with TestClient(app, headers=HEADERS) as client:
+        response = client.get("/api/chatgpt/status")
+        assert response.status_code == 200
+        assert response.json()["activeAccountId"] == ""
+        assert response.json()["activeModel"] == ""
+    assert auth.calls[0] == "status"
+    assert auth.calls[-1] == "close"
 
 
 HEADERS = {"Authorization": "Bearer app-session"}
@@ -103,6 +151,23 @@ def test_provider_error_body_never_reaches_ui():
         response = client.post("/api/chatgpt/models", json={"account_id": "bad"})
         assert response.status_code == 400
         assert "secret-token" not in response.text
+
+
+def test_safe_chatgpt_auth_error_reaches_ui_without_provider_details():
+    auth = AuthErrorFake()
+    app, _, _ = setup_app(auth)
+    with TestClient(app, headers=HEADERS) as client:
+        response = client.post("/api/chatgpt/login", json={"account_id": "missing"})
+        assert response.status_code == 400
+        assert response.json()["detail"] == "The selected ChatGPT account was not found."
+
+
+def test_unexpected_auth_exception_remains_generic():
+    app, _, _ = setup_app(FakeAuth())
+    with TestClient(app, headers=HEADERS) as client:
+        response = client.post("/api/chatgpt/models", json={"account_id": "bad"})
+        assert response.status_code == 400
+        assert response.json()["detail"] == "ChatGPT connection operation failed. Check connection status or sign in again."
 
 
 def test_chatgpt_protocol_has_no_paid_fallback():

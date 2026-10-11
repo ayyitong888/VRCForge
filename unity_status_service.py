@@ -39,6 +39,7 @@ class UnityStatusPorts:
     normalize_path: Callable[[str], str]
     core_installed: Callable[[Path], bool]
     required_tools: tuple[str, ...]
+    dependency_preflight: Callable[[Path], dict[str, Any]] | None = None
 
 
 class UnityStatusService:
@@ -74,13 +75,52 @@ class UnityStatusService:
                 "No Unity project is selected.",
                 cause_code="unity_project_not_selected",
             )
-        if not self._ports.core_installed(selected_project_path):
-            return self.build_vrcforge_mcp_core_unavailable_status(
+        dependency_preflight = (
+            self._ports.dependency_preflight(selected_project_path)
+            if self._ports.dependency_preflight is not None
+            else None
+        )
+        core_installed = self._ports.core_installed(selected_project_path)
+        if not core_installed:
+            dependency_blocker = (
+                isinstance(dependency_preflight, dict)
+                and dependency_preflight.get("ready") is False
+                and str(dependency_preflight.get("blockerCode") or "")
+            )
+            if dependency_blocker:
+                status = self.build_vrcforge_mcp_core_unavailable_status(
+                    selected_project_path,
+                    str(dependency_preflight.get("message") or "Unity project dependencies are missing."),
+                    cause_code=str(dependency_preflight["blockerCode"]),
+                )
+                status["dependencyPreflight"] = dependency_preflight
+                return status
+            status = self.build_vrcforge_mcp_core_unavailable_status(
                 selected_project_path,
                 "The selected project does not contain the VRCForge MCP2 unitypackage.",
                 cause_code="unity_core_package_incomplete",
             )
-        return self.build_vrcforge_mcp_core_status(selected_project_path, settings)
+            if dependency_preflight is not None:
+                status["dependencyPreflight"] = dependency_preflight
+            return status
+        status = self.build_vrcforge_mcp_core_status(selected_project_path, settings)
+        if dependency_preflight is not None:
+            dependency_blocker = (
+                isinstance(dependency_preflight, dict)
+                and dependency_preflight.get("ready") is False
+                and str(dependency_preflight.get("blockerCode") or "")
+            )
+            if dependency_blocker and status.get("connected") is not True:
+                status["blockerCode"] = str(dependency_preflight["blockerCode"])
+                status["causeCode"] = str(dependency_preflight["blockerCode"])
+                status["error"] = str(
+                    dependency_preflight.get("message")
+                    or status.get("error")
+                    or "Unity project dependencies are missing."
+                )
+                status["readiness"] = self.readiness(status)
+            status["dependencyPreflight"] = dependency_preflight
+        return status
 
     @staticmethod
     def readiness(status: dict[str, Any]) -> dict[str, Any]:

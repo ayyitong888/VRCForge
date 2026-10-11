@@ -52,6 +52,7 @@ class FakeHTTP:
         self.expected_client_id = ""
         self.issued_client_id = "oaiapp_test"
         self.claim_overrides: dict = {}
+        self.claim_removals: set[str] = set()
         self.token_overrides: dict = {}
         self.refresh_response = {
             "access_token": "access-rotated",
@@ -109,6 +110,8 @@ class FakeHTTP:
                 "exp": int(time.time()) + 3600,
             }
             claims.update(self.claim_overrides)
+            for claim in self.claim_removals:
+                claims.pop(claim, None)
             signer = self.other_key if self.token_overrides.pop("bad_signature", False) else self.signing_key
             id_token = jwt.encode(claims, signer, algorithm="RS256", headers={"kid": "test-key"})
             response = {
@@ -306,6 +309,93 @@ def test_identity_token_must_have_valid_signature_and_claims(
         service.close()
 
 
+@pytest.mark.parametrize(
+    "claim_name,delta",
+    [
+        ("iat", 2),
+        ("exp", -2),
+    ],
+)
+def test_identity_token_allows_small_clock_skew(tmp_path: Path, claim_name: str, delta: int):
+    fake = FakeHTTP()
+    fake.claim_overrides = {claim_name: int(time.time()) + delta}
+    service = _service(tmp_path, fake)
+    try:
+        _, callback_status, _ = _complete_login(service, fake)
+        assert callback_status == 200
+        assert service.status()["accounts"]
+    finally:
+        service.close()
+
+
+@pytest.mark.parametrize(
+    "claim_name,delta,claim_removals,expected_error",
+    [
+        ("iat", 6, set(), "The ChatGPT identity token time claim is invalid."),
+        ("exp", -6, set(), "The ChatGPT identity token has expired."),
+        (None, 0, {"exp"}, "The ChatGPT identity token is missing a required claim."),
+        ("aud", 0, set(), "The ChatGPT identity token audience is invalid."),
+        ("iss", 0, set(), "The ChatGPT identity token issuer is invalid."),
+    ],
+)
+def test_identity_token_failures_are_classified(
+    tmp_path: Path,
+    claim_name: str | None,
+    delta: int,
+    claim_removals: set[str],
+    expected_error: str,
+):
+    fake = FakeHTTP()
+    if claim_name is not None:
+        fake.claim_overrides = {
+            claim_name: int(time.time()) + delta if claim_name in {"iat", "exp"} else (
+                "another-client" if claim_name == "aud" else "https://issuer.invalid"
+            )
+        }
+    fake.claim_removals = claim_removals
+    service = _service(tmp_path, fake)
+    try:
+        _, callback_status, _ = _complete_login(service, fake)
+        assert callback_status == 400
+        assert service.status()["error"] == expected_error
+        assert service.status()["accounts"] == []
+    finally:
+        service.close()
+
+
+def test_bad_signature_is_classified_without_exposing_token_data(tmp_path: Path):
+    fake = FakeHTTP()
+    fake.token_overrides["bad_signature"] = True
+    service = _service(tmp_path, fake)
+    try:
+        _, callback_status, _ = _complete_login(service, fake)
+        assert callback_status == 400
+        assert service.status()["error"] == "The ChatGPT identity token signature is invalid."
+        assert "access-one" not in json.dumps(service.status())
+        assert "refresh-one" not in json.dumps(service.status())
+    finally:
+        service.close()
+
+
+def test_failed_new_account_login_can_be_retried_without_stuck_pending(tmp_path: Path):
+    fake = FakeHTTP()
+    fake.token_overrides["bad_signature"] = True
+    service = _service(tmp_path, fake)
+    try:
+        _, first_status, _ = _complete_login(service, fake)
+        assert first_status == 400
+        deadline = time.monotonic() + 2
+        while service.status()["pending"] and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert service.status()["pending"] is False
+
+        _, second_status, _ = _complete_login(service, fake)
+        assert second_status == 200
+        assert service.status()["accounts"]
+    finally:
+        service.close()
+
+
 def test_returning_account_reuses_registration_and_rejects_identity_change(tmp_path: Path):
     fake = FakeHTTP()
     service = _service(tmp_path, fake)
@@ -394,13 +484,8 @@ def test_logout_reports_revocation_and_local_clear_separately(tmp_path: Path):
                 "client_id": fake.issued_client_id,
             },
         )
-        account = service._storage.load_unlocked()["accounts"][0]
-        assert account["client_id"] == fake.issued_client_id
-        assert account["subject"] == "subject-1"
-        assert service.status()["accounts"][0]["connected"] is False
-        assert "access_token" not in account
-        assert "refresh_token" not in account
-        assert "id_token" not in account
+        assert service._storage.load_unlocked()["accounts"] == []
+        assert service.status()["accounts"] == []
     finally:
         service.close()
 
@@ -414,8 +499,29 @@ def test_failed_remote_revocation_still_clears_local_tokens(tmp_path: Path):
         assert status == 200
         assert service.logout(result["accountId"]) == {"revoked": False, "localCleared": True}
         assert fake.revocation_calls == 3
-        assert service.status()["accounts"][0]["connected"] is False
+        assert service.status()["accounts"] == []
         assert service.status()["error"] == "Remote sign-out could not be confirmed."
+    finally:
+        service.close()
+
+
+def test_logout_removes_only_selected_account_and_preserves_other_accounts(tmp_path: Path):
+    fake = FakeHTTP()
+    service = _service(tmp_path, fake)
+    try:
+        first, first_status, _ = _complete_login(service, fake)
+        assert first_status == 200
+        second, second_status, _ = _complete_login(service, fake)
+        assert second_status == 200
+        assert {item["id"] for item in service.status()["accounts"]} == {
+            first["accountId"], second["accountId"]
+        }
+
+        assert service.logout(first["accountId"]) == {"revoked": True, "localCleared": True}
+        remaining = service.status()["accounts"]
+        assert [item["id"] for item in remaining] == [second["accountId"]]
+        stored = service._storage.load_unlocked()["accounts"]
+        assert [item["id"] for item in stored] == [second["accountId"]]
     finally:
         service.close()
 

@@ -86,6 +86,15 @@ _PREPARATION_ACTIONS: dict[str, dict[str, Any]] = {
         ),
         "approvalRequired": True,
     },
+    "newtonsoft_dependency_present": {
+        "id": "install_newtonsoft_dependency",
+        "kind": "supervised_dependency_install",
+        "instruction": (
+            "Install Unity Newtonsoft Json through the supported VCC Avatar project "
+            "baseline, wait for Unity compilation to finish, then run Know Yourself again."
+        ),
+        "approvalRequired": True,
+    },
 }
 
 _READY_PROBES: tuple[tuple[str, str], ...] = (
@@ -195,6 +204,18 @@ def _preparation_steps(
                     "supportedSeries": list(SUPPORTED_UNITY_EDITOR_SERIES),
                 }
             )
+    newtonsoft = checks.get("package.newtonsoft", {})
+    if _normalized_status(newtonsoft.get("status")) == "error":
+        steps.append(
+            {
+                "id": "newtonsoft_dependency_present",
+                "title": "Unity Newtonsoft Json present",
+                "source": "doctor",
+                "sourceCheck": "package.newtonsoft",
+                "status": "error",
+                "ready": False,
+            }
+        )
     return steps
 
 
