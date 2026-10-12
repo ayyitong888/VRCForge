@@ -13,6 +13,7 @@ import {
 } from "../lib/api";
 import { defaultBaseUrlForProvider, defaultModelForProvider, providerDisplayName, providerNeedsApiKey } from "../lib/provider-ui";
 import { hasSavedProviderKey } from "../lib/provider-key-state";
+import { supportedApiTypeOptions } from "../lib/provider-protocol-options";
 
 type ApiConfig = AppBootstrap["apiConfig"];
 type VisionConfig = AppBootstrap["visionConfig"];
@@ -75,6 +76,7 @@ export function useProviderSettings({
   const [providerTestCredentialFingerprint, setProviderTestCredentialFingerprint] = useState("");
   const [providerTestEndpoint, setProviderTestEndpoint] = useState("");
   const providerTestGeneration = useRef(0);
+  const previousExplicitProtocol = useRef<{ provider: string; apiType: ProviderApiType } | null>(null);
 
   useEffect(() => {
     if (!apiConfig) {
@@ -89,6 +91,7 @@ export function useProviderSettings({
     setApiBaseUrl(apiConfig.base_url || "");
     setApiModel(apiConfig.model || defaultModelForProvider(apiConfig.provider || "gemini"));
     setApiType(apiConfig.api_type || apiConfig.apiType || "auto");
+    previousExplicitProtocol.current = null;
     setApiContextWindow(apiConfig.contextWindow ? String(Math.round(apiConfig.contextWindow / 1000)) : "");
     setApiThinkingLevel(apiConfig.thinking_level || "default");
     setModelOptions([]);
@@ -176,6 +179,10 @@ export function useProviderSettings({
 
   async function saveApiProvider(event?: FormEvent) {
     event?.preventDefault();
+    if (apiProvider === "deepseek" && apiModel.trim() === "deepseek-auto") {
+      setModelsError(t("provider.selectModel"));
+      return;
+    }
     const normalizedContextWindow = normalizeContextWindowK(apiContextWindow);
     if (
       normalizedContextWindow === null
@@ -216,6 +223,7 @@ export function useProviderSettings({
   }
 
   function handleProviderChange(provider: string) {
+    previousExplicitProtocol.current = null;
     setApiProvider(provider);
     setApiModel(defaultModelForProvider(provider));
     setApiType("auto");
@@ -233,9 +241,19 @@ export function useProviderSettings({
     invalidateProviderTest();
   }
 
-  function handleDeepSeekAutoNegotiationChange(enabled: boolean) {
-    setApiModel(enabled ? "deepseek-auto" : "deepseek-v4-flash");
-    setApiType("auto");
+  function handleProtocolAutoNegotiationChange(enabled: boolean) {
+    const explicitOptions = supportedApiTypeOptions(apiProvider, apiModel).filter((option) => option !== "auto");
+    if (enabled) {
+      if (apiType !== "auto" && explicitOptions.includes(apiType)) {
+        previousExplicitProtocol.current = { provider: apiProvider, apiType };
+      }
+      setApiType("auto");
+    } else {
+      const previous = previousExplicitProtocol.current;
+      setApiType(previous?.provider === apiProvider && previous.apiType !== "auto" && explicitOptions.includes(previous.apiType)
+        ? previous.apiType
+        : explicitOptions[0] || "auto");
+    }
     invalidateProviderTest();
   }
 
@@ -348,7 +366,7 @@ export function useProviderSettings({
       setModelOptionsScope({ provider: payload.provider || apiProvider, baseUrl: payload.baseUrl || apiBaseUrl.trim() });
       if (models.length === 0) {
         setModelsError(t("provider.noModelsReturned"));
-      } else if (!(apiProvider === "deepseek" && apiModel === "deepseek-auto") && !models.some((item) => item.id === apiModel)) {
+      } else if (!apiModel.trim()) {
         handleApiModelChange(payload.selectedModel && models.some((item) => item.id === payload.selectedModel) ? payload.selectedModel : models[0].id);
       }
     } catch (cause) {
@@ -361,6 +379,10 @@ export function useProviderSettings({
   }
 
   async function runProviderTest(capability: "text" | "structured" | "vision") {
+    if (apiProvider === "deepseek" && apiModel.trim() === "deepseek-auto") {
+      setModelsError(t("provider.selectModel"));
+      return;
+    }
     if (testingProvider) {
       return;
     }
@@ -469,7 +491,7 @@ export function useProviderSettings({
     providerSnapshot,
     saveApiProvider,
     handleProviderChange,
-    handleDeepSeekAutoNegotiationChange,
+    handleProtocolAutoNegotiationChange,
     handleVisionProviderChange,
     saveVisionProfile,
     clearVisionProfile,

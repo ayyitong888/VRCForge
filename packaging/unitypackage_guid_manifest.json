@@ -115,6 +115,7 @@
     { "path": "Assets/VRCForge/Setup", "guid": "341b5765717c400bbdf23fda43b9f428" },
     { "path": "Assets/VRCForge/Setup/Editor", "guid": "6d5a8a8328844bbdb7f859fad4d1b5e3" },
     { "path": "Assets/VRCForge/Setup/Editor/VRCForge.Setup.Editor.asmdef", "guid": "31085e2b2b6a445ead574171114d583f" },
+    { "path": "Assets/VRCForge/Setup/Editor/VRCForgeLocalization.cs", "guid": "f1ca0760213841128c10f9408a40298b" },
     { "path": "Assets/VRCForge/Setup/Editor/VRCForgeSetupWindow.cs", "guid": "62a1ba59ab5441bcbf4939ec80a5d415" },
     { "path": "Assets/VRCForge/VRCForge.Editor.asmdef", "guid": "0a25312f89964e2ba752cf5a76763c0f" }
   ]

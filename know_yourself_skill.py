@@ -72,8 +72,8 @@ _PREPARATION_ACTIONS: dict[str, dict[str, Any]] = {
         "id": "install_required_sdk",
         "kind": "supervised_dependency_install",
         "instruction": (
-            "Install the required avatar SDK through the configured package "
-            "workflow and wait for dependency resolution."
+            "Install or repair the official VRChat Avatar SDK through VCC or ALCOM, "
+            "then wait for Unity to finish compiling."
         ),
         "approvalRequired": True,
     },
@@ -90,8 +90,8 @@ _PREPARATION_ACTIONS: dict[str, dict[str, Any]] = {
         "id": "install_newtonsoft_dependency",
         "kind": "supervised_dependency_install",
         "instruction": (
-            "Install Unity Newtonsoft Json through the supported VCC Avatar project "
-            "baseline, wait for Unity compilation to finish, then run Know Yourself again."
+            "Install or repair the official VRChat Avatar SDK through VCC or ALCOM, "
+            "then wait for Unity to finish compiling before running Know Yourself again."
         ),
         "approvalRequired": True,
     },
@@ -209,7 +209,7 @@ def _preparation_steps(
         steps.append(
             {
                 "id": "newtonsoft_dependency_present",
-                "title": "Unity Newtonsoft Json present",
+                "title": "VRChat Avatar SDK",
                 "source": "doctor",
                 "sourceCheck": "package.newtonsoft",
                 "status": "error",

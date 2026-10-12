@@ -1,3 +1,4 @@
+import { supportedApiTypeOptions } from "../../lib/provider-protocol-options";
 import { Check, Eye, Loader2, MessageSquare, RefreshCw } from "lucide-react";
 import type { FormEvent, ReactNode } from "react";
 import i18n from "../../i18n";
@@ -34,7 +35,7 @@ type ProviderSetupProps = {
   onApiKeyChange: (value: string) => void;
   onBaseUrlChange: (value: string) => void;
   onModelChange: (value: string) => void;
-  onDeepSeekAutoNegotiationChange: (enabled: boolean) => void;
+  onProtocolAutoNegotiationChange: (enabled: boolean) => void;
   onApiTypeChange: (value: ProviderApiType) => void;
   onContextWindowChange: (value: string) => void;
   onThinkingLevelChange: (value: string) => void;
@@ -87,7 +88,7 @@ export function ProviderSetup({
   onApiKeyChange,
   onBaseUrlChange,
   onModelChange,
-  onDeepSeekAutoNegotiationChange,
+  onProtocolAutoNegotiationChange,
   onApiTypeChange,
   onContextWindowChange,
   onThinkingLevelChange,
@@ -98,7 +99,7 @@ export function ProviderSetup({
   const supportsReasoning = supportedReasoningVariants.length > 0;
   const hasUnsupportedReasoningVariant =
     thinkingLevel !== "default" && !supportedReasoningVariants.some((variant) => variant.key === thinkingLevel);
-  const deepseekAutoNegotiation = provider === "deepseek" && model === "deepseek-auto";
+  const protocolAutoNegotiation = apiType === "auto";
   const hasModelList = models.length > 0;
   const capabilities = providerCapabilities(modelCapabilities, capabilitySource);
   const apiTypeOptions = supportedApiTypeOptions(provider, model);
@@ -117,7 +118,7 @@ export function ProviderSetup({
   if (providerPickerOnly) {
     return (
       <div className="rounded-2xl border border-border bg-card p-5 shadow-composer">
-        <SettingsFieldLabel label={i18n.t("provider.apiProvider")} onboardingTarget="connection">
+        <SettingsFieldLabel label={i18n.t("provider.apiProvider")} heading onboardingTarget="connection">
           <select
             value={provider}
             onChange={(event) => onProviderChange(event.target.value)}
@@ -141,7 +142,7 @@ export function ProviderSetup({
   return (
     <form onSubmit={onSubmit} className="rounded-2xl border border-border bg-card p-5 shadow-composer">
       <div className="grid gap-4">
-        <SettingsFieldLabel label={i18n.t("provider.apiProvider")} onboardingTarget="connection">
+        <SettingsFieldLabel label={i18n.t("provider.apiProvider")} heading onboardingTarget="connection">
           <select
             value={provider}
             onChange={(event) => onProviderChange(event.target.value)}
@@ -192,38 +193,34 @@ export function ProviderSetup({
             />
           </SettingsFieldLabel>
         ) : null}
-        {provider === "deepseek" ? (
-          <SettingsFieldLabel label={i18n.t("provider.deepseekAutoNegotiation")}>
+        {provider !== "chatgpt" ? (
+          <div>
             <label className="flex cursor-pointer items-start gap-3 rounded-xl border border-border bg-background px-3 py-3">
               <input
                 type="checkbox"
-                checked={deepseekAutoNegotiation}
-                onChange={(event) => onDeepSeekAutoNegotiationChange(event.target.checked)}
-                aria-label={i18n.t("provider.deepseekAutoNegotiation")}
+                checked={protocolAutoNegotiation}
+                onChange={(event) => onProtocolAutoNegotiationChange(event.target.checked)}
+                aria-label={i18n.t("provider.protocolAutoNegotiation")}
                 className="mt-0.5 h-4 w-4 shrink-0 accent-primary"
               />
               <span className="min-w-0">
-                <span className="block text-sm font-medium text-foreground">{i18n.t("provider.deepseekAutoNegotiation")}</span>
-                <span className="mt-0.5 block text-xs leading-5 text-muted-foreground">{i18n.t("provider.deepseekAutoNegotiationHint")}</span>
+                <span className="block text-sm font-medium text-foreground">{i18n.t("provider.protocolAutoNegotiation")}</span>
+                <span className="mt-0.5 block text-xs leading-5 text-muted-foreground">{i18n.t("provider.protocolAutoNegotiationHint")}</span>
               </span>
             </label>
-          </SettingsFieldLabel>
+          </div>
         ) : null}
         <SettingsFieldLabel label={i18n.t("provider.model")} onboardingTarget="model">
           <div className="flex min-w-0 items-center gap-2">
-            {deepseekAutoNegotiation ? (
-              <div className="flex h-10 w-full min-w-0 items-center rounded-md border border-border bg-muted px-3 text-sm text-muted-foreground">
-                {i18n.t("provider.deepseekAutoRoute")}
-              </div>
-            ) : hasModelList ? (
+            {hasModelList ? (
               <select
-                value={models.some((item) => item.id === model) ? model : ""}
+                value={model === "deepseek-auto" ? "" : model}
                 onChange={(event) => onModelChange(event.target.value)}
                 className="h-10 w-full min-w-0 rounded-md border border-border bg-background px-3 text-sm outline-none focus:border-primary"
               >
                 {!models.some((item) => item.id === model) ? (
-                  <option value="" disabled>
-                    {i18n.t("provider.selectModel")}
+                  <option value={model === "deepseek-auto" ? "" : model} disabled={!model || model === "deepseek-auto"}>
+                    {model && model !== "deepseek-auto" ? model : i18n.t("provider.selectModel")}
                   </option>
                 ) : null}
                 {models.map((item) => (
@@ -234,7 +231,7 @@ export function ProviderSetup({
               </select>
             ) : (
               <input
-                value={model}
+                value={model === "deepseek-auto" ? "" : model}
                 onChange={(event) => onModelChange(event.target.value)}
                 placeholder={i18n.t("provider.modelPlaceholder")}
                 className="h-10 w-full min-w-0 rounded-md border border-border bg-background px-3 text-sm outline-none placeholder:text-muted-foreground/60 focus:border-primary"
@@ -338,19 +335,19 @@ export function ProviderSetup({
       </div>
       <div data-onboarding-provider="actions" className="mt-5 flex flex-wrap justify-end gap-2">
         <div aria-live="polite" className="min-h-5 w-full text-xs text-muted-foreground">{providerTestMessage || (!modelsError && keySaved && !apiKey.trim() ? i18n.t("provider.savedKeyTestHint") : "")}</div>
-        <Button type="button" variant="outline" disabled={!runtimeConnected || saving || Boolean(testingProvider)} onClick={() => onTestProvider("text")}>
+        <Button type="button" variant="outline" disabled={!runtimeConnected || saving || Boolean(testingProvider) || model === "deepseek-auto"} onClick={() => onTestProvider("text")}>
           {testingProvider === "text" ? <Loader2 className="h-4 w-4 animate-spin" /> : <MessageSquare className="h-4 w-4" />}
           {i18n.t("provider.testConnection")}
         </Button>
-        <Button type="button" variant="outline" disabled={!runtimeConnected || saving || Boolean(testingProvider)} onClick={() => onTestProvider("structured")}>
+        <Button type="button" variant="outline" disabled={!runtimeConnected || saving || Boolean(testingProvider) || model === "deepseek-auto"} onClick={() => onTestProvider("structured")}>
           {testingProvider === "structured" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
           {i18n.t("provider.testStructured")}
         </Button>
-        <Button type="button" variant="outline" disabled={!runtimeConnected || saving || Boolean(testingProvider)} onClick={() => onTestProvider("vision")}>
+        <Button type="button" variant="outline" disabled={!runtimeConnected || saving || Boolean(testingProvider) || model === "deepseek-auto"} onClick={() => onTestProvider("vision")}>
           {testingProvider === "vision" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Eye className="h-4 w-4" />}
           {i18n.t("provider.testVision")}
         </Button>
-        <Button disabled={!runtimeConnected || saving || !contextWindowValid || (providerNeedsApiKey(provider) && !apiKey.trim() && !keySaved) || !model.trim()} type="submit">
+        <Button disabled={!runtimeConnected || saving || !contextWindowValid || (providerNeedsApiKey(provider) && !apiKey.trim() && !keySaved) || !model.trim() || model === "deepseek-auto"} type="submit">
           {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
           {i18n.t("common.save")}
         </Button>
@@ -366,30 +363,6 @@ function firstPositiveContextWindow(model: ProviderModelInfo | undefined): numbe
     }
   }
   return undefined;
-}
-
-function supportedApiTypeOptions(provider: string, model: string): ProviderApiType[] {
-  if (provider === "deepseek") {
-    if (model.trim() === "deepseek-auto") {
-      return ["auto"];
-    }
-    return model.trim() === "deepseek-v4-flash" || model.trim() === "deepseek-v4-pro"
-      ? ["auto", "responses", "messages", "chat_completions"]
-      : ["auto", "chat_completions"];
-  }
-  if (provider === "custom") {
-    return ["auto", "responses", "chat_completions", "messages", "generate_content"];
-  }
-  if (provider === "openai") {
-    return ["auto", "responses", "chat_completions"];
-  }
-  if (provider === "gemini" || provider === "vertexai") {
-    return ["auto", "generate_content"];
-  }
-  if (provider === "anthropic") {
-    return ["auto", "messages"];
-  }
-  return ["auto", "chat_completions"];
 }
 
 export function VisionProfileSetup({
@@ -465,7 +438,7 @@ export function VisionProfileSetup({
             ) : null}
             <SettingsFieldLabel label={i18n.t("provider.model")}>
               <input
-                value={model}
+                value={model === "deepseek-auto" ? "" : model}
                 onChange={(event) => onModelChange(event.target.value)}
                 placeholder={i18n.t("provider.modelPlaceholder")}
                 className="h-10 w-full rounded-md border border-border bg-background px-3 text-sm outline-none placeholder:text-muted-foreground/60 focus:border-primary"
@@ -498,10 +471,10 @@ export function VisionProfileSetup({
   );
 }
 
-function SettingsFieldLabel({ label, children, onboardingTarget }: { label: string; children: ReactNode; onboardingTarget?: string }) {
+function SettingsFieldLabel({ label, children, onboardingTarget, heading = false }: { label: string; children: ReactNode; onboardingTarget?: string; heading?: boolean }) {
   return (
     <label data-onboarding-provider={onboardingTarget} className="grid min-w-0 gap-2 text-sm">
-      <span className="truncate font-medium text-muted-foreground">{label}</span>
+      <span className={heading ? "truncate text-sm font-semibold leading-5 tracking-normal text-foreground" : "truncate font-medium text-muted-foreground"}>{label}</span>
       {children}
     </label>
   );

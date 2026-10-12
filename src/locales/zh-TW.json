@@ -8,7 +8,7 @@
     "selectProject": "請先在 App 中選擇要連線的 Unity 專案，並用 Unity 開啟同一個專案。",
     "reloadDialog": "Unity 有等待處理的重新載入提示。請切回 Unity，確認自己的修改已妥善保留後處理此提示，再檢查連線。",
     "vrchatSdkMissing": "目前專案缺少 VRChat SDK。請補齊專案所需的 VRChat SDK 依賴，等待 Unity 編譯完成後再檢查連線。",
-    "newtonsoftMissing": "目前專案缺少 Newtonsoft JSON 依賴。請恢復專案所需的依賴套件，等待 Unity 編譯完成後再檢查連線。",
+    "newtonsoftMissing": "VRChat Avatar SDK 的配套依賴尚未就緒。請透過 VCC 或 ALCOM 安裝或修復 SDK，等待 Unity 完成依賴解析與編譯後再檢查連線，無需單獨安裝依賴。",
     "unknown": "暫時無法確認 Unity 已就緒。請檢查所選專案及 Unity Console；若問題持續，請透過設定中的回饋入口提交連線資訊，不要刪除專案。"
   },
   "coreVersion": {
@@ -1097,9 +1097,8 @@
     "apiType_responses": "Responses",
     "apiType_generate_content": "產生內容",
     "apiType_messages": "訊息",
-    "deepseekAutoNegotiation": "自動協商模型與協定",
-    "deepseekAutoNegotiationHint": "允許 VRCForge 在同一 DeepSeek 端點測試真實模型與協定；關閉後將嚴格使用下方指定的模型和 API 類型。",
-    "deepseekAutoRoute": "協商順序：Pro Responses → Pro Anthropic → Pro Chat → Flash Responses → Flash Anthropic → Flash Chat",
+    "protocolAutoNegotiation": "自動協商協定",
+    "protocolAutoNegotiationHint": "僅為你選擇的模型協商可用的通訊協定，不會更換模型。",
     "customEndpoint": "自訂相容介面",
     "noKeyNeeded": "無需金鑰",
     "selectModel": "請選擇模型",

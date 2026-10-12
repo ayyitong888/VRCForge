@@ -446,6 +446,37 @@ export function useChatSessions({
     });
   }, [activeProjectPath, customProjectPaths, endpoint, projectPaths, projectPrefsReady, runtimeConnected, setError, t]);
 
+  const externalReloadRef = useRef(reloadChatStorageState);
+  externalReloadRef.current = reloadChatStorageState;
+  const externalReloadErrorRef = useRef(setError);
+  externalReloadErrorRef.current = setError;
+  const externalReloadTimerRef = useRef<number | null>(null);
+  const externalReloadActiveRef = useRef(false);
+  useEffect(() => {
+    externalReloadActiveRef.current = runtimeConnected && projectPrefsReady;
+    return () => {
+      externalReloadActiveRef.current = false;
+      if (externalReloadTimerRef.current !== null) {
+        window.clearTimeout(externalReloadTimerRef.current);
+        externalReloadTimerRef.current = null;
+      }
+    };
+  }, [endpoint, runtimeConnected, projectPrefsReady]);
+
+  const notifyChatStorageChanged = useCallback(() => {
+    if (!externalReloadActiveRef.current) return;
+    if (externalReloadTimerRef.current !== null) window.clearTimeout(externalReloadTimerRef.current);
+    externalReloadTimerRef.current = window.setTimeout(() => {
+      externalReloadTimerRef.current = null;
+      if (externalReloadActiveRef.current) {
+        // Reuse serialized fetch/reconcile/CAS; never overwrite dirty local chats.
+        void externalReloadRef.current().catch((cause) => {
+          if (externalReloadActiveRef.current) externalReloadErrorRef.current(cause instanceof Error ? cause.message : String(cause));
+        });
+      }
+    }, 150);
+  }, []);
+
   const resolveChatStorageConflict = useCallback(async (): Promise<boolean> => {
     if (!runtimeConnected || !projectPrefsReady) {
       return false;
@@ -761,6 +792,7 @@ export function useChatSessions({
     resolvingChatStorageConflict,
     resolveChatStorageConflict,
     reloadChatStorageState,
+    notifyChatStorageChanged,
     markChatsDirty,
     touchChat,
     updateChat,

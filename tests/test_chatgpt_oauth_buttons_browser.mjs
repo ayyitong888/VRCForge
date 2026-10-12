@@ -160,7 +160,7 @@ try {
       observer.observe(panel, { childList: true, subtree: true });
     });
   });
-  await page.getByRole("button", { name: "Refresh status" }).click();
+  await page.getByRole("button", { name: "Refresh model list" }).click();
   await page.evaluate(() => window.__staleClick);
   await wait(() => requests.length === 3, "stale-selection ordinary login request");
   assert.equal(requests[2].account_id, "", "a selected ID absent from refreshed status becomes dynamic registration");

@@ -8,7 +8,7 @@
     "selectProject": "App で接続する Unity プロジェクトを選択し、Unity で同じプロジェクトを開いてください。",
     "reloadDialog": "Unity が再読み込みダイアログへの対応を待っています。Unity に戻り、変更内容が安全に保持されていることを確認してからダイアログに対応し、接続を再確認してください。",
     "vrchatSdkMissing": "このプロジェクトに VRChat SDK がありません。必要な VRChat SDK 依存関係を復元し、Unity のコンパイル完了後に接続を再確認してください。",
-    "newtonsoftMissing": "このプロジェクトに Newtonsoft JSON 依存関係がありません。必要なパッケージを復元し、Unity のコンパイル完了後に接続を再確認してください。",
+    "newtonsoftMissing": "VRChat Avatar SDK の依存関係が準備できていません。VCC または ALCOM で SDK をインストールまたは修復し、Unity の依存関係解決とコンパイルの完了後に接続を再確認してください。依存パッケージの個別インストールは不要です。",
     "unknown": "Unity の準備完了を確認できません。選択したプロジェクトと Unity Console を確認してください。解決しない場合は設定のフィードバックから接続情報を送信してください。プロジェクトを削除しないでください。"
   },
   "coreVersion": {
@@ -1097,9 +1097,8 @@
     "apiType_responses": "Responses",
     "apiType_generate_content": "コンテンツ生成",
     "apiType_messages": "メッセージ",
-    "deepseekAutoNegotiation": "モデルとプロトコルを自動ネゴシエーション",
-    "deepseekAutoNegotiationHint": "同じ DeepSeek エンドポイントで実在するモデルとプロトコルを VRCForge が検証します。オフにすると、下で指定したモデルと API タイプに固定します。",
-    "deepseekAutoRoute": "ネゴシエーション順：Pro Responses → Pro Anthropic → Pro Chat → Flash Responses → Flash Anthropic → Flash Chat",
+    "protocolAutoNegotiation": "プロトコルを自動交渉",
+    "protocolAutoNegotiationHint": "選択したモデルの通信プロトコルだけを交渉します。モデルは変更しません。",
     "customEndpoint": "カスタム互換エンドポイント",
     "noKeyNeeded": "キー不要",
     "selectModel": "モデルを選択",

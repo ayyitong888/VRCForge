@@ -168,6 +168,25 @@ class ProviderConfigurationService:
                 self._api_config = self._load_initial_api_config_locked()
             return self._api_config
 
+    def resolve_session_config(self, *, provider: str = "", model: str = "") -> ProviderApiConfig:
+        """Resolve one turn's choice without changing configured defaults.
+
+        A model-only choice retains its provider endpoint and credential (including
+        a ChatGPT account reference). A different provider resolves its own saved
+        key and default endpoint; it must never borrow the current provider's URL.
+        """
+        current = self.current_api_config()
+        selected_provider = self._policy.normalize_provider_name(provider) if str(provider or "").strip() else current.provider
+        selected_model = str(model or "").strip()
+        same_provider = selected_provider == current.provider
+        if same_provider and (not selected_model or selected_model == current.model):
+            return current
+        if same_provider:
+            request = replace(current, model=selected_model)
+        else:
+            request = ProviderApiConfig(provider=selected_provider, api_key="", base_url="", model=selected_model)
+        return self.resolve_api_request(request)
+
     def current_vision_config(self) -> ProviderVisionConfig:
         with self._lock:
             if self._vision_config is None:

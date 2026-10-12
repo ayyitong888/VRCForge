@@ -66,14 +66,14 @@ def build_unity_dependency_preflight_report(
             "VRChat Avatar SDK",
             VRCHAT_SDK_PACKAGE_IDS,
             "unity_vrchat_sdk_missing",
-            "Install the VRChat Avatar SDK through VCC, ALCOM, or vrc-get.",
+            "Install or repair the official VRChat Avatar SDK through VCC or ALCOM, then wait for Unity to finish compiling.",
         ),
         (
             "newtonsoft",
-            "Unity Newtonsoft Json",
+            "VRChat Avatar SDK",
             NEWTONSOFT_PACKAGE_IDS,
             "unity_newtonsoft_missing",
-            "Use a supported VCC Avatar project baseline that includes Unity Newtonsoft Json.",
+            "Install or repair the official VRChat Avatar SDK through VCC or ALCOM, then wait for Unity to finish compiling.",
         ),
     )
     metadata_readable = _unity_package_metadata_is_readable(project_path)
@@ -110,8 +110,7 @@ def build_unity_dependency_preflight_report(
     blocker_codes = {key: code for key, _title, _ids, code, _guidance in specs}
     blocker_code = blocker_codes.get(blocker_key, "")
     if blocker_code:
-        titles = [checks[key]["title"] for key in missing_keys]
-        message = f"Required package metadata was not detected: {', '.join(titles)}."
+        message = "VRChat Avatar SDK setup is incomplete. Install or repair the official Avatar SDK through VCC or ALCOM, then wait for Unity to finish compiling."
         status = "error"
         ready: bool | None = False
     elif unknown:

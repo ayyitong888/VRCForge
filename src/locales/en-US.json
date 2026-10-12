@@ -8,7 +8,7 @@
     "selectProject": "Select the Unity project in the App and open the same project in Unity.",
     "reloadDialog": "Unity is waiting for a reload dialog to be handled. Switch to Unity, make sure your edits are safely preserved, then handle the dialog and check the connection again.",
     "vrchatSdkMissing": "The VRChat SDK is missing from this project. Install the project's required VRChat SDK package, wait for Unity to finish compiling, then check the connection again.",
-    "newtonsoftMissing": "The Newtonsoft JSON dependency is missing from this project. Restore the project's required package, wait for Unity to finish compiling, then check the connection again.",
+    "newtonsoftMissing": "VRChat Avatar SDK dependencies are not ready. Install or repair the SDK with VCC or ALCOM, wait for Unity to resolve dependencies and finish compiling, then check the connection. No separate dependency installation is needed.",
     "unknown": "Unity readiness could not be confirmed. Check the selected project and Unity Console. If the problem persists, send connection information through Feedback in Settings; do not delete the project."
   },
   "coreVersion": {
@@ -1097,9 +1097,8 @@
     "apiType_responses": "Responses",
     "apiType_generate_content": "Generate Content",
     "apiType_messages": "Messages",
-    "deepseekAutoNegotiation": "Negotiate model and protocol automatically",
-    "deepseekAutoNegotiationHint": "Allow VRCForge to probe real models and protocols on the same DeepSeek endpoint. Turn this off to pin the model and API type below.",
-    "deepseekAutoRoute": "Negotiation order: Pro Responses → Pro Anthropic → Pro Chat → Flash Responses → Flash Anthropic → Flash Chat",
+    "protocolAutoNegotiation": "Automatically negotiate protocol",
+    "protocolAutoNegotiationHint": "Negotiate an available communication protocol for your selected model without changing the model.",
     "customEndpoint": "Custom Compatible Endpoint",
     "noKeyNeeded": "No key needed",
     "selectModel": "Select a model",

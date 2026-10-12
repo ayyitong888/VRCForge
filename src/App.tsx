@@ -514,7 +514,7 @@ export default function App() {
     providerSnapshot,
     saveApiProvider,
     handleProviderChange,
-    handleDeepSeekAutoNegotiationChange,
+    handleProtocolAutoNegotiationChange,
     handleVisionProviderChange,
     saveVisionProfile,
     clearVisionProfile,
@@ -836,6 +836,7 @@ export default function App() {
     resolvingChatStorageConflict,
     resolveChatStorageConflict,
     reloadChatStorageState,
+    notifyChatStorageChanged,
     touchChat,
     updateChat,
     updateChatIfRevision,
@@ -2135,6 +2136,9 @@ export default function App() {
       }
       if (eventType === "agentRuntimeTurn") {
         deliverRuntimeTurnContinuation(event.payload?.payload);
+      }
+      if (eventType === "chatStorageChanged") {
+        notifyChatStorageChanged();
       }
       if (eventType === "agentQuestions") {
         const payload = event.payload as { question?: AgentQuestion; questions?: AgentQuestion[] } | undefined;
@@ -4148,7 +4152,7 @@ export default function App() {
               onApiKeyChange={setApiKey}
               onApiBaseUrlChange={setApiBaseUrl}
               onApiModelChange={setApiModel}
-              onDeepSeekAutoNegotiationChange={handleDeepSeekAutoNegotiationChange}
+              onProtocolAutoNegotiationChange={handleProtocolAutoNegotiationChange}
               onApiTypeChange={setApiType}
               onApiContextWindowChange={setApiContextWindow}
               onApiThinkingLevelChange={setApiThinkingLevel}

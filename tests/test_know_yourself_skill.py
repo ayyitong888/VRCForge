@@ -282,7 +282,11 @@ def test_missing_newtonsoft_blocks_with_dependency_action_before_editor_focus() 
     assert report["stage"] == "install_newtonsoft_dependency"
     assert report["nextAction"]["kind"] == "supervised_dependency_install"
     assert report["nextAction"]["approvalRequired"] is True
-    assert "Unity Newtonsoft Json" in report["message"]
+    assert "VRChat Avatar SDK" in report["message"]
+    instruction = report["nextAction"]["instruction"]
+    assert "VCC or ALCOM" in instruction
+    assert "Unity to finish compiling" in instruction
+    assert "Newtonsoft" not in instruction
     assert "newtonsoft_dependency_present" in report["gaps"]
     assert "unity_editor_activation" not in report["gaps"]
 

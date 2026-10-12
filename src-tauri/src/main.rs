@@ -44,6 +44,7 @@ mod primitive_evidence_controller_launcher_windows;
 mod restart_manager_windows;
 mod sanitize;
 mod theme_background;
+mod telegram;
 mod vsk_open;
 
 use approval_notification_windows::*;
@@ -58,6 +59,7 @@ use event_bridge::*;
 use restart_manager_windows::*;
 use sanitize::*;
 use theme_background::*;
+use telegram::{telegram_configure, telegram_open_botfather, telegram_start, telegram_status, telegram_stop, telegram_test_connection};
 use vsk_open::PendingVskPaths;
 
 const WEBVIEW2_ACCESSIBILITY_ARG: &str = "--force-renderer-accessibility";
@@ -241,6 +243,12 @@ fn main() {
             chatgpt_oauth_logout,
             chatgpt_oauth_models,
             chatgpt_oauth_status,
+            telegram_configure,
+            telegram_test_connection,
+            telegram_open_botfather,
+            telegram_start,
+            telegram_status,
+            telegram_stop,
             compact_agent_history,
             consume_session_handoff_context,
             create_adjustment_checkpoint,

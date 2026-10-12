@@ -8,6 +8,7 @@ from provider_protocol_negotiation import (
     DEEPSEEK_AUTO_MODEL,
     is_explicit_protocol_compatibility_error,
     provider_protocol_candidates,
+    supported_provider_api_types,
 )
 
 
@@ -18,15 +19,57 @@ def _pairs(provider: str, model: str, api_type: str) -> list[tuple[str, str]]:
     ]
 
 
-def test_deepseek_automatic_model_negotiates_both_models_in_bounded_order() -> None:
-    assert _pairs("deepseek", DEEPSEEK_AUTO_MODEL, "auto") == [
-        ("deepseek-v4-pro", "responses"),
-        ("deepseek-v4-pro", "messages"),
-        ("deepseek-v4-pro", "chat_completions"),
-        ("deepseek-v4-flash", "responses"),
-        ("deepseek-v4-flash", "messages"),
-        ("deepseek-v4-flash", "chat_completions"),
+PROVIDER_PROTOCOL_CASES = [
+    ("openai", "selected-openai-model", ("responses", "chat_completions")),
+    ("chatgpt", "selected-chatgpt-model", ("responses",)),
+    ("deepseek", "deepseek-v4-pro", ("responses", "messages", "chat_completions")),
+    ("deepseek", "deepseek-v4-flash", ("responses", "messages", "chat_completions")),
+    ("deepseek", "deepseek-flash", ("responses", "messages", "chat_completions")),
+    ("deepseek", "selected-other-model", ("chat_completions",)),
+    ("custom", "selected-custom-model", ("responses", "chat_completions", "messages", "generate_content")),
+    ("gemini", "selected-gemini-model", ("generate_content",)),
+    ("vertexai", "selected-vertex-model", ("generate_content",)),
+    ("anthropic", "selected-anthropic-model", ("messages",)),
+    ("openrouter", "selected-openrouter-model", ("chat_completions",)),
+    ("ollama", "selected-ollama-model", ("chat_completions",)),
+]
+
+
+@pytest.mark.parametrize("provider,model,protocols", PROVIDER_PROTOCOL_CASES)
+def test_all_provider_auto_protocol_candidates_preserve_selected_model(
+    provider: str, model: str, protocols: tuple[str, ...],
+) -> None:
+    candidates = provider_protocol_candidates(provider, model, "auto")
+    assert [(item.provider, item.model, item.api_type) for item in candidates] == [
+        (provider, model, api_type) for api_type in protocols
     ]
+    assert supported_provider_api_types(provider, model) == protocols
+
+
+@pytest.mark.parametrize("provider,model,api_type", [
+    (provider, model, api_type)
+    for provider, model, protocols in PROVIDER_PROTOCOL_CASES
+    for api_type in protocols
+])
+def test_all_provider_supported_protocol_pins_preserve_selected_model(
+    provider: str, model: str, api_type: str,
+) -> None:
+    candidates = provider_protocol_candidates(provider, model, api_type)
+    assert [(item.provider, item.model, item.api_type) for item in candidates] == [
+        (provider, model, api_type)
+    ]
+
+
+@pytest.mark.parametrize("api_type", ["auto", "responses", "messages", "chat_completions"])
+def test_deepseek_automatic_model_requires_explicit_model_selection(api_type: str) -> None:
+    with pytest.raises(ValueError, match="Select a DeepSeek model explicitly"):
+        provider_protocol_candidates("deepseek", DEEPSEEK_AUTO_MODEL, api_type)
+
+
+@pytest.mark.parametrize("model", ["deepseek-v4-pro", "deepseek-v4-flash", "deepseek-flash"])
+@pytest.mark.parametrize("api_type", ["responses", "messages", "chat_completions"])
+def test_deepseek_explicit_protocol_preserves_selected_model(model: str, api_type: str) -> None:
+    assert _pairs("deepseek", model, api_type) == [(model, api_type)]
 
 
 def test_exact_deepseek_models_never_silently_change_model() -> None:

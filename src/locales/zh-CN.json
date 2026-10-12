@@ -8,7 +8,7 @@
     "selectProject": "请先在 App 中选择需要连接的 Unity 项目，并用 Unity 打开同一个项目。",
     "reloadDialog": "Unity 有等待处理的重载提示。请切回 Unity，确认自己的修改已妥善保留后处理该提示，再检查连接。",
     "vrchatSdkMissing": "当前项目缺少 VRChat SDK。请补齐项目所需的 VRChat SDK 依赖，等待 Unity 编译完成后再检查连接。",
-    "newtonsoftMissing": "当前项目缺少 Newtonsoft JSON 依赖。请恢复项目所需的依赖包，等待 Unity 编译完成后再检查连接。",
+    "newtonsoftMissing": "VRChat Avatar SDK 的配套依赖尚未就绪。请通过 VCC 或 ALCOM 安装或修复 SDK，等待 Unity 完成依赖解析与编译后再检查连接，无需单独安装依赖。",
     "unknown": "暂时无法确认 Unity 已就绪。请检查所选项目和 Unity Console；若问题持续，请通过设置中的反馈入口提交连接信息，不要删除项目。"
   },
   "coreVersion": {
@@ -1097,9 +1097,8 @@
     "apiType_responses": "Responses",
     "apiType_generate_content": "生成内容",
     "apiType_messages": "消息",
-    "deepseekAutoNegotiation": "自动协商模型与协议",
-    "deepseekAutoNegotiationHint": "允许 VRCForge 在同一 DeepSeek 端点测试真实模型与协议；关闭后将严格使用下方指定的模型和 API 类型。",
-    "deepseekAutoRoute": "协商顺序：Pro Responses → Pro Anthropic → Pro Chat → Flash Responses → Flash Anthropic → Flash Chat",
+    "protocolAutoNegotiation": "自动协商协议",
+    "protocolAutoNegotiationHint": "仅为你选择的模型协商可用的通信协议，不会更换模型。",
     "customEndpoint": "自定义兼容接口",
     "noKeyNeeded": "无需密钥",
     "selectModel": "请选择模型",

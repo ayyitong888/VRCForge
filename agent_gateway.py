@@ -86,6 +86,7 @@ from path_to_skill_controller import PATH_TO_SKILL_PREVIEW_INPUT_SCHEMA, PATH_TO
 from agent_runtime_session_state import AgentRuntimeSessionState, AgentRuntimeSessionStatePorts
 from agent_native_history_store import NativeHistoryStore
 from agent_runtime_native_turn import NativeRuntimeTurn
+from channel_project_selection import TOOL_NAME as PROJECT_SELECTION_TOOL, register_channel_project_selection
 from agent_runtime_followup_queue import AgentRuntimeFollowupQueue, FollowupQueuePorts
 from agent_runtime_run_ledger import AgentRuntimeRunLedger, AgentRuntimeRunLedgerPorts
 from agent_runtime_event_projection import project_runtime_turn_event
@@ -433,6 +434,7 @@ EXTERNAL_AGENT_INTERNAL_TOOLS = {
 EXTERNAL_MCP_INTERNAL_LOOP_TOOLS = EXTERNAL_AGENT_INTERNAL_TOOLS | {
     "vrcforge_exit_skill",
     "vrcforge_ask_user",
+    "vrcforge_request_project_selection",
     "vrcforge_classify_shell",
     "vrcforge_create_goal",
     "vrcforge_delegate_subagent",
@@ -2060,11 +2062,13 @@ class AgentGateway:
         runtime_timeline_changed: Callable[[dict[str, Any]], None] | None = None,
         runtime_subagent_list_tasks: Callable[[], Any] | None = None,
         runtime_subagent_cancel_task: Callable[[str], Any] | None = None,
+        project_selection_request: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
         load_mcp_resources: bool = True,
     ) -> None:
         self.config_path = config_path
         self.audit_dir = audit_dir
         self.public_base_url = public_base_url.rstrip("/")
+        self._project_selection_request = project_selection_request
         self._tools: dict[str, AgentTool] = {}
         self._write_handlers: dict[str, AgentWriteHandler] = {}
         # Explicit per-instance additions are used only when a host registers a
@@ -2640,6 +2644,7 @@ class AgentGateway:
                 "vrcforge_delegate_subagent",
                 "vrcforge_vision_audit_multi",
                 "vrcforge_ask_user",
+                PROJECT_SELECTION_TOOL,
             }:
                 tool_params = dict(tool_params)
                 tool_params["_runtimeTaskLinkAuthority"] = _RUNTIME_TASK_LINK_AUTHORITY
@@ -2712,6 +2717,8 @@ class AgentGateway:
             "When to use: explicitly leave the exact active instruction Skill before returning to the original task or another Skill. Give its name and exit reason. When NOT to use: pending approvals/jobs, claiming a failed repair succeeded, or changing task permissions. Negative example: exiting cannot approve a write or complete the user's task.",
             "plan/preview", self._exit_runtime_skill,
         )
+        if self._project_selection_request is not None:
+            register_channel_project_selection(self, self._project_selection_request)
 
     @contextmanager
     def _bind_runtime_skill_scope(self, loop: AgentTaskLoop) -> Iterator[None]:
@@ -2855,6 +2862,32 @@ class AgentGateway:
             values["_runtimeSessionId"] = runtime_session_id
             values["_runtimeClientTurnId"] = str(seed.get("clientTurnId") or "")
         return self.questions.create(values)
+
+    def request_runtime_project_selection(
+        self,
+        params: Mapping[str, Any] | None = None,
+        request_selection: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        """Forward only an in-process runtime's trusted selection scope."""
+        values = dict(params or {})
+        seed, runtime_session_id = self.consume_runtime_task_link(values)
+        if not isinstance(seed, Mapping) or not runtime_session_id:
+            return {"status": "failed", "errorCode": "runtime_scope_untrusted", "retryable": False}
+        session_id = str(seed.get("sessionId") or seed.get("session_id") or runtime_session_id).strip()
+        client_turn_id = str(seed.get("clientTurnId") or seed.get("client_turn_id") or "").strip()
+        project_root = str(seed.get("projectRoot") or seed.get("project_path") or "").strip()
+        chat_id = str(values.get("chatId") or values.get("chat_id") or "").strip()
+        if session_id != runtime_session_id or not session_id or not client_turn_id or not chat_id:
+            return {"status": "failed", "errorCode": "runtime_scope_invalid", "retryable": False}
+        scope = {"sessionId": session_id, "chatId": chat_id, "clientTurnId": client_turn_id,
+                 "projectRoot": project_root, "requestText": str(values.get("requestText") or "")}
+        callback = request_selection or self._project_selection_request
+        if callback is None:
+            return {"status": "failed", "errorCode": "project_selection_unavailable", "retryable": False}
+        result = callback(scope)
+        return dict(result) if isinstance(result, Mapping) else {
+            "status": "failed", "errorCode": "project_selection_invalid_response", "retryable": False,
+        }
 
     def _resume_runtime_task_after_question(
         self,
@@ -7778,13 +7811,16 @@ class AgentGateway:
                         provider_usage=task_seed_provider_usage(),
                         continue_after_approval=bool(plan.get("continueLoop")),
                     )
-                if step_tool == "vrcforge_ask_user":
+                if step_tool in {"vrcforge_ask_user", PROJECT_SELECTION_TOOL}:
                     for key in ("_runtimeTaskLinkAuthority", "_taskSeed", "_runtimeTaskSeed", "_runtimeTaskId", "_runtimeSessionId", "_runtimeClientTurnId"):
                         step_params.pop(key, None)
                     step_params["sessionId"] = session_id
                     step_params["projectRoot"] = project_root
                     step_params["goalDeliveryId"] = goal_delivery_id
-                if step_tool == "vrcforge_ask_user" and not goal_delivery_id:
+                    if step_tool == PROJECT_SELECTION_TOOL:
+                        step_params["chatId"] = chat_id
+                        step_params["requestText"] = message
+                if step_tool in {"vrcforge_ask_user", PROJECT_SELECTION_TOOL} and not goal_delivery_id:
                     step_params["_runtimeSessionId"] = session_id
                     step_params["_runtimeClientTurnId"] = client_turn_id
                     step_params["_taskSeed"] = runtime_approval_seed(
@@ -7800,7 +7836,7 @@ class AgentGateway:
                 if (
                     step_tool == "vrcforge_agent_desktop_action"
                     or step_tool.startswith("vrcforge_progress_")
-                    or step_tool == "vrcforge_ask_user"
+                    or step_tool in {"vrcforge_ask_user", PROJECT_SELECTION_TOOL}
                     or step_tool in {
                         "vrcforge_list_internal_tool_blocks",
                         "vrcforge_load_internal_tool_block",
@@ -7939,15 +7975,14 @@ class AgentGateway:
                         arguments=requirement_arguments,
                     )
                 action_outcome = ensure_dict(step_payload.get("outcome"))
-                if step_tool == "vrcforge_ask_user" and str(
+                if step_tool in {"vrcforge_ask_user", PROJECT_SELECTION_TOOL} and str(
                     action_outcome.get("status") or ""
                 ).strip() == "needs_user_action":
                     question_payload = ensure_dict(step_payload.get("result")).get("question")
-                    question_text = str(
-                        ensure_dict(question_payload).get("question") or ""
-                    ).strip()
-                    if question_text:
-                        action_outcome = {**action_outcome, "summary": question_text}
+                    question_text = str(ensure_dict(question_payload).get("question") or "").strip()
+                    selection_text = str(ensure_dict(step_payload.get("result")).get("summary") or "").strip()
+                    if question_text or selection_text:
+                        action_outcome = {**action_outcome, "summary": question_text or selection_text}
                         step_payload["outcome"] = action_outcome
                 task_action = task_loop.record_action(
                     kind=action_kind,
@@ -8157,7 +8192,7 @@ class AgentGateway:
                     unresolved_completion_action_keys[task_action_id] = action_key
                 requires_direct_user_input = bool(
                     step_waits_for_approval
-                    or step_tool == "vrcforge_ask_user"
+                    or step_tool in {"vrcforge_ask_user", PROJECT_SELECTION_TOOL}
                 )
                 if (
                     not requires_direct_user_input
@@ -10489,7 +10524,7 @@ def find_current_pending_question(steps: Any) -> dict[str, Any] | None:
     for step in reversed(steps):
         if not isinstance(step, dict) or bool(step.get("historical")):
             continue
-        if str(step.get("tool") or "") != "vrcforge_ask_user":
+        if str(step.get("tool") or "") not in {"vrcforge_ask_user", PROJECT_SELECTION_TOOL}:
             continue
         if str(ensure_dict(step.get("outcome")).get("status") or "") != "needs_user_action":
             continue
@@ -10497,7 +10532,7 @@ def find_current_pending_question(steps: Any) -> dict[str, Any] | None:
             ensure_dict(ensure_dict(step.get("result")).get("question")).get("questionId")
             or ""
         ).strip()
-        if question_id:
+        if question_id or str(step.get("tool") or "") == PROJECT_SELECTION_TOOL:
             return step
     return None
 

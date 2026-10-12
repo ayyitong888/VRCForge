@@ -110,7 +110,7 @@ try {
   await new Promise((resolveWait) => setTimeout(resolveWait, 100));
   assert.equal(modelRequests.length, 0, "status refreshes do not storm model requests");
 
-  await page.getByRole("button", { name: "Load models" }).click();
+  await page.getByRole("button", { name: "Refresh model list" }).click();
   await wait(() => modelRequests.length === 1, "explicit account A refresh");
   await page.locator("select").first().selectOption("account-b");
   await wait(() => modelRequests.some((request) => request.accountId === "account-b"), "automatic account B catalog load");
@@ -121,12 +121,12 @@ try {
   await new Promise((resolveWait) => setTimeout(resolveWait, 100));
   assert.equal(await page.locator("[data-chatgpt-model-select] option[value=a-late]").count(), 0, "late account A response is rejected");
 
-  await page.getByRole("button", { name: "Load models" }).click();
+  await page.getByRole("button", { name: "Refresh model list" }).click();
   await wait(() => modelRequests.length === 1, "explicit account B refresh failure");
   replyNext("account-b", { detail: "synthetic failure" }, 500);
   await wait(async () => (await page.locator("[data-chatgpt-model-select]").inputValue()) === "b-model", "catalog retained after refresh failure");
 
-  await page.getByRole("button", { name: "Load models" }).click();
+  await page.getByRole("button", { name: "Refresh model list" }).click();
   await wait(() => modelRequests.length === 1, "explicit account B empty refresh");
   replyNext("account-b", { models: [] });
   await wait(async () => (await page.locator("[data-chatgpt-model-select]").inputValue()) === "", "empty catalog placeholder");

@@ -89,10 +89,12 @@ VRCForge 对 Unity 资产写入采用以下受监督流程：
 - 请使用所选 Release 的 `VRCForge_Web_Installer_x64.exe`，或离线安装器 `VRCForge_Offline_Installer_x64.exe`
 - `VRCForge.unitypackage`
 
+推荐在准备工程时使用 [Creator Companion（VCC）](https://vcc.docs.vrchat.com/guides/getting-started/) 或 ALCOM 创建、管理 Avatar 工程。直接使用 Unity 的用户也可在现有工程内补齐官方 Avatar SDK；无需为了使用 VRCForge 更换项目管理器。
+
 然后完成三步连接：
 
 1. 安装 VRCForge，但先不要启动 App。
-2. 在目标 Unity 2022.3 LTS 工程中完整导入 `VRCForge.unitypackage`。若尚未安装 VRChat Avatar SDK，VRCForge 设置窗口会提示缺失依赖；通过 VCC 或 ALCOM 安装 Avatar SDK 及其依赖后，等待编译结束并出现 `[VRCForge MCP] Core Ready`。可从 `VRCForge → Setup → Check Dependencies` 重新打开检查窗口。
+2. 在目标 Unity 2022.3 LTS 工程中完整导入 `VRCForge.unitypackage`。若尚未安装 VRChat Avatar SDK，VRCForge 设置窗口会引导下载并导入官方 Avatar SDK；若安装不完整，按窗口提示在当前工程补齐缺项，等待编译结束并出现 `[VRCForge MCP] Core Ready`。可从 `VRCForge → Setup → Check Dependencies` 重新打开检查窗口。
 3. 启动 `VRCForge.exe`，选择该工程并连接。App 会发现工程内的 VRCForge Core，无需单独安装 MCP Server 或复制 MCP Token。
 
 升级旧版本前请阅读对应 [Release Notes](https://github.com/ayyitong888/VRCForge/releases)。

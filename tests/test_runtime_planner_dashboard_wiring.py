@@ -518,7 +518,10 @@ def test_catalog_filters_only_visible_tools_and_keeps_full_routing_metadata() ->
     }
     expected_execution.update(visible_execution_writes)
     expected_routable = set(gateway._tools) | routable_writes
-    runtime_only_exclusions = dashboard_server.RUNTIME_BLOCKED_SKILLS - {"vrcforge_execute_shell"}
+    runtime_only_exclusions = (dashboard_server.RUNTIME_BLOCKED_SKILLS - {"vrcforge_execute_shell"}) | {
+        # Channel-owned selection is absent from ordinary desktop/Unity catalogs.
+        "vrcforge_request_project_selection",
+    }
     expected_planning.difference_update(runtime_only_exclusions)
     expected_execution.difference_update(runtime_only_exclusions)
     expected_routable.difference_update(runtime_only_exclusions)

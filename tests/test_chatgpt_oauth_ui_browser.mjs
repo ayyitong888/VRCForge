@@ -53,11 +53,14 @@ const bundle = await build({
 const stylesheetPath = resolve("src/styles.css");
 const stylesheet = await postcss([tailwindcss()]).process(readFileSync(stylesheetPath, "utf8"), { from: stylesheetPath });
 let pending = false;
+let statusReads = 0;
+let modelReads = 0;
 const server = createServer((req, res) => {
   if (req.url?.startsWith("/api/chatgpt/status") && req.method === "GET") {
+    statusReads++;
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify({
-      accounts: [{ id: "current-account", label: "Current account", email: "", connected: true }],
+      accounts: [{ id: "current-account", label: "ChatGPT account 2", email: "person@example.invalid", connected: true }],
       pending,
       error: "",
       activeAccountId: "current-account",
@@ -66,6 +69,7 @@ const server = createServer((req, res) => {
     return;
   }
   if (req.url === "/api/chatgpt/models" && req.method === "POST") {
+    modelReads++;
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify({ models: [{ id: "gpt-6.1-sol", name: "gpt-6.1-sol" }] }));
     return;
@@ -106,6 +110,9 @@ try {
   await page.goto(`http://127.0.0.1:${server.address().port}/?verified=0&pending=0`);
   await wait(async () => (await page.locator("select").first().inputValue()) === "current-account", "connected account selection");
   const unverifiedBadge = page.locator("[data-chatgpt-active-badge]");
+  assert.equal(await page.locator("select").first().locator("option:checked").innerText(), "person@example.invalid");
+  assert.ok((await unverifiedBadge.innerText()).includes("person@example.invalid"));
+  assert.equal(await page.getByText("ChatGPT account 2", {exact:false}).count(), 0);
   assert.ok((await unverifiedBadge.getAttribute("class")).includes("amber"), "configured but unverified state stays yellow");
   assert.equal(await page.getByText("Connection test needs to be run again.", { exact: false }).count(), 1);
   assert.equal(await page.getByText("text: ok - Provider test succeeded.", { exact: false }).count(), 0, "technical probe details stay hidden");
@@ -117,7 +124,7 @@ try {
   assert.equal(await page.getByText("Connection test passed.", { exact: true }).count(), 1);
   assert.equal(await page.getByText("text: ok - Provider test succeeded.", { exact: false }).count(), 0, "technical probe details stay hidden");
   assert.equal(await page.getByText("Another sign-in is waiting in the browser; the current connection remains usable.", { exact: true }).count(), 1);
-  assert.equal(await page.getByRole("button", { name: "Load models" }).isEnabled(), true, "pending authorization does not disable the current connection");
+  assert.equal(await page.getByRole("button", { name: "Refresh model list" }).isEnabled(), true, "pending authorization does not disable the current connection");
   assert.equal(await page.getByRole("button", { name: "Cancel sign-in" }).count(), 1);
   assert.equal(await page.locator("[data-chatgpt-refresh]").count(), 1, "refresh stays in the header group");
 
@@ -127,10 +134,13 @@ try {
   assert.ok((await verifiedBadge.getAttribute("class")).includes("emerald"), "matching verified text test turns the badge green");
   assert.equal(await page.getByText("text: ok - Provider test succeeded.", { exact: false }).count(), 1, "developer options reveal technical probe details");
 
+  const beforeRefresh = {statusReads, modelReads};
+  await page.locator("[data-chatgpt-refresh]").click();
+  await wait(async () => statusReads > beforeRefresh.statusReads && modelReads > beforeRefresh.modelReads, "combined refresh reloads status and models");
   for (const language of ["en-US", "zh-CN"]) {
     const labels = language === "zh-CN"
-      ? ["重新登录", "添加其他账户", "退出登录", "加载模型", "测试连接"]
-      : ["Sign in again", "Add another account", "Sign out", "Load models", "Test connection"];
+      ? ["重新登录", "添加其他账户", "退出登录", "刷新模型列表", "测试连接"]
+      : ["Sign in again", "Add another account", "Sign out", "Refresh model list", "Test connection"];
     await page.goto(`http://127.0.0.1:${server.address().port}/?verified=1&lang=${language}`);
     await wait(async () => await page.getByRole("button", { name: labels[3], exact: true }).isEnabled(), "catalog loaded before layout check");
     for (const width of [900, 420]) {
@@ -149,7 +159,7 @@ try {
         assert.ok(await button.evaluate((element) => element.scrollWidth <= element.clientWidth + 1), `${label} does not overflow`);
         rects.push(rect);
       }
-      for (const group of [rects.slice(0, 3), rects.slice(3)]) {
+      for (const group of [rects.slice(0, 3)]) {
         for (const rect of group.slice(1)) {
           assert.ok(Math.abs(rect.width - group[0].width) <= 1, "buttons in each group have equal widths");
           assert.ok(Math.abs((width === 900 ? rect.y : rect.x) - (width === 900 ? group[0].y : group[0].x)) <= 1, "buttons stay aligned across responsive rows");

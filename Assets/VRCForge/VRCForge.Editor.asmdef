@@ -7,7 +7,8 @@
     "VRC.SDKBase.Editor",
     "VRC.SDKBase.Editor.BuildPipeline",
     "VRC.SDK3A",
-    "VRC.SDK3A.Editor"
+    "VRC.SDK3A.Editor",
+    "VRCForge.Setup.Editor"
   ],
   "includePlatforms": [
     "Editor"

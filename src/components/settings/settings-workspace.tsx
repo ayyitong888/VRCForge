@@ -33,6 +33,7 @@ import { ThemeCustomizationPanel } from "./theme-customization-panel";
 import type { ThemeCustomization } from "../../lib/theme-customization";
 import { DataRootSettingsPanel } from "./data-root-settings-panel";
 import { ChatGptOAuthSettings } from "../../features/chatgpt-oauth/settings";
+import { TelegramSettingsPanel } from "./telegram-settings-panel";
 
 type SettingsWorkspaceProps = {
   activeSection: SettingsSection;
@@ -107,7 +108,7 @@ type SettingsWorkspaceProps = {
   onApiKeyChange: (value: string) => void;
   onApiBaseUrlChange: (value: string) => void;
   onApiModelChange: (value: string) => void;
-  onDeepSeekAutoNegotiationChange: (enabled: boolean) => void;
+  onProtocolAutoNegotiationChange: (enabled: boolean) => void;
   onApiTypeChange: (value: ProviderApiType) => void;
   onApiContextWindowChange: (value: string) => void;
   onApiThinkingLevelChange: (value: string) => void;
@@ -209,7 +210,7 @@ export function SettingsWorkspace({
   onApiKeyChange,
   onApiBaseUrlChange,
   onApiModelChange,
-  onDeepSeekAutoNegotiationChange,
+  onProtocolAutoNegotiationChange,
   onApiTypeChange,
   onApiContextWindowChange,
   onApiThinkingLevelChange,
@@ -445,7 +446,7 @@ export function SettingsWorkspace({
                 onApiKeyChange={onApiKeyChange}
                 onBaseUrlChange={onApiBaseUrlChange}
                 onModelChange={onApiModelChange}
-                onDeepSeekAutoNegotiationChange={onDeepSeekAutoNegotiationChange}
+                onProtocolAutoNegotiationChange={onProtocolAutoNegotiationChange}
                 onApiTypeChange={onApiTypeChange}
                 onContextWindowChange={onApiContextWindowChange}
                 onThinkingLevelChange={onApiThinkingLevelChange}
@@ -578,7 +579,8 @@ export function SettingsWorkspace({
         ) : null}
 
         {visibleSection === "connectors" ? (
-        <section className="pb-6">
+        <section className="grid gap-6 pb-6">
+          <TelegramSettingsPanel endpoint={endpoint} selectedProjectPath={selectedProjectPath} />
           <ExternalAgentConnectorsPanel
             status={connectorStatus}
             loading={loadingConnectors}

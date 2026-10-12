@@ -35,11 +35,10 @@ def _newtonsoft_status(components: dict[str, Any]) -> str:
 def _newtonsoft_message(components: dict[str, Any]) -> str:
     status = _newtonsoft_status(components)
     if status == "error":
-        preflight = _newtonsoft_preflight(components)
-        return str(preflight.get("message") or "Unity Newtonsoft Json was not detected in the selected project.")
+        return "VRChat Avatar SDK setup is incomplete. Install or repair the official Avatar SDK through VCC or ALCOM, then wait for Unity to finish compiling."
     if status == "unknown":
-        return "Unity Newtonsoft Json status is unknown because dependency metadata is unavailable."
-    return "Unity Newtonsoft Json is available or not blocking the connected Core."
+        return "VRChat Avatar SDK status is unknown because project metadata is unavailable."
+    return "VRChat Avatar SDK is available or not blocking the connected Core."
 
 
 def _newtonsoft_detail(components: dict[str, Any]) -> dict[str, Any]:
@@ -148,15 +147,15 @@ class DoctorReadinessReportService:
                 "package.vrchat_sdk", "VRChat SDK", selected_project,
                 ["com.vrchat.avatars", "com.vrchat.base"],
                 "Avatar validation, expression menus, parameters, and VRChat build checks need the SDK packages.",
-                "Install the VRChat Avatar SDK through VCC, ALCOM, or vrc-get.",
+                "Install or repair the official VRChat Avatar SDK through VCC or ALCOM, then wait for Unity to finish compiling.",
             ),
             self._ports.doctor_check(
                 "package.newtonsoft",
-                "Unity Newtonsoft Json",
+                "VRChat Avatar SDK",
                 _newtonsoft_status(components),
                 _newtonsoft_message(components),
-                "VRCForge Core compilation can fail before connection when the supported Unity Newtonsoft Json package is absent.",
-                "Use a supported VCC Avatar project baseline that includes Unity Newtonsoft Json.",
+                "Wait for Unity to finish compiling after installing or repairing the VRChat Avatar SDK.",
+                "Install or repair the official VRChat Avatar SDK through VCC or ALCOM, then wait for Unity to finish compiling.",
                 _newtonsoft_detail(components),
             ),
             self._ports.package_doctor_check(

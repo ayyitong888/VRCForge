@@ -56,7 +56,7 @@ from pathlib import Path, PurePosixPath
 from threading import Event, Lock, RLock, Thread
 from types import SimpleNamespace
 from typing import Any, Callable, Literal, Mapping
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlencode
 
 AGENT_MCP_STDIO_MODE = "--agent-mcp-stdio" in sys.argv
 
@@ -382,6 +382,14 @@ from memory_consolidation_sources import MemoryScope, project_scope_key
 from memory_review_composition import MemoryReviewComposition, MemoryReviewCompositionPorts, build_memory_review_composition
 from memory_review_host import build_memory_review_router
 from chatgpt_integration.routes import build_chatgpt_oauth_router
+from telegram_bot_routes import build_telegram_router
+from telegram_bot_service import TelegramBotService
+from telegram_bot_settings import TelegramSettings
+from telegram_dashboard_integration import make_telegram_runtime_factory
+from channel_dashboard_integration import DashboardChannelApprovals, DashboardChannelPermissions
+from telegram_dashboard_monitor import TelegramDashboardMonitorMapper
+from channel_runtime_recovery import ChannelRuntimeRecovery
+from telegram_bot_questions import TelegramBotQuestions
 from memory_review_provider import invoke_memory_provider
 from memory_review_runtime import MemoryReviewIdleGate, MemoryReviewRuntimeCoordinator
 from optimization_service import (
@@ -1502,6 +1510,9 @@ def broadcast_runtime_turn_completed(payload: dict[str, Any]) -> None:
     if projected is None:
         return
     EVENT_BUS.broadcast_from_sync("agentRuntimeTurn", projected)
+    telegram_service = globals().get("TELEGRAM_SERVICE")
+    if telegram_service is not None:
+        telegram_service.observe_continuation(projected)
     EVENT_BUS.broadcast_from_sync(
         "agentRuntimeRuns",
         AGENT_GATEWAY.runtime_runs.list_runs(
@@ -1515,6 +1526,9 @@ def broadcast_runtime_status(payload: dict[str, Any]) -> None:
     """Publish one safe, non-CoT Runtime phase to authenticated App clients."""
 
     EVENT_BUS.broadcast_from_sync("agentRuntimeDelta", payload)
+    telegram_service = globals().get("TELEGRAM_SERVICE")
+    if telegram_service is not None:
+        telegram_service.observe_runtime_status(payload)
 
 
 def _sub_agent_task_finished(event: dict[str, Any]) -> None:
@@ -2125,6 +2139,11 @@ async def on_shutdown() -> None:
     global AGENT_MCP_APP
     global AGENT_MCP_CONTEXT
     global SUB_AGENT_CONTINUATION_REPLAY_TASK
+
+    try:
+        await TELEGRAM_SERVICE.stop()
+    except Exception:
+        emit_log("warn", "telegram", "Telegram shutdown did not finish cleanly.", {"failureClass": "shutdown"})
 
     with APP_UPDATE_SERVICE_LOCK:
         app_update_service = APP_UPDATE_SERVICE
@@ -2882,6 +2901,7 @@ async def app_agent_runtime_message(runtime_request: AgentRuntimeMessageRequest)
             except OSError:
                 pass
     await EVENT_BUS.broadcast("agentRuntimeTurn", payload)
+    TELEGRAM_SERVICE.notify_foreground_result(payload)
     await EVENT_BUS.broadcast(
         "agentRuntimeRuns",
         AGENT_GATEWAY.runtime_runs.list_runs(
@@ -4148,6 +4168,7 @@ async def app_agent_approve_and_execute(
             continuation.pop("harnessJourneyReceipt", None)
         payload["continuation"] = continuation
         await EVENT_BUS.broadcast("agentRuntimeTurn", continuation)
+        TELEGRAM_SERVICE.observe_continuation(continuation)
         await EVENT_BUS.broadcast(
             "agentRuntimeRuns",
             AGENT_GATEWAY.runtime_runs.list_runs(
@@ -4213,6 +4234,7 @@ async def app_agent_reject(
             continuation.pop("harnessJourneyReceipt", None)
         payload["continuation"] = continuation
         await EVENT_BUS.broadcast("agentRuntimeTurn", continuation)
+        TELEGRAM_SERVICE.observe_continuation(continuation)
         await EVENT_BUS.broadcast(
             "agentRuntimeRuns",
             AGENT_GATEWAY.runtime_runs.list_runs(
@@ -4283,6 +4305,7 @@ async def app_agent_request_approval_revision(approval_id: str, request: AgentAp
             continuation.pop("harnessJourneyReceipt", None)
         payload["continuation"] = continuation
         await EVENT_BUS.broadcast("agentRuntimeTurn", continuation)
+        TELEGRAM_SERVICE.observe_continuation(continuation)
         await EVENT_BUS.broadcast(
             "agentRuntimeRuns",
             AGENT_GATEWAY.runtime_runs.list_runs(
@@ -9707,6 +9730,99 @@ async def deactivate_chatgpt_account(account_id: str) -> None:
     )
 
 
+def _telegram_chat_snapshot() -> dict[str, Any]:
+    projects = TELEGRAM_SERVICE.settings.projection()["projects"]
+    query = urlencode([("projectPath", project) for project in projects]).encode("utf-8")
+    snapshot = read_chat_transcripts(Request({"type": "http", "query_string": query}))
+    if snapshot.get("writeBlocked"):
+        raise ValueError("chat_store_recovery_required")
+    return {**snapshot, "sourceRevisions": snapshot.get("sources", [])}
+
+
+async def _telegram_pending_questions(*, project: str, session: str) -> dict:
+    return await asyncio.to_thread(AGENT_GATEWAY.questions.list,
+        project_root=project, session_id=session, include_answered=False, limit=50)
+
+
+def _telegram_save_chats(chats: list, revisions: list) -> dict:
+    result = write_chat_transcripts_storage(ChatTranscriptsRequest(chats=chats, sourceRevisions=revisions))
+    EVENT_BUS.broadcast_from_sync("chatStorageChanged", {"source": "telegram"})
+    return result
+
+
+async def _telegram_runtime_message(params: dict) -> dict:
+    # The authenticated channel composition owns this capability for one turn.
+    # asyncio.to_thread preserves it without a global flag or a model-supplied field.
+    with bind_channel_project_selection():
+        return await app_agent_runtime_message(AgentRuntimeMessageRequest(**params))
+
+
+async def _telegram_model_catalog(_project_root: str) -> list[dict[str, Any]]:
+    from channel_dashboard_session_controls import model_catalog
+    return await model_catalog(configuration=PROVIDER_CONFIGURATION, catalog=PROVIDER_MODEL_CATALOG)
+
+
+async def _telegram_compact_chat(chat: dict[str, Any], project_root: str, instructions: str) -> dict[str, Any]:
+    from channel_dashboard_session_controls import compact_chat
+    return await compact_chat(chat=chat, project_root=project_root, instructions=instructions,
+        configuration=PROVIDER_CONFIGURATION, load_settings=load_dashboard_settings,
+        connection_request=ConnectionRequest,
+        request_plan=request_llm_plan, provider_requires_key=provider_requires_api_key,
+        compact_context=compact_context)
+
+
+async def _telegram_session_unresolved(chat: dict[str, Any], project_root: str) -> bool:
+    from channel_dashboard_session_controls import has_unresolved_state
+    return await has_unresolved_state(chat=chat, project_root=project_root,
+        approval_port=TELEGRAM_SERVICE.approval_port, list_questions=AGENT_GATEWAY.questions.list)
+
+TELEGRAM_SERVICE = TelegramBotService(
+    permission_port=DashboardChannelPermissions(
+        read=lambda: AGENT_GATEWAY.approval_transactions.permission_state(),
+        update=lambda mode: update_agentic_app_permission(AgentPermissionRequest(
+            execution_mode=mode, acknowledge_roslyn_risk=mode == "roslyn_full_auto")),
+    ),
+    recovery=ChannelRuntimeRecovery(AGENT_GATEWAY.runtime_runs),
+    questions=TelegramBotQuestions(list_pending=_telegram_pending_questions,
+        answer=lambda question_id, params: app_answer_agent_question(question_id, AgentQuestionAnswerRequest(**params))),
+    settings=TelegramSettings(runtime_paths.CONFIG_DIR / "telegram.dpapi"),
+    database_path=runtime_paths.USER_DATA_DIR / "telegram" / "bot.sqlite3",
+    owns_backend=lambda: BACKEND_OWNER_LEASE.owned,
+    monitor_snapshot=TelegramDashboardMonitorMapper(
+        load_chats=_telegram_chat_snapshot,
+        list_runs=lambda **params: AGENT_GATEWAY.runtime_runs.list_runs(limit=10, **params),
+        unity_status=lambda project: UNITY_STATUS.build_unity_status_snapshot(project_root=Path(project)),
+    ).snapshot,
+    approval_port=DashboardChannelApprovals(
+        list_pending=lambda project: AGENT_GATEWAY.approval_transactions.list_approvals(
+            include_expired=False, project_root=project, global_only=not bool(project)),
+        approve=lambda approval_id, project: app_agent_approve_and_execute(approval_id,
+            AgentApprovalScopeRequest(expectedProjectRoot=project, globalOnly=not bool(project))),
+        reject=lambda approval_id, project: app_agent_reject(approval_id,
+            AgentApprovalScopeRequest(expectedProjectRoot=project, globalOnly=not bool(project))),
+    ),
+    runtime_factory=make_telegram_runtime_factory(
+        recovery=ChannelRuntimeRecovery(AGENT_GATEWAY.runtime_runs),
+        load_chats=_telegram_chat_snapshot,
+        save_chats=_telegram_save_chats,
+        message=_telegram_runtime_message,
+        steer=lambda params: RUNTIME_QUEUE_PORT.submit_runtime_steer(params),
+        cancel=lambda params: AGENT_GATEWAY.request_runtime_cancel(params),
+        current_config=PROVIDER_CONFIGURATION.current_api_config,
+        model_catalog=_telegram_model_catalog,
+        compactor=_telegram_compact_chat,
+        unresolved=_telegram_session_unresolved,
+    ),
+)
+from channel_project_selection import (
+    register_channel_project_selection, bind_channel_project_selection, channel_project_selection_available,
+)
+register_channel_project_selection(AGENT_GATEWAY, TELEGRAM_SERVICE.request_project_selection)
+app.include_router(build_telegram_router(
+    authorize=lambda request: authenticate_app_request(request), service=TELEGRAM_SERVICE,
+))
+
+
 app.include_router(build_chatgpt_oauth_router(
     authorize=lambda request: authenticate_app_request(request),
     current_config=PROVIDER_CONFIGURATION.current_api_config,
@@ -14201,6 +14317,19 @@ def _execute_prepared_scene_view_capture(
         raise RuntimeError("Prepared screenshot plan contains no Core calls.")
     DASHBOARD_RUNTIME.latest_screenshot_path = captures[0]["imagePath"]
     DASHBOARD_RUNTIME.latest_screenshot_url = captures[0]["imageUrl"]
+    # Retain this approved execution's bytes, never another session's latest image.
+    try:
+        execution = current_approved_unity_execution()
+        binding = execution.diagnostic_context() if execution else {}
+        session, approval = binding.get("sessionId"), binding.get("approvalId")
+        image_path = Path(captures[0]["imagePath"])
+        if session and approval and image_path.resolve().parent == _vision_capture_output_path("preview.png").parent:
+            with image_path.open("rb") as preview_handle:
+                image = preview_handle.read(8 * 1024 * 1024 + 1)
+            TELEGRAM_SERVICE.record_capture(project=str(load_dashboard_settings(request).unity_project_path),
+                session=str(session), approval=str(approval), image=image)
+    except Exception:
+        emit_log("warn", "telegram", "Approved capture could not be retained for remote preview.", {})
     return {"ok": True, "captures": captures}
 
 
@@ -15306,7 +15435,10 @@ class _RuntimePlannerProviderTurnBinding:
 
     @contextmanager
     def bind(self, request: Mapping[str, object]):
-        config = PROVIDER_CONFIGURATION.current_api_config()
+        config = PROVIDER_CONFIGURATION.resolve_session_config(
+            provider=str(request.get("provider") or ""),
+            model=str(request.get("model") or ""),
+        )
         requested_limit = request.get("_requestedContextLimit")
         verified_limit: int | None = None
         requested_provider = str(request.get("provider") or "").strip()
@@ -15835,6 +15967,7 @@ RUNTIME_PLANNER_GENERAL_AGENT_TOOLS = frozenset(
         "vrcforge_progress_update",
         "vrcforge_progress_delete",
         "vrcforge_ask_user",
+        "vrcforge_request_project_selection",
         "vrcforge_delegate_subagent",
         "vrcforge_classify_shell",
         "vrcforge_execute_shell",
@@ -15860,6 +15993,7 @@ RUNTIME_PLANNER_CORE_AGENT_TOOLS = frozenset(
         "vrcforge_progress_update",
         "vrcforge_progress_delete",
         "vrcforge_ask_user",
+        "vrcforge_request_project_selection",
         "vrcforge_delegate_subagent",
         "vrcforge_classify_shell",
         "vrcforge_execute_shell",
@@ -16148,8 +16282,10 @@ class _RuntimePlannerCatalog:
         # routed by the planner to its dedicated owner, never the skill executor.
         projections = tuple(
             projection for projection in _RUNTIME_PROFILED_TOOL_REGISTRY.project(profile)
-            if projection.internal_name not in RUNTIME_BLOCKED_SKILLS
-            or projection.internal_name == "vrcforge_execute_shell"
+            if (projection.internal_name not in RUNTIME_BLOCKED_SKILLS
+                or projection.internal_name == "vrcforge_execute_shell")
+            if projection.internal_name != "vrcforge_request_project_selection"
+            or (not project_context_active and channel_project_selection_available())
         )
         visible_direct_tools = tuple(
             _runtime_planner_tool(tool, projection)

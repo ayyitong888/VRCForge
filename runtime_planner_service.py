@@ -246,6 +246,8 @@ def bounded_planner_tool_schema(value: object) -> dict[str, object]:
 
 
 def planner_tool_input_schema(name: str) -> dict[str, object]:
+    if name == "vrcforge_request_project_selection":
+        return {"type": "object", "properties": {}, "required": [], "additionalProperties": False}
     if name == "vrcforge_ask_user":
         from agent_question_service import QUESTION_INPUT_SCHEMA
         return deepcopy(QUESTION_INPUT_SCHEMA)

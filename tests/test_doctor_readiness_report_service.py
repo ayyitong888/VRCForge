@@ -170,7 +170,10 @@ def test_newtonsoft_projection_is_error_only_for_known_blocked_preflight():
     report = DoctorReadinessReportService(replace(ports, build_health=lambda: blocked_health)).build_app_doctor_report()
     check = next(item for item in report["checks"] if item["id"] == "package.newtonsoft")
     assert check["status"] == "error"
-    assert "Newtonsoft" in check["message"]
+    assert "Avatar SDK setup is incomplete" in check["message"]
+    assert "VCC or ALCOM" in check["message"]
+    assert "Unity to finish compiling" in check["message"]
+    assert "Newtonsoft" not in check["message"]
 
     healthy_health = {
         **blocked_health,

@@ -38,14 +38,18 @@ def provider_protocol_candidates(
     """Return an ordered, bounded candidate list.
 
     Explicit protocol selections are pins and therefore always return exactly
-    one candidate.  Only ``auto`` may return alternatives.  The special
-    DeepSeek automatic model is the sole opt-in route that may change models;
-    an exact model selection never does.
+    one candidate.  Only ``auto`` may return alternative protocols; every
+    candidate preserves the user's selected model.
     """
 
     provider_id = str(provider).strip().lower()
     model_id = str(model).strip()
     requested = str(requested_api_type or "auto").strip().lower()
+
+    if provider_id == "deepseek" and model_id == DEEPSEEK_AUTO_MODEL:
+        raise ValueError(
+            "Select a DeepSeek model explicitly; automatic selection applies only to the communication protocol."
+        )
 
     if provider_id == "chatgpt":
         if requested not in {"auto", "responses"}:
@@ -56,15 +60,6 @@ def provider_protocol_candidates(
         return (ProviderProtocolCandidate(provider_id, model_id, requested),)
 
     if provider_id == "deepseek":
-        if model_id == DEEPSEEK_AUTO_MODEL:
-            return (
-                ProviderProtocolCandidate(provider_id, DEEPSEEK_PRO_MODEL, "responses"),
-                ProviderProtocolCandidate(provider_id, DEEPSEEK_PRO_MODEL, "messages"),
-                ProviderProtocolCandidate(provider_id, DEEPSEEK_PRO_MODEL, "chat_completions"),
-                ProviderProtocolCandidate(provider_id, DEEPSEEK_FLASH_MODEL, "responses"),
-                ProviderProtocolCandidate(provider_id, DEEPSEEK_FLASH_MODEL, "messages"),
-                ProviderProtocolCandidate(provider_id, DEEPSEEK_FLASH_MODEL, "chat_completions"),
-            )
         if model_id in DEEPSEEK_FLASH_MODELS | {DEEPSEEK_PRO_MODEL}:
             return (
                 ProviderProtocolCandidate(provider_id, model_id, "responses"),
