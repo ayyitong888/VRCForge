@@ -119,27 +119,35 @@ def test_provider_test_invalid_structured_response_is_warning() -> None:
     assert "did not validate" in result["message"]
 
 
-def test_provider_test_deepseek_auto_stops_after_first_success() -> None:
+@pytest.mark.parametrize("model", ["deepseek-v4-pro", "deepseek-v4-flash", "deepseek-flash"])
+def test_provider_test_deepseek_auto_preserves_model_and_stops_after_first_success(model: str) -> None:
     probe = FakeProbe(['{"ok": true}', RuntimeError("must not run")])
     result = _service(probe).run(
         Request(
             provider="deepseek",
-            model="deepseek-auto",
+            model=model,
             api_type="auto",
             capability="structured",
         )
     )
 
     assert result["ok"] is True
-    assert result["recommendedModel"] == "deepseek-v4-pro"
+    assert result["recommendedModel"] == model
     assert result["recommendedApiType"] == "responses"
     assert [(call[0].model, call[0].api_type) for call in probe.calls] == [
-        ("deepseek-v4-pro", "responses"),
+        (model, "responses"),
     ]
     assert result["attempts"] == [
-        {"model": "deepseek-v4-pro", "apiType": "responses", "status": "verified"}
+        {"model": model, "apiType": "responses", "status": "verified"}
     ]
     assert "safe-key" not in str(result["attempts"])
+
+
+def test_provider_test_requires_explicit_model_before_protocol_probe() -> None:
+    probe = FakeProbe([RuntimeError("must not run")])
+    with pytest.raises(ValueError, match="Select a DeepSeek model explicitly"):
+        _service(probe).run(Request(provider="deepseek", model="deepseek-auto", api_type="auto"))
+    assert probe.calls == []
 
 
 def test_provider_test_continues_only_after_explicit_protocol_compatibility_error() -> None:
