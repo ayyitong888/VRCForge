@@ -2,12 +2,30 @@ import type { ChatThread } from "./chat-types";
 import type { ChatSourceRevision } from "./api/notes-chats";
 
 export type ChatStorageReconcileResult =
-  | { status: "merged"; chats: ChatThread[]; conflictIds: [] }
+  | { status: "merged"; chats: ChatThread[]; conflictIds: []; baselineFingerprints: Record<string, string> }
   | { status: "conflict"; chats: ChatThread[]; conflictIds: string[] };
 
 export type ChatFingerprintProjector = (chat: ChatThread) => unknown;
 
+export type ChatStorageVersions = {
+  baseline: Readonly<Record<string, string>>;
+  remote: Readonly<Record<string, string>>;
+};
+
 const identityChatProjection: ChatFingerprintProjector = (chat) => chat;
+
+export function chatDigestsFromPayload(
+  value: Record<string, string> | undefined,
+  chats: ReadonlyArray<{ id: string }>,
+): Record<string, string> | undefined {
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== "object" || Array.isArray(value)
+    || !chats.every((chat) => Object.prototype.hasOwnProperty.call(value, chat.id)
+      && typeof value[chat.id] === "string" && /^[a-f0-9]{64}$/.test(value[chat.id]))) {
+    throw new Error("Chat storage returned invalid chat version metadata.");
+  }
+  return Object.fromEntries(chats.map((chat) => [chat.id, value[chat.id]]));
+}
 
 export function sourceRevisionsFromPayload(
   sources: Array<ChatSourceRevision & Record<string, unknown>> | undefined,
@@ -41,12 +59,14 @@ export function reconcileChatStorage(
   local: ChatThread[],
   remote: ChatThread[],
   project: ChatFingerprintProjector = identityChatProjection,
+  versions?: ChatStorageVersions,
 ): ChatStorageReconcileResult {
   const localById = new Map(local.map((chat) => [chat.id, chat]));
   const remoteById = new Map(remote.map((chat) => [chat.id, chat]));
   const allIds = new Set([...Object.keys(baseline), ...localById.keys(), ...remoteById.keys()]);
   const selected = new Map<string, ChatThread>();
   const conflicts: string[] = [];
+  const nextBaseline = new Map<string, string>();
 
   for (const id of allIds) {
     const baseFingerprint = baseline[id];
@@ -55,13 +75,20 @@ export function reconcileChatStorage(
     const localFingerprint = localChat ? stableFingerprint(project(localChat)) : undefined;
     const remoteFingerprint = remoteChat ? stableFingerprint(project(remoteChat)) : undefined;
     const localChanged = localFingerprint !== baseFingerprint;
-    const remoteChanged = remoteFingerprint !== baseFingerprint;
+    // IPC display redaction is not a storage edit. Compare the server-owned
+    // version with its acknowledged version, independently of local content.
+    const remoteChanged = versions
+      ? versions.remote[id] !== versions.baseline[id]
+      : remoteFingerprint !== baseFingerprint;
 
-    if (localChanged && remoteChanged && localFingerprint !== remoteFingerprint) {
+    const nextFingerprint = remoteChanged ? remoteFingerprint : baseFingerprint;
+    if (nextFingerprint !== undefined) nextBaseline.set(id, nextFingerprint);
+
+    if (localChanged && remoteChanged && (versions || localFingerprint !== remoteFingerprint)) {
       conflicts.push(id);
       continue;
     }
-    const winner = localChanged ? localChat : remoteChat;
+    const winner = localChanged || !remoteChanged ? localChat : remoteChat;
     if (winner) {
       selected.set(id, winner);
     }
@@ -80,7 +107,7 @@ export function reconcileChatStorage(
     const chat = selected.get(id);
     return chat ? [chat] : [];
   });
-  return { status: "merged", chats, conflictIds: [] };
+  return { status: "merged", chats, conflictIds: [], baselineFingerprints: Object.fromEntries(nextBaseline) };
 }
 
 /**
@@ -94,8 +121,15 @@ export function preserveConflictingChatCopies(
   remote: ChatThread[],
   cloneLocal: (chat: ChatThread, index: number) => ChatThread,
   project: ChatFingerprintProjector = identityChatProjection,
+  versions?: ChatStorageVersions,
 ): { chats: ChatThread[]; conflictIds: string[] } {
-  const conflict = reconcileChatStorage(baseline, local, remote, project);
+  const conflict = reconcileChatStorage(
+    baseline,
+    local,
+    remote,
+    project,
+    restrictVersionsToChats(versions, baseline, local, remote),
+  );
   if (conflict.status === "merged") {
     return { chats: conflict.chats, conflictIds: [] };
   }
@@ -103,11 +137,14 @@ export function preserveConflictingChatCopies(
   const filteredBaseline = Object.fromEntries(
     Object.entries(baseline).filter(([id]) => !conflictSet.has(id)),
   );
+  const filteredLocal = local.filter((chat) => !conflictSet.has(chat.id));
+  const filteredRemote = remote.filter((chat) => !conflictSet.has(chat.id));
   const nonConflicting = reconcileChatStorage(
     filteredBaseline,
-    local.filter((chat) => !conflictSet.has(chat.id)),
-    remote.filter((chat) => !conflictSet.has(chat.id)),
+    filteredLocal,
+    filteredRemote,
     project,
+    restrictVersionsToChats(versions, filteredBaseline, filteredLocal, filteredRemote),
   );
   if (nonConflicting.status !== "merged") {
     throw new Error("non-conflicting chat reconciliation unexpectedly failed");
@@ -134,6 +171,28 @@ export function preserveConflictingChatCopies(
     return chat ? [cloneLocal(chat, index)] : [];
   });
   return { chats: [...merged, ...copies], conflictIds: conflict.conflictIds };
+}
+
+function restrictVersionsToChats(
+  versions: ChatStorageVersions | undefined,
+  baseline: Readonly<Record<string, string>>,
+  local: ReadonlyArray<{ id: string }>,
+  remote: ReadonlyArray<{ id: string }>,
+): ChatStorageVersions | undefined {
+  if (!versions) return undefined;
+  const ids = new Set([
+    ...Object.keys(baseline),
+    ...local.map((chat) => chat.id),
+    ...remote.map((chat) => chat.id),
+  ]);
+  return {
+    baseline: Object.fromEntries(
+      Object.entries(versions.baseline).filter(([id]) => ids.has(id)),
+    ),
+    remote: Object.fromEntries(
+      Object.entries(versions.remote).filter(([id]) => ids.has(id)),
+    ),
+  };
 }
 
 function stableFingerprint(value: unknown): string {

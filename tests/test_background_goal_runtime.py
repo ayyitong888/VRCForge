@@ -545,6 +545,238 @@ def test_usage_aggregation_saturates_token_values() -> None:
     assert result["bounded"] is True
 
 
+def test_usage_aggregation_preserves_cache_write_and_combines_coverage() -> None:
+    result = aggregate_bounded_usage(
+        [
+            {"inputTokens": 100, "outputTokens": 10, "cacheWriteTokens": 7,
+             "cacheWriteUsageRequestCount": 2, "cacheWriteUsageComplete": True},
+            {"inputTokens": 50, "outputTokens": 5, "cacheWriteTokens": 0,
+             "cacheWriteUsageRequestCount": 1, "cacheWriteUsageComplete": True},
+        ]
+    )
+    assert result["cacheWriteTokens"] == 7
+    assert result["cacheWriteUsageRequestCount"] == 3
+    assert result["cacheWriteUsageComplete"] is True
+
+    mixed = aggregate_bounded_usage(
+        [
+            {"inputTokens": 100, "cacheWriteTokens": 4,
+             "cacheWriteUsageRequestCount": 1, "cacheWriteUsageComplete": True},
+            {"inputTokens": 20},
+        ]
+    )
+    assert mixed["cacheWriteTokens"] == 4
+    assert mixed["cacheWriteUsageRequestCount"] == 1
+    assert mixed["cacheWriteUsageComplete"] is False
+
+    legacy = aggregate_bounded_usage({"inputTokens": 20, "outputTokens": 2})
+    assert "cacheWriteTokens" not in legacy
+    assert "cacheWriteUsageRequestCount" not in legacy
+    assert "cacheWriteUsageComplete" not in legacy
+
+
+def test_usage_aggregation_preserves_cache_read_and_combines_coverage() -> None:
+    result = aggregate_bounded_usage(
+        [
+            {"inputTokens": 100, "outputTokens": 10, "cachedTokens": 7,
+             "cacheUsageRequestCount": 2, "cacheUsageComplete": True},
+            {"inputTokens": 50, "outputTokens": 5, "cacheReadTokens": 0,
+             "cacheUsageRequestCount": 1, "cacheUsageComplete": True},
+        ]
+    )
+    assert result["cachedTokens"] == 7
+    assert result["cacheUsageRequestCount"] == 3
+    assert result["cacheUsageComplete"] is True
+
+    mixed = aggregate_bounded_usage(
+        [
+            {"inputTokens": 100, "cachedTokens": 4,
+             "cacheUsageRequestCount": 1, "cacheUsageComplete": True},
+            {"inputTokens": 20},
+        ]
+    )
+    assert mixed["cachedTokens"] == 4
+    assert mixed["cacheUsageRequestCount"] == 1
+    assert mixed["cacheUsageComplete"] is False
+
+
+@pytest.mark.parametrize(
+    "usage",
+    [
+        {"cachedTokens": 0, "cacheUsageRequestCount": 0,
+         "cacheUsageComplete": True},
+        {"cacheUsageRequestCount": 1, "cacheUsageComplete": True},
+        {"cachedTokens": True, "cacheUsageRequestCount": 1,
+         "cacheUsageComplete": True},
+    ],
+)
+def test_cache_read_complete_requires_positive_coverage_and_valid_tokens(usage: dict[str, object]) -> None:
+    result = aggregate_bounded_usage([usage])
+    assert result["cacheUsageComplete"] is False
+
+
+def test_cache_coverage_contradictions_with_request_count_are_incomplete() -> None:
+    result = aggregate_bounded_usage(
+        [{"requestCount": 1, "cachedTokens": 2,
+          "cacheUsageRequestCount": 2, "cacheUsageComplete": True,
+          "cacheWriteTokens": 0, "cacheWriteUsageRequestCount": 1,
+          "cacheWriteUsageComplete": True}]
+    )
+    assert result["requestCount"] == 1
+    assert result["cacheUsageComplete"] is False
+    assert result["cacheWriteUsageComplete"] is True
+
+
+@pytest.mark.parametrize(
+    ("request_count", "read_count", "write_count"),
+    [(2, 1, 2), (1, 2, 1), (2, 2, 1), (1, 1, 2)],
+)
+def test_cache_coverage_counts_must_match_request_count(
+    request_count: int, read_count: int, write_count: int
+) -> None:
+    result = aggregate_bounded_usage(
+        [{"requestCount": request_count, "cachedTokens": 0,
+          "cacheUsageRequestCount": read_count, "cacheUsageComplete": True,
+          "cacheWriteTokens": 0, "cacheWriteUsageRequestCount": write_count,
+          "cacheWriteUsageComplete": True}]
+    )
+    assert result["cacheUsageComplete"] is (read_count == request_count)
+    assert result["cacheWriteUsageComplete"] is (write_count == request_count)
+
+
+def test_cache_write_source_contradictions_cannot_cancel_in_aggregate() -> None:
+    result = aggregate_bounded_usage(
+        [
+            {"requestCount": 2, "cachedTokens": 0,
+             "cacheUsageRequestCount": 2, "cacheUsageComplete": True,
+             "cacheWriteTokens": 0, "cacheWriteUsageRequestCount": 1,
+             "cacheWriteUsageComplete": True},
+            {"requestCount": 2, "cachedTokens": 0,
+             "cacheUsageRequestCount": 2, "cacheUsageComplete": True,
+             "cacheWriteTokens": 0, "cacheWriteUsageRequestCount": 3,
+             "cacheWriteUsageComplete": True},
+        ]
+    )
+    assert result["requestCount"] == 4
+    assert result["cacheWriteUsageRequestCount"] == 4
+    assert result["cacheWriteUsageComplete"] is False
+
+
+def test_usage_cost_prices_openai_inclusive_cache_read_and_write_input() -> None:
+    result = aggregate_bounded_usage(
+        {"inputTokens": 100, "outputTokens": 10, "cachedTokens": 20,
+         "cacheWriteTokens": 30, "cacheWriteUsageRequestCount": 1,
+         "cacheWriteUsageComplete": True},
+        pricing={
+            "inputPerMillion": 2,
+            "outputPerMillion": 10,
+            "cachedInputPerMillion": 0.5,
+            "cacheWriteInputPerMillion": 1,
+        },
+    )
+    assert result["cost"] == pytest.approx(0.00024)
+
+
+def test_raw_anthropic_cache_creation_is_not_priced_as_normalized_input() -> None:
+    result = aggregate_bounded_usage(
+        {"input_tokens": 100, "output_tokens": 10, "cache_creation_input_tokens": 30},
+        pricing={"inputPerMillion": 2, "outputPerMillion": 10,
+                 "cacheWriteInputPerMillion": 1},
+    )
+    assert "cacheWriteTokens" not in result
+    assert "cost" not in result
+
+
+def test_usage_cost_keeps_explicitly_unknown_cache_write_unpriced():
+    result = aggregate_bounded_usage(
+        {"inputTokens": 100, "outputTokens": 2,
+         "cacheWriteUsageRequestCount": 0, "cacheWriteUsageComplete": False},
+        pricing={"inputPerMillion": 2, "outputPerMillion": 10},
+    )
+    assert "cost" not in result
+    assert result["costUnavailableReason"] == "usage_incomplete"
+
+
+@pytest.mark.parametrize(
+    "usage",
+    [
+        {"inputTokens": 100, "outputTokens": 10, "exact": False},
+        {"inputTokens": 100, "outputTokens": 10, "cachedTokens": 0,
+         "cacheUsageRequestCount": 1, "cacheUsageComplete": False},
+    ],
+)
+def test_usage_cost_fails_closed_for_exact_or_read_coverage_gaps(usage: dict[str, object]) -> None:
+    result = aggregate_bounded_usage(
+        usage, pricing={"inputPerMillion": 2, "outputPerMillion": 10}
+    )
+    assert "cost" not in result
+    assert result["costUnavailableReason"] == "usage_incomplete"
+    assert result["costUnavailableReason"] == "usage_incomplete"
+
+
+@pytest.mark.parametrize(
+    "usage",
+    [
+        {"cacheWriteTokens": 0, "cacheWriteUsageRequestCount": 0,
+         "cacheWriteUsageComplete": True},
+        {"cacheWriteUsageRequestCount": 1, "cacheWriteUsageComplete": True},
+        {"cacheWriteTokens": True, "cacheWriteUsageRequestCount": 1,
+         "cacheWriteUsageComplete": True},
+    ],
+)
+def test_cache_write_complete_requires_positive_coverage_and_valid_tokens(usage: dict[str, object]) -> None:
+    result = aggregate_bounded_usage([usage])
+    assert result["cacheWriteUsageComplete"] is False
+
+
+def test_usage_aggregation_preserves_request_count_and_exact_and() -> None:
+    result = aggregate_bounded_usage(
+        [
+            {"inputTokens": 10, "outputTokens": 2, "requestCount": 2, "exact": True},
+            {"inputTokens": 5, "outputTokens": 1, "requestCount": 1, "exact": False},
+        ]
+    )
+    assert result["requestCount"] == 3
+    assert result["exact"] is False
+
+    mixed = aggregate_bounded_usage([
+        {"inputTokens": 10, "outputTokens": 2, "requestCount": 1, "exact": True},
+        {"inputTokens": 5, "outputTokens": 1},
+    ])
+    assert mixed["requestCount"] == 1
+    assert mixed["exact"] is False
+
+
+@pytest.mark.parametrize(
+    ("usage", "pricing", "reason"),
+    [
+        ({"inputTokens": 100, "outputTokens": 10,
+          "cacheWriteUsageRequestCount": 1, "cacheWriteUsageComplete": True},
+         {"inputPerMillion": 2, "outputPerMillion": 10,
+          "cacheWriteInputPerMillion": 1}, "usage_incomplete"),
+        ({"inputTokens": 100, "outputTokens": 10, "cacheWriteTokens": 30,
+          "cacheWriteUsageRequestCount": 1, "cacheWriteUsageComplete": True},
+         {"inputPerMillion": 2, "outputPerMillion": 10}, "pricing_incomplete"),
+        ({"inputTokens": 100, "outputTokens": 10, "cacheWriteTokens": 30,
+          "cacheWriteUsageRequestCount": 1, "cacheWriteUsageComplete": False},
+         {"inputPerMillion": 2, "outputPerMillion": 10,
+          "cacheWriteInputPerMillion": 1}, "usage_incomplete"),
+        ({"inputTokens": 100, "outputTokens": 10, "cachedTokens": 80,
+          "cacheWriteTokens": 30, "cacheWriteUsageRequestCount": 1,
+          "cacheWriteUsageComplete": True},
+         {"inputPerMillion": 2, "outputPerMillion": 10,
+          "cachedInputPerMillion": 0.5, "cacheWriteInputPerMillion": 1},
+         "usage_inconsistent"),
+    ],
+)
+def test_usage_cost_fails_closed_for_cache_write_gaps(
+    usage: dict[str, int | bool], pricing: dict[str, float], reason: str
+) -> None:
+    result = aggregate_bounded_usage(usage, pricing=pricing)
+    assert "cost" not in result
+    assert result["costUnavailableReason"] == reason
+
+
 @pytest.mark.parametrize("code", ["permission_denied", "authorization_scope_denied"])
 def test_canonical_permission_code_survives_loop_classification(code):
     payload = {"ok": False, "status": "failed", "outcome": {

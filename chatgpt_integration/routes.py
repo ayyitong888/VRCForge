@@ -8,12 +8,13 @@ and single-use state, never by weakening dashboard authentication.
 from __future__ import annotations
 
 import asyncio
+from contextlib import nullcontext
 from typing import Any, Awaitable, Callable
 
 from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 
-from provider_configuration_service import ProviderApiConfig
+from provider_configuration_service import ProviderApiConfig, ProviderConfigurationBusyError
 from .service import ChatGPTAuthError
 
 
@@ -33,6 +34,7 @@ def build_chatgpt_oauth_router(
     service_factory: Callable[[], Any] | None = None,
     current_config: Callable[[], ProviderApiConfig] | None = None,
     deactivate: Callable[[str], Awaitable[None]] | None = None,
+    configuration_change: Callable[[], Any] = nullcontext,
 ) -> APIRouter:
     router = APIRouter(prefix="/api/chatgpt")
     service: Any = None
@@ -95,16 +97,17 @@ def build_chatgpt_oauth_router(
     @router.post("/logout")
     async def logout(body: ChatGPTAccountRequest, request: Request, response: Response) -> Any:
         check(request, response)
-        result = await call("logout", body.account_id)
-        if deactivate is not None and result.get("localCleared"):
-            try:
-                await deactivate(body.account_id)
-            except Exception as exc:
-                raise HTTPException(
-                    500,
-                    "ChatGPT sign-out cleared the account locally, but the active provider configuration could not be cleared.",
-                ) from exc
-        return result
+        try:
+            with configuration_change():
+                result = await call("logout", body.account_id)
+                if deactivate is not None and result.get("localCleared"):
+                    try:
+                        await deactivate(body.account_id)
+                    except Exception as exc:
+                        raise HTTPException(500, "ChatGPT sign-out cleared the account locally, but the active provider configuration could not be cleared.") from exc
+                return result
+        except ProviderConfigurationBusyError as exc:
+            raise HTTPException(409, str(exc)) from exc
 
     @router.post("/models")
     async def models(body: ChatGPTAccountRequest, request: Request, response: Response) -> Any:

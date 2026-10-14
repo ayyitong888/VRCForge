@@ -1616,16 +1616,19 @@ def request_responses_plan_with_metadata(
         return LlmPlanResponse(text=response.text, reasoning=reasoning, usage=usage)
     if native_messages is not None or native_tools is not None:
         raise ValueError("Native Responses history requires a supported native Responses adapter.")
-    adapter_type = (
-        DeepSeekResponsesAdapter
-        if normalize_provider_name(settings.llm_provider) == "deepseek"
-        else OpenAIResponsesAdapter
-    )
+    provider = normalize_provider_name(settings.llm_provider)
+    retry_kwargs = _llm_sdk_retry_kwargs(settings)
+    if provider not in {"deepseek", "openrouter"} and "max_retries" not in retry_kwargs:
+        # Generic/custom Responses requests already have a bounded planner
+        # retry loop; leave the SDK's implicit retries disabled unless the
+        # caller explicitly opts in through Settings.
+        retry_kwargs["max_retries"] = 0
+    adapter_type = DeepSeekResponsesAdapter if provider == "deepseek" else OpenAIResponsesAdapter
     adapter = adapter_type(
         api_key=settings.llm_api_key,
         base_url=settings.llm_base_url,
         client_factory=client_factory,
-        **(_llm_sdk_retry_kwargs(settings) | _openrouter_transport_kwargs(settings)),
+        **(retry_kwargs | _openrouter_transport_kwargs(settings)),
     )
     response = adapter.send_request(
         ProviderRuntimeRequest(
@@ -3098,6 +3101,28 @@ def extract_llm_token_usage(response: Any, settings: Settings, source: str = "")
             cache_read_tokens = first_usage_int(get_value(usage, details_key), ("cached_tokens",))
             if cache_read_tokens is not None:
                 break
+    cache_write_tokens = first_nonnegative_usage_int(
+        usage,
+        (
+            "cache_write_tokens",
+            "cacheWriteTokens",
+            "cache_creation_input_tokens",
+            "cacheCreationInputTokens",
+        ),
+    )
+    if cache_write_tokens is None:
+        for details_key in ("prompt_tokens_details", "input_tokens_details"):
+            cache_write_tokens = first_nonnegative_usage_int(
+                get_value(usage, details_key),
+                (
+                    "cache_write_tokens",
+                    "cacheWriteTokens",
+                    "cache_creation_input_tokens",
+                    "cacheCreationInputTokens",
+                ),
+            )
+            if cache_write_tokens is not None:
+                break
     if total_tokens is None and input_tokens is not None and output_tokens is not None:
         total_tokens = input_tokens + output_tokens
 
@@ -3118,6 +3143,8 @@ def extract_llm_token_usage(response: Any, settings: Settings, source: str = "")
         payload["totalTokens"] = total_tokens
     if cache_read_tokens is not None:
         payload["cacheReadTokens"] = cache_read_tokens
+    if cache_write_tokens is not None:
+        payload["cacheWriteTokens"] = cache_write_tokens
     if not exact:
         payload["unavailableReason"] = "provider_usage_missing"
     return payload
@@ -3134,6 +3161,17 @@ def first_usage_int(container: Any, keys: Sequence[str]) -> int | None:
             return max(0, int(value))
         if isinstance(value, str) and value.strip().isdigit():
             return max(0, int(value.strip()))
+    return None
+
+
+def first_nonnegative_usage_int(container: Any, keys: Sequence[str]) -> int | None:
+    """Read a provider count only when it is a genuine non-negative integer."""
+    for key in keys:
+        value = get_value(container, key)
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, int) and value >= 0:
+            return value
     return None
 
 

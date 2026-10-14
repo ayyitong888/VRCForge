@@ -55,6 +55,7 @@ export function Composer({
   attachments = [],
   onAttachFiles,
   onRemoveAttachment,
+  onUpdateAttachment,
   contextUsage,
   providerLabel,
   model,
@@ -83,6 +84,7 @@ export function Composer({
   attachments?: ChatAttachment[];
   onAttachFiles?: (files: ComposerFileInput) => void;
   onRemoveAttachment?: (id: string) => void;
+  onUpdateAttachment?: (id: string, text: string) => void;
   contextUsage?: ContextUsage;
   providerLabel?: string;
   model?: string;
@@ -99,11 +101,14 @@ export function Composer({
   const [paletteIndex, setPaletteIndex] = useState(0);
   const [paletteDismissed, setPaletteDismissed] = useState(false);
   const [dragDepth, setDragDepth] = useState(0);
+  const [selectedTextPopoverOpen, setSelectedTextPopoverOpen] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const composerRef = useRef<HTMLFormElement | null>(null);
   const currentMode = (permission?.executionMode || "approval") as ExecutionMode;
   const currentModeVisual = permissionVisualState(permission, currentMode);
   const canSubmit = !disabledReason && (input.trim().length > 0 || attachments.length > 0);
+  const selectedTextAttachments = attachments.filter((attachment) => attachment.name === SELECTED_TEXT_ATTACHMENT_NAME);
+  const regularAttachments = attachments.filter((attachment) => attachment.name !== SELECTED_TEXT_ATTACHMENT_NAME);
   const availableActions: ComposerAction[] = actions.length ? actions : [{ id: "attach", label: t("composerAction.attach"), description: t("composerAction.attachDesc") }];
   const commandActions: ComposerSlashCommand[] = [...availableActions, ...(onPlanModeChange && !editing ? [{
     id: "plan" as const,
@@ -291,7 +296,16 @@ export function Composer({
           ))}
         </div>
       ) : null}
-      <div className={cn("rounded-3xl border bg-card transition-colors", dragActive ? "border-primary/50 bg-primary/5" : "border-border", compact ? "p-3" : "p-4")}>
+      <div className={cn("rounded-3xl border bg-card/80 transition-colors", dragActive ? "border-primary/50 bg-primary/5" : "border-border", compact ? "p-3" : "p-4")}>
+        {selectedTextAttachments.length ? (
+          <SelectedTextQuoteChip
+            attachments={selectedTextAttachments}
+            open={selectedTextPopoverOpen}
+            onOpenChange={setSelectedTextPopoverOpen}
+            onRemove={onRemoveAttachment}
+            onUpdate={onUpdateAttachment}
+          />
+        ) : null}
         <textarea
           value={input}
           onChange={(event) => { setPaletteDismissed(false); setInput(event.target.value); }}
@@ -337,9 +351,9 @@ export function Composer({
             }
           }}
         />
-        {attachments.length ? (
+        {regularAttachments.length ? (
           <div className="mt-3">
-            <AttachmentStrip attachments={attachments} onRemove={onRemoveAttachment} />
+            <AttachmentStrip attachments={regularAttachments} onRemove={onRemoveAttachment} />
           </div>
         ) : null}
         <div className="mt-3 grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-2 xl:grid-cols-[auto_minmax(0,1fr)_auto]">
@@ -504,7 +518,9 @@ export function ContextUsageMeter({ usage, className = "" }: { usage: ContextUsa
       : i18n.t("chat.contextUsageUnavailable");
   const tooltipDetail = knownRatio
     ? i18n.t("chat.contextMeterTokenDetail", { used: formatCount(usage.used), limit: formatCount(usage.limit) })
-    : "";
+    : usage.limitKnown
+      ? i18n.t("chat.contextMeterCapacityDetail", { limit: formatCount(usage.limit) })
+      : "";
   const cacheRatio = usage.cacheHitRatio;
   const cacheKnown = usage.cacheUsageStatus === "complete" && typeof cacheRatio === "number"
     && Number.isFinite(cacheRatio) && cacheRatio >= 0 && cacheRatio <= 1;
@@ -556,6 +572,86 @@ export function ContextUsageMeter({ usage, className = "" }: { usage: ContextUsa
         {tooltipDetail ? <div className="mt-1 text-muted-foreground">{tooltipDetail}</div> : null}
         <div className="mt-1 text-muted-foreground" data-context-cache-hit-rate>{cacheDetail}</div>
       </div>
+    </div>
+  );
+}
+
+
+function SelectedTextQuoteChip({
+  attachments,
+  open,
+  onOpenChange,
+  onRemove,
+  onUpdate,
+}: {
+  attachments: ChatAttachment[];
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  onRemove?: (id: string) => void;
+  onUpdate?: (id: string, text: string) => void;
+}) {
+  const { t } = useTranslation();
+  const removeSelectedText = () => {
+    attachments.forEach((attachment) => onRemove?.(attachment.id));
+    onOpenChange(false);
+  };
+  return (
+    <div
+      className="relative mb-3 inline-flex min-w-0 max-w-full items-center"
+      data-composer-selected-text-chip
+      onKeyDown={(event) => {
+        if (event.key === "Escape") {
+          event.preventDefault();
+          onOpenChange(false);
+        }
+      }}
+    >
+      <button
+        type="button"
+        className="flex min-w-0 max-w-full items-center gap-2 overflow-hidden rounded-full border border-border/70 bg-background/75 px-3 py-1.5 pr-9 text-left text-xs text-foreground shadow-sm transition-colors hover:bg-muted"
+        aria-expanded={open}
+        aria-haspopup="dialog"
+        onClick={() => onOpenChange(!open)}
+        data-composer-selected-text-trigger
+      >
+        <MessageSquare className="h-4 w-4 shrink-0 text-muted-foreground" />
+        <span className="min-w-0 flex-1 truncate whitespace-nowrap">
+          {t("attachments.selectedText", { count: attachments.length })}
+        </span>
+      </button>
+      {onRemove ? (
+        <button
+          type="button"
+          className="absolute right-1 top-1/2 flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+          onClick={removeSelectedText}
+          title={t("attachments.remove")}
+          aria-label={t("attachments.remove")}
+          data-composer-selected-text-remove
+        >
+          <X className="h-3.5 w-3.5" />
+        </button>
+      ) : null}
+      {open ? (
+        <div
+          className="absolute bottom-[calc(100%+0.5rem)] left-0 z-50 max-h-72 w-full max-w-[min(42rem,calc(100vw-3rem))] overflow-y-auto rounded-lg border border-border bg-card px-3 py-2 text-sm leading-relaxed text-foreground shadow-panel"
+          role="dialog"
+          aria-label={t("attachments.selectedText", { count: attachments.length })}
+          data-composer-selected-text-popover
+        >
+          {attachments.map((attachment, index) => (
+            <div key={attachment.id} className={index ? "mt-3 border-t border-border pt-3" : ""}>
+              <textarea
+                value={attachment.text || ""}
+                onChange={(event) => onUpdate?.(attachment.id, event.target.value)}
+                className="min-h-24 w-full resize-y rounded-md border border-border bg-background/60 px-2 py-1.5 text-sm leading-relaxed text-foreground outline-none focus:border-primary"
+                aria-label={t("attachments.editSelectedText")}
+                data-composer-selected-text-editor={attachment.id}
+              />
+              <pre className="sr-only whitespace-pre-wrap">{attachment.text || ""}</pre>
+            </div>
+          ))}
+        </div>
+      ) : null}
     </div>
   );
 }

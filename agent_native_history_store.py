@@ -15,8 +15,6 @@ from typing import Any
 
 
 class NativeHistoryStore:
-    MAX_BYTES = 3 * 1024 * 1024
-
     def __init__(self, directory: Path) -> None:
         self.directory = directory
 
@@ -40,12 +38,9 @@ class NativeHistoryStore:
             path = self._path(session_id, binding)
         try:
             with path.open("rb") as stream:
-                raw = stream.read(self.MAX_BYTES + 1)
+                value = json.load(stream)
         except FileNotFoundError:
             return None
-        if len(raw) > self.MAX_BYTES:
-            raise ValueError("Saved native history exceeds the size limit")
-        value = json.loads(raw)
         if not isinstance(value, dict) or value.get("version") != 1 or value.get("sessionId") != session_id:
             raise ValueError("Saved native history identity is invalid")
         if binding is not None and value.get("native", {}).get("binding") != binding:
@@ -55,8 +50,6 @@ class NativeHistoryStore:
     def save(self, session_id: str, snapshot: dict[str, Any], selections: dict[str, Any]) -> None:
         raw = json.dumps({"version": 1, "sessionId": session_id, "native": snapshot,
                           "selections": selections}, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-        if len(raw) > self.MAX_BYTES:
-            raise ValueError("Saved native history exceeds the size limit")
         self.directory.mkdir(parents=True, exist_ok=True)
         # mkstemp owns a single private handle; close before atomic replacement.
         fd, temporary = tempfile.mkstemp(prefix=".native-", dir=self.directory)

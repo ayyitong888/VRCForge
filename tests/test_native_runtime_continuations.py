@@ -5,11 +5,15 @@ import hashlib
 import ntpath
 import threading
 from copy import deepcopy
+from unittest.mock import patch
+
+import pytest
 
 from tests.test_native_runtime_gateway import NativeModel, NativeTurn, call, setup_gateway
 from tests.test_dashboard_server import _TestRuntimePlannerCatalog, _TestRuntimePlannerDesktop
 from agent_gateway import AgentGateway
 from runtime_planner_service import PlannerModelResult, RuntimePlannerService
+from agent_runtime_native_turn import NativeRuntimeTurn
 
 
 def _write_gateway(tmp_path, replies, invoked):
@@ -65,6 +69,118 @@ def _binding(tmp_path):
     return hashlib.sha256(
         ("fixture-provider-model-route\n" + ntpath.normcase(ntpath.normpath(str(tmp_path)))).encode()
     ).hexdigest()
+
+
+def test_native_receipt_public_content_is_emitted_once_for_queued_calls(tmp_path):
+    gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
+
+    class Planner:
+        @staticmethod
+        def native_result_observation(item, *, project_context_active=False):
+            return item
+
+    turn = NativeRuntimeTurn(
+        gateway.runtime_sessions,
+        Planner(),
+        "native-queued-content-session",
+        "turn-queued-content",
+        "fixture-provider-model-route",
+        "inspect both files",
+        [],
+        None,
+        None,
+        None,
+    )
+    receipt = {
+        "role": "assistant",
+        "content": "I will inspect both files in order.",
+        "tool_calls": [
+            {"id": "read-one", "type": "function", "function": {"name": "read_one", "arguments": "{}"}},
+            {"id": "read-two", "type": "function", "function": {"name": "read_two", "arguments": "{}"}},
+        ],
+    }
+    turn.admit(receipt, tool_names=["read_one", "read_two"])
+
+    first = turn.next_receipt()
+    turn._loop_state.append({"tool": "read_one", "status": "executed", "outcome": {"status": "ok"}})
+    turn.settle()
+    second = turn.next_receipt()
+
+    assert first["content"] == receipt["content"]
+    assert second["content"] is None
+    assert [call["id"] for call in first["tool_calls"] + second["tool_calls"]] == ["read-one", "read-two"]
+
+
+def test_native_settles_approval_wrapper_when_inner_write_result_is_terminal_failure(tmp_path):
+    """A blocked approved write must settle its native call with the real failure."""
+    gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
+    binding = "fixture-provider-model-route"
+    call_id = "instantiate-009"
+    terminal_error = "A previous write did not finish cleanly."
+    class Planner:
+        @staticmethod
+        def native_result_observation(item, *, project_context_active=False):
+            return item
+
+    turn = NativeRuntimeTurn(
+        gateway.runtime_sessions,
+        Planner(),
+        "native-recovery-session",
+        "turn-009",
+        binding,
+        "instantiate the prefab",
+        [],
+        None,
+        None,
+        None,
+    )
+    receipt = call(call_id, "vrcforge_instantiate_prefab", {"name": "Milltina_Oneesan"})
+    turn.admit(receipt, tool_names=["vrcforge_instantiate_prefab"])
+    turn.next_receipt()
+    turn._loop_state.append({
+        "tool": "vrcforge_instantiate_prefab",
+        "status": "approval_pending",
+        "result": {
+            "ok": False,
+            "status": "failed",
+            "approval": {"status": "approved"},
+            "error": terminal_error,
+        },
+        "outcome": {"status": "failed", "summary": terminal_error},
+    })
+    turn.settle({"nextStep": "needs_user_action"})
+    snapshot = gateway.runtime_sessions.native_conversation(
+        "native-recovery-session", binding=binding
+    )
+    assert snapshot is not None
+    assert snapshot["binding"] == binding
+    assert snapshot["turnId"] == "turn-009"
+    assert gateway.runtime_sessions._native_pending(snapshot) == set()
+    tool_messages = [m for m in snapshot["messages"] if m.get("role") == "tool"]
+    assert len(tool_messages) == 1
+    assert tool_messages[0]["tool_call_id"] == call_id
+    observation = json.loads(tool_messages[0]["content"])["observations"][0]
+    assert observation["outcome"]["status"] == "failed"
+    assert observation["outcome"]["summary"] == terminal_error
+
+    # Re-open the actual native history store.  The owner primitive must be
+    # idempotent by the original call id and must not need a provider turn.
+    restored_gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
+    restored = restored_gateway.runtime_sessions.native_conversation(
+        "native-recovery-session", binding=binding
+    )
+    assert restored == snapshot
+    with patch.object(restored_gateway, "runtime_message", side_effect=AssertionError("fresh turn forbidden")):
+        with pytest.raises(ValueError, match="already settled"):
+            restored_gateway.runtime_sessions.settle_native_call(
+                "native-recovery-session",
+                binding=binding,
+                call_id=call_id,
+                content=json.dumps({"status": "failed", "error": "duplicate"}),
+            )
+    assert restored_gateway.runtime_sessions.native_conversation(
+        "native-recovery-session", binding=binding
+    ) == restored
 
 
 def test_native_approval_reject_keeps_call_id_and_never_runs_handler(tmp_path):

@@ -1222,6 +1222,93 @@ def test_provider_request_count_survives_an_async_task_boundary() -> None:
     assert resumed.approval_seed()["providerRequestCount"] == 2
 
 
+def test_usage_seed_preserves_turn_identity_and_binds_separate_runtime_parent() -> None:
+    loop = AgentTaskLoop("continue after approval", session_id="session-seed", turn_id="turn-original")
+    parent_usage = {
+        "exact": True,
+        "inputTokens": 11,
+        "outputTokens": 5,
+        "totalTokens": 16,
+    }
+    seed = loop.approval_seed(
+        requested_tool="vrcforge_capture_multi_screenshot",
+        requested_arguments={"angles": ["front"]},
+        provider_request_count=2,
+        provider_usage=parent_usage,
+        usage_parent_turn_id="turn-parent",
+    )
+    context = approval_task_context(
+        seed,
+        tool="vrcforge_capture_multi_screenshot",
+        arguments={"angles": ["front"]},
+    )
+    assert context is not None
+    assert seed["turnId"] == "turn-original"
+    assert seed["usageParentTurnId"] == "turn-parent"
+    assert context["turnId"] == "turn-original"
+    assert context["usageParentTurnId"] == "turn-parent"
+    assert len(context["providerUsageSnapshotSha256"]) == 64
+
+    resumed = AgentTaskLoop.from_approval_context(
+        context,
+        approval_completion(context, raw_result={"ok": True}, outcome=ok_outcome()),
+    )
+    next_seed = resumed.approval_seed(
+        requested_tool="vrcforge_capture_multi_screenshot",
+        requested_arguments={"angles": ["back"]},
+        provider_request_count=3,
+        provider_usage={
+            "exact": True,
+            "inputTokens": 14,
+            "outputTokens": 6,
+            "totalTokens": 20,
+        },
+        usage_parent_turn_id="turn-current",
+    )
+    assert next_seed["turnId"] == "turn-original"
+    assert next_seed["usageParentTurnId"] == "turn-current"
+    assert next_seed["providerUsageSnapshotSha256"] != seed["providerUsageSnapshotSha256"]
+
+
+def test_malformed_usage_seed_digest_is_preserved_as_unknown_marker() -> None:
+    from request_usage_reconciliation import reconcile_request_usage
+
+    loop = AgentTaskLoop("continue after approval", session_id="session-seed-invalid")
+    seed = loop.approval_seed(provider_request_count=2, provider_usage={
+        "exact": True, "inputTokens": 2, "outputTokens": 1, "totalTokens": 3,
+    }, usage_parent_turn_id="turn-parent")
+    seed["providerUsageSnapshotSha256"] = "not-a-digest"
+    context = approval_task_context(seed, tool="shell", arguments={})
+    assert context is not None
+    assert context["providerUsageSnapshotSha256"] == ""
+    result = reconcile_request_usage(
+        chain_id=context["taskId"],
+        expected_chain_id=context["taskId"],
+        parent_turn_id=context["usageParentTurnId"],
+        expected_parent_turn_id=context["usageParentTurnId"],
+        turn_id="turn-next",
+        parent_request_count=context["providerRequestCount"],
+        parent_usage=context["providerUsage"],
+        observed_delta={
+            "exact": True,
+            "requestCount": 1,
+            "inputTokens": 1,
+            "outputTokens": 1,
+            "totalTokens": 2,
+        },
+        cumulative_usage={
+            "exact": True,
+            "requestCount": 3,
+            "inputTokens": 3,
+            "outputTokens": 2,
+            "totalTokens": 5,
+        },
+        expected_parent_snapshot_sha256=context["providerUsageSnapshotSha256"],
+    )
+    assert result["status"] == "unknown"
+    assert result["reason"] == "parent_snapshot_missing"
+
+
 def test_provider_usage_survives_an_async_task_boundary_without_readding() -> None:
     loop = AgentTaskLoop(
         "continue after approval",

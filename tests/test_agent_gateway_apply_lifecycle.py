@@ -6,7 +6,11 @@ from pathlib import Path
 
 import pytest
 
-from agent_gateway import AgentGateway, AgentGatewayError
+from agent_gateway import (
+    AgentGateway,
+    AgentGatewayError,
+    visual_audit_correction_candidate,
+)
 from agent_approval_transactions import _confirmed_atomic_rollback_failure
 from approved_unity_execution import current_approved_unity_execution
 from unity_mcp_core_client import UnityMcpCoreClient
@@ -24,6 +28,34 @@ def create_project(root: Path) -> Path:
         encoding="utf-8",
     )
     return project
+
+
+def test_visual_audit_clipping_is_a_bounded_planner_correction_candidate() -> None:
+    assert visual_audit_correction_candidate(
+        "vrcforge_vision_audit_multi",
+        {
+            "outcome": {"status": "needs_user_action"},
+            "result": {
+                "visualVerified": False,
+                "coverageComplete": True,
+                "captureEvidenceVerified": True,
+                "overallStatus": "clipping",
+                "results": [{"angle": "back", "status": "clipping"}],
+            },
+        },
+        correction_attempted=False,
+    ) is True
+
+
+def test_visual_audit_candidate_does_not_open_a_write_failure() -> None:
+    assert visual_audit_correction_candidate(
+        "vrcforge_create_gameobject",
+        {
+            "outcome": {"status": "needs_user_action"},
+            "result": {"persistedReadback": False, "sceneSaved": False},
+        },
+        correction_attempted=False,
+    ) is False
 
 
 def approved_write(

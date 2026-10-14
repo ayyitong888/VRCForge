@@ -33,12 +33,14 @@ class AgentRuntimeSessionState:
 
     MAX_STEER_MAILBOX = 20
     MAX_FINAL_RESPONSES = 8
-    MAX_NATIVE_CONVERSATION_BYTES = 2 * 1024 * 1024
+    # Bound an individual provider receipt, not the accumulated local session.
+    # Model request capacity is enforced by the planner's verified token guard.
+    MAX_NATIVE_RESPONSE_BYTES = 2 * 1024 * 1024
 
     __slots__ = (
         "_ports",
         "_sessions",
-        "_cancelled_ids",
+        "_cancelled_targets",
         "_active_turns",
         "_finalizing_turns",
         "_final_responses",
@@ -53,7 +55,10 @@ class AgentRuntimeSessionState:
     def __init__(self, ports: AgentRuntimeSessionStatePorts) -> None:
         self._ports = ports
         self._sessions: dict[str, dict[str, Any]] = {}
-        self._cancelled_ids: set[str] = set()
+        # Cancellation is scoped to one identity tuple.  A session-only target
+        # is represented with empty turn/client fields and intentionally keeps
+        # the supported "stop every turn in this session" behavior.
+        self._cancelled_targets: set[tuple[str, str, str]] = set()
         self._active_turns: dict[tuple[str, str], str] = {}
         self._finalizing_turns: set[tuple[str, str]] = set()
         self._final_responses: dict[str, list[dict[str, Any]]] = {}
@@ -113,7 +118,7 @@ class AgentRuntimeSessionState:
     def clear(self) -> None:
         with self._ports.shared_state_lock:
             self._sessions.clear()
-            self._cancelled_ids.clear()
+            self._cancelled_targets.clear()
             self._active_turns.clear()
             self._finalizing_turns.clear()
             self._final_responses.clear()
@@ -151,6 +156,9 @@ class AgentRuntimeSessionState:
                 self._finalizing_turns.discard(key)
                 self._steer_mailboxes.pop(key, None)
                 self._steer_seen_ids.pop(key, None)
+            self._cancelled_targets = {
+                target for target in self._cancelled_targets if target[0] != session_id
+            }
             self._final_responses.pop(session_id, None)
 
     def get_session(self, session_id: str) -> dict[str, Any] | None:
@@ -176,9 +184,12 @@ class AgentRuntimeSessionState:
 
     @classmethod
     def _native_size_ok(cls, snapshot: dict[str, Any]) -> None:
-        encoded = json.dumps(snapshot, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-        if len(encoded) > cls.MAX_NATIVE_CONVERSATION_BYTES:
-            raise ValueError("Conversation context size exceeds 2MiB. Use Compact conversation or start a new conversation before retrying.")
+        # Complete local history must remain saveable after a tool has run.
+        # Do not conflate its serialized size with the model context window.
+        for message in snapshot.get("messages", []):
+            encoded = json.dumps(message, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")
+            if len(encoded) > cls.MAX_NATIVE_RESPONSE_BYTES:
+                raise ValueError("Individual native message exceeds the size limit")
 
     @staticmethod
     def _native_pending(snapshot: dict[str, Any]) -> set[str]:
@@ -306,7 +317,7 @@ class AgentRuntimeSessionState:
                 serialized = json.dumps(responses_output, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
             except (TypeError, ValueError) as exc:
                 raise ValueError("native Responses output items are not JSON-safe") from exc
-            if len(serialized.encode("utf-8")) > cls.MAX_NATIVE_CONVERSATION_BYTES:
+            if len(serialized.encode("utf-8")) > cls.MAX_NATIVE_RESPONSE_BYTES:
                 raise ValueError("native Responses output items exceed the size limit")
         return normalized
 
@@ -792,7 +803,10 @@ class AgentRuntimeSessionState:
         session_id: str = "",
         turn_id: str = "",
         client_turn_id: str = "",
-    ) -> None:
+    ) -> bool:
+        session_id = str(session_id or "").strip()
+        turn_id = str(turn_id or "").strip()
+        client_turn_id = str(client_turn_id or "").strip()
         with self._ports.shared_state_lock:
             if session_id and not (turn_id or client_turn_id):
                 active = [
@@ -802,20 +816,46 @@ class AgentRuntimeSessionState:
                 ]
                 if active:
                     for (_active_session_id, active_client_turn_id), active_turn_id in active:
-                        if active_turn_id:
-                            self._cancelled_ids.add(active_turn_id)
-                        if active_client_turn_id:
-                            self._cancelled_ids.add(active_client_turn_id)
+                        self._cancelled_targets.add(
+                            (session_id, active_turn_id, active_client_turn_id)
+                        )
                 else:
                     # Preserve the supported "stop before the turn starts"
                     # behavior; the next turn consumes this session marker.
-                    self._cancelled_ids.add(session_id)
-            if turn_id:
-                self._cancelled_ids.add(turn_id)
-            if client_turn_id:
-                self._cancelled_ids.add(client_turn_id)
+                    self._cancelled_targets.add((session_id, "", ""))
+                return True
+
+            # When one or more turn identities are supplied, all of them must
+            # resolve to one active target.  A known partial collision is
+            # rejected instead of allowing an OR match to cancel another turn;
+            # an entirely unknown tuple is retained for a turn that is about
+            # to begin.
+            active_targets = [
+                (active_session_id, active_turn_id, active_client_id)
+                for (active_session_id, active_client_id), active_turn_id in self._active_turns.items()
+                if active_turn_id and active_client_id
+            ]
+            matching = [
+                target for target in active_targets
+                if (not session_id or target[0] == session_id)
+                and (not turn_id or target[1] == turn_id)
+                and (not client_turn_id or target[2] == client_turn_id)
+            ]
+            colliding = [
+                target for target in active_targets
+                if (session_id and target[0] == session_id)
+                or (turn_id and target[1] == turn_id)
+                or (client_turn_id and target[2] == client_turn_id)
+            ]
+            if colliding and len(matching) != 1:
+                return False
+            if matching:
+                self._cancelled_targets.add(matching[0])
+            else:
+                self._cancelled_targets.add((session_id, turn_id, client_turn_id))
             if session_id and client_turn_id:
                 self._steer_mailboxes.pop((session_id, client_turn_id), None)
+            return True
 
     def begin_turn(
         self,
@@ -841,7 +881,7 @@ class AgentRuntimeSessionState:
         with self._ports.shared_state_lock:
             key = (session_id, client_turn_id)
             active_turn_id = self._active_turns.get(key)
-            if turn_id and active_turn_id != turn_id:
+            if turn_id and active_turn_id is not None and active_turn_id != turn_id:
                 return []
             undrained = copy.deepcopy(self._steer_mailboxes.get(key, []))
             if active_turn_id:
@@ -851,9 +891,19 @@ class AgentRuntimeSessionState:
             self._steer_seen_ids.pop(key, None)
             # A completed turn must not leave cancellation/steer state behind
             # that could affect a later turn reusing either identifier.
-            self._cancelled_ids.discard(client_turn_id)
-            if active_turn_id:
-                self._cancelled_ids.discard(active_turn_id)
+            self._cancelled_targets = {
+                target
+                for target in self._cancelled_targets
+                if not (
+                    (target[1] or target[2])
+                    and self._cancel_target_matches(
+                        target,
+                        session_id=session_id,
+                        turn_id=turn_id,
+                        client_turn_id=client_turn_id,
+                    )
+                )
+            }
             return undrained
 
     def owns_turn(self, *, session_id: str, turn_id: str, client_turn_id: str) -> bool:
@@ -924,6 +974,30 @@ class AgentRuntimeSessionState:
                 return result
         return {"ok": True, "sessionId": session_id, "clientTurnId": client_turn_id, "status": "missing"}
 
+    def runtime_waiting_for_configuration(self) -> bool:
+        """Only live-process waits hold settings; historical pending calls do not."""
+        with self._ports.shared_state_lock:
+            for session_id, entries in self._final_responses.items():
+                if not entries:
+                    continue
+                item = entries[-1]
+                if item.get("status") == "failed":
+                    continue
+                response = item.get("response") or {}
+                if self.cancel_requested(session_id=session_id, turn_id=str(response.get("turnId") or response.get("turn_id") or ""),
+                                         client_turn_id=str(item.get("clientTurnId") or "")):
+                    continue
+                plan = response.get("plan") or {}
+                if plan.get("nextStep") in {"cancelled", "interrupted", "failed", "done"}:
+                    continue
+                if (plan.get("completionGate") or {}).get("reason") == "question_pending":
+                    return True
+                for field in ("write", "shell", "skill"):
+                    payload = response.get(field) or {}
+                    if payload.get("status") in {"approval_pending", "pending_approval", "pending", "running", "accepted", "queued"}:
+                        return True
+            return False
+
     def submit_steer(
         self,
         *,
@@ -988,11 +1062,22 @@ class AgentRuntimeSessionState:
         turn_id: str = "",
         client_turn_id: str = "",
     ) -> bool:
+        session_id = str(session_id or "").strip()
+        turn_id = str(turn_id or "").strip()
+        client_turn_id = str(client_turn_id or "").strip()
         candidates = [item for item in (session_id, turn_id, client_turn_id) if item]
         if not candidates:
             return False
         with self._ports.shared_state_lock:
-            return any(item in self._cancelled_ids for item in candidates)
+            return any(
+                self._cancel_target_matches(
+                    target,
+                    session_id=session_id,
+                    turn_id=turn_id,
+                    client_turn_id=client_turn_id,
+                )
+                for target in self._cancelled_targets
+            )
 
     def consume_cancel_request(
         self,
@@ -1001,14 +1086,62 @@ class AgentRuntimeSessionState:
         turn_id: str = "",
         client_turn_id: str = "",
     ) -> bool:
+        session_id = str(session_id or "").strip()
+        turn_id = str(turn_id or "").strip()
+        client_turn_id = str(client_turn_id or "").strip()
         candidates = [item for item in (client_turn_id, turn_id, session_id) if item]
         if not candidates:
             return False
         with self._ports.shared_state_lock:
-            matched = [item for item in candidates if item in self._cancelled_ids]
-            for item in matched:
-                self._cancelled_ids.discard(item)
+            matched = {
+                target
+                for target in self._cancelled_targets
+                if self._cancel_target_matches(
+                    target,
+                    session_id=session_id,
+                    turn_id=turn_id,
+                    client_turn_id=client_turn_id,
+                )
+            }
+            self._cancelled_targets.difference_update(matched)
             return bool(matched)
+
+    @staticmethod
+    def _cancel_target_matches(
+        target: tuple[str, str, str],
+        *,
+        session_id: str,
+        turn_id: str,
+        client_turn_id: str,
+    ) -> bool:
+        target_session, target_turn, target_client = target
+        provided = sum(bool(item) for item in (session_id, turn_id, client_turn_id))
+        if not provided:
+            return False
+        # A session-only marker intentionally applies to every later turn in
+        # that session, including a full identity supplied when the turn begins.
+        if target_session and not target_turn and not target_client:
+            return bool(session_id and target_session == session_id)
+        # A session-only query must not accidentally match a turn-specific
+        # target; it means "stop the whole session" only when such a marker was
+        # explicitly created.
+        if provided == 1 and session_id:
+            return False
+        shared_identity = any(
+            query and stored and query == stored
+            for query, stored in (
+                (session_id, target_session),
+                (turn_id, target_turn),
+                (client_turn_id, target_client),
+            )
+        )
+        if not shared_identity:
+            return False
+        return (
+            (not session_id or not target_session or target_session == session_id)
+            and (not turn_id or not target_turn or target_turn == turn_id)
+            and (not client_turn_id or not target_client or target_client == client_turn_id)
+        )
 
     def set_stream_context(self, value: dict[str, str]) -> None:
         self._stream_context.value = dict(value)
@@ -1018,3 +1151,20 @@ class AgentRuntimeSessionState:
 
     def stream_context(self) -> dict[str, str]:
         return dict(getattr(self._stream_context, "value", {}) or {})
+
+    def next_provider_request_index(self) -> int | None:
+        """Allocate on the bound runtime owner thread, independently of usage.
+
+        The existing turn owner admits calls serially. Provider worker callbacks
+        receive this value by closure; no cross-turn map or global counter exists.
+        Unbound probes have no turn index. Request UUIDs remain globally unique.
+        """
+        context = self.stream_context()
+        identity = tuple(context.get(key) or "" for key in ("sessionId", "turnId", "clientTurnId"))
+        if not all(identity):
+            return None
+        if getattr(self._stream_context, "request_identity", None) != identity:
+            self._stream_context.request_identity = identity
+            self._stream_context.request_index = 0
+        self._stream_context.request_index += 1
+        return self._stream_context.request_index

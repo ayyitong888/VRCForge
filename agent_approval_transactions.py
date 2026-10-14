@@ -433,7 +433,6 @@ AVATAR_UPLOAD_MANUAL_APPROVAL_REASON = (
 )
 ROLLBACK_MANUAL_APPROVAL_TOOLS = frozenset(
     {
-        "vrcforge_restore_checkpoint",
         "vrcforge_rollback_parameters",
         "vrcforge_rollback_project_lifecycle",
         "vrcforge_rollback_project_catalog_registration",
@@ -446,7 +445,7 @@ def _always_manual_approval_reason(target_tool: str, full_permission: bool, hand
     """Share the protected-action exceptions between internal and external approval."""
     if target_tool == "vrcforge_install_user_unity_tools":
         return handler_reason
-    if target_tool == "vrcforge_restore_checkpoint":
+    if target_tool == "vrcforge_restore_checkpoint" and not full_permission:
         return CHECKPOINT_RESTORE_MANUAL_APPROVAL_REASON
     if target_tool in ROLLBACK_MANUAL_APPROVAL_TOOLS:
         return ROLLBACK_MANUAL_APPROVAL_REASON
@@ -1006,7 +1005,10 @@ class AgentApprovalTransactionService:
         config = config or self._ports.ensure_config()
         mode = normalize_execution_mode(config.execution_mode)
         explicit_reason = str(approval.get("explicitApprovalReason") or "").strip()
-        if str(approval.get("targetTool") or "") == "vrcforge_restore_checkpoint":
+        if (
+            str(approval.get("targetTool") or "") == "vrcforge_restore_checkpoint"
+            and mode != "roslyn_full_auto"
+        ):
             return explicit_reason or CHECKPOINT_RESTORE_MANUAL_APPROVAL_REASON
         if mode == "roslyn_full_auto":
             return ""
@@ -1178,6 +1180,24 @@ class AgentApprovalTransactionService:
             payload["error"] = outcome["error"]
         return payload
 
+    def _restore_request_is_incident_bound(self, arguments: Mapping[str, Any]) -> bool:
+        requested_recovery_id = str(
+            arguments.get("recoveryId") or arguments.get("recovery_id") or ""
+        ).strip()
+        requested_checkpoint_id = str(
+            arguments.get("checkpointId") or arguments.get("checkpoint_id") or ""
+        ).strip()
+        for recovery in self._ports.checkpoint.active_apply_recoveries():
+            recovery_id = str(recovery.get("id") or "").strip()
+            checkpoint_id = str(recovery.get("checkpointId") or "").strip()
+            if requested_recovery_id:
+                if recovery_id != requested_recovery_id:
+                    continue
+                return not requested_checkpoint_id or checkpoint_id == requested_checkpoint_id
+            if requested_checkpoint_id and checkpoint_id == requested_checkpoint_id:
+                return True
+        return False
+
     def create_apply_request(
         self,
         params: dict[str, Any],
@@ -1204,6 +1224,8 @@ class AgentApprovalTransactionService:
             raise AgentGatewayError(f"Unknown or unavailable write target: {target_tool}", status_code=404)
 
         arguments = ensure_dict(params.get("arguments") or params.get("params") or {})
+        arguments.pop("_vrcforge_incident_restore_auto", None)
+        arguments.pop("_restorePrepareForRecovery", None)
         if write_handler.requires_approved_execution_context and arguments.get("preview") is True:
             raise AgentGatewayError(
                 f"{target_tool} is an execution entry that performs the requested change; "
@@ -1289,6 +1311,11 @@ class AgentApprovalTransactionService:
         always_manual_reason = _always_manual_approval_reason(
             target_tool, full_permission_auto, mandatory_manual_approval_reason,
         )
+        if target_tool == "vrcforge_restore_checkpoint" and full_permission_auto:
+            if not self._restore_request_is_incident_bound(arguments):
+                always_manual_reason = CHECKPOINT_RESTORE_MANUAL_APPROVAL_REASON
+            else:
+                arguments["_vrcforge_incident_restore_auto"] = True
         requires_explicit_for_mode = bool(always_manual_reason) or (
             False if full_permission_auto else (
                 never_auto_approve
@@ -2799,6 +2826,10 @@ class AgentApprovalTransactionService:
             "restoreTool": "vrcforge_restore_checkpoint",
             "resolveTool": "vrcforge_resolve_interrupted_apply_recovery",
             "blockingWrites": True,
+            "restoreAttemptCount": 0,
+            "restoreAttemptLimit": 3,
+            "restoreSafetyCheckpointId": "",
+            "restoreSafetyCheckpointIds": [],
         }
         saved = self._ports.checkpoint.append_apply_recovery_entry(record)
         self._ports.append_audit({"event": "apply_recovery_started", "recovery": saved})
@@ -2843,6 +2874,16 @@ class AgentApprovalTransactionService:
             "resolveTool": "vrcforge_resolve_interrupted_apply_recovery",
             "blockingWrites": status in APPLY_RECOVERY_ACTIVE_STATUSES,
         }
+        for key in (
+            "restoreAttemptCount",
+            "restoreAttemptLimit",
+            "restoreSafetyCheckpointId",
+            "restoreSafetyCheckpointIds",
+            "restoreSafetyCheckpoint",
+            "recoveryIncidentKey",
+        ):
+            if key in recovery:
+                record[key] = recovery[key]
         if error:
             record["error"] = error
         if note:
@@ -3180,7 +3221,7 @@ class AgentApprovalTransactionService:
                 "coverageAudit": ROLLBACK_COVERAGE_AUDIT_SCHEMA,
                 "recoveryLedger": APPLY_RECOVERY_SCHEMA,
                 "postRestoreValidationRequired": False,
-                "note": "Marks a persisted interrupted-write recovery as manually resolved after the user confirms the Unity project state was handled.",
+                "note": "Marks a persisted interrupted-write recovery resolved from the supplied confirmation note; this operation does not assert an independent readback.",
             }
         if handler.name in LOCAL_STATE_CHECKPOINT_TARGETS:
             return {
@@ -3444,6 +3485,8 @@ class AgentApprovalTransactionService:
             )
 
         arguments = ensure_dict(params or {})
+        arguments.pop("_vrcforge_incident_restore_auto", None)
+        arguments.pop("_restorePrepareForRecovery", None)
         caller_requested_preview = arguments.get("preview") is True
         user_constraints = self._ports.read_user_constraints()
         arguments = self._inject_user_constraints_for_apply(arguments, user_constraints)
@@ -3517,6 +3560,14 @@ class AgentApprovalTransactionService:
         always_manual_reason = _always_manual_approval_reason(
             normalized_target, full_permission, mandatory_confirmation_reason,
         )
+        if (
+            normalized_target == "vrcforge_restore_checkpoint"
+            and full_permission
+            and not self._restore_request_is_incident_bound(arguments)
+        ):
+            always_manual_reason = CHECKPOINT_RESTORE_MANUAL_APPROVAL_REASON
+        elif normalized_target == "vrcforge_restore_checkpoint" and full_permission:
+            arguments["_vrcforge_incident_restore_auto"] = True
         confirmation_reason = str(always_manual_reason or (
             (
                 mandatory_confirmation_reason

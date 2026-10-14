@@ -76,6 +76,123 @@ def test_native_compaction_reuses_port_and_preserves_current_receipts():
     assert usage["cumulativeInputTokens"] >= 9000 and usage["compactionCount"] == 1
 
 
+def test_native_guard_excludes_inline_image_bytes_from_measurement():
+    _state, planner, _model, _turn = fixture(Compactor(), limit=8000)
+    request = {"messages": [{
+        "role": "user",
+        "content": [{
+            "type": "image_url",
+            "image_url": {"url": "data:image/png;base64," + "A" * 100_000},
+        }],
+    }]}
+    with planner.bind_turn({}):
+        guard = planner.native_context_guard(request)
+    assert guard is not None
+    assert guard["requestTokens"] < 200
+
+
+def test_native_image_is_rebound_after_compaction_without_entering_summary():
+    compactor = Compactor()
+    _state, planner, model, turn = fixture(compactor, limit=8000)
+    observe = {
+        "turn": {
+            "directImageInput": True,
+            "attachments": [{
+                "dataUrl": "data:image/png;base64," + "A" * 100_000,
+            }],
+        },
+    }
+    with planner.bind_turn({}):
+        result = planner.plan_agent_turn(
+            "Continue checking", {}, observe, native_turn=turn,
+        )
+    assert result["nextStep"] == "done"
+    assert turn.compaction["applied"] is True
+    assert "data:image/png;base64," not in json.dumps(compactor.calls[0][0])
+    current = next(
+        item for item in model.requests[0]["messages"]
+        if item.get("role") == "user" and isinstance(item.get("content"), list)
+    )
+    assert current["content"][0] == {"type": "text", "text": "Continue checking"}
+    assert current["content"][1]["type"] == "image_url"
+    assert current["content"][1]["image_url"]["url"].startswith("data:image/png;base64,")
+
+
+def test_native_image_without_compaction_reports_text_only_measurement():
+    _state, planner, model, turn = fixture(prior=False, limit=500_000)
+    usage = {}
+    observe = {
+        "turn": {
+            "directImageInput": True,
+            "attachments": [{"dataUrl": "data:image/png;base64," + "A" * 100_000}],
+        },
+    }
+    with planner.bind_turn({}):
+        result = planner.plan_agent_turn("Continue checking", {}, observe, native_turn=turn, context_usage=usage)
+        guard = planner.native_context_guard(model.requests[0])
+    assert result["nextStep"] == "done"
+    assert turn.compaction is None
+    _plain_state, plain_planner, _plain_model, plain_turn = fixture(prior=False, limit=500_000)
+    plain_usage = {}
+    with plain_planner.bind_turn({}):
+        plain_planner.plan_agent_turn("Continue checking", {}, {}, native_turn=plain_turn, context_usage=plain_usage)
+    assert abs(usage["lastPromptEstimatedTokens"] - plain_usage["lastPromptEstimatedTokens"]) < 200
+    assert usage["lastPromptCharacterCount"] < plain_usage["lastPromptCharacterCount"] + 500
+    assert guard["measurement"] == "text_only_with_images"
+    assert guard["imageCount"] == 1
+    assert guard["imageTokenEstimateAvailable"] is False
+    assert any(
+        item.get("role") == "user"
+        and isinstance(item.get("content"), list)
+        and any(part.get("type") == "image_url" for part in item["content"])
+        for item in model.requests[0]["messages"]
+    )
+    image = next(
+        part for item in model.requests[0]["messages"]
+        if item.get("role") == "user" and isinstance(item.get("content"), list)
+        for part in item["content"] if part.get("type") == "image_url"
+    )
+    assert len(image["image_url"]["url"]) > 1_000
+
+
+def test_native_text_prompt_measurement_still_counts_serialized_request():
+    _state, planner, _model, turn = fixture(prior=False, limit=500_000)
+    usage = {}
+    with planner.bind_turn({}):
+        result = planner.plan_agent_turn("Continue checking", {}, {}, native_turn=turn, context_usage=usage)
+    assert result["nextStep"] == "done"
+    assert usage["lastPromptEstimatedTokens"] > 0
+    assert usage["lastPromptCharacterCount"] > len("Continue checking")
+
+
+def test_native_image_survives_followup_tool_round_without_compaction():
+    state, planner, model, turn = fixture(prior=False, limit=500_000)
+    state.append_native_assistant("s", binding="b", message={
+        "role": "assistant", "content": None, "tool_calls": [{
+            "id": "followup-read", "type": "function",
+            "function": {"name": "read", "arguments": "{}"},
+        }],
+    })
+    state.settle_native_call("s", binding="b", call_id="followup-read", content='{"status":"ok"}')
+    state.append_native_user("s", binding="b", message="Continue checking")
+    observe = {
+        "turn": {
+            "directImageInput": True,
+            "attachments": [{"dataUrl": "data:image/png;base64," + "A" * 1_000}],
+        },
+    }
+    with planner.bind_turn({}):
+        result = planner.plan_agent_turn("Continue checking", {}, observe, native_turn=turn)
+    assert result["nextStep"] == "done"
+    assert turn.compaction is None
+    assert any(
+        item.get("role") == "user"
+        and isinstance(item.get("content"), list)
+        and any(part.get("type") == "image_url" for part in item["content"])
+        for item in model.requests[0]["messages"]
+    )
+
+
 def test_native_compaction_restores_exact_prefix_policy_once_without_touching_suffix():
     compactor = Compactor(summary="Old work. " + SCAN_RESULT_CONTINUATION_POLICY)
     state, planner, model, turn = fixture(compactor, prior_policy=True)
@@ -214,6 +331,38 @@ def test_native_current_turn_overflow_keeps_exact_history_without_compactor_call
     assert not compactor.calls and not model.requests
     assert result["nextStep"] == "context_compaction_required"
     assert state.native_conversation("s", binding="b") == before
+
+
+def test_native_cas_race_rebuilds_history_before_send_without_replay():
+    """A failed compact CAS must send the current transcript, without replay."""
+    compactor = Compactor(summary="stale compact summary")
+    state, planner, model, turn = fixture(compactor, limit=18_000)
+
+    def race_update() -> None:
+        state.append_native_user("s", binding="b", message="concurrent update")
+
+    compactor.hook = race_update
+    with planner.bind_turn({}):
+        result = planner.plan_agent_turn(
+            "Continue checking", {}, {}, native_turn=turn,
+        )
+
+    assert result["nextStep"] == "done"
+    assert turn.compaction is not None
+    assert turn.compaction["applied"] is False
+    assert model.requests
+    request_messages = model.requests[0]["messages"]
+    assert sum(
+        item.get("role") == "user" and item.get("content") == "concurrent update"
+        for item in request_messages
+    ) == 1
+    assert sum(
+        item.get("role") == "assistant" and any(
+            call.get("id") == "read-old" for call in item.get("tool_calls") or []
+        ) for item in request_messages
+    ) == 1
+    assert "stale compact summary" not in json.dumps(request_messages)
+    assert state._native_pending(turn.snapshot()) == set()
 
 
 def test_native_gateway_hydrates_visible_history_once(tmp_path):

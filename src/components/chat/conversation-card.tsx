@@ -11,13 +11,14 @@ import {
   Wrench,
   X,
 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { isValidElement, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import i18n from "../../i18n";
 import type { AgentApproval } from "../../lib/api";
+import { resolveAttachmentPayloadReferences, type AttachmentPayloadVault } from "../../lib/attachment-payloads";
 import { projectRuntimeResponseForDisplay } from "../../lib/chat-timeline-presentation";
 import type { ApprovalActionState, ChatAttachment, ConversationItem } from "../../lib/chat-types";
-import { elapsedSecondsSince, providerReconnectAttempt, type AgentRuntimePhase } from "../../lib/chat-streaming";
+import { elapsedSecondsSince, providerWaitingWindow, type AgentRuntimePhase } from "../../lib/chat-streaming";
 import { copyableAgentDialogueText } from "../../lib/conversation-utils";
 import type { PathToSkillOperationSummary } from "../../lib/path-to-skill-context";
 import { cn, formatCount } from "../../lib/utils";
@@ -31,6 +32,7 @@ import { RunRow, buildAgentTimelineRows, buildDurableTimelineRows, displayPlanne
 
 export function ConversationCard({
   item,
+  attachmentPayloads,
   approval,
   approvalAction,
   canRetry,
@@ -53,6 +55,7 @@ export function ConversationCard({
   onSaveOperationAsSkill,
 }: {
   item: Exclude<ConversationItem, { type: "handoff_card" }>;
+  attachmentPayloads?: AttachmentPayloadVault;
   approval?: AgentApproval | null;
   approvalAction?: ApprovalActionState;
   editing?: boolean;
@@ -77,6 +80,11 @@ export function ConversationCard({
   onSaveOperationAsSkill?: (summary: PathToSkillOperationSummary) => void;
 }) {
   const { t } = useTranslation();
+  const storedAttachments = item.type === "user" ? item.attachments : undefined;
+  const restoredAttachments = useMemo(
+    () => resolveAttachmentPayloadReferences(storedAttachments || [], attachmentPayloads),
+    [storedAttachments, attachmentPayloads],
+  );
   const streamingCreatedAt = item.type === "streaming" ? item.createdAt : undefined;
   const [streamingNowMs, setStreamingNowMs] = useState(() => Date.now());
   useEffect(() => {
@@ -86,17 +94,17 @@ export function ConversationCard({
     return () => window.clearInterval(timer);
   }, [streamingCreatedAt]);
   if (item.type === "user") {
-    const attachments = item.attachments || [];
+    const attachments = restoredAttachments;
     const displayedText = editing ? editingText : item.text;
-    const draftAttachments = editingAttachments || attachments;
+    const draftAttachments = editing ? editingAttachments || attachments : attachments;
     const imageAttachments = draftAttachments.filter((attachment) => attachment.dataUrl && attachment.type.startsWith("image/"));
     const otherAttachments = draftAttachments.filter((attachment) => !attachment.dataUrl || !attachment.type.startsWith("image/"));
     const hasEditingState = Boolean(editing);
 
     if (hasEditingState) {
       return (
-        <div className="group flex justify-end">
-          <div className="relative flex w-full max-w-[78%] flex-col items-end gap-2">
+        <div className="group flex min-w-0 justify-end">
+          <div className="relative flex min-w-0 w-full max-w-[78%] flex-col items-end gap-2">
             {item.queuedFrom ? (
               <div className="flex items-center gap-1 rounded-full bg-muted/70 px-2 py-1 text-[11px] text-muted-foreground">
                 <MessageSquare className="h-3 w-3" />
@@ -166,8 +174,8 @@ export function ConversationCard({
     }
 
     return (
-      <div className="group flex justify-end">
-        <div className="relative flex max-w-[78%] flex-col items-end gap-2">
+      <div className="group flex min-w-0 justify-end">
+        <div className="relative flex min-w-0 max-w-[78%] flex-col items-end gap-2">
           {item.queuedFrom || item.queueStatus ? (
             <div className="flex items-center gap-1 rounded-full bg-muted/70 px-2 py-1 text-[11px] text-muted-foreground">
               <MessageSquare className="h-3 w-3" />
@@ -176,8 +184,8 @@ export function ConversationCard({
           ) : null}
           {imageAttachments.length ? <UserImageAttachments messageId={item.id} attachments={imageAttachments} onImport={onImportAttachment} /> : null}
           {item.text ? (
-            <div className="rounded-2xl bg-muted px-4 py-2.5 text-sm text-foreground">
-              <ChatMarkdown text={item.text} />
+            <div className="min-w-0 max-w-full rounded-2xl bg-muted px-4 py-2.5 text-sm text-foreground [&_.chat-markdown]:[overflow-wrap:anywhere]" data-user-message-bubble>
+              <UserMessageText text={item.text} />
             </div>
           ) : null}
           {otherAttachments.length ? (
@@ -216,21 +224,35 @@ export function ConversationCard({
 
   if (item.type === "streaming") {
     const runtimeModelLabel = formatRuntimeModelLine(item.providerLabel, item.model);
-    // The streaming text is the complete live answer. Keep it visible while
-    // the durable process group supplies the execution history, but do not
-    // render the same assistant event a second time when the turn closes.
-    const timelineRows = buildDurableTimelineRows(item.timeline, elapsedSecondsSince(item.createdAt, streamingNowMs), "", [], { includeAssistant: false });
+    const streamingElapsed = elapsedSecondsSince(item.createdAt, streamingNowMs);
+    // Keep public assistant updates at their durable timeline position. The
+    // trailing event is suppressed only when it is the same text as the live
+    // buffer, so progress updates remain visible without duplicating the tail.
+    const timelineRows = buildDurableTimelineRows(item.timeline, undefined, "", [], {
+      live: true,
+      renderElapsed: false,
+      processTitleElapsed: streamingElapsed,
+      providerLine: runtimeModelLabel,
+      suppressTrailingAssistantText: item.text,
+    });
+    const hasTimelineProcessRows = timelineRows.some((row) => (
+      isValidElement(row)
+      && Boolean((row.props as { "data-agent-turn-process-group"?: boolean })["data-agent-turn-process-group"])
+    ));
     return (
       <div className="group flex justify-start" data-conversation-streaming-turn={item.clientTurnId}>
-        <div className="relative w-full max-w-[85%] space-y-1.5 px-1 text-sm">
-          <StreamingPhaseStatus item={item} nowMs={streamingNowMs} showElapsed={!timelineRows.length} />
-          {timelineRows.length ? <div data-vrcforge-live-runtime-timeline>{timelineRows}</div> : null}
-          {item.text ? <ChatMarkdown text={item.text} /> : null}
-          <div className="mt-1 flex items-center gap-2 text-[10px] text-muted-foreground">
-            {runtimeModelLabel ? (
-              <span>{runtimeModelLabel}</span>
-            ) : null}
-          </div>
+        <div className="relative flex w-full max-w-[85%] flex-col gap-3 px-1 text-sm leading-relaxed">
+          <StreamingPhaseStatus item={item} nowMs={streamingNowMs} showElapsed={false} />
+          {timelineRows.length ? <div className="space-y-3" data-vrcforge-live-runtime-timeline>{timelineRows}</div> : null}
+          {item.text ? <div className="leading-relaxed"><ChatMarkdown text={item.text} /></div> : null}
+          {(!hasTimelineProcessRows && streamingElapsed !== undefined) || runtimeModelLabel ? (
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-1 border-t border-border/60 pt-2 text-[10px] leading-relaxed text-muted-foreground">
+              {!hasTimelineProcessRows && streamingElapsed !== undefined ? (
+                <span>{t("agent.turnDuration", { duration: `${streamingElapsed}s` })}</span>
+              ) : null}
+              {runtimeModelLabel ? <span className="text-muted-foreground/75">{runtimeModelLabel}</span> : null}
+            </div>
+          ) : null}
         </div>
       </div>
     );
@@ -301,7 +323,7 @@ export function ConversationCard({
   }
 
   if (item.type === "timeline_event") {
-    const timelineRows = buildDurableTimelineRows([item.event]);
+    const timelineRows = buildDurableTimelineRows([item.event], undefined, "", [], { live: true });
     if (!timelineRows.length) return null;
     return (
       <div className="group flex justify-start" data-vrcforge-timeline-event={item.event.kind}>
@@ -343,7 +365,7 @@ export function ConversationCard({
 
   return (
     <div className="group flex justify-start" data-vrcforge-agent-client-turn={response.clientTurnId || undefined}>
-      <div className="relative flex w-full max-w-[85%] flex-col gap-1.5">
+      <div className="relative flex w-full max-w-[85%] flex-col gap-3 text-sm leading-relaxed">
         {timelineRows}
         <MessageActions
           onCopy={copyableReply ? () => onCopyItem?.({ ...item, response }) : undefined}
@@ -462,19 +484,27 @@ export function UserImageAttachments({
 function StreamingPhaseStatus({ item, nowMs, showElapsed }: { item: Extract<ConversationItem, { type: "streaming" }>; nowMs: number; showElapsed: boolean }) {
   const { t } = useTranslation();
   const elapsedSeconds = elapsedSecondsSince(item.createdAt, nowMs);
-  const reconnectAttempt = item.phase === "waiting_for_model"
-    ? providerReconnectAttempt(item.providerLastActivityAt, nowMs)
+  const reconnectAttempt = item.providerRetry?.attempt;
+  const waitingWindow = !reconnectAttempt && item.phase === "waiting_for_model"
+    ? providerWaitingWindow(item.providerLastActivityAt, nowMs)
     : undefined;
   const label = reconnectAttempt
-    ? t("chat.runtimePhase.reconnecting", { attempt: reconnectAttempt, max: 5 })
+    ? t("chat.runtimePhase.reconnecting", { attempt: reconnectAttempt, max: item.providerRetry?.max || 5 })
+    : waitingWindow
+      ? t("chat.runtimePhase.waitingForModelProgress", { window: waitingWindow, max: 5 })
     : streamingPhaseLabel(item.phase, t);
   const reconnecting = reconnectAttempt !== undefined;
-  const reconnectDetail = reconnectAttempt === 5
+  const waiting = waitingWindow !== undefined;
+  const reconnectDetail = reconnectAttempt === item.providerRetry?.max
     ? t("chat.runtimePhase.reconnectingRetry")
-    : t("chat.runtimePhase.reconnectingDetail");
+    : waitingWindow !== undefined
+      ? waitingWindow === 5
+        ? t("chat.runtimePhase.waitingForModelTimeout")
+        : t("chat.runtimePhase.waitingForModelDetail")
+      : t("chat.runtimePhase.reconnectingDetail");
   return (
     <div className="text-muted-foreground" data-vrcforge-streaming-phase={item.phase || "unknown"}>
-      {reconnecting ? (
+      {reconnecting || waiting ? (
         <details className="group">
           <summary className="group flex cursor-pointer list-none items-center gap-2 text-left [&::-webkit-details-marker]:hidden">
             <ChevronRight className="h-3.5 w-3.5 transition-transform group-open:rotate-90" aria-hidden="true" />
@@ -492,6 +522,28 @@ function StreamingPhaseStatus({ item, nowMs, showElapsed }: { item: Extract<Conv
         </div>
       )}
     </div>
+  );
+}
+
+function UserMessageText({ text }: { text: string }) {
+  const { t } = useTranslation();
+  // Presentation only: the original item remains the source for copy/edit/history.
+  const longMessage = text.length > 600 || text.split("\n").length > 8;
+  if (!longMessage) return <ChatMarkdown text={text} />;
+  return (
+    <details className="group/message min-w-0" data-user-message-disclosure>
+      <summary className="cursor-pointer list-none rounded-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring [&::-webkit-details-marker]:hidden">
+        <span className="mb-2 line-clamp-6 whitespace-pre-wrap leading-relaxed [overflow-wrap:anywhere] group-open/message:hidden">
+          {text.slice(0, 600)}{text.length > 600 ? "…" : ""}
+        </span>
+        <span className="flex items-center gap-1 text-xs text-muted-foreground">
+          <ChevronRight className="h-3.5 w-3.5 shrink-0 transition-transform group-open/message:rotate-90" aria-hidden="true" />
+          <span className="group-open/message:hidden">{t("common.expand")}</span>
+          <span className="hidden group-open/message:inline">{t("common.collapse")}</span>
+        </span>
+      </summary>
+      <div className="mt-2 min-w-0"><ChatMarkdown text={text} /></div>
+    </details>
   );
 }
 

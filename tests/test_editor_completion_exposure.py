@@ -2,6 +2,8 @@
 from pathlib import Path
 import sys
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / "tests")]
 
@@ -86,6 +88,133 @@ def test_real_exit_finalizer_carries_observed_state_and_validated_identity(monke
     assert receipt["identityVerification"]["editor"]["unityPid"] == 12
     assert receipt["identityVerification"]["beforeExecutionTargetDigest"] == receipt["identityVerification"]["afterExecutionTargetDigest"] == "matching-identity"
     assert receipt["transitionScheduled"] is False and receipt["verificationRequired"] is False
+
+
+def test_play_mode_finalize_refreshes_project_target_after_editor_instance_changes(monkeypatch):
+    import dashboard_server as ds
+
+    original = {
+        "scope": "avatar",
+        "project": {"root": "D:/Fixture", "projectId": "project-1"},
+        "editor": {"unityPid": 12, "processStartTime": "start-1", "coreInstanceId": "old-core"},
+        "scene": {"assetPath": "Assets/Main.unity"},
+    }
+    fresh = {
+        "scope": "project",
+        "project": {"root": "D:/Fixture", "projectId": "project-1"},
+        "editor": {"unityPid": 12, "processStartTime": "start-1", "coreInstanceId": "new-core"},
+    }
+    observed = []
+
+    monkeypatch.setattr(ds, "list_execution_targets_sync", lambda params: {"ok": True, "targets": [fresh]})
+    monkeypatch.setattr(ds, "load_dashboard_settings", lambda *args: None)
+    monkeypatch.setattr(ds, "capture_scene_view_status_direct", lambda *args, **kwargs: {"ok": True, "isPlayMode": True})
+
+    from contextlib import contextmanager
+
+    @contextmanager
+    def readback(arguments):
+        observed.append(arguments["executionTarget"])
+        yield {"verified": True}
+
+    monkeypatch.setattr(ds, "bound_editor_readback", readback)
+    receipt = ds.set_play_mode_finalize(
+        {"projectPath": "D:/Fixture", "executionTarget": original, "isPlaying": True}, {},
+        {"ok": True, "mutationStarted": True},
+    )
+
+    assert receipt["isPlayMode"] is True
+    assert observed == [fresh]
+
+
+def test_play_mode_finalize_refreshes_project_scope_target_on_exit(monkeypatch):
+    import dashboard_server as ds
+
+    original = {
+        "scope": "project",
+        "project": {"root": "D:/Fixture", "projectId": "project-1"},
+        "editor": {"unityPid": 12, "processStartTime": "start-1", "coreInstanceId": "old-core"},
+    }
+    fresh = {
+        "scope": "project",
+        "project": {"root": "D:/Fixture", "projectId": "project-1"},
+        "editor": {"unityPid": 12, "processStartTime": "start-1", "coreInstanceId": "new-core"},
+    }
+    observed = []
+
+    monkeypatch.setattr(ds, "list_execution_targets_sync", lambda params: {
+        "ok": True, "targets": [fresh], "candidateCount": 1,
+        "totalCandidateCount": 1, "hasMore": False, "complete": True,
+    })
+    monkeypatch.setattr(ds, "load_dashboard_settings", lambda *args: None)
+    monkeypatch.setattr(ds, "capture_scene_view_status_direct", lambda *args, **kwargs: {"ok": True, "isPlayMode": False})
+
+    from contextlib import contextmanager
+
+    @contextmanager
+    def readback(arguments):
+        observed.append(arguments["executionTarget"])
+        yield {"verified": True}
+
+    monkeypatch.setattr(ds, "bound_editor_readback", readback)
+    receipt = ds.set_play_mode_finalize(
+        {"projectPath": "D:/Fixture", "executionTarget": original, "isPlaying": False}, {},
+        {"ok": True, "mutationStarted": True},
+    )
+
+    assert receipt["isPlayMode"] is False
+    assert observed == [fresh]
+
+
+@pytest.mark.parametrize("metadata", [
+    {"hasMore": True},
+    {"complete": False},
+    {"totalCandidateCount": 2},
+    {"ambiguous": True},
+])
+def test_play_mode_target_refresh_rejects_incomplete_or_ambiguous_discovery(monkeypatch, metadata):
+    import editor_state_completion as domain
+
+    original = {
+        "scope": "project",
+        "project": {"root": "D:/Fixture", "projectId": "project-1"},
+        "editor": {"unityPid": 12, "processStartTime": "start-1", "coreInstanceId": "old-core"},
+    }
+    fresh = {
+        "scope": "project",
+        "project": {"root": "D:/Fixture", "projectId": "project-1"},
+        "editor": {"unityPid": 12, "processStartTime": "start-1", "coreInstanceId": "new-core"},
+    }
+    result = domain.fresh_play_mode_readback_arguments(
+        {"projectPath": "D:/Fixture", "executionTarget": original},
+        lambda _params: {"ok": True, "targets": [fresh], **metadata},
+    )
+    assert result["executionTarget"] is original
+
+
+@pytest.mark.parametrize("field", ["unityPid", "processStartTime", "projectRoot"])
+def test_play_mode_target_refresh_rejects_editor_identity_mismatch(field):
+    import editor_state_completion as domain
+
+    original = {
+        "scope": "project",
+        "project": {"root": "D:/Fixture", "projectId": "project-1"},
+        "editor": {"unityPid": 12, "processStartTime": "start-1", "coreInstanceId": "old-core"},
+    }
+    fresh = {
+        "scope": "project",
+        "project": {"root": "D:/Fixture", "projectId": "project-1"},
+        "editor": {"unityPid": 99, "processStartTime": "start-1", "coreInstanceId": "new-core"},
+    }
+    if field == "processStartTime":
+        fresh["editor"][field] = "start-2"
+    elif field == "projectRoot":
+        fresh["project"]["root"] = "D:/Other"
+    result = domain.fresh_play_mode_readback_arguments(
+        {"projectPath": "D:/Fixture", "executionTarget": original},
+        lambda _params: {"ok": True, "targets": [fresh]},
+    )
+    assert result["executionTarget"] is original
 
 
 def test_unrelated_finalizer_schema_is_not_given_editor_completion_projection(tmp_path):

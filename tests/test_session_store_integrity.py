@@ -28,6 +28,7 @@ def target(
     required_list_field: str = "",
     required_list_item_kind: str = "any",
     max_list_items: int = 0,
+    stream_jsonl: bool = False,
 ) -> SessionStoreTarget:
     return SessionStoreTarget(
         store_id=store_id,
@@ -38,6 +39,7 @@ def target(
         required_list_field=required_list_field,
         required_list_item_kind=required_list_item_kind,  # type: ignore[arg-type]
         max_list_items=max_list_items,
+        stream_jsonl=stream_jsonl,
     )
 
 
@@ -484,6 +486,47 @@ def test_jsonl_repair_preserves_valid_lines_and_future_schema_bytes(tmp_path: Pa
     assert after_scan["invalidCount"] == 0
     assert after_scan["unknownSchemaCount"] == 1
 
+
+def test_small_streamed_runtime_jsonl_keeps_existing_authorized_repair(tmp_path: Path) -> None:
+    path = tmp_path / "runtime-runs.jsonl"
+    first = b'{"schema":"known.v1","id":"first"}\n'
+    invalid = b'{"schema":"known.v1","id":\n'
+    last = b'{"schema":"known.v1","id":"last"}'
+    original = first + invalid + last
+    path.write_bytes(original)
+    store = target(path, store_id="runtime.runs", format="jsonl",
+                   known_schemas=("known.v1",), stream_jsonl=True)
+
+    scan = scan_session_store(store)
+    assert scan["repairable"] is True
+    repaired = repair_session_store(store, scan)
+
+    assert repaired["status"] == "repaired"
+    assert path.read_bytes() == first + last
+    assert sidecar(path, "quarantine", scan["digest"]).read_bytes() == invalid
+
+
+def test_streamed_runtime_jsonl_integrity_keeps_full_history_beyond_64mib(tmp_path: Path) -> None:
+    path = tmp_path / "runtime-runs.jsonl"
+    line = b'{"schema":"known.v1","id":"x","createdAt":"t","event":"noop"}\n'
+    with path.open("wb") as handle:
+        for _ in range((64 * 1024 * 1024) // len(line) + 2):
+            handle.write(line)
+        handle.write(b'{"schema":"known.v1","id":"tail","createdAt":"t","event":\n')
+    original_size = path.stat().st_size
+    scan = scan_session_store(target(path, store_id="runtime.runs", format="jsonl",
+                                     known_schemas=("known.v1",), stream_jsonl=True))
+    assert path.stat().st_size == original_size
+    assert scan["status"] == "needs_repair"
+    assert scan["invalidCount"] == 1
+    assert scan["recordCount"] > 1_000_000
+    assert scan["digest"]
+    assert scan["repairable"] is False
+    repaired = repair_session_store(store := target(path, store_id="runtime.runs", format="jsonl",
+                                                    known_schemas=("known.v1",), stream_jsonl=True), scan)
+    assert repaired["status"] == "needs_user_action"
+    assert repaired["reason"] == "streamed_jsonl_read_only"
+    assert path.stat().st_size == original_size
 
 def test_jsonl_bom_is_allowed_only_at_document_start_and_bytes_are_preserved(tmp_path: Path) -> None:
     path = tmp_path / "bom.jsonl"

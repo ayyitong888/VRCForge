@@ -340,6 +340,40 @@ def test_single_capture_handler_accepts_windows_slash_normalization_and_requires
     assert Path(result["imagePath"]) == output_path.resolve()
 
 
+def test_single_capture_handler_strips_execution_target_before_request_validation(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(dashboard_server, "DASHBOARD_ARTIFACTS_DIR", tmp_path)
+    target = {
+        "schema": "vrcforge.execution_target.v1",
+        "scope": "project",
+        "namespace": "vrcforge://projects/example",
+        "project": {"root": r"D:\Unity\Avatar", "projectId": "project-id"},
+        "editor": {"unityPid": 42, "processStartTime": "1", "coreInstanceId": "core-id"},
+    }
+    prepared, _preview = dashboard_server.prepare_capture_screenshot_request(
+        {"projectPath": r"D:\Unity\Avatar", "executionTarget": target}, None
+    )
+    assert prepared["executionTarget"] == target
+    output_path = tmp_path / "latest" / "vision_capture.png"
+    output_path.parent.mkdir(parents=True)
+    output_path.write_bytes(b"png")
+    monkeypatch.setattr(dashboard_server, "load_dashboard_settings", lambda _request: SimpleNamespace())
+    monkeypatch.setattr(
+        dashboard_server,
+        "invoke_unity_mcp",
+        lambda _settings, _tool, _arguments, preserve_tool_error=False: dashboard_server.McpResult(
+            exit_code=0,
+            stdout="ok",
+            stderr="",
+            payload={"data": {"imagePath": str(output_path)}},
+        ),
+    )
+
+    result = dashboard_server.capture_avatar_screenshot_approved_sync(prepared)
+
+    assert result["ok"] is True
+    assert Path(result["imagePath"]) == output_path.resolve()
+
+
 def test_single_capture_handler_reads_back_frozen_rotation_and_scope(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(dashboard_server, "DASHBOARD_ARTIFACTS_DIR", tmp_path)
     prepared, _preview = dashboard_server.prepare_capture_screenshot_request(
@@ -467,6 +501,44 @@ def test_multi_capture_handler_issues_one_task_owned_managed_receipt(tmp_path, m
     assert result["captureEvidenceId"] == consumed["captureEvidenceId"]
     assert result["data"]["angles"] == ["front", "back"]
     assert result["evidence"] == consumed["evidence"]
+
+
+def test_multi_capture_handler_strips_execution_target_before_request_validation(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(dashboard_server, "DASHBOARD_ARTIFACTS_DIR", tmp_path)
+    target = {
+        "schema": "vrcforge.execution_target.v1",
+        "scope": "project",
+        "namespace": "vrcforge://projects/example",
+        "project": {"root": r"D:\Unity\Avatar", "projectId": "project-id"},
+        "editor": {"unityPid": 42, "processStartTime": "1", "coreInstanceId": "core-id"},
+    }
+    prepared, _preview = dashboard_server.prepare_capture_multi_screenshot_request(
+        {"projectPath": r"D:\Unity\Avatar", "angles": ["front"], "executionTarget": target}, None
+    )
+    assert prepared["executionTarget"] == target
+    output_path = tmp_path / "latest" / "vision_front.png"
+    output_path.parent.mkdir(parents=True)
+    output_path.write_bytes(b"png")
+    monkeypatch.setattr(
+        dashboard_server,
+        "load_dashboard_settings",
+        lambda _request: SimpleNamespace(unity_project_path=r"D:\Unity\Avatar"),
+    )
+    monkeypatch.setattr(
+        dashboard_server,
+        "invoke_unity_mcp",
+        lambda _settings, _tool, _arguments, preserve_tool_error=False: dashboard_server.McpResult(
+            exit_code=0,
+            stdout="ok",
+            stderr="",
+            payload={"data": {"imagePath": str(output_path)}},
+        ),
+    )
+
+    result = dashboard_server.capture_avatar_multi_screenshot_approved_sync(prepared)
+
+    assert result["ok"] is True
+    assert result["data"]["angles"] == ["front"]
 
 
 def test_multi_capture_runs_each_angle_and_preserves_first_core_failure(tmp_path, monkeypatch) -> None:

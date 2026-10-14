@@ -38,7 +38,9 @@ from agent_shell_process_supervisor import (
 SHELL_RUNNER_NATIVE = "native-win-process"
 SHELL_RUNNER_POWERSHELL = "powershell-fallback"
 SHELL_NATIVE_BLOCK_PATTERN = re.compile(r"[|;&<>^`$%(){}\[\]#]|@\"|@'")
-SHELL_APPROVAL_BOUND_FILE_LIMIT = 16 * 1024 * 1024
+# Project assets routinely exceed 16 MiB. Keep a finite binding limit while
+# streaming the digest so approval memory use does not scale with asset size.
+SHELL_APPROVAL_BOUND_FILE_LIMIT = 1024 * 1024 * 1024
 AUTO_APPROVAL_MANUAL_SHELL_COMMANDS = {
     "del",
     "erase",
@@ -992,6 +994,8 @@ class AgentShellService:
                 if not path.is_absolute():
                     path = cwd / path
                 path = path.resolve()
+                if str(path) in referenced_files:
+                    continue
                 if not path.is_file():
                     continue
                 size = path.stat().st_size
@@ -1000,7 +1004,15 @@ class AgentShellService:
             if size > SHELL_APPROVAL_BOUND_FILE_LIMIT:
                 self._raise("A referenced shell file is too large to bind to approval.")
             try:
-                referenced_files[str(path)] = hashlib.sha256(path.read_bytes()).hexdigest()
+                digest = hashlib.sha256()
+                with path.open("rb") as stream:
+                    bound_bytes = 0
+                    while chunk := stream.read(1024 * 1024):
+                        bound_bytes += len(chunk)
+                        if bound_bytes > SHELL_APPROVAL_BOUND_FILE_LIMIT:
+                            self._raise("A referenced shell file is too large to bind to approval.")
+                        digest.update(chunk)
+                referenced_files[str(path)] = digest.hexdigest()
             except OSError:
                 self._raise("A referenced shell file could not be bound to approval.", 409)
         return {"argv": argv, "referencedFiles": referenced_files}

@@ -22,7 +22,7 @@ assert.doesNotMatch(workspace, /editing=\{Boolean\(editingMessage/);
 assert.match(timeline, /normalizeAgentSteps/);
 assert.match(timeline, /filter\(\(\{ step \}\) => step\.historical !== true\)/);
 assert.match(timeline, /buildDurableTimelineRows/);
-assert.match(timelinePresentation, /finalAssistant/);
+assert.match(timelinePresentation, /function interleavedTimelineEntries\(/);
 assert.match(timeline, /<ChatMarkdown text=\{entry\.text\}/);
 assert.match(timeline, /data-agent-invocation-output-card/);
 assert.match(timeline, /max-h-64 overflow-auto whitespace-pre-wrap break-words/);
@@ -55,7 +55,7 @@ assert.doesNotMatch(card.slice(card.indexOf('if \(item.type === "result"\)'), ca
 assert.doesNotMatch(card.slice(card.indexOf('if \(item.type === "approval_revision"\)'), card.indexOf('if \(item.type === "compact"\)')), /onCopy=/);
 assert.doesNotMatch(card.slice(card.indexOf('if \(item.type === "subagent"\)'), card.indexOf("const response =")), /onCopy=/);
 assert.match(card, /if \(item\.type === "timeline_event"\)/);
-assert.match(card, /buildDurableTimelineRows\(\[item\.event\]\)/);
+assert.match(card, /buildDurableTimelineRows\(\[item\.event\], undefined, "", \[\], \{ live: true \}\)/);
 const timelineEventBranch = card.slice(card.indexOf('if (item.type === "timeline_event")'), card.indexOf("const response ="));
 assert.doesNotMatch(timelineEventBranch, /MessageActions|createdAt/, "an event row must not receive its own chat-message timestamp");
 const agentBranch = card.slice(card.indexOf("const response ="));
@@ -76,7 +76,7 @@ assert.match(app, /showTransientNotice\("success", "copy"/);
 assert.match(app, /showTransientNotice\("error", "copy"/);
 
 assert.match(workspace, /data-chat-history-scroll/);
-assert.match(workspace, /className="h-full overflow-auto[^"]*"[\s\S]*data-chat-history-scroll/);
+assert.match(workspace, /className="app-scrollbar h-full overflow-auto[^"]*"[\s\S]*data-chat-history-scroll/);
 assert.match(workspace, /data-chat-composer-dock/);
 assert.ok(
   workspace.indexOf("data-chat-history-scroll") < workspace.lastIndexOf("data-chat-composer-dock"),

@@ -16,7 +16,7 @@ def test_read_schemas_keep_single_owner_and_reviewed_paging_progress_contract() 
     # Includes avatar/text/search paging, summary-first animation bindings and
     # scoped progress schemas in addition to the original reviewed readers.
     encoded = json.dumps(schemas, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
-    assert hashlib.sha256(encoded).hexdigest() == "8e731bcf0e530c386bf516750681035e1d3253504f68d9047afe56255d2c794c"
+    assert hashlib.sha256(encoded).hexdigest() == "810c3dfe8f4f1eca2c62d59596492ad5865eae2d935832ca657150f62cb82299"
     assert schemas["vrcforge_preview_texture_import_settings"] is unity_shared_input_schemas.TEXTURE_IMPORT_SETTINGS_PUBLIC_INPUT_SCHEMA
     assert schemas["vrcforge_preview_manage_fx_animator"] is unity_shared_input_schemas.MANAGE_FX_ANIMATOR_PUBLIC_INPUT_SCHEMA
 

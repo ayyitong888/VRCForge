@@ -207,6 +207,19 @@ def test_json_pointer_escaping_and_no_owner_argument_override():
                 read(step, jsonPointer=pointer)
 
 
+def test_missing_result_field_returns_bounded_legal_pointer_hints():
+    step = retained({"preferredCommandInstaller": {"path": "safe"}, "other": [1, 2]})
+    with bind_tool_result_context("session", "turn", "project", [step]):
+        page = read(step, jsonPointer="/commandInstaller")
+    assert page["ok"] is False
+    assert page["errorCode"] == "result_pointer_unavailable"
+    assert page["error"] == "Requested result field is unavailable"
+    assert {item["jsonPointer"] for item in page["availableFields"]} == {
+        "/preferredCommandInstaller", "/other",
+    }
+    assert "safe" not in json.dumps(page)
+
+
 def test_live_reader_schema_exposes_executable_bounds_and_rejects_r2_mistakes():
     import dashboard_server
     from runtime_planner_service import validate_planner_tool_arguments

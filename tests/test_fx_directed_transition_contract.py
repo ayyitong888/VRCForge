@@ -35,6 +35,8 @@ def test_transition_preview_validates_and_projects_source_destination_conditions
     plan = SOURCE[plan_start:SOURCE.index("if (action == \"delete_parameter\")", plan_start)]
     assert "sourceStateName" in plan
     assert "transitionScope" in plan
+    assert "timeParameterActive" in plan
+    assert "timeParameter" in plan
 
 
 def test_public_fx_schema_exposes_optional_exact_source_state() -> None:

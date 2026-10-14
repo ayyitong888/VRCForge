@@ -284,6 +284,22 @@ def test_cancel_markers_preserve_turn_precedence_and_single_consumption() -> Non
     assert state.consume_cancel_request(session_id="session-only") is False
 
 
+def test_provider_request_indices_are_owned_by_bound_turn_not_usage() -> None:
+    state, _lock = make_state()
+    assert state.next_provider_request_index() is None
+    identity = {"sessionId": "s", "turnId": "t", "clientTurnId": "c"}
+    state.set_stream_context(identity)
+    assert state.next_provider_request_index() == 1
+    state.set_stream_context(identity)
+    assert state.next_provider_request_index() == 2
+    state.clear_stream_context()
+    assert state.next_provider_request_index() is None
+    state.set_stream_context(identity)
+    assert state.next_provider_request_index() == 3
+    state.set_stream_context({**identity, "turnId": "continuation"})
+    assert state.next_provider_request_index() == 1
+
+
 def test_stream_context_is_turn_local_between_threads() -> None:
     state, _lock = make_state()
     barrier = threading.Barrier(3)
@@ -414,6 +430,34 @@ def test_runtime_active_turns_are_exact_pairs_for_concurrent_session_turns() -> 
     assert state.submit_steer(session_id="shared", target_client_turn_id="client-b", input_id="b2", message="b2")['accepted']
     state.mark_cancel_requested(session_id="shared", client_turn_id="client-a")
     assert state.drain_steer(session_id="shared", client_turn_id="client-b")
+
+
+def test_cancel_with_mismatched_session_and_turn_does_not_cancel_other_turn() -> None:
+    state, _lock = make_state()
+    state.begin_turn(session_id="session-a", turn_id="turn-a", client_turn_id="client-a")
+    state.begin_turn(session_id="session-b", turn_id="turn-b", client_turn_id="client-b")
+
+    state.mark_cancel_requested(
+        session_id="session-a", turn_id="turn-b", client_turn_id="client-b"
+    )
+
+    assert state.cancel_requested(
+        session_id="session-b", turn_id="turn-b", client_turn_id="client-b"
+    ) is False
+
+
+def test_future_partial_cancel_requires_shared_identity_and_finish_clears_only_same_turn() -> None:
+    state, _lock = make_state()
+    state.mark_cancel_requested(turn_id="future-turn-a")
+    state.mark_cancel_requested(session_id="session-b", turn_id="future-turn-b")
+
+    assert state.cancel_requested(session_id="session-c", client_turn_id="client-c") is False
+    assert state.cancel_requested(turn_id="future-turn-a") is True
+    assert state.cancel_requested(session_id="session-b", turn_id="future-turn-b") is True
+
+    state.finish_turn(session_id="session-a", turn_id="future-turn-a", client_turn_id="client-a")
+    assert state.cancel_requested(turn_id="future-turn-a") is False
+    assert state.cancel_requested(session_id="session-b", turn_id="future-turn-b") is True
 
 
 def test_discard_session_clears_every_active_turn_and_mailbox() -> None:

@@ -28,6 +28,14 @@
 
 ## 5. 完整验收和停止条件
 
+### 替换同一功能
+
+仅在用户批准替换本功能时使用：列出旧/新驱动的 controller/层/MA 组件、目标 bindings、enable/default 参数和 neutral 状态。若须临时共存，先写清验证方法、结束条件与待退役的精确项；新组件已挂载不等于替换完成，共存也不能单独证明运行冲突或某张截图的异常原因。
+
+新链路验证后，按批准的 preview/checkpoint 精确停用或移除旧驱动及不再需要的 bindings，不改无关层、参数域或源资产；删除资产仍需单独批准。回读实际绑定和启用状态，再核对 neutral、开/关及受影响的手势/表情，确认没有重复控制和恢复残留。运行控制仍需批准、有限预算与原 Play 状态恢复；缺运行证据就保留未验证项，不以新组件或静态校验成功结束替换。
+
+同一 controller 的多个差异仅在实际 schema 明确支持这些 action 时合批；核对 preview 和原子失败语义。当前 `edits` 仅支持状态/转换编辑，不支持 `delete_layer`，不得编造删层 batch；能力不足时说明范围与往返成本，不扩大工具权限。
+
 写后重新扫描受影响的 FX state/transition/motion 与 AnimationClip binding/key 值，并读取目标对象/BlendShape；对照批准的精确 delta 和相邻行为。`vrcforge_run_validation_report` 与 `vrcforge_build_test_readiness` 仅提供验证/就绪证据，不会替代 Unity/VRChat 运行时测试或实际 SDK/NDMF 构建；需要这些结果时明确标记未验证，不能宣称已构建或运行验收。
 
 **每笔写入都遵守当前用户配置的权限策略，并绑定精确目标、preview、checkpoint 和写后回读；回滚必须单独确认。**

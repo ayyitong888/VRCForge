@@ -244,6 +244,7 @@ class ChatGPTResponsesAdapter:
             activity_callback,
             error_factory=lambda message, response: ChatGPTResponseError(message, response),
             provider_label="ChatGPT Responses",
+            request_observer=activity_callback,
         )
 
 

@@ -193,6 +193,28 @@ namespace VRCForge.Editor
             EditorApplication.delayCall += EnsureInvocationPumpRegistered;
         }
 
+        internal static bool TryPostToEditor(Action callback)
+        {
+            if (callback == null)
+            {
+                return false;
+            }
+            var context = editorSynchronizationContext;
+            if (context == null)
+            {
+                return false;
+            }
+            try
+            {
+                context.Post(_ => callback(), null);
+                return true;
+            }
+            catch (InvalidOperationException)
+            {
+                return false;
+            }
+        }
+
         private static void RequestInvocationDrain()
         {
             var context = editorSynchronizationContext;

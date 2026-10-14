@@ -11,6 +11,7 @@ from agent_goal_store import (
     GOAL_DELIVERY_RUN_SCHEMA,
     AgentGoalStore,
     AgentGoalStoreError,
+    _merge_usage,
 )
 from background_goal_runtime import retry_backoff_seconds
 
@@ -878,6 +879,95 @@ class AgentGoalStoreTests(unittest.TestCase):
         self.assertEqual(result["writeStatus"], "applied")
         self.assertEqual(completed["usage"]["totalTokens"], 9)
         self.assertEqual(store.project_goals()[goal["goalId"]]["usageTotals"]["totalTokens"], 9)
+
+    def test_usage_totals_keep_cache_coverage_incomplete_across_persisted_delivery_events(self) -> None:
+        store = self.make_store()
+        goal, delivery = self.start_delivery(store)
+        store.block_delivery_for_approval(
+            delivery["deliveryId"],
+            "approval-usage",
+            response={"turnId": "pending"},
+            context_usage={
+                "exact": True,
+                "inputTokens": 10,
+                "outputTokens": 1,
+                "totalTokens": 11,
+                "cacheWriteTokens": 4,
+                "cacheWriteUsageRequestCount": 1,
+                "cacheWriteUsageComplete": False,
+            },
+        )
+        store.mark_by_approval_phase("approval-usage", "apply")
+        store.resolve_delivery_approval(
+            "approval-usage",
+            {
+                "ok": True,
+                "status": "applied",
+                "contextUsage": {
+                    "exact": True,
+                    "inputTokens": 5,
+                    "outputTokens": 1,
+                    "totalTokens": 6,
+                    "cacheWriteTokens": 0,
+                    "cacheWriteUsageRequestCount": 1,
+                    "cacheWriteUsageComplete": True,
+                },
+            },
+        )
+
+        reopened = self.make_store()
+        usage = reopened.project_goals()[goal["goalId"]]["usageTotals"]
+        self.assertEqual(usage["cacheWriteTokens"], 4)
+        self.assertEqual(usage["cacheWriteUsageRequestCount"], 2)
+        self.assertFalse(usage["cacheWriteUsageComplete"])
+
+    def test_usage_merge_distinguishes_empty_delta_from_missing_cache_coverage(self) -> None:
+        complete = {
+            "inputTokens": 5,
+            "outputTokens": 1,
+            "totalTokens": 6,
+            "cacheWriteTokens": 0,
+            "cacheWriteUsageRequestCount": 1,
+            "cacheWriteUsageComplete": True,
+        }
+        self.assertTrue(_merge_usage({}, complete)["cacheWriteUsageComplete"])
+        self.assertTrue(
+            _merge_usage(
+                {"cacheWriteUsageComplete": True, "cacheWriteUsageRequestCount": 1},
+                {},
+            )["cacheWriteUsageComplete"]
+        )
+        self.assertFalse(
+            _merge_usage({"cacheWriteTokens": 4}, complete)["cacheWriteUsageComplete"]
+        )
+        self.assertFalse(
+            _merge_usage(
+                {"cacheWriteUsageComplete": True, "cacheWriteUsageRequestCount": 1},
+                {"inputTokens": 5, "outputTokens": 1, "totalTokens": 6},
+            )["cacheWriteUsageComplete"]
+        )
+        merged = _merge_usage(
+            {"cacheWriteUsageComplete": False, "cacheWriteUsageRequestCount": 1},
+            {"cacheWriteUsageComplete": True, "cacheWriteUsageRequestCount": 1},
+        )
+        self.assertFalse(merged["cacheWriteUsageComplete"])
+        self.assertEqual(merged["cacheWriteUsageRequestCount"], 2)
+
+        read_complete = {
+            "inputTokens": 5,
+            "outputTokens": 1,
+            "totalTokens": 6,
+            "cacheReadTokens": 0,
+            "cacheUsageRequestCount": 1,
+            "cacheUsageComplete": True,
+        }
+        self.assertTrue(_merge_usage({}, read_complete)["cacheUsageComplete"])
+        read_merged = _merge_usage(
+            {"cacheUsageComplete": False, "cacheUsageRequestCount": 1},
+            {"cacheUsageComplete": True, "cacheUsageRequestCount": 1},
+        )
+        self.assertFalse(read_merged["cacheUsageComplete"])
+        self.assertEqual(read_merged["cacheUsageRequestCount"], 2)
 
     def test_failed_approval_transition_restores_the_pending_wait_state(self) -> None:
         store = self.make_store()

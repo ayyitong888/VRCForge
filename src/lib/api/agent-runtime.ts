@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { hasTauriInternals, invokeTauriWithAbort, requestJson } from "./http";
 import { ApiError } from "./http";
-import type { AgentApproval, AgentApprovalExecution, AgentDesktopAction, AgentGoal, AgentGoalBackgroundAcknowledgement, AgentGoalBackgroundState, AgentGoalDelivery, AgentMemory, AgentMessageAttachment, AgentProgress, AgentQuestion, AgentRuntimeContinuation, AgentRuntimeResponse, AgentRuntimeRun, AgentRuntimeRunLedger, AgentTurnResponseRecovery, CompactionRecoveryEntry, DesktopBridgeStatus, DesktopRuntimeSnapshot } from "./types";
+import type { AgentApproval, AgentApprovalExecution, AgentContextUsage, AgentDesktopAction, AgentGoal, AgentGoalBackgroundAcknowledgement, AgentGoalBackgroundState, AgentGoalDelivery, AgentMemory, AgentMessageAttachment, AgentProgress, AgentQuestion, AgentRuntimeContinuation, AgentRuntimeResponse, AgentRuntimeRun, AgentRuntimeRunLedger, AgentTurnResponseRecovery, CompactionRecoveryEntry, DesktopBridgeStatus, DesktopRuntimeSnapshot } from "./types";
 
 /** Finite model-turn budget required for unattended/background delivery. */
 export const DEFAULT_BACKGROUND_MAX_AGENTIC_TURNS = 25;
@@ -60,6 +60,8 @@ export type AgentHistoryCompactionDetails = {
   targetTokens?: number;
   realContextLimit?: number | null;
   estimatedInputTokens?: number;
+  /** Provider-reported compact calls, kept separate from current-window usage. */
+  providerUsage?: AgentContextUsage;
   attempts?: number;
   providerAttempts?: number;
   failureClass?: string;

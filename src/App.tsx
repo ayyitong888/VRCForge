@@ -129,7 +129,7 @@ import {
   selectedTextAttachment,
 } from "./lib/conversation-utils";
 import { ingestChatAttachment } from "./lib/attachment-ingest";
-import { resolveContextLimit } from "./lib/context-compaction";
+import { latestContextWindowUsage, resolveContextLimit } from "./lib/context-compaction";
 import { thinkingTraceLabel } from "./lib/provider-ui";
 import type { ChatAttachment, ComposerAction, ComposerActionId, ContextUsage, ConversationItem } from "./lib/chat-types";
 import { executionModeLabel, permissionVisualState } from "./lib/permission-ui";
@@ -1580,7 +1580,8 @@ export default function App() {
       return nextUsage;
     }
     const cachedUsage = buildContextUsageFromRuntime(
-      activeChat?.contextUsageCache,
+      conversation.some((item) => item.type === "compact")
+        ? latestContextWindowUsage(conversation, true) : activeChat?.contextUsageCache,
       providerSnapshot.provider,
       providerSnapshot.model,
       currentModelInfo,
@@ -1591,7 +1592,7 @@ export default function App() {
       return { ...cachedUsage, cached: true };
     }
     return nextUsage;
-  }, [activeChat?.contextUsageCache, apiConfig, currentModelInfo, latestContextUsage, providerSnapshot.model, providerSnapshot.provider, smokeMode, t]);
+  }, [activeChat?.contextUsageCache, conversation, apiConfig, currentModelInfo, latestContextUsage, providerSnapshot.model, providerSnapshot.provider, smokeMode, t]);
   const compactDebugEntries = useMemo(
     () =>
       (activeChat?.items || [])
@@ -1794,6 +1795,7 @@ export default function App() {
     : t("workspace.noProjectSelected");
   const answerRuntimeQuestion = async (questionId: string, optionId: string, value: string) => {
     setActiveView("chat");
+    const answeredQuestion = agentQuestions.find((item) => item.questionId === questionId);
     try {
       const payload = await answerAgentQuestion(endpoint, questionId, {
         answer: value,
@@ -1807,6 +1809,20 @@ export default function App() {
           ? { ...payload.runtimeContinuation, sessionId: payload.runtimeContinuation.sessionId || sessionId }
           : agentQuestions.find((item) => item.questionId === questionId)?.runtimeContinuation,
       });
+      const answerItemId = `question-answer-${questionId}`;
+      const answerChatId = activeChatId || ensureActiveChat();
+      const answerChat = getChatById(answerChatId);
+      if (answerChat && !answerChat.items.some((item) => item.id === answerItemId)) {
+        appendToChat(answerChatId, {
+          id: answerItemId,
+          type: "user",
+          text: `${answeredQuestion?.header ? `${answeredQuestion.header}\n` : ""}${answeredQuestion?.question || questionId}\n\n${value}`,
+          createdAt: new Date().toISOString(),
+        });
+        void persistChatsNow().catch((cause) => {
+          setError(cause instanceof Error ? cause.message : String(cause));
+        });
+      }
       void refreshRuntimeRuns(false);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -2070,6 +2086,12 @@ export default function App() {
   }, [endpoint]);
 
   useEffect(() => {
+    // Refresh the authoritative config lease at request/terminal boundaries,
+    // including a foreground reply that becomes an approval/question wait.
+    if (runtimeConnected) void refreshSilently();
+  }, [chatRunSending, runtimeConnected, endpoint]);
+
+  useEffect(() => {
     if (!runtimeConnected || !isTauriRuntime()) {
       return;
     }
@@ -2091,7 +2113,7 @@ export default function App() {
       "agentRuntimeRuns",
       "agentRuntimeTurn",
     ]);
-    const bootstrapEvents = new Set(["advancedSettings", "agentApprovals", "agentPermission", "hello", "projects", "unity_status"]);
+    const bootstrapEvents = new Set(["advancedSettings", "agentApprovals", "agentPermission", "agentQuestions", "agentRuntimeCancel", "agentRuntimeTurn", "hello", "projects", "unity_status"]);
     const scheduleBootstrapRefresh = () => {
       if (desktopEventBootstrapTimerRef.current !== null) {
         window.clearTimeout(desktopEventBootstrapTimerRef.current);
@@ -3253,6 +3275,12 @@ export default function App() {
     setAttachments((current) => current.filter((attachment) => attachment.id !== id));
   }
 
+  function updateAttachmentText(id: string, text: string) {
+    setAttachments((current) => current.map((attachment) => attachment.id === id
+      ? { ...attachment, originalText: attachment.originalText ?? attachment.text, text, size: new Blob([text]).size }
+      : attachment));
+  }
+
   async function importVaultAttachment(attachment: ChatAttachment) {
     const payloadHash = attachment.payloadKind === "vault_file" ? attachment.payloadHash : attachment.vaultPayloadHash;
     if (!payloadHash) {
@@ -4098,6 +4126,7 @@ export default function App() {
               reasoningVariants={reasoningVariants}
               apiKeySaved={apiKeySaved}
               savingApiConfig={savingApiConfig}
+              providerConfigurationLocked={chatRunSending || Boolean(apiConfig?.runtimeLocked)}
               modelOptions={modelOptions}
               loadingModels={loadingModels}
               modelsError={modelsError}
@@ -4205,6 +4234,8 @@ export default function App() {
               attachments={attachments}
               onAttachFiles={(files) => void addComposerFiles(files)}
               onRemoveAttachment={removeAttachment}
+              onUpdateAttachment={updateAttachmentText}
+              developerOptionsEnabled={developerOptionsEnabled}
               contextUsage={contextUsage}
               compaction={activeChat?.compaction}
               onCancelCompaction={activeChatId ? () => cancelCompaction(activeChatId) : undefined}
@@ -4219,6 +4250,7 @@ export default function App() {
               }))}
               onBindProject={bindProject}
               conversation={conversation}
+              attachmentPayloads={activeChat?.attachmentPayloads}
               queued={visibleQueued}
               agentQuestions={hasAgentRuntimeScope
                 ? agentQuestions.filter((item) => questionBelongsToRuntimeScope(item, runtimeScope, { requireSession: true }))

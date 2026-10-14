@@ -1899,6 +1899,8 @@ namespace VRCForge.Editor
             [VRCForgeInput("Optional write-defaults flag.", IsRequired = false)] public bool? writeDefaults { get; set; }
             [VRCForgeInput("Optional motion AnimationClip asset path.", IsRequired = false)] public string motionClipPath { get; set; } = "";
             [VRCForgeInput("Optional state speed.", IsRequired = false)] public float? speed { get; set; }
+            [VRCForgeInput("Optional: use an existing Float parameter as normalized motion time.", IsRequired = false)] public bool? timeParameterActive { get; set; }
+            [VRCForgeInput("Optional existing Float Animator parameter used as normalized motion time.", IsRequired = false)] public string timeParameter { get; set; } = "";
             [VRCForgeInput("Optional Any-State transition exit-time flag.", IsRequired = false)] public bool? hasExitTime { get; set; }
             [VRCForgeInput("Optional Any-State transition exit time.", IsRequired = false)] public float? exitTime { get; set; }
             [VRCForgeInput("Optional Any-State transition duration.", IsRequired = false)] public float? duration { get; set; }
@@ -1952,6 +1954,8 @@ namespace VRCForge.Editor
                     stateName = @params["stateName"]?.ToString() ?? "",
                     destinationStateName = @params["destinationStateName"]?.ToString() ?? "",
                     sourceStateName = @params["sourceStateName"]?.ToString() ?? "",
+                    timeParameterActive = @params["timeParameterActive"]?.Value<bool?>(),
+                    timeParameter = @params["timeParameter"]?.ToString() ?? "",
                     transitionScope = string.IsNullOrWhiteSpace(@params["sourceStateName"]?.ToString())
                         ? "AnyState"
                         : $"{@params["sourceStateName"]}->{(@params["destinationStateName"]?.ToString() ?? @params["stateName"]?.ToString() ?? "")}",
@@ -2069,6 +2073,14 @@ namespace VRCForge.Editor
                 if (arguments["newName"] != null) Required(arguments, "newName");
                 if (arguments["speed"] != null) WriteAnimationCurveTool.RequireFinite(arguments["speed"].Value<float>(), "speed");
                 if (arguments["writeDefaults"] != null) arguments["writeDefaults"].Value<bool>();
+                var existingTimeParameter = "";
+                if (action == "ensure_state" || action == "update_state")
+                {
+                    var existingLayer = controller?.layers.FirstOrDefault(item => item.name == arguments["layerName"]?.ToString());
+                    var existing = existingLayer == null ? null : AvatarPrimitiveCrudCore.FindState(existingLayer.stateMachine, arguments["stateName"]?.ToString() ?? "");
+                    existingTimeParameter = existing?.timeParameter ?? "";
+                }
+                ValidateTimeParameter(controller, arguments, existingTimeParameter);
             }
             if (action == "delete_layer" || action == "delete_state")
             {
@@ -2118,6 +2130,7 @@ namespace VRCForge.Editor
                 states = machine.states.Select(child => new
                 {
                     child.state.name, child.state.speed, child.state.writeDefaultValues,
+                    child.state.timeParameterActive, child.state.timeParameter,
                     motionPath = AssetDatabase.GetAssetPath(child.state.motion),
                     transitions = (child.state.transitions ?? Array.Empty<AnimatorStateTransition>()).Select(DescribeTransition).ToArray()
                 }).ToArray(),
@@ -2634,6 +2647,33 @@ namespace VRCForge.Editor
             {
                 state.speed = @params["speed"].Value<float>();
             }
+            if (@params["timeParameter"] != null)
+            {
+                state.timeParameter = @params["timeParameter"].ToString().Trim();
+            }
+            if (@params["timeParameterActive"] != null)
+            {
+                state.timeParameterActive = @params["timeParameterActive"].Value<bool>();
+            }
+        }
+
+        internal static void ValidateTimeParameter(AnimatorController controller, JObject arguments, string existingTimeParameter = "")
+        {
+            if (arguments["timeParameterActive"] == null && arguments["timeParameter"] == null) return;
+            if (arguments["timeParameterActive"] != null && arguments["timeParameterActive"].Type != JTokenType.Boolean)
+                throw new InvalidOperationException("timeParameterActive must be boolean.");
+            var requested = arguments["timeParameter"] != null
+                ? arguments["timeParameter"].ToString().Trim()
+                : (existingTimeParameter ?? "").Trim();
+            if (arguments["timeParameter"] != null && requested.Length == 0)
+                throw new InvalidOperationException("timeParameter must be non-empty when provided.");
+            var active = arguments["timeParameterActive"]?.Value<bool>() ?? false;
+            if (active && requested.Length == 0)
+                throw new InvalidOperationException("timeParameter is required when timeParameterActive is true.");
+            if (!active && requested.Length == 0) return;
+            var parameter = controller?.parameters?.SingleOrDefault(item => item.name == requested);
+            if (parameter == null || parameter.type != AnimatorControllerParameterType.Float)
+                throw new InvalidOperationException("timeParameter must reference an existing Float Animator parameter.");
         }
 
         private static AnimationClip LoadOrCreateClip(string rawPath, string assetDir)

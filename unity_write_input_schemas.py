@@ -855,8 +855,11 @@ EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS["vrcforge_apply_parameter_optimization"] =
 
 EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS["vrcforge_restore_checkpoint"] = {
     **UNITY_READ_TOOL_INPUT_SCHEMAS["vrcforge_preview_restore_checkpoint"],
+    "additionalProperties": False,
     "properties": {
         **UNITY_READ_TOOL_INPUT_SCHEMAS["vrcforge_preview_restore_checkpoint"]["properties"],
+        "recoveryId": {"type": "string", "minLength": 1, "description": "Optional active interrupted-apply recovery id. In full-permission mode it must identify the selected checkpoint's active incident for autonomous recovery."},
+        "recovery_id": {"type": "string", "minLength": 1, "description": "Existing alias of recoveryId."},
         "confirmRestore": {"type": "boolean", "description": "Must be true, or confirm_restore must be true, to confirm restoring the selected checkpoint. The normal approval flow still applies."},
         "confirm_restore": {"type": "boolean", "description": "Existing alias of confirmRestore."},
     },

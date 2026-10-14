@@ -431,6 +431,8 @@ MANAGE_FX_ANIMATOR_PUBLIC_INPUT_SCHEMA: dict[str, Any] = {
         "writeDefaults": {"type": "boolean"},
         "motionClipPath": {"type": "string", "pattern": "^Assets/"},
         "speed": {"type": "number"},
+        "timeParameterActive": {"type": "boolean", "description": "Optional: use a Float parameter as normalized motion time."},
+        "timeParameter": {"type": "string", "minLength": 1, "description": "Optional existing Float Animator parameter used as normalized motion time."},
         "hasExitTime": {"type": "boolean"},
         "exitTime": {"type": "number"},
         "duration": {"type": "number", "minimum": 0},
@@ -489,7 +491,7 @@ MATERIAL_VARIANT_FLATTEN_PUBLIC_INPUT_SCHEMA: dict[str, Any] = {
 
 # Batch mode extends the existing FX surface without changing single-action fields.
 _FX_BATCH_ITEM_FIELDS = (
-    "layerName", "stateName", "motionClipPath", "writeDefaults", "speed", "destinationStateName",
+    "layerName", "stateName", "motionClipPath", "writeDefaults", "speed", "timeParameterActive", "timeParameter", "destinationStateName",
     "transitionIndex", "hasExitTime", "exitTime", "duration", "canTransitionToSelf", "interruptionSource", "orderedInterruption", "conditions",
 )
 _FX_BATCH_ITEM_SCHEMA = {

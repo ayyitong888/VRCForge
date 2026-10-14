@@ -74,6 +74,7 @@ from package_install_workflow_service import (
 )
 from provider_configuration_service import (
     ProviderApiConfig,
+    ProviderVisionConfig,
     ProviderConfigurationPersistencePorts,
     ProviderConfigurationService,
 )
@@ -1986,7 +1987,17 @@ class DashboardServerTests(unittest.TestCase):
 
         try:
             dashboard_server.AGENT_GATEWAY.vision_analyze_fn = fake_vision
-            with TestClient(dashboard_server.app) as client:
+            with (
+                patch.object(
+                    dashboard_server.PROVIDER_CONFIGURATION,
+                    "current_vision_config",
+                    return_value=ProviderVisionConfig(
+                        provider="openai", api_key="fixture-vision-key",
+                        base_url="https://fixture.invalid/v1", model="gpt-4o", enabled=True,
+                    ),
+                ),
+                TestClient(dashboard_server.app) as client,
+            ):
                 response = client.post(
                     "/api/app/agent/message",
                     json={
@@ -2033,7 +2044,17 @@ class DashboardServerTests(unittest.TestCase):
 
         try:
             dashboard_server.AGENT_GATEWAY.vision_analyze_fn = fake_vision
-            with TestClient(dashboard_server.app) as client:
+            with (
+                patch.object(
+                    dashboard_server.PROVIDER_CONFIGURATION,
+                    "current_vision_config",
+                    return_value=ProviderVisionConfig(
+                        provider="openai", api_key="fixture-vision-key",
+                        base_url="https://fixture.invalid/v1", model="gpt-4o", enabled=True,
+                    ),
+                ),
+                TestClient(dashboard_server.app) as client,
+            ):
                 response = client.post(
                     "/api/app/agent/message",
                     json={
@@ -2086,7 +2107,17 @@ class DashboardServerTests(unittest.TestCase):
 
         try:
             dashboard_server.AGENT_GATEWAY.vision_analyze_fn = fake_vision
-            with TestClient(dashboard_server.app) as client:
+            with (
+                patch.object(
+                    dashboard_server.PROVIDER_CONFIGURATION,
+                    "current_vision_config",
+                    return_value=ProviderVisionConfig(
+                        provider="openai", api_key="fixture-vision-key",
+                        base_url="https://fixture.invalid/v1", model="gpt-4o", enabled=True,
+                    ),
+                ),
+                TestClient(dashboard_server.app) as client,
+            ):
                 response = client.post(
                     "/api/app/agent/message",
                     json={
@@ -4634,9 +4665,17 @@ class DashboardServerTests(unittest.TestCase):
                     "contextLimit": 64_000,
                 }
             )
-            with dashboard_server.RUNTIME_PLANNER.bind_turn(
-                dashboard_server.agent_runtime_request_payload(mismatched)
-            ) as mismatched_metadata:
+            selected_params = dashboard_server.agent_runtime_request_payload(mismatched)
+            with dashboard_server.RUNTIME_PLANNER.bind_turn(selected_params) as selected_metadata:
+                self.assertEqual(selected_metadata.verified_context_limit, 64_000)
+
+            # A valid session model override is not a binding mismatch. Exercise
+            # the negative case against the model the resolver actually binds.
+            with patch.object(
+                dashboard_server.PROVIDER_CONFIGURATION,
+                "resolve_session_config",
+                return_value=configured,
+            ), dashboard_server.RUNTIME_PLANNER.bind_turn(selected_params) as mismatched_metadata:
                 self.assertIsNone(mismatched_metadata.verified_context_limit)
 
         self.assertEqual(response.status_code, 200)
@@ -6578,7 +6617,10 @@ class DashboardServerTests(unittest.TestCase):
             patch.object(
                 dashboard_server.PROVIDER_CONFIGURATION,
                 "current_api_config",
-                return_value=_test_runtime_provider_config(),
+                return_value=ProviderApiConfig(
+                    provider="deepseek", api_key="fixture-deepseek-key",
+                    base_url="https://api.deepseek.com", model="deepseek-v4-pro",
+                ),
             ),
             patch(
                 "dashboard_server.request_llm_plan_with_metadata",
@@ -10756,6 +10798,15 @@ class DashboardServerTests(unittest.TestCase):
         self.assertFalse(parameter["networkSynced"])
         self.assertFalse(animator["writeDefaults"])
 
+    def test_ensure_animator_state_forwards_optional_time_parameter_fields(self) -> None:
+        request = dashboard_server.build_ensure_animator_state_request(
+            {"layerName": "Face", "stateName": "Jaw", "parameterName": "Jaw", "parameterType": "Float",
+             "time_parameter_active": True, "time_parameter": "Jaw"},
+            preview=True,
+        )
+        self.assertTrue(request["timeParameterActive"])
+        self.assertEqual(request["timeParameter"], "Jaw")
+
     @patch("dashboard_server.invoke_unity_mcp")
     @patch("dashboard_server.load_dashboard_settings")
     def test_create_wardrobe_preview_forwards_with_flag(self, mock_load_settings, mock_invoke) -> None:
@@ -13697,7 +13748,7 @@ class DashboardServerTests(unittest.TestCase):
         self.assertIn("valueTruncated", get_property_source)
         # Keep ICollection definite assignment explicit for Unity's C# compiler.
         self.assertIn("var collection = value as ICollection;", source)
-        self.assertIn("var totalKnown = collection != null;", source)
+        self.assertIn("if (collection != null)", source)
         self.assertNotIn("value is ICollection collection", source)
         self.assertIn(
             "value is UnityEngine.Object || !(value is IEnumerable enumerable) || value is string",
@@ -14499,6 +14550,61 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(
             result["errorCode"], "unitypackage_import_job_id_invalid"
         )
+        mock_invoke.assert_not_called()
+
+    @patch("dashboard_server.invoke_unity_mcp")
+    @patch("dashboard_server.load_dashboard_settings")
+    @patch("execution_target.validate_runtime_execution_target")
+    def test_setup_outfit_status_uses_read_only_backend_poll_lane(
+        self, mock_validate_target, mock_load_settings, mock_invoke
+    ) -> None:
+        mock_load_settings.return_value = SimpleNamespace()
+        mock_invoke.return_value = dashboard_server.McpResult(
+            exit_code=0,
+            stdout="ok",
+            stderr="",
+            payload={"data": {"ok": True, "status": "pending", "jobId": "b" * 32, "mutationStarted": False}},
+        )
+
+        result = dashboard_server.get_setup_outfit_status_sync(
+            {"projectPath": r"C:\Project", "jobId": "B" * 32, "executionTarget": {"schema": "vrcforge.execution_target.v1"}}
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], "pending")
+        mock_validate_target.assert_called_once()
+        _settings, tool_name, arguments = mock_invoke.call_args.args
+        self.assertEqual(tool_name, "vrc_setup_outfit")
+        self.assertEqual(arguments, {"jobId": "b" * 32})
+        self.assertEqual(mock_invoke.call_args.kwargs["execution_context"], {"lane": dashboard_server.SETUP_OUTFIT_POLL_LANE})
+        self.assertTrue(mock_invoke.call_args.kwargs["preserve_tool_error"])
+
+    @patch("dashboard_server.invoke_unity_mcp")
+    def test_setup_outfit_status_rejects_missing_execution_target_before_core(self, mock_invoke) -> None:
+        result = dashboard_server.get_setup_outfit_status_sync(
+            {"projectPath": r"C:\Project", "jobId": "a" * 32}
+        )
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["errorCode"], "setup_outfit_execution_target_required")
+        mock_invoke.assert_not_called()
+
+    @patch("dashboard_server.invoke_unity_mcp")
+    def test_setup_outfit_status_rejects_invalid_job_before_target_or_core(self, mock_invoke) -> None:
+        result = dashboard_server.get_setup_outfit_status_sync(
+            {"projectPath": r"C:\Project", "jobId": "not-a-job", "executionTarget": {}}
+        )
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["errorCode"], "setup_outfit_job_id_invalid")
+        mock_invoke.assert_not_called()
+
+    @patch("dashboard_server.invoke_unity_mcp")
+    @patch("execution_target.validate_runtime_execution_target", side_effect=RuntimeError("project_root_drifted"))
+    def test_setup_outfit_status_rejects_wrong_project_target_before_core(self, _mock_validate, mock_invoke) -> None:
+        result = dashboard_server.get_setup_outfit_status_sync(
+            {"projectPath": r"C:\Project", "jobId": "a" * 32, "executionTarget": {"schema": "vrcforge.execution_target.v1"}}
+        )
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["errorCode"], "setup_outfit_execution_target_invalid")
         mock_invoke.assert_not_called()
 
     @patch("dashboard_server.invoke_unity_mcp")

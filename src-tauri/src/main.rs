@@ -25,10 +25,10 @@ use tungstenite::http::HeaderValue;
 
 mod approval_notification_windows;
 mod backend;
-mod chat_snapshot_paging;
-mod chatgpt_oauth;
 #[cfg(windows)]
 mod capture_helper;
+mod chat_snapshot_paging;
+mod chatgpt_oauth;
 mod commands;
 mod event_bridge;
 #[cfg(windows)]
@@ -43,8 +43,8 @@ mod primitive_evidence_controller_launcher_windows;
 #[cfg(windows)]
 mod restart_manager_windows;
 mod sanitize;
-mod theme_background;
 mod telegram;
+mod theme_background;
 mod vsk_open;
 
 use approval_notification_windows::*;
@@ -58,8 +58,11 @@ use event_bridge::*;
 #[cfg(windows)]
 use restart_manager_windows::*;
 use sanitize::*;
+use telegram::{
+    telegram_configure, telegram_open_botfather, telegram_start, telegram_status, telegram_stop,
+    telegram_test_connection,
+};
 use theme_background::*;
-use telegram::{telegram_configure, telegram_open_botfather, telegram_start, telegram_status, telegram_stop, telegram_test_connection};
 use vsk_open::PendingVskPaths;
 
 const WEBVIEW2_ACCESSIBILITY_ARG: &str = "--force-renderer-accessibility";
@@ -134,13 +137,13 @@ fn main() {
     // the actual import still uses the authenticated backend package checks.
     #[cfg(windows)]
     let builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, cwd| {
-            let pending = app.state::<PendingVskPaths>();
-            pending.enqueue_args(args.into_iter().skip(1), Path::new(&cwd));
-            if let Some(window) = app.get_webview_window("main") {
-                restore_main_window(&window);
-            }
-            let _ = app.emit(vsk_open::EVENT_NAME, ());
-        }));
+        let pending = app.state::<PendingVskPaths>();
+        pending.enqueue_args(args.into_iter().skip(1), Path::new(&cwd));
+        if let Some(window) = app.get_webview_window("main") {
+            restore_main_window(&window);
+        }
+        let _ = app.emit(vsk_open::EVENT_NAME, ());
+    }));
     builder
         .plugin(tauri_plugin_notification::init())
         .manage(backend_state)
@@ -462,15 +465,14 @@ mod tests {
     use super::{
         advanced_settings_update_body, app_session_challenge_signature,
         app_session_challenge_signature_matches, app_window_title, approval_revision_body,
-        approval_scope_body, begin_backend_start, developer_options_challenge_path,
-        diagnostics_update_body, extract_challenge_signature, force_child_exit, hmac_sha256_hex,
-        percent_encode_query_component, prepare_app_quit, prepare_runtime_files,
-        primitive_live_bootstrap_requested, provider_config_body, resolve_logs_folder,
-        runtime_session_busy_error, runtime_session_probe_error,
+        approval_scope_body, begin_backend_start, begin_managed_backend_shutdown,
+        developer_options_challenge_path, diagnostics_update_body, extract_challenge_signature,
+        force_child_exit, hmac_sha256_hex, percent_encode_query_component, prepare_app_quit,
+        prepare_runtime_files, primitive_live_bootstrap_requested, provider_config_body,
+        resolve_logs_folder, runtime_session_busy_error, runtime_session_probe_error,
         runtime_session_verification_error, sanitize_backend_event, sanitize_text_for_webview,
         sanitize_webview_response, send_backend_graceful_shutdown_request_to,
-        begin_managed_backend_shutdown, stop_managed_backend_child, tauri_ipc_bridge_proof,
-        try_ensure_agent_notes_file,
+        stop_managed_backend_child, tauri_ipc_bridge_proof, try_ensure_agent_notes_file,
         validate_local_folder_to_open, validate_primitive_live_bootstrap,
         validate_project_folder_to_open, wait_for_child_exit, webview2_args_with_accessibility,
         webview_error_message, BackendSessionProbe, BackendState,

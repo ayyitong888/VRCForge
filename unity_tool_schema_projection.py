@@ -16,9 +16,51 @@ from unity_write_input_schemas import EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS
 _PROJECT_APPLICATION_WRITE_TOOLS = {
     "vrcforge_create_project", "vrcforge_register_project",
     "vrcforge_register_project_catalog", "vrcforge_restore_unity_core",
+    "vrcforge_install_unity_core",
     "vrcforge_rollback_project_catalog_registration",
     "vrcforge_rollback_project_lifecycle", "vrcforge_select_project",
     "vrcforge_restore_checkpoint",
+}
+
+
+_DESKTOP_ACTION_SCHEMA = {
+    "type": "object",
+    "description": (
+        "The outer action selects the desktop bridge (usually computer_use); "
+        "params.operation selects the bounded desktop operation."
+    ),
+    "required": ["action"],
+    "properties": {
+        "action": {
+            "type": "string",
+            "enum": ["computer_use", "screenshot", "annotation", "browser", "desktop_rescue"],
+            "description": "Desktop bridge action. Use computer_use for params.operation calls.",
+        },
+        "params": {
+            "type": "object",
+            "description": (
+                "Desktop operation parameters. For a read-only app catalog call, use "
+                "{operation: 'list_apps'}. Other operation-specific fields are passed through."
+            ),
+            "properties": {
+                "operation": {
+                    "type": "string",
+                    "enum": [
+                        "list_apps", "launch_app", "list_windows", "get_window", "window_state",
+                        "get_window_state", "inspect_window", "cursor_position", "screenshot",
+                        "focus_window", "activate_window", "move_pointer", "move", "click", "drag",
+                        "drag_pointer", "scroll", "type_text", "type", "key_press", "press_key",
+                        "press", "focus_element", "invoke_element", "invoke", "set_value",
+                        "set_element_value", "secondary_action", "perform_secondary_action", "wait",
+                        "sleep", "sequence",
+                    ],
+                    "description": "Bounded desktop operation; list_apps is read-only.",
+                }
+            },
+            "additionalProperties": True,
+        },
+    },
+    "additionalProperties": True,
 }
 
 
@@ -56,6 +98,8 @@ def canonical_unity_read_tool_input_schema(tool_name: str) -> dict[str, Any]:
     """Return the one model-facing schema shared by internal and external Agents."""
 
     name = str(tool_name or "").strip()
+    if name == "vrcforge_agent_desktop_action":
+        return deepcopy(_DESKTOP_ACTION_SCHEMA)
     registered = UNITY_READ_TOOL_INPUT_SCHEMAS.get(name)
     if isinstance(registered, Mapping):
         # A retained checkpoint supplies its own project/restore scope, including

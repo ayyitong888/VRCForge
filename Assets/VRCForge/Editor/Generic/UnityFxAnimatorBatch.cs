@@ -44,7 +44,7 @@ namespace VRCForge.Editor
                 var edgeEdit = action == "ensure_transition" || action == "delete_transition";
                 if (!stateEdit && !edgeEdit) throw new InvalidOperationException("Unsupported batch FX action.");
                 var allowed = stateEdit
-                    ? new[] { "action", "layerName", "stateName", "motionClipPath", "writeDefaults", "speed" }
+                    ? new[] { "action", "layerName", "stateName", "motionClipPath", "writeDefaults", "speed", "timeParameterActive", "timeParameter" }
                     : new[] { "action", "layerName", "sourceStateName", "destinationStateName", "transitionIndex", "hasExitTime", "exitTime", "duration", "canTransitionToSelf", "interruptionSource", "orderedInterruption", "conditions" };
                 if (edit.Properties().Any(property => !allowed.Contains(property.Name)))
                     throw new InvalidOperationException("Unsupported field for batch FX action.");
@@ -58,6 +58,7 @@ namespace VRCForge.Editor
                         if (action == "update_state") throw new InvalidOperationException("State not found for update.");
                         Required(edit, "motionClipPath");
                         state = new JObject { ["name"] = name, ["speed"] = 1f, ["writeDefaultValues"] = true,
+                            ["timeParameterActive"] = false, ["timeParameter"] = "",
                             ["motionPath"] = "", ["transitions"] = new JArray() };
                         if (((JArray)machine["states"]).Count == 0 && (string)machine["defaultState"] == "") machine["defaultState"] = name;
                         ((JArray)machine["states"]).Add(state);
@@ -72,6 +73,27 @@ namespace VRCForge.Editor
                     }
                     if (edit["speed"] != null) state["speed"] = Number(edit, "speed", 1f, false);
                     if (edit["writeDefaults"] != null) state["writeDefaultValues"] = Boolean(edit, "writeDefaults", true);
+                    if (edit["timeParameter"] != null)
+                    {
+                        var parameter = Required(edit, "timeParameter");
+                        var definition = ((JArray)result["parameters"]).OfType<JObject>().SingleOrDefault(item => (string)item["name"] == parameter);
+                        if (definition == null || (string)definition["type"] != "Float")
+                            throw new InvalidOperationException("timeParameter must reference an existing Float Animator parameter.");
+                        state["timeParameter"] = parameter;
+                    }
+                    if (edit["timeParameterActive"] != null)
+                    {
+                        state["timeParameterActive"] = Boolean(edit, "timeParameterActive", false);
+                        if ((bool)state["timeParameterActive"])
+                        {
+                            var effectiveParameter = ((string)state["timeParameter"] ?? "").Trim();
+                            if (effectiveParameter.Length == 0)
+                                throw new InvalidOperationException("timeParameter is required when timeParameterActive is true.");
+                            var definition = ((JArray)result["parameters"]).OfType<JObject>().SingleOrDefault(item => (string)item["name"] == effectiveParameter);
+                            if (definition == null || (string)definition["type"] != "Float")
+                                throw new InvalidOperationException("timeParameter must reference an existing Float Animator parameter.");
+                        }
+                    }
                     continue;
                 }
                 var destination = Required(edit, "destinationStateName"); edit["destinationStateName"] = destination;

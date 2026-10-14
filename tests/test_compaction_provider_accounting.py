@@ -23,16 +23,73 @@ def test_compaction_usage_accumulates_without_changing_main_request_window():
     _, planner, _, _ = fixture()
     with planner.bind_turn({}):
         guard_before = planner.native_context_guard({"messages": []}, context_usage=usage)
-    RuntimePlannerService.record_context_usage(None, usage, "summary page", [], USAGE, update_window=False)
-    RuntimePlannerService.record_context_usage(None, usage, "failed page", [], {}, update_window=False)
+    RuntimePlannerService.record_context_usage(None, usage, "summary page", [], USAGE,
+                                                update_window=False, phase="compaction")
+    RuntimePlannerService.record_context_usage(None, usage, "failed page", [], {},
+                                                update_window=False, phase="compaction")
     assert usage["requestCount"] == 3 and usage["inputTokens"] == 200
     assert usage["cacheReadTokens"] == 80 and usage["cacheUsageComplete"] is False
     assert usage["exact"] is False and usage["lastUsageExact"] is True
+    assert usage["usageByPhase"]["planner"]["requestCount"] == 1
+    assert usage["usageByPhase"]["planner"]["inputTokens"] == 100
+    assert usage["usageByPhase"]["compaction"]["requestCount"] == 2
+    assert usage["usageByPhase"]["compaction"]["inputTokens"] == 100
+    assert usage["usageByPhase"]["compaction"]["exact"] is False
+    assert usage["usageByPhaseComplete"] is True
+    assert usage["usageByPhaseCoveredRequestCount"] == usage["requestCount"]
+    assert "cacheWriteTokens" not in usage["usageByPhase"]["planner"]
+    assert "cacheWriteTokens" not in usage["usageByPhase"]["compaction"]
     for key in before:
         if key.startswith(("last", "peak", "sentHistory")):
             assert usage[key] == before[key]
     with planner.bind_turn({}):
         assert planner.native_context_guard({"messages": []}, context_usage=usage) == guard_before
+
+
+def test_old_aggregate_usage_is_marked_phase_incomplete():
+    usage = {
+        "requestCount": 2,
+        "inputTokens": 200,
+        "outputTokens": 20,
+        "totalTokens": 220,
+        "exact": True,
+    }
+    RuntimePlannerService.record_context_usage(None, usage, "new request", [], USAGE)
+    assert usage["requestCount"] == 3
+    assert usage["usageByPhaseComplete"] is False
+    assert usage["usageByPhaseCoveredRequestCount"] == 1
+
+
+def test_phase_cache_write_explicit_zero_is_preserved():
+    usage = {}
+    RuntimePlannerService.record_context_usage(
+        None, usage, "zero cache write", [], {**USAGE, "cacheWriteTokens": 0}
+    )
+    assert usage["usageByPhase"]["planner"]["cacheWriteTokens"] == 0
+
+
+def test_cache_write_accumulates_and_keeps_independent_coverage():
+    usage = {}
+    RuntimePlannerService.record_context_usage(
+        None, usage, "known write", [], {**USAGE, "cacheWriteTokens": 8}
+    )
+    assert usage["cacheWriteTokens"] == 8
+    assert usage["cacheWriteUsageRequestCount"] == 1
+    assert usage["cacheWriteUsageComplete"] is True
+    assert usage["usageByPhase"]["planner"]["cacheWriteTokens"] == 8
+
+    RuntimePlannerService.record_context_usage(None, usage, "missing write", [], {})
+    assert usage["cacheWriteTokens"] == 8
+    assert usage["cacheWriteUsageRequestCount"] == 1
+    assert usage["cacheWriteUsageComplete"] is False
+
+    RuntimePlannerService.record_context_usage(
+        None, usage, "explicit zero write", [], {**USAGE, "cacheWriteTokens": 0}
+    )
+    assert usage["cacheWriteTokens"] == 8
+    assert usage["cacheWriteUsageRequestCount"] == 2
+    assert usage["cacheWriteUsageComplete"] is False
+    assert usage["usageByPhase"]["planner"]["cacheWriteTokens"] == 8
 
 
 def model_fixture(monkeypatch, request):
@@ -119,3 +176,6 @@ def test_gateway_cancel_restores_window_but_keeps_compaction_cost(tmp_path):
     assert response["contextUsage"]["inputTokens"] == 18100
     assert response["contextUsage"]["requestCount"] == 2
     assert response["contextUsage"]["peakInputTokens"] == 18000
+    phases = response["contextUsage"]["usageByPhase"]
+    assert phases["planner"]["inputTokens"] == 18000
+    assert phases["compaction"]["inputTokens"] == 100

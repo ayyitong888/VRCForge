@@ -8,10 +8,12 @@ import {
   buildRuntimeStepResultQueues,
   buildTimelinePresentation,
   hasDurableExecutionEvents,
+  isFinalAssistantTimelineEvent,
   runtimeTerminalStatusKey,
   timelineInvocationDisplayLabel,
   type TimelineBatchKind,
   type TimelineInvocation,
+  type TimelinePresentationEntry,
 } from "../../lib/chat-timeline-presentation";
 import type { ApprovalActionState, ChatTimelineEvent } from "../../lib/chat-types";
 import { cn } from "../../lib/utils";
@@ -74,10 +76,14 @@ export function buildAgentTimelineRows({
     elapsedSeconds,
     response.plan.plannerFailure?.code,
     response.steps,
+    { providerLine, renderElapsed: true },
   );
   const shouldSurfaceModelIdentity = Boolean(response.plan.plannerFailure?.code);
+  const missingFinalAnswer = response.plan.reason === "native_final_answer_missing";
   if (durableRows.length) {
-    const fallbackAnswer = response.plan.reply || response.plan.summary;
+    const phaseTaggedAssistant = durableTimeline.some((event) => event.kind === "assistant" && (
+      event.payload?.phase === "commentary" || event.payload?.phase === "final_answer"
+    ));
     const rows = [...durableRows];
     const orderedSteps = normalizeAgentSteps(response.steps);
     const hasDurableExecution = hasDurableExecutionEvents(durableTimeline);
@@ -102,10 +108,16 @@ export function buildAgentTimelineRows({
     const hasDurableAssistant = durableTimeline.some(
       (event) => event.kind === "assistant" && Boolean(event.payload?.summary),
     );
+    const hasDurableFinalAssistant = durableTimeline.some(isFinalAssistantTimelineEvent);
+    const fallbackAnswer = phaseTaggedAssistant && !hasDurableFinalAssistant
+      ? ""
+      : response.plan.reply || response.plan.summary;
     const hasStepAnswer = orderedSteps.some(({ step }) => isStepKindAnswer(step.kind));
-    if (!hasDurableAssistant && !hasStepAnswer) {
+    if (!hasDurableFinalAssistant && !hasStepAnswer) {
       if (fallbackAnswer) {
         rows.push(renderPlanReplyRow(fallbackAnswer, planLabel, elapsedSeconds, t));
+      } else if (missingFinalAnswer) {
+        rows.push(renderMissingFinalAnswerNotice(t));
       } else if (shouldSurfaceModelIdentity) {
         rows.push(renderPlanIdentityRow(planLabel, elapsedSeconds, t));
       }
@@ -117,7 +129,7 @@ export function buildAgentTimelineRows({
   const orderedSteps = normalizeAgentSteps(response.steps);
   const legacyFallback = orderedSteps.length === 0;
   if (legacyFallback) {
-    return buildLegacyAgentTimelineRows({
+    const legacyRows = buildLegacyAgentTimelineRows({
       response,
       shell,
       vision,
@@ -134,6 +146,9 @@ export function buildAgentTimelineRows({
       elapsedSeconds,
       t,
     });
+    if (Number.isFinite(elapsedSeconds) || providerLine) legacyRows.push(renderTurnMetadataRow(elapsedSeconds, providerLine));
+    if (missingFinalAnswer) legacyRows.push(renderMissingFinalAnswerNotice(t));
+    return legacyRows;
   }
 
   const rows = buildAgentTimelineRowsFromSteps({
@@ -157,11 +172,13 @@ export function buildAgentTimelineRows({
     const fallbackAnswer = response.plan.reply || response.plan.summary;
     if (fallbackAnswer) {
       rows.push(renderPlanReplyRow(fallbackAnswer, planLabel, elapsedSeconds, t));
+    } else if (missingFinalAnswer) {
+      rows.push(renderMissingFinalAnswerNotice(t));
     } else if (shouldSurfaceModelIdentity) {
       rows.push(renderPlanIdentityRow(planLabel, elapsedSeconds, t));
     }
   }
-  return rows.length ? rows : buildLegacyAgentTimelineRows({
+  const fallbackRows = rows.length ? rows : buildLegacyAgentTimelineRows({
     response,
     shell,
     vision,
@@ -178,6 +195,10 @@ export function buildAgentTimelineRows({
     elapsedSeconds,
     t,
   });
+  if (Number.isFinite(elapsedSeconds) && !fallbackRows.some((row) => row && typeof row === "object" && "key" in row && (row as { key?: string }).key === "agent-turn-metadata")) {
+    fallbackRows.push(renderTurnMetadataRow(elapsedSeconds, providerLine));
+  }
+  return fallbackRows;
 }
 
 /** Render the server-owned ordered projection without exposing hidden reasoning. */
@@ -186,7 +207,14 @@ export function buildDurableTimelineRows(
   elapsedSeconds?: number,
   terminalFailureCode = "",
   steps: AgentRuntimeResponse["steps"] = [],
-  options: { includeAssistant?: boolean } = {},
+  options: {
+    includeAssistant?: boolean;
+    live?: boolean;
+    renderElapsed?: boolean;
+    processTitleElapsed?: number;
+    providerLine?: string;
+    suppressTrailingAssistantText?: string;
+  } = {},
 ): ReactNode[] {
   // Lifecycle evidence stays durable; the right sidebar owns its presentation.
   const presentation = buildTimelinePresentation(events.filter((event) => event.kind !== "subagent"), elapsedSeconds);
@@ -202,79 +230,85 @@ export function buildDurableTimelineRows(
   };
   const rows: ReactNode[] = [];
   const processRows: ReactNode[] = [];
-  const assistantRows: ReactNode[] = [];
+  const processInvocations: TimelineInvocation[] = [];
   const includeAssistant = options.includeAssistant !== false;
-  let processEventCount = 0;
-  let processHasFailure = false;
-  let processHasStarted = false;
-  let processGroupIndex = 0;
-  const flushProcessRows = () => {
-    if (!processRows.length) return;
-    rows.push(
-      <div key={`agent-turn-process-${processGroupIndex++}`} data-agent-turn-process-group>
-        <WorkSegmentRow
-          kind="process"
-          title={i18n.t("agent.workSegment")}
-          statusLabel={i18n.t("agent.workSegmentItems", { count: processEventCount })}
-          statusTone={processHasFailure ? "danger" : processHasStarted ? "warn" : "muted"}
-          showStatus
-        >
-          {processRows.splice(0)}
-        </WorkSegmentRow>
-      </div>,
-    );
-    processEventCount = 0;
-    processHasFailure = false;
-    processHasStarted = false;
-  };
-  if (Number.isFinite(presentation.elapsedSeconds)) {
-    rows.push(
-      <div key="agent-turn-duration" data-agent-turn-duration className="px-1 text-xs text-muted-foreground">
-        {i18n.t("agent.workSegmentElapsed", { duration: formatDuration(presentation.elapsedSeconds || 0) })}
-      </div>,
-    );
-  }
+  const turnElapsed = options.processTitleElapsed ?? (options.renderElapsed === false ? undefined : presentation.elapsedSeconds);
+  const finalAssistant = [...presentation.entries].reverse().find((entry) => (
+    entry.type === "assistant"
+    && (entry.phase === "final_answer"
+      || (!entry.phase && (Boolean(terminalFailureCode)
+        || ["done", "final", "completed", "failed", "error", "cancelled", "canceled"].includes(entry.status.toLowerCase()))))
+  ));
   for (const entry of presentation.entries) {
     if (entry.type === "assistant") {
       if (!includeAssistant) continue;
-      const terminalStatusKey = runtimeTerminalStatusKey(terminalFailureCode);
-      assistantRows.push(terminalStatusKey ? (
-        <div
-          key={entry.id}
-          data-vrcforge-terminal-status={terminalFailureCode}
-          role="status"
-          className="space-y-1.5 rounded-lg border border-destructive/20 bg-destructive/5 px-3 py-2 text-sm leading-relaxed"
-        >
-          <div className="flex items-center gap-1.5 text-xs font-medium text-destructive">
-            <AlertTriangle className="h-3.5 w-3.5" aria-hidden="true" />
-            <span>{i18n.t(terminalStatusKey)}</span>
-          </div>
-          <p className="text-muted-foreground">{entry.text}</p>
-        </div>
-      ) : (
-        <div key={entry.id} className="space-y-1 px-1 text-sm leading-relaxed">
-          <ChatMarkdown text={entry.text} />
-        </div>
-      ));
-      continue;
-    }
-    if (entry.kind === "process") {
-      flushProcessRows();
-      for (const invocation of entry.invocations) {
-        rows.push(renderDirectTimelineInvocation(invocation, takeFullResult(invocation)));
+      if (
+        entry.id === finalAssistant?.id
+        && options.suppressTrailingAssistantText?.trim()
+        && entry.text.trim() === options.suppressTrailingAssistantText.trim()
+      ) {
+        continue;
+      }
+      if (entry.id === finalAssistant?.id) {
+        rows.push(renderFinalAssistantRow(entry, terminalFailureCode));
+      } else {
+        processRows.push(
+          <div key={entry.id} className="space-y-1 px-1 text-sm leading-relaxed">
+            <ChatMarkdown text={entry.text} />
+          </div>,
+        );
       }
       continue;
     }
     for (const invocation of entry.invocations) {
-      processEventCount += 1;
-      processHasFailure ||= ["failed", "error"].includes(invocation.status.toLowerCase());
-      processHasStarted ||= invocation.status === "started";
+      processInvocations.push(invocation);
       processRows.push(renderDirectTimelineInvocation(invocation, takeFullResult(invocation)));
     }
   }
-  flushProcessRows();
-  rows.push(...assistantRows);
+  if (processRows.length) {
+    const processFailed = processInvocations.some((invocation) => ["failed", "error", "rejected", "cancelled", "canceled"].some((value) => invocation.status.toLowerCase().includes(value)));
+    rows.unshift(
+      <div key="agent-turn-process" data-agent-turn-process-group>
+        <WorkSegmentRow
+          kind="process"
+          title={turnProcessDisplayTitle(turnElapsed, processInvocations, i18n.t)}
+          statusLabel={processFailed ? i18n.t("skillStatus.failed") : ""}
+          statusTone={processFailed ? "danger" : "muted"}
+          showStatus={processFailed}
+          openByDefault={Boolean(options.live)}
+          processHeader
+        >
+          {processRows}
+        </WorkSegmentRow>
+      </div>,
+    );
+  }
+  if (options.providerLine && finalAssistant) {
+    rows.push(<div key="agent-turn-provider" className="mt-2 px-1 text-[10px] leading-relaxed text-muted-foreground/75">{options.providerLine}</div>);
+  }
   return rows;
+}
+
+function renderFinalAssistantRow(entry: Extract<TimelinePresentationEntry, { type: "assistant" }>, terminalFailureCode: string): ReactNode {
+  const terminalStatusKey = runtimeTerminalStatusKey(terminalFailureCode);
+  return terminalStatusKey ? (
+    <div
+      key={entry.id}
+      data-vrcforge-terminal-status={terminalFailureCode}
+      role="status"
+      className="space-y-1.5 rounded-lg border border-destructive/20 bg-destructive/5 px-3 py-2 text-sm leading-relaxed"
+    >
+      <div className="flex items-center gap-1.5 text-xs font-medium text-destructive">
+        <AlertTriangle className="h-3.5 w-3.5" aria-hidden="true" />
+        <span>{i18n.t(terminalStatusKey)}</span>
+      </div>
+      <p className="text-muted-foreground">{entry.text}</p>
+    </div>
+  ) : (
+    <div key={entry.id} className="space-y-1 px-1 text-sm leading-relaxed">
+      <ChatMarkdown text={entry.text} />
+    </div>
+  );
 }
 
 function renderDirectTimelineInvocation(invocation: TimelineInvocation, detail?: unknown): ReactNode {
@@ -295,13 +329,89 @@ function renderDirectTimelineInvocation(invocation: TimelineInvocation, detail?:
     <RunRow
       key={invocation.id}
       icon={workBatchIcon(invocation.kind)}
-      title={timelineInvocationDisplayLabel(invocation.label)}
+      title={invocationOperationTitle(invocation, i18n.t)}
       statusTone={danger ? "danger" : invocation.status === "started" ? "warn" : "ok"}
       statusLabel={invocation.status}
       detailCard
     >
       <InvocationDetailCard invocation={invocation} detail={detail} />
     </RunRow>
+  );
+}
+
+const GENERIC_INVOCATION_SUMMARIES = new Set([
+  "ok",
+  "done",
+  "executed",
+  "completed",
+  "listed",
+  "found",
+  "read",
+  "success",
+  "result",
+  "started",
+]);
+
+function invocationOperationTitle(invocation: TimelineInvocation, t: typeof i18n.t): string {
+  const tool = timelineInvocationDisplayLabel(invocation.label);
+  const normalizedStatus = invocation.status.toLowerCase();
+  if (["failed", "error", "rejected", "cancelled", "canceled"].some((value) => normalizedStatus.includes(value))) {
+    return t("agent.timeline.failedTool", { tool });
+  }
+  const summary = invocation.summary.trim();
+  if (summary && summary.length <= 180 && !GENERIC_INVOCATION_SUMMARIES.has(summary.toLowerCase())) {
+    return summary;
+  }
+  if (["started", "running", "pending"].includes(normalizedStatus)) {
+    return t("agent.timeline.runningTool", { tool });
+  }
+  switch (tool) {
+    case "read_text_file": return t("agent.timeline.readFile");
+    case "list_directory": return t("agent.timeline.listDirectory");
+    case "find_files": return t("agent.timeline.findFiles");
+    case "search_text": return t("agent.timeline.searchText");
+    case "edit_file": return t("agent.timeline.editFile");
+    case "write_file": return t("agent.timeline.writeFile");
+    case "delete_path": return t("agent.timeline.deletePath");
+    case "move_path": return t("agent.timeline.movePath");
+    case "apply_patch": return t("agent.timeline.applyPatch");
+    case "execute_shell": return t("agent.timeline.runCommand");
+    case "delegate_subagent": return t("agent.timeline.runSubagent");
+    default: return t("agent.timeline.callTool", { tool });
+  }
+}
+
+function turnProcessDisplayTitle(
+  elapsedSeconds: number | undefined,
+  invocations: TimelineInvocation[],
+  t: typeof i18n.t,
+): string {
+  if (Number.isFinite(elapsedSeconds)) return t("agent.turnDuration", { duration: formatDuration(elapsedSeconds || 0) });
+  const kind = invocations[0]?.kind || "process";
+  if (invocations.length === 1) return invocationOperationTitle(invocations[0], t);
+  const failed = invocations.filter((invocation) => ["failed", "error", "rejected", "cancelled", "canceled"].some((value) => invocation.status.toLowerCase().includes(value))).length;
+  if (failed) return t("agent.timeline.failedTools", { count: failed });
+  if (kind === "tool" && invocations.every((invocation) => timelineInvocationDisplayLabel(invocation.label) === "read_text_file")) {
+    return t("agent.timeline.readFiles", { count: invocations.length });
+  }
+  if (kind === "command") return t("agent.timeline.runCommands", { count: invocations.length });
+  if (kind === "subagent") return t("agent.timeline.runSubagents", { count: invocations.length });
+  if (kind === "file_edit") return t("agent.timeline.editFiles", { count: invocations.length });
+  if (kind === "process") return t("agent.timeline.progressUpdates", { count: invocations.length });
+  return t("agent.timeline.callTools", { count: invocations.length });
+}
+
+function renderTurnMetadataRow(elapsedSeconds?: number, providerLine?: string): ReactNode {
+  if (!Number.isFinite(elapsedSeconds) && !providerLine) return null;
+  return (
+    <div
+      key="agent-turn-metadata"
+      data-agent-turn-metadata
+      className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1 border-t border-border/60 px-1 pt-2 text-[10px] leading-relaxed text-muted-foreground"
+    >
+      {Number.isFinite(elapsedSeconds) ? <span>{i18n.t("agent.turnDuration", { duration: formatDuration(elapsedSeconds || 0) })}</span> : null}
+      {providerLine ? <span className="text-muted-foreground/75">{providerLine}</span> : null}
+    </div>
   );
 }
 
@@ -333,7 +443,7 @@ function InvocationDetailCard({ invocation, detail }: { invocation: TimelineInvo
         <div>{title}</div>
         <div className="mt-0.5 break-all font-mono text-[11px] font-normal text-muted-foreground">{invocation.label}</div>
       </div>
-      <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words px-3 py-2.5 font-mono text-xs leading-relaxed text-foreground">
+      <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words select-text px-3 py-2.5 font-mono text-xs leading-relaxed text-foreground">
         {content}
       </pre>
       <div
@@ -347,14 +457,6 @@ function InvocationDetailCard({ invocation, detail }: { invocation: TimelineInvo
       </div>
     </div>
   );
-}
-
-function workBatchTitle(kind: TimelineBatchKind, count: number): string {
-  if (kind === "command") return i18n.t("agent.commandBatch");
-  if (kind === "tool") return i18n.t("agent.toolBatch");
-  if (kind === "file_edit") return i18n.t("agent.workSegmentFiles", { count });
-  if (kind === "subagent") return i18n.t("agent.subagentBatch");
-  return i18n.t("agent.workSegment");
 }
 
 function workBatchIcon(kind: TimelineBatchKind): "shell" | "skill" | "plan" {
@@ -647,10 +749,7 @@ function buildLegacyAgentTimelineRows({
   rows.push(
     <div key="reply" className="px-1 text-sm">
       <ChatMarkdown text={planReply} />
-      <div className="mt-1 flex items-center gap-2 text-[10px] text-muted-foreground">
-        {planLabel ? <span>{planLabel}</span> : null}
-        {elapsedSeconds ? <span>{t("agent.elapsed", { time: formatDuration(elapsedSeconds) })}</span> : null}
-      </div>
+      {planLabel ? <div className="mt-2 text-[10px] leading-relaxed text-muted-foreground/75">{planLabel}</div> : null}
     </div>,
   );
   if (!planReply && shouldSurfaceModelIdentity && planLabel) {
@@ -872,10 +971,20 @@ function renderPlanReplyRow(
   return (
     <div key={key} className="px-1 text-sm">
       <ChatMarkdown text={answer} />
-      <div className="mt-1 flex items-center gap-2 text-[10px] text-muted-foreground">
-        {planLabel ? <span>{planLabel}</span> : null}
-        {elapsedSeconds ? <span>{t("agent.elapsed", { time: formatDuration(elapsedSeconds) })}</span> : null}
-      </div>
+      {planLabel ? <div className="mt-2 text-[10px] leading-relaxed text-muted-foreground/75">{planLabel}</div> : null}
+    </div>
+  );
+}
+
+function renderMissingFinalAnswerNotice(t: typeof i18n.t) {
+  return (
+    <div
+      key="missing-final-answer"
+      data-vrcforge-missing-final-answer
+      role="status"
+      className="mt-2 rounded-lg border border-border bg-muted/30 px-3 py-2 text-sm leading-relaxed text-muted-foreground"
+    >
+      {t("chat.runtimeTerminal.missingFinalAnswerNotice")}
     </div>
   );
 }
@@ -892,7 +1001,6 @@ function renderPlanIdentityRow(
   return (
     <div key={key} className="px-1 text-[10px] text-muted-foreground">
       <span>{planLabel}</span>
-      {elapsedSeconds ? <span className="ml-2">{t("agent.elapsed", { time: formatDuration(elapsedSeconds) })}</span> : null}
     </div>
   );
 }
@@ -933,11 +1041,12 @@ export function RunRow({
     <div className="text-muted-foreground" style={timelineOrder !== undefined ? { order: timelineOrder } : undefined}>
       <button
         type="button"
+        aria-expanded={open}
         onClick={() => setOpen((value) => !value)}
         className="group/run flex w-full min-w-0 items-center gap-2 rounded-md px-1 py-1 text-left transition-colors hover:bg-muted/50"
       >
         <Icon className="h-3.5 w-3.5 shrink-0" />
-        <span className="min-w-0 truncate text-xs">{compactExecution ? (icon === "shell" ? i18n.t("agent.runCommand") : i18n.t("agent.callTool")) : title}</span>
+        <span className="min-w-0 truncate text-xs" title={title}>{title}</span>
         {!compactExecution ? <span className={cn("shrink-0 text-xs", statusTone === "danger" ? "text-destructive" : statusTone === "warn" ? "text-amber-600" : statusTone === "ok" ? "text-emerald-600" : "text-muted-foreground")}>
           {statusLabel}
         </span> : null}
@@ -960,6 +1069,8 @@ function WorkSegmentRow({
   statusLabel,
   statusTone,
   showStatus = false,
+  openByDefault = false,
+  processHeader = false,
   children,
 }: {
   kind: TimelineBatchKind;
@@ -967,25 +1078,39 @@ function WorkSegmentRow({
   statusLabel: string;
   statusTone: "danger" | "warn" | "muted";
   showStatus?: boolean;
+  openByDefault?: boolean;
+  processHeader?: boolean;
   children: ReactNode;
 }) {
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(openByDefault);
   return (
     <div className="text-muted-foreground">
       <button
         type="button"
         aria-expanded={open}
         onClick={() => setOpen((value) => !value)}
-        className="group/work-segment flex w-full min-w-0 items-center gap-2 rounded-md px-1 py-1 text-left transition-colors hover:bg-muted/50"
+        className="group/work-segment flex w-full min-w-0 items-center gap-2 border-b border-border/60 px-1 py-2 text-left transition-colors hover:bg-muted/50"
       >
-        {kind === "command" ? <TerminalSquare className="h-3.5 w-3.5 shrink-0" /> : kind === "tool" || kind === "file_edit" ? <Wrench className="h-3.5 w-3.5 shrink-0" /> : <ListChecks className="h-3.5 w-3.5 shrink-0" />}
-        <span className="min-w-0 truncate text-xs">{kind === "command" ? i18n.t("agent.runCommand") : i18n.t("agent.callTool")}</span>
-        {showStatus ? <span className={cn("shrink-0 text-xs", statusTone === "danger" ? "text-destructive" : statusTone === "warn" ? "text-amber-600" : "text-muted-foreground")}>{statusLabel}</span> : null}
-        <span className="ml-auto shrink-0 opacity-0 transition-opacity group-hover/work-segment:opacity-100 group-focus-visible/work-segment:opacity-100">
-          {open ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
-        </span>
+        {processHeader ? (
+          <>
+            <span className="inline-flex min-w-0 items-center gap-1.5 text-sm leading-relaxed">
+              <span className="truncate">{title}</span>
+              {open ? <ChevronDown className="h-3.5 w-3.5 shrink-0" /> : <ChevronRight className="h-3.5 w-3.5 shrink-0" />}
+            </span>
+            {showStatus ? <span className={cn("shrink-0 text-xs", statusTone === "danger" ? "text-destructive" : statusTone === "warn" ? "text-amber-600" : "text-muted-foreground")}>{statusLabel}</span> : null}
+          </>
+        ) : (
+          <>
+            {kind === "command" ? <TerminalSquare className="h-3.5 w-3.5 shrink-0" /> : kind === "tool" || kind === "file_edit" ? <Wrench className="h-3.5 w-3.5 shrink-0" /> : <ListChecks className="h-3.5 w-3.5 shrink-0" />}
+            <span className="min-w-0 truncate text-sm leading-relaxed">{title}</span>
+            {showStatus ? <span className={cn("shrink-0 text-xs", statusTone === "danger" ? "text-destructive" : statusTone === "warn" ? "text-amber-600" : "text-muted-foreground")}>{statusLabel}</span> : null}
+            <span className="ml-auto shrink-0 opacity-0 transition-opacity group-hover/work-segment:opacity-100 group-focus-visible/work-segment:opacity-100">
+              {open ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+            </span>
+          </>
+        )}
       </button>
-      {open ? <div className="mt-1 space-y-1 rounded-lg bg-muted/20 py-1">{children}</div> : null}
+      {open ? <div className="mt-3 space-y-3 py-1">{children}</div> : null}
     </div>
   );
 }

@@ -11,6 +11,7 @@ import copy
 import json
 from collections.abc import Iterable, Mapping
 from typing import TYPE_CHECKING, Any, Callable
+from responses_native_protocol import public_assistant_messages
 from agent_scan_result_policy import (
     SCAN_RESULT_CONTINUATION_POLICY_V2,
     is_scan_result_policy_message,
@@ -114,6 +115,8 @@ class NativeRuntimeTurn:
         self._native_decision: dict[str, Any] | None = None
         self._native_steers: list[str] = []
         self._queued_calls: list[dict[str, Any]] = []
+        self._queued_public_content: str | None = None
+        self._queued_public_messages: list[dict[str, str]] = []
         self._argument_failure_counted = False
         self._scan_result_policy_persisted = False
         self.admitted_tool_names: set[str] | None = None
@@ -121,6 +124,7 @@ class NativeRuntimeTurn:
         self.compaction: dict[str, Any] | None = None
         # The gateway owns reader scope and lifecycle; the turn owns no store.
         self.retain_recovery = retain_recovery
+        self.retain_recovery_catalog: Callable[[list[dict[str, Any]]], str] | None = None
         state = self._state
         continuation_context = continuation_context or {}
         continuation_completion = continuation_completion or {}
@@ -264,6 +268,9 @@ class NativeRuntimeTurn:
         self._state.append_native_assistant(self._session_id, binding=self._binding, message=receipt)
         self._argument_failure_counted = False
         self._queued_calls = copy.deepcopy(receipt.get("tool_calls") or [])
+        public_content = receipt.get("content")
+        self._queued_public_content = public_content if isinstance(public_content, str) else None
+        self._queued_public_messages = public_assistant_messages(receipt)
         self.admitted_tool_names = set(tool_names)
         self._native_decision = None if self._queued_calls else {"ids": [], "cursor": len(self._loop_state)}
 
@@ -285,7 +292,16 @@ class NativeRuntimeTurn:
             raise ValueError("Native call cannot dispatch before its predecessor settles.")
         call = self._queued_calls.pop(0)
         self._native_decision = {"ids": [call["id"]], "cursor": len(self._loop_state)}
-        return {"role": "assistant", "content": None, "tool_calls": [copy.deepcopy(call)]}
+        public_content = self._queued_public_content
+        self._queued_public_content = None
+        public_messages = self._queued_public_messages
+        self._queued_public_messages = []
+        return {
+            "role": "assistant",
+            "content": public_content,
+            "tool_calls": [copy.deepcopy(call)],
+            **({"publicMessages": public_messages} if public_messages else {}),
+        }
 
     def reject_queued_receipt(self) -> None:
         """Bind one whole-receipt admission failure to every unexecuted call."""
@@ -318,6 +334,13 @@ class NativeRuntimeTurn:
                     if isinstance(outcome, Mapping)
                     else ""
                 )
+                # A write wrapper may retain approval_pending at the transport
+                # layer even after its inner approved request has failed (for
+                # example, the interrupted-apply recovery guard).  Preserve
+                # real approval/question waits, but settle a call when the
+                # canonical action outcome is already terminally failed.
+                if outcome_status in {"failed", "denied", "rejected", "cancelled", "not_executed"}:
+                    return False
                 if status in waiting_statuses or outcome_status in waiting_statuses:
                     return True
                 if status != "needs_user_action" and outcome_status != "needs_user_action":

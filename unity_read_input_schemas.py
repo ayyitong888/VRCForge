@@ -110,6 +110,16 @@ UNITY_READ_TOOL_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
             },
         },
     },
+    "vrcforge_get_setup_outfit_status": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["projectPath", "jobId", "executionTarget"],
+        "properties": {
+            "projectPath": _PROJECT_PATH_PROPERTY,
+            "jobId": {"type": "string", "pattern": "^[0-9a-fA-F]{32}$", "description": "Exact existing Setup Outfit job id; read-only status polling only."},
+            "executionTarget": {"type": "object", "description": "Current project-scoped execution target used to validate the active Unity Core identity.", "required": ["schema", "namespace", "scope", "project", "editor"], "additionalProperties": True},
+        },
+    },
     "vrcforge_inspect_outfit_package": {
         "type": "object", "additionalProperties": False, "required": ["packagePath"],
         "properties": {

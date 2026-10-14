@@ -6,7 +6,9 @@ import { build } from "esbuild";
 const require=createRequire(import.meta.url);
 const {chromium}=require(process.env.VRCFORGE_PLAYWRIGHT_PATH||"playwright");
 const app=readFileSync("src/App.tsx","utf8");
+const dashboard=readFileSync("dashboard_server.py","utf8");
 assert.match(app,/if \(eventType === "chatStorageChanged"\) \{\s*notifyChatStorageChanged\(\);\s*\}/);
+assert.match(dashboard,/async def write_chat_transcripts[\s\S]*?await EVENT_BUS\.broadcast\("chatStorageChanged", \{"source": "app"\}\)/);
 const bundle=await build({stdin:{resolveDir:process.cwd(),loader:"tsx",contents:`
 import React from 'react';import {createRoot} from 'react-dom/client';
 import i18n from 'i18next';import {initReactI18next} from 'react-i18next';

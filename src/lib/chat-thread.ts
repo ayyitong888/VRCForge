@@ -1,5 +1,6 @@
 import type { AgentContextUsage } from "./api";
 import type { ChatThread, ConversationItem } from "./chat-types";
+import { latestContextWindowUsage } from "./context-compaction";
 export {
   materializeRuntimeTimeline,
   mergeConversationTimelineItems,
@@ -66,7 +67,7 @@ export function cacheChatTimestampsFast(chat: ChatThread): ChatThread {
 }
 
 export function cacheChatContextUsageFast(chat: ChatThread): ChatThread {
-  const latestUsage = latestExactAgentContextUsage(chat.items);
+  const latestUsage = latestContextWindowUsage(chat.items, true);
   if (!latestUsage) {
     if (chat.contextUsageCache) {
       const { contextUsageCache: _contextUsageCache, ...rest } = chat;
@@ -142,19 +143,6 @@ export function normalizeChatContextUsage(value: unknown): AgentContextUsage | u
     typeof usage.totalTokens === "number" ||
     typeof usage.outputTokens === "number";
   return hasTokenCount ? usage : undefined;
-}
-
-function latestExactAgentContextUsage(items: ConversationItem[]): AgentContextUsage | undefined {
-  for (let index = items.length - 1; index >= 0; index -= 1) {
-    const item = items[index];
-    if (item.type === "agent") {
-      const usage = normalizeChatContextUsage(item.response.contextUsage);
-      if (usage) {
-        return usage;
-      }
-    }
-  }
-  return undefined;
 }
 
 function isUnstartedChat(chat: ChatThread): boolean {

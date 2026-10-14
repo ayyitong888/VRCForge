@@ -24,6 +24,7 @@ import { Button } from "../ui/button";
 import { matchPathToSkillRuntimeOperation, type PathToSkillOperationSummary } from "../../lib/path-to-skill-context";
 import { mergeConversationTimelineItems } from "../../lib/chat-thread";
 import { conversationItemRenderKey } from "../../lib/conversation-utils";
+import type { AttachmentPayloadVault } from "../../lib/attachment-payloads";
 
 function formatGoalElapsed(totalSeconds: number): string {
   const seconds = Math.max(0, Math.round(totalSeconds));
@@ -61,6 +62,7 @@ export function ChatWorkspace({
   attachments,
   onAttachFiles,
   onRemoveAttachment,
+  onUpdateAttachment,
   contextUsage,
   compaction,
   onCancelCompaction,
@@ -72,6 +74,7 @@ export function ChatWorkspace({
   projects,
   onBindProject,
   conversation,
+  attachmentPayloads,
   queued,
   agentQuestions,
   backgroundGoalDeliveries,
@@ -140,6 +143,7 @@ export function ChatWorkspace({
   attachments: ChatAttachment[];
   onAttachFiles: (files: FileList | File[] | null) => void;
   onRemoveAttachment: (id: string) => void;
+  onUpdateAttachment: (id: string, text: string) => void;
   contextUsage?: ContextUsage;
   compaction?: ChatCompactionState;
   onCancelCompaction?: () => void;
@@ -151,6 +155,7 @@ export function ChatWorkspace({
   projects: Array<{ key: string; name: string }>;
   onBindProject: (path: string) => void;
   conversation: ConversationItem[];
+  attachmentPayloads?: AttachmentPayloadVault;
   queued: QueuedChatTurn[];
   agentQuestions: AgentQuestion[];
   backgroundGoalDeliveries: AgentGoalDelivery[];
@@ -198,6 +203,7 @@ export function ChatWorkspace({
   sessionHandoffTargetChats: SessionHandoffTargetChat[];
   handoffSendOpen: boolean;
   onHandoffSendOpenChange: (open: boolean) => void;
+  developerOptionsEnabled?: boolean;
 }) {
   const { t } = useTranslation();
   const pendingAgentQuestions = useMemo(
@@ -208,6 +214,28 @@ export function ChatWorkspace({
     [agentQuestions, runtimeRuns],
   );
   const waitingForQuestion = pendingAgentQuestions.some(
+    (question) => questionContinuationDisplay(question) === "pending",
+  );
+  const activeQuestionContinuation = pendingAgentQuestions.find(
+    (question) => questionContinuationDisplay(question) === "active",
+  );
+  const questionContinuationBar = activeQuestionContinuation ? (
+    <div className="mb-3 flex items-center gap-2 rounded-xl border border-border bg-muted/40 px-3 py-2 text-xs" role="status" data-question-continuation-status>
+      <span className="min-w-0 flex-1 truncate">{t("questionCard.continuationRunning", "Continuing this task…")}</span>
+      {onStopQuestionContinuation ? (
+        <button
+          type="button"
+          className="shrink-0 rounded-md border border-border px-2 py-1 font-medium hover:bg-muted disabled:opacity-60"
+          onClick={() => void onStopQuestionContinuation(activeQuestionContinuation)}
+          disabled={!activeQuestionContinuation.runtimeContinuation?.turnId && !activeQuestionContinuation.runtimeContinuation?.clientTurnId}
+          data-question-continuation-stop
+        >
+          {t("questionCard.stopContinuation", "Stop")}
+        </button>
+      ) : null}
+    </div>
+  ) : null;
+  const pendingQuestionPrompts = pendingAgentQuestions.filter(
     (question) => questionContinuationDisplay(question) === "pending",
   );
   const conversationItems = mergeConversationTimelineItems(conversation);
@@ -263,6 +291,7 @@ export function ChatWorkspace({
       attachments={attachments}
       onAttachFiles={onAttachFiles}
       onRemoveAttachment={onRemoveAttachment}
+      onUpdateAttachment={onUpdateAttachment}
       contextUsage={contextUsage}
       providerLabel={providerLabel}
       model={model}
@@ -370,11 +399,12 @@ export function ChatWorkspace({
         </div>
         <div className="shrink-0 bg-workspace/95 px-4 pb-4 pt-2 md:px-6 md:pb-5 md:pt-2" data-chat-composer-dock>
           <div className="mx-auto max-w-3xl">
-            {pendingAgentQuestions.length ? (
+            {pendingQuestionPrompts.length ? (
               <div className="mb-3">
-                <AgentQuestionCard questions={pendingAgentQuestions} onAnswerQuestion={onAnswerQuestion} onStopContinuation={onStopQuestionContinuation} />
+                <AgentQuestionCard questions={pendingQuestionPrompts} onAnswerQuestion={onAnswerQuestion} />
               </div>
             ) : null}
+            {questionContinuationBar}
             {queueControls}
             <CompactionStatus state={compaction} onCancel={onCancelCompaction} />
             {activeGoalBar}
@@ -389,7 +419,7 @@ export function ChatWorkspace({
     <div className="relative flex min-h-0 flex-1 flex-col">
       <div className="relative min-h-0 flex-1">
         <div
-          className="h-full overflow-auto px-4 py-6 md:px-6 md:py-8"
+          className="app-scrollbar h-full overflow-auto px-4 py-6 md:px-6 md:py-8"
           data-chat-history-scroll
           onMouseUp={onConversationMouseUp}
           onScroll={(event) => onConversationScroll(event.currentTarget)}
@@ -436,6 +466,7 @@ export function ChatWorkspace({
               <div key={conversationItemRenderKey(item, conversationRenderScope, conversationItemKeyOccurrences)} data-conversation-item-id={item.id}>
                 <ConversationCard
                 item={item}
+                attachmentPayloads={attachmentPayloads}
                 approval={approval}
                 approvalAction={approval ? approvalActions[approval.id] : undefined}
                 canRetry={!sending && queued.length === 0 && item.id === latestRetryableItemId}
@@ -481,11 +512,12 @@ export function ChatWorkspace({
       </div>
       <div className="shrink-0 bg-workspace/95 px-4 pb-4 pt-2 md:px-6 md:pb-5 md:pt-2" data-chat-composer-dock>
         <div className="mx-auto max-w-3xl">
-          {pendingAgentQuestions.length ? (
+          {pendingQuestionPrompts.length ? (
             <div className="mb-3">
-              <AgentQuestionCard questions={pendingAgentQuestions} onAnswerQuestion={onAnswerQuestion} onStopContinuation={onStopQuestionContinuation} />
+              <AgentQuestionCard questions={pendingQuestionPrompts} onAnswerQuestion={onAnswerQuestion} />
             </div>
           ) : null}
+          {questionContinuationBar}
           {queueControls}
           <CompactionStatus state={compaction} onCancel={onCancelCompaction} />
           {handoffSendOpen ? (

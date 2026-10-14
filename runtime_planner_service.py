@@ -9,10 +9,12 @@ import json
 from context_compaction import normalize_compaction_recovery
 from planner_structured_tool_evidence import project_structured_tool_evidence
 from provider_runtime_adapters import ProviderTokenLimitError
+from responses_native_protocol import public_assistant_messages
 import math
 import ntpath
 from pathlib import Path
 import re
+import time
 import time
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Callable, Mapping, Protocol
@@ -33,6 +35,14 @@ from agent_tool_result_contract import _views
 from agent_completion_verifier import _normalize_diagnostics
 from agent_memory_tools import MEMORY_TOOL_NAMES, MEMORY_TOOL_SCHEMAS
 from agent_scan_result_policy import is_scan_result_policy_message, restored_scan_result_policy
+from native_request_composition import (
+    attach_native_request_composition,
+    attach_native_request_origin,
+    composition_metrics,
+    copy_native_request,
+    generated_message_digest,
+    result_page_ledger,
+)
 
 CONTEXT_USAGE_SCHEMA = "vrcforge.context_usage.v1"
 RUNTIME_CONTEXT_COMPACTION_SCHEMA = "vrcforge.runtime_context_compaction.v1"
@@ -860,6 +870,14 @@ def usage_int(value: object) -> int | None:
         return max(0, int(value.strip()))
     return None
 
+def nonnegative_usage_int(value: object) -> int | None:
+    """Accept cache-write counts only as genuine non-negative integers."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int) and value >= 0:
+        return value
+    return None
+
 def estimate_runtime_context_tokens(text: str) -> int:
     """Conservative dependency-free estimate for unsampled prompt deltas."""
 
@@ -875,6 +893,110 @@ def estimate_runtime_context_tokens(text: str) -> int:
         )
         quarter_tokens += 4 if is_cjk else len(character.encode("utf-8"))
     return (quarter_tokens + 3) // 4
+
+
+def _native_measurement_projection(value: object) -> object:
+    """Keep native request shape while excluding inline image bytes from estimates."""
+    if isinstance(value, str):
+        if value.startswith("data:image/") and "," in value:
+            return value.split(",", 1)[0] + ",<image-payload-omitted>"
+        return value
+    if isinstance(value, list):
+        return [_native_measurement_projection(item) for item in value]
+    if isinstance(value, Mapping):
+        return {
+            key: _native_measurement_projection(item)
+            for key, item in value.items()
+        }
+    return value
+
+
+def _native_image_count(value: object) -> int:
+    if isinstance(value, Mapping):
+        count = 1 if value.get("type") in {"image_url", "input_image"} else 0
+        return count + sum(_native_image_count(item) for item in value.values())
+    if isinstance(value, list):
+        return sum(_native_image_count(item) for item in value)
+    return 0
+
+
+def _native_image_blocks(observe: Mapping[str, object]) -> list[dict[str, object]]:
+    turn = ensure_dict(observe.get("turn"))
+    if turn.get("directImageInput") is not True:
+        return []
+    return [
+        {"type": "image_url", "image_url": {"url": str(item.get("dataUrl"))}}
+        for item in ensure_list(turn.get("attachments"))
+        if isinstance(item, Mapping)
+        and isinstance(item.get("dataUrl"), str)
+        and str(item.get("dataUrl")).startswith("data:image/")
+    ][:8]
+
+
+def _bind_native_image_blocks(
+    request: Mapping[str, object], observe: Mapping[str, object], current_message: str | None,
+) -> dict[str, object]:
+    blocks = _native_image_blocks(observe)
+    if not blocks:
+        return copy_native_request(request, {})
+    messages = deepcopy(ensure_list(request.get("messages")))
+    for index in range(len(messages) - 1, -1, -1):
+        candidate = messages[index]
+        if not isinstance(candidate, dict) or candidate.get("role") != "user":
+            continue
+        content = candidate.get("content")
+        if not isinstance(content, str) or (current_message is not None and content != current_message):
+            continue
+        messages[index] = {
+            **candidate,
+            "content": [{"type": "text", "text": content}, *blocks],
+        }
+        return copy_native_request(request, {"messages": messages})
+    return copy_native_request(request, {"messages": messages})
+
+
+def _refresh_native_provenance(request: Mapping[str, object]) -> dict[str, object]:
+    """Refresh generated-message coordinates after recovery/compaction.
+
+    A digest must occur exactly once in the current message list before it is
+    retained as host provenance.  Missing or duplicate matches are explicitly
+    unknown, preventing stale or user-duplicated text from being classified as
+    runtime context.
+    """
+    origin = deepcopy(ensure_dict(request.get("_diagnosticOrigin")))
+    generated = ensure_dict(origin.get("generatedMessageDigests"))
+    positions = ensure_dict(origin.get("generatedMessagePositions"))
+    messages = request.get("messages")
+    current_messages = messages if isinstance(messages, list) else []
+    for kind in ("runtimeContext", "runtimeState"):
+        expected = generated.get(kind)
+        if kind == "runtimeState":
+            state_matches = [
+                (index, item) for index, item in enumerate(current_messages)
+                if isinstance(item, Mapping)
+                and item.get("role") == "system"
+                and isinstance(item.get("content"), str)
+                and item["content"].startswith("Current runtime state (data): ")
+            ]
+            if state_matches:
+                index, item = state_matches[-1]
+                generated[kind] = generated_message_digest(item)
+                positions[kind] = index
+                continue
+        matches = [
+            index for index, item in enumerate(current_messages)
+            if isinstance(expected, str)
+            and isinstance(item, Mapping)
+            and generated_message_digest(item) == expected
+        ]
+        if len(matches) == 1:
+            positions[kind] = matches[0]
+        else:
+            generated[kind] = None
+            positions[kind] = None
+    origin["generatedMessagePositions"] = positions
+    origin["generatedMessageDigests"] = generated
+    return origin
 
 def classify_runtime_compaction_failure(exc: Exception) -> str:
     message = str(exc or "").casefold()
@@ -1732,7 +1854,11 @@ class RuntimePlannerService:
         context_limit = self._verified_context_limit.get()
         if not isinstance(context_limit, int) or context_limit <= 0:
             return None
-        serialized = json.dumps(dict(request), ensure_ascii=False, separators=(",", ":"))
+        serialized = json.dumps(
+            _native_measurement_projection(dict(request)),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
         request_tokens = estimate_runtime_context_tokens(serialized)
         usage = context_usage or {}
         last_input_tokens = usage_int(usage.get("lastInputTokens"))
@@ -1744,6 +1870,7 @@ class RuntimePlannerService:
             else 0
         )
         projected_tokens = provider_overhead + request_tokens
+        image_count = _native_image_count(request)
         trigger_tokens = max(1, int(context_limit * RUNTIME_CONTEXT_COMPACTION_TRIGGER_RATIO + 0.999999))
         hard_limit_tokens = max(1, int(context_limit * RUNTIME_CONTEXT_COMPACTION_HARD_RATIO + 0.999999))
         return {
@@ -1761,7 +1888,11 @@ class RuntimePlannerService:
             "usageExact": usage_exact and last_input_tokens is not None and previous_prompt_tokens is not None,
             "providerOverheadTokens": provider_overhead,
             "requestTokens": request_tokens,
-            "measurement": "native_serialized_request_estimate",
+            "measurement": "text_only_with_images" if image_count else "native_serialized_request_estimate",
+            **({
+                "imageCount": image_count,
+                "imageTokenEstimateAvailable": False,
+            } if image_count else {}),
         }
 
     @staticmethod
@@ -1776,13 +1907,20 @@ class RuntimePlannerService:
             recoveries.append(recovery)
         if not recoveries:
             return request
-        information = []
-        for item in recoveries:
-            text = retain_recovery(deepcopy(item))
+        catalog = getattr(native_turn, "retain_recovery_catalog", None)
+        if callable(catalog):
+            text = catalog([deepcopy(item) for item in recoveries])
             if not isinstance(text, str) or not text.strip():
-                raise ValueError("native compaction recovery reader returned no information")
-            if text not in information:
-                information.append(text)
+                raise ValueError("native compaction recovery catalog returned no information")
+            information = [text]
+        else:
+            information = []
+            for item in recoveries:
+                text = retain_recovery(deepcopy(item))
+                if not isinstance(text, str) or not text.strip():
+                    raise ValueError("native compaction recovery reader returned no information")
+                if text not in information:
+                    information.append(text)
         messages = deepcopy(request["messages"])
         prefix = "Current runtime state (data): "
         if not messages or messages[-1].get("role") != "system" or not messages[-1]["content"].startswith(prefix):
@@ -1790,7 +1928,7 @@ class RuntimePlannerService:
         state = json.loads(messages[-1]["content"][len(prefix):])
         state["compactionRecoveryInformation"] = information
         messages[-1]["content"] = prefix + json.dumps(state, ensure_ascii=False, separators=(",", ":"))
-        return {**request, "messages": messages}
+        return copy_native_request(request, {"messages": messages})
 
     def maybe_compact_native_context(
         self, request: dict[str, object], native_turn: NativeRuntimeTurn,
@@ -1850,7 +1988,8 @@ class RuntimePlannerService:
                 "trigger": "auto", "phase": "mid_turn", "targetTokens": guard["targetAfterTokens"],
                 "realContextLimit": guard["contextLimit"],
                 "_recordUsage": lambda prompt, usage: self.record_context_usage(
-                    context_usage if context_usage is not None else {}, prompt, [], usage, update_window=False),
+                    context_usage if context_usage is not None else {}, prompt, [], usage,
+                    update_window=False, phase="compaction"),
             }))
             metadata["attempts"] = bounded_runtime_compaction_integer(result.get("providerAttempts"), 16)
             if ensure_dict(result.get("completeness")).get("summarizerInputComplete") is False:
@@ -1862,7 +2001,9 @@ class RuntimePlannerService:
             recovery = normalize_compaction_recovery(result["recovery"]) if "recovery" in result else None
             retained_messages = deepcopy(snapshot["messages"][cut:])
             retained_messages.extend(restored_scan_result_policy(snapshot["messages"], retained_messages))
-            candidate = {**request, "messages": [{"role": "assistant", "content": summary}] + retained_messages + runtime_messages}
+            candidate = copy_native_request(
+                request, {"messages": [{"role": "assistant", "content": summary}] + retained_messages + runtime_messages}
+            )
             candidate = self._native_recovery_request(candidate, native_turn, recovery)
             after = self.native_context_guard(candidate, context_usage=context_usage)
             reduction = guard["beforeTokens"] - after["beforeTokens"]
@@ -1893,7 +2034,7 @@ class RuntimePlannerService:
         native_turn.compaction = runtime_compaction_audit_view(metadata)
         if metadata.get("applied") and "recovery" in metadata:
             native_turn.compaction.update({key: metadata[key] for key in ("recovery", "completeness")})
-        request = {**request, "messages": native_turn.messages() + runtime_messages}
+        request = copy_native_request(request, {"messages": native_turn.messages() + runtime_messages})
         return request, self.native_context_guard(request, context_usage=context_usage)
 
 
@@ -1912,6 +2053,8 @@ class RuntimePlannerService:
             exposure_layer: str = EXPOSURE_LAYER_PLANNING,
             *,
             native_turn: NativeRuntimeTurn | None = None,
+            provider_retry_callback: Callable[[dict[str, object]], None] | None = None,
+            provider_retry_wait: Callable[[float], bool] | None = None,
         ) -> dict[str, object]:
             loop_state = loop_state or []
             if params.get("planMode") is True:
@@ -1944,6 +2087,8 @@ class RuntimePlannerService:
                 global_instructions=self._read_global_instructions(),
                 project_instructions=instruction_snapshot.content,
                 native_turn=native_turn,
+                provider_retry_callback=provider_retry_callback,
+                provider_retry_wait=provider_retry_wait,
             )
             if llm_plan is not None:
                 return llm_plan
@@ -1964,9 +2109,13 @@ class RuntimePlannerService:
             invalid_response_preview: str = "",
             invalid_response_stage: str = "",
             format_correction: Mapping[str, object] | None = None,
+            retry_attempts: int = 0,
+            retry_decision: str = "",
         ) -> dict[str, object]:
             post_tool = phase == "post_tool"
             invalid_response = cause_code == "planner_invalid_response"
+            image_transport_unsupported = cause_code == "provider_image_transport_unsupported"
+            image_not_bound = cause_code == "provider_image_not_bound"
             not_configured = cause_code == "provider_not_configured"
             token_limit = cause_code == "provider_token_limit"
             if not_configured:
@@ -1980,6 +2129,10 @@ class RuntimePlannerService:
                      else "模型响应达到 token 限制，未形成完整答复，本轮未执行工具。")
                     + "已停止，未自动重试或执行不完整工具调用。请缩小本轮读取范围，或确认输出预算后再继续。"
                 )
+            elif image_transport_unsupported:
+                reply = "当前 Provider 协议无法在主规划请求中传输图片。本轮未调用独立识图模型，也未执行工具；请切换到支持图片的协议或启用独立识图模型。"
+            elif image_not_bound:
+                reply = "当前图片无法安全绑定到本轮用户消息，因此没有发送模型请求或执行工具；请重试。"
             elif post_tool and invalid_response:
                 reply = (
                     "上一步工具已经执行，结果也已保留，但模型返回的下一步规划格式无效。"
@@ -2012,6 +2165,10 @@ class RuntimePlannerService:
             )
             if provider_error_details:
                 planner_failure["providerError"] = provider_error_details
+            if retry_attempts:
+                planner_failure["retryAttempts"] = retry_attempts
+            if retry_decision:
+                planner_failure["retryDecision"] = retry_decision
             if cause_code == "planner_invalid_response":
                 parse_diagnostics: dict[str, object] = {}
                 parse_llm_plan_response(invalid_response_preview, diagnostics=parse_diagnostics)
@@ -2102,6 +2259,25 @@ class RuntimePlannerService:
             if isinstance(exc, ProviderTokenLimitError):
                 return "provider_token_limit"
             message = str(exc).casefold()
+            exception_fields = getattr(exc, "__dict__", {})
+            status_code = exception_fields.get("status_code") if isinstance(exception_fields, Mapping) else None
+            response = exception_fields.get("response") if isinstance(exception_fields, Mapping) else None
+            if not isinstance(status_code, int):
+                status_code = getattr(response, "status_code", None) if response is not None else None
+            if status_code == 429:
+                return "provider_rate_limited"
+            if status_code in {502, 503, 504} and any(marker in message for marker in ("capacity", "overload", "busy", "unavailable")):
+                return "provider_capacity"
+            stream_error_code = str(
+                exception_fields.get("stream_error_code") if isinstance(exception_fields, Mapping) else ""
+            ).strip().casefold()
+            if stream_error_code in {"rate_limit_exceeded", "rate_limited", "rate_limit"}:
+                return "provider_rate_limited"
+            if stream_error_code in {
+                "capacity", "capacity_exceeded", "model_capacity_exceeded",
+                "server_overloaded", "server_is_overloaded", "overloaded",
+            }:
+                return "provider_capacity"
             if isinstance(exc, TimeoutError) or any(marker in message for marker in ("timeout", "timed out", "deadline")):
                 return "provider_timeout"
             if any(marker in message for marker in ("unauthorized", "forbidden", "authentication", "invalid api key")):
@@ -2114,6 +2290,60 @@ class RuntimePlannerService:
             ):
                 return "provider_connection_failed"
             return "provider_request_failed"
+
+    @classmethod
+    def _provider_retry_reason(cls, exc: Exception) -> str:
+            """Return a retry reason only before provider output has started."""
+            if getattr(exc, "stream_started", None) is not False:
+                return ""
+            code = cls._planner_failure_code(exc)
+            if code in {"provider_connection_failed", "provider_timeout", "provider_rate_limited", "provider_capacity"}:
+                return {
+                    "provider_connection_failed": "connection",
+                    "provider_timeout": "timeout",
+                    "provider_rate_limited": "rate_limit",
+                    "provider_capacity": "capacity",
+                }[code]
+            # HTTP 503 is retryable without provider-specific capacity wording.
+            # Keep its final diagnosis generic rather than claiming a connection
+            # failure or capacity issue that the response did not establish.
+            status_code = getattr(exc, "status_code", None)
+            if not isinstance(status_code, int):
+                status_code = getattr(getattr(exc, "response", None), "status_code", None)
+            if code == "provider_request_failed" and status_code == 503:
+                return "server_error"
+            return ""
+
+    @staticmethod
+    def _provider_no_more_retry(exc: Exception) -> bool:
+            if bool(getattr(exc, "no_more_retry", False)):
+                return True
+            candidates = [getattr(exc, "body", None)]
+            response = getattr(exc, "response", None)
+            candidates.append(getattr(response, "body", None) if response is not None else None)
+            for body in candidates:
+                if not isinstance(body, Mapping):
+                    continue
+                headers = body.get("headers")
+                if isinstance(headers, Mapping) and str(headers.get("x-retry-metadata") or "").upper() == "NO_MORE_RETRY":
+                    return True
+                if str(body.get("code") or "").casefold() in {"no_more_retry", "no-more-retry"}:
+                    return True
+            return False
+
+    @staticmethod
+    def _provider_retry_delay(exc: Exception, attempt: int) -> float:
+            headers = getattr(exc, "headers", None)
+            if headers is None:
+                response = getattr(exc, "response", None)
+                headers = getattr(response, "headers", None) if response is not None else None
+            retry_after = headers.get("retry-after") if hasattr(headers, "get") else None
+            try:
+                if retry_after is not None:
+                    return min(5.0, max(0.1, float(retry_after)))
+            except (TypeError, ValueError):
+                pass
+            return min(2.0, 0.25 * (2 ** max(0, attempt - 1)))
 
     @staticmethod
     def _planner_provider_error_details(exc: Exception | None) -> dict[str, object]:
@@ -2144,6 +2374,31 @@ class RuntimePlannerService:
             body = exception_fields.get("body")
             if isinstance(body, Mapping):
                 details["body"] = redact_sensitive(dict(body))
+            headers = exception_fields.get("headers")
+            if headers is None:
+                headers = response_fields.get("headers")
+            if hasattr(headers, "get"):
+                retry_after = headers.get("retry-after")
+                if retry_after is not None:
+                    details["retryAfter"] = str(retry_after)[:40]
+                if str(headers.get("x-no-more-retry") or "").casefold() in {"1", "true", "yes"}:
+                    details["noMoreRetry"] = True
+            stream_error_code = exception_fields.get("stream_error_code")
+            if isinstance(stream_error_code, str) and stream_error_code.strip():
+                details["streamErrorCode"] = stream_error_code.strip()[:100]
+            stream_error_message = exception_fields.get("stream_error_message")
+            if isinstance(stream_error_message, str) and stream_error_message.strip():
+                details["streamErrorMessage"] = re.sub(
+                    r"(?i)\b(api[_-]?key|authorization|bearer|token|secret|password)\b(\s*[:=]\s*)([^\s,;}]+)",
+                    r"\1\2<redacted>",
+                    stream_error_message[:500],
+                )
+            stream_error_status = exception_fields.get("stream_error_status")
+            if isinstance(stream_error_status, str) and stream_error_status.strip():
+                details["streamErrorStatus"] = stream_error_status.strip()[:40]
+            stream_error_status_code = exception_fields.get("stream_error_status_code")
+            if type(stream_error_status_code) is int and stream_error_status_code > 0:
+                details["streamErrorStatusCode"] = stream_error_status_code
             return details
 
     @staticmethod
@@ -2195,6 +2450,8 @@ class RuntimePlannerService:
             global_instructions: str = "",
             project_instructions: str = "",
             native_turn: NativeRuntimeTurn | None = None,
+            provider_retry_callback: Callable[[dict[str, object]], None] | None = None,
+            provider_retry_wait: Callable[[float], bool] | None = None,
         ) -> dict[str, object] | None:
             model_port = self._model
             if model_port is None:
@@ -2208,6 +2465,8 @@ class RuntimePlannerService:
                 else "initial"
             )
             format_correction: dict[str, object] = {}
+            retry_attempts = 0
+            retry_decision = ""
             native_call_ids: list[str] = []
             try:
                 native = native_turn is not None
@@ -2215,18 +2474,57 @@ class RuntimePlannerService:
                 persist_scan_policy = getattr(native_turn, "persist_scan_result_policy", None) if native else None
                 if queued_receipt is None and callable(persist_scan_policy):
                     persist_scan_policy()
+                native_history_messages = native_turn.messages() if native_turn is not None else []
                 native_request, native_tools = self._build_native_plan_request(
-                    native_turn.messages() if native_turn is not None else [], observe=observe, exposure_layer=exposure_layer,
+                    native_history_messages, observe=observe, exposure_layer=exposure_layer,
                     project_context_active=project_context_active, project_path=project_path,
                     internal_tool_blocks=internal_tool_blocks,
                     global_instructions=global_instructions, project_instructions=project_instructions,
+                    current_message=message,
                 ) if native else ({}, [])
+                if native and ensure_dict(observe.get("turn")).get("directImageInput") is True:
+                    image_bound = any(
+                        isinstance(item.get("content"), list)
+                        and any(isinstance(part, Mapping) and part.get("type") == "image_url"
+                                for part in item["content"])
+                        for item in native_request.get("messages", [])
+                        if isinstance(item, Mapping)
+                    )
+                    if not image_bound:
+                        return self._planner_failure_plan(
+                            cause_code="provider_image_not_bound", phase=phase,
+                            planner_label=planner_label,
+                        )
                 if native and queued_receipt is None:
-                    native_turn.persist_request_context(native_request["messages"][:-1])
+                    # Images belong to the current provider request, but they
+                    # are transport data rather than persisted conversation
+                    # text. Keep the append-only native history comparison
+                    # text-only so a multimodal request cannot rewrite the
+                    # stored user message.
+                    persisted_messages = deepcopy(native_request["messages"][:-1])
+                    # Restore only the current-user image projection before
+                    # comparing against append-only history. Other existing
+                    # multimodal history must remain byte-for-byte intact.
+                    for index, original in enumerate(native_history_messages):
+                        if index < len(persisted_messages):
+                            persisted_messages[index] = deepcopy(original)
+                    native_turn.persist_request_context(persisted_messages)
                     native_request = self._native_recovery_request(native_request, native_turn)
                     native_request, native_guard = self.maybe_compact_native_context(
                         native_request, native_turn, context_usage=context_usage,
                     )
+                    native_request = _bind_native_image_blocks(native_request, observe, message)
+                    # Refresh only the private diagnostic provenance after
+                    # recovery/compaction/image projection.  The provider sees
+                    # instructions/messages/tools only; the sidecar is removed
+                    # from measurement serialization and never persisted.
+                    origin = _refresh_native_provenance(native_request)
+                    native_request = attach_native_request_composition(
+                        native_request,
+                        origin=origin,
+                    )
+                    if native_guard is not None and ensure_dict(native_turn.compaction).get("applied") is True:
+                        native_guard = self.native_context_guard(native_request, context_usage=context_usage)
                     if native_guard is not None and context_usage is not None:
                         context_usage["nativeContextGuard"] = native_guard
                     if native_turn.cancelled() or native_guard is not None and native_guard.get("blocked"):
@@ -2242,8 +2540,17 @@ class RuntimePlannerService:
                         })
                         blocked_plan["plannerFailure"]["retryable"] = False
                         return blocked_plan
+                if not native and ensure_dict(observe.get("turn")).get("directImageInput") is True:
+                    return self._planner_failure_plan(
+                        cause_code="provider_image_transport_unsupported",
+                        phase=phase,
+                        planner_label=planner_label,
+                    )
                 # Count the complete request, including schemas and history. Never log it.
-                prompt = json.dumps(native_request, ensure_ascii=False, separators=(",", ":")) if native else self._build_llm_plan_prompt(
+                prompt = json.dumps(
+                    _native_measurement_projection(dict(native_request)),
+                    ensure_ascii=False, separators=(",", ":"),
+                ) if native else self._build_llm_plan_prompt(
                     message, history, loop_state or [],
                     observe=observe, exposure_layer=exposure_layer,
                     project_context_active=project_context_active, project_path=project_path,
@@ -2253,11 +2560,49 @@ class RuntimePlannerService:
                 for format_attempt in range(1 if native else 2):
                     rejected_native_batch = False
                     try:
-                        raw_response = (
-                            PlannerModelResult("", assistant_message=queued_receipt, finish_reason="tool_calls")
-                            if queued_receipt is not None else
-                            model_port.plan_native(native_request) if native else model_port.plan(prompt)
-                        )
+                        while True:
+                            try:
+                                raw_response = (
+                                    PlannerModelResult("", assistant_message=queued_receipt, finish_reason="tool_calls")
+                                    if queued_receipt is not None else
+                                    model_port.plan_native(native_request) if native else model_port.plan(prompt)
+                                )
+                                break
+                            except Exception as provider_exc:
+                                reason = self._provider_retry_reason(provider_exc)
+                                no_more_retry = self._provider_no_more_retry(provider_exc)
+                                if not reason or no_more_retry or queued_receipt is not None or retry_attempts >= 5 or (native_turn is not None and native_turn.cancelled()):
+                                    if reason and (no_more_retry or retry_attempts >= 5):
+                                        retry_decision = "NO_MORE_RETRY"
+                                        if provider_retry_callback is not None:
+                                            try:
+                                                provider_retry_callback({
+                                                    "attempt": min(retry_attempts, 5), "max": 5,
+                                                    "reason": reason, "terminal": "NO_MORE_RETRY",
+                                                })
+                                            except Exception:
+                                                pass
+                                    raise
+                                measured = getattr(provider_exc, "provider_usage", None)
+                                if queued_receipt is None and context_usage is not None and isinstance(measured, Mapping):
+                                    self.record_context_usage(context_usage, prompt, history, dict(measured))
+                                retry_attempts += 1
+                                event = {"attempt": retry_attempts, "max": 5, "reason": reason}
+                                details = self._planner_provider_error_details(provider_exc)
+                                if isinstance(details.get("statusCode"), int):
+                                    event["statusCode"] = details["statusCode"]
+                                if provider_retry_callback is not None:
+                                    try:
+                                        provider_retry_callback(event)
+                                    except Exception:
+                                        pass
+                                delay = self._provider_retry_delay(provider_exc, retry_attempts)
+                                if provider_retry_wait is not None:
+                                    if not provider_retry_wait(delay):
+                                        retry_decision = "CANCELLED"
+                                        raise RuntimeError("Provider retry cancelled by user.") from provider_exc
+                                else:
+                                    time.sleep(delay)
                     except Exception as exc:
                         from provider_runtime_adapters import ProviderNativeToolRejection
 
@@ -2303,6 +2648,7 @@ class RuntimePlannerService:
                                     "issues": [{"path": "tool_calls", "code": "tool_not_visible"}]}
                                 return self._planner_argument_error_plan(
                                     base={"planner": "llm", "nativeCallIds": native_call_ids,
+                                          **({"publicMessages": public_assistant_messages(receipt)} if public_assistant_messages(receipt) else {}),
                                           "skillNeeded": False, "writeNeeded": False, "shellNeeded": False},
                                     action_kind="control", tool_name="native_batch", arguments=None,
                                     validation=rejection, phase=phase,
@@ -2324,6 +2670,7 @@ class RuntimePlannerService:
                                     "issues": [{"path": "tool_calls", "code": "native_batch_not_admitted"}]}
                                 return self._planner_argument_error_plan(
                                     base={"planner": "llm", "nativeCallIds": native_call_ids,
+                                          **({"publicMessages": public_assistant_messages(receipt)} if public_assistant_messages(receipt) else {}),
                                           "skillNeeded": False, "writeNeeded": False, "shellNeeded": False},
                                     action_kind="control", tool_name="native_batch", arguments=None,
                                     validation=rejection, phase=phase,
@@ -2351,6 +2698,7 @@ class RuntimePlannerService:
                         if rejection:
                             return self._planner_argument_error_plan(
                                 base={"planner": "llm", "nativeCallIds": native_call_ids,
+                                      **({"publicMessages": public_assistant_messages(receipt)} if public_assistant_messages(receipt) else {}),
                                       "skillNeeded": False, "writeNeeded": False, "shellNeeded": False},
                                 action_kind=rejection["kind"], tool_name=rejection["tool"],
                                 arguments=rejection.get("arguments"), validation=rejection, phase=phase,
@@ -2407,6 +2755,8 @@ class RuntimePlannerService:
                     transport_phase=self._planner_transport_phase(exc),
                     provider_error=exc,
                     format_correction=format_correction,
+                    retry_attempts=retry_attempts,
+                    retry_decision=retry_decision,
                 )
             if not isinstance(payload, dict):
                 return self._planner_failure_plan(
@@ -2459,6 +2809,8 @@ class RuntimePlannerService:
 
             base = {
                 **({"nativeCallIds": native_call_ids} if native_call_ids else {}),
+                **({"publicMessages": public_assistant_messages(receipt)}
+                   if native and public_assistant_messages(receipt) else {}),
                 **({"formatCorrection": dict(format_correction)} if format_correction else {}),
                 "planner": "llm",
                 "plannerLabel": planner_label,
@@ -2743,6 +3095,11 @@ class RuntimePlannerService:
                     "nextStep": "classify_shell",
                 }
             elif action == "reply":
+                if native and public_assistant_messages(receipt) and not reply:
+                    return {
+                        **base, "reply": "", "summary": "The model stopped without a final answer.",
+                        "nextStep": "needs_user_action", "reason": "native_final_answer_missing",
+                    }
                 reply_text = reply or summary
                 if reply_text:
                     return {
@@ -2824,7 +3181,7 @@ class RuntimePlannerService:
             prompt: str,
             history: list[dict[str, object]],
             provider_usage: dict[str, object] | None,
-            *, update_window: bool = True,
+            *, update_window: bool = True, phase: str = "planner",
         ) -> None:
             usage = ensure_dict(provider_usage)
             if not update_window and "lastInputTokens" in current and "lastUsageExact" not in current:
@@ -2849,9 +3206,39 @@ class RuntimePlannerService:
                         "cumulativeTotalTokens": 0,
                         "cacheUsageComplete": True,
                         "cacheUsageRequestCount": 0,
+                        "cacheWriteUsageComplete": True,
+                        "cacheWriteUsageRequestCount": 0,
                         "promptCharacterCount": 0,
+                        "usageByPhase": {},
                     }
                 )
+
+            phase_name = str(phase or "planner").strip().casefold()
+            if phase_name not in {"planner", "compaction"}:
+                phase_name = "planner"
+            usage_by_phase = current.setdefault("usageByPhase", {})
+            if not isinstance(usage_by_phase, dict):
+                usage_by_phase = {}
+                current["usageByPhase"] = usage_by_phase
+            phase_usage = usage_by_phase.setdefault(phase_name, {
+                "requestCount": 0, "inputTokens": 0, "outputTokens": 0,
+                "totalTokens": 0,
+                "exact": True, "cacheUsageComplete": True,
+                "cacheUsageRequestCount": 0,
+            })
+            if not isinstance(phase_usage, dict):
+                phase_usage = {"requestCount": 0, "inputTokens": 0,
+                               "outputTokens": 0, "totalTokens": 0,
+                               "exact": True, "cacheUsageComplete": True,
+                               "cacheUsageRequestCount": 0}
+                usage_by_phase[phase_name] = phase_usage
+            if "cacheWriteUsageComplete" not in current:
+                current["cacheWriteUsageComplete"] = int(current.get("requestCount") or 0) == 0
+                current["cacheWriteUsageRequestCount"] = 0
+            if "cacheWriteUsageComplete" not in phase_usage:
+                phase_usage["cacheWriteUsageComplete"] = int(phase_usage.get("requestCount") or 0) == 0
+                phase_usage["cacheWriteUsageRequestCount"] = 0
+            phase_usage["requestCount"] = int(phase_usage.get("requestCount") or 0) + 1
 
             # Keep the original cumulative field names as compatibility aliases.
             # This also upgrades an in-memory usage projection created by an older
@@ -2867,6 +3254,13 @@ class RuntimePlannerService:
                     current[legacy_key] = int(current.get(cumulative_key) or 0)
 
             current["requestCount"] = int(current.get("requestCount") or 0) + 1
+            covered_phase_requests = sum(
+                int(bucket.get("requestCount") or 0)
+                for bucket in usage_by_phase.values()
+                if isinstance(bucket, dict)
+            )
+            current["usageByPhaseCoveredRequestCount"] = covered_phase_requests
+            current["usageByPhaseComplete"] = covered_phase_requests == current["requestCount"]
             current["promptCharacterCount"] = int(current.get("promptCharacterCount") or 0) + len(prompt)
             if update_window:
                 current["lastPromptCharacterCount"] = len(prompt)
@@ -2891,9 +3285,17 @@ class RuntimePlannerService:
             output_tokens = usage_int(usage.get("outputTokens"))
             total_tokens = usage_int(usage.get("totalTokens"))
             cache_read_tokens = usage_int(usage.get("cacheReadTokens"))
+            cache_write_tokens = nonnegative_usage_int(usage.get("cacheWriteTokens"))
             cache_reported = exact and input_tokens is not None and cache_read_tokens is not None
+            cache_write_reported = exact and input_tokens is not None and cache_write_tokens is not None
             current["cacheUsageRequestCount"] = int(current.get("cacheUsageRequestCount") or 0) + int(cache_reported)
             current["cacheUsageComplete"] = current.get("cacheUsageComplete") is True and cache_reported
+            phase_usage["cacheUsageRequestCount"] = int(phase_usage.get("cacheUsageRequestCount") or 0) + int(cache_reported)
+            phase_usage["cacheUsageComplete"] = phase_usage.get("cacheUsageComplete") is True and cache_reported
+            current["cacheWriteUsageRequestCount"] = int(current.get("cacheWriteUsageRequestCount") or 0) + int(cache_write_reported)
+            current["cacheWriteUsageComplete"] = current.get("cacheWriteUsageComplete") is True and cache_write_reported
+            phase_usage["cacheWriteUsageRequestCount"] = int(phase_usage.get("cacheWriteUsageRequestCount") or 0) + int(cache_write_reported)
+            phase_usage["cacheWriteUsageComplete"] = phase_usage.get("cacheWriteUsageComplete") is True and cache_write_reported
             if total_tokens is None and input_tokens is not None and output_tokens is not None:
                 total_tokens = input_tokens + output_tokens
 
@@ -2902,6 +3304,7 @@ class RuntimePlannerService:
                 or output_tokens is not None
                 or total_tokens is not None
                 or cache_read_tokens is not None
+                or cache_write_tokens is not None
             ):
                 if input_tokens is not None:
                     cumulative_input_tokens = int(current.get("cumulativeInputTokens") or 0) + input_tokens
@@ -2925,9 +3328,18 @@ class RuntimePlannerService:
                         current["peakTotalTokens"] = max(int(current.get("peakTotalTokens") or 0), total_tokens)
                 if cache_read_tokens is not None:
                     current["cacheReadTokens"] = int(current.get("cacheReadTokens") or 0) + cache_read_tokens
+                if cache_write_tokens is not None:
+                    current["cacheWriteTokens"] = int(current.get("cacheWriteTokens") or 0) + cache_write_tokens
+                for key, value in (("inputTokens", input_tokens), ("outputTokens", output_tokens),
+                                   ("totalTokens", total_tokens), ("cacheReadTokens", cache_read_tokens),
+                                   ("cacheWriteTokens", cache_write_tokens)):
+                    if value is not None:
+                        phase_usage[key] = int(phase_usage.get(key) or 0) + value
             else:
                 current["exact"] = False
                 current["unavailableReason"] = str(usage.get("unavailableReason") or "provider_usage_missing")
+                phase_usage["exact"] = False
+                phase_usage["unavailableReason"] = str(usage.get("unavailableReason") or "provider_usage_missing")
 
     def maybe_compact_runtime_history(
             self,
@@ -3026,7 +3438,8 @@ class RuntimePlannerService:
                         "targetTokens": target_tokens,
                         "realContextLimit": context_limit,
                         "_recordUsage": lambda prompt, usage: self.record_context_usage(
-                            context_usage, prompt, [], usage, update_window=False),
+                            context_usage, prompt, [], usage,
+                            update_window=False, phase="compaction"),
                     },
                 ))
                 metadata["attempts"] = bounded_runtime_compaction_integer(result.get("providerAttempts"), 16)
@@ -3641,6 +4054,145 @@ class RuntimePlannerService:
                             + sanitize_planner_observation_text(str(vision.get("reason") or vision.get("error") or "pixels were not analyzed"), None)
                         )
             if isinstance(result, dict):
+                if tool_name in {
+                    "vrcforge_vision_audit",
+                    "vrcforge_vision_audit_multi",
+                }:
+                    # Vision results are normalized by the dashboard before
+                    # reaching this boundary. Expose only the bounded,
+                    # decision-relevant judgment; never pass through provider
+                    # text, image data, or artifact paths.
+                    audit = (
+                        result["audit"]
+                        if isinstance(result.get("audit"), Mapping)
+                        else result
+                    )
+                    audit_projection: dict[str, object] = {}
+                    for key in ("status", "summary", "recommendation", "guidance"):
+                        value = audit.get(key)
+                        if isinstance(value, str) and value.strip():
+                            audit_projection[key] = sanitize_planner_observation_text(value, 600)
+                    for key in (
+                        "overallStatus",
+                        "visualVerified",
+                        "coverageComplete",
+                        "captureEvidenceVerified",
+                    ):
+                        value = audit.get(key)
+                        if isinstance(value, (bool, str)) and value != "":
+                            audit_projection[key] = (
+                                sanitize_planner_observation_text(value, 600)
+                                if isinstance(value, str)
+                                else value
+                            )
+                    if isinstance(audit.get("contractComplete"), bool):
+                        audit_projection["contractComplete"] = audit["contractComplete"]
+                    angles = audit.get("angles")
+                    if isinstance(angles, list):
+                        audit_projection["angles"] = [
+                            sanitize_planner_observation_text(item, 120)
+                            for item in angles[:RUNTIME_PLANNER_TOOL_OBSERVATION_MAX_ITEMS]
+                            if isinstance(item, str) and item.strip()
+                        ]
+                    issues = audit.get("issues")
+                    if isinstance(issues, list):
+                        audit_projection["issues"] = [
+                            sanitize_planner_observation_text(item, 300)
+                            for item in issues[:RUNTIME_PLANNER_TOOL_OBSERVATION_MAX_ITEMS]
+                            if isinstance(item, (str, int, float)) and not isinstance(item, bool)
+                        ]
+                    annotations = audit.get("annotations")
+                    if isinstance(annotations, list):
+                        projected_annotations: list[dict[str, object]] = []
+                        for item in annotations[:RUNTIME_PLANNER_TOOL_OBSERVATION_MAX_ITEMS]:
+                            if not isinstance(item, Mapping):
+                                continue
+                            projected_item: dict[str, object] = {}
+                            for key in ("label", "reason", "severity"):
+                                value = item.get(key)
+                                if isinstance(value, str) and value.strip():
+                                    projected_item[key] = sanitize_planner_observation_text(value, 300)
+                            box = item.get("box")
+                            if isinstance(box, Mapping):
+                                projected_box = {
+                                    key: value
+                                    for key, value in ((name, box.get(name)) for name in ("x", "y", "width", "height"))
+                                    if isinstance(value, (int, float)) and not isinstance(value, bool)
+                                }
+                                if projected_box:
+                                    projected_item["box"] = projected_box
+                            if projected_item:
+                                projected_annotations.append(projected_item)
+                        audit_projection["annotations"] = projected_annotations
+                    results = audit.get("results")
+                    if isinstance(results, list):
+                        projected_results: list[dict[str, object]] = []
+                        for item in results[:RUNTIME_PLANNER_TOOL_OBSERVATION_MAX_ITEMS]:
+                            if not isinstance(item, Mapping):
+                                continue
+                            # Multi-angle dashboard results keep the provider
+                            # audit under each result's nested ``audit``
+                            # object.  Preserve the bounded diagnostic fields
+                            # at this boundary; exposing only angle/status
+                            # makes clipping actionable only in logs, not to
+                            # the next planner turn.
+                            item_audit = (
+                                item.get("audit")
+                                if isinstance(item.get("audit"), Mapping)
+                                else item
+                            )
+                            projected_result: dict[str, object] = {}
+                            for key in ("angle", "status"):
+                                value = item.get(key)
+                                if isinstance(value, str) and value.strip():
+                                    projected_result[key] = sanitize_planner_observation_text(value, 300)
+                            summary = item.get("summary")
+                            if not isinstance(summary, str) or not summary.strip():
+                                summary = item_audit.get("summary")
+                            if isinstance(summary, str) and summary.strip():
+                                projected_result["summary"] = sanitize_planner_observation_text(summary, 300)
+                            item_issues = item.get("issues")
+                            if not isinstance(item_issues, list):
+                                item_issues = item_audit.get("issues")
+                            if isinstance(item_issues, list):
+                                projected_result["issues"] = [
+                                    sanitize_planner_observation_text(issue, 300)
+                                    for issue in item_issues[:RUNTIME_PLANNER_TOOL_OBSERVATION_MAX_ITEMS]
+                                    if isinstance(issue, (str, int, float)) and not isinstance(issue, bool)
+                                ]
+                            item_annotations = item.get("annotations")
+                            if not isinstance(item_annotations, list):
+                                item_annotations = item_audit.get("annotations")
+                            if isinstance(item_annotations, list):
+                                projected_annotations: list[dict[str, object]] = []
+                                for annotation in item_annotations[:RUNTIME_PLANNER_TOOL_OBSERVATION_MAX_ITEMS]:
+                                    if not isinstance(annotation, Mapping):
+                                        continue
+                                    projected_annotation: dict[str, object] = {}
+                                    for key in ("label", "reason", "severity"):
+                                        value = annotation.get(key)
+                                        if isinstance(value, str) and value.strip():
+                                            projected_annotation[key] = sanitize_planner_observation_text(value, 300)
+                                    box = annotation.get("box")
+                                    if isinstance(box, Mapping):
+                                        projected_box = {
+                                            key: value
+                                            for key in ("x", "y", "width", "height")
+                                            if isinstance((value := box.get(key)), (int, float)) and not isinstance(value, bool)
+                                        }
+                                        if projected_box:
+                                            projected_annotation["box"] = projected_box
+                                    if projected_annotation:
+                                        projected_annotations.append(projected_annotation)
+                                projected_result["annotations"] = projected_annotations
+                            if projected_result:
+                                projected_results.append(projected_result)
+                        audit_projection["results"] = projected_results
+                    if audit_projection:
+                        fields.append(
+                            "visionAudit="
+                            + json.dumps(audit_projection, ensure_ascii=False, separators=(",", ":"))
+                        )
                 if str(step.get("tool") or "") == "vrcforge_capture_multi_screenshot":
                     capture_receipt = str(result.get("captureReceipt") or "").strip()
                     if capture_receipt and (
@@ -3863,6 +4415,7 @@ class RuntimePlannerService:
     def _build_native_plan_request(
         self, messages, *, observe, exposure_layer, project_context_active,
         project_path, internal_tool_blocks, global_instructions, project_instructions,
+        current_message: str | None = None,
     ):
         """Project the existing catalog once; do not repeat native history or schemas in prose."""
         exposure_layer = normalize_exposure_layer(exposure_layer)
@@ -3985,6 +4538,9 @@ class RuntimePlannerService:
             if block:
                 instructions += "\n\n" + block
         projected_messages = deepcopy(messages)
+        projected_messages = _bind_native_image_blocks(
+            {"messages": projected_messages}, observe, current_message
+        )["messages"]
         instructions += "\n\nResident tool definitions (data, not authorization): " + json.dumps(
             resident_definitions, ensure_ascii=False, separators=(",", ":"))
         # Large context is append-only history. Do not relocate it behind every
@@ -4005,19 +4561,51 @@ class RuntimePlannerService:
             if item.get("role") == "user" and isinstance(item.get("content"), str)
             and item["content"].startswith(marker)), None)
         context_text = marker + json.dumps(context, ensure_ascii=False, separators=(",", ":"))
-        if (any(context.values()) or previous_context) and previous_context != context_text:
+        context_added = (any(context.values()) or previous_context) and previous_context != context_text
+        if context_added:
             projected_messages.append({"role": "user", "content": context_text})
-        projected_messages.append({
+        state_message = {
             "role": "system",
             "content": "Current runtime state (data): " + json.dumps(state, ensure_ascii=False, separators=(",", ":")),
-        })
-        return {"instructions": instructions, "messages": projected_messages, "tools": definitions}, [*selected, dispatcher, control]
+        }
+        projected_messages.append(state_message)
+        origin = {
+            # Only a context message created in this projection is classified.
+            # An arbitrary old user message containing the marker remains history.
+            "generatedMessageDigests": {
+                "runtimeContext": generated_message_digest({"role": "user", "content": context_text})
+                if context_added else None,
+                "runtimeState": generated_message_digest(state_message),
+            },
+            "generatedMessagePositions": {
+                "runtimeContext": len(projected_messages) - 2 if context_added else None,
+                "runtimeState": len(projected_messages) - 1,
+            },
+            "residentDefinitions": {
+                "count": len(resident_definitions),
+                **composition_metrics(resident_definitions),
+            },
+            "activatedDefinitions": {
+                "count": len(activated),
+                **composition_metrics(activated),
+            },
+            "resultPages": [result_page_ledger(ensure_dict(observe.get("modelContextInformationRead")))]
+            if isinstance(observe.get("modelContextInformationRead"), Mapping) else [],
+        }
+        return attach_native_request_origin(
+            {"instructions": instructions, "messages": projected_messages, "tools": definitions},
+            origin=origin,
+        ), [*selected, dispatcher, control]
 
     @staticmethod
     def _native_action_payload(receipt, tools, *, catalog=None):
         calls = receipt.get("tool_calls") or []
         if not calls:
-            return {"action": "reply", "reply": receipt.get("content") or "",
+            messages = public_assistant_messages(receipt)
+            final = next((item["text"] for item in reversed(messages) if item.get("phase") == "final_answer"), None)
+            if final is None:
+                final = next((item["text"] for item in reversed(messages) if item.get("phase") is None), "")
+            return {"action": "reply", "reply": final if messages else receipt.get("content") or "",
                     "completion_claim": {"satisfied": False}}, None
         call = calls[0]
         function = ensure_dict(call.get("function"))
@@ -4110,7 +4698,7 @@ class RuntimePlannerService:
         if not validation.get("ok"):
             return None, {**validation, "kind": kind, "tool": name, "arguments": arguments}
         return {"action": kind, f"{kind}_tool": name, f"{kind}_params": arguments,
-                "reply": receipt.get("content") or ""}, None
+                "reply": "" if public_assistant_messages(receipt) else receipt.get("content") or ""}, None
 
     def _build_llm_plan_prompt(
             self,

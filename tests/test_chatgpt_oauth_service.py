@@ -8,6 +8,7 @@ import threading
 import time
 from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlsplit
 
@@ -340,15 +341,25 @@ def test_identity_token_allows_small_clock_skew(tmp_path: Path, claim_name: str,
 )
 def test_identity_token_failures_are_classified(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     claim_name: str | None,
     delta: int,
     claim_removals: set[str],
     expected_error: str,
 ):
+    fixed_now = int(time.time())
+
+    class FixedJwtClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime.fromtimestamp(fixed_now, timezone.utc).astimezone(tz)
+
+    # Verify the exact six-second boundary independently of login scheduling.
+    monkeypatch.setattr(jwt.api_jwt, "datetime", FixedJwtClock)
     fake = FakeHTTP()
     if claim_name is not None:
         fake.claim_overrides = {
-            claim_name: int(time.time()) + delta if claim_name in {"iat", "exp"} else (
+            claim_name: fixed_now + delta if claim_name in {"iat", "exp"} else (
                 "another-client" if claim_name == "aud" else "https://issuer.invalid"
             )
         }
@@ -452,14 +463,14 @@ def test_access_token_refresh_is_serialized_and_models_keep_visible_order(tmp_pa
 
         fake.model_payload = {
             "models": [
-                {"slug": "first", "display_name": "First", "visibility": "list"},
+                {"slug": "first", "display_name": "First", "visibility": "list", "context_window": 123456, "max_output_tokens": 4096},
                 {"slug": "hidden", "display_name": "Hidden", "visibility": "hide"},
-                {"slug": "second", "display_name": "Second", "visibility": "list"},
+                {"slug": "second", "display_name": "Second", "visibility": "list", "context_window": True, "input_token_limit": -5},
                 {"id": "ignored", "name": "Malformed", "visibility": "list"},
             ]
         }
         assert service1.models(result["accountId"]) == [
-            {"id": "first", "name": "First"},
+            {"id": "first", "name": "First", "contextWindow": 123456, "maxOutputTokens": 4096},
             {"id": "second", "name": "Second"},
         ]
         assert fake.get_calls[-1][0] == "https://api.openai.com/v1/models"

@@ -1,5 +1,6 @@
 import { hasTauriInternals, invokeTauriWithAbort, requestJson } from "./http";
 import type { AgentNotes } from "./types";
+import type { ChatStoragePatches } from "../chat-storage-delta";
 
 export async function fetchAgentNotes(endpoint: string): Promise<AgentNotes> {
   if (hasTauriInternals()) {
@@ -49,6 +50,7 @@ export type StoredChats<T> = {
   sources?: Array<ChatSourceRevision & Record<string, unknown>>;
   recoveries?: ChatRecoveryMarker[];
   writeBlocked?: boolean;
+  chatDigests?: Record<string, string>;
 };
 
 export async function fetchChats<T>(endpoint: string, projectPaths: string[] = []): Promise<StoredChats<T>> {
@@ -71,6 +73,7 @@ export async function saveChats<T>(
   endpoint: string,
   chats: T[],
   sourceRevisions: ChatSourceRevision[] = [],
+  chatPatches?: ChatStoragePatches,
 ): Promise<{
   ok: boolean;
   path: string;
@@ -78,15 +81,19 @@ export async function saveChats<T>(
   appCount?: number;
   projectPaths?: Array<Record<string, unknown>>;
   sourceRevisions?: ChatSourceRevision[];
+  chatDigests?: Record<string, string>;
 }> {
   if (hasTauriInternals()) {
     return invokeTauriWithAbort("save_chats", {
-      request: { body: { chats, sourceRevisions }, timeoutMs: 60000 },
+      request: {
+        body: { chats, sourceRevisions, ...(chatPatches ? { chatPatches } : {}) },
+        timeoutMs: 60000,
+      },
     });
   }
   return requestJson(`${endpoint}/api/app/chats`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ chats, sourceRevisions }),
+    body: JSON.stringify({ chats, sourceRevisions, ...(chatPatches ? { chatPatches } : {}) }),
   });
 }

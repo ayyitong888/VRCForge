@@ -16,7 +16,7 @@ export function ChatMarkdown({ text, variant = "agent" }: { text?: string; varia
   }
   return (
     <div
-      className={cn("chat-markdown break-words leading-relaxed", inverted ? "text-primary-foreground" : "text-foreground")}
+      className={cn("chat-markdown min-w-0 select-text break-words leading-relaxed", inverted ? "text-primary-foreground" : "text-foreground")}
       data-testid={`chat-markdown-${variant}`}
     >
       <ReactMarkdown

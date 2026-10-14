@@ -16,8 +16,7 @@ export function AgentQuestionCard({
 }) {
   const { t } = useTranslation();
   const pendingQuestions = useMemo(
-    () => questions.filter((question) => (question.status || "pending").toLowerCase() === "pending"
-      || Boolean(question.runtimeContinuation)),
+    () => questions.filter((question) => (question.status || "pending").toLowerCase() === "pending"),
     [questions],
   );
   const [index, setIndex] = useState(0);

@@ -45,6 +45,12 @@ const translations = {
   "chat.runtimeTerminal.noProgressMessage": "LOCALIZED_NO_PROGRESS_FAILED_NOT_COMPLETE",
   "chat.runtimeTerminal.providerTimeoutStatus": "LOCALIZED_PROVIDER_TIMEOUT_STATUS",
   "chat.providerResponseTimedOut": "LOCALIZED_PROVIDER_TIMEOUT",
+  "chat.runtimeTerminal.providerRateLimitedStatus": "LOCALIZED_PROVIDER_RATE_LIMITED_STATUS",
+  "chat.runtimeTerminal.providerRateLimitedMessage": "LOCALIZED_PROVIDER_RATE_LIMITED",
+  "chat.runtimeTerminal.providerCapacityStatus": "LOCALIZED_PROVIDER_CAPACITY_STATUS",
+  "chat.runtimeTerminal.providerCapacityMessage": "LOCALIZED_PROVIDER_CAPACITY",
+  "chat.runtimeTerminal.providerRequestFailedStatus": "LOCALIZED_PROVIDER_REQUEST_FAILED_STATUS",
+  "chat.runtimeTerminal.providerRequestFailedMessage": "LOCALIZED_PROVIDER_REQUEST_FAILED",
 };
 const localized = projectRuntimeResponseForDisplay(response, (key) => translations[key] || key);
 assert.equal(localized.plan.reply, translations["chat.runtimeTerminal.noProgressMessage"]);
@@ -82,6 +88,50 @@ assert.equal(providerTimeout.plan.reply, translations["chat.providerResponseTime
 assert.equal(providerTimeout.timeline.at(-1).payload.summary, translations["chat.providerResponseTimedOut"]);
 assert.equal(runtimeTerminalStatusKey("provider_timeout"), "chat.runtimeTerminal.providerTimeoutStatus");
 
+const providerTerminals = [
+  {
+    code: "provider_rate_limited",
+    statusKey: "chat.runtimeTerminal.providerRateLimitedStatus",
+    messageKey: "chat.runtimeTerminal.providerRateLimitedMessage",
+    providerError: { statusCode: 429, streamErrorCode: "rate_limit_exceeded" },
+  },
+  {
+    code: "provider_capacity",
+    statusKey: "chat.runtimeTerminal.providerCapacityStatus",
+    messageKey: "chat.runtimeTerminal.providerCapacityMessage",
+    providerError: { streamErrorCode: "capacity" },
+  },
+];
+for (const terminal of providerTerminals) {
+  const projected = projectRuntimeResponseForDisplay({
+    ...response,
+    plan: {
+      ...response.plan,
+      plannerFailure: { code: terminal.code, phase: "pre_tool", providerError: terminal.providerError },
+    },
+  }, (key) => translations[key] || key);
+  const suffix = terminal.providerError.statusCode ? " (HTTP 429)" : "";
+  assert.equal(projected.plan.reply, `${translations[terminal.messageKey]}${suffix}`);
+  assert.equal(projected.timeline.at(-1).payload.summary, `${translations[terminal.messageKey]}${suffix}`);
+  assert.equal(runtimeTerminalStatusKey(terminal.code), terminal.statusKey);
+}
+
+const genericProviderFailure = projectRuntimeResponseForDisplay({
+  ...response,
+  plan: {
+    ...response.plan,
+    reply: "",
+    plannerFailure: { code: "provider_request_failed", phase: "post_tool", retryable: false },
+  },
+  timeline: [response.timeline[0]],
+}, (key) => translations[key] || key);
+assert.equal(genericProviderFailure.plan.reply,
+  translations["chat.runtimeTerminal.providerRequestFailedMessage"]);
+assert.equal(runtimeTerminalStatusKey("provider_request_failed"),
+  "chat.runtimeTerminal.providerRequestFailedStatus");
+assert.equal(genericProviderFailure.timeline.length, 1,
+  "generic provider failure must not invent a tool or assistant event");
+
 const unknownResponse = {
   ...response,
   plan: { ...response.plan, plannerFailure: { code: "future_failure" } },
@@ -98,6 +148,18 @@ for (const locale of ["en-US", "ja-JP", "zh-CN", "zh-TW"]) {
     `${locale} must localize the explicit failed/not-complete status`);
   assert.equal(typeof messages.chat.runtimeTerminal.providerTimeoutStatus, "string",
     `${locale} must localize the provider-timeout status`);
+  assert.equal(typeof messages.chat.runtimeTerminal.providerRateLimitedStatus, "string",
+    `${locale} must localize the provider-rate-limited status`);
+  assert.equal(typeof messages.chat.runtimeTerminal.providerRateLimitedMessage, "string",
+    `${locale} must localize the provider-rate-limited message`);
+  assert.equal(typeof messages.chat.runtimeTerminal.providerCapacityStatus, "string",
+    `${locale} must localize the provider-capacity status`);
+  assert.equal(typeof messages.chat.runtimeTerminal.providerCapacityMessage, "string",
+    `${locale} must localize the provider-capacity message`);
+  assert.equal(typeof messages.chat.runtimeTerminal.providerRequestFailedStatus, "string",
+    `${locale} must localize the generic provider-request-failed status`);
+  assert.equal(typeof messages.chat.runtimeTerminal.providerRequestFailedMessage, "string",
+    `${locale} must localize the generic provider-request-failed message`);
 }
 
 const timelineComponent = await readFile(

@@ -98,6 +98,21 @@ def test_archive_without_reader_never_claims_readable_or_enters_prompt():
     assert "compactionRecoveryInformation" not in model.requests[-1]["messages"][-1]["content"]
 
 
+def test_native_recovery_uses_one_bounded_catalog_for_many_archives():
+    _, planner, _, turn = fixture(prior=False)
+    archives = [recovery(f"ARCHIVE_{index}") for index in range(20)]
+    turn.add_recoveries(archives)
+    calls = []
+    turn.retain_recovery = lambda value: (_ for _ in ()).throw(AssertionError("per-archive projection used"))
+    turn.retain_recovery_catalog = lambda values: calls.append(values) or "CATALOG_READER_REF"
+    request = {"messages": [{"role": "system", "content": "Current runtime state (data): {}"}]}
+    rebound = planner._native_recovery_request(request, turn)
+    state = json.loads(rebound["messages"][-1]["content"].split(": ", 1)[1])
+    assert state["compactionRecoveryInformation"] == ["CATALOG_READER_REF"]
+    assert len(calls) == 1 and len(calls[0]) == 20
+    assert len(rebound["messages"][-1]["content"]) < 200
+
+
 def test_recovery_page_is_measured_before_compaction_commits():
     compactor = RecoveringCompactor()
     _, planner, model, turn = fixture(compactor)

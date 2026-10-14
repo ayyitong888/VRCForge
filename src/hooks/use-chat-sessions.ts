@@ -12,11 +12,13 @@ import {
   restoredCompactionRequiresPersistence,
 } from "../lib/chat-compaction-state";
 import {
+  chatDigestsFromPayload,
   preserveConflictingChatCopies,
   reconcileChatStorage,
   snapshotChatFingerprints,
   sourceRevisionsFromPayload,
 } from "../lib/chat-storage-reconcile";
+import { buildChatStoragePatches } from "../lib/chat-storage-delta";
 import {
   cacheChatContextUsageFast,
   cacheChatTimestampsFast,
@@ -105,20 +107,27 @@ export function useChatSessions({
   const [resolvingChatStorageConflict, setResolvingChatStorageConflict] = useState(false);
 
   const chatsLoadedRef = useRef(false);
-  const restoredChatPathKeyRef = useRef("");
+  const restoredChatRequestKeyRef = useRef("");
   const chatsDirtyRef = useRef(false);
   const chatsSaveVersionRef = useRef(0);
   const chatTimestampCacheTimerRef = useRef<number | null>(null);
   const chatsRef = useRef<ChatThread[]>(initialChatState.chats);
   const chatsSaveQueueRef = useRef<Promise<void>>(Promise.resolve());
-  const chatRestoreGenerationRef = useRef(0);
+  const chatRestoreIntentKeyRef = useRef("");
+  const chatRestoreInFlightKeysRef = useRef(new Set<string>());
+  const chatRestoreMountedRef = useRef(true);
   const chatSourceRevisionsRef = useRef<ChatSourceRevision[]>([]);
   // The initial browser cache is an unsynchronized local candidate, not a
   // server baseline. An empty baseline preserves it as a local addition during
   // the first three-way merge instead of interpreting a missing server row as
   // a confirmed deletion.
   const chatBaselineFingerprintsRef = useRef<Record<string, string>>({});
+  const chatServerDigestsRef = useRef<Record<string, string> | undefined>(undefined);
   const chatPersistenceBlockedRef = useRef(false);
+  // A concurrent-edit marker owns the visible error until the user resolves
+  // the conflict. A queued debounce can still reject after the marker is set;
+  // that generic rejection must not hide the reason the save was blocked.
+  const chatStorageConflictRef = useRef(false);
   const chatStorageRecoveryBlockedRef = useRef(false);
   const chatDeletedIdsRef = useRef<Set<string>>(new Set());
   const chatSidebarActivityCacheRef = useRef(new WeakMap<ChatThread, SidebarChatActivity | null>());
@@ -162,14 +171,15 @@ export function useChatSessions({
     updateChat(activeChatId, (current) => ({ ...current, lastViewedAt: marker }));
   }, [activeChatId, activeView, chats]);
 
-  useEffect(
-    () => () => {
+  useEffect(() => {
+    chatRestoreMountedRef.current = true;
+    return () => {
+      chatRestoreMountedRef.current = false;
       if (chatTimestampCacheTimerRef.current) {
         window.clearTimeout(chatTimestampCacheTimerRef.current);
       }
-    },
-    [],
-  );
+    };
+  }, []);
 
   function collectChatStorageProjectPaths(snapshot = chatsRef.current): string[] {
     const paths = [
@@ -205,9 +215,17 @@ export function useChatSessions({
       invalidCount: conflictIds.length,
     };
     chatPersistenceBlockedRef.current = true;
+    chatStorageConflictRef.current = true;
     setChatPersistenceBlocked(true);
     setChatRecoveries([conflictMarker]);
     setError(t("chat.sessionConcurrentConflict", { count: conflictIds.length }));
+  }
+
+  function setChatSaveError(cause: unknown, fallback: string) {
+    if (chatStorageConflictRef.current) {
+      return;
+    }
+    setError(chatSaveErrorMessage(cause, fallback));
   }
 
   async function reconcileFetchedChatStorage(
@@ -218,32 +236,21 @@ export function useChatSessions({
       return { status: "cancelled", chats: chatsRef.current, shouldPersist: false };
     }
     const sourceRevisions = sourceRevisionsFromPayload(payload.sources);
-    const localProjectKeys = new Set(
-      chatsRef.current
-        .map((chat) => normalizeProjectPathKey(chat.projectPath))
-        .filter(Boolean),
-    );
-    const unavailableLocalRecoveries: ChatRecoveryMarker[] = (payload.sources || []).flatMap((source) => {
-      const projectPath = typeof source.projectPath === "string" ? source.projectPath : "";
-      const projectKey = normalizeProjectPathKey(projectPath);
-      if (source.unavailable !== true || source.indexed === true || !projectKey || !localProjectKeys.has(projectKey)) {
-        return [];
-      }
-      return [{
-        storeId: String(source.storeId || "chat.project-unavailable"),
-        scope: "project",
-        status: "unsupported",
-        reason: "project_unavailable",
-        requiresApproval: false,
-        invalidCount: 0,
-      }];
-    });
-    const recoveries = [...(payload.recoveries || []), ...unavailableLocalRecoveries];
+    // The backend deliberately keeps ad-hoc, unindexed project paths out of
+    // `recoveries` and `writeBlocked`: a historical chat can retain a path
+    // whose project is no longer mounted without making the whole chat store
+    // read-only. Treat the backend recovery list as authoritative here;
+    // synthesizing a marker from `sources` re-blocks a healthy store whenever
+    // a refresh includes such a historical path.
+    const recoveries = payload.recoveries || [];
     const blockingRecoveries = recoveries.filter((recovery) => recovery.status !== "recovered");
     const blocked = payload.writeBlocked === true || blockingRecoveries.length > 0;
     const recoveringFromDamagedSource = chatStorageRecoveryBlockedRef.current
       || recoveries.some((recovery) => recovery.status === "recovered");
-    const { chats: unfilteredRemoteChats, shouldPersist } = normalizeStoredChatSnapshot(payload.chats || []);
+    const { chats: unfilteredRemoteChats, shouldPersist } = normalizeStoredChatSnapshot(
+      payload.chats || [],
+      chatsLoadedRef.current ? chatsRef.current : [],
+    );
     const unfilteredRemoteFingerprints = snapshotChatFingerprints(unfilteredRemoteChats, projectDurableChatFingerprint);
     const remoteChats = recoveringFromDamagedSource
       ? unfilteredRemoteChats.filter((chat) => {
@@ -256,6 +263,10 @@ export function useChatSessions({
       : unfilteredRemoteChats;
     if (!shouldCommit()) {
       return { status: "cancelled", chats: chatsRef.current, shouldPersist: false };
+    }
+    const remoteDigests = chatDigestsFromPayload(payload.chatDigests, remoteChats);
+    if (chatServerDigestsRef.current !== undefined && remoteDigests === undefined) {
+      throw new Error("Chat storage response omitted chat version metadata after it was established.");
     }
     chatSourceRevisionsRef.current = sourceRevisions;
     if (blocked) {
@@ -282,6 +293,9 @@ export function useChatSessions({
       chatsRef.current,
       remoteChats,
       projectDurableChatFingerprint,
+      !recoveringFromDamagedSource && remoteDigests && chatServerDigestsRef.current
+        ? { baseline: chatServerDigestsRef.current, remote: remoteDigests }
+        : undefined,
     );
     if (reconciled.status === "conflict") {
       if (recoveringFromDamagedSource) {
@@ -291,10 +305,11 @@ export function useChatSessions({
       markChatStorageConflict(reconciled.conflictIds);
       return { status: "conflict", chats: chatsRef.current, shouldPersist: false };
     }
-    const remoteFingerprints = snapshotChatFingerprints(remoteChats, projectDurableChatFingerprint);
+    const remoteFingerprints = reconciled.baselineFingerprints;
     const mergedFingerprints = snapshotChatFingerprints(reconciled.chats, projectDurableChatFingerprint);
     const mergedDiffersFromRemote = !chatFingerprintSnapshotsEqual(mergedFingerprints, remoteFingerprints);
     chatBaselineFingerprintsRef.current = remoteFingerprints;
+    chatServerDigestsRef.current = remoteDigests;
     chatsRef.current = reconciled.chats;
     setChats(reconciled.chats);
     chatPersistenceBlockedRef.current = false;
@@ -322,11 +337,21 @@ export function useChatSessions({
     if (chatPersistenceBlockedRef.current) {
       throw new Error(t("chat.sessionSaveBlocked"));
     }
-    const result = await saveChats(endpoint, snapshot, chatSourceRevisionsRef.current);
+    const chatPatches = buildChatStoragePatches(
+      snapshot,
+      chatBaselineFingerprintsRef.current,
+      chatServerDigestsRef.current,
+    );
+    const result = await saveChats(endpoint, snapshot, chatSourceRevisionsRef.current, chatPatches);
+    const nextServerDigests = chatDigestsFromPayload(result.chatDigests, snapshot);
+    if (chatServerDigestsRef.current !== undefined && nextServerDigests === undefined) {
+      throw new Error("Chat storage acknowledgement omitted chat version metadata after it was established.");
+    }
     if (result.sourceRevisions) {
       chatSourceRevisionsRef.current = result.sourceRevisions;
     }
     chatBaselineFingerprintsRef.current = snapshotChatFingerprints(snapshot, projectDurableChatFingerprint);
+    chatServerDigestsRef.current = nextServerDigests;
     if (chatsSaveVersionRef.current === saveVersion) {
       if (clearDirty) {
         chatsDirtyRef.current = false;
@@ -371,27 +396,35 @@ export function useChatSessions({
     }
     const restoreProjectPaths = collectChatStorageProjectPaths();
     const restorePathKey = restoreProjectPaths.map((path) => normalizeProjectPathKey(path)).sort().join("\n");
-    if (chatsLoadedRef.current && restoredChatPathKeyRef.current === restorePathKey) {
+    const restoreRequestKey = `${endpoint}\n${restorePathKey}`;
+    if (chatsLoadedRef.current && restoredChatRequestKeyRef.current === restoreRequestKey) {
       return;
     }
-    let restoreCancelled = false;
-    const restoreGeneration = chatRestoreGenerationRef.current + 1;
-    chatRestoreGenerationRef.current = restoreGeneration;
+    if (chatRestoreInFlightKeysRef.current.has(restoreRequestKey)) {
+      chatRestoreIntentKeyRef.current = restoreRequestKey;
+      restoredChatRequestKeyRef.current = restoreRequestKey;
+      return;
+    }
+    chatRestoreIntentKeyRef.current = restoreRequestKey;
+    chatRestoreInFlightKeysRef.current.add(restoreRequestKey);
     chatsLoadedRef.current = false;
-    restoredChatPathKeyRef.current = restorePathKey;
+    restoredChatRequestKeyRef.current = restoreRequestKey;
+    const isCurrentRestore = () => (
+      chatRestoreMountedRef.current && chatRestoreIntentKeyRef.current === restoreRequestKey
+    );
     void (async () => {
       try {
         const outcome = await enqueueChatStorageOperation(async () => {
-          if (restoreCancelled || chatRestoreGenerationRef.current !== restoreGeneration) {
+          if (!isCurrentRestore()) {
             return { status: "cancelled", chats: chatsRef.current, shouldPersist: false } satisfies ChatStorageLoadOutcome;
           }
           const payload = await fetchChats<unknown>(endpoint, restoreProjectPaths);
           return reconcileFetchedChatStorage(
             payload,
-            () => !restoreCancelled && chatRestoreGenerationRef.current === restoreGeneration,
+            () => isCurrentRestore(),
           );
         });
-        if (restoreCancelled || outcome.status === "cancelled") {
+        if (!isCurrentRestore() || outcome.status === "cancelled") {
           return;
         }
         chatsLoadedRef.current = true;
@@ -407,22 +440,21 @@ export function useChatSessions({
                 return;
               }
               void enqueueChatSave(false)
-                .catch((cause) => setError(chatSaveErrorMessage(cause, t("chat.sessionSaveBlocked"))));
+                .catch((cause) => setChatSaveError(cause, t("chat.sessionSaveBlocked")));
             }, 3000);
           }
         }
       } catch {
-        if (restoreCancelled) {
+        if (!isCurrentRestore()) {
           return;
         }
         chatsLoadedRef.current = false;
-        restoredChatPathKeyRef.current = "";
+        restoredChatRequestKeyRef.current = "";
         setError(t("chat.sessionRestoreFailed"));
+      } finally {
+        chatRestoreInFlightKeysRef.current.delete(restoreRequestKey);
       }
     })();
-    return () => {
-      restoreCancelled = true;
-    };
   }, [runtimeConnected, endpoint, projectPaths, customProjectPaths, projectPrefsReady, activeProjectPath, setError, t]);
 
   const reloadChatStorageState = useCallback(async (): Promise<boolean> => {
@@ -471,7 +503,9 @@ export function useChatSessions({
       if (externalReloadActiveRef.current) {
         // Reuse serialized fetch/reconcile/CAS; never overwrite dirty local chats.
         void externalReloadRef.current().catch((cause) => {
-          if (externalReloadActiveRef.current) externalReloadErrorRef.current(cause instanceof Error ? cause.message : String(cause));
+          if (externalReloadActiveRef.current && !chatStorageConflictRef.current) {
+            externalReloadErrorRef.current(cause instanceof Error ? cause.message : String(cause));
+          }
         });
       }
     }, 150);
@@ -491,6 +525,10 @@ export function useChatSessions({
         }
         const sourceRevisions = sourceRevisionsFromPayload(payload.sources);
         const { chats: remoteChats } = normalizeStoredChatSnapshot(payload.chats || []);
+        const remoteDigests = chatDigestsFromPayload(payload.chatDigests, remoteChats);
+        if (chatServerDigestsRef.current !== undefined && remoteDigests === undefined) {
+          throw new Error("Chat storage response omitted chat version metadata after it was established.");
+        }
         const localCopyIds = new Map<string, string>();
         const resolved = preserveConflictingChatCopies(
           chatBaselineFingerprintsRef.current,
@@ -515,9 +553,13 @@ export function useChatSessions({
             };
           },
           projectDurableChatFingerprint,
+          chatServerDigestsRef.current && remoteDigests
+            ? { baseline: chatServerDigestsRef.current, remote: remoteDigests }
+            : undefined,
         );
         chatSourceRevisionsRef.current = sourceRevisions;
         chatBaselineFingerprintsRef.current = snapshotChatFingerprints(remoteChats, projectDurableChatFingerprint);
+        chatServerDigestsRef.current = remoteDigests;
         chatsRef.current = resolved.chats;
         setChats(resolved.chats);
         setActiveChatId((current) => localCopyIds.get(current) || current);
@@ -539,6 +581,7 @@ export function useChatSessions({
         chatStorageRecoveryBlockedRef.current = false;
         setChatPersistenceBlocked(false);
         setChatRecoveries([]);
+        chatStorageConflictRef.current = false;
         return true;
       });
     } finally {
@@ -552,7 +595,7 @@ export function useChatSessions({
     }
     const timer = window.setTimeout(() => {
       void enqueueChatSave(true)
-        .catch((cause) => setError(chatSaveErrorMessage(cause, t("chat.sessionSaveBlocked"))));
+        .catch((cause) => setChatSaveError(cause, t("chat.sessionSaveBlocked")));
     }, 800);
     return () => window.clearTimeout(timer);
   }, [chats, runtimeConnected, endpoint]);
@@ -823,10 +866,19 @@ function chatFingerprintSnapshotsEqual(
   return leftKeys.length === rightKeys.length && leftKeys.every((key) => left[key] === right[key]);
 }
 
-function normalizeStoredChatSnapshot(values: unknown[]): { chats: ChatThread[]; shouldPersist: boolean } {
+function normalizeStoredChatSnapshot(values: unknown[], liveChats: ChatThread[] = []): { chats: ChatThread[]; shouldPersist: boolean } {
   let shouldPersist = false;
+  const liveCompactions = new Map(liveChats.map((chat) => [chat.id, chat.compaction]));
   const chats = values.filter(isStoredChat).map((chat) => {
-    const restoredCompactionWasInterrupted = restoredCompactionRequiresPersistence(chat.compaction);
+    // Storage notifications also read snapshots written by this live window.
+    // Only cold restoration may classify its own active generation as abandoned;
+    // the normal three-way merge still checks remote edits and revisions.
+    const liveCompaction = liveCompactions.get(chat.id);
+    const preserveActive = Boolean(liveCompaction?.generation
+      && liveCompaction.generation === chat.compaction?.generation
+      && liveCompaction.status === chat.compaction?.status
+      && restoredCompactionRequiresPersistence(liveCompaction));
+    const restoredCompactionWasInterrupted = !preserveActive && restoredCompactionRequiresPersistence(chat.compaction);
     const normalized: ChatThread = {
       id: chat.id,
       sessionId: typeof chat.sessionId === "string" ? chat.sessionId : "",
@@ -843,7 +895,7 @@ function normalizeStoredChatSnapshot(values: unknown[]): { chats: ChatThread[]; 
       archived: chat.archived === true,
       revision: normalizeChatRevision(chat.revision),
       lastViewedAt: typeof chat.lastViewedAt === "string" ? chat.lastViewedAt : "",
-      compaction: normalizeRestoredCompaction(chat.compaction),
+      compaction: normalizeRestoredCompaction(chat.compaction, undefined, preserveActive),
       contextUsageCache: normalizeChatContextUsage(chat.contextUsageCache),
       attachmentPayloads: normalizeAttachmentPayloadVault(chat.attachmentPayloads),
       compactedAttachmentRefs: normalizeCompactedAttachmentReferences(chat.compactedAttachmentRefs),

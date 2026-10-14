@@ -13,6 +13,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol
@@ -129,6 +131,10 @@ class ProviderConfigurationPolicyPorts:
     provider_config_descriptor: Callable[[ProviderApiConfig], dict[str, Any]]
 
 
+class ProviderConfigurationBusyError(RuntimeError):
+    """A live task owns the model configuration until its current lifecycle exits."""
+
+
 class ProviderConfigurationService:
     """Own current Provider configuration, persistence and projections."""
 
@@ -143,6 +149,48 @@ class ProviderConfigurationService:
         self._lock = lock
         self._api_config: ProviderApiConfig | None = None
         self._vision_config: ProviderVisionConfig | None = None
+        self._runtime_bindings = 0
+        self._configuration_changes = 0
+        self._configuration_change_owner: ContextVar[bool] = ContextVar("provider_configuration_change", default=False)
+        self.runtime_waiting: Callable[[], bool] = lambda: False
+
+    def runtime_configuration_locked(self) -> bool:
+        with self._lock:
+            return bool(self._runtime_bindings or self.runtime_waiting())
+
+    def _assert_configuration_idle(self) -> None:
+        if self.runtime_configuration_locked() or (self._configuration_changes and not self._configuration_change_owner.get()):
+            raise ProviderConfigurationBusyError(
+                "Model settings are locked while a task is running or waiting for approval or an answer. Finish or stop the task before changing them."
+            )
+
+    @contextmanager
+    def configuration_change(self):
+        """Reserve one async account/config mutation without holding a lock across awaits."""
+        with self._lock:
+            self._assert_configuration_idle()
+            self._configuration_changes += 1
+        token = self._configuration_change_owner.set(True)
+        try:
+            yield
+        finally:
+            self._configuration_change_owner.reset(token)
+            with self._lock:
+                self._configuration_changes -= 1
+
+    @contextmanager
+    def bind_runtime_config(self, *, provider: str = "", model: str = ""):
+        """Bind before turn admission; every exit releases this process-only lease."""
+        with self._lock:
+            if self._configuration_changes:
+                raise ProviderConfigurationBusyError("Model settings are being changed. Try again when the change finishes.")
+            config = self.resolve_session_config(provider=provider, model=model)
+            self._runtime_bindings += 1
+        try:
+            yield config
+        finally:
+            with self._lock:
+                self._runtime_bindings -= 1
 
     @property
     def config_path(self) -> Path:
@@ -184,7 +232,7 @@ class ProviderConfigurationService:
         if same_provider:
             request = replace(current, model=selected_model)
         else:
-            request = ProviderApiConfig(provider=selected_provider, api_key="", base_url="", model=selected_model)
+            request = ProviderApiConfig(provider=selected_provider, api_key="", base_url=self._policy.get_provider_defaults(selected_provider)["base_url"], model=selected_model)
         return self.resolve_api_request(request)
 
     def current_vision_config(self) -> ProviderVisionConfig:
@@ -294,7 +342,9 @@ class ProviderConfigurationService:
                     defaults["base_url"],
                 ),
                 model=str(vision_section.get("model") or "").strip(),
-                enabled=bool(vision_section.get("enabled", True)),
+                # An existing vision profile must be explicitly enabled before
+                # it can receive image bytes; omitted legacy fields stay off.
+                enabled=bool(vision_section.get("enabled", False)),
             )
         except (AttributeError, RuntimeError, TypeError, ValueError):
             return ProviderVisionConfig()
@@ -517,6 +567,8 @@ class ProviderConfigurationService:
             committed_vision = self._vision_config or self._load_initial_vision_config_locked()
             api = api_config if api_config is not None else committed_api
             vision = vision_config if vision_config is not None else committed_vision
+            if api != committed_api or _clear_chatgpt_account_id:
+                self._assert_configuration_idle()
             api_keys, vision_keys = self._load_provider_key_maps_locked(document)
             for target, config in (
                 (api_keys, committed_api),
@@ -605,6 +657,7 @@ class ProviderConfigurationService:
             "authHeader": self._policy.provider_auth_label(config.provider),
             "apiKeyRequired": requires_key,
             "configured": not requires_key or bool(config.api_key),
+            "runtimeLocked": self.runtime_configuration_locked(),
             "savedKeyProviders": self._saved_key_providers(),
         }
 

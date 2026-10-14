@@ -138,9 +138,16 @@ def _merge_usage(base: Any, delta: Any) -> dict[str, Any]:
     if not incoming:
         return current
     result = dict(current)
+    completeness_fields = {
+        "cacheUsageComplete": ("inputTokens", "outputTokens", "totalTokens", "cacheReadTokens", "cacheUsageRequestCount"),
+        "cacheWriteUsageComplete": ("inputTokens", "outputTokens", "totalTokens", "cacheWriteTokens", "cacheWriteUsageRequestCount"),
+    }
     for key, value in incoming.items():
         if isinstance(value, bool):
-            result[key] = bool(result.get(key, True)) and value if key == "exact" else value
+            if key == "exact":
+                result[key] = bool(result.get(key, True)) and value
+            elif key not in completeness_fields:
+                result[key] = value
         elif isinstance(value, (int, float)) and not isinstance(value, bool):
             if key.lower().startswith("peak") or key.lower().startswith("max"):
                 result[key] = max(float(result.get(key) or 0), value)
@@ -150,6 +157,16 @@ def _merge_usage(base: Any, delta: Any) -> dict[str, Any]:
                 result[key] = (result.get(key) or 0) + value
         else:
             result[key] = value
+    for key, receipt_fields in completeness_fields.items():
+        prior_receipt = any(field in current for field in receipt_fields)
+        incoming_receipt = any(field in incoming for field in receipt_fields)
+        if key in incoming:
+            result[key] = (
+                incoming[key] is True
+                and (current.get(key) is True if key in current else not prior_receipt)
+            )
+        elif incoming_receipt:
+            result[key] = False
     return result
 
 

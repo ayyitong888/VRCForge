@@ -159,6 +159,19 @@ def test_runtime_target_rechecks_descriptor_and_scene_file_identity(tmp_path: Pa
     assert exc_info.value.code == "scene_identity_mismatch"
 
 
+def test_runtime_target_resolves_core_asset_path_when_absolute_path_is_omitted(tmp_path: Path):
+    target = _live_runtime_target(tmp_path)
+    target["scene"].pop("absolutePath")
+
+    validated = validate_runtime_execution_target(
+        target,
+        project_root=str(tmp_path),
+        required_scope="avatar",
+    )
+
+    assert validated["scene"]["absolutePath"] == str((tmp_path / "Assets" / "Main.unity").resolve())
+
+
 def test_binding_refresh_allows_display_change_but_rejects_avatar_replacement(tmp_path: Path):
     target = _live_runtime_target(tmp_path)
     registry = ExecutionTargetBindingRegistry()

@@ -55,6 +55,8 @@ from agent_gateway import (
 )
 from checkpoint_storage_baseline import measure_checkpoint_storage, verify_duplicate_candidates
 
+RESTORE_ATTEMPT_LIMIT = 3
+
 
 def _noop_scan_invalidation(_project_root: str, _reason: str) -> None:
     return None
@@ -911,6 +913,7 @@ class AgentCheckpointRecoveryService:
                 "targetTool": "vrcforge_restore_checkpoint",
                 "arguments": {
                     "checkpointId": checkpoint_id,
+                    "recoveryId": str(recovery.get("id") or ""),
                     "confirmRestore": True,
                     **(
                         {
@@ -960,11 +963,15 @@ class AgentCheckpointRecoveryService:
             return {"ok": False, "schema": APPLY_RECOVERY_SCHEMA, "error": "interrupted apply recovery was not found."}
         if not self._ports.approval.apply_recovery_blocks_writes(recovery):
             return {"ok": True, "schema": APPLY_RECOVERY_SCHEMA, "status": "already_resolved", "recovery": recovery}
-        resolution_note = str(params.get("note") or params.get("reason") or "User confirmed the interrupted write was handled outside VRCForge.").strip()
+        resolution_note = str(
+            params.get("note")
+            or params.get("reason")
+            or "Recovery was resolved from the supplied confirmation; no independent readback is asserted by this operation."
+        ).strip()
         resolved = self._ports.approval.finish_apply_recovery(
             recovery,
             status="dismissed",
-            resolution="manual_confirmed",
+            resolution="confirmed_with_supplied_note",
             note=resolution_note,
         )
         return {"ok": True, "schema": APPLY_RECOVERY_SCHEMA, "status": "resolved", "recovery": resolved}
@@ -1248,6 +1255,93 @@ class AgentCheckpointRecoveryService:
         if not available.get("ok"):
             return available
         local_state_restore = checkpoint.get("strategy") in {"local_state_archive", "project_chat_archive"}
+        recovery = self._select_apply_recovery(params, include_resolved=False)
+        incident_restore_auto = bool(params.get("_vrcforge_incident_restore_auto"))
+        if incident_restore_auto and recovery is None:
+            return {
+                "ok": False,
+                "checkpoint": checkpoint,
+                "status": "restore_incident_unbound",
+                "errorCode": "recovery_incident_unbound",
+                "error": "Automatic recovery restore requires a matching active incident; no restore was attempted.",
+            }
+        recovery_safety_required = bool(
+            recovery
+            and (incident_restore_auto or params.get("recoveryId") or params.get("recovery_id"))
+        )
+        if recovery_safety_required and recovery:
+            try:
+                attempt_count = int(recovery.get("restoreAttemptCount") or 0)
+            except (TypeError, ValueError):
+                attempt_count = 0
+            try:
+                attempt_limit = int(recovery.get("restoreAttemptLimit") or RESTORE_ATTEMPT_LIMIT)
+            except (TypeError, ValueError):
+                attempt_limit = RESTORE_ATTEMPT_LIMIT
+            attempt_limit = max(1, min(attempt_limit, RESTORE_ATTEMPT_LIMIT))
+            if attempt_count >= attempt_limit:
+                return {
+                    "ok": False,
+                    "checkpoint": checkpoint,
+                    "status": "restore_attempt_limit_reached",
+                    "errorCode": "recovery_restore_attempt_limit",
+                    "error": f"This recovery incident has reached its {attempt_limit}-attempt restore limit; current state and prior evidence were preserved.",
+                    "recoveryId": str(recovery.get("id") or ""),
+                    "restoreAttemptCount": attempt_count,
+                    "restoreAttemptLimit": attempt_limit,
+                }
+        # Keep the Unity preparation result out of the public argument map.  A
+        # caller can provide arbitrary JSON to this service, so a reserved
+        # marker in ``params`` must never be treated as proof that preparation
+        # happened.  The result is handed to the executor through the private
+        # call context below instead.
+        restore_params = dict(params)
+        restore_params.pop("_restorePrepareForRecovery", None)
+        prepared_for_restore: dict[str, Any] = {}
+        if (
+            recovery_safety_required
+            and not local_state_restore
+            and self._checkpoint_restore_prepare_handler is not None
+            and self._checkpoint_restore_handler is None
+        ):
+            return {
+                "ok": False,
+                "checkpoint": checkpoint,
+                "status": "restore_prepare_failed",
+                "error": "Unity restore preparation is configured without a matching reload handler; current state was not backed up and restore was not attempted.",
+            }
+        if recovery_safety_required and not local_state_restore:
+            if self._checkpoint_restore_prepare_handler is None:
+                return {
+                    "ok": False,
+                    "checkpoint": checkpoint,
+                    "status": "restore_prepare_failed",
+                    "error": "Unity restore preparation is unavailable; current state was not backed up and restore was not attempted.",
+                }
+            try:
+                prepared = ensure_dict(
+                    self._checkpoint_restore_prepare_handler(
+                        Path(str(checkpoint.get("projectRoot") or ""))
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001 - fail closed before backup/restore.
+                prepared = {"ok": False, "error": str(exc)}
+            if not prepared.get("ok"):
+                return {
+                    "ok": False,
+                    "checkpoint": checkpoint,
+                    "status": "restore_prepare_failed",
+                    "unityRestorePrepare": prepared,
+                    "error": str(
+                        prepared.get("error")
+                        or "Unity did not prove a safe restore preparation; current state was not backed up."
+                    ),
+                }
+            prepared_for_restore = prepared
+        if recovery_safety_required and recovery:
+            recovery_update = self._prepare_restore_attempt(checkpoint, recovery)
+            if not recovery_update.get("ok"):
+                return recovery_update
         if (not local_state_restore and self._checkpoint_restore_prepare_handler is not None
                 and self._checkpoint_restore_handler is None):
             return {
@@ -1257,15 +1351,118 @@ class AgentCheckpointRecoveryService:
                 "error": "Unity restore preparation is configured without a matching reload handler.",
             }
         with self._scan_mutation(checkpoint.get("projectRoot"), "vrcforge_restore_checkpoint"):
-            return self._execute_checkpoint_restore(checkpoint, params)
+            return self._execute_checkpoint_restore(
+                checkpoint,
+                restore_params,
+                internal_restore_prepare=prepared_for_restore,
+            )
+
+    def _prepare_restore_attempt(
+        self, checkpoint: dict[str, Any], recovery: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Persist a current-state safety checkpoint before an incident restore."""
+        try:
+            attempt_count = int(recovery.get("restoreAttemptCount") or 0)
+        except (TypeError, ValueError):
+            attempt_count = 0
+        try:
+            attempt_limit = int(recovery.get("restoreAttemptLimit") or RESTORE_ATTEMPT_LIMIT)
+        except (TypeError, ValueError):
+            attempt_limit = RESTORE_ATTEMPT_LIMIT
+        attempt_limit = max(1, min(attempt_limit, RESTORE_ATTEMPT_LIMIT))
+        if attempt_count >= attempt_limit:
+            return {
+                "ok": False,
+                "checkpoint": checkpoint,
+                "status": "restore_attempt_limit_reached",
+                "errorCode": "recovery_restore_attempt_limit",
+                "error": f"This recovery incident has reached its {attempt_limit}-attempt restore limit; current state and prior evidence were preserved.",
+                "recoveryId": str(recovery.get("id") or ""),
+                "restoreAttemptCount": attempt_count,
+                "restoreAttemptLimit": attempt_limit,
+            }
+        backup_id = (
+            f"restore_safety_{recovery.get('id') or 'incident'}_"
+            f"{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')}_{secrets.token_hex(3)}"
+        )
+        backup_record = {
+            "schema": "vrcforge.checkpoint.v1",
+            "id": backup_id,
+            "createdAt": utc_now_iso(),
+            "targetTool": "vrcforge_restore_checkpoint",
+            "reason": "Current-state safety backup before interrupted-write recovery restore.",
+            "projectRoot": str(checkpoint.get("projectRoot") or ""),
+            "recoveryId": str(recovery.get("id") or ""),
+            "safetyBackupForCheckpointId": str(checkpoint.get("id") or ""),
+        }
+        strategy = str(checkpoint.get("strategy") or "")
+        project_root = Path(str(checkpoint.get("projectRoot") or ""))
+        if strategy == "local_state_archive":
+            backup = self._create_local_state_checkpoint(backup_record)
+        elif strategy == "project_chat_archive":
+            backup = self._create_project_chat_checkpoint(project_root, backup_record)
+        else:
+            backup = self._create_archive_checkpoint(project_root, backup_record)
+        if not backup.get("ok"):
+            return {
+                "ok": False,
+                "checkpoint": checkpoint,
+                "status": "restore_safety_backup_failed",
+                "errorCode": "recovery_safety_backup_failed",
+                "error": str(backup.get("error") or "Could not create the current-state safety checkpoint; restore was not attempted."),
+                "recoveryId": str(recovery.get("id") or ""),
+                "safetyBackup": backup,
+            }
+        updated = {
+            **recovery,
+            "restoreAttemptCount": attempt_count + 1,
+            "restoreAttemptLimit": attempt_limit,
+            "restoreSafetyCheckpointId": str(backup.get("id") or backup_id),
+            "restoreSafetyCheckpointIds": [
+                *[
+                    str(item).strip()
+                    for item in ensure_list(recovery.get("restoreSafetyCheckpointIds"))
+                    if str(item).strip()
+                ],
+                str(backup.get("id") or backup_id),
+            ],
+            "restoreSafetyCheckpoint": {
+                "id": str(backup.get("id") or backup_id),
+                "strategy": str(backup.get("strategy") or ""),
+                "archivePath": str(backup.get("archivePath") or ""),
+            },
+        }
+        saved = self._ports.approval.finish_apply_recovery(
+            updated,
+            status="needs_recovery",
+            resolution="restore_attempt_prepared",
+            note="Current state was checkpointed before this restore attempt; the safety checkpoint is retained in the recovery ledger.",
+            result_summary={
+                "restoreAttemptCount": attempt_count + 1,
+                "restoreAttemptLimit": attempt_limit,
+                "safetyCheckpointId": str(backup.get("id") or backup_id),
+            },
+        )
+        return {"ok": True, "recovery": saved, "safetyBackup": backup}
 
     def _execute_checkpoint_restore(
-        self, checkpoint: dict[str, Any], params: dict[str, Any]
+        self,
+        checkpoint: dict[str, Any],
+        params: dict[str, Any],
+        *,
+        internal_restore_prepare: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         local_state_restore = checkpoint.get("strategy") in {"local_state_archive", "project_chat_archive"}
         project_root = Path(str(checkpoint.get("projectRoot") or ""))
-        restore_prepare: dict[str, Any] = {}
-        if not local_state_restore and self._checkpoint_restore_prepare_handler is not None:
+        # This value is intentionally supplied only by _restore_checkpoint_locked
+        # after invoking the real Unity prepare handler.  Never consume a
+        # user-supplied JSON field as an internal proof of preparation.
+        restore_prepare: dict[str, Any] = ensure_dict(internal_restore_prepare)
+        if (
+            not local_state_restore
+            and self._checkpoint_restore_prepare_handler is not None
+            and not restore_prepare
+        ):
             try:
                 restore_prepare = ensure_dict(
                     self._checkpoint_restore_prepare_handler(project_root)
@@ -3440,6 +3637,14 @@ class AgentCheckpointRecoveryService:
             checkpoint_id = str(recovery.get("checkpointId") or recovery.get("checkpoint_id") or "").strip()
             if checkpoint_id:
                 protected.add(checkpoint_id)
+            safety_id = str(recovery.get("restoreSafetyCheckpointId") or "").strip()
+            if safety_id:
+                protected.add(safety_id)
+            protected.update(
+                str(item).strip()
+                for item in ensure_list(recovery.get("restoreSafetyCheckpointIds"))
+                if str(item).strip()
+            )
         if include_recent:
             candidates = archives if archives is not None else self._checkpoint_archive_files()
             # A third successful edit must not evict the first step's rollback

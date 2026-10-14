@@ -1,5 +1,5 @@
 import type { ConversationItem } from "./chat-types";
-import type { CompactionRecoveryEntry } from "./api/types";
+import type { AgentContextUsage, CompactionRecoveryEntry } from "./api/types";
 
 export function normalizeCompactionRecovery(value: unknown): CompactionRecoveryEntry[] {
   const candidates = Array.isArray(value) ? value : value ? [value] : [];
@@ -299,14 +299,36 @@ export type RuntimeCompactionProjection = {
   replacedCount: number;
 };
 
-export function invalidateCompactedWindowUsage(items: readonly ConversationItem[]): ConversationItem[] {
-  return items.map((item) => {
-    if (item.type !== "agent" || !item.response.contextUsage) {
-      return item;
-    }
-    const { contextUsage: _staleContextUsage, ...response } = item.response;
-    return { ...item, response };
-  });
+export function contextUsageBoundaryItemId(items: readonly ConversationItem[]): string {
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    if (items[index].type === "agent") return items[index].id;
+  }
+  return "";
+}
+
+/** Historical receipts stay immutable; only the active window feeds occupancy. */
+export function latestContextWindowUsage(
+  items: readonly ConversationItem[],
+  exactOnly = false,
+): AgentContextUsage | undefined {
+  let boundary = -1;
+  const summarizedIds = new Set(items.flatMap((item) => item.type === "compact" ? item.summarizedItemIds || [] : []));
+  for (const item of items) {
+    if (item.type !== "compact" || summarizedIds.has(item.id)) continue;
+    const id = item.contextUsageBoundaryItemId;
+    if (typeof id !== "string") return undefined;
+    const index = id === "" ? -1 : items.findIndex((candidate) => candidate.type === "agent" && candidate.id === id);
+    if (id !== "" && index < 0) return undefined;
+    boundary = Math.max(boundary, index);
+  }
+  for (let index = items.length - 1; index > boundary; index -= 1) {
+    const item = items[index];
+    if (item.type !== "agent") continue;
+    const usage = item.response.contextUsage;
+    if (!usage || (exactOnly && (usage.exact !== true || ![usage.inputTokens, usage.totalTokens, usage.outputTokens].some((value) => typeof value === "number")))) continue;
+    return usage;
+  }
+  return undefined;
 }
 
 export function projectRuntimeCompactionItems(
@@ -315,6 +337,8 @@ export function projectRuntimeCompactionItems(
   compactItem: Extract<ConversationItem, { type: "compact" }>,
 ): RuntimeCompactionProjection {
   const projected: ConversationItem[] = [];
+  const marker = { ...compactItem, contextUsageBoundaryItemId: contextUsageBoundaryItemId(items), summarizedItemIds: [...summarizedItemIds].filter((id) =>
+    items.some((item) => item.id === id && (item.type === "user" || item.type === "agent" || item.type === "compact"))) };
   let inserted = false;
   let replacedCount = 0;
   for (const item of items) {
@@ -326,9 +350,11 @@ export function projectRuntimeCompactionItems(
     }
     replacedCount += 1;
     if (!inserted) {
-      projected.push(compactItem);
+      projected.push(marker);
       inserted = true;
     }
+    projected.push(item);
+    continue;
   }
   return replacedCount > 0 ? { items: projected, replacedCount } : { items: [...items], replacedCount: 0 };
 }

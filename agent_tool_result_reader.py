@@ -19,6 +19,16 @@ from planner_structured_tool_evidence import _identity_key, _private_or_opaque, 
 TOOL_NAME = "vrcforge_read_tool_result"
 PAGE_SCHEMA = "vrcforge.tool_result_page.v1"
 MAX_PAGE_CHARS = 12000
+
+
+class _ResultFieldUnavailable(ValueError):
+    def __init__(self, pointer: str, parent_pointer: str, fields: list[tuple[str, object]]) -> None:
+        super().__init__("Requested result field is unavailable")
+        self.pointer = pointer
+        self.parent_pointer = parent_pointer
+        self.fields = fields
+
+
 INPUT_SCHEMA = {
     "type": "object",
     "required": ["resultRef"],
@@ -325,6 +335,42 @@ def retain_model_information(session_id: str, turn_id: str, project_root: str,
             "modelInformationRead": {**descriptor, "page": first_page}}
 
 
+def _unavailable_field_page(
+    error: _ResultFieldUnavailable,
+    *,
+    result_ref: str,
+    source: str,
+    step: Mapping[str, Any],
+    sanitize: Callable[[object, int], str],
+) -> dict[str, Any]:
+    fields: list[dict[str, Any]] = []
+    for name, value in error.fields:
+        if not _safe_key(name, value, sanitize):
+            continue
+        pointer = _pointer(error.parent_pointer, name)
+        if len(pointer) > 1024:
+            continue
+        fields.append({"jsonPointer": pointer,
+                       "type": "array" if isinstance(value, list) else "object" if isinstance(value, dict) else "value"})
+        if len(fields) >= 12 or _size(fields) > 1200:
+            break
+    return {
+        "schema": PAGE_SCHEMA,
+        "ok": False,
+        "status": "failed",
+        "authority": "untrusted_tool_output",
+        "resultRef": result_ref,
+        "source": source,
+        "sourceStep": step["index"],
+        "sourceTool": step["tool"],
+        "jsonPointer": error.pointer,
+        "errorCode": "result_pointer_unavailable",
+        "error": "Requested result field is unavailable",
+        "availableFields": fields,
+        "interpretation": "Choose one of the bounded availableFields pointers and retry the same resultRef. No result values were returned.",
+    }
+
+
 def _select(root: object, pointer: str, sanitize: Callable[[object, int], str]) -> object:
     if not isinstance(pointer, str) or len(pointer) > 1024 or (pointer and not pointer.startswith("/")):
         raise ValueError("jsonPointer must be a bounded RFC6901 pointer")
@@ -332,12 +378,15 @@ def _select(root: object, pointer: str, sanitize: Callable[[object, int], str]) 
     if len(parts) > 32:
         raise ValueError("jsonPointer is too deep")
     value = root
-    for part in parts:
+    for depth, part in enumerate(parts):
         if re.search(r"~(?![01])", part):
             raise ValueError("Invalid JSON pointer escape")
         key = part.replace("~1", "/").replace("~0", "~")
         if isinstance(value, dict):
-            if key not in value or not _safe_key(key, value[key], sanitize):
+            if key not in value:
+                parent_pointer = "" if depth == 0 else "/" + "/".join(parts[:depth])
+                raise _ResultFieldUnavailable(pointer, parent_pointer, list(value.items()))
+            if not _safe_key(key, value[key], sanitize):
                 raise PermissionError("Requested result field is unavailable")
             value = value[key]
         elif isinstance(value, list) and re.fullmatch(r"0|[1-9][0-9]*", key):
@@ -476,7 +525,12 @@ def read_tool_result(params: Mapping[str, Any], *, sanitize: Callable[[object, i
     else:
         root = step["result"]
     pointer = params.get("jsonPointer", "")
-    value = _select(root, pointer, sanitize)
+    try:
+        value = _select(root, pointer, sanitize)
+    except _ResultFieldUnavailable as exc:
+        return _unavailable_field_page(
+            exc, result_ref=ref, source=source, step=step, sanitize=sanitize,
+        )
     offset, limit = params.get("offset", 0), params.get("limit", 6)
     if type(offset) is not int or offset < 0 or type(limit) is not int or not 1 <= limit <= 20:
         raise ValueError("offset must be nonnegative and limit must be between 1 and 20")

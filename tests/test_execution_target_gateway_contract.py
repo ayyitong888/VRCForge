@@ -23,7 +23,7 @@ def test_bootstrap_tools_are_shared_core_reads_with_strict_public_schemas() -> N
 
     project_application_tools = {
         "vrcforge_create_project", "vrcforge_register_project", "vrcforge_register_project_catalog",
-        "vrcforge_restore_unity_core", "vrcforge_rollback_project_catalog_registration",
+        "vrcforge_install_unity_core", "vrcforge_restore_unity_core", "vrcforge_rollback_project_catalog_registration",
         "vrcforge_rollback_project_lifecycle", "vrcforge_select_project", "vrcforge_restore_checkpoint",
     }
     for name, schema in agent_gateway.EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS.items():

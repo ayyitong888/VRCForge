@@ -164,10 +164,10 @@ def test_stop_retry_uses_original_owner_and_blocks_preview_until_recovered(tmp_p
     gateway, calls = scripted_gateway(tmp_path, monkeypatch)
     attempts = []
     recovered = False
-    def cancel(params):
-        attempts.append(params)
+    def cancel(*, session_id, turn_id, client_turn_id, reason):
+        attempts.append({"sessionId": session_id, "turnId": turn_id, "clientTurnId": client_turn_id, "reason": reason})
         return {"subAgentCancelPartialFailure": not recovered}
-    monkeypatch.setattr(gateway, "request_runtime_cancel", cancel)
+    monkeypatch.setattr(gateway, "_cancel_runtime_owned_work", cancel)
     gateway.runtime_message({"message": "prepare", "sessionId": "s", "clientTurnId": "c", "projectRoot": str(tmp_path)})
     reads = []
     def preview(args, unused):
@@ -202,3 +202,72 @@ def test_production_approval_resume_parks_prepared_handoff_without_provider(tmp_
     assert result is not None
     assert result["plan"]["nextStep"] == "await_user_instruction"
     assert not calls
+
+
+@pytest.mark.parametrize("stop_failure", [None, "lookup", "cancel"])
+def test_approval_handoff_stops_original_resources_without_cancelling_other_turns(tmp_path, monkeypatch, stop_failure):
+    from agent_gateway import AgentGatewayError
+    from agent_task_loop import AgentTaskLoop, approval_task_context, approval_completion
+
+    gateway, calls = scripted_gateway(tmp_path, monkeypatch)
+    cancelled = []
+    shell_owners = []
+    recovered = stop_failure is None
+    original_owner = gateway._runtime_shell_owner("prepare-turn", "c", "s")
+    tasks = [
+        {"id": "owned", "status": "running", "sessionId": "s", "parentTurnId": "prepare-turn", "parentClientTurnId": "c"},
+        {"id": "other-turn", "status": "running", "sessionId": "s", "parentTurnId": "unrelated", "parentClientTurnId": "other"},
+        {"id": "foreign-session", "status": "running", "sessionId": "foreign", "parentTurnId": "prepare-turn", "parentClientTurnId": "c"},
+        {"id": "foreign-client", "status": "running", "sessionId": "s", "parentTurnId": "prepare-turn", "parentClientTurnId": "foreign"},
+    ]
+
+    def list_tasks():
+        if stop_failure == "lookup" and not recovered:
+            raise RuntimeError("task lookup unavailable")
+        return tasks
+
+    def cancel_task(task):
+        cancelled.append(task)
+        if stop_failure == "cancel" and not recovered:
+            return {"ok": False}
+        return {"ok": True}
+
+    gateway.bind_runtime_subagent_control(list_tasks=list_tasks, cancel_task=cancel_task)
+    monkeypatch.setattr(type(gateway.shell), "cancel_owner", lambda self, owner: shell_owners.append(owner) or [])
+    state = gateway._runtime_session_state
+    assert state.begin_turn(session_id="s", turn_id="unrelated", client_turn_id="other")
+    # The public endpoint must not gain a bypass for stale/partially matching IDs.
+    with pytest.raises(AgentGatewayError) as rejected:
+        gateway.request_runtime_cancel({"sessionId": "s", "turnId": "prepare-turn", "clientTurnId": "c"})
+    assert rejected.value.status_code == 409
+    assert not cancelled and not shell_owners
+
+    arguments = {"projectPath": str(tmp_path), "arguments": {"mode": "transform"}}
+    loop = AgentTaskLoop("prepare adjustment", session_id="s", turn_id="prepare-turn", client_turn_id="c", project_root=str(tmp_path))
+    context = approval_task_context(loop.approval_seed(requested_tool=TOOL, requested_arguments=arguments), tool=TOOL, arguments=arguments)
+    raw = receipt(tmp_path)
+    completion = approval_completion(context, raw_result=raw, outcome={"status": "ok", "summary": "prepared", "verification": {"state": "verified", "checks": []}})
+    result = gateway.resume_runtime_task_after_approval(
+        {"id": "prepare-approval", "taskContext": context, "arguments": arguments},
+        {"status": "applied", "result": raw, "taskCompletion": completion},
+    )
+    assert not calls
+    assert result["plan"]["nextStep"] == "await_user_instruction"
+    assert shell_owners == [original_owner]
+    assert cancelled == ([] if stop_failure == "lookup" else ["owned"])
+    handoff = state.user_adjustment("s", str(tmp_path))
+    assert (handoff["turnId"], handoff["clientTurnId"]) == ("prepare-turn", "c")
+    assert handoff["cancellation"]["subAgentCancelPartialFailure"] is bool(stop_failure)
+    assert state.owns_turn(session_id="s", turn_id="unrelated", client_turn_id="other")
+    assert not state.consume_cancel_request(session_id="s", turn_id="unrelated", client_turn_id="other")
+    if stop_failure:
+        assert result["plan"]["completionGate"]["reason"] == "user_adjustment_stop_unconfirmed"
+        assert "Finish the manual adjustment" not in result["plan"]["reply"]
+        recovered = True
+        # Retry on a new user turn must still stop the original owner's resources.
+        gateway.runtime_message({"message": "retry stop", "sessionId": "s", "clientTurnId": "retry", "projectRoot": str(tmp_path)})
+        assert not calls  # No fresh-read handler: the provider remains blocked.
+        assert shell_owners == [original_owner, original_owner]
+        assert cancelled == (["owned"] if stop_failure == "lookup" else ["owned", "owned"])
+        assert state.user_adjustment("s", str(tmp_path))["cancellation"]["subAgentCancelPartialFailure"] is False
+        assert not state.consume_cancel_request(session_id="s", turn_id="unrelated", client_turn_id="other")

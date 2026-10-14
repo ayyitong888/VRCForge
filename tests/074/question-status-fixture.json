@@ -1,0 +1,203 @@
+[
+  {
+    "name": "current_question_historical_failed",
+    "expected": "blocked",
+    "top_plan": {
+      "nextStep": "needs_user_action",
+      "completionGate": {
+        "status": "needs_user_action",
+        "reason": "question_pending"
+      }
+    },
+    "skill_payload": {
+      "tool": "vrcforge_ask_user",
+      "ok": true,
+      "status": "needs_user_action",
+      "result": {
+        "question": {
+          "questionId": "q-current"
+        }
+      }
+    },
+    "write_payload": {
+      "tool": "historical-write",
+      "ok": false,
+      "status": "failed"
+    }
+  },
+  {
+    "name": "stop_priority",
+    "expected": "cancelled",
+    "top_plan": {
+      "nextStep": "cancelled",
+      "completionGate": {
+        "status": "cancelled",
+        "reason": "user_stop"
+      }
+    },
+    "skill_payload": {
+      "tool": "vrcforge_ask_user",
+      "ok": true,
+      "status": "needs_user_action",
+      "result": {
+        "question": {
+          "questionId": "q-current"
+        }
+      }
+    },
+    "write_payload": {
+      "tool": "historical-write",
+      "ok": false,
+      "status": "failed"
+    }
+  },
+  {
+    "name": "missing_question_id",
+    "expected": "failed",
+    "top_plan": {
+      "nextStep": "needs_user_action",
+      "completionGate": {
+        "status": "needs_user_action",
+        "reason": "question_pending"
+      }
+    },
+    "skill_payload": {
+      "tool": "vrcforge_ask_user",
+      "ok": true,
+      "status": "needs_user_action",
+      "result": {
+        "question": {}
+      }
+    },
+    "write_payload": {
+      "tool": "historical-write",
+      "ok": false,
+      "status": "failed"
+    }
+  },
+  {
+    "name": "scope_denial_does_not_mask_failure",
+    "expected": "failed",
+    "top_plan": {
+      "nextStep": "needs_user_action",
+      "completionGate": {
+        "status": "needs_user_action",
+        "reason": "question_pending"
+      }
+    },
+    "skill_payload": {
+      "tool": "vrcforge_ask_user",
+      "ok": false,
+      "status": "needs_user_action",
+      "error": {
+        "code": "authorization_scope_denied"
+      },
+      "result": {
+        "question": {
+          "questionId": "q-current"
+        }
+      }
+    }
+  },
+  {
+    "name": "verification_failure_does_not_mask_failure",
+    "expected": "failed",
+    "top_plan": {
+      "nextStep": "needs_user_action",
+      "completionGate": {
+        "status": "needs_user_action",
+        "reason": "question_pending"
+      }
+    },
+    "skill_payload": {
+      "tool": "vrcforge_ask_user",
+      "ok": false,
+      "status": "needs_user_action",
+      "failureClass": "verification_failed",
+      "verification": {
+        "state": "failed"
+      },
+      "result": {
+        "question": {
+          "questionId": "q-current"
+        }
+      }
+    }
+  },
+  {
+    "name": "ask_user_error_receipt_does_not_mask_failure",
+    "expected": "failed",
+    "top_plan": {
+      "nextStep": "needs_user_action",
+      "completionGate": {
+        "status": "needs_user_action",
+        "reason": "question_pending"
+      }
+    },
+    "skill_payload": {
+      "tool": "vrcforge_ask_user",
+      "ok": false,
+      "status": "needs_user_action",
+      "failureClass": "tool_error",
+      "error": {
+        "code": "runtime_tool_error"
+      },
+      "result": {
+        "question": {
+          "questionId": "q-current"
+        }
+      }
+    }
+  },
+  {
+    "name": "wrong_tool_does_not_create_question_boundary",
+    "expected": "failed",
+    "top_plan": {
+      "nextStep": "needs_user_action",
+      "completionGate": {
+        "status": "needs_user_action",
+        "reason": "question_pending"
+      }
+    },
+    "skill_payload": {
+      "tool": "vrcforge_other_tool",
+      "ok": true,
+      "status": "needs_user_action",
+      "result": {
+        "question": {
+          "questionId": "q-current"
+        }
+      }
+    },
+    "write_payload": {
+      "tool": "historical-write",
+      "ok": false,
+      "status": "failed"
+    }
+  },
+  {
+    "name": "missing_ok_does_not_mask_historical_failure",
+    "expected": "failed",
+    "top_plan": {
+      "nextStep": "needs_user_action",
+      "completionGate": {
+        "status": "needs_user_action",
+        "reason": "question_pending"
+      }
+    },
+    "skill_payload": {
+      "tool": "vrcforge_ask_user",
+      "status": "needs_user_action",
+      "result": {
+        "question": {
+          "questionId": "q-current"
+        }
+      }
+    },
+    "write_payload": {
+      "tool": "historical-write",
+      "ok": false,
+      "status": "failed"
+    }
+  }
+]

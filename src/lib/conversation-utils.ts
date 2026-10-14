@@ -15,6 +15,7 @@ import {
   resolveContextInputTokens,
   resolveContextLimit,
   mergeCompactionRecovery,
+  latestContextWindowUsage,
 } from "./context-compaction";
 import { subAgentAdoptedHistoryText } from "./subagent-merge";
 import { formatCount } from "./utils";
@@ -82,10 +83,29 @@ export function buildContextUsageFromRuntime(
   t: TFunction,
   userContextWindow?: number,
 ): ContextUsage | undefined {
-  if (!usage) {
-    return undefined;
-  }
   const contextLimit = resolveContextLimit(provider, model, modelInfo, userContextWindow);
+  const capacityOnly = () => ({
+    used: 0,
+    limit: contextLimit.limit,
+    limitKnown: true as const,
+    source: "unavailable" as const,
+    exact: false,
+    ratio: 0,
+    label: t("chat.contextMeterCapacityOnly", { limit: formatCount(contextLimit.limit) }),
+    title: t("chat.contextUsageUnavailableTitle", { model: model || provider || t("chat.currentModel") }),
+    warning: false,
+    cacheUsageStatus: "unknown" as const,
+  });
+  if (!usage) {
+    if (!contextLimit.known) {
+      return undefined;
+    }
+    return capacityOnly();
+  }
+  if ((usage.model && normalizeModelId(usage.model) !== normalizeModelId(model))
+      || (usage.provider && normalizeContextProvider(usage.provider) !== normalizeContextProvider(provider))) {
+    return contextLimit.known ? capacityOnly() : undefined;
+  }
   // Cache counters are cumulative across requests; context occupancy uses the peak.
   const cacheInput = numberOrNull(usage.inputTokens);
   const cacheRead = numberOrNull(usage.cacheReadTokens);
@@ -152,18 +172,18 @@ export function buildContextUsageFromRuntime(
 }
 
 export function latestAgentContextUsage(items: ConversationItem[]): AgentContextUsage | undefined {
-  for (let index = items.length - 1; index >= 0; index -= 1) {
-    const item = items[index];
-    if (item.type === "agent" && item.response.contextUsage) {
-      return item.response.contextUsage;
-    }
-  }
-  return undefined;
+  return latestContextWindowUsage(items);
 }
 
 export function buildChatHistory(items: ConversationItem[], t: TFunction): ChatHistoryEntry[] {
   const history: ChatHistoryEntry[] = [];
+  const summarizedItemIds = new Set(items.flatMap((item) => (
+    item.type === "compact" ? item.summarizedItemIds || [] : []
+  )));
   for (const item of items) {
+    if (summarizedItemIds.has(item.id)) {
+      continue;
+    }
     if (item.type === "user") {
       const text = appendAttachmentSummary(item.text, item.attachments || [], t).trim();
       if (text) {

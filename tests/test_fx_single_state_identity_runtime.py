@@ -17,18 +17,21 @@ def test_single_fx_edit_rejects_ambiguous_state_before_mutation(tmp_path):
     handler = method(fx, "public static object HandleCommand(")
     assert handler.index("ValidateEdit(controller, action, @params)") < handler.index("recovery.Begin()") < handler.index("Apply(action, controller")
     selected = method(fx, "private static void ValidateEdit(")
+    selected += method(fx, "internal static void ValidateTimeParameter(")
     if "private static void ValidateStateNameIdentity(" in fx:
         selected += method(fx, "private static void ValidateStateNameIdentity(")
     core = source[:source.index("public static class ManageFxAnimatorTool")]
     lookup = method(core, "internal static AnimatorState FindState(")
     program = r'''
 using System; using System.Linq; using System.Collections.Generic; using Newtonsoft.Json.Linq;
-class AnimatorState {internal string name;}
+class AnimatorState {internal string name;internal string timeParameter="";}
 class ChildAnimatorState {internal AnimatorState state;}
 class ChildAnimatorStateMachine {internal AnimatorStateMachine stateMachine;}
 class AnimatorStateMachine {internal ChildAnimatorState[] states=new ChildAnimatorState[0];internal ChildAnimatorStateMachine[] stateMachines=new ChildAnimatorStateMachine[0];}
 class AnimatorControllerLayer {internal string name="FX";internal AnimatorStateMachine stateMachine;}
-class AnimatorController {internal AnimatorControllerLayer[] layers;}
+enum AnimatorControllerParameterType {Float}
+class AnimatorControllerParameter {internal string name;internal AnimatorControllerParameterType type;}
+class AnimatorController {internal AnimatorControllerLayer[] layers;internal AnimatorControllerParameter[] parameters=new AnimatorControllerParameter[0];}
 static class AvatarPrimitiveCrudCore {LOOKUP}
 static class WriteAnimationCurveTool {internal static void RequireFinite(float value,string key){if(float.IsNaN(value)||float.IsInfinity(value))throw new InvalidOperationException(key);}}
 class Probe {

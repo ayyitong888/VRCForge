@@ -224,6 +224,14 @@ def _authorized_path(value: str | Path, allowed_roots: Iterable[str | Path]) -> 
     raise PermissionError(f"path is outside every authorized root: {candidate_lexical}")
 
 
+def host_scope_roots() -> list[str]:
+    """Return the current host roots for a trusted Full Access runtime turn."""
+    if os.name == "nt":
+        return [f"{chr(code)}:\\" for code in range(ord("A"), ord("Z") + 1)
+                if Path(f"{chr(code)}:\\").exists()]
+    return [os.path.sep]
+
+
 def _directory(value: str | Path, allowed_roots: Iterable[str | Path]) -> Path:
     path = _authorized_path(value, allowed_roots)
     if not path.is_dir():
@@ -656,6 +664,6 @@ def web_search(
 
 
 __all__ = [
-    "FileReadLimitError", "extract_explicit_local_roots", "list_directory", "read_text_file", "find_files", "search_text",
+    "FileReadLimitError", "extract_explicit_local_roots", "host_scope_roots", "list_directory", "read_text_file", "find_files", "search_text",
     "web_fetch", "web_search", "WEB_FETCH_TOOL_NAME", "WEB_SEARCH_TOOL_NAME", "GENERAL_AGENT_WEB_TOOL_METADATA",
 ]

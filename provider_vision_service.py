@@ -129,6 +129,8 @@ class ProviderVisionService:
         self,
     ) -> tuple[VisionModelConfig | None, str, str]:
         profile = self._state.profile_config()
+        if profile.enabled and not profile.configured:
+            return None, "", "The enabled vision profile is not configured; choose a provider and model or disable it."
         if profile.configured and profile.enabled:
             if self._policy.provider_requires_api_key(profile.provider) and not profile.api_key.strip():
                 return (

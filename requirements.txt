@@ -21,6 +21,8 @@ PyJWT[crypto]>=2.10.0
 # Local validation and tests.
 httpx>=0.27.0
 pytest>=8.0.0
+jsonpatch==1.33
+jsonpointer>=3.0.0,<4
 
 # Native Windows pseudoterminal support for interactive Shell sessions.
 pywinpty==3.0.5; sys_platform == "win32"

@@ -995,6 +995,8 @@ namespace VRCForge.Editor
             [VRCForgeInput("Animator condition mode.", IsRequired = false)] public string conditionMode { get; set; } = "Equals";
             [VRCForgeInput("Animator condition threshold.", IsRequired = false)] public float? threshold { get; set; } = 0f;
             [VRCForgeInput("Set Write Defaults on the ensured state.", IsRequired = false)] public bool? writeDefaults { get; set; } = true;
+            [VRCForgeInput("Optional: use an existing Float parameter as normalized motion time.", IsRequired = false)] public bool? timeParameterActive { get; set; }
+            [VRCForgeInput("Optional existing Float Animator parameter used as normalized motion time.", IsRequired = false)] public string timeParameter { get; set; } = "";
             [VRCForgeInput("Return a non-mutating preview.", IsRequired = false)] public bool? preview { get; set; } = false;
             [VRCForgeInput("Asset directory for a newly created FX controller.", IsRequired = false)] public string assetDir { get; set; } = "";
         }
@@ -1016,6 +1018,8 @@ namespace VRCForge.Editor
                 var conditionMode = AvatarAuthoringCrudCore.ParseConditionMode(@params["conditionMode"]?.ToString() ?? "Equals");
                 var threshold = @params["threshold"]?.Value<float?>() ?? 0f;
                 var writeDefaults = @params["writeDefaults"]?.Value<bool?>() ?? true;
+                var timeParameterActive = @params["timeParameterActive"]?.Value<bool?>();
+                var timeParameter = (@params["timeParameter"]?.ToString() ?? "").Trim();
                 var preview = @params["preview"]?.Value<bool?>() ?? false;
                 if (string.IsNullOrWhiteSpace(layerName)) return VRCForgeToolResult.Failed("layerName is required.");
                 if (string.IsNullOrWhiteSpace(stateName)) return VRCForgeToolResult.Failed("stateName is required.");
@@ -1028,6 +1032,20 @@ namespace VRCForge.Editor
                 ValidateTargetIdentity(controller, layerName, stateName, parameterName, parameterType);
                 var layerExists = controller != null && controller.layers.Any(layer => string.Equals(layer.name, layerName, StringComparison.Ordinal));
                 var existingState = layerExists ? FindState(controller.layers.First(layer => layer.name == layerName).stateMachine, stateName) : null;
+                if (timeParameterActive == true && timeParameter.Length == 0 && existingState == null)
+                    throw new InvalidOperationException("timeParameter is required when timeParameterActive is true for a new state.");
+                var effectiveTimeParameter = timeParameter.Length > 0 ? timeParameter : (existingState?.timeParameter ?? "");
+                if (timeParameter.Length > 0 || timeParameterActive == true)
+                {
+                    if (effectiveTimeParameter.Length == 0)
+                        throw new InvalidOperationException("timeParameter is required when timeParameterActive is true.");
+                    var requestedParameter = controller?.parameters?.SingleOrDefault(item => item.name == effectiveTimeParameter);
+                    var willCreateFloatParameter = requestedParameter == null
+                        && string.Equals(effectiveTimeParameter, parameterName, StringComparison.Ordinal)
+                        && parameterType == AnimatorControllerParameterType.Float;
+                    if (!willCreateFloatParameter && (requestedParameter == null || requestedParameter.type != AnimatorControllerParameterType.Float))
+                        throw new InvalidOperationException("timeParameter must reference an existing Float Animator parameter.");
+                }
                 var stateExists = existingState != null;
                 var plannedControllerPath = controller != null ? AssetDatabase.GetAssetPath(controller)
                     : GeneratedAssetPaths.UniqueAssetPath($"{assetDir}/{AvatarAuthoringCrudCore.Sanitize(descriptor.name, "Avatar")}_FX.controller");
@@ -1045,6 +1063,8 @@ namespace VRCForge.Editor
                     conditionMode = conditionMode.ToString(),
                     threshold,
                     writeDefaults,
+                    timeParameterActive,
+                    timeParameter,
                     willCreateFxController = controller == null,
                     willCreateLayer = !layerExists,
                     willCreateState = !stateExists,
@@ -1121,6 +1141,10 @@ namespace VRCForge.Editor
                     stateCreated = true;
                 }
                 state.writeDefaultValues = writeDefaults;
+                if (timeParameter.Length > 0) state.timeParameter = timeParameter;
+                if (timeParameterActive.HasValue) state.timeParameterActive = timeParameterActive.Value;
+                if (state.timeParameterActive && string.IsNullOrWhiteSpace(state.timeParameter))
+                    throw new InvalidOperationException("timeParameter is required when timeParameterActive is true.");
                 if (state.motion == null)
                 {
                     clipReceipt = new AnimatorTransactionReceipt
@@ -1291,6 +1315,8 @@ namespace VRCForge.Editor
                 {
                     state.name,
                     state.writeDefaultValues,
+                    state.timeParameterActive,
+                    state.timeParameter,
                     motionPath = AssetDatabase.GetAssetPath(state.motion)
                 }
             };

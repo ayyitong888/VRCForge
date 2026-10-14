@@ -82,6 +82,43 @@ def test_append_repairs_truncated_tail_and_read_skips_invalid_json(tmp_path: Pat
     assert events[0]["event"] == "runtime_started"
 
 
+def test_usage_reconciliation_is_private_but_durable(tmp_path: Path) -> None:
+    ledger, _lock = make_ledger(tmp_path)
+    reconciliation = {
+        "schema": "vrcforge.request_usage_reconciliation.v1",
+        "status": "verified",
+        "chainId": "task-1",
+        "parentTurnId": "turn-1",
+        "turnId": "turn-2",
+        "parentSnapshotSha256": "a" * 64,
+        "delta": {"requestCount": 3},
+    }
+    record = ledger.build_run_from_turn(
+        event="runtime_turn_completed",
+        status="completed",
+        agent_name="desktop-agent",
+        session_id="session-1",
+        turn_id="turn-2",
+        client_turn_id="client-2",
+        message="done",
+        attachments=[],
+        params={},
+        top_plan={"reply": "done"},
+        steps=[],
+        shell_payload=None,
+        skill_payload=None,
+        write_payload=None,
+        approval_id="",
+        usage_reconciliation=reconciliation,
+    )
+    ledger.append(record)
+
+    raw = ledger.read_events()[0]
+    assert raw["usageReconciliation"] == reconciliation
+    public = ledger.list_runs(session_id="session-1", limit=10)
+    assert "usageReconciliation" not in json.dumps(public, ensure_ascii=False)
+
+
 def test_queue_event_and_grouped_run_projection_preserve_filters(tmp_path: Path) -> None:
     ledger, _lock = make_ledger(tmp_path)
     queued = ledger.record_queue_event(
@@ -653,6 +690,27 @@ def test_foreground_completion_replay_is_idempotent_by_session_and_client_turn(t
         write_payload=None,
         approval_id="",
     ) == "blocked"
+    # A current ask-user boundary must remain resumable even when an earlier
+    # write/diagnostic in this same turn failed (native-turn-007 shape).
+    assert ledger.turn_run_status(
+        top_plan={
+            "nextStep": "needs_user_action",
+            "completionGate": {"status": "needs_user_action", "reason": "question_pending"},
+        },
+        shell_payload=None,
+        skill_payload={
+            "tool": "vrcforge_ask_user",
+            "ok": True,
+            "status": "needs_user_action",
+            "result": {"question": {"questionId": "question_20261012_215703_405097_478433"}},
+        },
+        write_payload={
+            "tool": "vrcforge_import_outfit_package",
+            "ok": False,
+            "status": "failed",
+        },
+        approval_id="",
+    ) == "blocked"
     assert ledger.turn_run_status(
         top_plan={"nextStep": "done"},
         shell_payload=None,
@@ -660,3 +718,92 @@ def test_foreground_completion_replay_is_idempotent_by_session_and_client_turn(t
         write_payload=None,
         approval_id="",
     ) == "completed"
+
+
+def test_shell_terminal_event_after_append_recovers_once_after_gateway_rebuild(tmp_path: Path) -> None:
+    """A terminal event must retain a recoverable continuation across an interruption."""
+
+    gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
+    shell_session_id = "shell-stage-interrupted-before-pending"
+    terminal = {
+        "shellSessionId": shell_session_id,
+        "runtimeSessionId": "session-stage-interrupted",
+        "turnId": "turn-stage-interrupted",
+        "clientTurnId": "client-stage-interrupted",
+        "status": "finished",
+        "exitCode": 7,
+        "timedOut": False,
+        "cancelled": False,
+        "terminationFailed": False,
+        "result": {"ok": False, "exitCode": 7, "stdout": "bounded-output", "stderr": ""},
+        "taskSeed": {
+            "schema": "vrcforge.agent_task_loop.v2",
+            "taskId": "task-stage-interrupted",
+            "sessionId": "session-stage-interrupted",
+            "clientTurnId": "client-stage-interrupted",
+            "requestedKind": "shell",
+            "requestedTool": "shell",
+        },
+    }
+
+    ledger_type = type(gateway.runtime_runs)
+    append = ledger_type.append
+
+    def append_then_interrupt(ledger: AgentRuntimeRunLedger, record: dict[str, Any]) -> None:
+        append(ledger, record)
+        if record.get("event") == "runtime_shell_process_finished":
+            raise BaseException("simulated process interruption after terminal append")
+
+    with patch.object(ledger_type, "append", new=append_then_interrupt):
+        with pytest.raises(BaseException, match="after terminal append"):
+            gateway.shell._ports.session_finished(terminal)
+
+    process_events = [
+        event
+        for event in gateway.runtime_runs.read_events(limit=0)
+        if event.get("event") == "runtime_shell_process_finished"
+        and event.get("shellSessionId") == shell_session_id
+    ]
+    assert len(process_events) == 1
+
+    restarted = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
+    continuation = {
+        "sessionId": "session-stage-interrupted",
+        "turnId": "turn-stage-interrupted:shell",
+        "clientTurnId": f"client-stage-interrupted:shell:{shell_session_id}",
+        "continuationSource": "shell_process_finished",
+        "plan": {"reply": "resumed once"},
+    }
+    with patch.object(
+        restarted,
+        "resume_runtime_task_after_shell",
+        return_value=continuation,
+    ) as resume, patch.object(restarted, "_runtime_turn_completed") as completed, patch.object(
+        type(restarted.shell), "execute", autospec=True
+    ) as shell_execute:
+        reconciled = restarted.reconcile_runtime_shell_continuations()
+        duplicate = restarted.reconcile_runtime_shell_continuations()
+
+    assert reconciled["pendingDispatched"] == 1
+    assert reconciled["delivered"] == 1
+    assert duplicate["pendingDispatched"] == 0
+    assert duplicate["delivered"] == 0
+    resume.assert_called_once()
+    completed.assert_called_once_with(continuation)
+    shell_execute.assert_not_called()
+    resumed_event = resume.call_args.args[0]
+    assert resumed_event["shellSessionId"] == shell_session_id
+    assert resumed_event["exitCode"] == 7
+    assert resumed_event["result"]["stdoutSummary"] == "bounded-output"
+    assert resumed_event["taskSeed"]["taskId"] == "task-stage-interrupted"
+    public_projection = json.dumps(
+        restarted.runtime_runs.list_runs(session_id="session-stage-interrupted", limit=20),
+        ensure_ascii=False,
+    )
+    assert "task-stage-interrupted" not in public_projection
+    assert "bounded-output" not in public_projection
+    assert sum(
+        event.get("event") == "runtime_shell_process_finished"
+        and event.get("shellSessionId") == shell_session_id
+        for event in restarted.runtime_runs.read_events(limit=0)
+    ) == 1

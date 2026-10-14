@@ -36,6 +36,53 @@ def test_shell_runtime_turn_projection_is_bounded_and_drops_internal_state() -> 
     assert "result" not in projected
 
 
+def test_runtime_turn_projection_preserves_bounded_context_usage() -> None:
+    projected = project_runtime_turn_event(
+        {
+            "continuationSource": "question_answered",
+            "sessionId": "owner-session",
+            "turnId": "question-terminal",
+            "contextUsage": {
+                "schema": "vrcforge.context_usage.v1",
+                "exact": True,
+                "provider": "chatgpt",
+                "model": "gpt-6.1-sol",
+                "inputTokens": 44773,
+                "outputTokens": 148,
+                "totalTokens": 44921,
+                "requestCount": 3,
+                "priorRequestCount": 20,
+                "cacheReadTokens": 13824,
+                "cacheUsageComplete": True,
+                "coverage": {
+                    "planner": {"requestCount": 2, "reportedRequestCount": 2, "complete": True},
+                    "compaction": {"requestCount": 3, "complete": False, "unknown": "drop"},
+                },
+                "cacheCoverage": {
+                    "requestCount": 3,
+                    "read": {"requestCount": 3, "reportedRequestCount": 2, "complete": False},
+                    "write": {"requestCount": 3, "reportedRequestCount": 3, "complete": True},
+                },
+                "inputTokens": {"wrong": "type"},
+                "secret": "must-not-cross",
+            },
+            "plan": {"reply": "蓝色", "nextStep": "done"},
+        }
+    )
+
+    assert projected is not None
+    assert projected["contextUsage"]["totalTokens"] == 44921
+    assert projected["contextUsage"]["priorRequestCount"] == 20
+    assert projected["contextUsage"]["cacheReadTokens"] == 13824
+    assert projected["contextUsage"]["coverage"]["planner"]["complete"] is True
+    assert projected["contextUsage"]["coverage"]["planner"]["reportedRequestCount"] == 2
+    assert projected["contextUsage"]["coverage"]["compaction"] == {"requestCount": 3, "complete": False}
+    assert projected["contextUsage"]["cacheCoverage"]["requestCount"] == 3
+    assert projected["contextUsage"]["cacheCoverage"]["read"]["complete"] is False
+    assert "inputTokens" not in projected["contextUsage"]
+    assert "secret" not in projected["contextUsage"]
+
+
 def test_runtime_turn_projection_rejects_non_shell_or_unowned_events() -> None:
     assert project_runtime_turn_event({"continuationSource": "approval", "sessionId": "s", "turnId": "t"}) is None
     assert project_runtime_turn_event({"continuationSource": "shell_process_finished", "turnId": "t"}) is None
@@ -121,3 +168,142 @@ def test_foreground_completion_projection_preserves_full_reply_and_safe_timeline
     assert projected["timeline"][0]["payload"]["summary"] == "private planner summary"
     assert projected["timeline"][1]["payload"]["summary"] == reply
     assert "observe" not in projected
+
+
+def test_runtime_turn_projection_preserves_bounded_retry_terminal_metadata() -> None:
+    projected = project_runtime_turn_event(
+        {
+            "continuationSource": "foreground_completed",
+            "sessionId": "owner-session",
+            "turnId": "retry-terminal",
+            "plan": {
+                "nextStep": "planner_failed",
+                "plannerFailure": {
+                    "code": "provider_rate_limited",
+                    "phase": "initial",
+                    "transportPhase": "first_byte",
+                    "retryable": True,
+                    "retryAttempts": 5,
+                    "retryDecision": "NO_MORE_RETRY",
+                    "providerError": {
+                        "statusCode": 429,
+                        "type": "RateLimitError",
+                        "code": "rate_limit_exceeded",
+                        "streamStarted": False,
+                        "message": "drop",
+                        "body": {"headers": {"authorization": "drop"}},
+                        "headers": {"x-retry-metadata": "drop"},
+                        "stack": "drop",
+                    },
+                },
+            },
+        }
+    )
+
+    assert projected is not None
+    assert projected["plan"]["plannerFailure"] == {
+        "code": "provider_rate_limited",
+        "phase": "initial",
+        "transportPhase": "first_byte",
+        "retryable": True,
+        "retryAttempts": 5,
+        "retryDecision": "NO_MORE_RETRY",
+        "providerError": {
+            "statusCode": 429,
+            "type": "RateLimitError",
+            "code": "rate_limit_exceeded",
+            "streamStarted": False,
+        },
+    }
+
+
+def test_runtime_turn_projection_preserves_started_stream_without_fabricating_retry() -> None:
+    projected = project_runtime_turn_event(
+        {
+            "continuationSource": "foreground_completed",
+            "sessionId": "owner-session",
+            "turnId": "stream-terminal",
+            "plan": {
+                "nextStep": "planner_failed",
+                "plannerFailure": {
+                    "code": "provider_request_failed",
+                    "phase": "initial",
+                    "retryable": False,
+                    "providerError": {
+                        "statusCode": 200,
+                        "type": "StreamError",
+                        "code": "stream_failed",
+                        "streamStarted": True,
+                    },
+                },
+            },
+        }
+    )
+
+    assert projected is not None
+    failure = projected["plan"]["plannerFailure"]
+    assert failure["providerError"] == {
+        "statusCode": 200,
+        "type": "StreamError",
+        "code": "stream_failed",
+        "streamStarted": True,
+    }
+    assert "retryDecision" not in failure
+
+
+def test_runtime_turn_projection_rejects_invalid_failure_fields_and_absent_failure_stays_absent() -> None:
+    without_failure = project_runtime_turn_event(
+        {
+            "continuationSource": "foreground_completed",
+            "sessionId": "owner-session",
+            "turnId": "no-failure",
+            "plan": {"nextStep": "done"},
+        }
+    )
+    assert without_failure is not None
+    assert "plannerFailure" not in without_failure["plan"]
+
+    projected = project_runtime_turn_event(
+        {
+            "continuationSource": "foreground_completed",
+            "sessionId": "owner-session",
+            "turnId": "malicious-failure",
+            "plan": {
+                "plannerFailure": {
+                    "code": "bad value with spaces",
+                    "phase": {"nested": "drop"},
+                    "transportPhase": "first_byte\nforged",
+                    "retryable": "true",
+                    "retryAttempts": -1,
+                    "retryDecision": "RETRY_FOREVER",
+                    "providerError": {
+                        "statusCode": 700,
+                        "type": "bad type with spaces",
+                        "code": "../secret",
+                        "streamStarted": "true",
+                        "message": "drop",
+                        "body": {"api_key": "drop"},
+                        "headers": {"authorization": "drop"},
+                        "stack": "drop",
+                    },
+                },
+            },
+        }
+    )
+
+    assert projected is not None
+    assert "plannerFailure" not in projected["plan"]
+
+
+def test_runtime_turn_projection_ignores_container_retry_decision_without_raising() -> None:
+    projected = project_runtime_turn_event(
+        {
+            "continuationSource": "foreground_completed",
+            "sessionId": "owner-session",
+            "turnId": "container-failure",
+            "plan": {"plannerFailure": {"retryDecision": {"NO_MORE_RETRY": True}}},
+        }
+    )
+
+    assert projected is not None
+    assert "plannerFailure" not in projected["plan"]

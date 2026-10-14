@@ -17,6 +17,7 @@ from typing import Any
 
 from agent_tool_result_contract import completion_gate_plan, normalize_agent_tool_result
 from agent_budget_policy import AgentBudgetPolicy, freeze_agent_budget_policy
+from request_usage_reconciliation import usage_snapshot_sha256
 
 
 TASK_LOOP_SCHEMA = "vrcforge.agent_task_loop.v2"
@@ -74,6 +75,13 @@ def _bounded_text(value: Any, limit: int | None) -> str:
     return str(value or "").strip()[:limit]
 
 
+def _bounded_snapshot_digest(value: Any) -> str:
+    text = _bounded_text(value, 64).lower()
+    if len(text) != 64 or any(character not in "0123456789abcdef" for character in text):
+        return ""
+    return text
+
+
 def _approval_history(value: Any) -> list[dict[str, str]]:
     """Preserve the accepted textual conversation for approval resumption.
 
@@ -102,7 +110,7 @@ def _bounded_provider_usage(value: Any) -> dict[str, Any]:
     result: dict[str, Any] = {}
     if value.get("exact") is True:
         result["exact"] = True
-    for key in ("inputTokens", "outputTokens", "totalTokens", "cacheReadTokens"):
+    for key in ("inputTokens", "outputTokens", "totalTokens", "cacheReadTokens", "cacheWriteTokens"):
         item = value.get(key)
         if isinstance(item, int) and not isinstance(item, bool) and item >= 0:
             result[key] = item
@@ -119,6 +127,15 @@ def _bounded_provider_usage(value: Any) -> dict[str, Any]:
             and result.get("exact") is True
             and "inputTokens" in result and "cacheReadTokens" in result
         )
+    if "cacheWriteUsageComplete" in value or "cacheWriteUsageRequestCount" in value:
+        count = value.get("cacheWriteUsageRequestCount")
+        result["cacheWriteUsageRequestCount"] = count if type(count) is int and count >= 0 else 0
+        result["cacheWriteUsageComplete"] = (
+            value.get("cacheWriteUsageComplete") is True
+            and result["cacheWriteUsageRequestCount"] > 0
+            and result.get("exact") is True
+            and "inputTokens" in result and "cacheWriteTokens" in result
+        )
     return result
 
 
@@ -133,11 +150,13 @@ def merge_provider_usage(
         return latest
     if not latest:
         return {
-            **{key: previous[key] for key in ("inputTokens", "outputTokens", "totalTokens", "cacheReadTokens") if key in previous},
+            **{key: previous[key] for key in ("inputTokens", "outputTokens", "totalTokens", "cacheReadTokens", "cacheWriteTokens") if key in previous},
             "exact": False,
             "unavailableReason": "provider_usage_missing",
             **({"cacheUsageComplete": False, "cacheUsageRequestCount": previous.get("cacheUsageRequestCount", 0)}
                if "cacheUsageComplete" in previous else {}),
+            **({"cacheWriteUsageComplete": False, "cacheWriteUsageRequestCount": previous.get("cacheWriteUsageRequestCount", 0)}
+               if "cacheWriteUsageComplete" in previous else {}),
         }
     primary_keys = ("inputTokens", "outputTokens", "totalTokens")
     complete = all(key in previous and key in latest for key in primary_keys)
@@ -148,7 +167,7 @@ def merge_provider_usage(
             and latest.get("exact") is True
         ),
     }
-    for key in ("inputTokens", "outputTokens", "totalTokens", "cacheReadTokens"):
+    for key in ("inputTokens", "outputTokens", "totalTokens", "cacheReadTokens", "cacheWriteTokens"):
         if key in previous and key in latest:
             merged[key] = previous[key] + latest[key]
         elif key in previous and key != "cacheReadTokens":
@@ -160,6 +179,9 @@ def merge_provider_usage(
     if "cacheUsageComplete" in previous or "cacheUsageComplete" in latest:
         merged["cacheUsageRequestCount"] = previous.get("cacheUsageRequestCount", 0) + latest.get("cacheUsageRequestCount", 0)
         merged["cacheUsageComplete"] = previous.get("cacheUsageComplete") is True and latest.get("cacheUsageComplete") is True
+    if "cacheWriteUsageComplete" in previous or "cacheWriteUsageComplete" in latest:
+        merged["cacheWriteUsageRequestCount"] = previous.get("cacheWriteUsageRequestCount", 0) + latest.get("cacheWriteUsageRequestCount", 0)
+        merged["cacheWriteUsageComplete"] = previous.get("cacheWriteUsageComplete") is True and latest.get("cacheWriteUsageComplete") is True
     return merged
 
 
@@ -683,6 +705,7 @@ def approval_task_context(
         "objective": objective,
         "sessionId": _bounded_text(seed.get("sessionId"), 180),
         "turnId": _bounded_text(seed.get("turnId"), 180),
+        "usageParentTurnId": _bounded_text(seed.get("usageParentTurnId"), 180),
         "clientTurnId": _bounded_text(seed.get("clientTurnId"), 180),
         "projectRoot": _bounded_text(seed.get("projectRoot"), 600),
         "agentName": _bounded_text(seed.get("agentName"), 160),
@@ -700,6 +723,9 @@ def approval_task_context(
             min(int(seed.get("providerRequestCount") or 0), 100),
         ),
         "providerUsage": _bounded_provider_usage(seed.get("providerUsage")),
+        "providerUsageSnapshotSha256": _bounded_snapshot_digest(
+            seed.get("providerUsageSnapshotSha256")
+        ),
         "modelTurnsUsed": max(0, min(int(seed.get("modelTurnsUsed") or 0), 4096)),
         "budgetPolicy": {
             "maxModelTurns": freeze_agent_budget_policy(seed.get("budgetPolicy")).max_model_turns,
@@ -897,6 +923,7 @@ def prepare_approval_task_continuation(
             "summary": summary,
             "reply": summary,
             "planner": "runtime",
+            "shellNeeded": False,
             "continueLoop": False,
             "nextStep": "done",
         }
@@ -906,6 +933,7 @@ def prepare_approval_task_continuation(
             "summary": summary,
             "reply": summary,
             "planner": "runtime",
+            "shellNeeded": False,
             "continueLoop": False,
             "nextStep": "tool_failed" if task_status == "failed" else "needs_user_action",
             "completionGate": {
@@ -1371,16 +1399,42 @@ class AgentTaskLoop:
         continue_after_approval: bool = True,
         provider_request_count: int | None = None,
         provider_usage: Mapping[str, Any] | None = None,
+        usage_parent_turn_id: str | None = None,
+        # Kept as a compatibility-shaped argument for callers that adopted
+        # the pre-freeze candidate; it must not alter the task's turnId.
+        turn_id: str | None = None,
+        provider_usage_snapshot_sha256: str | None = None,
     ) -> dict[str, Any]:
         effective_kind = _bounded_text(requested_kind, 32) or "write"
         effective_tool = _bounded_text(requested_tool, 160)
         effective_arguments = dict(requested_arguments or {})
+        effective_provider_request_count = max(
+            0,
+            min(
+                int(
+                    self.provider_request_count
+                    if provider_request_count is None
+                    else provider_request_count
+                ),
+                100,
+            ),
+        )
+        effective_provider_usage = _bounded_provider_usage(
+            self.provider_usage if provider_usage is None else provider_usage
+        )
+        effective_snapshot = _bounded_snapshot_digest(provider_usage_snapshot_sha256)
+        if not effective_snapshot:
+            effective_snapshot = usage_snapshot_sha256(
+                effective_provider_request_count,
+                effective_provider_usage,
+            )
         return {
             "schema": TASK_LOOP_SCHEMA,
             "taskId": self.task_id,
             "objective": _bounded_text(self.objective, None),
             "sessionId": _bounded_text(self.session_id, 180),
             "turnId": _bounded_text(self.turn_id, 180),
+            "usageParentTurnId": _bounded_text(usage_parent_turn_id, 180),
             "clientTurnId": _bounded_text(self.client_turn_id, 180),
             "projectRoot": _bounded_text(self.project_root, 600),
             "agentName": _bounded_text(self.agent_name, 160),
@@ -1391,20 +1445,9 @@ class AgentTaskLoop:
             "toolCallsUsed": max(
                 0, int(self.tool_calls_used if tool_calls_used is None else tool_calls_used)
             ),
-            "providerRequestCount": max(
-                0,
-                min(
-                    int(
-                        self.provider_request_count
-                        if provider_request_count is None
-                        else provider_request_count
-                    ),
-                    100,
-                ),
-            ),
-            "providerUsage": _bounded_provider_usage(
-                self.provider_usage if provider_usage is None else provider_usage
-            ),
+            "providerRequestCount": effective_provider_request_count,
+            "providerUsage": effective_provider_usage,
+            "providerUsageSnapshotSha256": effective_snapshot,
             "modelTurnsUsed": max(0, min(int(self.model_turns_used or 0), 4096)),
             "budgetPolicy": {
                 "maxModelTurns": self.budget_policy.max_model_turns,

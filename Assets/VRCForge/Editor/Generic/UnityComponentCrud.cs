@@ -572,45 +572,157 @@ namespace VRCForge.Editor
             int maxItems,
             out int returnedItemCount,
             out int valueItemCount,
-            out bool valueTruncated)
+            out bool valueTruncated,
+            out bool valueIncomplete)
         {
             returnedItemCount = -1;
             valueItemCount = -1;
             valueTruncated = false;
-            // UnityEngine.Object references such as Transform also implement
-            // IEnumerable.  They are scalar object references for MCP
-            // property reads and must not be expanded into child transforms.
-            if (value is UnityEngine.Object || !(value is IEnumerable enumerable) || value is string)
+            valueIncomplete = false;
+            var nodesRemaining = 2048;
+            var activeObjects = new HashSet<object>(ReferenceEqualityComparer.Instance);
+            // UnityEngine.Object values remain scalar; preserve the existing
+            // collection dispatch contract: value is UnityEngine.Object || !(value is IEnumerable enumerable) || value is string.
+            var described = DescribeValueBounded(value, maxItems, 0, ref nodesRemaining, activeObjects, ref valueTruncated, ref valueIncomplete);
+            if (value is IEnumerable && !(value is string) && !(value is UnityEngine.Object))
+            {
+                var collection = value as ICollection;
+                if (collection != null)
+                {
+                    valueItemCount = collection.Count;
+                    returnedItemCount = Math.Min(collection.Count, maxItems);
+                    valueTruncated = valueTruncated || collection.Count > returnedItemCount;
+                }
+                else if (described is IList list)
+                {
+                    returnedItemCount = list.Count;
+                    valueItemCount = valueTruncated ? -1 : returnedItemCount;
+                }
+            }
+            return described;
+        }
+
+        private sealed class ReferenceEqualityComparer : IEqualityComparer<object>
+        {
+            internal static readonly ReferenceEqualityComparer Instance = new ReferenceEqualityComparer();
+            public new bool Equals(object left, object right) => ReferenceEquals(left, right);
+            public int GetHashCode(object value) => System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(value);
+        }
+
+        private static object DescribeValueBounded(
+            object value,
+            int maxItems,
+            int depth,
+            ref int nodesRemaining,
+            HashSet<object> activeObjects,
+            ref bool truncated,
+            ref bool incomplete)
+        {
+            if (nodesRemaining-- <= 0)
+            {
+                truncated = true;
+                incomplete = true;
+                return new Dictionary<string, object> { ["__incomplete"] = true, ["__truncated"] = true };
+            }
+            if (value == null || value is string || value is bool || value is Enum
+                || value.GetType().IsPrimitive || value is Vector2 || value is Vector3
+                || value is Vector4 || value is Quaternion || value is Color
+                || value is Bounds || value is Matrix4x4 || value is UnityEngine.Object)
             {
                 return DescribeValue(value);
             }
-
-            var items = new List<object>();
-            var collection = value as ICollection;
-            var totalKnown = collection != null;
-            if (collection != null)
+            if (depth >= 4)
             {
-                valueItemCount = collection.Count;
+                truncated = true;
+                incomplete = true;
+                return new Dictionary<string, object> { ["__incomplete"] = true, ["__truncated"] = true };
             }
-            foreach (var item in enumerable)
+            if (!value.GetType().IsValueType && !activeObjects.Add(value))
             {
-                if (items.Count >= maxItems)
+                incomplete = true;
+                return new Dictionary<string, object> { ["__incomplete"] = true, ["__cycle"] = true };
+            }
+            try
+            {
+                if (value is IEnumerable enumerable)
                 {
-                    valueTruncated = true;
-                    break;
+                    var items = new List<object>();
+                    foreach (var item in enumerable)
+                    {
+                        if (items.Count >= maxItems)
+                        {
+                            truncated = true;
+                            incomplete = true;
+                            break;
+                        }
+                        items.Add(DescribeValueBounded(item, maxItems, depth + 1, ref nodesRemaining, activeObjects, ref truncated, ref incomplete));
+                        if (nodesRemaining <= 0)
+                            break;
+                    }
+                    return items;
                 }
-                items.Add(DescribeValue(item));
+
+                var fields = new Dictionary<string, object>();
+                var fieldType = value.GetType();
+                if (!fieldType.IsDefined(typeof(SerializableAttribute), false))
+                {
+                    incomplete = true;
+                    return new Dictionary<string, object>
+                    {
+                        ["__type"] = fieldType.FullName,
+                        ["__incomplete"] = true
+                    };
+                }
+                while (fieldType != null && fieldType != typeof(object))
+                {
+                    foreach (var field in fieldType.GetFields(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly))
+                    {
+                        if (field.IsStatic || field.IsNotSerialized || field.IsInitOnly
+                            || (!field.IsPublic && field.GetCustomAttribute<SerializeField>() == null))
+                            continue;
+                        if (fields.ContainsKey(field.Name))
+                        {
+                            incomplete = true;
+                            fields["__duplicateField"] = field.Name;
+                            continue;
+                        }
+                        fields[field.Name] = DescribeValueBounded(field.GetValue(value), maxItems, depth + 1, ref nodesRemaining, activeObjects, ref truncated, ref incomplete);
+                        if (nodesRemaining <= 0)
+                            break;
+                    }
+                    if (nodesRemaining <= 0)
+                        break;
+                    fieldType = fieldType.BaseType;
+                }
+                if (fields.Count == 0)
+                {
+                    incomplete = true;
+                    fields["__type"] = value.GetType().FullName;
+                    fields["__incomplete"] = true;
+                }
+                else if (incomplete)
+                {
+                    fields["__incomplete"] = true;
+                }
+                if (truncated)
+                    fields["__truncated"] = true;
+                return fields;
             }
-            returnedItemCount = items.Count;
-            if (!totalKnown && !valueTruncated)
+            finally
             {
-                valueItemCount = returnedItemCount;
+                if (!value.GetType().IsValueType)
+                    activeObjects.Remove(value);
             }
-            else if (totalKnown)
-            {
-                valueTruncated = valueItemCount > returnedItemCount;
-            }
-            return items;
+        }
+
+        internal static object DescribeValue(
+            object value,
+            int maxItems,
+            out int returnedItemCount,
+            out int valueItemCount,
+            out bool valueTruncated)
+        {
+            return DescribeValue(value, maxItems, out returnedItemCount, out valueItemCount, out valueTruncated, out _);
         }
 
         internal static Type FindType(string fullName)
@@ -1009,7 +1121,8 @@ namespace VRCForge.Editor
                     maxItems,
                     out var returnedItemCount,
                     out var valueItemCount,
-                    out var valueTruncated);
+                    out var valueTruncated,
+                    out var valueIncomplete);
 
                 var payload = new
                 {
@@ -1021,7 +1134,8 @@ namespace VRCForge.Editor
                     propertyValue,
                     returnedItemCount = returnedItemCount >= 0 ? (int?)returnedItemCount : null,
                     valueItemCount = valueItemCount >= 0 ? (int?)valueItemCount : null,
-                    valueTruncated
+                    valueTruncated,
+                    valueIncomplete
                 };
 
                 return VRCForgeToolResult.Completed(

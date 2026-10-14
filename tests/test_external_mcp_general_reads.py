@@ -87,6 +87,24 @@ def test_external_mcp_general_read_rejects_missing_or_forged_scope(tmp_path: Pat
     assert escaped["status"] == "failed"
 
 
+def test_external_mcp_cannot_borrow_runtime_full_permission_scope(tmp_path: Path) -> None:
+    gateway = _gateway(tmp_path)
+    config = gateway.ensure_config()
+    config.execution_mode = "roslyn_full_auto"
+    gateway.save_config(config)
+    root = tmp_path / "workspace"
+    root.mkdir()
+    outside = tmp_path / "outside.txt"
+    outside.write_text("private", encoding="utf-8")
+
+    result = gateway.call_external_mcp_tool(
+        "vrcforge_read_text_file",
+        {"projectPath": str(root.resolve()), "path": "../outside.txt"},
+    )
+    assert result["status"] == "failed"
+    assert "private" not in str(result)
+
+
 def test_external_mcp_dispatches_each_general_read_handler(tmp_path: Path) -> None:
     gateway = _gateway(tmp_path)
     root = tmp_path / "workspace"

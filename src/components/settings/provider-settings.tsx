@@ -385,11 +385,23 @@ export function VisionProfileSetup({
 }: VisionProfileSetupProps) {
   const requiresBaseUrl = PROVIDERS_REQUIRING_BASE_URL.includes(provider);
   const saveDisabled =
-    !runtimeConnected || saving || !provider || !model.trim() || (providerNeedsApiKey(provider) && !apiKey.trim() && !keySaved);
+    !runtimeConnected || saving || Boolean(enabled && provider && (!model.trim() || (providerNeedsApiKey(provider) && !apiKey.trim() && !keySaved)));
 
   return (
     <form onSubmit={onSubmit} className="rounded-2xl border border-border bg-card p-5 shadow-composer">
       <div className="grid gap-4">
+        <label className="flex cursor-pointer items-start gap-2 text-sm">
+          <input
+            type="checkbox"
+            checked={enabled}
+            onChange={(event) => onEnabledChange(event.target.checked)}
+            className="mt-0.5 h-4 w-4 accent-primary"
+          />
+          <span>
+            <span className="block font-medium text-foreground">{i18n.t("vision.enabledLabel")}</span>
+            {!enabled ? <span className="block text-muted-foreground">{i18n.t("vision.disabledDescription")}</span> : null}
+          </span>
+        </label>
         <SettingsFieldLabel label={i18n.t("provider.apiProvider")}>
           <select
             value={provider}
@@ -407,7 +419,7 @@ export function VisionProfileSetup({
             <option value="custom">{i18n.t("provider.customEndpoint")}</option>
           </select>
         </SettingsFieldLabel>
-        {provider ? (
+        {provider && enabled ? (
           <>
             <SettingsFieldLabel label={i18n.t("provider.apiKey")}>
               {providerNeedsApiKey(provider) ? (
@@ -444,15 +456,6 @@ export function VisionProfileSetup({
                 className="h-10 w-full rounded-md border border-border bg-background px-3 text-sm outline-none placeholder:text-muted-foreground/60 focus:border-primary"
               />
             </SettingsFieldLabel>
-            <label className="flex cursor-pointer items-center gap-2 text-sm">
-              <input
-                type="checkbox"
-                checked={enabled}
-                onChange={(event) => onEnabledChange(event.target.checked)}
-                className="h-4 w-4 accent-primary"
-              />
-              {i18n.t("vision.enabledLabel")}
-            </label>
           </>
         ) : null}
       </div>

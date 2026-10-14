@@ -88,6 +88,21 @@ def _under_root(value: Any, root: str, field: str) -> str:
     return path
 
 
+def _scene_absolute_path(scene: Mapping[str, Any], root: str) -> str:
+    """Resolve a Core scene identity that may expose only its assetPath."""
+
+    explicit = scene.get("absolutePath") or scene.get("path")
+    if explicit:
+        return _under_root(explicit, root, "scene.absolutePath")
+    asset_path = scene.get("assetPath")
+    if isinstance(asset_path, str) and asset_path.strip():
+        # Keep containment and extension checks below authoritative; this only
+        # supplies the filesystem candidate when Core omitted absolutePath.
+        candidate = Path(root) / asset_path.replace("/", os.sep)
+        return _under_root(str(candidate), root, "scene.assetPath")
+    return _under_root(None, root, "scene.absolutePath")
+
+
 def _identity_scope_for_target(target: Mapping[str, Any]) -> str:
     scope = str(target.get("scope") or "project").strip().casefold()
     if scope not in {"project", "scene", "avatar", "object", "component"}:
@@ -162,7 +177,7 @@ def validate_execution_target(
 
     if scope in {"scene", "avatar", "object", "component"}:
         scene = dict(_mapping(target.get("scene"), "scene"))
-        scene_path = _under_root(scene.get("absolutePath") or scene.get("path"), root, "scene.absolutePath")
+        scene_path = _scene_absolute_path(scene, root)
         if not scene_path.casefold().endswith(".unity"):
             raise ExecutionTargetError("scene_path_invalid", "ExecutionTarget scene must be a Unity scene asset.")
         _required_string(scene.get("guid"), "scene.guid")
@@ -288,7 +303,7 @@ def validate_runtime_execution_target(
     target_scope = _identity_scope_for_target(target_mapping)
     if target_scope != "project":
         scene = _mapping(target_mapping.get("scene"), "scene")
-        scene_path = _under_root(scene.get("absolutePath") or scene.get("path"), root, "scene.absolutePath")
+        scene_path = _scene_absolute_path(scene, root)
         try:
             stat = Path(scene_path).stat()
             digest = hashlib.sha256(Path(scene_path).read_bytes()).hexdigest()

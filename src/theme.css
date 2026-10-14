@@ -297,6 +297,16 @@
     background-size: cover;
   }
 
+  /* Let the composer follow the selected wallpaper while retaining enough
+     surface contrast for text and controls. */
+  html[data-vrcforge-wallpaper="active"] [data-chat-composer-dock] {
+    background-color: transparent;
+  }
+
+  html[data-vrcforge-wallpaper="active"] [data-vrcforge-composer-dropzone] {
+    background-color: hsl(var(--muted) / 0.58);
+  }
+
   html[data-vrcforge-wallpaper="active"][data-vrcforge-wallpaper-scope="app"] #root > main {
     background-image:
       linear-gradient(
@@ -522,7 +532,7 @@
 
   .app-scrollbar {
     color-scheme: light;
-    scrollbar-color: hsl(var(--scrollbar-thumb)) hsl(var(--scrollbar-track));
+    scrollbar-color: hsl(var(--scrollbar-thumb)) transparent;
     scrollbar-width: thin;
   }
 
@@ -555,19 +565,19 @@
   .app-scrollbar::-webkit-scrollbar-track,
   .app-scrollbar::-webkit-scrollbar-track-piece,
   .app-scrollbar::-webkit-scrollbar-corner {
-    background-color: hsl(var(--scrollbar-track));
+    background-color: transparent;
   }
 
   .app-scrollbar::-webkit-scrollbar-button {
     width: 0;
     height: 0;
     display: none;
-    background-color: hsl(var(--scrollbar-track));
+    background-color: transparent;
   }
 
   .app-scrollbar::-webkit-scrollbar-thumb {
     min-height: 32px;
-    border: 2px solid hsl(var(--scrollbar-track));
+    border: 2px solid transparent;
     border-radius: 9999px;
     background-color: hsl(var(--scrollbar-thumb));
     background-clip: padding-box;

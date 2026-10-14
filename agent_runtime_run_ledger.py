@@ -13,6 +13,8 @@ from background_goal_runtime import classify_runtime_plan_outcome, classify_runt
 from runtime_planner_service import public_runtime_payload
 
 
+
+
 def _ensure_dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
@@ -27,6 +29,7 @@ def _ensure_list(value: Any) -> list[Any]:
 
 def _public_event(value: dict[str, Any]) -> dict[str, Any]:
     projected = dict(value)
+    projected.pop("usageReconciliation", None)
     projected.pop("continuationTaskSeed", None)
     projected.pop("continuationTerminalEvent", None)
     if projected.get("shellContinuationState"):
@@ -428,6 +431,7 @@ class AgentRuntimeRunLedger:
         approval_id: str,
         continuation_event: dict[str, Any] | None = None,
         context_usage: dict[str, Any] | None = None,
+        usage_reconciliation: dict[str, Any] | None = None,
         context_compaction: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         approval_ids = []
@@ -473,6 +477,8 @@ class AgentRuntimeRunLedger:
         }
         if context_usage:
             record["contextUsage"] = context_usage
+        if usage_reconciliation:
+            record["usageReconciliation"] = usage_reconciliation
         if context_compaction:
             record["contextCompaction"] = context_compaction
         if continuation_event:
@@ -491,6 +497,34 @@ class AgentRuntimeRunLedger:
         plan_outcome, _plan_label = classify_runtime_plan_outcome(top_plan)
         if plan_outcome == "cancelled":
             return "cancelled"
+        # A live ask-user boundary is the current turn terminal even when an
+        # earlier diagnostic/write step in the same turn failed.  Keep this
+        # narrow: only the explicit question_pending plan reason and a real
+        # questionId from vrcforge_ask_user qualify; generic needs_user_action
+        # receipts (scope denial, failed verification, etc.) remain terminal
+        # failures/blocked outcomes below.
+        question_boundary = (
+            str(top_plan.get("nextStep") or "").strip() == "needs_user_action"
+            and str(_ensure_dict(top_plan.get("completionGate")).get("reason") or "").strip()
+            == "question_pending"
+        )
+        question_payload = _ensure_dict(skill_payload)
+        question_id = ""
+        if question_boundary and question_payload.get("tool") == "vrcforge_ask_user":
+            for candidate in (
+                _ensure_dict(question_payload.get("result")).get("question"),
+                question_payload.get("outcome"),
+            ):
+                if isinstance(candidate, dict):
+                    question_id = str(candidate.get("questionId") or "").strip()
+                    if question_id:
+                        break
+        if (
+            question_id
+            and question_payload.get("ok") is True
+            and str(question_payload.get("status") or "").strip() == "needs_user_action"
+        ):
+            return "blocked"
         payloads = [
             _ensure_dict(payload)
             for payload in (shell_payload, skill_payload, write_payload)

@@ -93,6 +93,51 @@ def test_native_model_reuses_provider_owner_and_keeps_replay_out_of_ui(runtime_t
         dashboard_server.AGENT_GATEWAY.runtime_sessions.clear_stream_context()
 
 
+def test_provider_receipts_keep_unique_indices_when_first_usage_is_missing():
+    from provider_request_metrics import RequestMetrics
+    from native_request_composition import attach_native_request_composition
+
+    binding = dashboard_server._RuntimePlannerProviderTurnBinding()
+    model = dashboard_server._RuntimePlannerModel(binding)
+    records = []
+    calls = []
+
+    def request(_settings, prompt, *, stream_activity_callback, **_kwargs):
+        calls.append(prompt)
+        receipt = RequestMetrics(stream_activity_callback, {"input": [], "model": "fixture"})
+        receipt.finish({}, success=len(calls) > 1, error="fixture" if len(calls) == 1 else "")
+        if len(calls) == 1:
+            raise RuntimeError("fixture failed without usage")
+        return LlmPlanResponse(text="ok", reasoning={}, usage={})
+
+    context = {"sessionId": "index-session", "turnId": "index-turn", "clientTurnId": "index-client"}
+    dashboard_server.AGENT_GATEWAY.runtime_sessions.set_stream_context(context)
+    try:
+        with (patch.object(dashboard_server.PROVIDER_CONFIGURATION, "current_api_config", return_value=fixture_config()),
+              patch.object(dashboard_server.PROVIDER_TEXT_PROBE, "probe_settings", return_value=SimpleNamespace()),
+              patch.object(dashboard_server, "request_llm_plan_with_metadata", side_effect=request),
+              patch.object(type(dashboard_server.AGENT_GATEWAY.runtime_runs), "append", side_effect=records.append),
+              patch.object(dashboard_server.EVENT_BUS, "broadcast_from_sync")):
+            with binding.bind({}):
+                with pytest.raises(RuntimeError, match="fixture failed"):
+                    model.plan("first")
+                model.plan_native(attach_native_request_composition({
+                    "instructions": "private-composition-text", "messages": [], "tools": []}))
+                model.plan("compact", _deadline=time.monotonic() + 30)
+        assert [r["requestIndex"] for r in records] == [1, 1, 2, 2, 3, 3]
+        assert [r["phase"] for r in records] == ["planner"] * 2 + ["native"] * 2 + ["compaction"] * 2
+        assert records[2]["metrics"]["nativeComposition"]["instructions"]["chars"] == len("private-composition-text")
+        assert "nativeComposition" not in records[3]["metrics"]
+        assert "private-composition-text" not in repr(records)
+        assert all(all(r[k] == v for k, v in context.items()) for r in records)
+        assert records[1]["metrics"]["usagePresent"] is False
+        assert records[0]["metrics"]["requestId"] == records[1]["metrics"]["requestId"]
+        assert records[0]["metrics"]["requestId"] != records[2]["metrics"]["requestId"]
+    finally:
+        model.shutdown()
+        dashboard_server.AGENT_GATEWAY.runtime_sessions.clear_stream_context()
+
+
 def test_provider_turn_binding_uses_frozen_explicit_native_route_only():
     binding = dashboard_server._RuntimePlannerProviderTurnBinding()
     config = fixture_config()

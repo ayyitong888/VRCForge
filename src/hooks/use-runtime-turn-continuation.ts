@@ -6,6 +6,59 @@ const RUNTIME_TURN_EVENT_SCHEMA = "vrcforge.runtime_turn_event.v1";
 const RUNTIME_CONTINUATION_SOURCES = new Set(["approval_finished", "shell_process_finished", "sub_agent_finished", "question_answered", "foreground_completed"]);
 const MAX_PENDING_CONTINUATIONS = 32;
 const MAX_DELIVERED_CONTINUATIONS = 512;
+const PLANNER_FAILURE_RETRY_ATTEMPTS_LIMIT = 100;
+const SAFE_IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$/;
+
+type PlannerFailure = NonNullable<AgentRuntimeResponse["plan"]["plannerFailure"]>;
+
+function safePlannerIdentifier(value: unknown): string | undefined {
+  return typeof value === "string" && SAFE_IDENTIFIER.test(value) ? value : undefined;
+}
+
+function plannerFailureRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+function sanitizePlannerFailure(value: unknown): PlannerFailure | undefined {
+  const source = plannerFailureRecord(value);
+  if (!source) return undefined;
+  const result: PlannerFailure = {};
+  for (const key of ["code", "phase", "transportPhase"] as const) {
+    const identifier = safePlannerIdentifier(source[key]);
+    if (identifier) result[key] = identifier;
+  }
+  if (typeof source.retryable === "boolean") result.retryable = source.retryable;
+  if (Number.isInteger(source.retryAttempts)
+    && typeof source.retryAttempts === "number"
+    && source.retryAttempts >= 0
+    && source.retryAttempts <= PLANNER_FAILURE_RETRY_ATTEMPTS_LIMIT) {
+    result.retryAttempts = source.retryAttempts;
+  }
+  if (source.retryDecision === "NO_MORE_RETRY" || source.retryDecision === "CANCELLED") {
+    result.retryDecision = source.retryDecision;
+  }
+  const providerSource = plannerFailureRecord(source.providerError);
+  if (providerSource) {
+    const providerError: NonNullable<PlannerFailure["providerError"]> = {};
+    for (const key of ["type", "code"] as const) {
+      const identifier = safePlannerIdentifier(providerSource[key]);
+      if (identifier) providerError[key] = identifier;
+    }
+    if (Number.isInteger(providerSource.statusCode)
+      && typeof providerSource.statusCode === "number"
+      && providerSource.statusCode >= 100
+      && providerSource.statusCode <= 599) {
+      providerError.statusCode = providerSource.statusCode;
+    }
+    if (typeof providerSource.streamStarted === "boolean") {
+      providerError.streamStarted = providerSource.streamStarted;
+    }
+    if (Object.keys(providerError).length > 0) result.providerError = providerError;
+  }
+  return Object.keys(result).length > 0 ? result : undefined;
+}
 
 export type RuntimeTurnEvent = {
   schema?: string;
@@ -13,11 +66,19 @@ export type RuntimeTurnEvent = {
   sessionId?: string;
   turnId?: string;
   clientTurnId?: string;
+  contextUsage?: AgentRuntimeResponse["contextUsage"];
   plan?: {
     summary?: string;
     reply?: string;
     planner?: string;
     nextStep?: string;
+    reason?: string;
+    publicMessages?: Array<{
+      id: string;
+      text: string;
+      phase?: "commentary" | "final_answer";
+    }>;
+    plannerFailure?: AgentRuntimeResponse["plan"]["plannerFailure"];
     taskCompletion?: Record<string, unknown>;
   };
   timeline?: AgentRuntimeResponse["timeline"];
@@ -122,9 +183,10 @@ function runtimeTurnEvent(value: unknown): RuntimeTurnEvent | null {
   return event;
 }
 
-function responseFromRuntimeTurnEvent(event: RuntimeTurnEvent): AgentRuntimeResponse {
+export function responseFromRuntimeTurnEvent(event: RuntimeTurnEvent): AgentRuntimeResponse {
   const sessionId = event.sessionId!.trim();
   const turnId = event.turnId!.trim();
+  const plannerFailure = sanitizePlannerFailure(event.plan?.plannerFailure);
   return {
     ok: true,
     session_id: sessionId,
@@ -132,6 +194,7 @@ function responseFromRuntimeTurnEvent(event: RuntimeTurnEvent): AgentRuntimeResp
     turn_id: turnId,
     turnId,
     clientTurnId: event.clientTurnId?.trim() || undefined,
+    contextUsage: event.contextUsage,
     observe: {},
     plan: {
       summary: event.plan?.summary || "",
@@ -139,6 +202,9 @@ function responseFromRuntimeTurnEvent(event: RuntimeTurnEvent): AgentRuntimeResp
       planner: event.plan?.planner || "runtime",
       shellNeeded: false,
       nextStep: event.plan?.nextStep || "done",
+      reason: event.plan?.reason,
+      publicMessages: event.plan?.publicMessages,
+      plannerFailure,
       taskCompletion: event.plan?.taskCompletion,
     },
     timeline: event.timeline,

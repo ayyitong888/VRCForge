@@ -5,19 +5,13 @@ import {
   applyAgentRuntimeDeltaToStreamingItem,
   elapsedSecondsSince,
   finalizeCancelledStreamingTurn,
-  providerReconnectAttempt,
+  providerWaitingWindow,
 } from "../src/lib/chat-streaming.ts";
 import { buildTimelinePresentation } from "../src/lib/chat-timeline-presentation.ts";
 import { runtimeContinuationDeliveryState } from "../src/hooks/use-runtime-turn-continuation.ts";
 
 const startedAt = "2026-08-14T00:00:00.000Z";
 const startedMs = Date.parse(startedAt);
-assert.equal(providerReconnectAttempt(startedAt, startedMs + 59_999), undefined);
-assert.equal(providerReconnectAttempt(startedAt, startedMs + 60_000), 1);
-assert.equal(providerReconnectAttempt(startedAt, startedMs + 119_999), 1);
-assert.equal(providerReconnectAttempt(startedAt, startedMs + 120_000), 2);
-assert.equal(providerReconnectAttempt(startedAt, startedMs + 300_000), 5);
-assert.equal(providerReconnectAttempt(startedAt, startedMs + 900_000), 5, "the display is bounded to the Provider call's five windows");
 assert.equal(elapsedSecondsSince(startedAt, startedMs + 1_499), 1, "running elapsed time advances from the local turn start");
 assert.equal(elapsedSecondsSince(startedAt, startedMs + 2_501), 3, "running elapsed time uses the real wall clock");
 
@@ -61,8 +55,6 @@ const activity = applyAgentRuntimeDeltaToStreamingItem(waiting, {
   activity: true,
 }, activityAt);
 assert.equal(activity.providerLastActivityAt, activityAt, "reasoning activity resets the idle watchdog");
-assert.equal(providerReconnectAttempt(activity.providerLastActivityAt, Date.parse(activityAt) + 59_999), undefined);
-assert.equal(providerReconnectAttempt(activity.providerLastActivityAt, Date.parse(activityAt) + 60_000), 1);
 const providerEventAt = "2026-08-14T00:01:30.500Z";
 const providerEvent = applyAgentRuntimeDeltaToStreamingItem(activity, {
   type: "agentRuntimeDelta",
@@ -70,6 +62,22 @@ const providerEvent = applyAgentRuntimeDeltaToStreamingItem(activity, {
   activity: true,
 }, providerEventAt);
 assert.equal(providerEvent.providerLastActivityAt, providerEventAt, "an activity-only Provider event also clears reconnect progress");
+const retrying = applyAgentRuntimeDeltaToStreamingItem(activity, {
+  type: "agentRuntimeDelta", clientTurnId: "client-live", phase: "waiting_for_model",
+  providerRetry: { attempt: 1, max: 5, reason: "connection" },
+}, providerEventAt);
+assert.deepEqual(retrying.providerRetry, { attempt: 1, max: 5, reason: "connection" }, "reconnect UI uses the real retry event");
+const resumed = applyAgentRuntimeDeltaToStreamingItem(retrying, {
+  type: "agentRuntimeDelta", clientTurnId: "client-live", phase: "waiting_for_model", activity: true,
+}, providerEventAt);
+assert.equal(resumed.providerRetry, undefined, "provider activity clears the retry banner and resets the wait clock");
+const noFakeRetry = applyAgentRuntimeDeltaToStreamingItem(activity, {
+  type: "agentRuntimeDelta", clientTurnId: "client-live", phase: "waiting_for_model",
+}, providerEventAt);
+assert.equal(noFakeRetry.providerRetry, undefined, "idle time alone never invents a retry attempt");
+assert.equal(providerWaitingWindow(activityAt, Date.parse(activityAt) + 59_999), undefined);
+assert.equal(providerWaitingWindow(activityAt, Date.parse(activityAt) + 60_000), 1);
+assert.equal(providerWaitingWindow(activityAt, Date.parse(activityAt) + 300_000), 5);
 
 const toolCall = {
   id: "timeline-turn-live-4",
@@ -165,6 +173,8 @@ for (const locale of ["en-US", "ja-JP", "zh-CN", "zh-TW"]) {
   assert.match(messages.chat.runtimePhase.reconnecting, /\{\{max\}\}/);
   assert.equal(typeof messages.chat.runtimePhase.reconnectingDetail, "string", `${locale} must localize safe reconnect detail`);
   assert.equal(typeof messages.chat.runtimePhase.reconnectingRetry, "string", `${locale} must localize terminal reconnect next step`);
+  assert.equal(typeof messages.chat.runtimePhase.waitingForModelProgress, "string", `${locale} must localize time-only waiting progress`);
+  assert.equal(typeof messages.chat.runtimePhase.waitingForModelTimeout, "string", `${locale} must clarify time-only timeout is not a retry`);
   assert.equal(typeof messages.chat.providerResponseTimedOut, "string", `${locale} must explain that timeout needs a manual retry`);
 }
 
@@ -172,7 +182,7 @@ const card = await readFile(resolve(import.meta.dirname, "..", "src", "component
 const controller = await readFile(resolve(import.meta.dirname, "..", "src", "hooks", "use-chat-run-controller.ts"), "utf8");
 const timelinePresentationSource = await readFile(resolve(import.meta.dirname, "..", "src", "lib", "chat-timeline-presentation.ts"), "utf8");
 assert.match(card, /clearInterval\(timer\)/, "terminal replacement and Stop unmount must clear the reconnect clock");
-assert.match(card, /buildDurableTimelineRows\(item\.timeline, elapsedSecondsSince\(item\.createdAt, streamingNowMs\), \"\", \[\], \{ includeAssistant: false \}\)/,
+assert.match(card, /buildDurableTimelineRows[\s\S]*live: true,[\s\S]*suppressTrailingAssistantText: item\.text/,
   "the complete live answer must not be rendered a second time from the durable assistant event");
 assert.match(card, /window\.setInterval\(\(\) => setStreamingNowMs\(Date\.now\(\)\), 1_000\)/,
   "the transient card advances elapsed time locally while backend events are quiet");

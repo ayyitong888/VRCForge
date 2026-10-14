@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pytest
 
+import dashboard_server
 from unity_execution_plans_scene import build_scene_execution_plan
 
 
@@ -26,6 +27,60 @@ from unity_execution_plans_scene import build_scene_execution_plan
 ])
 def test_scene_handler_argument_projection(target, arguments, expected):
     assert build_scene_execution_plan(target, arguments) == [expected]
+
+
+def test_ensure_animator_state_freezes_time_parameter_fields() -> None:
+    plan = build_scene_execution_plan(
+        "vrcforge_ensure_animator_state",
+        {
+            "avatarPath": "Milltina_Oneesan",
+            "layerName": "OneesanFT_LeftEye",
+            "stateName": "Continuous",
+            "parameterName": "v2/EyeLidLeft",
+            "parameterType": "Float",
+            "conditionMode": "Greater",
+            "threshold": -1,
+            "writeDefaults": True,
+            "timeParameterActive": True,
+            "timeParameter": "v2/EyeLidLeft",
+            "assetDir": "Assets/Oneesan/FaceTracking/Controllers",
+        },
+    )
+    assert plan == [
+        (
+            "vrc_ensure_animator_state",
+            {
+                "avatarPath": "Milltina_Oneesan",
+                "layerName": "OneesanFT_LeftEye",
+                "stateName": "Continuous",
+                "parameterName": "v2/EyeLidLeft",
+                "parameterType": "Float",
+                "conditionMode": "Greater",
+                "threshold": -1,
+                "writeDefaults": True,
+                "timeParameterActive": True,
+                "timeParameter": "v2/EyeLidLeft",
+                "assetDir": "Assets/Oneesan/FaceTracking/Controllers",
+                "preview": False,
+            },
+        )
+    ]
+    assert plan[0][1] == dashboard_server.build_ensure_animator_state_request(
+        {
+            "avatarPath": "Milltina_Oneesan",
+            "layerName": "OneesanFT_LeftEye",
+            "stateName": "Continuous",
+            "parameterName": "v2/EyeLidLeft",
+            "parameterType": "Float",
+            "conditionMode": "Greater",
+            "threshold": -1,
+            "writeDefaults": True,
+            "timeParameterActive": True,
+            "timeParameter": "v2/EyeLidLeft",
+            "assetDir": "Assets/Oneesan/FaceTracking/Controllers",
+        },
+        False,
+    )
 
 
 def test_expression_builders_preserve_aliases_defaults_and_non_preview():

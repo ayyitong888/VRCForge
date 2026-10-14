@@ -53,14 +53,15 @@ assert.equal(result.legacy, "", "older persisted subagent cards use the sidebar 
 for(const route of ["completed","streaming","streamingMixed","merged"]){
   assert.doesNotMatch(result[route], /Subagent sentinel|Child result sentinel|data-vrcforge-timeline-event="subagent"/, route);
 }
-for (const route of ["completed", "streamingMixed", "merged"]) {
-  assert.equal((result[route].match(/agent.callTool/g) || []).length, 1,
-    route + " retains the real read tool without a second collapsed lifecycle tool row");
+for (const route of ["completed", "merged"]) {
+  assert.equal((result[route].match(/data-agent-turn-process-group/g) || []).length, 1,
+    route + " retains the real tool process without a second lifecycle group");
 }
 assert.equal((result.streaming.match(/agent.callTool/g) || []).length, 0);
 assert.doesNotMatch(result.streaming, /data-vrcforge-live-runtime-timeline/, "no empty lifecycle wrapper");
 assert.match(result.completed, /User final answer/);
-assert.match(result.completed, /agent.callTool/);
+assert.match(result.completed, /agent.workSegment/);
+assert.match(result.streamingMixed, /read_text_file/);
 assert.match(result.streamingMixed, /data-vrcforge-live-runtime-timeline/);
 assert.match(result.sidebar, /data-vrcforge-open-subagent-surface/);
 assert.equal(result.unchanged, true);

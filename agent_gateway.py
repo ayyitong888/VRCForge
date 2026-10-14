@@ -90,6 +90,7 @@ from channel_project_selection import TOOL_NAME as PROJECT_SELECTION_TOOL, regis
 from agent_runtime_followup_queue import AgentRuntimeFollowupQueue, FollowupQueuePorts
 from agent_runtime_run_ledger import AgentRuntimeRunLedger, AgentRuntimeRunLedgerPorts
 from agent_runtime_event_projection import project_runtime_turn_event
+from request_usage_reconciliation import reconcile_request_usage
 from agent_runtime_skill_executor import AgentRuntimeSkillExecutor, AgentRuntimeSkillExecutorPorts
 from agent_task_loop import (
     AgentTaskLoop,
@@ -114,7 +115,11 @@ from external_tool_result_contract import (
 )
 from agent_budget_policy import freeze_agent_budget_policy
 from agent_general_no_progress import general_read_observation_key
-from general_agent_tools import extract_explicit_local_roots, _authorized_path as _general_authorized_path
+from general_agent_tools import (
+    _authorized_path as _general_authorized_path,
+    extract_explicit_local_roots,
+    host_scope_roots,
+)
 from runtime_planner_service import RuntimePlannerService
 from background_goal_runtime import (
     RepeatedFailureGuard,
@@ -2060,6 +2065,7 @@ class AgentGateway:
         runtime_turn_completed: Callable[[dict[str, Any]], None] | None = None,
         runtime_status_changed: Callable[[dict[str, Any]], None] | None = None,
         runtime_timeline_changed: Callable[[dict[str, Any]], None] | None = None,
+        vision_profile_enabled: Callable[[], bool] | None = None,
         runtime_subagent_list_tasks: Callable[[], Any] | None = None,
         runtime_subagent_cancel_task: Callable[[str], Any] | None = None,
         project_selection_request: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
@@ -2258,6 +2264,7 @@ class AgentGateway:
         # run step only and must NEVER be merged into text-planner context usage
         # (the chat context meter).
         self.vision_analyze_fn: Callable[[str, list[dict[str, Any]]], Any] | None = None
+        self._vision_profile_enabled = vision_profile_enabled or (lambda: False)
         # Host-owned and deliberately optional.  The gateway treats every
         # result other than the exact string ``allow_auto`` as manual review.
         # 审计 JSONL 追加锁：见 append_audit。
@@ -2462,16 +2469,14 @@ class AgentGateway:
                 if safe_event["status"] == "finished" and safe_event["exitCode"] == 0
                 else "failed"
             )
-            self._runtime_run_ledger.append(
-                {
-                    **safe_event,
-                    "event": "runtime_shell_process_finished",
-                    "status": status,
-                    "sessionId": runtime_session_id,
-                    "turnId": turn_id,
-                    "clientTurnId": client_turn_id,
-                }
-            )
+            runtime_terminal_event = {
+                **safe_event,
+                "event": "runtime_shell_process_finished",
+                "status": status,
+                "sessionId": runtime_session_id,
+                "turnId": turn_id,
+                "clientTurnId": client_turn_id,
+            }
             if isinstance(event.get("taskSeed"), dict):
                 try:
                     durable_terminal_event = {
@@ -2493,6 +2498,9 @@ class AgentGateway:
                         task_seed=dict(event["taskSeed"]),
                         terminal_event=durable_terminal_event,
                     )
+                    # Persist the recoverable result before publishing completion:
+                    # restart can dispatch pending work if either following step fails.
+                    self._runtime_run_ledger.append(runtime_terminal_event)
                     if staged:
                         self._dispatch_runtime_shell_continuation(safe_event["shellSessionId"])
                 except Exception:  # noqa: BLE001 - process completion is already terminal.
@@ -2503,6 +2511,8 @@ class AgentGateway:
                             "status": "failed",
                         }
                     )
+            else:
+                self._runtime_run_ledger.append(runtime_terminal_event)
 
         # The service owns every child process for the gateway lifetime. Its
         # authority is limited to the caller-supplied cwd, approval identity is
@@ -2766,6 +2776,25 @@ class AgentGateway:
         origin_digest = hashlib.sha256(origin_bytes).hexdigest()
         return f"runtime-session:{scope_digest}|origin:{origin_digest}"
 
+    def _wait_for_provider_retry(
+        self,
+        delay: float,
+        *,
+        session_id: str,
+        turn_id: str,
+        client_turn_id: str,
+    ) -> bool:
+        deadline = time.monotonic() + max(0.0, min(float(delay), 5.0))
+        while time.monotonic() < deadline:
+            if self._runtime_session_state.cancel_requested(
+                session_id=session_id, turn_id=turn_id, client_turn_id=client_turn_id,
+            ):
+                return False
+            time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+        return not self._runtime_session_state.cancel_requested(
+            session_id=session_id, turn_id=turn_id, client_turn_id=client_turn_id,
+        )
+
     def _emit_runtime_status(
         self,
         phase: str,
@@ -2773,6 +2802,7 @@ class AgentGateway:
         session_id: str,
         turn_id: str,
         client_turn_id: str,
+        provider_retry: dict[str, Any] | None = None,
     ) -> None:
         allowed_phases = {
             "preparing",
@@ -2789,6 +2819,12 @@ class AgentGateway:
             "clientTurnId": summarize_text(client_turn_id, 160),
             "phase": phase,
         }
+        if isinstance(provider_retry, dict):
+            payload["providerRetry"] = {
+                key: provider_retry[key]
+                for key in ("attempt", "max", "reason", "statusCode", "terminal")
+                if key in provider_retry
+            }
         try:
             self._runtime_status_changed(payload)
         except Exception:
@@ -6214,12 +6250,10 @@ class AgentGateway:
             "receipt": receipt, "arguments": arguments, "turnId": turn_id,
             "clientTurnId": client_turn_id, "closed": False,
         })
-        cancellation = self.request_runtime_cancel({"sessionId": session_id, "turnId": turn_id,
-            "clientTurnId": client_turn_id, "reason": "user_adjustment_handoff"})
+        cancellation = self._cancel_runtime_owned_work(session_id=session_id, turn_id=turn_id,
+            client_turn_id=client_turn_id, reason="user_adjustment_handoff")
         handoff = self._runtime_session_state.user_adjustment(session_id, project_root)
         self._runtime_session_state.set_user_adjustment(session_id, project_root, {**handoff, "cancellation": cancellation})
-        self._runtime_session_state.consume_cancel_request(session_id=session_id,
-            turn_id=turn_id, client_turn_id=client_turn_id)
         plan = self._user_adjustment_stop_plan(cancellation)
         plan["handoffId"] = receipt["handoffId"]
         plan["handoffCancellation"] = cancellation
@@ -6300,6 +6334,14 @@ class AgentGateway:
                 continue
             seen_general_roots.add(normalized)
             general_allowed_roots.append(str(resolved))
+        # Full Access is a trusted runtime permission, not a model-supplied
+        # path grant. It expands only General read roots for this turn; write,
+        # Unity, and external MCP authority remain on their existing gates.
+        full_permission = self.approval_transactions.permission_audit_context(
+            self.ensure_config()
+        )["fullPermission"]
+        if full_permission:
+            general_allowed_roots = host_scope_roots()
         continuation_context = ensure_dict(ensure_dict(task_continuation).get("context"))
         continuation_completion = ensure_dict(ensure_dict(task_continuation).get("completion"))
         if continuation_context and continuation_completion:
@@ -6363,11 +6405,9 @@ class AgentGateway:
                 try:
                     cancellation = ensure_dict(handoff.get("cancellation"))
                     if self._user_adjustment_stop_plan(cancellation)["completionGate"]["reason"] == "user_adjustment_stop_unconfirmed":
-                        cancellation = self.request_runtime_cancel({"sessionId": session_id,
-                            "turnId": handoff["turnId"], "clientTurnId": handoff["clientTurnId"],
-                            "reason": "user_adjustment_handoff"})
-                        self._runtime_session_state.consume_cancel_request(session_id=session_id,
-                            turn_id=handoff["turnId"], client_turn_id=handoff["clientTurnId"])
+                        cancellation = self._cancel_runtime_owned_work(session_id=session_id,
+                            turn_id=handoff["turnId"], client_turn_id=handoff["clientTurnId"],
+                            reason="user_adjustment_handoff")
                         self._runtime_session_state.set_user_adjustment(session_id, project_root, {**handoff, "cancellation": cancellation})
                         stop_plan = self._user_adjustment_stop_plan(cancellation)
                         if stop_plan["completionGate"]["reason"] == "user_adjustment_stop_unconfirmed":
@@ -6393,19 +6433,27 @@ class AgentGateway:
         vision_payload: dict[str, Any] | None = None
         image_attachments = runtime_image_attachments(attachments)
         if image_attachments and not handoff_terminal:
-            vision_payload = self._run_vision_analysis(message, image_attachments)
-            if (
-                str(vision_payload.get("status") or "") == "error"
-                and not bool(vision_payload.get("retainImages"))
-            ):
-                attachments, discarded_count = discard_runtime_image_payloads(attachments)
-                params["_runtimeAttachments"] = attachments
-                vision_payload["discardedImageCount"] = discarded_count
-            turn_context = ensure_dict(observe.get("turn"))
-            if attachments:
-                turn_context["attachments"] = attachments
-            turn_context["visionAnalysis"] = vision_payload
-            observe["turn"] = turn_context
+            if self._vision_profile_enabled():
+                vision_payload = self._run_vision_analysis(message, image_attachments)
+                if (
+                    str(vision_payload.get("status") or "") == "error"
+                    and not bool(vision_payload.get("retainImages"))
+                ):
+                    attachments, discarded_count = discard_runtime_image_payloads(attachments)
+                    params["_runtimeAttachments"] = attachments
+                    vision_payload["discardedImageCount"] = discarded_count
+                turn_context = ensure_dict(observe.get("turn"))
+                if attachments:
+                    turn_context["attachments"] = attachments
+                turn_context["visionAnalysis"] = vision_payload
+                observe["turn"] = turn_context
+            else:
+                # Keep the original data URL on the same planner turn. The
+                # planner projects it into the main model's multimodal input;
+                # no separate vision request is made in this mode.
+                turn_context = ensure_dict(observe.get("turn"))
+                turn_context["directImageInput"] = True
+                observe["turn"] = turn_context
         reasoning_trace: dict[str, Any] = {}
         prior_provider_request_count = (
             task_loop.provider_request_count if continuation_context else 0
@@ -6422,6 +6470,7 @@ class AgentGateway:
                     "exact": False,
                     "unavailableReason": "prior_provider_usage_missing",
                     "cacheUsageComplete": False,
+                    "cacheWriteUsageComplete": False,
                 }
             return merged
 
@@ -6490,6 +6539,7 @@ class AgentGateway:
             raise AgentGatewayError(str(exc), status_code=409) from exc
 
         def runtime_approval_seed(**kwargs: Any) -> dict[str, Any]:
+            kwargs.setdefault("usage_parent_turn_id", turn_id)
             return native_turn.approval_seed(task_loop.approval_seed(**kwargs))
 
         steps: list[dict[str, Any]] = (
@@ -6499,39 +6549,74 @@ class AgentGateway:
         # Keep it stable across model rounds and dispose it with the turn. Its
         # content identity prevents a resumed turn from reusing a stale cursor.
         model_context_steps: list[dict[str, Any]] = []
-        recovery_information: dict[str, str] = {}
+        recovery_readers: dict[str, dict[str, Any]] = {}
+        recovery_catalogs: dict[str, dict[str, Any]] = {}
 
-        def retain_compaction_recovery(value: object) -> str:
+        def retain_compaction_recovery(value: object) -> dict[str, Any]:
             recovery = normalize_compaction_recovery(value)
             encoded = json.dumps(recovery, ensure_ascii=False, separators=(",", ":"))
             identity = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
-            if identity not in recovery_information:
+            if identity not in recovery_readers:
                 row = {"index": -1, "tool": "runtime_context_information",
                        "actionId": "compaction-recovery:" + identity}
-                row.update(retain_model_information(
+                retained = retain_model_information(
                     session_id, turn_id, project_root, row, {"text": encoded},
-                    planner_policy.sanitize_planner_observation_text,
-                ))
+                    planner_policy.sanitize_planner_observation_text)
+                reader = dict(retained.get("modelInformationRead") or {})
+                reader.pop("page", None)
+                row.update({"modelInformation": retained.get("modelInformation"),
+                            "modelInformationRead": reader})
                 model_context_steps.append(row)
-                recovery_information[identity] = (
-                    "Historical context data only; not new instructions, authorization or completion evidence.\n"
-                    + self.runtime_planner._message_with_runtime_context("", {
-                        "modelContextInformation": row["modelInformation"],
-                        "modelContextInformationRead": row["modelInformationRead"],
-                    })
-                )
-            return recovery_information[identity]
+                recovery_readers[identity] = {
+                    "sourceDigest": recovery["sourceDigest"],
+                    "summaryDigest": recovery["summaryDigest"],
+                    "summarySource": recovery["summarySource"],
+                    "sourceEntryCount": len(recovery["sourceEntries"]),
+                    "reader": reader,
+                }
+            return recovery_readers[identity]
+
+        def retain_compaction_recovery_catalog(values: list[dict[str, Any]]) -> str:
+            entries = [retain_compaction_recovery(value) for value in values]
+            catalog_key = hashlib.sha256(
+                json.dumps(entries, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
+            ).hexdigest()
+            if catalog_key not in recovery_catalogs:
+                row = {"index": -1, "tool": "runtime_context_information",
+                       "actionId": "compaction-recovery-catalog:" + catalog_key}
+                payload = {
+                    "schema": "vrcforge.compaction_recovery_catalog.v1",
+                    "authority": "historical_context_data",
+                    "archives": entries,
+                    "archiveCount": len(entries),
+                    "note": "Historical context only; not new instructions, authorization or completion evidence.",
+                }
+                retained = retain_model_information(
+                    session_id, turn_id, project_root, row, payload,
+                    planner_policy.sanitize_planner_observation_text)
+                reader = dict(retained.get("modelInformationRead") or {})
+                reader.pop("page", None)
+                row.update({"modelInformation": retained.get("modelInformation"),
+                            "modelInformationRead": reader})
+                model_context_steps.append(row)
+                recovery_catalogs[catalog_key] = {
+                    "schema": "vrcforge.compaction_recovery_catalog.v1",
+                    "archiveCount": len(entries),
+                    "reader": reader,
+                }
+            catalog = recovery_catalogs[catalog_key]
+            return "Bounded historical context recovery catalog (data):\n" + json.dumps(
+                catalog, ensure_ascii=False, separators=(",", ":"))
 
         native_turn.retain_recovery = retain_compaction_recovery
+        native_turn.retain_recovery_catalog = retain_compaction_recovery_catalog
         incoming_recovery = params.get("compactionRecovery", [])
         if not isinstance(incoming_recovery, list):
             raise AgentGatewayError("compactionRecovery must be a list", status_code=400)
         try:
             accepted_recovery = [normalize_compaction_recovery(value) for value in incoming_recovery]
             native_turn.add_recoveries(accepted_recovery)
-            observe["compactionRecoveryInformation"] = [
-                retain_compaction_recovery(value) for value in accepted_recovery
-            ]
+            observe["compactionRecoveryInformation"] = [retain_compaction_recovery_catalog(accepted_recovery)] if accepted_recovery else []
         except ValueError as exc:
             raise AgentGatewayError(str(exc), status_code=400) from exc
         context_information = self.runtime_planner.complete_runtime_context_information(
@@ -6579,6 +6664,7 @@ class AgentGateway:
             phase: str = "",
             subagent_status: str = "",
             action_id: str = "",
+            message_id: str = "",
         ) -> None:
             """Persist the visible runtime order without prompts, CoT, or raw arguments."""
 
@@ -6592,6 +6678,7 @@ class AgentGateway:
                 ("phase", phase, 80),
                 ("subagentStatus", subagent_status, 40),
                 ("actionId", action_id, 96),
+                ("messageId", message_id, 180),
             ):
                 if kind == "assistant" and key == "summary":
                     # Final answers are Markdown bodies, not compact tool summaries.
@@ -6714,6 +6801,7 @@ class AgentGateway:
         runtime_compaction_attempted = False
         planner_argument_failures = 0
         completion_claim_correction_attempted = False
+        visual_correction_attempted = False
         general_no_progress_attempts = 0
         last_general_read_key = ""
         unresolved_planner_argument_failure: dict[str, Any] | None = None
@@ -7021,9 +7109,9 @@ class AgentGateway:
                     runtime_compaction_attempted = True
                     if compaction_result.get("applied"):
                         if compaction_result.get("recovery"):
-                            observe.setdefault("compactionRecoveryInformation", []).append(
-                                retain_compaction_recovery(compaction_result["recovery"])
-                            )
+                            observe["compactionRecoveryInformation"] = [
+                                retain_compaction_recovery_catalog(native_turn.recoveries())
+                            ]
                         if runtime_compaction_usage_checkpoint is None:
                             runtime_compaction_usage_checkpoint = usage_before_compaction
                         runtime_compaction = compaction_result
@@ -7114,6 +7202,19 @@ class AgentGateway:
                 context_usage=context_usage,
                 reasoning_trace=reasoning_trace,
                 exposure_layer=runtime_exposure_layer,
+                provider_retry_callback=lambda retry: self._emit_runtime_status(
+                    "waiting_for_model",
+                    session_id=session_id,
+                    turn_id=turn_id,
+                    client_turn_id=client_turn_id,
+                    provider_retry=retry,
+                ),
+                provider_retry_wait=lambda delay: self._wait_for_provider_retry(
+                    delay,
+                    session_id=session_id,
+                    turn_id=turn_id,
+                    client_turn_id=client_turn_id,
+                ),
                 **({"native_turn": native_turn} if native_binding else {}),
             )
             if native_binding and native_turn.compaction is not None:
@@ -7241,7 +7342,15 @@ class AgentGateway:
                 planner_argument_failures = 0
 
             planner_reply = str(plan.get("reply") or "").strip()
-            if planner_reply and any(
+            public_messages = plan.get("publicMessages") or []
+            for public_message in public_messages:
+                message_phase = public_message.get("phase") or ""
+                append_timeline_event(
+                    "assistant", label="Assistant", summary=public_message["text"],
+                    status="progress" if message_phase == "commentary" else "done",
+                    phase=message_phase, message_id=public_message["id"],
+                )
+            if not public_messages and planner_reply and any(
                 (
                     str(plan.get("shellCommand") or params.get("shell_command") or params.get("shellCommand") or "").strip(),
                     plan.get("writeNeeded") and plan.get("writeTool"),
@@ -7249,10 +7358,10 @@ class AgentGateway:
                 )
             ):
                 append_timeline_event(
-                    "planner",
-                    label="Agent update",
+                    "assistant",
+                    label="Assistant update",
                     summary=planner_reply,
-                    status="planned",
+                    status="progress",
                 )
 
             planned_tool_name = str(plan.get("writeTool") or plan.get("skillTool") or "").strip()
@@ -8190,6 +8299,21 @@ class AgentGateway:
                 unresolved_completion_outcomes[action_key] = step_outcome
                 if task_action_id:
                     unresolved_completion_action_keys[task_action_id] = action_key
+                if (
+                    str(plan.get("planner") or "").strip().casefold() == "llm"
+                    and visual_audit_correction_candidate(
+                        step_tool,
+                        step_payload,
+                        correction_attempted=visual_correction_attempted,
+                    )
+                ):
+                    # Keep the failed audit receipt and its evidence in the
+                    # loop state, but give the planner one bounded turn to
+                    # choose a new safe correction/capture path. The consumed
+                    # receipt is never replayed by this branch.
+                    visual_correction_attempted = True
+                    plan["continueLoop"] = True
+                    continue
                 requires_direct_user_input = bool(
                     step_waits_for_approval
                     or step_tool in {"vrcforge_ask_user", PROJECT_SELECTION_TOOL}
@@ -8345,6 +8469,7 @@ class AgentGateway:
                 break
         reasoning_trace = ensure_dict(reasoning_trace)
         context_usage = ensure_dict(context_usage)
+        observed_context_usage = deepcopy(context_usage)
         if prior_provider_request_count:
             context_usage["priorRequestCount"] = prior_provider_request_count
             context_usage["requestCount"] = (
@@ -8363,6 +8488,7 @@ class AgentGateway:
                         "exact": False,
                         "unavailableReason": "prior_provider_usage_missing",
                         "cacheUsageComplete": False,
+                        "cacheWriteUsageComplete": False,
                     }
                 context_usage.update(merged_provider_usage)
                 for token_key in ("inputTokens", "outputTokens", "totalTokens"):
@@ -8373,6 +8499,34 @@ class AgentGateway:
                 context_usage["taskTotalAvailable"] = (
                     merged_provider_usage.get("exact") is True
                 )
+        usage_reconciliation = reconcile_request_usage(
+            chain_id=task_loop.task_id,
+            expected_chain_id=(
+                str(continuation_context.get("taskId") or "").strip()
+                if continuation_context
+                else task_loop.task_id
+            ),
+            parent_turn_id=(
+                str(continuation_context.get("usageParentTurnId") or "").strip()
+                if continuation_context
+                else ""
+            ),
+            expected_parent_turn_id=(
+                str(continuation_context.get("usageParentTurnId") or "").strip()
+                if continuation_context
+                else None
+            ),
+            expected_parent_snapshot_sha256=(
+                continuation_context.get("providerUsageSnapshotSha256")
+                if continuation_context
+                else None
+            ),
+            turn_id=turn_id,
+            parent_request_count=prior_provider_request_count,
+            parent_usage=prior_provider_usage,
+            observed_delta=observed_context_usage,
+            cumulative_usage=context_usage,
+        )
         first_plan = first_plan or last_plan or {}
         # 单步（含纯回复/未连接）保持与历史一致的顶层 plan 形状；多步才综合成 loop 计划。
         terminal_override = handoff_terminal is not None or last_plan.get("scopeDenied") is True or str(last_plan.get("nextStep") or "") in {
@@ -8507,7 +8661,17 @@ class AgentGateway:
             top_plan["visionStatus"] = vision_payload.get("status")
 
         final_reply = str(top_plan.get("reply") or top_plan.get("summary") or "").strip()
-        if final_reply:
+        public_final_already_emitted = any(
+            event.get("kind") == "assistant"
+            and event.get("payload", {}).get("summary") == final_reply
+            and event.get("payload", {}).get("status") == "done"
+            and event.get("payload", {}).get("messageId")
+            for event in timeline
+        )
+        if top_plan.get("reason") == "native_final_answer_missing":
+            # A stopped turn without a final answer is a runtime notice, not model text.
+            top_plan["reply"] = ""
+        elif final_reply and not public_final_already_emitted:
             append_timeline_event(
                 "assistant",
                 label="Assistant",
@@ -8600,6 +8764,7 @@ class AgentGateway:
                 "clientTurnId": client_turn_id,
                 "plan": top_plan,
                 "timeline": timeline,
+                "contextUsage": context_usage,
             }
         )
         self._runtime_run_ledger.append(
@@ -8621,6 +8786,7 @@ class AgentGateway:
                 approval_id=approval_id,
                 continuation_event=continuation_event,
                 context_usage=context_usage,
+                usage_reconciliation=usage_reconciliation,
                 context_compaction=planner_policy.runtime_compaction_audit_view(runtime_compaction),
             )
         )
@@ -8874,11 +9040,25 @@ class AgentGateway:
         target_id = turn_id or client_turn_id
         if not target_id and not session_id:
             raise AgentGatewayError("turnId, clientTurnId, or sessionId is required.", status_code=400)
-        self._runtime_session_state.mark_cancel_requested(
+        accepted = self._runtime_session_state.mark_cancel_requested(
             session_id=session_id,
             turn_id=turn_id,
             client_turn_id=client_turn_id,
         )
+        if not accepted:
+            raise AgentGatewayError(
+                "The runtime cancellation identity does not match one active turn.",
+                status_code=409,
+            )
+        return self._cancel_runtime_owned_work(
+            session_id=session_id, turn_id=turn_id, client_turn_id=client_turn_id, reason=reason,
+        )
+
+    def _cancel_runtime_owned_work(
+        self, *, session_id: str, turn_id: str, client_turn_id: str, reason: str,
+    ) -> dict[str, Any]:
+        # Internal task cleanup also owns resources after its runtime turn ended.
+        # Public Stop must first validate the active identity in request_runtime_cancel.
         cancelled_question_seeds = self.questions.cancel_runtime_questions(
             session_id=session_id, turn_id=turn_id, client_turn_id=client_turn_id
         )
@@ -8902,14 +9082,9 @@ class AgentGateway:
                 (
                     run
                     for run in self._runtime_run_ledger.list_runs(limit=200).get("runs", [])
-                    if (
-                        turn_id
-                        and str(run.get("turnId") or "") == turn_id
-                    )
-                    or (
-                        client_turn_id
-                        and str(run.get("clientTurnId") or "") == client_turn_id
-                    )
+                    if (not session_id or str(run.get("sessionId") or "") == session_id)
+                    and (not turn_id or str(run.get("turnId") or "") == turn_id)
+                    and (not client_turn_id or str(run.get("clientTurnId") or "") == client_turn_id)
                 ),
                 None,
             )
@@ -10684,6 +10859,39 @@ def runtime_step_failure_class(payload: Any) -> str:
     """Return one bounded failure class for a runtime tool step."""
 
     return classify_runtime_step_failure(payload)
+
+
+def visual_audit_correction_candidate(
+    tool: str,
+    step_payload: Mapping[str, Any],
+    *,
+    correction_attempted: bool,
+) -> bool:
+    """Allow one planner turn for a structured, correctable visual finding."""
+
+    if correction_attempted or str(tool or "").strip() != "vrcforge_vision_audit_multi":
+        return False
+    outcome = ensure_dict(step_payload.get("outcome"))
+    if str(outcome.get("status") or "").strip().casefold() != "needs_user_action":
+        return False
+    result = ensure_dict(step_payload.get("result"))
+    if not result or result.get("visualVerified") is not False:
+        return False
+    if result.get("coverageComplete") is not True or result.get("captureEvidenceVerified") is not True:
+        return False
+    overall = str(result.get("overallStatus") or result.get("overall_status") or "").strip().casefold()
+    if overall not in {"clipping", "failed"}:
+        return False
+    findings = result.get("results") or result.get("angles") or result.get("findings")
+    if isinstance(findings, Mapping):
+        findings = list(findings.values())
+    if not isinstance(findings, list):
+        return False
+    return any(
+        isinstance(item, Mapping)
+        and str(item.get("status") or item.get("overallStatus") or "").strip().casefold() == "clipping"
+        for item in findings
+    )
 
 
 def strip_simple_yaml_scalar(value: str) -> Any:

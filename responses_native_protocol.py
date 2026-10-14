@@ -214,6 +214,30 @@ def parse_native_response(
     return receipt
 
 
+def public_assistant_messages(receipt: Mapping[str, Any]) -> list[dict[str, str]]:
+    """Project only public message text; preserve private replay items untouched.
+
+    Phase-less receipts retain the existing legacy content behavior.
+    """
+    if "publicMessages" in receipt:
+        return copy.deepcopy(receipt["publicMessages"])
+    items = receipt.get("responses_output") or []
+    if not any(item.get("type") == "message" and item.get("phase") is not None for item in items):
+        return []
+    projected = []
+    for index, item in enumerate(items):
+        if item.get("type") != "message":
+            continue
+        text = _message_text(item).strip()
+        if not text:
+            continue
+        message = {"id": str(item.get("id") or f"message-{index}")[:180], "text": text[:32_000]}
+        if item.get("phase") is not None:
+            message["phase"] = item["phase"]
+        projected.append(message)
+    return projected
+
+
 def stream_response(
     client: Any,
     payload: Mapping[str, Any],
@@ -223,6 +247,7 @@ def stream_response(
     *,
     error_factory: Callable[[str, Any], Exception],
     provider_label: str = "Responses",
+    request_observer: Callable[[dict[str, Any]], None] | None = None,
 ) -> Any:
     """Consume a completed Responses stream and own its client and watcher."""
     watcher_stop = threading.Event()
@@ -250,6 +275,10 @@ def stream_response(
     stream: Any = None
     completed_items: dict[int, dict[str, Any]] = {}
     terminal_response: Any = None
+    metrics = None
+    request_succeeded = False
+    request_failure = ""
+    stream_started = False
     if cancel_event is not None:
         def close_on_cancel() -> None:
             while not watcher_stop.wait(0.05):
@@ -266,6 +295,9 @@ def stream_response(
     try:
         if cancel_event is not None and cancel_event.is_set():
             raise RuntimeError(f"{provider_label} request cancelled.")
+        if request_observer is not None:
+            from provider_request_metrics import RequestMetrics
+            metrics = RequestMetrics(request_observer, payload)
         stream = client.responses.create(**dict(payload))
         for event in stream:
             if cancel_event is not None and cancel_event.is_set():
@@ -274,14 +306,17 @@ def stream_response(
             if event_type in {"response.completed", "response.failed", "response.incomplete"}:
                 terminal_response = _value(event, "response")
             if "reasoning" in event_type or "summary" in event_type:
+                stream_started = True
                 if activity_callback is not None:
                     activity_callback({"kind": "reasoning_activity"})
             if event_type in {"error", "response.error", "response.failed", "response.incomplete"}:
                 raise _stream_failure(event, provider_label)
             if event_type == "response.output_text.delta":
                 delta = str(_value(event, "delta") or "")
-                if delta and stream_callback is not None:
-                    stream_callback(delta)
+                if delta:
+                    stream_started = True
+                    if stream_callback is not None:
+                        stream_callback(delta)
             elif event_type in {"response.output_item.added", "response.output_item.done"}:
                 item = _value(event, "item")
                 if event_type == "response.output_item.done":
@@ -294,6 +329,7 @@ def stream_response(
                     completed_items[index] = final_item
                 item_type = str(_value(item, "type") or "")
                 if item_type == "function_call" and activity_callback is not None:
+                    stream_started = True
                     activity_callback({"kind": "tool_call_activity"})
             if event_type == "response.completed":
                 response = _value(event, "response")
@@ -314,15 +350,47 @@ def stream_response(
                     if sorted(completed_items) != list(range(len(completed_items))):
                         raise RuntimeError(f"{provider_label} completed output has missing items.")
                     result["output"] = [completed_items[index] for index in range(len(completed_items))]
+                request_succeeded = True
                 return result
         raise RuntimeError(f"{provider_label} stream ended before response.completed.")
     except Exception as exc:
+        request_failure = type(exc).__name__
+        try:
+            setattr(exc, "stream_started", stream_started)
+            response_headers = _value(terminal_response, "headers") if terminal_response is not None else None
+            no_more = response_headers.get("x-no-more-retry") if hasattr(response_headers, "get") else None
+            if str(no_more).casefold() in {"1", "true", "yes"}:
+                setattr(exc, "no_more_retry", True)
+        except Exception:
+            pass
         if cancel_event is not None and cancel_event.is_set():
             raise RuntimeError(f"{provider_label} request cancelled.") from None
         if terminal_response is not None and isinstance(exc, (ValueError, RuntimeError)):
-            raise error_factory(str(exc), terminal_response) from exc
+            wrapped = error_factory(str(exc), terminal_response)
+            try:
+                setattr(wrapped, "stream_started", stream_started)
+                if getattr(exc, "no_more_retry", False):
+                    setattr(wrapped, "no_more_retry", True)
+                for attribute in (
+                    "stream_error_code", "stream_error_message", "stream_error_status",
+                    "stream_error_status_code",
+                    "status_code", "headers",
+                ):
+                    value = getattr(exc, attribute, None)
+                    if value is not None:
+                        setattr(wrapped, attribute, value)
+            except Exception:
+                pass
+            raise wrapped from exc
         raise
     finally:
+        if metrics is not None:
+            metrics.finish(
+                _normalized_usage(terminal_response),
+                success=request_succeeded,
+                error=request_failure,
+                service_tier=_value(terminal_response, "service_tier"),
+            )
         watcher_stop.set()
         close_stream = getattr(stream, "close", None)
         if callable(close_stream):
@@ -562,7 +630,34 @@ def _stream_failure(event: Any, provider_label: str) -> RuntimeError:
     message = str(_value(error, "message") or "").strip()[:240]
     detail = ": ".join(part for part in (code, message) if part)
     suffix = f" ({detail})" if detail else ""
-    return RuntimeError(f"{provider_label} stream did not complete successfully{suffix}.")
+    failure = RuntimeError(f"{provider_label} stream did not complete successfully{suffix}.")
+    # Stream-level error codes are provider metadata, not HTTP status.  Keep
+    # them separate so an HTTP 200 response.failed event cannot become a
+    # fabricated 429/503 in the planner classifier.
+    if code:
+        setattr(failure, "stream_error_code", code)
+    if message:
+        setattr(failure, "stream_error_message", message)
+    response_status = str(_value(response, "status") or "").strip()[:40]
+    if response_status:
+        setattr(failure, "stream_error_status", response_status)
+    for source in (event, response):
+        status_code = _value(source, "status_code")
+        if type(status_code) is int and status_code > 0:
+            # A status embedded in a stream event is provider metadata. It is
+            # not the HTTP response status returned by the SDK transport.
+            setattr(failure, "stream_error_status_code", status_code)
+            break
+    headers = _value(response, "headers") or _value(event, "headers")
+    if isinstance(headers, Mapping):
+        safe_headers = {}
+        for key in ("retry-after", "x-no-more-retry", "x-retry-metadata"):
+            value = headers.get(key)
+            if value is not None:
+                safe_headers[key] = str(value)[:80]
+        if safe_headers:
+            setattr(failure, "headers", safe_headers)
+    return failure
 
 
 def _value(value: Any, key: str) -> Any:

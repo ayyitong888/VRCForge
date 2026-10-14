@@ -33,6 +33,32 @@ function nodes(node) {
   return node && typeof node === "object" ? [node, ...nodes(node.props?.children)] : [];
 }
 
+test("switching models never reuses another model's occupancy or cache rate", () => {
+  assert.equal(buildContextUsageFromRuntime({ ...base, provider: "chatgpt", model: "old" }, "chatgpt", "new", undefined, t), undefined);
+  assert.equal(buildContextUsageFromRuntime({ ...base, provider: "other", model: "new" }, "chatgpt", "new", undefined, t), undefined);
+  const usage = buildContextUsageFromRuntime({ ...base, provider: "chatgpt", model: "new" }, "chatgpt", "new", { contextWindow: 2000 }, t);
+  assert.equal(usage.limit, 2000);
+  assert.equal(usage.limitKnown, true);
+});
+
+test("known capacity remains visible when the provider omits usage", () => {
+  const usage = buildContextUsageFromRuntime(undefined, "fixture", "fixture", undefined, t, 2000);
+  assert.equal(usage.used, 0);
+  assert.equal(usage.limit, 2000);
+  assert.equal(usage.limitKnown, true);
+  assert.equal(usage.exact, false);
+  const meter = exports.ContextUsageMeter({ usage });
+  assert.match(meter.props.title, /Known capacity 2000; current usage unavailable/);
+});
+
+test("mismatched usage never leaks old occupancy but retains current capacity", () => {
+  const usage = buildContextUsageFromRuntime({ ...base, provider: "other", model: "old" }, "fixture", "fixture", undefined, t, 2000);
+  assert.equal(usage.used, 0);
+  assert.equal(usage.limit, 2000);
+  assert.equal(usage.exact, false);
+  assert.match(usage.label, /Capacity 2,000/);
+});
+
 test("complete cache uses cumulative input and preserves peak context occupancy", () => {
   const { usage, meter } = render();
   assert.equal(usage.cacheHitRatio, 0.25);

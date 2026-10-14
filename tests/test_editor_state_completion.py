@@ -1,4 +1,5 @@
 import dashboard_server as ds
+import pytest
 
 
 def test_gm_completion_has_independent_receipt(monkeypatch):
@@ -6,6 +7,35 @@ def test_gm_completion_has_independent_receipt(monkeypatch):
     result = ds.gesture_manager_enter_play_mode_finalize({"projectPath": "D:/Project", "avatarPath": "Scene/Avatar"}, {}, {"ok": True})
     assert result.get("verified") is True
     assert result["readback"]["avatarPath"] == "Scene/Avatar"
+
+
+def test_gm_completion_refreshes_project_target_after_play_reload(monkeypatch):
+    from contextlib import contextmanager
+
+    old_target = {"scope": "project", "editor": {"coreInstanceId": "old"}}
+    fresh_target = {"scope": "project", "editor": {"coreInstanceId": "fresh"}}
+    arguments = {"projectPath": "D:/Project", "avatarPath": "Avatar", "executionTarget": old_target}
+    refreshed = {**arguments, "executionTarget": fresh_target}
+    seen = []
+
+    monkeypatch.setattr(ds, "fresh_play_mode_readback_arguments", lambda current, _discover: refreshed)
+
+    @contextmanager
+    def readback(current):
+        seen.append(current)
+        yield {"verified": True}
+
+    monkeypatch.setattr(ds, "bound_editor_readback", readback)
+    monkeypatch.setattr(ds, "gesture_manager_status_sync", lambda _args: {
+        "ok": True,
+        "isPlayMode": True,
+        "managers": [{"avatarPath": "Avatar", "moduleConnected": True, "managerPath": "GestureManager"}],
+    })
+
+    result = ds.gesture_manager_enter_play_mode_finalize(arguments, {}, {"ok": True})
+
+    assert result["verified"] is True
+    assert seen == [refreshed]
 
 
 def test_set_play_mode_has_independent_finalizer():
@@ -29,6 +59,53 @@ def test_play_mode_unknown_never_verifies(monkeypatch):
     assert result["commitState"] == "unknown"
     assert result.get("verified") is not True
     assert result["retryable"] is False
+
+
+def test_play_mode_retries_transient_reload_identity_until_fresh_target(monkeypatch):
+    from contextlib import contextmanager
+    from execution_target import ExecutionTargetError
+
+    calls = []
+
+    @contextmanager
+    def readback(_arguments):
+        calls.append(1)
+        if len(calls) == 1:
+            raise ExecutionTargetError(
+                "editor_identity_mismatch",
+                "ExecutionTarget coreInstanceId does not match the active Unity Core.",
+            )
+        yield {"verified": True}
+
+    monkeypatch.setattr(ds, "fresh_play_mode_readback_arguments", lambda arguments, _discover: arguments)
+    monkeypatch.setattr(ds, "bound_editor_readback", readback)
+    monkeypatch.setattr(ds, "load_dashboard_settings", lambda *a: None)
+    monkeypatch.setattr(ds, "capture_scene_view_status_direct", lambda *a, **k: {"ok": True, "isPlayMode": True})
+    monkeypatch.setattr(ds.time, "sleep", lambda seconds: None)
+    result = ds.set_play_mode_finalize(
+        {"projectPath": "D:/Project", "executionTarget": {"scope": "project"}, "isPlaying": True},
+        {}, {"ok": True},
+    )
+    assert result["verified"] is True
+    assert len(calls) == 2
+
+
+def test_play_mode_does_not_retry_permanent_target_drift(monkeypatch):
+    from contextlib import contextmanager
+    from execution_target import ExecutionTargetError
+
+    @contextmanager
+    def readback(_arguments):
+        raise ExecutionTargetError("project_root_drifted", "ExecutionTarget project root changed.")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(ds, "fresh_play_mode_readback_arguments", lambda arguments, _discover: arguments)
+    monkeypatch.setattr(ds, "bound_editor_readback", readback)
+    with pytest.raises(ExecutionTargetError, match="project root changed"):
+        ds.set_play_mode_finalize(
+            {"projectPath": "D:/Project", "executionTarget": {"scope": "project"}, "isPlaying": True},
+            {}, {"ok": True},
+        )
 
 
 def test_bound_read_rejects_wrong_editor_before_poll(monkeypatch):

@@ -72,7 +72,7 @@ try {
     assert.match(approval, /data-approval-card/); assert.ok(!approval.includes("data-ordinary-composer"));
   }
   const running = render([{ ...pending, status: "answered", runtimeContinuation: { status: "running", turnId: "t" } }]);
-  assert.match(running, />Stop</); assert.ok(!running.includes("Choose a repair"));
+  assert.match(running, /data-question-continuation-stop/); assert.match(running, />Stop</); assert.ok(!running.includes("Choose a repair"));
   assert.equal((running.match(/<textarea\b/g) || []).length, 1, "only ordinary composer returns while the continuation runs");
   console.log("question dock: pending replaces composer; editable custom answer; settled exits; active Stop retained");
 } finally {

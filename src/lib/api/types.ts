@@ -148,6 +148,7 @@ export type ProviderApiType = "auto" | "chat_completions" | "responses" | "gener
 export type ProviderCapabilityKey = "text" | "structured_json" | "vision" | "reasoning" | "tools";
 
 export type ApiConfig = {
+  runtimeLocked?: boolean;
   /** Persisted authentication prerequisites; does not imply a successful test. */
   configured: boolean;
   provider: string;
@@ -492,9 +493,23 @@ export type AgentReasoningTrace = {
   }>;
 };
 
+export type AgentProviderUsageCoverage = {
+  requestCount?: number;
+  reportedRequestCount?: number;
+  complete?: boolean;
+};
+
+export type AgentProviderUsageCacheCoverage = {
+  requestCount?: number;
+  read?: AgentProviderUsageCoverage;
+  write?: AgentProviderUsageCoverage;
+};
+
 export type AgentContextUsage = {
   schema?: string;
   source?: string;
+  scope?: string;
+  taskTotalAvailable?: boolean;
   exact?: boolean;
   provider?: string;
   providerLabel?: string;
@@ -511,9 +526,15 @@ export type AgentContextUsage = {
   peakInputTokens?: number;
   peakTotalTokens?: number;
   cacheReadTokens?: number;
+  cacheWriteTokens?: number;
   cacheUsageComplete?: boolean;
   cacheUsageRequestCount?: number;
+  cacheWriteUsageComplete?: boolean;
+  cacheWriteUsageRequestCount?: number;
   requestCount?: number;
+  coverage?: Record<string, AgentProviderUsageCoverage>;
+  cacheCoverage?: AgentProviderUsageCacheCoverage;
+  partial?: boolean;
   sentHistoryEntryCount?: number;
   sentHistoryCharacterCount?: number;
   promptCharacterCount?: number;
@@ -574,6 +595,12 @@ export type AgentRuntimeResponse = {
   plan: {
     summary: string;
     reply?: string;
+    reason?: string;
+    publicMessages?: Array<{
+      id: string;
+      text: string;
+      phase?: "commentary" | "final_answer";
+    }>;
     planner: string;
     plannerLabel?: string;
     shellNeeded: boolean;
@@ -589,7 +616,10 @@ export type AgentRuntimeResponse = {
       code?: string;
       phase?: string;
       retryable?: boolean;
-      transportPhase?: "first_byte" | "idle" | "overall" | string;
+      transportPhase?: string;
+      retryAttempts?: number;
+      retryDecision?: "NO_MORE_RETRY" | "CANCELLED";
+      providerError?: { type?: string; code?: string; statusCode?: number; streamStarted?: boolean };
     };
     taskCompletion?: Record<string, unknown>;
     choices?: Array<{
@@ -681,6 +711,7 @@ export type AgentRuntimeResponse = {
       status?: string;
       tool?: string;
       phase?: string;
+      messageId?: string;
       actionId?: string;
       subagentStatus?: "created" | "started" | "completed" | "failed";
     };

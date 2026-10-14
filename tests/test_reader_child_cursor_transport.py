@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from agent_gateway import redact_sensitive
@@ -83,7 +85,6 @@ def test_invalid_parent_does_not_preserve_nested_cursor_arguments():
 @pytest.mark.parametrize("field,value", [
     ("resultRef", "result_" + "0" * 32),
     ("source", "owner_model"),
-    ("jsonPointer", "/controls/0/other"),
 ])
 def test_child_cursor_mutation_is_rejected(field, value):
     step = _step({"controls": [{"menuName": "Default", "fxCandidates": [{"name": "clip"}] * 1200}]})
@@ -94,3 +95,20 @@ def test_child_cursor_mutation_is_rejected(field, value):
         forged[field] = value
         with pytest.raises((PermissionError, ValueError)):
             read_tool_result(forged, sanitize=sanitize)
+
+
+def test_child_cursor_missing_pointer_returns_bounded_field_hints():
+    step = _step({"controls": [{"menuName": "Default", "fxCandidates": [{"name": "clip"}] * 1200}]})
+    with bind_tool_result_context("session", "turn", "project", [step]):
+        page = _page(step)
+        child = redact_sensitive(redact_sensitive(page))["items"][0]["childReferences"][0]
+        forged = dict(child["nextRequest"]["arguments"])
+        forged["jsonPointer"] = "/controls/0/other"
+        result = read_tool_result(forged, sanitize=sanitize)
+    assert result["ok"] is False
+    assert result["errorCode"] == "result_pointer_unavailable"
+    assert result["error"] == "Requested result field is unavailable"
+    assert {item["jsonPointer"] for item in result["availableFields"]} == {
+        "/controls/0/menuName", "/controls/0/fxCandidates",
+    }
+    assert "clip" not in json.dumps(result)

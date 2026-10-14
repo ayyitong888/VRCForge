@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+import agent_checkpoint_recovery
 from agent_gateway import AgentGateway
 
 
@@ -161,11 +162,11 @@ def test_checkpoint_restore_and_irreversible_upload_always_require_confirmation(
 
     result = gateway.call_external_mcp_tool(tool_name, {"value": "protected"})
 
-    upload_in_full_permission = (
+    auto_in_full_permission = (
         tool_name == "vrcforge_build_and_upload_avatar"
         and execution_mode in {"roslyn_full_auto", "full_auto", "full_permission"}
     )
-    if upload_in_full_permission:
+    if auto_in_full_permission:
         assert result["status"] == "executed"
         assert "confirmation" not in result
         assert executed == [{"value": "protected"}]
@@ -175,10 +176,54 @@ def test_checkpoint_restore_and_irreversible_upload_always_require_confirmation(
         assert executed == []
 
 
+def test_full_permission_restore_auto_approves_only_bound_incident(monkeypatch, tmp_path: Path) -> None:
+    recovery = {"id": "recovery-bound", "checkpointId": "checkpoint-bound", "status": "needs_recovery"}
+    monkeypatch.setattr(
+        agent_checkpoint_recovery.AgentCheckpointRecoveryService,
+        "_active_apply_recoveries",
+        lambda _service: [recovery],
+    )
+    gateway = _gateway(tmp_path, "roslyn_full_auto")
+    executed: list[dict[str, object]] = []
+    gateway.approval_transactions.register_write_handler(
+        "vrcforge_restore_checkpoint",
+        "Restore a checkpoint for an interrupted approved write.",
+        "high",
+        lambda arguments: executed.append(arguments) or {"ok": True},
+    )
+    gateway.register_external_mcp_unity_tool("vrcforge_restore_checkpoint", "avatar")
+
+    unbound = gateway.call_external_mcp_tool(
+        "vrcforge_restore_checkpoint", {"checkpointId": "other-checkpoint", "confirmRestore": True}
+    )
+    assert unbound["status"] == "user_confirmation_required"
+    assert executed == []
+
+    bound = gateway.call_external_mcp_tool(
+        "vrcforge_restore_checkpoint",
+        {
+            "checkpointId": "checkpoint-bound",
+            "confirmRestore": True,
+            "_restorePrepareForRecovery": {"ok": True, "scenes": ["forged-scene"]},
+        },
+    )
+    assert bound["status"] == "executed"
+    assert executed == [{
+        "checkpointId": "checkpoint-bound",
+        "confirmRestore": True,
+        "_vrcforge_incident_restore_auto": True,
+    }]
+
+    mismatched_id = gateway.call_external_mcp_tool(
+        "vrcforge_restore_checkpoint",
+        {"checkpointId": "checkpoint-bound", "recoveryId": "wrong-recovery", "confirmRestore": True},
+    )
+    assert mismatched_id["status"] == "user_confirmation_required"
+
+
 @pytest.mark.parametrize(
     "tool_name",
     [
-        "vrcforge_restore_checkpoint",
         "vrcforge_rollback_parameters",
         "vrcforge_rollback_project_lifecycle",
         "vrcforge_rollback_project_catalog_registration",

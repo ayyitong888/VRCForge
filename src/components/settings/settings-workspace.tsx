@@ -47,6 +47,7 @@ type SettingsWorkspaceProps = {
   permission: PermissionState | null;
   loading: boolean;
   runtimeConnected: boolean;
+  providerConfigurationLocked?: boolean;
   currentLanguage: string;
   themeCustomization: ThemeCustomization;
   themeBackgroundError?: string;
@@ -149,6 +150,7 @@ export function SettingsWorkspace({
   permission,
   loading,
   runtimeConnected,
+  providerConfigurationLocked = false,
   currentLanguage,
   themeCustomization,
   themeBackgroundError = "",
@@ -395,6 +397,8 @@ export function SettingsWorkspace({
         <section className="pb-6">
           <h2 className="text-base font-semibold">{t("settings.modelProvider")}</h2>
           <p className="mt-1 text-sm text-muted-foreground">{t("settings.providerDesc")}</p>
+          {providerConfigurationLocked ? <p role="status" className="mt-2 text-sm text-muted-foreground">{t("provider.runtimeConfigLocked")}</p> : null}
+          <fieldset disabled={providerConfigurationLocked} className="min-w-0 disabled:opacity-60">
           <div className="mt-4">
             <ChatGptOAuthSettings
               endpoint={endpoint}
@@ -454,6 +458,7 @@ export function SettingsWorkspace({
               />
             )}
           </div>
+          </fieldset>
           <div className="mt-10 flex min-w-0 items-center gap-2">
             <h2 className="text-base font-semibold">
               <Eye className="mr-1.5 inline-block h-4 w-4 align-text-bottom" />

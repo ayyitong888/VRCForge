@@ -196,7 +196,11 @@ from background_goal_runtime import (
     ProviderPreflightCache,
     RuntimeLaneBudget,
 )
-from chat_snapshot_transport import snapshot_response as chat_snapshot_response
+from chat_snapshot_transport import (
+    chat_content_digest,
+    chat_digests,
+    snapshot_response as chat_snapshot_response,
+)
 from chat_transcript_archive import (
     DOCUMENT_VERSIONS as CHAT_DOCUMENT_VERSIONS,
     blob_path as chat_archive_blob_path,
@@ -580,6 +584,7 @@ from provider_model_catalog_service import (
     ProviderModelCatalogService,
 )
 from provider_configuration_service import (
+    ProviderConfigurationBusyError,
     ProviderApiConfig,
     ProviderConfigurationPersistencePorts,
     ProviderConfigurationPolicyPorts,
@@ -1580,8 +1585,10 @@ AGENT_GATEWAY = AgentGateway(
     runtime_turn_completed=broadcast_runtime_turn_completed,
     runtime_status_changed=broadcast_runtime_status,
     runtime_timeline_changed=broadcast_runtime_status,
+    vision_profile_enabled=lambda: bool(PROVIDER_CONFIGURATION.current_vision_config().enabled),
     load_mcp_resources=not AGENT_MCP_STDIO_MODE,
 )
+PROVIDER_CONFIGURATION.runtime_waiting = AGENT_GATEWAY.runtime_sessions.runtime_waiting_for_configuration
 RUNTIME_QUEUE_PORT = runtime_queue_ports.CallbackRuntimeQueueAdapter(
     runtime_queue_ports.RuntimeQueueCallbacks(
         submit_runtime_steer=lambda params=None: AGENT_GATEWAY.submit_runtime_steer(
@@ -2050,6 +2057,17 @@ async def on_startup() -> None:
     global SUB_AGENT_CONTINUATION_REPLAY_TASK
 
     EVENT_BUS.set_loop(asyncio.get_running_loop())
+    # Load lazy SDK resources on this thread before model/runtime workers can
+    # race their first imports (notably models and responses).
+    try:
+        import openai.resources  # noqa: F401 - initialize optional SDK resources.
+    except Exception as exc:  # noqa: BLE001 - optional SDK failure must not block the app.
+        emit_log(
+            "warn",
+            "provider",
+            "OpenAI SDK resources could not be initialized during startup.",
+            {"error": str(exc)},
+        )
     _RUNTIME_PLANNER_MODEL.start()
     AGENT_GATEWAY.start_runtime_continuations()
     AGENT_GATEWAY.shell.start()
@@ -3026,12 +3044,30 @@ def app_issue_computer_use_turn_grant(request: ComputerUseTurnGrantRequest) -> d
 
 @app.post("/api/app/agent/compact")
 def app_agent_compact(request: AgentCompactRequest) -> dict[str, Any]:
+    from compact_provider_usage import (
+        aggregate_compact_provider_usage,
+        record_compact_provider_receipt,
+    )
+
     settings = load_dashboard_settings(ConnectionRequest())
     summarizer: Callable[[str], Any] | None = None
+    provider_receipts: list[Mapping[str, Any]] = []
+
     if not provider_requires_api_key(settings.llm_provider) or str(settings.llm_api_key or "").strip():
-        summarizer = lambda prompt: request_llm_plan(settings, prompt)
+        def summarize(prompt: str) -> str:
+            try:
+                response = request_llm_plan_with_metadata(settings, prompt)
+            except Exception as exc:  # Provider errors are swallowed by compact_context after this receipt.
+                record_compact_provider_receipt(
+                    provider_receipts, getattr(exc, "provider_usage", None), "provider_error"
+                )
+                raise
+            record_compact_provider_receipt(provider_receipts, getattr(response, "usage", None))
+            return str(getattr(response, "text", "") or "")
+
+        summarizer = summarize
     try:
-        return compact_context(
+        result = compact_context(
             request.history,
             summarizer=summarizer,
             source_digest=request.source_digest,
@@ -3043,6 +3079,10 @@ def app_agent_compact(request: AgentCompactRequest) -> dict[str, Any]:
             target_tokens=request.target_tokens,
             real_context_limit=request.real_context_limit,
         )
+        result["providerUsage"] = aggregate_compact_provider_usage(
+            provider_receipts, provider=settings.llm_provider, model=settings.llm_model
+        )
+        return result
     except ContextCompactionInputError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -4667,12 +4707,47 @@ def inspect_chat_project_index(*, self_heal_app_owned: bool = False) -> tuple[di
 
 
 def chat_record_fingerprint(chat: dict[str, Any]) -> str:
-    encoded = json.dumps(chat, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
-    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+    return chat_content_digest(chat)
 
 
 @app.get("/api/app/chats")
 def read_chat_transcripts(request: Request) -> dict[str, Any]:
+    # Keep transport dependencies local: the installed dashboard replaces this
+    # function body independently of the module's embedded globals.
+    from chat_snapshot_transport import (
+        cached_snapshot_page as _cached_snapshot_page,
+        chat_digests as _chat_digests,
+        snapshot_principal_hash as _snapshot_principal_hash,
+    )
+
+    # Continuations may reuse only the immutable page-0 bytes for this
+    # authenticated principal and requested project scope. A miss deliberately
+    # falls through to the existing full read/build path, preserving its 409
+    # digest-change behavior and avoiding any cache dependency for ordinary GETs.
+    requested_project_paths = request.query_params.getlist("projectPath")
+    raw_headers = request.scope.get("headers") or []
+    authorization = ""
+    for raw_name, raw_value in raw_headers:
+        if bytes(raw_name).lower() == b"authorization":
+            authorization = bytes(raw_value).decode("latin-1")
+            break
+    principal_hash = _snapshot_principal_hash(authorization)
+    cache_context = (principal_hash, requested_project_paths)
+    if request.query_params.get("snapshotPage") == "1":
+        try:
+            continuation_offset = int(request.query_params.get("textOffset", "0"))
+        except (TypeError, ValueError):
+            continuation_offset = 0
+        if continuation_offset > 0 and request.query_params.get("snapshotDigest"):
+            cached_page = _cached_snapshot_page(
+                text_offset=continuation_offset,
+                snapshot_digest=request.query_params.get("snapshotDigest", ""),
+                principal_hash=principal_hash,
+                project_paths=requested_project_paths,
+            )
+            if cached_page is not None:
+                return cached_page
+
     with CHAT_TRANSCRIPTS_LOCK:
         app_path = chat_transcripts_path()
         app_target = chat_store_target(app_path, scope="app")
@@ -4693,7 +4768,6 @@ def read_chat_transcripts(request: Request) -> dict[str, Any]:
             if str(item.get("id") or "")
         }
         conflicting_chat_ids: set[str] = set()
-        requested_project_paths = request.query_params.getlist("projectPath")
         for requested_project_path in requested_project_paths:
             remember_chat_project_path(requested_project_path)
         index_recovery_blocking = bool(index_recovery and index_recovery.get("status") != "recovered")
@@ -4794,16 +4868,21 @@ def read_chat_transcripts(request: Request) -> dict[str, Any]:
             "path": str(app_path),
             "exists": app_path.exists(),
             "chats": chats,
+            "chatDigests": _chat_digests(chats),
             "count": len(chats),
             "sources": sources,
             "recoveries": recoveries,
             "writeBlocked": any(item.get("status") != "recovered" for item in recoveries),
-        }, request.query_params)
+        }, request.query_params, cache_context=cache_context)
 
 
 @app.post("/api/app/chats")
 async def write_chat_transcripts(request: ChatTranscriptsRequest) -> dict[str, Any]:
     storage_result, chats, automatic_groups = await asyncio.to_thread(write_chat_transcripts_storage, request)
+    # Notify already-open desktop sessions after the CAS-backed snapshot is
+    # committed. The frontend reloads through its serialized reconcile path,
+    # preserving dirty local chats and the current active-chat selection.
+    await EVENT_BUS.broadcast("chatStorageChanged", {"source": "app"})
     # Vault 引用同步：该请求总是携带全部会话，作为活引用快照驱动 LRU 清理。
     # 清理失败绝不阻断会话保存。
     vault_retention: dict[str, Any] = {}
@@ -5035,6 +5114,83 @@ def _assert_no_current_chat_source_id_conflicts(
 def write_chat_transcripts_storage(
     request: ChatTranscriptsRequest,
 ) -> tuple[dict[str, Any], list[dict[str, Any]], list[tuple[MemoryScope, str, list[dict[str, Any]]]]]:
+    # Delta requests are materialized from raw server records while holding
+    # the same lock as the existing whole-snapshot CAS writer.  The recursive
+    # call below then reuses all existing source validation and atomic writes.
+    from chat_snapshot_transport import chat_digests as _chat_digests
+
+    if request.chat_patches is not None:
+        from chat_storage_delta import ChatStoragePatchError, materialize_chat_patches
+
+        with CHAT_TRANSCRIPTS_LOCK:
+            app_path = chat_transcripts_path()
+            app_target = chat_store_target(app_path, scope="app")
+            app_chats, _app_source, app_recovery = load_chat_transcript_file(
+                app_target,
+                scope="app",
+                self_heal_app_owned=False,
+            )
+            if app_recovery:
+                raise HTTPException(
+                    status_code=409,
+                    detail={"code": "chat_store_recovery_required", "recovery": app_recovery},
+                )
+            current_chats: list[dict[str, Any]] = [*app_chats]
+            index_source, index_recovery = inspect_chat_project_index(self_heal_app_owned=False)
+            if index_recovery:
+                raise HTTPException(
+                    status_code=409,
+                    detail={"code": "chat_store_recovery_required", "recovery": index_recovery},
+                )
+            project_paths: list[str] = list(load_chat_project_index_paths())
+            for revision in request.source_revisions:
+                if isinstance(revision, dict) and str(revision.get("scope") or "") == "project":
+                    project_path = str(revision.get("projectPath") or "").strip()
+                    if project_path:
+                        project_paths.append(project_path)
+            seen_projects: set[str] = set()
+            for project_path in project_paths:
+                project_root = resolve_chat_project_root(project_path)
+                project_key = normalize_chat_project_key(project_path)
+                if project_root is None or not project_key or project_key in seen_projects:
+                    if project_root is None or not project_key:
+                        raise HTTPException(status_code=409, detail={"code": "chat_store_project_unavailable"})
+                    continue
+                seen_projects.add(project_key)
+                project_file = project_chat_transcripts_path(project_path)
+                if project_file is None:
+                    raise HTTPException(status_code=409, detail={"code": "chat_store_project_unsafe"})
+                project_target = chat_store_target(project_file, scope="project", project_path=str(project_root))
+                project_chats, _project_source, project_recovery = load_chat_transcript_file(
+                    project_target,
+                    scope="project",
+                    self_heal_app_owned=False,
+                )
+                if project_recovery:
+                    raise HTTPException(
+                        status_code=409,
+                        detail={"code": "chat_store_recovery_required", "recovery": project_recovery},
+                    )
+                source_project_path = str(project_root)
+                current_chats.extend({**chat, "projectPath": source_project_path} for chat in project_chats)
+            try:
+                patch_payload = {
+                    chat_id: patch.model_dump(by_alias=True)
+                    for chat_id, patch in request.chat_patches.items()
+                }
+                materialized = materialize_chat_patches(current_chats, request.chats, patch_payload)
+            except ChatStoragePatchError as exc:
+                raise HTTPException(
+                    status_code=exc.status_code,
+                    detail={
+                        "code": "chat_patch_base_changed" if exc.status_code == 409 else "chat_patch_invalid",
+                        "message": str(exc),
+                    },
+                ) from exc
+            return write_chat_transcripts_storage(
+                ChatTranscriptsRequest(chats=materialized, sourceRevisions=request.source_revisions)
+            )
+
     if len(request.chats) > CHAT_TRANSCRIPTS_MAX_CHATS:
         raise HTTPException(
             status_code=413,
@@ -5070,6 +5226,7 @@ def write_chat_transcripts_storage(
             app_chats.append(chat)
     app_path = chat_transcripts_path()
     archive_writes: dict[Path, bytes] = {}
+    stored_chats_for_digest: list[dict[str, Any]] = []
 
     def archive_document(records: list[dict[str, Any]], path: Path, **fields: Any) -> str:
         packed, blobs = encode_archived_chats(records)
@@ -5202,6 +5359,7 @@ def write_chat_transcripts_storage(
             chat_store_target(app_path, scope="app"),
             scope="app",
         )
+        stored_chats_for_digest.extend(_app_chats)
         source_revisions.append(app_source)
         index_source, _index_recovery = inspect_chat_project_index()
         source_revisions.append(index_source)
@@ -5209,6 +5367,11 @@ def write_chat_transcripts_storage(
             _group_chats, source, _recovery = load_chat_transcript_file(
                 chat_store_target(group["path"], scope="project", project_path=group["projectPath"]),
                 scope="project",
+            )
+            source_project_path = str(resolve_chat_project_root(str(group["projectPath"])) or group["projectPath"])
+            stored_chats_for_digest.extend(
+                {**chat, "projectPath": source_project_path}
+                for chat in _group_chats
             )
             source_revisions.append(source)
 
@@ -5230,6 +5393,7 @@ def write_chat_transcripts_storage(
             "appCount": len(app_chats),
             "projectPaths": project_paths,
             "sourceRevisions": source_revisions,
+            "chatDigests": _chat_digests(stored_chats_for_digest),
         },
         chats,
         automatic_groups,
@@ -8682,6 +8846,7 @@ def _session_store_targets(context: dict[str, Any]) -> list[SessionStoreTarget]:
             schema_required=True,
             required_string_fields=("id", "createdAt", "event"),
             guard_root=AGENT_GATEWAY.runtime_runs.log_path.parent,
+            stream_jsonl=True,
         ),
         SessionStoreTarget(
             "session.agent-goals",
@@ -9691,7 +9856,10 @@ async def update_api_config(request: ApiConfigRequest) -> dict[str, Any]:
         config = PROVIDER_CONFIGURATION.resolve_api_request(request)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    PROVIDER_CONFIGURATION.save_api_config(config)
+    try:
+        PROVIDER_CONFIGURATION.save_api_config(config)
+    except ProviderConfigurationBusyError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     payload = {
         "configPath": str(CONFIG_PATH),
         "apiConfig": PROVIDER_CONFIGURATION.serialize_api_config(include_secret=True),
@@ -9831,6 +9999,7 @@ app.include_router(build_chatgpt_oauth_router(
         model=config.model, api_type=config.api_type,
     )),
     deactivate=deactivate_chatgpt_account,
+    configuration_change=PROVIDER_CONFIGURATION.configuration_change,
 ))
 
 
@@ -14334,7 +14503,11 @@ def _execute_prepared_scene_view_capture(
 
 
 def capture_avatar_screenshot_approved_sync(arguments: dict[str, Any]) -> dict[str, Any]:
-    request_arguments = {key: value for key, value in arguments.items() if key != "rotation" and not key.startswith("_vrcforge_")}
+    request_arguments = {
+        key: value
+        for key, value in arguments.items()
+        if key not in {"rotation", "executionTarget"} and not key.startswith("_vrcforge_")
+    }
     request = VisionCaptureRequest(**request_arguments)
     angle = _normalize_capture_angles([request.angle])[0] if request.angle else None
     expected = _scene_view_capture_call(
@@ -14356,7 +14529,11 @@ def capture_avatar_screenshot_approved_sync(arguments: dict[str, Any]) -> dict[s
 
 
 def capture_avatar_multi_screenshot_approved_sync(arguments: dict[str, Any]) -> dict[str, Any]:
-    request_arguments = {key: value for key, value in arguments.items() if not key.startswith("_vrcforge_")}
+    request_arguments = {
+        key: value
+        for key, value in arguments.items()
+        if key != "executionTarget" and not key.startswith("_vrcforge_")
+    }
     request = VisionCaptureMultiRequest(**request_arguments)
     angles = _normalize_capture_angles(request.angles)
     expected_calls = [
@@ -15435,35 +15612,35 @@ class _RuntimePlannerProviderTurnBinding:
 
     @contextmanager
     def bind(self, request: Mapping[str, object]):
-        config = PROVIDER_CONFIGURATION.resolve_session_config(
+        with PROVIDER_CONFIGURATION.bind_runtime_config(
             provider=str(request.get("provider") or ""),
             model=str(request.get("model") or ""),
-        )
-        requested_limit = request.get("_requestedContextLimit")
-        verified_limit: int | None = None
-        requested_provider = str(request.get("provider") or "").strip()
-        requested_model = _runtime_planner_model_id(request.get("model"))
-        if requested_limit is not None and requested_provider and requested_model:
-            try:
-                provider_matches = normalize_provider_name(requested_provider) == normalize_provider_name(config.provider)
-            except RuntimeError:
-                provider_matches = False
-            if provider_matches and requested_model == _runtime_planner_model_id(config.model):
-                verified_limit = int(requested_limit)
-        label = " · ".join(
-            part
-            for part in (provider_display_name(config.provider), str(config.model or "").strip())
-            if part
-        )
-        token = self._config.set(config)
-        try:
-            yield PlannerTurnMetadata(
-                verified_context_limit=verified_limit,
-                planner_label=label,
-                native_binding=config.native_binding(),
+        ) as config:
+            requested_limit = request.get("_requestedContextLimit")
+            verified_limit: int | None = None
+            requested_provider = str(request.get("provider") or "").strip()
+            requested_model = _runtime_planner_model_id(request.get("model"))
+            if requested_limit is not None and requested_provider and requested_model:
+                try:
+                    provider_matches = normalize_provider_name(requested_provider) == normalize_provider_name(config.provider)
+                except RuntimeError:
+                    provider_matches = False
+                if provider_matches and requested_model == _runtime_planner_model_id(config.model):
+                    verified_limit = int(requested_limit)
+            label = " · ".join(
+                part
+                for part in (provider_display_name(config.provider), str(config.model or "").strip())
+                if part
             )
-        finally:
-            self._config.reset(token)
+            token = self._config.set(config)
+            try:
+                yield PlannerTurnMetadata(
+                    verified_context_limit=verified_limit,
+                    planner_label=label,
+                    native_binding=config.native_binding(),
+                )
+            finally:
+                self._config.reset(token)
 
     def current_config(self) -> ProviderApiConfig:
         config = self._config.get()
@@ -15580,6 +15757,7 @@ class _RuntimePlannerModel:
         )
         stream_state = {"firstByteAt": None, "lastActivityAt": time.monotonic()}
         context = AGENT_GATEWAY.runtime_sessions.stream_context()
+        request_index = AGENT_GATEWAY.runtime_sessions.next_provider_request_index()
         if _deadline is not None:
             if self._runtime_cancel_requested(context):
                 raise RuntimePlannerProviderCancelledError("Compaction was cancelled before provider admission.")
@@ -15620,6 +15798,26 @@ class _RuntimePlannerModel:
 
         def stream_activity_callback(_activity: dict[str, Any]) -> None:
             """Emit only a fixed safe phase; never provider reasoning text."""
+            if _activity.get("kind") == "provider_request_metrics":
+                # Local run owner only. Payload contains hashes/counts, never
+                # prompts, reasoning text, account IDs or authorization data.
+                metrics = dict(_activity)
+                if native_request is not None and metrics.get("requestPhase") == "start":
+                    composition = native_request.get("_diagnosticComposition")
+                    if isinstance(composition, Mapping):
+                        metrics["nativeComposition"] = dict(composition)
+                AGENT_GATEWAY.runtime_runs.append({
+                    "event": "provider_request_metrics",
+                    "sessionId": context.get("sessionId") or "",
+                    "turnId": context.get("turnId") or "",
+                    "clientTurnId": context.get("clientTurnId") or "",
+                    "provider": config.provider,
+                    "model": str(config.model or ""),
+                    "requestIndex": request_index,
+                    "phase": "approval_review" if _review else "compaction" if _deadline is not None else "native" if native_request is not None else "planner",
+                    "metrics": metrics,
+                })
+                return
             now = time.monotonic()
             if stream_state["firstByteAt"] is None:
                 stream_state["firstByteAt"] = now
@@ -19682,6 +19880,38 @@ def get_unitypackage_import_status_sync(params: dict[str, Any]) -> dict[str, Any
     return payload
 
 
+SETUP_OUTFIT_POLL_LANE = "app_setup_outfit_poll"
+
+
+def get_setup_outfit_status_sync(params: dict[str, Any]) -> dict[str, Any]:
+    """Read one existing Setup Outfit job through the backend-owned poll lane."""
+    params = params or {}
+    job_id = str(params.get("jobId") or params.get("job_id") or "").strip().lower()
+    if len(job_id) != 32 or any(character not in "0123456789abcdef" for character in job_id):
+        return {"ok": False, "status": "invalid_request", "errorCode": "setup_outfit_job_id_invalid", "error": "jobId must be exactly 32 lowercase hexadecimal characters."}
+    project_path = str(params.get("projectPath") or params.get("project_path") or "").strip()
+    if not project_path:
+        return {"ok": False, "status": "invalid_request", "errorCode": "setup_outfit_project_path_required", "error": "projectPath is required for Setup Outfit job polling."}
+    target = params.get("executionTarget")
+    if not isinstance(target, dict):
+        return {"ok": False, "status": "invalid_request", "errorCode": "setup_outfit_execution_target_required", "error": "executionTarget is required for Setup Outfit job polling."}
+    try:
+        from execution_target import validate_runtime_execution_target
+        validate_runtime_execution_target(target, project_root=project_path, required_scope="project")
+    except Exception as exc:  # noqa: BLE001 - preserve the read-tool error boundary.
+        return {"ok": False, "status": "invalid_request", "errorCode": str(getattr(exc, "code", "") or "setup_outfit_execution_target_invalid"), "error": str(exc)}
+    settings = load_dashboard_settings(build_agent_connection_request(params))
+    payload = ensure_dict_payload(
+        extract_tool_result_payload(
+            invoke_unity_mcp(settings, "vrc_setup_outfit", {"jobId": job_id}, execution_context={"lane": "app_setup_outfit_poll"}, preserve_tool_error=True)
+        ),
+        "Setup Outfit job status",
+    )
+    payload.setdefault("ok", True)
+    payload.setdefault("jobId", job_id)
+    return payload
+
+
 def build_test_avatar_execution_plan(
     params: dict[str, Any],
 ) -> list[tuple[str, dict[str, Any]]]:
@@ -21716,6 +21946,12 @@ def build_ensure_animator_state_request(params: dict[str, Any], preview: bool) -
         "writeDefaults": _coerce_gateway_bool(params.get("write_defaults", params.get("writeDefaults")), True),
         "preview": preview,
     }
+    if params.get("time_parameter_active", params.get("timeParameterActive")) is not None:
+        request["timeParameterActive"] = _coerce_gateway_bool(
+            params.get("time_parameter_active", params.get("timeParameterActive")), False
+        )
+    if params.get("time_parameter", params.get("timeParameter")) is not None:
+        request["timeParameter"] = str(params.get("time_parameter", params.get("timeParameter")) or "").strip()
     asset_dir = str(params.get("asset_dir") or params.get("assetDir") or "").strip()
     if asset_dir:
         request["assetDir"] = asset_dir
@@ -21812,6 +22048,8 @@ def _avatar_primitive_request(params: dict[str, Any], preview: bool | None = Non
         "writeDefaults",
         "motionClipPath",
         "speed",
+        "timeParameterActive",
+        "timeParameter",
         "viewPosition",
         "lipSync",
         "visemeSkinnedMeshPath",
@@ -21866,6 +22104,8 @@ def _avatar_primitive_request(params: dict[str, Any], preview: bool | None = Non
         "conditionMode": ("condition_mode",),
         "writeDefaults": ("write_defaults",),
         "motionClipPath": ("motion_clip_path",),
+        "timeParameterActive": ("time_parameter_active",),
+        "timeParameter": ("time_parameter",),
         "viewPosition": ("view_position",),
         "visemeSkinnedMeshPath": ("viseme_skinned_mesh_path",),
         "visemeBlendShapes": ("viseme_blend_shapes",),
@@ -23813,7 +24053,12 @@ def gesture_manager_set_parameter_sync(params: dict[str, Any]) -> dict[str, Any]
     return payload
 
 
-from editor_state_completion import bound_editor_readback, verified_editor_receipt
+from editor_state_completion import (
+    bound_editor_readback,
+    fresh_play_mode_readback_arguments,
+    verified_editor_receipt,
+)
+from execution_target import ExecutionTargetError
 
 
 GESTURE_MANAGER_ENTER_PLAY_MODE_TIMEOUT_SECONDS = 45.0
@@ -23862,12 +24107,27 @@ def gesture_manager_enter_play_mode_finalize(
     last_exception: UnityMcpError | None = None
     while time.monotonic() <= deadline:
         try:
-            with bound_editor_readback(arguments) as identity_verification:
+            # Entering Play Mode can domain-reload Unity and replace only the
+            # Core instance identity.  Refresh the project-scoped target before
+            # readback so the postcondition validates the live Core, while the
+            # project/PID/process lifetime remains unchanged.
+            readback_arguments = fresh_play_mode_readback_arguments(
+                arguments, list_execution_targets_sync
+            )
+            with bound_editor_readback(readback_arguments) as identity_verification:
                 status = gesture_manager_status_sync(
-                    {**arguments, "avatarPath": avatar_path, "includeParameters": False}
+                    {**readback_arguments, "avatarPath": avatar_path, "includeParameters": False}
                 )
             last_status = dict(status) if isinstance(status, dict) else {}
             last_exception = None
+        except ExecutionTargetError as exc:
+            # A Core descriptor may be unavailable or carry the pre-reload
+            # instance briefly. Keep the bounded poll alive for those
+            # transition-only cases; permanent identity drift stays fail-closed.
+            if exc.code not in {"execution_target_authority_unavailable", "editor_identity_mismatch"}:
+                raise
+            last_exception = exc
+            last_status = {}
         except UnityMcpError as exc:
             last_exception = exc
             last_status = {}
@@ -23948,9 +24208,18 @@ def set_play_mode_finalize(arguments: dict[str, Any], _baseline: dict[str, Any],
     last_status = {}
     while time.monotonic() <= deadline:
         try:
-            with bound_editor_readback(arguments) as identity_verification:
-                settings = load_dashboard_settings(build_agent_connection_request(arguments))
+            readback_arguments = fresh_play_mode_readback_arguments(arguments, list_execution_targets_sync)
+            with bound_editor_readback(readback_arguments) as identity_verification:
+                settings = load_dashboard_settings(build_agent_connection_request(readback_arguments))
                 last_status = capture_scene_view_status_direct(settings, require_play_mode=False)
+        except ExecutionTargetError as exc:
+            # A Core descriptor can be unavailable or carry the pre-reload
+            # instance for a short interval. Keep the bounded poll alive for
+            # those two transition-only cases; real identity drift remains
+            # fail-closed and is re-raised.
+            if exc.code not in {"execution_target_authority_unavailable", "editor_identity_mismatch"}:
+                raise
+            last_status = {"ok": False, "errorCode": exc.code}
         except UnityMcpError:
             last_status = {}
         if last_status.get("ok") is not False and last_status.get("isPlayMode") is requested:
@@ -25749,7 +26018,7 @@ def register_agent_gateway_tools() -> None:
     AGENT_GATEWAY.register_tool("vrcforge_agent_message", "Run one VRCForge agent runtime turn.", "plan/preview", lambda params: AGENT_GATEWAY.runtime_message(params, agent_name=str(params.get("agent_name") or params.get("agentName") or "external-agent")))
     AGENT_GATEWAY.register_tool(
         "vrcforge_agent_desktop_action",
-        "Run an action only inside a user-started Computer Use turn. Supported params.operation values are list_apps, launch_app, list_windows, get_window, window_state/get_window_state, inspect_window, screenshot, focus_window/activate_window, move_pointer, click, drag, scroll, type_text, key_press/press_key, focus_element, invoke_element, set_value, secondary_action/perform_secondary_action, wait, and sequence. Start with list_apps, carry the returned window handle plus app/process identity, then use window_state for a bounded screenshot and/or UI Automation text. Input actions require and automatically activate a target window; click and value/secondary actions can use a fresh elementIndex. Never target terminals, authentication/security UI, password managers, ChatGPT/Codex, or Windows-key shortcuts. Before deleting, sending/submitting, uploading, installing, changing permissions/settings, or making financial/medical actions, call vrcforge_ask_user at action time unless the exact action was explicitly pre-approved and policy permits that. Execution stays visible, cancellable, and scoped to the explicit turn.",
+        "Run an action only inside a user-started Computer Use turn. The call shape is {action: 'computer_use', params: {operation: 'list_apps'}}: action selects the desktop bridge and params.operation selects the bounded operation. Supported params.operation values are list_apps, launch_app, list_windows, get_window, window_state/get_window_state, inspect_window, screenshot, focus_window/activate_window, move_pointer, cursor_position, click, drag, scroll, type_text, key_press/press_key, focus_element, invoke_element, set_value, secondary_action/perform_secondary_action, wait, and sequence. Start with the read-only list_apps example, carry the returned window handle plus app/process identity, then use window_state for a bounded screenshot and/or UI Automation text. Input actions require and automatically activate a target window; click and value/secondary actions can use a fresh elementIndex. Never target terminals, authentication/security UI, password managers, ChatGPT/Codex, or Windows-key shortcuts. Before deleting, sending/submitting, uploading, installing, changing permissions/settings, or making financial/medical actions, call vrcforge_ask_user at action time unless the exact action was explicitly pre-approved and policy permits that. Execution stays visible, cancellable, and scoped to the explicit turn.",
         "supervised-write",
         AGENT_GATEWAY.desktop.request_turn_authorized_desktop_action_and_wait,
         write=True,
@@ -26151,6 +26420,12 @@ def register_agent_gateway_tools() -> None:
         "When to use: resume read-only status polling for an existing VRCForge UnityPackage import after a timeout or reconnect, using its exact jobId. When NOT to use: do not use it to start or retry an import, guess a jobId, restore a checkpoint, or dismiss a recovery record. Negative example: do not call this tool with a package path when no import job has been started.",
         "read/debug",
         get_unitypackage_import_status_sync,
+    )
+    AGENT_GATEWAY.register_tool(
+        "vrcforge_get_setup_outfit_status",
+        "When to use: read one existing Modular Avatar Setup Outfit job by its exact jobId after a timeout or reconnect. When NOT to use: do not start, retry, cancel, approve, restore, or infer completion from a missing job. Negative example: do not call it with an outfit path or without the exact project executionTarget.",
+        "read/debug",
+        get_setup_outfit_status_sync,
     )
     AGENT_GATEWAY.register_tool(
         "vrcforge_get_build_test_status",

@@ -108,6 +108,24 @@ def run_planning_continuation(gateway, tmp_path):
         )
 
 
+def test_normal_turn_direct_image_reaches_native_provider_without_vision_runner(tmp_path):
+    gateway, model, _ = setup_gateway(tmp_path, [
+        call("read-1", "vrcforge_read_text_file", {"path": "a.txt"}), finish,
+    ])
+    gateway._vision_profile_enabled = lambda: False
+    gateway.vision_analyze_fn = lambda *_args: (_ for _ in ()).throw(AssertionError("vision runner must not run"))
+    result = run(gateway, tmp_path, attachments=[{
+        "id": "image-1", "name": "probe.png", "type": "image/png", "size": 68,
+        "dataUrl": "data:image/png;base64,iVBORw0KGgo=", "payloadKind": "data_url",
+    }])
+    assert model.requests, result
+    assert len(model.requests) == 2
+    for request in model.requests:
+        user = next(message for message in request["messages"] if message.get("role") == "user")
+        assert {item["type"] for item in user["content"]} == {"text", "image_url"}
+        assert user["content"][1]["image_url"]["url"].startswith("data:image/png;base64,")
+
+
 def test_native_default_exposes_write_immediately_and_preserves_approval(tmp_path):
     from tests.test_native_permission_modes import _set_mode, _write_gateway_for_mode
 
@@ -148,6 +166,32 @@ def test_native_gateway_pairs_actual_tool_result_and_keeps_receipt_private(tmp_p
     assert result["plan"]["nextStep"] == "done"
     assert "private-fixture-replay" not in json.dumps(result)
     assert "private-fixture-replay" not in json.dumps(gateway._runtime_session_state.get_session("native-session"))
+
+
+def test_native_provider_public_reply_precedes_tool_without_leaking_action_json(tmp_path):
+    public_reply = "I will inspect the file before summarizing it."
+
+    def progress_receipt():
+        receipt = call("read-1", "vrcforge_read_text_file", {"path": "a.txt"})
+        receipt["content"] = public_reply
+        receipt["reasoning_content"] = "private-native-reasoning"
+        return receipt
+
+    gateway, model, _ = setup_gateway(tmp_path, [progress_receipt(), finish])
+    emitted = []
+    gateway._runtime_timeline_changed = emitted.append
+
+    result = run(gateway, tmp_path)
+
+    timeline = result["timeline"]
+    assert [event["kind"] for event in timeline] == [
+        "assistant", "tool_call", "tool_result", "assistant",
+    ]
+    assert timeline[0]["payload"]["summary"] == public_reply
+    assert "private-native-reasoning" not in json.dumps(result)
+    assert '"path": "a.txt"' not in json.dumps(timeline)
+    assert [item["timelineEvent"] for item in emitted] == timeline
+    assert len(model.requests) == 2
 
 
 @pytest.mark.parametrize("kind", ["hidden", "invalid"])

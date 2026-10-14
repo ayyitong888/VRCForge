@@ -349,10 +349,7 @@ fn backend_request_context(
     })
 }
 
-fn authenticated_backend_response<F>(
-    token: &str,
-    send_once: F,
-) -> Result<AppApiResponse, String>
+fn authenticated_backend_response<F>(token: &str, send_once: F) -> Result<AppApiResponse, String>
 where
     F: FnMut() -> Result<AppApiResponse, String>,
 {
@@ -472,10 +469,9 @@ where
 #[cfg(test)]
 mod memory_review_backend_error_tests {
     use super::{
-        authenticated_backend_response_with_probe,
-        backend_json_error_from_response, bounded_backend_error_detail,
-        bounded_backend_request_timeout, tauri_ipc_bridge_proof, AppApiResponse,
-        BackendJsonErrorEnvelope, BackendRequestContext, BackendSessionProbe,
+        authenticated_backend_response_with_probe, backend_json_error_from_response,
+        bounded_backend_error_detail, bounded_backend_request_timeout, tauri_ipc_bridge_proof,
+        AppApiResponse, BackendJsonErrorEnvelope, BackendRequestContext, BackendSessionProbe,
     };
     use std::time::Duration;
 
@@ -562,7 +558,10 @@ mod memory_review_backend_error_tests {
         let path = "/api/app/test?scope=fixture";
         let context = BackendRequestContext {
             agent: ureq::AgentBuilder::new().build(),
-            url: format!("{super_endpoint}{path}", super_endpoint = super::BACKEND_ENDPOINT),
+            url: format!(
+                "{super_endpoint}{path}",
+                super_endpoint = super::BACKEND_ENDPOINT
+            ),
             transport_proof: tauri_ipc_bridge_proof(&token, method, path),
             token: token.clone(),
         };
@@ -760,13 +759,13 @@ mod backend_start_result_tests {
         backend_start_failure_payload, ready_backend_start_result, wait_for_backend_or_child_exit,
         BackendSessionProbe, BackendStartupWait, BackendState,
     };
+    #[cfg(windows)]
+    use std::os::windows::process::CommandExt;
     use std::{
         path::Path,
         process::{Command, Stdio},
         time::{Duration, Instant},
     };
-    #[cfg(windows)]
-    use std::os::windows::process::CommandExt;
 
     #[test]
     fn verified_early_backend_is_returned_without_starting_a_second_worker() {
@@ -850,7 +849,6 @@ mod backend_start_result_tests {
         assert_eq!(outcome, BackendStartupWait::ChildExited(Some(23)));
         assert!(started.elapsed() < Duration::from_millis(500));
     }
-
 }
 
 pub(crate) fn begin_backend_start(state: &BackendState) -> Result<bool, String> {
@@ -885,7 +883,9 @@ pub(crate) fn run_backend_start_worker(app_handle: tauri::AppHandle) {
     clear_backend_start_in_progress(&app_handle);
 }
 
-pub(crate) fn managed_backend_exit_code(state: &BackendState) -> Result<Option<Option<i32>>, String> {
+pub(crate) fn managed_backend_exit_code(
+    state: &BackendState,
+) -> Result<Option<Option<i32>>, String> {
     let mut guard = state
         .child
         .lock()
@@ -1123,7 +1123,8 @@ pub(crate) fn start_backend_in_background(
         BackendStartupWait::Ready => {}
     }
 
-    let session_probe = wait_for_backend_session_probe(&app_session_token, BACKEND_SESSION_VERIFY_WAIT);
+    let session_probe =
+        wait_for_backend_session_probe(&app_session_token, BACKEND_SESSION_VERIFY_WAIT);
     if session_probe == BackendSessionProbe::Accepted {
         mark_backend_session_verified();
         return Ok(serde_json::json!({
@@ -1536,7 +1537,10 @@ mod app_api_response_tests {
 
         assert!(result.ok);
         assert_eq!(result.status, 200);
-        assert_eq!(result.body["payload"].as_str().unwrap().len(), 11 * 1024 * 1024);
+        assert_eq!(
+            result.body["payload"].as_str().unwrap().len(),
+            11 * 1024 * 1024
+        );
     }
 
     #[test]
@@ -1569,7 +1573,10 @@ mod app_api_response_tests {
                 .expect("non-JSON status error should become an envelope");
         assert_eq!(non_json_result.status, 502);
         assert!(!non_json_result.ok);
-        assert_eq!(non_json_result.body["detail"], "HTTP 502: response was not JSON");
+        assert_eq!(
+            non_json_result.body["detail"],
+            "HTTP 502: response was not JSON"
+        );
     }
 
     #[test]

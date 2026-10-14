@@ -33,7 +33,7 @@ import {
   boundedCompactionAttempts,
   boundedCompactionSummaryCharacters,
 } from "../lib/chat-compaction-state";
-import { fingerprintCompactionSource, mergeCompactionRecovery, projectRuntimeCompactionItems } from "../lib/context-compaction";
+import { contextUsageBoundaryItemId, fingerprintCompactionSource, mergeCompactionRecovery, projectRuntimeCompactionItems } from "../lib/context-compaction";
 import {
   cancelAgentRunFollowup,
   issueComputerUseTurnGrant,
@@ -990,6 +990,8 @@ export function useChatRunController({
             beforeTokens: runtimeCompaction.beforeTokens,
             afterTokens: runtimeCompaction.afterTokens,
             contextLimit: runtimeCompaction.contextLimit,
+            summarizedItemIds: [...summarizedItemIds],
+            contextUsageBoundaryItemId: contextUsageBoundaryItemId(durableItems),
             compactionRecovery: mergeCompactionRecovery(
               collectCompactionRecovery(durableItems),
               responseRecovery,

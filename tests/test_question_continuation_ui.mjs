@@ -54,19 +54,23 @@ const active = renderToStaticMarkup(React.createElement(AgentQuestionCard, {
   onAnswerQuestion: async () => {},
   onStopContinuation: () => {},
 }));
-if (!active.includes("Continuing this task") || !active.includes(">Stop<")) throw new Error("running continuation was not rendered with Stop");
+if (active.includes("Continuing this task") || active.includes(">Stop<")) throw new Error("answered question card must leave the dock even while continuation runs");
 const terminal = renderToStaticMarkup(React.createElement(AgentQuestionCard, {
   questions: [{ ...base, runtimeContinuation: { questionId: "q-1", status: "failed", error: "planner failed" } }],
   onAnswerQuestion: async () => {},
 }));
-if (!terminal.includes("planner failed")) throw new Error("terminal continuation failure was not rendered");
-console.log(JSON.stringify({ activeVisible: true, stopVisible: true, terminalFailureVisible: true }));
-for (const [runStatus, nextStep, expected] of [["cancel_requested", "", "Stopping…"], ["blocked", "pending_approval", "Waiting for the next action"]]) {
+if (terminal.includes("planner failed") || terminal.includes("Approve repair?")) throw new Error("settled continuation must leave the question card");
+console.log(JSON.stringify({ activeCardHidden: true, settledCardHidden: true }));
+for (const [runStatus, nextStep] of [["cancel_requested", ""]]) {
   const question = projectAgentQuestionContinuation({ ...base, sessionId: "s", runtimeContinuationStatus: "delivered" },
     [{ sessionId: "s", turnId: "t", clientTurnId: "c:question:q-1", status: runStatus, nextStep }]);
   const html = renderToStaticMarkup(React.createElement(AgentQuestionCard, { questions: [question], onAnswerQuestion: () => {}, onStopContinuation: () => {} }));
-  if (!html.includes(expected) || html.includes("Continuation stopped") || html.includes("Continuation completed")) throw new Error("Raw snapshot state was projected incorrectly: " + runStatus);
+  if (html.includes("Approve repair?") || html.includes(">Stop<")) throw new Error("settled continuation must leave the question card: " + runStatus);
 }
+const blocked = projectAgentQuestionContinuation({ ...base, sessionId: "s", runtimeContinuationStatus: "delivered" },
+  [{ sessionId: "s", turnId: "t", clientTurnId: "c:question:q-1", status: "blocked", nextStep: "pending_approval" }]);
+const blockedHtml = renderToStaticMarkup(React.createElement(AgentQuestionCard, { questions: [blocked], onAnswerQuestion: () => {} }));
+if (blockedHtml.includes("Approve repair?")) throw new Error("blocked settled continuation must leave the question card");
 `);
 try {
   await build({

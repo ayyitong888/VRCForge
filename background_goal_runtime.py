@@ -736,6 +736,9 @@ _USAGE_ALIASES: Mapping[str, tuple[str, ...]] = MappingProxyType(
             "cacheReadInputTokens",
             "cache_read_input_tokens",
         ),
+        "cacheWriteTokens": (
+            "cacheWriteTokens",
+        ),
     }
 )
 
@@ -744,6 +747,12 @@ _PRICING_ALIASES: Mapping[str, tuple[str, ...]] = MappingProxyType(
         "input": ("inputPerMillion", "input_per_million"),
         "output": ("outputPerMillion", "output_per_million"),
         "cached": ("cachedInputPerMillion", "cached_input_per_million", "cachedPerMillion", "cached_per_million"),
+        "cacheWrite": (
+            "cacheWriteInputPerMillion",
+            "cache_write_input_per_million",
+            "cacheWritePerMillion",
+            "cache_write_per_million",
+        ),
     }
 )
 
@@ -776,6 +785,20 @@ def aggregate_bounded_usage(
     totals = {field: 0 for field in _USAGE_ALIASES}
     seen: set[str] = set()
     bounded = False
+    cache_write_coverage_seen = False
+    cache_write_coverage_complete = True
+    cache_write_coverage_request_count = 0
+    cache_write_coverage_unmarked_records = 0
+    cache_read_coverage_seen = False
+    cache_read_coverage_complete = True
+    cache_read_coverage_request_count = 0
+    cache_read_coverage_unmarked_records = 0
+    unsupported_raw_cache_write = False
+    request_count_seen = False
+    request_count_total = 0
+    exact_seen = False
+    exact_all = True
+    exact_unmarked_records = 0
     for index, record in enumerate(records):
         if index >= max_records:
             bounded = True
@@ -783,6 +806,14 @@ def aggregate_bounded_usage(
         if not isinstance(record, Mapping):
             continue
         source = record.get("usage") if isinstance(record.get("usage"), Mapping) else record
+        source_request_count = None
+        if any(
+            key in source
+            for key in ("cache_write_tokens", "cache_creation_input_tokens", "cacheCreationInputTokens")
+        ) and "cacheWriteTokens" not in source:
+            # Provider response shapes must be normalized before this ledger;
+            # Anthropic cache creation tokens are not assumed to be inclusive.
+            unsupported_raw_cache_write = True
         for field, aliases in _USAGE_ALIASES.items():
             value = _first_bounded_usage_int(source, aliases)
             if value is None:
@@ -793,8 +824,98 @@ def aggregate_bounded_usage(
                 bounded = True
             else:
                 totals[field] += value
+        if "requestCount" in source:
+            request_count_seen = True
+            source_request_count = _first_bounded_usage_int(source, ("requestCount",))
+            if source_request_count is None:
+                pass
+            elif source_request_count > max_tokens or request_count_total > max_tokens - source_request_count:
+                request_count_total = max_tokens
+                bounded = True
+            else:
+                request_count_total += source_request_count
+        if "exact" in source:
+            exact_seen = True
+            exact_all = exact_all and source.get("exact") is True
+        else:
+            exact_unmarked_records += 1
+        has_cache_write_coverage = (
+            "cacheWriteUsageRequestCount" in source
+            or "cacheWriteUsageComplete" in source
+        )
+        if has_cache_write_coverage:
+            cache_write_coverage_seen = True
+            request_count = _first_bounded_usage_int(source, ("cacheWriteUsageRequestCount",))
+            cache_write_tokens = _first_bounded_usage_int(source, ("cacheWriteTokens",))
+            if request_count is None:
+                cache_write_coverage_complete = False
+            else:
+                if request_count > max_tokens or cache_write_coverage_request_count > max_tokens - request_count:
+                    cache_write_coverage_request_count = max_tokens
+                    bounded = True
+                else:
+                    cache_write_coverage_request_count += request_count
+                if request_count <= 0 or cache_write_tokens is None:
+                    cache_write_coverage_complete = False
+                if source_request_count is not None and request_count != source_request_count:
+                    cache_write_coverage_complete = False
+            cache_write_coverage_complete = (
+                cache_write_coverage_complete
+                and source.get("cacheWriteUsageComplete") is True
+            )
+        else:
+            cache_write_coverage_unmarked_records += 1
+        has_cache_read_coverage = (
+            "cacheUsageRequestCount" in source
+            or "cacheUsageComplete" in source
+        )
+        if has_cache_read_coverage:
+            cache_read_coverage_seen = True
+            read_request_count = _first_bounded_usage_int(source, ("cacheUsageRequestCount",))
+            cached_tokens = _first_bounded_usage_int(source, _USAGE_ALIASES["cachedTokens"])
+            if read_request_count is None:
+                cache_read_coverage_complete = False
+            else:
+                if read_request_count > max_tokens or cache_read_coverage_request_count > max_tokens - read_request_count:
+                    cache_read_coverage_request_count = max_tokens
+                    bounded = True
+                else:
+                    cache_read_coverage_request_count += read_request_count
+                if read_request_count <= 0 or cached_tokens is None:
+                    cache_read_coverage_complete = False
+                if source_request_count is not None and read_request_count != source_request_count:
+                    cache_read_coverage_complete = False
+            cache_read_coverage_complete = (
+                cache_read_coverage_complete
+                and source.get("cacheUsageComplete") is True
+            )
+        else:
+            cache_read_coverage_unmarked_records += 1
+
+    if cache_write_coverage_seen:
+        result_coverage_complete = (
+            cache_write_coverage_complete and cache_write_coverage_unmarked_records == 0
+        )
+        if request_count_seen and cache_write_coverage_request_count != request_count_total:
+            result_coverage_complete = False
+    if cache_read_coverage_seen:
+        read_result_coverage_complete = (
+            cache_read_coverage_complete and cache_read_coverage_unmarked_records == 0
+        )
+        if request_count_seen and cache_read_coverage_request_count != request_count_total:
+            read_result_coverage_complete = False
 
     result: dict[str, Any] = {field: totals[field] for field in _USAGE_ALIASES if field in seen}
+    if cache_write_coverage_seen:
+        result["cacheWriteUsageRequestCount"] = cache_write_coverage_request_count
+        result["cacheWriteUsageComplete"] = result_coverage_complete
+    if cache_read_coverage_seen:
+        result["cacheUsageRequestCount"] = cache_read_coverage_request_count
+        result["cacheUsageComplete"] = read_result_coverage_complete
+    if request_count_seen:
+        result["requestCount"] = request_count_total
+    if exact_seen:
+        result["exact"] = exact_all and exact_unmarked_records == 0
     if bounded:
         result["bounded"] = True
 
@@ -803,6 +924,9 @@ def aggregate_bounded_usage(
         return result
     if bounded:
         result["costUnavailableReason"] = "usage_bounded"
+        return result
+    if unsupported_raw_cache_write:
+        result["costUnavailableReason"] = "usage_incomplete"
         return result
 
     cost, unavailable_reason = _explicit_usage_cost(result, pricing)
@@ -838,6 +962,18 @@ def _explicit_usage_cost(
 ) -> tuple[float | None, str | None]:
     if "inputTokens" not in usage or "outputTokens" not in usage:
         return None, "usage_incomplete"
+    if "exact" in usage and usage["exact"] is not True:
+        return None, "usage_incomplete"
+    if "cacheUsageComplete" in usage and usage["cacheUsageComplete"] is not True:
+        return None, "usage_incomplete"
+    if (
+        "cacheUsageRequestCount" in usage
+        and int(usage.get("cacheUsageRequestCount") or 0) > 0
+        and "cachedTokens" not in usage
+    ):
+        return None, "usage_incomplete"
+    if "cacheWriteUsageComplete" in usage and usage["cacheWriteUsageComplete"] is not True:
+        return None, "usage_incomplete"
 
     input_rate, input_state = _explicit_price(pricing, _PRICING_ALIASES["input"])
     output_rate, output_state = _explicit_price(pricing, _PRICING_ALIASES["output"])
@@ -849,7 +985,17 @@ def _explicit_usage_cost(
     input_tokens = int(usage["inputTokens"])
     output_tokens = int(usage["outputTokens"])
     cached_tokens = int(usage.get("cachedTokens", 0))
-    if cached_tokens > input_tokens:
+    has_cache_write = "cacheWriteTokens" in usage
+    if has_cache_write and usage.get("cacheWriteUsageComplete") is not True:
+        return None, "usage_incomplete"
+    if (
+        "cacheWriteUsageRequestCount" in usage
+        and int(usage.get("cacheWriteUsageRequestCount") or 0) > 0
+        and not has_cache_write
+    ):
+        return None, "usage_incomplete"
+    cache_write_tokens = int(usage.get("cacheWriteTokens", 0))
+    if cached_tokens < 0 or cache_write_tokens < 0 or cached_tokens + cache_write_tokens > input_tokens:
         return None, "usage_inconsistent"
 
     cached_rate = Decimal(0)
@@ -860,10 +1006,19 @@ def _explicit_usage_cost(
         if cached_rate is None:
             return None, "pricing_incomplete"
 
+    cache_write_rate = Decimal(0)
+    if has_cache_write:
+        cache_write_rate, cache_write_state = _explicit_price(pricing, _PRICING_ALIASES["cacheWrite"])
+        if cache_write_state == "invalid":
+            return None, "pricing_invalid"
+        if cache_write_rate is None:
+            return None, "pricing_incomplete"
+
     million = Decimal(1_000_000)
     cost = (
-        Decimal(input_tokens - cached_tokens) * input_rate
+        Decimal(input_tokens - cached_tokens - cache_write_tokens) * input_rate
         + Decimal(cached_tokens) * cached_rate
+        + Decimal(cache_write_tokens) * cache_write_rate
         + Decimal(output_tokens) * output_rate
     ) / million
     return float(cost.quantize(Decimal("0.000000000001"))), None

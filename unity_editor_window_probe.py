@@ -204,7 +204,7 @@ def confirm_unity_reload_dialog(params: dict[str, Any]) -> dict[str, Any]:
                 "dialogClosed": None,
                 "mutationStarted": True,
                 "commitState": "unknown",
-                "error": "Reload was clicked, but the same Unity process could not be inspected to verify dialog closure.",
+                "error": "Reload message was dispatched, but the same Unity process could not be inspected to verify dialog closure.",
                 "retryable": False,
             }
         if not after.get("blocked"):
@@ -219,7 +219,7 @@ def confirm_unity_reload_dialog(params: dict[str, Any]) -> dict[str, Any]:
                 "dialogClosed": True,
             }
         if time.monotonic() >= deadline:
-            raise UnityReloadDialogError("Unity received Reload, but the dialog did not close within two seconds.")
+            raise UnityReloadDialogError("Reload message was dispatched, but the dialog did not close within two seconds.")
         time.sleep(0.05)
 
 
@@ -249,6 +249,10 @@ def _post_reload_button_click(process_id: int, window_handle: int, button_handle
     user32.GetClassNameW.restype = ctypes.c_int
     user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
     user32.GetWindowTextW.restype = ctypes.c_int
+    user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+    user32.SetForegroundWindow.restype = wintypes.BOOL
+    user32.GetForegroundWindow.argtypes = []
+    user32.GetForegroundWindow.restype = wintypes.HWND
     user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
     user32.PostMessageW.restype = wintypes.BOOL
 
@@ -270,12 +274,26 @@ def _post_reload_button_click(process_id: int, window_handle: int, button_handle
     user32.GetWindowTextW(button_handle, label, len(label))
     if class_name.value.casefold() != "button" or _normalize_control_label(label.value) not in _RELOAD_LABELS:
         raise UnityReloadDialogError("The approved control is no longer the exact Unity Reload button.")
+    _activate_reload_dialog(user32, window_handle)
     ctypes.set_last_error(0)
     if not user32.PostMessageW(button_handle, _BUTTON_CLICK_MESSAGE, 0, 0):
         error_code = ctypes.get_last_error()
         raise UnityReloadDialogError(
             f"The approved Unity Reload button could not be clicked: Windows error {error_code}."
         )
+
+
+def _activate_reload_dialog(user32: Any, window_handle: int) -> None:
+    """Activate the approved modal before BM_CLICK; inactive dialogs may ignore it."""
+
+    ctypes.set_last_error(0)
+    if not user32.SetForegroundWindow(window_handle):
+        error_code = ctypes.get_last_error()
+        raise UnityReloadDialogError(
+            f"The approved Unity Reload dialog could not be activated: Windows error {error_code}."
+        )
+    if int(user32.GetForegroundWindow() or 0) != window_handle:
+        raise UnityReloadDialogError("The approved Unity Reload dialog did not become the foreground window.")
 
 
 def _enumerate_process_windows(process_id: int) -> list[dict[str, Any]]:
