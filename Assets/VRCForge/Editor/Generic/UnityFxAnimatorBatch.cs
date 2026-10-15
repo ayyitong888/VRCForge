@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Text;
 using Newtonsoft.Json;
@@ -201,7 +202,8 @@ namespace VRCForge.Editor
                 if (!path.StartsWith("Assets/", StringComparison.Ordinal)) throw new InvalidOperationException("Controller must be an existing Assets controller.");
                 var controller = AssetDatabase.LoadAssetAtPath<AnimatorController>(path)
                     ?? throw new InvalidOperationException("Controller not found.");
-                if (AssetDatabase.LoadAllAssetsAtPath(path).Any(EditorUtility.IsDirty))
+                var persistenceObjects = LoadPersistenceObjects(path, controller);
+                if (persistenceObjects.Any(EditorUtility.IsDirty))
                     throw new InvalidOperationException("Save or discard existing controller edits before a batch.");
                 var guid = AssetDatabase.AssetPathToGUID(path);
                 var motions = new HashSet<string>(StringComparer.Ordinal);
@@ -219,8 +221,10 @@ namespace VRCForge.Editor
                     return VRCForgeToolResult.Completed("Preview: would apply one controller batch.", new {
                         ok = true, preview = true, batch = true, controllerPath = path, editCount = edits.Count,
                         plan = Projection(expected) });
+                ProbeExclusiveAssetFiles(path);
+                persistenceObjects = LoadPersistenceObjects(path, controller);
                 recovery.Capture(path); recovery.Begin();
-                Undo.RegisterCompleteObjectUndo(AssetDatabase.LoadAllAssetsAtPath(path), "FX animator batch");
+                Undo.RegisterCompleteObjectUndo(persistenceObjects, "FX animator batch");
                 phase = "asset_mutation"; mutated = true;
                 foreach (JObject edit in edits)
                 {
@@ -240,7 +244,8 @@ namespace VRCForge.Editor
                 AssetDatabase.ImportAsset(path, ImportAssetOptions.ForceSynchronousImport | ImportAssetOptions.ForceUpdate);
                 var actual = AssetDatabase.LoadAssetAtPath<AnimatorController>(path)
                     ?? throw new InvalidOperationException("Controller reload failed.");
-                if (AssetDatabase.AssetPathToGUID(path) != guid || AssetDatabase.LoadAllAssetsAtPath(path).Any(EditorUtility.IsDirty))
+                var persistedObjects = LoadPersistenceObjects(path, actual);
+                if (AssetDatabase.AssetPathToGUID(path) != guid || persistedObjects.Any(EditorUtility.IsDirty))
                     throw new InvalidOperationException("Controller identity or saved state changed.");
                 var readback = Snapshot(actual); Verify(expected, readback);
                 var evidence = SceneObjectCopyCore.ReadStableAssetEvidence(path, "FX batch readback");
@@ -256,6 +261,56 @@ namespace VRCForge.Editor
             catch (Exception exception)
             {
                 return WriteAnimationCurveTool.EditFailure("fx_animator_batch_failed", exception, mutated, phase, recovery);
+            }
+        }
+
+        private static UnityEngine.Object[] LoadPersistenceObjects(string path, UnityEngine.Object mainObject)
+        {
+            var objects = AssetDatabase.LoadAllAssetsAtPath(path);
+            ValidatePersistenceObjectSet(path, mainObject, objects);
+            var result = new List<UnityEngine.Object> { mainObject };
+            foreach (var item in objects)
+            {
+                if (item == null || !EditorUtility.IsPersistent(item)) continue;
+                var itemPath = AssetDatabase.GetAssetPath(item);
+                if (itemPath != path)
+                    throw new InvalidOperationException("FX controller has a persistent object from another asset.");
+                if (!result.Any(existing => existing == item)) result.Add(item);
+            }
+            return result.ToArray();
+        }
+
+        private static void ValidatePersistenceObjectSet(string path, UnityEngine.Object mainObject, UnityEngine.Object[] objects)
+        {
+            if (mainObject == null
+                || !EditorUtility.IsPersistent(mainObject)
+                || AssetDatabase.GetAssetPath(mainObject) != path
+                || objects == null
+                || objects.Length == 0)
+            {
+                throw new InvalidOperationException("FX controller main persistence object or object listing is unavailable.");
+            }
+        }
+
+        private static void ProbeExclusiveAssetFiles(string path)
+        {
+            var absolute = SceneObjectCopyCore.ToAbsoluteAssetPath(path);
+            foreach (var candidate in new[] { absolute, absolute + ".meta" })
+            {
+                if (!File.Exists(candidate))
+                    throw new InvalidOperationException("FX controller or metadata is missing.");
+                try
+                {
+                    using (var stream = new FileStream(candidate, FileMode.Open, FileAccess.ReadWrite, FileShare.None)) { }
+                }
+                catch (IOException exception)
+                {
+                    throw new InvalidOperationException("FX controller or metadata is locked by another process.", exception);
+                }
+                catch (UnauthorizedAccessException exception)
+                {
+                    throw new InvalidOperationException("FX controller or metadata is not writable.", exception);
+                }
             }
         }
 
