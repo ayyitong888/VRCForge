@@ -44,6 +44,7 @@
     "settings": "設定",
     "projects": "プロジェクト",
     "chats": "チャット",
+    "testChats": "テストチャット",
     "newChat": "新規チャット",
     "noTempChats": "一時チャットはありません",
     "expandSidebar": "サイドバーを展開",
@@ -1112,6 +1113,9 @@
     "unpinChat": "ピン留め解除",
     "pinChat": "チャットをピン留め",
     "renameChat": "チャット名を変更",
+    "markTestChat": "テストチャットとしてマーク",
+    "unmarkTestChat": "テストマークを解除",
+    "testChat": "テストチャット",
     "permanentDelete": "完全に削除"
   },
   "deleteModal": {

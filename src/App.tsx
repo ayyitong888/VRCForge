@@ -846,6 +846,7 @@ export default function App() {
     getChatById,
     newConversation,
     togglePinChat,
+    toggleTestChat,
     startRenameChat,
     commitRenameChat,
     deleteChatPermanently,
@@ -4521,6 +4522,7 @@ export default function App() {
         onAddSelectionToComposer={addSelectionToComposer}
         onCloseChatMenu={() => setChatMenu(null)}
         onTogglePinChat={togglePinChat}
+        onToggleTestChat={toggleTestChat}
         onStartRenameChat={startRenameChat}
         onDeleteChat={setDeleteTargetId}
         onCancelDeleteChat={() => setDeleteTargetId("")}

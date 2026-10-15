@@ -1124,7 +1124,7 @@ def is_valid_chat_record(value: Any) -> bool:
         return False
     if "titleSource" in value and value.get("titleSource") not in {"auto", "manual"}:
         return False
-    if any(field in value and not isinstance(value.get(field), bool) for field in ("pinned", "archived")):
+    if any(field in value and not isinstance(value.get(field), bool) for field in ("pinned", "archived", "isTestChat")):
         return False
     if "revision" in value and not _is_safe_nonnegative_integer(value.get("revision")):
         return False

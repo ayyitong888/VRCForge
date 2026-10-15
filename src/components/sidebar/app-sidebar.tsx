@@ -247,6 +247,7 @@ export function AppSidebar({
                           unreadCount={backgroundGoalUnreadByChat[chat.id] || 0}
                           indent
                           pinned={chat.pinned}
+                          isTestChat={chat.isTestChat}
                           renaming={renamingChatId === chat.id}
                           renameDraft={renameDraft}
                           onRenameChange={onChatRenameChange}
@@ -319,6 +320,7 @@ export function AppSidebar({
                       unreadCount={backgroundGoalUnreadByChat[chat.id] || 0}
                       indent
                       pinned={chat.pinned}
+                      isTestChat={chat.isTestChat}
                       renaming={renamingChatId === chat.id}
                       renameDraft={renameDraft}
                       onRenameChange={onChatRenameChange}
@@ -354,6 +356,7 @@ export function AppSidebar({
                 active={activeView === "chat" && chat.id === activeChatId}
                 unreadCount={backgroundGoalUnreadByChat[chat.id] || 0}
                 pinned={chat.pinned}
+                isTestChat={chat.isTestChat}
                 renaming={renamingChatId === chat.id}
                 renameDraft={renameDraft}
                 onRenameChange={onChatRenameChange}
@@ -372,6 +375,35 @@ export function AppSidebar({
           )}
         </SidebarSection>
       )}
+
+      {collapsed ? null : chatSidebar.testChats.length > 0 ? (
+        <SidebarSection title={t("sidebar.testChats")}>
+          {chatSidebar.testChats.map((chat) => (
+            <SidebarChat
+              key={chat.id}
+              chatId={chat.id}
+              title={chat.title || t("sidebar.newChat")}
+              meta={chatSidebar.times.get(chat.id) || ""}
+              activity={chatSidebar.activityByChat.get(chat.id)}
+              active={activeView === "chat" && chat.id === activeChatId}
+              unreadCount={backgroundGoalUnreadByChat[chat.id] || 0}
+              pinned={chat.pinned}
+              isTestChat
+              renaming={renamingChatId === chat.id}
+              renameDraft={renameDraft}
+              onRenameChange={onChatRenameChange}
+              onRenameCommit={onChatRenameCommit}
+              onClick={() => onOpenChat(chat)}
+              onTogglePin={() => onTogglePinChat(chat.id)}
+              onDelete={() => onDeleteChat(chat.id)}
+              onContextMenu={(event) => {
+                event.preventDefault();
+                onChatMenu(chat.id, event);
+              }}
+            />
+          ))}
+        </SidebarSection>
+      ) : null}
 
       <div className="mt-auto">
         <button

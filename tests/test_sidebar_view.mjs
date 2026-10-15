@@ -4,7 +4,7 @@ import { build } from "esbuild";
 const bundle = await build({ entryPoints: ["src/lib/sidebar-view.ts"], bundle: true, write: false, format: "esm", platform: "node" });
 const { buildChatSidebarView, chatSidebarActivity } = await import(`data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].text).toString("base64")}`);
 const threadBundle = await build({ entryPoints: ["src/lib/chat-thread.ts"], bundle: true, write: false, format: "esm", platform: "node" });
-const { filterPersistableChats } = await import(`data:text/javascript;base64,${Buffer.from(threadBundle.outputFiles[0].text).toString("base64")}`);
+const { filterPersistableChats, groupSidebarChats } = await import(`data:text/javascript;base64,${Buffer.from(threadBundle.outputFiles[0].text).toString("base64")}`);
 
 const baseResponse = {
   ok: true,
@@ -35,6 +35,11 @@ assert.equal(buildChatSidebarView(sidebarChats, "en", (value) => value, 0, "chat
 assert.equal(buildChatSidebarView(sidebarChats, "en", (value) => value, 0, "").activityByChat.get("chat-1"), "completed", "leaving chat view does not silently clear a background completion");
 const persisted = filterPersistableChats([chat(baseResponse, { lastViewedAt: "2026-09-24T00:00:10.000Z" })])[0];
 assert.equal(persisted.lastViewedAt, "2026-09-24T00:00:10.000Z", "lastViewedAt survives the existing persistence projection");
+const testChat = chat(baseResponse, { id: "acceptance-chat", isTestChat: true, projectPath: "D:/Fixture" });
+const grouped = groupSidebarChats([testChat, chat(baseResponse)], (value) => value.toLowerCase());
+assert.deepEqual(grouped.testChats.map((item) => item.id), ["acceptance-chat"], "marked chats use the dedicated test group");
+assert.equal(grouped.projectChatsByPath.get("d:/fixture")?.some((item) => item.id === "acceptance-chat"), false, "marked chats are not duplicated in project groups");
+assert.equal(grouped.testChats[0].projectPath, "D:/Fixture", "project ownership remains on the test chat record");
 for (const nextStep of ["needs_user_action", "approval_pending", "cancelled", "failed", "completion_unverified"]) {
   assert.equal(chatSidebarActivity(chat({ ...baseResponse, plan: { nextStep } })), undefined, `${nextStep} must not create a completed sidebar marker`);
 }

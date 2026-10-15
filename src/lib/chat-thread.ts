@@ -15,6 +15,7 @@ import {
 } from "./attachment-payloads";
 
 export type ChatSidebarGroups = {
+  testChats: ChatThread[];
   temporaryChats: ChatThread[];
   projectChatsByPath: Map<string, ChatThread[]>;
 };
@@ -27,6 +28,7 @@ export function groupSidebarChats(
   list: ChatThread[],
   normalizeProjectPath: (value: string) => string,
 ): ChatSidebarGroups {
+  const testChats: ChatThread[] = [];
   const temporaryChats: ChatThread[] = [];
   const projectChatsByPath = new Map<string, ChatThread[]>();
   for (const chat of list) {
@@ -34,6 +36,10 @@ export function groupSidebarChats(
       continue;
     }
     if (isUnstartedChat(chat)) {
+      continue;
+    }
+    if (chat.isTestChat === true) {
+      testChats.push(chat);
       continue;
     }
     const key = normalizeProjectPath(chat.projectPath || "");
@@ -48,11 +54,12 @@ export function groupSidebarChats(
       projectChatsByPath.set(key, [chat]);
     }
   }
+  testChats.sort(compareChatsForSidebar);
   temporaryChats.sort(compareChatsForSidebar);
   for (const group of projectChatsByPath.values()) {
     group.sort(compareChatsForSidebar);
   }
-  return { temporaryChats, projectChatsByPath };
+  return { testChats, temporaryChats, projectChatsByPath };
 }
 
 export function cacheChatTimestampsFast(chat: ChatThread): ChatThread {

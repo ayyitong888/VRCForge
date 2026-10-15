@@ -36,6 +36,40 @@ def test_lifecycle_events_survive_actual_chat_storage_write_and_read(tmp_path, m
     assert all(is_valid_chat_record(row) for row in saved)
 
 
+def test_explicit_test_chat_marker_survives_project_scoped_storage_and_snapshot(tmp_path, monkeypatch):
+    import dashboard_server as server
+    from chat_snapshot_transport import snapshot_page
+    from dashboard_api_models import ChatTranscriptsRequest
+
+    project = tmp_path / "AvatarProject"
+    project.mkdir()
+    monkeypatch.setattr(server, "chat_transcripts_path", lambda: tmp_path / "chats.json")
+    monkeypatch.setattr(server, "chat_project_index_path", lambda: tmp_path / "projects.json")
+    monkeypatch.setattr(server, "project_chat_transcripts_path", lambda _path: project / ".vrcforge" / "chat-transcripts.json")
+    chat = {
+        "id": "acceptance-chat",
+        "title": "Natural wardrobe request",
+        "isTestChat": True,
+        "projectPath": str(project),
+        "items": [{"id": "user-1", "type": "user", "text": "Please help me organize this avatar wardrobe."}],
+    }
+    assert is_valid_chat_record(chat)
+    result, _, _ = server.write_chat_transcripts_storage(ChatTranscriptsRequest(chats=[chat]))
+    assert result["ok"] is True
+    saved = json.loads((project / ".vrcforge" / "chat-transcripts.json").read_text(encoding="utf-8"))["chats"]
+    assert saved == [chat]
+
+    page = snapshot_page({"chats": saved})
+    projected = json.loads(page["text"])
+    assert projected["chats"][0]["isTestChat"] is True
+    assert projected["chats"][0]["projectPath"] == str(project)
+
+
+def test_test_chat_marker_requires_a_boolean():
+    chat = {"id": "chat", "isTestChat": "true", "items": []}
+    assert not is_valid_chat_record(chat)
+
+
 @pytest.mark.parametrize("field,value", [
     ("id", ""), ("id", 3), ("sequence", -1), ("sequence", True),
     ("sequence", 1.5), ("timestamp", None), ("timestamp", ""),

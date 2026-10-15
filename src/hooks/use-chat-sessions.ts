@@ -713,6 +713,10 @@ export function useChatSessions({
     updateChat(chatId, (chat) => ({ ...chat, pinned: !chat.pinned }));
   }
 
+  function toggleTestChat(chatId: string) {
+    updateChat(chatId, (chat) => ({ ...chat, isTestChat: !chat.isTestChat }));
+  }
+
   function startRenameChat(chat: ChatThread) {
     setRenamingChatId(chat.id);
     setRenameDraft(chat.title || "");
@@ -846,6 +850,7 @@ export function useChatSessions({
     getChatById,
     newConversation,
     togglePinChat,
+    toggleTestChat,
     startRenameChat,
     commitRenameChat,
     deleteChatPermanently,
@@ -884,6 +889,7 @@ function normalizeStoredChatSnapshot(values: unknown[], liveChats: ChatThread[] 
       sessionId: typeof chat.sessionId === "string" ? chat.sessionId : "",
       title: typeof chat.title === "string" ? chat.title : "",
       titleSource: chat.titleSource === "auto" || chat.titleSource === "manual" ? chat.titleSource : undefined,
+      isTestChat: chat.isTestChat === true ? true : undefined,
       projectPath: typeof chat.projectPath === "string" ? chat.projectPath : "",
       projectType: chat.projectType === "general" || chat.projectType === "unity"
         ? chat.projectType

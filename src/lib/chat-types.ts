@@ -187,6 +187,8 @@ export type ChatThread = {
   title: string;
   /** Manual titles are user-owned; automatic generation may only fill auto titles. */
   titleSource?: "auto" | "manual";
+  /** Explicit acceptance-session marker; never inferred from title or prompt text. */
+  isTestChat?: boolean;
   projectPath: string;
   projectType?: "general" | "unity";
   createdAt?: string;

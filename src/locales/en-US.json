@@ -44,6 +44,7 @@
     "settings": "Settings",
     "projects": "Projects",
     "chats": "Chats",
+    "testChats": "Test chats",
     "newChat": "New Chat",
     "noTempChats": "No quick chats yet",
     "expandSidebar": "Expand sidebar",
@@ -1117,6 +1118,9 @@
     "unpinChat": "Unpin",
     "pinChat": "Pin Chat",
     "renameChat": "Rename Chat",
+    "markTestChat": "Mark as test chat",
+    "unmarkTestChat": "Unmark test chat",
+    "testChat": "Test chat",
     "permanentDelete": "Delete Permanently"
   },
   "deleteModal": {

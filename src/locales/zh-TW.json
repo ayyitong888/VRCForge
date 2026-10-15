@@ -44,6 +44,7 @@
     "settings": "設定",
     "projects": "專案",
     "chats": "對話",
+    "testChats": "測試對話",
     "newChat": "新對話",
     "noTempChats": "暫無臨時對話",
     "expandSidebar": "展開側邊欄",
@@ -1112,6 +1113,9 @@
     "unpinChat": "取消置頂",
     "pinChat": "置頂對話",
     "renameChat": "重新命名對話",
+    "markTestChat": "標記為測試會話",
+    "unmarkTestChat": "取消測試標記",
+    "testChat": "測試會話",
     "permanentDelete": "永久刪除"
   },
   "deleteModal": {
