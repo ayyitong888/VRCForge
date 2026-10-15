@@ -26353,7 +26353,7 @@ def register_agent_gateway_tools() -> None:
     AGENT_GATEWAY.register_tool("vrcforge_preview_write_animation_curve", "Preview one AnimationClip binding edit or an atomic curves batch without writing.", "plan/preview", lambda params: write_animation_curve_sync(params, preview=True))
     AGENT_GATEWAY.register_tool("vrcforge_preview_manage_expression_parameters", "Preview deleting, renaming, reordering, or updating existing expression parameters without writing.", "plan/preview", lambda params: manage_expression_parameters_sync(params, preview=True))
     AGENT_GATEWAY.register_tool("vrcforge_preview_manage_expression_menu", "Preview expression menu control create/update/delete/reorder without writing.", "plan/preview", lambda params: manage_expression_menu_sync(params, preview=True))
-    AGENT_GATEWAY.register_tool("vrcforge_preview_manage_fx_animator", "Preview one FX AnimatorController edit or ordered edits batch without writing.", "plan/preview", lambda params: manage_fx_animator_sync(params, preview=True))
+    AGENT_GATEWAY.register_tool("vrcforge_preview_manage_fx_animator", "Preview one FX edit or an atomic ordered edits batch, including multiple delete_layer entries by exact unique layerName, without writing.", "plan/preview", lambda params: manage_fx_animator_sync(params, preview=True))
     AGENT_GATEWAY.register_tool("vrcforge_preview_restore_backup", "Preview which files a safe backup restore would overwrite, without writing.", "plan/preview", preview_safe_backup_restore_sync)
     AGENT_GATEWAY.register_tool("vrcforge_scan_avatar_performance", "Calculate VRChat SDK performance statistics and rank for an avatar.", "read/debug", scan_avatar_performance_sync)
     AGENT_GATEWAY.register_tool("vrcforge_package_manager_status", "Detect vrc-get/ALCOM/vpm CLIs and addon package install state.", "read/debug", PACKAGE_INSTALL_WORKFLOWS.package_manager_status)
@@ -27101,7 +27101,7 @@ def register_agent_gateway_tools() -> None:
     )
     register_write_handler(
         "vrcforge_manage_fx_animator",
-        "Create, update, or delete FX AnimatorController layers, states and transitions, or atomically apply ordered edits to one existing controller.",
+        "Create, update, or delete FX layers, states and transitions. For multiple deletions on one controller, use one atomic edits batch of delete_layer entries with exact unique layerName; delete synced dependents before their target. Preserve clip and subasset references; preview and approve the complete batch.",
         "high",
         lambda params: manage_fx_animator_sync(params, preview=False),
     )

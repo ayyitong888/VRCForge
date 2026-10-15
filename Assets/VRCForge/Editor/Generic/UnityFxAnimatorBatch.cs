@@ -37,6 +37,24 @@ namespace VRCForge.Editor
                 var layerName = Required(edit, "layerName");
                 var layers = ((JArray)result["layers"]).OfType<JObject>().Where(layer => (string)layer["name"] == layerName).ToArray();
                 if (layers.Length != 1) throw new InvalidOperationException("Batch requires one unambiguous existing layer.");
+                if (action == "delete_layer")
+                {
+                    if (edit.Properties().Any(property => !new[] { "action", "layerName" }.Contains(property.Name)))
+                        throw new InvalidOperationException("Layer deletion accepts only action and exact layerName.");
+                    var allLayers = (JArray)result["layers"];
+                    var index = allLayers.IndexOf(layers[0]);
+                    foreach (JObject remaining in allLayers)
+                    {
+                        if (remaining == layers[0]) continue;
+                        var synced = (int?)remaining["syncedLayerIndex"] ?? -1;
+                        if (synced < -1 || synced >= allLayers.Count || synced == index)
+                            throw new InvalidOperationException("Delete synced dependent layers before their target; invalid sync references cannot be preserved.");
+                        if (synced > index) remaining["syncedLayerIndex"] = synced - 1;
+                    }
+                    allLayers.RemoveAt(index);
+                    edit["action"] = action; edit["layerName"] = layerName;
+                    continue;
+                }
                 var machine = (JObject)layers[0]["machine"];
                 var allStates = States(machine).ToArray();
                 if (allStates.GroupBy(state => (string)state["name"]).Any(group => group.Count() > 1))
@@ -228,7 +246,8 @@ namespace VRCForge.Editor
                 phase = "asset_mutation"; mutated = true;
                 foreach (JObject edit in edits)
                 {
-                    ManageFxAnimatorTool.ApplyForBatch((string)edit["action"], controller, edit);
+                    if ((string)edit["action"] == "delete_layer") ApplyLayerDeletion(controller, (string)edit["layerName"]);
+                    else ManageFxAnimatorTool.ApplyForBatch((string)edit["action"], controller, edit);
                     if ((string)edit["action"] == "ensure_transition")
                     {
                         var layer = controller.layers.Single(item => item.name == (string)edit["layerName"]);
@@ -314,6 +333,24 @@ namespace VRCForge.Editor
             }
         }
 
+        private static void ApplyLayerDeletion(AnimatorController controller, string layerName)
+        {
+            var layers = controller.layers.ToList();
+            var target = layers.Single(layer => layer.name == layerName);
+            var index = layers.IndexOf(target);
+            foreach (var remaining in layers)
+            {
+                if (remaining == target) continue;
+                if (remaining.syncedLayerIndex < -1 || remaining.syncedLayerIndex >= layers.Count || remaining.syncedLayerIndex == index)
+                    throw new InvalidOperationException("Layer sync references changed since preflight.");
+                if (remaining.syncedLayerIndex > index) remaining.syncedLayerIndex--;
+            }
+            // RemoveLayer clears/destroys its state machine. Keep subassets intact,
+            // including shared machines, behaviours and motions still referenced elsewhere.
+            layers.RemoveAt(index);
+            controller.layers = layers.ToArray();
+        }
+
         private static JObject Snapshot(AnimatorController controller)
         {
             var snapshot = (JObject)ManageFxAnimatorTool.DescribeForBatch(controller);
@@ -383,9 +420,9 @@ namespace VRCForge.Editor
                 throw new InvalidOperationException("FX batch differs from the preflight final plan.");
             var expectedIds = new HashSet<string>(expected.Descendants().OfType<JObject>().Where(item => item["_id"] != null).Select(item => (string)item["_id"]));
             var actualNodes = actual.Descendants().OfType<JObject>().Where(item => item["_id"] != null && expectedIds.Contains((string)item["_id"]))
-                .ToDictionary(item => (string)item["_id"], StringComparer.Ordinal);
+                .ToLookup(item => (string)item["_id"], StringComparer.Ordinal);
             foreach (var node in expected.Descendants().OfType<JObject>().Where(item => item["_id"] != null))
-                if (!actualNodes.TryGetValue((string)node["_id"], out var persisted) || !JToken.DeepEquals(node["_guard"], persisted["_guard"]))
+                if (!actualNodes.Contains((string)node["_id"]) || actualNodes[(string)node["_id"]].Any(persisted => !JToken.DeepEquals(node["_guard"], persisted["_guard"])))
                     throw new InvalidOperationException("An existing FX object's unchanged settings or behaviour references changed.");
         }
     }

@@ -82,6 +82,24 @@ def test_actual_ordered_fx_planner(tmp_path):
         ((JArray)envelope["edits"]).Add(new JObject());Check(Reject(()=>ValidateEnvelope(envelope)),"129 edits reject");
         envelope["edits"]=Edits();envelope["action"]="single";Check(Reject(()=>ValidateEnvelope(envelope)),"single and batch fields reject");
         envelope.Remove("action");envelope["controllerPath"]=new string('x',512*1024);Check(Reject(()=>ValidateEnvelope(envelope)),"512 KiB limit enforced");
+        var deletion=Original(); var deletionLayers=(JArray)deletion["layers"];
+        foreach(var name in new[]{"Hat","Hair","Cuffs"}){var row=(JObject)deletionLayers[0].DeepClone();row["name"]=name;row["syncedLayerIndex"]=-1;deletionLayers.Add(row);}
+        Verify(deletion,(JObject)deletion.DeepClone());Check(true,"shared persistent object identities verify across layers");
+        var deletes=JArray.Parse(@"[{'action':'delete_layer','layerName':'Hat'},{'action':'delete_layer','layerName':'Hair'},{'action':'delete_layer','layerName':'Cuffs'}]");
+        plan=BuildPlan(deletion,deletes,Motions());
+        Check(((JArray)plan["layers"]).Count==1 && JToken.DeepEquals(plan["layers"][0],deletionLayers[0]),"multiple named deletes preserve survivor graph and references");
+        Check(deletionLayers.Count==4,"delete planning leaves original unchanged");
+        var invalid=(JArray)deletes.DeepClone(); invalid.Add(new JObject{["action"]="delete_layer",["layerName"]="Missing"});
+        Check(Reject(()=>BuildPlan(deletion,invalid,Motions())) && deletionLayers.Count==4,"late invalid delete leaves original unchanged");
+        invalid=(JArray)deletes.DeepClone();invalid.Add(deletes[0].DeepClone());Check(Reject(()=>BuildPlan(deletion,invalid,Motions())),"repeated delete rejects");
+        var sync=(JObject)deletion.DeepClone();sync["layers"][3]["syncedLayerIndex"]=2;
+        plan=BuildPlan(sync,JArray.Parse(@"[{'action':'delete_layer','layerName':'Hat'}]"),Motions());
+        Check((int)plan["layers"][2]["syncedLayerIndex"]==1,"surviving sync target shifts with named deletion");
+        Check(Reject(()=>BuildPlan(sync,JArray.Parse(@"[{'action':'delete_layer','layerName':'Hair'}]"),Motions())),"retained synced dependent blocks target deletion");
+        plan=BuildPlan(sync,JArray.Parse(@"[{'action':'delete_layer','layerName':'Cuffs'},{'action':'delete_layer','layerName':'Hair'}]"),Motions());
+        Check(((JArray)plan["layers"]).Count==2,"dependent can be deleted before sync target");
+        invalid=JArray.Parse(@"[{'action':'delete_layer','layerName':'Hat','stateName':'unexpected'}]");
+        Check(Reject(()=>BuildPlan(deletion,invalid,Motions())),"delete rejects unrelated fields");
         return failures==0?0:1;
     }
     '''
@@ -94,4 +112,4 @@ def test_actual_ordered_fx_planner(tmp_path):
     (tmp_path/"Probe.runtimeconfig.json").write_text(json.dumps({"runtimeOptions":{"tfm":"netcoreapp3.1","framework":{"name":"Microsoft.NETCore.App","version":"3.1.0"}}}),encoding="utf-8")
     result=subprocess.run([dotnet,str(dll)],capture_output=True,text=True,timeout=30)
     assert result.returncode==0,result.stdout+result.stderr
-    assert result.stdout.count("PASS ")==30
+    assert result.stdout.count("PASS ")==39
