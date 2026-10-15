@@ -880,6 +880,16 @@ pub async fn send_agent_message(
     .await
 }
 
+#[tauri::command]
+pub async fn generate_chat_title(
+    request: DesktopJsonBodyRequest,
+) -> Result<serde_json::Value, String> {
+    blocking_backend_json_request(move || {
+        post_json_body_command("/api/app/chat-title", request, 16_000)
+    })
+    .await
+}
+
 #[cfg(test)]
 mod agent_message_transport_tests {
     use super::DesktopAgentMessageRequest;

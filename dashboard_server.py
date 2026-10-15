@@ -596,6 +596,7 @@ from provider_test_integration_service import (
     ProviderTestServicePorts,
     ProviderTextProbeRunner,
 )
+from chat_title_service import ChatTitleService
 from provider_vision_service import (
     ProviderVisionPolicyPorts,
     ProviderVisionSdkRunner,
@@ -1048,6 +1049,7 @@ from dashboard_api_models import (
     AgentToolRequest,
     AgentSessionRequest,
     AgentRuntimeMessageRequest,
+    ChatTitleRequest,
     AgentHarnessJourneyReceiptRequest,
     AgentRuntimeCancelRequest,
     ComputerUseTurnGrantRequest,
@@ -1342,6 +1344,10 @@ PROVIDER_TEXT_PROBE = ProviderTextProbeRunner(
         settings_factory=Settings,
         runtime_request_factory=ProviderRuntimeRequest,
     )
+)
+CHAT_TITLE_SERVICE = ChatTitleService(
+    PROVIDER_CONFIGURATION.bind_runtime_config,
+    PROVIDER_TEXT_PROBE.probe,
 )
 PROVIDER_TESTS = ProviderTestIntegrationService(
     ProviderTestServicePorts(
@@ -2856,6 +2862,34 @@ async def update_agentic_app_data_root(request: DataRootUpdateRequest) -> dict[s
         {"target": str(target), "moved": report.get("moved"), "skipped": report.get("skipped")},
     )
     return {"ok": True, "errors": [], "migrated": list(report.get("moved") or [])}
+
+
+@app.post("/api/app/chat-title")
+async def app_chat_title(request: ChatTitleRequest) -> dict[str, Any]:
+    """Generate one isolated title request after a new chat's first turn."""
+
+    cancel_event = Event()
+    try:
+        result = await asyncio.wait_for(
+            asyncio.to_thread(
+                CHAT_TITLE_SERVICE.generate,
+                message=request.message,
+                provider=request.provider or "",
+                model=request.model or "",
+                cancel_event=cancel_event,
+            ),
+            timeout=15.0,
+        )
+    except asyncio.TimeoutError:
+        return {"ok": False, "title": "", "reason": "timeout"}
+    except Exception:  # noqa: BLE001 - title generation never fails the main turn.
+        return {"ok": False, "title": "", "reason": "provider_failed"}
+    finally:
+        # wait_for() cancels this request task on timeout/disconnect, while the
+        # provider probe runs in a bounded worker thread. Always signal that
+        # worker on every exit path, including asyncio.CancelledError.
+        cancel_event.set()
+    return {"ok": result.ok, "title": result.title, "reason": result.reason}
 
 
 @app.post("/api/app/agent/message")

@@ -39,10 +39,16 @@ import {
   issueComputerUseTurnGrant,
   recordAgentRunQueued,
   requestAgentRunCancel,
+  requestChatTitle,
   sendAgentMessage,
 } from "../lib/api";
 import { DEFAULT_BACKGROUND_MAX_AGENTIC_TURNS } from "../lib/api/agent-runtime";
 import { projectVisionFailureNotice } from "../lib/vision-failure-notice";
+import {
+  applyGeneratedChatTitle,
+  chatTitleRunSucceeded,
+  shouldGenerateChatTitle,
+} from "../lib/chat-title";
 
 // Keep the client launch cap aligned with RuntimeLaneBudget's 12 background
 // slots; the backend retains four interactive slots within the total 16.
@@ -186,6 +192,7 @@ export function useChatRunController({
   const streamingTurnChatRef = useRef(new Map<string, string>());
   const activeTurnAbortRef = useRef<AbortController | null>(null);
   const backgroundTurnAbortRefs = useRef(new Map<string, AbortController>());
+  const titleGenerationAttemptedRef = useRef(new Set<string>());
   const rehydratedRef = useRef(false);
 
   useEffect(() => {
@@ -226,6 +233,31 @@ export function useChatRunController({
 
   function isRunning() {
     return sendingRef.current;
+  }
+
+  async function maybeGenerateChatTitle(
+    chatId: string,
+    message: string,
+    provider: string,
+    model: string,
+    fallbackTitle: string,
+  ): Promise<void> {
+    const current = getChatById(chatId);
+    if (!current || current.titleSource === "manual" || current.title !== fallbackTitle) {
+      return;
+    }
+    if (titleGenerationAttemptedRef.current.has(chatId)) return;
+    titleGenerationAttemptedRef.current.add(chatId);
+    try {
+      const result = await requestChatTitle(endpoint, message, provider, model);
+      const generatedTitle = result.ok ? result.title.trim() : "";
+      if (!generatedTitle) return;
+      updateChat(chatId, (current) => applyGeneratedChatTitle(current, fallbackTitle, generatedTitle));
+      await persistChatsNow?.().catch(() => undefined);
+    } catch {
+      // The first-message title remains the durable fallback when this
+      // independent, best-effort request cannot complete.
+    }
   }
 
   function markQueuedTurnStatus(turnId: string, status: QueuedTurn["queueStatus"]): void {
@@ -677,6 +709,7 @@ export function useChatRunController({
        const baseItems = (prepared?.baseItems ?? options?.baseItems ?? chat?.items ?? []).filter(
          (item) => item.type !== "user" || item.clientTurnId !== turn.id,
        );
+      const shouldGenerateTitle = shouldGenerateChatTitle(chat, baseItems.length, background);
       const chatSessionId = (prepared?.sessionId ?? options?.sessionId ?? chat?.sessionId) || `session-${turn.id}`;
       const chatAgentName = chat?.agentName || "desktop-agent";
       const history = baseItems.length > 0 ? buildChatHistory(baseItems, t) : [];
@@ -759,6 +792,7 @@ export function useChatRunController({
             ...touchChat(current),
             sessionId: chatSessionId,
             title: current.title || (message.length > 24 ? `${message.slice(0, 24)}...` : message),
+            titleSource: current.title ? current.titleSource : "auto",
             attachmentPayloads: Object.keys(attachmentPayloads).length ? attachmentPayloads : undefined,
             items: [
               ...stripTransientConversationItems(options?.baseItems ?? current.items).filter(
@@ -896,6 +930,7 @@ export function useChatRunController({
             ...touchChat(current),
             sessionId: current.sessionId || response.sessionId || response.session_id || chatSessionId,
             title: current.title || (message.length > 24 ? `${message.slice(0, 24)}...` : message),
+            titleSource: current.title ? current.titleSource : "auto",
             attachmentPayloads: Object.keys(attachmentPayloads).length ? attachmentPayloads : undefined,
             items: [
               ...current.items.filter(
@@ -928,6 +963,10 @@ export function useChatRunController({
       updateChat(chatId, (current) => ({
         ...applyRuntimeResponseToChat(current),
       }));
+      if (shouldGenerateTitle && chatTitleRunSucceeded(response)) {
+        const fallbackTitle = message.length > 24 ? `${message.slice(0, 24)}...` : message;
+        void maybeGenerateChatTitle(chatId, message, turn.provider, turn.model, fallbackTitle);
+      }
       if (midTurnCompactionApplied && persistChatsNow) {
         await persistChatsNow();
       }

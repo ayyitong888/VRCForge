@@ -722,7 +722,7 @@ export function useChatSessions({
     if (!cancel && renamingChatId) {
       const title = renameDraft.trim();
       if (title) {
-        updateChat(renamingChatId, (chat) => ({ ...chat, title }));
+        updateChat(renamingChatId, (chat) => ({ ...chat, title, titleSource: "manual" }));
       }
     }
     setRenamingChatId("");
@@ -883,6 +883,7 @@ function normalizeStoredChatSnapshot(values: unknown[], liveChats: ChatThread[] 
       id: chat.id,
       sessionId: typeof chat.sessionId === "string" ? chat.sessionId : "",
       title: typeof chat.title === "string" ? chat.title : "",
+      titleSource: chat.titleSource === "auto" || chat.titleSource === "manual" ? chat.titleSource : undefined,
       projectPath: typeof chat.projectPath === "string" ? chat.projectPath : "",
       projectType: chat.projectType === "general" || chat.projectType === "unity"
         ? chat.projectType

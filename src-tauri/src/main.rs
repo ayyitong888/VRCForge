@@ -292,6 +292,7 @@ fn main() {
             fetch_app_health,
             fetch_avatars,
             fetch_chats,
+            generate_chat_title,
             fetch_data_root,
             fetch_diagnostics,
             fetch_doctor,

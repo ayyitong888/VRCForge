@@ -495,7 +495,7 @@ mod chat_snapshot_sanitizer_tests {
                 "/chats/0/items/0/text",
                 "/other"
             ],
-            "chats":[{"items":[{
+            "chats":[{"titleSource":"auto", "items":[{
                 "type":"agent", "text":"api_key=private-value",
                 "compactionRecovery":[recovery.clone(), recovery.clone()],
                 "response":{"contextCompaction":{"recovery":recovery.clone()}}
@@ -504,6 +504,7 @@ mod chat_snapshot_sanitizer_tests {
             "api_key":"must-not-cross"
         });
         let actual = sanitize_chat_snapshot_response(value);
+        assert_eq!(actual["chats"][0]["titleSource"], "auto");
         assert_eq!(actual["chats"][0]["items"][0]["compactionRecovery"][0], recovery);
         assert_eq!(actual["chats"][0]["items"][0]["response"]["contextCompaction"]["recovery"], recovery);
         assert_eq!(actual["chats"][0]["items"][0]["compactionRecovery"][1]["summary"], "[redacted]");

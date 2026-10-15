@@ -53,6 +53,34 @@ export type StoredChats<T> = {
   chatDigests?: Record<string, string>;
 };
 
+export type ChatTitleResponse = {
+  ok: boolean;
+  title: string;
+  reason?: string;
+};
+
+export async function requestChatTitle(
+  endpoint: string,
+  message: string,
+  provider?: string,
+  model?: string,
+  signal?: AbortSignal,
+): Promise<ChatTitleResponse> {
+  const body = { message, provider, model };
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort<ChatTitleResponse>("generate_chat_title", {
+      request: { body, timeoutMs: 16000 },
+    }, signal);
+  }
+  return requestJson<ChatTitleResponse>(`${endpoint}/api/app/chat-title`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    signal,
+    timeoutMs: 16000,
+  });
+}
+
 export async function fetchChats<T>(endpoint: string, projectPaths: string[] = []): Promise<StoredChats<T>> {
   const params = new URLSearchParams();
   for (const projectPath of projectPaths) {

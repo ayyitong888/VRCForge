@@ -1122,6 +1122,8 @@ def is_valid_chat_record(value: Any) -> bool:
         for field in ("sessionId", "title", "projectPath", "createdAt", "updatedAt", "agentName")
     ):
         return False
+    if "titleSource" in value and value.get("titleSource") not in {"auto", "manual"}:
+        return False
     if any(field in value and not isinstance(value.get(field), bool) for field in ("pinned", "archived")):
         return False
     if "revision" in value and not _is_safe_nonnegative_integer(value.get("revision")):

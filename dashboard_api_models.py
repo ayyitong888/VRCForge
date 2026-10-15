@@ -860,6 +860,14 @@ class ChatSnapshotPatch(BaseModel):
     model_config = {"populate_by_name": True, "extra": "forbid"}
 
 
+class ChatTitleRequest(BaseModel):
+    message: str = Field(min_length=1, max_length=12000)
+    provider: str | None = Field(default=None, max_length=120)
+    model: str | None = Field(default=None, max_length=240)
+
+    model_config = {"populate_by_name": True, "extra": "forbid"}
+
+
 class ChatTranscriptsRequest(BaseModel):
     chats: list[dict[str, Any]] = Field(default_factory=list)
     source_revisions: list[dict[str, Any]] = Field(default_factory=list, alias="sourceRevisions")
