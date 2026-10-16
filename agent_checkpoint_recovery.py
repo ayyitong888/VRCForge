@@ -1402,7 +1402,12 @@ class AgentCheckpointRecoveryService:
         elif strategy == "project_chat_archive":
             backup = self._create_project_chat_checkpoint(project_root, backup_record)
         else:
-            backup = self._create_archive_checkpoint(project_root, backup_record)
+            # Persisted archiveFiles already includes each asset's .meta file.
+            # Recovery must preserve that exact scope, including on failure.
+            exact_files = ensure_string_list(checkpoint.get("archiveFiles"))
+            backup = self._create_archive_checkpoint(
+                project_root, backup_record, exact_files=exact_files or None,
+            )
         if not backup.get("ok"):
             return {
                 "ok": False,
@@ -1715,13 +1720,15 @@ class AgentCheckpointRecoveryService:
         self.prune_checkpoint_archives(protected_checkpoint_ids={checkpoint_id})
         return record
 
-    def _create_archive_checkpoint(self, project_root: Path, record: dict[str, Any]) -> dict[str, Any]:
+    def _create_archive_checkpoint(
+        self, project_root: Path, record: dict[str, Any], *, exact_files: list[str] | None = None,
+    ) -> dict[str, Any]:
         checkpoint_id = str(record["id"])
         project_key = self._checkpoint_project_key(project_root)
         archive_dir = self._ports.checkpoint_store_dir() / project_key
         archive_path = archive_dir / f"{checkpoint_id}.zip"
         temp_path = archive_path.with_suffix(".zip.tmp")
-        requested_files = ensure_string_list(record.get("archiveFiles"))
+        requested_files = ensure_string_list(exact_files if exact_files is not None else record.get("archiveFiles"))
         archive_files: list[str] = []
         if requested_files:
             expected_files: list[str] = []
@@ -1733,14 +1740,23 @@ class AgentCheckpointRecoveryService:
                     archive_files = []
                     break
                 meta = Path(str(target) + ".meta")
-                if not target.is_file() or not meta.is_file():
+                if not target.is_file() or (exact_files is None and not meta.is_file()):
                     archive_files = []
                     break
-                expected_files.extend((normalized, normalized + ".meta"))
-                archive_files.extend((normalized, normalized + ".meta"))
+                members = (normalized, normalized + ".meta") if exact_files is None else (normalized,)
+                expected_files.extend(members)
+                archive_files.extend(members)
             archive_files = list(dict.fromkeys(archive_files))
             if set(archive_files) != set(expected_files):
                 archive_files = []
+        if exact_files is not None and not archive_files:
+            record.update({
+                "ok": False, "blocking": True, "status": "failed", "strategy": "archive",
+                "archivePath": str(archive_path), "archiveFiles": requested_files,
+                "error": "Exact recovery backup scope is invalid or a scoped file is unavailable; no archive was created.",
+            })
+            self._append_checkpoint(record)
+            return record
         if requested_files and not archive_files:
             record.pop("archiveFiles", None)
             record["archiveScopeFallbackReason"] = "target_or_metadata_unavailable"
