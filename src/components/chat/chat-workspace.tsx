@@ -62,7 +62,6 @@ export function ChatWorkspace({
   attachments,
   onAttachFiles,
   onRemoveAttachment,
-  onUpdateAttachment,
   contextUsage,
   compaction,
   onCancelCompaction,
@@ -143,7 +142,6 @@ export function ChatWorkspace({
   attachments: ChatAttachment[];
   onAttachFiles: (files: FileList | File[] | null) => void;
   onRemoveAttachment: (id: string) => void;
-  onUpdateAttachment: (id: string, text: string) => void;
   contextUsage?: ContextUsage;
   compaction?: ChatCompactionState;
   onCancelCompaction?: () => void;
@@ -291,7 +289,6 @@ export function ChatWorkspace({
       attachments={attachments}
       onAttachFiles={onAttachFiles}
       onRemoveAttachment={onRemoveAttachment}
-      onUpdateAttachment={onUpdateAttachment}
       contextUsage={contextUsage}
       providerLabel={providerLabel}
       model={model}

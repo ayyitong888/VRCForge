@@ -55,7 +55,6 @@ export function Composer({
   attachments = [],
   onAttachFiles,
   onRemoveAttachment,
-  onUpdateAttachment,
   contextUsage,
   providerLabel,
   model,
@@ -84,7 +83,6 @@ export function Composer({
   attachments?: ChatAttachment[];
   onAttachFiles?: (files: ComposerFileInput) => void;
   onRemoveAttachment?: (id: string) => void;
-  onUpdateAttachment?: (id: string, text: string) => void;
   contextUsage?: ContextUsage;
   providerLabel?: string;
   model?: string;
@@ -101,7 +99,6 @@ export function Composer({
   const [paletteIndex, setPaletteIndex] = useState(0);
   const [paletteDismissed, setPaletteDismissed] = useState(false);
   const [dragDepth, setDragDepth] = useState(0);
-  const [selectedTextPopoverOpen, setSelectedTextPopoverOpen] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const composerRef = useRef<HTMLFormElement | null>(null);
   const currentMode = (permission?.executionMode || "approval") as ExecutionMode;
@@ -300,10 +297,7 @@ export function Composer({
         {selectedTextAttachments.length ? (
           <SelectedTextQuoteChip
             attachments={selectedTextAttachments}
-            open={selectedTextPopoverOpen}
-            onOpenChange={setSelectedTextPopoverOpen}
             onRemove={onRemoveAttachment}
-            onUpdate={onUpdateAttachment}
           />
         ) : null}
         <textarea
@@ -579,46 +573,32 @@ export function ContextUsageMeter({ usage, className = "" }: { usage: ContextUsa
 
 function SelectedTextQuoteChip({
   attachments,
-  open,
-  onOpenChange,
   onRemove,
-  onUpdate,
 }: {
   attachments: ChatAttachment[];
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
   onRemove?: (id: string) => void;
-  onUpdate?: (id: string, text: string) => void;
 }) {
   const { t } = useTranslation();
+  const selectedPreview = attachments.map((attachment) => attachment.text || "").filter(Boolean).join("\n\n");
   const removeSelectedText = () => {
     attachments.forEach((attachment) => onRemove?.(attachment.id));
-    onOpenChange(false);
   };
   return (
     <div
       className="relative mb-3 inline-flex min-w-0 max-w-full items-center"
       data-composer-selected-text-chip
-      onKeyDown={(event) => {
-        if (event.key === "Escape") {
-          event.preventDefault();
-          onOpenChange(false);
-        }
-      }}
     >
-      <button
-        type="button"
-        className="flex min-w-0 max-w-full items-center gap-2 overflow-hidden rounded-full border border-border/70 bg-background/75 px-3 py-1.5 pr-9 text-left text-xs text-foreground shadow-sm transition-colors hover:bg-muted"
-        aria-expanded={open}
-        aria-haspopup="dialog"
-        onClick={() => onOpenChange(!open)}
-        data-composer-selected-text-trigger
-      >
-        <MessageSquare className="h-4 w-4 shrink-0 text-muted-foreground" />
-        <span className="min-w-0 flex-1 truncate whitespace-nowrap">
-          {t("attachments.selectedText", { count: attachments.length })}
+      <SelectedTextHoverPreview text={selectedPreview}>
+        <span
+          className="flex min-w-0 max-w-full cursor-default items-center gap-2 overflow-hidden rounded-full border border-border/70 bg-background/75 px-3 py-1.5 pr-9 text-left text-xs text-foreground shadow-sm"
+          data-composer-selected-text-trigger
+        >
+          <MessageSquare className="h-4 w-4 shrink-0 text-muted-foreground" />
+          <span className="min-w-0 flex-1 truncate whitespace-nowrap">
+            {t("attachments.selectedText", { count: attachments.length })}
+          </span>
         </span>
-      </button>
+      </SelectedTextHoverPreview>
       {onRemove ? (
         <button
           type="button"
@@ -631,28 +611,35 @@ function SelectedTextQuoteChip({
           <X className="h-3.5 w-3.5" />
         </button>
       ) : null}
-      {open ? (
-        <div
-          className="absolute bottom-[calc(100%+0.5rem)] left-0 z-50 max-h-72 w-full max-w-[min(42rem,calc(100vw-3rem))] overflow-y-auto rounded-lg border border-border bg-card px-3 py-2 text-sm leading-relaxed text-foreground shadow-panel"
-          role="dialog"
-          aria-label={t("attachments.selectedText", { count: attachments.length })}
-          data-composer-selected-text-popover
-        >
-          {attachments.map((attachment, index) => (
-            <div key={attachment.id} className={index ? "mt-3 border-t border-border pt-3" : ""}>
-              <textarea
-                value={attachment.text || ""}
-                onChange={(event) => onUpdate?.(attachment.id, event.target.value)}
-                className="min-h-24 w-full resize-y rounded-md border border-border bg-background/60 px-2 py-1.5 text-sm leading-relaxed text-foreground outline-none focus:border-primary"
-                aria-label={t("attachments.editSelectedText")}
-                data-composer-selected-text-editor={attachment.id}
-              />
-              <pre className="sr-only whitespace-pre-wrap">{attachment.text || ""}</pre>
-            </div>
-          ))}
-        </div>
-      ) : null}
     </div>
+  );
+}
+
+function SelectedTextHoverPreview({ text, children }: { text: string; children: ReactNode }) {
+  const anchorRef = useRef<HTMLSpanElement | null>(null);
+  const [position, setPosition] = useState<{ left: number; top: number; below: boolean } | null>(null);
+  const preview = text.trim().slice(0, 260);
+  if (!preview) return <>{children}</>;
+  const updatePosition = () => {
+    const rect = anchorRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const maxWidth = Math.min(512, Math.max(0, window.innerWidth - 16));
+    const left = Math.min(Math.max(8, rect.left), Math.max(8, window.innerWidth - maxWidth - 8));
+    setPosition({ left, top: rect.top < 180 ? rect.bottom + 8 : rect.top - 8, below: rect.top < 180 });
+  };
+  return (
+    <span ref={anchorRef} className="relative inline-flex min-w-0 max-w-full" onMouseEnter={updatePosition} onMouseLeave={() => setPosition(null)} onFocus={updatePosition}>
+      {children}
+      {position ? (
+        <span
+          className="pointer-events-none fixed z-[60] max-h-[min(50vh,18rem)] w-[min(32rem,calc(100vw-1rem))] max-w-[calc(100vw-1rem)] overflow-y-auto whitespace-pre-wrap break-words rounded-lg border border-border bg-card px-3 py-2 text-sm leading-relaxed text-foreground shadow-panel"
+          style={{ left: position.left, top: position.top, transform: position.below ? undefined : "translateY(-100%)" }}
+          aria-hidden="true"
+        >
+          {preview}{text.length > preview.length ? "..." : ""}
+        </span>
+      ) : null}
+    </span>
   );
 }
 

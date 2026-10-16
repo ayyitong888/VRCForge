@@ -1,4 +1,4 @@
-// Real Composer + production Tailwind styles. Synthetic content only; no app/provider calls.
+// Real Composer + production Tailwind styles. Screenshot quote replay; no app/provider calls.
 import assert from "node:assert/strict";
 import { readFileSync, mkdirSync } from "node:fs";
 import { createServer } from "node:http";
@@ -11,7 +11,7 @@ import tailwindcss from "tailwindcss";
 const root = resolve(import.meta.dirname, "..");
 const require = createRequire(import.meta.url);
 const { chromium } = require(process.env.VRCFORGE_PLAYWRIGHT_PATH || "playwright");
-const quote = "第一行原文\n\n第二行原文，保留完整换行。\nEND_OF_SELECTED_QUOTE";
+const quote = "给你三个不同风格的名字，都适合黑白配色的模型";
 const compiled = await build({
   stdin: {
     resolveDir: root,
@@ -32,8 +32,7 @@ const compiled = await build({
       function Fixture() {
         return <main style={{width:'100%', padding:'220px 16px 16px'}}><div data-chat-composer-dock className="bg-workspace/95"><Composer input="draft" setInput={()=>{}} sending={false}
           onSubmit={()=>{}} onSwitchMode={()=>{}} attachments={[selected,regular]}
-          onRemoveAttachment={id=>window.removed.push(id)}
-          onUpdateAttachment={(id,text)=>{ selected.originalText ??= selected.text; selected.text=text; window.edited.push({id,text,originalText:selected.originalText}); }} /></div></main>;
+          onRemoveAttachment={id=>window.removed.push(id)} /></div></main>;
       }
       createRoot(document.getElementById('root')).render(<Fixture/>);
     `,
@@ -133,24 +132,28 @@ try {
     });
     assert.deepEqual(geometry, { aboveTextarea: true, oneLine: true, fitsViewport: true }, `selected text chip layout at ${width}px`);
   }
-  await page.locator("[data-composer-selected-text-trigger]").click();
-  const popover = page.locator("[data-composer-selected-text-popover]");
-  assert.equal(await popover.innerText(), quote, "popover exposes the full original multiline quote");
+  const label = page.locator("[data-composer-selected-text-trigger]");
+  await label.hover();
+  const preview = chip.locator('[aria-hidden="true"]').filter({ hasText: quote });
+  assert.equal(await preview.innerText(), quote, "hover previews the original multiline quote");
+  await label.click();
+  assert.equal(await chip.locator('button').count(), 1, "only the remove control is a button");
+  assert.equal(await chip.locator('textarea, input, [contenteditable="true"], [role="dialog"]').count(), 0, "clicking a quote never opens an editor");
+  assert.equal(await label.evaluate(el => el.tabIndex), -1, "quote label is not a clickable keyboard control");
+  assert.equal(await preview.evaluate(el => getComputedStyle(el).pointerEvents), "none", "preview cannot intercept clicks");
   assert.equal(await page.evaluate(() => window.originalQuote), quote, "source binding retains the original quote");
-  await page.locator('[data-composer-selected-text-editor="selection-bound-1"]').fill("edited quote");
-  assert.deepEqual(await page.evaluate(() => window.edited), [{ id: "selection-bound-1", text: "edited quote", originalText: quote }], "selected-text editor preserves original quote text while updating the bound attachment");
+  assert.deepEqual(await page.evaluate(() => window.edited), [], "quote remains unchanged");
   const screenshot = process.env.VRCFORGE_SELECTED_TEXT_CHIP_SCREENSHOT;
   if (screenshot) {
     mkdirSync(resolve(screenshot, ".."), { recursive: true });
     await page.screenshot({ path: screenshot });
   }
-  await page.locator("[data-composer-selected-text-trigger]").press("Escape");
-  assert.equal(await popover.count(), 0, "Escape closes the selected-text popover");
-  await page.locator("[data-composer-selected-text-trigger]").click();
+  await textarea.hover();
+  assert.equal(await preview.count(), 0, "moving away dismisses the preview");
   await page.locator("[data-composer-selected-text-remove]").click();
   assert.deepEqual(await page.evaluate(() => window.removed), ["selection-bound-1"], "inline remove targets the bound selected-text attachment");
   assert.deepEqual(errors, []);
-  console.log("PASS: selected-text chip stays above textarea and single-line at 375/768px; full quote popover and bound removal verified.");
+  console.log("PASS: selected-text chip at 375/768px; inert label, hover preview, unchanged quote and remove-only interaction verified.");
 } finally {
   await browser?.close();
   await new Promise(done => server.close(done));

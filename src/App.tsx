@@ -3276,12 +3276,6 @@ export default function App() {
     setAttachments((current) => current.filter((attachment) => attachment.id !== id));
   }
 
-  function updateAttachmentText(id: string, text: string) {
-    setAttachments((current) => current.map((attachment) => attachment.id === id
-      ? { ...attachment, originalText: attachment.originalText ?? attachment.text, text, size: new Blob([text]).size }
-      : attachment));
-  }
-
   async function importVaultAttachment(attachment: ChatAttachment) {
     const payloadHash = attachment.payloadKind === "vault_file" ? attachment.payloadHash : attachment.vaultPayloadHash;
     if (!payloadHash) {
@@ -4235,7 +4229,6 @@ export default function App() {
               attachments={attachments}
               onAttachFiles={(files) => void addComposerFiles(files)}
               onRemoveAttachment={removeAttachment}
-              onUpdateAttachment={updateAttachmentText}
               developerOptionsEnabled={developerOptionsEnabled}
               contextUsage={contextUsage}
               compaction={activeChat?.compaction}
