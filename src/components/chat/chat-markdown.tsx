@@ -1,16 +1,22 @@
-import { useMemo } from "react";
+import { isValidElement, useId, useMemo } from "react";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import type { Components } from "react-markdown";
 import rehypeRaw from "rehype-raw";
 import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
+import rehypeKatex from "rehype-katex";
 
 import { isInternalRuntimeUrl } from "../../lib/runtime-url";
 import { cn } from "../../lib/utils";
+import { MarkdownCodeBlock } from "./markdown-code-block";
 
 export function ChatMarkdown({ text, variant = "agent" }: { text?: string; variant?: "agent" | "user" }) {
   const inverted = variant === "user";
   const components = useMemo(() => buildChatMarkdownComponents(inverted), [inverted]);
+  const instanceId = useId().replace(/[^A-Za-z0-9_-]/g, "");
+  const clobberPrefix = useMemo(() => `vrcforge-${instanceId}-`, [instanceId]);
+  const sanitizeSchema = useMemo(() => ({ ...CHAT_MARKDOWN_SANITIZE_SCHEMA, clobberPrefix }), [clobberPrefix]);
   if (!text?.trim()) {
     return null;
   }
@@ -20,8 +26,9 @@ export function ChatMarkdown({ text, variant = "agent" }: { text?: string; varia
       data-testid={`chat-markdown-${variant}`}
     >
       <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
-        rehypePlugins={[rehypeRaw, [rehypeSanitize, CHAT_MARKDOWN_SANITIZE_SCHEMA]]}
+        remarkPlugins={[remarkGfm, remarkMath]}
+        remarkRehypeOptions={{ clobberPrefix: "" }}
+        rehypePlugins={[rehypeRaw, [rehypeSanitize, sanitizeSchema], [scopeMarkdownFragments, clobberPrefix], [rehypeKatex, { trust: false }]]}
         components={components}
         urlTransform={safeMarkdownUrlTransform}
       >
@@ -45,6 +52,7 @@ const CHAT_MARKDOWN_SANITIZE_SCHEMA = {
   ],
   attributes: {
     ...defaultSchema.attributes,
+    "*": [...(defaultSchema.attributes?.["*"] || []), "id"],
     a: [
       ...(defaultSchema.attributes?.a || []),
       "target",
@@ -58,8 +66,7 @@ const CHAT_MARKDOWN_SANITIZE_SCHEMA = {
       "aria-checked",
     ],
     code: [
-      ...(defaultSchema.attributes?.code || []),
-      ["className", /^language-[A-Za-z0-9_-]+$/],
+      ["className", /^language-[A-Za-z0-9_+-]+$/, "math-inline", "math-display"],
     ],
     span: [
       ...(defaultSchema.attributes?.span || []),
@@ -91,13 +98,16 @@ function buildChatMarkdownComponents(inverted: boolean): Components {
     h4: ({ node: _node, ...props }) => <h4 className={cn("mb-2 mt-4 text-sm font-semibold leading-snug first:mt-0", textClass)} {...props} />,
     h5: ({ node: _node, ...props }) => <h5 className={cn("mb-2 mt-4 text-sm font-semibold leading-snug first:mt-0", mutedClass)} {...props} />,
     h6: ({ node: _node, ...props }) => <h6 className={cn("mb-2 mt-4 text-xs font-semibold uppercase leading-snug first:mt-0", mutedClass)} {...props} />,
-    p: ({ node: _node, ...props }) => <p className="my-3 whitespace-pre-wrap first:mt-0 last:mb-0" {...props} />,
+    p: ({ node: _node, ...props }) => <p className={cn("my-3 first:mt-0 last:mb-0", inverted && "whitespace-pre-wrap")} {...props} />,
     a: ({ node: _node, href, ...props }) => {
       const safeHref = safeMarkdownUrlTransform(String(href || ""));
       if (!safeHref) {
         return <span {...props} />;
       }
-      return <a className={linkClass} href={safeHref} target="_blank" rel="noreferrer" {...props} />;
+      if (safeHref.startsWith("#")) {
+        return <a className={linkClass} {...props} href={safeHref} target={undefined} />;
+      }
+      return <a className={linkClass} {...props} href={safeHref} target="_blank" rel="noreferrer" />;
     },
     blockquote: ({ node: _node, ...props }) => <blockquote className={cn("my-3 border-l-2 pl-3", borderClass, mutedClass)} {...props} />,
     ul: ({ node: _node, className, ...props }) => <ul className={cn("my-3 list-disc space-y-1.5 pl-5 first:mt-0 last:mb-0", className)} {...props} />,
@@ -113,7 +123,13 @@ function buildChatMarkdownComponents(inverted: boolean): Components {
     td: ({ node: _node, ...props }) => <td className={cn("border-b border-r px-3 py-2 align-top last:border-r-0", borderClass)} {...props} />,
     tr: ({ node: _node, ...props }) => <tr className="last:[&>td]:border-b-0" {...props} />,
     hr: ({ node: _node, ...props }) => <hr className={cn("my-4", borderClass)} {...props} />,
-    pre: ({ node: _node, ...props }) => <pre className={cn("app-scrollbar my-3 max-h-80 overflow-auto rounded-md border p-3 text-xs first:mt-0 last:mb-0", borderClass, softBgClass)} {...props} />,
+    pre: ({ node: _node, children: _children }) => {
+      const codeElement = Array.isArray(_children) ? _children[0] : _children;
+      const codeProps = isValidElement(codeElement) ? codeElement.props as { className?: unknown; children?: unknown } : {};
+      const className = typeof codeProps.className === "string" ? codeProps.className : "";
+      const language = className.match(/(?:^|\s)language-([A-Za-z0-9_+-]+)/)?.[1];
+      return <MarkdownCodeBlock code={markdownCodeText(codeProps.children)} language={language} inverted={inverted} />;
+    },
     code: ({ node: _node, className, ...props }) => <code className={cn("rounded px-1 py-0.5 font-mono text-[0.92em]", softBgClass, className)} {...props} />,
     strong: ({ node: _node, ...props }) => <strong className={cn("font-semibold", textClass)} {...props} />,
     em: ({ node: _node, ...props }) => <em className="italic" {...props} />,
@@ -128,6 +144,54 @@ function buildChatMarkdownComponents(inverted: boolean): Components {
       return <img className={cn("my-3 max-h-96 max-w-full rounded-md border object-contain", borderClass)} src={safeSrc} alt={alt || ""} {...props} />;
     },
   };
+}
+
+function markdownCodeText(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) return value.map(markdownCodeText).join("");
+  if (isValidElement(value)) return markdownCodeText((value.props as { children?: unknown }).children);
+  return value == null ? "" : String(value);
+}
+
+function scopeMarkdownFragments(prefix: string) {
+  return (tree: { children?: Array<Record<string, unknown>> }) => {
+    const ids = new Set<string>();
+    walkMarkdownTree(tree, (node) => {
+      const properties = node.properties as Record<string, unknown> | undefined;
+      if (typeof properties?.id === "string") {
+        // Footnote identifiers may contain URI escapes; fragments navigate to decoded IDs.
+        try { properties.id = decodeURIComponent(properties.id); } catch { /* Preserve literal malformed escapes. */ }
+        ids.add(properties.id as string);
+      }
+    });
+    walkMarkdownTree(tree, (node) => {
+      const properties = node.properties as Record<string, unknown> | undefined;
+      if (!properties) return;
+      if (typeof properties.href === "string" && properties.href.startsWith("#")) {
+        properties.href = `#${resolveMarkdownFragment(properties.href.slice(1), ids, prefix)}`;
+      }
+      if (Array.isArray(properties.ariaDescribedBy)) {
+        properties.ariaDescribedBy = properties.ariaDescribedBy.map((id) => resolveMarkdownFragment(String(id), ids, prefix));
+      } else if (typeof properties.ariaDescribedBy === "string") {
+        properties.ariaDescribedBy = properties.ariaDescribedBy.split(/\s+/).map((id) => resolveMarkdownFragment(id, ids, prefix)).join(" ");
+      }
+    });
+  };
+}
+
+function resolveMarkdownFragment(fragment: string, ids: Set<string>, prefix: string): string {
+  let decoded = fragment;
+  try { decoded = decodeURIComponent(fragment); } catch { /* Keep malformed escapes as literal fragments. */ }
+  if (ids.has(decoded)) return decoded;
+  const prefixed = `${prefix}${decoded}`;
+  if (ids.has(prefixed)) return prefixed;
+  return fragment;
+}
+
+function walkMarkdownTree(node: { children?: Array<Record<string, unknown>> } | null | undefined, visit: (node: Record<string, unknown>) => void) {
+  if (!node) return;
+  visit(node as Record<string, unknown>);
+  for (const child of node.children || []) walkMarkdownTree(child, visit);
 }
 
 function safeMarkdownUrlTransform(url: string): string {

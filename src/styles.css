@@ -1,5 +1,14 @@
 @import "./theme.css";
+@import "katex/dist/katex.min.css";
+@import "./components/chat/markdown-code-block.css";
 
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+.chat-markdown .katex-display {
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding-block: 0.25rem;
+}

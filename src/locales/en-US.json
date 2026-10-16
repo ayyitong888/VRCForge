@@ -711,6 +711,13 @@
     "roslynFullAutoDesc": "Auto approve all requests with an audit trail. Highest risk; no extra startup confirmation."
   },
   "chat": {
+    "markdown": {
+      "copy": "Copy code",
+      "copied": "Copied",
+      "copyFailed": "Copy failed",
+      "mermaidLoading": "Rendering diagram…",
+      "mermaidUnavailable": "Diagram preview is unavailable. You can still view and copy the source."
+    },
     "inputPlaceholder": "Type anything",
     "sessionRecoveryBlocked": "{{count}} chat storage source(s) need recovery. Healthy chats were loaded, but saving is paused until Doctor resolves the damaged source.",
     "sessionSaveBlocked": "Chat saving is paused because a storage source needs recovery. Open Doctor before continuing.",

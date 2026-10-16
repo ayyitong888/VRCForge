@@ -711,6 +711,13 @@
     "roslynFullAutoDesc": "所有請求自動通過並留痕；風險最高，不再需要啟動額外確認。"
   },
   "chat": {
+    "markdown": {
+      "copy": "複製程式碼",
+      "copied": "已複製",
+      "copyFailed": "複製失敗",
+      "mermaidLoading": "正在產生圖表…",
+      "mermaidUnavailable": "暫時無法顯示圖表，仍可查看和複製原始碼。"
+    },
     "inputPlaceholder": "隨心輸入",
     "sessionRecoveryBlocked": "有 {{count}} 個聊天儲存來源需要復原。健康會話已載入，但在 Doctor 處理損壞來源前會暫停儲存。",
     "sessionSaveBlocked": "聊天儲存來源需要復原，儲存已暫停。請先開啟 Doctor 處理。",

@@ -711,6 +711,13 @@
     "roslynFullAutoDesc": "すべてのリクエストを監査記録付きで自動承認します。最もリスクが高く、起動時の追加確認はありません。"
   },
   "chat": {
+    "markdown": {
+      "copy": "コードをコピー",
+      "copied": "コピーしました",
+      "copyFailed": "コピーできませんでした",
+      "mermaidLoading": "図を描画中…",
+      "mermaidUnavailable": "図を表示できません。ソースは引き続き表示・コピーできます。"
+    },
     "inputPlaceholder": "自由に入力",
     "sessionRecoveryBlocked": "{{count}} 件のチャット保存元に復旧が必要です。正常なチャットは読み込みましたが、Doctor が破損元を処理するまで保存を停止します。",
     "sessionSaveBlocked": "チャット保存元に復旧が必要なため、保存を停止しています。先に Doctor を開いてください。",
