@@ -679,7 +679,7 @@ def test_native_completed_prefix_replace_is_atomic_cas_and_preserves_current_suf
         ]
     )
     source = state.native_conversation("s", binding="b")
-    replaced = state.replace_native_completed_prefix(
+    replaced = state.replace_native_compacted_history(
         "s", binding="b", expected_snapshot=source, summary="Older continuity"
     )
     assert replaced["activeTurnStart"] == 1
@@ -688,7 +688,7 @@ def test_native_completed_prefix_replace_is_atomic_cas_and_preserves_current_suf
         {"role": "user", "content": "current"},
     ]
     with pytest.raises(ValueError, match="snapshot"):
-        state.replace_native_completed_prefix(
+        state.replace_native_compacted_history(
             "s", binding="b", expected_snapshot=source, summary="stale"
         )
     assert state.native_conversation("s", binding="b") == replaced
@@ -712,7 +712,7 @@ def test_native_compaction_tail_restores_exact_prefix_policy_in_same_save_and_is
     })
     state.begin_native_turn("s", binding="b", turn_id="t2", message="current")
     source = state.native_conversation("s", binding="b")
-    compacted = state.replace_native_completed_prefix(
+    compacted = state.replace_native_compacted_history(
         "s", binding="b", expected_snapshot=source, summary="summary",
     )
     policy = {"role": "system", "content": SCAN_RESULT_CONTINUATION_POLICY}
@@ -720,7 +720,7 @@ def test_native_compaction_tail_restores_exact_prefix_policy_in_same_save_and_is
     assert compacted["messages"][-1] == policy and compacted["activeTurnStart"] == 1
     state.begin_native_turn("s", binding="b", turn_id="t3", message="next turn")
     next_source = state.native_conversation("s", binding="b")
-    next_compacted = state.replace_native_completed_prefix(
+    next_compacted = state.replace_native_compacted_history(
         "s", binding="b", expected_snapshot=next_source, summary="summary again",
     )
     assert next_compacted["messages"].count(policy) == 1
@@ -736,13 +736,13 @@ def test_native_compaction_tail_restores_exact_prefix_policy_in_same_save_and_is
     before = failed_state.native_conversation("s", binding="b")
     failing_store.fail = True
     with pytest.raises(OSError, match="disk unavailable"):
-        failed_state.replace_native_completed_prefix(
+        failed_state.replace_native_compacted_history(
             "s", binding="b", expected_snapshot=before, summary="summary",
         )
     assert failed_state.native_conversation("s", binding="b") == before
 
 
-def test_native_prefix_cas_preserves_pending_current_suffix_and_rejects_invalid_boundary() -> None:
+def test_native_compaction_rejects_pending_calls_and_invalid_boundary_atomically() -> None:
     state, _lock = make_state()
     state.begin_native_turn(
         "s", binding="b", turn_id="t", message="current", initial_history=[
@@ -758,14 +758,14 @@ def test_native_prefix_cas_preserves_pending_current_suffix_and_rejects_invalid_
         ]}
     )
     source = state.native_conversation("s", binding="b")
-    replaced = state.replace_native_completed_prefix(
-        "s", binding="b", expected_snapshot=source, summary="Older continuity"
-    )
-    assert replaced["messages"][1:] == source["messages"][source["activeTurnStart"]:]
-    assert state._native_pending(replaced) == {"pending"}
-    assert replaced["messages"].count({"role": "system", "content": SCAN_RESULT_CONTINUATION_POLICY}) == 1
-    invalid = dict(replaced)
-    invalid["activeTurnStart"] = 2
+    with pytest.raises(ValueError, match="pending"):
+        state.replace_native_compacted_history(
+            "s", binding="b", expected_snapshot=source, summary="Older continuity"
+        )
+    assert state.native_conversation("s", binding="b") == source
+    assert state._native_pending(source) == {"pending"}
+    invalid = dict(source)
+    invalid["activeTurnStart"] = 3
     with pytest.raises(ValueError, match="active turn"):
         state.restore_native_conversation("other", binding="b", snapshot=invalid)
 
@@ -778,7 +778,7 @@ def test_native_stale_precompaction_snapshot_cannot_expand_owner() -> None:
         ]
     )
     stale = state.native_conversation("s", binding="b")
-    compacted = state.replace_native_completed_prefix(
+    compacted = state.replace_native_compacted_history(
         "s", binding="b", expected_snapshot=stale, summary="Older continuity"
     )
     assert state.restore_native_conversation("s", binding="b", snapshot=stale) == compacted

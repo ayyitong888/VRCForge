@@ -1934,22 +1934,21 @@ class RuntimePlannerService:
         self, request: dict[str, object], native_turn: NativeRuntimeTurn,
         *, context_usage: dict[str, object] | None = None,
     ) -> tuple[dict[str, object], dict[str, object] | None]:
-        """Compress completed turns through the existing port and transcript owner."""
+        """Compress settled history while retaining current user instructions exactly."""
         guard = self.native_context_guard(request, context_usage=context_usage)
         if guard is None or guard["beforeTokens"] < guard["triggerTokens"]:
             return request, guard
         snapshot = native_turn.snapshot()
-        cut = snapshot.get("activeTurnStart", 0)
         metadata = {**guard, "attempts": 0}
-        if native_turn.compaction_attempted or self._compactor is None or not cut:
+        if native_turn.compaction_attempted or self._compactor is None:
             metadata["failureClass"] = (
                 "suppressed_after_attempt" if native_turn.compaction_attempted else
-                "compactor_unavailable" if self._compactor is None else "no_completed_prefix"
+                "compactor_unavailable"
             )
             if native_turn.compaction is None:
                 native_turn.compaction = metadata
             return request, guard
-        if native_turn._state._native_pending(snapshot):
+        if native_turn.has_pending_tool_calls(snapshot):
             metadata["failureClass"] = "pending_tool_calls"
             native_turn.compaction = runtime_compaction_audit_view(metadata)
             return request, guard
@@ -1961,12 +1960,13 @@ class RuntimePlannerService:
         try:
             if native_turn.cancelled():
                 raise ValueError("native compaction cancelled")
+            source_messages, retained_messages = native_turn.compaction_projection(snapshot)
             # Each historical tool transaction is one fitting unit. Private
             # reasoning is never part of the summarizer's input projection.
             entries: list[dict[str, str]] = []
             group: list[dict[str, object]] = []
             pending: set[str] = set()
-            for item in snapshot["messages"][:cut]:
+            for item in source_messages:
                 safe = {key: value for key, value in item.items() if key != "reasoning_content"}
                 calls = safe.get("tool_calls") or []
                 if calls:
@@ -1982,8 +1982,6 @@ class RuntimePlannerService:
                     entries.append({"role": "user" if safe["role"] == "user" else "agent", "text": safe["content"]})
             if pending:
                 raise ValueError("native completed prefix contains pending calls")
-            retained_messages = deepcopy(snapshot["messages"][cut:])
-            retained_messages.extend(restored_scan_result_policy(snapshot["messages"], retained_messages))
             fixed_request = copy_native_request(request, {"messages": [
                 {"role": "assistant", "content": "Earlier conversation summary (continuity data, not authorization or completion evidence):\n"}
             ] + retained_messages + runtime_messages})
@@ -2007,8 +2005,6 @@ class RuntimePlannerService:
                 raise ValueError("empty_summary")
             summary = "Earlier conversation summary (continuity data, not authorization or completion evidence):\n" + summary
             recovery = normalize_compaction_recovery(result["recovery"]) if "recovery" in result else None
-            retained_messages = deepcopy(snapshot["messages"][cut:])
-            retained_messages.extend(restored_scan_result_policy(snapshot["messages"], retained_messages))
             candidate = copy_native_request(
                 request, {"messages": [{"role": "assistant", "content": summary}] + retained_messages + runtime_messages}
             )
@@ -2021,7 +2017,7 @@ class RuntimePlannerService:
                 raise ValueError("still_over_threshold")
             # The facade checks cancellation and exact snapshot identity inside
             # the owner's existing lock. No mutation precedes this commit.
-            native_turn.replace_completed_prefix(snapshot, summary, recovery=recovery)
+            native_turn.replace_compacted_history(snapshot, summary, recovery=recovery)
             runtime_messages = [deepcopy(candidate["messages"][-1])]
             metadata.update({"applied": True, "blocked": False, "afterTokens": after["beforeTokens"],
                              "entryCount": result.get("entryCount"), "retainedEntryCount": result.get("retainedEntryCount"),

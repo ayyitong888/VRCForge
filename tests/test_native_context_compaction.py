@@ -48,7 +48,7 @@ def plan(planner, turn, usage=None):
         return planner.plan_agent_turn("Continue checking", {}, {}, native_turn=turn, context_usage=usage)
 
 
-def test_native_compaction_reuses_port_and_preserves_current_receipts():
+def test_native_compaction_reuses_port_and_summarizes_settled_current_receipts():
     compactor = Compactor()
     state, planner, model, turn = fixture(compactor)
     state.append_native_assistant("s", binding="b", message={"role": "assistant", "content": "checking",
@@ -57,7 +57,7 @@ def test_native_compaction_reuses_port_and_preserves_current_receipts():
     state.settle_native_call("s", binding="b", call_id="current-read", content='{"status":"ok"}')
     state.append_native_user("s", binding="b", message="Keep checking")
     before = state.native_conversation("s", binding="b")
-    suffix = deepcopy(before["messages"][before["activeTurnStart"]:])
+    suffix = [deepcopy(item) for item in before["messages"][before["activeTurnStart"]:] if item["role"] == "user"]
     usage = {"requestCount": 9, "cumulativeInputTokens": 9000, "peakInputTokens": 15000}
 
     result = plan(planner, turn, usage)
@@ -68,6 +68,9 @@ def test_native_compaction_reuses_port_and_preserves_current_receipts():
     assert "PRIVATE_REASONING_SENTINEL" not in json.dumps([history for history, _metadata in compactor.calls])
     grouped = [entry["text"] for entry in compactor.calls[0][0] if "read-old" in entry["text"]]
     assert len(grouped) == 1 and "readback-old" in grouped[0] and "fixture.txt" in grouped[0]
+    current_group = [entry["text"] for entry in compactor.calls[0][0] if "current-read" in entry["text"]]
+    assert len(current_group) == 1 and '"status":"ok"' in current_group[0].replace('\\"', '"')
+    assert "CURRENT_EXACT_REPLAY" not in str(compactor.calls[0][0])
     assert model.requests[0]["messages"][1:-1] == suffix
     assert model.requests[0]["messages"][-1]["role"] == "system"
     assert state.native_conversation("s", binding="b")["activeTurnStart"] == 1

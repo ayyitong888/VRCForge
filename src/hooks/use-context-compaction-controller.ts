@@ -506,7 +506,7 @@ function buildReplacementItems(
     }
   }
   const recentDialogue = lastUserIndex >= 0
-    ? durable.slice(lastUserIndex).filter((item) => item.type === "user" || item.type === "agent")
+    ? [durable[lastUserIndex]]
     : [];
   const stateCards = durable
     .filter((item) => item.type === "subagent" || item.type === "result");

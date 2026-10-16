@@ -545,7 +545,22 @@ class AgentRuntimeSessionState:
                 return restored(existing)
             raise ValueError("native snapshot conflicts with current conversation")
 
-    def replace_native_completed_prefix(
+    @classmethod
+    def native_compaction_projection(cls, snapshot: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        # Every pending call (including approval/question waits) blocks replacement.
+        if cls._native_pending(snapshot):
+            raise ValueError("native compaction has pending calls")
+        start = snapshot["activeTurnStart"]
+        retained = [copy.deepcopy(item) for item in snapshot["messages"][start:]
+                    if item["role"] == "user"]
+        source = [copy.deepcopy(item) for index, item in enumerate(snapshot["messages"])
+                  if index < start or item["role"] != "user"]
+        if not retained or not source:
+            raise ValueError("native compaction source is unavailable")
+        retained.extend(restored_scan_result_policy(snapshot["messages"], retained))
+        return source, retained
+
+    def replace_native_compacted_history(
         self,
         session_id: str,
         *,
@@ -562,11 +577,7 @@ class AgentRuntimeSessionState:
             current = self._native_conversations.get(session_id)
             if current is None or current["binding"] != binding or current != expected:
                 raise ValueError("native snapshot compare-and-replace mismatch")
-            cut = current["activeTurnStart"]
-            if cut <= 0 or self._native_pending({"messages": current["messages"][:cut]}):
-                raise ValueError("native completed prefix is unavailable")
-            retained_messages = copy.deepcopy(current["messages"][cut:])
-            retained_messages.extend(restored_scan_result_policy(current["messages"], retained_messages))
+            _source, retained_messages = self.native_compaction_projection(current)
             candidate = {
                 "binding": binding,
                 "turnId": current["turnId"],

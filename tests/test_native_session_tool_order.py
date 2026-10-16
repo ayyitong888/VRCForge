@@ -65,7 +65,7 @@ def test_compaction_preserves_order_and_old_snapshot_can_start_order():
     owner.order_tools(definitions(["b1", "a1"]))
     continued = turn(state, turn_id="next")
     snapshot = continued.snapshot()
-    continued.replace_completed_prefix(snapshot, "previous task")
+    continued.replace_compacted_history(snapshot, "previous task")
     assert continued.snapshot()["toolOrder"] == ["b1", "a1"]
     legacy = deepcopy(continued.snapshot())
     legacy.pop("toolOrder")

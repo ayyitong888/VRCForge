@@ -20,32 +20,45 @@ function harness(items, summary="历史仅检查，未修改。"){
 const user=(id,text)=>({id,type:'user',text});
 const agent=(id,text,extra={})=>({id,type:'agent',response:{ok:true,plan:{reply:text},...extra},timeline:[]});
 
-test('actual failed projection requests only old source and 100-token summary budget',{skip:!process.env.VRCFORGE_COMPACT_PROJECTION},async()=>{
+test('actual failed projection includes completed answer and reserves exact latest user',{skip:!process.env.VRCFORGE_COMPACT_PROJECTION},async()=>{
  const raw=JSON.parse(await readFile(process.env.VRCFORGE_COMPACT_PROJECTION,'utf8'));
  const before=JSON.stringify(raw);
  const h=harness(raw.state.items);const outcome=await h.run();
  assert.equal(h.requests.length,1);
- assert.equal(h.requests[0].targetTokens,100);
- assert.equal(h.requests[0].history.length,5);
- assert.ok(h.requests[0].history.every(x=>x.role==='user'));
+ assert.equal(h.requests[0].targetTokens,872);
+ assert.equal(h.requests[0].history.length,6);
+ assert.equal(h.requests[0].history.filter(x=>x.role==='user').length,5);
+ assert.equal(h.requests[0].history.at(-1).role,'agent');
  assert.equal(outcome.status,'applied');
  assert.deepEqual(h.chat.items.slice(-2),raw.state.items.slice(-2));
  assert.equal(JSON.stringify(raw),before);
- // Replaying the original too-long summary must still fail the unchanged gate.
+ // The original actual summary now fits because the completed answer is replaced.
  const old=harness(raw.state.items,raw.response.summary);
- assert.equal((await old.run()).status,'failed');
- assert.equal(old.chat.compaction.failureClass,'reduction_gate');
- assert.equal(old.chat.sessionId,'session');
- assert.deepEqual(old.chat.items,raw.state.items);
+ assert.equal((await old.run()).status,'applied');
+ assert.equal(old.chat.compaction.afterTokens,778);
+ const oversized=harness(raw.state.items,raw.response.summary.repeat(3));
+ assert.equal((await oversized.run()).status,'failed');
+ assert.equal(oversized.chat.compaction.failureClass,'reduction_gate');
+ assert.deepEqual(oversized.chat.items,raw.state.items);
  // Immediately re-compacting this short result has no useful 64-token room.
  assert.equal((await h.run()).status,'skipped');
  assert.equal(h.requests.length,1);
  assert.equal(h.errors.at(-1),'compact.noContent');
 });
-test('single latest turn or insufficient room skips with manual noContent feedback',async()=>{
- for(const items of [[user('u','current'),agent('a','current answer')],[user('old','tiny'),user('u','current '.repeat(100)),agent('a','answer '.repeat(100))]]){
+test('only user text or insufficient room skips with manual noContent feedback',async()=>{
+ for(const items of [[user('u','current')],[user('old','tiny'),user('u','current '.repeat(100)),agent('a','tiny answer')]]){
   const h=harness(items);assert.equal((await h.run()).status,'skipped');assert.equal(h.requests.length,0);assert.deepEqual(h.errors,['compact.noContent']);assert.equal(h.chat.sessionId,'session');
  }
+});
+
+test('single user turn compacts its completed answer without changing durable UI items',async()=>{
+ const items=[user('u','Keep this exact goal and do not write assets.'),agent('a','Historical observations '.repeat(200))];
+ const h=harness(items);assert.equal((await h.run()).status,'applied');
+ assert.deepEqual(h.requests[0].history,[{role:'agent',text:items[1].response.plan.reply.trim()}]);
+ assert.deepEqual(h.chat.items.filter(x=>x.type!=='compact'),items);
+ const marker=h.chat.items.find(x=>x.type==='compact');
+ assert.deepEqual(marker.summarizedItemIds,['a']);
+ assert.equal(h.chat.sessionId,'');
 });
 test('previous compact marker filters covered dialogue while durable references survive',async()=>{
  const items=[{id:'old-marker',type:'compact',detail:'Earlier summarized work '.repeat(80),summarizedItemIds:['covered-u','covered-a']},user('covered-u','DO_NOT_RESURRECT'),agent('covered-a','DO_NOT_RESURRECT',{approvalId:'approval-old'}),user('later-u','later work '.repeat(100)),agent('later-a','later answer '.repeat(100),{write:{result:{checkpointId:'checkpoint-old'}}}),{id:'retained-result',type:'result',approvalId:'approval-card',result:{ok:true}},user('latest','keep latest'),agent('latest-answer','unchanged')];

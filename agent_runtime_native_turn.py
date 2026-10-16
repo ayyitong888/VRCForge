@@ -256,13 +256,20 @@ class NativeRuntimeTurn:
             session_id=self._session_id, turn_id=self._turn_id, client_turn_id=self._client_turn_id,
         )
 
-    def replace_completed_prefix(self, expected_snapshot: dict[str, Any], summary: str,
+    def has_pending_tool_calls(self, snapshot: dict[str, Any]) -> bool:
+        return bool(self._state._native_pending(snapshot))
+
+    def compaction_projection(self, snapshot: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Read-only projection; installation still revalidates snapshot identity."""
+        return self._state.native_compaction_projection(snapshot)
+
+    def replace_compacted_history(self, expected_snapshot: dict[str, Any], summary: str,
                                  *, recovery: dict[str, Any] | None = None) -> None:
         # Check Stop and compare-and-replace under the same existing state lock.
         with self._state.shared_state_lock:
             if self.cancelled():
                 raise ValueError("native compaction cancelled")
-            self._state.replace_native_completed_prefix(
+            self._state.replace_native_compacted_history(
                 self._session_id, binding=self._binding,
                 expected_snapshot=expected_snapshot, summary=summary, recovery=recovery,
             )

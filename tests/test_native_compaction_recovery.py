@@ -27,7 +27,7 @@ def test_native_recovery_survives_snapshot_cas_begin_and_restore():
     first, second = recovery(), recovery("SECOND_ARCHIVE_TAIL")
     turn.add_recoveries([first, first])
     before = turn.snapshot()
-    turn.replace_completed_prefix(before, "Earlier summary", recovery=second)
+    turn.replace_compacted_history(before, "Earlier summary", recovery=second)
     assert turn.recoveries() == [first, second]
     turn.recoveries()[0]["summary"] = "mutated copy"
     assert turn.recoveries()[0] == first
@@ -130,7 +130,7 @@ def test_stale_cas_does_not_install_new_archive():
     state.append_native_user("s", binding="b", message="new steer")
     current = turn.snapshot()
     with pytest.raises(ValueError, match="compare-and-replace"):
-        turn.replace_completed_prefix(before, "Summary", recovery=recovery())
+        turn.replace_compacted_history(before, "Summary", recovery=recovery())
     assert turn.snapshot() == current
 
 

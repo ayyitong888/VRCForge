@@ -59,7 +59,7 @@ def test_compaction_restores_only_latest_trusted_version_at_tail(tmp_path, versi
     state.begin_native_turn("s", binding="b", turn_id="new", message="new")
     before = state.native_conversation("s", binding="b")
     suffix = deepcopy(before["messages"][before["activeTurnStart"]:])
-    state.replace_native_completed_prefix("s", binding="b", expected_snapshot=before, summary="summary")
+    state.replace_native_compacted_history("s", binding="b", expected_snapshot=before, summary="summary")
     after = state.native_conversation("s", binding="b")
     assert after["messages"] == [{"role": "assistant", "content": "summary"}, *suffix, message(versions[-1])]
     assert owner(tmp_path / "native").native_conversation("s", binding="b") == after
