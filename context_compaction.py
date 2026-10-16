@@ -415,7 +415,7 @@ def _build_prompt(
         "Do not reconstruct, guess, or emit secrets, raw absolute paths, home directory names, "
         "private keys, tokens, or Avatar Blueprint IDs. Preserve concrete decisions and pending work. "
         f"Write in language '{language or 'auto'}'. Trigger={trigger}; phase={phase}. "
-        f"Keep the result comfortably below {max(256, target_tokens)} tokens. "
+        f"Keep the result comfortably below {target_tokens} tokens. "
         "Return exactly one JSON object matching this schema (all keys required): "
         f"{json.dumps(contract, ensure_ascii=False, separators=(',', ':'))}. "
         "Each list item must be a string. Do not use Markdown fences.\n"

@@ -225,6 +225,12 @@ test("successful replacement clears session and persistence failure restores it"
   assert.deepEqual(chat.items[0].summarizedItemIds, ["user-1", "agent-1"]);
   assert.equal(chat.items[1].text, "A long user request that should be compacted.");
   assert.equal(chat.items[2].response, "A long assistant response that should be compacted.");
+  // A fresh completed turn supplies real material for the second summary;
+  // an immediate re-summary of seven characters has no 64-token budget.
+  chat.items.push(
+    { id: "agent-new", type: "agent", response: "Newly completed details ".repeat(20), timeline: [] },
+    { id: "user-new", type: "user", text: "Keep this newest user turn." },
+  );
   harness.compactAgentHistoryState.promise = async () => ({ summary: "s", summaryDigest: "digest-2", entryCount: 2,
     providerUsage: { exact: true, inputTokens: 50, outputTokens: 5, totalTokens: 55 } });
   const second = await controller.compactChat(request());
@@ -330,6 +336,12 @@ test("actual conversation projection survives JSON reload and second compact wit
   assert.deepEqual(actualBuildChatHistory(firstRoundTrip, (value) => value).map((entry) => entry.text), [
     "summary", "Keep this newest user turn.",
   ]);
+  // A fresh completed turn supplies real material for the second summary;
+  // an immediate re-summary of seven characters has no 64-token budget.
+  chat.items.push(
+    { id: "agent-new", type: "agent", response: "Newly completed details ".repeat(20), timeline: [] },
+    { id: "user-new", type: "user", text: "Keep this newest user turn." },
+  );
   harness.compactAgentHistoryState.promise = async () => ({ summary: "s", summaryDigest: "digest-2", entryCount: 2 });
   assert.equal((await controller.compactChat(request())).status, "applied");
   const secondRoundTrip = JSON.parse(JSON.stringify(chat.items));

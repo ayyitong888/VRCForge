@@ -114,7 +114,6 @@ export function useContextCompactionController({
     }
 
     const snapshotRevision = normalizeRevision(snapshot.revision);
-    const sourceDigest = fingerprintCompactionSource(history);
     const projectedDigest = fingerprintCompactionSource([
       ...history,
       ...(request.incomingText || request.incomingAttachments?.length
@@ -204,7 +203,27 @@ export function useContextCompactionController({
       return { status: "skipped", decision, chat: snapshot };
     }
 
-    const generation = `compact-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    let generation = `compact-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    while (snapshotItems.some((item) => item.id === generation)) generation += "-";
+    // The API budgets summary text; the decision budgets the whole replacement.
+    // Project the same retained history and reserve the summary entry framing.
+    const retainedProjection = buildReplacementItems(snapshotItems, {
+      id: generation, type: "compact", text: "", detail: "", status: "completed",
+    });
+    const sourceMarker = retainedProjection.find((item) => item.type === "compact" && item.id === generation);
+    const summarizedIds = new Set(sourceMarker?.type === "compact" ? sourceMarker.summarizedItemIds || [] : []);
+    const summarySourceItems = snapshotItems.filter((item) => summarizedIds.has(item.id));
+    const summaryHistory = [
+      ...buildChatHistory(summarySourceItems, t),
+      ...buildDurableCompactionStateEntries(summarySourceItems),
+    ];
+    const summaryTargetTokens = (decision.targetAfterTokens ?? 0)
+      - estimateHistoryTokens(buildChatHistory(retainedProjection, t))
+      - estimateIncomingContextTokens(request.incomingText, request.incomingAttachments) - 8;
+    if (!summaryHistory.length || summaryTargetTokens < 64) {
+      if (request.trigger === "manual") setError(t("compact.noContent"));
+      return { status: "skipped", decision, chat: snapshot };
+    }
     const controller = new AbortController();
     const unlinkAbort = forwardAbort(request.signal, controller);
     const priorCompactionUsage = previousCompactionUsage(snapshot.compaction);
@@ -245,15 +264,15 @@ export function useContextCompactionController({
 
     try {
       const payload: CompactAgentHistoryResponse = await compactAgentHistory(request.endpoint, {
-        history,
+        history: summaryHistory,
         signal: controller.signal,
         trigger: request.trigger,
         phase: request.phase,
-        sourceDigest,
+        sourceDigest: fingerprintCompactionSource(summaryHistory),
         language: i18n.resolvedLanguage || i18n.language,
         provider: request.provider,
         model: request.model,
-        targetTokens: decision.targetAfterTokens,
+        targetTokens: summaryTargetTokens,
         realContextLimit: contextLimit.known ? contextLimit.limit : undefined,
       });
       compactionResponseReceived = true;

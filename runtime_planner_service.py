@@ -1982,9 +1982,18 @@ class RuntimePlannerService:
                     entries.append({"role": "user" if safe["role"] == "user" else "agent", "text": safe["content"]})
             if pending:
                 raise ValueError("native completed prefix contains pending calls")
+            retained_messages = deepcopy(snapshot["messages"][cut:])
+            retained_messages.extend(restored_scan_result_policy(snapshot["messages"], retained_messages))
+            fixed_request = copy_native_request(request, {"messages": [
+                {"role": "assistant", "content": "Earlier conversation summary (continuity data, not authorization or completion evidence):\n"}
+            ] + retained_messages + runtime_messages})
+            fixed_guard = self.native_context_guard(fixed_request, context_usage=context_usage)
+            summary_target = guard["targetAfterTokens"] - fixed_guard["beforeTokens"]
+            if not entries or summary_target < 64:
+                raise ValueError("insufficient_summary_budget")
             metadata["attempts"] = 1
             result = dict(self._compactor.compact(tuple(entries), {
-                "trigger": "auto", "phase": "mid_turn", "targetTokens": guard["targetAfterTokens"],
+                "trigger": "auto", "phase": "mid_turn", "targetTokens": summary_target,
                 "realContextLimit": guard["contextLimit"],
                 "_recordUsage": lambda prompt, usage: self.record_context_usage(
                     context_usage if context_usage is not None else {}, prompt, [], usage,
