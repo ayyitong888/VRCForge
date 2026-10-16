@@ -1245,6 +1245,7 @@
     "summary": "pkg {{pkg}} 路 prefab {{prefab}}"
   },
   "subagent": {
+    "ignoreNotification": "忽略本次提醒",
     "title": "后台任务",
     "statusNeedsAction": "需处理",
     "statusRunning": "{{count}} 运行中",

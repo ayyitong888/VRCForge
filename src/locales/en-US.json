@@ -1245,6 +1245,7 @@
     "summary": "pkg {{pkg}} / prefab {{prefab}}"
   },
   "subagent": {
+    "ignoreNotification": "Ignore this reminder",
     "title": "Background Tasks",
     "statusNeedsAction": "Needs Action",
     "statusRunning": "{{count}} Running",

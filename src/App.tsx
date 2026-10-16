@@ -142,8 +142,10 @@ import { buildEmptyProjectState } from "./lib/sidebar-view";
 import { localizeRuntimeHealthMessage } from "./lib/runtime-workspace-view";
 import { resolveRuntimeAuthorizationStatus } from "./lib/runtime-authorization-status";
 import {
+  loadSubAgentReviewNotificationIds,
   parseApprovalNotificationAction,
   parseSubAgentReviewNotificationAction,
+  saveSubAgentReviewNotificationIds,
   showApprovalNotification,
   showSubAgentReviewNotification,
   SUB_AGENT_REVIEW_NOTIFICATION_ACTION_EVENT,
@@ -402,7 +404,9 @@ export default function App() {
   const pendingApprovalsRef = useRef<AgentApproval[]>([]);
   const knownApprovalNotificationIdsRef = useRef<Set<string>>(new Set());
   const exhaustedApprovalNotificationIdsRef = useRef<Set<string>>(new Set());
-  const knownSubAgentReviewNotificationIdsRef = useRef<Set<string>>(new Set());
+  const deliveredSubAgentReviewNotificationIdsRef = useRef<Set<string>>(loadSubAgentReviewNotificationIds());
+  const knownSubAgentReviewNotificationIdsRef = useRef<Set<string>>(new Set(deliveredSubAgentReviewNotificationIdsRef.current));
+  const inFlightSubAgentReviewNotificationIdsRef = useRef<Set<string>>(new Set());
   const handledSubAgentReviewNotificationIdsRef = useRef<Set<string>>(new Set());
   const exhaustedSubAgentReviewNotificationIdsRef = useRef<Set<string>>(new Set());
   const subAgentReviewNotificationActionHandlerRef = useRef<(payload: unknown) => void>(() => undefined);
@@ -1308,7 +1312,27 @@ export default function App() {
     if (!isTauriRuntime() || !runtimeConnected) {
       return;
     }
-    const reviewTasks = (subAgentList?.tasks || []).filter((task) => {
+    // Wait for the first task snapshot; an empty reconnect snapshot must not
+    // erase persisted delivery markers and cause a duplicate toast.
+    if (!subAgentList) {
+      return;
+    }
+    const taskSnapshot = subAgentList.tasks || [];
+    // An empty reconnect response is temporarily unavailable state. Do not
+    // interpret it as evidence that persisted notifications were resolved.
+    if (!taskSnapshot.length) {
+      return;
+    }
+    const allReviewTasks = taskSnapshot.filter((task) => {
+      return (
+        isAwaitingMergeReview(task)
+        && typeof task.revision === "number"
+        && Number.isInteger(task.revision)
+        && task.revision > 0
+        && Boolean(task.parentChatId)
+      );
+    });
+    const reviewTasks = allReviewTasks.filter((task) => {
       return (
         isAwaitingMergeReview(task)
         && typeof task.revision === "number"
@@ -1318,10 +1342,14 @@ export default function App() {
         && getChatById(task.parentChatId || "")
       );
     });
-    const pendingReviewNotificationIds = new Set(reviewTasks.map((task) => toReviewNotificationId(task)));
+    const pendingReviewNotificationIds = new Set(allReviewTasks.map((task) => toReviewNotificationId(task)));
+    const snapshotTaskIds = new Set(taskSnapshot.map((task) => task.id));
     for (const notificationId of knownSubAgentReviewNotificationIdsRef.current) {
-      if (!pendingReviewNotificationIds.has(notificationId)) {
+      const taskId = notificationId.split(":", 1)[0];
+      if (snapshotTaskIds.has(taskId) && !pendingReviewNotificationIds.has(notificationId)) {
         knownSubAgentReviewNotificationIdsRef.current.delete(notificationId);
+        inFlightSubAgentReviewNotificationIdsRef.current.delete(notificationId);
+        deliveredSubAgentReviewNotificationIdsRef.current.delete(notificationId);
       }
     }
     for (const notificationId of handledSubAgentReviewNotificationIdsRef.current) {
@@ -1334,6 +1362,7 @@ export default function App() {
         exhaustedSubAgentReviewNotificationIdsRef.current.delete(notificationId);
       }
     }
+    saveSubAgentReviewNotificationIds(deliveredSubAgentReviewNotificationIdsRef.current);
 
     for (const task of reviewTasks) {
       const reviewNotificationId = toReviewNotificationId(task);
@@ -1344,6 +1373,7 @@ export default function App() {
         continue;
       }
       knownSubAgentReviewNotificationIdsRef.current.add(reviewNotificationId);
+      inFlightSubAgentReviewNotificationIdsRef.current.add(reviewNotificationId);
       const notify = () =>
         showSubAgentReviewNotification({
           taskId: task.id,
@@ -1353,7 +1383,12 @@ export default function App() {
           body: `${task.displayName || t("subagent.taskLabel")} · ${t("subagent.awaitingReview")} (${task.revision})`,
           openLabel: t("subagent.inspect"),
         });
-      void notify().catch(() =>
+      const deliver = () => notify().then(() => {
+        inFlightSubAgentReviewNotificationIdsRef.current.delete(reviewNotificationId);
+        deliveredSubAgentReviewNotificationIdsRef.current.add(reviewNotificationId);
+        saveSubAgentReviewNotificationIds(deliveredSubAgentReviewNotificationIdsRef.current);
+      });
+      void deliver().catch(() =>
         new Promise<void>((resolve) => window.setTimeout(resolve, 1_500))
           .then(() => {
             const currentTask = subAgentTasksRef.current.find((current) => current.id === task.id);
@@ -1366,18 +1401,20 @@ export default function App() {
               || !getChatById(currentTask.parentChatId || "")
             ) {
               knownSubAgentReviewNotificationIdsRef.current.delete(reviewNotificationId);
+              inFlightSubAgentReviewNotificationIdsRef.current.delete(reviewNotificationId);
               return;
             }
-            return notify();
+            return deliver();
           })
           .catch((cause) => {
             knownSubAgentReviewNotificationIdsRef.current.delete(reviewNotificationId);
+            inFlightSubAgentReviewNotificationIdsRef.current.delete(reviewNotificationId);
             exhaustedSubAgentReviewNotificationIdsRef.current.add(reviewNotificationId);
             setError(cause instanceof Error ? cause.message : String(cause));
           }),
       );
     }
-  }, [getChatById, runtimeConnected, subAgentList?.tasks, t, toReviewNotificationId]);
+  }, [getChatById, runtimeConnected, subAgentList, t, toReviewNotificationId]);
 
   useLayoutEffect(() => {
     subAgentReviewRuntimeConnectedRef.current = runtimeConnected;
@@ -1442,7 +1479,6 @@ export default function App() {
     if (runtimeConnected) {
       return;
     }
-    knownSubAgentReviewNotificationIdsRef.current.clear();
     handledSubAgentReviewNotificationIdsRef.current.clear();
     exhaustedSubAgentReviewNotificationIdsRef.current.clear();
   }, [runtimeConnected]);
@@ -3599,6 +3635,20 @@ export default function App() {
     }
   }
 
+  function ignoreSubAgentReviewNotification(task: SubAgentTask) {
+    if (!task.parentChatId || typeof task.revision !== "number" || !Number.isInteger(task.revision) || task.revision <= 0) {
+      return;
+    }
+    const notificationId = toReviewNotificationId(task);
+    knownSubAgentReviewNotificationIdsRef.current.add(notificationId);
+    inFlightSubAgentReviewNotificationIdsRef.current.delete(notificationId);
+    deliveredSubAgentReviewNotificationIdsRef.current.add(notificationId);
+    saveSubAgentReviewNotificationIds(deliveredSubAgentReviewNotificationIdsRef.current);
+    setSelectedSubAgent(null);
+    setSelectedSubAgentPanelOpen(false);
+    setSubAgentError("");
+  }
+
   function adoptSubAgentNextAction(task: SubAgentTask) {
     const nextAction = subAgentProposedNextAction(task);
     if (!nextAction) {
@@ -3834,6 +3884,7 @@ export default function App() {
           onCancel={(taskId) => void cancelSubAgentTask(taskId)}
           onRetry={(taskId) => void retrySubAgentTask(taskId)}
           onMerge={(task, decision) => void mergeSubAgentTask(task, decision)}
+          onIgnoreNotification={ignoreSubAgentReviewNotification}
           onAdoptNextAction={adoptSubAgentNextAction}
           busyTaskIds={subAgentActionBusyTaskIds}
           onClose={() => setSelectedSubAgentPanelOpen(false)}
