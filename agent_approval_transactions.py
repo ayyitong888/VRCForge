@@ -3194,6 +3194,25 @@ class AgentApprovalTransactionService:
                     "No Unity checkpoint or automatic rollback is provided."
                 ),
             }
+        if handler.name == "vrcforge_refresh_asset_database":
+            return {
+                "schema": ROLLBACK_POLICY_SCHEMA,
+                "required": True,
+                "kind": "conditional_refresh_checkpoint",
+                "approvalRequired": True,
+                "preWriteCheckpointRequired": True,
+                "preWriteCheckpointConditional": True,
+                "checkpointScope": [*UNITY_PROJECT_CHECKPOINT_SCOPE],
+                "restoreTool": "vrcforge_restore_checkpoint",
+                "coverageAudit": ROLLBACK_COVERAGE_AUDIT_SCHEMA,
+                "postRestoreValidationRequired": True,
+                "note": (
+                    "Package resolution and importer-reference restoration retain a project checkpoint. "
+                    "Schema-valid refresh or exact reimport without package resolution or metadata restoration does not save dirty "
+                    "scenes/assets and requires no checkpoint. The execution receipt reports whether a checkpoint "
+                    "was actually created; reimport completion does not claim a global backup or persistence proof."
+                ),
+            }
         if not handler.pre_write_checkpoint_required:
             raise ValueError(f"Write handler {handler.name!r} has no truthful rollback policy.")
         if handler.name == "vrcforge_restore_checkpoint":

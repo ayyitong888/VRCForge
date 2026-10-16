@@ -25271,6 +25271,21 @@ def import_unitypackage_sync(params: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
+def _refresh_asset_database_checkpoint_required(arguments: Mapping[str, Any]) -> bool:
+    """Refresh/import discovery never implicitly saves unrelated dirty assets."""
+    from jsonschema import Draft202012Validator
+
+    schema = EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS["vrcforge_refresh_asset_database"]
+    request = {key: value for key, value in arguments.items()
+               if key != "executionTarget" and not key.startswith("_vrcforge_")}
+    if not Draft202012Validator(schema).is_valid(request):
+        return True
+    items = request.get("reimportAssets")
+    if request.get("resolvePackages", False) is not False:
+        return True
+    return any("restoreScriptedImporterReference" in item for item in (items or []))
+
+
 def build_refresh_asset_database_execution_plan(
     params: dict[str, Any],
 ) -> list[tuple[str, dict[str, Any]]]:
@@ -25374,8 +25389,8 @@ def normalize_refresh_asset_database_outcome(result: dict[str, Any]) -> dict[str
     raw_status = str(normalized.get("status") or "").strip().lower()
     after = normalized.get("after") if isinstance(normalized.get("after"), dict) else {}
     compile_snapshot = after.get("compile") if isinstance(after.get("compile"), dict) else None
-    # Core refresh may SaveAssets. Job/compile completion is not a persistence
-    # receipt, so missing write facts remain unknown; preserve explicit facts.
+    # Refresh does not save dirty assets. Job/compile completion still does not
+    # prove persistence; preserve explicit write facts and leave missing facts unknown.
     normalized.setdefault("mutationStarted", None)
     normalized.setdefault("committed", None)
     normalized.setdefault("commitState", "unknown")
@@ -25487,6 +25502,15 @@ def refresh_asset_database_sync(params: dict[str, Any]) -> dict[str, Any]:
     package_resolve_timeout = int(arguments["packageResolveTimeoutSeconds"])
     settings = load_dashboard_settings(build_agent_connection_request(params or {}))
     settings.unity_mcp_timeout_seconds = max(int(settings.unity_mcp_timeout_seconds or 30), 120, package_resolve_timeout + 30)
+    if "reimportAssets" not in arguments:
+        core_info = UnityMcpCoreClient(
+            Path(settings.unity_project_path), timeout_seconds=3.0,
+        ).core_info()
+        if core_info.get("assetDatabaseRefreshSavesDirtyAssets") is not False:
+            raise AgentGatewayError(
+                "Loaded Unity Core does not provide non-saving refresh; install and load the current Core before refreshing.",
+                status_code=409,
+            )
     payload = ensure_dict_payload(
         extract_tool_result_payload(invoke_unity_mcp(settings, tool_name, arguments)),
         "refresh asset database",
@@ -27283,6 +27307,7 @@ def register_agent_gateway_tools() -> None:
         "low",
         refresh_asset_database_sync,
         approved_execution_plan_builder=build_refresh_asset_database_execution_plan,
+        pre_write_checkpoint_required=_refresh_asset_database_checkpoint_required,
         verification_profile="unity_refresh_console",
         verification_prepare_handler=lambda arguments: UNITY_CONSOLE_COMPLETION_VERIFIER.capture_baseline(
             "unity_refresh_console", arguments,

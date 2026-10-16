@@ -2407,6 +2407,7 @@ namespace VRCForge.Editor
                 ["projectIdSource"] = "normalized_project_path_sha256",
                 ["compileSnapshot"] = CompileErrorMonitor.ReadCoreInfoSnapshot(30),
                 ["scanScope"] = ScanScopeJournal.Capabilities(),
+                ["assetDatabaseRefreshSavesDirtyAssets"] = VRCForge.Editor.AssetDatabaseRefreshTool.SavesDirtyAssets,
             };
         }
 
