@@ -9,10 +9,13 @@ const { chromium } = createRequire(import.meta.url)(process.env.VRCFORGE_PLAYWRI
 const root = process.cwd();
 const baseline = process.env.VRCFORGE_MESSAGE_EDIT_BASELINE;
 const app = readFileSync(resolve(baseline || root, "src/App.tsx"), "utf8");
-const editHandler = app.slice(app.indexOf("  function editConversationMessage("), app.indexOf("  function cancelMessageEdit("));
+const editHandler = app.slice(app.indexOf("  function editConversationMessage("), app.indexOf("  function retryConversationItem("));
+const receipt = process.env.VRCFORGE_MESSAGE_EDIT_TURN_RECEIPT
+  ? JSON.parse(readFileSync(process.env.VRCFORGE_MESSAGE_EDIT_TURN_RECEIPT, "utf8"))
+  : {ok:true,sessionId:'session',clientTurnId:'turn',status:'missing'};
 const output = await build({
   stdin: { resolveDir: root, loader: "tsx", contents: `
-    import React, {useState} from 'react';
+    import React, {useState,useRef} from 'react';
     import {createRoot} from 'react-dom/client';
     import {ChatWorkspace} from './src/components/chat/chat-workspace';
     import {initReactI18next} from 'react-i18next';
@@ -20,17 +23,26 @@ const output = await build({
     import messages from './src/locales/zh-CN.json';
     i18n.use(initReactI18next).init({lng:'zh-CN',resources:{'zh-CN':{translation:messages}},interpolation:{escapeValue:false}});
     const t=i18n.t.bind(i18n), noop=()=>{};
-    const original={id:'user',type:'user',text:'有没有简短向的命中'};
-    const chat={id:'chat',sessionId:'session',items:[original]};
+    const receipt=${JSON.stringify(receipt)};
+    const original={id:'user',type:'user',text:'有没有简短向的命中',clientTurnId:receipt.clientTurnId};
+    const chat={id:'chat',sessionId:receipt.sessionId,items:[original]};
     window.sent=0; window.errors=[];
     window.fetch=()=>{throw new Error('Unexpected network request');};
     function Fixture(){
       const [sending,setSending]=useState(true);
       const [editingMessage,setEditingMessage]=useState(null);
+      const [savingMessageEdit,setSavingMessageEdit]=useState(false);
+      const messageEditSaveInFlightRef=useRef(false),messageEditSnapshotRef=useRef(null);
       const activeChatId='chat', input='原先未发送草稿',attachments=[],compacting=false,visibleQueued=[];
       const isChatRunActive=()=>sending,getChatById=()=>chat,cloneChatAttachments=x=>structuredClone(x);
       const latestConversationItemId=(items,predicate)=>[...items].reverse().find(predicate)?.id;
       const setRuntimeNotice=noop,setError=message=>window.errors.push(message);
+      const setInput=noop,setAttachments=noop,hasUnresolvedRuntimeState=()=>false;
+      const resolveContextLimit=()=>({known:false}),providerSnapshot={},currentModelInfo=null,apiConfig=null,endpoint='http://fixture';
+      const fetchAgentTurnResponse=async()=>window.turnState||receipt;
+      const fetchAgentRuns=async()=>({ok:true,runs:[{status:'approved'},{status:'applying'},{status:'applied'}]});
+      const runTurnNow=async(chatId,turn)=>{window.sent++;window.savedText=turn.text;};
+      messageEditSnapshotRef.current={draft:editingMessage,chatId:activeChatId,busy:sending};
       ${editHandler}
       window.finishRuntime=()=>setSending(false);
       window.originalChat=chat;
@@ -39,7 +51,8 @@ const output = await build({
         conversation={chat.items} latestEditableUserItemId="user" latestRetryableItemId=""
         editingItemId={editingMessage?.itemId||''} editingText={editingMessage?.draftText||''} editingAttachments={[]}
         onEditItem={editConversationMessage} onEditItemChangeText={text=>setEditingMessage(current=>({...current,draftText:text}))}
-        onEditItemCancel={()=>setEditingMessage(null)} onEditItemSave={()=>{window.sent++;window.savedText=editingMessage.draftText;}}
+        onEditItemCancel={cancelMessageEdit} onEditItemSave={saveMessageEdit}
+        editSaveDisabledReason={savingMessageEdit||sending?'busy':''}
         queued={[]} agentQuestions={[]} runtimeRuns={[]} scopedPendingApprovals={[]} approvalActions={{}} activeGoal={null}
         attachments={[]} commands={[]} actions={[]} projects={[]} backgroundGoalDeliveries={[]} backgroundGoalProviderWarnings={[]}
         pendingApprovalForResponse={()=>null} onAnswerQuestion={noop} onStopQuestionContinuation={noop}
@@ -82,7 +95,12 @@ try{
   await page.evaluate(()=>window.finishRuntime());
   await page.waitForTimeout(30);
   assert.equal(await save.isEnabled(),true);
+  await page.evaluate(receipt=>{window.turnState={...receipt,status:'running'};},receipt);
   await save.click();
+  assert.equal(await page.evaluate(()=>window.sent),0,"backend active turn survives local transport completion");
+  await page.evaluate(receipt=>{window.turnState=receipt;},receipt);
+  await save.click();
+  await page.waitForFunction(()=>window.sent===1);
   assert.deepEqual(await page.evaluate(()=>({sent:window.sent,text:window.savedText})),{sent:1,text:"有没有简短向的名字"});
   assert.deepEqual(errors,[]);
   console.log("PASS: real ChatWorkspace typo replay; immediate draft, busy save disabled, unchanged history, settled save enabled.");

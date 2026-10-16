@@ -185,7 +185,7 @@ import {
   fetchAgentGoals,
   fetchAgentMemory,
   fetchAgentApprovals,
-  fetchAgentRuns,
+  fetchAgentTurnResponse,
   fetchAppSession,
   fetchAppHealth,
   fetchSubAgent,
@@ -2878,11 +2878,15 @@ export default function App() {
     messageEditSaveInFlightRef.current = true;
     setSavingMessageEdit(true);
     try {
-      // Aborting the UI transport is not a backend cancellation acknowledgement.
-      // Read the existing session before replacing its displayed history.
-      if (originalChat.sessionId) {
-        const ledger = await fetchAgentRuns(endpoint, { sessionId: originalChat.sessionId, limit: 100 });
-        if (!ledger.ok || ledger.runs.some((run) => !["completed", "cancelled", "failed", "denied", "blocked"].includes(String(run.status || "")))) {
+      // Read the exact turn's live owner, not the ledger's historical tool and
+      // approval events. "missing" also means no active/finalizing turn after
+      // restart or recovery-cache expiry; it does not mean execution is pending.
+      const originalItem = originalChat.items.find((item) => item.id === draft.itemId);
+      const clientTurnId = originalItem?.type === "user" ? originalItem.clientTurnId : undefined;
+      if (originalChat.sessionId && clientTurnId) {
+        const state = await fetchAgentTurnResponse(endpoint, originalChat.sessionId, clientTurnId);
+        if (!state.ok || state.sessionId !== originalChat.sessionId || state.clientTurnId !== clientTurnId
+          || !["completed", "failed", "missing"].includes(state.status)) {
           setError(t("chat.cannotActionWhileRunning"));
           return true;
         }
@@ -4355,7 +4359,7 @@ export default function App() {
               approvalActions={approvalActions}
               editingItemId={editingMessage?.chatId === activeChatId ? editingMessage.itemId : ""}
               editingText={editingMessage?.draftText || ""}
-              editSaveDisabledReason={editingMessage && (savingMessageEdit || sending || visibleQueued.length > 0 || hasUnresolvedRuntimeState(editingMessage.chatId, getChatById(editingMessage.chatId)?.sessionId || "")) ? t("chat.cannotActionWhileRunning") : ""}
+              editSaveDisabledReason={editingMessage && (savingMessageEdit || sending || compacting || visibleQueued.length > 0 || hasUnresolvedRuntimeState(editingMessage.chatId, getChatById(editingMessage.chatId)?.sessionId || "")) ? t("chat.cannotActionWhileRunning") : ""}
               editingAttachments={editingMessage?.draftAttachments || []}
               onEditItemChangeText={updateEditingMessageText}
               onEditItemRemoveAttachment={removeEditingMessageAttachment}

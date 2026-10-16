@@ -28,6 +28,7 @@ function fixture() {
     setSavingMessageEdit: () => {}, t: (key) => key,
     resolveContextLimit: () => ({ known: false }), providerSnapshot: {}, currentModelInfo: null, apiConfig: null,
     endpoint: "http://fixture", fetchAgentRuns: async () => ({ ok: true, runs: [], count: 0 }),
+    fetchAgentTurnResponse: async () => ({ ok: true, sessionId: "session", clientTurnId: "turn", status: "completed" }),
     runTurnNow: async (...args) => { scope.sent.push(args); }, errors: [], sent: [],
   };
   function sync() { scope.messageEditSnapshotRef.current = { draft: scope.editingMessage, chatId: scope.activeChatId, busy: scope.running || scope.compacting || scope.visibleQueued.length > 0 || scope.unresolved }; }
@@ -58,9 +59,10 @@ test("save waits for local work, compaction, queue and unresolved runtime state"
   }
 });
 
-test("fresh cancelling receipt prevents resend even after local sending is false", async () => {
+test("active exact turn prevents resend even after local sending is false", async () => {
   const { scope, handlers } = fixture(); handlers.editConversationMessage("user");
   scope.fetchAgentRuns = async () => ({ ok: true, runs: [{ status: "cancelling", sessionId: "session" }], count: 1 });
+  scope.fetchAgentTurnResponse = async () => ({ ok: true, sessionId: "session", clientTurnId: "turn", status: "running" });
   await handlers.saveMessageEdit();
   assert.equal(scope.sent.length, 0);
   assert.ok(scope.editingMessage);
@@ -69,7 +71,7 @@ test("fresh cancelling receipt prevents resend even after local sending is false
 test("one explicit save starts one rerun; changed chat or cancelled draft cannot resume it", async () => {
   for (const change of ["none", "chat", "cancel", "latest", "runtime"]) {
     const { scope, handlers, sync } = fixture(); handlers.editConversationMessage("user");
-    let finish; scope.fetchAgentRuns = () => new Promise(resolve => { finish = resolve; });
+    let finish; scope.fetchAgentTurnResponse = scope.fetchAgentRuns = () => new Promise(resolve => { finish = resolve; });
     const first = handlers.saveMessageEdit();
     const second = handlers.saveMessageEdit();
     if (change === "chat") scope.activeChatId = "other";
@@ -78,7 +80,7 @@ test("one explicit save starts one rerun; changed chat or cancelled draft cannot
     if (change === "runtime") scope.running = true;
     sync();
     assert.equal(typeof finish, "function", "save checks backend before changing history");
-    finish({ ok: true, runs: [{ status: "completed", sessionId: "session" }], count: 1 });
+    finish({ ok: true, sessionId: "session", clientTurnId: "turn", status: "completed", runs: [{ status: "completed", sessionId: "session" }], count: 1 });
     await Promise.all([first, second]);
     assert.equal(scope.sent.length, change === "none" ? 1 : 0, change);
     assert.equal(scope.messageEditSaveInFlightRef.current, false);
@@ -87,8 +89,42 @@ test("one explicit save starts one rerun; changed chat or cancelled draft cannot
 
 test("failed runtime read preserves the editable draft without sending", async () => {
   const { scope, handlers } = fixture(); handlers.editConversationMessage("user");
-  scope.fetchAgentRuns = async () => { throw new Error("offline"); };
+  scope.fetchAgentTurnResponse = scope.fetchAgentRuns = async () => { throw new Error("offline"); };
   await handlers.saveMessageEdit();
   assert.equal(scope.sent.length, 0);
   assert.ok(scope.editingMessage);
+});
+
+test("historical approval events cannot permanently block a settled edit", async () => {
+  const { scope, handlers } = fixture();
+  if (process.env.VRCFORGE_MESSAGE_EDIT_TURN_RECEIPT) {
+    const receipt = JSON.parse(readFileSync(process.env.VRCFORGE_MESSAGE_EDIT_TURN_RECEIPT, "utf8"));
+    scope.chat.sessionId = receipt.sessionId;
+    scope.chat.items.find(item => item.id === "user").clientTurnId = receipt.clientTurnId;
+    scope.fetchAgentTurnResponse = async () => receipt;
+  }
+  handlers.editConversationMessage("user");
+  const ledger = process.env.VRCFORGE_MESSAGE_EDIT_LEDGER
+    ? JSON.parse(readFileSync(process.env.VRCFORGE_MESSAGE_EDIT_LEDGER, "utf8"))
+    : { ok: true, runs: [
+      { event: "runtime_turn_completed", status: "blocked", clientTurnId: "turn" },
+      ...["approved", "applying", "applied"].map(status => ({ event: "approval_status", status })),
+    ] };
+  assert.ok(ledger.runs.some(run => ["approved", "applying", "applied"].includes(run.status)));
+  scope.fetchAgentRuns = async () => ledger;
+  await handlers.saveMessageEdit();
+  assert.equal(scope.sent.length, 1);
+});
+
+test("exact-turn status validates identity and handles expired recovery receipts", async () => {
+  for (const [status, identityMatches, ok, expected] of [
+    ["missing", true, true, 1], ["failed", true, true, 1],
+    ["running", true, true, 0], ["unknown", true, true, 0],
+    ["completed", false, true, 0], ["completed", true, false, 0],
+  ]) {
+    const { scope, handlers } = fixture(); handlers.editConversationMessage("user");
+    scope.fetchAgentTurnResponse = async () => ({ ok, sessionId: identityMatches ? "session" : "other", clientTurnId: "turn", status });
+    await handlers.saveMessageEdit();
+    assert.equal(scope.sent.length, expected, `${status}/${identityMatches}/${ok}`);
+  }
 });

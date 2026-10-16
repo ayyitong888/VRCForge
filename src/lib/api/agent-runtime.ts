@@ -187,6 +187,15 @@ function recoveryReader(endpoint: string): AgentTurnResponseReader {
   };
 }
 
+/** Read one turn's live execution state; historical ledger events are not liveness. */
+export function fetchAgentTurnResponse(
+  endpoint: string,
+  sessionId: string,
+  clientTurnId: string,
+): Promise<AgentTurnResponseRecovery> {
+  return recoveryReader(endpoint)(sessionId, clientTurnId);
+}
+
 export async function sendAgentMessage(
   endpoint: string,
   message: string,
