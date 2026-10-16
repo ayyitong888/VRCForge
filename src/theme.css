@@ -248,7 +248,9 @@
 
   * {
     @apply border-border;
-    scrollbar-color: hsl(var(--scrollbar-thumb)) hsl(var(--scrollbar-track));
+    /* Let each surface provide the track behind its thumb; a fixed global
+       track reads as a bright strip on wallpaper, cards, and overlays. */
+    scrollbar-color: hsl(var(--scrollbar-thumb)) transparent;
     scrollbar-width: thin;
   }
 
@@ -260,19 +262,19 @@
   *::-webkit-scrollbar-track,
   *::-webkit-scrollbar-track-piece,
   *::-webkit-scrollbar-corner {
-    background-color: hsl(var(--scrollbar-track));
+    background-color: transparent;
   }
 
   *::-webkit-scrollbar-button {
     width: 0;
     height: 0;
     display: none;
-    background-color: hsl(var(--scrollbar-track));
+    background-color: transparent;
   }
 
   *::-webkit-scrollbar-thumb {
     min-height: 32px;
-    border: 2px solid hsl(var(--scrollbar-track));
+    border: 2px solid transparent;
     border-radius: 9999px;
     background-color: hsl(var(--scrollbar-thumb));
     background-clip: padding-box;
@@ -538,19 +540,18 @@
 
   .dark .app-scrollbar {
     color-scheme: dark;
+    scrollbar-color: hsl(var(--scrollbar-thumb)) transparent;
   }
 
   .sidebar-scrollbar {
-    --scrollbar-local-track: hsl(var(--sidebar));
     --scrollbar-local-thumb: hsl(var(--scrollbar-thumb));
     --scrollbar-local-thumb-hover: hsl(220 10% 48%);
     color-scheme: light;
-    scrollbar-color: var(--scrollbar-local-thumb) var(--scrollbar-local-track);
+    scrollbar-color: var(--scrollbar-local-thumb) transparent;
     scrollbar-width: thin;
   }
 
   .dark .sidebar-scrollbar {
-    --scrollbar-local-track: hsl(var(--sidebar));
     --scrollbar-local-thumb: hsl(224 12% 42%);
     --scrollbar-local-thumb-hover: hsl(224 12% 54%);
     color-scheme: dark;
@@ -586,19 +587,19 @@
   .sidebar-scrollbar::-webkit-scrollbar-track,
   .sidebar-scrollbar::-webkit-scrollbar-track-piece,
   .sidebar-scrollbar::-webkit-scrollbar-corner {
-    background-color: var(--scrollbar-local-track);
+    background-color: transparent;
   }
 
   .sidebar-scrollbar::-webkit-scrollbar-button {
     width: 0;
     height: 0;
     display: none;
-    background-color: var(--scrollbar-local-track);
+    background-color: transparent;
   }
 
   .sidebar-scrollbar::-webkit-scrollbar-thumb {
     min-height: 32px;
-    border: 2px solid var(--scrollbar-local-track);
+    border: 2px solid transparent;
     border-radius: 9999px;
     background-color: var(--scrollbar-local-thumb);
     background-clip: padding-box;

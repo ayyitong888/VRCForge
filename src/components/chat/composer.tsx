@@ -1,7 +1,7 @@
 import { Archive, Camera, Check, ChevronDown, ClipboardList, Globe, MessageSquare, MousePointer2, Paperclip, Pencil, Plus, Send, Shield, Square, Target, X } from "lucide-react";
 import { getCurrentWebview, type DragDropEvent } from "@tauri-apps/api/webview";
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { type ClipboardEvent, type DragEvent, type FormEvent, type ReactNode, useEffect, useRef, useState } from "react";
+import { Fragment, type ClipboardEvent, type DragEvent, type FormEvent, type ReactNode, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import i18n from "../../i18n";
 import { executionModeLabel, EXECUTION_MODES, permissionVisualState } from "../../lib/permission-ui";
@@ -617,26 +617,37 @@ function SelectedTextQuoteChip({
 
 function SelectedTextHoverPreview({ text, children }: { text: string; children: ReactNode }) {
   const anchorRef = useRef<HTMLSpanElement | null>(null);
-  const [position, setPosition] = useState<{ left: number; top: number; below: boolean } | null>(null);
-  const preview = text.trim().slice(0, 260);
+  const [position, setPosition] = useState<{ left: number; top: number; below: boolean; maxHeight: number } | null>(null);
+  const preview = text.trim();
   if (!preview) return <>{children}</>;
   const updatePosition = () => {
     const rect = anchorRef.current?.getBoundingClientRect();
     if (!rect) return;
     const maxWidth = Math.min(512, Math.max(0, window.innerWidth - 16));
     const left = Math.min(Math.max(8, rect.left), Math.max(8, window.innerWidth - maxWidth - 8));
-    setPosition({ left, top: rect.top < 180 ? rect.bottom + 8 : rect.top - 8, below: rect.top < 180 });
+    const above = Math.max(0, rect.top - 16);
+    const belowSpace = Math.max(0, window.innerHeight - rect.bottom - 16);
+    const below = above < Math.min(288, window.innerHeight / 2) && belowSpace > above;
+    setPosition({ left, top: below ? rect.bottom : rect.top, below,
+      maxHeight: Math.min(288, window.innerHeight / 2, below ? belowSpace : above) });
   };
   return (
     <span ref={anchorRef} className="relative inline-flex min-w-0 max-w-full" onMouseEnter={updatePosition} onMouseLeave={() => setPosition(null)} onFocus={updatePosition}>
       {children}
       {position ? (
         <span
-          className="pointer-events-none fixed z-[60] max-h-[min(50vh,18rem)] w-[min(32rem,calc(100vw-1rem))] max-w-[calc(100vw-1rem)] overflow-y-auto whitespace-pre-wrap break-words rounded-lg border border-border bg-card px-3 py-2 text-sm leading-relaxed text-foreground shadow-panel"
-          style={{ left: position.left, top: position.top, transform: position.below ? undefined : "translateY(-100%)" }}
-          aria-hidden="true"
+          className="fixed z-[60] w-[min(32rem,calc(100vw-1rem))] max-w-[calc(100vw-1rem)]"
+          style={{ left: position.left, top: position.top, transform: position.below ? undefined : "translateY(-100%)",
+            paddingTop: position.below ? 8 : 0, paddingBottom: position.below ? 0 : 8 }}
         >
-          {preview}{text.length > preview.length ? "..." : ""}
+          {/* Padding bridges the hover gap; the text stays read-only but accepts scrolling. */}
+          <span
+            className="block overflow-y-auto overscroll-contain whitespace-pre-wrap break-words rounded-lg border border-border bg-card px-3 py-2 text-sm leading-relaxed text-foreground shadow-panel"
+            style={{ maxHeight: position.maxHeight }}
+            aria-hidden="true"
+          >
+            {preview}
+          </span>
         </span>
       ) : null}
     </span>
@@ -669,12 +680,12 @@ export function AttachmentStrip({
           const isImage = Boolean(attachment.dataUrl && attachment.type.startsWith("image/"));
           const isVaultFile = attachment.payloadKind === "vault_file" || Boolean(attachment.vaultPayloadHash);
           const extension = attachmentExtension(attachment, t("attachments.fileTypeFallback"));
-          const selectedPreview = isSelectedText ? (attachment.text || "").replace(/\s+/g, " ").trim().slice(0, 260) : "";
-          return (
+          const selectedPreview = isSelectedText ? (attachment.text || "").trim().slice(0, 260) : "";
+          const attachmentCard = (
             <div
-              key={attachment.id}
               className={cn(
-                "group relative overflow-hidden rounded-xl border border-border bg-background text-foreground shadow-sm",
+                "group relative rounded-xl border border-border text-foreground shadow-sm",
+                isSelectedText ? "overflow-visible bg-background/75" : "overflow-hidden bg-background",
                 isImage ? "h-28 w-28" : "h-[72px] w-[220px]",
                 isSelectedText && "h-auto min-h-10 w-auto max-w-full rounded-full px-3 py-2",
               )}
@@ -712,12 +723,6 @@ export function AttachmentStrip({
                   </div>
                 </div>
               )}
-              {isSelectedText && selectedPreview ? (
-                <div className="pointer-events-none absolute bottom-[calc(100%+0.5rem)] left-0 z-50 hidden w-max max-w-[min(32rem,calc(100vw-3rem))] rounded-lg border border-border bg-popover px-3 py-2 text-sm leading-relaxed text-popover-foreground shadow-panel group-hover:block">
-                  {selectedPreview}
-                  {attachment.text && attachment.text.length > selectedPreview.length ? "..." : ""}
-                </div>
-              ) : null}
               {isImage && isVaultFile && onImport ? (
                 <button
                   type="button"
@@ -745,6 +750,9 @@ export function AttachmentStrip({
               ) : null}
             </div>
           );
+          return isSelectedText && selectedPreview
+            ? <SelectedTextHoverPreview key={attachment.id} text={attachment.text || ""}>{attachmentCard}</SelectedTextHoverPreview>
+            : <Fragment key={attachment.id}>{attachmentCard}</Fragment>;
         })}
       </div>
     );
@@ -754,11 +762,10 @@ export function AttachmentStrip({
       {attachments.map((attachment) => {
         const isSelectedText = attachment.name === SELECTED_TEXT_ATTACHMENT_NAME;
         const isVaultFile = attachment.payloadKind === "vault_file" || Boolean(attachment.vaultPayloadHash);
-        const selectedPreview = isSelectedText ? (attachment.text || "").replace(/\s+/g, " ").trim().slice(0, 260) : "";
-        return (
+        const selectedPreview = isSelectedText ? (attachment.text || "").trim().slice(0, 260) : "";
+        const attachmentCard = (
           <div
-            key={attachment.id}
-            className={cn("group relative flex max-w-full min-w-0 items-center gap-2 rounded-md border border-border/70 bg-background/75 px-2 py-1 text-xs text-foreground shadow-sm", isSelectedText && "rounded-full")}
+            className={cn("group relative flex max-w-full min-w-0 items-center gap-2 rounded-md border border-border/70 px-2 py-1 text-xs text-foreground shadow-sm", isSelectedText ? "rounded-full bg-background/75" : "bg-background/75")}
             title={isSelectedText ? undefined : `${attachment.name} · ${formatAttachmentSize(attachment.size)}`}
           >
             {attachment.dataUrl && attachment.type.startsWith("image/") ? (
@@ -782,12 +789,6 @@ export function AttachmentStrip({
                 {t("attachments.importToProject")}
               </button>
             ) : null}
-            {isSelectedText && selectedPreview ? (
-              <div className="pointer-events-none absolute bottom-[calc(100%+0.5rem)] left-0 z-50 hidden w-max max-w-[min(32rem,calc(100vw-3rem))] rounded-lg border border-border bg-popover px-3 py-2 text-sm leading-relaxed text-popover-foreground shadow-panel group-hover:block">
-                {selectedPreview}
-                {attachment.text && attachment.text.length > selectedPreview.length ? "..." : ""}
-              </div>
-            ) : null}
             {onRemove ? (
               <button
                 type="button"
@@ -801,6 +802,9 @@ export function AttachmentStrip({
             ) : null}
           </div>
         );
+        return isSelectedText && selectedPreview
+          ? <SelectedTextHoverPreview key={attachment.id} text={attachment.text || ""}>{attachmentCard}</SelectedTextHoverPreview>
+          : <Fragment key={attachment.id}>{attachmentCard}</Fragment>;
       })}
     </div>
   );
