@@ -9,11 +9,16 @@
     "userRequirementsOverrideDefaults": true,
     "approvalBeforeWrites": true,
     "design": {
-      "selector": {"name": "衣柜", "type": "Int", "saved": true, "synced": true, "default": 0},
+      "source": "current_user_confirmed_new_wardrobe_preferences",
+      "preserveExistingStructureFirst": true,
+      "missingPreferenceAction": "present_a_concrete_design_before_writes",
+      "referenceProjectIsNotUniversalDefault": true,
+      "organization": {"readableAndMaintainable": true, "clearCategories": true, "recognizableNames": true, "relatedObjectsAdjacent": true, "preferExistingConventions": true, "newScopeOnly": true, "beforeReorderReparentOrRename": ["animation_bindings", "bones", "component_relative_paths", "inbound_references"], "noUnapprovedExistingObjectMoves": true},
+      "selector": {"source": "current_user_confirmed_preferences_or_approved_design", "intSkeletonOnlyWhenApproved": true, "boolFloatOrOtherTopologyUsesAtomicTools": true},
       "valueMapSource": "current_user_approved_design_not_project_fixture",
-      "fx": {"transitionSource": "AnyState", "condition": "selector_equals_approved_value", "durationSeconds": 0, "hasExitTime": false, "canTransitionToSelf": false, "writeDefaultsMustBeExplicitInPreview": true},
-      "animation": {"fullMutualExclusionMatrixRequired": true, "stableStatePolicy": "selected_on_other_outfits_off", "instantKeyframeTimeSeconds": 0, "partsAndMorphsRequireFitEvidence": true, "animatedTransitionsRequireUserConfirmedTimeline": true},
-      "menu": {"root": "user_approved_location", "suggestedCategories": ["衣服", "头发", "配饰"]},
+      "fx": {"source": "current_user_confirmed_preferences_or_approved_design", "writeDefaultsMustBeExplicitInPreview": true, "unverifiedReferenceSettingsMustNotBecomeDefaults": true},
+      "animation": {"expectedEffectsSource": "current_user_approved_design", "mutualExclusionWhenRequested": true, "partsAndMorphsRequireFitEvidence": true, "animatedTransitionsRequireUserConfirmedTimeline": true},
+      "menu": {"source": "current_user_confirmed_preferences_or_approved_design", "paginateWithinPlatformCapacity": true},
       "oneOutfitAtATime": true,
       "perOutfitReadbackAndRuntimeAcceptance": true
     }
@@ -68,6 +73,9 @@
   },
   "recognitionLoop": {
     "mode": "read_only_before_authoring",
+    "classificationDoesNotProveBusinessPurpose": true,
+    "crossCheck": ["menu_purpose", "actual_objects", "clip_effects"],
+    "ambiguousDestinations": "preserve_all_candidates_inspect_before_claim_or_repair",
     "termination": {
       "queue": "finite_discovered_candidates_and_pages",
       "unchangedEvidence": "do_not_revisit_same_visited_key",
@@ -333,6 +341,7 @@
     },
     {
       "name": "install_using_compatible_tool_when_requested",
+      "guidance": "Only when the approved design selects an Int wardrobe may a one-value Int skeleton be created. For an independent Bool, Float, or other approved topology, use the existing parameter, animator, FX, curve, and menu atomic tools with preview, approval, write, and independent readback; do not convert the design to Int. For an approved Int skeleton, set manageWardrobe=false for the first outfit; verify exact installed object paths before the separate add_wardrobe_outfit primitive. Existing objects must not be reinstalled. manageWardrobe=true requires an existing strict wardrobe scan record.",
       "tool": "vrcforge_preview_setup_outfit",
       "tools": [
         "vrcforge_setup_outfit",
@@ -346,9 +355,12 @@
     },
     {
       "name": "edit_approved_parameters_or_fx",
+      "guidance": "Create a skeleton only for an approved new scope where it is missing. A skeleton is not a strict verified wardrobe; never repeat creation because a strict scan is empty.",
       "tool": "vrcforge_preview_ensure_expression_parameter",
       "tools": [
         "vrcforge_ensure_expression_parameter",
+        "vrcforge_preview_create_wardrobe",
+        "vrcforge_create_wardrobe",
         "vrcforge_preview_manage_expression_parameters",
         "vrcforge_manage_expression_parameters",
         "vrcforge_preview_manage_fx_animator",
@@ -361,6 +373,7 @@
     },
     {
       "name": "edit_approved_wardrobe_mapping",
+      "guidance": "add_wardrobe_outfit can add the first installed outfit to an existing Int/FX Equals skeleton using verified object paths and an explicit approved value. It preserves old clips: complete approved mutual-exclusion curves in all affected states, then fresh scan; recognition is not runtime acceptance.",
       "tool": "vrcforge_preview_manage_wardrobe",
       "tools": [
         "vrcforge_manage_wardrobe",
