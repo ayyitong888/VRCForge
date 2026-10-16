@@ -20,6 +20,7 @@ import {
 import { subAgentAdoptedHistoryText } from "./subagent-merge";
 import { formatCount } from "./utils";
 import type { CompactionRecoveryEntry } from "./api/types";
+import { buildTimelinePresentation, materializeRuntimeTimeline, isFinalAssistantPresentationEntry } from "./chat-timeline-presentation";
 
 const CONTEXT_TOKEN_LIMIT_DISPLAY_ESTIMATE = 128000;
 export const MAX_ATTACHMENT_PAYLOAD_BYTES = 4 * 1024 * 1024;
@@ -217,6 +218,25 @@ export function collectCompactionRecovery(items: ConversationItem[]): Compaction
 }
 
 export function visibleAgentDialogueText(response: AgentRuntimeResponse): string {
+  const assistantEntries = buildTimelinePresentation(materializeRuntimeTimeline(response)).entries.filter(
+    (entry) => entry.type === "assistant",
+  );
+  const finalEntry = [...assistantEntries].reverse().find(isFinalAssistantPresentationEntry);
+  const hasUnacceptedFinal = assistantEntries.some((entry) => entry.status === "completion_unverified");
+  const hasStructuredPhases = assistantEntries.some((entry) => entry.phase === "commentary" || entry.phase === "final_answer");
+  // A structured timeline may terminate with status=done without repeating
+  // final_answer; legacy unphased timelines retain the plan.reply fallback.
+  if (finalEntry && (finalEntry.phase === "final_answer" || hasStructuredPhases)) return finalEntry.text;
+  // A durable unaccepted final must not reappear through the model-only fallback.
+  if (hasUnacceptedFinal) return "";
+
+  const publicMessages = response.plan?.publicMessages || [];
+  const finalMessage = [...publicMessages].reverse().find((message) => message.phase === "final_answer");
+  if (finalMessage) return String(finalMessage.text || "");
+
+  // Match the visible timeline: progress without an explicit final is not an answer.
+  if (assistantEntries.some((entry) => entry.phase === "commentary")
+    || publicMessages.some((message) => message.phase === "commentary")) return "";
   return String(response.plan?.reply || response.plan?.summary || "");
 }
 

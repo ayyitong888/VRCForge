@@ -7343,11 +7343,26 @@ class AgentGateway:
 
             planner_reply = str(plan.get("reply") or "").strip()
             public_messages = plan.get("publicMessages") or []
+            command = str(plan.get("shellCommand") or "").strip()
+            if not command and step_index == 0 and plan.get("shellNeeded") is True:
+                command = param_command
+            needs_completion_claim_correction = bool(
+                not command
+                and not (plan.get("writeNeeded") and plan.get("writeTool"))
+                and not (plan.get("skillNeeded") and plan.get("skillTool"))
+                and not completion_claim_correction_attempted
+                and str(plan.get("planner") or "").strip().casefold() == "llm"
+                and task_loop.completed_action_ids()
+                and ensure_dict(
+                    task_loop.gate_terminal(plan).get("completionGate")
+                ).get("reason") == "completion_claim_unbound"
+            )
             for public_message in public_messages:
                 message_phase = public_message.get("phase") or ""
                 append_timeline_event(
                     "assistant", label="Assistant", summary=public_message["text"],
-                    status="progress" if message_phase == "commentary" else "done",
+                    status=("progress" if message_phase == "commentary" else
+                            "completion_unverified" if message_phase == "final_answer" and needs_completion_claim_correction else "done"),
                     phase=message_phase, message_id=public_message["id"],
                 )
             if not public_messages and planner_reply and any(
@@ -7379,9 +7394,6 @@ class AgentGateway:
             # Provider has independently selected the Shell action.  It must
             # never bypass a failed/missing Provider plan and create an
             # approval on its own.
-            command = str(plan.get("shellCommand") or "").strip()
-            if not command and step_index == 0 and plan.get("shellNeeded") is True:
-                command = param_command
             shell_step_params = ensure_dict(plan.get("shellParams"))
             unity_shell_access = "unity_project_access" in ensure_list(plan.get("toolCapabilities"))
             general_shell_root = general_allowed_roots[0] if general_allowed_roots else ""
@@ -7442,14 +7454,7 @@ class AgentGateway:
                     f"{plan.get('skillTool')}::"
                     + json.dumps(plan.get("skillParams"), ensure_ascii=False, sort_keys=True, default=str),
                 )
-            elif (
-                not completion_claim_correction_attempted
-                and str(plan.get("planner") or "").strip().casefold() == "llm"
-                and task_loop.completed_action_ids()
-                and ensure_dict(
-                    task_loop.gate_terminal(plan).get("completionGate")
-                ).get("reason") == "completion_claim_unbound"
-            ):
+            elif needs_completion_claim_correction:
                 completed_action_ids = task_loop.completed_action_ids()
                 correction_summary = (
                     "If complete: action=reply, completion_claim.satisfied=true; omit optional "

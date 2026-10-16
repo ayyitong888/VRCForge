@@ -9,6 +9,7 @@ import {
   buildTimelinePresentation,
   hasDurableExecutionEvents,
   isFinalAssistantTimelineEvent,
+  isFinalAssistantPresentationEntry,
   runtimeTerminalStatusKey,
   timelineInvocationDisplayLabel,
   type TimelineBatchKind,
@@ -234,10 +235,9 @@ export function buildDurableTimelineRows(
   const includeAssistant = options.includeAssistant !== false;
   const turnElapsed = options.processTitleElapsed ?? (options.renderElapsed === false ? undefined : presentation.elapsedSeconds);
   const finalAssistant = [...presentation.entries].reverse().find((entry) => (
-    entry.type === "assistant"
-    && (entry.phase === "final_answer"
-      || (!entry.phase && (Boolean(terminalFailureCode)
-        || ["done", "final", "completed", "failed", "error", "cancelled", "canceled"].includes(entry.status.toLowerCase()))))
+    (entry.type === "assistant" && entry.status !== "completion_unverified"
+      && !entry.phase && Boolean(terminalFailureCode))
+    || isFinalAssistantPresentationEntry(entry)
   ));
   for (const entry of presentation.entries) {
     if (entry.type === "assistant") {

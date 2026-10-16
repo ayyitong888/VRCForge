@@ -110,3 +110,47 @@ def test_commentary_only_after_tool_does_not_trigger_completion_correction(tmp_p
     assert result["plan"]["reason"] == "native_final_answer_missing"
     assert result["plan"]["reply"] == ""
     assert [event["payload"]["phase"] for event in result["timeline"] if event["kind"] == "assistant"] == ["commentary", "commentary"]
+
+
+def test_unaccepted_final_retains_original_phase_until_completion_claim(tmp_path):
+    from tests.test_native_runtime_gateway import finish
+    read = call("read", "vrcforge_read_text_file", {"path": "1.txt"})["tool_calls"][0]
+    candidate = receipt([message("candidate", "Original proposed final.", "final_answer")])
+    gateway, model, invoked = setup_gateway(tmp_path, [receipt([], [read]), candidate, finish])
+    result = run(gateway, tmp_path)
+    public = [event["payload"] for event in result["timeline"] if event["kind"] == "assistant"]
+    assert len(invoked) == 1 and len(model.requests) == 3
+    assert public[0] == {"label": "Assistant", "summary": "Original proposed final.",
+                         "status": "completion_unverified", "phase": "final_answer", "messageId": "candidate"}
+    assert [item["status"] for item in public] == ["completion_unverified", "done"]
+    assert result["plan"]["nextStep"] == "done"
+    assert is_valid_chat_record({"id": "acceptance", "items": [{"id": "a", "type": "agent", "response": result, "timeline": result["timeline"]}]})
+
+
+def test_unaccepted_final_is_not_promoted_when_turn_budget_stops(tmp_path):
+    read = call("read", "vrcforge_read_text_file", {"path": "1.txt"})["tool_calls"][0]
+    gateway, model, _ = setup_gateway(tmp_path, [receipt([], [read]), receipt([
+        message("candidate", "Original unaccepted text.", "final_answer")])])
+    result = run(gateway, tmp_path, maxAgenticTurns=2)
+    public = [event["payload"] for event in result["timeline"] if event["kind"] == "assistant"]
+    assert len(model.requests) == 2
+    assert public[0]["phase"] == "final_answer"
+    assert public[0]["summary"] == "Original unaccepted text."
+    assert public[0]["status"] == "completion_unverified"
+    assert not any(item.get("status") == "done" for item in public)
+
+
+def test_terminal_blocked_final_retains_visible_original_message(tmp_path):
+    read = call("read", "vrcforge_read_text_file", {"path": "1.txt"})["tool_calls"][0]
+    gateway, model, invoked = setup_gateway(tmp_path, [receipt([], [read]), receipt([
+        message("blocked", "The read failed; I cannot complete this task.", "final_answer")])])
+    gateway.register_tool("vrcforge_read_text_file", "When to use: read. When NOT to use: write.",
+                          "plan/preview", lambda args: {"ok": False, "error": "fixture-read-failed"})
+    result = run(gateway, tmp_path)
+    assert len(model.requests) == 2
+    assert result["plan"]["nextStep"] != "done"
+    public = [event["payload"] for event in result["timeline"] if event["kind"] == "assistant"]
+    assert public[0]["status"] == "done"
+    assert public[0]["phase"] == "final_answer"
+    assert public[0]["messageId"] == "blocked"
+    assert public[0]["summary"] == "The read failed; I cannot complete this task."

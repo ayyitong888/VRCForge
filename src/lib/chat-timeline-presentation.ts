@@ -111,6 +111,7 @@ function assistantPhase(value: unknown): "commentary" | "final_answer" | undefin
 
 export function isFinalAssistantTimelineEvent(event: ChatTimelineEvent): boolean {
   if (event.kind !== "assistant") return false;
+  if (event.payload?.status === "completion_unverified") return false;
   const phase = assistantPhase(event.payload?.phase);
   if (phase) return phase === "final_answer";
   return ["done", "final", "completed", "failed", "error", "cancelled", "canceled"].includes(String(event.payload?.status || "").toLowerCase());
@@ -120,6 +121,7 @@ export function isFinalAssistantPresentationEntry(
   entry: TimelinePresentationEntry,
 ): entry is Extract<TimelinePresentationEntry, { type: "assistant" }> {
   if (entry.type !== "assistant") return false;
+  if (entry.status === "completion_unverified") return false;
   if (entry.phase) return entry.phase === "final_answer";
   return ["done", "final", "completed", "failed", "error", "cancelled", "canceled"].includes(entry.status.toLowerCase());
 }

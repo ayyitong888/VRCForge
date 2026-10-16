@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import {
   buildTimelinePresentation,
   isFinalAssistantTimelineEvent,
+  isFinalAssistantPresentationEntry,
   materializeRuntimeTimeline,
   projectRuntimeResponseForDisplay,
 } from "../src/lib/chat-timeline-presentation.ts";
@@ -117,3 +118,23 @@ const persisted = JSON.parse(JSON.stringify([{
 assert.equal(persisted.items[0].response.timeline[0].payload.phase, "commentary", "chat storage retains assistant phase");
 assert.equal(persisted.items[0].response.timeline[0].payload.messageId, "public-message-1", "chat storage retains public message identity");
 console.log("chat public message phase contract: ok");
+
+const unaccepted = { ...finalAnswer, payload: { ...finalAnswer.payload, status: "completion_unverified" } };
+const accepted = { ...finalAnswer, id: "accepted-control", sequence: 3,
+  timestamp: "2026-10-14T01:00:03.000Z", payload: { summary: "Accepted final.", status: "done" } };
+const acceptanceResponse = { ...response, plan: { ...response.plan, reply: "Accepted final.", plannerFailure: undefined },
+  timeline: [commentary, unaccepted, accepted] };
+const roundtripped = JSON.parse(JSON.stringify(acceptanceResponse));
+const acceptanceTimeline = materializeRuntimeTimeline(roundtripped);
+assert.equal(acceptanceTimeline.length, 3, "materialization never manufactures another final");
+assert.equal(isFinalAssistantTimelineEvent(unaccepted), false);
+assert.equal(acceptanceTimeline[1].payload.phase, "final_answer");
+assert.equal(acceptanceTimeline[1].payload.summary, "final answer");
+const acceptanceEntries = buildTimelinePresentation(acceptanceTimeline).entries;
+assert.deepEqual(acceptanceEntries.filter(isFinalAssistantPresentationEntry).map(e => e.text), ["Accepted final."]);
+const cancelled = { ...accepted, payload: { summary: "Request cancelled.", status: "cancelled" } };
+const cancelledProjection = projectRuntimeResponseForDisplay({ ...acceptanceResponse,
+  plan: { ...response.plan, plannerFailure: { code: "provider_request_failed" } }, timeline: [unaccepted, cancelled] }, () => "Failure notice.");
+assert.equal(cancelledProjection.timeline[0].payload.summary, "final answer", "failure projection preserves unaccepted model text");
+assert.equal(cancelledProjection.timeline[1].payload.summary, "Failure notice.");
+assert.match(timelineSource, /isFinalAssistantPresentationEntry\(entry\)/, "folding uses the shared final predicate");
