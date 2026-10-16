@@ -214,6 +214,12 @@ class NativeRuntimeTurn:
                 raise ValueError("Unexpected native context message.")
             self._state.append_native_user(self._session_id, binding=self._binding, message=message["content"])
 
+    def persist_runtime_state(self, message: dict[str, Any]) -> None:
+        """Retain the host-built state at its exact provider-input position."""
+        self._state.append_native_runtime_state(
+            self._session_id, binding=self._binding, message=message,
+        )
+
     def persist_scan_result_policy(self) -> None:
         if not self._binding or self._scan_result_policy_persisted:
             return

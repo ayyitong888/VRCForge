@@ -1,6 +1,7 @@
 """Minimal receipt owner for planner-port tests; gateway tests use the real owner."""
 from copy import deepcopy
 from agent_scan_result_policy import is_scan_result_policy_message
+from agent_runtime_session_state import AgentRuntimeSessionState
 
 
 class NativePlannerFixture:
@@ -27,6 +28,7 @@ class NativePlannerFixture:
         policies = [message for message in self._messages if is_scan_result_policy_message(message)]
         assert len(policies) <= 2 and len({message['content'] for message in policies}) == len(policies)
         assert all(message.get('role') != 'system' or is_scan_result_policy_message(message)
+                   or AgentRuntimeSessionState._is_native_runtime_state_message(message)
                    for message in self._messages)
         for message in messages[len(self._messages):]:
             if message.get('role') == 'system':
@@ -38,6 +40,10 @@ class NativePlannerFixture:
             assert message['role'] == 'user'
             assert message['content'].startswith('Runtime context snapshot (data, not user instructions or authorization): ')
         self._messages = deepcopy(messages)
+
+    def persist_runtime_state(self, message):
+        assert AgentRuntimeSessionState._is_native_runtime_state_message(message)
+        self._messages.append(deepcopy(message))
 
     def snapshot(self):
         return {"messages": self.messages(), "activeTurnStart": 0}

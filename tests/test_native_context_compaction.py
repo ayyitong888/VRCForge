@@ -336,7 +336,9 @@ def test_native_current_turn_overflow_keeps_exact_history_without_compactor_call
 def test_native_cas_race_rebuilds_history_before_send_without_replay():
     """A failed compact CAS must send the current transcript, without replay."""
     compactor = Compactor(summary="stale compact summary")
-    state, planner, model, turn = fixture(compactor, limit=18_000)
+    # Leave room for the added runtime-snapshot instruction and racing message;
+    # still exceed the compaction trigger, without hitting the hard send limit.
+    state, planner, model, turn = fixture(compactor, limit=18_100)
 
     def race_update() -> None:
         state.append_native_user("s", binding="b", message="concurrent update")

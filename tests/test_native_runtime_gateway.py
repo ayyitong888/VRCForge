@@ -62,10 +62,15 @@ def budgeted_request_history(request):
     assert messages[-1]["role"] == "system"
     assert "modelTurnBudget" not in json.loads(messages[-1]["content"].split(": ", 1)[1])
     from agent_scan_result_policy import is_scan_result_policy_message
-    policies = [message for message in messages[:-1] if message.get("role") == "system"]
+    from agent_runtime_session_state import AgentRuntimeSessionState
+    # These callers inspect conversational/tool history; retained state is
+    # covered independently by the complete wire-prefix regression.
+    history = [message for message in messages[:-1]
+               if not AgentRuntimeSessionState._is_native_runtime_state_message(message)]
+    policies = [message for message in history if message.get("role") == "system"]
     assert len(policies) <= 1
     assert all(is_scan_result_policy_message(message) for message in policies)
-    return messages[:-1]
+    return history
 
 
 def runtime_state(request):

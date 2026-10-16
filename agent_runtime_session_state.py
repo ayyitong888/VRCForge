@@ -378,6 +378,11 @@ class AgentRuntimeSessionState:
                 pending.remove(call_id)
                 normalized_messages.append(copy.deepcopy(message))
             elif role == "system":
+                if cls._is_native_runtime_state_message(message):
+                    if pending:
+                        raise ValueError("native runtime state cannot interrupt pending tool calls")
+                    normalized_messages.append(copy.deepcopy(message))
+                    continue
                 if not is_scan_result_policy_message(message):
                     raise ValueError("native system message is not a host scan policy")
                 if message["content"] in scan_policies_seen or pending or (
@@ -591,6 +596,49 @@ class AgentRuntimeSessionState:
             candidate["messages"].append({"role": "user", "content": message})
             self._native_size_ok(candidate)
             self._save_native(session_id, candidate)
+
+    @staticmethod
+    def _is_native_runtime_state_message(message: dict[str, Any]) -> bool:
+        prefix = "Current runtime state (data): "
+        if set(message) != {"role", "content"} or message.get("role") != "system":
+            return False
+        content = message.get("content")
+        if not isinstance(content, str) or not content.startswith(prefix):
+            return False
+        try:
+            state = json.loads(content[len(prefix):])
+        except (TypeError, ValueError):
+            return False
+        required = {"exposureLayer", "projectContextActive", "allowedRuntimeActions", "availableToolNames"}
+        optional = {"planMode", "modeConstraint", "projectPath", "loadedToolBlocks", "shellExecutor", "compactionRecoveryInformation"}
+        if not isinstance(state, dict) or not required <= state.keys() or state.keys() - required - optional:
+            return False
+        if not isinstance(state["exposureLayer"], str) or state["exposureLayer"] not in {"planning", "execution"} or not isinstance(state["projectContextActive"], bool):
+            return False
+        for key in ("allowedRuntimeActions", "availableToolNames", "loadedToolBlocks", "compactionRecoveryInformation"):
+            if key in state and (not isinstance(state[key], list) or any(not isinstance(item, str) for item in state[key])):
+                return False
+        return (all(isinstance(state[key], str) for key in ("modeConstraint", "projectPath") if key in state)
+                and ("planMode" not in state or isinstance(state["planMode"], bool))
+                and ("shellExecutor" not in state or isinstance(state["shellExecutor"], dict)))
+
+    def append_native_runtime_state(
+        self, session_id: str, *, binding: str, message: dict[str, Any],
+    ) -> None:
+        session_id = self._native_required(session_id, "session id")
+        binding = self._native_required(binding, "binding")
+        if not self._is_native_runtime_state_message(message):
+            raise ValueError("native runtime state must be host-built structured data")
+        with self._ports.shared_state_lock:
+            snapshot = self._native_conversations.get(session_id)
+            if snapshot is None or snapshot["binding"] != binding:
+                raise ValueError("native conversation binding mismatch")
+            if self._native_pending(snapshot):
+                raise ValueError("native conversation has pending tool calls")
+            candidate = copy.deepcopy(snapshot)
+            candidate["messages"].append(copy.deepcopy(message))
+            normalized = self._validate_native_snapshot(candidate, binding=binding)
+            self._save_native(session_id, normalized)
 
     def append_native_scan_result_policy_once(
         self, session_id: str, *, binding: str, message: dict[str, Any],
