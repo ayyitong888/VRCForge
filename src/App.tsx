@@ -790,6 +790,7 @@ export default function App() {
     hideProject,
     unhideProject,
     projectDisplayName,
+    projectDisplayLabel,
     togglePinProject,
     startRenameProject,
     commitRenameProject,
@@ -1739,7 +1740,7 @@ export default function App() {
   }, [selectedSubAgent?.id]);
   const hasRunningSubAgents = subAgentTasks.some((task) => ["queued", "running", "cancelling"].includes(task.status));
   const activeProjectName =
-    projectDisplayName(projectItems.find((project) => normalizeProjectPathKey(projectKey(project)) === normalizeProjectPathKey(activeProjectPath))) ||
+    projectDisplayLabel(projectItems.find((project) => normalizeProjectPathKey(projectKey(project)) === normalizeProjectPathKey(activeProjectPath))) ||
     (activeProjectPath ? shortPath(activeProjectPath) : "");
   const effectiveLeftPaneWidth = layoutPaneWidths.left;
   const effectiveRightPaneWidth = rightSidebarCollapsed ? 44 : layoutPaneWidths.right;
@@ -1823,13 +1824,13 @@ export default function App() {
     (message?: string) => localizeRuntimeHealthMessage(t, message),
     [t],
   );
-  const authoritativeProjectName = projectDisplayName(
+  const authoritativeProjectName = projectDisplayLabel(
     projectItems.find(
       (project) => normalizeProjectPathKey(projectKey(project)) === normalizeProjectPathKey(authoritativeSelectedProjectPath),
     ),
   );
   const workspaceProjectLabel = workspaceProjectPath
-    ? projectDisplayName(projectItems.find(
+    ? projectDisplayLabel(projectItems.find(
         (project) => normalizeProjectPathKey(projectKey(project)) === normalizeProjectPathKey(workspaceProjectPath),
       )) || shortPath(workspaceProjectPath)
     : t("workspace.noProjectSelected");
@@ -3949,7 +3950,7 @@ export default function App() {
           projectRenameDraft={projectRenameDraft}
           renamingChatId={renamingChatId}
           renameDraft={renameDraft}
-          projectDisplayName={projectDisplayName}
+          projectDisplayName={projectDisplayLabel}
           onNewTemporaryChat={openTemporaryChat}
           onOpenProjectPicker={() => {
             setProjectModalError("");
