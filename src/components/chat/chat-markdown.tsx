@@ -121,7 +121,7 @@ function buildChatMarkdownComponents(inverted: boolean): Components {
     thead: ({ node: _node, ...props }) => <thead className={inverted ? "bg-primary-foreground/15" : "bg-muted/70"} {...props} />,
     th: ({ node: _node, ...props }) => <th className={cn("border-b border-r px-3 py-2 text-left font-semibold last:border-r-0", borderClass)} {...props} />,
     td: ({ node: _node, ...props }) => <td className={cn("border-b border-r px-3 py-2 align-top last:border-r-0", borderClass)} {...props} />,
-    tr: ({ node: _node, ...props }) => <tr className="last:[&>td]:border-b-0" {...props} />,
+    tr: ({ node: _node, ...props }) => <tr className="[&:last-child>td]:border-b-0" {...props} />,
     hr: ({ node: _node, ...props }) => <hr className={cn("my-4", borderClass)} {...props} />,
     pre: ({ node: _node, children: _children }) => {
       const codeElement = Array.isArray(_children) ? _children[0] : _children;
