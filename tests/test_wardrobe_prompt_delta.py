@@ -13,6 +13,16 @@ SKILL = WORKFLOW.parents[1] / "SKILL.md"
 WORKFLOW_JSON = WORKFLOW.parents[1] / "workflows" / "wardrobe-authoring.json"
 
 
+def test_upload_budget_warning_does_not_block_approved_local_editing():
+    text = SKILL.read_text(encoding="utf-8")
+    assert "区分本地制作与 Build／上传目标" in text
+    assert "不能单独作为停止已获批准的本地创建或编辑的理由" in text
+    assert "不要擅自关闭同步、削减面捕或修改无关参数" in text
+    assert "用户要求 Build／上传时，再按相应检查结果判断是否可完成" in text
+    assert "实际工具错误、目标或批准方案不一致、待审批仍按原流程处理，不得绕过" in text
+    assert "未验证的上传或运行效果不得宣称通过" in text
+
+
 def test_wardrobe_prompt_declares_identity_target_discovery_and_binding_tools():
     skill_text = SKILL.read_text(encoding="utf-8")
     workflow_text = WORKFLOW_JSON.read_text(encoding="utf-8")
