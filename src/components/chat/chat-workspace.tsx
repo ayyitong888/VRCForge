@@ -95,6 +95,7 @@ export function ChatWorkspace({
   latestEditableUserItemId,
   editingItemId,
   editingText,
+  editSaveDisabledReason,
   editingAttachments,
   onEditItemChangeText,
   onEditItemRemoveAttachment,
@@ -174,6 +175,7 @@ export function ChatWorkspace({
   latestEditableUserItemId: string;
   editingItemId: string;
   editingText: string;
+  editSaveDisabledReason?: string;
   editingAttachments: ChatAttachment[];
   onEditItemChangeText: (value: string) => void;
   onEditItemRemoveAttachment: (attachmentId: string) => void;
@@ -467,9 +469,10 @@ export function ChatWorkspace({
                 approval={approval}
                 approvalAction={approval ? approvalActions[approval.id] : undefined}
                 canRetry={!sending && queued.length === 0 && item.id === latestRetryableItemId}
-                canEdit={!sending && queued.length === 0 && item.id === latestEditableUserItemId}
+                canEdit={item.id === latestEditableUserItemId}
                 editing={editingItemId === item.id}
                 editingText={editingText}
+                editSaveDisabledReason={editSaveDisabledReason || (sending || queued.length > 0 ? t("chat.cannotActionWhileRunning") : "")}
                 editingAttachments={editingAttachments}
                 onEditTextChange={onEditItemChangeText}
                 onEditAttachmentRemove={onEditItemRemoveAttachment}

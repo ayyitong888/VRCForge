@@ -39,6 +39,7 @@ export function ConversationCard({
   canEdit,
   editing,
   editingText,
+  editSaveDisabledReason,
   editingAttachments,
   onEditTextChange,
   onEditAttachmentRemove,
@@ -60,6 +61,7 @@ export function ConversationCard({
   approvalAction?: ApprovalActionState;
   editing?: boolean;
   editingText?: string;
+  editSaveDisabledReason?: string;
   editingAttachments?: ChatAttachment[];
   onEditTextChange?: (value: string) => void;
   onEditAttachmentRemove?: (attachmentId: string) => void;
@@ -153,11 +155,13 @@ export function ConversationCard({
                 type="button"
                 className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
                 onClick={onEditItemSave}
-                title={t("chat.saveEdit")}
+                disabled={Boolean(editSaveDisabledReason)}
+                title={editSaveDisabledReason || t("chat.saveEdit")}
                 aria-label={t("chat.saveEdit")}
               >
                 <Save className="h-3.5 w-3.5" />
               </button>
+              {editSaveDisabledReason ? <span role="status" className="text-xs text-muted-foreground">{editSaveDisabledReason}</span> : null}
               <button
                 type="button"
                 className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"

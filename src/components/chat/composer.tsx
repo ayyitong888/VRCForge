@@ -522,13 +522,12 @@ export function ContextUsageMeter({ usage, className = "" }: { usage: ContextUsa
     ? i18n.t("chat.contextCacheHitRate", { percent: Number((cacheRatio * 100).toFixed(2)) })
     : i18n.t(usage.cacheUsageStatus === "incomplete" || usage.cacheUsageStatus === "complete"
       ? "chat.contextCacheHitRateIncomplete" : "chat.contextCacheHitRateUnknown");
-  const nativeTitle = [tooltipTitle, tooltipDetail, cacheDetail].filter(Boolean).join("\n");
+  const accessibleLabel = [tooltipTitle, tooltipDetail, cacheDetail].filter(Boolean).join("\n");
   return (
     <div
       className={cn("group relative flex h-8 w-8 shrink-0 items-center justify-center rounded-full", className)}
       tabIndex={0}
-      aria-label={nativeTitle}
-      title={nativeTitle}
+      aria-label={accessibleLabel}
       data-context-meter="true"
       data-context-percent={knownRatio ? String(percent) : "unknown"}
     >
@@ -742,7 +741,7 @@ export function AttachmentStrip({
                     isSelectedText && "static ml-2 inline-flex align-middle",
                   )}
                   onClick={() => onRemove(attachment.id)}
-                  title={t("attachments.remove")}
+                  title={isSelectedText ? undefined : t("attachments.remove")}
                   aria-label={t("attachments.remove")}
                 >
                   <X className="h-3.5 w-3.5" />
@@ -794,7 +793,7 @@ export function AttachmentStrip({
                 type="button"
                 className="shrink-0 rounded p-0.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
                 onClick={() => onRemove(attachment.id)}
-                title={t("attachments.remove")}
+                title={isSelectedText ? undefined : t("attachments.remove")}
                 aria-label={t("attachments.remove")}
               >
                 <X className="h-3.5 w-3.5" />

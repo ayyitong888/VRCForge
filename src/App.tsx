@@ -383,6 +383,9 @@ export default function App() {
   const [subAgentActionBusyTaskIds, setSubAgentActionBusyTaskIds] = useState<Set<string>>(() => new Set());
   const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
   const [editingMessage, setEditingMessage] = useState<EditingMessageDraft | null>(null);
+  const [savingMessageEdit, setSavingMessageEdit] = useState(false);
+  const messageEditSaveInFlightRef = useRef(false);
+  const messageEditSnapshotRef = useRef<{ draft: EditingMessageDraft | null; chatId: string; busy: boolean }>({ draft: null, chatId: "", busy: false });
   const [selectionMenu, setSelectionMenu] = useState<{ x: number; y: number; text: string } | null>(null);
   const [doctorReport, setDoctorReport] = useState<DoctorReport | null>(null);
   const [loadingDoctor, setLoadingDoctor] = useState(false);
@@ -2780,11 +2783,14 @@ export default function App() {
     );
   }
 
+  messageEditSnapshotRef.current = {
+    draft: editingMessage,
+    chatId: activeChatId,
+    busy: isChatRunActive() || compacting || visibleQueued.length > 0
+      || Boolean(editingMessage && hasUnresolvedRuntimeState(editingMessage.chatId, getChatById(editingMessage.chatId)?.sessionId || "")),
+  };
+
   function editConversationMessage(itemId: string) {
-    if (isChatRunActive() || compacting || visibleQueued.length > 0) {
-      setError(t("chat.cannotActionWhileRunning"));
-      return;
-    }
     const chat = getChatById(activeChatId);
     if (!chat) {
       return;
@@ -2851,58 +2857,77 @@ export default function App() {
   }
 
   async function saveMessageEdit() {
-    if (!editingMessage) {
-      return false;
-    }
-    if (isChatRunActive() || compacting || visibleQueued.length > 0) {
+    const draft = editingMessage;
+    if (!draft || messageEditSaveInFlightRef.current) return false;
+    if (isChatRunActive() || compacting || visibleQueued.length > 0
+      || hasUnresolvedRuntimeState(draft.chatId, getChatById(draft.chatId)?.sessionId || "")) {
       setError(t("chat.cannotActionWhileRunning"));
       return true;
     }
-    const chat = getChatById(editingMessage.chatId);
-    if (!chat || chat.id !== activeChatId) {
+    const originalChat = getChatById(draft.chatId);
+    if (!originalChat || originalChat.id !== activeChatId) {
       discardMessageEdit();
       return true;
     }
-    const index = chat.items.findIndex((item) => item.id === editingMessage.itemId);
-    const item = index >= 0 ? chat.items[index] : null;
-    if (!item || item.type !== "user") {
-      discardMessageEdit();
-      return true;
-    }
-    if (latestConversationItemId(chat.items, (entry) => entry.type === "user") !== editingMessage.itemId) {
-      setError(t("chat.latestMessageActionOnly", { defaultValue: "Only the latest message can be changed." }));
-      return true;
-    }
-    const nextText = editingMessage.draftText.trim();
-    const nextAttachments = cloneChatAttachments(editingMessage.draftAttachments);
+    const nextText = draft.draftText.trim();
+    const nextAttachments = cloneChatAttachments(draft.draftAttachments);
     if (!nextText && nextAttachments.length === 0) {
       discardMessageEdit();
       return true;
     }
-    const turnContextLimit = resolveContextLimit(providerSnapshot.provider, providerSnapshot.model, currentModelInfo, apiConfig?.contextWindow);
-    const turn: QueuedTurn = {
-      id: `edit-${Date.now()}-${Math.random().toString(16).slice(2)}`,
-      text: nextText,
-      planMode: item.planMode === true,
-      attachments: nextAttachments,
-      providerLabel: providerSnapshot.providerLabel,
-      provider: providerSnapshot.provider,
-      model: providerSnapshot.model,
-      contextLimit: turnContextLimit.known ? turnContextLimit.limit : undefined,
-    };
-    setEditingMessage(null);
-    setInput(editingMessage.priorInput);
-    setAttachments(cloneChatAttachments(editingMessage.priorAttachments));
-    await runTurnNow(chat.id, turn, {
-      baseItems: chat.items.slice(0, index),
-      sessionId: "",
-      restoreOnFailure: {
-        items: chat.items,
-        sessionId: chat.sessionId,
-        title: chat.title,
-        updatedAt: chat.updatedAt,
-      },
-    });
+    messageEditSaveInFlightRef.current = true;
+    setSavingMessageEdit(true);
+    try {
+      // Aborting the UI transport is not a backend cancellation acknowledgement.
+      // Read the existing session before replacing its displayed history.
+      if (originalChat.sessionId) {
+        const ledger = await fetchAgentRuns(endpoint, { sessionId: originalChat.sessionId, limit: 100 });
+        if (!ledger.ok || ledger.runs.some((run) => !["completed", "cancelled", "failed", "denied", "blocked"].includes(String(run.status || "")))) {
+          setError(t("chat.cannotActionWhileRunning"));
+          return true;
+        }
+      }
+      const current = messageEditSnapshotRef.current;
+      if (current.draft !== draft || current.chatId !== draft.chatId || current.busy || isChatRunActive()) return true;
+      const chat = getChatById(draft.chatId);
+      if (!chat || chat.sessionId !== originalChat.sessionId) return true;
+      const index = chat.items.findIndex((item) => item.id === draft.itemId);
+      const item = index >= 0 ? chat.items[index] : null;
+      if (!item || item.type !== "user") return true;
+      if (latestConversationItemId(chat.items, (entry) => entry.type === "user") !== draft.itemId) {
+        setError(t("chat.latestMessageActionOnly", { defaultValue: "Only the latest message can be changed." }));
+        return true;
+      }
+      const turnContextLimit = resolveContextLimit(providerSnapshot.provider, providerSnapshot.model, currentModelInfo, apiConfig?.contextWindow);
+      const turn: QueuedTurn = {
+        id: `edit-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+        text: nextText,
+        planMode: item.planMode === true,
+        attachments: nextAttachments,
+        providerLabel: providerSnapshot.providerLabel,
+        provider: providerSnapshot.provider,
+        model: providerSnapshot.model,
+        contextLimit: turnContextLimit.known ? turnContextLimit.limit : undefined,
+      };
+      setEditingMessage(null);
+      setInput(draft.priorInput);
+      setAttachments(cloneChatAttachments(draft.priorAttachments));
+      await runTurnNow(chat.id, turn, {
+        baseItems: chat.items.slice(0, index),
+        sessionId: "",
+        restoreOnFailure: {
+          items: chat.items,
+          sessionId: chat.sessionId,
+          title: chat.title,
+          updatedAt: chat.updatedAt,
+        },
+      });
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      messageEditSaveInFlightRef.current = false;
+      setSavingMessageEdit(false);
+    }
     return true;
   }
 
@@ -4330,6 +4355,7 @@ export default function App() {
               approvalActions={approvalActions}
               editingItemId={editingMessage?.chatId === activeChatId ? editingMessage.itemId : ""}
               editingText={editingMessage?.draftText || ""}
+              editSaveDisabledReason={editingMessage && (savingMessageEdit || sending || visibleQueued.length > 0 || hasUnresolvedRuntimeState(editingMessage.chatId, getChatById(editingMessage.chatId)?.sessionId || "")) ? t("chat.cannotActionWhileRunning") : ""}
               editingAttachments={editingMessage?.draftAttachments || []}
               onEditItemChangeText={updateEditingMessageText}
               onEditItemRemoveAttachment={removeEditingMessageAttachment}
