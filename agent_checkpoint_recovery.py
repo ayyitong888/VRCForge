@@ -1247,6 +1247,35 @@ class AgentCheckpointRecoveryService:
         with self._ports.state.checkpoint_storage_lock:
             return self._restore_checkpoint_locked(params)
 
+    def doctor_restore_diagnostics(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Return redacted recovery failure diagnostics for Doctor/support export."""
+        params = params or {}
+        include_resolved = bool(params.get("includeResolved") or params.get("include_resolved"))
+        recoveries = self._coalesced_apply_recoveries(include_resolved=include_resolved)
+        recovery_id = str(params.get("recoveryId") or params.get("recovery_id") or "").strip()
+        if recovery_id:
+            recoveries = [item for item in recoveries if str(item.get("id") or "") == recovery_id]
+        return {
+            "ok": True,
+            "schema": "vrcforge.restore_failure_doctor.v1",
+            "recoveries": [
+                {
+                    "id": item.get("id"),
+                    "status": item.get("status"),
+                    "restoreAttemptCount": item.get("restoreAttemptCount", 0),
+                    "restoreSuccessCount": item.get("restoreSuccessCount", 0),
+                    "zeroEffectConsecutiveFailures": item.get("zeroEffectConsecutiveFailures", 0),
+                    "zeroEffectAutoLaunchBlocked": bool(item.get("zeroEffectAutoLaunchBlocked")),
+                    "diagnostics": [
+                        item for item in (item.get("restoreFailureDiagnostics") or [])
+                        if isinstance(item, dict)
+                    ][-20:],
+                }
+                for item in recoveries
+            ],
+        }
+
+
     def _restore_checkpoint_locked(self, params: dict[str, Any]) -> dict[str, Any]:
         from checkpoint_unity_evidence import checkpoint_core_error, record_unity_recovery_evidence
         checkpoint = self._load_checkpoint(str(params.get("checkpoint_id") or params.get("checkpointId") or "").strip())

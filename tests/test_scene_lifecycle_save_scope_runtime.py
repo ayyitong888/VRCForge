@@ -15,14 +15,17 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def _source(name):
     path = f"Assets/VRCForge/Editor/{name}.cs"
+    before = os.environ.get("VRCFORGE_SCENE_SAVE_SCOPE_SOURCE_DIR")
+    if before and (Path(before) / (name + ".cs")).exists():
+        return (Path(before) / (name + ".cs")).read_text(encoding="utf-8-sig")
     revision = os.environ.get("VRCFORGE_SCENE_SAVE_SCOPE_GIT_REF")
     if revision:
         return subprocess.check_output(["git", "show", f"{revision}:{path}"], cwd=ROOT, text=True, encoding="utf-8")
     return (ROOT / path).read_text(encoding="utf-8-sig")
 
 
-@pytest.mark.parametrize("kind", ["new", "save", "save_as"])
-def test_scene_save_retains_unrelated_dirty_asset_and_checks_readback(tmp_path, kind):
+@pytest.mark.parametrize("kind", ["new", "save", "save_clean", "save_as"])
+def test_explicit_save_and_save_as_persist_project_assets(tmp_path, kind):
     if kind == "new":
         source = _source("SaveNewSceneTool")
         begin = source.index("if (!EditorSceneManager.SaveScene(")
@@ -30,9 +33,9 @@ def test_scene_save_retains_unrelated_dirty_asset_and_checks_readback(tmp_path, 
         setup = 'var snapshot = new Snapshot();'
     else:
         source = _source("Stage1SceneTools")
-        begin = source.index("mutationStarted = true;", source.index('if (action == "save" && !scene.isDirty)'))
+        begin = source.index("mutationStarted = true;", source.index("public static class SceneSaveTool"))
         end = source.index('return VRCForgeToolResult.Completed("Scene save committed', begin)
-        setup = 'var scene = new Scene { path="Assets/Existing.unity" }; string action="'+kind+'", scenePath=scene.path, destination="Assets/Copy.unity";'
+        setup = 'var scene = new Scene { path="Assets/Existing.unity", isDirty='+("false" if kind == "save_clean" else "true")+' }; Probe.saved=scene; Probe.savedPath=scene.path; string action="'+("save" if kind == "save_clean" else kind)+'", scenePath=scene.path, destination="Assets/Copy.unity";'
     segment = source[begin:end]
     program = r'''
 using System;
@@ -63,13 +66,13 @@ class Probe {
  return null;}
  static void Run(bool corrupt){globalSaves=sceneWrites=imports=evidenceReads=sceneReads=0;unrelatedDiskValue=1;unrelatedMemoryValue=2;unrelatedDirty=true;badReadback=corrupt;bool rejected=false;
  try{Save();}catch(SceneObjectCopyException){rejected=true;}
- if(globalSaves!=0||unrelatedDiskValue!=1||!unrelatedDirty)throw new Exception("unrelated dirty asset persisted");
- if(sceneWrites!=1||imports!=1||evidenceReads!=1||sceneReads!=1||saved.isDirty)throw new Exception("scene save/import/readback regressed");
+ if(globalSaves!=EXPECTED_SAVE||unrelatedDiskValue!=EXPECTED_DISK||unrelatedDirty!=EXPECTED_DIRTY)throw new Exception("explicit save project asset semantics regressed");
+ if(sceneWrites!=EXPECTED_SCENE||imports!=1||evidenceReads!=1||sceneReads!=1||saved.isDirty)throw new Exception("scene save/import/readback regressed");
  if(rejected!=corrupt)throw new Exception("scene hierarchy readback guard regressed");
  Console.WriteLine("PASS scoped scene save; unrelated asset retained; corruptReadback="+corrupt);}
  static void Main(){Run(false);Run(true);}
 }
-'''.replace('//SETUP', setup).replace('//SEGMENT', segment)
+'''.replace('//SETUP', setup).replace('//SEGMENT', segment).replace('EXPECTED_SAVE', '1' if kind in {'save','save_clean','save_as'} else '0').replace('EXPECTED_DISK', '2' if kind in {'save','save_clean','save_as'} else '1').replace('EXPECTED_DIRTY', 'false' if kind in {'save','save_clean','save_as'} else 'true').replace('EXPECTED_SCENE', '0' if kind == 'save_clean' else '1')
     dotnet = shutil.which('dotnet')
     base = Path(os.environ.get('ProgramFiles', 'C:/Program Files')) / 'dotnet'
     compilers = sorted((base/'sdk').glob('*/Roslyn/bincore/csc.dll'))

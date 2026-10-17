@@ -8,10 +8,11 @@ import subprocess
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
+LONG_ASSET = "Assets/FacialTracking_Milltina/Animation/Binary/Animator_cf600331d188874428d4edc2927781cc/v2BrowInnerUp_False_0_Positive_cf600331d188874428d4edc2927781cc.anim"
 
 
 @pytest.mark.parametrize('damaged', [False, True])
-def test_restore_rejects_damaged_backup_before_writing(tmp_path, damaged, failure_mode=None):
+def test_restore_rejects_damaged_backup_before_writing(tmp_path, damaged, failure_mode=None, long_flat=False, external_backup=None):
     source = (ROOT / 'Assets/VRCForge/Editor/PrefabTools.cs').read_text(encoding='utf-8')
     stubs = r'''
 namespace UnityEngine {public static class Application {public static string dataPath;}}
@@ -40,6 +41,39 @@ if(System.IO.File.ReadAllText(target)!="original")throw new System.Exception("re
 }}
 }
 '''
+    if long_flat:
+        stubs = stubs.replace(
+            'var target=System.IO.Path.Combine(root,"Assets/file.asset");var original=System.Text.Encoding.UTF8.GetBytes("original");System.IO.File.WriteAllBytes(target,original);',
+            'var target=System.IO.Path.Combine(root,@"' + LONG_ASSET.replace('/', '\\') + '");System.IO.Directory.CreateDirectory(System.IO.Path.GetDirectoryName(target));var original=System.Text.Encoding.UTF8.GetBytes("original-long-animation");System.IO.File.WriteAllBytes(target,original);',
+        )
+    if external_backup:
+        stubs = stubs.replace(
+            'var target=System.IO.Path.Combine(root,@"' + LONG_ASSET.replace('/', '\\') + '");System.IO.Directory.CreateDirectory(System.IO.Path.GetDirectoryName(target));var original=System.Text.Encoding.UTF8.GetBytes("original-long-animation");System.IO.File.WriteAllBytes(target,original);',
+            'var target=System.IO.Path.Combine(root,@"' + LONG_ASSET.replace('/', '\\') + '");var original=System.Text.Encoding.UTF8.GetBytes("animation-data");',
+        )
+        start = stubs.index('var backup=System.IO.Path.Combine(root,"Library/VRCForge/Backups/test");')
+        end = stubs.index('foreach(var confirm', start)
+        stubs = stubs[:start] + 'var backup=args[2];\n' + stubs[end:]
+        stubs = stubs.replace('System.IO.File.WriteAllText(target,"mutated-after-backup");', '')
+        stubs = stubs.replace(
+            'confirmRestore=confirm,refreshAssets=false',
+            'confirmRestore=confirm,refreshAssets=false,allowOverwriteChanged=true',
+        ).replace('!="original-long-animation"', '!="animation-data"')
+        stubs = stubs.replace(
+            'System.IO.File.WriteAllText(System.IO.Path.Combine(backup,"file.asset"),damaged?"damaged":"original");',
+            'System.IO.Directory.CreateDirectory(System.IO.Path.Combine(backup,"files"));System.IO.File.WriteAllBytes(System.IO.Path.Combine(backup,"files/00000000"),damaged?System.Text.Encoding.UTF8.GetBytes("damaged"):original);',
+        )
+        stubs = stubs.replace(
+            'project_relative_path="Assets/file.asset",backup_relative_path="file.asset"',
+            'project_relative_path=@"' + LONG_ASSET.replace('/', '\\') + '",backup_relative_path="files/00000000"',
+        )
+        stubs = stubs.replace(
+            'foreach(var confirm in new[]{false,true}){',
+            'System.IO.File.WriteAllText(target,"mutated-after-backup");foreach(var confirm in new[]{false,true}){',
+        ).replace(
+            'if(System.IO.File.ReadAllText(target)!="original")throw new System.Exception("restore corrupted target");',
+            'if(confirm && System.IO.File.ReadAllText(target)!="animation-data")throw new System.Exception("production restore did not read flat backup path");',
+        )
     if failure_mode:
         stubs = stubs.replace('damaged?"damaged":"original"', '"replacement"')
         stubs = stubs.replace('sha256=Hash(original)}}', 'sha256=Hash(System.Text.Encoding.UTF8.GetBytes("replacement"))}}')
@@ -67,7 +101,7 @@ using var locked=new System.IO.FileStream(second,System.IO.FileMode.Open,System.
     assert built.returncode == 0, built.stdout + built.stderr
     shutil.copy2(newtonsoft, tmp_path / 'Newtonsoft.Json.dll')
     (tmp_path / 'Probe.runtimeconfig.json').write_text(json.dumps({'runtimeOptions': {'tfm': 'netcoreapp3.1', 'framework': {'name': 'Microsoft.NETCore.App', 'version': '3.1.0'}}}), encoding='utf-8')
-    ran = subprocess.run([dotnet, str(dll), str(tmp_path), str(damaged)], capture_output=True, text=True, timeout=30)
+    ran = subprocess.run([dotnet, str(dll), str(tmp_path), str(damaged), str(external_backup or "")], capture_output=True, text=True, timeout=30)
     assert ran.returncode == 0, ran.stdout + ran.stderr
 
 

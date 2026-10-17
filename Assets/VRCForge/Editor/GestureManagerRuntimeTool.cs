@@ -35,12 +35,16 @@ namespace VRCForge.Editor
             public bool enterPlayModePending;
             public string enterPlayModeErrorCode = string.Empty;
             public string enterPlayModeError = string.Empty;
+            public JObject playModeTransition;
+            public string[] dirtyScenePaths = Array.Empty<string>();
+            public string[] dirtyAssetPaths = Array.Empty<string>();
         }
 
         internal sealed class ManagerBinding
         {
             public MonoBehaviour Behaviour;
             public object Module;
+            public GameObject Avatar;
             public string ManagerPath;
             public string AvatarPath;
         }
@@ -56,9 +60,20 @@ namespace VRCForge.Editor
                 ? null
                 : UnityEditor.PackageManager.PackageInfo.FindForAssetPath(prefabAssetPath);
             var bindings = Discover(requestedAvatarPath);
+            var loadedScenes = CheckpointPrepareTool.LoadedScenes()
+                .Where(scene => !CheckpointPrepareTool.IsKnownTransientPreviewScene(scene)).ToArray();
+            var loadedScenePaths = new HashSet<string>(loadedScenes.Select(scene => scene.path), StringComparer.Ordinal);
             return new Status
             {
                 isPlayMode = EditorApplication.isPlaying,
+                dirtyScenePaths = loadedScenes
+                    .Where(scene => scene.isDirty).Select(scene => scene.path)
+                    .Distinct(StringComparer.Ordinal).OrderBy(path => path, StringComparer.Ordinal).ToArray(),
+                dirtyAssetPaths = Resources.FindObjectsOfTypeAll<UnityEngine.Object>()
+                    .Where(asset => asset != null && EditorUtility.IsPersistent(asset) && EditorUtility.IsDirty(asset))
+                    .Select(AssetDatabase.GetAssetPath).Where(path => !string.IsNullOrWhiteSpace(path)
+                        && path.StartsWith("Assets/", StringComparison.Ordinal) && !loadedScenePaths.Contains(path))
+                    .Distinct(StringComparer.Ordinal).OrderBy(path => path, StringComparer.Ordinal).ToArray(),
                 packageDetected = !string.IsNullOrEmpty(prefabAssetPath),
                 packageVersion = packageInfo?.version ?? string.Empty,
                 prefabAssetPath = prefabAssetPath,
@@ -67,6 +82,7 @@ namespace VRCForge.Editor
                 enterPlayModePending = GestureManagerPlayModeCoordinator.Pending,
                 enterPlayModeErrorCode = GestureManagerPlayModeCoordinator.LastErrorCode,
                 enterPlayModeError = GestureManagerPlayModeCoordinator.LastError,
+                playModeTransition = GestureManagerPlayModeCoordinator.ReadTransition(bindings),
                 managers = bindings.Select(binding => Describe(
                     binding,
                     includeAllParameters,
@@ -110,6 +126,7 @@ namespace VRCForge.Editor
                 {
                     Behaviour = behaviour,
                     Module = module,
+                    Avatar = avatar,
                     ManagerPath = HierarchyPath(behaviour.transform),
                     AvatarPath = avatarPath
                 });
@@ -219,6 +236,7 @@ namespace VRCForge.Editor
                     {
                         Behaviour = manager,
                         Module = existingModule,
+                        Avatar = existingAvatar,
                         ManagerPath = HierarchyPath(manager.transform),
                         AvatarPath = existingAvatarPath
                     };
@@ -264,6 +282,7 @@ namespace VRCForge.Editor
                 {
                     Behaviour = manager,
                     Module = connectedModule,
+                    Avatar = connectedAvatar,
                     ManagerPath = HierarchyPath(manager.transform),
                     AvatarPath = connectedAvatarPath
                 };
@@ -374,6 +393,7 @@ namespace VRCForge.Editor
                 managerPath = binding.ManagerPath,
                 avatarPath = binding.AvatarPath,
                 managerActive = binding.Behaviour && binding.Behaviour.isActiveAndEnabled,
+                avatarGlobalObjectId = binding.Avatar ? GlobalObjectId.GetGlobalObjectIdSlow(binding.Avatar).ToString() : string.Empty,
                 moduleConnected = binding.Module != null,
                 moduleType = binding.Module?.GetType().FullName ?? string.Empty,
                 menuAsset = menu ? menu.name : string.Empty,
@@ -686,6 +706,7 @@ namespace VRCForge.Editor
         private const string AvatarPathKey = "VRCForge.GestureManager.EnterPlayMode.AvatarPath";
         private const string LastErrorCodeKey = "VRCForge.GestureManager.EnterPlayMode.LastErrorCode";
         private const string LastErrorKey = "VRCForge.GestureManager.EnterPlayMode.LastError";
+        private const string TransitionKey = "VRCForge.GestureManager.EnterPlayMode.Transition";
 
         static GestureManagerPlayModeCoordinator()
         {
@@ -701,13 +722,52 @@ namespace VRCForge.Editor
         internal static string LastErrorCode => SessionState.GetString(LastErrorCodeKey, string.Empty);
         internal static string LastError => SessionState.GetString(LastErrorKey, string.Empty);
 
-        internal static void Prepare(string managerPath, string avatarPath)
+        internal static JObject CaptureTarget(GameObject avatar)
         {
+            if (!avatar) throw new InvalidOperationException("GM transition avatar is unavailable.");
+            var result = ExecutionTargetInspector.HandleCommand(new JObject {
+                ["scope"] = "avatar",
+                ["avatarGlobalObjectId"] = GlobalObjectId.GetGlobalObjectIdSlow(avatar).ToString()
+            }) as VRCForgeToolResult;
+            var target = result?.Payload as JObject;
+            if (result == null || !result.IsSuccessful || target == null || target["avatar"] == null)
+                throw new InvalidOperationException("GM transition requires an exact saved-scene avatar identity.");
+            return (JObject)target.DeepClone();
+        }
+
+        internal static JObject ReadTransition(IReadOnlyList<GestureManagerRuntimeBridge.ManagerBinding> bindings)
+        {
+            var raw = SessionState.GetString(TransitionKey, string.Empty);
+            if (string.IsNullOrEmpty(raw)) return null;
+            try
+            {
+                var transition = JObject.Parse(raw);
+                if ((string)transition["status"] != "completed" || Pending || !EditorApplication.isPlaying)
+                    return null;
+                var matches = bindings.Where(item => item.Module != null
+                    && item.ManagerPath == (string)transition["managerPath"]
+                    && item.AvatarPath == (string)transition["avatarPath"]).ToArray();
+                if (matches.Length != 1 || !JToken.DeepEquals(CaptureTarget(matches[0].Avatar), transition["completedExecutionTarget"]))
+                    return null;
+                return transition;
+            }
+            catch (Exception) { return null; }
+        }
+
+        internal static string Prepare(string managerPath, string avatarPath, GameObject avatar)
+        {
+            var transition = new JObject {
+                ["id"] = Guid.NewGuid().ToString("N"), ["status"] = "pending",
+                ["managerPath"] = managerPath, ["avatarPath"] = avatarPath,
+                ["sourceExecutionTarget"] = CaptureTarget(avatar)
+            };
+            SessionState.SetString(TransitionKey, transition.ToString(Newtonsoft.Json.Formatting.None));
             SessionState.SetString(ManagerPathKey, managerPath ?? string.Empty);
             SessionState.SetString(AvatarPathKey, avatarPath ?? string.Empty);
             SessionState.SetString(LastErrorCodeKey, string.Empty);
             SessionState.SetString(LastErrorKey, string.Empty);
             SessionState.SetBool(PendingKey, true);
+            return (string)transition["id"];
         }
 
         private static void OnPlayModeStateChanged(PlayModeStateChange state)
@@ -719,6 +779,7 @@ namespace VRCForge.Editor
             else if (state == PlayModeStateChange.EnteredEditMode)
             {
                 SessionState.SetBool(PendingKey, false);
+                SessionState.EraseString(TransitionKey);
             }
         }
 
@@ -731,10 +792,32 @@ namespace VRCForge.Editor
 
             var managerPath = SessionState.GetString(ManagerPathKey, string.Empty);
             var avatarPath = SessionState.GetString(AvatarPathKey, string.Empty);
-            if (GestureManagerRuntimeBridge.TryConnect(managerPath, avatarPath, out _, out var error))
+            if (GestureManagerRuntimeBridge.TryConnect(managerPath, avatarPath, out var binding, out var error))
             {
-                SessionState.SetString(LastErrorCodeKey, string.Empty);
-                SessionState.SetString(LastErrorKey, string.Empty);
+                try
+                {
+                    var transition = JObject.Parse(SessionState.GetString(TransitionKey, string.Empty));
+                    var source = (JObject)transition["sourceExecutionTarget"];
+                    var completed = CaptureTarget(binding.Avatar);
+                    if (!JToken.DeepEquals(source["project"], completed["project"])
+                        || !JToken.DeepEquals(source["scene"], completed["scene"])
+                        || !JToken.DeepEquals(source["editor"]?["unityPid"], completed["editor"]?["unityPid"])
+                        || !JToken.DeepEquals(source["editor"]?["processStartTime"], completed["editor"]?["processStartTime"])
+                        || (string)source["avatar"]?["exactHierarchyPath"] != binding.AvatarPath
+                        || (string)completed["avatar"]?["exactHierarchyPath"] != binding.AvatarPath
+                        || binding.ManagerPath != (string)transition["managerPath"])
+                        throw new InvalidOperationException("GM Play Mode transition source identity changed.");
+                    transition["completedExecutionTarget"] = completed;
+                    transition["status"] = "completed";
+                    SessionState.SetString(TransitionKey, transition.ToString(Newtonsoft.Json.Formatting.None));
+                    SessionState.SetString(LastErrorCodeKey, string.Empty);
+                    SessionState.SetString(LastErrorKey, string.Empty);
+                }
+                catch (Exception exception)
+                {
+                    SessionState.SetString(LastErrorCodeKey, "gesture_manager_transition_identity_failed");
+                    SessionState.SetString(LastErrorKey, exception.Message);
+                }
             }
             else
             {
@@ -853,7 +936,7 @@ namespace VRCForge.Editor
                     NoMutation(avatarPath));
             }
 
-            GestureManagerPlayModeCoordinator.Prepare(managerPath, avatarPath);
+            var transitionId = GestureManagerPlayModeCoordinator.Prepare(managerPath, avatarPath, avatars[0].gameObject);
             EditorApplication.EnterPlaymode();
             return VRCForgeToolResult.Completed(
                 $"Gesture Manager Play Mode entry requested for avatar: {avatarPath}",
@@ -866,8 +949,9 @@ namespace VRCForge.Editor
                     isPlayMode = false,
                     moduleConnected = false,
                     enterPlayModePending = true,
-                    persistent = false,
-                    sceneDirty = false,
+                    playModeTransitionId = transitionId,
+                    projectPlayCallbacksMayPersistAssets = true,
+                    assetRollbackClaimed = false,
                     mutationStarted = true,
                     committed = true,
                     commitState = "enter_play_mode_requested"
@@ -890,8 +974,8 @@ namespace VRCForge.Editor
                     isPlayMode = true,
                     moduleConnected = true,
                     moduleType = binding.Module?.GetType().FullName ?? string.Empty,
-                    persistent = false,
-                    sceneDirty = false,
+                    projectPlayCallbacksMayPersistAssets = true,
+                    assetRollbackClaimed = false,
                     mutationStarted = true,
                     committed = true,
                     commitState = "runtime_connected"

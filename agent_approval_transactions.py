@@ -2976,6 +2976,9 @@ class AgentApprovalTransactionService:
             or status.get("error")
             or status.get("errorCode")
             or status.get("isPlayMode") is not True
+            or status.get("enterPlayModePending") is not False
+            or status.get("enterPlayModeErrorCode")
+            or status.get("enterPlayModeError")
             or not isinstance(status.get("managers"), list)
         ):
             return []
@@ -2985,7 +2988,11 @@ class AgentApprovalTransactionService:
         avatar_path = str(
             arguments.get("avatar_path") or arguments.get("avatarPath") or ""
         ).strip().strip("/")
-        if not project_root or not avatar_path or not isinstance(execution_target, Mapping):
+        transition = status.get("playModeTransition")
+        completed_target = (
+            transition.get("completedExecutionTarget") if isinstance(transition, Mapping) else None
+        )
+        if not project_root or not avatar_path:
             return []
         if not any(
             isinstance(manager, Mapping)
@@ -2994,7 +3001,6 @@ class AgentApprovalTransactionService:
             for manager in status["managers"]
         ):
             return []
-        target_digest = execution_target_digest(execution_target)
         resolved: list[dict[str, Any]] = []
         for recovery in self._ports.checkpoint.active_apply_recoveries():
             if str(recovery.get("targetTool") or "") != "vrcforge_gesture_manager_enter_play_mode":
@@ -3008,14 +3014,49 @@ class AgentApprovalTransactionService:
                 continue
             if not isinstance(recovery.get("executionTarget"), Mapping):
                 continue
-            if execution_target_digest(recovery["executionTarget"]) != target_digest:
-                continue
             pending_summary = recovery.get("resultSummary")
             if not isinstance(pending_summary, Mapping) or not (
                 pending_summary.get("enterPlayModePending") is True
                 and pending_summary.get("isPlayMode") is False
                 and pending_summary.get("moduleConnected") is False
                 and pending_summary.get("commitState") == "enter_play_mode_requested"
+            ):
+                continue
+            if isinstance(transition, Mapping):
+                source = transition.get("sourceExecutionTarget")
+                if (
+                    transition.get("status") != "completed"
+                    or not transition.get("id")
+                    or transition.get("id") != pending_summary.get("playModeTransitionId")
+                    or not isinstance(source, Mapping)
+                    or not isinstance(completed_target, Mapping)
+                    or execution_target_digest(source) != execution_target_digest(recovery["executionTarget"])
+                    or source.get("project") != completed_target.get("project")
+                    or source.get("scene") != completed_target.get("scene")
+                    or any(ensure_dict(source.get("editor")).get(key) != ensure_dict(completed_target.get("editor")).get(key)
+                           for key in ("unityPid", "processStartTime"))
+                    or ensure_dict(source.get("avatar")).get("exactHierarchyPath") != avatar_path
+                    or ensure_dict(completed_target.get("avatar")).get("exactHierarchyPath") != avatar_path
+                    or transition.get("avatarPath") != avatar_path
+                    or (isinstance(execution_target, Mapping)
+                        and execution_target_digest(execution_target) != execution_target_digest(completed_target))
+                ):
+                    continue
+                managers = [item for item in status["managers"] if isinstance(item, Mapping)]
+                if len(managers) != 1 or not (
+                    managers[0].get("moduleConnected") is True
+                    and managers[0].get("managerPath") == transition.get("managerPath")
+                    and managers[0].get("avatarGlobalObjectId") == ensure_dict(completed_target.get("avatar")).get("globalObjectId")
+                ):
+                    continue
+                # The Core-owned transition is not a replacement for current
+                # process/scene authority. An unbound read must pass that gate too.
+                try:
+                    validate_runtime_execution_target(completed_target, project_root=project_root, required_scope="avatar")
+                except (ExecutionTargetError, OSError, ValueError, TypeError):
+                    continue
+            elif not isinstance(execution_target, Mapping) or (
+                execution_target_digest(recovery["executionTarget"]) != execution_target_digest(execution_target)
             ):
                 continue
             resolved.append(
@@ -3027,6 +3068,7 @@ class AgentApprovalTransactionService:
                 )
             )
         return resolved
+
 
     def visible_write_targets(
         self,
@@ -4220,6 +4262,7 @@ class AgentApprovalTransactionService:
                         "isPlayMode",
                         "moduleConnected",
                         "enterPlayModePending",
+                        "playModeTransitionId",
                         "commitState",
                     ):
                         if key in result:

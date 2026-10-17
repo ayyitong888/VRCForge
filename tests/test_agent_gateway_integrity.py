@@ -1161,6 +1161,7 @@ def test_public_mcp_gesture_manager_pending_receipt_projects_pending_operation(t
     connected_status = {
         "ok": True,
         "isPlayMode": True,
+        "enterPlayModePending": False,
         "managers": [
             {
                 "avatarPath": "Avatar",

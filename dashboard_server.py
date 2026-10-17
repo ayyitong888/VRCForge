@@ -9475,6 +9475,10 @@ def read_agentic_app_doctor() -> dict[str, Any]:
     try:
         report = DOCTOR_READINESS_REPORT.build_app_doctor_report()
         report["dataRoot"] = data_root_status_payload()
+        try:
+            report["restoreFailureDiagnostics"] = AGENT_GATEWAY.checkpoint_recovery.doctor_restore_diagnostics({"includeResolved": True})
+        except Exception:  # noqa: BLE001 - keep the main Doctor report available without raw exception details.
+            report["restoreFailureDiagnostics"] = {"ok": False, "error": "Recovery failure diagnostics are unavailable."}
         return report
     except Exception as exc:  # noqa: BLE001 - doctor must not break first-run desktop startup.
         checks = [
@@ -9513,6 +9517,7 @@ def read_agentic_app_doctor() -> dict[str, Any]:
             "dataRoot": data_root_status_payload(),
             "checks": checks,
         }
+
 
 
 @app.post("/api/app/doctor/unity-mcp/repair")
@@ -23965,7 +23970,10 @@ def gesture_manager_status_sync(params: dict[str, Any]) -> dict[str, Any]:
             and str(item.get("avatarPath") or "").strip().strip("/") == requested_avatar
         ]
         status = {**status, "managerCount": len(managers), "detected": bool(managers), "managers": managers}
-    return {"ok": True, **status}
+    result = {"ok": True, **status}
+    AGENT_GATEWAY.approval_transactions.reconcile_gesture_manager_pending_recovery(params, result)
+    return result
+
 
 
 def prepare_runtime_observation_request(arguments, _preview):
@@ -27373,7 +27381,7 @@ def register_agent_gateway_tools() -> None:
     )
     register_write_handler(
         "vrcforge_scene_save",
-        "When to use: save the exact active scene in place, or save it as one new non-existing Assets scene after a bound preview and approval. When NOT to use: do not open, unload, replace, overwrite, or silently save a different or dirty scene. Negative example: do not call save_as with an existing destination or use save merely because another tool reports unsaved changes.",
+        "When to use: explicitly save current work (the exact active scene plus modified project assets), or save_as to one new non-existing Assets scene plus modified project assets, after a bound preview and approval. Both actions persist project assets; save also does so when the scene is clean; the preview lists dirty assets and project save callbacks may affect other assets. When NOT to use: do not implicitly save, open, unload, replace, or overwrite a different scene. Negative example: do not call save_as with an existing destination or use save merely because another tool reports unsaved changes.",
         "high",
         unity_mcp_write_sync,
         request_preparer=lambda params, preview: prepare_stage1_atomic_request(params, preview, SCENE_SAVE_TOOL),
