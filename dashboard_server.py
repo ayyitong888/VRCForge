@@ -16428,7 +16428,20 @@ def load_internal_tool_block(params: dict[str, Any]) -> dict[str, Any]:
         from tool_discovery_search import search_tool_leaves
         catalog = _RuntimePlannerCatalog().read(normalize_exposure_layer(params.get("exposureLayer")), project_context_active=params.get("projectContextActive") is True)
         visible = [t for t in catalog.visible_tools if not t.requires_user_activation or catalog.computer_use_model_invocable]
-        return search_tool_leaves(query.strip(), visible, AGENT_GATEWAY.runtime_sessions.internal_tool_selections(session_id))
+        runtime_sessions = AGENT_GATEWAY.runtime_sessions
+        selections = runtime_sessions.internal_tool_selections(session_id)
+        _, available_tools = RuntimePlannerService._select_plan_tools(
+            catalog,
+            runtime_sessions.internal_tool_blocks(session_id),
+            {"internalToolSelections": selections},
+            project_context_active=params.get("projectContextActive") is True,
+        )
+        return search_tool_leaves(
+            query.strip(),
+            visible,
+            selections,
+            available_tool_names={tool.name for tool in available_tools},
+        )
     if not branch or branch in CANONICAL_TOOL_BLOCKS:
         if requested_tools or all_tools:
             return {"ok": False, "status": "failed", "errorCode": "internal_tool_selection_invalid", "error": "Select a leaf before specifying tools.", "mutationStarted": False}

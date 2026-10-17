@@ -1,6 +1,7 @@
 """Bounded keyword routes into the existing, permission-filtered tool tree."""
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import Mapping
 from collections import defaultdict
@@ -43,6 +44,9 @@ _OPERATION_PREFIXES = frozenset({
     "apply", "create", "delete", "ensure", "manage", "preview", "read", "rename", "scan",
     "set", "update", "write",
 })
+_QUERY_FILLER_WORDS = frozenset({
+    "a", "an", "and", "for", "from", "in", "of", "on", "or", "the", "this", "that", "to", "with",
+})
 
 
 def _terms(value):
@@ -82,11 +86,91 @@ def _target_terms(runtime_name):
     return set(parts)
 
 
+def _search_relevance(records, tokens, query):
+    """Select by whole-query topic relevance, then distinguish by names/actions."""
+    action_terms = tokens & (_WRITE_INTENT | _READ_INTENT)
+    topic_terms = tokens - action_terms - _QUERY_FILLER_WORDS
+    if not topic_terms:
+        topic_terms = tokens
+
+    query_text = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", query)
+    query_sequence = re.findall(r"[a-z]+|[0-9]+|[\u4e00-\u9fff]+", query_text.casefold())
+
+    documents = {}
+    frequencies = defaultdict(int)
+    for tool in records:
+        name = _terms(tool.name + " " + tool.runtime_name)
+        description = _terms(tool.description)
+        schema = _schema_terms(tool.input_schema)
+        block = _terms(tool.block)
+        documents[tool.name] = (name, description, schema, block)
+        for term in name | description | schema | block:
+            frequencies[term] += 1
+
+    count = len(records)
+    weights = {
+        term: min(2.5, 1.0 + math.log((count + 1) / (frequencies[term] + 1)))
+        for term in topic_terms if frequencies[term]
+    }
+    read_requested = bool(tokens & _READ_INTENT)
+    ranked = {}
+    for tool in records:
+        name, description, schema, block = documents[tool.name]
+        topic_score = 0.0
+        coverage = 0
+        for term, weight in weights.items():
+            # Names, descriptions, and executable schemas carry equal topic
+            # evidence. A block path is useful context, but by itself should
+            # not make every tool in a generic leaf a strong match.
+            source_weight = 1.0 if term in (name | description | schema) else 0.25 if term in block else 0.0
+            if source_weight:
+                # A subject mentioned in a description or executable schema
+                # is still a strong topic match; name/action signals only
+                # break ties after the full subject has been compared.
+                topic_score += weight * source_weight
+                coverage += 1
+
+        # Exact action matches help distinguish a scan from another read-only
+        # tool in the same domain without letting a common verb dominate.
+        action_score = sum(
+            2.0 if term in name else 0.5 if term in description else 0.0
+            for term in action_terms
+        )
+        if read_requested:
+            operation = tool.runtime_name.removeprefix("vrcforge_").split("_")
+            if operation and operation[0] == "unity":
+                operation = operation[1:]
+            if operation and operation[0] in _READ_INTENT:
+                action_score += 1.5
+        name_score = sum(weight for term, weight in weights.items() if term in name)
+        name_sequence = re.findall(
+            r"[a-z]+|[0-9]+|[\u4e00-\u9fff]+",
+            re.sub(r"(?<=[a-z])(?=[A-Z])", " ", tool.name + " " + tool.runtime_name).casefold(),
+        )
+        # A requested operation immediately followed by its subject is a
+        # stronger signal than either token independently (for example,
+        # "scan materials"). The subject still has to occur in the name.
+        for previous, subject in zip(query_sequence, query_sequence[1:]):
+            if previous not in action_terms or subject not in topic_terms or subject not in name:
+                continue
+            subject_weight = weights.get(subject, 0.0)
+            if subject_weight and any(
+                name_sequence[index:index + 2] == [previous, subject]
+                for index in range(len(name_sequence) - 1)
+            ):
+                name_score += subject_weight * 1.5
+        ranked[tool.name] = (
+            round(topic_score, 6), coverage,
+            round(name_score, 6), round(action_score, 6),
+        )
+    return ranked
+
+
 def _is_write_intent(tokens):
     return bool(tokens & _WRITE_INTENT)
 
 
-def search_tool_leaves(query, tools, selections):
+def search_tool_leaves(query, tools, selections, *, available_tool_names=None):
     query, truncation = _bounded_query(query)
     tokens = _terms(query)
     records = [t for t in tools if t.block != "core" and "/" in t.block]
@@ -101,7 +185,11 @@ def search_tool_leaves(query, tools, selections):
         text_hits = len(tokens & text_terms)
         schema_hits = len((tokens - _WRITE_INTENT - _READ_INTENT) & _schema_terms(tool.input_schema))
         scores[tool.name] = (name_hits, schema_hits, text_hits)
-    best = max((score[0] for score in scores.values()), default=0)
+    search_records = (
+        [tool for tool in records if not tool.write]
+        if tokens & _READ_INTENT and not tokens & _WRITE_INTENT else records
+    )
+    relevance = _search_relevance(search_records, tokens, query)
     exact_leaf = query.strip().casefold()
     leaf_matches = [t for t in records if t.block.casefold() == exact_leaf]
     exact_tool_matches = [
@@ -109,7 +197,12 @@ def search_tool_leaves(query, tools, selections):
         if t.name.casefold() == exact_leaf or t.runtime_name.casefold() == exact_leaf
     ]
     direct_matches = leaf_matches or exact_tool_matches
-    matched = direct_matches or [t for t in records if scores[t.name][0] == best and (best or scores[t.name][2])]
+    best_topic_score = max((score[0] for score in relevance.values()), default=0.0)
+    matched = direct_matches or [
+        tool for tool in search_records
+        if best_topic_score > 0
+        and relevance[tool.name][0] >= best_topic_score * 0.75
+    ]
     write_intent = _is_write_intent(tokens)
     numeric_change = any(token.isdigit() for token in tokens)
     if not write_intent and not (tokens & _READ_INTENT):
@@ -167,7 +260,10 @@ def search_tool_leaves(query, tools, selections):
     grouped = defaultdict(list)
     for tool in matched:
         grouped[tool.block].append(tool)
-    ordered = sorted(grouped, key=lambda block: (-max(scores[t.name][2] for t in grouped[block]), block))
+    ordered = sorted(grouped, key=lambda block: (
+        tuple(-part for part in max(relevance.get(t.name, (0, 0, 0, 0)) for t in grouped[block])),
+        block,
+    ))
     results = []
     for block in ordered[:5]:
         matches = grouped[block]
@@ -189,8 +285,12 @@ def search_tool_leaves(query, tools, selections):
                 required_names.update((preview.name, write.name))
         required = sorted(required_names)
         bundle = sorted(matched_names | required_names)
-        loaded = selections.get(block, [])
-        missing = [n for n in bundle if loaded is not None and n not in loaded]
+        if available_tool_names is not None:
+            loaded = set(bundle) & set(available_tool_names)
+        else:
+            selected = selections.get(block, [])
+            loaded = set(bundle) if selected is None else set(selected)
+        missing = [n for n in bundle if n not in loaded]
         results.append({
             "leafPath": block,
             "toolNames": sorted(t.name for t in matches),
