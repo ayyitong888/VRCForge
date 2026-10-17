@@ -2162,6 +2162,11 @@ class RuntimePlannerService:
                     "上一步工具已经执行，结果也已保留，但模型返回的下一步规划格式无效。"
                     "规划失败后未再执行工具，请重试。"
                 )
+            elif cause_code == "native_history_save_failed":
+                reply = (
+                    "本地会话历史保存失败，文件替换已作有限重试；已执行的工具没有重放。"
+                    "本轮已停止，请排除本地文件占用或权限问题后继续。"
+                )
             elif post_tool:
                 reply = (
                     "上一步工具已经执行，结果也已保留，但读取结果后的下一次模型规划失败。"
@@ -2279,6 +2284,9 @@ class RuntimePlannerService:
 
     @staticmethod
     def _planner_failure_code(exc: Exception) -> str:
+            from agent_native_history_store import NativeHistoryPersistenceError
+            if isinstance(exc, NativeHistoryPersistenceError):
+                return "native_history_save_failed"
             if isinstance(exc, PlannerProviderNotConfiguredError):
                 return "provider_not_configured"
             if isinstance(exc, ProviderTokenLimitError):

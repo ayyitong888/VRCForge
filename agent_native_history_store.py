@@ -10,8 +10,13 @@ import hashlib
 import json
 import os
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
+
+
+class NativeHistoryPersistenceError(OSError):
+    """A local durable-history failure, never a Provider transport failure."""
 
 
 class NativeHistoryStore:
@@ -38,9 +43,12 @@ class NativeHistoryStore:
             path = self._path(session_id, binding)
         try:
             with path.open("rb") as stream:
-                value = json.load(stream)
+                raw = stream.read()
         except FileNotFoundError:
             return None
+        # Parsing can be expensive; do not hold a Windows read handle that
+        # prevents another process from atomically replacing this snapshot.
+        value = json.loads(raw)
         if not isinstance(value, dict) or value.get("version") != 1 or value.get("sessionId") != session_id:
             raise ValueError("Saved native history identity is invalid")
         if binding is not None and value.get("native", {}).get("binding") != binding:
@@ -58,7 +66,17 @@ class NativeHistoryStore:
                 stream.write(raw)
                 stream.flush()
                 os.fsync(stream.fileno())
-            os.replace(temporary, self._path(session_id, snapshot["binding"]))
+            target = self._path(session_id, snapshot["binding"])
+            for attempt in range(3):
+                try:
+                    os.replace(temporary, target)
+                    break
+                except OSError as exc:
+                    # Retry only the same already-written private file, never
+                    # a Provider request or a tool whose side effects occurred.
+                    if getattr(exc, "winerror", None) not in {5, 32, 33} or attempt == 2:
+                        raise NativeHistoryPersistenceError("Could not persist local native history.") from exc
+                    time.sleep(0.025 * (attempt + 1))
         finally:
             if os.path.exists(temporary):
                 os.unlink(temporary)
