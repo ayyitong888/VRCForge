@@ -111,7 +111,9 @@ def test_every_business_field_and_semantic_order_changes_expire_and_publish_new_
         assert reply["expired"] is True
         assert reply["status"] == "replaced"
         assert reply["replacementRef"] != ref
-        assert reply["replacementSummary"]["detailsOmitted"] is True
+        assert reply["replacementSummary"]["detailsOmitted"] is False
+        assert reply["replacementSummary"]["inlineComplete"] is True
+        assert reply["replacementSummary"]["fields"] == fresh
         again = read_tool_result({"resultRef": ref}, sanitize=sanitize)
         assert again["replacementRef"] == reply["replacementRef"]
     assert len(calls) == 1

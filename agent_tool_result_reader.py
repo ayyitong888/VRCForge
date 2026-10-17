@@ -19,6 +19,10 @@ from planner_structured_tool_evidence import _identity_key, _private_or_opaque, 
 TOOL_NAME = "vrcforge_read_tool_result"
 PAGE_SCHEMA = "vrcforge.tool_result_page.v1"
 MAX_PAGE_CHARS = 12000
+MAX_SCAN_SUMMARY_CHARS = 6000
+MAX_INLINE_SCAN_CHARS = 4000
+_SCAN_PAGING_FIELDS = ("paging", "pagination", "nextRequest", "nextKeyRequest",
+                       "nextOffset", "hasMore", "total", "totalCount", "returned", "complete", "readHints")
 
 
 class _ResultFieldUnavailable(ValueError):
@@ -143,17 +147,57 @@ def scan_result_summary(step: Mapping[str, Any], sanitize: Callable[[object, int
     # retained evidence text or the first large text page.
     if _size(completeness) > 1600:
         completeness = [{"facts": {"coverageDetailsOmitted": True}}]
-    return {"authority": "untrusted_tool_output", "fields": fields,
+    summary = {"authority": "untrusted_tool_output", "fields": fields,
             "capturedAt": snapshot.get("capturedAt"), "persisted": snapshot.get("persisted") is True,
             "scope": "validated_scope" if _validated_scan_snapshot(step) else "current_turn",
             "freshness": "validated_on_read" if _validated_scan_snapshot(step) else "unverified",
             "expired": snapshot.get("expired") is True,
             "status": "needs_rescan" if snapshot.get("expired") is True else "snapshot",
             "reason": sanitize(snapshot.get("reason", ""), 160),
-            "scanScopePreview": scope_preview, "detailsOmitted": True,
+            "scanScopePreview": scope_preview, "detailsOmitted": True, "inlineComplete": False,
             "sourceCompleteness": completeness, "sourceConstraints": constraints,
             "sourceConstraintsTruncated": truncated,
             "interpretation": "Summary only; missing details are not evidence of absence. Page the exact reference. Paging completion is not scan completeness or freshness verification."}
+    # A small complete public page needs no second read. Use the same redactor
+    # and exact-selector rules as the reader; never label a partial projection
+    # complete, nor confuse a complete page with an exhaustive source scan.
+    if _size(result) <= MAX_INLINE_SCAN_CHARS:
+        public = project_structured_tool_evidence(result, sanitize_text=sanitize, mode="runtimecomplete")
+        candidate = {**summary, "fields": public["data"], "detailsOmitted": False, "inlineComplete": True,
+                     "interpretation": "Complete public result page; hidden private fields are not evidence of absence. Paging completion is not scan completeness or freshness verification."}
+        if not public["truncated"] and _size(candidate) <= MAX_SCAN_SUMMARY_CHARS:
+            return candidate
+    # Source cursors belong to the control plane. Do not force a separate
+    # reader call merely to discover the authoritative next offset, and never
+    # publish a shortened/partially projected continuation request.
+    incomplete = False
+    if isinstance(result, Mapping):
+        for name in _SCAN_PAGING_FIELDS:
+            if name not in result:
+                continue
+            raw = {name: result[name]}
+            if _size(raw) > 1800:
+                incomplete = True
+                continue
+            public = project_structured_tool_evidence(raw, sanitize_text=sanitize, mode="runtimecomplete")
+            value = result[name]
+            if name in {"nextRequest", "nextKeyRequest"} and isinstance(value, dict) and set(value) == {"tool", "arguments"}:
+                # Only this source-owned continuation envelope can carry an
+                # argument map. Project its values normally and require an
+                # exact match; generic argument/output fields stay opaque.
+                arguments = value["arguments"]
+                tool = value["tool"]
+                if isinstance(arguments, dict) and isinstance(tool, str) and sanitize(tool, 160) == tool:
+                    safe_args = project_structured_tool_evidence(arguments, sanitize_text=sanitize, mode="runtimecomplete")
+                    if not safe_args["truncated"] and not safe_args["redactedFields"] and safe_args["data"] == arguments:
+                        public = {"data": raw, "truncated": False, "redactedFields": 0}
+            candidate = {**summary, "fields": {**summary["fields"], **public["data"]}}
+            if public["truncated"] or public["redactedFields"] or public["data"] != raw or _size(candidate) > MAX_SCAN_SUMMARY_CHARS - 64:
+                incomplete = True
+                continue
+            summary = candidate
+    summary["pagingControlsIncomplete"] = incomplete
+    return summary
 
 
 def result_reference(session_id: str, turn_id: str, project_root: str, step: Mapping[str, Any]) -> str:

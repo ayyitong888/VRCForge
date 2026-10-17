@@ -51,9 +51,11 @@ def test_changed_rescan_flows_through_public_reader_and_model_projection(tmp_pat
 
     assert page["status"] == "replaced"
     assert page["expired"] is True
-    assert page["replacementSummary"]["detailsOmitted"] is True
+    assert page["replacementSummary"]["detailsOmitted"] is False
+    assert page["replacementSummary"]["inlineComplete"] is True
+    assert page["replacementSummary"]["fields"] == fresh
     assert page["replacementRef"]
-    assert "PRIVATE_DETAIL_MARKER" not in str(page)
+    assert page["replacementSummary"]["fields"]["rows"][0]["name"] == "PRIVATE_DETAIL_MARKER"
     assert replacement_page["items"][0]["value"] == fresh["rows"][0]
     assert len(scan_calls) == 1
     replacement_raw = store._connection
