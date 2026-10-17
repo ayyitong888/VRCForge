@@ -137,11 +137,11 @@ def test_reviewed_guide_version_import_updates_prior_immutable_version(app_profi
     old_result = app.SKILL_PACKAGE_CONTROLLER.import_package({"packagePath": str(old_archive), "devMode": True, "projectToUserSkills": True})
     assert old_result["ok"] and old_result["projectedSkill"]["name"] == delivery.SKILL_NAME
 
-    current_archive = service.export_dev(delivery.bundled_source_dir(), tmp_path / "guide-1.0.4.vsk").package_path
+    current_archive = service.export_dev(delivery.bundled_source_dir(), tmp_path / "guide-1.0.5.vsk").package_path
     current_result = app.SKILL_PACKAGE_CONTROLLER.import_package({"packagePath": str(current_archive), "devMode": True, "projectToUserSkills": True})
     assert current_result["ok"] and current_result["projectedSkill"]["name"] == delivery.SKILL_NAME
     installed = service.load_registry()["skills"][delivery.PACKAGE_ID]
-    assert installed["version"] == "1.0.4"
+    assert installed["version"] == "1.0.5"
     projected = gateway.skills.user_skills_dir / delivery.SKILL_NAME / "references" / "user-tool-author-guide.md"
     assert projected.read_bytes() == (delivery.bundled_source_dir() / "references" / "user-tool-author-guide.md").read_bytes()
 

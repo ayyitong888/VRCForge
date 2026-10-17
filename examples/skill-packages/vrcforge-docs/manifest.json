@@ -2,7 +2,7 @@
   "id": "com.vrcforge.workflows.docs",
   "name": "VRCForge Docs",
   "skill_name": "vrcforge-docs",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "author": "VRCForge",
   "description": "VRCForge documentation and self-knowledge with Agent-selected diagnosis, supervised setup and verified repair.",
   "min_vrcforge_version": "1.8.1",
