@@ -2,6 +2,13 @@
   "schema": "vrcforge.skill-package.workflow.v1",
   "mode": "approval_required",
   "selfContained": true,
+  "fxLayerDeletion": {
+    "when": "multiple_approved_layers_on_one_existing_controller_and_live_schema_supports_delete_layer",
+    "execution": "one_ordered_edits_batch_with_exact_unique_layer_names",
+    "syncDependencies": "delete_dependents_before_target",
+    "preserve": ["shared_state_machines", "motion_and_clip_subassets", "unrelated_layers_and_parameters"],
+    "validation": "one_preview_approval_checkpoint_and_persisted_readback_for_entire_batch"
+  },
   "requiresOtherSkills": [],
   "scope": [
     "animation_clip",

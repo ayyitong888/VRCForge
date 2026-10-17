@@ -56,6 +56,13 @@ RUNTIME_REPLY_LANGUAGE_INSTRUCTION = (
     "Respond in the user's language as established in the conversation, "
     "unless the user explicitly requests another language. "
 )
+RUNTIME_PUBLIC_COMMUNICATION_INSTRUCTION = (
+    "For a task requiring tools, give a brief opening before the first tool call explaining the immediate work. "
+    "When you have meaningful findings, state the finding and next step; give brief updates for a changed approach, a blocker, or a long wait. "
+    "During longer tasks, after tool results return, give a concise progress update if about a minute has passed since your last update. "
+    "Group related work; do not narrate every tool call or repeat preparation, reveal private reasoning, or invent progress. "
+    "Make the final answer self-contained and complete, so the user need not read earlier progress updates. "
+)
 RUNTIME_SCOPE_UNITY_INSTRUCTION = (
     "A Unity project is explicitly bound to this turn. Use the project tool catalog when it is relevant. "
     "For questions about the current scene, component bindings, or Avatar behavior, prefer the dedicated read-only inspection tools; "
@@ -587,6 +594,7 @@ class PlannerModelResult:
     # Exact provider replay is private transport state, never planner/UI reasoning.
     assistant_message: Mapping[str, object] = field(default_factory=dict, repr=False)
     finish_reason: str = ""
+    model: str = ""
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "usage", MappingProxyType(dict(self.usage)))
@@ -2470,6 +2478,7 @@ class RuntimePlannerService:
             format_correction: dict[str, object] = {}
             retry_attempts = 0
             retry_decision = ""
+            actual_model = ""
             native_call_ids: list[str] = []
             try:
                 native = native_turn is not None
@@ -2526,6 +2535,7 @@ class RuntimePlannerService:
                         native_request,
                         origin=origin,
                     )
+                    native_request._provider_turn_state = getattr(native_turn, "provider_turn_state", None)
                     if native_guard is not None and ensure_dict(native_turn.compaction).get("applied") is True:
                         native_guard = self.native_context_guard(native_request, context_usage=context_usage)
                     if native_guard is not None and context_usage is not None:
@@ -2631,6 +2641,7 @@ class RuntimePlannerService:
                         reasoning_trace.clear()
                         reasoning_trace.update(provider_reasoning)
                     planner_label = raw_response.planner_label.strip() or str(planner_label or "").strip()
+                    actual_model = str(raw_response.model or "").strip() or actual_model
                     response_text, provider_usage = normalize_llm_plan_result(raw_response)
                     if queued_receipt is None:
                         self.record_context_usage(context_usage if context_usage is not None else {}, prompt, history, provider_usage)
@@ -2820,6 +2831,7 @@ class RuntimePlannerService:
                 **({"formatCorrection": dict(format_correction)} if format_correction else {}),
                 "planner": "llm",
                 "plannerLabel": planner_label,
+                **({"model": actual_model} if actual_model else {}),
                 "reply": reply,
                 "userConstraintsApplied": bool(observe.get("userConstraints", {}).get("enabled")),
                 "shellNeeded": False,
@@ -4533,7 +4545,10 @@ class RuntimePlannerService:
             ". The host binds completed-action evidence; optional evidence_action_ids must refer to completed actions. "
             "Only verified outcomes support success; unrelated successes "
             "do not resolve failures. Otherwise answer honestly without claiming completion. "
-            "Keep routine calls quiet; explain meaningful findings or blockers briefly.\n"
+            f"{RUNTIME_PUBLIC_COMMUNICATION_INSTRUCTION}"
+            'Use ordinary public assistant content for updates; use phase="commentary" only when the protocol supports it. '
+            "When work remains, include the next tool call in the same response as the update and continue the task. "
+            "Do not use action=reply for a progress update; reserve it for the final answer.\n"
         )
         if project_context_active:
             instructions += "\n" + RUNTIME_SCOPE_UNITY_INSTRUCTION
@@ -4601,10 +4616,22 @@ class RuntimePlannerService:
             "resultPages": [result_page_ledger(ensure_dict(observe.get("modelContextInformationRead")))]
             if isinstance(observe.get("modelContextInformationRead"), Mapping) else [],
         }
-        return attach_native_request_origin(
+        request = attach_native_request_origin(
             {"instructions": instructions, "messages": projected_messages, "tools": definitions},
             origin=origin,
-        ), [*selected, dispatcher, control]
+        )
+        # Private registry metadata lets the provider ledger classify a
+        # call_tool receipt without exposing permissions or raw arguments to
+        # the provider.  The transport still receives only the existing
+        # messages/tools payload above.
+        request["_requestMetadata"] = {"toolMetadata": {
+            tool.name: {
+                "permission": "Write" if tool.write else "ReadOnly",
+                "effect": "write" if tool.write else "read",
+            }
+            for tool in [*selected, *navigation, dispatcher, control]
+        }}
+        return request, [*selected, dispatcher, control]
 
     @staticmethod
     def _native_action_payload(receipt, tools, *, catalog=None):
@@ -4694,6 +4721,9 @@ class RuntimePlannerService:
             validation = validate_planner_tool_arguments(tool.input_schema, arguments)
             if not validation.get("ok"):
                 return None, {**validation, "kind": "control", "tool": name, "arguments": arguments}
+            if (arguments.get("action") != "reply" and not arguments.get("reply")
+                    and not public_assistant_messages(receipt) and receipt.get("content")):
+                arguments["reply"] = receipt["content"]
             if arguments.get("action") == "correct":
                 target = next((item for item in tools if item.name == arguments.get("tool") and item.name not in {name, "call_tool"}), None)
                 if target is None or not arguments.get("correction_for_action_id"):
@@ -4701,7 +4731,8 @@ class RuntimePlannerService:
                 kind = "write" if target.write else "skill"
                 return {"action": kind, f"{kind}_tool": target.name,
                         f"{kind}_params": arguments.get("arguments"),
-                        "correction_for_action_id": arguments["correction_for_action_id"]}, None
+                        "correction_for_action_id": arguments["correction_for_action_id"],
+                        **({"reply": arguments["reply"]} if arguments.get("reply") else {})}, None
             return arguments, None
         validation = validate_planner_tool_arguments(tool.input_schema, arguments)
         if not validation.get("ok"):
@@ -4910,9 +4941,9 @@ class RuntimePlannerService:
                 '失败收尾示例：{"action":"reply","reply":"仍有步骤未验证，原因是…","completion_claim":{"satisfied":false}}；这表示如实失败，不是成功完成。\n'
                 "reply 字段是直接展示给用户的对话内容：用第一人称。"
                 f"{RUNTIME_REPLY_LANGUAGE_INSTRUCTION}"
-                "Non-final action commentary is optional: omit reply or use an empty string for routine steps. "
-                "Do not repeat preparation or narrate routine tool discovery/loading. "
-                "Give a brief update only for meaningful new findings, a changed approach, a blocker, or a long wait. "
+                f"{RUNTIME_PUBLIC_COMMUNICATION_INSTRUCTION}"
+                "Put public updates in the reply field of the same JSON action object and continue that action; "
+                "do not add a preamble outside the JSON object. Reserve action=reply for the final answer. "
                 "Use already-visible tools directly; do not list or load a block for a tool that is already available. "
                 "When the requested evidence is sufficient, reply immediately with the requested result; "
                 "avoid unrequested facts, repeated assurances, and offers to do more.\n\n"

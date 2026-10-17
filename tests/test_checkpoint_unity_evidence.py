@@ -66,7 +66,7 @@ def test_prepare_failure_registers_refs_and_manual_close_cleans(tmp_path):
     current = service._select_apply_recovery({'recoveryId': recovery['id']})
     assert current['unityEvidenceReferences'] == [ref]
     assert path.exists()
-    assert current.get('restoreAttemptCount', 0) == 0
+    assert current.get('restoreAttemptCount', 0) == 1
     closed = service.resolve_interrupted_apply_recovery({'recoveryId': recovery['id'], 'confirmResolved': True})
     assert closed['ok'] and not path.exists()
     assert closed['recovery']['unityEvidenceCleanup']['deleted'] == [ref['reference']]
@@ -150,7 +150,7 @@ def test_invalid_prepare_evidence_blocks_before_attempt_and_preserves_file(tmp_p
     assert result['status'] == 'restore_prepare_failed'
     assert result['unityRestorePrepare']['errorCode'] == 'checkpoint_evidence_invalid'
     current = service._select_apply_recovery({'recoveryId': recovery['id']})
-    assert current.get('restoreAttemptCount', 0) == 0
+    assert current.get('restoreAttemptCount', 0) == 1
     assert current['unityEvidenceWarnings']
     assert controller.read_text() == 'changed' and path.exists()
 

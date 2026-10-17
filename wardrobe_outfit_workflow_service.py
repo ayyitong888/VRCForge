@@ -1588,6 +1588,23 @@ class CreateWardrobePreviewPorts:
     ensure_menu: CreateWardrobeStepPort
 
 
+def _create_wardrobe_step_arguments(
+    params: dict[str, Any], arguments: dict[str, Any],
+) -> dict[str, Any]:
+    # These selectors belong to the primitive handler, not its frozen Core
+    # arguments. Keep an explicit target from falling back to dashboard state.
+    connection = {
+        key: params[key]
+        for key in (
+            "projectPath", "project_path", "projectRoot", "project_root",
+            "settings_path", "unity_host", "unity_port", "unity_instance",
+            "executionTarget",
+        )
+        if key in params
+    }
+    return {**arguments, **connection}
+
+
 class CreateWardrobePreviewService:
     """Own the complete read/preview Wardrobe creation sequence."""
 
@@ -1602,9 +1619,9 @@ class CreateWardrobePreviewService:
             return invalid
         calls = self._ports.build_calls(normalized, True)
         results = (
-            self._ports.ensure_parameter(calls[0][1]),
-            self._ports.ensure_animator(calls[1][1]),
-            self._ports.ensure_menu(calls[2][1]),
+            self._ports.ensure_parameter(_create_wardrobe_step_arguments(normalized, calls[0][1])),
+            self._ports.ensure_animator(_create_wardrobe_step_arguments(normalized, calls[1][1])),
+            self._ports.ensure_menu(_create_wardrobe_step_arguments(normalized, calls[2][1])),
         )
         steps = [
             {"tool": calls[index][0], "result": result}
@@ -1661,7 +1678,7 @@ class CreateWardrobeApprovedWriteService:
         steps: list[dict[str, Any]] = []
         for index, invoke in enumerate(step_ports):
             try:
-                result = invoke(calls[index][1])
+                result = invoke(_create_wardrobe_step_arguments(normalized, calls[index][1]))
             except Exception as exc:
                 result = {"ok": False, "error": str(exc), "commitState": "unknown"}
             steps.append({"tool": calls[index][0], "result": result})
@@ -1733,6 +1750,20 @@ class CreateWardrobeApprovedWriteService:
             "preview": False,
             "action": "create_wardrobe",
             "parameterName": request["parameterName"],
+            "wardrobeStage": "skeleton",
+            "strictWardrobeVerified": False,
+            "nextSteps": [
+                "The verified receipt covers the parameter, default FX state and menu only; "
+                "a one-value skeleton is not a verified wardrobe. Do not repeat create_wardrobe.",
+                "Install the first outfit separately using preview/add_outfit with manageWardrobe=false "
+                "or the exposed instantiate/setup tools; read back its exact object paths and setup result.",
+                "Use vrcforge_preview_add_wardrobe_outfit and approved vrcforge_add_wardrobe_outfit "
+                "with the existing Int parameter, verified object paths and explicit approved value.",
+                "The add primitive preserves existing clips. Complete approved mutual-exclusion "
+                "curves in every affected state, including default, then fresh vrcforge_scan_wardrobe. "
+                "Only a strict scan match permits the full add_outfit workflow for later outfits; "
+                "configuration recognition does not prove runtime or visual acceptance.",
+            ],
             "steps": steps,
         }
 

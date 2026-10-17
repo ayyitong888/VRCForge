@@ -91,8 +91,21 @@ def _noop_scan_invalidation(_project_root: str, _reason: str) -> None:
     return None
 
 
+def _noop_scan_completion(
+    _project_root: str,
+    _reason: str,
+    _outcome: Any,
+    _marker: Any,
+) -> None:
+    return None
+
+
 PATCH_SET_SCHEMA = "vrcforge.modular_patch_set.v1"
 _UNITY_SERIALIZED_SUFFIXES = frozenset({".unity", ".prefab", ".asset", ".mat", ".controller", ".overridecontroller", ".anim", ".playable", ".mask"})
+# Scene-save checkpoint preparation is authoritative revalidation only. The
+# actual handler retains the mutation fence; fencing this preflight would
+# expire a prior scan before a verified no-change receipt can preserve it.
+_READ_ONLY_CHECKPOINT_PREPARE_TARGETS = frozenset({"vrcforge_scene_save"})
 
 
 def _checkpoint_archive_files_for_write(target_tool: str, arguments: Mapping[str, Any]) -> list[str]:
@@ -432,6 +445,10 @@ CHECKPOINT_RESTORE_MANUAL_APPROVAL_REASON = (
     "Checkpoint restore always requires manual user approval because it can remove "
     "or replace project files."
 )
+CHECKPOINT_RESTORE_AUTO_LAUNCH_BLOCKED_REASON = (
+    "Checkpoint restore automatic launch is blocked after three proven zero-effect failures; "
+    "a new invocation requires explicit manual user approval."
+)
 AVATAR_UPLOAD_MANUAL_APPROVAL_REASON = (
     "VRChat avatar upload always requires one exact user confirmation because remote metadata, "
     "visibility, thumbnail, or bundle changes cannot be undone by a local checkpoint."
@@ -645,7 +662,8 @@ class ApprovalTransactionPorts:
     read_user_constraints: Callable[[], UserConstraintsSnapshot]
     roslyn_available: Callable[[AgentGatewayConfig | None], bool]
     save_config: Callable[[AgentGatewayConfig], None]
-    invalidate_scan_results: Callable[[str, str], None] = _noop_scan_invalidation
+    invalidate_scan_results: Callable[[str, str], Any] = _noop_scan_invalidation
+    complete_scan_mutation: Callable[[str, str, Any, Any], None] = _noop_scan_completion
 
 
 class AgentApprovalTransactionService:
@@ -695,14 +713,24 @@ class AgentApprovalTransactionService:
         self._restore_pending_approvals()
 
     @contextmanager
-    def _scan_mutation(self, project_root: Any, reason: str) -> Iterator[None]:
+    def _scan_mutation(
+        self,
+        project_root: Any,
+        reason: str,
+        recovery: dict[str, Any] | None = None,
+    ) -> Iterator[dict[str, Any]]:
         root = str(project_root or "").strip()
         callback = self._ports.invalidate_scan_results
-        callback(root, f"{reason}:starting")
+        marker = callback(root, f"{reason}:starting")
+        state: dict[str, Any] = {}
         try:
-            yield
+            yield state
         finally:
-            callback(root, f"{reason}:finished")
+            completion = self._ports.complete_scan_mutation
+            if completion is _noop_scan_completion or marker is None:
+                callback(root, f"{reason}:finished")
+            else:
+                completion(root, reason, state.get("outcome"), marker)
 
     def validate_patch_set(self, value: Any) -> dict[str, Any]:
         return validate_modular_patch_set(value)
@@ -1185,7 +1213,7 @@ class AgentApprovalTransactionService:
             payload["error"] = outcome["error"]
         return payload
 
-    def _restore_request_is_incident_bound(self, arguments: Mapping[str, Any]) -> bool:
+    def _matching_restore_recovery(self, arguments: Mapping[str, Any]) -> dict[str, Any] | None:
         requested_recovery_id = str(
             arguments.get("recoveryId") or arguments.get("recovery_id") or ""
         ).strip()
@@ -1198,10 +1226,13 @@ class AgentApprovalTransactionService:
             if requested_recovery_id:
                 if recovery_id != requested_recovery_id:
                     continue
-                return not requested_checkpoint_id or checkpoint_id == requested_checkpoint_id
+                return recovery if not requested_checkpoint_id or checkpoint_id == requested_checkpoint_id else None
             if requested_checkpoint_id and checkpoint_id == requested_checkpoint_id:
-                return True
-        return False
+                return recovery
+        return None
+
+    def _restore_request_is_incident_bound(self, arguments: Mapping[str, Any]) -> bool:
+        return self._matching_restore_recovery(arguments) is not None
 
     def create_apply_request(
         self,
@@ -1317,8 +1348,11 @@ class AgentApprovalTransactionService:
             target_tool, full_permission_auto, mandatory_manual_approval_reason,
         )
         if target_tool == "vrcforge_restore_checkpoint" and full_permission_auto:
-            if not self._restore_request_is_incident_bound(arguments):
+            matching_recovery = self._matching_restore_recovery(arguments)
+            if matching_recovery is None:
                 always_manual_reason = CHECKPOINT_RESTORE_MANUAL_APPROVAL_REASON
+            elif matching_recovery.get("zeroEffectAutoLaunchBlocked"):
+                always_manual_reason = CHECKPOINT_RESTORE_AUTO_LAUNCH_BLOCKED_REASON
             else:
                 arguments["_vrcforge_incident_restore_auto"] = True
         requires_explicit_for_mode = bool(always_manual_reason) or (
@@ -1879,6 +1913,7 @@ class AgentApprovalTransactionService:
                                 ensure_dict(approval.get("approvedUnityExecutionPlan")),
                                 verification_baseline,
                                 ensure_dict(approval.get("taskContext")),
+                                recovery=recovery,
                             )
             elif requires_checkpoint and target_tool in LOCAL_STATE_CHECKPOINT_TARGETS:
                 if not self._ports.state.skill_package_write_lock_bound:
@@ -1944,6 +1979,7 @@ class AgentApprovalTransactionService:
                                     ),
                                     verification_baseline,
                                     ensure_dict(approval.get("taskContext")),
+                                    recovery=recovery,
                                 )
             else:
                 if requires_checkpoint:
@@ -1983,6 +2019,7 @@ class AgentApprovalTransactionService:
                         ensure_dict(approval.get("approvedUnityExecutionPlan")),
                         verification_baseline,
                         ensure_dict(approval.get("taskContext")),
+                        recovery=recovery,
                     )
             if core_call_audits:
                 request_trace = {
@@ -2439,14 +2476,16 @@ class AgentApprovalTransactionService:
         frozen_execution_plan: dict[str, Any],
         verification_baseline: dict[str, Any],
         task_context: dict[str, Any],
+        recovery: dict[str, Any] | None = None,
     ) -> Any:
         handler_arguments = dict(arguments)
         handler_arguments.pop("_vrcforge_approved_execution", None)
         if not write_handler.requires_approved_execution_context:
             with self._scan_mutation(
-                extract_project_root(handler_arguments), target_tool
-            ):
+                extract_project_root(handler_arguments), target_tool, recovery
+            ) as mutation:
                 result = write_handler.handler(handler_arguments)
+                mutation["outcome"] = _domain_write_receipt(result)
             observation_pending = (
                 target_tool == "vrcforge_start_runtime_observation"
                 and isinstance(result, Mapping)
@@ -2523,8 +2562,9 @@ class AgentApprovalTransactionService:
         )
         try:
             with bind_approved_unity_execution(execution_plan):
-                with self._scan_mutation(project_root, target_tool):
+                with self._scan_mutation(project_root, target_tool, recovery) as mutation:
                     result = write_handler.handler(handler_arguments)
+                    mutation["outcome"] = _domain_write_receipt(result)
         finally:
             if not execution_plan.consumed:
                 execution_plan.burn()
@@ -3068,7 +3108,6 @@ class AgentApprovalTransactionService:
                 )
             )
         return resolved
-
 
     def visible_write_targets(
         self,
@@ -3681,12 +3720,24 @@ class AgentApprovalTransactionService:
         always_manual_reason = _always_manual_approval_reason(
             normalized_target, full_permission, mandatory_confirmation_reason,
         )
+        matching_recovery = (
+            self._matching_restore_recovery(arguments)
+            if normalized_target == "vrcforge_restore_checkpoint" and full_permission
+            else None
+        )
         if (
             normalized_target == "vrcforge_restore_checkpoint"
             and full_permission
-            and not self._restore_request_is_incident_bound(arguments)
+            and matching_recovery is None
         ):
             always_manual_reason = CHECKPOINT_RESTORE_MANUAL_APPROVAL_REASON
+        elif (
+            normalized_target == "vrcforge_restore_checkpoint"
+            and full_permission
+            and matching_recovery is not None
+            and matching_recovery.get("zeroEffectAutoLaunchBlocked")
+        ):
+            always_manual_reason = CHECKPOINT_RESTORE_AUTO_LAUNCH_BLOCKED_REASON
         elif normalized_target == "vrcforge_restore_checkpoint" and full_permission:
             arguments["_vrcforge_incident_restore_auto"] = True
         confirmation_reason = str(always_manual_reason or (
@@ -3793,6 +3844,7 @@ class AgentApprovalTransactionService:
         arguments: dict[str, Any],
         handler_arguments_digest: str,
         frozen_execution_plan: Mapping[str, Any],
+        recovery: dict[str, Any] | None = None,
     ) -> Any:
         """Run one external handler with only the shared exact Core authority."""
 
@@ -3802,7 +3854,7 @@ class AgentApprovalTransactionService:
         if not write_handler.requires_approved_execution_context:
             with bind_operation_context(operation_id, execution_target if isinstance(execution_target, Mapping) else None):
                 with (nullcontext() if arguments.get("preview") is True else self._scan_mutation(
-                    extract_project_root(handler_arguments), target_tool
+                    extract_project_root(handler_arguments), target_tool, recovery
                 )):
                     return write_handler.handler(handler_arguments)
 
@@ -3892,9 +3944,11 @@ class AgentApprovalTransactionService:
             with bind_approved_unity_execution(execution_plan):
                 with bind_operation_context(operation_id, execution_target if isinstance(execution_target, Mapping) else None):
                     with (nullcontext() if arguments.get("preview") is True else self._scan_mutation(
-                        project_root, target_tool
-                    )):
+                        project_root, target_tool, recovery
+                    )) as mutation:
                         result = write_handler.handler(handler_arguments)
+                        if isinstance(mutation, dict):
+                            mutation["outcome"] = _domain_write_receipt(result)
         finally:
             if not execution_plan.consumed:
                 execution_plan.burn()
@@ -4197,6 +4251,7 @@ class AgentApprovalTransactionService:
                     arguments,
                     handler_arguments_digest,
                     frozen_execution_plan,
+                    recovery=recovery,
                 )
             source_tool_result = result
             # Runtime observation owns a finite Unity sampling job.  Its start

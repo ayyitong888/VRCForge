@@ -12890,17 +12890,14 @@ class DashboardServerTests(unittest.TestCase):
         gm_enter_policy = targets["vrcforge_gesture_manager_enter_play_mode"]["rollbackPolicy"]
         self.assertEqual(gm_enter_policy["kind"], "ephemeral_editor_state_inverse")
         self.assertEqual(gm_enter_policy["restoreTool"], "vrcforge_set_play_mode")
-        self.assertTrue(gm_enter_policy["preWriteCheckpointRequired"])
+        self.assertFalse(gm_enter_policy["preWriteCheckpointRequired"])
 
         gm_runtime_policy = targets["vrcforge_gesture_manager_set_parameter"]["rollbackPolicy"]
         self.assertFalse(gm_runtime_policy["preWriteCheckpointRequired"])
         play_exit_policy = targets["vrcforge_set_play_mode"]["rollbackPolicy"]
-        # The published rollback summary is conservative for this conditional
-        # policy because it is evaluated without the requested isPlaying value.
-        self.assertTrue(play_exit_policy["preWriteCheckpointRequired"])
+        self.assertFalse(play_exit_policy["preWriteCheckpointRequired"])
         play_policy = dashboard_server.AGENT_GATEWAY._write_handlers["vrcforge_set_play_mode"].pre_write_checkpoint_required
-        self.assertTrue(callable(play_policy))
-        self.assertFalse(play_policy({"isPlaying": False}))
+        self.assertFalse(play_policy)
 
         restore_policy = targets["vrcforge_restore_checkpoint"]["rollbackPolicy"]
         self.assertEqual(restore_policy["kind"], "checkpoint_restore")
@@ -12940,17 +12937,16 @@ class DashboardServerTests(unittest.TestCase):
         self.assertIn("closedScenes", source)
         self.assertIn("reopenErrors", source)
         self.assertIn("recoveryRequired = true", source)
-        self.assertIn("EditorSceneManager.SaveScene(scene)", source)
-        self.assertIn(
-            "if (scene.isDirty)\n"
-            "                    {\n"
-            "                        if (!EditorSceneManager.SaveScene(scene))",
-            source,
-        )
-        self.assertLess(
-            source.index('"unsaved_open_scene"'),
-            source.index("AssetDatabase.SaveAssets()"),
-        )
+        prepare_source = source[
+            source.index("public static class CheckpointPrepareTool") :
+            source.index("public static class CheckpointReloadTool")
+        ]
+        self.assertNotIn("EditorSceneManager.SaveScene", prepare_source)
+        self.assertNotIn("AssetDatabase.SaveAssets", prepare_source)
+        self.assertIn('? "dirty_editor_state" : ""', prepare_source)
+        self.assertIn("snapshotIncludesUnsavedState = false", prepare_source)
+        self.assertIn("saved = false", prepare_source)
+        self.assertIn("mutationStarted = false", prepare_source)
         self.assertIn("EditorSceneManager.OpenScene", source)
         self.assertIn("NewSceneSetup.EmptyScene", source)
         self.assertIn("EditorSceneManager.CloseScene(scene, true)", source)
@@ -17370,6 +17366,7 @@ namespace VRCForge.Editor
                 patch("dashboard_server.parse_args", return_value=args),
                 patch("dashboard_server.backend_bind_target_occupied", return_value=False),
                 patch("dashboard_server.BACKEND_OWNER_LEASE", lease),
+                patch.object(dashboard_server.AGENT_GATEWAY._scan_results, "reconcile_orphaned_mutations", return_value={"ok": True}) as reconcile,
                 patch("dashboard_server.run_owned_uvicorn_server") as run_server,
             ):
                 result = dashboard_server.main()
@@ -17377,10 +17374,33 @@ namespace VRCForge.Editor
             self.assertEqual(result, 0)
             self.assertTrue(worker.is_alive())
             run_server.assert_called_once_with(args.host, args.port)
+            reconcile.assert_called_once_with()
             lease.release.assert_not_called()
         finally:
             stop_worker.set()
             worker.join(timeout=2)
+
+    def test_backend_main_releases_owner_when_scan_reconcile_fails(self) -> None:
+        args = dashboard_server.parse_args([])
+        lease = Mock()
+        lease.acquire.return_value = True
+        with (
+            patch("dashboard_server.parse_args", return_value=args),
+            patch("dashboard_server.backend_bind_target_occupied", return_value=False),
+            patch("dashboard_server.BACKEND_OWNER_LEASE", lease),
+            patch.object(
+                dashboard_server.AGENT_GATEWAY._scan_results,
+                "reconcile_orphaned_mutations",
+                side_effect=RuntimeError("reconcile failed"),
+            ),
+            patch("dashboard_server.run_owned_uvicorn_server") as run_server,
+            patch("builtins.print"),
+        ):
+            result = dashboard_server.main()
+
+        self.assertEqual(result, 1)
+        lease.release.assert_called_once_with()
+        run_server.assert_not_called()
 
     def test_shader_plan_validation_respects_locked_materials_and_properties(self) -> None:
         validation = dashboard_server.validate_shader_material_tuning_plan(

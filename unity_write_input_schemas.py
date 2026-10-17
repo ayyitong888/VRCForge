@@ -1224,7 +1224,7 @@ _ADD_OUTFIT_PROPERTIES = {
     'folder': {'type': ['string', 'null'], 'default': '', 'description': 'Optional asset-search folder used only for query resolution.'},
     'parentPath': {'type': ['string', 'null'], 'description': 'Existing parent hierarchy path; defaults to avatarPath.'},
     'outfitName': {'type': ['string', 'null'], 'description': 'New single-segment object name; defaults to prefab name, then Outfit. Existing target objects are rejected.'},
-    'parameterName': {'type': ['string', 'null'], 'description': 'Optional wardrobe selector. Omission starts with Clothes and the existing wardrobe-selection policy; an explicit value selects that exact wardrobe.'},
+    'parameterName': {'type': ['string', 'null'], 'description': 'Selector for an existing strict verified wardrobe when manageWardrobe=true. A newly created one-value skeleton is insufficient; first install without binding, then add via preview_add_wardrobe_outfit/add_wardrobe_outfit. Omission uses the existing wardrobe-selection policy.'},
     'unpackMode': {'type': ['string', 'null'], 'default': 'outermost', 'description': 'Used only when unpackPrefab is enabled: outermost or completely, compared case-insensitively.'},
     'offObjectPaths': {'description': 'Optional array of paths, or one scalar path, switched off by the wardrobe entry. Existing values are converted to text and de-duplicated; both spellings are combined.'},
     'subMenuName': {'type': ['string', 'null'], 'default': 'Wardrobe', 'description': 'Menu group used when manageWardrobe is enabled.'},
@@ -1239,6 +1239,7 @@ for _outfit_flag, _outfit_default in (
         'default': _outfit_default,
         'description': 'Optional boolean. Existing conversion accepts numbers and strings true/false, 1/0, yes/no, y/n, on/off; null or unrecognized values use the default. ' + ('Omission preserves the wardrobe tool default; only forwarded when explicitly provided.' if _outfit_flag == 'writeDefaults' else ''),
     }
+_ADD_OUTFIT_PROPERTIES['manageWardrobe']['description'] += ' True requires an existing strict scan. False installs/setup only, without wardrobe scanning, creation or binding; use for the first outfit before the separate approved add_wardrobe_outfit primitive.'
 for _outfit_alias, _outfit_canonical in {
     'avatar_path': 'avatarPath', 'asset_path': 'assetPath', 'query': 'assetQuery', 'asset_query': 'assetQuery',
     'type_name': 'typeName', 'parent_path': 'parentPath', 'outfit_name': 'outfitName', 'name': 'outfitName',

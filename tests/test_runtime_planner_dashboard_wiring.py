@@ -12,6 +12,8 @@ from test_runtime_planner_service import service
 import dashboard_server
 from agent_task_loop import AgentTaskLoop
 from provider_configuration_service import ProviderApiConfig
+from provider_request_ledger import ProviderRequestLedger
+from responses_native_protocol import parse_native_response, stream_response
 from runtime_planner_service import (
     EXPOSURE_LAYER_EXECUTION,
     EXPOSURE_LAYER_PLANNING,
@@ -133,6 +135,145 @@ def test_provider_receipts_keep_unique_indices_when_first_usage_is_missing():
         assert records[1]["metrics"]["usagePresent"] is False
         assert records[0]["metrics"]["requestId"] == records[1]["metrics"]["requestId"]
         assert records[0]["metrics"]["requestId"] != records[2]["metrics"]["requestId"]
+    finally:
+        model.shutdown()
+        dashboard_server.AGENT_GATEWAY.runtime_sessions.clear_stream_context()
+
+
+def test_native_planner_leaf_writes_joinable_rows_for_write_and_scan_mock_transport(tmp_path, monkeypatch):
+    """The real dashboard leaf must pass its durable ledger into native transport."""
+    binding = dashboard_server._RuntimePlannerProviderTurnBinding()
+    model = dashboard_server._RuntimePlannerModel(binding)
+    context = {
+        "sessionId": "native-ledger-session",
+        "turnId": "native-ledger-turn",
+        "clientTurnId": "native-ledger-task",
+    }
+    responses = [
+        {
+            "id": "resp-native-ledger-write",
+            "status": "completed",
+            "model": "fixture-model",
+            "output": [{
+                "id": "fc-native-ledger-write",
+                "type": "function_call",
+                "call_id": "call-native-ledger-write",
+                "name": "call_tool",
+                "namespace": "vrcforge",
+                "arguments": '{"tool":"vrcforge_manage_fx_animator","arguments":{"secret":"drop"}}',
+            }],
+            "usage": {"input_tokens": 12, "output_tokens": 4, "total_tokens": 16,
+                      "input_tokens_details": {"cached_tokens": 0},
+                      "output_tokens_details": {"reasoning_tokens": 0}},
+        },
+        {
+            "id": "resp-native-ledger-scan",
+            "status": "completed",
+            "model": "fixture-model",
+            "output": [{
+                "id": "fc-native-ledger-scan",
+                "type": "function_call",
+                "call_id": "call-native-ledger-scan",
+                "name": "call_tool",
+                "namespace": "vrcforge",
+                "arguments": '{"tool":"vrcforge_scan_fx_animator","arguments":{"secret":"drop"}}',
+            }],
+            "usage": {"input_tokens": 8, "output_tokens": 3, "total_tokens": 11,
+                      "input_tokens_details": {"cached_tokens": 0},
+                      "output_tokens_details": {"reasoning_tokens": 0}},
+        },
+    ]
+
+    class FakeClient:
+        def __init__(self, response):
+            self.responses = SimpleNamespace(
+                create=lambda **_payload: iter([{"type": "response.completed", "response": response}])
+            )
+            self.closed = 0
+
+        def close(self):
+            self.closed += 1
+
+    def request(_settings, _prompt, **kwargs):
+        response = responses.pop(0)
+        raw = stream_response(
+            FakeClient(response),
+            {"model": "fixture-model", "input": [], "tools": kwargs["native_tools"]},
+            kwargs["cancel_event"],
+            kwargs["stream_callback"],
+            kwargs["stream_activity_callback"],
+            error_factory=lambda message, _response: RuntimeError(message),
+            provider_label="Fixture Responses",
+            request_observer=kwargs["stream_activity_callback"],
+        )
+        native = parse_native_response(raw, kwargs["native_tools"], namespace="vrcforge")
+        return LlmPlanResponse(
+            text=native.text,
+            reasoning={},
+            usage=native.usage,
+            assistant_message=native.assistant_message,
+            finish_reason=native.finish_reason,
+        )
+
+    native_request = {
+        "instructions": "short policy",
+        "messages": [{"role": "user", "content": "capture"}],
+        "tools": [{
+            "type": "function",
+            "function": {"name": "call_tool", "parameters": {}},
+        }],
+        "_diagnosticComposition": {"instructions": {"chars": 12}},
+        "_requestMetadata": {"toolMetadata": {
+            "vrcforge_manage_fx_animator": {"permission": "Write", "effect": "write"},
+            "vrcforge_scan_fx_animator": {"permission": "ReadOnly", "effect": "read"},
+        }},
+        "_approvalTaskContext": {
+            "firstApprovalRequestOrdinal": 1,
+            "firstApprovalRequestIds": ["approval-physical-1"],
+        },
+    }
+    monkeypatch.setattr(dashboard_server.AGENT_GATEWAY, "audit_dir", tmp_path)
+    dashboard_server.AGENT_GATEWAY.runtime_sessions.set_stream_context(context)
+    try:
+        with (
+            patch.object(dashboard_server.PROVIDER_CONFIGURATION, "current_api_config", return_value=fixture_config()),
+            patch.object(dashboard_server.PROVIDER_TEXT_PROBE, "probe_settings", return_value=SimpleNamespace()),
+            patch.object(dashboard_server, "request_llm_plan_with_metadata", side_effect=request),
+            patch.object(dashboard_server.EVENT_BUS, "broadcast_from_sync"),
+        ):
+            with binding.bind({}):
+                results = [model.plan_native(native_request), model.plan_native(native_request)]
+        assert all(result.finish_reason == "tool_calls" for result in results)
+        rows = ProviderRequestLedger(tmp_path / "provider-requests.jsonl").read_rows()
+        assert len(rows) == 2
+        write_row, scan_row = rows
+        assert write_row["providerRequestId"] == "resp-native-ledger-write"
+        assert write_row["localDispatchId"] and write_row["localDispatchId"] != write_row["providerRequestId"]
+        assert write_row["sessionId"] == context["sessionId"]
+        assert write_row["turnId"] == context["turnId"]
+        assert write_row["taskId"] == context["clientTurnId"]
+        assert write_row["requestOrdinal"] == 1
+        assert write_row["firstApprovalRequestOrdinal"] == 1
+        assert write_row["firstApprovalRequestIds"] == ["approval-physical-1"]
+        assert write_row["toolCalls"] == [{
+            "id": "call-native-ledger-write",
+            "name": "vrcforge_manage_fx_animator",
+            "permission": "Write",
+            "effect": "write",
+        }]
+        assert write_row["phases"] == ["审批"]
+        assert write_row["tokenUsage"]["cacheReadTokens"] == 0
+        assert write_row["tokenUsage"]["reasoningTokens"] == 0
+        assert scan_row["providerRequestId"] == "resp-native-ledger-scan"
+        assert scan_row["requestOrdinal"] == 2
+        assert scan_row["toolCalls"] == [{
+            "id": "call-native-ledger-scan",
+            "name": "vrcforge_scan_fx_animator",
+            "permission": "ReadOnly",
+            "effect": "read",
+        }]
+        assert scan_row["phases"] == ["预览"]
+        assert "secret" not in repr(rows)
     finally:
         model.shutdown()
         dashboard_server.AGENT_GATEWAY.runtime_sessions.clear_stream_context()
@@ -411,6 +552,7 @@ def test_model_worker_routes_three_visual_journey_samples_through_one_turn_owner
         stream_callback=None,
         stream_activity_callback=None,
         cancel_event=None,
+        **_kwargs,
     ) -> LlmPlanResponse:
         settings_seen.append(settings)
         prompts.append(prompt)

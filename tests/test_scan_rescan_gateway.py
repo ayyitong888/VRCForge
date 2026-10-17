@@ -152,8 +152,8 @@ def test_generation_change_between_cas_and_receipt_is_rejected(tmp_path, monkeyp
             latest = original_owned(session, turn, project_root, result_ref)
             owned_calls.append(result_ref)
             if len(owned_calls) == 2:
-                store.begin_mutation(project, "shell")
-                store.end_mutation(project, "shell")
+                marker = store.begin_mutation(project, "shell")
+                store.end_mutation(project, "shell", marker=marker)
             return latest
 
         monkeypatch.setattr(verifier, "_owned", mutate_after_final_read)

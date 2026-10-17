@@ -37,6 +37,8 @@ from agent_shell_process_supervisor import (
 
 SHELL_RUNNER_NATIVE = "native-win-process"
 SHELL_RUNNER_POWERSHELL = "powershell-fallback"
+# Match the process transport's UTF-8 decoder without changing file decoding.
+_POWERSHELL_UTF8_PREFIX = "$OutputEncoding = [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false);\n"
 SHELL_NATIVE_BLOCK_PATTERN = re.compile(r"[|;&<>^`$%(){}\[\]#]|@\"|@'")
 # Project assets routinely exceed 16 MiB. Keep a finite binding limit while
 # streaming the digest so approval memory use does not scale with asset size.
@@ -980,7 +982,7 @@ class AgentShellService:
         ]
         if not interactive:
             argv.append("-NonInteractive")
-        return [*argv, "-Command", command]
+        return [*argv, "-Command", _POWERSHELL_UTF8_PREFIX + command]
 
     def _command_execution_binding(self, command: str, cwd: Path) -> dict[str, Any]:
         argv = self._command_argv(command)
@@ -1500,7 +1502,7 @@ class AgentShellService:
                     "-ExecutionPolicy",
                     "Bypass",
                     "-Command",
-                    command,
+                    _POWERSHELL_UTF8_PREFIX + command,
                 ]
             if cancel_ids and self._ports.cancellation_requested(
                 cancel_ids[0] if len(cancel_ids) > 0 else "",

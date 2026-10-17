@@ -22,6 +22,7 @@ from runtime_planner_service import (
     PlannerTool,
     PlannerTurnMetadata,
     RuntimePlannerService,
+    RUNTIME_PUBLIC_COMMUNICATION_INSTRUCTION,
     sanitize_planner_observation_text,
     latest_loop_step_needs_model_correction,
     parse_llm_plan_response,
@@ -515,6 +516,24 @@ def test_native_planning_control_advertises_phase_entry_without_executing_embedd
     assert plan["nextStep"] == "enter_execution" and plan["enterExecution"] is True
     assert not plan["writeNeeded"] and not plan["skillNeeded"]
     assert plan["nativeCallIds"] == ["call-read"]
+
+
+@pytest.mark.parametrize("layer", ["planning", "execution"])
+def test_native_instructions_require_public_updates_without_user_prompt_or_host_invention(layer):
+    model = NativeModel({"role": "assistant", "content": "Read result."})
+    plan = service(model=model).plan_agent_turn(
+        "inspect project", {}, {}, exposure_layer=layer,
+        native_turn=NativePlannerFixture([{"role": "user", "content": "inspect project"}]),
+    )
+    instructions = model.requests[0]["instructions"]
+    assert instructions.count(RUNTIME_PUBLIC_COMMUNICATION_INSTRUCTION) == 1
+    assert "ordinary public assistant content" in instructions
+    assert 'phase="commentary" only when the protocol supports it' in instructions
+    assert "include the next tool call in the same response" in instructions
+    assert "Do not use action=reply for a progress update" in instructions
+    assert "Keep routine calls quiet" not in instructions
+    assert "Non-final action commentary is optional" not in instructions
+    assert not plan.get("publicMessages")  # Instructions do not manufacture model output.
 
 
 def test_native_followup_preserves_exact_history_without_reprinting_it_as_instructions():
@@ -3401,3 +3420,27 @@ def test_schema_projection_keeps_absent_or_invalid_schema_compatibility():
     from runtime_planner_service import bounded_planner_tool_schema
     for value in (None, [], "text", False):
         assert bounded_planner_tool_schema(value) == {}
+
+
+@pytest.mark.parametrize("layer", ["planning", "execution"])
+def test_legacy_prompt_uses_shared_public_behavior_with_json_action_format(layer):
+    prompt = service()._build_llm_plan_prompt("inspect project", [], exposure_layer=layer)
+    assert prompt.count(RUNTIME_PUBLIC_COMMUNICATION_INSTRUCTION) == 1
+    assert "reply field of the same JSON action object and continue that action" in prompt
+    assert "do not add a preamble outside the JSON object" in prompt
+    assert "Reserve action=reply for the final answer" in prompt
+    assert 'phase="commentary"' not in prompt
+    assert "Non-final action commentary is optional" not in prompt
+    assert "Give a brief update only" not in prompt
+    assert "只返回一个 JSON 对象" in prompt
+
+
+def test_shared_public_behavior_covers_opening_milestones_cadence_and_final():
+    instruction = RUNTIME_PUBLIC_COMMUNICATION_INSTRUCTION
+    assert "before the first tool call explaining the immediate work" in instruction
+    assert "state the finding and next step" in instruction
+    assert "a changed approach, a blocker, or a long wait" in instruction
+    assert "after tool results return" in instruction and "about a minute" in instruction
+    assert "do not narrate every tool call" in instruction
+    assert "reveal private reasoning, or invent progress" in instruction
+    assert "final answer self-contained and complete" in instruction

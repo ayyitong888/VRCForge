@@ -70,6 +70,8 @@ class ProviderRuntimeResponse:
     text: str
     usage: dict[str, Any] = field(default_factory=dict)
     reasoning_summary: list[Any] = field(default_factory=list)
+    # Exact model identifier reported by the provider response, when present.
+    model: str = ""
 
 
 _TOOL_NAME = "vrcforge_plan_action"
@@ -265,13 +267,13 @@ class _ResponsesProtocolAdapter(_ResponsesRequestBase):
             # multiple calls or any unknown output item.
             if len(tool_calls) != 1 or unexpected:
                 raise RuntimeError(f"{self._provider_label} returned an invalid planner tool call.")
-            return ProviderRuntimeResponse(text=self.parse_tool_call(tool_calls[0]), usage=_usage(response), reasoning_summary=_summaries(output))
+            return ProviderRuntimeResponse(text=self.parse_tool_call(tool_calls[0]), usage=_usage(response), reasoning_summary=_summaries(output), model=str(_value(response, "model") or "").strip())
         text = str(_value(response, "output_text") or "")
         if not text:
             text = "".join(_message_text(item) for item in output if str(_value(item, "type") or "") == "message")
         if not text:
             raise RuntimeError(self._empty_completion_error())
-        return ProviderRuntimeResponse(text=text, usage=_usage(response), reasoning_summary=_summaries(output))
+        return ProviderRuntimeResponse(text=text, usage=_usage(response), reasoning_summary=_summaries(output), model=str(_value(response, "model") or "").strip())
 
     def parse_tool_call(self, item: Any) -> str:
         if str(_value(item, "name") or "") != _TOOL_NAME:
@@ -390,17 +392,18 @@ class _ResponsesProtocolAdapter(_ResponsesRequestBase):
                         text=parsed.text,
                         usage=parsed.usage or usage,
                         reasoning_summary=parsed.reasoning_summary,
+                        model=parsed.model or str(_value(final_response, "model") or "").strip(),
                     )
                 if tool_item is not None:
                     if not planner_mode:
                         raise stream_error(f"{self._provider_label} probe returned an unexpected tool call.")
                     assembled = {"type": "function_call", "name": _value(tool_item, "name"), "arguments": "".join(tool_args) or _value(tool_item, "arguments")}
-                    return ProviderRuntimeResponse(text=self.parse_tool_call(assembled), usage=usage, reasoning_summary=_summaries(_as_list(_value(final_response, "output"))))
+                    return ProviderRuntimeResponse(text=self.parse_tool_call(assembled), usage=usage, reasoning_summary=_summaries(_as_list(_value(final_response, "output"))), model=str(_value(final_response, "model") or "").strip())
                 final_text = str(_value(final_response, "output_text") or "")
                 completed_text = final_text or "".join(text_parts)
                 if not completed_text:
                     raise stream_error(f"{self._provider_label} stream completed without a message or planner action.")
-                return ProviderRuntimeResponse(text=completed_text, usage=usage, reasoning_summary=_summaries(_as_list(_value(final_response, "output"))))
+                return ProviderRuntimeResponse(text=completed_text, usage=usage, reasoning_summary=_summaries(_as_list(_value(final_response, "output"))), model=str(_value(final_response, "model") or "").strip())
         if not final_seen:
             raise stream_error(f"{self._provider_label} stream ended before response.completed.")
         raise stream_error(f"{self._provider_label} stream returned no response.")

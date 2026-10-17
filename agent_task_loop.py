@@ -421,6 +421,39 @@ def _bounded_outcome(value: Mapping[str, Any]) -> dict[str, Any]:
     return result
 
 
+def _failure_summary(value: Any, *, depth: int = 0) -> str:
+    """Find the additive plain-language failure summary in a bounded result envelope."""
+    if depth > 5 or not isinstance(value, Mapping):
+        return ""
+    summary = _bounded_text(value.get("failureSummary"), 600)
+    if summary:
+        return summary
+    for key in ("result", "execution", "writeFailure", "recovery", "diagnostics"):
+        found = _failure_summary(value.get(key), depth=depth + 1)
+        if found:
+            return found
+    return ""
+
+
+def _failure_envelope(value: Any, *, depth: int = 0) -> dict[str, Any]:
+    """Collect only bounded machine-failure fields from nested result envelopes."""
+    if depth > 5 or not isinstance(value, Mapping):
+        return {}
+    fields: dict[str, Any] = {}
+    for key in (
+        "status", "error", "code", "failureLayer", "mutationStarted", "committed",
+        "commitState", "checkpointRecoveryRequired", "temporaryCleanupRequired",
+        "failureSummary", "currentStateDigest", "turnControl", "diagnostics",
+    ):
+        if key in value:
+            fields[key] = value[key]
+    for key in ("result", "execution", "writeFailure", "recovery", "diagnostics"):
+        nested = _failure_envelope(value.get(key), depth=depth + 1)
+        for nested_key, nested_value in nested.items():
+            fields.setdefault(nested_key, nested_value)
+    return fields
+
+
 def _bounded_action(value: Mapping[str, Any]) -> dict[str, Any] | None:
     action_id = _bounded_text(value.get("actionId"), 80)
     tool = _bounded_text(value.get("tool"), 160)
@@ -962,8 +995,7 @@ def prepare_approval_task_continuation(
         "terminalPlan": terminal_plan,
     }
     if task_status == "failed" and not revision_requested:
-        execution_result = execution.get("result")
-        execution_result = execution_result if isinstance(execution_result, Mapping) else {}
+        execution_result = _failure_envelope(execution)
         write_failure = execution.get("writeFailure")
         write_failure = write_failure if isinstance(write_failure, Mapping) else {}
         checkpoint = execution.get("checkpoint")
@@ -979,6 +1011,10 @@ def prepare_approval_task_continuation(
             "commitState",
             "checkpointRecoveryRequired",
             "temporaryCleanupRequired",
+            "failureSummary",
+            "currentStateDigest",
+            "turnControl",
+            "diagnostics",
         ):
             value = execution_result.get(key)
             if isinstance(value, str):
@@ -996,6 +1032,24 @@ def prepare_approval_task_continuation(
             "checkpointId": _bounded_text(checkpoint.get("id"), 180),
             "outcome": _bounded_outcome(outcome),
         }
+        summary = _failure_summary(execution)
+        if summary and terminal_plan is not None:
+            terminal_plan["summary"] = summary
+            terminal_plan["reply"] = summary
+            terminal_plan["failureSummary"] = summary
+        if terminal_plan is not None and execution_result:
+            terminal_plan["restoreFailure"] = dict(execution_result)
+        if (
+            _status(context.get("tool")) == "vrcforge_restore_checkpoint"
+            and terminal_plan is not None
+        ):
+            terminal_plan["restoreFailureTurnStop"] = True
+            terminal_plan["completionGate"] = {
+                **dict(terminal_plan.get("completionGate") or {}),
+                "status": "failed",
+                "reason": "restore_failure_turn_stop",
+                "checkpointRecoveryRequired": True,
+            }
     if revision_requested:
         task_continuation["plannerObservation"] = {
             "tool": _bounded_text(context.get("tool"), 160),

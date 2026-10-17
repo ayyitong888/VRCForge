@@ -1091,9 +1091,18 @@ def _is_json_safe_runtime_value(value: Any) -> bool:
 
 def _is_valid_chat_timeline_event(value: Any) -> bool:
     """Validate the existing public display envelope, never raw runtime data."""
-    if not isinstance(value, dict) or set(value) != {"id", "sequence", "timestamp", "kind", "payload"}:
+    if not isinstance(value, dict) or not set(value).issubset(
+        {"id", "sequence", "timestamp", "kind", "payload", "sessionId", "turnId", "clientTurnId"}
+    ) or not {"id", "sequence", "timestamp", "kind", "payload"}.issubset(value):
         return False
     if any(not isinstance(value.get(key), str) or not value[key].strip() for key in ("id", "timestamp")):
+        return False
+    owner_limits = {"sessionId": 180, "turnId": 180, "clientTurnId": 240}
+    if any(
+        key in value
+        and (not isinstance(value[key], str) or not value[key].strip() or len(value[key]) > limit)
+        for key, limit in owner_limits.items()
+    ):
         return False
     if not _is_safe_nonnegative_integer(value.get("sequence")):
         return False

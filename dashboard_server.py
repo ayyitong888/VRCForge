@@ -9519,7 +9519,6 @@ def read_agentic_app_doctor() -> dict[str, Any]:
         }
 
 
-
 @app.post("/api/app/doctor/unity-mcp/repair")
 async def repair_agentic_app_unity_mcp(request: UnityMcpRepairRequest) -> dict[str, Any]:
     await emit_log_async(
@@ -15786,6 +15785,11 @@ class _RuntimePlannerModel:
     def plan(self, prompt: str, *, native_request: Mapping[str, object] | None = None, _review: bool = False,
              _deadline: float | None = None,
              _usage_callback: Callable[[Mapping[str, object]], None] | None = None) -> PlannerModelResult:
+        # Keep the durable physical-request ledger at the existing gateway
+        # audit root.  This local import avoids changing dashboard bootstrap
+        # construction and lets tests replace the provider leaf in isolation.
+        from provider_request_ledger import ProviderRequestLedger, ledger_scope
+
         config = self._turn.current_config()
         if provider_requires_api_key(config.provider) and not config.api_key:
             raise PlannerProviderNotConfiguredError("LLM API key is not configured.")
@@ -15821,6 +15825,42 @@ class _RuntimePlannerModel:
             or f"provider-plan-{secrets.token_hex(8)}"
         )
         owner = _RuntimePlannerProviderCall(owner_id=owner_id)
+        request_context: dict[str, Any] = {
+            "sessionId": context.get("sessionId") or "",
+            "turnId": context.get("turnId") or "",
+            "clientTurnId": context.get("clientTurnId") or "",
+            "taskId": context.get("clientTurnId") or "",
+            "provider": config.provider,
+            "model": str(config.model or ""),
+            "requestOrdinal": request_index,
+        }
+        if _review:
+            request_context["phase"] = "审批"
+        elif _deadline is not None:
+            request_context["phase"] = "恢复"
+        if native_request is not None:
+            composition = native_request.get("_diagnosticComposition")
+            if isinstance(composition, Mapping):
+                request_context["nativeComposition"] = dict(composition)
+            approval_context = native_request.get("_approvalTaskContext")
+            if isinstance(approval_context, Mapping):
+                request_context["approvalTaskContext"] = dict(approval_context)
+            # Preserve only protocol/registry stage labels; the ledger helper
+            # applies its allow-list and never stores arbitrary request text.
+            for key in ("phase", "primaryPhase", "phases", "permission", "effect", "actionKind", "intent", "stage"):
+                if key in native_request:
+                    request_context[key] = native_request[key]
+            metadata = native_request.get("_requestMetadata")
+            if isinstance(metadata, Mapping):
+                for key in ("phase", "primaryPhase", "phases", "permission", "effect", "actionKind", "intent", "stage"):
+                    if key in metadata:
+                        request_context[key] = metadata[key]
+                if isinstance(metadata.get("toolMetadata"), Mapping):
+                    request_context["toolMetadata"] = metadata["toolMetadata"]
+        request_ledger = ProviderRequestLedger(
+            AGENT_GATEWAY.audit_dir / "provider-requests.jsonl",
+            lock=getattr(AGENT_GATEWAY, "_lock", None),
+        )
 
         def stream_callback(delta: str) -> None:
             now = time.monotonic()
@@ -15845,6 +15885,8 @@ class _RuntimePlannerModel:
                     composition = native_request.get("_diagnosticComposition")
                     if isinstance(composition, Mapping):
                         metrics["nativeComposition"] = dict(composition)
+                elif metrics.get("requestPhase") != "start":
+                    metrics.pop("nativeComposition", None)
                 AGENT_GATEWAY.runtime_runs.append({
                     "event": "provider_request_metrics",
                     "sessionId": context.get("sessionId") or "",
@@ -15893,14 +15935,18 @@ class _RuntimePlannerModel:
                     "native_messages": [{"role": "system", "content": prompt}, *native_request["messages"]],
                     "native_tools": native_request["tools"],
                 }
-                owner.response = request_llm_plan_with_metadata(
-                    settings,
-                    prompt,
-                    stream_callback=stream_callback,
-                    cancel_event=owner.cancellation,
-                    stream_activity_callback=stream_activity_callback,
-                    **native_options, **({"session_id": str(context.get("sessionId") or "")} if config.provider == "chatgpt" else {}),
-                )
+                with ledger_scope(request_ledger, request_context, request_index):
+                    owner.response = request_llm_plan_with_metadata(
+                        settings,
+                        prompt,
+                        stream_callback=stream_callback,
+                        cancel_event=owner.cancellation,
+                        stream_activity_callback=stream_activity_callback,
+                        **native_options, **({
+                            "session_id": str(context.get("sessionId") or ""),
+                            "native_turn_state": native_request.get("_providerTurnState") if native_request is not None else None,
+                        } if config.provider == "chatgpt" else {}),
+                    )
             except BaseException as exc:  # noqa: BLE001 - re-raised on the owning runtime thread.
                 owner.error = exc
             finally:
@@ -15982,6 +16028,7 @@ class _RuntimePlannerModel:
                 usage=dict(response.usage or {}),
                 reasoning=dict(response.reasoning or {}),
                 planner_label=planner_label,
+                model=str(response.model or "").strip(),
                 assistant_message=dict(response.assistant_message or {}) if native_request is not None else {},
                 finish_reason=response.finish_reason if native_request is not None else "",
             )
@@ -20369,7 +20416,26 @@ CHECKPOINT_RELOAD_READY_POLL_SECONDS = 0.5
 CHECKPOINT_RELOAD_CONNECTION_CLOSED_ERROR = "Unity MCP Core connection closed unexpectedly."
 
 
-def prepare_unity_checkpoint_restore_sync(project_root: Path, *, checkpoint_files: list[str] | None = None) -> dict[str, Any]:
+def prepare_unity_checkpoint_restore_sync(project_root: Path, *, checkpoint_files: list[str] | None = None, **recovery_options: Any) -> dict[str, Any]:
+    capture_evidence_only = recovery_options.pop("capture_evidence_only", False)
+    if recovery_options or type(capture_evidence_only) is not bool:
+        raise TypeError("Unsupported checkpoint recovery evidence options.")
+    if capture_evidence_only:
+        if not checkpoint_files:
+            return {"ok": False, "error": "Exact checkpoint files are required for recovery evidence.",
+                    "code": "recovery_evidence_scope_missing", "mutationStarted": False}
+        settings = load_dashboard_settings(build_agent_connection_request({}))
+        settings.unity_mcp_timeout_seconds = CHECKPOINT_RELOAD_CALL_TIMEOUT_SECONDS
+        settings.unity_mcp_retries = 0
+        result = invoke_unity_mcp(
+            settings,
+            "vrc_prepare_checkpoint",
+            {"projectPath": str(project_root), "checkpointFiles": checkpoint_files,
+             "recoveryEvidenceOnly": True},
+            execution_context={"lane": "app_safety_control"},
+            preserve_tool_error=True,
+        )
+        return normalize_unity_checkpoint_result(result, project_root)
     live_connection = globals().get("PRIMITIVE_BASIS_LIVE_CONNECTION")
     if isinstance(live_connection, PrimitiveBasisLiveUnityConnection):
         return live_connection.prepare_restore_checkpoint(project_root, checkpoint_files=checkpoint_files)
@@ -23975,7 +24041,6 @@ def gesture_manager_status_sync(params: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-
 def prepare_runtime_observation_request(arguments, _preview):
     from runtime_observation import prepare_request
     request = prepare_request(arguments, DASHBOARD_ARTIFACTS_DIR / "latest")
@@ -24332,11 +24397,6 @@ def select_scene_object_sync(params: dict[str, Any]) -> dict[str, Any]:
     )
     payload.setdefault("ok", True)
     return payload
-
-
-def _play_mode_checkpoint_required(arguments: Mapping[str, Any]) -> bool:
-    value = arguments.get("isPlaying") if "isPlaying" in arguments else arguments.get("is_playing")
-    return value if isinstance(value, bool) else True
 
 
 def set_play_mode_sync(params: dict[str, Any]) -> dict[str, Any]:
@@ -26453,12 +26513,12 @@ def register_agent_gateway_tools() -> None:
     AGENT_GATEWAY.register_tool("vrcforge_package_install_request", "when-to-use: request supervised VPM package installation or an explicitly requested package upgrade through the selected package manager; creates an approval request only. when-NOT-to-use: do not use it for direct manifest edits, arbitrary UnityPackages, or an upgrade without a newer packageVersion and upgrade=true. Negative example: do not call it to bypass the installed-package-first safety gate.", "supervised-write", lambda params: PACKAGE_INSTALL_WORKFLOWS.request_install(params or {}, agent_name=str((params or {}).get("agent_name") or (params or {}).get("agentName") or "external-agent")), write=True)
     AGENT_GATEWAY.register_tool("vrcforge_diagnose_package_install_errors", "Read package-manager output and Unity compile errors to explain plugin/package install failures without repairing automatically.", "read/debug", PACKAGE_INSTALL_WORKFLOWS.diagnose_install)
     AGENT_GATEWAY.register_tool("vrcforge_preview_setup_outfit", "Check Modular Avatar Setup Outfit readiness for an outfit object, without writing.", "plan/preview", WARDROBE_OUTFIT_WORKFLOWS.preview_setup_outfit)
-    AGENT_GATEWAY.register_tool("vrcforge_preview_add_wardrobe_outfit", "Preview adding one outfit to an existing int-exclusive wardrobe (assigned int value, FX state, on/off objects, menu placement), without writing.", "plan/preview", WARDROBE_OUTFIT_WORKFLOWS.preview_add_wardrobe_outfit)
+    AGENT_GATEWAY.register_tool("vrcforge_preview_add_wardrobe_outfit", "when-to-use: preview adding an already installed outfit to an existing Int parameter and FX Equals layer, including the first outfit on a newly created skeleton; supply verified object paths and the approved explicit value. Existing clips are preserved, so inspect mutual-exclusion curves separately. when-NOT-to-use: do not use to instantiate or fit a prefab, infer object paths, or treat preview as runtime acceptance. Negative example: an empty strict scan is not permission to recreate an existing skeleton.", "plan/preview", WARDROBE_OUTFIT_WORKFLOWS.preview_add_wardrobe_outfit)
     AGENT_GATEWAY.register_tool("vrcforge_preview_add_outfit_part", "Preview adding an int-gated part toggle (e.g. a hat) to one outfit value of an int-exclusive wardrobe: Bool parameter, dedicated FX layer (int Equals N AND bool gating), on/off clips, and menu toggle, without writing.", "plan/preview", WARDROBE_OUTFIT_WORKFLOWS.preview_add_outfit_part)
     AGENT_GATEWAY.register_tool("vrcforge_preview_add_modular_avatar_component", "Preview adding a common Modular Avatar component (MergeArmature, BoneProxy, MenuInstaller, MergeAnimator, Parameters) to a scene object, resolving references and fields, without writing.", "plan/preview", WARDROBE_OUTFIT_WORKFLOWS.preview_add_modular_avatar_component)
     AGENT_GATEWAY.register_tool("vrcforge_preview_manage_wardrobe", "Preview destructive or structural wardrobe management actions (remove/rename/reorder outfits, set default value, delete wardrobe) without writing.", "plan/preview", WARDROBE_OUTFIT_WORKFLOWS.preview_manage_wardrobe)
-    AGENT_GATEWAY.register_tool("vrcforge_preview_create_wardrobe", "Preview creating an empty int-exclusive wardrobe skeleton (Int parameter, FX layer/default state, and menu), without writing.", "plan/preview", WARDROBE_OUTFIT_WORKFLOWS.preview_create_wardrobe)
-    AGENT_GATEWAY.register_tool("vrcforge_preview_add_outfit", "Preview the full add-outfit workflow: resolve prefab, instantiate under avatar, run Setup Outfit, scan/create wardrobe if needed, and add the outfit to it.", "plan/preview", WARDROBE_OUTFIT_WORKFLOWS.preview_add_outfit)
+    AGENT_GATEWAY.register_tool("vrcforge_preview_create_wardrobe", "when-to-use: preview an explicitly requested new one-value wardrobe skeleton (Int parameter, default FX state and menu). It is not a strict verified wardrobe; install the first outfit separately and use preview_add_wardrobe_outfit/add_wardrobe_outfit. when-NOT-to-use: do not repeat creation after a zero strict scan or assume the skeleton permits full add_outfit. Negative example: existing menu/FX evidence must not be overwritten because no wardrobe was recognized.", "plan/preview", WARDROBE_OUTFIT_WORKFLOWS.preview_create_wardrobe)
+    AGENT_GATEWAY.register_tool("vrcforge_preview_add_outfit", "when-to-use: preview exact prefab installation and optional Setup Outfit. manageWardrobe=true requires an existing strict verified wardrobe; manageWardrobe=false installs without binding and supports first-outfit preparation. No wardrobe is auto-created. For a new skeleton, follow installation with preview_add_wardrobe_outfit/add_wardrobe_outfit and complete approved mutual-exclusion curves before a fresh scan. when-NOT-to-use: do not use to bind an already installed outfit or bootstrap a skeleton with manageWardrobe=true. Negative example: repeating create_wardrobe cannot satisfy the strict scan.", "plan/preview", WARDROBE_OUTFIT_WORKFLOWS.preview_add_outfit)
     AGENT_GATEWAY.register_tool("vrcforge_list_checkpoints", "List pre-write git checkpoints created by VRCForge.", "read/debug", lambda params: AGENT_GATEWAY.checkpoint_recovery.list_checkpoints(params or {}))
     AGENT_GATEWAY.register_tool("vrcforge_preview_restore_checkpoint", "Preview restoring Assets/Packages/ProjectSettings from a VRCForge checkpoint.", "plan/preview", lambda params: AGENT_GATEWAY.checkpoint_recovery.preview_restore_checkpoint(params or {}))
     AGENT_GATEWAY.register_tool("vrcforge_list_interrupted_apply_recoveries", "List interrupted or unfinished approved writes that must be restored or resolved before new writes.", "read/debug", lambda params: AGENT_GATEWAY.checkpoint_recovery.list_interrupted_apply_recoveries(params or {}))
@@ -27075,7 +27135,7 @@ def register_agent_gateway_tools() -> None:
     )
     register_write_handler(
         "vrcforge_add_wardrobe_outfit",
-        "Add one outfit to an existing int-exclusive wardrobe (assign next int value, set new objects scene-default off, author an on/off clip, add an FX Any-State Equals state, and a menu toggle) through VRCForge.",
+        "when-to-use: after approval, add an installed outfit to an existing Int parameter and FX Equals layer, including the first outfit on a new skeleton. Supply verified object paths and an explicit approved value; omission allocates max+1. Adds a clip/state/menu and preserves existing clips, whose mutual-exclusion curves require separate approved edits. when-NOT-to-use: do not use to instantiate/fit a prefab or claim full runtime switching from this receipt. Negative example: do not recreate a skeleton merely because its strict scan is empty.",
         "high",
         WARDROBE_OUTFIT_APPROVED_WRITES.add_wardrobe_outfit,
     )
@@ -27109,7 +27169,7 @@ def register_agent_gateway_tools() -> None:
     )
     register_write_handler(
         "vrcforge_create_wardrobe",
-        "Create an empty int-exclusive wardrobe skeleton (expression Int parameter, FX layer/default state, and wardrobe menu) through VRCForge.",
+        "when-to-use: create an explicitly approved new one-value wardrobe skeleton (Int parameter, default FX state and menu). The receipt verifies that skeleton only. Install the first outfit separately, use preview_add_wardrobe_outfit/add_wardrobe_outfit, complete approved mutual-exclusion curves, then fresh-scan. when-NOT-to-use: do not treat this as a complete wardrobe or repeat creation to satisfy add_outfit's strict gate. Negative example: an empty scan does not prove absence of existing structure.",
         "high",
         WARDROBE_OUTFIT_APPROVED_WRITES.create_wardrobe,
     )
@@ -27167,7 +27227,7 @@ def register_agent_gateway_tools() -> None:
     )
     register_write_handler(
         "vrcforge_add_outfit",
-        "Run the approval-bound add-outfit workflow against one existing verified wardrobe: instantiate an exact prefab, optionally unpack it, run Modular Avatar Setup Outfit, and bind the exact approved wardrobe value.",
+        "when-to-use: install an exact prefab after approval, optionally unpack and run Setup Outfit. manageWardrobe=true binds to an existing strict verified wardrobe; false installs without scanning, creating or binding a wardrobe, including first-outfit preparation. For a new skeleton then use preview_add_wardrobe_outfit/add_wardrobe_outfit with exact objects and an explicit approved value. when-NOT-to-use: do not bootstrap a one-value skeleton with manageWardrobe=true or reinstall an existing outfit. Negative example: repeating create_wardrobe does not satisfy the strict gate.",
         "high",
         WARDROBE_OUTFIT_APPROVED_WRITES.add_outfit,
         request_preparer=WARDROBE_OUTFIT_APPROVED_WRITES.prepare_add_outfit,
@@ -27761,6 +27821,25 @@ PREPARED_ADD_OUTFIT_PREPARER = PreparedAddOutfitPreparer(
     state_builder=PREPARED_ADD_OUTFIT_STATE,
     nonce_hex=secrets.token_hex,
 )
+
+
+def _prepared_add_outfit_core_payload(
+    settings: Settings,
+    tool_name: str,
+    arguments: dict[str, Any],
+    scope: str,
+) -> dict[str, Any]:
+    """Normalize a Core receipt for the prepared workflow boundary."""
+    payload = ensure_dict_payload(
+        extract_tool_result_payload(invoke_unity_mcp(settings, tool_name, arguments)),
+        scope,
+    )
+    # Core receipts carry domain fields and structured success, while the
+    # gateway's direct handlers expose the historical ``ok`` alias.
+    payload.setdefault("ok", payload.get("success") is not False)
+    return payload
+
+
 PREPARED_ADD_OUTFIT_APPROVED_WRITE = PreparedAddOutfitApprovedWriteService(
     PreparedAddOutfitApprovedWritePorts(
         state_builder=PREPARED_ADD_OUTFIT_STATE,
@@ -27770,29 +27849,29 @@ PREPARED_ADD_OUTFIT_APPROVED_WRITE = PreparedAddOutfitApprovedWriteService(
         load_settings=lambda arguments: load_dashboard_settings(
             build_agent_connection_request(arguments)
         ),
-        instantiate=lambda settings, arguments: ensure_dict_payload(
-            extract_tool_result_payload(
-                invoke_unity_mcp(settings, "vrc_instantiate_prefab", arguments)
-            ),
+        instantiate=lambda settings, arguments: _prepared_add_outfit_core_payload(
+            settings,
+            "vrc_instantiate_prefab",
+            arguments,
             "prepared Add Outfit vrc_instantiate_prefab",
         ),
-        unpack=lambda settings, arguments: ensure_dict_payload(
-            extract_tool_result_payload(
-                invoke_unity_mcp(settings, "vrc_unpack_prefab", arguments)
-            ),
+        unpack=lambda settings, arguments: _prepared_add_outfit_core_payload(
+            settings,
+            "vrc_unpack_prefab",
+            arguments,
             "prepared Add Outfit vrc_unpack_prefab",
         ),
-        start_setup=lambda settings, arguments: ensure_dict_payload(
-            extract_tool_result_payload(
-                invoke_unity_mcp(settings, "vrc_setup_outfit", arguments)
-            ),
+        start_setup=lambda settings, arguments: _prepared_add_outfit_core_payload(
+            settings,
+            "vrc_setup_outfit",
+            arguments,
             "prepared Add Outfit vrc_setup_outfit",
         ),
         poll_setup=SETUP_OUTFIT_APPROVED_WRITE.wait_for_existing_job,
-        add_wardrobe=lambda settings, arguments: ensure_dict_payload(
-            extract_tool_result_payload(
-                invoke_unity_mcp(settings, "vrc_add_wardrobe_outfit", arguments)
-            ),
+        add_wardrobe=lambda settings, arguments: _prepared_add_outfit_core_payload(
+            settings,
+            "vrc_add_wardrobe_outfit",
+            arguments,
             "prepared Add Outfit vrc_add_wardrobe_outfit",
         ),
         read_gameobject=get_gameobject_sync,
@@ -28807,6 +28886,20 @@ def main() -> int:
                 file=sys.stderr,
             )
             return 1
+    try:
+        AGENT_GATEWAY._scan_results.reconcile_orphaned_mutations()
+    except Exception:
+        if adopted is not None:
+            try:
+                adopted.close()
+            finally:
+                install_primitive_basis_live_runtime(None)
+        BACKEND_OWNER_LEASE.release()
+        print(
+            "VRCForge backend refused to start because stale scan reconciliation failed.",
+            file=sys.stderr,
+        )
+        return 1
     if getattr(sys, "frozen", False):
         install_standard_stream_capture(DIAGNOSTIC_LOGGER)
     try:

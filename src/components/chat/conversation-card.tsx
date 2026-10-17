@@ -227,7 +227,6 @@ export function ConversationCard({
   }
 
   if (item.type === "streaming") {
-    const runtimeModelLabel = formatRuntimeModelLine(item.providerLabel, item.model);
     const streamingElapsed = elapsedSecondsSince(item.createdAt, streamingNowMs);
     // Keep public assistant updates at their durable timeline position. The
     // trailing event is suppressed only when it is the same text as the live
@@ -236,7 +235,6 @@ export function ConversationCard({
       live: true,
       renderElapsed: false,
       processTitleElapsed: streamingElapsed,
-      providerLine: runtimeModelLabel,
       suppressTrailingAssistantText: item.text,
     });
     const hasTimelineProcessRows = timelineRows.some((row) => (
@@ -249,12 +247,9 @@ export function ConversationCard({
           <StreamingPhaseStatus item={item} nowMs={streamingNowMs} showElapsed={false} />
           {timelineRows.length ? <div className="space-y-3" data-vrcforge-live-runtime-timeline>{timelineRows}</div> : null}
           {item.text ? <div className="leading-relaxed"><ChatMarkdown text={item.text} /></div> : null}
-          {(!hasTimelineProcessRows && streamingElapsed !== undefined) || runtimeModelLabel ? (
+          {!hasTimelineProcessRows && streamingElapsed !== undefined ? (
             <div className="flex flex-wrap items-center gap-x-2 gap-y-1 border-t border-border/60 pt-2 text-[10px] leading-relaxed text-muted-foreground">
-              {!hasTimelineProcessRows && streamingElapsed !== undefined ? (
-                <span>{t("agent.turnDuration", { duration: `${streamingElapsed}s` })}</span>
-              ) : null}
-              {runtimeModelLabel ? <span className="text-muted-foreground/75">{runtimeModelLabel}</span> : null}
+              <span>{t("agent.turnDuration", { duration: `${streamingElapsed}s` })}</span>
             </div>
           ) : null}
         </div>
@@ -344,7 +339,10 @@ export function ConversationCard({
   const vision = response.vision;
   const write = response.write;
   const copyableReply = copyableAgentDialogueText(response);
-  const providerLine = formatRuntimeModelLine(item.providerLabel, item.model);
+  // The requested turn model is not proof of the model that answered. Keep
+  // historical labels tied to response metadata and omit them when the
+  // backend does not report an actual model.
+  const providerLine = formatRuntimeModelLine("", response.model);
   const replySource = providerLine;
   const awaitingApproval = shell?.status === "pending_approval";
   const nextStep = response.plan.nextStep || "";

@@ -178,6 +178,7 @@ class DesktopComputerUseService:
             "session_id": str(getattr(context, "session_id", "")),
             "turn_id": str(getattr(context, "turn_id", "")),
             "client_turn_id": str(getattr(context, "client_turn_id", "")),
+            "project_root": str(getattr(context, "project_root", "")),
         }
         computer_use_requested = bool(params.get("_computerUseRequested"))
         if computer_use_requested:
@@ -199,6 +200,9 @@ class DesktopComputerUseService:
         context.session_id = str(params.get("session_id") or params.get("sessionId") or "")
         context.turn_id = ""
         context.client_turn_id = str(params.get("client_turn_id") or params.get("clientTurnId") or "")
+        context.project_root = str(
+            params.get("projectRoot") or params.get("project_root") or params.get("projectPath") or ""
+        )
         try:
             yield
         finally:
@@ -523,6 +527,25 @@ class DesktopComputerUseService:
         session_id = str(getattr(context, "session_id", ""))
         turn_id = str(getattr(context, "turn_id", ""))
         client_turn_id = str(getattr(context, "client_turn_id", ""))
+        project_root = str(getattr(context, "project_root", ""))
+        for canonical, aliases, authorized in (
+            ("sessionId", ("sessionId", "session_id"), session_id),
+            ("clientTurnId", ("clientTurnId", "client_turn_id"), client_turn_id),
+            ("projectRoot", ("projectRoot", "project_root", "projectPath"), project_root),
+        ):
+            for alias in aliases:
+                supplied = str(request_params.get(alias) or "").strip()
+                if not supplied:
+                    continue
+                expected = authorized.strip()
+                if canonical == "projectRoot":
+                    supplied = self._ports.normalize_filesystem_path(supplied)
+                    expected = self._ports.normalize_filesystem_path(expected)
+                if supplied != expected:
+                    raise self._error(
+                        f"Computer Use action {canonical} does not match the authorized turn.", 403
+                    )
+            request_params[canonical] = authorized
         if self._ports.runtime_cancel_requested(
             session_id=session_id,
             turn_id=turn_id,
@@ -532,10 +555,6 @@ class DesktopComputerUseService:
                 "Computer Use turn was cancelled before the desktop action started.",
                 409,
             )
-        if session_id:
-            request_params.setdefault("sessionId", session_id)
-        if client_turn_id:
-            request_params.setdefault("clientTurnId", client_turn_id)
         action_params = dict(_ensure_dict(request_params.get("params")))
         action_params["_visualTheme"] = str(getattr(context, "visual_theme", "light"))
         action_params["_visualAccent"] = str(getattr(context, "visual_accent", ""))

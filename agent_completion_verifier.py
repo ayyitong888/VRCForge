@@ -60,6 +60,25 @@ class UnityConsoleCompletionVerifier:
             raise AgentCompletionVerificationError(
                 "Unity compile diagnostics were truncated before the approved write."
             )
+        if profile == "persisted_scene_write_console" and _complete_console_snapshot(snapshot):
+            stable_snapshot = self._read_snapshot(
+                arguments,
+                timeout_seconds=self._timeout_seconds,
+            )
+            if (
+                not stable_snapshot["readable"]
+                or stable_snapshot["isCompiling"]
+                or not stable_snapshot["captureComplete"]
+                or stable_snapshot["truncated"]
+                or not _identity_complete(stable_snapshot)
+                or _stable_snapshot_digest(stable_snapshot) != _stable_snapshot_digest(snapshot)
+            ):
+                error = AgentCompletionVerificationError(
+                    "Unity Console diagnostics are not stable enough to start the approved write."
+                )
+                error.details = {"failure": {"kind": "unstable_or_missing_snapshot"}}
+                raise error
+            snapshot = stable_snapshot
         return {
             "schema": "vrcforge.unity_console_baseline.v1",
             "projectPathDigest": snapshot["projectPathDigest"],
@@ -170,6 +189,54 @@ class UnityConsoleCompletionVerifier:
                 code="unity_process_changed",
                 summary="The Unity process changed before completion verification finished.",
             )
+        if (
+            profile == "persisted_scene_write_console"
+            and _complete_console_snapshot(baseline)
+            and _complete_console_snapshot(stable_snapshot)
+        ):
+            # A Console fallback is not a CompilationPipeline pass. For pure
+            # scene writes, two complete same-source reads can still provide a
+            # bounded Console diagnostic delta with explicit evidence kind.
+            new_diagnostics = [
+                item
+                for item in stable_snapshot["diagnostics"]
+                if str(item["id"]) not in baseline_ids
+            ]
+            new_errors = [item for item in new_diagnostics if item["severity"] == "error"]
+            new_warnings = [item for item in new_diagnostics if item["severity"] == "warning"]
+            passed = not new_errors and not new_warnings
+            attached = _attach_console_verification(
+                result,
+                profile,
+                passed=passed,
+                code="" if passed else "unity_console_regression",
+                summary=(
+                    "Unity Console diagnostics are stable with no new errors or warnings; this is Console readback evidence, not a full compilation snapshot."
+                    if passed
+                    else "Unity Console reported new errors or warnings after the scene write."
+                ),
+                new_errors=new_errors,
+                new_warnings=new_warnings,
+            )
+            attached["consoleVerification"].update({
+                "evidenceKind": "console_snapshot",
+                "comparisonAvailable": True,
+                "observedErrorCount": sum(
+                    1 for item in stable_snapshot["diagnostics"] if item["severity"] == "error"
+                ),
+                "observedWarningCount": sum(
+                    1 for item in stable_snapshot["diagnostics"] if item["severity"] == "warning"
+                ),
+                "observedErrors": [
+                    item for item in stable_snapshot["diagnostics"] if item["severity"] == "error"
+                ][:20],
+                "observedWarnings": [
+                    item for item in stable_snapshot["diagnostics"] if item["severity"] == "warning"
+                ][:20],
+                "baselineSource": baseline["source"],
+                "observedSource": stable_snapshot["source"],
+            })
+            return attached
         if not _complete_pipeline_snapshot(baseline) or not _complete_pipeline_snapshot(stable_snapshot):
             # A readable Console fallback is not the previous compilation's full
             # diagnostic set. Never subtract it from a later pipeline snapshot.
@@ -208,6 +275,11 @@ class UnityConsoleCompletionVerifier:
                 "observedWarnings": observed_warnings[:20],
                 "baselineSource": str(baseline.get("source") or ""),
                 "observedSource": stable_snapshot["source"],
+                "evidenceKind": (
+                    "compilation_pipeline"
+                    if _complete_pipeline_snapshot(stable_snapshot)
+                    else "console_snapshot_unavailable"
+                ),
             })
             return attached
         new_diagnostics = [
@@ -218,7 +290,7 @@ class UnityConsoleCompletionVerifier:
         new_errors = [item for item in new_diagnostics if item["severity"] == "error"]
         new_warnings = [item for item in new_diagnostics if item["severity"] == "warning"]
         passed = not new_errors and not new_warnings
-        return _attach_console_verification(
+        attached = _attach_console_verification(
             result,
             profile,
             passed=passed,
@@ -231,6 +303,9 @@ class UnityConsoleCompletionVerifier:
             new_errors=new_errors,
             new_warnings=new_warnings,
         )
+        attached["consoleVerification"]["evidenceKind"] = "compilation_pipeline"
+        attached["consoleVerification"]["comparisonAvailable"] = True
+        return attached
 
     def _read_snapshot(
         self,
@@ -360,6 +435,14 @@ def _complete_pipeline_snapshot(snapshot: Mapping[str, Any]) -> bool:
         snapshot.get("source") == "compilation_pipeline"
         and snapshot.get("captureComplete") is True
         and str(snapshot.get("capturedAt") or "").strip()
+    )
+
+
+def _complete_console_snapshot(snapshot: Mapping[str, Any]) -> bool:
+    """A complete Console fallback read; its timestamp may be empty."""
+    return bool(
+        snapshot.get("source") == "console_log"
+        and snapshot.get("captureComplete") is True
     )
 
 

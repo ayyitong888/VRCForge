@@ -588,6 +588,8 @@ export type AgentRuntimeResponse = {
   backgroundGoalSkipped?: boolean;
   backgroundGoalDeferred?: boolean;
   status?: string;
+  /** Provider-reported model actually used for this completed response. */
+  model?: string;
   providerWarningKey?: string;
   approval_id?: string;
   approvalId?: string;

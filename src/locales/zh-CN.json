@@ -92,6 +92,8 @@
     "unityEditor": "当前 Unity",
     "vrcForgeTools": "改模工具",
     "externalAgent": "外部 Agent",
+    "internalAgentNotTested": "未测试 · 点击测试",
+    "testInternalAgentConnection": "测试 Agent 连接",
     "pendingConfirmation": "需要你确认",
     "noProjectSelected": "未选择 Unity 项目",
     "project": "项目",
@@ -145,6 +147,8 @@
     "internalOAuthConnected": "ChatGPT OAuth 已登录",
     "internalApiNeedsTest": "内部 API 已配置 · 请测试连接",
     "internalOAuthNeedsTest": "ChatGPT OAuth 账号已配置 · 请测试连接",
+    "internalApiTestFailed": "内部 API 连接测试未通过 · 请重试",
+    "internalOAuthTestFailed": "ChatGPT OAuth 连接测试未通过 · 请重试",
     "authorizationBoth": "外部 Agent 已连接 · 内部供应商已连接",
     "authorizationNotConfigured": "尚未配置 Agent 连接",
     "authorizationDisconnected": "运行时已断开",
@@ -1245,7 +1249,6 @@
     "summary": "pkg {{pkg}} 路 prefab {{prefab}}"
   },
   "subagent": {
-    "ignoreNotification": "忽略本次提醒",
     "title": "后台任务",
     "statusNeedsAction": "需处理",
     "statusRunning": "{{count}} 运行中",
@@ -1276,6 +1279,7 @@
     "review": "合并审查",
     "mergeAdopt": "合并进对话",
     "mergeDismiss": "标记不采纳",
+    "ignoreNotification": "忽略本次提醒",
     "mergedBadge": "已合并",
     "dismissedBadge": "未采纳",
     "nextAction": "建议的下一步",

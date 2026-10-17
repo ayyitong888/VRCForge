@@ -303,7 +303,7 @@ export function Composer({
         <textarea
           value={input}
           onChange={(event) => { setPaletteDismissed(false); setInput(event.target.value); }}
-          className="min-h-[76px] w-full resize-none bg-transparent px-1 text-base outline-none placeholder:text-muted-foreground"
+          className="app-scrollbar min-h-[76px] w-full resize-none bg-transparent px-1 text-base outline-none placeholder:text-muted-foreground"
           placeholder={disabledReason || t(planMode ? "composerAction.planPlaceholder" : "chat.inputPlaceholder")}
           disabled={Boolean(disabledReason)}
           onKeyDown={(event) => {

@@ -160,6 +160,16 @@ class LlmPlanResponse:
     usage: dict[str, Any] = field(default_factory=dict)
     assistant_message: dict[str, Any] = field(default_factory=dict, repr=False)
     finish_reason: str = ""
+    model: str = ""
+
+
+def actual_response_model(value: Any) -> str:
+    """Read only a model identifier reported by the provider response."""
+    for key in ("model", "model_version", "modelVersion"):
+        candidate = str(get_value(value, key) or "").strip()
+        if candidate:
+            return candidate
+    return ""
 
 
 class UnityMcpError(RuntimeError):
@@ -1433,6 +1443,7 @@ def request_llm_plan_with_metadata(
     native_messages: Sequence[Mapping[str, Any]] | None = None,
     native_tools: Sequence[Mapping[str, Any]] | None = None,
     session_id: str = "",
+    native_turn_state: dict[str, str] | None = None,
 ) -> LlmPlanResponse:
     provider = normalize_provider_name(settings.llm_provider)
     if provider != "chatgpt" and (native_messages is not None or native_tools is not None):
@@ -1476,6 +1487,7 @@ def request_llm_plan_with_metadata(
             native_messages,
             native_tools,
             session_id,
+            native_turn_state,
         )
 
     try:
@@ -1502,6 +1514,7 @@ def _request_llm_protocol_with_metadata(
     native_messages: Sequence[Mapping[str, Any]] | None = None,
     native_tools: Sequence[Mapping[str, Any]] | None = None,
     session_id: str = "",
+    native_turn_state: dict[str, str] | None = None,
 ) -> LlmPlanResponse:
     if api_type == "responses":
         return request_responses_plan_with_metadata(
@@ -1514,6 +1527,7 @@ def _request_llm_protocol_with_metadata(
             native_messages=native_messages,
             native_tools=native_tools,
             session_id=session_id,
+            native_turn_state=native_turn_state,
         )
     if api_type == "generate_content":
         if normalize_provider_name(settings.llm_provider) == "vertexai":
@@ -1550,6 +1564,7 @@ def request_responses_plan_with_metadata(
     native_messages: Sequence[Mapping[str, Any]] | None = None,
     native_tools: Sequence[Mapping[str, Any]] | None = None,
     session_id: str = "",
+    native_turn_state: dict[str, str] | None = None,
 ) -> LlmPlanResponse:
     """Use one configured Responses endpoint without executing returned calls."""
 
@@ -1562,7 +1577,9 @@ def request_responses_plan_with_metadata(
             api_key=settings.llm_api_key,
             base_url=settings.llm_base_url,
             client_factory=client_factory,
-            **(_llm_sdk_retry_kwargs(settings) if provider == "deepseek" else {"session_id": session_id}),
+            **(_llm_sdk_retry_kwargs(settings) if provider == "deepseek" else {
+                "session_id": session_id, "native_turn_state": native_turn_state,
+            }),
         )
         source = f"{provider}-responses"
         if native_requested:
@@ -1588,6 +1605,7 @@ def request_responses_plan_with_metadata(
                     "usage": native_response.usage,
                 },
                 source=source,
+                response_model=native_response.model,
             )
             parsed.reasoning = extract_llm_reasoning_trace(
                 {"output": [{"type": "reasoning", "summary": summary} for summary in native_response.reasoning_summary]},
@@ -1613,7 +1631,7 @@ def request_responses_plan_with_metadata(
             source=source,
         )
         usage = extract_llm_token_usage({"usage": response.usage}, settings, source=source)
-        return LlmPlanResponse(text=response.text, reasoning=reasoning, usage=usage)
+        return LlmPlanResponse(text=response.text, reasoning=reasoning, usage=usage, model=str(getattr(response, "model", "") or "").strip())
     if native_messages is not None or native_tools is not None:
         raise ValueError("Native Responses history requires a supported native Responses adapter.")
     provider = normalize_provider_name(settings.llm_provider)
@@ -1650,7 +1668,7 @@ def request_responses_plan_with_metadata(
         source=source,
     )
     usage = extract_llm_token_usage({"usage": response.usage}, settings, source=source)
-    return LlmPlanResponse(text=response.text, reasoning=reasoning, usage=usage)
+    return LlmPlanResponse(text=response.text, reasoning=reasoning, usage=usage, model=str(getattr(response, "model", "") or "").strip())
 
 
 def request_deepseek_responses_plan_with_metadata(
@@ -1785,6 +1803,7 @@ def request_gemini_plan_with_metadata(
                 text="".join(chunks),
                 reasoning=extract_llm_reasoning_trace(final_chunk, settings, source="gemini") if final_chunk is not None else {"itemCount": 0, "items": [], "provider": settings.llm_provider, "model": settings.llm_model, "source": "gemini"},
                 usage=extract_llm_token_usage(final_chunk, settings, source="gemini") if final_chunk is not None else provider_stream_usage_missing(settings, "gemini"),
+                model=actual_response_model(final_chunk),
             )
         response = client.models.generate_content(
             model=settings.llm_model,
@@ -1795,6 +1814,7 @@ def request_gemini_plan_with_metadata(
             text=getattr(response, "text", "") or "",
             reasoning=extract_llm_reasoning_trace(response, settings, source="gemini"),
             usage=extract_llm_token_usage(response, settings, source="gemini"),
+            model=actual_response_model(response),
         )
     except Exception as exc:  # noqa: BLE001
         raise RuntimeError(format_multimodal_error(exc, settings, bool(image_paths), "Gemini")) from exc
@@ -1882,6 +1902,7 @@ def request_vertex_ai_plan_with_metadata(
                     text="".join(chunks),
                     reasoning=extract_llm_reasoning_trace(final_chunk, settings, source="vertexai") if final_chunk is not None else {"itemCount": 0, "items": [], "provider": settings.llm_provider, "model": settings.llm_model, "source": "vertexai"},
                     usage=extract_llm_token_usage(final_chunk, settings, source="vertexai") if final_chunk is not None else provider_stream_usage_missing(settings, "vertexai"),
+                    model=actual_response_model(final_chunk),
                 )
             response = client.models.generate_content(
                 model=settings.llm_model,
@@ -1892,6 +1913,7 @@ def request_vertex_ai_plan_with_metadata(
                 text=getattr(response, "text", "") or "",
                 reasoning=extract_llm_reasoning_trace(response, settings, source="vertexai"),
                 usage=extract_llm_token_usage(response, settings, source="vertexai"),
+                model=actual_response_model(response),
             )
         finally:
             watcher_stop.set()
@@ -2474,9 +2496,10 @@ def request_openai_compatible_plan_with_metadata(
             native_tool_calls: dict[int, dict[str, Any]] = {}
             native_finish_reason = ""
             usage_event: Any = None
+            response_model = ""
 
             def consume_stream(stream: Any) -> None:
-                nonlocal usage_event, native_finish_reason
+                nonlocal usage_event, native_finish_reason, response_model
                 terminal_seen = False
                 for event in stream:
                     if cancel_event is not None and cancel_event.is_set():
@@ -2486,6 +2509,7 @@ def request_openai_compatible_plan_with_metadata(
                         raise RuntimeError(f"{provider_display_name(settings.llm_provider)} stream error: {stringify_provider_error(error)}")
                     if get_value(event, "usage") is not None:
                         usage_event = event
+                    response_model = actual_response_model(event) or response_model
                     choices = get_value(event, "choices") or []
                     if not choices:
                         continue
@@ -2545,6 +2569,7 @@ def request_openai_compatible_plan_with_metadata(
                         settings,
                         {"choices": [{"message": {"role": "assistant", "content": "".join(chunks), "tool_calls": [native_tool_calls[index] for index in sorted(native_tool_calls)], "reasoning_content": "".join(native_reasoning_content)}, "finish_reason": native_finish_reason}], "usage": get_value(usage_event, "usage") if usage_event is not None else {}},
                         source="openai-compatible",
+                        response_model=response_model,
                     )
                 return LlmPlanResponse(
                     text="".join(chunks),
@@ -2558,6 +2583,7 @@ def request_openai_compatible_plan_with_metadata(
                         if usage_event is not None
                         else provider_stream_usage_missing(settings, "openai-compatible")
                     ),
+                    model=response_model,
                 )
 
             try:
@@ -2611,6 +2637,7 @@ def request_openai_compatible_plan_with_metadata(
             text=extract_openai_message_text(response),
             reasoning=extract_llm_reasoning_trace(response, settings, source="openai-compatible"),
             usage=extract_llm_token_usage(response, settings, source="openai-compatible"),
+            model=actual_response_model(response),
         )
     except ProviderTokenLimitError:
         raise
@@ -2719,6 +2746,7 @@ def request_anthropic_plan_with_metadata(
                 text="".join(chunks) or extract_anthropic_message_text(final_message),
                 reasoning=extract_llm_reasoning_trace(final_message, settings, source=response_source),
                 usage=extract_llm_token_usage(final_message, settings, source=response_source),
+                model=actual_response_model(final_message),
             )
         response = client.messages.create(
             **request_payload,
@@ -2727,6 +2755,7 @@ def request_anthropic_plan_with_metadata(
             text=extract_anthropic_message_text(response),
             reasoning=extract_llm_reasoning_trace(response, settings, source=response_source),
             usage=extract_llm_token_usage(response, settings, source=response_source),
+            model=actual_response_model(response),
         )
     except Exception as exc:  # noqa: BLE001
         if image_paths:
@@ -2875,7 +2904,7 @@ def resolve_vertex_ai_project_location(base_url: str) -> tuple[str, str]:
     return project, location or "us-central1"
 
 
-def _native_chat_response(settings: Settings, response: Any, *, source: str) -> LlmPlanResponse:
+def _native_chat_response(settings: Settings, response: Any, *, source: str, response_model: str = "") -> LlmPlanResponse:
     choices = as_list(get_value(response, "choices"))
     choice = choices[0] if choices else {}
     message = get_value(choice, "message") or {}
@@ -2913,6 +2942,7 @@ def _native_chat_response(settings: Settings, response: Any, *, source: str) -> 
         usage=extract_llm_token_usage(response, settings, source=source),
         assistant_message=receipt,
         finish_reason=finish_reason,
+        model=response_model or actual_response_model(response),
     )
 
 

@@ -329,7 +329,7 @@ function renderDirectTimelineInvocation(invocation: TimelineInvocation, detail?:
     <RunRow
       key={invocation.id}
       icon={workBatchIcon(invocation.kind)}
-      title={invocationOperationTitle(invocation, i18n.t)}
+      title={[invocationOperationTitle(invocation, i18n.t), invocationTarget(detail)].filter(Boolean).join(" · ")}
       statusTone={danger ? "danger" : invocation.status === "started" ? "warn" : "ok"}
       statusLabel={invocation.status}
       detailCard
@@ -339,28 +339,19 @@ function renderDirectTimelineInvocation(invocation: TimelineInvocation, detail?:
   );
 }
 
-const GENERIC_INVOCATION_SUMMARIES = new Set([
-  "ok",
-  "done",
-  "executed",
-  "completed",
-  "listed",
-  "found",
-  "read",
-  "success",
-  "result",
-  "started",
-]);
+// Use the persisted result's explicit path, never its prose or file contents,
+// to identify the object. The full path remains in the expandable detail.
+function invocationTarget(detail: unknown): string {
+  if (!detail || typeof detail !== "object" || !("path" in detail)) return "";
+  const path = (detail as { path?: unknown }).path;
+  return typeof path === "string" ? path.trim().replace(/\\/g, "/").split("/").filter(Boolean).pop() || "" : "";
+}
 
 function invocationOperationTitle(invocation: TimelineInvocation, t: typeof i18n.t): string {
   const tool = timelineInvocationDisplayLabel(invocation.label);
   const normalizedStatus = invocation.status.toLowerCase();
   if (["failed", "error", "rejected", "cancelled", "canceled"].some((value) => normalizedStatus.includes(value))) {
     return t("agent.timeline.failedTool", { tool });
-  }
-  const summary = invocation.summary.trim();
-  if (summary && summary.length <= 180 && !GENERIC_INVOCATION_SUMMARIES.has(summary.toLowerCase())) {
-    return summary;
   }
   if (["started", "running", "pending"].includes(normalizedStatus)) {
     return t("agent.timeline.runningTool", { tool });

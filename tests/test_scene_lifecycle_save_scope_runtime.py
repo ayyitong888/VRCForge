@@ -72,7 +72,7 @@ class Probe {
  Console.WriteLine("PASS scoped scene save; unrelated asset retained; corruptReadback="+corrupt);}
  static void Main(){Run(false);Run(true);}
 }
-'''.replace('//SETUP', setup).replace('//SEGMENT', segment).replace('EXPECTED_SAVE', '1' if kind in {'save','save_clean','save_as'} else '0').replace('EXPECTED_DISK', '2' if kind in {'save','save_clean','save_as'} else '1').replace('EXPECTED_DIRTY', 'false' if kind in {'save','save_clean','save_as'} else 'true').replace('EXPECTED_SCENE', '0' if kind == 'save_clean' else '1')
+'''.replace('//SETUP', setup).replace('//SEGMENT', segment).replace('EXPECTED_SAVE', '1' if kind in {'new','save','save_clean','save_as'} else '0').replace('EXPECTED_DISK', '2' if kind in {'new','save','save_clean','save_as'} else '1').replace('EXPECTED_DIRTY', 'false' if kind in {'new','save','save_clean','save_as'} else 'true').replace('EXPECTED_SCENE', '0' if kind == 'save_clean' else '1')
     dotnet = shutil.which('dotnet')
     base = Path(os.environ.get('ProgramFiles', 'C:/Program Files')) / 'dotnet'
     compilers = sorted((base/'sdk').glob('*/Roslyn/bincore/csc.dll'))

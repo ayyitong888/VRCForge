@@ -111,6 +111,8 @@ class NativeRuntimeTurn:
         self._turn_id = turn_id
         self._client_turn_id = client_turn_id
         self._binding = binding
+        # Transport-only state belongs to this turn, never durable conversation history.
+        self.provider_turn_state: dict[str, str] = {}
         self._loop_state = loop_state
         self._native_decision: dict[str, Any] | None = None
         self._native_steers: list[str] = []
@@ -372,7 +374,16 @@ class NativeRuntimeTurn:
                 return False
 
             waiting = any(is_waiting(item) for item in observations if isinstance(item, Mapping))
-            if waiting and (terminal or {}).get("nextStep") not in {"cancelled", "interrupted"}:
+            terminal_map = terminal if isinstance(terminal, Mapping) else {}
+            terminal_gate = terminal_map.get("completionGate")
+            restore_terminal = (
+                terminal_map.get("restoreFailureTurnStop") is True
+                or (
+                    isinstance(terminal_gate, Mapping)
+                    and str(terminal_gate.get("reason") or "") == "restore_failure_turn_stop"
+                )
+            )
+            if waiting and terminal_map.get("nextStep") not in {"cancelled", "interrupted"} and not restore_terminal:
                 return
             result: dict[str, Any] = {
                 "observations": [
@@ -386,6 +397,7 @@ class NativeRuntimeTurn:
                     for key in (
                         "nextStep",
                         "completionGate",
+                        "restoreFailureTurnStop",
                     )
                     if key in terminal
                 }

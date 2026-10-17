@@ -950,6 +950,9 @@ class AgentCheckpointRecoveryService:
             "generatedAt": generated_at,
             "recovery": recovery,
             "preview": preview,
+            "doctorRestoreDiagnostics": self.doctor_restore_diagnostics({
+                "recoveryId": recovery.get("id"), "includeResolved": True,
+            }),
             "recentAuditLogs": self._ports.recent_audit_logs(limit=80),
         }
         bundle_dir = self._ports.audit_dir() / "incident-bundles"
@@ -1247,6 +1250,147 @@ class AgentCheckpointRecoveryService:
         with self._ports.state.checkpoint_storage_lock:
             return self._restore_checkpoint_locked(params)
 
+    def _invoke_restore_prepare(
+        self,
+        project_root: Path,
+        *,
+        checkpoint_files: list[str] | None,
+        capture_evidence_only: bool = False,
+        request_id: str = "",
+        phase: str = "prepare_restore",
+    ) -> dict[str, Any]:
+        """Invoke the existing Core preparation port with a bounded probe flag."""
+        from checkpoint_unity_evidence import checkpoint_core_error
+
+        callback = self._checkpoint_restore_prepare_handler
+        if callback is None:
+            return {"ok": False, "errorCode": "recovery_prepare_unavailable", "error": "Unity restore preparation is unavailable."}
+        kwargs = {"checkpoint_files": checkpoint_files}
+        if capture_evidence_only:
+            kwargs["capture_evidence_only"] = True
+        try:
+            result = ensure_dict(callback(project_root, **kwargs))
+            result.setdefault("requestId", request_id)
+            result.setdefault("phase", phase)
+            return result
+        except Exception as exc:  # noqa: BLE001 - fail closed before restore writes.
+            return checkpoint_core_error(exc, request_id=request_id, phase=phase)
+
+    def _persist_restore_policy(self, recovery: dict[str, Any], **fields: Any) -> dict[str, Any]:
+        latest = self._select_apply_recovery({"recoveryId": recovery.get("id")}, include_resolved=True) or recovery
+        updated = {**latest, **fields}
+        return self._append_apply_recovery_entry(updated)
+
+    def _record_restore_failure_policy(
+        self,
+        *,
+        checkpoint: dict[str, Any],
+        recovery: dict[str, Any] | None,
+        result: dict[str, Any],
+        before_disk: dict[str, Any] | None,
+        tentative_attempt: bool,
+        request_id: str = "",
+        phase: str = "restore",
+        before_core: dict[str, Any] | None = None,
+        after_core: dict[str, Any] | None = None,
+        observations: tuple[dict[str, Any] | None, ...] = (),
+    ) -> dict[str, Any]:
+        from checkpoint_unity_evidence import (
+            capture_core_observation,
+            capture_project_disk_snapshot,
+            classify_restore_failure,
+            redact_restore_failure_diagnostic,
+        )
+
+        project_root = Path(str(checkpoint.get("projectRoot") or ""))
+        result.setdefault("requestId", request_id)
+        result.setdefault("phase", phase)
+        after_disk = capture_project_disk_snapshot(project_root)
+        if before_core is None:
+            before_core = capture_core_observation(result, side="before")
+        if after_core is None:
+            after_core = capture_core_observation(result, side="after")
+        proof = classify_restore_failure(before_disk, after_disk, before_core, after_core, *observations)
+        counted = bool(proof.get("counted"))
+        diagnostic = redact_restore_failure_diagnostic(result, proof)
+        if recovery:
+            latest = self._select_apply_recovery({"recoveryId": recovery.get("id")}, include_resolved=True) or recovery
+            try:
+                count = max(0, int(latest.get("restoreAttemptCount") or 0))
+            except (TypeError, ValueError):
+                count = 0
+            try:
+                zero_count = max(0, min(RESTORE_ATTEMPT_LIMIT, int(latest.get("zeroEffectConsecutiveFailures") or 0)))
+            except (TypeError, ValueError):
+                zero_count = 0
+            if counted:
+                if not tentative_attempt:
+                    count += 1
+                zero_count = 0
+            else:
+                # A safety checkpoint may have tentatively consumed this new
+                # attempt.  Refund only that attempt; historical incidents stay.
+                if tentative_attempt:
+                    count = max(0, count - 1)
+                zero_count = min(RESTORE_ATTEMPT_LIMIT, zero_count + 1)
+            diagnostics = [
+                *[item for item in (latest.get("restoreFailureDiagnostics") or []) if isinstance(item, dict)],
+                diagnostic,
+            ][-20:]
+            blocked = zero_count >= RESTORE_ATTEMPT_LIMIT
+            saved = self._persist_restore_policy(
+                latest,
+                restoreAttemptCount=count,
+                zeroEffectConsecutiveFailures=zero_count,
+                zeroEffectAutoLaunchBlocked=blocked,
+                restoreFailurePolicy={
+                    **proof,
+                    "counted": counted,
+                    "tentativeAttempt": tentative_attempt,
+                },
+                restoreFailureDiagnostics=diagnostics,
+            )
+            result["recovery"] = saved
+            result["restoreAttemptCount"] = count
+            result["zeroEffectConsecutiveFailures"] = zero_count
+            result["automaticLaunchBlocked"] = blocked
+            result["requiresExplicitUserConfirmation"] = blocked
+            result["requiresNewInvocation"] = blocked
+        result["restoreFailurePolicy"] = proof
+        result["diagnostic"] = diagnostic
+        stage_label = {
+            "prepare_restore": "恢复准备",
+            "archive": "检查点文件恢复",
+            "reload": "Unity 场景重载",
+            "safety_backup": "恢复前安全备份",
+        }.get(phase, "恢复")
+        if proof.get("classification") == "proven_zero_effect":
+            result["canRetry"] = True
+            result["retryMessage"] = f"{stage_label}失败，文件没动，可以再试。"
+            result["failureSummary"] = result["retryMessage"]
+        else:
+            result["canRetry"] = False
+            result["failureSummary"] = f"{stage_label}失败，恢复结果未能证明为零影响；当前回合已停止。"
+        result["turnControl"] = {"stopCurrentTurn": True, "automaticRetry": False}
+        return result
+
+    def _record_restore_success(self, recovery: dict[str, Any] | None, result: dict[str, Any]) -> None:
+        if not recovery:
+            return
+        latest = self._select_apply_recovery({"recoveryId": recovery.get("id")}, include_resolved=True) or recovery
+        try:
+            success_count = max(0, min(RESTORE_ATTEMPT_LIMIT, int(latest.get("restoreSuccessCount") or 0)))
+        except (TypeError, ValueError):
+            success_count = 0
+        # Successful restores are evidence for the success counter only.  Do
+        # not clear prior incident counts or historical diagnostics.
+        self._persist_restore_policy(
+            latest,
+            restoreSuccessCount=min(RESTORE_ATTEMPT_LIMIT, success_count + 1),
+            zeroEffectConsecutiveFailures=0,
+            zeroEffectAutoLaunchBlocked=False,
+        )
+
     def doctor_restore_diagnostics(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         """Return redacted recovery failure diagnostics for Doctor/support export."""
         params = params or {}
@@ -1275,9 +1419,8 @@ class AgentCheckpointRecoveryService:
             ],
         }
 
-
     def _restore_checkpoint_locked(self, params: dict[str, Any]) -> dict[str, Any]:
-        from checkpoint_unity_evidence import checkpoint_core_error, record_unity_recovery_evidence
+        from checkpoint_unity_evidence import capture_core_observation, capture_project_disk_snapshot, record_unity_recovery_evidence
         checkpoint = self._load_checkpoint(str(params.get("checkpoint_id") or params.get("checkpointId") or "").strip())
         if not checkpoint:
             return {"ok": False, "error": "checkpoint_id was not found."}
@@ -1290,6 +1433,7 @@ class AgentCheckpointRecoveryService:
         if not available.get("ok"):
             return available
         local_state_restore = checkpoint.get("strategy") in {"local_state_archive", "project_chat_archive"}
+        request_id = f"restore_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')}_{secrets.token_hex(4)}"
         recovery = self._select_apply_recovery(params, include_resolved=False)
         incident_restore_auto = bool(params.get("_vrcforge_incident_restore_auto"))
         if incident_restore_auto and recovery is None:
@@ -1299,6 +1443,22 @@ class AgentCheckpointRecoveryService:
                 "status": "restore_incident_unbound",
                 "errorCode": "recovery_incident_unbound",
                 "error": "Automatic recovery restore requires a matching active incident; no restore was attempted.",
+            }
+        if incident_restore_auto and recovery and recovery.get("zeroEffectAutoLaunchBlocked"):
+            return {
+                "ok": False,
+                "checkpoint": checkpoint,
+                "status": "recovery_auto_launch_blocked",
+                "errorCode": "recovery_auto_launch_blocked",
+                "error": "Automatic recovery restore is blocked after three proven zero-effect failures; request a new explicit user-approved restore invocation.",
+                "recoveryId": str(recovery.get("id") or ""),
+                "zeroEffectConsecutiveFailures": int(recovery.get("zeroEffectConsecutiveFailures") or 0),
+                "automaticLaunchBlocked": True,
+                "requiresExplicitUserConfirmation": True,
+                "requiresNewInvocation": True,
+                "requestId": request_id,
+                "phase": "automatic_gate",
+                "turnControl": {"stopCurrentTurn": True, "automaticRetry": False},
             }
         recovery_safety_required = bool(
             recovery
@@ -1324,6 +1484,9 @@ class AgentCheckpointRecoveryService:
                     "recoveryId": str(recovery.get("id") or ""),
                     "restoreAttemptCount": attempt_count,
                     "restoreAttemptLimit": attempt_limit,
+                    "requestId": request_id,
+                    "phase": "automatic_gate",
+                    "turnControl": {"stopCurrentTurn": True, "automaticRetry": False},
                 }
         # Keep the Unity preparation result out of the public argument map.  A
         # caller can provide arbitrary JSON to this service, so a reserved
@@ -1332,39 +1495,77 @@ class AgentCheckpointRecoveryService:
         # call context below instead.
         restore_params = dict(params)
         restore_params.pop("_restorePrepareForRecovery", None)
+        restore_params["_restoreRequestId"] = request_id
         prepared_for_restore: dict[str, Any] = {}
+        pre_restore_probe: dict[str, Any] = {}
+        pre_restore_core: dict[str, Any] | None = None
+        before_disk = capture_project_disk_snapshot(Path(str(checkpoint.get("projectRoot") or "")))
         if (
             recovery_safety_required
             and not local_state_restore
             and self._checkpoint_restore_prepare_handler is not None
             and self._checkpoint_restore_handler is None
         ):
-            return {
+            return self._record_restore_failure_policy(
+                checkpoint=checkpoint,
+                recovery=recovery,
+                result={
                 "ok": False,
                 "checkpoint": checkpoint,
                 "status": "restore_prepare_failed",
                 "error": "Unity restore preparation is configured without a matching reload handler; current state was not backed up and restore was not attempted.",
-            }
+                },
+                before_disk=before_disk,
+                tentative_attempt=False,
+                request_id=request_id,
+                phase="prepare_restore",
+            )
         if recovery_safety_required and not local_state_restore:
             if self._checkpoint_restore_prepare_handler is None:
-                return {
+                return self._record_restore_failure_policy(
+                    checkpoint=checkpoint,
+                    recovery=recovery,
+                    result={
                     "ok": False,
                     "checkpoint": checkpoint,
                     "status": "restore_prepare_failed",
                     "error": "Unity restore preparation is unavailable; current state was not backed up and restore was not attempted.",
-                }
-            try:
-                prepared = ensure_dict(
-                    self._checkpoint_restore_prepare_handler(
-                        Path(str(checkpoint.get("projectRoot") or "")),
-                        checkpoint_files=ensure_string_list(checkpoint.get("archiveFiles")) or None,
-                    )
+                    },
+                    before_disk=before_disk,
+                    tentative_attempt=False,
+                    request_id=request_id,
+                    phase="prepare_restore",
                 )
-            except Exception as exc:  # noqa: BLE001 - fail closed before backup/restore.
-                prepared = checkpoint_core_error(exc)
+            pre_restore_probe = self._invoke_restore_prepare(
+                Path(str(checkpoint.get("projectRoot") or "")),
+                checkpoint_files=ensure_string_list(checkpoint.get("archiveFiles")) or None,
+                capture_evidence_only=True,
+                request_id=request_id,
+                phase="prepare_restore",
+            )
+            pre_restore_core = capture_core_observation(
+                pre_restore_probe,
+                side="after",
+                project_root=Path(str(checkpoint.get("projectRoot") or "")),
+            )
+            recovery = record_unity_recovery_evidence(self, checkpoint, pre_restore_probe) or recovery
+            prepared = self._invoke_restore_prepare(
+                Path(str(checkpoint.get("projectRoot") or "")),
+                checkpoint_files=ensure_string_list(checkpoint.get("archiveFiles")) or None,
+                request_id=request_id,
+                phase="prepare_restore",
+            )
             recovery = record_unity_recovery_evidence(self, checkpoint, prepared) or recovery
             if not prepared.get("ok"):
-                return {
+                probe_before = self._invoke_restore_prepare(
+                    Path(str(checkpoint.get("projectRoot") or "")),
+                    checkpoint_files=ensure_string_list(checkpoint.get("archiveFiles")) or None,
+                    capture_evidence_only=True,
+                    request_id=request_id,
+                    phase="prepare_restore",
+                )
+                recovery = record_unity_recovery_evidence(self, checkpoint, probe_before) or recovery
+                failed = {
                     "ok": False,
                     "checkpoint": checkpoint,
                     "status": "restore_prepare_failed",
@@ -1373,26 +1574,121 @@ class AgentCheckpointRecoveryService:
                         prepared.get("error")
                         or "Unity did not prove a safe restore preparation; current state was not backed up."
                     ),
+                    "requestId": request_id,
+                    "phase": "prepare_restore",
                 }
+                failed = self._record_restore_failure_policy(
+                    checkpoint=checkpoint,
+                    recovery=recovery,
+                    result=failed,
+                    before_disk=before_disk,
+                    tentative_attempt=False,
+                    request_id=request_id,
+                    phase="prepare_restore",
+                    before_core=pre_restore_core,
+                    after_core=capture_core_observation(probe_before, side="after", project_root=Path(str(checkpoint.get("projectRoot") or ""))),
+                    observations=(capture_core_observation(prepared, project_root=Path(str(checkpoint.get("projectRoot") or ""))), capture_core_observation(pre_restore_probe, project_root=Path(str(checkpoint.get("projectRoot") or ""))), capture_core_observation(probe_before, project_root=Path(str(checkpoint.get("projectRoot") or "")))),
+                )
+                return failed
             prepared_for_restore = prepared
         if recovery_safety_required and recovery:
             recovery_update = self._prepare_restore_attempt(checkpoint, recovery)
             if not recovery_update.get("ok"):
-                return recovery_update
+                post_backup_probe = self._invoke_restore_prepare(
+                    Path(str(checkpoint.get("projectRoot") or "")),
+                    checkpoint_files=ensure_string_list(checkpoint.get("archiveFiles")) or None,
+                    capture_evidence_only=True,
+                    request_id=request_id,
+                    phase="safety_backup",
+                ) if self._checkpoint_restore_prepare_handler is not None and not local_state_restore else {}
+                if post_backup_probe:
+                    recovery = record_unity_recovery_evidence(self, checkpoint, post_backup_probe) or recovery
+                return self._record_restore_failure_policy(
+                    checkpoint=checkpoint,
+                    recovery=recovery,
+                    result=recovery_update,
+                    before_disk=before_disk,
+                    tentative_attempt=False,
+                    request_id=request_id,
+                    phase="safety_backup",
+                    before_core=pre_restore_core,
+                    after_core=capture_core_observation(
+                        post_backup_probe,
+                        side="after",
+                        project_root=Path(str(checkpoint.get("projectRoot") or "")),
+                    ) if post_backup_probe else None,
+                    observations=(
+                        capture_core_observation(pre_restore_probe, project_root=Path(str(checkpoint.get("projectRoot") or ""))),
+                        capture_core_observation(recovery_update, project_root=Path(str(checkpoint.get("projectRoot") or ""))),
+                        capture_core_observation(post_backup_probe, project_root=Path(str(checkpoint.get("projectRoot") or ""))),
+                    ),
+                )
+            recovery = recovery_update.get("recovery") or recovery
         if (not local_state_restore and self._checkpoint_restore_prepare_handler is not None
                 and self._checkpoint_restore_handler is None):
-            return {
-                "ok": False,
-                "checkpoint": checkpoint,
-                "status": "restore_prepare_failed",
-                "error": "Unity restore preparation is configured without a matching reload handler.",
-            }
+            return self._record_restore_failure_policy(
+                checkpoint=checkpoint,
+                recovery=recovery,
+                result={
+                    "ok": False,
+                    "checkpoint": checkpoint,
+                    "status": "restore_prepare_failed",
+                    "error": "Unity restore preparation is configured without a matching reload handler.",
+                },
+                before_disk=before_disk,
+                tentative_attempt=bool(recovery_safety_required and recovery),
+                request_id=request_id,
+                phase="prepare_restore",
+            )
         with self._scan_mutation(checkpoint.get("projectRoot"), "vrcforge_restore_checkpoint"):
-            return self._execute_checkpoint_restore(
+            result = self._execute_checkpoint_restore(
                 checkpoint,
                 restore_params,
                 internal_restore_prepare=prepared_for_restore,
             )
+        if not result.get("ok"):
+            failure_phase = "reload" if str(result.get("status") or "").endswith("reload_failed") else "archive"
+            post_restore_probe = self._invoke_restore_prepare(
+                Path(str(checkpoint.get("projectRoot") or "")),
+                checkpoint_files=ensure_string_list(checkpoint.get("archiveFiles")) or None,
+                capture_evidence_only=True,
+                request_id=request_id,
+                phase=failure_phase,
+            ) if self._checkpoint_restore_prepare_handler is not None and not local_state_restore else {}
+            if post_restore_probe:
+                recovery = record_unity_recovery_evidence(self, checkpoint, post_restore_probe) or recovery
+            post_core = capture_core_observation(
+                post_restore_probe,
+                side="after",
+                project_root=Path(str(checkpoint.get("projectRoot") or "")),
+            ) if post_restore_probe else capture_core_observation(
+                result,
+                side="after",
+                project_root=Path(str(checkpoint.get("projectRoot") or "")),
+            )
+            result = self._record_restore_failure_policy(
+                checkpoint=checkpoint,
+                recovery=recovery,
+                result=result,
+                before_disk=before_disk,
+                tentative_attempt=bool(recovery_safety_required and recovery),
+                request_id=request_id,
+                phase=failure_phase,
+                before_core=pre_restore_core or capture_core_observation(
+                    prepared_for_restore,
+                    side="before",
+                    project_root=Path(str(checkpoint.get("projectRoot") or "")),
+                ),
+                after_core=post_core,
+                observations=(
+                    capture_core_observation(prepared_for_restore, project_root=Path(str(checkpoint.get("projectRoot") or ""))),
+                    capture_core_observation(result, project_root=Path(str(checkpoint.get("projectRoot") or ""))),
+                    capture_core_observation(post_restore_probe, project_root=Path(str(checkpoint.get("projectRoot") or ""))),
+                ),
+            )
+        else:
+            self._record_restore_success(recovery, result)
+        return result
 
     def _prepare_restore_attempt(
         self, checkpoint: dict[str, Any], recovery: dict[str, Any]
@@ -1417,6 +1713,7 @@ class AgentCheckpointRecoveryService:
                 "recoveryId": str(recovery.get("id") or ""),
                 "restoreAttemptCount": attempt_count,
                 "restoreAttemptLimit": attempt_limit,
+                "turnControl": {"stopCurrentTurn": True, "automaticRetry": False},
             }
         backup_id = (
             f"restore_safety_{recovery.get('id') or 'incident'}_"
@@ -1507,15 +1804,12 @@ class AgentCheckpointRecoveryService:
             and self._checkpoint_restore_prepare_handler is not None
             and not restore_prepare
         ):
-            try:
-                restore_prepare = ensure_dict(
-                    self._checkpoint_restore_prepare_handler(
-                        project_root,
-                        checkpoint_files=ensure_string_list(checkpoint.get("archiveFiles")) or None,
-                    )
-                )
-            except Exception as exc:  # noqa: BLE001 - fail before touching project files.
-                restore_prepare = checkpoint_core_error(exc)
+            restore_prepare = self._invoke_restore_prepare(
+                project_root,
+                checkpoint_files=ensure_string_list(checkpoint.get("archiveFiles")) or None,
+                request_id=str(params.get("_restoreRequestId") or ""),
+                phase="prepare_restore",
+            )
             record_unity_recovery_evidence(self, checkpoint, restore_prepare)
             if not restore_prepare.get("ok"):
                 payload = {
@@ -1616,7 +1910,11 @@ class AgentCheckpointRecoveryService:
                     self._checkpoint_restore_handler(project_root, reload_context)
                 )
             except Exception as exc:  # noqa: BLE001
-                reload_result = checkpoint_core_error(exc)
+                reload_result = checkpoint_core_error(
+                    exc,
+                    request_id=str(params.get("_restoreRequestId") or ""),
+                    phase="reload",
+                )
             record_unity_recovery_evidence(self, checkpoint, reload_result)
             expected_baseline = checkpoint_prepare.get("assetBaseline")
             actual_readback = reload_result.get("assetReadback")

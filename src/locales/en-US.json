@@ -92,6 +92,8 @@
     "unityEditor": "Current Unity",
     "vrcForgeTools": "Avatar Tools",
     "externalAgent": "External Agent",
+    "internalAgentNotTested": "Not tested · Click to test",
+    "testInternalAgentConnection": "Test Agent connection",
     "pendingConfirmation": "Needs Your Confirmation",
     "noProjectSelected": "No Unity project selected",
     "project": "Project",
@@ -145,6 +147,8 @@
     "internalOAuthConnected": "ChatGPT OAuth is signed in",
     "internalApiNeedsTest": "Internal API configured · test connection",
     "internalOAuthNeedsTest": "ChatGPT OAuth account configured · test connection",
+    "internalApiTestFailed": "Internal API connection test failed · retry",
+    "internalOAuthTestFailed": "ChatGPT OAuth connection test failed · retry",
     "authorizationBoth": "External Agent connected · Internal provider connected",
     "authorizationNotConfigured": "No Agent connection is configured",
     "authorizationDisconnected": "Runtime is disconnected",
@@ -1245,7 +1249,6 @@
     "summary": "pkg {{pkg}} / prefab {{prefab}}"
   },
   "subagent": {
-    "ignoreNotification": "Ignore this reminder",
     "title": "Background Tasks",
     "statusNeedsAction": "Needs Action",
     "statusRunning": "{{count}} Running",
@@ -1276,6 +1279,7 @@
     "review": "Merge review",
     "mergeAdopt": "Merge into chat",
     "mergeDismiss": "Dismiss",
+    "ignoreNotification": "Ignore this reminder",
     "mergedBadge": "Merged",
     "dismissedBadge": "Dismissed",
     "nextAction": "Proposed next action",

@@ -1364,11 +1364,22 @@ namespace VRCForge.Editor
             {
                 return false;
             }
+            var hasRecoveryEvidenceOnly = isPrepareCheckpoint && arguments.Property("recoveryEvidenceOnly") != null;
+            var recoveryEvidenceOnly = false;
+            if (hasRecoveryEvidenceOnly)
+            {
+                if (!HasBoolean(arguments, "recoveryEvidenceOnly")) return false;
+                recoveryEvidenceOnly = arguments["recoveryEvidenceOnly"].Value<bool>();
+            }
             var phaseName = arguments["phase"]?.Type == JTokenType.String ? arguments["phase"].Value<string>() : null;
             var scopeField = isPrepareCheckpoint || phaseName == "prepare_restore" ? "checkpointFiles"
                 : phaseName == "reload" ? "restoredAssetPaths" : null;
             if (scopeField != null && arguments.Property(scopeField) != null)
             {
+                if (recoveryEvidenceOnly && (scopeField != "checkpointFiles" || arguments[scopeField] == null))
+                {
+                    return false;
+                }
                 try
                 {
                     CheckpointPrepareTool.ExactFileScope(arguments[scopeField], allowEmpty: scopeField == "restoredAssetPaths");
@@ -1379,6 +1390,15 @@ namespace VRCForge.Editor
                 }
                 arguments = (JObject)arguments.DeepClone();
                 arguments.Remove(scopeField);
+            }
+            else if (recoveryEvidenceOnly)
+            {
+                return false;
+            }
+            if (hasRecoveryEvidenceOnly)
+            {
+                arguments = (JObject)arguments.DeepClone();
+                arguments.Remove("recoveryEvidenceOnly");
             }
             var materialBaselineOnly = isPrepareCheckpoint && arguments.Property("materialBaselineOnly") != null;
             if (materialBaselineOnly)
@@ -2425,6 +2445,8 @@ namespace VRCForge.Editor
                 ["scanScope"] = ScanScopeJournal.Capabilities(),
                 ["assetDatabaseRefreshSavesDirtyAssets"] = VRCForge.Editor.AssetDatabaseRefreshTool.SavesDirtyAssets,
                 ["checkpointPrepareSavesDirtyAssets"] = VRCForge.Editor.CheckpointPrepareTool.SavesDirtyAssets,
+                ["checkpointRecoveryEvidenceOnly"] = true,
+                ["checkpointRecoveryEvidenceSchema"] = "vrcforge.recovery_witness.v1",
             };
         }
 

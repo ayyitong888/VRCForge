@@ -217,6 +217,35 @@ class ScanResultStore:
     def _generation(connection, project: str) -> int:
         return connection.execute("SELECT COALESCE(SUM(epoch), 0) FROM mutations WHERE project IN (?, '')", (project,)).fetchone()[0]
 
+    @staticmethod
+    def _verified_no_change(outcome: Any) -> bool:
+        """Accept only the complete, authoritative no-op transaction receipt."""
+        if not isinstance(outcome, dict) or not all(
+            (
+                outcome.get("ok") is True,
+                outcome.get("verified") is True,
+                outcome.get("changed") is False,
+                outcome.get("cleanNoChange") is True,
+                outcome.get("mutationStarted") is False,
+                outcome.get("commitState") == "no_change",
+            )
+        ):
+            return False
+        binding = outcome.get("applyBinding")
+        readback = outcome.get("readback")
+        if not isinstance(binding, dict) or not isinstance(readback, dict):
+            return False
+        for expected, actual in (
+            ("expectedSceneGuid", "guid"),
+            ("expectedSceneFileDigest", "fileDigest"),
+            ("expectedSceneFileIdentity", "fileIdentity"),
+            ("expectedSceneMetaDigest", "metaDigest"),
+            ("expectedSceneMetaIdentity", "metaIdentity"),
+        ):
+            if binding.get(expected) != readback.get(actual):
+                return False
+        return True
+
     def generation(self, project_root: str | Path) -> int:
         project = _project(project_root, global_allowed=True)
         with self._lock:
@@ -443,7 +472,7 @@ class ScanResultStore:
                     prior_fingerprints = {}
                 if proof is not None and set(prior_fingerprints) != set(paths):
                     proof = None
-                if reason:
+                if reason and reason != "mutation_in_progress":
                     self._expire(connection, ref, reason)
             else:
                 observed = _fingerprints(project, paths)
@@ -565,7 +594,7 @@ class ScanResultStore:
                 except (ValueError, KeyError, TypeError):
                     reason = "fingerprint_unavailable"
             if reason:
-                if not (proof is not None and reason == "mutation_in_progress"):
+                if reason != "mutation_in_progress":
                     self._expire(connection, result_ref, reason)
                 result = self._expiry(row, reason, proof, changed_paths)
             else:
@@ -634,17 +663,75 @@ class ScanResultStore:
             connection.execute("INSERT INTO mutations VALUES (?, 0, 1) ON CONFLICT(project) DO UPDATE SET epoch=epoch+1", (project,))
             self._invalidate(connection, project, reason)
 
-    def begin_mutation(self, project_root: str | Path, reason: str) -> None:
+    def begin_mutation(self, project_root: str | Path, reason: str) -> dict[str, int | str]:
         project, reason = _project(project_root, global_allowed=True), _owner(reason)
         with self._lock, self._connection(create=True) as connection:
             connection.execute("INSERT INTO mutations VALUES (?, 1, 1) ON CONFLICT(project) DO UPDATE SET pending=pending+1, epoch=epoch+1", (project,))
-            self._invalidate(connection, project, reason)
+            return {"project": project, "generation": self._generation(connection, project)}
 
-    def end_mutation(self, project_root: str | Path, reason: str) -> None:
+    def end_mutation(
+        self,
+        project_root: str | Path,
+        reason: str,
+        outcome: Any = None,
+        marker: Any = None,
+    ) -> None:
         project, reason = _project(project_root, global_allowed=True), _owner(reason)
         with self._lock, self._connection(create=True) as connection:
-            self._invalidate(connection, project, reason)
-            connection.execute("INSERT INTO mutations VALUES (?, 0, 1) ON CONFLICT(project) DO UPDATE SET pending=MAX(0, pending-1), epoch=epoch+1", (project,))
+            pending = connection.execute(
+                "SELECT COALESCE(SUM(pending), 0) FROM mutations WHERE project IN (?, '')",
+                (project,),
+            ).fetchone()[0]
+            current_generation = self._generation(connection, project)
+            marker_generation = marker.get("generation") if isinstance(marker, dict) else None
+            preserve = (
+                self._verified_no_change(outcome)
+                and pending == 1
+                and marker_generation == current_generation
+            )
+            if not preserve:
+                self._invalidate(connection, project, reason)
+            connection.execute(
+                "INSERT INTO mutations VALUES (?, 0, 1) ON CONFLICT(project) DO UPDATE SET pending=MAX(0, pending-1), epoch=epoch+?",
+                (project, 0 if preserve else 1),
+            )
+
+    def reconcile_orphaned_mutations(self, reason: str = "backend_owner_start_reconcile") -> dict[str, Any]:
+        """Clear pending mutations left by a backend that no longer owns its lock.
+
+        The caller invokes this once after acquiring the process-wide backend
+        owner lease and before accepting requests. Recovery ledgers are kept
+        untouched; active-process completion remains paired by the normal
+        mutation context.
+        """
+        reason = _owner(reason)
+        with self._lock, self._connection(create=True) as connection:
+            mutation_rows = connection.execute(
+                "SELECT project, pending FROM mutations WHERE pending > 0"
+            ).fetchall()
+            projects = {str(row["project"]) for row in mutation_rows}
+            cleared_pending = 0
+            for project in sorted(projects):
+                pending_row = connection.execute(
+                    "SELECT pending FROM mutations WHERE project=?",
+                    (project,),
+                ).fetchone()
+                pending = int(pending_row["pending"]) if pending_row is not None else 0
+                if pending <= 0:
+                    continue
+                self._invalidate(connection, project, reason)
+                if pending > 0:
+                    connection.execute(
+                        "UPDATE mutations SET pending=0, epoch=epoch+1 WHERE project=?",
+                        (project,),
+                    )
+                    cleared_pending += pending
+            return {
+                "ok": True,
+                "reason": reason,
+                "clearedProjects": sorted(projects),
+                "clearedPending": cleared_pending,
+            }
 
     def delete(self, session_id: str) -> None:
         session_id = _owner(session_id)

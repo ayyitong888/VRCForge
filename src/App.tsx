@@ -4460,6 +4460,8 @@ export default function App() {
               workspaceSummary={workspaceDiff}
               activeDesktopActions={activeDesktopActions}
               refreshUnityStatus={refreshUnityStatus}
+              onTestAgentConnection={() => void runProviderTest("text")}
+              providerTestAttempted={Boolean(providerTestMessage.trim())}
               onHideSidebar={() => setRightSidebarCollapsed(true)}
               onOpenPendingApprovals={() => {
                 setPendingApprovalPanelOpen(true);

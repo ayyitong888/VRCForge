@@ -73,6 +73,11 @@ def bind_authoritative_preview(
         raise SceneAssetSaveError("New scene preview sceneWasDirty is invalid.")
     root_count = _integer(result.get("rootObjectCount"), "rootObjectCount", 0, 1_000_000)
     hierarchy_digest = _hex(result.get("sceneHierarchyDigest"), "sceneHierarchyDigest", _DIGEST)
+    dirty_asset_paths = _string_list(result.get("dirtyAssetPaths"), "dirtyAssetPaths")
+    dirty_asset_count = _integer(result.get("dirtyAssetCount"), "dirtyAssetCount", 0, 1_000_000)
+    if dirty_asset_count != len(dirty_asset_paths):
+        raise SceneAssetSaveError("New scene preview dirtyAssetCount is invalid.")
+    dirty_asset_digest = _hex(result.get("dirtyAssetDigest"), "dirtyAssetDigest", _DIGEST)
     preview_digest = _hex(result.get("previewDigest"), "previewDigest", _DIGEST)
     if compute_preview_digest(result) != preview_digest:
         raise SceneAssetSaveError("New scene preview digest is invalid.")
@@ -90,6 +95,8 @@ def bind_authoritative_preview(
         "expectedSceneWasDirty": scene_was_dirty,
         "expectedRootObjectCount": root_count,
         "expectedSceneHierarchyDigest": hierarchy_digest,
+        "expectedDirtyAssetPaths": dirty_asset_paths,
+        "expectedDirtyAssetDigest": dirty_asset_digest,
         "expectedPreviewDigest": preview_digest,
     }
     approval = {
@@ -102,6 +109,10 @@ def bind_authoritative_preview(
         "sceneWasDirty": scene_was_dirty,
         "rootObjectCount": root_count,
         "sceneHierarchyDigest": hierarchy_digest,
+        "dirtyAssetCount": dirty_asset_count,
+        "dirtyAssetPaths": dirty_asset_paths,
+        "dirtyAssetDigest": dirty_asset_digest,
+        "saveScope": result.get("saveScope"),
         "createNew": True,
         "overwrite": False,
         "previewDigest": preview_digest,
@@ -149,6 +160,16 @@ def validate_apply_result(arguments: dict[str, Any], payload: Any) -> dict[str, 
         arguments.get("expectedPreviewDigest"), "expectedPreviewDigest", _DIGEST
     ):
         raise SceneAssetSaveError("New scene apply preview binding changed.")
+    if result.get("saveScope") != "scene_and_project_wide_assets":
+        raise SceneAssetSaveError("New scene apply saveScope is invalid.")
+    if _string_list(result.get("dirtyAssetPaths"), "dirtyAssetPaths") != _string_list(
+        arguments.get("expectedDirtyAssetPaths"), "expectedDirtyAssetPaths"
+    ):
+        raise SceneAssetSaveError("New scene apply dirty asset scope changed.")
+    if _hex(result.get("dirtyAssetDigest"), "dirtyAssetDigest", _DIGEST) != _hex(
+        arguments.get("expectedDirtyAssetDigest"), "expectedDirtyAssetDigest", _DIGEST
+    ):
+        raise SceneAssetSaveError("New scene apply dirty asset scope changed.")
     _hex(result.get("sceneGuid"), "sceneGuid", _GUID)
     for name in (
         "sceneFileDigest",
@@ -178,6 +199,9 @@ def compute_preview_digest(payload: dict[str, Any]) -> str:
         value.get("sceneWasDirty"),
         value.get("rootObjectCount"),
         value.get("sceneHierarchyDigest"),
+        value.get("dirtyAssetCount"),
+        *(value.get("dirtyAssetPaths") or []),
+        value.get("dirtyAssetDigest"),
         value.get("targetExists"),
         value.get("targetMetaExists"),
     )
@@ -202,6 +226,8 @@ def _require_common_preview(result: dict[str, Any]) -> None:
             raise SceneAssetSaveError(f"New scene preview {key} is invalid.")
     if _integer(result.get("mutationCount"), "mutationCount", 0, 0) != 0:
         raise SceneAssetSaveError("New scene preview mutationCount is invalid.")
+    if result.get("saveScope") != "scene_and_project_wide_assets":
+        raise SceneAssetSaveError("New scene preview saveScope is invalid.")
 
 
 def _scene_path(value: Any) -> str:
@@ -249,6 +275,14 @@ def _integer(value: Any, label: str, minimum: int, maximum: int) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < minimum or value > maximum:
         raise SceneAssetSaveError(f"{label} is invalid.")
     return value
+
+
+def _string_list(value: Any, label: str) -> list[str]:
+    if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+        raise SceneAssetSaveError(f"{label} is invalid.")
+    if value != sorted(set(value)):
+        raise SceneAssetSaveError(f"{label} is invalid.")
+    return list(value)
 
 
 def _hex(value: Any, label: str, pattern: re.Pattern[str]) -> str:

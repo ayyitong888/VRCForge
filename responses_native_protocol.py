@@ -24,6 +24,7 @@ class NativeResponse:
     finish_reason: str
     usage: dict[str, Any] = field(default_factory=dict)
     reasoning_summary: list[Any] = field(default_factory=list)
+    model: str = ""
 
 
 class NativeToolRejection(RuntimeError):
@@ -208,6 +209,7 @@ def parse_native_response(
         finish_reason="tool_calls" if calls else "stop",
         usage=_normalized_usage(response),
         reasoning_summary=summaries,
+        model=str(_value(response, "model") or "").strip(),
     )
     if unexposed:
         raise NativeToolRejection(receipt)
@@ -248,6 +250,7 @@ def stream_response(
     error_factory: Callable[[str, Any], Exception],
     provider_label: str = "Responses",
     request_observer: Callable[[dict[str, Any]], None] | None = None,
+    response_headers_callback: Callable[[Mapping[str, str]], None] | None = None,
 ) -> Any:
     """Consume a completed Responses stream and own its client and watcher."""
     watcher_stop = threading.Event()
@@ -299,6 +302,8 @@ def stream_response(
             from provider_request_metrics import RequestMetrics
             metrics = RequestMetrics(request_observer, payload)
         stream = client.responses.create(**dict(payload))
+        if response_headers_callback is not None:
+            response_headers_callback(getattr(getattr(stream, "response", None), "headers", {}))
         for event in stream:
             if cancel_event is not None and cancel_event.is_set():
                 raise RuntimeError(f"{provider_label} request cancelled.")
@@ -385,11 +390,35 @@ def stream_response(
         raise
     finally:
         if metrics is not None:
+            output_items = _value(terminal_response, "output")
+            tool_calls = []
+            if isinstance(output_items, list):
+                for item in output_items:
+                    if str(_value(item, "type") or "") != "function_call":
+                        continue
+                    call_name = _value(item, "name")
+                    action = ""
+                    arguments = _value(item, "arguments")
+                    if isinstance(arguments, str):
+                        try:
+                            decoded = json.loads(arguments)
+                        except (TypeError, ValueError):
+                            decoded = None
+                        if isinstance(decoded, Mapping):
+                            action = str(decoded.get("action") or "").strip()[:80]
+                            call_name = decoded.get("write_tool") or decoded.get("skill_tool") or decoded.get("tool") or call_name
+                    tool_calls.append({
+                        "id": _value(item, "call_id") or _value(item, "id"),
+                        "name": call_name,
+                        "action": action,
+                    })
             metrics.finish(
                 _normalized_usage(terminal_response),
                 success=request_succeeded,
                 error=request_failure,
                 service_tier=_value(terminal_response, "service_tier"),
+                provider_request_id=_value(terminal_response, "id"),
+                tool_calls=tool_calls,
             )
         watcher_stop.set()
         close_stream = getattr(stream, "close", None)

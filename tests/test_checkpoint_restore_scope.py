@@ -58,4 +58,11 @@ def test_restore_prepare_receives_checkpoint_scope(tmp_path, incident, exact, pr
         assert not list(owner._ports.checkpoint_store_dir().rglob("restore_safety_*.zip"))
         if incident:
             recovery = owner.list_interrupted_apply_recoveries()["recoveries"][0]
-            assert recovery.get("restoreAttemptCount", 0) == 0
+            # The fixture deliberately supplies no complete disk+Core witness
+            # on a failed preparation.  It cannot prove zero effect, so the
+            # conservative policy counts one attempt even though the exact
+            # checkpoint scope assertions above still hold.
+            assert recovery.get("restoreAttemptCount", 0) == 1
+            assert result["restoreFailurePolicy"]["classification"] == "unknown"
+            assert result["restoreFailurePolicy"]["counted"] is True
+            assert result["restoreFailurePolicy"]["coreProof"]["valid"] is False

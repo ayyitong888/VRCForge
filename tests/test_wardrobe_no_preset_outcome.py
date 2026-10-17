@@ -23,13 +23,37 @@ def test_new_build_defaults_are_excluded_from_existing_operations(operation):
     assert branch["approvalBeforeWrites"] is True
 
 
-def test_from_scratch_branch_retains_default_authoring_design():
+def test_from_scratch_branch_uses_confirmed_personal_design_without_global_presets():
     workflow = json.loads((ROOT / "workflows/wardrobe-authoring.json").read_text(encoding="utf-8"))
     design = workflow["newBuildDefaults"]["design"]
-    assert design["selector"] == {"name": "衣柜", "type": "Int", "saved": True, "synced": True, "default": 0}
-    assert design["animation"]["fullMutualExclusionMatrixRequired"] is True
-    assert design["fx"]["durationSeconds"] == 0
+    assert design["source"] == "current_user_confirmed_new_wardrobe_preferences"
+    assert design["preserveExistingStructureFirst"] is True
+    assert design["selector"]["source"] == "current_user_confirmed_preferences_or_approved_design"
+    assert not {"name", "type", "default", "saved", "synced"} & design["selector"].keys()
+    assert not {"transitionSource", "durationSeconds", "hasExitTime", "canTransitionToSelf", "writeDefaults"} & design["fx"].keys()
+    assert design["animation"]["mutualExclusionWhenRequested"] is True
     assert design["perOutfitReadbackAndRuntimeAcceptance"] is True
+
+
+def test_new_organization_is_readable_without_moving_existing_objects():
+    workflow = json.loads((ROOT / "workflows/wardrobe-authoring.json").read_text(encoding="utf-8"))
+    organization = workflow["newBuildDefaults"]["design"]["organization"]
+    assert all(organization[key] is True for key in (
+        "readableAndMaintainable", "clearCategories", "recognizableNames",
+        "relatedObjectsAdjacent", "preferExistingConventions", "newScopeOnly",
+        "noUnapprovedExistingObjectMoves",
+    ))
+    assert organization["beforeReorderReparentOrRename"] == [
+        "animation_bindings", "bones", "component_relative_paths", "inbound_references",
+    ]
+
+
+def test_recognition_checks_business_purpose_and_preserves_ambiguous_destinations():
+    workflow = json.loads((ROOT / "workflows/wardrobe-authoring.json").read_text(encoding="utf-8"))
+    loop = workflow["recognitionLoop"]
+    assert loop["classificationDoesNotProveBusinessPurpose"] is True
+    assert loop["crossCheck"] == ["menu_purpose", "actual_objects", "clip_effects"]
+    assert loop["ambiguousDestinations"] == "preserve_all_candidates_inspect_before_claim_or_repair"
 
 
 def test_animation_contract_does_not_supply_an_activation_answer():

@@ -25,11 +25,15 @@ def fixture(tmp_path):
     def invalidate(root, reason):
         events.append((root, reason))
         if reason.endswith(":starting"):
-            store.begin_mutation(root, reason)
-        else:
-            store.end_mutation(root, reason)
+            return store.begin_mutation(root, reason)
+        store.end_mutation(root, reason)
 
-    owner._ports = replace(owner._ports, invalidate_scan_results=invalidate)
+    def complete(root, reason, outcome, marker):
+        events.append((root, reason + ":finished"))
+        store.end_mutation(root, reason, outcome=outcome, marker=marker)
+
+    owner._ports = replace(owner._ports, invalidate_scan_results=invalidate,
+                           complete_scan_mutation=complete)
     recovery = gateway.checkpoint_recovery
     recovery._ports = replace(recovery._ports, invalidate_scan_results=invalidate)
     return gateway, store, project, events
@@ -152,6 +156,174 @@ def test_handler_failure_always_finishes_invalidation(fixture, lane):
     assert "expired" not in capture(store, project, "after")
 
 
+def test_verified_no_change_handler_preserves_existing_scan(fixture):
+    gateway, store, project, events = fixture
+    owner = gateway.approval_transactions
+
+    def complete(root, reason, outcome, marker):
+        events.append((root, reason + ":complete"))
+        store.end_mutation(root, reason, outcome=outcome, marker=marker)
+
+    def start(root, reason):
+        events.append((root, reason))
+        return store.begin_mutation(root, reason)
+
+    owner._ports = replace(
+        owner._ports,
+        invalidate_scan_results=start,
+        complete_scan_mutation=complete,
+    )
+    before = capture(store, project, "before")
+    owner.register_write_handler(
+        "fixture_write",
+        "Write fixture",
+        "low",
+        lambda _args: {
+            "ok": True,
+            "toolName": "vrcforge_scene_save",
+            "result": {
+                "payload": {
+                    "data": {
+                        "schema": "vrcforge.scene_save.v1",
+                        "ok": True,
+                        "verified": True,
+                        "changed": False,
+                        "cleanNoChange": True,
+                        "mutationStarted": False,
+                        "commitState": "no_change",
+                        "applyBinding": {
+                            "expectedSceneGuid": "guid",
+                            "expectedSceneFileDigest": "file-digest",
+                            "expectedSceneFileIdentity": "file-identity",
+                            "expectedSceneMetaDigest": "meta-digest",
+                            "expectedSceneMetaIdentity": "meta-identity",
+                        },
+                        "readback": {
+                            "guid": "guid",
+                            "fileDigest": "file-digest",
+                            "fileIdentity": "file-identity",
+                            "metaDigest": "meta-digest",
+                            "metaIdentity": "meta-identity",
+                        },
+                    }
+                }
+            },
+        },
+        pre_write_checkpoint_required=False,
+    )
+
+    assert invoke(owner, "internal", "fixture_write", project)["ok"] is True
+    assert store.lookup("session", "before", str(project), before["resultRef"]) == {
+        "step": {
+            "id": "scan",
+            "tool": "vrc_scan_fx_animator",
+            "status": "ok",
+            "result": {"rows": [1, 2, 3]},
+        }
+    }
+    assert events[-1] == (str(project), "fixture_write:complete")
+
+
+def test_scene_save_no_change_preserves_scan_through_checkpoint_prepare(fixture):
+    gateway, store, project, events = fixture
+    owner = gateway.approval_transactions
+    owner._ports = replace(
+        owner._ports,
+        is_unity_project_root=lambda _root: True,
+        run_git=lambda *_args: {"ok": False},
+    )
+    before = capture(store, project, "before-checkpoint")
+    owner.register_write_handler(
+        "vrcforge_scene_save",
+        "Save the exact active scene.",
+        "high",
+        lambda _args: {
+            "ok": True,
+            "toolName": "vrcforge_scene_save",
+            "result": {"payload": {"data": {
+                "schema": "vrcforge.scene_save.v1",
+                "ok": True,
+                "verified": True,
+                "changed": False,
+                "cleanNoChange": True,
+                "mutationStarted": False,
+                "commitState": "no_change",
+                "applyBinding": {
+                    "expectedSceneGuid": "guid",
+                    "expectedSceneFileDigest": "file-digest",
+                    "expectedSceneFileIdentity": "file-identity",
+                    "expectedSceneMetaDigest": "meta-digest",
+                    "expectedSceneMetaIdentity": "meta-identity",
+                },
+                "readback": {
+                    "guid": "guid",
+                    "fileDigest": "file-digest",
+                    "fileIdentity": "file-identity",
+                    "metaDigest": "meta-digest",
+                    "metaIdentity": "meta-identity",
+                },
+            }}},
+        },
+        checkpoint_prepare_handler=lambda _root, _args: {"ok": True},
+        pre_write_checkpoint_required=True,
+    )
+    request = owner.create_apply_request({
+        "target_tool": "vrcforge_scene_save",
+        "arguments": {"projectRoot": str(project)},
+    })
+    approval_id = request["approval"]["id"]
+    owner.approve(approval_id)
+    applied = owner.apply_approved({"approval_id": approval_id})
+
+    assert applied["ok"] is True
+    assert store.lookup("session", "before-checkpoint", str(project), before["resultRef"]) == {
+        "step": {
+            "id": "scan",
+            "tool": "vrc_scan_fx_animator",
+            "status": "ok",
+            "result": {"rows": [1, 2, 3]},
+        }
+    }
+    assert events == [(str(project), "vrcforge_scene_save:starting"),
+                      (str(project), "vrcforge_scene_save:finished")]
+
+
+def test_scene_save_read_only_checkpoint_prepare_preserves_scan_without_mutation_fence(fixture):
+    gateway, store, project, events = fixture
+    owner = gateway.approval_transactions
+    owner._ports = replace(owner._ports, is_unity_project_root=lambda _root: True)
+    before = capture(store, project, "before-generic-prepare")
+    expected = store.lookup("session", "before-generic-prepare", project, before["resultRef"])
+    observed = []
+    archives = []
+
+    def archive(_root, record):
+        archives.append(record)
+        return {**record, "ok": True}
+
+    owner._ports = replace(owner._ports,
+        run_git=lambda *_args: {"ok": False},
+        invalidate_scan_results=lambda *_args: pytest.fail("read-only prepare entered a mutation fence"),
+        checkpoint=replace(owner._ports.checkpoint, create_archive_checkpoint=archive))
+
+    def prepare(_root):
+        # Core capability requires a non-saving prepare; scans remain readable.
+        observed.append(store.lookup("session", "before-generic-prepare", project, before["resultRef"]))
+        return {"ok": True, "saved": False, "mutationStarted": False}
+
+    owner.checkpoint_prepare_handler = prepare
+    owner.register_write_handler("vrcforge_scene_save", "Save scene", "high", lambda _args: {})
+    result = owner._create_pre_write_checkpoint(
+        {"id": "approval", "targetTool": "vrcforge_scene_save"}, {"projectPath": str(project)},
+    )
+    assert result["ok"] is True
+    assert observed == [expected]
+    assert store.lookup("session", "before-generic-prepare", project, before["resultRef"]) == expected
+    assert len(archives) == 1
+    assert archives[0]["unityPrepare"] == {"ok": True, "saved": False, "mutationStarted": False}
+    assert events == []
+
+
 def test_failed_finish_propagates_and_keeps_future_captures_blocked(fixture):
     gateway, store, project, events = fixture
     owner = gateway.approval_transactions
@@ -187,36 +359,45 @@ def test_failed_checkpoint_gate_never_invalidates(fixture, monkeypatch):
 
 
 @pytest.mark.parametrize("dedicated", [False, True])
-@pytest.mark.parametrize("failed_phase", ["starting", "finished"])
-def test_checkpoint_prepare_cannot_fallback_past_invalidation_failure(fixture, dedicated, failed_phase):
-    gateway, _store, project, events = fixture
+@pytest.mark.parametrize("failure", ["blocking_result", "exception"])
+def test_read_only_checkpoint_prepare_failure_blocks_archive_and_write(fixture, dedicated, failure):
+    gateway, store, project, events = fixture
     owner = gateway.approval_transactions
+    before = capture(store, project, "before-failed-prepare")
+    expected = store.lookup("session", "before-failed-prepare", project, before["resultRef"])
+    calls = []
 
-    def invalidate(root, reason):
-        events.append((root, reason))
-        if reason.endswith(":" + failed_phase):
-            raise RuntimeError("prepare invalidation unavailable")
+    def invalidate(*_args):
+        pytest.fail("read-only failed prepare entered a mutation fence")
 
     def prepare(*_args):
-        events.append((str(project), "prepare"))
-        return {"ok": True}
+        calls.append("prepare")
+        assert store.lookup("session", "before-failed-prepare", project, before["resultRef"]) == expected
+        if failure == "exception":
+            raise RuntimeError("prepare unavailable")
+        return {"ok": False, "blocking": True, "error": "dirty_editor_state"}
 
     owner._ports = replace(owner._ports, invalidate_scan_results=invalidate,
         is_unity_project_root=lambda _root: True,
         run_git=lambda *_args: {"ok": False},
         checkpoint=replace(owner._ports.checkpoint,
             create_archive_checkpoint=lambda *_args: pytest.fail("checkpoint fallback executed")))
-    owner.register_write_handler("fixture_write", "Write fixture", "low", lambda _args: {"ok": True},
+    owner.register_write_handler("fixture_write", "Write fixture", "low",
+                                 lambda _args: pytest.fail("write executed after failed prepare"),
                                  checkpoint_prepare_handler=prepare if dedicated else None)
     if not dedicated:
         owner.checkpoint_prepare_handler = prepare
-    with pytest.raises(RuntimeError, match="prepare invalidation unavailable"):
-        owner._create_pre_write_checkpoint({"id": "approval", "targetTool": "fixture_write"},
-                                          {"projectPath": str(project)})
-    expected = [(str(project), "fixture_write:starting")]
-    if failed_phase == "finished":
-        expected.extend([(str(project), "prepare"), (str(project), "fixture_write:finished")])
-    assert events == expected
+    request = owner.create_apply_request({"target_tool": "fixture_write",
+                                          "arguments": {"projectPath": str(project)}})
+    owner.approve(request["approval"]["id"])
+    result = owner.apply_approved({"approvalId": request["approval"]["id"]})
+    assert result["ok"] is False
+    assert result["checkpoint"]["blocking"] is True
+    assert result["checkpoint"]["status"] == "failed"
+    assert result["checkpoint"]["unityPrepare"]["ok"] is False
+    assert calls == ["prepare"]
+    assert store.lookup("session", "before-failed-prepare", project, before["resultRef"]) == expected
+    assert events == []
 
 
 @pytest.mark.parametrize("name", ["vrcforge_shell_execute", "vrcforge_execute_roslyn_script",
@@ -280,7 +461,7 @@ def test_restore_guard_covers_prepare_restore_cleanup_and_reload(fixture, monkey
     for name in ("_restore_archive_checkpoint", "_restore_local_state_checkpoint", "_restore_project_chat_checkpoint"):
         monkeypatch.setattr(AgentCheckpointRecoveryService, name, mutation)
     if strategy in {"git", "archive"}:
-        owner.checkpoint_restore_prepare_handler = lambda _root: mutation()
+        owner.checkpoint_restore_prepare_handler = lambda _root, *, checkpoint_files=None: mutation()
         owner.checkpoint_restore_handler = lambda _root, _ctx: mutation()
     assert owner.restore_checkpoint({"checkpointId": "checkpoint", "confirmRestore": True})["ok"] is True
     assert events[-1] == (str(project), "vrcforge_restore_checkpoint:finished")
@@ -316,7 +497,7 @@ def test_restore_invalidation_failure_is_not_swallowed_by_prepare(fixture, monke
         raise RuntimeError("restore invalidation unavailable")
 
     owner._ports = replace(owner._ports, invalidate_scan_results=invalidate)
-    owner.checkpoint_restore_prepare_handler = lambda _root: pytest.fail("prepare executed")
+    owner.checkpoint_restore_prepare_handler = lambda _root, *, checkpoint_files=None: pytest.fail("prepare executed")
     owner.checkpoint_restore_handler = lambda _root, _ctx: pytest.fail("reload executed")
     with pytest.raises(RuntimeError, match="restore invalidation unavailable"):
         owner.restore_checkpoint({"checkpointId": "checkpoint", "confirmRestore": True})

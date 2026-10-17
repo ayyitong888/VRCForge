@@ -254,6 +254,35 @@ def test_agent_steps_require_ui_safe_field_shapes(tmp_path: Path) -> None:
     assert scan["reason"] == "invalid_list_records"
 
 
+def test_timeline_event_allows_bounded_owner_fields_but_rejects_invalid_or_unknown_fields() -> None:
+    event = {
+        "id": "timeline-1",
+        "sequence": 1,
+        "timestamp": "2026-10-15T00:00:00Z",
+        "kind": "subagent",
+        "sessionId": "session-1",
+        "turnId": "turn-1",
+        "clientTurnId": "client-turn-1",
+        "payload": {"label": "worker", "status": "completed"},
+    }
+    chat = {"id": "chat-timeline-owner", "items": [{"id": "item-1", "type": "timeline_event", "event": event}]}
+
+    assert is_valid_chat_record(chat)
+
+    for field, value in (
+        ("sessionId", " "),
+        ("turnId", 1),
+        ("clientTurnId", "x" * 241),
+    ):
+        malformed = json.loads(json.dumps(chat))
+        malformed["items"][0]["event"][field] = value
+        assert not is_valid_chat_record(malformed), field
+
+    malformed = json.loads(json.dumps(chat))
+    malformed["items"][0]["event"]["runtimeState"] = "unexpected"
+    assert not is_valid_chat_record(malformed)
+
+
 def test_attachment_vault_and_compacted_references_require_ui_safe_shapes() -> None:
     body = "attachment body"
     payload_hash = hashlib.sha256(body.encode()).hexdigest()

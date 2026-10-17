@@ -51,6 +51,7 @@ namespace VRCForge.Editor
             [VRCForgeInput("Optional exact active Unity project root.", IsRequired = false)] public string projectPath { get; set; } = "";
             [VRCForgeInput("Exact existing assets resolved by the approved write preview.", IsRequired = false)] public string[] checkpointAssetPaths { get; set; }
             [VRCForgeInput("Exact disk files in the production checkpoint; absent means full project.", IsRequired = false)] public string[] checkpointFiles { get; set; }
+            [VRCForgeInput("Capture a complete read-only before/after witness for a failed restore; requires a non-empty exact checkpoint file scope.", IsRequired = false)] public bool recoveryEvidenceOnly { get; set; }
             [VRCForgeInput("Capture only exact clean material assets without saving scenes or assets.", IsRequired = false)] public bool materialBaselineOnly { get; set; }
             [VRCForgeInput("Live-run SHA-256 digest when a bound fixture request is used.", IsRequired = false)] public string expectedRunIdDigest { get; set; } = "";
             [VRCForgeInput("Expected Unity project-root SHA-256 digest.", IsRequired = false)] public string expectedProjectPathDigest { get; set; } = "";
@@ -66,6 +67,15 @@ namespace VRCForge.Editor
                 var identity = PrimitiveBasisLiveGuard.RequireBoundRequest(@params);
                 ValidateProject(@params);
                 EnsureEditorReady();
+                if (@params?["recoveryEvidenceOnly"] != null
+                    && @params["recoveryEvidenceOnly"].Type != JTokenType.Boolean)
+                {
+                    throw new InvalidOperationException("recoveryEvidenceOnly must be a boolean.");
+                }
+                if (@params?["recoveryEvidenceOnly"]?.Value<bool>() == true)
+                {
+                    return HandleRecoveryEvidenceOnly(@params);
+                }
                 if (@params?["materialBaselineOnly"]?.Value<bool>() == true)
                 {
                     var baseline = CaptureReadOnlyMaterialBaseline(@params?["checkpointAssetPaths"]);
@@ -348,6 +358,230 @@ namespace VRCForge.Editor
             }
             return scenes;
         }
+
+        private static VRCForgeToolResult HandleRecoveryEvidenceOnly(JObject @params)
+        {
+            // The witness is deliberately global: unrelated dirty assets are part of
+            // the proof surface and cannot be hidden behind checkpointFiles.
+            var fileScope = ExactFileScope(@params?["checkpointFiles"]);
+            if (fileScope == null || fileScope.Count == 0)
+            {
+                throw new InvalidOperationException(
+                    "recoveryEvidenceOnly requires a non-empty exact checkpoint file scope.");
+            }
+
+            using (var evidence = new CheckpointEvidenceFiles(
+                ProjectRoot(),
+                () => new[] { CaptureRecoveryWitness() },
+                "recoveryEvidence",
+                true))
+            {
+                evidence.RecordBefore(new[] { CaptureRecoveryWitness() });
+                var result = VRCForgeToolResult.Completed(
+                    "Captured a read-only recovery witness without changing Unity editor state.",
+                    new
+                    {
+                        ok = true,
+                        phase = "prepare",
+                        recoveryEvidenceOnly = true,
+                        checkpointFileCount = fileScope.Count,
+                        saved = false,
+                        imported = false,
+                        refreshed = false,
+                        mutationStarted = false,
+                        committed = false,
+                        snapshotIncludesUnsavedState = true,
+                    });
+                return evidence.Complete(result);
+            }
+        }
+
+        internal static object CaptureRecoveryWitness()
+        {
+            var errors = new List<object>();
+            var coreInstanceId = VRCForgeMcpCoreServer.CurrentInstanceId ?? "";
+            var processId = 0;
+            var processStartedAtUtc = "";
+            try
+            {
+                using (var process = System.Diagnostics.Process.GetCurrentProcess())
+                {
+                    processId = process.Id;
+                    processStartedAtUtc = process.StartTime.ToUniversalTime().ToString("O");
+                }
+            }
+            catch (Exception ex)
+            {
+                errors.Add(new { kind = "core_process_identity", error = ex.GetType().Name });
+            }
+            var projectPathDigest = Fingerprint(ProjectRoot());
+            var dirtyAssets = new List<object>();
+            foreach (var asset in Resources.FindObjectsOfTypeAll<UnityEngine.Object>()
+                .Where(item => item != null && EditorUtility.IsPersistent(item) && EditorUtility.IsDirty(item))
+                .OrderBy(item => SafeAssetPath(item), StringComparer.Ordinal)
+                .ThenBy(item => item.GetInstanceID()))
+            {
+                var assetPath = SafeAssetPath(asset);
+                if (string.IsNullOrWhiteSpace(assetPath) || !assetPath.StartsWith("Assets/", StringComparison.Ordinal)) continue;
+                var type = asset.GetType().FullName ?? asset.GetType().Name;
+                var dirtyCount = EditorUtility.GetDirtyCount(asset);
+                try
+                {
+                    var serialized = EditorJsonUtility.ToJson(asset);
+                    dirtyAssets.Add(new
+                    {
+                        assetPath,
+                        instanceId = asset.GetInstanceID(),
+                        type,
+                        dirty = EditorUtility.IsDirty(asset),
+                        dirtyCount,
+                        serializedState = serialized,
+                        serializedFingerprint = Fingerprint(assetPath + "\n" + asset.GetInstanceID() + "\n" + type + "\n" + dirtyCount + "\n" + serialized),
+                        serializedComplete = true,
+                    });
+                }
+                catch (Exception ex)
+                {
+                    errors.Add(new { kind = "dirty_asset_serialization", assetPath, instanceId = asset.GetInstanceID(), type, error = ex.GetType().Name });
+                    dirtyAssets.Add(new { assetPath, instanceId = asset.GetInstanceID(), type, dirty = EditorUtility.IsDirty(asset), dirtyCount, serializedState = "", serializedFingerprint = "", serializedComplete = false });
+                }
+            }
+
+            var scenes = new List<object>();
+            foreach (var scene in LoadedScenes())
+            {
+                try
+                {
+                    var topology = scene.isDirty ? CaptureDirtySceneTopology(scene, errors) : null;
+                    var topologyJson = topology == null ? "" : topology.ToString(Newtonsoft.Json.Formatting.None);
+                    scenes.Add(new
+                    {
+                        handle = scene.handle,
+                        path = scene.path ?? "",
+                        name = scene.name ?? "",
+                        loaded = scene.isLoaded,
+                        active = scene == SceneManager.GetActiveScene(),
+                        dirty = scene.isDirty,
+                        knownTransientPreview = IsKnownTransientPreviewScene(scene),
+                        topology,
+                        topologyFingerprint = Fingerprint(scene.handle + "\n" + (scene.path ?? "") + "\n" + (scene.name ?? "") + "\n" + scene.isLoaded + "\n" + (scene == SceneManager.GetActiveScene()) + "\n" + scene.isDirty + "\n" + topologyJson),
+                        serializedComplete = !scene.isDirty || topology != null,
+                    });
+                }
+                catch (Exception ex)
+                {
+                    errors.Add(new { kind = "scene_serialization", handle = scene.handle, path = scene.path ?? "", error = ex.GetType().Name });
+                    scenes.Add(new { handle = scene.handle, path = scene.path ?? "", name = scene.name ?? "", loaded = scene.isLoaded, active = scene == SceneManager.GetActiveScene(), dirty = scene.isDirty, knownTransientPreview = IsKnownTransientPreviewScene(scene), topology = (JObject)null, topologyFingerprint = "", serializedComplete = false });
+                }
+            }
+
+            var complete = !string.IsNullOrWhiteSpace(coreInstanceId)
+                && processId > 0
+                && !string.IsNullOrWhiteSpace(processStartedAtUtc)
+                && !string.IsNullOrWhiteSpace(projectPathDigest)
+                && errors.Count == 0
+                && dirtyAssets.All(item => (bool)JObject.FromObject(item)["serializedComplete"])
+                && scenes.All(item => (bool)JObject.FromObject(item)["serializedComplete"]);
+            return new
+            {
+                schema = "vrcforge.recovery_witness.v1",
+                coreIdentity = coreInstanceId,
+                coreInstanceId,
+                coreProductIdentity = VRCForgeMcpToolContract.CoreIdentity,
+                coreVersion = VRCForgeMcpToolContract.ProductVersion,
+                coreContractVersion = VRCForgeMcpToolContract.ToolContractVersion,
+                unityProcessId = processId,
+                unityProcessStartedAtUtc = processStartedAtUtc,
+                processId,
+                processStartTime = processStartedAtUtc,
+                projectPathDigest,
+                projectRootDigest = projectPathDigest,
+                loadedSceneCount = scenes.Count,
+                dirtySceneCount = scenes.Count(item => (bool)JObject.FromObject(item)["dirty"]),
+                dirtyAssetCount = dirtyAssets.Count,
+                loadedScenes = scenes,
+                dirtyAssets,
+                serializationErrors = errors,
+                complete,
+            };
+        }
+
+        private static JObject CaptureDirtySceneTopology(Scene scene, List<object> errors)
+        {
+            var objects = new JArray();
+            foreach (var root in scene.GetRootGameObjects().OrderBy(item => item.name, StringComparer.Ordinal))
+            {
+                foreach (var transform in root.GetComponentsInChildren<Transform>(true))
+                {
+                    var gameObject = transform.gameObject;
+                    var components = new JArray();
+                    var componentIndex = 0;
+                    foreach (var component in gameObject.GetComponents<Component>())
+                    {
+                        if (component == null)
+                        {
+                            errors.Add(new { kind = "scene_component_serialization", scene = scene.path ?? "", path = RelativePath(root.transform, transform), componentIndex, error = "missing_component" });
+                            componentIndex++;
+                            continue;
+                        }
+                        try
+                        {
+                            components.Add(new JObject
+                            {
+                                ["index"] = componentIndex,
+                                ["type"] = component.GetType().FullName ?? component.GetType().Name,
+                                ["serializedState"] = EditorJsonUtility.ToJson(component),
+                            });
+                        }
+                        catch (Exception ex)
+                        {
+                            errors.Add(new { kind = "scene_component_serialization", scene = scene.path ?? "", path = RelativePath(root.transform, transform), componentIndex, type = component.GetType().FullName ?? component.GetType().Name, error = ex.GetType().Name });
+                        }
+                        componentIndex++;
+                    }
+                    try
+                    {
+                        objects.Add(new JObject
+                        {
+                            ["path"] = RelativePath(root.transform, transform),
+                            ["gameObjectState"] = EditorJsonUtility.ToJson(gameObject),
+                            ["components"] = components,
+                        });
+                    }
+                    catch (Exception ex)
+                    {
+                        errors.Add(new { kind = "scene_game_object_serialization", scene = scene.path ?? "", path = RelativePath(root.transform, transform), error = ex.GetType().Name });
+                    }
+                }
+            }
+            return new JObject { ["objects"] = objects };
+        }
+
+        private static string RelativePath(Transform root, Transform current)
+        {
+            var parts = new List<string>();
+            for (var item = current; item != null; item = item.parent)
+            {
+                parts.Add(item.name ?? "");
+                if (item == root) break;
+            }
+            parts.Reverse();
+            return string.Join("/", parts);
+        }
+
+        private static string SafeAssetPath(UnityEngine.Object asset)
+        {
+            try { return AssetDatabase.GetAssetPath(asset) ?? ""; }
+            catch { return ""; }
+        }
+
+        private static string Fingerprint(string value)
+        {
+            using (var hash = SHA256.Create())
+            {
+                return BitConverter.ToString(hash.ComputeHash(new UTF8Encoding(false).GetBytes(value ?? ""))).Replace("-", "").ToLowerInvariant();
+            }
+        }
     }
 
     // Files are owned by this invocation until their references are returned. The
@@ -356,36 +590,66 @@ namespace VRCForge.Editor
     {
         private readonly string projectRoot;
         private readonly Func<object[]> captureAfter;
+        private readonly string evidenceName;
+        private readonly bool requireComplete;
         private readonly List<string> createdFiles = new List<string>();
         private JObject before;
+        private bool beforeComplete = true;
         private bool published;
 
         internal CheckpointEvidenceFiles(string projectRoot, Func<object[]> captureAfter)
+            : this(projectRoot, captureAfter, "dirtyAssetEvidence", false)
+        {
+        }
+
+        internal CheckpointEvidenceFiles(string projectRoot, Func<object[]> captureAfter, string evidenceName, bool requireComplete)
         {
             this.projectRoot = projectRoot;
             this.captureAfter = captureAfter;
+            this.evidenceName = evidenceName;
+            this.requireComplete = requireComplete;
         }
+
 
         internal void RecordBefore(object[] rows)
         {
             before = Write(rows);
+            beforeComplete = RowsComplete(rows);
         }
 
         internal VRCForgeToolResult Complete(VRCForgeToolResult result)
         {
             if (before == null) return result;
             var payload = result.Payload == null ? new JObject() : JObject.FromObject(result.Payload);
-            payload["dirtyAssetEvidenceBefore"] = before;
+            payload[evidenceName + "Before"] = before;
             try
             {
-                payload["dirtyAssetEvidenceAfter"] = Write(captureAfter());
+                var afterRows = captureAfter();
+                payload[evidenceName + "After"] = Write(afterRows);
+                var afterComplete = RowsComplete(afterRows);
+                if (requireComplete)
+                {
+                    payload[evidenceName + "Complete"] = beforeComplete && afterComplete;
+                    if (!beforeComplete || !afterComplete)
+                    {
+                        result = VRCForgeToolResult.FailedWithCode(
+                            "checkpoint_recovery_evidence_incomplete",
+                            "The read-only recovery witness could not serialize the complete editor state.",
+                            payload);
+                    }
+                }
             }
             catch (Exception ex)
             {
                 payload["evidenceError"] = ex.GetType().Name;
                 payload["recoveryRequired"] = true;
-                result = VRCForgeToolResult.FailedWithCode("checkpoint_evidence_capture_failed",
-                    "Checkpoint dirty-asset evidence could not be completed.", payload);
+                if (requireComplete) payload[evidenceName + "Complete"] = false;
+                result = VRCForgeToolResult.FailedWithCode(
+                    requireComplete ? "checkpoint_recovery_evidence_capture_failed" : "checkpoint_evidence_capture_failed",
+                    requireComplete
+                        ? "The read-only recovery witness could not be completed."
+                        : "Checkpoint dirty-asset evidence could not be completed.",
+                    payload);
             }
             var completed = result.IsSuccessful
                 ? VRCForgeToolResult.Completed(result.Message, payload)
@@ -408,6 +672,22 @@ namespace VRCForge.Editor
                 ["dirtyCount"] = row["dirtyCount"]?.DeepClone()
             }));
             var summary = new JObject { ["total"] = rows.Length, ["items"] = items };
+            var witness = document.FirstOrDefault() as JObject;
+            if (witness != null && witness["schema"]?.Value<string>() == "vrcforge.recovery_witness.v1")
+            {
+                summary["schema"] = witness["schema"];
+                summary["coreIdentity"] = Bounded(witness["coreIdentity"]?.ToString());
+                summary["coreInstanceId"] = Bounded(witness["coreInstanceId"]?.ToString());
+                summary["coreVersion"] = Bounded(witness["coreVersion"]?.ToString());
+                summary["processId"] = witness["processId"];
+                summary["processStartTime"] = Bounded(witness["processStartTime"]?.ToString());
+                summary["projectPathDigest"] = Bounded(witness["projectPathDigest"]?.ToString());
+                summary["loadedSceneCount"] = witness["loadedSceneCount"];
+                summary["dirtySceneCount"] = witness["dirtySceneCount"];
+                summary["dirtyAssetCount"] = witness["dirtyAssetCount"];
+                summary["complete"] = witness["complete"];
+            }
+            else if (requireComplete && RowsComplete(rows)) summary["complete"] = true;
             do
             {
                 summary["truncated"] = items.Count < rows.Length;
@@ -434,6 +714,18 @@ namespace VRCForge.Editor
             }
             return new JObject { ["reference"] = reference, ["sha256"] = digest,
                 ["byteCount"] = bytes.Length, ["objectCount"] = rows.Length, ["summary"] = summary };
+        }
+
+        private static bool RowsComplete(object[] rows)
+        {
+            if (rows == null) return false;
+            foreach (var row in rows)
+            {
+                if (row == null) return false;
+                var value = JToken.FromObject(row)?["complete"];
+                if (value != null && value.Type == JTokenType.Boolean && !value.Value<bool>()) return false;
+            }
+            return true;
         }
 
         private static string Bounded(string value)

@@ -1180,30 +1180,30 @@ BUILTIN_SKILL_OVERRIDES: dict[str, dict[str, Any]] = {
     },
     "vrcforge_preview_manage_fx_animator": {
         "title": "Manage FX Animator Preview",
-        "inputs": ["Avatar path or controller path, action, layer/state/transition fields."],
-        "outputs": ["Planned FX layer/state/transition changes; no writes."],
+        "inputs": ["Avatar/controller; action or edits (delete_layer: exact layerName)."],
+        "outputs": ["FX layer/state/transition preview; no writes."],
         "sideEffects": "none",
         "tags": ["animator", "avatar-authoring", "preview"],
     },
     "vrcforge_manage_fx_animator": {
         "title": "Manage FX Animator",
-        "inputs": ["Avatar path or controller path, action, layer/state/transition fields."],
-        "outputs": ["Created, updated, or deleted FX layers, states, Any-State transitions, motions, and conditions."],
-        "sideEffects": "edits AnimatorController assets after approval",
+        "inputs": ["Avatar/controller; action or approved edits (delete_layer: exact layerName)."],
+        "outputs": ["FX layer/state/Any-State/motion/condition edits."],
+        "sideEffects": "approved AnimatorController edits",
         "tags": ["animator", "avatar-authoring", "write"],
     },
     "vrcforge_create_wardrobe": {
         "title": "Create Wardrobe",
-        "inputs": ["Avatar path, wardrobe int parameter name, menu name, and optional generated asset folder."],
-        "outputs": ["Created or reused expression parameters/menu/FX assets, default state, and default menu toggle."],
-        "sideEffects": "creates or updates expression parameters, expression menu, FX controller/layer, and generated default clip after approval",
+        "inputs": ["Avatar, Int parameter, menu; optional output folder."],
+        "outputs": ["Skeleton and first-outfit steps; strict scan pending."],
+        "sideEffects": "approved creation/update of parameters, menu, FX/layer and default clip",
         "tags": ["wardrobe", "menu", "animator", "write"],
     },
     "vrcforge_add_wardrobe_outfit": {
         "title": "Add Wardrobe Outfit",
-        "inputs": ["Avatar path, existing int parameter name, outfit name, object paths, optional off-objects/value/flags."],
-        "outputs": ["Assigned int value, authored clip path, added FX state, and menu toggle path."],
-        "sideEffects": "adds an FX state, animation clip, and menu toggle to an existing int-exclusive wardrobe after approval",
+        "inputs": ["Avatar, Int/FX Equals skeleton, outfit, verified objects, approved value/off-objects/flags."],
+        "outputs": ["Int value, clip, FX state and menu toggle paths."],
+        "sideEffects": "approved FX state, clip and toggle addition to an existing Int-exclusive wardrobe",
         "tags": ["wardrobe", "menu", "animator", "write"],
     },
     "vrcforge_add_outfit_part": {
@@ -1229,7 +1229,7 @@ BUILTIN_SKILL_OVERRIDES: dict[str, dict[str, Any]] = {
     },
     "vrcforge_preview_add_outfit": {
         "title": "Add Outfit Workflow Preview",
-        "inputs": ["Avatar path, prefab asset path/guid or asset query, optional wardrobe int parameter and manageWardrobe flag."],
+        "inputs": ["Avatar; prefab path/GUID/query; optional wardrobe Int and manageWardrobe."],
         "outputs": ["Resolved prefab and ordered workflow steps; no writes."],
         "sideEffects": "none",
         "tags": ["wardrobe", "modular-avatar", "preview"],
@@ -1237,8 +1237,8 @@ BUILTIN_SKILL_OVERRIDES: dict[str, dict[str, Any]] = {
     "vrcforge_add_outfit": {
         "title": "Add Outfit Workflow",
         "inputs": ["Avatar path, prefab asset path/guid or asset query, optional wardrobe int parameter and manageWardrobe flag."],
-        "outputs": ["Instantiated outfit path plus setup, wardrobe scan/create, and wardrobe write results."],
-        "sideEffects": "instantiates a prefab, runs Modular Avatar Setup Outfit, scans/creates an int-exclusive wardrobe when needed, and adds the object to it after approval",
+        "outputs": ["Outfit and optional setup/binding; never creates a wardrobe."],
+        "sideEffects": "instantiates/setup outfit; manageWardrobe=true requires a strict existing wardrobe; false skips binding",
         "tags": ["wardrobe", "modular-avatar", "write"],
     },
     "vrcforge_import_outfit_package": {
@@ -2388,6 +2388,7 @@ class AgentGateway:
                 roslyn_available=self.roslyn_available,
                 save_config=self.save_config,
                 invalidate_scan_results=self._invalidate_scan_results,
+                complete_scan_mutation=self._scan_results.end_mutation,
             ),
             ApprovalGoalPorts(
                 deny_approval=self._goal.deny_agent_goal_approval,
@@ -3238,11 +3239,10 @@ class AgentGateway:
             self._runtime_session_state.configure_native_store(NativeHistoryStore(audit_dir / "native-history"))
             self._desktop.configure_paths(audit_dir)
 
-    def _invalidate_scan_results(self, project_root: str, reason: str) -> None:
-        # Unknown-scope writes invalidate all project snapshots.
+    def _invalidate_scan_results(self, project_root: str, reason: str) -> Any:
         name, _, phase = reason.rpartition(":")
         if phase == "starting":
-            self._scan_results.begin_mutation(project_root, name)
+            return self._scan_results.begin_mutation(project_root, name)
         elif phase == "finished":
             self._scan_results.end_mutation(project_root, name)
         else:
@@ -8209,6 +8209,19 @@ class AgentGateway:
                 action_id=planned_action_id,
             )
 
+            from checkpoint_unity_evidence import restore_failure_terminal_plan
+            restore_terminal = restore_failure_terminal_plan(
+                plan,
+                step_tool or task_record_tool,
+                step_payload,
+            )
+            if restore_terminal is not None:
+                # A failed recovery is a hard safety boundary. Preserve the
+                # canonical failure receipt, then stop before a planner retry
+                # or any later proposal in the same native receipt.
+                last_plan = restore_terminal
+                break
+
             handoff_terminal = self._accept_user_adjustment_receipt(
                 step_payload, ensure_dict(execution_arguments), session_id=session_id,
                 project_root=project_root, turn_id=turn_id, client_turn_id=client_turn_id,
@@ -8534,17 +8547,27 @@ class AgentGateway:
         )
         first_plan = first_plan or last_plan or {}
         # 单步（含纯回复/未连接）保持与历史一致的顶层 plan 形状；多步才综合成 loop 计划。
-        terminal_override = handoff_terminal is not None or last_plan.get("scopeDenied") is True or str(last_plan.get("nextStep") or "") in {
-            "plan_mode_blocked",
-            "cancelled",
-            "context_compaction_required",
-            "loop_suppressed",
-        }
+        terminal_override = (
+            handoff_terminal is not None
+            or last_plan.get("scopeDenied") is True
+            or last_plan.get("restoreFailureTurnStop") is True
+            or str(last_plan.get("nextStep") or "") in {
+                "plan_mode_blocked",
+                "cancelled",
+                "context_compaction_required",
+                "loop_suppressed",
+            }
+        )
         top_plan = last_plan if terminal_override else (
             first_plan if iterations <= 1 else self._summarize_loop_plan(
                 message, first_plan, last_plan, steps
             )
         )
+        actual_response_model = str(
+            last_plan.get("model") or first_plan.get("model") or ""
+        ).strip()
+        if actual_response_model and isinstance(top_plan, dict):
+            top_plan["model"] = actual_response_model
         if cap_reached and isinstance(top_plan, dict):
             top_plan["stepLimitReached"] = True
             top_plan["nextStep"] = "paused"
@@ -8691,6 +8714,8 @@ class AgentGateway:
             "observe": summarize_params(observe),
             "plan": top_plan,
         }
+        if actual_response_model:
+            turn["model"] = actual_response_model
         if client_turn_id:
             turn["clientTurnId"] = client_turn_id
         if goal_delivery_id:
@@ -8806,6 +8831,8 @@ class AgentGateway:
             "plan": top_plan,
             "task": ensure_dict(top_plan.get("task")) or task_loop.snapshot(),
         }
+        if actual_response_model:
+            payload["model"] = actual_response_model
         if timeline:
             payload["timeline"] = timeline
         if continuation_source:

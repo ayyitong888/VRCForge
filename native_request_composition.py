@@ -34,12 +34,16 @@ class NativePlannerRequest(dict):
     """
 
     def __init__(self, value: Mapping[str, Any], *, origin: Mapping[str, Any] | None = None,
-                 composition: Mapping[str, Any] | None = None) -> None:
+                 composition: Mapping[str, Any] | None = None,
+                 provider_turn_state: dict[str, str] | None = None) -> None:
         super().__init__(value)
         self._diagnostic_origin = dict(origin or {})
         self._diagnostic_composition = dict(composition or {})
+        self._provider_turn_state = provider_turn_state
 
     def get(self, key: str, default: Any = None) -> Any:  # noqa: D401 - dict compatibility
+        if key == "_providerTurnState":
+            return self._provider_turn_state if self._provider_turn_state is not None else default
         if key == "_diagnosticOrigin":
             return self._diagnostic_origin if self._diagnostic_origin else default
         if key == "_diagnosticComposition":
@@ -53,6 +57,7 @@ def copy_native_request(request: Mapping[str, Any], updates: Mapping[str, Any]) 
         {**dict(request), **dict(updates)},
         origin=request.get("_diagnosticOrigin") if isinstance(request, Mapping) else None,
         composition=request.get("_diagnosticComposition") if isinstance(request, Mapping) else None,
+        provider_turn_state=request.get("_providerTurnState"),
     )
 
 
@@ -417,6 +422,7 @@ def attach_native_request_composition(
         dict(request),
         origin=effective_origin,
         composition=build_native_request_composition(request, origin=effective_origin),
+        provider_turn_state=request.get("_providerTurnState"),
     )
 
 
@@ -424,4 +430,5 @@ def attach_native_request_origin(
     request: Mapping[str, Any], *, origin: Mapping[str, Any] | None = None,
 ) -> NativePlannerRequest:
     """Attach only construction provenance, without measuring yet."""
-    return NativePlannerRequest(dict(request), origin=origin)
+    return NativePlannerRequest(dict(request), origin=origin,
+                                provider_turn_state=request.get("_providerTurnState"))

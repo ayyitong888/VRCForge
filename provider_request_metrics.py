@@ -7,6 +7,17 @@ import time
 import uuid
 from typing import Any, Callable, Mapping
 
+from provider_request_ledger import (
+    LEDGER_SCHEMA as _LEDGER_SCHEMA,
+    ProviderRequestLedger,
+    classify_request_phases,
+    current_scope,
+    safe_context as _safe_context,
+    safe_id as _safe_id,
+    safe_tool_calls as _safe_tool_calls,
+    usage_row as _usage_row,
+)
+
 
 _SERVICE_TIERS = frozenset(
     {"auto", "default", "flex", "scale", "priority", "fast", "ultrafast"}
@@ -234,42 +245,118 @@ def compare_prefix(previous: Mapping[str, Any], current: Mapping[str, Any]) -> d
 
 
 class RequestMetrics:
-    """Owned by one SDK create attempt; callbacks cannot fail the provider call."""
-    def __init__(self, callback: Callable[[dict[str, Any]], None], payload: Mapping[str, Any]):
+    """Owned by one physical SDK create attempt; callbacks cannot fail it."""
+    def __init__(
+        self,
+        callback: Callable[[dict[str, Any]], None],
+        payload: Mapping[str, Any],
+    ):
         self.callback = callback
-        self.request_id = uuid.uuid4().hex
+        scope = current_scope()
+        self.context = _safe_context(scope.get("context"))
+        request_ordinal = scope.get("requestOrdinal")
+        if type(request_ordinal) is int and request_ordinal > 0:
+            self.context.setdefault("requestOrdinal", request_ordinal)
+        self.ledger = scope.get("ledger")
+        self.request_id = _safe_id(self.context.get("localDispatchId"), 180) or uuid.uuid4().hex
+        self.row_id = f"prq_{self.request_id}"
         self.started = time.monotonic()
+        self.provider_request_id = _safe_id(self.context.get("providerRequestId"), 180)
+        self._start_payload = payload_metrics(payload)
         self.finished = False
         try:
-            self._emit("start", payloadMetrics=payload_metrics(payload))
+            self._emit("start", payloadMetrics=self._start_payload)
         except Exception:
             self._emit("start", telemetryMissing=True)
 
     def _emit(self, phase: str, **data: Any) -> None:
+        event = {"kind": "provider_request_metrics", "requestId": self.request_id,
+                 "localDispatchId": self.request_id, "requestPhase": phase, **self.context, **data}
+        if self.provider_request_id:
+            event["providerRequestId"] = self.provider_request_id
         try:
-            self.callback({"kind": "provider_request_metrics", "requestId": self.request_id,
-                           "requestPhase": phase, **data})
+            self.callback(event)
         except Exception:
             pass
+        if self.ledger is not None:
+            try:
+                row = {
+                    "schema": _LEDGER_SCHEMA,
+                    "rowId": self.row_id,
+                    "eventId": self.ledger.event_id(self.row_id, phase),
+                    "requestId": self.provider_request_id or self.request_id,
+                    "localDispatchId": self.request_id,
+                    "requestPhase": phase,
+                    "status": data.get("status", "started" if phase == "start" else "unknown"),
+                    **self.context,
+                }
+                if self.provider_request_id:
+                    row["providerRequestId"] = self.provider_request_id
+                for key in ("payloadMetrics", "usage", "usagePresent", "serviceTier", "failureClass", "latencyMs", "toolCalls", "phases", "primaryPhase", "phaseUnknown", "output"):
+                    if key in data:
+                        row[key] = data[key]
+                if phase == "terminal":
+                    row["tokenUsage"] = _usage_row(data.get("usage"))
+                self.ledger.append(row)
+            except Exception:
+                # Ledger failure is diagnostic-only and must never alter the request.
+                pass
 
     def finish(
         self,
-        usage: Mapping[str, Any],
+        usage: Mapping[str, Any] | None,
         *,
         success: bool,
         error: str = "",
         service_tier: Any = None,
+        provider_request_id: Any = None,
+        tool_calls: Any = None,
+        phases: list[str] | tuple[str, ...] | None = None,
+        primary_phase: str | None = None,
+        output: Mapping[str, Any] | None = None,
     ) -> None:
         if self.finished:
             return
         self.finished = True
+        usage = usage if isinstance(usage, Mapping) else {}
         safe = {key: value if type(value) is int and value >= 0 else None
                 for key, value in ((key, usage.get(key)) for key in ("input_tokens", "output_tokens", "total_tokens", "reasoning_tokens"))}
-        details = usage.get("input_tokens_details") or usage.get("prompt_tokens_details") or {}
+        detail_sets = [
+            usage.get("input_tokens_details"),
+            usage.get("prompt_tokens_details"),
+        ]
         for key in ("cached_tokens", "cache_write_tokens"):
-            value = details.get(key) if isinstance(details, Mapping) else None
-            safe[key] = value if type(value) is int and value >= 0 else None
+            value = None
+            for details in detail_sets:
+                candidate = details.get(key) if isinstance(details, Mapping) else None
+                if type(candidate) is int and candidate >= 0:
+                    value = candidate
+                    break
+            safe[key] = value
+        self.provider_request_id = _safe_id(provider_request_id, 180) or self.provider_request_id
+        normalized_calls = _safe_tool_calls(tool_calls)
+        tool_metadata = self.context.get("toolMetadata")
+        if isinstance(tool_metadata, Mapping):
+            for call in normalized_calls:
+                metadata = tool_metadata.get(call.get("name"))
+                if isinstance(metadata, Mapping):
+                    for key in ("permission", "effect", "actionKind", "intent", "stage"):
+                        value = metadata.get(key)
+                        if isinstance(value, str) and value and key not in call:
+                            call[key] = value
+        normalized_phases, inferred_primary = classify_request_phases(normalized_calls, {
+            **self.context,
+            "phases": list(phases or ()),
+            "primaryPhase": primary_phase,
+        })
+        primary_phase = inferred_primary
+        phase_unknown = not bool(normalized_phases)
         self._emit("terminal", status="completed" if success else "failed", failureClass=error,
                    latencyMs=round((time.monotonic()-self.started)*1000), usage=safe,
                    serviceTier=_normalize_service_tier(service_tier),
-                   usagePresent=any(value is not None for value in safe.values()))
+                   usagePresent=any(value is not None for value in safe.values()),
+                   toolCalls=normalized_calls,
+                   phases=normalized_phases,
+                   phaseUnknown=phase_unknown,
+                   primaryPhase=primary_phase or self.context.get("primaryPhase"),
+                   output=dict(output) if isinstance(output, Mapping) else {})

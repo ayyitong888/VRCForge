@@ -72,8 +72,8 @@ def test_first_turn_paging_does_not_repeat_a_fresh_scan(setup, monkeypatch, tool
         reply = store.lookup("owner", "first", project, ref)
         assert reply["step"] == step
         assert reply["verification"] == "current_turn"
-    store.begin_mutation(project, "shell")
-    store.end_mutation(project, "shell")
+    marker = store.begin_mutation(project, "shell")
+    store.end_mutation(project, "shell", marker=marker)
     assert store.lookup("owner", "first", project, ref)["reason"] == "mutation_after_verification"
 
 
@@ -250,8 +250,8 @@ def test_owner_isolation_and_mutation_after_verification_never_rescans_again(set
     assert store.lookup("foreign", "next", project, ref) is None
     assert not calls
     assert store.lookup("owner", "next", project, ref)["step"] == step
-    store.begin_mutation(project, "shell")
-    store.end_mutation(project, "shell")
+    marker = store.begin_mutation(project, "shell")
+    store.end_mutation(project, "shell", marker=marker)
     assert store.lookup("owner", "next", project, ref)["reason"] == "mutation_after_verification"
     assert len(calls) == 1
 
@@ -260,8 +260,8 @@ def test_mutation_during_rescan_cannot_be_marked_valid(setup, monkeypatch):
     project, store = setup
     ref, step, _ = save(project, store)
     def scan(*args):
-        store.begin_mutation(project, "shell")
-        store.end_mutation(project, "shell")
+        marker = store.begin_mutation(project, "shell")
+        store.end_mutation(project, "shell", marker=marker)
         return step["result"]
     monkeypatch.setattr(rescan, "direct_scan", scan)
     assert store.lookup("owner", "next", project, ref)["reason"] == "mutation_during_verification"
