@@ -280,8 +280,8 @@ def planner_tool_input_schema(name: str, *, tool_block_ids: list[str] | None = N
                 "block": {"type": "string", "minLength": 1,
                           **({"enum": list(tool_block_ids)} if tool_block_ids is not None else {}),
                           "description": 'Omit block to browse root categories: {"tools":[]}. Copy a returned exact root or leaf ID.'},
-                "query": {"type": "string", "minLength": 1, "maxLength": 160,
-                          "description": 'Search the task, including its intended change and target properties, e.g. {"query":"change Animator state speed","tools":[]}; omit block. Returns full leaf paths, exact names and the same-leaf preview/write load bundle for the requested edit, or read tools for inspection.'},
+                "query": {"type": "string", "minLength": 1,
+                          "description": 'Search with short task keywords, e.g. {"query":"change Animator state speed","tools":[]}; omit block. Effective search limit: 160 characters. Longer queries use the leading whole keywords within that limit and return queryTruncated=true. Returns full leaf paths, exact names and same-leaf preview/write bundles for edits, or read tools for inspection.'},
                 "tools": {
                     "type": "array", "items": {"type": "string", "minLength": 1},
                     "uniqueItems": True,
@@ -4541,7 +4541,7 @@ class RuntimePlannerService:
                     "arguments": {"type": "object", "additionalProperties": True}}})
         navigation = [PlannerTool(name, description, "runtime/navigation", runtime_name="vrcforge_" + name,
                                   input_schema=planner_tool_input_schema("vrcforge_" + name, tool_block_ids=tool_block_ids)) for name, description in (
-            ("load_internal_tool_block", 'When to use: first search the task directly, e.g. {"query":"change Animator state speed","tools":[]}. For modifications include the intended change and target properties to obtain the required same-leaf preview/write bundle together, without unrelated authoring pairs. Inspection queries remain read-only. Results include full leaf paths and exact tool names. Copy one loadCall to load the needed bundle once; reuse already-loaded tools. If no match, omit block to browse roots, e.g. {"tools":[]}; copy an exact root or leaf ID from the tree or enum. Load exact tools from one leaf; allTools:true explicitly loads that leaf. Definitions are returned for call_tool. When NOT to use: guess a block, repeat loaded definitions, execute a tool or grant approval. Negative example: mentioning a tool is not an instruction to load it.'),
+            ("load_internal_tool_block", 'When to use: first search with short task keywords, e.g. {"query":"change Animator state speed","tools":[]}. Effective query limit is 160 characters; longer input uses the first whole keywords within that limit and reports queryTruncated=true. For modifications include the intended change and target properties to obtain the required same-leaf preview/write bundle together, without unrelated authoring pairs. Inspection queries remain read-only. Results include full leaf paths and exact tool names. Copy one loadCall to load the needed bundle once; reuse already-loaded tools. If no match, omit block to browse roots, e.g. {"tools":[]}; copy an exact root or leaf ID from the tree or enum. Load exact tools from one leaf; allTools:true explicitly loads that leaf. Definitions are returned for call_tool. When NOT to use: guess a block, repeat loaded definitions, execute a tool or grant approval. Negative example: mentioning a tool is not an instruction to load it.'),
             ("unload_internal_tool_block", "When to use: unload one selected tool leaf. When NOT to use: execute tools or erase conversation evidence. Negative example: unloading does not undo an asset edit."),
         )]
         definitions = [{"type": "function", "function": {

@@ -5,6 +5,31 @@ import re
 from collections.abc import Mapping
 from collections import defaultdict
 
+QUERY_MAX_CHARS = 160
+
+
+def _bounded_query(query):
+    original = query.strip()
+    if len(original) <= QUERY_MAX_CHARS:
+        return original, {}
+    words = []
+    size = 0
+    for word in original.split():
+        needed = len(word) + bool(words)
+        if size + needed > QUERY_MAX_CHARS:
+            break
+        words.append(word)
+        size += needed
+    # Never split a keyword. If even the first keyword is too long, return
+    # the normal no-match/root-navigation result with explicit truncation.
+    effective = " ".join(words)
+    return effective, {
+        "queryTruncated": True,
+        "queryLimit": QUERY_MAX_CHARS,
+        "originalQueryChars": len(original),
+        "effectiveQueryChars": len(effective),
+    }
+
 
 _WRITE_INTENT = frozenset({
     "add", "apply", "change", "create", "delete", "edit", "ensure", "fix", "manage",
@@ -62,6 +87,7 @@ def _is_write_intent(tokens):
 
 
 def search_tool_leaves(query, tools, selections):
+    query, truncation = _bounded_query(query)
     tokens = _terms(query)
     records = [t for t in tools if t.block != "core" and "/" in t.block]
     scores = {}
@@ -177,6 +203,7 @@ def search_tool_leaves(query, tools, selections):
         })
     return {
         "ok": True, "schema": "vrcforge.internal_tool_search.v1", "query": query,
+        **truncation,
         "status": "found" if results else "not_found", "matches": results,
         "hasMore": len(ordered) > 5,
         "fallbackCall": {"tools": []},
