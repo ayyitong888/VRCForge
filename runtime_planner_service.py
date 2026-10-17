@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     from agent_runtime_native_turn import NativeRuntimeTurn
 
 from tool_usage_contract import tool_usage_description
-from internal_tool_blocks import project_internal_tool_block_level
+from internal_tool_blocks import canonical_tool_tree, project_internal_tool_block_level
 
 from planner_schema_sharing import _shared_planner_schema_defs, _planner_schema_without_shared_defs
 from project_instruction_context import (
@@ -262,7 +262,7 @@ def bounded_planner_tool_schema(value: object) -> dict[str, object]:
     return dict(result)
 
 
-def planner_tool_input_schema(name: str) -> dict[str, object]:
+def planner_tool_input_schema(name: str, *, tool_block_ids: list[str] | None = None) -> dict[str, object]:
     if name == "vrcforge_request_project_selection":
         return {"type": "object", "properties": {}, "required": [], "additionalProperties": False}
     if name == "vrcforge_ask_user":
@@ -277,7 +277,9 @@ def planner_tool_input_schema(name: str) -> dict[str, object]:
         return {
             "type": "object", "required": ["tools"], "additionalProperties": False,
             "properties": {
-                "block": {"type": "string", "minLength": 1},
+                "block": {"type": "string", "minLength": 1,
+                          **({"enum": list(tool_block_ids)} if tool_block_ids is not None else {}),
+                          "description": 'Omit block to browse root categories: {"tools":[]}. Copy a returned exact root or leaf ID.'},
                 "tools": {
                     "type": "array", "items": {"type": "string", "minLength": 1},
                     "uniqueItems": True,
@@ -2487,12 +2489,16 @@ class RuntimePlannerService:
                 if queued_receipt is None and callable(persist_scan_policy):
                     persist_scan_policy()
                 native_history_messages = native_turn.messages() if native_turn is not None else []
+                tool_block_ids = ["core", *(row["id"] for row in canonical_tool_tree()["roots"])]
+                if native:
+                    tool_block_ids = native_turn.freeze_tool_block_ids(tool_block_ids)
                 native_request, native_tools = self._build_native_plan_request(
                     native_history_messages, observe=observe, exposure_layer=exposure_layer,
                     project_context_active=project_context_active, project_path=project_path,
                     internal_tool_blocks=internal_tool_blocks,
                     global_instructions=global_instructions, project_instructions=project_instructions,
                     current_message=message,
+                    tool_block_ids=tool_block_ids,
                 ) if native else ({}, [])
                 if native and ensure_dict(observe.get("turn")).get("directImageInput") is True:
                     image_bound = any(
@@ -4434,10 +4440,13 @@ class RuntimePlannerService:
         self, messages, *, observe, exposure_layer, project_context_active,
         project_path, internal_tool_blocks, global_instructions, project_instructions,
         current_message: str | None = None,
+        tool_block_ids: list[str] | None = None,
     ):
         """Project the existing catalog once; do not repeat native history or schemas in prose."""
         exposure_layer = normalize_exposure_layer(exposure_layer)
         catalog = self._catalog.read(exposure_layer, project_context_active=project_context_active)
+        if tool_block_ids is None:
+            tool_block_ids = sorted({"core", *(row["id"] for row in canonical_tool_tree()["roots"])})
         blocks, selected = self._select_plan_tools(catalog, internal_tool_blocks, observe)
         explicit_plan = observe.get("planMode") is True
         control_actions = ["reply", "shell", "correct", "enter_execution"]
@@ -4487,8 +4496,8 @@ class RuntimePlannerService:
                     "tool": {"type": "string", "minLength": 1},
                     "arguments": {"type": "object", "additionalProperties": True}}})
         navigation = [PlannerTool(name, description, "runtime/navigation", runtime_name="vrcforge_" + name,
-                                  input_schema=planner_tool_input_schema("vrcforge_" + name)) for name, description in (
-            ("load_internal_tool_block", "When to use: browse tool categories with tools:[] or load exact tools from one owner leaf; allTools:true explicitly loads that leaf. Full definitions are returned in the result for call_tool. When NOT to use: execute a tool or grant write approval. Negative example: mentioning a tool is not an instruction to load it."),
+                                  input_schema=planner_tool_input_schema("vrcforge_" + name, tool_block_ids=tool_block_ids)) for name, description in (
+            ("load_internal_tool_block", 'When to use: omit block to browse root categories, e.g. {"tools":[]}; copy an exact root or full leaf ID from the returned tree or block enum. Load exact tools from one owner leaf; allTools:true explicitly loads that leaf. Full definitions are returned in the result for call_tool. When NOT to use: guess a block ID, execute a tool or grant write approval. Negative example: mentioning a tool is not an instruction to load it.'),
             ("unload_internal_tool_block", "When to use: unload one selected tool leaf. When NOT to use: execute tools or erase conversation evidence. Negative example: unloading does not undo an asset edit."),
         )]
         definitions = [{"type": "function", "function": {

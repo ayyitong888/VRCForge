@@ -190,6 +190,13 @@ class NativeRuntimeTurn:
     def snapshot(self) -> dict[str, Any]:
         return self._state.native_conversation(self._session_id, binding=self._binding) or {}
 
+    def freeze_tool_block_ids(self, block_ids: list[str]) -> list[str]:
+        if not self._binding:
+            return list(block_ids)
+        return self._state.freeze_native_tool_block_ids(
+            self._session_id, binding=self._binding, block_ids=block_ids,
+        )
+
     def recoveries(self) -> list[dict[str, Any]]:
         return self.snapshot().get("compactionRecovery", [])
 

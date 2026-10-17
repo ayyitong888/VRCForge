@@ -13,6 +13,12 @@ class NativePlannerFixture:
         self._tool_order = []
         self._queued_calls = []
         self.admitted_tool_names = set()
+        self._tool_block_ids = None
+
+    def freeze_tool_block_ids(self, block_ids):
+        if self._tool_block_ids is None:
+            self._tool_block_ids = list(block_ids)
+        return list(self._tool_block_ids)
 
     def order_tools(self, definitions):
         by_name = {item["function"]["name"]: item for item in definitions}

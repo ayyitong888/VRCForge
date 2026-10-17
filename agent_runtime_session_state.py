@@ -326,8 +326,12 @@ class AgentRuntimeSessionState:
         cls, snapshot: dict[str, Any], *, binding: str,
     ) -> dict[str, Any]:
         required = {"binding", "turnId", "messages", "activeTurnStart"}
-        if not isinstance(snapshot, dict) or not required <= set(snapshot) or set(snapshot) - required - {"toolOrder", "compactionRecovery"}:
+        if not isinstance(snapshot, dict) or not required <= set(snapshot) or set(snapshot) - required - {"toolOrder", "compactionRecovery", "toolBlockIds"}:
             raise ValueError("native snapshot fields are invalid")
+        if "toolBlockIds" in snapshot:
+            ids = snapshot["toolBlockIds"]
+            if not isinstance(ids, list) or not ids or any(not isinstance(x, str) or not x for x in ids) or len(ids) != len(set(ids)):
+                raise ValueError("native tool block snapshot is invalid")
         if "toolOrder" in snapshot:
             order = snapshot["toolOrder"]
             if not isinstance(order, list) or any(not isinstance(name, str) or not name.strip() for name in order) or len(set(order)) != len(order):
@@ -401,6 +405,8 @@ class AgentRuntimeSessionState:
         }
         if "toolOrder" in snapshot:
             normalized["toolOrder"] = list(snapshot["toolOrder"])
+        if "toolBlockIds" in snapshot:
+            normalized["toolBlockIds"] = list(snapshot["toolBlockIds"])
         if "compactionRecovery" in snapshot:
             normalized["compactionRecovery"] = cls._merge_native_recoveries([], snapshot["compactionRecovery"])
         if normalized_messages[active_turn_start].get("role") != "user":
@@ -709,6 +715,21 @@ class AgentRuntimeSessionState:
             candidate["messages"].append({"role": "tool", "tool_call_id": call_id, "content": content})
             self._native_size_ok(candidate)
             self._save_native(session_id, candidate)
+
+    def freeze_native_tool_block_ids(self, session_id: str, *, binding: str, block_ids: list[str]) -> list[str]:
+        """Keep the first discovery enum for this stored session/binding."""
+        with self._ports.shared_state_lock:
+            self._load_native(session_id, binding)
+            snapshot = self._native_conversations.get(session_id)
+            if snapshot is None or snapshot["binding"] != binding:
+                raise ValueError("native conversation binding mismatch")
+            if "toolBlockIds" not in snapshot:
+                candidate = copy.deepcopy(snapshot)
+                candidate["toolBlockIds"] = sorted(set(block_ids))
+                candidate = self._validate_native_snapshot(candidate, binding=binding)
+                self._save_native(session_id, candidate)
+                snapshot = candidate
+            return list(snapshot["toolBlockIds"])
 
     def internal_tool_blocks(self, session_id: str) -> frozenset[str]:
         with self._ports.shared_state_lock:
