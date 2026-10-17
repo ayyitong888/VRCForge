@@ -1785,6 +1785,8 @@ class RuntimePlannerService:
                    if result.get("code") == "planner_invalid_response" else {}),
                 "outcome": {"status": sanitize_planner_observation_text(ensure_dict(step.get("outcome")).get("status"), 80)},
                 "observation": self._llm_loop_step_observation(dict(step), native_contract=True)}
+        if step.get("tool") == "vrcforge_load_internal_tool_block" and isinstance(result.get("legalBlocks"), list):
+            observation["legalBlocks"] = [x for x in result["legalBlocks"] if isinstance(x, str)]
         if (step.get("tool") == "vrcforge_load_internal_tool_block" and result.get("ok") is True
                 and result.get("status") == "loaded"
                 and step.get("status") not in {"failed", "error", "rejected"}
@@ -2255,6 +2257,7 @@ class RuntimePlannerService:
                     ),
                     "summary": str(validation.get("summary") or ""),
                     "issues": list(validation.get("issues") or []),
+                    **({"legalBlocks": list(validation["legalBlocks"])} if "legalBlocks" in validation else {}),
                 },
                 "plannerFailure": {
                     "code": "planner_invalid_response",
@@ -4745,6 +4748,11 @@ class RuntimePlannerService:
             return arguments, None
         validation = validate_planner_tool_arguments(tool.input_schema, arguments)
         if not validation.get("ok"):
+            if tool.runtime_name == "vrcforge_load_internal_tool_block" and any(
+                issue.get("path") == "block" and issue.get("code") == "enum" for issue in validation.get("issues", [])
+            ):
+                validation["legalBlocks"] = list(tool.input_schema["properties"]["block"]["enum"])
+                validation["summary"] = "Unknown block. Use one of legalBlocks, or omit block with tools:[] to browse roots."
             return None, {**validation, "kind": kind, "tool": name, "arguments": arguments}
         return {"action": kind, f"{kind}_tool": name, f"{kind}_params": arguments,
                 "reply": "" if public_assistant_messages(receipt) else receipt.get("content") or ""}, None

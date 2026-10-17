@@ -37,3 +37,14 @@ def test_block_enum_stays_fixed_across_turns_and_native_store_reload(tmp_path):
     assert not validate_planner_tool_arguments(schema, {"tools": [], "block": "new/leaf"})["ok"]
     reloaded.begin_native_turn("fresh", binding="binding", turn_id="one", message="new session")
     assert reloaded.freeze_native_tool_block_ids("fresh", binding="binding", block_ids=["core", "new/leaf"]) == ["core", "new/leaf"]
+
+
+def test_invalid_selector_error_includes_complete_legal_ids_without_loading():
+    import dashboard_server as host
+    result = host.load_internal_tool_block({"sessionId": "invalid-block-report", "block": "unity", "tools": []})
+    assert not result["ok"]
+    assert result["errorCode"] == "internal_tool_block_selector_invalid"
+    assert set(result["legalBlocks"]) == {"core", *(row["id"] for row in canonical_tool_tree()["roots"])}
+    assert result["mutationStarted"] is False
+    assert result["committed"] is False
+    assert host.AGENT_GATEWAY.runtime_sessions.internal_tool_blocks("invalid-block-report") == frozenset({"core"})

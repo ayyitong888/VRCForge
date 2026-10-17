@@ -6911,6 +6911,7 @@ class AgentGateway:
                         "code": "planner_invalid_response",
                         "summary": summary,
                         "issues": issues,
+                        **({"legalBlocks": list(validation["legalBlocks"])} if "legalBlocks" in validation else {}),
                     },
                     "outcome": outcome,
                 }

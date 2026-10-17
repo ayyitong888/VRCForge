@@ -105,6 +105,7 @@ from internal_tool_blocks import (
     INTERNAL_GENERAL_TOOL_NAMES,
     build_internal_tool_block_tree,
     canonical_tool_owner,
+    canonical_tool_tree,
     internal_tool_block_for_name,
     project_internal_tool_block_level,
     resolve_internal_tool_block_selector,
@@ -16408,6 +16409,7 @@ def load_internal_tool_block(params: dict[str, Any]) -> dict[str, Any]:
             "committed": False,
             "commitState": "not_started",
         }
+        response["legalBlocks"] = ["core", *(row["id"] for row in canonical_tool_tree()["roots"])]
         response["nextActions"] = [
             "Call load_internal_tool_block with no block to browse root categories, then copy a returned selector."
         ]
@@ -16522,6 +16524,7 @@ def unload_internal_tool_block(params: dict[str, Any]) -> dict[str, Any]:
             "mutationStarted": False,
             "committed": False,
             "commitState": "not_started",
+            "legalBlocks": ["core", *(row["id"] for row in canonical_tool_tree()["roots"] if row["parentId"] is not None)],
         }
     loaded = AGENT_GATEWAY.runtime_sessions.unload_internal_tool_block(session_id, block)
     selections = AGENT_GATEWAY.runtime_sessions.internal_tool_selections(session_id)
