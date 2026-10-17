@@ -326,8 +326,16 @@ class AgentRuntimeSessionState:
         cls, snapshot: dict[str, Any], *, binding: str,
     ) -> dict[str, Any]:
         required = {"binding", "turnId", "messages", "activeTurnStart"}
-        if not isinstance(snapshot, dict) or not required <= set(snapshot) or set(snapshot) - required - {"toolOrder", "compactionRecovery", "toolBlockIds"}:
+        if not isinstance(snapshot, dict) or not required <= set(snapshot) or set(snapshot) - required - {"toolOrder", "compactionRecovery", "toolBlockIds", "bindingToolDefinition"}:
             raise ValueError("native snapshot fields are invalid")
+        if "bindingToolDefinition" in snapshot:
+            definition = snapshot["bindingToolDefinition"]
+            if definition is not None and (not isinstance(definition, dict)
+                    or set(definition) != {"name", "description", "parameters"}
+                    or not isinstance(definition["name"], str) or not definition["name"]
+                    or not isinstance(definition["description"], str)
+                    or not isinstance(definition["parameters"], dict)):
+                raise ValueError("native binding tool definition is invalid")
         if "toolBlockIds" in snapshot:
             ids = snapshot["toolBlockIds"]
             if not isinstance(ids, list) or not ids or any(not isinstance(x, str) or not x for x in ids) or len(ids) != len(set(ids)):
@@ -403,6 +411,8 @@ class AgentRuntimeSessionState:
             "messages": normalized_messages,
             "activeTurnStart": active_turn_start,
         }
+        if "bindingToolDefinition" in snapshot:
+            normalized["bindingToolDefinition"] = copy.deepcopy(snapshot["bindingToolDefinition"])
         if "toolOrder" in snapshot:
             normalized["toolOrder"] = list(snapshot["toolOrder"])
         if "toolBlockIds" in snapshot:
@@ -590,8 +600,9 @@ class AgentRuntimeSessionState:
                 "messages": [{"role": "assistant", "content": summary}] + retained_messages,
                 "activeTurnStart": 1,
             }
-            if "toolOrder" in current:
-                candidate["toolOrder"] = list(current["toolOrder"])
+            for key in ("toolOrder", "toolBlockIds", "bindingToolDefinition"):
+                if key in current:
+                    candidate[key] = copy.deepcopy(current[key])
             if recovery is not None or "compactionRecovery" in current:
                 candidate["compactionRecovery"] = self._merge_native_recoveries(
                     current.get("compactionRecovery", []), [recovery] if recovery is not None else [])
@@ -730,6 +741,20 @@ class AgentRuntimeSessionState:
                 self._save_native(session_id, candidate)
                 snapshot = candidate
             return list(snapshot["toolBlockIds"])
+
+    def freeze_native_binding_tool_definition(self, session_id: str, *, binding: str, definition: dict | None) -> dict | None:
+        """Retain the first Unity binding definition, independently of admission."""
+        with self._ports.shared_state_lock:
+            self._load_native(session_id, binding)
+            snapshot = self._native_conversations.get(session_id)
+            if snapshot is None or snapshot["binding"] != binding:
+                raise ValueError("native conversation binding mismatch")
+            if "bindingToolDefinition" not in snapshot:
+                candidate = {**snapshot, "bindingToolDefinition": copy.deepcopy(definition)}
+                candidate = self._validate_native_snapshot(candidate, binding=binding)
+                self._save_native(session_id, candidate)
+                snapshot = candidate
+            return copy.deepcopy(snapshot["bindingToolDefinition"])
 
     def internal_tool_blocks(self, session_id: str) -> frozenset[str]:
         with self._ports.shared_state_lock:

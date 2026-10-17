@@ -2502,8 +2502,11 @@ class RuntimePlannerService:
                     persist_scan_policy()
                 native_history_messages = native_turn.messages() if native_turn is not None else []
                 tool_block_ids = ["core", *(row["id"] for row in canonical_tool_tree()["roots"])]
+                binding_tool_definition = self._binding_tool_definition(project_context_active)
                 if native:
                     tool_block_ids = native_turn.freeze_tool_block_ids(tool_block_ids)
+                    if project_context_active:
+                        binding_tool_definition = native_turn.freeze_binding_tool_definition(binding_tool_definition)
                 native_request, native_tools = self._build_native_plan_request(
                     native_history_messages, observe=observe, exposure_layer=exposure_layer,
                     project_context_active=project_context_active, project_path=project_path,
@@ -2511,6 +2514,7 @@ class RuntimePlannerService:
                     global_instructions=global_instructions, project_instructions=project_instructions,
                     current_message=message,
                     tool_block_ids=tool_block_ids,
+                    binding_tool_definition=binding_tool_definition,
                 ) if native else ({}, [])
                 if native and ensure_dict(observe.get("turn")).get("directImageInput") is True:
                     image_bound = any(
@@ -4419,7 +4423,7 @@ class RuntimePlannerService:
             return observation_prefix(observation_limit)
 
     @staticmethod
-    def _select_plan_tools(catalog, internal_tool_blocks, observe):
+    def _select_plan_tools(catalog, internal_tool_blocks, observe, *, project_context_active=False):
         selected_blocks = None
         if internal_tool_blocks is not None:
             raw_blocks = (
@@ -4438,28 +4442,42 @@ class RuntimePlannerService:
                 continue
             if observe.get("planMode") is True and (tool.write or tool.runtime_name == "vrcforge_delegate_subagent"):
                 continue
-            if selected_blocks is not None and tool.block not in selected_blocks:
+            resident_binding = (project_context_active and tool.runtime_name == "vrcforge_bind_execution_target"
+                                and not tool.write and not tool.requires_user_activation)
+            if selected_blocks is not None and tool.block not in selected_blocks and not resident_binding:
                 continue
             selection = selections.get(tool.block)
-            if tool.block != "core" and isinstance(selection, list) and tool.name not in selection:
+            if tool.block != "core" and isinstance(selection, list) and tool.name not in selection and not resident_binding:
                 continue
             if tool.requires_user_activation and not catalog.computer_use_model_invocable:
                 continue
             selected.append(tool)
         return selected_blocks, selected
 
+    def _binding_tool_definition(self, project_context_active: bool) -> dict | None:
+        if not project_context_active:
+            return None
+        catalog = self._catalog.read(EXPOSURE_LAYER_PLANNING, project_context_active=True)
+        tool = resolve_catalog_tool(catalog.visible_tools, "vrcforge_bind_execution_target")
+        if tool is None or tool.write or tool.requires_user_activation:
+            return None
+        return {"name": tool.name,
+                "description": planner_tool_usage_description(tool.name, tool.description, write=False),
+                "parameters": deepcopy(dict(tool.input_schema))}
+
     def _build_native_plan_request(
         self, messages, *, observe, exposure_layer, project_context_active,
         project_path, internal_tool_blocks, global_instructions, project_instructions,
         current_message: str | None = None,
         tool_block_ids: list[str] | None = None,
+        binding_tool_definition: dict | None = None,
     ):
         """Project the existing catalog once; do not repeat native history or schemas in prose."""
         exposure_layer = normalize_exposure_layer(exposure_layer)
         catalog = self._catalog.read(exposure_layer, project_context_active=project_context_active)
         if tool_block_ids is None:
             tool_block_ids = sorted({"core", *(row["id"] for row in canonical_tool_tree()["roots"])})
-        blocks, selected = self._select_plan_tools(catalog, internal_tool_blocks, observe)
+        blocks, selected = self._select_plan_tools(catalog, internal_tool_blocks, observe, project_context_active=project_context_active)
         explicit_plan = observe.get("planMode") is True
         control_actions = ["reply", "shell", "correct", "enter_execution"]
         action_descriptions = {
@@ -4545,6 +4563,10 @@ class RuntimePlannerService:
             {"name": tool.name, "description": planner_tool_usage_description(tool.name, tool.description, write=tool.write),
              "parameters": deepcopy(dict(tool.input_schema))}
             for tool in resident_tools]
+        if project_context_active:
+            binding_definition = binding_tool_definition or self._binding_tool_definition(True)
+            if binding_definition and binding_definition["name"] not in {d["name"] for d in resident_definitions}:
+                resident_definitions.append(deepcopy(binding_definition))
         state["availableToolNames"] = [tool.name for tool in selected]
         instructions = (
             f"You are VRCForge. Help with the user's actual task. {RUNTIME_REPLY_LANGUAGE_INSTRUCTION}"
@@ -4591,7 +4613,7 @@ class RuntimePlannerService:
         # Large context is append-only history. Do not relocate it behind every
         # new tool result. Permission-dependent core definitions stay out of the
         # fixed prefix, so Plan never introduces write/activation-only schemas.
-        resident_names = {tool.name for tool in resident_tools}
+        resident_names = {definition["name"] for definition in resident_definitions}
         activated = [{"name": tool.name,
                       "description": planner_tool_usage_description(tool.name, tool.description, write=tool.write),
                       "parameters": deepcopy(dict(tool.input_schema))}
@@ -4789,7 +4811,7 @@ class RuntimePlannerService:
             message = self._message_with_runtime_context(message, observe, exposure_layer=exposure_layer,
                                                         project_context_active=project_context_active,
                                                         catalog=catalog)
-            selected_blocks, selected_tools = self._select_plan_tools(catalog, internal_tool_blocks, observe)
+            selected_blocks, selected_tools = self._select_plan_tools(catalog, internal_tool_blocks, observe, project_context_active=project_context_active)
             tool_selections = ensure_dict(observe.get("internalToolSelections"))
             projected_schemas = [bounded_planner_tool_schema(tool.input_schema) for tool in selected_tools]
             shared_schema_defs = _shared_planner_schema_defs(projected_schemas)

@@ -14,11 +14,19 @@ class NativePlannerFixture:
         self._queued_calls = []
         self.admitted_tool_names = set()
         self._tool_block_ids = None
+        self._binding_tool_definition_frozen = False
+        self._binding_tool_definition = None
 
     def freeze_tool_block_ids(self, block_ids):
         if self._tool_block_ids is None:
             self._tool_block_ids = list(block_ids)
         return list(self._tool_block_ids)
+
+    def freeze_binding_tool_definition(self, definition):
+        if not self._binding_tool_definition_frozen:
+            self._binding_tool_definition = deepcopy(definition)
+            self._binding_tool_definition_frozen = True
+        return deepcopy(self._binding_tool_definition)
 
     def order_tools(self, definitions):
         by_name = {item["function"]["name"]: item for item in definitions}

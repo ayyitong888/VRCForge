@@ -218,6 +218,13 @@ class NativeRuntimeTurn:
             self._session_id, binding=self._binding, block_ids=block_ids,
         )
 
+    def freeze_binding_tool_definition(self, definition: dict | None) -> dict | None:
+        if not self._binding:
+            return copy.deepcopy(definition)
+        return self._state.freeze_native_binding_tool_definition(
+            self._session_id, binding=self._binding, definition=definition,
+        )
+
     def recoveries(self) -> list[dict[str, Any]]:
         return self.snapshot().get("compactionRecovery", [])
 
