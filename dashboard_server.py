@@ -16389,6 +16389,14 @@ def load_internal_tool_block(params: dict[str, Any]) -> dict[str, Any]:
     all_tools = params.get("allTools", False)
     if not isinstance(requested_tools, list) or not isinstance(all_tools, bool) or (all_tools and requested_tools):
         return {"ok": False, "status": "failed", "errorCode": "internal_tool_selection_invalid", "error": "tools is required: use [] to browse, or exact names to load. To explicitly request ALL tools in one leaf, use tools:[] and allTools:true. allTools must be boolean and cannot be combined with non-empty tools.", "mutationStarted": False}
+    if "query" in params:
+        query = params["query"]
+        if not isinstance(query, str) or not query.strip() or len(query) > 160 or branch or requested_tools or all_tools:
+            return {"ok": False, "status": "failed", "errorCode": "internal_tool_selection_invalid", "error": "Use query (1-160 characters) with tools:[] and omit block/allTools.", "mutationStarted": False}
+        from tool_discovery_search import search_tool_leaves
+        catalog = _RuntimePlannerCatalog().read(normalize_exposure_layer(params.get("exposureLayer")), project_context_active=params.get("projectContextActive") is True)
+        visible = [t for t in catalog.visible_tools if not t.requires_user_activation or catalog.computer_use_model_invocable]
+        return search_tool_leaves(query.strip(), visible, AGENT_GATEWAY.runtime_sessions.internal_tool_selections(session_id))
     if not branch or branch in CANONICAL_TOOL_BLOCKS:
         if requested_tools or all_tools:
             return {"ok": False, "status": "failed", "errorCode": "internal_tool_selection_invalid", "error": "Select a leaf before specifying tools.", "mutationStarted": False}
@@ -16493,6 +16501,12 @@ def load_internal_tool_block(params: dict[str, Any]) -> dict[str, Any]:
                     f"Retry load_internal_tool_block with block={expected_block} and the exact requested tools."
                 ]
             return response
+    existing = AGENT_GATEWAY.runtime_sessions.internal_tool_selections(session_id)
+    if block in existing and (existing[block] is None or set(requested_tools) <= set(existing[block])):
+        return {"ok": True, "status": "reused", "block": block,
+                "exposureLayer": normalize_exposure_layer(params.get("exposureLayer")),
+                "loadedBlocks": sorted(AGENT_GATEWAY.runtime_sessions.internal_tool_blocks(session_id)),
+                "selectedTools": existing[block], "definitionSource": "existing_session_history"}
     loaded = AGENT_GATEWAY.runtime_sessions.load_internal_tool_block_selected(session_id, block, requested_tools)
     selections = AGENT_GATEWAY.runtime_sessions.internal_tool_selections(session_id)
     return {

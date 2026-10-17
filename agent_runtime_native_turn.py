@@ -162,7 +162,8 @@ class NativeRuntimeTurn:
                 resumed_result = {
                     "status": continuation_completion.get("status") or "completed",
                     "observations": [
-                        planner.native_result_observation(item, project_context_active=self._project_context_active)
+                        planner.native_result_observation(item, project_context_active=self._project_context_active,
+                                                          retained_tool_names=self._retained_tool_names(restored["messages"]))
                         for item in loop_state
                         if item.get("actionId") == continuation_context.get("requestedActionId")
                         or item is continuation_observation
@@ -189,6 +190,26 @@ class NativeRuntimeTurn:
 
     def snapshot(self) -> dict[str, Any]:
         return self._state.native_conversation(self._session_id, binding=self._binding) or {}
+
+    @staticmethod
+    def _retained_tool_names(messages) -> set[str]:
+        names = set()
+        for message in messages:
+            if message.get("role") != "tool":
+                continue
+            try:
+                payload = json.loads(message.get("content", ""))
+            except (ValueError, TypeError):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            for observation in payload.get("observations", []):
+                if not isinstance(observation, dict):
+                    continue
+                for definition in observation.get("loadedToolDefinitions", []):
+                    if isinstance(definition, dict) and isinstance(definition.get("name"), str):
+                        names.add(definition["name"])
+        return names
 
     def freeze_tool_block_ids(self, block_ids: list[str]) -> list[str]:
         if not self._binding:
@@ -392,9 +413,11 @@ class NativeRuntimeTurn:
             )
             if waiting and terminal_map.get("nextStep") not in {"cancelled", "interrupted"} and not restore_terminal:
                 return
+            retained_names = self._retained_tool_names(self.snapshot().get("messages", []))
             result: dict[str, Any] = {
                 "observations": [
-                    self._planner.native_result_observation(item, project_context_active=self._project_context_active)
+                    self._planner.native_result_observation(item, project_context_active=self._project_context_active,
+                                                            retained_tool_names=retained_names)
                     for item in observations
                 ]
             }

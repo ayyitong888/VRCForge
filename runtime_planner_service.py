@@ -280,6 +280,8 @@ def planner_tool_input_schema(name: str, *, tool_block_ids: list[str] | None = N
                 "block": {"type": "string", "minLength": 1,
                           **({"enum": list(tool_block_ids)} if tool_block_ids is not None else {}),
                           "description": 'Omit block to browse root categories: {"tools":[]}. Copy a returned exact root or leaf ID.'},
+                "query": {"type": "string", "minLength": 1, "maxLength": 160,
+                          "description": 'Search keywords directly, e.g. {"query":"FX animator","tools":[]}; omit block. Returns full leaf paths, exact names and same-leaf workflow load bundles.'},
                 "tools": {
                     "type": "array", "items": {"type": "string", "minLength": 1},
                     "uniqueItems": True,
@@ -1776,7 +1778,7 @@ class RuntimePlannerService:
             return ""
         return hashlib.sha256((route + "\n" + ntpath.normcase(ntpath.normpath(project_root or ""))).encode()).hexdigest()
 
-    def native_result_observation(self, step: Mapping[str, object], *, project_context_active: bool = False) -> dict[str, object]:
+    def native_result_observation(self, step: Mapping[str, object], *, project_context_active: bool = False, retained_tool_names: set[str] | None = None) -> dict[str, object]:
         """Use the established bounded, trust-labelled observation/readback projection."""
         result = ensure_dict(step.get("result"))
         observation = {**{key: sanitize_planner_observation_text(step[key], 180) for key in ("kind", "status", "actionId") if key in step},
@@ -1787,8 +1789,12 @@ class RuntimePlannerService:
                 "observation": self._llm_loop_step_observation(dict(step), native_contract=True)}
         if step.get("tool") == "vrcforge_load_internal_tool_block" and isinstance(result.get("legalBlocks"), list):
             observation["legalBlocks"] = [x for x in result["legalBlocks"] if isinstance(x, str)]
+        if step.get("tool") == "vrcforge_load_internal_tool_block" and result.get("schema") == "vrcforge.internal_tool_search.v1":
+            observation["toolSearch"] = deepcopy(result)
+        if step.get("tool") == "vrcforge_load_internal_tool_block" and result.get("status") == "reused":
+            observation["reuseLoadedTools"] = {"block": result.get("block"), "selectedTools": result.get("selectedTools"), "definitionSource": "existing_session_history"}
         if (step.get("tool") == "vrcforge_load_internal_tool_block" and result.get("ok") is True
-                and result.get("status") == "loaded"
+                and result.get("status") in {"loaded", "reused"}
                 and step.get("status") not in {"failed", "error", "rejected"}
                 and ensure_dict(step.get("outcome")).get("status") not in {"failed", "error", "denied"}):
             catalog = self._catalog.read(normalize_exposure_layer(result.get("exposureLayer")),
@@ -1801,8 +1807,11 @@ class RuntimePlannerService:
                 for tool in catalog.visible_tools
                 if tool.block == result.get("block")
                 and (names is None or isinstance(names, list) and tool.name in names)
+                and (result.get("status") != "reused" or tool.name not in (retained_tool_names or set()))
                 and (not tool.requires_user_activation or catalog.computer_use_model_invocable)
             ]
+            if not observation["loadedToolDefinitions"]:
+                observation.pop("loadedToolDefinitions")
             observation["dispatchPolicy"] = (
                 "Native function.name must be exactly call_tool for every ordinary tool invocation. "
                 "Put the loaded definition's exact name in call_tool.tool and its parameters in call_tool.arguments. "
@@ -4500,7 +4509,7 @@ class RuntimePlannerService:
                     "arguments": {"type": "object", "additionalProperties": True}}})
         navigation = [PlannerTool(name, description, "runtime/navigation", runtime_name="vrcforge_" + name,
                                   input_schema=planner_tool_input_schema("vrcforge_" + name, tool_block_ids=tool_block_ids)) for name, description in (
-            ("load_internal_tool_block", 'When to use: omit block to browse root categories, e.g. {"tools":[]}; copy an exact root or full leaf ID from the returned tree or block enum. Load exact tools from one owner leaf; allTools:true explicitly loads that leaf. Full definitions are returned in the result for call_tool. When NOT to use: guess a block ID, execute a tool or grant write approval. Negative example: mentioning a tool is not an instruction to load it.'),
+            ("load_internal_tool_block", 'When to use: first search keywords directly, e.g. {"query":"FX animator","tools":[]}, to get full leaf paths, exact names and same-leaf workflow bundles. Copy one loadCall to load the needed bundle once; reuse already-loaded tools. If no match, omit block to browse roots, e.g. {"tools":[]}; copy an exact root or leaf ID from the tree or enum. Load exact tools from one leaf; allTools:true explicitly loads that leaf. Definitions are returned for call_tool. When NOT to use: guess a block, repeat loaded definitions, execute a tool or grant approval. Negative example: mentioning a tool is not an instruction to load it.'),
             ("unload_internal_tool_block", "When to use: unload one selected tool leaf. When NOT to use: execute tools or erase conversation evidence. Negative example: unloading does not undo an asset edit."),
         )]
         definitions = [{"type": "function", "function": {
