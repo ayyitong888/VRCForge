@@ -85,9 +85,10 @@ def test_material_index_pages_from_one_private_result_reference(tmp_path, monkey
         call("material-scan", "vrcforge_scan_materials", {
             "avatarPath": "Avatar", "indexOnly": True, "limit": 25,
         }),
-        _read_page("material-page-25", 25),
-        _read_page("material-page-45", 45),
-        _read_page("material-page-65", 65),
+        _read_page("material-page-0", 0),
+        _read_page("material-page-20", 20),
+        _read_page("material-page-40", 40),
+        _read_page("material-page-60", 60),
         finish,
     ])
 
@@ -116,9 +117,11 @@ def test_material_index_pages_from_one_private_result_reference(tmp_path, monkey
     assert len(scan_steps) == 1
     assert len(business_scans) == 1
     assert scan_steps[0]["result"]["paging"]["returned"] == 25
-    assert len(page_steps) == 3
+    assert len(page_steps) == 4
 
-    observed = list(scan_steps[0]["result"]["index"])
+    # The source's 25-row page was hidden in the actual model summary.
+    # Reconstruct coverage from delivered reader rows, not the private receipt.
+    observed = []
     reference = scan_steps[0]["resultRead"]["resultRef"]
     for step in page_steps:
         page = step["result"]
@@ -139,7 +142,7 @@ def test_material_index_pages_from_one_private_result_reference(tmp_path, monkey
     continuation = json.loads(scan_observation.split("; resultContinuation=", 1)[1])
     assert continuation["nextRequest"]["tool"] == "vrcforge_read_tool_result"
     assert continuation["nextRequest"]["arguments"] == {
-        "resultRef": reference, "jsonPointer": "/index", "offset": 25, "limit": 20,
+        "resultRef": reference, "jsonPointer": "/index", "offset": 0, "limit": 20,
     }
     assert "source scan for later offsets" in scan_observation
 

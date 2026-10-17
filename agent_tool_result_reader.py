@@ -124,6 +124,59 @@ def scan_result_continuation(step: Mapping[str, Any]) -> dict[str, Any]:
     return descriptor if isinstance(descriptor, dict) else {}
 
 
+def observation_result_continuation(step: Mapping[str, Any], visible_result: object,
+                                    sanitize: Callable[[object, int], str]) -> tuple[Any, dict[str, Any]]:
+    """Align reader hints with delivered rows, without changing retained source pages."""
+    fields = deepcopy(visible_result)
+    descriptor = scan_result_continuation(step)
+    request = descriptor.get("nextRequest")
+    if not isinstance(request, dict) or request.get("tool") not in {TOOL_NAME, "read_tool_result"}:
+        return fields, descriptor
+    args = request.get("arguments")
+    if (not isinstance(args, dict) or args.get("resultRef") != descriptor.get("resultRef")
+            or args.get("source", "result") != "result" or args.get("textOffset") is not None
+            or not isinstance(args.get("jsonPointer"), str) or not args["jsonPointer"]):
+        return fields, descriptor
+    pointer = args["jsonPointer"]
+    following = 0
+    try:
+        source = _select(step.get("result"), pointer, sanitize)
+        visible = _select(fields, pointer, sanitize)
+        parent = _select(step.get("result"), pointer.rsplit("/", 1)[0], sanitize)
+        base = parent.get("paging", {}).get("offset", 0) if isinstance(parent, Mapping) else 0
+        if isinstance(source, list) and isinstance(visible, list) and type(base) is int and base >= 0:
+            # Projection may drop array members. Only an exact continuous
+            # source prefix proves that the model received those positions.
+            delivered = 0
+            for original, observed in zip(source, visible):
+                if original != observed:
+                    break
+                delivered += 1
+            if delivered:
+                following = base + delivered
+    except (ValueError, PermissionError, TypeError, AttributeError):
+        pass  # Missing or hidden collection: no delivered prefix, start at zero.
+    replacement = deepcopy(request)
+    replacement["arguments"]["offset"] = following
+    descriptor["nextRequest"] = replacement
+
+    def align(value: object) -> None:
+        if isinstance(value, dict):
+            for key, child in value.items():
+                if (key == "nextRequest" and isinstance(child, dict) and set(child) == set(request)
+                        and child.get("tool") in {TOOL_NAME, "read_tool_result"}
+                        and child.get("arguments") == args):
+                    value[key] = deepcopy(replacement)
+                else:
+                    align(child)
+        elif isinstance(value, list):
+            for child in value:
+                align(child)
+
+    align(fields)
+    return fields, descriptor
+
+
 def scan_result_summary(step: Mapping[str, Any], sanitize: Callable[[object, int], str]) -> dict[str, Any] | None:
     """Project new owner-captured scans; never rewrite earlier native history."""
     result, snapshot = step.get("result"), step.get("scanSnapshot")

@@ -3697,14 +3697,16 @@ class RuntimePlannerService:
                                    native_contract: bool = False) -> str:
         if self is not None:
             step = self._planner_result_read_step(step)
-        from agent_tool_result_reader import scan_result_continuation, scan_result_summary
+        from agent_tool_result_reader import observation_result_continuation, scan_result_summary
         scan_summary = scan_result_summary(step, sanitize_planner_observation_text)
         if scan_summary is not None:
+            scan_summary["fields"], scan_continuation = observation_result_continuation(
+                step, scan_summary["fields"], sanitize_planner_observation_text)
             scan_summary["sourceCompleteness"] = RuntimePlannerService.model_source_completeness(step) + scan_summary["sourceCompleteness"]
             control = {key: step[key] for key in ("kind", "status", "actionId") if key in step}
             return (json.dumps(control, ensure_ascii=False, separators=(",", ":"))
                     + "; scanSummary=" + json.dumps(scan_summary, ensure_ascii=False, separators=(",", ":"))
-                    + "; resultContinuation=" + json.dumps(scan_result_continuation(step), ensure_ascii=False, separators=(",", ":")))
+                    + "; resultContinuation=" + json.dumps(scan_continuation, ensure_ascii=False, separators=(",", ":")))
         retained = ensure_dict(step.get("modelInformation"))
         descriptor = ensure_dict(step.get("modelInformationRead"))
         page = ensure_dict(descriptor.get("page"))
@@ -3731,8 +3733,8 @@ class RuntimePlannerService:
             result_read = step.get("resultRead")
             if (eligible_result(str(step.get("tool") or ""), step.get("result"))
                     and isinstance(result_read, dict) and isinstance(result_read.get("resultRef"), str)):
-                control += "; resultContinuation=" + json.dumps(
-                    result_read, ensure_ascii=False, separators=(",", ":"))
+                _, result_read = observation_result_continuation(step, {}, sanitize_planner_observation_text)
+                control += "; resultContinuation=" + json.dumps(result_read, ensure_ascii=False, separators=(",", ":"))
             continuation = {key: value for key, value in descriptor.items() if key != "page"}
             if isinstance(page.get("nextRequest"), dict):
                 continuation["nextRequest"] = page["nextRequest"]
@@ -4424,7 +4426,9 @@ class RuntimePlannerService:
                 if structured_evidence:
                     # Appending domain data must not shorten the pre-existing
                     # canonical failure/recovery evidence allowance.
-                    continuation = step.get("resultRead")
+                    from agent_tool_result_reader import observation_result_continuation
+                    structured_evidence["data"], continuation = observation_result_continuation(
+                        step, structured_evidence["data"], sanitize_planner_observation_text)
                     if (tool_name in _SKILL_PACKAGE_LIST_TOOLS
                             and isinstance(result.get("installed"), list)
                             and isinstance(continuation, dict)):
