@@ -333,7 +333,7 @@ UNITY_READ_TOOL_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
         "required": ["projectPath", "scope"],
         "properties": {
             "projectPath": _PROJECT_PATH_PROPERTY,
-            "scope": {"type": "string", "enum": ["project", "scene", "avatar", "object", "component"]},
+            "scope": {"type": "string", "enum": ["project", "scene", "avatar", "object", "component"], "description": "Use avatar to bind the current Avatar directly; candidate discovery is performed by the bind tool and must be complete and unique."},
             "avatarGlobalObjectId": {"type": "string"},
             "objectGlobalObjectId": {"type": "string"},
             "componentGlobalObjectId": {"type": "string"},
@@ -343,11 +343,19 @@ UNITY_READ_TOOL_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
     "vrcforge_refresh_execution_target": {
         "type": "object",
         "additionalProperties": False,
-        "required": ["projectPath", "executionTargetHandle", "executionTarget"],
+        "required": ["projectPath", "executionTarget"],
         "properties": {
             "projectPath": _PROJECT_PATH_PROPERTY,
-            "executionTargetHandle": {"type": "string", "minLength": 16},
-            "executionTarget": {"type": "object", "additionalProperties": True},
+            "executionTarget": {
+                "type": "object",
+                "properties": {
+                    "schema": {"const": "vrcforge.execution_target_ref.v1"},
+                    "ref": {"type": "string", "minLength": 16},
+                },
+                "required": ["schema", "ref"],
+                "additionalProperties": False,
+                "description": "The public reference returned by bind_execution_target for this same project and session.",
+            },
         },
     },
     "vrcforge_get_property": {

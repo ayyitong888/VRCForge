@@ -23936,30 +23936,41 @@ def refresh_execution_target_sync(params: dict[str, Any]) -> dict[str, Any]:
     raw = dict(params or {})
     previous = raw.get("executionTarget")
     if not isinstance(previous, dict):
-        raise RuntimeError("executionTarget is required for refresh.")
+        raise RuntimeError("A bound public executionTarget reference is required for refresh.")
+    project_root = str(raw.get("projectPath") or "").strip()
+    if not project_root:
+        raise RuntimeError("projectPath is required for ExecutionTarget refresh.")
+    previous_target = AGENT_GATEWAY.resolve_execution_target_reference(previous)
     request: dict[str, Any] = {
-        "projectPath": raw.get("projectPath"),
-        "scope": str(previous.get("scope") or "").strip(),
+        "projectPath": project_root,
+        "scope": str(previous_target.get("scope") or "").strip(),
     }
     for section, output_key in (
         ("avatar", "avatarGlobalObjectId"),
         ("object", "objectGlobalObjectId"),
         ("component", "componentGlobalObjectId"),
     ):
-        identity = previous.get(section)
+        identity = previous_target.get(section)
         if isinstance(identity, dict) and identity.get("globalObjectId"):
             request[output_key] = identity["globalObjectId"]
-    component = previous.get("component")
+    component = previous_target.get("component")
     if isinstance(component, dict) and component.get("type"):
         request["componentType"] = component["type"]
     payload = list_execution_targets_sync(request)
     targets = payload["targets"]
-    if len(targets) != 1:
+    if (
+        payload.get("ok") is False
+        or len(targets) != 1
+        or payload.get("totalCandidateCount", len(targets)) != 1
+        or payload.get("hasMore") is True
+        or payload.get("complete") is False
+    ):
         raise RuntimeError(
-            f"ExecutionTarget refresh requires the same exact candidate; Core returned {len(targets)}."
+            "ExecutionTarget refresh requires exactly one candidate across complete discovery; "
+            f"Core returned {len(targets)} in this page."
         )
     refreshed = AGENT_GATEWAY.refresh_execution_target(
-        str(raw.get("executionTargetHandle") or ""),
+        previous,
         targets[0],
         project_root=str(payload["projectPath"]),
     )
@@ -26335,13 +26346,13 @@ def register_agent_gateway_tools() -> None:
     )
     AGENT_GATEWAY.register_tool(
         "vrcforge_bind_execution_target",
-        "When to use: Bind exactly one live Core-issued ExecutionTarget before an identity-sensitive read or supervised write. When NOT to use: Do not bind an ambiguous candidate, another project/Editor, or a hierarchy path fallback. Negative example: Reuse a target after Scene reload or Avatar replacement.",
+        "When to use: Bind the current Avatar directly with {projectPath, scope: \"avatar\"}; this tool discovers candidates internally, so you do not need to call vrcforge_list_execution_targets or bind the project first. It returns a path-free public reference only when discovery is complete and the Avatar identity is unique. Use vrcforge_list_execution_targets only when you need to inspect or select a specific target. When NOT to use: Do not guess a GlobalObjectId, bind an incomplete or ambiguous result, use a hierarchy path as identity, or reuse the reference after project, Editor, Scene, or Avatar drift. Negative example: If two Avatars match, stop and ask for a precise selection instead of choosing one.",
         "read/debug",
         bind_execution_target_sync,
     )
     AGENT_GATEWAY.register_tool(
         "vrcforge_refresh_execution_target",
-        "When to use: Explicitly refresh the saved-scene revision and digest for the same bound project, Editor, Scene, Avatar, object, and component identities. When NOT to use: Do not refresh across replacement, recreation, another Unity process, or another project. Negative example: Turn an identity mismatch into a new target silently.",
+        "When to use: Explicitly refresh the saved-scene revision and digest using the public reference for the same bound project, Editor, Scene, Avatar, object, and component identities. When NOT to use: Do not refresh across replacement, recreation, another Unity process, session, or project. Negative example: Turn an identity mismatch into a new target silently.",
         "read/debug",
         refresh_execution_target_sync,
     )

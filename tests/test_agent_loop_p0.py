@@ -14,6 +14,7 @@ path.
 
 import copy
 import json
+import os
 import re
 import tempfile
 import unittest
@@ -39,7 +40,7 @@ from provider_configuration_service import ProviderApiConfig
 from runtime_planner_service import PlannerModelResult
 from vrchat_blendshape_agent import LlmPlanResponse
 from agent_runtime_skill_executor import AgentRuntimeSkillExecutor
-from execution_target import canonical_namespace, project_identity
+from execution_target import EXECUTION_TARGET_SCHEMA, canonical_namespace, process_start_time, project_identity
 from session_store_integrity import is_valid_chat_record
 
 
@@ -1000,6 +1001,125 @@ class AgentLoopP0Tests(unittest.TestCase):
         self.assertEqual(continuation["plan"]["nextStep"], "done", continuation)
         self.assertEqual(continuation["task"]["status"], "completed")
         execute_payload.assert_called_once()
+
+    @provider_plan_fixture
+    def test_native_approval_resume_restores_trusted_session_for_public_execution_target_ref(self) -> None:
+        gateway = self.gateway
+        project = self._unity_project()
+        session_id = "public-ref-approval-resume-session"
+        project_root = str(project.resolve())
+        start_time = process_start_time(os.getpid())
+        descriptor_dir = project / "Library" / "VRCForge"
+        descriptor_dir.mkdir(parents=True)
+        (descriptor_dir / "mcp-core.json").write_text(json.dumps({
+            "projectPath": project_root,
+            "projectId": project_identity(project_root),
+            "processId": os.getpid(),
+            "processStartTime": start_time,
+            "instanceId": "approval-resume-core",
+        }), encoding="utf-8")
+        target = {
+            "schema": EXECUTION_TARGET_SCHEMA,
+            "scope": "project",
+            "project": {"root": project_root, "projectId": project_identity(project_root)},
+            "editor": {
+                "unityPid": os.getpid(),
+                "processStartTime": start_time,
+                "coreInstanceId": "approval-resume-core",
+            },
+        }
+        target["namespace"] = canonical_namespace(target)
+        with gateway.resource_context(f"runtime:{session_id}"):
+            public_reference = gateway.bind_execution_target(target, project_root=project_root)["executionTarget"]
+
+        write_tool = "vrcforge_test_identity_resume_write"
+        probe_tool = "vrcforge_test_identity_resume_probe"
+        previous_write = gateway._write_handlers.get(write_tool)
+        previous_probe = gateway._tools.get(probe_tool)
+        gateway.approval_transactions.register_write_handler(
+            write_tool,
+            "Test-only approval target for public ExecutionTarget resume coverage.",
+            "low",
+            lambda _arguments: {"ok": True, "status": "applied", "result": {"ok": True}},
+            pre_write_checkpoint_required=False,
+        )
+        observed_probe = []
+        gateway.register_tool(
+            probe_tool,
+            "Test-only identity-bound read used after approval resume.",
+            "read/debug",
+            lambda arguments: observed_probe.append({
+                "context": gateway._mcp_resource_context.get(),
+                "target": copy.deepcopy(arguments["executionTarget"]),
+            }) or {"ok": True, "data": {"executionTarget": copy.deepcopy(arguments["executionTarget"])}},
+        )
+        plan_calls = []
+
+        def plan_turn(_message, _params, _observe, *_args, **kwargs):
+            plan_calls.append(kwargs.get("task_continuation"))
+            if len(plan_calls) == 1:
+                return {
+                    "planner": "llm", "writeNeeded": True, "writeTool": write_tool,
+                    "writeParams": {"projectPath": project_root, "executionTarget": public_reference},
+                    "continueLoop": True, "nextStep": "call_tool",
+                }
+            return {
+                "planner": "llm", "skillNeeded": True, "skillTool": probe_tool,
+                "skillParams": {
+                    "projectPath": project_root,
+                    "executionTarget": public_reference,
+                    "sessionId": "model-forged-session",
+                    "_runtimeSessionId": "model-forged-session",
+                },
+                "continueLoop": False, "nextStep": "call_skill",
+            }
+
+        resume_contexts = []
+        original_resume = gateway.resume_runtime_task_after_approval
+
+        def resume_with_context_observation(*args, **kwargs):
+            resume_contexts.append(gateway._mcp_resource_context.get())
+            return original_resume(*args, **kwargs)
+
+        try:
+            with patch.object(gateway.runtime_planner, "plan_agent_turn", side_effect=plan_turn), \
+                 patch.object(gateway, "resume_runtime_task_after_approval", side_effect=resume_with_context_observation), \
+                 TestClient(dashboard_server.app) as client:
+                initial_response = client.post("/api/app/agent/message", json={
+                    "message": "Perform the approved test action and inspect the bound project.",
+                    "projectPath": project_root,
+                    "session_id": session_id,
+                })
+                self.assertEqual(initial_response.status_code, 200, initial_response.text)
+                initial = initial_response.json()
+                approval_id = initial["approval_id"]
+                approval = gateway._approvals[approval_id]
+                self.assertEqual(approval["taskContext"]["sessionId"], session_id)
+                self.assertEqual(approval["arguments"]["executionTarget"], public_reference)
+                approved = client.post(
+                    f"/api/app/agent/approvals/{approval_id}/approve",
+                    json={"expectedProjectRoot": project_root, "globalOnly": False},
+                )
+                self.assertEqual(approved.status_code, 200, approved.text)
+                payload = approved.json()
+        finally:
+            if previous_write is None:
+                gateway._write_handlers.pop(write_tool, None)
+            else:
+                gateway._write_handlers[write_tool] = previous_write
+            if previous_probe is None:
+                gateway._tools.pop(probe_tool, None)
+            else:
+                gateway._tools[probe_tool] = previous_probe
+
+        self.assertEqual(payload["execution"]["status"], "applied")
+        self.assertEqual(resume_contexts, [None])
+        self.assertEqual(len(observed_probe), 1)
+        self.assertEqual(observed_probe[0]["context"], f"runtime:{session_id}")
+        self.assertEqual(observed_probe[0]["target"]["project"]["root"], project_root)
+        continuation = payload["continuation"]
+        self.assertEqual(continuation["sessionId"], session_id)
+        self.assertEqual(continuation["steps"][-1]["result"]["data"]["executionTarget"], public_reference)
 
     @provider_plan_fixture
     def test_rejected_write_returns_to_the_original_task_as_needs_user_action(self) -> None:

@@ -141,6 +141,7 @@ from execution_target import (
     ExecutionTargetBindingRegistry,
     ExecutionTargetError,
     execution_target_digest,
+    is_execution_target_reference,
     validate_execution_target,
     validate_runtime_execution_target,
 )
@@ -2146,7 +2147,10 @@ class AgentGateway:
         self._runtime_session_state = AgentRuntimeSessionState(
             AgentRuntimeSessionStatePorts(shared_state_lock=self._lock,
                 native_history_store=NativeHistoryStore(self.audit_dir / "native-history"),
-                discard_result_snapshots=lambda session_id: self._scan_results.delete(session_id))
+                discard_result_snapshots=lambda session_id: (
+                    self._scan_results.delete(session_id),
+                    self._execution_target_bindings.discard_session(f"runtime:{session_id}"),
+                ))
         )
         self._runtime_followup_queue = AgentRuntimeFollowupQueue(
             FollowupQueuePorts(path=self.audit_dir / "runtime-followups.json", lock=self._lock)
@@ -2659,10 +2663,46 @@ class AgentGateway:
             }:
                 tool_params = dict(tool_params)
                 tool_params["_runtimeTaskLinkAuthority"] = _RUNTIME_TASK_LINK_AUTHORITY
+            params_for_handler = tool_params
+            public_reference = params_for_handler.get("executionTarget")
+            resolved_target: dict[str, Any] | None = None
+            if (
+                tool.name != "vrcforge_refresh_execution_target"
+                and is_execution_target_reference(public_reference)
+            ):
+                project_root = str(
+                    params_for_handler.get("projectPath")
+                    or params_for_handler.get("projectRoot")
+                    or ""
+                )
+                if not project_root:
+                    raise AgentGatewayError(
+                        "ExecutionTarget references require the exact projectPath.",
+                        status_code=409,
+                        cause_code="project_root_missing",
+                    )
+                resolved_target = self.resolve_execution_target_reference(
+                    public_reference,
+                    project_root=project_root,
+                    required_scope=identity_scope(
+                        tool.name,
+                        write=bool(tool.write),
+                        arguments=params_for_handler,
+                    ),
+                )
+                params_for_handler = dict(tool_params)
+                params_for_handler["executionTarget"] = resolved_target
             agent_token = self._tool_agent_context.set(tool_agent_name)
             owner_token = self._tool_owner_context.set(tool_owner_id)
             try:
-                return tool.handler(tool_params)
+                result = tool.handler(params_for_handler)
+                if resolved_target is not None:
+                    return self._replace_execution_target_with_reference(
+                        result,
+                        execution_target_digest(resolved_target),
+                        public_reference,
+                    )
+                return result
             except PermissionError as exc:
                 # Only native denials from the fixed file-read handlers define
                 # this boundary; tool prose or a generic nonretryable error does not.
@@ -3688,8 +3728,23 @@ class AgentGateway:
             data = resource["data"]
             if data.get("status") != "bound":
                 raise McpResourceError("Current Gateway identity is unbound; explicitly bind an ExecutionTarget")
-            target = validate_execution_target(data.get("exactExecutionTarget"))
-            if resource["identity"] != self._mcp_resource_identity(target):
+            public_reference = data.get("exactExecutionTarget")
+            if is_execution_target_reference(public_reference):
+                try:
+                    target = self._execution_target_bindings.resolve_in_current_session(
+                        public_reference,
+                        session_context=self.execution_target_session_context(),
+                    )
+                except ExecutionTargetError as exc:
+                    raise McpResourceError("Identity Resource ExecutionTarget reference is stale") from exc
+                expected_resource_identity = {
+                    "executionTarget": dict(public_reference),
+                    "executionTargetDigest": execution_target_digest(target),
+                }
+            else:
+                target = validate_execution_target(public_reference)
+                expected_resource_identity = self._mcp_resource_identity(target)
+            if resource["identity"] != expected_resource_identity:
                 raise McpResourceError("Identity Resource anchors do not match its ExecutionTarget")
             if data.get("executionTargetDigest") != execution_target_digest(target):
                 raise McpResourceError("Identity Resource ExecutionTarget digest is invalid")
@@ -3739,7 +3794,15 @@ class AgentGateway:
             result, fallback_summary="Tool Resource identity capture", write=tool_name in self._write_handlers,
         )["status"] == "failed" or ensure_dict(result.get("outcome")).get("status") == "failed":
             target = None
-        identity = self._mcp_resource_identity(target)
+        public_reference = target if is_execution_target_reference(target) else None
+        target_digest = str(result.get("executionTargetDigest") or "")
+        if public_reference is not None:
+            identity = {
+                "executionTarget": dict(public_reference),
+                "executionTargetDigest": target_digest,
+            }
+        else:
+            identity = self._mcp_resource_identity(target)
         operation_id = str(
             result.get("operationId")
             or result.get("requestId")
@@ -3767,8 +3830,14 @@ class AgentGateway:
         lowered_name = tool_name.casefold()
         if target is not None:
             snapshot_scope = str(target.get("scope") or "project")
+            if public_reference is not None:
+                snapshot_scope = identity_scope(
+                    tool_name,
+                    write=tool_name in self._write_handlers,
+                    arguments=arguments,
+                )
             snapshot_id = stable_hash(
-                f"{target.get('namespace') or execution_target_digest(target)}:{tool_name}"
+                f"{target.get('namespace') or target_digest or execution_target_digest(target)}:{tool_name}"
             )
             entries.append({
                 "base_uri": f"vrcforge://snapshot/{snapshot_scope}/{snapshot_id}",
@@ -3825,7 +3894,7 @@ class AgentGateway:
                 "data": {
                     "status": "bound",
                     "exactExecutionTarget": dict(target),
-                    "executionTargetDigest": execution_target_digest(target),
+                    "executionTargetDigest": target_digest if public_reference is not None else execution_target_digest(target),
                     "sourceOperationId": operation_id,
                 },
                 "identity": identity, "source_mode": source_mode,
@@ -4598,19 +4667,26 @@ class AgentGateway:
         project_root = arguments.get("projectPath") or arguments.get("projectRoot")
         if not isinstance(target, Mapping):
             raise AgentGatewayError(
-                "This Unity MCP call requires arguments.projectPath and the exact executionTarget returned by vrcforge_bind_execution_target. Call vrcforge_list_execution_targets, then bind one exact candidate. Hierarchy paths alone are never identity.",
+                "This Unity MCP call requires arguments.projectPath and the public executionTarget reference returned by vrcforge_bind_execution_target for this same project and session. Call vrcforge_list_execution_targets, then bind one exact candidate. Hierarchy paths alone are never identity.",
                 status_code=409,
                 cause_code="execution_target_missing",
             )
+        required_scope = (
+            identity_scope(tool_name, write=bool(write_handler), arguments=arguments)
+            if required
+            else str(target.get("scope") or "project")
+        )
         try:
+            if is_execution_target_reference(target):
+                return self.resolve_execution_target_reference(
+                    target,
+                    project_root=str(project_root or ""),
+                    required_scope=required_scope,
+                )
             return validate_runtime_execution_target(
                 target,
                 project_root=str(project_root or ""),
-                required_scope=(
-                    identity_scope(tool_name, write=bool(write_handler), arguments=arguments)
-                    if required
-                    else str(target.get("scope") or "project")
-                ),
+                required_scope=required_scope,
             )
         except ExecutionTargetError as exc:
             raise AgentGatewayError(
@@ -4639,14 +4715,103 @@ class AgentGateway:
                 committed=False,
             ) from exc
 
-    def bind_execution_target(self, target: Mapping[str, Any], *, project_root: str) -> dict[str, Any]:
-        """Mint a bounded handle only after the live Core identity verifies."""
+    def execution_target_session_context(self) -> str:
+        """Return the Gateway-owned current session identity, never a Tool argument."""
 
-        return self._execution_target_bindings.bind(target, project_root=project_root)
+        context = self._mcp_resource_context.get()
+        if not isinstance(context, str) or not context.strip():
+            raise AgentGatewayError(
+                "ExecutionTarget binding requires the current authenticated Agent session.",
+                status_code=409,
+                cause_code="execution_target_session_missing",
+                failure_layer="execution_target",
+                failure_phase="before_unity_core_call",
+            )
+        return context
+
+    @staticmethod
+    def _replace_execution_target_with_reference(
+        value: Any,
+        target_digest: str,
+        public_reference: Mapping[str, Any],
+    ) -> Any:
+        if isinstance(value, Mapping):
+            projected: dict[str, Any] = {}
+            for key, item in value.items():
+                if (
+                    str(key) == "executionTarget"
+                    and isinstance(item, Mapping)
+                    and execution_target_digest(item) == target_digest
+                ):
+                    projected[str(key)] = dict(public_reference)
+                else:
+                    projected[str(key)] = AgentGateway._replace_execution_target_with_reference(
+                        item,
+                        target_digest,
+                        public_reference,
+                    )
+            return projected
+        if isinstance(value, list):
+            return [
+                AgentGateway._replace_execution_target_with_reference(
+                    item,
+                    target_digest,
+                    public_reference,
+                )
+                for item in value
+            ]
+        return value
+
+    def resolve_execution_target_reference(
+        self,
+        reference: Mapping[str, Any],
+        *,
+        project_root: str | None = None,
+        required_scope: str | None = None,
+    ) -> dict[str, Any]:
+        try:
+            session_context = self.execution_target_session_context()
+            if project_root is None and required_scope is None:
+                return self._execution_target_bindings.resolve_in_current_session(
+                    reference,
+                    session_context=session_context,
+                )
+            if not project_root or not required_scope:
+                raise ExecutionTargetError(
+                    "execution_target_scope_invalid",
+                    "ExecutionTarget reference resolution requires both projectPath and the Tool scope.",
+                )
+            return self._execution_target_bindings.resolve(
+                reference,
+                project_root=project_root,
+                session_context=session_context,
+                required_scope=required_scope,
+            )
+        except ExecutionTargetError as exc:
+            raise AgentGatewayError(
+                f"Unity MCP identity lock rejected this reference: {exc}",
+                status_code=409,
+                cause_code=exc.code,
+                failure_layer="execution_target",
+                failure_phase="before_unity_core_call",
+                operation_kind="read",
+                tool_routing_started=False,
+                mutation_started=False,
+                committed=False,
+            ) from exc
+
+    def bind_execution_target(self, target: Mapping[str, Any], *, project_root: str) -> dict[str, Any]:
+        """Return a path-free session reference after live Core identity verifies."""
+
+        return self._execution_target_bindings.bind(
+            target,
+            project_root=project_root,
+            session_context=self.execution_target_session_context(),
+        )
 
     def refresh_execution_target(
         self,
-        handle: str,
+        reference: Mapping[str, Any],
         observed_target: Mapping[str, Any],
         *,
         project_root: str,
@@ -4654,9 +4819,10 @@ class AgentGateway:
         """Refresh scene bytes while rejecting project/editor/object replacement."""
 
         return self._execution_target_bindings.refresh(
-            handle,
+            reference,
             observed_target,
             project_root=project_root,
+            session_context=self.execution_target_session_context(),
         )
 
     def _guard_external_mcp_project_scope(
@@ -4745,14 +4911,28 @@ class AgentGateway:
             tool = self._tools.get(name)
             if tool is None or not self._external_mcp_read_tool_visible(tool, config):
                 raise AgentGatewayError(f"Unknown or unavailable MCP tool: {name}", status_code=404)
+            public_reference = arguments.get("executionTarget")
             verified_target = self._validate_external_mcp_execution_target(name, arguments)
+            call_arguments = dict(arguments)
+            if verified_target is not None and is_execution_target_reference(public_reference):
+                call_arguments["executionTarget"] = verified_target
             result = self._call_external_mcp_read_tool(
                 tool,
-                arguments,
+                call_arguments,
                 agent_name=agent_name,
             )
             if verified_target is not None:
-                result["executionTarget"] = verified_target
+                if is_execution_target_reference(public_reference):
+                    result = self._replace_execution_target_with_reference(
+                        result,
+                        execution_target_digest(verified_target),
+                        public_reference,
+                    )
+                result["executionTarget"] = (
+                    dict(public_reference)
+                    if is_execution_target_reference(public_reference)
+                    else verified_target
+                )
                 result["executionTargetDigest"] = execution_target_digest(verified_target)
             result["canonicalToolName"] = canonical_tool_name(name)
             result["legacyAliasUsed"] = requested_name != name
@@ -4766,6 +4946,7 @@ class AgentGateway:
             raise AgentGatewayError(f"Unknown or unavailable MCP tool: {name}", status_code=404)
 
         try:
+            public_reference = arguments.get("executionTarget")
             execution_target = self._validate_external_mcp_execution_target(
                 name,
                 arguments,
@@ -4801,14 +4982,25 @@ class AgentGateway:
                 dict(confirmation),
                 agent_name=agent_name,
             )
+            if execution_target is not None and is_execution_target_reference(public_reference):
+                result = self._replace_execution_target_with_reference(
+                    result,
+                    execution_target_digest(execution_target),
+                    public_reference,
+                )
+                result["executionTarget"] = dict(public_reference)
+                result["executionTargetDigest"] = execution_target_digest(execution_target)
             result["canonicalToolName"] = canonical_tool_name(name)
             result["legacyAliasUsed"] = requested_name != name
             if prompt_skill_provenance is not None:
                 result["promptSkillProvenance"] = prompt_skill_provenance
             return result
 
+        preparation_arguments = dict(arguments)
+        if execution_target is not None and is_execution_target_reference(public_reference):
+            preparation_arguments["executionTarget"] = execution_target
         try:
-            prepared = self.approval_transactions.prepare_external_mcp_write(name, arguments)
+            prepared = self.approval_transactions.prepare_external_mcp_write(name, preparation_arguments)
         except AgentGatewayError as exc:
             return self._external_mcp_no_write_error(name, "write_preparation", exc)
         except Exception as exc:  # noqa: BLE001 - preserve the redacted causal chain for the calling Agent.
@@ -4854,6 +5046,14 @@ class AgentGateway:
                     prepared,
                     request_arguments_digest=request_arguments_digest,
                 )
+                if execution_target is not None and is_execution_target_reference(public_reference):
+                    proposal = self._replace_execution_target_with_reference(
+                        proposal,
+                        execution_target_digest(execution_target),
+                        public_reference,
+                    )
+                    proposal["executionTarget"] = dict(public_reference)
+                    proposal["executionTargetDigest"] = execution_target_digest(execution_target)
                 if prompt_skill_provenance is not None:
                     proposal["promptSkillProvenance"] = prompt_skill_provenance
                 return proposal
@@ -4873,7 +5073,17 @@ class AgentGateway:
         result = self._external_mcp_write_result(name, applied)
         if execution_target is not None:
             result["executionTargetDigest"] = execution_target_digest(execution_target)
-            result["executionTarget"] = execution_target
+            if is_execution_target_reference(public_reference):
+                result = self._replace_execution_target_with_reference(
+                    result,
+                    execution_target_digest(execution_target),
+                    public_reference,
+                )
+            result["executionTarget"] = (
+                dict(public_reference)
+                if is_execution_target_reference(public_reference)
+                else execution_target
+            )
             result.setdefault("operationId", str(applied.get("operationId") or ""))
             if isinstance(result.get("outcome"), Mapping):
                 result["outcome"] = {**dict(result["outcome"]), "operationId": result.get("operationId"), "executionTargetDigest": result["executionTargetDigest"]}

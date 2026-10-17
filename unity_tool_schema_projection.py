@@ -76,14 +76,29 @@ def _with_execution_target_schema(schema: Mapping[str, Any], *, required: bool) 
     if "projectPath" not in properties:
         return projected
     properties["executionTarget"] = {
-        "type": "object",
+        "oneOf": [
+            {
+                "type": "object",
+                "properties": {
+                    "schema": {"const": "vrcforge.execution_target_ref.v1"},
+                    "ref": {"type": "string", "minLength": 16},
+                },
+                "required": ["schema", "ref"],
+                "additionalProperties": False,
+            },
+            {
+                "type": "object",
+                "required": ["schema", "namespace", "scope", "project", "editor"],
+                "additionalProperties": True,
+            },
+        ],
         "description": (
-            "Exact vrcforge.execution_target.v1 envelope returned by "
-            "vrcforge_bind_execution_target. Hierarchy paths are display-only "
-            "and never substitute for GlobalObjectId identity."
+            "Public vrcforge.execution_target_ref.v1 reference returned by "
+            "vrcforge_bind_execution_target for this same project and session. "
+            "Pass it unchanged as executionTarget. A legacy exact vrcforge.execution_target.v1 "
+            "envelope is accepted only after the same live identity validation. Hierarchy paths "
+            "are display-only and never substitute for GlobalObjectId identity."
         ),
-        "required": ["schema", "namespace", "scope", "project", "editor"],
-        "additionalProperties": True,
     }
     projected["properties"] = properties
     if required:
