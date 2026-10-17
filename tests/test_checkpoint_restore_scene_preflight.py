@@ -37,7 +37,7 @@ def test_scene_preflight_preserves_files_and_reopens_original_context(tmp_path, 
     cache.parent.mkdir(parents=True)
     cache.write_bytes(b'keep cache')
     context = {'ok': True, 'scenes': ['Assets/Current.unity'], 'activeScenePath': 'Assets/Current.unity'}
-    service.checkpoint_restore_prepare_handler = lambda _: dict(context)
+    service.checkpoint_restore_prepare_handler = lambda _, *, checkpoint_files=None: dict(context)
     seen = []
 
     def reload(_root, value):

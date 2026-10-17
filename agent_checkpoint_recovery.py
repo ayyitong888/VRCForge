@@ -163,7 +163,7 @@ class AgentCheckpointRecoveryService:
         ] = {}
         self._project_chat_checkpoint_lock = ports.project_chat_checkpoint_lock
         self._checkpoint_project_root_resolver: Callable[[], str] | None = None
-        self._checkpoint_restore_prepare_handler: Callable[[Path], dict[str, Any]] | None = None
+        self._checkpoint_restore_prepare_handler: Callable[..., dict[str, Any]] | None = None
         self._checkpoint_restore_handler: Callable[[Path, dict[str, Any]], dict[str, Any]] | None = None
 
     @contextmanager
@@ -194,11 +194,11 @@ class AgentCheckpointRecoveryService:
         self._checkpoint_project_root_resolver = callback
 
     @property
-    def checkpoint_restore_prepare_handler(self) -> Callable[[Path], dict[str, Any]] | None:
+    def checkpoint_restore_prepare_handler(self) -> Callable[..., dict[str, Any]] | None:
         return self._checkpoint_restore_prepare_handler
 
     @checkpoint_restore_prepare_handler.setter
-    def checkpoint_restore_prepare_handler(self, callback: Callable[[Path], dict[str, Any]] | None) -> None:
+    def checkpoint_restore_prepare_handler(self, callback: Callable[..., dict[str, Any]] | None) -> None:
         self._checkpoint_restore_prepare_handler = callback
 
     @property
@@ -537,6 +537,7 @@ class AgentCheckpointRecoveryService:
 
     def _delete_checkpoint_archives_locked(self, checkpoint_ids: Any) -> dict[str, Any]:
         """删除用户在面板里勾选的存档；活跃恢复检查点强制保护，不会被删。"""
+        from checkpoint_unity_evidence import cleanup_checkpoint_evidence
         requested = {
             str(cid).strip()
             for cid in (checkpoint_ids or [])
@@ -574,6 +575,7 @@ class AgentCheckpointRecoveryService:
                     "sizeBytes": archive["sizeBytes"],
                 }
             )
+            cleanup_checkpoint_evidence(self, cid)
             self._remove_empty_checkpoint_archive_parents(path.parent)
         if deleted:
             self._ports.append_audit(
@@ -795,6 +797,8 @@ class AgentCheckpointRecoveryService:
         *,
         protected_checkpoint_ids: set[str] | None = None,
     ) -> dict[str, Any]:
+        from checkpoint_unity_evidence import cleanup_checkpoint_evidence
+
         config = self._ports.ensure_config()
         normalized_max = normalize_checkpoint_archive_max_size_mb(
             config.checkpoint_archive_max_size_mb if max_size_mb is None else max_size_mb
@@ -834,6 +838,7 @@ class AgentCheckpointRecoveryService:
                 )
                 continue
             deleted.append({"path": str(path), "checkpointId": archive["checkpointId"], "sizeBytes": archive["sizeBytes"]})
+            cleanup_checkpoint_evidence(self, archive['checkpointId'])
             remaining_bytes -= archive["sizeBytes"]
             self._remove_empty_checkpoint_archive_parents(path.parent)
 
@@ -1243,6 +1248,7 @@ class AgentCheckpointRecoveryService:
             return self._restore_checkpoint_locked(params)
 
     def _restore_checkpoint_locked(self, params: dict[str, Any]) -> dict[str, Any]:
+        from checkpoint_unity_evidence import checkpoint_core_error, record_unity_recovery_evidence
         checkpoint = self._load_checkpoint(str(params.get("checkpoint_id") or params.get("checkpointId") or "").strip())
         if not checkpoint:
             return {"ok": False, "error": "checkpoint_id was not found."}
@@ -1321,11 +1327,13 @@ class AgentCheckpointRecoveryService:
             try:
                 prepared = ensure_dict(
                     self._checkpoint_restore_prepare_handler(
-                        Path(str(checkpoint.get("projectRoot") or ""))
+                        Path(str(checkpoint.get("projectRoot") or "")),
+                        checkpoint_files=ensure_string_list(checkpoint.get("archiveFiles")) or None,
                     )
                 )
             except Exception as exc:  # noqa: BLE001 - fail closed before backup/restore.
-                prepared = {"ok": False, "error": str(exc)}
+                prepared = checkpoint_core_error(exc)
+            recovery = record_unity_recovery_evidence(self, checkpoint, prepared) or recovery
             if not prepared.get("ok"):
                 return {
                     "ok": False,
@@ -1457,6 +1465,8 @@ class AgentCheckpointRecoveryService:
         *,
         internal_restore_prepare: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        from checkpoint_unity_evidence import checkpoint_core_error, record_unity_recovery_evidence
+
         local_state_restore = checkpoint.get("strategy") in {"local_state_archive", "project_chat_archive"}
         project_root = Path(str(checkpoint.get("projectRoot") or ""))
         # This value is intentionally supplied only by _restore_checkpoint_locked
@@ -1470,10 +1480,14 @@ class AgentCheckpointRecoveryService:
         ):
             try:
                 restore_prepare = ensure_dict(
-                    self._checkpoint_restore_prepare_handler(project_root)
+                    self._checkpoint_restore_prepare_handler(
+                        project_root,
+                        checkpoint_files=ensure_string_list(checkpoint.get("archiveFiles")) or None,
+                    )
                 )
             except Exception as exc:  # noqa: BLE001 - fail before touching project files.
-                restore_prepare = {"ok": False, "error": str(exc)}
+                restore_prepare = checkpoint_core_error(exc)
+            record_unity_recovery_evidence(self, checkpoint, restore_prepare)
             if not restore_prepare.get("ok"):
                 payload = {
                     "ok": False,
@@ -1573,7 +1587,8 @@ class AgentCheckpointRecoveryService:
                     self._checkpoint_restore_handler(project_root, reload_context)
                 )
             except Exception as exc:  # noqa: BLE001
-                reload_result = {"ok": False, "error": str(exc)}
+                reload_result = checkpoint_core_error(exc)
+            record_unity_recovery_evidence(self, checkpoint, reload_result)
             expected_baseline = checkpoint_prepare.get("assetBaseline")
             actual_readback = reload_result.get("assetReadback")
             exact_asset_readback = (

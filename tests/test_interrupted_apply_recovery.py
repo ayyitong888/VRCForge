@@ -152,7 +152,6 @@ class InterruptedApplyRecoveryTests(unittest.TestCase):
             resolved = restarted_gateway.approval_transactions.apply_approved({"approval_id": resolve_id})
             self.assertTrue(resolved["ok"])
             self.assertFalse(restarted_gateway.checkpoint_recovery.list_interrupted_apply_recoveries()["blockingWrites"])
-
             unblocked = restarted_gateway.approval_transactions.apply_approved({"approval_id": approval_id})
             self.assertTrue(unblocked["ok"])
             self.assertEqual(len(calls), 1)
@@ -201,7 +200,7 @@ class InterruptedApplyRecoveryTests(unittest.TestCase):
             gateway.approval_transactions.checkpoint_prepare_handler = lambda _path: {"ok": True}
             prepare_calls: list[Path] = []
             gateway.checkpoint_recovery.checkpoint_restore_prepare_handler = (
-                lambda path: prepare_calls.append(path) or {"ok": True, "scenes": [], "activeScenePath": ""}
+                lambda path, *, checkpoint_files=None: prepare_calls.append(path) or {"ok": True, "scenes": [], "activeScenePath": ""}
             )
             gateway.checkpoint_recovery.checkpoint_restore_handler = (
                 lambda _path, _context: {"ok": False, "error": "Unity reload is still blocked."}
@@ -277,7 +276,7 @@ class InterruptedApplyRecoveryTests(unittest.TestCase):
             for expected_count in (1, 2, 3):
                 gateway = AgentGateway(config_path, audit_path)
                 gateway.checkpoint_recovery.checkpoint_restore_prepare_handler = (
-                    lambda _path: {"ok": True, "scenes": [], "activeScenePath": ""}
+                    lambda _path, *, checkpoint_files=None: {"ok": True, "scenes": [], "activeScenePath": ""}
                 )
                 gateway.checkpoint_recovery.checkpoint_restore_handler = (
                     lambda _path, _context: {"ok": False, "error": "Unity reload is still blocked."}
@@ -302,7 +301,7 @@ class InterruptedApplyRecoveryTests(unittest.TestCase):
             gateway = AgentGateway(config_path, audit_path)
             prepare_calls: list[Path] = []
             gateway.checkpoint_recovery.checkpoint_restore_prepare_handler = (
-                lambda path: prepare_calls.append(path) or {"ok": True}
+                lambda path, *, checkpoint_files=None: prepare_calls.append(path) or {"ok": True}
             )
             gateway.checkpoint_recovery.checkpoint_restore_handler = (
                 lambda _path, _context: {"ok": True}
@@ -326,7 +325,7 @@ class InterruptedApplyRecoveryTests(unittest.TestCase):
             gateway.approval_transactions.checkpoint_prepare_handler = lambda _path: {"ok": True}
             prepare_calls: list[Path] = []
             gateway.checkpoint_recovery.checkpoint_restore_prepare_handler = (
-                lambda path: prepare_calls.append(path) or {"ok": True, "scenes": [], "activeScenePath": ""}
+                lambda path, *, checkpoint_files=None: prepare_calls.append(path) or {"ok": True, "scenes": [], "activeScenePath": ""}
             )
             gateway.checkpoint_recovery.checkpoint_restore_handler = (
                 lambda _path, _context: {"ok": False, "error": "Unity reload is still blocked."}
@@ -375,7 +374,7 @@ class InterruptedApplyRecoveryTests(unittest.TestCase):
             gateway = AgentGateway(root / "config" / "agent_gateway.json", root / "audit")
             gateway.approval_transactions.checkpoint_prepare_handler = lambda _path: {"ok": True}
             gateway.checkpoint_recovery.checkpoint_restore_prepare_handler = (
-                lambda _path: {"ok": True, "scenes": [], "activeScenePath": ""}
+                lambda _path, *, checkpoint_files=None: {"ok": True, "scenes": [], "activeScenePath": ""}
             )
             gateway.checkpoint_recovery.checkpoint_restore_handler = (
                 lambda _path, _context: {"ok": True}

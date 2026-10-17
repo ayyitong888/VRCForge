@@ -3,8 +3,9 @@ from __future__ import annotations
 import dashboard_server
 
 
-CHECKPOINT_TOOLS = ("vrcforge_gesture_manager_enter_play_mode", "vrcforge_select_scene_object")
+CHECKPOINT_TOOLS = ("vrcforge_select_scene_object",)
 RUNTIME_NO_CHECKPOINT_TOOLS = (
+    "vrcforge_gesture_manager_enter_play_mode",
     "vrcforge_gesture_manager_set_parameter",
     "vrcforge_set_play_mode",
     "vrcforge_confirm_unity_reload_dialog",
@@ -26,10 +27,12 @@ def test_editor_state_handlers_use_bound_checkpoint_policy() -> None:
         assert handler.checkpoint_prepare_handler is not None or name == "vrcforge_confirm_unity_reload_dialog"
 
 
-def test_set_play_mode_checkpoint_policy_follows_normalized_target() -> None:
+def test_play_transitions_do_not_claim_checkpoint_rollback() -> None:
+    gm_handler = dashboard_server.AGENT_GATEWAY._write_handlers["vrcforge_gesture_manager_enter_play_mode"]
+    assert gm_handler.pre_write_checkpoint_required is False
+    assert "Project Play callbacks may save or generate assets" in gm_handler.description
     policy = dashboard_server.AGENT_GATEWAY._write_handlers["vrcforge_set_play_mode"].pre_write_checkpoint_required
-    assert policy({"isPlaying": True}) is True
-    assert policy({"is_playing": True}) is True
-    assert policy({"isPlaying": False}) is False
-    assert policy({"is_playing": False}) is False
-    assert policy({"isPlaying": "false"}) is True
+    assert policy is False
+    assert "Project Play callbacks may save or generate assets" in (
+        dashboard_server.AGENT_GATEWAY._write_handlers["vrcforge_set_play_mode"].description
+    )

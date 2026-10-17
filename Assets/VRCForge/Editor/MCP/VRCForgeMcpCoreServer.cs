@@ -1364,6 +1364,22 @@ namespace VRCForge.Editor
             {
                 return false;
             }
+            var phaseName = arguments["phase"]?.Type == JTokenType.String ? arguments["phase"].Value<string>() : null;
+            var scopeField = isPrepareCheckpoint || phaseName == "prepare_restore" ? "checkpointFiles"
+                : phaseName == "reload" ? "restoredAssetPaths" : null;
+            if (scopeField != null && arguments.Property(scopeField) != null)
+            {
+                try
+                {
+                    CheckpointPrepareTool.ExactFileScope(arguments[scopeField], allowEmpty: scopeField == "restoredAssetPaths");
+                }
+                catch (InvalidOperationException)
+                {
+                    return false;
+                }
+                arguments = (JObject)arguments.DeepClone();
+                arguments.Remove(scopeField);
+            }
             var materialBaselineOnly = isPrepareCheckpoint && arguments.Property("materialBaselineOnly") != null;
             if (materialBaselineOnly)
             {
@@ -2408,6 +2424,7 @@ namespace VRCForge.Editor
                 ["compileSnapshot"] = CompileErrorMonitor.ReadCoreInfoSnapshot(30),
                 ["scanScope"] = ScanScopeJournal.Capabilities(),
                 ["assetDatabaseRefreshSavesDirtyAssets"] = VRCForge.Editor.AssetDatabaseRefreshTool.SavesDirtyAssets,
+                ["checkpointPrepareSavesDirtyAssets"] = VRCForge.Editor.CheckpointPrepareTool.SavesDirtyAssets,
             };
         }
 

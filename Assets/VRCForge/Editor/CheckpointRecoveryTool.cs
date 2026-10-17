@@ -2,6 +2,8 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Security.Cryptography;
+using System.Text;
 using VRCForge.Core.MCP;
 using Newtonsoft.Json.Linq;
 using UnityEditor;
@@ -13,16 +15,42 @@ namespace VRCForge.Editor
 {
     [VRCForgeCommand(
         toolId: "vrc_prepare_checkpoint",
-        Summary = "Save open project scenes and dirty assets immediately before VRCForge creates a rollback checkpoint. Internal safety tool."
+        Summary = "Inspect saved project state before VRCForge creates a disk rollback checkpoint. Never saves unsaved editor state. Internal safety tool."
     )]
     public static class CheckpointPrepareTool
     {
+        public const bool SavesDirtyAssets = false;
+        internal static HashSet<string> ExactFileScope(JToken token, bool allowEmpty = false)
+        {
+            if (token == null) return null;
+            if (!(token is JArray rows) || (!allowEmpty && rows.Count == 0)) throw new InvalidOperationException("Exact checkpoint file scope is empty.");
+            var paths = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var row in rows)
+            {
+                var path = row.Type == JTokenType.String ? row.Value<string>() : "";
+                if (string.IsNullOrEmpty(path) || !path.StartsWith("Assets/", StringComparison.Ordinal) || path.Contains("\\") || path.Split('/').Any(part => part == ".." || part == "." || part.Length == 0))
+                    throw new InvalidOperationException("Invalid exact checkpoint file scope.");
+                paths.Add(path.EndsWith(".meta", StringComparison.Ordinal) ? path.Substring(0, path.Length - 5) : path);
+            }
+            return paths;
+        }
+        internal static object[] DirtyAssetEvidence()
+        {
+            return Resources.FindObjectsOfTypeAll<UnityEngine.Object>()
+                .Where(asset => asset != null && EditorUtility.IsPersistent(asset) && EditorUtility.IsDirty(asset)
+                    && AssetDatabase.GetAssetPath(asset).StartsWith("Assets/", StringComparison.Ordinal))
+                .OrderBy(asset => AssetDatabase.GetAssetPath(asset), StringComparer.Ordinal).ThenBy(asset => asset.GetInstanceID())
+                .Select(asset => (object)new { assetPath = AssetDatabase.GetAssetPath(asset), instanceId = asset.GetInstanceID(),
+                    type = asset.GetType().FullName, dirty = EditorUtility.IsDirty(asset), dirtyCount = EditorUtility.GetDirtyCount(asset),
+                    serializedState = EditorJsonUtility.ToJson(asset) }).ToArray();
+        }
         private const string NdmfPreviewSceneGuid = "8cbd3f19cef3477439841053ced0661b";
 
         public class Parameters
         {
             [VRCForgeInput("Optional exact active Unity project root.", IsRequired = false)] public string projectPath { get; set; } = "";
             [VRCForgeInput("Exact existing assets resolved by the approved write preview.", IsRequired = false)] public string[] checkpointAssetPaths { get; set; }
+            [VRCForgeInput("Exact disk files in the production checkpoint; absent means full project.", IsRequired = false)] public string[] checkpointFiles { get; set; }
             [VRCForgeInput("Capture only exact clean material assets without saving scenes or assets.", IsRequired = false)] public bool materialBaselineOnly { get; set; }
             [VRCForgeInput("Live-run SHA-256 digest when a bound fixture request is used.", IsRequired = false)] public string expectedRunIdDigest { get; set; } = "";
             [VRCForgeInput("Expected Unity project-root SHA-256 digest.", IsRequired = false)] public string expectedProjectPathDigest { get; set; } = "";
@@ -33,9 +61,6 @@ namespace VRCForge.Editor
 
         public static object HandleCommand(JObject @params)
         {
-            var receipts = new List<TransactionReceipt>();
-            var transactionHandle = "";
-            var mutationStarted = false;
             try
             {
                 var identity = PrimitiveBasisLiveGuard.RequireBoundRequest(@params);
@@ -47,197 +72,67 @@ namespace VRCForge.Editor
                     return VRCForgeToolResult.Completed("Captured material baseline without saving.", new
                     {
                         ok = true, projectPath = ProjectRoot(), phase = "prepare",
-                        assetBaseline = baseline, mutationStarted = false, saved = false
+                        assetBaseline = baseline, mutationStarted = false, saved = false,
+                        snapshotIncludesUnsavedState = false
                     });
                 }
 
                 var allLoadedScenes = LoadedScenes();
-                var ignoredTransientScenes = allLoadedScenes
-                    .Where(IsKnownTransientPreviewScene)
-                    .Select(scene => scene.path)
-                    .ToList();
-                var loadedScenes = allLoadedScenes
-                    .Where(scene => !IsKnownTransientPreviewScene(scene))
-                    .ToList();
-                var unsavedScenes = loadedScenes
-                    .Where(scene => string.IsNullOrWhiteSpace(scene.path))
-                    .Select((scene, index) => new
-                    {
-                        index,
-                        name = string.IsNullOrWhiteSpace(scene.name) ? "Untitled" : scene.name
-                    })
-                    .ToList();
-                if (unsavedScenes.Count > 0)
-                {
-                    return VRCForgeToolResult.Failed(
-                        "unsaved_open_scene",
-                        new
-                        {
-                            message = "Save every open scene before an App-approved write so VRCForge can create a recoverable checkpoint.",
-                            blocking = true,
-                            recoverable = false,
-                            scenes = unsavedScenes
-                        });
-                }
-
-                var unsupportedScenes = loadedScenes
-                    .Where(scene => !scene.path.StartsWith("Assets/", StringComparison.Ordinal))
-                    .Select(scene => scene.path)
-                    .ToList();
-                if (unsupportedScenes.Count > 0)
-                {
-                    return VRCForgeToolResult.Failed(
-                        "scene_outside_project_assets",
-                        new
-                        {
-                            message = "Every open scene must be saved under this project's Assets folder before an App-approved write.",
-                            blocking = true,
-                            recoverable = false,
-                            scenes = unsupportedScenes
-                        });
-                }
-
-                transactionHandle = $"checkpoint:{ProjectRoot()}";
-                foreach (var scene in loadedScenes)
-                {
-                    receipts.Add(new TransactionReceipt
-                    {
-                        Asset = $"scene:{scene.path}",
-                        Before = DescribeSceneState(scene.path)
-                    });
-                }
-                var loadedScenePaths = new HashSet<string>(
-                    loadedScenes.Select(scene => scene.path),
-                    StringComparer.Ordinal);
+                var ignoredTransientScenes = allLoadedScenes.Where(IsKnownTransientPreviewScene)
+                    .Select(scene => scene.path).ToArray();
+                var loadedScenes = allLoadedScenes.Where(scene => !IsKnownTransientPreviewScene(scene)).ToList();
+                var unsavedScenes = loadedScenes.Where(scene => string.IsNullOrWhiteSpace(scene.path))
+                    .Select(scene => string.IsNullOrWhiteSpace(scene.name) ? "Untitled" : scene.name).ToArray();
+                var unsupportedScenes = loadedScenes.Where(scene => !string.IsNullOrWhiteSpace(scene.path)
+                    && !scene.path.StartsWith("Assets/", StringComparison.Ordinal)).Select(scene => scene.path).ToArray();
+                var dirtyScenePaths = loadedScenes.Where(scene => scene.isDirty).Select(scene => scene.path).ToArray();
+                var loadedScenePaths = new HashSet<string>(loadedScenes.Select(scene => scene.path), StringComparer.Ordinal);
+                // Include persistent main assets, subassets and importers; IsDirty is state, not provenance.
                 var dirtyAssetPaths = Resources.FindObjectsOfTypeAll<UnityEngine.Object>()
-                    .Where(asset => asset != null
-                        && EditorUtility.IsPersistent(asset)
-                        && EditorUtility.IsDirty(asset))
+                    .Where(asset => asset != null && EditorUtility.IsPersistent(asset) && EditorUtility.IsDirty(asset))
                     .Select(AssetDatabase.GetAssetPath)
-                    .Where(path => !string.IsNullOrWhiteSpace(path)
-                        && path.StartsWith("Assets/", StringComparison.Ordinal)
+                    .Where(path => !string.IsNullOrWhiteSpace(path) && path.StartsWith("Assets/", StringComparison.Ordinal)
                         && !loadedScenePaths.Contains(path))
-                    .Distinct(StringComparer.Ordinal)
-                    .OrderBy(path => path, StringComparer.Ordinal)
-                    .ToList();
-                foreach (var assetPath in dirtyAssetPaths)
+                    .Distinct(StringComparer.Ordinal).OrderBy(path => path, StringComparer.Ordinal).ToArray();
+                var fileScope = ExactFileScope(@params?["checkpointFiles"]);
+                var blockingDirtyAssetPaths = dirtyAssetPaths.Where(path => fileScope == null || fileScope.Contains(path)).ToArray();
+                var code = unsavedScenes.Length > 0 ? "unsaved_open_scene"
+                    : unsupportedScenes.Length > 0 ? "scene_outside_project_assets"
+                    : dirtyScenePaths.Length > 0 || blockingDirtyAssetPaths.Length > 0 ? "dirty_editor_state" : "";
+                if (code.Length > 0)
                 {
-                    receipts.Add(new TransactionReceipt
+                    return VRCForgeToolResult.Failed(code, new
                     {
-                        Asset = assetPath,
-                        Before = DescribeAssetState(assetPath)
+                        message = "A disk checkpoint cannot preserve unsaved editor state. Save intended changes explicitly before this asset write; open scenes must be under Assets.",
+                        blocking = true, recoverable = false, unsavedScenes, unsupportedScenes,
+                        dirtyScenePaths, dirtyAssetPaths, blockingDirtyAssetPaths, ignoredTransientScenes,
+                        snapshotIncludesUnsavedState = false, saved = false,
+                        mutationStarted = false, committed = false, commitState = "not_started"
                     });
                 }
-
-                mutationStarted = true;
-                foreach (var scene in loadedScenes)
-                {
-                    var receipt = receipts.First(item => item.Asset == $"scene:{scene.path}");
-                    if (scene.isDirty)
-                    {
-                        if (!EditorSceneManager.SaveScene(scene))
-                        {
-                            receipt.After = DescribeSceneState(scene.path);
-                            receipt.Status = "failed";
-                            receipt.Error = "Unity returned false from EditorSceneManager.SaveScene.";
-                            return VRCForgeToolResult.Failed(
-                                "scene_save_failed",
-                                new
-                                {
-                                    message = $"Unity could not save the open scene '{scene.path}' before checkpointing.",
-                                    blocking = true,
-                                    recoverable = false,
-                                    scene = scene.path,
-                                    mutationStarted = true,
-                                    committed = (bool?)null,
-                                    commitState = "unknown",
-                                    requestMayHaveCommitted = true,
-                                    transaction = BuildTransaction(receipts, transactionHandle)
-                                });
-                        }
-                    }
-                    receipt.After = DescribeSceneState(scene.path);
-                    receipt.Status = "succeeded";
-                }
-                AssetDatabase.SaveAssets();
                 var assetBaseline = CaptureAssetBaseline(@params?["checkpointAssetPaths"]);
-                foreach (var receipt in receipts.Where(item => !item.Asset.StartsWith("scene:", StringComparison.Ordinal)))
-                {
-                    receipt.After = ReadAssetAfter(receipt.Asset);
-                    receipt.Status = "succeeded";
-                }
                 var scenes = loadedScenes.Select(scene => scene.path).ToList();
                 var activeScene = SceneManager.GetActiveScene();
-                var activeScenePath = loadedScenes.Any(scene => scene == activeScene)
-                    ? activeScene.path
-                    : string.Empty;
-                return VRCForgeToolResult.Completed(
-                    "Saved open scenes and dirty assets before checkpointing.",
-                    new
-                    {
-                        ok = true,
-                        projectPath = ProjectRoot(),
-                        scenes,
-                        activeScenePath,
-                        ignoredTransientScenes,
-                        assetBaseline,
-                        unityProcessId = identity?.ProcessId,
-                        unityProcessStartedAtUtc = identity?.StartedAtUtc,
-                        unityExecutableDigest = identity?.ExecutableDigest,
-                        projectPathDigest = identity?.ProjectPathDigest,
-                        transaction = BuildTransaction(receipts, transactionHandle)
-                    });
+                var activeScenePath = loadedScenes.Any(scene => scene == activeScene) ? activeScene.path : string.Empty;
+                return VRCForgeToolResult.Completed("Inspected saved state without saving scenes or assets.", new
+                {
+                    ok = true, projectPath = ProjectRoot(), scenes, activeScenePath,
+                    dirtyScenePaths, dirtyAssetPaths, blockingDirtyAssetPaths, ignoredTransientScenes, assetBaseline,
+                    saved = false, mutationStarted = false, snapshotIncludesUnsavedState = false,
+                    unityProcessId = identity?.ProcessId,
+                    unityProcessStartedAtUtc = identity?.StartedAtUtc,
+                    unityExecutableDigest = identity?.ExecutableDigest,
+                    projectPathDigest = identity?.ProjectPathDigest
+                });
             }
             catch (Exception ex)
             {
-                if (mutationStarted)
+                return VRCForgeToolResult.Failed($"Checkpoint preparation failed: {ex.Message}", new
                 {
-                    foreach (var receipt in receipts)
-                    {
-                        receipt.After = receipt.Asset.StartsWith("scene:", StringComparison.Ordinal)
-                            ? DescribeSceneState(receipt.Asset.Substring("scene:".Length))
-                            : ReadAssetAfter(receipt.Asset);
-                    }
-                    var failed = receipts.FirstOrDefault(item => item.Status == "not_attempted");
-                    if (failed != null)
-                    {
-                        failed.Status = "failed";
-                        failed.Error = ex.Message;
-                    }
-                    else
-                    {
-                        receipts.Add(new TransactionReceipt
-                        {
-                            Asset = $"transaction:{transactionHandle}",
-                            Before = new { started = true },
-                            After = new { completed = false },
-                            Status = "failed",
-                            Error = ex.Message
-                        });
-                    }
-                    return VRCForgeToolResult.Failed($"Checkpoint preparation failed: {ex.Message}", new
-                    {
-                        blocking = true,
-                        mutationStarted = true,
-                        committed = (bool?)null,
-                        commitState = "unknown",
-                        requestMayHaveCommitted = true,
-                        transaction = BuildTransaction(receipts, transactionHandle)
-                    });
-                }
-                return VRCForgeToolResult.Failed($"Checkpoint preparation failed: {ex.Message}");
+                    blocking = true, mutationStarted = false, committed = false,
+                    commitState = "not_started", saved = false, snapshotIncludesUnsavedState = false
+                });
             }
-        }
-
-        private static object DescribeSceneState(string scenePath)
-        {
-            var scene = SceneManager.GetSceneByPath(scenePath);
-            return new
-            {
-                loaded = scene.IsValid() && scene.isLoaded,
-                dirty = scene.IsValid() && scene.isDirty,
-                file = DescribeProjectFile(scenePath)
-            };
         }
 
         private static object DescribeAssetState(string assetPath)
@@ -455,6 +350,105 @@ namespace VRCForge.Editor
         }
     }
 
+    // Files are owned by this invocation until their references are returned. The
+    // backend then owns their incident lifetime and removes exact hash matches.
+    internal sealed class CheckpointEvidenceFiles : IDisposable
+    {
+        private readonly string projectRoot;
+        private readonly Func<object[]> captureAfter;
+        private readonly List<string> createdFiles = new List<string>();
+        private JObject before;
+        private bool published;
+
+        internal CheckpointEvidenceFiles(string projectRoot, Func<object[]> captureAfter)
+        {
+            this.projectRoot = projectRoot;
+            this.captureAfter = captureAfter;
+        }
+
+        internal void RecordBefore(object[] rows)
+        {
+            before = Write(rows);
+        }
+
+        internal VRCForgeToolResult Complete(VRCForgeToolResult result)
+        {
+            if (before == null) return result;
+            var payload = result.Payload == null ? new JObject() : JObject.FromObject(result.Payload);
+            payload["dirtyAssetEvidenceBefore"] = before;
+            try
+            {
+                payload["dirtyAssetEvidenceAfter"] = Write(captureAfter());
+            }
+            catch (Exception ex)
+            {
+                payload["evidenceError"] = ex.GetType().Name;
+                payload["recoveryRequired"] = true;
+                result = VRCForgeToolResult.FailedWithCode("checkpoint_evidence_capture_failed",
+                    "Checkpoint dirty-asset evidence could not be completed.", payload);
+            }
+            var completed = result.IsSuccessful
+                ? VRCForgeToolResult.Completed(result.Message, payload)
+                : VRCForgeToolResult.FailedWithCode(result.ErrorCode, result.Message, payload);
+            published = true;
+            return completed;
+        }
+
+        private JObject Write(object[] rows)
+        {
+            var document = JArray.FromObject(rows);
+            var bytes = new UTF8Encoding(false).GetBytes(document.ToString(Newtonsoft.Json.Formatting.None));
+            string digest;
+            using (var hash = SHA256.Create())
+                digest = BitConverter.ToString(hash.ComputeHash(bytes)).Replace("-", "").ToLowerInvariant();
+            var items = new JArray(document.Take(16).Select(row => new JObject
+            {
+                ["assetPath"] = Bounded(row["assetPath"]?.ToString()),
+                ["type"] = Bounded(row["type"]?.ToString()),
+                ["dirtyCount"] = row["dirtyCount"]?.DeepClone()
+            }));
+            var summary = new JObject { ["total"] = rows.Length, ["items"] = items };
+            do
+            {
+                summary["truncated"] = items.Count < rows.Length;
+                if (Encoding.UTF8.GetByteCount(summary.ToString(Newtonsoft.Json.Formatting.None)) <= 4096) break;
+                items.RemoveAt(items.Count - 1);
+            } while (items.Count > 0);
+            var reference = "Library/VRCForge/CheckpointEvidence/" + Guid.NewGuid().ToString("N") + ".json";
+            var path = Path.Combine(projectRoot, reference);
+            var temporary = path + ".tmp";
+            Directory.CreateDirectory(Path.GetDirectoryName(path));
+            try
+            {
+                using (var stream = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                {
+                    stream.Write(bytes, 0, bytes.Length);
+                    stream.Flush(true);
+                }
+                File.Move(temporary, path);
+                createdFiles.Add(path);
+            }
+            finally
+            {
+                if (File.Exists(temporary)) File.Delete(temporary);
+            }
+            return new JObject { ["reference"] = reference, ["sha256"] = digest,
+                ["byteCount"] = bytes.Length, ["objectCount"] = rows.Length, ["summary"] = summary };
+        }
+
+        private static string Bounded(string value)
+        {
+            value = value ?? "";
+            return value.Length <= 80 ? value : value.Substring(0, 80);
+        }
+
+        public void Dispose()
+        {
+            if (!published)
+                foreach (var path in createdFiles) File.Delete(path);
+        }
+    }
+
     [VRCForgeCommand(
         toolId: "vrc_reload_after_checkpoint_restore",
         Summary = "Reload restored project scenes and refresh assets after VRCForge rollback. Internal safety tool."
@@ -468,6 +462,8 @@ namespace VRCForge.Editor
             [VRCForgeInput("Exact project scene paths captured before restore.", IsRequired = false)] public List<string> scenePaths { get; set; } = new List<string>();
             [VRCForgeInput("Exact active project scene path captured before restore.", IsRequired = false)] public string activeScenePath { get; set; } = "";
             [VRCForgeInput("Refresh non-scene assets because checkpoint restore changed them.", IsRequired = false)] public bool refreshAssets { get; set; } = true;
+            [VRCForgeInput("Exact approved checkpoint disk footprint.", IsRequired = false)] public string[] checkpointFiles { get; set; }
+            [VRCForgeInput("Actual restored disk files for targeted asset import.", IsRequired = false)] public string[] restoredAssetPaths { get; set; }
             [VRCForgeInput("Exact asset state captured by checkpoint preparation.", IsRequired = false)] public JArray assetBaseline { get; set; }
             [VRCForgeInput("Live-run SHA-256 digest when a bound fixture request is used.", IsRequired = false)] public string expectedRunIdDigest { get; set; } = "";
             [VRCForgeInput("Expected Unity project-root SHA-256 digest.", IsRequired = false)] public string expectedProjectPathDigest { get; set; } = "";
@@ -477,6 +473,12 @@ namespace VRCForge.Editor
         }
 
         public static object HandleCommand(JObject @params)
+        {
+            using (var evidence = new CheckpointEvidenceFiles(CheckpointPrepareTool.ProjectRoot(), CheckpointPrepareTool.DirtyAssetEvidence))
+                return evidence.Complete(HandleCommandWithEvidence(@params, evidence));
+        }
+
+        private static VRCForgeToolResult HandleCommandWithEvidence(JObject @params, CheckpointEvidenceFiles evidence)
         {
             var receipts = new List<SceneTransactionReceipt>();
             var transactionHandle = "";
@@ -488,6 +490,8 @@ namespace VRCForge.Editor
                 CheckpointPrepareTool.ValidateProject(@params);
                 CheckpointPrepareTool.EnsureEditorReady();
                 var phase = (@params?["phase"]?.ToString() ?? "reload").Trim();
+                var dirtyAssetEvidenceBefore = CheckpointPrepareTool.DirtyAssetEvidence();
+                var checkpointFiles = CheckpointPrepareTool.ExactFileScope(@params?["checkpointFiles"]);
                 recoveryPhase = phase;
                 if (string.Equals(phase, "prepare_restore", StringComparison.Ordinal))
                 {
@@ -545,6 +549,7 @@ namespace VRCForge.Editor
                     Scene scratch = default;
                     try
                     {
+                        evidence.RecordBefore(dirtyAssetEvidenceBefore);
                         mutationStarted = true;
                         if (prepareScenes.Count > 0)
                         {
@@ -628,6 +633,7 @@ namespace VRCForge.Editor
                             phase,
                             projectPath = CheckpointPrepareTool.ProjectRoot(),
                             scenes = prepareScenes,
+                            checkpointFiles,
                             activeScenePath = prepareActiveScenePath,
                             unityProcessId = identity?.ProcessId,
                             unityProcessStartedAtUtc = identity?.StartedAtUtc,
@@ -688,6 +694,7 @@ namespace VRCForge.Editor
                     Asset = path,
                     Before = DescribeScene(path)
                 }));
+                evidence.RecordBefore(dirtyAssetEvidenceBefore);
                 mutationStarted = true;
 
                 var scratchScenes = CheckpointPrepareTool.LoadedScenes()
@@ -855,7 +862,10 @@ namespace VRCForge.Editor
                 }
                 if (refreshAssets)
                 {
-                    AssetDatabase.Refresh(ImportAssetOptions.ForceSynchronousImport | ImportAssetOptions.ForceUpdate);
+                    var restoredPaths = CheckpointPrepareTool.ExactFileScope(@params?["restoredAssetPaths"], allowEmpty: true);
+                    if (restoredPaths == null) AssetDatabase.Refresh(ImportAssetOptions.ForceSynchronousImport | ImportAssetOptions.ForceUpdate);
+                    else foreach (var path in restoredPaths.Where(path => !path.EndsWith(".unity", StringComparison.OrdinalIgnoreCase)))
+                        AssetDatabase.ImportAsset(path, ImportAssetOptions.ForceSynchronousImport | ImportAssetOptions.ForceUpdate);
                 }
                 var assetReadback = @params?.Property("assetBaseline") != null
                     ? CheckpointPrepareTool.RestoreAssetBaseline(@params["assetBaseline"]) : null;

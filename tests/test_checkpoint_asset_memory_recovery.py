@@ -18,7 +18,7 @@ def test_zero_disk_diff_needs_exact_asset_reload_receipt(tmp_path, monkeypatch, 
     monkeypatch.setattr(cls, "_restore_archive_checkpoint", lambda *_: {"ok": True, "restoredFiles": [], "deletedFiles": []})
     monkeypatch.setattr(cls, "_cleanup_checkpoint_restore_unity_caches", lambda *_: {})
     monkeypatch.setattr(cls, "_build_checkpoint_rollback_coverage_audit", lambda *a, **kw: {"ok": True})
-    service.checkpoint_restore_prepare_handler = lambda _: {"ok": True, "scenes": []}
+    service.checkpoint_restore_prepare_handler = lambda _, *, checkpoint_files=None: {"ok": True, "scenes": []}
     seen = []
     def reload(_, context):
         seen.append(context)
@@ -59,9 +59,9 @@ def test_registered_menu_checkpoint_uses_preview_exact_paths(tmp_path, monkeypat
     seen = []
     monkeypatch.setattr(server, "manage_expression_menu_sync", lambda arguments, preview: {
         "ok": True, "plan": {"checkpointAssetPaths": ["Assets/ExactSubmenu.asset"]}})
-    monkeypatch.setattr(server, "prepare_unity_checkpoint_sync", lambda root, paths: seen.append(paths) or {"ok": True, "assetBaseline": [{"assetPath": "Assets/ExactSubmenu.asset"}]})
+    monkeypatch.setattr(server, "prepare_unity_checkpoint_sync", lambda root, paths, *, checkpoint_files: seen.append((paths, checkpoint_files)) or {"ok": True, "assetBaseline": [{"assetPath": "Assets/ExactSubmenu.asset"}]})
     result = handler.checkpoint_prepare_handler(tmp_path, {"_checkpointTargetTool": "vrcforge_manage_expression_menu", "menuPath": "logical/name"})
-    assert seen == [["Assets/ExactSubmenu.asset"]]
+    assert seen == [(["Assets/ExactSubmenu.asset"], ["Assets/ExactSubmenu.asset"])]
     assert result["assetBaselineRequired"] is True
 
 

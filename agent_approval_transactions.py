@@ -113,6 +113,11 @@ def _checkpoint_archive_files_for_write(target_tool: str, arguments: Mapping[str
             paths.add(row["clipPath"])
     elif target_tool == "vrcforge_manage_fx_animator":
         edits = nested.get("edits")
+        if "edits" not in nested:
+            action = nested.get("action")
+            if not isinstance(action, str) or not action.strip():
+                return []
+            edits = [nested]
         controller = nested.get("controllerPath")
         if not isinstance(edits, list) or not edits or not isinstance(controller, str):
             return []
@@ -2592,6 +2597,8 @@ class AgentApprovalTransactionService:
         project_root = project_root.resolve()
         record = {**base_record, "projectRoot": str(project_root)}
         archive_files = _checkpoint_archive_files_for_write(target_tool, arguments)
+        if archive_files and not all(is_path_within((project_root / path).resolve(), project_root) and (project_root / path).is_file() and (project_root / (path + ".meta")).is_file() for path in archive_files):
+            archive_files = []
         if not self._ports.is_unity_project_root(project_root):
             record.update(
                 {
@@ -2614,16 +2621,33 @@ class AgentApprovalTransactionService:
             else None
         )
         if dedicated_checkpoint_prepare is not None:
-            with self._scan_mutation(project_root, target_tool):
+            # Checkpoint preparation inspects state; it must never save editor changes.
+            checkpoint_mutation = nullcontext({})
+            with checkpoint_mutation as mutation:
                 try:
                     prepare_result = ensure_dict(
                         dedicated_checkpoint_prepare(project_root, {**dict(arguments), "_checkpointTargetTool": target_tool})
                     )
-                except Exception:  # noqa: BLE001 - dedicated preflight details stay internal.
+                except Exception as exc:  # noqa: BLE001 - dedicated preflight details stay internal.
+                    try:
+                        import sys
+                        import traceback
+                        from diagnostic_privacy import redact_public_evidence
+
+                        print(
+                            "ERROR: checkpoint_preflight_exception " + json.dumps({
+                                "exceptionType": type(exc).__name__,
+                                "traceback": [redact_public_evidence(line) for line in traceback.format_exception(exc)],
+                            }, ensure_ascii=True),
+                            file=sys.stderr, flush=True,
+                        )
+                    except Exception:  # noqa: BLE001 - diagnostics must not alter the failed preflight.
+                        pass
                     prepare_result = {
                         "ok": False,
                         "error": "The dedicated checkpoint preflight failed.",
                     }
+                mutation["outcome"] = prepare_result
             record["unityPrepare"] = prepare_result
             if not prepare_result.get("ok"):
                 record.update(
@@ -2647,11 +2671,13 @@ class AgentApprovalTransactionService:
                     "archiveScopeReason", "full_project_prepared_scope_not_proven"
                 )
         elif self._checkpoint_prepare_handler is not None:
-            with self._scan_mutation(project_root, target_tool):
+            # Disk snapshot preparation never persists unsaved editor state.
+            with nullcontext({}) as mutation:
                 try:
-                    prepare_result = ensure_dict(self._checkpoint_prepare_handler(project_root))
+                    prepare_result = ensure_dict(self._checkpoint_prepare_handler(project_root, checkpoint_files=archive_files) if archive_files else self._checkpoint_prepare_handler(project_root))
                 except Exception as exc:  # noqa: BLE001
-                    prepare_result = {"ok": False, "error": str(exc)}
+                    prepare_result = {"ok": False, "blocking": True, "error": str(exc)}
+                mutation["outcome"] = prepare_result
             record["unityPrepare"] = prepare_result
             if not prepare_result.get("ok"):
                 warning = str(prepare_result.get("error") or "Unity could not prepare a rollback checkpoint.")
@@ -2691,6 +2717,12 @@ class AgentApprovalTransactionService:
         elif target_tool in {"vrcforge_manage_expression_menu", "vrcforge_set_renderer_material_slot"} and archive_files is not None:
             record["archiveScopeReason"] = "full_project_prepared_asset_scope_invalid"
 
+        if archive_files and dedicated_checkpoint_prepare is None and not record.get("archiveFiles"):
+            record.update(ok=False, blocking=True, status="failed", error="Exact checkpoint files changed after preparation.")
+            self._ports.checkpoint.append_checkpoint(record)
+            return record
+        if record.get("archiveFiles"):
+            return self._ports.checkpoint.create_archive_checkpoint(project_root, record)
         git_root_result = self._ports.run_git(project_root, ["rev-parse", "--show-toplevel"])
         if not git_root_result["ok"]:
             return self._ports.checkpoint.create_archive_checkpoint(project_root, record)
@@ -2881,9 +2913,16 @@ class AgentApprovalTransactionService:
             "restoreSafetyCheckpointIds",
             "restoreSafetyCheckpoint",
             "recoveryIncidentKey",
+            "unityEvidenceReferences",
+            "unityEvidenceWarnings",
         ):
             if key in recovery:
                 record[key] = recovery[key]
+        latest_evidence = next((item for item in self._ports.checkpoint.active_apply_recoveries()
+                                if item.get("id") == record["id"]), {})
+        for key in ("unityEvidenceReferences", "unityEvidenceWarnings"):
+            if key in latest_evidence:
+                record[key] = latest_evidence[key]
         if error:
             record["error"] = error
         if note:
@@ -2893,6 +2932,12 @@ class AgentApprovalTransactionService:
         if write_failure is not None:
             record["writeFailure"] = write_failure
         saved = self._ports.checkpoint.append_apply_recovery_entry(record)
+        if status not in APPLY_RECOVERY_ACTIVE_STATUSES and saved.get("unityEvidenceReferences"):
+            from checkpoint_unity_evidence import cleanup_recovery_evidence
+            saved = self._ports.checkpoint.append_apply_recovery_entry({
+                **saved,
+                "unityEvidenceCleanup": cleanup_recovery_evidence(saved),
+            })
         self._ports.append_audit({"event": "apply_recovery_updated", "recovery": saved})
         return saved
 
@@ -3033,6 +3078,21 @@ class AgentApprovalTransactionService:
                 "postRestoreValidationRequired": True,
                 "note": "The exact VCC, ALCOM, or Unity Hub catalogue bytes are receipt-bound before registration.",
             }
+        if handler.name == "vrcforge_create_safe_backup":
+            return {
+                "schema": ROLLBACK_POLICY_SCHEMA,
+                "required": False,
+                "kind": "create_new_backup_artifact",
+                "approvalRequired": True,
+                "preWriteCheckpointRequired": False,
+                "checkpointScope": [],
+                "restoreTool": "",
+                "coverageAudit": "",
+                "postRestoreValidationRequired": False,
+                "note": "Creates a new project-owned backup directory and manifest without changing source assets. "
+                        "Unsaved editor memory is not captured. Failed creation cleans its own unchanged partial files; "
+                        "a completed backup is retained, and restoring source assets is a separate approved write.",
+            }
         if handler.name == "vrcforge_install_unity_core":
             return {
                 "schema": ROLLBACK_POLICY_SCHEMA,
@@ -3105,8 +3165,8 @@ class AgentApprovalTransactionService:
                 "postRestoreValidationRequired": True,
                 "note": (
                     "This operation changes transient Unity Editor or Play Mode state. "
-                    "Entering Play retains a project snapshot before mutation; runtime parameter changes and "
-                    "Play Mode exit use their explicit inverse/readback path without claiming a scene checkpoint. "
+                    "Play transitions use their explicit inverse/readback path without saving or claiming an asset checkpoint. "
+                    "Project Play callbacks may save or generate persistent assets; the inverse transition does not undo those writes. "
                     "Runtime observation additionally creates bounded managed artifacts with create-new semantics; "
                     "the parameter is never automatically restored and partial artifacts are retained as evidence."
                 ),

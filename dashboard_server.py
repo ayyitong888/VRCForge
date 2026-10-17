@@ -20329,16 +20329,29 @@ def finalize_add_modular_avatar_component_verification_sync(
     )
 
 
-def prepare_unity_checkpoint_sync(project_root: Path, checkpoint_asset_paths: list[str] | None = None) -> dict[str, Any]:
+def prepare_unity_checkpoint_sync(project_root: Path, checkpoint_asset_paths: list[str] | None = None, *, checkpoint_files: list[str]) -> dict[str, Any]:
+    if not checkpoint_files:
+        return {"ok": False, "blocking": True, "code": "checkpoint_scope_unresolved",
+                "error": "The approved write did not establish an exact checkpoint file scope.",
+                "mutationStarted": False, "saved": False}
+    try:
+        core_info = UnityMcpCoreClient(project_root, timeout_seconds=3.0).core_info()
+    except Exception as exc:
+        return {"ok": False, "blocking": True, "code": "checkpoint_core_capability_unavailable",
+                "error": str(exc), "mutationStarted": False, "saved": False}
+    if core_info.get("checkpointPrepareSavesDirtyAssets") is not False:
+        return {"ok": False, "blocking": True, "code": "checkpoint_core_upgrade_required",
+                "error": "Install and load the current Core before preparing a non-saving checkpoint.",
+                "mutationStarted": False, "saved": False}
     live_connection = globals().get("PRIMITIVE_BASIS_LIVE_CONNECTION")
     if isinstance(live_connection, PrimitiveBasisLiveUnityConnection):
-        return live_connection.prepare_checkpoint(project_root, checkpoint_asset_paths)
+        return live_connection.prepare_checkpoint(project_root, checkpoint_asset_paths, checkpoint_files=checkpoint_files)
     settings = load_dashboard_settings(build_agent_connection_request({}))
     settings.unity_mcp_timeout_seconds = max(int(settings.unity_mcp_timeout_seconds or 30), 180)
     result = invoke_unity_mcp(
         settings,
         "vrc_prepare_checkpoint",
-        {"projectPath": str(project_root), **({"checkpointAssetPaths": checkpoint_asset_paths} if checkpoint_asset_paths is not None else {})},
+        {"projectPath": str(project_root), **({"checkpointAssetPaths": checkpoint_asset_paths} if checkpoint_asset_paths is not None else {}), **({"checkpointFiles": checkpoint_files} if checkpoint_files is not None else {})},
         execution_context={"lane": "app_safety_control"},
         preserve_tool_error=True,
     )
@@ -20351,10 +20364,10 @@ CHECKPOINT_RELOAD_READY_POLL_SECONDS = 0.5
 CHECKPOINT_RELOAD_CONNECTION_CLOSED_ERROR = "Unity MCP Core connection closed unexpectedly."
 
 
-def prepare_unity_checkpoint_restore_sync(project_root: Path) -> dict[str, Any]:
+def prepare_unity_checkpoint_restore_sync(project_root: Path, *, checkpoint_files: list[str] | None = None) -> dict[str, Any]:
     live_connection = globals().get("PRIMITIVE_BASIS_LIVE_CONNECTION")
     if isinstance(live_connection, PrimitiveBasisLiveUnityConnection):
-        return live_connection.prepare_restore_checkpoint(project_root)
+        return live_connection.prepare_restore_checkpoint(project_root, checkpoint_files=checkpoint_files)
     settings = load_dashboard_settings(build_agent_connection_request({}))
     settings.unity_mcp_timeout_seconds = min(
         max(int(settings.unity_mcp_timeout_seconds or 30), 1),
@@ -20367,6 +20380,7 @@ def prepare_unity_checkpoint_restore_sync(project_root: Path) -> dict[str, Any]:
         {
             "projectPath": str(project_root),
             "phase": "prepare_restore",
+            **({"checkpointFiles": checkpoint_files} if checkpoint_files is not None else {}),
         },
         execution_context={"lane": "app_safety_control"},
         preserve_tool_error=True,
@@ -20495,6 +20509,7 @@ def reload_unity_checkpoint_sync(
                 "scenePaths": prepared_scenes,
                 "activeScenePath": active_scene_path,
                 "refreshAssets": refresh_assets,
+                **({"restoredAssetPaths": normalize_string_list(ensure_dict(restore_prepare).get("restoredFiles"))} if ensure_dict(restore_prepare).get("checkpointFiles") and not ensure_dict(restore_prepare).get("deletedFiles") else {}),
                 **({"assetBaseline": ensure_dict(restore_prepare)["assetBaseline"]} if "assetBaseline" in ensure_dict(restore_prepare) else {}),
             },
             execution_context={"lane": "app_safety_control"},
@@ -20899,7 +20914,8 @@ def prepare_authoritative_unity_checkpoint_sync(
                 and component.get("type") == "UnityEngine.CanvasGroup"))
         )
         if not proven:
-            return prepare_unity_checkpoint_sync(project_root)
+            return {"ok": False, "blocking": True, "code": "checkpoint_scope_unresolved",
+                    "error": "The approved component write did not establish an exact checkpoint scene scope."}
         query = {"projectPath": str(project_root), "scope": target["scope"],
                  "objectGlobalObjectId": obj["globalObjectId"]}
         if ensure_dict(target.get("avatar")).get("globalObjectId"):
@@ -20916,9 +20932,9 @@ def prepare_authoritative_unity_checkpoint_sync(
         preview = manage_expression_menu_sync(arguments, preview=True)
         plan = ensure_dict(preview.get("plan"))
         paths = plan.get("checkpointAssetPaths")
-        if preview.get("ok") is not True or not isinstance(paths, list) or any(not isinstance(path, str) for path in paths):
+        if preview.get("ok") is not True or not isinstance(paths, list) or not paths or any(not isinstance(path, str) for path in paths):
             return {"ok": False, "error": "The menu preview did not provide its exact checkpoint asset footprint."}
-        prepared = prepare_unity_checkpoint_sync(project_root, paths)
+        prepared = prepare_unity_checkpoint_sync(project_root, paths, checkpoint_files=paths)
         baseline = prepared.get("assetBaseline")
         if (prepared.get("ok") is not True or not isinstance(baseline, list)
                 or any(not isinstance(item, dict) for item in baseline)
@@ -20985,7 +21001,13 @@ def prepare_authoritative_unity_checkpoint_sync(
         MATERIAL_TEXTURE_ASSIGNMENT_TOOL,
         MATERIAL_VARIANT_FLATTEN_TOOL,
     }:
-        return prepare_unity_checkpoint_sync(project_root)
+        from agent_approval_transactions import _checkpoint_archive_files_for_write
+
+        checkpoint_files = _checkpoint_archive_files_for_write(checkpoint_target, arguments)
+        if not checkpoint_files:
+            return {"ok": False, "blocking": True, "code": "checkpoint_scope_unresolved",
+                    "error": "The approved write did not establish an exact checkpoint file scope."}
+        return prepare_unity_checkpoint_sync(project_root, checkpoint_files=checkpoint_files)
     approved_write_arguments = copy.deepcopy(arguments)
     approved_write_arguments.pop("_vrcforge_user_constraints", None)
     try:
@@ -24118,6 +24140,8 @@ def gesture_manager_enter_play_mode_sync(params: dict[str, Any]) -> dict[str, An
         ),
         "Gesture Manager Play Mode entry",
     )
+    payload["projectPlayCallbacksMayPersistAssets"] = True
+    payload["assetRollbackClaimed"] = False
     payload.setdefault("ok", True)
     return payload
 
@@ -24334,6 +24358,8 @@ def set_play_mode_sync(params: dict[str, Any]) -> dict[str, Any]:
         ),
         "set Play Mode",
     )
+    payload["projectPlayCallbacksMayPersistAssets"] = True
+    payload["assetRollbackClaimed"] = False
     payload.setdefault("ok", True)
     return payload
 
@@ -26719,11 +26745,12 @@ def register_agent_gateway_tools() -> None:
     AGENT_GATEWAY.register_tool("vrcforge_restore_last_backup", "Request approval to restore the last face or shader backup.", "supervised-write", request_agent_restore_last_backup, write=True)
     register_write_handler(
         "vrcforge_create_safe_backup",
-        "Create a project-owned safe backup snapshot through VRCForge approval and checkpoint controls.",
+        "When to use: create a new project-owned backup directory and manifest from exact source assets and saved scene files. Sources are read without saving unsaved editor state. When NOT to use: do not treat this disk snapshot as a backup of unsaved memory or overwrite an existing backup. Negative example: do not invoke backup as a Save All operation.",
         "medium",
         create_safe_backup_sync,
         requires_approved_execution_context=True,
         approved_execution_plan_builder=build_safe_backup_execution_plan,
+        pre_write_checkpoint_required=False,
     )
     register_write_handler(
         "vrcforge_capture_screenshot",
@@ -26759,10 +26786,11 @@ def register_agent_gateway_tools() -> None:
     )
     register_write_handler(
         "vrcforge_gesture_manager_enter_play_mode",
-        "When to use: with exactly one active Gesture Manager, enter Play Mode through Gesture Manager 3.9.9's public editor/runtime path and return the connected manager/avatar identity. When NOT to use: do not use generic Play Mode as a substitute, do not create another manager, and do not use this to change runtime parameters. Negative example: do not call it when two active Gesture Managers are present and guess which one should control the avatar.",
+        "When to use: with exactly one active Gesture Manager, enter Play Mode through Gesture Manager 3.9.9's public editor/runtime path and return the connected manager/avatar identity. Project Play callbacks may save or generate assets; this transition does not claim asset rollback. When NOT to use: do not use generic Play Mode as a substitute, do not create another manager, and do not use this to change runtime parameters. Negative example: do not call it when two active Gesture Managers are present and guess which one should control the avatar.",
         "low",
         gesture_manager_enter_play_mode_sync,
         verification_finalize_handler=gesture_manager_enter_play_mode_finalize,
+        pre_write_checkpoint_required=False,
     )
     register_write_handler(
         "vrcforge_gesture_manager_set_parameter",
@@ -26779,11 +26807,11 @@ def register_agent_gateway_tools() -> None:
     )
     register_write_handler(
         "vrcforge_set_play_mode",
-        "When to use: request one explicit Unity Play Mode state, then poll capture/status until the requested state is observed. When NOT to use: do not treat transition_scheduled as final verification and do not use it while Unity is compiling or updating. Negative example: do not repeatedly toggle Play Mode when one pending transition has not completed.",
+        "When to use: request one explicit Unity Play Mode state, then poll capture/status until the requested state is observed. Project Play callbacks may save or generate assets; the inverse transition does not undo those writes. When NOT to use: do not treat transition_scheduled as final verification and do not use it while Unity is compiling or updating. Negative example: do not repeatedly toggle Play Mode when one pending transition has not completed.",
         "low",
         set_play_mode_sync,
         verification_finalize_handler=set_play_mode_finalize,
-        pre_write_checkpoint_required=_play_mode_checkpoint_required,
+        pre_write_checkpoint_required=False,
     )
     register_write_handler(
         "vrcforge_confirm_unity_reload_dialog",
@@ -28355,15 +28383,15 @@ class PrimitiveBasisLiveUnityConnection:
             "exitCode": result.exit_code,
         }
 
-    def prepare_checkpoint(self, project_root: Path, checkpoint_asset_paths: list[str] | None = None) -> dict[str, Any]:
+    def prepare_checkpoint(self, project_root: Path, checkpoint_asset_paths: list[str] | None = None, *, checkpoint_files: list[str] | None = None) -> dict[str, Any]:
         return self._checkpoint_call("vrc_prepare_checkpoint", project_root,
-            {"checkpointAssetPaths": checkpoint_asset_paths} if checkpoint_asset_paths is not None else None)
+            {**({"checkpointAssetPaths": checkpoint_asset_paths} if checkpoint_asset_paths is not None else {}), **({"checkpointFiles": checkpoint_files} if checkpoint_files is not None else {})})
 
-    def prepare_restore_checkpoint(self, project_root: Path) -> dict[str, Any]:
+    def prepare_restore_checkpoint(self, project_root: Path, *, checkpoint_files: list[str] | None = None) -> dict[str, Any]:
         return self._checkpoint_call(
             "vrc_reload_after_checkpoint_restore",
             project_root,
-            {"phase": "prepare_restore"},
+            {"phase": "prepare_restore", **({"checkpointFiles": checkpoint_files} if checkpoint_files is not None else {})},
         )
 
     def reload_checkpoint(
@@ -28381,6 +28409,7 @@ class PrimitiveBasisLiveUnityConnection:
                     prepared.get("scenes") if isinstance(prepared.get("scenes"), list) else []
                 ),
                 "activeScenePath": str(prepared.get("activeScenePath") or "").strip(),
+                **({"restoredAssetPaths": normalize_string_list(prepared.get("restoredFiles"))} if prepared.get("checkpointFiles") and not prepared.get("deletedFiles") else {}),
                 **({"assetBaseline": prepared["assetBaseline"]} if "assetBaseline" in prepared else {}),
                 "refreshAssets": any(
                     not str(path).replace("\\", "/").lower().endswith(".unity")

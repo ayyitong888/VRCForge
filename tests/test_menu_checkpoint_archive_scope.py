@@ -13,7 +13,10 @@ def _prepare(monkeypatch,root,*,action='update',extra=None,plan_changes=None):
     plan={'action':action,'targetMenuExists':True,'targetMenuAssetPath':ASSET,'checkpointAssetPaths':[ASSET],'newMenuAssetPaths':[]}
     plan.update(plan_changes or {})
     monkeypatch.setattr(server,'manage_expression_menu_sync',lambda *a,**kw:{'ok':True,'plan':plan})
-    monkeypatch.setattr(server,'prepare_unity_checkpoint_sync',lambda *a:{'ok':True,'assetBaseline':[{'assetPath':ASSET,'assetGuid':'a'*32,'serializedState':{}}]})
+    def prepare(root, asset_paths, *, checkpoint_files):
+        assert checkpoint_files == asset_paths == plan['checkpointAssetPaths']
+        return {'ok':True,'assetBaseline':[{'assetPath':ASSET,'assetGuid':'a'*32,'serializedState':{}}]}
+    monkeypatch.setattr(server,'prepare_unity_checkpoint_sync',prepare)
     handler=server.AGENT_GATEWAY._write_handlers[MENU]
     return handler.checkpoint_prepare_handler(root,{'_checkpointTargetTool':MENU,'action':action,**(extra or {})})
 

@@ -8,17 +8,45 @@ import subprocess
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_material_checkpoint_safety_lane(tmp_path):
-    source = (ROOT / "Assets/VRCForge/Editor/MCP/VRCForgeMcpCoreServer.cs").read_text(encoding="utf-8")
+def _safety_predicate_methods(source):
     names = ["IsStrictSafetyControlRequest", "HasCompleteSafetyControlLiveBinding", "HasExactKeys", "HasString", "HasNonEmptyString", "HasBoolean", "HasTrueBoolean", "HasBoundedInteger", "HasStringArray"]
     methods = []
     for name in names:
         start = source.index("        private static bool " + name + "(")
         end = source.index("\n        }", start) + len("\n        }")
         methods.append(source[start:end])
+    checkpoint_source = (ROOT / "Assets/VRCForge/Editor/CheckpointRecoveryTool.cs").read_text(encoding="utf-8")
+    start = checkpoint_source.index("        internal static HashSet<string> ExactFileScope(")
+    end = checkpoint_source.index("\n        }", start) + len("\n        }")
+    return "\n".join(methods), "static class CheckpointPrepareTool {\n" + checkpoint_source[start:end] + "\n}\n"
+
+
+def _run_safety_probe(tmp_path, program):
+    base = Path(os.environ.get("ProgramFiles", "C:/Program Files")) / "dotnet"
+    compiler = sorted((base / "sdk").glob("*/Roslyn/bincore/csc.dll"))[-1]
+    refs = sorted((base / "packs/Microsoft.NETCore.App.Ref").glob("*/ref/netcoreapp3.1"))[-1]
+    newtonsoft = compiler.parents[2] / "Newtonsoft.Json.dll"
+    cs = tmp_path / "Probe.cs"
+    cs.write_text(program, encoding="utf-8")
+    dll = tmp_path / "Probe.dll"
+    cmd = [shutil.which("dotnet"), str(compiler), "-nologo", "-target:exe", "-nostdlib+", "-langversion:8.0", f"-out:{dll}", f"-r:{newtonsoft}"]
+    cmd += [f"-r:{p}" for p in refs.glob("*.dll")] + [str(cs)]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stdout + result.stderr
+    shutil.copy2(newtonsoft, tmp_path / "Newtonsoft.Json.dll")
+    (tmp_path / "Probe.runtimeconfig.json").write_text(json.dumps({"runtimeOptions":{"tfm":"netcoreapp3.1","framework":{"name":"Microsoft.NETCore.App","version":"3.1.0"}}}), encoding="utf-8")
+    result = subprocess.run([shutil.which("dotnet"), str(dll)], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
+    return result.stdout
+
+
+def test_material_checkpoint_safety_lane(tmp_path):
+    source = (ROOT / "Assets/VRCForge/Editor/MCP/VRCForgeMcpCoreServer.cs").read_text(encoding="utf-8")
+    methods, checkpoint_class = _safety_predicate_methods(source)
     program = '''using System; using System.Linq; using System.Collections.Generic; using Newtonsoft.Json.Linq;
+''' + checkpoint_class + '''
 class Probe {
-''' + "\n".join(methods) + '''
+''' + methods + '''
 static void Check(bool value,string name){if(!value)throw new Exception(name);}
 static JObject Prep(int n){return new JObject { ["projectPath"]="D:/Actual", ["materialBaselineOnly"]=true,
 ["checkpointAssetPaths"]=new JArray(Enumerable.Range(0,n).Select(i=>(object)("Assets/M"+i+".mat"))) };}
@@ -42,19 +70,4 @@ bad=Reload(1,true);bad["assetBaseline"][0]["materialStateDigest"]="invalid";Chec
 bad=Reload(1,true);bad["phase"]="prepare_restore";Check(!IsStrictSafetyControlRequest("vrc_reload_after_checkpoint_restore",bad),"wrong phase allowed");
 Console.WriteLine("PASS 12");return 0;}}
 '''
-    base = Path(os.environ.get("ProgramFiles", "C:/Program Files")) / "dotnet"
-    compiler = sorted((base / "sdk").glob("*/Roslyn/bincore/csc.dll"))[-1]
-    refs = sorted((base / "packs/Microsoft.NETCore.App.Ref").glob("*/ref/netcoreapp3.1"))[-1]
-    newtonsoft = compiler.parents[2] / "Newtonsoft.Json.dll"
-    cs = tmp_path / "Probe.cs"
-    cs.write_text(program, encoding="utf-8")
-    dll = tmp_path / "Probe.dll"
-    cmd = [shutil.which("dotnet"), str(compiler), "-nologo", "-target:exe", "-nostdlib+", "-langversion:8.0", f"-out:{dll}", f"-r:{newtonsoft}"]
-    cmd += [f"-r:{p}" for p in refs.glob("*.dll")] + [str(cs)]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-    assert result.returncode == 0, result.stdout + result.stderr
-    shutil.copy2(newtonsoft, tmp_path / "Newtonsoft.Json.dll")
-    (tmp_path / "Probe.runtimeconfig.json").write_text(json.dumps({"runtimeOptions":{"tfm":"netcoreapp3.1","framework":{"name":"Microsoft.NETCore.App","version":"3.1.0"}}}), encoding="utf-8")
-    result = subprocess.run([shutil.which("dotnet"), str(dll)], capture_output=True, text=True, timeout=30)
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert "PASS 12" in result.stdout
+    assert "PASS 12" in _run_safety_probe(tmp_path, program)

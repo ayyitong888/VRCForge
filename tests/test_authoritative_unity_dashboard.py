@@ -922,7 +922,7 @@ def test_strict_checkpoint_blocks_canonical_drift_before_saving(tmp_path: Path) 
     save_prepare.assert_not_called()
 
 
-def test_existing_unity_writes_keep_the_saving_checkpoint_prepare(tmp_path: Path) -> None:
+def test_unproven_unity_write_scope_blocks_before_checkpoint_prepare(tmp_path: Path) -> None:
     project = tmp_path / "Project"
     (project / "Assets").mkdir(parents=True)
     expected = {"ok": True, "mode": "save_existing_state"}
@@ -939,8 +939,9 @@ def test_existing_unity_writes_keep_the_saving_checkpoint_prepare(tmp_path: Path
             },
         )
 
-    assert result == expected
-    save_prepare.assert_called_once_with(project.resolve())
+    assert result['ok'] is False and result['blocking'] is True
+    assert result['code'] == 'checkpoint_scope_unresolved'
+    save_prepare.assert_not_called()
 
 
 @pytest.mark.parametrize(
