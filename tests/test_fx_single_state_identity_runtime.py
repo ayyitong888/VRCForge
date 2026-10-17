@@ -43,6 +43,7 @@ class Probe {
  static int failures;
  static void Check(bool value,string label){Console.WriteLine((value?"PASS ":"FAIL ")+label);if(!value)failures++;}
  static bool Reject(AnimatorController c,string action,JObject args){try{ValidateEdit(c,action,args);return false;}catch(InvalidOperationException e){return e.Message.Contains("ambiguous");}}
+ static bool RejectMissing(AnimatorController c,JObject args){try{ValidateEdit(c,"update_state",args);return false;}catch(InvalidOperationException e){return e.Message.Contains("not found for update");}}
  static AnimatorStateMachine Machine(params string[] names)=>new AnimatorStateMachine{states=names.Select(n=>new ChildAnimatorState{state=new AnimatorState{name=n}}).ToArray()};
  static JObject Args(string name)=>new JObject{["layerName"]="FX",["stateName"]=name};
  public static int Main(){
@@ -55,6 +56,8 @@ class Probe {
   }
   Check(!Reject(c,"update_state",Args("Unique")),"unique state accepted even with unrelated duplicate names");
   Check(!Reject(c,"ensure_state",Args("New")),"new state creation unchanged");
+  Check(RejectMissing(c,Args("Missing")),"update refuses a missing state");
+  var missingLayer=Args("Unique");missingLayer["layerName"]="Missing";Check(RejectMissing(c,missingLayer),"update refuses a missing layer");
   root.states=root.states.Concat(new[]{new ChildAnimatorState{state=new AnimatorState{name="Idle"}}}).ToArray();
   Check(Reject(c,"update_state",Args("Idle")),"root versus nested duplicate rejected");
   var uniqueNested=new AnimatorController{layers=new[]{new AnimatorControllerLayer{stateMachine=Machine()}}};uniqueNested.layers[0].stateMachine.stateMachines=new[]{new ChildAnimatorStateMachine{stateMachine=Machine("Nested")}};
@@ -88,4 +91,4 @@ class Probe {
     (tmp_path / "Probe.runtimeconfig.json").write_text(json.dumps({"runtimeOptions": {"tfm": "net8.0", "framework": {"name": "Microsoft.NETCore.App", "version": "8.0.0"}}}), encoding="utf-8")
     result = subprocess.run([str(dotnet), str(dll)], capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr
-    assert result.stdout.count("PASS ") == 19
+    assert result.stdout.count("PASS ") == 21

@@ -72,6 +72,7 @@ def _gameobject_target(params: dict[str, Any]) -> str:
 
 
 _AVATAR_KEYS = (
+    "expectedSpeed", "expectedStateDigest",
     "edits",
     "curves", "clips",
     "sourceStateName",

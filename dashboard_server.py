@@ -22237,6 +22237,8 @@ def _avatar_primitive_request(params: dict[str, Any], preview: bool | None = Non
         "writeDefaults",
         "motionClipPath",
         "speed",
+        "expectedSpeed",
+        "expectedStateDigest",
         "timeParameterActive",
         "timeParameter",
         "viewPosition",
@@ -26549,7 +26551,7 @@ def register_agent_gateway_tools() -> None:
     AGENT_GATEWAY.register_tool("vrcforge_preview_write_animation_curve", "Preview one AnimationClip binding edit or an atomic curves batch without writing.", "plan/preview", lambda params: write_animation_curve_sync(params, preview=True))
     AGENT_GATEWAY.register_tool("vrcforge_preview_manage_expression_parameters", "Preview deleting, renaming, reordering, or updating existing expression parameters without writing.", "plan/preview", lambda params: manage_expression_parameters_sync(params, preview=True))
     AGENT_GATEWAY.register_tool("vrcforge_preview_manage_expression_menu", "Preview expression menu control create/update/delete/reorder without writing.", "plan/preview", lambda params: manage_expression_menu_sync(params, preview=True))
-    AGENT_GATEWAY.register_tool("vrcforge_preview_manage_fx_animator", "Preview one FX edit or an atomic ordered edits batch, including multiple delete_layer entries by exact unique layerName, without writing.", "plan/preview", lambda params: manage_fx_animator_sync(params, preview=True))
+    AGENT_GATEWAY.register_tool("vrcforge_preview_manage_fx_animator", "when-to-use: preview one FX edit or atomic ordered batch without writing. A single state edit returns authoritative stateChange.before/after and expectedStateDigest; pass expectedSpeed when the user specifies the old speed, and copy expectedStateDigest into the write. This preview can supply the current target state without a separate full controller scan. when-NOT-to-use: do not infer before from requested values or use this as write approval. Negative example: a changed controller requires a new preview.", "plan/preview", lambda params: manage_fx_animator_sync(params, preview=True))
     AGENT_GATEWAY.register_tool("vrcforge_preview_restore_backup", "Preview which files a safe backup restore would overwrite, without writing.", "plan/preview", preview_safe_backup_restore_sync)
     AGENT_GATEWAY.register_tool("vrcforge_scan_avatar_performance", "Calculate VRChat SDK performance statistics and rank for an avatar.", "read/debug", scan_avatar_performance_sync)
     AGENT_GATEWAY.register_tool("vrcforge_package_manager_status", "Detect vrc-get/ALCOM/vpm CLIs and addon package install state.", "read/debug", PACKAGE_INSTALL_WORKFLOWS.package_manager_status)

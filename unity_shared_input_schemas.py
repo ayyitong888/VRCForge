@@ -431,6 +431,8 @@ MANAGE_FX_ANIMATOR_PUBLIC_INPUT_SCHEMA: dict[str, Any] = {
         "writeDefaults": {"type": "boolean"},
         "motionClipPath": {"type": "string", "pattern": "^Assets/"},
         "speed": {"type": "number"},
+        "expectedSpeed": {"type": "number", "description": "Expected current speed for a single state edit; a mismatch is refused before mutation."},
+        "expectedStateDigest": {"type": "string", "pattern": "^[0-9a-f]{64}$", "description": "Copy from the authoritative FX preview to reject controller changes before writing."},
         "timeParameterActive": {"type": "boolean", "description": "Optional: use a Float parameter as normalized motion time."},
         "timeParameter": {"type": "string", "minLength": 1, "description": "Optional existing Float Animator parameter used as normalized motion time."},
         "hasExitTime": {"type": "boolean"},
