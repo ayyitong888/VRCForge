@@ -6526,6 +6526,24 @@ class AgentGateway:
         )
         if continuation_observation:
             loop_state.append(continuation_observation)
+        steps: list[dict[str, Any]] = (
+            task_loop.historical_steps() if continuation_context else []
+        )
+        approved_execution = ensure_dict(ensure_dict(task_continuation).get("execution"))
+        approved_result = approved_execution.get("result")
+        if (continuation_context.get("tool") == "vrcforge_manage_fx_animator"
+                and isinstance(approved_result, dict)
+                and approved_result.get("schema") == "vrcforge.fx_animator_write.v1"
+                and isinstance(approved_result.get("writeVerification"), dict)):
+            action_id = str(continuation_context.get("requestedActionId") or "")
+            completed_step = next((item for item in steps if item.get("actionId") == action_id), None)
+            completed_observation = next((item for item in loop_state if item.get("actionId") == action_id), None)
+            if completed_step is not None and completed_observation is not None:
+                completed_step["result"] = approved_result
+                reader = result_continuation(session_id, turn_id, project_root, completed_step,
+                                             planner_policy.sanitize_planner_observation_text)
+                completed_step["resultRead"] = reader
+                completed_observation.update({"result": approved_result, "resultRead": reader})
         native_binding = self.runtime_planner.native_conversation_binding(project_root)
         try:
             native_turn = NativeRuntimeTurn(
@@ -6542,9 +6560,6 @@ class AgentGateway:
             kwargs.setdefault("usage_parent_turn_id", turn_id)
             return native_turn.approval_seed(task_loop.approval_seed(**kwargs))
 
-        steps: list[dict[str, Any]] = (
-            task_loop.historical_steps() if continuation_context else []
-        )
         # Context belongs to this invocation, not to a synthetic executed tool.
         # Keep it stable across model rounds and dispose it with the turn. Its
         # content identity prevents a resumed turn from reusing a stale cursor.

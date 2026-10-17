@@ -4337,6 +4337,20 @@ class RuntimePlannerService:
                 preview = "; ".join(fields)
                 return "; ".join(part for part in (preview, "; ".join(causal_fields)) if part)
 
+            if (tool_name == "vrcforge_manage_fx_animator" and isinstance(result, dict)
+                    and result.get("schema") == "vrcforge.fx_animator_write.v1"
+                    and isinstance(result.get("writeVerification"), dict)):
+                # This bounded projection is produced from the same persisted
+                # write receipt, never from an approval or an expired scan.
+                summary = _sanitize_complete_planner_value(redact_sensitive(result["writeVerification"]))
+                continuation = step.get("resultRead")
+                continuation_text = ("; resultContinuation=" + json.dumps(continuation, ensure_ascii=False, separators=(",", ":"))
+                                     if isinstance(continuation, dict) else "")
+                return observation_prefix(observation_limit) + "; writeVerification=" + json.dumps(
+                    summary, ensure_ascii=False, separators=(",", ":")) + continuation_text + (
+                    "; writeVerificationPolicy=This is the approved write\'s persisted readback, not scan freshness. "
+                    "Use its explicit target values when covered; read retained full content only for missing or truncated details. "
+                    "Do not reuse expired scan evidence as current or repeat a scan solely to recover an already verified value.")
             if read_evidence:
                 executed_input = ""
                 if tool_name in {"shell", "unity_shell"} and isinstance(step.get("executedInput"), dict):

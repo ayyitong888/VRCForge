@@ -22388,6 +22388,11 @@ def manage_fx_animator_sync(params: dict[str, Any], preview: bool = False) -> di
         "manage FX animator",
     )
     payload.setdefault("ok", True)
+    if not preview:
+        from agent_write_verification_summary import bounded_write_verification_summary
+        summary = bounded_write_verification_summary(payload, request)
+        if summary is not None:
+            payload["writeVerification"] = summary
     return payload
 
 
