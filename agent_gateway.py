@@ -2687,14 +2687,11 @@ class AgentGateway:
                         status_code=409,
                         cause_code="project_root_missing",
                     )
-                resolved_target = self.resolve_execution_target_reference(
-                    public_reference,
-                    project_root=project_root,
-                    required_scope=identity_scope(
-                        tool.name,
-                        write=bool(tool.write),
-                        arguments=params_for_handler,
-                    ),
+                # Restore the same identity as the full-envelope read path.
+                # The shared read guard retains explicit mandatory scopes;
+                # optional reads do not acquire a new name-derived scope.
+                resolved_target = self._validate_external_mcp_execution_target(
+                    tool.name, params_for_handler,
                 )
                 params_for_handler = dict(tool_params)
                 params_for_handler["executionTarget"] = resolved_target
@@ -3876,10 +3873,10 @@ class AgentGateway:
         if target is not None:
             snapshot_scope = str(target.get("scope") or "project")
             if public_reference is not None:
-                snapshot_scope = identity_scope(
-                    tool_name,
-                    write=tool_name in self._write_handlers,
-                    arguments=arguments,
+                snapshot_scope = self._execution_target_bindings.bound_scope(
+                    public_reference,
+                    session_context=self.execution_target_session_context(),
+                    project_root=arguments.get("projectPath") or arguments.get("projectRoot") or None,
                 )
             snapshot_id = stable_hash(
                 f"{target.get('namespace') or target_digest or execution_target_digest(target)}:{tool_name}"
@@ -4716,11 +4713,11 @@ class AgentGateway:
                 status_code=409,
                 cause_code="execution_target_missing",
             )
-        required_scope = (
-            identity_scope(tool_name, write=bool(write_handler), arguments=arguments)
-            if required
-            else str(target.get("scope") or "project")
-        )
+        required_scope = None
+        if required:
+            required_scope = identity_scope(tool_name, write=bool(write_handler), arguments=arguments)
+        elif not is_execution_target_reference(target):
+            required_scope = str(target.get("scope") or "project")
         try:
             if is_execution_target_reference(target):
                 return self.resolve_execution_target_reference(
@@ -4821,10 +4818,10 @@ class AgentGateway:
                     reference,
                     session_context=session_context,
                 )
-            if not project_root or not required_scope:
+            if not project_root or (required_scope is not None and not required_scope):
                 raise ExecutionTargetError(
                     "execution_target_scope_invalid",
-                    "ExecutionTarget reference resolution requires both projectPath and the Tool scope.",
+                    "ExecutionTarget reference resolution requires the exact projectPath and a valid explicit Tool scope.",
                 )
             return self._execution_target_bindings.resolve(
                 reference,

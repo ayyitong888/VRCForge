@@ -436,13 +436,12 @@ class ExecutionTargetBindingRegistry:
             "lifetime": "gateway_process_or_explicit_refresh",
         }
 
-    def resolve(
+    def _owned_binding(
         self,
         reference: Mapping[str, Any],
         *,
-        project_root: str,
         session_context: str,
-        required_scope: str,
+        project_root: str | None = None,
     ) -> dict[str, Any]:
         if not is_execution_target_reference(reference):
             raise ExecutionTargetError(
@@ -450,7 +449,7 @@ class ExecutionTargetBindingRegistry:
                 "ExecutionTarget reference is invalid.",
             )
         handle = str(reference["ref"])
-        normalized_root = normalize_project_root(project_root)
+        normalized_root = normalize_project_root(project_root) if project_root is not None else None
         normalized_session = self._normalized_session(session_context)
         with self._lock:
             prior = dict(self._bindings.get(handle) or {})
@@ -464,7 +463,9 @@ class ExecutionTargetBindingRegistry:
                 "execution_target_session_mismatch",
                 "ExecutionTarget reference belongs to another session.",
             )
-        if os.path.normcase(str(prior.get("projectRoot") or "")) != os.path.normcase(normalized_root):
+        if normalized_root is not None and (
+            os.path.normcase(str(prior.get("projectRoot") or "")) != os.path.normcase(normalized_root)
+        ):
             raise ExecutionTargetError(
                 "project_root_drifted",
                 "ExecutionTarget reference belongs to another project.",
@@ -475,10 +476,50 @@ class ExecutionTargetBindingRegistry:
                 "execution_target_handle_invalid",
                 "ExecutionTarget reference has no verified identity.",
             )
+        return prior
+
+    def bound_scope(
+        self,
+        reference: Mapping[str, Any],
+        *,
+        session_context: str,
+        project_root: str | None = None,
+    ) -> str:
+        """Read owner-bound snapshot metadata, not current operation authority.
+
+        Publishing an immutable receipt must not revalidate a pre-write scene
+        after that write changed it. Tool dispatch and current-identity reads
+        still use resolve() and its complete live identity checks.
+        """
+        prior = self._owned_binding(
+            reference, session_context=session_context, project_root=project_root,
+        )
+        target = prior["target"]
+        if execution_target_digest(target) != prior.get("digest"):
+            raise ExecutionTargetError(
+                "execution_target_identity_drifted",
+                "ExecutionTarget reference identity changed; bind a new target explicitly.",
+            )
+        return _identity_scope_for_target(target)
+
+    def resolve(
+        self,
+        reference: Mapping[str, Any],
+        *,
+        project_root: str,
+        session_context: str,
+        required_scope: str | None = None,
+    ) -> dict[str, Any]:
+        """Restore a bound identity; an explicit operation scope stays strict."""
+        normalized_root = normalize_project_root(project_root)
+        prior = self._owned_binding(
+            reference, session_context=session_context, project_root=normalized_root,
+        )
+        target = prior["target"]
         verified = validate_runtime_execution_target(
             target,
             project_root=normalized_root,
-            required_scope=required_scope,
+            required_scope=_identity_scope_for_target(target) if required_scope is None else required_scope,
         )
         if execution_target_digest(verified) != prior.get("digest"):
             raise ExecutionTargetError(
@@ -495,36 +536,11 @@ class ExecutionTargetBindingRegistry:
     ) -> dict[str, Any]:
         """Resolve a ref for its owning session without exposing its project root."""
 
-        if not is_execution_target_reference(reference):
-            raise ExecutionTargetError(
-                "execution_target_reference_invalid",
-                "ExecutionTarget reference is invalid.",
-            )
-        handle = str(reference["ref"])
-        normalized_session = self._normalized_session(session_context)
-        with self._lock:
-            prior = dict(self._bindings.get(handle) or {})
-        if not prior:
-            raise ExecutionTargetError(
-                "execution_target_handle_invalid",
-                "ExecutionTarget reference is unknown or expired.",
-            )
-        if prior.get("sessionContext") != normalized_session:
-            raise ExecutionTargetError(
-                "execution_target_session_mismatch",
-                "ExecutionTarget reference belongs to another session.",
-            )
-        target = prior.get("target")
-        if not isinstance(target, Mapping):
-            raise ExecutionTargetError(
-                "execution_target_handle_invalid",
-                "ExecutionTarget reference has no verified identity.",
-            )
+        prior = self._owned_binding(reference, session_context=session_context)
         return self.resolve(
             reference,
             project_root=str(prior.get("projectRoot") or ""),
-            session_context=normalized_session,
-            required_scope=str(target.get("scope") or "project"),
+            session_context=session_context,
         )
 
     def refresh(
