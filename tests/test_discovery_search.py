@@ -9,7 +9,7 @@ from tests.test_runtime_planner_service import FakeCatalog
 BLOCK = "behavior/animator_clips_bindings"
 
 
-def _tool(name, runtime_name, *, block=BLOCK, write=False, description=""):
+def _tool(name, runtime_name, *, block=BLOCK, write=False, description="", input_schema=None):
     return PlannerTool(
         name,
         description or name,
@@ -17,6 +17,7 @@ def _tool(name, runtime_name, *, block=BLOCK, write=False, description=""):
         write=write,
         runtime_name=runtime_name,
         block=block,
+        input_schema=input_schema or {"type": "object"},
     )
 
 
@@ -27,6 +28,31 @@ def _fx_tools():
         _tool("manage_fx_animator", "vrcforge_manage_fx_animator", write=True,
               description="Manage FX Animator bindings."),
         _tool("scan_curves", "vrcforge_unity_scan_curves", description="Inspect animation curves."),
+    )
+
+
+def _task_tools():
+    contract = {
+        "type": "object",
+        "properties": {
+            "controllerPath": {"type": "string"},
+            "layerName": {"type": "string"},
+            "stateName": {"type": "string"},
+            "speed": {"type": "number"},
+            "action": {"enum": ["update_state", "ensure_state"]},
+        },
+    }
+    return (
+        _tool("scan_fx_animator", "vrcforge_unity_scan_fx_animator",
+              description="Inspect FX Animator controller and state.", input_schema={"type": "object", "properties": {"controllerPath": {"type": "string"}}}),
+        _tool("preview_manage_fx_animator", "vrcforge_preview_manage_fx_animator",
+              description="Preview one exact FX Animator state update.", input_schema=contract),
+        _tool("manage_fx_animator", "vrcforge_manage_fx_animator", write=True,
+              description="Apply one approved FX Animator state update.", input_schema=contract),
+        _tool("preview_ensure_animator_state", "vrcforge_preview_ensure_animator_state",
+              description="Preview ensuring an Animator state exists.", input_schema={"type": "object", "properties": {"stateName": {"type": "string"}}}),
+        _tool("ensure_animator_state", "vrcforge_ensure_animator_state", write=True,
+              description="Ensure an Animator state exists.", input_schema={"type": "object", "properties": {"stateName": {"type": "string"}}}),
     )
 
 
@@ -74,6 +100,86 @@ def test_search_no_match_returns_root_browse_fallback():
     assert result["status"] == "not_found"
     assert result["matches"] == []
     assert result["fallbackCall"] == {"tools": []}
+
+
+def test_task_query_selects_fx_update_bundle_for_english_and_chinese_requests():
+    queries = (
+        "temporary controller Left Hand Fist speed 1 to 0.75",
+        "\u4e34\u65f6 controller Left Hand Fist speed1\u65390.75",
+    )
+    for query in queries:
+        match = search_tool_leaves(query, _task_tools(), {})["matches"][0]
+        assert match["leafPath"] == BLOCK
+        assert set(match["toolNames"]) == {
+            "scan_fx_animator", "preview_manage_fx_animator", "manage_fx_animator"
+        }
+        assert match["requiredTools"] == ["manage_fx_animator", "preview_manage_fx_animator"]
+        assert "ensure_animator_state" not in match["toolNames"]
+        assert "ensure_animator_state" not in match["requiredTools"]
+
+
+def test_real_task_query_prefers_fx_manage_bundle_over_ensure_state():
+    catalog = dashboard_server._RuntimePlannerCatalog().read(
+        "execution", project_context_active=True
+    )
+
+    result = search_tool_leaves(
+        "project identity animator state speed preview controller",
+        catalog.visible_tools,
+        {},
+    )
+
+    match = next(item for item in result["matches"]
+                 if item["leafPath"] == BLOCK)
+    assert match["toolNames"] == [
+        "unity_manage_fx_animator",
+        "unity_preview_manage_fx_animator",
+        "unity_scan_fx_animator",
+    ]
+    assert "unity_ensure_animator_state" not in match["toolNames"]
+    assert "unity_preview_ensure_animator_state" not in match["toolNames"]
+    assert match["requiredTools"] == [
+        "unity_manage_fx_animator",
+        "unity_preview_manage_fx_animator",
+    ]
+
+
+def test_non_modification_query_does_not_implicitly_add_write_bundle():
+    match = search_tool_leaves("inspect FX animator", _task_tools(), {})["matches"][0]
+
+    assert "manage_fx_animator" not in match["toolNames"]
+    assert "manage_fx_animator" not in match["requiredTools"]
+    assert "manage_fx_animator" not in (match["loadCall"] or {}).get("tools", [])
+
+
+
+def test_scan_query_stays_read_only_and_does_not_infer_preview_pair():
+    scanned = search_tool_leaves("scan FX animator", _task_tools(), {})["matches"][0]
+
+    assert "manage_fx_animator" not in scanned["toolNames"]
+    assert "preview_manage_fx_animator" not in scanned["requiredTools"]
+    assert all(not name.startswith("manage") for name in scanned["loadCall"]["tools"])
+
+
+def test_temporary_is_context_only_and_unknown_change_falls_back():
+    inspected = search_tool_leaves(
+        "inspect temporary controller", _task_tools(), {}
+    )
+    assert inspected["status"] == "found"
+    assert all(not name.startswith("manage") for name in inspected["matches"][0]["toolNames"])
+    assert all(not name.startswith("ensure") for name in inspected["matches"][0]["toolNames"])
+
+    unknown = search_tool_leaves("change nonexistent-zorb", _task_tools(), {})
+    assert unknown["status"] == "not_found"
+    assert unknown["matches"] == []
+    assert unknown["fallbackCall"] == {"tools": []}
+
+
+def test_exact_tool_query_cannot_be_redirected_by_write_intent():
+    result = search_tool_leaves("manage_fx_animator", _task_tools(), {})
+
+    assert result["matches"][0]["toolNames"] == ["manage_fx_animator"]
+    assert "ensure_animator_state" not in result["matches"][0]["requiredTools"]
 
 
 def test_search_does_not_mutate_selection_and_reports_loaded_bundle_reuse():
@@ -211,3 +317,11 @@ def test_repeated_loader_call_reuses_session_without_second_state_mutation(monke
     assert second["status"] == "reused"
     assert len(mutations) == 1
     assert second["selectedTools"] == ["scan_fx_animator"]
+
+
+def test_unknown_modification_does_not_match_unrelated_real_schema_description():
+    catalog = dashboard_server._RuntimePlannerCatalog().read("execution", project_context_active=True)
+    result = search_tool_leaves("change nonexistent-zorb", catalog.visible_tools, {})
+    assert result["status"] == "not_found"
+    assert result["matches"] == []
+    assert result["fallbackCall"] == {"tools": []}
