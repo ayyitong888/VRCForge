@@ -553,19 +553,19 @@ def test_builtin_group_names_are_reserved_for_crud_projection_and_existing_rows(
         root = Path(temp_dir)
         service, _audits = _service(root)
         with pytest.raises(AgentGatewayError, match="conflicts with a builtin tool") as create_error:
-            service.create_user_skill({"name": "know-yourself"})
+            service.create_user_skill({"name": "runtime-diagnostics"})
         assert create_error.value.status_code == 409
         with pytest.raises(AgentGatewayError, match="conflicts with a builtin tool"):
-            service.validate_projection_name("know-yourself")
+            service.validate_projection_name("runtime-diagnostics")
 
-        skill_dir = root / "skills" / "know-yourself"
+        skill_dir = root / "skills" / "runtime-diagnostics"
         skill_dir.mkdir(parents=True)
         skill_dir.joinpath("SKILL.md").write_text(
-            render_skill_markdown({"name": "know-yourself", "instructions": "legacy"}),
+            render_skill_markdown({"name": "runtime-diagnostics", "instructions": "legacy"}),
             encoding="utf-8",
         )
         row = next(item for item in service.build_skill_registry()["skills"] if item.get("source") == "user")
-        assert row["name"] == "know-yourself"
+        assert row["name"] == "runtime-diagnostics"
         assert row["available"] is False
         assert row["validation"]["status"] == "error"
 

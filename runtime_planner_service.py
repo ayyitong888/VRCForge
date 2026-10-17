@@ -4219,18 +4219,15 @@ class RuntimePlannerService:
             visible_read_names = {
                 tool.runtime_name: tool.name for tool in selected_tools if not tool.write
             }
-            readiness_name = visible_read_names.get("vrcforge_know_yourself")
-            if readiness_name:
-                runtime_scope_instruction += (
-                    "\nReadiness and connection diagnosis: for first-run/readiness questions or a VRCForge, Unity, MCP, "
-                    "bridge, editor-plugin or Provider connection problem (cannot connect, not connected, disconnected "
-                    "or connection failed), "
-                    f"call {readiness_name} before filesystem, Shell or repair tools. "
-                    "After a successful report, answer from that report and its safe next action; "
-                    "do not add unrelated project/list/read probes or invent generic setup. "
-                    "Ordinary Internet, GitHub and unrelated network support are not readiness triggers. "
-                    "Do not run a mandatory readiness preflight for every ordinary Unity read."
-                )
+            runtime_scope_instruction += (
+                "\nVRCForge documentation and self-knowledge: use the installed vrcforge-docs guide when relevant; "
+                "discover/read its instructions through the existing installed-Skill reader before choosing workflow tools. "
+                "For documented usage read the relevant first-party source; for current failures choose the narrowest "
+                "observed diagnostic tools. vrcforge_know_yourself is an optional broad readiness snapshot, not a mandatory "
+                "first call. A factual question may finish with a sourced answer; an authorized setup/repair request "
+                "continues through supervised action and verification of the original failure. "
+                "Do not run a mandatory readiness preflight for ordinary Unity reads or unrelated network support."
+            )
             web_fetch_name = visible_read_names.get("vrcforge_web_fetch")
             web_search_name = visible_read_names.get("vrcforge_web_search")
             if web_fetch_name:
@@ -4299,7 +4296,7 @@ class RuntimePlannerService:
                 "规则：只返回一个 JSON 对象，不要 Markdown 代码块外的文字；action 只能是 skill、shell、reply、enter_execution 或 write；planning 层禁止 write，execution 层才允许 write；绝不能把工具名写进 action；工具名必须严格来自下面的列表并写进 skill_tool 或 write_tool；"
                 f"当前工具曝光层是 {exposure_layer}；planning 层只能使用读/检查工具，执行类工具必须先进入 execution 层；Unity 项目写入按当前权限模式走审批或全权限自动执行；"
                 "如果『已执行步骤』里某个工具刚刚已经给出了你需要的结果，不要重复调用同一个工具——改为基于结果继续下一步或 reply 收尾；"
-                f"诊断 VRCForge 自身启动、连接或历史日志时，{'就绪和连接问题先遵循上面的只读 readiness 路径；' if readiness_name else ''}"
+                "诊断 VRCForge 自身启动、连接或历史日志时，按 vrcforge-docs 和当前证据自主选择相关层；"
                 "历史日志等额外证据确有需要且尚未可见时，先发现并加载相应的只读诊断工具块，再按可见工具的实际说明读取证据。"
                 "所需诊断工具尚未可见时，用同一个加载工具导航：tools 必填；tools=[] 时省略 block 看根层、传分类或叶节点只看目录；加载时传叶节点和具名 tools 名单，之后调用已曝光的工具。不可调用未列出的工具或用普通 Shell 代替这条诊断路径。一般工程外任务和用户明确要求的 Shell 操作仍可使用普通 Shell。"
                 # VRCForge 自纠回环：失败要读错误、修正后重试或换路，绝不假装成功。

@@ -1,0 +1,12 @@
+{
+  "id": "com.vrcforge.workflows.docs",
+  "name": "VRCForge Docs",
+  "skill_name": "vrcforge-docs",
+  "version": "1.0.0",
+  "author": "VRCForge",
+  "description": "VRCForge documentation and self-knowledge with Agent-selected diagnosis, supervised setup and verified repair.",
+  "min_vrcforge_version": "1.8.1",
+  "execution": "agentic",
+  "permissions": ["read_project", "read_package", "analyze_logs", "write_project_files", "execute_shell"],
+  "entrypoints": {"skill": "SKILL.md"}
+}

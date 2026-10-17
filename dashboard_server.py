@@ -74,7 +74,7 @@ from dashboard_foundation import (
     runtime_settings_path,
 )
 from bounded_process import BoundedProcessResult, run_bounded_process
-from bundled_skill_delivery import deliver_bundled_guide
+from bundled_skill_delivery import deliver_bundled_docs, deliver_bundled_guide
 from alcom_litedb_reader import read_alcom_litedb_projects
 from app_update_service import AppUpdateService
 from agent_command_safety import normalize_filesystem_path
@@ -2072,6 +2072,16 @@ async def on_startup() -> None:
             emit_log("info", "skills", "Bundled setup and repair guide checked.", {"status": bundled_guide["status"]})
         except Exception as exc:  # noqa: BLE001 - guide delivery cannot block startup repair.
             emit_log("warn", "skills", "Bundled setup and repair guide is unavailable.", {"error": str(exc)})
+        try:
+            with SKILL_PACKAGE_WRITE_LOCK, AGENT_GATEWAY.skills.write_lock:
+                bundled_docs = deliver_bundled_docs(
+                    SKILL_PACKAGE_PROJECTION,
+                    AGENT_GATEWAY.skills.user_skills_dir,
+                    version=app.version,
+                )
+            emit_log("info", "skills", "Bundled VRCForge Docs checked.", {"status": bundled_docs["status"]})
+        except Exception as exc:  # noqa: BLE001 - preserve startup when documentation is unavailable.
+            emit_log("warn", "skills", "Bundled VRCForge Docs is unavailable.", {"error": str(exc)})
         try:
             SUB_AGENT_COLLABORATION.start()
             await asyncio.to_thread(
@@ -25874,7 +25884,7 @@ def register_agent_gateway_tools() -> None:
     AGENT_GATEWAY.register_tool("vrcforge_health", "Read VRCForge backend and component health.", "read/debug", lambda _params: build_full_health_payload())
     AGENT_GATEWAY.register_tool(
         "vrcforge_know_yourself",
-        "When to use: first-run/readiness questions or any VRCForge, Unity, MCP, bridge, editor-plugin, or Provider connection problem, including 'cannot connect', 'not connected', and 'what should I do'. When NOT to use: ordinary Internet, GitHub, or unrelated network troubleshooting, or when the user asks to execute a repair instead of diagnose it. Negative example: answer a general Wi-Fi question without inspecting VRCForge state.",
+        "When to use: optionally read one broad VRCForge readiness snapshot when a connection problem spans unknown provider, project, Core or Unity layers. When NOT to use: documentation-only questions, a failure already identified by narrower current evidence, mandatory preflight for ordinary Unity reads, or unrelated Internet/GitHub support. Negative example: do not run a broad snapshot again after exact project and missing-Core evidence already identify the required installation. A diagnostic report alone does not complete an authorized repair.",
         "read/debug",
         KNOW_YOURSELF_READINESS.know_yourself_sync,
     )

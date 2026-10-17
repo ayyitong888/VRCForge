@@ -211,7 +211,9 @@ def test_activated_bundled_guide_allows_its_readonly_discovery_and_support_reads
         assert loop.skill_policy_block_reason(plan["skillTool"]) == ""
         result = gateway.runtime_skills.execute(plan["skillTool"], {**plan["skillParams"], "sessionId": "guide-policy-test"}, "test")
         assert result["ok"], result
-    assert loop.skill_policy_block_reason("vrcforge_execute_shell") == "skill_tool_not_allowed"
+    # The guide now permits host downloads; the Shell's own authorization and
+    # Unity-write checks still apply after this instruction-scope decision.
+    assert loop.skill_policy_block_reason("vrcforge_execute_shell") == ""
     assert loop.skill_policy_block_reason("vrcforge_delete_path") == "skill_tool_not_allowed"
 
 

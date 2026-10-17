@@ -70,6 +70,7 @@ def test_fresh_normal_profile_loads_complete_guide_internally_and_external_promp
     assert prompt["context"]["gameOnlyAcceptance"] == []
     support = {item["path"]: item["content"] for item in prompt["skill"]["supportFiles"]}
     assert set(support) == {
+        "references/zero-start.md",
         "workflows/first-run.json",
         "references/repair-guide.md",
         "references/user-tool-author-guide.md",
@@ -136,11 +137,11 @@ def test_reviewed_guide_version_import_updates_prior_immutable_version(app_profi
     old_result = app.SKILL_PACKAGE_CONTROLLER.import_package({"packagePath": str(old_archive), "devMode": True, "projectToUserSkills": True})
     assert old_result["ok"] and old_result["projectedSkill"]["name"] == delivery.SKILL_NAME
 
-    current_archive = service.export_dev(delivery.bundled_source_dir(), tmp_path / "guide-1.0.3.vsk").package_path
+    current_archive = service.export_dev(delivery.bundled_source_dir(), tmp_path / "guide-1.0.4.vsk").package_path
     current_result = app.SKILL_PACKAGE_CONTROLLER.import_package({"packagePath": str(current_archive), "devMode": True, "projectToUserSkills": True})
     assert current_result["ok"] and current_result["projectedSkill"]["name"] == delivery.SKILL_NAME
     installed = service.load_registry()["skills"][delivery.PACKAGE_ID]
-    assert installed["version"] == "1.0.3"
+    assert installed["version"] == "1.0.4"
     projected = gateway.skills.user_skills_dir / delivery.SKILL_NAME / "references" / "user-tool-author-guide.md"
     assert projected.read_bytes() == (delivery.bundled_source_dir() / "references" / "user-tool-author-guide.md").read_bytes()
 
