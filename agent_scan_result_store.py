@@ -543,6 +543,10 @@ class ScanResultStore:
             metadata = self._metadata(
                 row, row["reason"], linked_proof if proof_validated else None, validation_changed_paths
             )
+        if step.get("tool") == "vrcforge_scan_materials":
+            # Material index reuse is authorized by its exact Core scope proof,
+            # not by observable comparison to a bounded first source page.
+            return metadata
         if eligible(step, arguments) and row["reason"] not in {"mutation_in_progress", "mutation_during_scan"}:
             return comparison_metadata(metadata)
         if step.get("tool") not in WHITELIST or (isinstance(step.get("result"), dict)
@@ -573,6 +577,8 @@ class ScanResultStore:
             reason = row["reason"]
             if not reason and self._pending(connection, project):
                 reason = "mutation_in_progress"
+            if not reason and require_proof and proof is None:
+                reason = "core_scope_unavailable"
             if not reason and proof is None and row["boot"] != self._boot_id:
                 reason = "runtime_observation_gap"
             if not reason and proof is None and row["turn"] != turn_id:
@@ -610,7 +616,7 @@ class ScanResultStore:
         if not valid:
             validation_reason = validation.get("reason") or "scope_invalid"
             transient = validation_reason in _TRANSIENT_SCOPE_FAILURES
-            if transient and boot == self._boot_id and turn == turn_id:
+            if transient and boot == self._boot_id and turn == turn_id and not require_proof:
                 return result
             reason = validation_reason if not transient else (
                 "runtime_observation_gap" if boot != self._boot_id else "core_scope_unavailable"

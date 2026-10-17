@@ -2144,6 +2144,12 @@ class AgentGateway:
         self._runtime_skill_scope: contextvars.ContextVar[AgentTaskLoop | None] = contextvars.ContextVar(
             "vrcforge_runtime_skill_scope", default=None,
         )
+        # A material scan's complete compact index is borrowed only from its
+        # exact in-process runtime invocation, then stored with the existing
+        # result reference. Network callers cannot populate this slot.
+        self._material_scan_capture_context: contextvars.ContextVar[dict[str, Any] | None] = contextvars.ContextVar(
+            "vrcforge_material_scan_capture", default=None,
+        )
         self._runtime_session_state = AgentRuntimeSessionState(
             AgentRuntimeSessionStatePorts(shared_state_lock=self._lock,
                 native_history_store=NativeHistoryStore(self.audit_dir / "native-history"),
@@ -2778,6 +2784,45 @@ class AgentGateway:
             yield
         finally:
             self._runtime_skill_scope.reset(token)
+
+    def capture_material_scan_result(self, payload: object) -> bool | None:
+        """Borrow a validated compact index into the current exact scan call."""
+        capture = self._material_scan_capture_context.get()
+        if capture is None:
+            return None
+        if capture.get("tool") != "vrcforge_scan_materials" or capture.get("payload") is not None:
+            return False
+        if (not isinstance(payload, Mapping)
+                or set(payload) != {"ok", "avatarPath", "index", "totalItems"}
+                or payload.get("ok") is not True
+                or not isinstance(payload.get("avatarPath"), str)
+                or type(payload.get("totalItems")) is not int):
+            return False
+        rows = payload.get("index")
+        if not isinstance(rows, list) or payload["totalItems"] != len(rows):
+            return False
+        allowed = {"material_id", "material_name", "renderer_path", "shader_name",
+                   "material_id_ambiguous", "renderer_id_ambiguous"}
+        copied_rows: list[dict[str, Any]] = []
+        for row in rows:
+            if not isinstance(row, Mapping) or not row or set(row) - allowed:
+                return False
+            for key, value in row.items():
+                if (key in {"material_id_ambiguous", "renderer_id_ambiguous"}
+                        and type(value) is not bool):
+                    return False
+                if key not in {"material_id_ambiguous", "renderer_id_ambiguous"} and not isinstance(value, str):
+                    return False
+            if not isinstance(row.get("material_id"), str) or not row.get("material_id"):
+                return False
+            copied_rows.append(dict(row))
+        capture["payload"] = {
+            "ok": True,
+            "avatarPath": payload["avatarPath"],
+            "index": copied_rows,
+            "totalItems": len(copied_rows),
+        }
+        return True
 
     def _exit_runtime_skill(self, params: dict[str, Any]) -> dict[str, Any]:
         loop = self._runtime_skill_scope.get()
@@ -7985,6 +8030,7 @@ class AgentGateway:
                 client_turn_id=client_turn_id,
             )
             tool_calls_used += 1
+            private_material_scan_result: dict[str, Any] | None = None
             if action_kind == "shell":
                 step_tool = "unity_shell" if unity_shell_access else "shell"
                 explicit_shell_location = bool(
@@ -8222,15 +8268,31 @@ class AgentGateway:
                         step_params["projectContextActive"] = project_context_active
                     else:
                         step_params.setdefault("exposureLayer", runtime_exposure_layer)
-                with self._bind_runtime_skill_scope(task_loop), (bind_memory_tool_context(project_root, memory_request_text, tuple(memory_user_texts)) if step_tool in MEMORY_TOOL_NAMES else nullcontext()), (
-                    bind_tool_result_context(session_id, turn_id, project_root, [*model_context_steps, *steps], snapshot_lookup=self._scan_results.lookup if project_root else None) if step_tool == RESULT_READER_TOOL else nullcontext()
-                ):
-                    step_payload = self._runtime_skill_executor.execute(
-                        step_tool,
-                        step_params,
-                        agent_name,
-                        owner_id=self._runtime_shell_owner(turn_id, client_turn_id, session_id),
-                    )
+                material_capture_state = (
+                    {"tool": step_tool, "payload": None}
+                    if step_tool == "vrcforge_scan_materials" else None
+                )
+                material_capture_token = (
+                    self._material_scan_capture_context.set(material_capture_state)
+                    if material_capture_state is not None else None
+                )
+                try:
+                    with self._bind_runtime_skill_scope(task_loop), (bind_memory_tool_context(project_root, memory_request_text, tuple(memory_user_texts)) if step_tool in MEMORY_TOOL_NAMES else nullcontext()), (
+                        bind_tool_result_context(session_id, turn_id, project_root, [*model_context_steps, *steps], snapshot_lookup=self._scan_results.lookup if project_root else None) if step_tool == RESULT_READER_TOOL else nullcontext()
+                    ):
+                        step_payload = self._runtime_skill_executor.execute(
+                            step_tool,
+                            step_params,
+                            agent_name,
+                            owner_id=self._runtime_shell_owner(turn_id, client_turn_id, session_id),
+                        )
+                finally:
+                    if material_capture_token is not None:
+                        self._material_scan_capture_context.reset(material_capture_token)
+                if material_capture_state is not None:
+                    candidate = material_capture_state.get("payload")
+                    if isinstance(candidate, dict):
+                        private_material_scan_result = candidate
                 skill_payload = step_payload
                 loop_step = {
                     "tool": step_tool,
@@ -8400,9 +8462,19 @@ class AgentGateway:
             scan_tool = self._tools.get(step_tool)
             if (retained_result and is_scan_tool(step_tool) and scan_tool is not None
                     and not scan_tool.write and step_payload.get("status") == "executed"):
+                snapshot_step = steps[-1]
+                private_result_read: dict[str, Any] = {}
+                if step_tool == "vrcforge_scan_materials" and private_material_scan_result is not None:
+                    snapshot_step = {**steps[-1], "result": private_material_scan_result}
+                    private_result_read = result_continuation(
+                        session_id, turn_id, project_root, snapshot_step,
+                        planner_policy.sanitize_planner_observation_text,
+                    )
+                    if private_result_read:
+                        snapshot_step["resultRead"] = private_result_read
                 try:
                     scan_snapshot = self._scan_results.capture(
-                        session_id, turn_id, project_root, steps[-1], execution_arguments,
+                        session_id, turn_id, project_root, snapshot_step, execution_arguments,
                         expected_generation=scan_generation,
                     )
                 except (OSError, ValueError) as exc:
@@ -8412,6 +8484,60 @@ class AgentGateway:
                                      "storageError": type(exc).__name__, "scanScope": {"tool": step_tool, "dependencyCoverage": "unverified"}}
                 steps[-1]["scanSnapshot"] = scan_snapshot
                 loop_state[-1]["scanSnapshot"] = scan_snapshot
+                if step_tool == "vrcforge_scan_materials" and private_result_read:
+                    public_result = ensure_dict(steps[-1].get("result"))
+                    paging = ensure_dict(public_result.get("paging"))
+                    read_hints = ensure_dict(public_result.get("readHints"))
+                    if (scan_snapshot.get("persisted") is True
+                            and scan_snapshot.get("scope") == "validated_scope"
+                            and scan_snapshot.get("freshness") == "validated"
+                            and scan_snapshot.get("expired") is not True):
+                        offset = paging.get("offset")
+                        returned = paging.get("returned")
+                        total = paging.get("total")
+                        next_offset = offset + returned if type(offset) is int and type(returned) is int else None
+                        paging.pop("nextOffset", None)
+                        if (type(next_offset) is int and type(total) is int and 0 <= next_offset < total
+                                and isinstance(private_result_read.get("resultRef"), str)):
+                            reader_request = {
+                                "tool": RESULT_READER_TOOL,
+                                "arguments": {
+                                    "resultRef": private_result_read["resultRef"],
+                                    "jsonPointer": "/index",
+                                    "offset": next_offset,
+                                    "limit": 20,
+                                },
+                            }
+                            # Keep the exact control envelope at top level for
+                            # the bounded scan projection, and adjacent to the
+                            # source paging facts for direct tool consumers.
+                            paging["nextRequest"] = reader_request
+                            public_result["nextRequest"] = reader_request
+                            # This owner-generated continuation is retained
+                            # verbatim for the model; generic path redaction
+                            # must not rewrite its validated JSON pointer.
+                            private_result_read = {**private_result_read, "nextRequest": reader_request}
+                        else:
+                            paging.pop("nextRequest", None)
+                            public_result.pop("nextRequest", None)
+                        steps[-1]["resultRead"] = private_result_read
+                        loop_state[-1]["resultRead"] = private_result_read
+                        read_hints["discovery"] = (
+                            "The full index is retained with this result. Follow the exact nextRequest in "
+                            "resultContinuation; do not call the source scan for later offsets."
+                        )
+                    else:
+                        paging.pop("nextOffset", None)
+                        paging.pop("nextRequest", None)
+                        public_result.pop("nextRequest", None)
+                        read_hints["discovery"] = (
+                            "The complete index is unavailable, unverified, or expired for this result. Only the returned "
+                            "page is readable; start a fresh scan to obtain more rows."
+                        )
+                    public_result["paging"] = paging
+                    public_result["readHints"] = read_hints
+                    steps[-1]["result"] = public_result
+                    loop_state[-1]["result"] = public_result
 
             result_outcome = ensure_dict(step_payload.get("outcome"))
             result_summary = str(

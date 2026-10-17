@@ -12240,7 +12240,25 @@ def scan_shader_materials_sync(request: ShaderMaterialScanRequest) -> dict[str, 
             limit = request.limit or 25
             rows = materials[request.offset:request.offset + limit]
             byte_limited = False
+            material_capture_status: bool | None = None
             if request.index_only:
+                full_index: list[dict[str, Any]] | None = []
+                for material in materials:
+                    if not isinstance(material, Mapping):
+                        full_index = None
+                        break
+                    full_index.append({key: material[key] for key in (
+                        "material_id", "material_name", "renderer_path", "shader_name",
+                        "material_id_ambiguous", "renderer_id_ambiguous",
+                    ) if key in material})
+                capture_material_index = getattr(AGENT_GATEWAY, "capture_material_scan_result", None)
+                if callable(capture_material_index):
+                    material_capture_status = capture_material_index({
+                        "ok": True,
+                        "avatarPath": avatar_path,
+                        "index": full_index,
+                        "totalItems": len(materials),
+                    })
                 index = []
                 for material in rows:
                     row = {key: material[key] for key in (
@@ -12261,22 +12279,36 @@ def scan_shader_materials_sync(request: ShaderMaterialScanRequest) -> dict[str, 
                     index.append(row)
                 rows = index
             next_offset = request.offset + len(rows)
+            paging = {
+                "total": len(materials), "offset": request.offset, "limit": limit,
+                "returned": len(rows), "byteLimited": byte_limited,
+                "nextOffset": next_offset if next_offset < len(materials) else None,
+                "hasMore": next_offset < len(materials),
+            }
+            read_hints = {
+                "discovery": "Use indexOnly=true and follow paging.nextOffset until null; keep avatar and filters unchanged. Each call performs a fresh scan.",
+                "details": "Pass exact material_id values from the index as materialIds for full details. Use a smaller selection if the host truncates a large detail response.",
+            }
+            if material_capture_status is not None:
+                paging.pop("nextOffset", None)
+                if material_capture_status is True:
+                    read_hints["discovery"] = (
+                        "The full index is being retained with this result. Use the exact resultContinuation "
+                        "reader request in paging.nextRequest; do not call the source scan for later offsets."
+                    )
+                else:
+                    read_hints["discovery"] = (
+                        "The complete index could not be retained with this result. Only the returned page "
+                        "is available; start a fresh scan to obtain more rows."
+                    )
             return {
                 "ok": True,
                 "avatarPath": avatar_path,
                 "index" if request.index_only else "materials": rows,
                 "summary": summary,
                 "summaryScope": "material_selection",
-                "paging": {
-                    "total": len(materials), "offset": request.offset, "limit": limit,
-                    "returned": len(rows), "byteLimited": byte_limited,
-                    "nextOffset": next_offset if next_offset < len(materials) else None,
-                    "hasMore": next_offset < len(materials),
-                },
-                "readHints": {
-                    "discovery": "Use indexOnly=true and follow paging.nextOffset until null; keep avatar and filters unchanged. Each call performs a fresh scan.",
-                    "details": "Pass exact material_id values from the index as materialIds for full details. Use a smaller selection if the host truncates a large detail response.",
-                },
+                "paging": paging,
+                "readHints": read_hints,
             }
         return {
             "ok": True,
