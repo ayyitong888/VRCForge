@@ -185,6 +185,11 @@ namespace VRCForge.Editor
         private static string MemoryHash(Object target)
         {
             var text = EditorJsonUtility.ToJson(target);
+            // Material inventory observes mesh names and assignments, not mesh
+            // vertex buffers. Keep name changes visible on their owning slot.
+            var mesh = target is SkinnedMeshRenderer skinned ? skinned.sharedMesh
+                : target is MeshFilter filter ? filter.sharedMesh : null;
+            if (mesh != null) text += "\nmeshName:" + mesh.name;
             if (target is GameObject hierarchyObject) text += AvatarPrimitiveCrudCore.GetTransformPath(hierarchyObject.transform);
             if (target is Component hierarchyComponent) text += AvatarPrimitiveCrudCore.GetTransformPath(hierarchyComponent.transform);
             if (target is AnimationClip clip)
@@ -226,8 +231,22 @@ namespace VRCForge.Editor
             return before + ":" + digest;
         }
 
-        private static Scope Measure(string[] roots)
+        // Material inventory reads hierarchy membership, renderer slots, meshes,
+        // materials and shader semantics; expression menus and animator graphs
+        // are not dependencies of that observation.
+        internal static bool MaterialReferenceRelevant(Object owner, string propertyPath, Object referenced, bool includeTextures)
         {
+            if (owner is Renderer) return propertyPath.StartsWith("m_Materials", StringComparison.Ordinal) || propertyPath == "m_Mesh";
+            if (owner is MeshFilter) return propertyPath == "m_Mesh";
+            if (owner is Material) return propertyPath == "m_Shader" || propertyPath == "m_Parent"
+                || (includeTextures && propertyPath.StartsWith("m_SavedProperties.m_TexEnvs", StringComparison.Ordinal));
+            return false;
+        }
+
+        private static Scope Measure(string[] roots, JObject selector)
+        {
+            var materialScope = (string)selector?["scanTool"] == "vrcforge_scan_avatar_materials";
+            var includeTextures = (bool?)selector?["arguments"]?["includeTextures"] ?? true;
             var scope = new Scope { epoch = state.epoch, sceneEpoch = state.sceneEpoch, roots = roots,
                 capturedAt = DateTime.UtcNow.ToString("o"), objects = new Dictionary<string, string>(), files = new Dictionary<string, string>() };
             var pending = new Queue<Object>(roots.Select(Resolve));
@@ -254,11 +273,11 @@ namespace VRCForge.Editor
                 scope.scene |= !EditorUtility.IsPersistent(target);
                 if (AssetPath(path) && paths.Add(path))
                 {
-                    foreach (var dependency in AssetDatabase.GetDependencies(path, true))
+                    foreach (var dependency in materialScope && !(target is Shader) ? Array.Empty<string>() : AssetDatabase.GetDependencies(path, true))
                     {
                         if (!AssetPath(dependency)) continue;
                         paths.Add(dependency);
-                        foreach (var asset in AssetDatabase.LoadAllAssetsAtPath(dependency))
+                        foreach (var asset in materialScope ? Array.Empty<Object>() : AssetDatabase.LoadAllAssetsAtPath(dependency))
                             if (asset != null && !(asset is MonoScript)) pending.Enqueue(asset);
                     }
                 }
@@ -266,6 +285,7 @@ namespace VRCForge.Editor
                 {
                     foreach (var component in gameObject.GetComponents<Component>())
                     {
+                        if (materialScope && !(component is Transform) && !(component is Renderer) && !(component is MeshFilter)) continue;
                         if (component == null) throw new InvalidDataException("missing_component");
                         pending.Enqueue(component);
                     }
@@ -276,8 +296,18 @@ namespace VRCForge.Editor
                     var property = serialized.GetIterator();
                     while (property.Next(true))
                     {
+                        if (materialScope && property.propertyType == SerializedPropertyType.ObjectReference
+                            && !MaterialReferenceRelevant(target, property.propertyPath, property.objectReferenceValue, includeTextures)) continue;
                         if (property.propertyType == SerializedPropertyType.ObjectReference && property.objectReferenceValue == null
-                            && property.objectReferenceInstanceIDValue != 0) throw new InvalidDataException("unresolved_scope_reference");
+                            && property.objectReferenceInstanceIDValue != 0)
+                        {
+                            var failure = new InvalidDataException("unresolved_scope_reference");
+                            failure.Data["objectType"] = target.GetType().FullName;
+                            failure.Data["propertyPath"] = property.propertyPath;
+                            throw failure;
+                        }
+                        if (materialScope && property.propertyType == SerializedPropertyType.ObjectReference
+                            && property.objectReferenceValue is Mesh) continue;
                         if (property.propertyType == SerializedPropertyType.ObjectReference && property.objectReferenceValue != null
                             && !(target is Transform && property.name == "m_Father")
                             && !(property.objectReferenceValue is MonoScript)) pending.Enqueue(property.objectReferenceValue);
@@ -377,7 +407,7 @@ namespace VRCForge.Editor
             try
             {
                 Observe();
-                var scope = Measure(Roots(parameters ?? new JObject()));
+                var scope = Measure(Roots(parameters ?? new JObject()), parameters);
                 scope.selector = (JObject)(parameters ?? new JObject()).DeepClone();
                 if (state.scopes.Count >= MaxScopes) throw new InvalidDataException("scope_journal_full");
                 var token = "scope_" + Guid.NewGuid().ToString("N");
@@ -390,7 +420,13 @@ namespace VRCForge.Editor
                 result["assetPaths"] = new JArray(scope.files.Keys.Where(path => path.StartsWith("Assets/", StringComparison.Ordinal)));
                 return result;
             }
-            catch (Exception exception) { return Receipt(false, exception.Message); }
+            catch (Exception exception)
+            {
+                var receipt = Receipt(false, exception.Message);
+                if (exception.Data["objectType"] is string objectType && exception.Data["propertyPath"] is string propertyPath)
+                    receipt["failureContext"] = new JObject { ["objectType"] = objectType, ["propertyPath"] = propertyPath };
+                return receipt;
+            }
         }
 
         internal static JObject Validate(JObject parameters)
@@ -404,7 +440,7 @@ namespace VRCForge.Editor
                 if (saved.scene && saved.sceneEpoch != state.sceneEpoch) return Receipt(false, "play_mode_scene_scope_changed");
                 if (saved.selector == null || !saved.roots.SequenceEqual(Roots(saved.selector)))
                     return Receipt(false, "scope_membership_changed");
-                var current = Measure(saved.roots);
+                var current = Measure(saved.roots, saved.selector);
                 var changed = saved.files.Keys.Union(current.files.Keys)
                     .Where(path => !saved.files.TryGetValue(path, out var old) || !current.files.TryGetValue(path, out var now) || old != now).ToArray();
                 var same = changed.Length == 0 && saved.objects.Count == current.objects.Count
