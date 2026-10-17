@@ -325,3 +325,58 @@ def test_unknown_modification_does_not_match_unrelated_real_schema_description()
     assert result["status"] == "not_found"
     assert result["matches"] == []
     assert result["fallbackCall"] == {"tools": []}
+
+
+def test_wide_read_query_uses_full_keywords_and_prefers_material_scan():
+    materials_block = "appearance/materials_shaders"
+    diagnostics_block = "diagnostics_build/build_runtime"
+    tools = (
+        _tool(
+            "scan_materials",
+            "vrcforge_scan_materials",
+            block=materials_block,
+            description=(
+                "Read the current loaded avatar materials and semantic shader "
+                "properties, including shader family and dissolve settings."
+            ),
+        ),
+        _tool(
+            "avatar_upload_readiness",
+            "vrcforge_avatar_upload_readiness",
+            block=diagnostics_block,
+            description=(
+                "Inspect avatar upload readiness for the current execution "
+                "identity and loaded avatar."
+            ),
+        ),
+    )
+
+    result = search_tool_leaves(
+        "read only current execution identity loaded avatar scan materials "
+        "semantic properties shader family dissolve readiness",
+        tools,
+        {},
+    )
+
+    assert result["status"] == "found"
+    assert result["matches"][0]["leafPath"] == materials_block
+    assert result["matches"][0]["toolNames"] == ["scan_materials"]
+    assert all(
+        item["leafPath"] != diagnostics_block
+        for item in result["matches"][:1]
+    )
+
+
+def test_read_keyword_does_not_match_readiness_name_as_a_substring():
+    tools = (
+        _tool("read_identity", "vrcforge_read_identity", description="Read identity."),
+        _tool(
+            "avatar_upload_readiness",
+            "vrcforge_avatar_upload_readiness",
+            description="Inspect upload readiness.",
+        ),
+    )
+
+    result = search_tool_leaves("read", tools, {})
+
+    assert result["matches"][0]["toolNames"] == ["read_identity"]

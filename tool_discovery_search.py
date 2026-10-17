@@ -66,9 +66,13 @@ def search_tool_leaves(query, tools, selections):
     records = [t for t in tools if t.block != "core" and "/" in t.block]
     scores = {}
     for tool in records:
-        names = (tool.name + " " + tool.runtime_name).casefold()
-        name_hits = sum(token in names for token in tokens)
-        text_hits = sum(token in (tool.block + " " + tool.description).casefold() for token in tokens)
+        # Match keywords as complete tokens.  Substring matching makes a read
+        # query score ``readiness`` and other unrelated words, which can route
+        # broad inspection requests to the wrong leaf.
+        name_terms = _terms(tool.name + " " + tool.runtime_name)
+        text_terms = _terms(tool.block + " " + tool.description)
+        name_hits = len(tokens & name_terms)
+        text_hits = len(tokens & text_terms)
         schema_hits = len((tokens - _WRITE_INTENT - _READ_INTENT) & _schema_terms(tool.input_schema))
         scores[tool.name] = (name_hits, schema_hits, text_hits)
     best = max((score[0] for score in scores.values()), default=0)
@@ -97,8 +101,7 @@ def search_tool_leaves(query, tools, selections):
             tool for tool in records
             if tool.write and (
                 scores[tool.name][1] > 0
-                or any(token in (tool.name + " " + tool.runtime_name).casefold()
-                       for token in content_tokens)
+                or bool(content_tokens & _terms(tool.name + " " + tool.runtime_name))
             )
         ]
         if candidates:
