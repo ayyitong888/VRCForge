@@ -355,6 +355,9 @@ def stream_response(
                     if sorted(completed_items) != list(range(len(completed_items))):
                         raise RuntimeError(f"{provider_label} completed output has missing items.")
                     result["output"] = [completed_items[index] for index in range(len(completed_items))]
+                # Execution and telemetry must consume the same reconciled
+                # receipt when the terminal event omits streamed output items.
+                terminal_response = result
                 request_succeeded = True
                 return result
         raise RuntimeError(f"{provider_label} stream ended before response.completed.")
@@ -419,6 +422,10 @@ def stream_response(
                 service_tier=_value(terminal_response, "service_tier"),
                 provider_request_id=_value(terminal_response, "id"),
                 tool_calls=tool_calls,
+                output={
+                    "functionCallCount": len(tool_calls),
+                    "messageCount": sum(_value(item, "type") == "message" for item in output_items),
+                } if isinstance(output_items, list) else {},
             )
         watcher_stop.set()
         close_stream = getattr(stream, "close", None)

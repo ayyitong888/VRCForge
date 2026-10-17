@@ -20,14 +20,6 @@ from typing import Any, Mapping
 LEDGER_SCHEMA = "vrcforge.provider_request.v1"
 PHASES = ("找工具", "绑定", "预览", "审批", "恢复")
 _SAFE_METADATA = re.compile(r"^[A-Za-z0-9_.:/-]{1,80}$")
-_WRITE_ACTIONS = frozenset({
-    "write", "execute", "mutate", "apply", "create", "delete", "move", "set", "update",
-    "enter_execution", "requiresapproval", "requires_approval",
-})
-_READ_ACTIONS = frozenset({"read", "scan", "inspect", "observe", "preview", "plan", "get"})
-_DISCOVERY_ACTIONS = frozenset({"discover", "search", "list", "load", "browse", "catalog"})
-_BIND_ACTIONS = frozenset({"bind", "attach", "select"})
-_RESTORE_ACTIONS = frozenset({"restore", "rollback", "recover", "resume", "replay"})
 _ACTIVE_SCOPE: ContextVar[dict[str, Any] | None] = ContextVar("vrcforge_provider_request_ledger", default=None)
 
 
@@ -212,55 +204,13 @@ def safe_tool_calls(value: Any) -> list[dict[str, str]]:
 
 
 def classify_request_phases(tool_calls: Any, context: Mapping[str, Any] | None = None) -> tuple[list[str], str | None]:
-    """Classify generated actions from explicit metadata and name conventions."""
-    safe = safe_context(context)
-    phases = [item for item in (safe.get("phases") or []) if item in PHASES]
-    primary = safe.get("primaryPhase") if safe.get("primaryPhase") in PHASES else None
-    calls = safe_tool_calls(tool_calls)
-    for row in calls:
-        metadata = safe.get("toolMetadata", {}).get(row.get("name"), {})
-        if isinstance(metadata, Mapping):
-            for key, value in metadata.items():
-                row.setdefault(key, value)
-        name = str(row.get("name") or "").casefold()
-        action = str(row.get("action") or row.get("actionKind") or row.get("effect") or "").casefold()
-        permission = str(row.get("permission") or "").casefold().replace(" ", "")
-        stage = str(row.get("stage") or "").casefold()
-        if "preview_restore" in name or "restore_preview" in name:
-            candidate_phases = ("预览", "恢复")
-        elif stage.startswith(("preview", "inspect", "read")) or action in _READ_ACTIONS:
-            candidate_phases = ("预览",)
-        elif stage.startswith(("restore", "rollback", "recover", "resume")) or action in _RESTORE_ACTIONS:
-            candidate_phases = ("恢复",)
-        elif permission in {"write", "requiresapproval", "requires_approval"} or action in _WRITE_ACTIONS:
-            candidate_phases = ("审批",)
-        elif stage.startswith(("bind", "attach", "select")) or action in _BIND_ACTIONS:
-            candidate_phases = ("绑定",)
-        elif action in _DISCOVERY_ACTIONS:
-            candidate_phases = ("找工具",)
-        else:
-            # Name conventions are deliberately narrow: read/scan defaults to
-            # preview, and only explicit discovery verbs map to tool finding.
-            if "preview_restore" in name or "restore_preview" in name:
-                candidate_phases = ("预览", "恢复")
-            elif any(token in name for token in ("restore", "rollback", "recover", "resume", "replay")):
-                candidate_phases = ("恢复",)
-            elif any(token in name for token in ("load_internal_tool_block", "list_internal_tool_blocks", "catalog", "discover")):
-                candidate_phases = ("找工具",)
-            elif any(token in name for token in ("approval", "authorize", "confirm", "permission")):
-                candidate_phases = ("审批",)
-            elif any(token in name for token in ("read", "scan", "inspect", "observe", "preview", "plan", "get_")):
-                candidate_phases = ("预览",)
-            else:
-                candidate_phases = ()
-        for phase in candidate_phases:
-            if phase not in phases:
-                phases.append(phase)
-    if primary is None and phases:
-        primary = phases[0]
-    if primary is not None and primary not in phases:
-        phases.insert(0, primary)
-    return phases, primary
+    """Look up actual tool names only; caller/model phase hints have no authority."""
+    from provider_tool_phases import PHASE_BY_TOOL
+
+    phases = list(dict.fromkeys(
+        PHASE_BY_TOOL.get(row["name"], "unknown") for row in safe_tool_calls(tool_calls)
+    )) or ["unknown"]
+    return phases, phases[0]
 
 
 class ProviderRequestLedger:

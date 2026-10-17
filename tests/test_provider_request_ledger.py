@@ -31,7 +31,7 @@ def test_single_physical_request_persists_authoritative_id_and_task_binding(tmp_
     response = {
         "id": "resp_123",
         "status": "completed",
-        "output": [{"type": "function_call", "id": "fc_1", "call_id": "call_1", "name": "preview_avatar"}],
+        "output": [{"type": "function_call", "id": "fc_1", "call_id": "call_1", "name": "unity_preview_manage_fx_animator"}],
         "usage": {
             "input_tokens": 0,
             "output_tokens": 0,
@@ -67,7 +67,7 @@ def test_single_physical_request_persists_authoritative_id_and_task_binding(tmp_
     assert row["firstApprovalRequestOrdinal"] == 1
     assert row["firstApprovalRequestIds"] == ["local-before-http", "resp_123"]
     assert row["primaryPhase"] == "预览"
-    assert row["toolCalls"] == [{"id": "call_1", "name": "preview_avatar"}]
+    assert row["toolCalls"] == [{"id": "call_1", "name": "unity_preview_manage_fx_animator"}]
     assert row["tokenUsage"] == {
         "inputTokens": 0, "outputTokens": 0, "totalTokens": 0,
         "reasoningTokens": 0, "cacheReadTokens": 0, "cacheWriteTokens": None,
@@ -78,9 +78,9 @@ def test_single_physical_request_persists_authoritative_id_and_task_binding(tmp_
 def test_multitool_phase_array_uses_name_conventions_without_prompt_guessing():
     phases, primary = classify_request_phases(
         [
-            {"id": "1", "name": "discover_tool_catalog"},
-            {"id": "2", "name": "request_approval"},
-            {"id": "3", "name": "restore_checkpoint"},
+            {"id": "1", "name": "load_internal_tool_block"},
+            {"id": "2", "name": "vrcforge_manage_fx_animator"},
+            {"id": "3", "name": "vrcforge_restore_checkpoint"},
         ],
         {"sessionId": "s", "turnId": "t", "clientTurnId": "task"},
     )
@@ -88,7 +88,7 @@ def test_multitool_phase_array_uses_name_conventions_without_prompt_guessing():
     assert primary == "找工具"
 
 
-def test_phase_classifier_uses_action_metadata_without_tool_name_tables():
+def test_phase_classifier_uses_the_fixed_name_table_despite_conflicting_metadata():
     phases, primary = classify_request_phases([
         {"id": "write", "name": "vrcforge_manage_fx_animator", "permission": "Write"},
         {"id": "scan", "name": "vrcforge_scan_fx_animator", "effect": "read"},
@@ -98,9 +98,9 @@ def test_phase_classifier_uses_action_metadata_without_tool_name_tables():
     assert primary == "审批"
 
     phases, primary = classify_request_phases([
-        {"id": "preview-restore", "name": "preview_restore_shader", "action": "preview"},
+        {"id": "preview-restore", "name": "vrcforge_preview_interrupted_apply_recovery", "action": "preview"},
     ])
-    assert phases == ["预览", "恢复"]
+    assert phases == ["预览"]
     assert primary == "预览"
 
 
@@ -113,7 +113,7 @@ def test_runtime_action_extracts_only_tool_name_and_phase_from_arguments(tmp_pat
         "output": [{
             "type": "function_call", "id": "fc", "call_id": "call",
             "name": "vrcforge_runtime_action",
-            "arguments": '{"action":"write","write_tool":"apply_avatar_change","write_params":{"secret":"do-not-log"}}',
+            "arguments": '{"action":"write","write_tool":"vrcforge_manage_fx_animator","write_params":{"secret":"do-not-log"}}',
         }],
     }
     with ledger_scope(ledger):
@@ -123,7 +123,7 @@ def test_runtime_action_extracts_only_tool_name_and_phase_from_arguments(tmp_pat
             request_observer=callbacks.append,
         )
     row = ledger.read_rows()[0]
-    assert row["toolCalls"] == [{"id": "call", "name": "apply_avatar_change", "action": "write"}]
+    assert row["toolCalls"] == [{"id": "call", "name": "vrcforge_manage_fx_animator", "action": "write"}]
     assert row["primaryPhase"] == "审批"
     assert "do-not-log" not in json.dumps(row)
 
@@ -148,7 +148,8 @@ def test_failed_physical_request_is_durable_with_unknown_usage_and_intended_phas
             )
     row = ledger.read_rows()[0]
     assert row["status"] == "failed"
-    assert row["primaryPhase"] == "审批"
+    assert row["primaryPhase"] == "unknown"
+    assert row["phaseUnknown"] is True
     assert row["usagePresent"] is False
     assert all(value is None for value in row["tokenUsage"].values())
     assert len(calls) == 1
@@ -174,7 +175,7 @@ def test_request_metrics_keeps_reasoning_and_cache_unknown_separate_from_zero(tm
             {"input_tokens": 7, "output_tokens": 0, "total_tokens": 7,
              "input_tokens_details": {"cached_tokens": 0}},
             success=True,
-            tool_calls=[{"id": "call", "name": "load_tool_block"}],
+            tool_calls=[{"id": "call", "name": "load_internal_tool_block"}],
         )
     row = ledger.read_rows()[0]
     assert row["tokenUsage"]["inputTokens"] == 7
@@ -205,3 +206,40 @@ def test_native_composition_context_is_content_free(tmp_path):
     assert "raw-prompt" not in encoded
     assert "must-not-persist" not in encoded
     assert "a" * 64 in encoded
+
+
+def test_recovered_stream_items_are_also_the_authoritative_ledger_output(tmp_path):
+    ledger = ProviderRequestLedger(tmp_path / "provider.jsonl")
+    item = {"type": "function_call", "id": "fc_stream", "call_id": "call_stream",
+            "name": "load_internal_tool_block", "arguments": '{"tools":[],"secret":"do-not-log"}'}
+    terminal = {"id": "resp_stream", "status": "completed", "output": [],
+                "usage": {"input_tokens": 12, "output_tokens": 3, "total_tokens": 15}}
+    events = [{"type": "response.output_item.done", "output_index": 0, "item": item},
+              {"type": "response.completed", "response": terminal}]
+    client = SimpleNamespace(responses=SimpleNamespace(create=lambda **_: iter(events)), close=lambda: None)
+    with ledger_scope(ledger, {"toolMetadata": {
+        "load_internal_tool_block": {"permission": "ReadOnly", "effect": "read"},
+    }}):
+        result = stream_response(client, {"model": "fixture", "input": []}, None, None, None,
+                                 error_factory=lambda message, _: RuntimeError(message),
+                                 request_observer=lambda _: None)
+    assert result["output"] == [item]
+    row = ledger.read_rows()[0]
+    assert row["requestId"] == "resp_stream"
+    assert row["toolCalls"] == [{"id": "call_stream", "name": "load_internal_tool_block",
+                                  "permission": "ReadOnly", "effect": "read"}]
+    assert row["phases"] == ["找工具"]
+    assert row["phaseUnknown"] is False
+    assert "do-not-log" not in json.dumps(row)
+
+
+def test_fixed_phases_cover_the_benchmark_tools():
+    phases, primary = classify_request_phases([
+        {"id": "discover", "name": "load_internal_tool_block", "effect": "read"},
+        {"id": "bind", "name": "unity_bind_execution_target", "effect": "read"},
+        {"id": "preview", "name": "unity_scan_fx_animator", "effect": "read"},
+        {"id": "restore", "name": "vrcforge_restore_checkpoint", "permission": "Write", "effect": "write"},
+        {"id": "write", "name": "unity_manage_fx_animator", "permission": "Write", "effect": "write"},
+    ])
+    assert phases == ["找工具", "绑定", "预览", "恢复", "审批"]
+    assert primary == "找工具"

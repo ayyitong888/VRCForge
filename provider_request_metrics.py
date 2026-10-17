@@ -350,7 +350,7 @@ class RequestMetrics:
             "primaryPhase": primary_phase,
         })
         primary_phase = inferred_primary
-        phase_unknown = not bool(normalized_phases)
+        phase_unknown = "unknown" in normalized_phases
         self._emit("terminal", status="completed" if success else "failed", failureClass=error,
                    latencyMs=round((time.monotonic()-self.started)*1000), usage=safe,
                    serviceTier=_normalize_service_tier(service_tier),
@@ -358,5 +358,5 @@ class RequestMetrics:
                    toolCalls=normalized_calls,
                    phases=normalized_phases,
                    phaseUnknown=phase_unknown,
-                   primaryPhase=primary_phase or self.context.get("primaryPhase"),
+                   primaryPhase=primary_phase,
                    output=dict(output) if isinstance(output, Mapping) else {})
