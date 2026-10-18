@@ -50,6 +50,7 @@ namespace VRCForge.Editor
             public JObject selector;
             public Dictionary<string, string> objects;
             public Dictionary<string, string> files;
+            public string[] metadataOnlyAssetPaths;
         }
 
         static ScanScopeJournal()
@@ -184,8 +185,7 @@ namespace VRCForge.Editor
 
         private static string MemoryHash(Object target)
         {
-            // Material inventory reports texture metadata; disk fingerprints
-            // cover asset contents. Serializing pixel buffers is unbounded and
+            // Material inventory reports texture metadata. Serializing pixel buffers is unbounded and
             // adds data which that reader does not observe.
             var text = target is Texture texture
                 ? TextureObservation(texture).ToString(Formatting.None) : EditorJsonUtility.ToJson(target);
@@ -235,13 +235,18 @@ namespace VRCForge.Editor
                 && !path.Contains("\\") && !path.Split('/').Any(part => part == ".." || part == "." || part == "");
         }
 
-        private static string FileHash(string path, ref long budget)
+        private static string FileHash(string path, ref long budget, bool metadataOnly = false)
         {
             if (!AssetPath(path)) throw new InvalidDataException("invalid_asset_path");
             var file = new FileInfo(path);
-            if (!file.Exists || file.Length > budget) throw new InvalidDataException("disk_scope_unavailable");
-            budget -= file.Length;
+            if (!file.Exists) throw new InvalidDataException("disk_scope_unavailable");
             var before = file.Length + ":" + file.LastWriteTimeUtc.Ticks;
+            // A material inventory observes imported texture metadata, not pixels.
+            // Keep source presence/stat and importer .meta coverage without reading
+            // pixel files into a content budget unrelated to that observation.
+            if (metadataOnly) return before;
+            if (file.Length > budget) throw new InvalidDataException("disk_scope_unavailable");
+            budget -= file.Length;
             string digest;
             // Project-scoped, read-only handle, closed before returning.
             using (var input = file.OpenRead())
@@ -270,14 +275,46 @@ namespace VRCForge.Editor
             return material.GetTexturePropertyNames().Select(material.GetTexture).Where(texture => texture != null);
         }
 
+        private static HashSet<string> ReadMaterialSelectionIds(JObject selector)
+        {
+            var value = selector?["arguments"]?["materialIds"];
+            if (value == null || value.Type == JTokenType.Null) return null;
+            if (!(value is JArray values)) throw new InvalidDataException("invalid_material_selection");
+            // The public scanner normalizes an empty list to an unfiltered scan.
+            if (values.Count == 0) return null;
+            var ids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var item in values)
+            {
+                if (item.Type != JTokenType.String) throw new InvalidDataException("invalid_material_selection");
+                var id = item.Value<string>();
+                if (!string.IsNullOrWhiteSpace(id)) ids.Add(id.Trim());
+            }
+            return ids;
+        }
+
+        internal static bool MaterialIdSelected(HashSet<string> selectedMaterialIds, string materialId)
+        {
+            return selectedMaterialIds == null || selectedMaterialIds.Contains(materialId);
+        }
+
+        internal static string MaterialSelectorDigest(IEnumerable<string> materialIds)
+        {
+            return Hash(string.Join("\n", materialIds.Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(value => value, StringComparer.Ordinal)));
+        }
+
         private static Scope Measure(string[] roots, JObject selector)
         {
             var materialScope = (string)selector?["scanTool"] == "vrcforge_scan_avatar_materials";
             var includeTextures = (bool?)selector?["arguments"]?["includeTextures"] ?? true;
+            var selectedMaterialIds = materialScope ? ReadMaterialSelectionIds(selector) : null;
             var scope = new Scope { epoch = state.epoch, sceneEpoch = state.sceneEpoch, roots = roots,
                 capturedAt = DateTime.UtcNow.ToString("o"), objects = new Dictionary<string, string>(), files = new Dictionary<string, string>() };
+            var materialSelectorProofs = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
             var pending = new Queue<Object>(roots.Select(Resolve));
             var paths = new HashSet<string>();
+            var metadataOnlyTexturePaths = new HashSet<string>();
+            var contentRequiredPaths = new HashSet<string>();
             while (pending.Count > 0)
             {
                 var target = pending.Dequeue();
@@ -286,6 +323,8 @@ namespace VRCForge.Editor
                 if (scope.objects.ContainsKey(id)) continue;
                 if (scope.objects.Count >= MaxObjects) throw new InvalidDataException("scope_too_large");
                 var path = AssetDatabase.GetAssetPath(target);
+                if (materialScope && target is Texture) metadataOnlyTexturePaths.Add(path);
+                else contentRequiredPaths.Add(path);
                 var hash = MemoryHash(target);
                 var dirty = EditorUtility.GetDirtyCount(target);
                 if (!state.watches.TryGetValue(id, out var watch))
@@ -304,6 +343,7 @@ namespace VRCForge.Editor
                     {
                         if (!AssetPath(dependency)) continue;
                         paths.Add(dependency);
+                        contentRequiredPaths.Add(dependency);
                         foreach (var asset in materialScope ? Array.Empty<Object>() : AssetDatabase.LoadAllAssetsAtPath(dependency))
                             if (asset != null && !(asset is MonoScript)) pending.Enqueue(asset);
                     }
@@ -317,6 +357,24 @@ namespace VRCForge.Editor
                         pending.Enqueue(component);
                     }
                     foreach (Transform child in gameObject.transform) pending.Enqueue(child.gameObject);
+                }
+                if (materialScope && selectedMaterialIds != null && target is Renderer renderer)
+                {
+                    // Match ShaderMaterialScanner's renderer path, slot order, and ID algorithm.
+                    var rendererPath = RendererComponentIdentity.Create(renderer).rendererPath;
+                    var sharedMaterials = renderer.sharedMaterials ?? Array.Empty<Material>();
+                    for (var slotIndex = 0; slotIndex < sharedMaterials.Length; slotIndex++)
+                    {
+                        var assignedMaterial = sharedMaterials[slotIndex];
+                        if (assignedMaterial == null) continue;
+                        var materialId = MaterialInventoryIdentity.CreateMaterialId(rendererPath, slotIndex,
+                            assignedMaterial.name ?? string.Empty, assignedMaterial.shader != null ? assignedMaterial.shader.name : string.Empty);
+                        var materialObjectId = Identity(assignedMaterial);
+                        if (!materialSelectorProofs.TryGetValue(materialObjectId, out var ids))
+                            materialSelectorProofs[materialObjectId] = ids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                        ids.Add(materialId);
+                        if (MaterialIdSelected(selectedMaterialIds, materialId)) pending.Enqueue(assignedMaterial);
+                    }
                 }
                 if (materialScope && target is Material material)
                     foreach (var texture in MaterialTextureDependencies(material, includeTextures)) pending.Enqueue(texture);
@@ -335,6 +393,8 @@ namespace VRCForge.Editor
                             failure.Data["propertyPath"] = property.propertyPath;
                             throw failure;
                         }
+                        if (materialScope && selectedMaterialIds != null && target is Renderer
+                            && property.propertyPath.StartsWith("m_Materials", StringComparison.Ordinal)) continue;
                         if (materialScope && property.propertyType == SerializedPropertyType.ObjectReference
                             && property.objectReferenceValue is Mesh) continue;
                         if (property.propertyType == SerializedPropertyType.ObjectReference && property.objectReferenceValue != null
@@ -343,11 +403,32 @@ namespace VRCForge.Editor
                     }
                 }
             }
+            foreach (var pair in materialSelectorProofs)
+            {
+                var digest = MaterialSelectorDigest(pair.Value);
+                if (scope.objects.TryGetValue(pair.Key, out var existing))
+                {
+                    var parts = existing.Split(':');
+                    if (parts.Length != 3) throw new InvalidDataException("diagnostic_object_state_unavailable");
+                    scope.objects[pair.Key] = parts[0] + ":" + parts[1] + ":" + Hash(parts[2] + "|material-selector:" + digest);
+                }
+                else
+                {
+                    if (scope.objects.Count >= MaxObjects) throw new InvalidDataException("scope_too_large");
+                    // Identity-only proof: name/shader/slot identity is read to validate selection,
+                    // while unselected material properties and texture assets remain out of scope.
+                    scope.objects[pair.Key] = "0:0:" + Hash("material-selector:" + digest);
+                }
+            }
             long budget = 128 * 1024 * 1024;
+            scope.metadataOnlyAssetPaths = metadataOnlyTexturePaths.Where(path => paths.Contains(path)
+                && !contentRequiredPaths.Contains(path) && path.StartsWith("Assets/", StringComparison.Ordinal))
+                .OrderBy(path => path, StringComparer.Ordinal).ToArray();
             foreach (var path in paths.OrderBy(value => value, StringComparer.Ordinal))
             {
                 if (!state.paths.ContainsKey(path)) state.paths[path] = 0;
-                scope.files[path] = state.paths[path] + ":" + FileHash(path, ref budget) + ":" + FileHash(path + ".meta", ref budget);
+                var metadataOnly = materialScope && metadataOnlyTexturePaths.Contains(path) && !contentRequiredPaths.Contains(path);
+                scope.files[path] = state.paths[path] + ":" + FileHash(path, ref budget, metadataOnly) + ":" + FileHash(path + ".meta", ref budget);
             }
             return scope;
         }
@@ -447,6 +528,7 @@ namespace VRCForge.Editor
                 result["capturedAt"] = scope.capturedAt;
                 result["dependencyCoverage"] = "complete";
                 result["assetPaths"] = new JArray(scope.files.Keys.Where(path => path.StartsWith("Assets/", StringComparison.Ordinal)));
+                result["metadataOnlyAssetPaths"] = new JArray(scope.metadataOnlyAssetPaths ?? Array.Empty<string>());
                 return result;
             }
             catch (Exception exception)

@@ -1760,13 +1760,14 @@ def _reset_compacted_context_usage(usage: dict[str, object], summary_digest: str
 
 
 class RuntimePlannerService:
-    def __init__(self, *, catalog: PlannerCatalogPort, desktop: DesktopPlanningObservationPort, model: PlannerModelPort | None = None, compactor: RuntimeHistoryCompactionPort | None = None, turn: PlannerTurnPort | None = None, global_instructions: Callable[[], str] | None = None) -> None:
+    def __init__(self, *, catalog: PlannerCatalogPort, desktop: DesktopPlanningObservationPort, model: PlannerModelPort | None = None, compactor: RuntimeHistoryCompactionPort | None = None, turn: PlannerTurnPort | None = None, global_instructions: Callable[[], str] | None = None, tool_image_reader: Callable[[Mapping[str, object], str], Mapping[str, object]] | None = None) -> None:
         self._catalog = catalog
         self._desktop = desktop
         self._model = model
         self._compactor = compactor
         self._turn = turn
         self._global_instructions = global_instructions
+        self._tool_image_reader = tool_image_reader
         self._native_binding = ContextVar("runtime_native_binding", default="")
         self._verified_context_limit = ContextVar("verified_context_limit", default=None)
 
@@ -2573,10 +2574,14 @@ class RuntimePlannerService:
                             persisted_messages[index] = deepcopy(original)
                     native_turn.persist_request_context(persisted_messages)
                     native_request = self._native_recovery_request(native_request, native_turn)
+                    from native_tool_images import collect_tool_images, bind_tool_images
+                    tool_image_content = collect_tool_images(loop_state or [], self._tool_image_reader, project_path)
+                    native_request = bind_tool_images(native_request, tool_image_content)
                     native_request, native_guard = self.maybe_compact_native_context(
                         native_request, native_turn, context_usage=context_usage,
                     )
                     native_request = _bind_native_image_blocks(native_request, observe, message)
+                    native_request = bind_tool_images(native_request, tool_image_content)
                     # Refresh only the private diagnostic provenance after
                     # recovery/compaction/image projection.  The provider sees
                     # instructions/messages/tools only; the sidecar is removed
@@ -2587,7 +2592,7 @@ class RuntimePlannerService:
                         origin=origin,
                     )
                     native_request._provider_turn_state = getattr(native_turn, "provider_turn_state", None)
-                    if native_guard is not None and ensure_dict(native_turn.compaction).get("applied") is True:
+                    if tool_image_content or (native_guard is not None and ensure_dict(native_turn.compaction).get("applied") is True):
                         native_guard = self.native_context_guard(native_request, context_usage=context_usage)
                     if native_guard is not None and context_usage is not None:
                         context_usage["nativeContextGuard"] = native_guard

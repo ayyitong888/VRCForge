@@ -104,7 +104,7 @@ def test_scope_client_checks_capability_each_call_and_unwraps_completed_data(mon
 
     class FakeClient:
         def __init__(self, _project, *, timeout_seconds):
-            assert timeout_seconds == 3.0
+            assert timeout_seconds == 30.0
 
         def core_info(self):
             calls.append(("core_info",))
@@ -332,9 +332,9 @@ def test_random_guid_reference_graph_expands_real_store_fingerprints_and_reader_
     fingerprint_batches = []
     actual_fingerprints = store_module._fingerprints
 
-    def counted_fingerprints(root, selected):
+    def counted_fingerprints(root, selected, metadata_only_paths=()):
         fingerprint_batches.append(set(selected))
-        return actual_fingerprints(root, selected)
+        return actual_fingerprints(root, selected, metadata_only_paths)
 
     monkeypatch.setattr(store_module, "_fingerprints", counted_fingerprints)
     store = ScanResultStore(tmp_path / "result-store")

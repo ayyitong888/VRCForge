@@ -82,6 +82,7 @@ from operation_context import bind_operation_context
 from execution_target import (
     ExecutionTargetError,
     execution_target_digest,
+    is_execution_target_reference,
     validate_runtime_execution_target,
 )
 from mcp_tool_descriptor import identity_scope
@@ -678,6 +679,7 @@ class ApprovalTransactionPorts:
     read_user_constraints: Callable[[], UserConstraintsSnapshot]
     roslyn_available: Callable[[AgentGatewayConfig | None], bool]
     save_config: Callable[[AgentGatewayConfig], None]
+    resolve_execution_target_reference: Callable[..., dict[str, Any]]
     invalidate_scan_results: Callable[[str, str], Any] = _noop_scan_invalidation
     complete_scan_mutation: Callable[[str, str, Any, Any], None] = _noop_scan_completion
 
@@ -1287,6 +1289,14 @@ class AgentApprovalTransactionService:
             )
         user_constraints = self._ports.read_user_constraints()
         arguments = self._inject_user_constraints_for_apply(arguments, user_constraints)
+        execution_target = arguments.get("executionTarget")
+        if is_execution_target_reference(execution_target):
+            project_root = str(arguments.get("projectPath") or arguments.get("projectRoot") or "").strip()
+            arguments["executionTarget"] = self._ports.resolve_execution_target_reference(
+                execution_target,
+                project_root=project_root,
+                required_scope=identity_scope(target_tool, write=True, arguments=arguments),
+            )
         preview = params.get("preview")
         if write_handler.request_preparer is not None:
             explicit_preconditions = _explicit_write_preconditions(arguments)

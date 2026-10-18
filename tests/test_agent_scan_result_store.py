@@ -453,7 +453,7 @@ def test_capture_fingerprints_are_computed_with_shared_lock_and_transaction(tmp_
     store = ScanResultStore(tmp_path / "store", lock)
     original = store_module._fingerprints
 
-    def checked(project_root, paths):
+    def checked(project_root, paths, metadata_only_paths=()):
         assert lock._is_owned()
         connection = sqlite3.connect(store._path, timeout=0)
         try:
@@ -461,7 +461,7 @@ def test_capture_fingerprints_are_computed_with_shared_lock_and_transaction(tmp_
                 connection.execute("BEGIN IMMEDIATE")
         finally:
             connection.close()
-        return original(project_root, paths)
+        return original(project_root, paths, metadata_only_paths)
 
     monkeypatch.setattr(store_module, "_fingerprints", checked)
     assert capture(store, capture_data)["persisted"] is True

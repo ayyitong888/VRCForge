@@ -121,6 +121,14 @@ class ScopeCaptureBudget:
         roots = {"paths": sorted(set(paths)), "avatar": avatar,
                  "allProjectClips": args.get("includeAllProjectClips", False),
                  "identity": info.get("captureRootIdentity")}
+        if request["scanTool"] == "vrcforge_scan_avatar_materials":
+            # The same Avatar can have distinct full-inventory and selected-detail
+            # scopes. A failed broad capture must not suppress a bounded selection.
+            selected = args.get("materialIds")
+            roots["materialSelection"] = (sorted({value.strip().casefold() for value in selected
+                                                   if isinstance(value, str) and value.strip()})
+                                          if isinstance(selected, list) and selected else None)
+            roots["includeTextures"] = args.get("includeTextures", True)
         if not roots["identity"]:
             return None
         digest = hashlib.sha256(json.dumps(roots, sort_keys=True, separators=(",", ":")).encode()).hexdigest()

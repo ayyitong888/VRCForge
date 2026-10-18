@@ -103,6 +103,7 @@ from agent_task_loop import (
     safe_recoverable_write_failure,
 )
 from checkpoint_user_policy import (
+    bind_approved_write,
     bind_continued_checkpoint_skip,
     bind_user_checkpoint_skip,
     checkpoint_skip_authority_for_context,
@@ -2407,6 +2408,7 @@ class AgentGateway:
                 read_user_constraints=self.read_user_constraints,
                 roslyn_available=self.roslyn_available,
                 save_config=self.save_config,
+                resolve_execution_target_reference=self.resolve_execution_target_reference,
                 invalidate_scan_results=self._invalidate_scan_results,
                 complete_scan_mutation=self._scan_results.end_mutation,
             ),
@@ -2434,6 +2436,27 @@ class AgentGateway:
                 )
 
         def create_shell_approval(request: ShellApprovalRequest) -> dict[str, Any]:
+            task_context = approval_task_context(
+                request.task_context,
+                tool=request.target_tool,
+                arguments=request.arguments,
+            )
+            if task_context is not None and isinstance(
+                task_context.get("checkpointUserPolicy"), Mapping
+            ):
+                bound_policy = bind_approved_write(
+                    task_context.get("checkpointUserPolicy"),
+                    task_context,
+                    target_tool=request.target_tool,
+                    requested_arguments=ensure_dict(task_context.get("requestedArguments")),
+                    approved_arguments=request.arguments,
+                    approved_project_root=str(extract_project_root(request.arguments) or ""),
+                    plan_digest="",
+                )
+                if bound_policy is None:
+                    task_context.pop("checkpointUserPolicy", None)
+                else:
+                    task_context["checkpointUserPolicy"] = bound_policy
             return self.approval_transactions._new_approval(
                 agent_name=request.agent_name,
                 target_tool=request.target_tool,
@@ -2445,11 +2468,7 @@ class AgentGateway:
                 requires_explicit_approval=request.requires_explicit_approval,
                 explicit_approval_reason=request.explicit_approval_reason,
                 goal_delivery_id=request.goal_delivery_id,
-                task_context=approval_task_context(
-                    request.task_context,
-                    tool=request.target_tool,
-                    arguments=request.arguments,
-                ),
+                task_context=task_context,
             )
 
         def update_shell_approval_metadata(approval_id: str, metadata: dict[str, Any]) -> None:

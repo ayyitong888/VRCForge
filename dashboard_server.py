@@ -14599,6 +14599,17 @@ def _execute_prepared_scene_view_capture(
             angle = angles[index]
             capture["angle"] = angle
         captures.append(capture)
+        # The approved capture owner publishes immutable pixels. Native input
+        # only receives the receipt, never an arbitrary filesystem path.
+        execution = current_approved_unity_execution()
+        binding = execution.diagnostic_context() if execution else {}
+        context_id = AGENT_GATEWAY._mcp_resource_context.get()
+        if context_id and binding.get("sessionId") and binding.get("approvalId"):
+            from scene_capture_preview import publish_scene_capture_preview
+            capture["preview"] = publish_scene_capture_preview(
+                AGENT_GATEWAY._mcp_resources, approved_path,
+                str(settings.unity_project_path), binding, context_id,
+            )
     if first_failure is not None:
         failure = dict(first_failure)
         failure["captures"] = captures
@@ -21685,8 +21696,9 @@ def prepare_renderer_material_slot_request(
     params: dict[str, Any],
     caller_preview: Any,
 ) -> tuple[dict[str, Any], Any]:
+    request = dict(params or {})
     return prepare_unity_mcp_write_request(
-        build_renderer_material_slot_wrapper_arguments(params or {}),
+        build_renderer_material_slot_wrapper_arguments(request),
         caller_preview,
     )
 
@@ -28862,6 +28874,36 @@ _RUNTIME_PROFILED_TOOL_REGISTRY = _build_runtime_profiled_tool_registry()
 
 _RUNTIME_PLANNER_TURN = _RuntimePlannerProviderTurnBinding()
 _RUNTIME_PLANNER_MODEL = _RuntimePlannerModel(_RUNTIME_PLANNER_TURN)
+
+
+def _read_native_tool_image_resource(preview: Mapping[str, object], project_path: str) -> dict[str, Any]:
+    """Read only the exact current-session source preview returned by a Tool."""
+    context_id = AGENT_GATEWAY._mcp_resource_context.get()
+    registry = AGENT_GATEWAY._mcp_resources
+    if not context_id or registry is None or not project_path or not Path(project_path).is_absolute():
+        raise ValueError("Tool image requires the current authenticated project session.")
+    uri = preview.get("resourceUri")
+    is_capture = preview.get("schema") == "vrcforge.scene_capture_preview.v1"
+    identity_keys = ("captureId",) if is_capture else ("assetPath", "assetGuid")
+    envelope = registry.validate_reference(
+        uri, expected_type="scene_capture_preview" if is_capture else "texture_asset_preview", context_id=context_id,
+        expected_identity={key: preview.get(key) for key in identity_keys},
+    )
+    identity = envelope.get("identity", {})
+    if os.path.normcase(os.path.abspath(str(identity.get("projectRoot") or ""))) != os.path.normcase(os.path.abspath(project_path)):
+        raise ValueError("Tool image belongs to a different project.")
+    data = envelope.get("data", {})
+    expected_schema = "vrcforge.scene_capture_preview.v1" if is_capture else "vrcforge.texture_asset_preview.v1"
+    if preview.get("schema") != expected_schema or preview.get("mimeType") != "image/png" \
+            or any(not preview.get(key) or data.get(key) != preview.get(key)
+                   for key in (*identity_keys, "sha256", "sourceSha256")):
+        raise ValueError("Tool image does not match its captured preview receipt.")
+    if is_capture:
+        from scene_capture_preview import read_scene_capture_preview
+        return read_scene_capture_preview(envelope)
+    return AGENT_GATEWAY.read_mcp_resource(uri)
+
+
 RUNTIME_PLANNER = RuntimePlannerService(
     catalog=_RuntimePlannerCatalog(),
     desktop=_RuntimePlannerDesktopObservation(),
@@ -28869,6 +28911,7 @@ RUNTIME_PLANNER = RuntimePlannerService(
     compactor=_RuntimePlannerCompactor(_RUNTIME_PLANNER_TURN, _RUNTIME_PLANNER_MODEL),
     turn=_RUNTIME_PLANNER_TURN,
     global_instructions=lambda: AGENT_GATEWAY.read_user_constraints().content,
+    tool_image_reader=_read_native_tool_image_resource,
 )
 AGENT_GATEWAY.bind_runtime_planner(RUNTIME_PLANNER)
 

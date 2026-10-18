@@ -27,7 +27,9 @@ SCOPED_SCAN_TOOLS = frozenset({
     "vrcforge_scan_avatar_items",
     "vrcforge_read_avatar_descriptor",
 })
-CORE_TIMEOUT_SECONDS = 3.0
+# Scope measurement includes dependency hashes, not just a bootstrap probe.
+# Keep one bounded read deadline; failed captures remain suppressed by the store.
+CORE_TIMEOUT_SECONDS = 30.0
 MAX_SCOPE_PATHS = 256
 _MATERIAL_SCAN_ALIAS = "vrcforge_scan_materials"
 _TOKEN = re.compile(r"scope_[0-9a-f]{32}\Z")
@@ -261,6 +263,10 @@ class AgentScanScopeClient:
         normalized_paths = sorted(set(paths))
         if len(normalized_paths) != len(paths):
             return {"schema": SCAN_SCOPE_SCHEMA, "verified": False, "reason": "invalid_scope_response"}
+        metadata_paths = content.get("metadataOnlyAssetPaths", [])
+        if not isinstance(metadata_paths, list) or any(not isinstance(path, str) for path in metadata_paths) \
+                or len(set(metadata_paths)) != len(metadata_paths) or not set(metadata_paths).issubset(normalized_paths):
+            return {"schema": SCAN_SCOPE_SCHEMA, "verified": False, "reason": "invalid_scope_response"}
         return {
             "schema": SCAN_SCOPE_SCHEMA,
             "verified": True,
@@ -269,6 +275,7 @@ class AgentScanScopeClient:
             "assetPaths": normalized_paths,
             "capturedAt": captured_at,
             "dependencyCoverage": "complete",
+            **({"metadataOnlyAssetPaths": sorted(metadata_paths)} if metadata_paths else {}),
         }
 
     def validate(self, token: str) -> dict[str, Any]:
