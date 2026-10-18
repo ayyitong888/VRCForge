@@ -418,7 +418,9 @@ class UserConstraintsSnapshot:
     error: str = ""
 
 
-RUNTIME_DIRECT_SKILL_CATEGORIES = {"read/debug", "plan/preview"}
+# Runtime observation status is a bounded, read-only tool in its own category;
+# its start operation remains a supervised write handler.
+RUNTIME_DIRECT_SKILL_CATEGORIES = {"read/debug", "plan/preview", "runtime/observation"}
 # Interactive work stops on the model's final assistant response. Automation
 # may explicitly set maxAgenticTurns; tool calls remain telemetry only and
 # completion remains Runtime-verified.
