@@ -68,6 +68,8 @@ namespace VRCForge.Editor
             public int? expectedAssignedValue { get; set; }
             [VRCForgeInput("Optional Write Defaults setting; defaults to the existing wardrobe convention.", IsRequired = false)]
             public bool? writeDefaults { get; set; }
+            [VRCForgeInput("Exact checkpointAssetPaths returned by the approved preview.", IsRequired = false)]
+            public string[] expectedCheckpointAssetPaths { get; set; } = new string[0];
         }
 
         public static object HandleCommand(JObject @params)
@@ -92,6 +94,7 @@ namespace VRCForge.Editor
                 var subMenuName = (@params["subMenuName"]?.ToString() ?? "Wardrobe").Trim();
                 var expectedWardrobeFingerprint = (@params["expectedWardrobeFingerprint"]?.ToString() ?? string.Empty).Trim();
                 var approvedObjectReceiptNonce = (@params["approvedObjectReceiptNonce"]?.ToString() ?? string.Empty).Trim();
+                var expectedCheckpointAssetPaths = @params["expectedCheckpointAssetPaths"]?.ToObject<string[]>();
 
                 if (string.IsNullOrWhiteSpace(parameterName))
                 {
@@ -290,6 +293,18 @@ namespace VRCForge.Editor
                     warnings.Add("Menu is full and SubMenu overflow is disabled; no menu toggle will be added (FX/parameter still wired).");
                 }
 
+                var checkpointPaths = new List<string> { fxControllerPath, clipPath };
+                if (addMenuToggle)
+                {
+                    checkpointPaths.AddRange(ExpressionWritePersistence.Capture(descriptor.expressionsMenu).Keys);
+                    if (!string.IsNullOrWhiteSpace(menuAssetPath)) checkpointPaths.Add(menuAssetPath);
+                }
+                if (setObjectsDefaultOff && resolvedTargets.Any(item => item.gameObject.activeSelf))
+                {
+                    checkpointPaths.Add(descriptor.gameObject.scene.path);
+                }
+                var checkpointAssetPaths = AvatarAuthoringCrudCore.CheckpointAssetPaths(checkpointPaths);
+
                 var plan = new
                 {
                     action = "add_wardrobe_outfit",
@@ -314,6 +329,7 @@ namespace VRCForge.Editor
                     menuAssetDir,
                     menuAssetPath,
                     menuOverflowToSubMenu = menuPlan.createsSubMenu,
+                    checkpointAssetPaths,
                     existingOutfitCount = existingValues.Count,
                     warnings
                 };
@@ -329,6 +345,9 @@ namespace VRCForge.Editor
                             plan
                         });
                 }
+
+                AvatarAuthoringCrudCore.RequireExpectedCheckpointAssetPaths(
+                    checkpointAssetPaths, expectedCheckpointAssetPaths);
 
                 // ---- APPLY -------------------------------------------------------
                 transactionHandle = $"{avatarRootPath}|{parameterName}";

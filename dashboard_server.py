@@ -21152,6 +21152,19 @@ def prepare_authoritative_unity_checkpoint_sync(
             discover=list_execution_targets_sync, inspect_owner=read_component_property_sync,
             prepare=prepare_unity_checkpoint_sync,
         )
+    if checkpoint_target in {"vrcforge_create_wardrobe", "vrcforge_add_wardrobe_outfit"}:
+        from unity_wardrobe_checkpoint import prepare_wardrobe_checkpoint
+
+        return prepare_wardrobe_checkpoint(
+            project_root, arguments, discover=list_execution_targets_sync,
+            preview=lambda tool, values: {
+                "vrc_ensure_expression_parameter": ensure_expression_parameter_sync,
+                "vrc_ensure_animator_state": ensure_animator_state_sync,
+                "vrc_ensure_expression_menu_control": ensure_expression_menu_control_sync,
+                "vrc_add_wardrobe_outfit": lambda query, preview: WARDROBE_OUTFIT_WORKFLOWS.preview_add_wardrobe_outfit(query),
+            }[tool](values, preview=True), prepare=prepare_unity_checkpoint_sync,
+            operation=checkpoint_target.removeprefix("vrcforge_"),
+        )
     if checkpoint_target == "vrcforge_add_outfit":
         from unity_scene_workflow_checkpoint import prepare_add_outfit_checkpoint
 
@@ -22236,6 +22249,8 @@ def build_ensure_expression_parameter_request(params: dict[str, Any], preview: b
     asset_dir = str(params.get("asset_dir") or params.get("assetDir") or "").strip()
     if asset_dir:
         request["assetDir"] = asset_dir
+    if "expectedCheckpointAssetPaths" in params:
+        request["expectedCheckpointAssetPaths"] = params["expectedCheckpointAssetPaths"]
     return request
 
 
@@ -22273,6 +22288,8 @@ def build_ensure_expression_menu_control_request(params: dict[str, Any], preview
     asset_dir = str(params.get("asset_dir") or params.get("assetDir") or "").strip()
     if asset_dir:
         request["assetDir"] = asset_dir
+    if "expectedCheckpointAssetPaths" in params:
+        request["expectedCheckpointAssetPaths"] = params["expectedCheckpointAssetPaths"]
     return request
 
 
@@ -22318,6 +22335,8 @@ def build_ensure_animator_state_request(params: dict[str, Any], preview: bool) -
     asset_dir = str(params.get("asset_dir") or params.get("assetDir") or "").strip()
     if asset_dir:
         request["assetDir"] = asset_dir
+    if "expectedCheckpointAssetPaths" in params:
+        request["expectedCheckpointAssetPaths"] = params["expectedCheckpointAssetPaths"]
     return request
 
 
@@ -27397,6 +27416,10 @@ def register_agent_gateway_tools() -> None:
         "when-to-use: after approval, add an installed outfit to an existing Int parameter and FX Equals layer, including the first outfit on a new skeleton. Supply verified object paths and an explicit approved value; omission allocates max+1. Adds a clip/state/menu and preserves existing clips, whose mutual-exclusion curves require separate approved edits. when-NOT-to-use: do not use to instantiate/fit a prefab or claim full runtime switching from this receipt. Negative example: do not recreate a skeleton merely because its strict scan is empty.",
         "high",
         WARDROBE_OUTFIT_APPROVED_WRITES.add_wardrobe_outfit,
+        request_preparer=lambda values, caller_preview: prepare_wardrobe_request(
+            values, caller_preview, operation="add_wardrobe_outfit",
+            preview=lambda tool, query: WARDROBE_OUTFIT_WORKFLOWS.preview_add_wardrobe_outfit(query),
+        ),
     )
     register_write_handler(
         "vrcforge_manage_wardrobe",
@@ -27426,11 +27449,20 @@ def register_agent_gateway_tools() -> None:
         requires_approved_execution_context=True,
         approved_execution_plan_builder=build_unity_mcp_write_execution_plan,
     )
+    from unity_wardrobe_checkpoint import prepare_wardrobe_request
+
     register_write_handler(
         "vrcforge_create_wardrobe",
         "when-to-use: create an explicitly approved new one-value wardrobe skeleton (Int parameter, default FX state and menu). The receipt verifies that skeleton only. Install the first outfit separately, use preview_add_wardrobe_outfit/add_wardrobe_outfit, complete approved mutual-exclusion curves, then fresh-scan. when-NOT-to-use: do not treat this as a complete wardrobe or repeat creation to satisfy add_outfit's strict gate. Negative example: an empty scan does not prove absence of existing structure.",
         "high",
         WARDROBE_OUTFIT_APPROVED_WRITES.create_wardrobe,
+        request_preparer=lambda values, caller_preview: prepare_wardrobe_request(
+            values, caller_preview, preview=lambda tool, query: {
+                "vrc_ensure_expression_parameter": ensure_expression_parameter_sync,
+                "vrc_ensure_animator_state": ensure_animator_state_sync,
+                "vrc_ensure_expression_menu_control": ensure_expression_menu_control_sync,
+            }[tool](query, preview=True),
+        ),
     )
     register_write_handler(
         "vrcforge_ensure_expression_parameter",

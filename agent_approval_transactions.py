@@ -2743,10 +2743,6 @@ class AgentApprovalTransactionService:
             if "archiveAssetPaths" in prepare_result:
                 # Never accept an archive scope directly from caller arguments.
                 archive_files = prepare_result.get("archiveAssetPaths")
-                if not isinstance(archive_files, list) or not archive_files:
-                    record.update(ok=False, blocking=True, status="failed", error="The authoritative checkpoint scope is empty or invalid.")
-                    self._ports.checkpoint.append_checkpoint(record)
-                    return record
                 record["archiveScopeReason"] = prepare_result.get(
                     "archiveScopeReason", "full_project_prepared_scope_not_proven"
                 )

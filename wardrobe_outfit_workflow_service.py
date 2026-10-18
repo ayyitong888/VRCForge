@@ -509,6 +509,13 @@ def build_add_wardrobe_outfit_request(
     params: dict[str, Any],
     preview: bool,
 ) -> dict[str, Any]:
+    if not preview and "_vrcforge_prepared_unity_execution" in params:
+        from prepared_unity_execution import build_prepared_execution_plan, prepared_evidence
+        if prepared_evidence(params).get("schema") == "vrcforge.prepared-add-wardrobe-outfit.v1":
+            calls = build_prepared_execution_plan(params)
+            if len(calls) != 1 or calls[0][0] != "vrc_add_wardrobe_outfit":
+                raise ValueError("The prepared outfit binding has an invalid Core call.")
+            return calls[0][1]
     request: dict[str, Any] = {
         "avatarPath": str(
             params.get("avatar_path") or params.get("avatarPath") or ""
@@ -983,6 +990,10 @@ def build_create_wardrobe_core_calls(
     params: dict[str, Any],
     preview: bool,
 ) -> list[tuple[str, dict[str, Any]]]:
+    if not preview and "_vrcforge_prepared_unity_execution" in params:
+        from prepared_unity_execution import build_prepared_execution_plan, prepared_evidence
+        if prepared_evidence(params).get("schema") == "vrcforge.prepared-create-wardrobe.v1":
+            return build_prepared_execution_plan(params)
     request = build_create_wardrobe_request(params, preview)
     invalid = validate_create_wardrobe_request(request)
     if invalid is not None:
