@@ -1376,10 +1376,19 @@ def _is_valid_agent_response(value: Any) -> bool:
         if "result" in write and not _is_json_safe_runtime_value(write.get("result")):
             return False
     if "result" in value and value.get("result") is not None:
-        if write is None and not _is_valid_shell_result(value.get("result")):
-            return False
-        if write is not None and not _is_json_safe_runtime_value(value.get("result")):
-            return False
+        result = value.get("result")
+        if not _is_valid_shell_result(result):
+            has_typed_tool_envelope = (
+                write is not None
+                or isinstance(value.get("shell"), dict)
+                or isinstance(value.get("skill"), dict)
+            )
+            if (
+                not has_typed_tool_envelope
+                or not isinstance(result, dict)
+                or not _is_json_safe_runtime_value(result)
+            ):
+                return False
     plan = value.get("plan")
     if not isinstance(plan, dict):
         return False
@@ -1470,8 +1479,13 @@ def _is_valid_agent_response(value: Any) -> bool:
             reasons = classification.get("reasons")
             if not isinstance(reasons, list) or any(not isinstance(reason, str) for reason in reasons):
                 return False
-        if "result" in shell and shell.get("result") is not None and not _is_valid_shell_result(shell.get("result")):
-            return False
+        if "result" in shell and shell.get("result") is not None:
+            shell_result = shell.get("result")
+            if (
+                not _is_valid_shell_result(shell_result)
+                and (not isinstance(shell_result, dict) or not _is_json_safe_runtime_value(shell_result))
+            ):
+                return False
     reasoning = value.get("reasoning")
     if reasoning is not None:
         if not isinstance(reasoning, dict):

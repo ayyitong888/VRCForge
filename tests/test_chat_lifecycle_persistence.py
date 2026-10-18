@@ -36,6 +36,52 @@ def test_lifecycle_events_survive_actual_chat_storage_write_and_read(tmp_path, m
     assert all(is_valid_chat_record(row) for row in saved)
 
 
+def test_generated_title_and_generic_runtime_failure_reply_survive_chat_storage(tmp_path, monkeypatch):
+    import dashboard_server as server
+    from dashboard_api_models import ChatTranscriptsRequest
+
+    monkeypatch.setattr(server, "chat_transcripts_path", lambda: tmp_path / "chats.json")
+    monkeypatch.setattr(server, "chat_project_index_path", lambda: tmp_path / "projects.json")
+    generic_failure = {
+        "ok": False,
+        "status": "failed",
+        "error": {"type": "checkpoint", "code": "fixture_blocked", "summary": "Preparation failed."},
+    }
+    chat = {
+        "id": "generated-title-chat",
+        "sessionId": "session-1",
+        "title": "Generated title",
+        "titleSource": "auto",
+        "items": [
+            {"id": "user-1", "type": "user", "text": "Please make the change."},
+            {
+                "id": "turn-1",
+                "type": "agent",
+                "response": {
+                    "ok": True,
+                    "sessionId": "session-1",
+                    "turnId": "turn-1",
+                    "plan": {"summary": "The operation failed safely.", "planner": "runtime", "shellNeeded": False},
+                    "shell": {
+                        "ok": False,
+                        "status": "failed",
+                        "error": "Preparation failed.",
+                        "result": generic_failure,
+                    },
+                    "skill": {"ok": True, "status": "executed", "tool": "fixture_read", "write": False},
+                    "result": generic_failure,
+                },
+            },
+        ],
+    }
+
+    saved, _, _ = server.write_chat_transcripts_storage(ChatTranscriptsRequest(chats=[chat]))
+
+    assert saved["ok"] is True
+    stored = json.loads((tmp_path / "chats.json").read_text(encoding="utf-8"))["chats"]
+    assert stored == [chat]
+
+
 def test_explicit_test_chat_marker_survives_project_scoped_storage_and_snapshot(tmp_path, monkeypatch):
     import dashboard_server as server
     from chat_snapshot_transport import snapshot_page

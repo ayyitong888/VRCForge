@@ -17,6 +17,7 @@ import {
   type TimelinePresentationEntry,
 } from "../../lib/chat-timeline-presentation";
 import type { ApprovalActionState, ChatTimelineEvent } from "../../lib/chat-types";
+import { isAgentShellResult } from "../../lib/runtime-parsing";
 import { cn } from "../../lib/utils";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
@@ -761,6 +762,7 @@ function buildLegacyAgentTimelineRows({
   t: typeof i18n.t;
 }): ReactNode[] {
   const rows: ReactNode[] = [];
+  const shellExecutionResult = shell && isAgentShellResult(shell.result) ? shell.result : undefined;
   const planReply = response.plan.reply || response.plan.summary;
   const shouldSurfaceModelIdentity = Boolean(response.plan.plannerFailure?.code);
   rows.push(
@@ -829,10 +831,10 @@ function buildLegacyAgentTimelineRows({
         key="shell"
         icon="shell"
         title={shell.classification.command}
-        statusTone={shell.result ? (shell.result.ok ? "ok" : "danger") : awaitingApproval ? "warn" : riskTone(shell.classification.risk)}
+        statusTone={shellExecutionResult ? (shellExecutionResult.ok ? "ok" : "danger") : awaitingApproval ? "warn" : riskTone(shell.classification.risk)}
         statusLabel={
-          shell.result
-            ? t("shell.exitCodeDuration", { code: shell.result.exitCode, time: formatDuration(shell.result.durationSeconds) })
+          shellExecutionResult
+            ? t("shell.exitCodeDuration", { code: shellExecutionResult.exitCode, time: formatDuration(shellExecutionResult.durationSeconds) })
             : awaitingApproval
               ? t("shell.awaitConfirmation")
               : t("shell.riskLevel", { level: shell.classification.risk })
@@ -851,11 +853,11 @@ function buildLegacyAgentTimelineRows({
             ))}
           </div>
         ) : null}
-        {shell.result ? (
+        {shellExecutionResult ? (
           <>
-            <DataLine label={t("shell.elapsed")} value={formatDuration(shell.result.durationSeconds)} />
-            <OutputBlock label={t("shell.output")} value={shell.result.stdout} />
-            {shell.result.stderr ? <OutputBlock label={t("shell.errorOutput")} value={shell.result.stderr} danger /> : null}
+            <DataLine label={t("shell.elapsed")} value={formatDuration(shellExecutionResult.durationSeconds)} />
+            <OutputBlock label={t("shell.output")} value={shellExecutionResult.stdout} />
+            {shellExecutionResult.stderr ? <OutputBlock label={t("shell.errorOutput")} value={shellExecutionResult.stderr} danger /> : null}
           </>
         ) : null}
       </RunRow>,

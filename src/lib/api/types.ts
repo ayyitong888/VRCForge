@@ -692,7 +692,7 @@ export type AgentRuntimeResponse = {
     approval?: AgentApproval;
     approval_id?: string;
     approvalId?: string;
-    result?: AgentShellResult;
+    result?: AgentShellResult | Record<string, unknown>;
     error?: string;
   };
   skill?: AgentSkillResult;

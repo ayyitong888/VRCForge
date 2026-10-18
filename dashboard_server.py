@@ -20579,7 +20579,7 @@ def finalize_add_modular_avatar_component_verification_sync(
     )
 
 
-def prepare_unity_checkpoint_sync(project_root: Path, checkpoint_asset_paths: list[str] | None = None, *, checkpoint_files: list[str] | None) -> dict[str, Any]:
+def prepare_unity_checkpoint_sync(project_root: Path, checkpoint_asset_paths: list[str] | None = None, *, checkpoint_files: list[str] | None = None) -> dict[str, Any]:
     # None is an explicit request for the Core's established full-project
     # snapshot mode. An empty list remains an invalid exact-file scope.
     if checkpoint_files is not None and not checkpoint_files:

@@ -6862,6 +6862,60 @@ class AgentGateway:
                     seed["checkpointSkipAuthority"] = dict(checkpoint_skip_authority)
             return seed
 
+        def bind_runtime_checkpoint_policy(policy_tool: str, policy_arguments: dict[str, Any], choice: object) -> dict[str, Any] | None:
+            nonlocal checkpoint_skip_authority
+            checkpoint_user_policy = None
+            user_source = params.get("_humanUserMessageSource")
+            if isinstance(user_source, Mapping):
+                # A fresh authenticated owner message supersedes an
+                # inherited continuation grant. It may explicitly
+                # re-authorize this write below, but the old capability
+                # cannot silently survive a changed owner instruction.
+                checkpoint_skip_authority = None
+                owner_message = str(user_source.get("message") or "")
+                supplied_session = str(params.get("session_id") or params.get("sessionId") or "")
+                supplied_client_turn = str(params.get("client_turn_id") or params.get("clientTurnId") or "")
+                if (
+                    owner_message == str(params.get("message") or "")
+                    and str(user_source.get("sessionId") or "") == supplied_session
+                    and str(user_source.get("clientTurnId") or "") == supplied_client_turn
+                    and str(user_source.get("projectRoot") or "") == project_root
+                    and task_loop.session_id == session_id
+                    and task_loop.client_turn_id == client_turn_id
+                    and task_loop.project_root == project_root
+                ):
+                    authority = {
+                        **dict(user_source),
+                        "sessionId": task_loop.session_id,
+                        "turnId": task_loop.turn_id,
+                        "clientTurnId": task_loop.client_turn_id,
+                    }
+                    checkpoint_user_policy = bind_user_checkpoint_skip(
+                        authority,
+                        choice,
+                        session_id=task_loop.session_id,
+                        turn_id=task_loop.turn_id,
+                        client_turn_id=task_loop.client_turn_id,
+                        project_root=project_root,
+                        tool=policy_tool,
+                        arguments=policy_arguments,
+                    )
+            elif checkpoint_skip_authority is not None:
+                checkpoint_user_policy = bind_continued_checkpoint_skip(
+                    checkpoint_skip_authority,
+                    choice,
+                    task_context={
+                        "taskId": task_loop.task_id,
+                        "sessionId": task_loop.session_id,
+                        "turnId": task_loop.turn_id,
+                        "clientTurnId": task_loop.client_turn_id,
+                        "projectRoot": task_loop.project_root,
+                    },
+                    tool=policy_tool,
+                    arguments=policy_arguments,
+                )
+            return checkpoint_user_policy
+
         # Context belongs to this invocation, not to a synthetic executed tool.
         # Keep it stable across model rounds and dispose it with the turn. Its
         # content identity prevents a resumed turn from reusing a stale cursor.
@@ -8093,6 +8147,9 @@ class AgentGateway:
                     "workspaceRoot": shell_workspace_root,
                     "options": shell_step_params,
                 }
+                checkpoint_user_policy = bind_runtime_checkpoint_policy(
+                    step_tool, {"command": command, **shell_step_params}, plan.get("checkpointChoice"),
+                )
                 step_payload = self.shell.execute(
                     {
                         **shell_step_params,
@@ -8177,56 +8234,9 @@ class AgentGateway:
                     with bind_memory_tool_context(project_root, memory_request_text, tuple(memory_user_texts)):
                         step_payload = self._runtime_skill_executor.execute(step_tool, action_arguments, agent_name)
                 else:
-                    checkpoint_user_policy = None
-                    user_source = params.get("_humanUserMessageSource")
-                    if isinstance(user_source, Mapping):
-                        # A fresh authenticated owner message supersedes an
-                        # inherited continuation grant. It may explicitly
-                        # re-authorize this write below, but the old capability
-                        # cannot silently survive a changed owner instruction.
-                        checkpoint_skip_authority = None
-                        owner_message = str(user_source.get("message") or "")
-                        supplied_session = str(params.get("session_id") or params.get("sessionId") or "")
-                        supplied_client_turn = str(params.get("client_turn_id") or params.get("clientTurnId") or "")
-                        if (
-                            owner_message == str(params.get("message") or "")
-                            and str(user_source.get("sessionId") or "") == supplied_session
-                            and str(user_source.get("clientTurnId") or "") == supplied_client_turn
-                            and str(user_source.get("projectRoot") or "") == project_root
-                            and task_loop.session_id == session_id
-                            and task_loop.client_turn_id == client_turn_id
-                            and task_loop.project_root == project_root
-                        ):
-                            authority = {
-                                **dict(user_source),
-                                "sessionId": task_loop.session_id,
-                                "turnId": task_loop.turn_id,
-                                "clientTurnId": task_loop.client_turn_id,
-                            }
-                            checkpoint_user_policy = bind_user_checkpoint_skip(
-                                authority,
-                                plan.get("checkpointChoice"),
-                                session_id=task_loop.session_id,
-                                turn_id=task_loop.turn_id,
-                                client_turn_id=task_loop.client_turn_id,
-                                project_root=project_root,
-                                tool=step_tool,
-                                arguments=action_arguments,
-                            )
-                    elif checkpoint_skip_authority is not None:
-                        checkpoint_user_policy = bind_continued_checkpoint_skip(
-                            checkpoint_skip_authority,
-                            plan.get("checkpointChoice"),
-                            task_context={
-                                "taskId": task_loop.task_id,
-                                "sessionId": task_loop.session_id,
-                                "turnId": task_loop.turn_id,
-                                "clientTurnId": task_loop.client_turn_id,
-                                "projectRoot": task_loop.project_root,
-                            },
-                            tool=step_tool,
-                            arguments=action_arguments,
-                        )
+                    checkpoint_user_policy = bind_runtime_checkpoint_policy(
+                        step_tool, action_arguments, plan.get("checkpointChoice"),
+                    )
                     step_payload = self.approval_transactions._execute_write_request(
                         step_tool,
                         action_arguments,

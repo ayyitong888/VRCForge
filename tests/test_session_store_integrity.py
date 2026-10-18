@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 import hashlib
 import json
 import math
@@ -433,6 +434,40 @@ def test_pending_supervised_write_result_is_valid_non_shell_history() -> None:
     malformed = json.loads(json.dumps(chat))
     malformed["items"][0]["response"]["result"]["ratio"] = math.inf
     assert not is_valid_chat_record(malformed)
+
+
+def test_generic_runtime_result_is_valid_with_a_typed_tool_envelope() -> None:
+    result = {
+        "ok": False,
+        "status": "failed",
+        "error": {"type": "checkpoint", "code": "fixture_blocked", "summary": "Preparation failed."},
+    }
+    chat = {
+        "id": "generic-tool-result-chat",
+        "items": [{
+            "id": "turn-1",
+            "type": "agent",
+            "response": {
+                "plan": {"summary": "The operation failed safely.", "planner": "runtime", "shellNeeded": False},
+                "shell": {"ok": False, "status": "failed", "error": "Preparation failed.", "result": result},
+                "result": result,
+            },
+        }],
+    }
+
+    assert is_valid_chat_record(chat)
+
+    malformed_result = deepcopy(chat)
+    malformed_result["items"][0]["response"]["result"]["ratio"] = float("inf")
+    assert not is_valid_chat_record(malformed_result)
+
+    malformed_shell_result = deepcopy(chat)
+    malformed_shell_result["items"][0]["response"]["shell"]["result"]["ratio"] = float("inf")
+    assert not is_valid_chat_record(malformed_shell_result)
+
+    untyped_result = deepcopy(chat)
+    del untyped_result["items"][0]["response"]["shell"]
+    assert not is_valid_chat_record(untyped_result)
 
 
 def test_project_owned_repair_requires_supervision_and_writes_nothing(tmp_path: Path) -> None:
