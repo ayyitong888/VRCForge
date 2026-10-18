@@ -11440,7 +11440,39 @@ def _read_avatar_blendshapes_tuning_adapter(request: AvatarBlendshapeListRequest
             scoped_export = {**export_payload, "avatars": [{**avatar_payload, "renderers": [
                 renderer for renderer in renderers if renderer.get("rendererPath") in selected_paths
             ]}]}
-        blendshapes = serialize_blendshape_details(scoped_export, selected_avatar, filter_scope)
+        classification_summary = None
+        unknown_blendshapes = None
+        unknown_preview = None
+        candidate_avatar_payload = None
+        if filter_scope in {"face_static", "face_unknown"}:
+            classified_rows, classification_summary = classify_face_blendshape_details(
+                scoped_export, selected_avatar
+            )
+            all_unknown_blendshapes = [
+                row for row in classified_rows if row["usageCategory"] == "unknown"
+            ]
+            unknown_total = len(all_unknown_blendshapes)
+            if filter_scope == "face_static":
+                unknown_blendshapes = all_unknown_blendshapes[:10]
+            else:
+                unknown_blendshapes = all_unknown_blendshapes
+            unknown_preview = {
+                "total": unknown_total,
+                "returned": len(unknown_blendshapes),
+                "hasMore": len(unknown_blendshapes) < unknown_total,
+                "nextRequest": {"scope": "face_unknown"}
+                if filter_scope == "face_static" and len(unknown_blendshapes) < unknown_total
+                else None,
+            }
+            selected_category = "static_shape" if filter_scope == "face_static" else "unknown"
+            blendshapes = [row for row in classified_rows if row["usageCategory"] == selected_category]
+            candidate_avatar_payload = filter_avatar_to_blendshape_rows(
+                scoped_export,
+                selected_avatar.avatar_path,
+                blendshapes,
+            )
+        else:
+            blendshapes = serialize_blendshape_details(scoped_export, selected_avatar, filter_scope)
         source_summary = export_payload.get("summary", {})
         selection_summary = (
             _blendshape_selection_summary(scoped_export)
@@ -11475,7 +11507,9 @@ def _read_avatar_blendshapes_tuning_adapter(request: AvatarBlendshapeListRequest
             "generatedAtUtc": export_payload.get("generatedAtUtc"),
             "summary": selection_summary,
             **({"sourceSummary": source_summary} if request.renderer_paths is not None else {}),
-            "avatars": scoped_export.get("avatars", []),
+            "avatars": (
+                [candidate_avatar_payload] if candidate_avatar_payload is not None else scoped_export.get("avatars", [])
+            ),
             "selectedAvatar": selected_avatar_payload,
             **({"sourceSelectedAvatar": source_selected_avatar} if source_selected_avatar is not None else {}),
             "blendshapes": blendshapes,
@@ -11483,10 +11517,17 @@ def _read_avatar_blendshapes_tuning_adapter(request: AvatarBlendshapeListRequest
             "summaryScope": summary_scope,
             **({"rendererPaths": request.renderer_paths} if request.renderer_paths is not None else {}),
             "filterNote": (
-                "Only face-related blendshapes are shown for the face editor."
+                "Face-related is broader than static sculpting and can include preset expressions. face_static returns all classified static candidates plus a bounded unknown preview; use face_unknown to inspect the full ambiguous set."
+                if filter_scope == "face_static"
+                else "Only ambiguous face-related shapes are shown. They were withheld from static sculpt candidates because their use could not be established from names or authored sections."
+                if filter_scope == "face_unknown"
+                else "Face-related blendshapes are shown; this includes expression controls and is not a static sculpt filter."
                 if filter_scope == "face"
                 else "All blendshapes from the selected avatar renderers are shown."
             ),
+            **({"classificationSummary": classification_summary, "unknownBlendshapes": unknown_blendshapes,
+                "unknownPreview": unknown_preview,
+                "candidateSummary": {"blendshapeCount": len(blendshapes)}} if classification_summary is not None else {}),
         }
     except (RuntimeError, UnityMcpError) as exc:
         emit_log("error", "blendshape", "Failed to load blendshape list.", {"error": str(exc)})
@@ -16872,9 +16913,77 @@ def resolve_blendshape_filter_scope(request: DashboardRequest) -> str:
     if len(values) == 2 and values[0] != values[1]:
         raise RuntimeError("Conflicting scope and filterScope values.")
     scope = values[0] if values else "face"
-    if scope not in {"face", "all"}:
-        raise RuntimeError("scope/filterScope must be either 'face' or 'all'.")
+    if scope not in {"face", "face_static", "face_unknown", "all"}:
+        raise RuntimeError("scope/filterScope must be one of 'face', 'face_static', 'face_unknown', or 'all'.")
     return scope
+
+
+def classify_face_blendshape_details(
+    export_payload: dict[str, Any],
+    selected_avatar: SelectedAvatar,
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    """Classify face rows using their ordered authored section markers and names."""
+    from vrchat_blendshape_agent import classify_face_blendshape_usage, parse_blendshape_section_marker
+
+    avatar = next(
+        avatar for avatar in export_payload.get("avatars") or []
+        if avatar.get("avatarPath") == selected_avatar.avatar_path
+    )
+    rows: list[dict[str, Any]] = []
+    counts: dict[str, int] = {"static_shape": 0, "expression": 0, "tracking": 0, "unknown": 0}
+    for renderer in avatar.get("renderers") or []:
+        author_section = None
+        for blendshape in renderer.get("blendshapes") or []:
+            marker = parse_blendshape_section_marker(blendshape.get("name", ""))
+            if marker:
+                author_section = marker
+                continue
+            classification = classify_face_blendshape_usage(renderer, blendshape, author_section)
+            category = classification["usageCategory"]
+            if category not in counts:
+                continue
+            counts[category] += 1
+            rows.append({
+                "avatarPath": selected_avatar.avatar_path,
+                "avatarName": selected_avatar.avatar_name,
+                "rendererName": renderer.get("rendererName", ""),
+                "rendererPath": renderer.get("rendererPath", ""),
+                "meshName": renderer.get("meshName", ""),
+                "blendshapeName": blendshape.get("name", ""),
+                "currentWeight": float(blendshape.get("currentWeight", 0.0) or 0.0),
+                "normalizedWeight": float(blendshape.get("normalizedWeight", 0.0) or 0.0),
+                "index": int(blendshape.get("index", 0) or 0),
+                "authorSection": author_section or "",
+                **classification,
+            })
+    return rows, counts
+
+
+def filter_avatar_to_blendshape_rows(
+    export_payload: dict[str, Any],
+    avatar_path: str,
+    rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Return a copied avatar inventory containing only explicitly selected candidates."""
+    avatar = next(
+        avatar for avatar in export_payload.get("avatars") or []
+        if avatar.get("avatarPath") == avatar_path
+    )
+    selected = {(row["rendererPath"], row["index"]) for row in rows}
+    renderers = []
+    for renderer in avatar.get("renderers") or []:
+        path = renderer.get("rendererPath", "")
+        blendshapes = [
+            shape for shape in renderer.get("blendshapes") or []
+            if (path, int(shape.get("index", 0) or 0)) in selected
+        ]
+        if not blendshapes:
+            continue
+        renderer_copy = dict(renderer)
+        renderer_copy["blendshapes"] = blendshapes
+        renderer_copy["blendshapeCount"] = len(blendshapes)
+        renderers.append(renderer_copy)
+    return {**avatar, "renderers": renderers}
 
 
 def serialize_blendshape_details(
@@ -21024,6 +21133,14 @@ def prepare_authoritative_unity_checkpoint_sync(
 ) -> dict[str, Any]:
     arguments = dict(arguments)
     checkpoint_target = arguments.pop("_checkpointTargetTool", "")
+    if checkpoint_target == "vrcforge_set_property":
+        from unity_component_checkpoint import prepare_component_property_checkpoint
+
+        return prepare_component_property_checkpoint(
+            project_root, arguments, build_plan=build_scene_execution_plan,
+            discover=list_execution_targets_sync, inspect_owner=read_component_property_sync,
+            prepare=prepare_unity_checkpoint_sync,
+        )
     if checkpoint_target in {"vrcforge_add_component", "vrcforge_remove_component"}:
         # Only this native component's scene-only mutation is established here.
         # Arbitrary component callbacks can write assets and retain full archives.
@@ -23895,12 +24012,17 @@ def read_component_property_sync(params: dict[str, Any]) -> dict[str, Any]:
         "componentIndex": int(params.get("component_index", params.get("componentIndex", 0)) or 0),
         "maxItems": max_items,
     }
+    if params.get("includeCheckpointScope") is True:
+        request["includeCheckpointScope"] = True
     settings = load_dashboard_settings(build_agent_connection_request(params))
     payload = ensure_dict_payload(
-        extract_tool_result_payload(invoke_unity_mcp(settings, "vrc_get_property", request)),
+        extract_tool_result_payload(invoke_unity_mcp(
+            settings, "vrc_get_property", request,
+            preserve_tool_error=params.get("includeCheckpointScope") is True,
+        )),
         "get property",
     )
-    payload.setdefault("ok", True)
+    payload.setdefault("ok", payload.get("success") is not False)
     return payload
 
 
@@ -26414,7 +26536,7 @@ def register_agent_gateway_tools() -> None:
         ),
     )
     AGENT_GATEWAY.register_tool("vrcforge_list_avatars", "List avatars from the current Unity project.", "read/debug", lambda params: AVATAR_TUNING_WORKFLOWS.read_avatars(build_agent_dashboard_request(params)))
-    AGENT_GATEWAY.register_tool("vrcforge_scan_blendshapes", "Read avatar blendshape names, current weights and renderer identity. when-to-use: inspect facial shapes by default, or use scope=all and optional exact rendererPaths for body/clothing/accessories. when-NOT-to-use: do not use to change weights or inspect material properties; for example, 'set the dress blendshape to 100' requires a separate approved write.", "read/debug", lambda params: AVATAR_TUNING_WORKFLOWS.read_avatar_blendshapes(AvatarBlendshapeListRequest(**{**build_agent_dashboard_request(params).model_dump(), "rendererPaths": params.get("rendererPaths")})))
+    AGENT_GATEWAY.register_tool("vrcforge_scan_blendshapes", "Read avatar blendshape names, current weights and renderer identity. when-to-use: scope=face lists face-related shapes including expressions; scope=face_static lists all evidence-classified static sculpt candidates and a bounded preview of ambiguous shapes; use scope=face_unknown to inspect the full ambiguous set; scope=all preserves the complete inventory. when-NOT-to-use: do not treat face as a static-sculpt filter or use this read tool to change weights/materials; for example, 'set the dress blendshape to 100' requires a separate approved write.", "read/debug", lambda params: AVATAR_TUNING_WORKFLOWS.read_avatar_blendshapes(AvatarBlendshapeListRequest(**{**build_agent_dashboard_request(params).model_dump(), "rendererPaths": params.get("rendererPaths")})))
     AGENT_GATEWAY.register_tool("vrcforge_scan_materials", "Scan shader/material inventory for an avatar.", "read/debug", lambda params: SHADER_VISION_PROTECTION.scan_shader_materials(ShaderMaterialScanRequest(**params)))
     for name, reader_name, collection in (
         ("vrcforge_list_shader_tuning_history", "read_shader_tuning_history", "records"),

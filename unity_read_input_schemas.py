@@ -435,9 +435,9 @@ UNITY_READ_TOOL_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
             },
             "scope": {
                 "type": "string",
-                "enum": ["face", "all"],
+                "enum": ["face", "face_static", "face_unknown", "all"],
                 "default": "face",
-                "description": "Use all to inspect body, clothing and accessory shapes; omission preserves the face-editor filter.",
+                "description": "face returns face-related shapes, including expression controls, and is not a static-sculpt filter. face_static returns all evidence-classified static sculpt candidates plus a bounded unknown preview; use face_unknown to inspect the full ambiguous set. all preserves the complete avatar shape inventory, including authored section markers.",
             },
             "rendererPaths": {
                 "type": "array",

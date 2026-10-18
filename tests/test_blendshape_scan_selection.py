@@ -58,12 +58,67 @@ def test_all_without_renderer_filter_returns_every_shape(scan):
     result=scan[0](scope='all')
     assert len(result['blendshapes'])==5
 
+def test_static_face_scope_separates_expression_tracking_and_unknown(scan):
+    invoke,export=scan
+    renderer=export['avatars'][0]['renderers'][0]
+    renderer['blendshapes']=[
+        {'name':'----------FACEOPTION----------','index':0,'currentWeight':0,'normalizedWeight':0},
+        {'name':'jaw_wide','index':1,'currentWeight':0,'normalizedWeight':0},
+        {'name':'custom_cheek','index':2,'currentWeight':0,'normalizedWeight':0},
+        {'name':'----------Expression----------','index':3,'currentWeight':0,'normalizedWeight':0},
+        {'name':'smile','index':4,'currentWeight':0,'normalizedWeight':0},
+        {'name':'vrc.v_aa','index':5,'currentWeight':0,'normalizedWeight':0},
+    ]
+    original=[dict(shape) for shape in renderer['blendshapes']]
+
+    result=invoke(avatarPath=PATH,scope='face_static',rendererPaths=[f'{PATH}/Face'])
+
+    assert [row['blendshapeName'] for row in result['blendshapes']]==['jaw_wide']
+    assert result['blendshapes'][0]['usageCategory']=='static_shape'
+    assert result['blendshapes'][0]['authorSection']=='FACEOPTION'
+    assert result['blendshapes'][0]['classificationSource']=='author_section_and_blendshape_name'
+    assert result['blendshapes'][0]['classificationConfidence']=='medium'
+    assert [row['blendshapeName'] for row in result['unknownBlendshapes']]==['custom_cheek']
+    assert result['classificationSummary']=={'static_shape':1,'expression':1,'tracking':1,'unknown':1}
+    assert [shape['name'] for shape in result['avatars'][0]['renderers'][0]['blendshapes']]==['jaw_wide']
+    assert [shape['name'] for shape in renderer['blendshapes']]==[shape['name'] for shape in original]
+
+def test_static_face_unknown_preview_is_bounded(scan):
+    invoke,export=scan
+    renderer=export['avatars'][0]['renderers'][0]
+    renderer['blendshapes']=[
+        {'name':f'custom_cheek_{i}','index':i,'currentWeight':0,'normalizedWeight':0}
+        for i in range(12)
+    ]
+    result=invoke(avatarPath=PATH,scope='face_static')
+    assert result['blendshapes']==[]
+    assert len(result['unknownBlendshapes'])==10
+    assert result['unknownPreview']=={
+        'total':12,'returned':10,'hasMore':True,'nextRequest':{'scope':'face_unknown'}
+    }
+    full=invoke(avatarPath=PATH,scope='face_unknown')
+    assert len(full['blendshapes'])==12
+    assert len(full['unknownBlendshapes'])==12
+    assert full['unknownPreview']=={
+        'total':12,'returned':12,'hasMore':False,'nextRequest':None
+    }
+
+def test_unknown_face_scope_is_an_explicit_review_surface(scan):
+    invoke,export=scan
+    renderer=export['avatars'][0]['renderers'][0]
+    renderer['blendshapes']=[{'name':'custom_cheek','index':0,'currentWeight':0,'normalizedWeight':0}]
+    result=invoke(avatarPath=PATH,scope='face_unknown')
+    assert [row['blendshapeName'] for row in result['blendshapes']]==['custom_cheek']
+    assert result['blendshapes'][0]['usageCategory']=='unknown'
+    assert result['classificationSummary']['unknown']==1
+    assert 'classificationSummary' in result
+
 def test_exact_selection_retains_explicit_face_filter(scan):
     result=scan[0](scope='face',rendererPaths=[f'{PATH}/Body'])
     assert result['blendshapes']==[]
     assert result['summary']=={'avatarCount':1,'rendererCount':1,'blendshapeCount':2}
     assert result['summaryScope']=='selection_inventory'
-    assert result['filterNote']=='Only face-related blendshapes are shown for the face editor.'
+    assert result['filterNote']=='Face-related blendshapes are shown; this includes expression controls and is not a static sculpt filter.'
 
 def test_unknown_renderer_is_rejected_not_broadened(scan):
     with pytest.raises(Exception,match='Unknown rendererPaths'):

@@ -1012,6 +1012,88 @@ ARKIT_TRACKING_COMPACT_NAMES = (
     "tongueout",
 )
 
+_BLENDSHAPE_SECTION_MARKER = re.compile(r"^[-=_]{2,}\s*(.*?)\s*[-=_]{2,}$")
+_STATIC_SHAPE_TERMS = (
+    "option", "morph", "shape", "contour", "size", "wide", "narrow", "big", "small",
+    "long", "short", "thick", "thin", "horizontal", "vertical", "position", "angle",
+)
+_FACIAL_EXPRESSION_TERMS = (
+    "close", "open", "joy", "happy", "anger", "angry", "sad", "surpris", "smile", "frown",
+    "wink", "grimace", "pleasure", "tear", "sweat", "dead", "nervous", "unwilling", "sexy",
+    "expression", "bikkuri", "doya", "guruguru",
+)
+
+
+def parse_blendshape_section_marker(name: str) -> str | None:
+    """Return an authored section heading embedded between separator characters."""
+    match = _BLENDSHAPE_SECTION_MARKER.fullmatch(str(name or "").strip())
+    return match.group(1).strip() if match and match.group(1).strip() else None
+
+
+def classify_face_blendshape_usage(
+    renderer: dict[str, Any],
+    blendshape: dict[str, Any],
+    author_section: str | None = None,
+) -> dict[str, str]:
+    """Classify sculpt candidates conservatively; preserve ambiguous rows for explicit review."""
+    name = str(blendshape.get("name") or "")
+    normalized_name = name.casefold().replace("-", "_").replace(".", "_")
+    section = str(author_section or "").casefold().replace("_", " ").strip()
+
+    if parse_blendshape_section_marker(name):
+        return {
+            "usageCategory": "section_marker",
+            "classificationSource": "blendshape_name_separator",
+            "classificationConfidence": "high",
+            "classificationReason": "This is an authored section label, not an editable face sculpt candidate.",
+        }
+    if is_facial_tracking_blendshape_name(normalized_name):
+        return {
+            "usageCategory": "tracking",
+            "classificationSource": "blendshape_name_tracking_rule",
+            "classificationConfidence": "high",
+            "classificationReason": "The name matches a known VRC/viseme/face-tracking naming pattern.",
+        }
+    if not is_face_related_blendshape(renderer, blendshape):
+        return {
+            "usageCategory": "non_face",
+            "classificationSource": "existing_face_relevance_filter",
+            "classificationConfidence": "high",
+            "classificationReason": "The existing face relevance filter does not identify this as a face blendshape.",
+        }
+
+    if any(term in section for term in ("expression", "mmd", "viseme", "tracking")):
+        return {
+            "usageCategory": "expression",
+            "classificationSource": "author_section",
+            "classificationConfidence": "high",
+            "classificationReason": f"The authored section '{author_section}' identifies expression or tracking controls.",
+        }
+    if any(term in normalized_name for term in _FACIAL_EXPRESSION_TERMS):
+        return {
+            "usageCategory": "expression",
+            "classificationSource": "blendshape_name_expression_rule",
+            "classificationConfidence": "medium",
+            "classificationReason": "The name indicates a posed facial expression; review the exact mesh if this seems wrong.",
+        }
+
+    has_shape_language = any(term in normalized_name for term in _STATIC_SHAPE_TERMS)
+    has_shape_section = any(term in section for term in ("option", "morph", "shape", "oral cavity"))
+    if has_shape_language and has_shape_section:
+        return {
+            "usageCategory": "static_shape",
+            "classificationSource": "author_section_and_blendshape_name",
+            "classificationConfidence": "medium",
+            "classificationReason": f"The authored section '{author_section}' and the name both suggest an anatomical or shape adjustment.",
+        }
+
+    return {
+        "usageCategory": "unknown",
+        "classificationSource": "insufficient_name_or_section_evidence",
+        "classificationConfidence": "low",
+        "classificationReason": "The available name and authored section do not establish whether this is sculpting or expression control.",
+    }
+
 
 def filter_planning_payload_to_face_blendshapes(export_payload: dict[str, Any]) -> dict[str, Any]:
     filtered_avatars: list[dict[str, Any]] = []

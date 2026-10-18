@@ -2704,7 +2704,7 @@ class AgentApprovalTransactionService:
                 self._ports.checkpoint.append_checkpoint(record)
                 return record
             if target_tool in {"vrcforge_manage_expression_menu", "vrcforge_set_renderer_material_slot",
-                               "vrcforge_add_component", "vrcforge_remove_component"}:
+                               "vrcforge_add_component", "vrcforge_remove_component", "vrcforge_set_property"}:
                 # Never accept an archive scope directly from caller arguments.
                 archive_files = prepare_result.get("archiveAssetPaths")
                 record["archiveScopeReason"] = prepare_result.get(

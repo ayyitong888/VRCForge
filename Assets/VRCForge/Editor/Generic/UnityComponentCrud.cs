@@ -774,6 +774,76 @@ namespace VRCForge.Editor
             return SceneObjectCopyCore.ResolveSavedScene(gameObject.scene.path, "component target scene");
         }
 
+        private static bool IsEngineComponentAssembly(Assembly assembly)
+        {
+            var core = typeof(Component).Assembly;
+            if (assembly == core)
+            {
+                return true;
+            }
+            if (assembly == null || assembly.IsDynamic)
+            {
+                return false;
+            }
+            var name = assembly.GetName().Name;
+            // Engine modules are loaded beside the actual CoreModule, not from
+            // project/plugin assemblies that merely use a UnityEngine name.
+            return name.StartsWith("UnityEngine.", StringComparison.Ordinal)
+                && string.Equals(System.IO.Path.GetFileName(assembly.Location), name + ".dll", StringComparison.OrdinalIgnoreCase)
+                && string.Equals(System.IO.Path.GetDirectoryName(assembly.Location),
+                    System.IO.Path.GetDirectoryName(core.Location), StringComparison.OrdinalIgnoreCase);
+        }
+
+        internal static object BuildPropertyCheckpointScope(
+            Component component, MemberInfo member, int componentIndex,
+            string propertyPath, SavedSceneSnapshot scene)
+        {
+            if (component == null || member == null || member.DeclaringType == null || scene == null || component is MonoBehaviour
+                || !IsEngineComponentAssembly(component.GetType().Assembly)
+                || !IsEngineComponentAssembly(member.DeclaringType.Assembly))
+            {
+                throw new InvalidOperationException(
+                    "component_property_checkpoint_scope_unsupported: Generic property writes require a native Unity component/member; custom component setter side effects have no proven checkpoint scope.");
+            }
+            var owner = component.gameObject;
+            if (owner == null || owner.scene.path != scene.Path
+                || owner.scene.handle != scene.Handle || componentIndex < 0)
+            {
+                throw new InvalidOperationException("component_property_checkpoint_owner_invalid: The resolved component has no unique saved scene owner.");
+            }
+            var objectId = GlobalObjectId.GetGlobalObjectIdSlow(owner);
+            var componentId = GlobalObjectId.GetGlobalObjectIdSlow(component);
+            if (objectId.identifierType != 2 || componentId.identifierType != 2
+                || objectId.targetObjectId == 0 || componentId.targetObjectId == 0
+                || !string.Equals(objectId.assetGUID.ToString(), scene.Guid, StringComparison.OrdinalIgnoreCase)
+                || !string.Equals(componentId.assetGUID.ToString(), scene.Guid, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException("component_property_checkpoint_owner_invalid: The resolved component and object must belong to the saved scene identity.");
+            }
+            return new
+            {
+                schema = "vrcforge.component_property_checkpoint.v1",
+                ownerKind = "scene",
+                scenePath = scene.Path,
+                sceneGuid = scene.Guid,
+                sceneDigest = scene.FileDigest,
+                objectGlobalObjectId = objectId.ToString(),
+                componentGlobalObjectId = componentId.ToString(),
+                componentType = component.GetType().FullName,
+                componentIndex,
+                propertyPath,
+                archiveAssetPaths = new[] { scene.Path }
+            };
+        }
+
+        internal static void RecordPropertyPrefabOverride(Component component)
+        {
+            if (PrefabUtility.IsPartOfPrefabInstance(component))
+            {
+                PrefabUtility.RecordPrefabInstancePropertyModifications(component);
+            }
+        }
+
         internal static SavedSceneSnapshot SaveAndResolveScene(SavedSceneSnapshot beforeScene)
         {
             // Undo.RecordObject normally finalizes its diff at the end of the
@@ -1097,12 +1167,19 @@ namespace VRCForge.Editor
 
             [VRCForgeInput("Maximum collection items to return (1-2000, default 50). The result reports total/returned counts and truncation.", IsRequired = false)]
             public int? maxItems { get; set; } = 50;
+
+            [VRCForgeInput("If true, return only the authoritative saved-scene checkpoint scope for this scalar component property without invoking its getter. Not supported with queries.", IsRequired = false)]
+            public bool? includeCheckpointScope { get; set; } = false;
         }
 
         public static object HandleCommand(JObject @params)
         {
             if (@params != null && @params.ContainsKey("queries"))
+            {
+                if (@params.Value<bool?>("includeCheckpointScope") == true)
+                    return VRCForgeToolResult.Failed("includeCheckpointScope requires one scalar component property; it cannot be combined with queries.");
                 return UnityComponentPropertyBatch.Handle(@params);
+            }
             var p = (@params ?? new JObject()).ToObject<GetPropertyParameters>() ?? new GetPropertyParameters();
             try
             {
@@ -1110,6 +1187,20 @@ namespace VRCForge.Editor
                 var type = ComponentCrudCore.ResolveComponentType(p.componentType);
                 var component = ComponentCrudCore.ResolveComponent(go, type, p.componentIndex ?? 0);
                 var member = ComponentCrudCore.ResolveMember(component.GetType(), p.propertyPath);
+                if (p.includeCheckpointScope == true)
+                {
+                    var checkpointScope = ComponentCrudCore.BuildPropertyCheckpointScope(
+                        component, member, p.componentIndex ?? 0, p.propertyPath,
+                        ComponentCrudCore.ResolveSavedSceneFor(component.gameObject));
+                    return VRCForgeToolResult.Completed("Read the resolved component property's checkpoint scope without invoking its getter.", new
+                    {
+                        gameObjectPath = ComponentCrudCore.GetHierarchyPath(component.gameObject.transform),
+                        componentType = component.GetType().FullName,
+                        componentIndex = p.componentIndex ?? 0,
+                        propertyPath = p.propertyPath,
+                        checkpointScope
+                    });
+                }
                 var value = ComponentCrudCore.GetReadOnlyMemberValue(component, member);
                 var maxItems = p.maxItems ?? 50;
                 if (maxItems < 1 || maxItems > 2000)
@@ -2128,6 +2219,8 @@ namespace VRCForge.Editor
                 goPath = ComponentCrudCore.GetHierarchyPath(go.transform);
                 beforeScene = ComponentCrudCore.ResolveSavedSceneFor(go);
                 var objectId = GlobalObjectId.GetGlobalObjectIdSlow(go).ToString();
+                var checkpointScope = ComponentCrudCore.BuildPropertyCheckpointScope(
+                    component, member, componentIndex, p.propertyPath, beforeScene);
 
                 oldValue = ComponentCrudCore.GetMemberValue(component, member);
                 var newValue = ComponentCrudCore.ConvertValue(valueToken, memberType);
@@ -2142,6 +2235,7 @@ namespace VRCForge.Editor
                         componentType = component.GetType().FullName,
                         componentIndex = p.componentIndex ?? 0,
                         propertyPath = p.propertyPath,
+                        checkpointScope,
                         valueType = memberType.FullName,
                         oldValue = ComponentCrudCore.DescribeValue(oldValue),
                         newValue = ComponentCrudCore.DescribeValue(newValue)
@@ -2209,6 +2303,7 @@ namespace VRCForge.Editor
                 mutationStarted = true;
                 failureStage = "unity_mutation";
                 ComponentCrudCore.SetMemberValue(component, member, newValue);
+                ComponentCrudCore.RecordPropertyPrefabOverride(component);
                 mutationApplied = true;
                 EditorUtility.SetDirty(component);
                 EditorUtility.SetDirty(go);
