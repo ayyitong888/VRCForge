@@ -9,7 +9,10 @@ import threading
 
 import pytest
 
+from agent_approval_transactions import AgentApprovalTransactionService
 from agent_gateway import AgentGateway
+from agent_task_loop import TASK_LOOP_SCHEMA
+from checkpoint_user_policy import bind_user_checkpoint_skip
 from tests.test_dashboard_server import bind_test_runtime_planner
 
 
@@ -44,6 +47,144 @@ def test_runtime_question_identity_is_fail_closed(tmp_path: Path) -> None:
     assert result["question"]["options"] == []
     raw = (tmp_path / "audit" / "agent-questions.jsonl").read_text(encoding="utf-8")
     assert "runtimeTaskSeed" not in raw
+
+
+def test_question_dispatch_keeps_only_host_seeded_checkpoint_capability(tmp_path: Path, monkeypatch) -> None:
+    gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
+    source = {
+        "source": "app_user_message",
+        "message": "Skip the checkpoint for this task.",
+        "sessionId": "session-owned",
+        "turnId": "turn-owned",
+        "clientTurnId": "client-owned",
+        "projectRoot": str(tmp_path),
+    }
+    original_arguments = {"projectRoot": str(tmp_path), "value": "first"}
+    original_policy = bind_user_checkpoint_skip(
+        source, {"mode": "skip", "quote": "Skip the checkpoint"},
+        session_id="session-owned", turn_id="turn-owned", client_turn_id="client-owned",
+        project_root=str(tmp_path), tool="vrcforge_fixture_first_write", arguments=original_arguments,
+    )
+    seed = {
+        "schema": TASK_LOOP_SCHEMA,
+        "taskId": "task-owned",
+        "objective": "continue the approved task",
+        "sessionId": "session-owned",
+        "turnId": "turn-owned",
+        "clientTurnId": "client-owned",
+        "projectRoot": str(tmp_path),
+        "requestedTool": "vrcforge_ask_user",
+        "requestedKind": "skill",
+        "requestedArguments": {"question": "continue?"},
+        "checkpointUserPolicy": original_policy,
+    }
+    assert original_policy is not None
+    bind_test_runtime_planner(gateway, lambda _prompt: {"text": "{}"})
+    captured = {}
+    monkeypatch.setattr(
+        gateway, "_runtime_message_impl",
+        lambda params, **kwargs: captured.update({"params": params, **kwargs}) or {"ok": True},
+    )
+
+    result = gateway._dispatch_runtime_task_after_question("question-owned", seed, "continue")
+
+    assert result == {"ok": True}
+    context = captured["task_continuation"]["context"]
+    authority = context["checkpointSkipAuthority"]
+    assert authority["taskId"] == "task-owned"
+    assert authority["sessionId"] == "session-owned"
+    assert authority["sourceQuote"] == "Skip the checkpoint"
+    assert "tool" not in authority
+    assert "argumentsSha256" not in authority
+
+
+def test_question_answer_rebinds_checkpoint_authority_to_the_resumed_write(tmp_path: Path, monkeypatch) -> None:
+    resumed = threading.Event()
+    gateway = AgentGateway(
+        tmp_path / "config.json", tmp_path / "audit",
+        runtime_turn_completed=lambda _payload: resumed.set(),
+    )
+    gateway.register_tool(
+        "vrcforge_fixture_checkpoint_write",
+        "when-to-use: write a fixture. when-NOT-to-use: do not use for other work.",
+        "supervised-write",
+        lambda _args: {"ok": True},
+        write=True,
+    )
+    gateway.register_tool(
+        "vrcforge_ask_user",
+        "when-to-use: ask a bounded user question. when-NOT-to-use: do not use otherwise.",
+        "plan/preview",
+        gateway.create_runtime_question,
+    )
+    quote = "Skip the checkpoint for this task."
+    responses = [
+        {"text": json.dumps({
+            "action": "write",
+            "write_tool": "vrcforge_fixture_checkpoint_write",
+            "write_params": {},
+            "checkpoint_choice": {"mode": "skip", "quote": quote},
+        })},
+        {"text": json.dumps({
+            "action": "skill",
+            "skill_tool": "vrcforge_ask_user",
+            "skill_params": {"question": "Continue?"},
+        })},
+        {"text": json.dumps({
+            "action": "write",
+            "write_tool": "vrcforge_fixture_checkpoint_write",
+            "write_params": {"resumed": True},
+            "checkpoint_choice": {"mode": "skip", "quote": quote},
+        })},
+        {"text": json.dumps({"action": "reply", "reply": "resumed"})},
+    ]
+    response_index = 0
+
+    def scripted(_prompt: str):
+        nonlocal response_index
+        result = responses[min(response_index, len(responses) - 1)]
+        response_index += 1
+        return result
+
+    bind_test_runtime_planner(gateway, scripted)
+    captured_contexts = []
+
+    def capture_write(_service, _tool, _arguments, _agent_name, *, goal_delivery_id="", task_context=None):
+        captured_contexts.append(task_context)
+        return {
+            "status": "executed",
+            "result": {"ok": True, "status": "completed", "committed": True},
+            "outcome": {"status": "completed", "summary": "fixture write completed"},
+        }
+
+    monkeypatch.setattr(AgentApprovalTransactionService, "_execute_write_request", capture_write)
+    first = gateway.runtime_message({
+        "message": quote,
+        "sessionId": "runtime-session",
+        "clientTurnId": "runtime-turn",
+        "projectRoot": str(tmp_path),
+        "_humanUserMessageSource": {
+            "source": "app_user_message",
+            "message": quote,
+            "sessionId": "runtime-session",
+            "clientTurnId": "runtime-turn",
+            "projectRoot": str(tmp_path),
+        },
+    })
+    assert first["plan"]["nextStep"] == "needs_user_action"
+    question = gateway.questions.list(session_id="runtime-session", project_root=str(tmp_path))["questions"][0]
+
+    _answer(gateway, question, tmp_path)
+    assert resumed.wait(5), "the actual resumed runtime did not finish"
+    assert gateway.shutdown_runtime_continuations(5)["ok"]
+
+    assert response_index >= 4
+    assert len(captured_contexts) == 2
+    resumed_policy = captured_contexts[1]["checkpointUserPolicy"]
+    assert resumed_policy["tool"] == "vrcforge_fixture_checkpoint_write"
+    assert resumed_policy["argumentsSha256"] != captured_contexts[0]["checkpointUserPolicy"]["argumentsSha256"]
+    assert resumed_policy["sessionId"] == "runtime-session"
+    assert resumed_policy["sourceQuote"] == quote
 
 
 def test_untrusted_question_cannot_queue_runtime_continuation(tmp_path: Path, monkeypatch) -> None:

@@ -17,6 +17,10 @@ from typing import Any
 
 from agent_tool_result_contract import completion_gate_plan, normalize_agent_tool_result, runtime_observation_receipt
 from agent_budget_policy import AgentBudgetPolicy, freeze_agent_budget_policy
+from checkpoint_user_policy import (
+    checkpoint_skip_authority_for_context,
+    checkpoint_skip_authority_from_policy,
+)
 from request_usage_reconciliation import usage_snapshot_sha256
 
 
@@ -864,6 +868,18 @@ def approval_task_context(
         # This host-attested record is created only by the runtime after it
         # matches a model quote to the current app user message.
         context["checkpointUserPolicy"] = copy.deepcopy(dict(user_checkpoint_policy))
+    if "checkpointSkipAuthority" in seed:
+        # A present but invalid/revoked capability must not be recreated from
+        # an older per-write record carried beside it.
+        checkpoint_skip_authority = checkpoint_skip_authority_for_context(
+            seed.get("checkpointSkipAuthority"), context,
+        )
+    else:
+        checkpoint_skip_authority = checkpoint_skip_authority_from_policy(
+            user_checkpoint_policy, context,
+        )
+    if checkpoint_skip_authority is not None:
+        context["checkpointSkipAuthority"] = checkpoint_skip_authority
     native_conversation = seed.get("_nativeConversation")
     if isinstance(native_conversation, Mapping):
         # Private continuation state is frozen outside the normal task-loop

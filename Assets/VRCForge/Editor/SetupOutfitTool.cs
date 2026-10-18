@@ -399,9 +399,18 @@ namespace VRCForge.Editor
                 throw new InvalidOperationException(
                     "Outfit target scene has not been saved to disk; save the scene once before running Setup Outfit with saveScene=true.");
             }
+            // Setup Outfit records Undo changes which otherwise finalize after
+            // this same-frame save and can mark the scene dirty again.
+            Undo.FlushUndoRecordObjects();
             if (!EditorSceneManager.SaveScene(scene))
             {
                 throw new InvalidOperationException($"Could not save target scene: {scene.path}");
+            }
+            var savedScene = SceneObjectCopyCore.ResolveSavedScene(
+                scene.path, "Setup Outfit saved scene readback");
+            if (savedScene.Scene.handle != scene.handle)
+            {
+                throw new InvalidOperationException("Setup Outfit saved scene identity changed.");
             }
             return true;
         }

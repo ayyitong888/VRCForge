@@ -9,6 +9,9 @@ from pathlib import Path
 from typing import Any
 
 
+_CHECKPOINT_SKIP_AUTHORITY_SCHEMA = "vrcforge.user_checkpoint_skip_authority.v1"
+
+
 def _digest(value: Mapping[str, Any]) -> str:
     encoded = json.dumps(dict(value), ensure_ascii=True, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
@@ -50,6 +53,134 @@ def bind_user_checkpoint_skip(
         "tool": tool,
         "argumentsSha256": _digest(arguments),
     }
+
+
+def checkpoint_skip_authority_from_policy(
+    policy: object,
+    task_context: object,
+) -> dict[str, Any] | None:
+    """Promote a trusted, task-seeded user policy to continuation authority.
+
+    The returned capability deliberately omits the original write tool and
+    argument digest. Those values authorize only the write that created the
+    policy and must never be reused for a later action.
+    """
+    if not isinstance(policy, Mapping) or not isinstance(task_context, Mapping):
+        return None
+    if (
+        policy.get("schema") != "vrcforge.user_checkpoint_policy.v1"
+        or policy.get("status") != "skipped_by_user"
+        or policy.get("source") != "user_message"
+    ):
+        return None
+    source_quote = policy.get("sourceQuote")
+    original_tool = policy.get("tool")
+    original_digest = policy.get("argumentsSha256")
+    if (
+        not isinstance(source_quote, str) or not source_quote.strip()
+        or not isinstance(original_tool, str) or not original_tool.strip()
+        or not isinstance(original_digest, str) or len(original_digest) != 64
+        or any(char not in "0123456789abcdef" for char in original_digest.lower())
+    ):
+        return None
+    task_id = str(task_context.get("taskId") or "")
+    session_id = str(task_context.get("sessionId") or "")
+    turn_id = str(task_context.get("turnId") or "")
+    client_turn_id = str(task_context.get("clientTurnId") or "")
+    project_root = str(task_context.get("projectRoot") or "")
+    if not task_id or not session_id or not turn_id or not client_turn_id:
+        return None
+    if any(
+        str(policy.get(key) or "") != expected
+        for key, expected in (
+            ("sessionId", session_id),
+            ("turnId", turn_id),
+            ("clientTurnId", client_turn_id),
+            ("projectRoot", project_root),
+        )
+    ):
+        return None
+    return {
+        "schema": _CHECKPOINT_SKIP_AUTHORITY_SCHEMA,
+        "status": "active",
+        "source": "checkpoint_user_policy",
+        "sourceQuote": source_quote,
+        "taskId": task_id,
+        "sessionId": session_id,
+        "projectRoot": project_root,
+        "originTurnId": turn_id,
+        "originClientTurnId": client_turn_id,
+    }
+
+
+def checkpoint_skip_authority_for_context(
+    authority: object,
+    task_context: object,
+) -> dict[str, Any] | None:
+    """Return only a live task-scoped capability matching the trusted context."""
+    if not isinstance(authority, Mapping) or not isinstance(task_context, Mapping):
+        return None
+    if (
+        authority.get("schema") != _CHECKPOINT_SKIP_AUTHORITY_SCHEMA
+        or authority.get("status") != "active"
+        or authority.get("source") != "checkpoint_user_policy"
+    ):
+        return None
+    source_quote = authority.get("sourceQuote")
+    if not isinstance(source_quote, str) or not source_quote.strip():
+        return None
+    expected = {
+        "taskId": str(task_context.get("taskId") or ""),
+        "sessionId": str(task_context.get("sessionId") or ""),
+        "projectRoot": str(task_context.get("projectRoot") or ""),
+        "originTurnId": str(task_context.get("turnId") or ""),
+        "originClientTurnId": str(task_context.get("clientTurnId") or ""),
+    }
+    if not expected["taskId"] or not expected["sessionId"]:
+        return None
+    if any(str(authority.get(key) or "") != value for key, value in expected.items()):
+        return None
+    return {
+        "schema": _CHECKPOINT_SKIP_AUTHORITY_SCHEMA,
+        "status": "active",
+        "source": "checkpoint_user_policy",
+        "sourceQuote": source_quote,
+        **expected,
+    }
+
+
+def bind_continued_checkpoint_skip(
+    authority: object,
+    choice: object,
+    *,
+    task_context: object,
+    tool: str,
+    arguments: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Bind inherited owner authority to this new write's current arguments."""
+    normalized = checkpoint_skip_authority_for_context(authority, task_context)
+    if normalized is None or not isinstance(choice, Mapping):
+        return None
+    if choice.get("mode") != "skip" or choice.get("quote") != normalized["sourceQuote"]:
+        return None
+    source = {
+        "source": "app_user_message",
+        "message": normalized["sourceQuote"],
+        "sessionId": normalized["sessionId"],
+        "turnId": normalized["originTurnId"],
+        "clientTurnId": normalized["originClientTurnId"],
+        "projectRoot": normalized["projectRoot"],
+    }
+    return bind_user_checkpoint_skip(
+        source,
+        choice,
+        session_id=normalized["sessionId"],
+        turn_id=normalized["originTurnId"],
+        client_turn_id=normalized["originClientTurnId"],
+        project_root=normalized["projectRoot"],
+        tool=tool,
+        arguments=arguments,
+    )
 
 
 def checkpoint_skip_matches(policy: object, task_context: object, *, tool: str,

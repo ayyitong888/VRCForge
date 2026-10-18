@@ -102,7 +102,12 @@ from agent_task_loop import (
     prepare_sub_agent_task_continuation,
     safe_recoverable_write_failure,
 )
-from checkpoint_user_policy import bind_user_checkpoint_skip
+from checkpoint_user_policy import (
+    bind_continued_checkpoint_skip,
+    bind_user_checkpoint_skip,
+    checkpoint_skip_authority_for_context,
+    checkpoint_skip_authority_from_policy,
+)
 from agent_tool_result_contract import completion_gate_plan, normalize_agent_tool_result
 from context_compaction import normalize_compaction_recovery
 from stage1_atomic_writes import (
@@ -6814,11 +6819,46 @@ class AgentGateway:
             raise AgentGatewayError(str(exc), status_code=409) from exc
 
         checkpoint_user_policy: dict[str, Any] | None = None
+        checkpoint_skip_authority: dict[str, Any] | None = None
+        continuation_source = str(ensure_dict(task_continuation).get("source") or "")
+        if (
+            continuation_source in {
+                "question_answered",
+                "approval_finished",
+                "approval_revision_requested",
+                "shell_finished",
+                "sub_agent_finished",
+            }
+            and task_loop.session_id == session_id
+            and task_loop.project_root == project_root
+        ):
+            checkpoint_skip_authority = checkpoint_skip_authority_for_context(
+                continuation_context.get("checkpointSkipAuthority"),
+                {
+                    "taskId": task_loop.task_id,
+                    "sessionId": task_loop.session_id,
+                    "turnId": task_loop.turn_id,
+                    "clientTurnId": task_loop.client_turn_id,
+                    "projectRoot": task_loop.project_root,
+                },
+            )
+
         def runtime_approval_seed(**kwargs: Any) -> dict[str, Any]:
+            nonlocal checkpoint_skip_authority
             kwargs.setdefault("usage_parent_turn_id", turn_id)
             seed = native_turn.approval_seed(task_loop.approval_seed(**kwargs))
             if checkpoint_user_policy:
                 seed["checkpointUserPolicy"] = dict(checkpoint_user_policy)
+                if checkpoint_skip_authority is None:
+                    checkpoint_skip_authority = checkpoint_skip_authority_from_policy(
+                        checkpoint_user_policy, seed,
+                    )
+            if checkpoint_skip_authority is not None:
+                checkpoint_skip_authority = checkpoint_skip_authority_for_context(
+                    checkpoint_skip_authority, seed,
+                )
+                if checkpoint_skip_authority is not None:
+                    seed["checkpointSkipAuthority"] = dict(checkpoint_skip_authority)
             return seed
 
         # Context belongs to this invocation, not to a synthetic executed tool.
@@ -8139,6 +8179,11 @@ class AgentGateway:
                     checkpoint_user_policy = None
                     user_source = params.get("_humanUserMessageSource")
                     if isinstance(user_source, Mapping):
+                        # A fresh authenticated owner message supersedes an
+                        # inherited continuation grant. It may explicitly
+                        # re-authorize this write below, but the old capability
+                        # cannot silently survive a changed owner instruction.
+                        checkpoint_skip_authority = None
                         owner_message = str(user_source.get("message") or "")
                         supplied_session = str(params.get("session_id") or params.get("sessionId") or "")
                         supplied_client_turn = str(params.get("client_turn_id") or params.get("clientTurnId") or "")
@@ -8147,23 +8192,40 @@ class AgentGateway:
                             and str(user_source.get("sessionId") or "") == supplied_session
                             and str(user_source.get("clientTurnId") or "") == supplied_client_turn
                             and str(user_source.get("projectRoot") or "") == project_root
+                            and task_loop.session_id == session_id
+                            and task_loop.client_turn_id == client_turn_id
+                            and task_loop.project_root == project_root
                         ):
                             authority = {
                                 **dict(user_source),
-                                "sessionId": session_id,
-                                "turnId": turn_id,
-                                "clientTurnId": client_turn_id,
+                                "sessionId": task_loop.session_id,
+                                "turnId": task_loop.turn_id,
+                                "clientTurnId": task_loop.client_turn_id,
                             }
                             checkpoint_user_policy = bind_user_checkpoint_skip(
                                 authority,
                                 plan.get("checkpointChoice"),
-                                session_id=session_id,
-                                turn_id=turn_id,
-                                client_turn_id=client_turn_id,
+                                session_id=task_loop.session_id,
+                                turn_id=task_loop.turn_id,
+                                client_turn_id=task_loop.client_turn_id,
                                 project_root=project_root,
                                 tool=step_tool,
                                 arguments=action_arguments,
                             )
+                    elif checkpoint_skip_authority is not None:
+                        checkpoint_user_policy = bind_continued_checkpoint_skip(
+                            checkpoint_skip_authority,
+                            plan.get("checkpointChoice"),
+                            task_context={
+                                "taskId": task_loop.task_id,
+                                "sessionId": task_loop.session_id,
+                                "turnId": task_loop.turn_id,
+                                "clientTurnId": task_loop.client_turn_id,
+                                "projectRoot": task_loop.project_root,
+                            },
+                            tool=step_tool,
+                            arguments=action_arguments,
+                        )
                     step_payload = self.approval_transactions._execute_write_request(
                         step_tool,
                         action_arguments,
