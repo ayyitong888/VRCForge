@@ -247,6 +247,8 @@ namespace VRCForge.Editor
                 ?? throw new InvalidOperationException(
                     "Modular Avatar runtime types were not found. Install the Modular Avatar package first.");
             var payload = BuildPreviewPayload(parameters, mergeArmatureType, out var outfit, out var existingMerge);
+            var avatarRoot = ResolveAvatarDescriptor(parameters.avatarPath ?? "").transform;
+            var transformSnapshot = TransformPreservationSnapshot.Capture(avatarRoot, outfit);
             if (string.IsNullOrWhiteSpace(job.outfitGlobalObjectId)
                 || !string.Equals(
                     GlobalObjectId.GetGlobalObjectIdSlow(outfit.gameObject).ToString(),
@@ -267,7 +269,21 @@ namespace VRCForge.Editor
             }
             job.mutationStarted = true;
             PersistJob(job);
-            var setupEntryPoint = ExecuteSetupOutfit(outfit.gameObject);
+            TransformPreservationSnapshot.Report transformPreservation = null;
+            var setupEntryPoint = "";
+            try
+            {
+                setupEntryPoint = ExecuteSetupOutfit(outfit.gameObject);
+            }
+            finally
+            {
+                transformPreservation = transformSnapshot.Restore(
+                    "Preserve avatar transforms during Modular Avatar Setup Outfit");
+                if (transformPreservation.restoredCount > 0)
+                {
+                    EditorSceneManager.MarkSceneDirty(outfit.gameObject.scene);
+                }
+            }
 
             var mergeAfter = outfit.GetComponentsInChildren(mergeArmatureType, true).Length;
             var componentTypes = outfit.GetComponentsInChildren<Component>(true)
@@ -287,6 +303,16 @@ namespace VRCForge.Editor
 
             payload["confirmed"] = true;
             payload["setupEntryPoint"] = setupEntryPoint;
+            payload["transformPreservation"] = new JObject
+            {
+                ["ownerPath"] = transformPreservation.ownerPath,
+                ["excludedSubtreePath"] = GetTransformPath(outfit),
+                ["snapshotCount"] = transformPreservation.snapshotCount,
+                ["driftedCount"] = transformPreservation.driftedCount,
+                ["restoredCount"] = transformPreservation.restoredCount,
+                ["skippedCount"] = transformPreservation.skippedCount,
+                ["preserved"] = transformPreservation.preserved,
+            };
             payload["mergeArmaturesBefore"] = existingMerge;
             payload["mergeArmaturesAfter"] = mergeAfter;
             payload["modularAvatarComponents"] = JObject.FromObject(componentTypes);

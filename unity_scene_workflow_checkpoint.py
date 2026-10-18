@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any, Callable
+from prepared_unity_execution import build_prepared_execution_plan, prepared_evidence
 
 
 _CORE_TOOLS = {
@@ -11,6 +12,72 @@ _CORE_TOOLS = {
     "vrcforge_unpack_prefab": "vrc_unpack_prefab",
     "vrcforge_create_gameobject": "vrc_create_gameobject",
 }
+
+
+def prepare_add_outfit_checkpoint(project_root: Path, arguments: dict[str, Any], *, discover, prepare) -> dict[str, Any]:
+    """Bind a sealed instantiate+setup installation to its one saved scene."""
+    def reject(message):
+        return {"ok": False, "blocking": True, "code": "checkpoint_scope_unresolved",
+                "error": message, "mutationStarted": False, "saved": False}
+    try:
+        evidence = prepared_evidence(arguments)
+        calls = build_prepared_execution_plan(arguments)
+        if (evidence.get("schema") != "vrcforge.prepared-add-outfit.v1"
+                or evidence.get("manageWardrobe") is not False
+                or evidence.get("setupOutfit") is not True
+                or evidence.get("unpackPrefab") is not False
+                or [call[0] for call in calls] != ["vrc_instantiate_prefab", "vrc_setup_outfit"]):
+            raise ValueError("This Add Outfit plan has no proven scene-only installation footprint.")
+        target = arguments["executionTarget"]
+        avatar = target["avatar"]
+        scene = target["scene"]
+        facts = evidence["readFacts"]
+        asset, owner, parent = facts["asset"], facts["avatar"], facts["parent"]
+        bound_parent = target["object"] if target.get("scope") in {"object", "component"} else avatar
+        name = evidence["outfitName"]
+        if (not _hierarchy_path(name) or "/" in name
+                or facts["outfitPath"] != parent["gameObjectPath"] + "/" + name
+                or facts["outfitPath"] in parent["children"]
+                or owner["globalObjectId"] != avatar["globalObjectId"]
+                or owner["gameObjectPath"] != avatar["exactHierarchyPath"]
+                or owner["scenePath"] != scene["assetPath"]
+                or parent["scenePath"] != scene["assetPath"]
+                or parent["globalObjectId"] != bound_parent["globalObjectId"]
+                or Path(evidence["projectIdentity"]["projectPath"]).resolve() != project_root.resolve()
+                or not asset["assetPath"].startswith("Assets/")
+                or ".." in Path(asset["assetPath"]).parts
+                or not asset["assetPath"].endswith(".prefab")
+                or any(len(asset[key]) != 32 or any(c not in "0123456789abcdef" for c in asset[key])
+                       for key in ("guid", "dependencyHash"))):
+            raise ValueError("The sealed installation identity differs from its bound scene owner.")
+        instantiate, setup = calls[0][1], calls[1][1]
+        nonce = instantiate.get("approvedObjectReceiptNonce")
+        if not isinstance(nonce, str) or len(nonce) != 64 or any(c not in "0123456789abcdef" for c in nonce):
+            raise ValueError("The installation has no exact approved continuation nonce.")
+        project = evidence["projectIdentity"]["projectPath"]
+        if type(instantiate.get("worldPositionStays")) is not bool or instantiate != {
+            "projectPath": project, "assetPath": asset["assetPath"], "guid": asset["guid"],
+            "parentPath": parent["gameObjectPath"], "name": name,
+            "worldPositionStays": instantiate["worldPositionStays"],
+            "expectedPrefabGuid": asset["guid"], "expectedAssetDependencyHash": asset["dependencyHash"],
+            "expectedScenePath": scene["assetPath"], "expectedParentGlobalObjectId": parent["globalObjectId"],
+            "expectedResultPath": facts["outfitPath"], "preview": False,
+            "approvedObjectReceiptNonce": nonce, "approvedContinuationTools": ["vrc_setup_outfit"],
+        } or setup != {
+            "projectPath": project, "avatarPath": owner["gameObjectPath"],
+            "outfitPath": facts["outfitPath"], "confirmSetup": True, "saveScene": True,
+            "approvedObjectReceiptNonce": nonce,
+        }:
+            raise ValueError("The sealed installation calls do not match their exact scene-only effects.")
+    except (KeyError, TypeError, ValueError, RuntimeError, OSError) as exc:
+        return reject(str(exc))
+    result = prepare_scene_workflow_checkpoint(
+        project_root, {"executionTarget": target}, checkpoint_target="vrcforge_instantiate_prefab",
+        build_plan=lambda _tool, _args: [calls[0]], discover=discover, prepare=prepare,
+    )
+    if result.get("ok") is True:
+        result["archiveScopeReason"] = "revalidated_scene_only_add_outfit_owner"
+    return result
 
 
 def prepare_scene_workflow_checkpoint(

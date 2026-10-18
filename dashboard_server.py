@@ -21152,6 +21152,13 @@ def prepare_authoritative_unity_checkpoint_sync(
             discover=list_execution_targets_sync, inspect_owner=read_component_property_sync,
             prepare=prepare_unity_checkpoint_sync,
         )
+    if checkpoint_target == "vrcforge_add_outfit":
+        from unity_scene_workflow_checkpoint import prepare_add_outfit_checkpoint
+
+        return prepare_add_outfit_checkpoint(
+            project_root, arguments, discover=list_execution_targets_sync,
+            prepare=prepare_unity_checkpoint_sync,
+        )
     if checkpoint_target in {"vrcforge_setup_outfit", "vrcforge_instantiate_prefab",
                              "vrcforge_unpack_prefab", "vrcforge_create_gameobject"}:
         from unity_scene_workflow_checkpoint import prepare_scene_workflow_checkpoint

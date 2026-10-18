@@ -178,6 +178,13 @@ def test_add_outfit_preparer_freezes_exact_calls_and_executor_checks_readback(tm
 
     assert result["ok"] is True
     assert result["outfitPath"] == "Avatar/Hoodie"
+    assert result["mutationStarted"] is True
+    assert result["commitState"] == "complete"
+    assert result["checkpointRecoveryRequired"] is False
+    from agent_tool_result_contract import normalize_agent_tool_result
+    outcome = normalize_agent_tool_result(result,write=True,fallback_summary="Add Outfit did not complete")
+    assert outcome["commitState"] == "complete"
+    assert outcome["recovery"] is False
     assert [tool for tool, _arguments in write_calls] == [tool for tool, _arguments in calls]
 
 

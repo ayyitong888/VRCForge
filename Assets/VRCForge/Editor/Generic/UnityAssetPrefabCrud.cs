@@ -705,6 +705,8 @@ namespace VRCForge.Editor
             var continuationCount = 0;
             var continuationReserved = false;
             var mutationSceneHandle = -1;
+            TransformPreservationSnapshot transformSnapshot = null;
+            TransformPreservationSnapshot.Report transformPreservation = null;
             try
             {
                 var path = AssetPrefabCore.ResolveAssetPath(p.assetPath, p.guid);
@@ -812,6 +814,8 @@ namespace VRCForge.Editor
 
                 // Require a clean saved scene and isolate this operation from prior Undo work.
                 beforeScene = SceneObjectCopyCore.ResolveSavedScene(scenePath, "prefab target scene");
+                transformSnapshot = TransformPreservationSnapshot.Capture(
+                    TransformPreservationSnapshot.FindHumanoidOwner(parent != null ? parent.transform : null));
                 Undo.IncrementCurrentGroup();
                 undoGroup = Undo.GetCurrentGroup();
                 Undo.SetCurrentGroupName($"Instantiate {instanceName}");
@@ -837,6 +841,12 @@ namespace VRCForge.Editor
                     instance.name = instanceName;
                 }
                 EditorUtility.SetDirty(instance);
+                transformPreservation = transformSnapshot.Restore(
+                    $"Preserve avatar transforms during instantiate {instanceName}");
+                if (transformPreservation.restoredCount > 0)
+                {
+                    EditorSceneManager.MarkSceneDirty(scene);
+                }
 
                 var goPath = ComponentCrudCore.GetHierarchyPath(instance.transform);
                 mutatedPath = goPath;
@@ -919,6 +929,15 @@ namespace VRCForge.Editor
                     before,
                     after,
                     readback = new { persisted = true, data = after },
+                    transformPreservation = new
+                    {
+                        ownerPath = transformPreservation.ownerPath,
+                        snapshotCount = transformPreservation.snapshotCount,
+                        driftedCount = transformPreservation.driftedCount,
+                        restoredCount = transformPreservation.restoredCount,
+                        skippedCount = transformPreservation.skippedCount,
+                        preserved = transformPreservation.preserved,
+                    },
                     sceneSaved = true,
                     persistedReadback = true,
                     readbackVerified = true,
@@ -941,6 +960,18 @@ namespace VRCForge.Editor
                 if (continuationReserved)
                 {
                     VRCForgeApprovedObjectReceipt.CancelReservation(continuationNonce);
+                }
+                if (mutationStarted && transformPreservation == null && transformSnapshot != null)
+                {
+                    try
+                    {
+                        transformPreservation = transformSnapshot.Restore(
+                            "Preserve avatar transforms after failed prefab instantiate");
+                    }
+                    catch
+                    {
+                        // Scoped Undo cleanup below remains the authoritative failure path.
+                    }
                 }
                 if (mutationStarted)
                 {

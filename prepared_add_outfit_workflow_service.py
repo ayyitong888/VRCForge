@@ -884,7 +884,10 @@ class PreparedAddOutfitApprovedWriteService:
             return {
                 "ok": True,
                 "preview": False,
+                "mutationStarted": True,
                 "committed": True,
+                "commitState": "complete",
+                "checkpointRecoveryRequired": False,
                 "outfitPath": read_facts["outfitPath"],
                 "steps": steps,
                 "finalObject": final_object,

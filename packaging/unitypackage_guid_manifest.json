@@ -1,6 +1,7 @@
 {
   "schema": "vrcforge.unitypackage-guid-manifest.v1",
   "entries": [
+    { "path": "Assets/VRCForge/Editor/TransformPreservationSnapshot.cs", "guid": "ffd6c337e38c4deda5ff49fe5c2100c3" },
     { "path": "Assets/VRCForge/Editor/Generic/UnityMaterialKeywordEdit.cs", "guid": "3e59d08aa4b84445b88ac82b8215012e" },
     { "path": "Assets/VRCForge/Editor/Generic/UnityMaterialTextureBatch.cs", "guid": "4f3d7f8e1a2b4c5d9e6f708192a3b4c5" },
     { "path": "Assets/VRCForge/Editor/Generic/RelocateGeneratedAssetsTool.cs", "guid": "9f2ef8b4d0d74a2e9b9bd7c8d6d8f4aa" },
