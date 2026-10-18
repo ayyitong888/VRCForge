@@ -874,6 +874,21 @@ def test_unknown_declared_verification_profile_fails_closed() -> None:
     assert gated["nextStep"] == "needs_user_action"
 
 
+def test_failed_visual_verification_is_not_reported_as_a_unity_write_failure() -> None:
+    loop = AgentTaskLoop("inspect the managed views")
+    result = loop.record_action(
+        kind="skill", tool="vrcforge_vision_audit_multi", arguments={"captureReceipt": "managed"},
+        raw_result={"ok": True, "visualVerified": False, "coverageComplete": True,
+                    "captureEvidenceVerified": True},
+        outcome=ok_outcome("visual findings"),
+    )
+    assert result["status"] == "needs_user_action"
+    assert "visual audit" in result["outcome"]["summary"]
+    assert "Unity write" not in result["outcome"]["summary"]
+    assert result["outcome"]["verification"]["checks"][0] == {"kind": "visualVerified", "state": "failed"}
+    assert loop.gate_terminal({"planner": "llm", "nextStep": "done", "reply": "done"})["nextStep"] != "done"
+
+
 def test_approval_context_binds_identity_and_verifies_terminal_result() -> None:
     loop = AgentTaskLoop(
         "create one object",

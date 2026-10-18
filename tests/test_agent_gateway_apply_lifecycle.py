@@ -43,7 +43,7 @@ def test_visual_audit_clipping_is_a_bounded_planner_correction_candidate() -> No
                 "results": [{"angle": "back", "status": "clipping"}],
             },
         },
-        correction_attempted=False,
+        previous_audits=[],
     ) is True
 
 
@@ -54,7 +54,63 @@ def test_visual_audit_candidate_does_not_open_a_write_failure() -> None:
             "outcome": {"status": "needs_user_action"},
             "result": {"persistedReadback": False, "sceneSaved": False},
         },
-        correction_attempted=False,
+        previous_audits=[],
+    ) is False
+
+
+def _visual_findings(verdicts: list[tuple[str, str]], **overrides) -> dict:
+    return {
+        "visualVerified": False, "coverageComplete": True,
+        "captureEvidenceVerified": True, "overallStatus": "clipping",
+        "results": [{"angle": angle, "status": status} for angle, status in verdicts],
+        **overrides,
+    }
+
+
+@pytest.mark.parametrize(
+    "current,expected",
+    [
+        ([("front", "pass"), ("side_left", "pass"), ("side_right", "clipping")], True),
+        ([("front", "clipping"), ("side_left", "pass")], False),
+        ([("side_left", "pass"), ("side_right", "clipping")], False),
+        ([("front", "pass"), ("side_left", "clipping")], False),
+        ([("front", "clipping"), ("front", "pass")], False),
+    ],
+    ids=["resolved-angle", "new-receipt-same-failure", "missing-is-not-resolved", "regression", "ambiguous-angle"],
+)
+def test_visual_audit_progress_requires_explicit_pass_without_regression(current, expected) -> None:
+    previous = _visual_findings([("front", "clipping"), ("side_left", "pass")])
+    result = _visual_findings(current, captureEvidenceId="different-capture-receipt")
+    assert visual_audit_correction_candidate(
+        "vrcforge_vision_audit_multi",
+        {"outcome": {"status": "needs_user_action"}, "result": result},
+        previous_audits=[previous],
+    ) is expected
+    assert result["visualVerified"] is False
+
+
+def test_visual_audit_progress_cannot_regress_an_earlier_passed_angle() -> None:
+    history = [
+        _visual_findings([("front", "clipping"), ("side_left", "pass")]),
+        _visual_findings([("front", "pass"), ("side_right", "clipping")]),
+    ]
+    current = _visual_findings([("front", "pass"), ("side_left", "clipping"), ("side_right", "pass")])
+    assert visual_audit_correction_candidate(
+        "vrcforge_vision_audit_multi",
+        {"outcome": {"status": "needs_user_action"}, "result": current},
+        previous_audits=history,
+    ) is False
+
+
+@pytest.mark.parametrize("missing_proof", ["coverageComplete", "captureEvidenceVerified"])
+def test_visual_progress_never_bypasses_missing_capture_proof(missing_proof) -> None:
+    previous = _visual_findings([("front", "clipping")])
+    result = _visual_findings([("front", "pass"), ("side_right", "clipping")])
+    result[missing_proof] = False
+    assert visual_audit_correction_candidate(
+        "vrcforge_vision_audit_multi",
+        {"outcome": {"status": "needs_user_action"}, "result": result},
+        previous_audits=[previous],
     ) is False
 
 

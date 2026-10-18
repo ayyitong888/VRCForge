@@ -677,7 +677,9 @@ def apply_declared_verification(
         return {
             "status": "needs_user_action",
             "summary": (
-                "The Unity write returned, but its required persisted readback did not pass: "
+                ("The visual audit did not pass its required checks: "
+                 if profile == "multi_angle_visual" else
+                 "The Unity write returned, but its required persisted readback did not pass: ")
                 + ", ".join(failed)
                 + "."
             ),

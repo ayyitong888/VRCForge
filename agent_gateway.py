@@ -7069,7 +7069,7 @@ class AgentGateway:
         runtime_compaction_attempted = False
         planner_argument_failures = 0
         completion_claim_correction_attempted = False
-        visual_correction_attempted = False
+        visual_correction_audits: list[Mapping[str, Any]] = []
         general_no_progress_attempts = 0
         last_general_read_key = ""
         unresolved_planner_argument_failure: dict[str, Any] | None = None
@@ -8667,19 +8667,20 @@ class AgentGateway:
                 unresolved_completion_outcomes[action_key] = step_outcome
                 if task_action_id:
                     unresolved_completion_action_keys[task_action_id] = action_key
-                if (
+                visual_correction_available = (
                     str(plan.get("planner") or "").strip().casefold() == "llm"
                     and visual_audit_correction_candidate(
                         step_tool,
                         step_payload,
-                        correction_attempted=visual_correction_attempted,
+                        previous_audits=visual_correction_audits,
                     )
-                ):
+                )
+                if visual_correction_available:
                     # Keep the failed audit receipt and its evidence in the
-                    # loop state, but give the planner one bounded turn to
-                    # choose a new safe correction/capture path. The consumed
-                    # receipt is never replayed by this branch.
-                    visual_correction_attempted = True
+                    # loop state. A later correction requires an explicitly
+                    # failing angle to pass, without regressing an earlier
+                    # passing angle. New receipts alone are not progress.
+                    visual_correction_audits.append(ensure_dict(step_payload.get("result")))
                     plan["continueLoop"] = True
                     continue
                 requires_direct_user_input = bool(
@@ -11247,11 +11248,11 @@ def visual_audit_correction_candidate(
     tool: str,
     step_payload: Mapping[str, Any],
     *,
-    correction_attempted: bool,
+    previous_audits: list[Mapping[str, Any]],
 ) -> bool:
-    """Allow one planner turn for a structured, correctable visual finding."""
+    """Continue verified visual findings only while angle verdicts improve."""
 
-    if correction_attempted or str(tool or "").strip() != "vrcforge_vision_audit_multi":
+    if str(tool or "").strip() != "vrcforge_vision_audit_multi":
         return False
     outcome = ensure_dict(step_payload.get("outcome"))
     if str(outcome.get("status") or "").strip().casefold() != "needs_user_action":
@@ -11269,11 +11270,40 @@ def visual_audit_correction_candidate(
         findings = list(findings.values())
     if not isinstance(findings, list):
         return False
-    return any(
+    correctable = any(
         isinstance(item, Mapping)
         and str(item.get("status") or item.get("overallStatus") or "").strip().casefold() == "clipping"
         for item in findings
     )
+    if not correctable:
+        return False
+    if not previous_audits:
+        return True
+
+    def angle_verdicts(audit: Mapping[str, Any]) -> dict[str, str]:
+        rows = audit.get("results")
+        if not isinstance(rows, list):
+            return {}
+        verdicts: dict[str, str] = {}
+        for row in rows:
+            if not isinstance(row, Mapping):
+                return {}
+            angle = str(row.get("angle") or "").strip().casefold()
+            status = str(row.get("status") or "").strip().casefold()
+            if not angle or angle in verdicts or status not in {"pass", "clipping", "failed"}:
+                return {}
+            verdicts[angle] = status
+        return verdicts
+
+    current = angle_verdicts(result)
+    previous = angle_verdicts(previous_audits[-1])
+    prior_passed = {
+        angle for audit in previous_audits
+        for angle, status in angle_verdicts(audit).items() if status == "pass"
+    }
+    resolved = any(status != "pass" and current.get(angle) == "pass" for angle, status in previous.items())
+    regressed = any(current.get(angle) in {"clipping", "failed"} for angle in prior_passed)
+    return resolved and not regressed
 
 
 def strip_simple_yaml_scalar(value: str) -> Any:

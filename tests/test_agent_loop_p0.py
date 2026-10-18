@@ -3978,6 +3978,58 @@ class AgentLoopP0Tests(unittest.TestCase):
         )
 
 
+    def test_visual_correction_continues_after_proven_progress_but_stops_without_it(self) -> None:
+        gateway = self.gateway
+        session_id = "visual-progress-correction-session"
+        gateway.runtime_sessions.load_internal_tool_block(session_id, "attachments")
+        project = self._unity_project()
+        plans: list[dict[str, object]] = []
+
+        def plan_agent_turn(*args, **_kwargs):
+            plans.append({"prompt": str(args[1]) if len(args) > 1 else ""})
+            assert len(plans) <= 3, "An unchanged visual finding must stop before another model call"
+            return {
+                "planner": "llm", "skillNeeded": True,
+                "skillTool": "vrcforge_vision_audit_multi",
+                "skillParams": {"captureReceipt": f"managed-progress-{len(plans)}"},
+                "continueLoop": True, "nextStep": "call_skill",
+            }
+
+        def visual_audit(_owner, tool_name, _params, agent_name=None, owner_id=""):
+            first = len(plans) == 1
+            return {
+                "tool": tool_name, "status": "executed",
+                "result": {
+                    "ok": True, "overallStatus": "clipping",
+                    "coverageComplete": True, "visualVerified": False,
+                    "captureEvidenceVerified": True,
+                    "results": (
+                        [{"angle": "front", "status": "clipping"},
+                         {"angle": "side_left", "status": "pass"}]
+                        if first else
+                        [{"angle": "front", "status": "pass"},
+                         {"angle": "side_left", "status": "pass"},
+                         {"angle": "side_right", "status": "clipping"}]
+                    ),
+                },
+                "outcome": {"status": "needs_user_action", "summary": "structured visual findings"},
+            }
+
+        with patch.object(gateway.runtime_planner, "plan_agent_turn", side_effect=plan_agent_turn), patch.object(
+            type(gateway.runtime_skills), "execute", autospec=True, side_effect=visual_audit,
+        ) as execute_skill:
+            result = gateway.runtime_message({
+                "message": "Inspect the current views and correct the visible problems.",
+                "projectPath": str(project), "projectRoot": str(project),
+                "session_id": session_id, "client_turn_id": "visual-progress-correction-turn",
+            })
+
+        assert execute_skill.call_count == 3, result["plan"]
+        assert len(plans) == 3
+        assert result["plan"]["nextStep"] in {"needs_user_action", "completion_unverified"}
+        assert all(step["result"]["visualVerified"] is False for step in result["steps"])
+        assert result["task"]["status"] != "completed"
+
     def test_permanent_visual_provider_rejection_refeeds_route_and_discards_images(self) -> None:
         gateway = self.gateway
         gateway.runtime_sessions.load_internal_tool_block(
