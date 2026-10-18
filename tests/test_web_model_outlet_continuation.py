@@ -1,7 +1,5 @@
 import json
 
-import pytest
-
 from general_agent_tools import web_search
 from runtime_planner_service import planner_read_output_evidence
 
@@ -44,7 +42,7 @@ def test_model_outlet_preserves_exact_search_cursor_and_safe_metadata():
     }
 
 
-def test_model_outlet_cursor_reconstructs_all_pages_and_changed_digest_rejects():
+def test_model_outlet_cursor_reconstructs_all_pages_from_cached_snapshot():
     client = _Client(_search_html())
     result = web_search("sample", client=client, max_results=5)
     titles = []
@@ -62,10 +60,10 @@ def test_model_outlet_cursor_reconstructs_all_pages_and_changed_digest_rejects()
 
     changed = _Client(_search_html() + b'<a class="result__a" href="https://example.test/new">New</a>')
     first_request = web_search("sample", client=client, max_results=5)["nextRequest"]
-    with pytest.raises(ValueError, match="snapshot changed"):
-        web_search(client=changed, query=first_request["query"],
-                   max_results=first_request["maxResults"], offset=first_request["offset"],
-                   snapshot_digest=first_request["snapshotDigest"])
+    continued = web_search(client=changed, query=first_request["query"],
+                           max_results=first_request["maxResults"], offset=first_request["offset"],
+                           snapshot_digest=first_request["snapshotDigest"])
+    assert [row["title"] for row in continued["results"]] == [f"Result {i}" for i in range(5, 10)]
 
 
 def test_model_outlet_sanitizes_query_and_rejects_untrusted_cursor_fields():

@@ -1628,13 +1628,13 @@ BUILTIN_SKILL_GROUPS: list[dict[str, Any]] = [
     {
         "name": "face-tuning-workflow",
         "title": "Face Tuning Workflow",
-        "description": "Plan, preview, approve, apply, and restore face Blendshape tuning.",
+        "description": "Plan, preview, approve, apply, and restore face Blendshape tuning. After a successful save, explicitly call vrcforge_refresh_execution_target with the same public executionTarget before any later Unity read; if refresh fails, stop and preserve the revision check instead of retrying with the stale reference.",
         "category": "face",
         "permissionMode": "approval_required",
         "riskLevel": "high",
         "whenToUse": "face tuning, expression tuning, blendshape edit, face restore",
         "inputs": ["Avatar path, tuning request, blendshape targets, and approval id."],
-        "outputs": ["Plan, dry-run preview, approval request, apply result, and restore result."],
+        "outputs": ["Plan, dry-run preview, approval request, apply result, same-target refresh after a successful save before any later Unity read (stop if refresh fails), and restore result."],
         "sideEffects": "can write Unity avatar Blendshape values after approval",
         "backupRestore": "requires preview, backup, apply, validate, restore path",
         "allowedTools": [
@@ -1647,6 +1647,7 @@ BUILTIN_SKILL_GROUPS: list[dict[str, Any]] = [
             "vrcforge_run_face_tuning",
             "vrcforge_undo_blendshapes",
             "vrcforge_restore_last_backup",
+            "vrcforge_refresh_execution_target",
         ],
         "entrypointTool": "vrcforge_plan_face_tuning",
         "tags": ["builtin", "group", "face", "blendshape", "write"],

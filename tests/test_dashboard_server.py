@@ -39,6 +39,8 @@ from agent_gateway import (
     redact_background_goal_persistence,
     redact_sensitive,
     summarize_text,
+    summarize_skill_registry,
+    build_runtime_skill_payload,
 )
 from agent_shell_service import (
     SHELL_RUNNER_NATIVE,
@@ -11376,6 +11378,39 @@ class DashboardServerTests(unittest.TestCase):
         self.assertIn("VRCAvatarDescriptor", source)
         self.assertIn("VRCExpressionsMenu", source)
         self.assertIn("AnimatorController", source)
+
+    def test_face_tuning_skill_exposes_refresh_after_save_to_provider(self) -> None:
+        config = dashboard_server.AGENT_GATEWAY.ensure_config()
+        config.enabled = True
+        dashboard_server.AGENT_GATEWAY.save_config(config)
+        headers = {"Authorization": f"Bearer {config.token}"}
+
+        with TestClient(dashboard_server.app) as client:
+            payload = client.get("/api/agent/manifest?exposure_layer=execution", headers=headers).json()
+
+        skill = next(item for item in payload["skills"] if item["name"] == "face-tuning-workflow")
+        tool_names = {item["name"] for item in payload["tools"]}
+        self.assertIn("vrcforge_refresh_execution_target", tool_names)
+        self.assertIn("vrcforge_refresh_execution_target", skill["allowedTools"])
+        self.assertIn("refresh", skill["description"].casefold())
+        self.assertTrue(any("same-target refresh after a successful save before any later Unity read" in item for item in skill["outputs"]))
+        runtime_skill = build_runtime_skill_payload(skill, {})
+        self.assertIn("vrcforge_refresh_execution_target", runtime_skill["allowedTools"])
+        self.assertTrue(any("stop if refresh fails" in item for item in runtime_skill["outputs"]))
+
+        observed_registry = summarize_skill_registry(
+            dashboard_server.AGENT_GATEWAY.skills.build_skill_registry()
+        )
+        observed_skill = next(item for item in observed_registry["skills"] if item["name"] == "face-tuning-workflow")
+        self.assertIn("vrcforge_refresh_execution_target", observed_skill["allowedTools"])
+
+        planner_catalog = dashboard_server._RuntimePlannerCatalog().read(
+            "execution", project_context_active=True
+        )
+        planner_tool_names = {item.name for item in planner_catalog.visible_tools}
+        self.assertIn("unity_refresh_execution_target", planner_tool_names)
+        planner_skill = next(item for item in planner_catalog.skills if item.name == "face-tuning-workflow")
+        self.assertIn("same public executionTarget", planner_skill.description)
 
     def test_avatar_primitive_tools_registered_with_safe_exposure(self) -> None:
         config = dashboard_server.AGENT_GATEWAY.ensure_config()

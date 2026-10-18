@@ -10,10 +10,13 @@ import os
 import re
 import hashlib
 import json
+import threading
+import time
+from collections import OrderedDict
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Protocol
-from urllib.parse import urlencode
+from urllib.parse import parse_qs, urlencode, urljoin, urlsplit
 
 import httpx
 
@@ -27,6 +30,10 @@ WEB_MAX_TIMEOUT = 30.0
 WEB_MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 WEB_MAX_REDIRECTS = 3
 WEB_MAX_SEARCH_RESULTS = 10
+WEB_SEARCH_SNAPSHOT_TTL_SECONDS = 15 * 60
+WEB_SEARCH_SNAPSHOT_MAX_ENTRIES = 32
+WEB_SEARCH_SNAPSHOT_MAX_BYTES = 16 * 1024 * 1024
+WEB_SEARCH_SNAPSHOT_MAX_ENTRY_BYTES = 8 * 1024 * 1024
 
 
 class FileReadLimitError(ValueError):
@@ -51,7 +58,7 @@ GENERAL_AGENT_WEB_TOOL_METADATA = {
         "name": WEB_SEARCH_TOOL_NAME,
         "description": (
             "Search the public web and return normalized results when-to-use: use when "
-            "the user needs discovery by topic or keywords. maxResults is a page size; follow nextRequest to read remaining admitted results. Keep snapshotDigest; changed results require restarting at offset 0. when-NOT-to-use: do not use "
+            "the user needs discovery by topic or keywords. maxResults is a page size; follow nextRequest to read remaining admitted results from the retained snapshot without re-running search. Keep snapshotDigest; if the snapshot expires or is unavailable, restart at offset 0. when-NOT-to-use: do not use "
             "for private data, authenticated search, or a known URL (use web_fetch). "
             "Negative example: do not search when the user asked only for a local file check."
         ),
@@ -87,7 +94,7 @@ class _WebPageParser(HTMLParser):
             self._skip_depth += 1
         classes = (attrs_map.get("class") or "").split()
         if tag == "a" and "result__a" in classes:
-            self._result = {"title": "", "url": attrs_map.get("href") or "", "snippet": ""}
+            self._result = {"title": "", "url": _canonical_search_result_url(attrs_map.get("href") or ""), "snippet": ""}
             self._result_depth = 1
         elif tag == "a" and "result__snippet" in classes and self.results:
             self._snippet_target = self.results[-1]
@@ -131,6 +138,21 @@ class _WebPageParser(HTMLParser):
     @property
     def text(self) -> str:
         return " ".join(self._parts)
+
+
+def _canonical_search_result_url(value: str) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    resolved = urljoin("https://html.duckduckgo.com", raw)
+    parsed = urlsplit(resolved)
+    if parsed.hostname in {"duckduckgo.com", "www.duckduckgo.com", "html.duckduckgo.com"} and parsed.path == "/l/":
+        targets = parse_qs(parsed.query).get("uddg") or []
+        if targets:
+            target = urlsplit(targets[0])
+            if target.scheme in {"http", "https"} and target.hostname:
+                return targets[0]
+    return resolved
 
 _SENSITIVE_NAMES = {
     ".env",
@@ -339,6 +361,57 @@ def _result_page(rows: Iterable[dict[str, Any]], *, offset: int, max_count: int,
     has_more = offset + len(page) < total
     return page, {"offset": offset, "nextOffset": offset + len(page) if has_more and page else None,
                   "hasMore": has_more, "totalCount": total, "snapshotDigest": actual_digest}
+
+
+class _WebSearchSnapshotCache:
+    """Keep immutable public search rows briefly so pagination never re-runs search."""
+
+    def __init__(self) -> None:
+        self._entries: OrderedDict[str, tuple[float, str, tuple[dict[str, Any], ...], int]] = OrderedDict()
+        self._payload_bytes = 0
+        self._lock = threading.Lock()
+
+    def _evict_expired(self, now: float) -> None:
+        for digest, (created, _query, _rows, size) in tuple(self._entries.items()):
+            if now - created > WEB_SEARCH_SNAPSHOT_TTL_SECONDS:
+                self._entries.pop(digest, None)
+                self._payload_bytes -= size
+
+    def get(self, digest: str, query: str) -> tuple[dict[str, Any], ...] | None:
+        now = time.monotonic()
+        with self._lock:
+            self._evict_expired(now)
+            entry = self._entries.get(digest)
+            if entry is None:
+                return None
+            if entry[1] != query:
+                raise ValueError("search snapshot query changed; restart pagination at offset 0")
+            self._entries.move_to_end(digest)
+            return entry[2]
+
+    def put(self, digest: str, query: str, rows: list[dict[str, Any]]) -> bool:
+        immutable_rows = tuple(dict(row) for row in rows)
+        size = len(json.dumps(immutable_rows, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+        if size > WEB_SEARCH_SNAPSHOT_MAX_ENTRY_BYTES:
+            return False
+        now = time.monotonic()
+        with self._lock:
+            self._evict_expired(now)
+            previous = self._entries.pop(digest, None)
+            if previous is not None:
+                self._payload_bytes -= previous[3]
+            while self._entries and (
+                len(self._entries) >= WEB_SEARCH_SNAPSHOT_MAX_ENTRIES
+                or self._payload_bytes + size > WEB_SEARCH_SNAPSHOT_MAX_BYTES
+            ):
+                _old_digest, old_entry = self._entries.popitem(last=False)
+                self._payload_bytes -= old_entry[3]
+            self._entries[digest] = (now, query, immutable_rows, size)
+            self._payload_bytes += size
+        return True
+
+
+_WEB_SEARCH_SNAPSHOTS = _WebSearchSnapshotCache()
 
 
 def list_directory(
@@ -633,34 +706,54 @@ def web_search(
     """Search DuckDuckGo's public HTML endpoint without credentials."""
     if not isinstance(query, str) or not query.strip():
         raise ValueError("query must be a non-empty string")
+    query = query.strip()
     max_results = _limit(max_results, "max_results", WEB_MAX_SEARCH_RESULTS)
     if max_results == 0:
         return {"query": query, "results": [], "truncated": False}
+    if type(offset) is not int or offset < 0:
+        raise ValueError("offset must be a non-negative integer")
+    if snapshot_digest is not None and (
+        not isinstance(snapshot_digest, str)
+        or re.fullmatch(r"[0-9a-f]{64}", snapshot_digest) is None
+    ):
+        raise ValueError("snapshot_digest must be a SHA-256 digest")
+    if offset != 0 and snapshot_digest is None:
+        raise ValueError("snapshot_digest is required to continue a search result page")
     timeout = _web_timeout(timeout)
-    url = "https://html.duckduckgo.com/html/?" + urlencode({"q": query.strip()})
-    http, owned = _web_client(client, timeout)
-    try:
+    rows = _WEB_SEARCH_SNAPSHOTS.get(snapshot_digest, query) if snapshot_digest else None
+    truncated = False
+    if rows is None:
+        if offset != 0:
+            raise ValueError("search snapshot expired or unavailable; restart pagination at offset 0")
+        url = "https://html.duckduckgo.com/html/?" + urlencode({"q": query})
+        http, owned = _web_client(client, timeout)
         try:
-            response = http.get(url, timeout=timeout)
-        except Exception as exc:
-            raise RuntimeError(f"web_search request failed: {exc}") from exc
-        status = int(getattr(response, "status_code", 0) or 0)
-        if status >= 400:
-            raise RuntimeError(f"web_search returned HTTP {status}")
-        if _content_type(response) and "html" not in _content_type(response):
-            raise ValueError("web_search provider returned non-HTML content")
-        raw, truncated = _response_bytes(response, WEB_MAX_RESPONSE_BYTES)
-        parser = _WebPageParser()
-        parser.feed(raw.decode("utf-8", errors="replace"))
-        results, page = _result_page(parser.results, offset=offset, max_count=max_results,
-                                     snapshot_digest=snapshot_digest, scope={"query": query.strip()})
-        next_request = {"query": query.strip(), "maxResults": max_results,
-                        "offset": page["nextOffset"], "snapshotDigest": page["snapshotDigest"]} if page["hasMore"] else None
-        return {"query": query.strip(), "results": results, "truncated": truncated or page["hasMore"],
-                **page, "nextRequest": next_request}
-    finally:
-        if owned:
-            http.close()  # type: ignore[attr-defined]
+            try:
+                response = http.get(url, timeout=timeout)
+            except Exception as exc:
+                raise RuntimeError(f"web_search request failed: {exc}") from exc
+            status = int(getattr(response, "status_code", 0) or 0)
+            if status >= 400:
+                raise RuntimeError(f"web_search returned HTTP {status}")
+            if _content_type(response) and "html" not in _content_type(response):
+                raise ValueError("web_search provider returned non-HTML content")
+            raw, truncated = _response_bytes(response, WEB_MAX_RESPONSE_BYTES)
+            parser = _WebPageParser()
+            parser.feed(raw.decode("utf-8", errors="replace"))
+            rows = tuple(parser.results)
+        finally:
+            if owned:
+                http.close()  # type: ignore[attr-defined]
+
+    results, page = _result_page(rows, offset=offset, max_count=max_results,
+                                 snapshot_digest=snapshot_digest, scope={"query": query})
+    if page["hasMore"] and snapshot_digest is None:
+        if not _WEB_SEARCH_SNAPSHOTS.put(page["snapshotDigest"], query, list(rows)):
+            raise ValueError("search result snapshot exceeds continuation cache capacity")
+    next_request = {"query": query, "maxResults": max_results,
+                    "offset": page["nextOffset"], "snapshotDigest": page["snapshotDigest"]} if page["hasMore"] else None
+    return {"query": query, "results": results, "truncated": truncated or page["hasMore"],
+            **page, "nextRequest": next_request}
 
 
 __all__ = [

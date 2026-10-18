@@ -71,6 +71,15 @@ def test_web_search_normalizes_public_html_results_without_network() -> None:
     assert "q=vrcforge" in client.calls[0][0]
 
 
+def test_web_search_unwraps_duckduckgo_tracking_urls_before_snapshotting() -> None:
+    html = b"<a class='result__a' href='//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.test%2Fitem&rut=unstable'>Source</a>"
+    result = web_search(
+        "tracking-url-normalization",
+        client=FakeClient(FakeResponse(html, headers={"content-type": "text/html"})),
+    )
+    assert result["results"][0]["url"] == "https://example.test/item"
+
+
 def test_web_tool_metadata_has_required_negative_guidance() -> None:
     assert {WEB_FETCH_TOOL_NAME, WEB_SEARCH_TOOL_NAME} <= set(GENERAL_AGENT_WEB_TOOL_METADATA)
     for metadata in GENERAL_AGENT_WEB_TOOL_METADATA.values():

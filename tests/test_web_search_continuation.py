@@ -21,14 +21,37 @@ def test_all_admitted_search_results_have_continuation():
     assert page['nextRequest'] is None
 
 
-def test_search_continuation_rejects_changed_source_or_query():
+def test_continuation_reads_the_original_snapshot_without_a_new_search():
+    http = client()
+    first = web_search('dynamic-sample', client=http, max_results=5)
+    http.response.content += b'<a class="result__a" href="https://example.test/new">New result</a>'
+
+    request = first['nextRequest']
+    page = web_search(request['query'], client=http, max_results=request['maxResults'],
+                      offset=request['offset'], snapshot_digest=request['snapshotDigest'])
+
+    assert [row['title'] for row in page['results']] == ['Result 5', 'Result 6', 'Result 7', 'Result 8', 'Result 9']
+    assert len(http.calls) == 1
+
+
+def test_search_continuation_rejects_changed_query_and_uses_cached_source():
     http=client()
     first=web_search('sample',client=http,max_results=5)
-    with pytest.raises(ValueError,match='snapshot changed'):
+    with pytest.raises(ValueError,match='snapshot query changed'):
         web_search('different',client=http,offset=5,snapshot_digest=first['snapshotDigest'])
     http.response.content+=b'<a class="result__a" href="https://example.test/new">New</a>'
-    with pytest.raises(ValueError,match='snapshot changed'):
-        web_search('sample',client=http,offset=5,snapshot_digest=first['snapshotDigest'])
+    request=first['nextRequest']
+    page=web_search(request['query'],client=http,max_results=request['maxResults'],
+                    offset=request['offset'],snapshot_digest=request['snapshotDigest'])
+    assert [row['title'] for row in page['results']]==['Result 5','Result 6','Result 7','Result 8','Result 9']
+    assert len(http.calls)==1
+
+
+def test_expired_or_unknown_search_snapshot_fails_without_network():
+    http=client()
+    with pytest.raises(ValueError,match='snapshot expired or unavailable'):
+        web_search('unknown-snapshot',client=http,max_results=5,offset=5,snapshot_digest='a'*64)
+    assert http.calls==[]
 
 from tests.test_planner_web_evidence import web_adapters, projected
 
