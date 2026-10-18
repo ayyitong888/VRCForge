@@ -5,7 +5,8 @@ from test_curve_fx_authoring_runtime_contract import method
 ROOT=Path(__file__).resolve().parents[1]
 
 def test_blendshape_flushes_before_scoped_save_and_checks_result(tmp_path):
- s=(ROOT/"Assets/VRCForge/Editor/BlendshapeApplier.cs").read_text(encoding="utf-8")
+ ref=os.environ.get("VRCFORGE_BLENDSHAPE_SAVE_GIT_REF")
+ s=subprocess.check_output(["git","show",f"{ref}:Assets/VRCForge/Editor/BlendshapeApplier.cs"],cwd=ROOT,text=True,encoding="utf-8") if ref else (ROOT/"Assets/VRCForge/Editor/BlendshapeApplier.cs").read_text(encoding="utf-8")
  body=method(s,"public static object HandleCommand(JObject @params)")
  receipt=method(s,"private sealed class BlendshapeChangeReceipt")
  code=r"""using System;using System.Linq;using System.Collections.Generic;using Newtonsoft.Json.Linq;using SkinnedMeshRenderer=Renderer;
@@ -15,9 +16,10 @@ class Mesh {public int GetBlendShapeIndex(string s)=>0;}
 class Renderer {public Go gameObject=new Go();public Mesh sharedMesh=new Mesh();public float weight=100;public static bool ThrowAfterWrite;public float GetBlendShapeWeight(int i)=>weight;public void SetBlendShapeWeight(int i,float w){weight=w;if(ThrowAfterWrite)throw new Exception("injected write failure");}}
 class Mathf {public static float Clamp(float x,float min,float max)=>Math.Max(min,Math.Min(max,x));}
 class EditorUtility {public static void SetDirty(object o){}}
+class ComponentCrudCore {public static bool PrefabRecorded;public static void RecordPropertyPrefabOverride(object renderer){PrefabRecorded=true;}}
 class Undo {public static bool Pending;public static void RecordObject(object r,string s){Pending=true;}public static void FlushUndoRecordObjects(){if(Pending)Probe.Target.gameObject.scene.isDirty=true;Pending=false;}}
 class AssetDatabase {public static int Saves;public static void SaveAssets(){Saves++;}}
-class EditorSceneManager {public static bool Fail;public static int GlobalSaves;public static void MarkSceneDirty(UnityEngine.SceneManagement.Scene s){s.isDirty=true;}public static bool SaveScene(UnityEngine.SceneManagement.Scene s){if(Fail)return false;s.isDirty=false;return true;}public static bool SaveOpenScenes(){GlobalSaves++;return SaveScene(Probe.Target.gameObject.scene);}}
+class EditorSceneManager {public static bool Fail;public static int GlobalSaves;public static void MarkSceneDirty(UnityEngine.SceneManagement.Scene s){s.isDirty=true;}public static bool SaveScene(UnityEngine.SceneManagement.Scene s){if(!ComponentCrudCore.PrefabRecorded)throw new Exception("prefab override was not recorded before saving");if(Fail)return false;s.isDirty=false;return true;}public static bool SaveOpenScenes(){GlobalSaves++;return SaveScene(Probe.Target.gameObject.scene);}}
 class VRCForgeToolResult {public bool ok;public object payload;public static object Completed(string s,object p)=>new VRCForgeToolResult{ok=true,payload=p};public static object Failed(string s,object p=null)=>new VRCForgeToolResult{ok=false,payload=p};}
 class WriteAnimationCurveTool {public class AssetEditRecovery {float weight;bool dirty;public static bool Fail,MemoryMismatch,DirtyMismatch;public static int Restores,Captures;public void Capture(string p){Captures++;}public void Begin(){weight=Probe.Target.weight;dirty=Probe.Target.gameObject.scene.isDirty;}public void Complete(){}public bool Restore(){Restores++;if(!MemoryMismatch)Probe.Target.weight=weight;Probe.Target.gameObject.scene.isDirty=DirtyMismatch?!dirty:dirty;Undo.Pending=false;return !Fail;}}}
 class Probe {public static Renderer Target=new Renderer();static Renderer ResolveRenderer(string a,string r)=>Target;

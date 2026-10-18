@@ -21133,6 +21133,17 @@ def prepare_authoritative_unity_checkpoint_sync(
 ) -> dict[str, Any]:
     arguments = dict(arguments)
     checkpoint_target = arguments.pop("_checkpointTargetTool", "")
+    execution_target = arguments.get("executionTarget")
+    if isinstance(execution_target, dict) and execution_target.get("schema") == "vrcforge.execution_target_ref.v1":
+        from mcp_tool_descriptor import identity_scope
+        try:
+            arguments["executionTarget"] = AGENT_GATEWAY.resolve_execution_target_reference(
+                execution_target, project_root=str(project_root),
+                required_scope=identity_scope(checkpoint_target, write=True),
+            )
+        except AgentGatewayError as exc:
+            return {"ok": False, "blocking": True, "code": "checkpoint_scope_unresolved",
+                    "error": str(exc), "mutationStarted": False, "saved": False}
     if checkpoint_target == "vrcforge_set_property":
         from unity_component_checkpoint import prepare_component_property_checkpoint
 
@@ -21140,6 +21151,20 @@ def prepare_authoritative_unity_checkpoint_sync(
             project_root, arguments, build_plan=build_scene_execution_plan,
             discover=list_execution_targets_sync, inspect_owner=read_component_property_sync,
             prepare=prepare_unity_checkpoint_sync,
+        )
+    if checkpoint_target == "vrcforge_apply_blendshapes":
+        from unity_blendshape_checkpoint import prepare_blendshape_checkpoint
+        from mcp_tool_descriptor import identity_scope
+
+        return prepare_blendshape_checkpoint(
+            project_root, arguments, build_plan=lambda values: build_prepared_execution_plan(values),
+            resolve_reference=lambda reference, **kwargs: AGENT_GATEWAY.resolve_execution_target_reference(
+                reference, **kwargs
+            ),
+            discover=list_execution_targets_sync,
+            inspect_owner=read_component_property_sync,
+            prepare=prepare_unity_checkpoint_sync,
+            required_scope=identity_scope(checkpoint_target, write=True),
         )
     if checkpoint_target in {"vrcforge_add_component", "vrcforge_remove_component"}:
         # Only this native component's scene-only mutation is established here.

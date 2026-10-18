@@ -105,6 +105,7 @@ namespace VRCForge.Editor
                     var currentWeight = renderer.GetBlendShapeWeight(blendshapeIndex);
                     if (currentWeight != clampedWeight)
                         throw new InvalidOperationException("Blendshape weight readback did not match the requested value.");
+                    ComponentCrudCore.RecordPropertyPrefabOverride(renderer);
                     EditorUtility.SetDirty(renderer);
                     EditorUtility.SetDirty(renderer.gameObject);
                     EditorSceneManager.MarkSceneDirty(renderer.gameObject.scene);

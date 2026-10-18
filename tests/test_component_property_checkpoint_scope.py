@@ -49,6 +49,21 @@ def test_property_write_derives_exact_scene_before_checkpoint(case):
     assert args == before
 
 
+def test_internal_property_reference_is_resolved_without_changing_approved_arguments(case, monkeypatch):
+    root, target, args, _, calls = case
+    reference = {'schema': 'vrcforge.execution_target_ref.v1', 'ref': 'session-bound-reference'}
+    args['executionTarget'] = reference
+    def resolve(value, **kwargs):
+        assert value == reference
+        assert kwargs == {'project_root': str(root), 'required_scope': 'component'}
+        return deepcopy(target)
+    monkeypatch.setattr(server.AGENT_GATEWAY, 'resolve_execution_target_reference', resolve)
+    result = server.prepare_authoritative_unity_checkpoint_sync(root, {**args, '_checkpointTargetTool': 'vrcforge_set_property'})
+    assert result['ok'] is True, result
+    assert calls == [(root, ['Assets/Main.unity'])]
+    assert args['executionTarget'] == reference
+
+
 @pytest.mark.parametrize('field,value', [
     ('schema', 'forged'), ('ownerKind', 'prefab'), ('scenePath', 'Assets/Other.unity'),
     ('sceneGuid', 'other'), ('sceneDigest', 'b' * 64), ('objectGlobalObjectId', 'other'),
