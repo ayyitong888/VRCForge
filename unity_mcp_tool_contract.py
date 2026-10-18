@@ -5,7 +5,7 @@ from __future__ import annotations
 CORE_IDENTITY = "vrcforge.unity-core"
 HANDSHAKE_PROTOCOL = "vrcforge.core-handshake.v1"
 PRODUCT_VERSION = "1.9.2"
-TOOL_CONTRACT_VERSION = "169"
+TOOL_CONTRACT_VERSION = "170"
 PREVIOUS_CORE_TOOL_CONTRACT_VERSION = "87"
 
 EXPECTED_TOOL_NAMES = frozenset(

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 import math
+import re
 from typing import Any
 
 from external_tool_result_contract import (
@@ -84,6 +85,15 @@ def _first_text(views: list[Mapping[str, Any]], keys: tuple[str, ...]) -> str:
             if isinstance(value, str) and value.strip():
                 return value.strip()[:600]
     return ""
+
+
+def runtime_observation_receipt(value: Any) -> Mapping[str, Any] | None:
+    """Find the domain receipt, never infer a job from generic pending status."""
+    return next((view for view in _views(value)
+        if view.get("schema") == "vrcforge.runtime_observation.v1"
+        and re.fullmatch(r"[0-9a-f]{32}", str(view.get("jobId") or ""))
+        and isinstance(view.get("avatarPath"), str) and view["avatarPath"]
+        and isinstance(view.get("coreIdentity"), str) and view["coreIdentity"]), None)
 
 
 def _bounded_text_list(value: Any, *, limit: int = 6) -> list[str]:
@@ -408,6 +418,10 @@ def normalize_agent_tool_result(
         is_gesture_manager_entry_pending(str(view.get("tool") or ""), view)
         for view in views
     )
+    observation = runtime_observation_receipt(value)
+    observation_pending = bool(observation and observation.get("status") == "pending"
+        and observation.get("ok") is True and observation.get("mutationStarted") is True
+        and observation.get("verified") is False and observation.get("commitState") == "pending")
 
     failed_view: Mapping[str, Any] | None = None
     top_level_execution_status = _status(
@@ -475,6 +489,11 @@ def normalize_agent_tool_result(
             ),
             **_structured_error_route_fields(projected_error),
         }
+    elif observation_pending:
+        status = "pending"
+        summary = "Runtime observation is sampling. Poll the same job; do not repeat start."
+        verification = {"state": "pending", "checks": []}
+        error = None
     elif gm_entry_pending:
         status = "pending"
         summary = "Gesture Manager Play Mode entry was requested and is pending."

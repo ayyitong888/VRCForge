@@ -8870,7 +8870,7 @@ class AgentGateway:
                     client_turn_id=client_turn_id,
                 )
                 break  # 进入审批等待 → 本轮收尾。
-            if task_action.get("status") == "running":
+            if task_action.get("status") == "running" and task_action.get("runtimeStatus") != "polling":
                 # Background Shell and sub-agent tasks own the next decision
                 # after their durable terminal event.  Never continue against
                 # a seed that predates later tool calls.

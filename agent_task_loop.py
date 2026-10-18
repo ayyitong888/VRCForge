@@ -15,7 +15,7 @@ import hashlib
 import json
 from typing import Any
 
-from agent_tool_result_contract import completion_gate_plan, normalize_agent_tool_result
+from agent_tool_result_contract import completion_gate_plan, normalize_agent_tool_result, runtime_observation_receipt
 from agent_budget_policy import AgentBudgetPolicy, freeze_agent_budget_policy
 from request_usage_reconciliation import usage_snapshot_sha256
 
@@ -530,6 +530,10 @@ def _bounded_action(value: Mapping[str, Any]) -> dict[str, Any] | None:
         result["preProvider"] = True
     if value.get("_nativeReadObservation") is True:
         result["_nativeReadObservation"] = True
+    if isinstance(value.get("_runtimeObservation"), Mapping):
+        result["_runtimeObservation"] = dict(value["_runtimeObservation"])
+        if value.get("runtimeStatus") == "polling":
+            result["runtimeStatus"] = "polling"
     transaction = _bounded_write_transaction(value.get("writeTransaction"))
     if transaction is not None:
         result["writeTransaction"] = transaction
@@ -889,6 +893,8 @@ def approval_completion(
     status = _status(verified.get("status"))
     if status == "ok":
         task_status = "completed"
+    elif status == "pending" and runtime_observation_receipt(raw_result):
+        task_status = "running"
     elif status == "failed":
         task_status = "failed"
     else:
@@ -1698,6 +1704,9 @@ class AgentTaskLoop:
         )
         outcome_status = _status(effective.get("status"))
         running_state = _running_state(raw_result)
+        observation = runtime_observation_receipt(raw_result)
+        if outcome_status == "pending" and observation:
+            running_state = "polling"
         if outcome_status == "failed":
             lifecycle = "failed"
         elif outcome_status == "needs_user_action":
@@ -1732,6 +1741,20 @@ class AgentTaskLoop:
             record["_nativeReadObservation"] = True
         if running_state:
             record["runtimeStatus"] = running_state
+        if observation and tool in {"vrcforge_start_runtime_observation", "vrcforge_get_runtime_observation"}:
+            identity = {key: observation[key] for key in ("jobId", "avatarPath", "coreIdentity")}
+            record["_runtimeObservation"] = identity
+            verified_completion = (outcome_status == "ok" and observation.get("status") == "completed"
+                and observation.get("verified") is True and isinstance(observation.get("readback"), Mapping))
+            failed_completion = outcome_status == "failed" and observation.get("status") in {"partial", "failed"}
+            if tool == "vrcforge_get_runtime_observation" and (verified_completion or failed_completion):
+                for prior in self._actions.values():
+                    if (prior.get("tool") == "vrcforge_start_runtime_observation"
+                            and prior.get("status") == "running"
+                            and prior.get("_runtimeObservation") == identity):
+                        terminal_status = "completed" if verified_completion else "failed"
+                        prior.update(status=terminal_status, runtimeStatus=terminal_status, outcome=dict(effective),
+                            completionReadActionId=action_id)
         self._actions[action_id] = record
         corrected_ids = [accepted_correction_id] if accepted_correction_id else []
         if tool == "vrcforge_load_internal_tool_block" and lifecycle == "completed" and outcome_status == "ok":
