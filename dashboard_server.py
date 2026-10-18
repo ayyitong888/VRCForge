@@ -65,7 +65,7 @@ from fastapi import BackgroundTasks, FastAPI, HTTPException, Request, WebSocket,
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field, SecretStr, model_validator
+from pydantic import BaseModel, Field, SecretStr, ValidationError, model_validator
 
 from dashboard_foundation import (
     app_auth_disabled_for_test_process,
@@ -14742,7 +14742,14 @@ def audit_avatar_screenshot_sync(request: VisionAuditRequest) -> dict[str, Any]:
 
 
 def audit_latest_managed_screenshot_for_agent(params: dict[str, Any]) -> dict[str, Any]:
-    AgentVisionAuditRequest(**(params or {}))
+    try:
+        AgentVisionAuditRequest(**(params or {}))
+    except ValidationError as exc:
+        return {
+            "ok": False, "errorCode": "invalid_tool_arguments", "error": str(exc),
+            "failurePhase": "argument_validation", "retryable": True,
+            "mutationStarted": False, "committed": False, "commitState": "not_started",
+        }
     payload = audit_avatar_screenshot_sync(VisionAuditRequest())
     return {"ok": payload["ok"], "audit": payload["audit"]}
 
@@ -15290,7 +15297,15 @@ def audit_managed_avatar_multi_screenshot_for_agent(
         raise RuntimeError("Managed visual evidence task identity is invalid.")
     if not capture_action_ids:
         raise RuntimeError("Managed visual evidence is not bound to a completed capture action.")
-    request = ManagedVisionAuditMultiRequest(**arguments)
+    try:
+        request = ManagedVisionAuditMultiRequest(**arguments)
+    except ValidationError as exc:
+        return {
+            "ok": False, "errorCode": "invalid_tool_arguments", "error": str(exc),
+            "failurePhase": "argument_validation", "retryable": True,
+            "captureReceiptConsumed": False,
+            "mutationStarted": False, "committed": False, "commitState": "not_started",
+        }
     return audit_managed_avatar_multi_screenshot_sync(
         request,
         task_binding={

@@ -263,6 +263,13 @@ def bounded_planner_tool_schema(value: object) -> dict[str, object]:
 
 
 def planner_tool_input_schema(name: str, *, tool_block_ids: list[str] | None = None) -> dict[str, object]:
+    if name in {"vrcforge_vision_audit", "vrcforge_vision_audit_multi"}:
+        from dashboard_api_models import AgentVisionAuditRequest, ManagedVisionAuditMultiRequest
+        request_model = (
+            ManagedVisionAuditMultiRequest if name == "vrcforge_vision_audit_multi"
+            else AgentVisionAuditRequest
+        )
+        return bounded_planner_tool_schema(request_model.model_json_schema(by_alias=True))
     if name == "vrcforge_request_project_selection":
         return {"type": "object", "properties": {}, "required": [], "additionalProperties": False}
     if name == "vrcforge_ask_user":
@@ -1149,6 +1156,14 @@ def managed_multi_capture_receipt(
         tool = str(step.get("tool") or "").strip()
         result = ensure_dict(step.get("result"))
         if tool == "vrcforge_vision_audit_multi":
+            if (str(step.get("actionId") or "").startswith("planner_validation_")
+                    and result.get("code") == "planner_invalid_response"):
+                # Host schema validation rejected this proposal before dispatch.
+                continue
+            if (result.get("captureReceiptConsumed") is False
+                    and result.get("failurePhase") == "argument_validation"):
+                # The owning handler rejected arguments before consuming evidence.
+                continue
             retry_receipt = str(result.get("captureReceipt") or "").strip()
             if (
                 retry_receipt
@@ -1184,6 +1199,12 @@ def managed_multi_visual_audit_consumed_without_retry(
         tool = str(step.get("tool") or "").strip()
         if tool == "vrcforge_vision_audit_multi":
             result = ensure_dict(step.get("result"))
+            if (str(step.get("actionId") or "").startswith("planner_validation_")
+                    and result.get("code") == "planner_invalid_response"):
+                continue
+            if (result.get("captureReceiptConsumed") is False
+                    and result.get("failurePhase") == "argument_validation"):
+                continue
             return not bool(
                 str(result.get("captureReceipt") or "").strip()
                 and result.get("retryable") is True
