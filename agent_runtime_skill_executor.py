@@ -52,6 +52,7 @@ class AgentRuntimeSkillExecutorPorts:
     inject_user_constraints: Callable[[dict[str, Any], RuntimeSkillTool, Any], dict[str, Any]]
     append_audit: Callable[[dict[str, Any]], None]
     redact: Callable[[Any], Any]
+    redact_runtime_result: Callable[[Any], Any]
     summarize_params: Callable[[Any], dict[str, Any]]
     ensure_string_list: Callable[[Any], list[str]]
     build_runtime_skill_payload: Callable[..., dict[str, Any]]
@@ -157,7 +158,7 @@ class AgentRuntimeSkillExecutor:
         user_constraints = self._ports.read_user_constraints()
         tool_params = self._ports.inject_user_constraints(params, tool, user_constraints)
         try:
-            result = self._ports.redact(
+            result = self._ports.redact_runtime_result(
                 self._ports.invoke_tool(tool, tool_params, agent_name, owner_id)
             )
             outcome = normalize_agent_tool_result(
@@ -586,7 +587,7 @@ class AgentRuntimeSkillExecutor:
         user_constraints = self._ports.read_user_constraints()
         tool_params = self._ports.inject_user_constraints(tool_params, tool, user_constraints)
         try:
-            result = self._ports.redact(
+            result = self._ports.redact_runtime_result(
                 self._ports.invoke_tool(tool, tool_params, agent_name, owner_id)
             )
             outcome = normalize_agent_tool_result(

@@ -2751,6 +2751,7 @@ class AgentGateway:
                 inject_user_constraints=self._inject_user_constraints,
                 append_audit=self.append_audit,
                 redact=redact_sensitive,
+                redact_runtime_result=redact_runtime_tool_result,
                 summarize_params=summarize_params,
                 ensure_string_list=ensure_string_list,
                 build_runtime_skill_payload=build_runtime_skill_payload,
@@ -11588,26 +11589,58 @@ def summarize_value(key: Any, value: Any) -> Any:
 
 
 
+_RUNTIME_HOST_ONLY_RESULT_FIELDS = frozenset({"_generalallowedroots", "_nativereadobservation"})
+
+
 def redact_sensitive(value: Any) -> Any:
+    return _redact_tool_value(value, summarize_arguments=True, filter_host_fields=False)
+
+
+def redact_runtime_tool_result(value: Any) -> Any:
+    """Secret-redact runtime results while preserving executable argument data."""
+    return _redact_tool_value(value, summarize_arguments=False, filter_host_fields=True)
+
+
+def _redact_tool_value(value: Any, *, summarize_arguments: bool, filter_host_fields: bool) -> Any:
     if isinstance(value, dict):
         result: dict[str, Any] = {}
         for key, item in value.items():
             lowered = str(key).lower()
             if lowered == "_nativereadobservation":
                 continue
+            if filter_host_fields and lowered in _RUNTIME_HOST_ONLY_RESULT_FIELDS:
+                continue
             if lowered in planner_policy.RECURSIVE_SENSITIVE_FIELDS:
                 result[str(key)] = "<redacted>"
-            elif lowered in {"arguments"} and isinstance(item, dict):
+            elif summarize_arguments and lowered == "arguments" and isinstance(item, dict):
                 result[str(key)] = summarize_params(item)
             else:
-                result[str(key)] = redact_sensitive(item)
+                result[str(key)] = _redact_tool_value(
+                    item,
+                    summarize_arguments=summarize_arguments,
+                    filter_host_fields=filter_host_fields,
+                )
         # Reader continuations are executable selectors, not diagnostic path
         # summaries. Preserve only the validated four scalar argument fields.
         reader_arguments = page_next_request_arguments(value)
         if reader_arguments is not None:
             result["nextRequest"]["arguments"] = {
-                key: redact_sensitive(item) for key, item in reader_arguments.items()
+                key: _redact_tool_value(
+                    item,
+                    summarize_arguments=summarize_arguments,
+                    filter_host_fields=filter_host_fields,
+                )
+                for key, item in reader_arguments.items()
             }
+        elif not summarize_arguments:
+            request = value.get("nextRequest")
+            arguments = request.get("arguments") if isinstance(request, dict) else None
+            if (
+                isinstance(request, dict)
+                and request.get("tool") == RESULT_READER_TOOL
+                and isinstance(arguments, dict)
+            ):
+                result["nextRequest"]["arguments"] = summarize_params(arguments)
         if isinstance(value.get("items"), list):
             for index, row in enumerate(value["items"]):
                 if not isinstance(row, dict):
@@ -11615,8 +11648,22 @@ def redact_sensitive(value: Any) -> Any:
                 arguments = page_item_request_arguments(value, row)
                 if arguments is not None:
                     result["items"][index]["nextRequest"]["arguments"] = {
-                        key: redact_sensitive(item) for key, item in arguments.items()
+                        key: _redact_tool_value(
+                            item,
+                            summarize_arguments=summarize_arguments,
+                            filter_host_fields=filter_host_fields,
+                        )
+                        for key, item in arguments.items()
                     }
+                elif not summarize_arguments:
+                    request = row.get("nextRequest")
+                    request_arguments = request.get("arguments") if isinstance(request, dict) else None
+                    if (
+                        isinstance(request, dict)
+                        and request.get("tool") == RESULT_READER_TOOL
+                        and isinstance(request_arguments, dict)
+                    ):
+                        result["items"][index]["nextRequest"]["arguments"] = summarize_params(request_arguments)
                 children = row.get("childReferences")
                 if arguments is not None and isinstance(children, list):
                     child_page = {
@@ -11630,13 +11677,34 @@ def redact_sensitive(value: Any) -> Any:
                             continue
                         arguments = page_item_request_arguments(child_page, child)
                         if arguments is None:
+                            request = child.get("nextRequest")
+                            request_arguments = request.get("arguments") if isinstance(request, dict) else None
+                            if (
+                                not summarize_arguments
+                                and isinstance(request, dict)
+                                and request.get("tool") == RESULT_READER_TOOL
+                                and isinstance(request_arguments, dict)
+                            ):
+                                result["items"][index]["childReferences"][child_index]["nextRequest"]["arguments"] = summarize_params(request_arguments)
                             continue
                         result["items"][index]["childReferences"][child_index]["nextRequest"]["arguments"] = {
-                            key: redact_sensitive(item) for key, item in arguments.items()
+                            key: _redact_tool_value(
+                                item,
+                                summarize_arguments=summarize_arguments,
+                                filter_host_fields=filter_host_fields,
+                            )
+                            for key, item in arguments.items()
                         }
         return result
     if isinstance(value, list):
-        return [redact_sensitive(item) for item in value]
+        return [
+            _redact_tool_value(
+                item,
+                summarize_arguments=summarize_arguments,
+                filter_host_fields=filter_host_fields,
+            )
+            for item in value
+        ]
     if isinstance(value, str):
         return re.sub(
             r"(?i)\bbearer\s+[a-z0-9._~+/-]+",
