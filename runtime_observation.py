@@ -5,10 +5,67 @@ import math
 import re
 import uuid
 import struct
+import os
+import stat
 from PIL import Image
 
 PUBLIC_KEYS = ("avatarPath", "parameterName", "value", "durationSeconds", "frameCount", "width", "height", "cameraPosition", "targetPosition", "upVector", "fieldOfView")
 OPTIONAL_KEYS = ("parameterSteps", "rendererProbes")
+
+
+def core_artifact_root():
+    """The Core's per-user spool contract, independent of the App profile."""
+    local = os.environ.get("LOCALAPPDATA", "").strip()
+    if not local:
+        raise ValueError("The Core observation spool requires LocalApplicationData.")
+    return Path(local).absolute() / "VRCForge/agentic-app/artifacts/dashboard/latest"
+
+
+def publish_artifact_copies(receipt, source_root, artifact_root):
+    """Publish checked job PNGs without moving originals or replacing user files.
+
+    The backend owns these durable evidence files under its configured profile;
+    normal artifact retention owns their lifetime. File access uses the running
+    user's permissions. Neither directory is taken from Agent arguments.
+    """
+    from runtime_frame_resources import _checked_bytes
+    if receipt.get("status") != "completed" or receipt.get("verified") is not True or not isinstance(receipt.get("readback"), dict):
+        raise ValueError("Only verified observation evidence may be published.")
+    destination = Path(artifact_root).absolute() / receipt["jobId"]
+
+    def reject_links(path):
+        for part in (path, *path.parents):
+            try:
+                info = part.lstat()
+            except FileNotFoundError:
+                continue
+            if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 1024):
+                raise ValueError("Observation artifact destination cannot traverse links.")
+
+    checked = []
+    for index, frame in enumerate(receipt["frames"]):
+        content = _checked_bytes({"mimeType": "image/png", "jobId": receipt["jobId"], "fileIndex": index,
+            "artifactRoot": str(source_root), "imagePath": frame["imagePath"], "sha256": frame["sha256"],
+            "width": receipt["width"], "height": receipt["height"]})
+        path = destination / f"{index:03d}.png"
+        reject_links(path)
+        if path.exists() and (not path.is_file() or path.read_bytes() != content):
+            raise ValueError("Existing observation artifact differs; it will not be overwritten.")
+        checked.append((frame, path, content))
+    destination.mkdir(parents=True, exist_ok=True)
+    published = []
+    for frame, path, content in checked:
+        reject_links(path)
+        try:
+            with path.open("xb") as target:
+                target.write(content)
+        except FileExistsError:
+            pass
+        reject_links(path)
+        if path.read_bytes() != content:
+            raise ValueError("Observation artifact changed during publication.")
+        published.append({**frame, "sourceImagePath": frame["imagePath"], "artifactImagePath": str(path)})
+    return published
 
 
 def state_selection(arguments):

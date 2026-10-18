@@ -24540,8 +24540,8 @@ def gesture_manager_status_sync(params: dict[str, Any]) -> dict[str, Any]:
 
 
 def prepare_runtime_observation_request(arguments, _preview):
-    from runtime_observation import prepare_request
-    request = prepare_request(arguments, DASHBOARD_ARTIFACTS_DIR / "latest")
+    from runtime_observation import core_artifact_root, prepare_request
+    request = prepare_request(arguments, core_artifact_root())
     prepared = {**arguments, **request}
     return prepared, {"ok": True, "request": request, "persistent": False}
 
@@ -24580,6 +24580,7 @@ def runtime_observation_status_sync(arguments):
 
 
 def runtime_observation_status_raw(arguments):
+    from runtime_observation import core_artifact_root, publish_artifact_copies
     settings = load_dashboard_settings(build_agent_connection_request(arguments))
     with bound_editor_readback(arguments):
         result = ensure_dict_payload(extract_tool_result_payload(invoke_unity_mcp(settings, "vrc_get_runtime_observation", {"jobId": arguments["jobId"], "avatarPath": arguments["avatarPath"]}, preserve_tool_error=True)), "runtime observation status")
@@ -24587,12 +24588,14 @@ def runtime_observation_status_raw(arguments):
         from runtime_observation import validate_result
         result = validate_result(result, {"jobId": arguments["jobId"], "avatarPath": arguments["avatarPath"],
             "frameCount": result.get("requestedFrameCount"), "width": result.get("width"), "height": result.get("height"),
-            "outputDirectory": str(DASHBOARD_ARTIFACTS_DIR / "latest" / "runtime-observations" / arguments["jobId"]),
+            "outputDirectory": str(core_artifact_root() / "runtime-observations" / arguments["jobId"]),
             "parameterSteps": result.get("parameterSteps", []), "rendererProbes": result.get("rendererProbes", [])})
     if result.get("ok") is True and result.get("verified") is True and result.get("status") == "completed":
         from runtime_frame_resources import publish_verified_frames
+        result["frames"] = publish_artifact_copies(result, core_artifact_root() / "runtime-observations",
+            DASHBOARD_ARTIFACTS_DIR / "latest" / "runtime-observations")
         result["frames"] = publish_verified_frames(AGENT_GATEWAY._mcp_resources, result,
-            DASHBOARD_ARTIFACTS_DIR / "latest" / "runtime-observations", arguments.get("executionTarget"))
+            core_artifact_root() / "runtime-observations", arguments.get("executionTarget"))
     elif str(result.get("status") or "").casefold() in {"partial", "failed"}:
         # A terminal Core failure/partial receipt is evidence of an incomplete
         # observation, never a successful read-only status response.
@@ -24603,7 +24606,7 @@ def runtime_observation_status_raw(arguments):
         result.setdefault("readbackState", "failed")
     for frame in result.get("frames", []):
         if isinstance(frame, dict) and frame.get("imagePath"):
-            frame["imageUrl"] = to_artifact_url(frame["imagePath"])
+            frame["imageUrl"] = to_artifact_url(frame.get("artifactImagePath") or frame["imagePath"])
     result.setdefault("ok", True)
     return result
 
