@@ -112,6 +112,9 @@ def test_saved_ack_digest_matches_get_digest_and_changes_after_durable_edit(tmp_
     first, _, _ = server.write_chat_transcripts_storage(ChatTranscriptsRequest(chats=[chat]))
     fetched = server.read_chat_transcripts(Request({'type': 'http', 'query_string': b''}))
     assert first['chatDigests'] == fetched['chatDigests']
+    assert first['chatMetadataShapes'] == fetched['chatMetadataShapes']
+    assert 'items' not in fetched['chatMetadataShapes']['chat-1']
+    assert all(value is True or isinstance(value, dict) for value in fetched['chatMetadataShapes']['chat-1'].values())
     paged = server.read_chat_transcripts(
         Request({'type': 'http', 'query_string': b'snapshotPage=1'})
     )
@@ -186,6 +189,8 @@ def test_chat_delta_write_materializes_raw_app_and_project_records(tmp_path, mon
     )
     fetched = server.read_chat_transcripts(Request({'type': 'http', 'query_string': b''}))
     assert first['chatDigests'] == fetched['chatDigests']
+    assert set(fetched['chatMetadataShapes']) == {'delta-app', 'delta-project'}
+    assert 'items' not in fetched['chatMetadataShapes']['delta-app']
     normalized_project = str(project.resolve())
     assert fetched['chats'][1]['projectPath'] == normalized_project
 
@@ -211,6 +216,7 @@ def test_chat_delta_write_materializes_raw_app_and_project_records(tmp_path, mon
     ))[0]
     after = server.read_chat_transcripts(Request({'type': 'http', 'query_string': b''}))
     assert second['chatDigests'] == after['chatDigests']
+    assert second['chatMetadataShapes'] == after['chatMetadataShapes']
     saved = {chat['id']: chat for chat in after['chats']}
     assert saved['delta-app']['items'][0]['text'] == 'remember api_key; morning sea salt'
     assert saved['delta-app']['items'][1]['response']['plan']['summary'].endswith('api_key was remembered.')

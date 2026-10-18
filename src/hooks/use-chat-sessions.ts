@@ -13,6 +13,7 @@ import {
 } from "../lib/chat-compaction-state";
 import {
   chatDigestsFromPayload,
+  chatMetadataShapesFromPayload,
   preserveConflictingChatCopies,
   reconcileChatStorage,
   snapshotChatFingerprints,
@@ -123,6 +124,7 @@ export function useChatSessions({
   // a confirmed deletion.
   const chatBaselineFingerprintsRef = useRef<Record<string, string>>({});
   const chatServerDigestsRef = useRef<Record<string, string> | undefined>(undefined);
+  const chatServerMetadataShapesRef = useRef<Record<string, Record<string, unknown>> | undefined>(undefined);
   const chatPersistenceBlockedRef = useRef(false);
   // A concurrent-edit marker owns the visible error until the user resolves
   // the conflict. A queued debounce can still reject after the marker is set;
@@ -265,8 +267,12 @@ export function useChatSessions({
       return { status: "cancelled", chats: chatsRef.current, shouldPersist: false };
     }
     const remoteDigests = chatDigestsFromPayload(payload.chatDigests, remoteChats);
+    const remoteShapes = chatMetadataShapesFromPayload(payload.chatMetadataShapes, remoteChats);
     if (chatServerDigestsRef.current !== undefined && remoteDigests === undefined) {
       throw new Error("Chat storage response omitted chat version metadata after it was established.");
+    }
+    if ((chatServerDigestsRef.current !== undefined || remoteDigests !== undefined) && remoteShapes === undefined) {
+      throw new Error("Chat storage response omitted chat metadata shape after it was established.");
     }
     chatSourceRevisionsRef.current = sourceRevisions;
     if (blocked) {
@@ -300,6 +306,8 @@ export function useChatSessions({
     if (reconciled.status === "conflict") {
       if (recoveringFromDamagedSource) {
         chatBaselineFingerprintsRef.current = {};
+        chatServerDigestsRef.current = undefined;
+        chatServerMetadataShapesRef.current = undefined;
       }
       chatStorageRecoveryBlockedRef.current = false;
       markChatStorageConflict(reconciled.conflictIds);
@@ -310,6 +318,7 @@ export function useChatSessions({
     const mergedDiffersFromRemote = !chatFingerprintSnapshotsEqual(mergedFingerprints, remoteFingerprints);
     chatBaselineFingerprintsRef.current = remoteFingerprints;
     chatServerDigestsRef.current = remoteDigests;
+    chatServerMetadataShapesRef.current = remoteShapes;
     chatsRef.current = reconciled.chats;
     setChats(reconciled.chats);
     chatPersistenceBlockedRef.current = false;
@@ -341,17 +350,23 @@ export function useChatSessions({
       snapshot,
       chatBaselineFingerprintsRef.current,
       chatServerDigestsRef.current,
+      chatServerMetadataShapesRef.current,
     );
     const result = await saveChats(endpoint, snapshot, chatSourceRevisionsRef.current, chatPatches);
     const nextServerDigests = chatDigestsFromPayload(result.chatDigests, snapshot);
+    const nextServerShapes = chatMetadataShapesFromPayload(result.chatMetadataShapes, snapshot);
     if (chatServerDigestsRef.current !== undefined && nextServerDigests === undefined) {
       throw new Error("Chat storage acknowledgement omitted chat version metadata after it was established.");
+    }
+    if (nextServerDigests !== undefined && nextServerShapes === undefined) {
+      throw new Error("Chat storage acknowledgement omitted chat metadata shape after it was established.");
     }
     if (result.sourceRevisions) {
       chatSourceRevisionsRef.current = result.sourceRevisions;
     }
     chatBaselineFingerprintsRef.current = snapshotChatFingerprints(snapshot, projectDurableChatFingerprint);
     chatServerDigestsRef.current = nextServerDigests;
+    chatServerMetadataShapesRef.current = nextServerShapes;
     if (chatsSaveVersionRef.current === saveVersion) {
       if (clearDirty) {
         chatsDirtyRef.current = false;
@@ -526,8 +541,12 @@ export function useChatSessions({
         const sourceRevisions = sourceRevisionsFromPayload(payload.sources);
         const { chats: remoteChats } = normalizeStoredChatSnapshot(payload.chats || []);
         const remoteDigests = chatDigestsFromPayload(payload.chatDigests, remoteChats);
+        const remoteShapes = chatMetadataShapesFromPayload(payload.chatMetadataShapes, remoteChats);
         if (chatServerDigestsRef.current !== undefined && remoteDigests === undefined) {
           throw new Error("Chat storage response omitted chat version metadata after it was established.");
+        }
+        if ((chatServerDigestsRef.current !== undefined || remoteDigests !== undefined) && remoteShapes === undefined) {
+          throw new Error("Chat storage response omitted chat metadata shape after it was established.");
         }
         const localCopyIds = new Map<string, string>();
         const resolved = preserveConflictingChatCopies(
@@ -560,6 +579,7 @@ export function useChatSessions({
         chatSourceRevisionsRef.current = sourceRevisions;
         chatBaselineFingerprintsRef.current = snapshotChatFingerprints(remoteChats, projectDurableChatFingerprint);
         chatServerDigestsRef.current = remoteDigests;
+        chatServerMetadataShapesRef.current = remoteShapes;
         chatsRef.current = resolved.chats;
         setChats(resolved.chats);
         setActiveChatId((current) => localCopyIds.get(current) || current);
@@ -901,7 +921,7 @@ function normalizeStoredChatSnapshot(values: unknown[], liveChats: ChatThread[] 
       pinned: chat.pinned === true,
       archived: chat.archived === true,
       revision: normalizeChatRevision(chat.revision),
-      lastViewedAt: typeof chat.lastViewedAt === "string" ? chat.lastViewedAt : "",
+      lastViewedAt: typeof chat.lastViewedAt === "string" ? chat.lastViewedAt : undefined,
       compaction: normalizeRestoredCompaction(chat.compaction, undefined, preserveActive),
       contextUsageCache: normalizeChatContextUsage(chat.contextUsageCache),
       attachmentPayloads: normalizeAttachmentPayloadVault(chat.attachmentPayloads),

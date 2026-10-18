@@ -446,6 +446,28 @@ def test_native_action_payload_does_not_execute_runtime_alias_and_reports_curren
     assert "loadCall" not in rejection["summary"]
 
 
+def test_native_write_receipt_carries_structured_checkpoint_choice_through_dispatch():
+    tool = PlannerTool("write_file", "Write one file.", "write", write=True,
+                       input_schema={"type": "object", "properties": {"path": {"type": "string"}},
+                                     "required": ["path"], "additionalProperties": False})
+    catalog = FakeCatalog(execution=PlannerCatalogSnapshot(visible_tools=(tool,), routable_tools=(tool,)))
+    quote = "Please skip the checkpoint for this write"
+    model = NativeModel(native_call("call_tool", json.dumps({
+        "tool": "write_file", "arguments": {"path": "Assets/item.asset"},
+        "checkpoint_choice": {"mode": "skip", "quote": quote},
+    })))
+    native = NativePlannerFixture([{"role": "user", "content": quote}])
+    plan = service(catalog=catalog, model=model).plan_agent_turn(
+        quote, {}, {}, exposure_layer=EXPOSURE_LAYER_EXECUTION, native_turn=native,
+    )
+    assert plan["writeNeeded"] is True
+    assert plan["writeTool"] == "write_file"
+    assert plan["checkpointChoice"] == {"mode": "skip", "quote": quote}
+    dispatcher = next(item for item in model.requests[0]["tools"]
+                      if item["function"]["name"] == "call_tool")
+    assert "checkpoint_choice" in dispatcher["function"]["parameters"]["properties"]
+
+
 def test_native_action_payload_rejects_ambiguous_exact_catalog_names() -> None:
     first = PlannerTool("same_name", "first", "read")
     second = PlannerTool("same_name", "second", "read")

@@ -445,6 +445,7 @@ CHECKPOINT_RESTORE_MANUAL_APPROVAL_REASON = (
     "Checkpoint restore always requires manual user approval because it can remove "
     "or replace project files."
 )
+from checkpoint_user_policy import bind_approved_write, checkpoint_skip_matches
 CHECKPOINT_RESTORE_AUTO_LAUNCH_BLOCKED_REASON = (
     "Checkpoint restore automatic launch is blocked after three proven zero-effect failures; "
     "a new invocation requires explicit manual user approval."
@@ -483,14 +484,23 @@ def _write_failure_facts(
     checkpoint: Mapping[str, Any],
     recovery: Mapping[str, Any],
     no_write_conflict: bool,
+    exception: BaseException | None = None,
 ) -> dict[str, Any]:
     """Compatibility projection from the one external error constructor."""
 
     result = dict(failure_result) if isinstance(failure_result, Mapping) else {}
     checkpoint_failed = checkpoint.get("ok") is False
+    confirmed_prewrite_no_mutation = bool(
+        result.get("mutationStarted") is False
+        and result.get("committed") is False
+        and result.get("commitState") == "not_started"
+        and result.get("safeToRetry") is True
+        and ("saved" not in result or result.get("saved") is False)
+    )
     clean_pre_write_failure = bool(
         checkpoint_failed
         or no_write_conflict
+        or confirmed_prewrite_no_mutation
         or (not checkpoint and failure_layer == "completion_verification_baseline")
     )
     after_console = result.get("consoleVerification")
@@ -505,6 +515,7 @@ def _write_failure_facts(
         "recovery_id": str(recovery.get("id") or "")[:180],
         "console_before": redact_sensitive(dict(verification_baseline)),
         "console_after": after_console,
+        "exception": exception,
     }
     if clean_pre_write_failure:
         constructor_args.update(
@@ -517,6 +528,11 @@ def _write_failure_facts(
                 "temporary_cleanup_required": False,
             }
         )
+    if confirmed_prewrite_no_mutation:
+        # The handler supplied a complete, explicit retry-safe no-write tuple.
+        # Keep that decision ahead of the generic wrapper exception's
+        # retryable=False default in the canonical error projection.
+        constructor_args["retryable"] = True
     elif "checkpointRecoveryRequired" not in result:
         constructor_args["checkpoint_recovery_required"] = bool(recovery)
     error_object = build_external_tool_error(**constructor_args)
@@ -1400,6 +1416,27 @@ class AgentApprovalTransactionService:
                     f"Could not freeze the exact Core execution plan for {target_tool}.",
                     status_code=409,
                 ) from exc
+        normalized_task_context = approval_task_context(
+            task_context,
+            tool=target_tool,
+            arguments=arguments,
+        )
+        if normalized_task_context is not None and isinstance(
+            normalized_task_context.get("checkpointUserPolicy"), Mapping
+        ):
+            bound_policy = bind_approved_write(
+                normalized_task_context.get("checkpointUserPolicy"),
+                normalized_task_context,
+                target_tool=target_tool,
+                requested_arguments=ensure_dict(normalized_task_context.get("requestedArguments")),
+                approved_arguments=arguments,
+                approved_project_root=str(extract_project_root(arguments) or ""),
+                plan_digest=str(ensure_dict(approved_execution_plan).get("planDigest") or ""),
+            )
+            if bound_policy is None:
+                normalized_task_context.pop("checkpointUserPolicy", None)
+            else:
+                normalized_task_context["checkpointUserPolicy"] = bound_policy
         approval = self._new_approval(
             agent_name=str(params.get("agent_name") or params.get("agentName") or "external-agent"),
             target_tool=target_tool,
@@ -1420,11 +1457,7 @@ class AgentApprovalTransactionService:
                     "requiresExplicitApproval": requires_explicit_for_mode,
                 },
             ),
-            task_context=approval_task_context(
-                task_context,
-                tool=target_tool,
-                arguments=arguments,
-            ),
+            task_context=normalized_task_context,
         )
         if include_arguments_digest:
             approval["argumentsDigest"] = stable_hash(
@@ -1874,7 +1907,33 @@ class AgentApprovalTransactionService:
                 )
             failure_layer = "checkpoint"
             classification = ensure_dict(arguments.get("classification_snapshot"))
-            requires_checkpoint = _requires_pre_write_checkpoint(write_handler, arguments) and not (
+            task_context = ensure_dict(approval.get("taskContext"))
+            checkpoint_user_skip = checkpoint_skip_matches(
+                task_context.get("checkpointUserPolicy"),
+                task_context,
+                tool=target_tool,
+                arguments=ensure_dict(approval.get("arguments")),
+                plan_digest=str(ensure_dict(approval.get("approvedUnityExecutionPlan")).get("planDigest") or ""),
+            )
+            if checkpoint_user_skip:
+                task_context["checkpointSkipApplied"] = True
+                approval["taskContext"] = task_context
+                self._ports.append_audit({
+                    "event": "approval_checkpoint_skipped_by_user",
+                    "status": "skipped_by_user",
+                    "source": "user_message",
+                    "sourceQuote": str(ensure_dict(task_context.get("checkpointUserPolicy")).get("sourceQuote") or ""),
+                    "sessionId": str(task_context.get("sessionId") or ""),
+                    "turnId": str(task_context.get("turnId") or ""),
+                    "clientTurnId": str(task_context.get("clientTurnId") or ""),
+                    "projectRoot": str(task_context.get("projectRoot") or ""),
+                    "tool": target_tool,
+                    "argumentsSha256": str(ensure_dict(task_context.get("checkpointUserPolicy")).get("argumentsSha256") or ""),
+                    "approvedArgumentsSha256": str(ensure_dict(task_context.get("checkpointUserPolicy")).get("approvedArgumentsSha256") or ""),
+                    "approvedPlanDigest": str(ensure_dict(task_context.get("checkpointUserPolicy")).get("approvedPlanDigest") or ""),
+                    "rollbackAvailable": False,
+                })
+            requires_checkpoint = _requires_pre_write_checkpoint(write_handler, arguments) and not checkpoint_user_skip and not (
                 target_tool == "vrcforge_shell_execute" and classification.get("readOnly") is True
             )
             if requires_checkpoint and target_tool == PROJECT_CHAT_CHECKPOINT_TARGET:
@@ -2082,6 +2141,7 @@ class AgentApprovalTransactionService:
             if completion_status == "failed":
                 failure_layer = "result_verification"
                 raise AgentGatewayError(str(completion_outcome["summary"]))
+            failure_layer = "checkpoint_finalize"
             checkpoint = self._finish_created_asset_checkpoint(checkpoint, result, pending=observation_pending)
             if checkpoint:
                 approval["checkpoint"] = checkpoint
@@ -2213,6 +2273,7 @@ class AgentApprovalTransactionService:
                 checkpoint=ensure_dict(checkpoint),
                 recovery=ensure_dict(recovery),
                 no_write_conflict=no_write_conflict,
+                exception=exc,
             )
             redacted_failure_result = redact_sensitive(
                 dict(failure_result)
@@ -2235,12 +2296,11 @@ class AgentApprovalTransactionService:
                     "summary": f"{write_handler.description} failed.",
                     "verification": {"state": "failed", "checks": []},
                 }
-            if task_completion is None:
-                task_completion = approval_completion(
-                    ensure_dict(approval.get("taskContext")),
-                    raw_result=failure_result,
-                    outcome=completion_outcome,
-                )
+            task_completion = approval_completion(
+                ensure_dict(approval.get("taskContext")),
+                raw_result=failure_result,
+                outcome=completion_outcome,
+            )
             with self._ports.state.shared_state_lock:
                 approval["status"] = "failed"
                 approval["failedAt"] = utc_now_iso()
@@ -2511,7 +2571,12 @@ class AgentApprovalTransactionService:
                     result,
                 )
             return result
-        checkpoint_required = _requires_pre_write_checkpoint(write_handler, handler_arguments)
+        checkpoint_policy = ensure_dict(task_context.get("checkpointUserPolicy"))
+        checkpoint_required = _requires_pre_write_checkpoint(write_handler, handler_arguments) and not (
+            task_context.get("checkpointSkipApplied") is True
+            and checkpoint_policy.get("status") == "skipped_by_user"
+            and str(checkpoint_policy.get("targetTool") or "") == target_tool
+        )
         checkpoint_id = str(ensure_dict(checkpoint).get("id") or "").strip()
         if checkpoint_required and (not checkpoint or checkpoint.get("ok") is not True or not checkpoint_id):
             raise AgentGatewayError(

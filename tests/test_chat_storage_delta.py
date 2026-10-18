@@ -109,3 +109,30 @@ def test_patch_does_not_allow_copy_or_move_to_escape_item_boundaries():
         forbidden = _patch(current, metadataPatch=[operation])
         with pytest.raises(ChatStoragePatchError):
             materialize_chat_patches([current], [{"id": current["id"]}], {current["id"]: forbidden})
+
+
+def test_missing_synthesized_parent_is_added_and_raw_private_fields_survive():
+    current = _chat()
+    current.update({"privateExtension": {"opaque": "keep-me"}})
+    patch = _patch(
+        current,
+        metadataPatch=[{
+            "op": "add",
+            "path": "/contextUsageCache",
+            "value": {"inputTokens": 12, "totalTokens": 20},
+        }],
+    )
+    result = materialize_chat_patches([current], [{"id": current["id"]}], {current["id"]: patch})[0]
+    assert result["contextUsageCache"] == {"inputTokens": 12, "totalTokens": 20}
+    assert result["privateExtension"] == {"opaque": "keep-me"}
+    assert result["items"] == current["items"]
+
+
+def test_missing_parent_replace_is_rejected_as_patch_error_not_uncaught_pointer_exception():
+    current = _chat()
+    patch = _patch(current, metadataPatch=[{
+        "op": "replace", "path": "/contextUsageCache/inputTokens", "value": 12,
+    }])
+    with pytest.raises(ChatStoragePatchError) as error:
+        materialize_chat_patches([current], [{"id": current["id"]}], {current["id"]: patch})
+    assert error.value.status_code == 422

@@ -1426,6 +1426,7 @@ namespace VRCForge.Editor
             [VRCForgeInput("Create a submenu when one is not assigned.", IsRequired = false)] public bool? createSubMenu { get; set; }
             [VRCForgeInput("Optional submenu parameter-name array.", IsRequired = false)] public object[] subParameters { get; set; }
             [VRCForgeInput("Ordered control-name array for reorder.", IsRequired = false)] public object[] orderNames { get; set; }
+            [VRCForgeInput("Exact root, existing owner, and new menu asset paths returned by the approved preview.", IsRequired = false)] public string[] expectedPlanAssetPaths { get; set; } = Array.Empty<string>();
         }
 
         public static object HandleCommand(JObject @params)
@@ -1447,6 +1448,19 @@ namespace VRCForge.Editor
                 if (preview)
                 {
                     return VRCForgeToolResult.Completed($"Preview: would manage expression menu ({action}).", new { ok = true, preview = true, plan });
+                }
+
+                var expectedPlanAssetPaths = (@params["expectedPlanAssetPaths"] as JArray)?.Values<string>()
+                    .Where(path => !string.IsNullOrWhiteSpace(path)).Distinct(StringComparer.Ordinal)
+                    .OrderBy(path => path, StringComparer.Ordinal).ToArray() ?? Array.Empty<string>();
+                var actualPlanAssetPaths = (JObject.FromObject(plan)["plannedAssetPaths"] as JArray)
+                    ?.Values<string>().Where(path => !string.IsNullOrWhiteSpace(path))
+                    .Distinct(StringComparer.Ordinal).OrderBy(path => path, StringComparer.Ordinal).ToArray()
+                    ?? Array.Empty<string>();
+                if (expectedPlanAssetPaths.Length == 0
+                    || !expectedPlanAssetPaths.SequenceEqual(actualPlanAssetPaths, StringComparer.Ordinal))
+                {
+                    throw new InvalidOperationException("The approved expression-menu asset plan changed; preview and approve the exact current paths.");
                 }
 
                 var rootWasMissing = root == null;
@@ -1523,6 +1537,10 @@ namespace VRCForge.Editor
                 if (resolved == null) break;
                 existingParent = resolved;
             }
+            var checkpointAssetPaths = existingParent != null ? new[] { AssetDatabase.GetAssetPath(existingParent) } : Array.Empty<string>();
+            var plannedAssetPaths = new[] { rootMenuAssetPath }.Concat(checkpointAssetPaths).Concat(newMenuAssetPaths)
+                .Where(path => !string.IsNullOrWhiteSpace(path)).Distinct(StringComparer.Ordinal)
+                .OrderBy(path => path, StringComparer.Ordinal).ToArray();
             return new
             {
                 action,
@@ -1531,7 +1549,8 @@ namespace VRCForge.Editor
                 rootMenuPath = rootMenuAssetPath,
                 targetMenuAssetPath = targetMenu != null ? AssetDatabase.GetAssetPath(targetMenu) : "",
                 targetMenuExists = targetMenu != null,
-                checkpointAssetPaths = existingParent != null ? new[] { AssetDatabase.GetAssetPath(existingParent) } : Array.Empty<string>(),
+                checkpointAssetPaths,
+                plannedAssetPaths,
                 assetDir,
                 newMenuAssetPaths,
                 menuPath = @params["menuPath"]?.ToString() ?? "",

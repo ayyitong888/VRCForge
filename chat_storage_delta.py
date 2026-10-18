@@ -7,6 +7,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 import jsonpatch
+import jsonpointer
 
 from chat_snapshot_transport import chat_content_digest
 
@@ -69,7 +70,7 @@ def _apply_operations(document: dict[str, Any], operations: Any, *, item: bool) 
     validated = _validate_operations(operations, item=item)
     try:
         result = jsonpatch.JsonPatch(validated).apply(document, in_place=False)
-    except (jsonpatch.JsonPatchException, TypeError, ValueError) as exc:
+    except (jsonpatch.JsonPatchException, jsonpointer.JsonPointerException, TypeError, ValueError) as exc:
         raise ChatStoragePatchError("chat patch failed against the current raw record") from exc
     if not isinstance(result, dict):
         raise ChatStoragePatchError("chat patch must leave an object record")

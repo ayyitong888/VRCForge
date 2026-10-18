@@ -220,6 +220,9 @@ pub(crate) fn sanitize_chat_snapshot_response(mut value: serde_json::Value) -> s
         .as_object_mut()
         .and_then(|object| object.remove("chatDigests"))
         .and_then(|digests| validated_chat_digests(&digests));
+    let chat_metadata_shapes = value.as_object_mut()
+        .and_then(|object| object.remove("chatMetadataShapes"))
+        .and_then(|shapes| validated_chat_metadata_shapes(&shapes));
     let paths = value.as_object_mut()
         .and_then(|object| object.remove("_validatedCompactionRecoveryPaths"))
         .and_then(|paths| paths.as_array().cloned())
@@ -265,7 +268,30 @@ pub(crate) fn sanitize_chat_snapshot_response(mut value: serde_json::Value) -> s
             object.insert("chatDigests".to_string(), digests);
         }
     }
+    if let Some(shapes) = chat_metadata_shapes {
+        if let Some(object) = value.as_object_mut() {
+            object.insert("chatMetadataShapes".to_string(), shapes);
+        }
+    }
     value
+}
+
+fn validated_chat_metadata_shapes(value: &serde_json::Value) -> Option<serde_json::Value> {
+    fn valid_shape(value: &serde_json::Value) -> bool {
+        match value {
+            serde_json::Value::Bool(true) => true,
+            serde_json::Value::Object(fields) => fields.values().all(valid_shape),
+            _ => false,
+        }
+    }
+    let object = value.as_object()?;
+    let mut retained = serde_json::Map::new();
+    for (chat_id, shape) in object {
+        if !chat_id.is_empty() && valid_shape(shape) {
+            retained.insert(chat_id.clone(), shape.clone());
+        }
+    }
+    Some(serde_json::Value::Object(retained))
 }
 
 fn validated_chat_digests(value: &serde_json::Value) -> Option<serde_json::Value> {
@@ -621,6 +647,11 @@ mod chat_snapshot_sanitizer_tests {
                 "bad": "not-a-digest",
                 "wrong-type": 7,
             },
+            "chatMetadataShapes": {
+                "chat-safe": {"id": true, "usage": {"inputTokens": true}},
+                "bad-shape": {"private": "must not pass through"},
+                "wrong-type": 4,
+            },
             "_validatedChatTextPaths": [
                 "/chats/0/items/0/response/plan/summary",
                 "/chats/0/items/0/response/plan/task/objective",
@@ -662,6 +693,9 @@ mod chat_snapshot_sanitizer_tests {
         assert_eq!(actual["chatDigests"]["chat-safe"], "a".repeat(64));
         assert!(actual["chatDigests"].get("bad").is_none());
         assert!(actual["chatDigests"].get("wrong-type").is_none());
+        assert_eq!(actual["chatMetadataShapes"]["chat-safe"]["usage"]["inputTokens"], true);
+        assert!(actual["chatMetadataShapes"]["bad-shape"].is_null());
+        assert!(actual["chatMetadataShapes"]["wrong-type"].is_null());
         assert_eq!(actual["chats"][0]["items"][0]["response"]["plan"]["summary"], safe);
         assert_eq!(actual["chats"][0]["items"][0]["response"]["plan"]["task"]["objective"], safe);
         assert_eq!(actual["chats"][0]["items"][0]["response"]["task"]["objective"], safe);

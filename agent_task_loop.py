@@ -441,7 +441,7 @@ def _failure_envelope(value: Any, *, depth: int = 0) -> dict[str, Any]:
         return {}
     fields: dict[str, Any] = {}
     for key in (
-        "status", "error", "code", "failureLayer", "mutationStarted", "committed",
+        "status", "error", "code", "failureLayer", "mutationStarted", "saved", "safeToRetry", "committed",
         "commitState", "checkpointRecoveryRequired", "temporaryCleanupRequired",
         "failureSummary", "currentStateDigest", "turnControl", "diagnostics",
     ):
@@ -452,6 +452,51 @@ def _failure_envelope(value: Any, *, depth: int = 0) -> dict[str, Any]:
         for nested_key, nested_value in nested.items():
             fields.setdefault(nested_key, nested_value)
     return fields
+
+
+def safe_recoverable_write_failure(*values: Any) -> bool:
+    """Only admit a failed write back to the planner with explicit no-write facts."""
+    candidates: list[Mapping[str, Any]] = []
+
+    def collect(value: Any, depth: int = 0) -> None:
+        if depth > 5 or not isinstance(value, Mapping):
+            return
+        candidates.append(value)
+        for key in ("result", "outcome", "writeFailure", "error", "diagnostics", "sourceError"):
+            collect(value.get(key), depth + 1)
+
+    for value in values:
+        collect(value)
+    if not candidates:
+        return False
+    if any(candidate.get("mutationStarted") is True or candidate.get("saved") is True
+           or candidate.get("safeToRetry") is False
+           or candidate.get("committed") is True
+           or candidate.get("checkpointRecoveryRequired") is True
+           or (candidate.get("commitState") is not None
+               and str(candidate.get("commitState") or "").strip().casefold() != "not_started")
+           for candidate in candidates):
+        return False
+    mutation_facts = {candidate.get("mutationStarted") for candidate in candidates if isinstance(candidate.get("mutationStarted"), bool)}
+    retry_facts = {candidate.get("safeToRetry") for candidate in candidates if isinstance(candidate.get("safeToRetry"), bool)}
+    committed_facts = {candidate.get("committed") for candidate in candidates if isinstance(candidate.get("committed"), bool)}
+    commit_states = {str(candidate.get("commitState") or "").strip().casefold() for candidate in candidates if candidate.get("commitState") is not None}
+    if (mutation_facts != {False} or retry_facts != {True} or committed_facts != {False}
+            or commit_states != {"not_started"}):
+        return False
+    for candidate in candidates:
+        phase = str(candidate.get("failurePhase") or "").strip().casefold()
+        code = str(candidate.get("errorCode") or candidate.get("code") or "").strip().casefold()
+        if "restore" in phase or "rollback" in phase or "restore" in code:
+            return False
+    return any(
+        candidate.get("mutationStarted") is False
+        and candidate.get("committed") is False
+        and str(candidate.get("commitState") or "").strip().casefold() == "not_started"
+        and candidate.get("safeToRetry") is True
+        and candidate.get("saved") is not True
+        for candidate in candidates
+    )
 
 
 def _bounded_action(value: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -810,6 +855,11 @@ def approval_task_context(
             _TOOL_DEFAULT_VERIFICATION_PROFILE.get(tool, "canonical_tool_result"),
         ),
     }
+    user_checkpoint_policy = seed.get("checkpointUserPolicy")
+    if isinstance(user_checkpoint_policy, Mapping):
+        # This host-attested record is created only by the runtime after it
+        # matches a model quote to the current app user message.
+        context["checkpointUserPolicy"] = copy.deepcopy(dict(user_checkpoint_policy))
     native_conversation = seed.get("_nativeConversation")
     if isinstance(native_conversation, Mapping):
         # Private continuation state is frozen outside the normal task-loop
@@ -962,6 +1012,16 @@ def prepare_approval_task_continuation(
             "continueLoop": False,
             "nextStep": "done",
         }
+    elif (
+        task_status == "failed"
+        and not rejected
+        and context.get("continueAfterApproval") is not False
+        and _status(context.get("tool")) != "vrcforge_restore_checkpoint"
+        and safe_recoverable_write_failure(execution, outcome)
+    ):
+        # Preserve the failed write facts and let the owner planner decide
+        # whether to diagnose or choose another action. This does not retry it.
+        terminal_plan = None
     elif task_status != "completed":
         summary = _bounded_text(outcome.get("summary"), 600) or "The approved task needs user action."
         terminal_plan = {
@@ -1009,6 +1069,8 @@ def prepare_approval_task_continuation(
             "code",
             "failureLayer",
             "mutationStarted",
+            "saved",
+            "safeToRetry",
             "committed",
             "commitState",
             "checkpointRecoveryRequired",

@@ -232,6 +232,26 @@ export function buildDurableTimelineRows(
   const rows: ReactNode[] = [];
   const processRows: ReactNode[] = [];
   const processInvocations: TimelineInvocation[] = [];
+  let pendingCalls: Array<{ invocation: TimelineInvocation; detail: unknown }> = [];
+  const flushToolCalls = () => {
+    if (!pendingCalls.length) return;
+    const calls = pendingCalls;
+    pendingCalls = [];
+    const failed = calls.some(({ invocation }) => /failed|error|rejected|cancelled|canceled/.test(invocation.status.toLowerCase()));
+    processRows.push(
+      <div key={`tools-${calls[0].invocation.id}`} data-agent-tool-call-group>
+        <WorkSegmentRow
+          kind="tool"
+          title={i18n.t("agent.timeline.callTools", { count: calls.length })}
+          statusLabel={failed ? i18n.t("skillStatus.failed") : ""}
+          statusTone={failed ? "danger" : "muted"}
+          showStatus={failed}
+        >
+          {calls.map(({ invocation, detail }) => renderDirectTimelineInvocation(invocation, detail))}
+        </WorkSegmentRow>
+      </div>,
+    );
+  };
   const includeAssistant = options.includeAssistant !== false;
   const turnElapsed = options.processTitleElapsed ?? (options.renderElapsed === false ? undefined : presentation.elapsedSeconds);
   const finalAssistant = [...presentation.entries].reverse().find((entry) => (
@@ -241,6 +261,7 @@ export function buildDurableTimelineRows(
   ));
   for (const entry of presentation.entries) {
     if (entry.type === "assistant") {
+      flushToolCalls();
       if (!includeAssistant) continue;
       if (
         entry.id === finalAssistant?.id
@@ -262,9 +283,15 @@ export function buildDurableTimelineRows(
     }
     for (const invocation of entry.invocations) {
       processInvocations.push(invocation);
-      processRows.push(renderDirectTimelineInvocation(invocation, takeFullResult(invocation)));
+      if (invocation.kind === "process") {
+        flushToolCalls();
+        processRows.push(renderDirectTimelineInvocation(invocation, takeFullResult(invocation)));
+      } else {
+        pendingCalls.push({ invocation, detail: takeFullResult(invocation) });
+      }
     }
   }
+  flushToolCalls();
   if (processRows.length) {
     const processFailed = processInvocations.some((invocation) => ["failed", "error", "rejected", "cancelled", "canceled"].some((value) => invocation.status.toLowerCase().includes(value)));
     rows.unshift(
@@ -1080,7 +1107,7 @@ function WorkSegmentRow({
         type="button"
         aria-expanded={open}
         onClick={() => setOpen((value) => !value)}
-        className="group/work-segment flex w-full min-w-0 items-center gap-2 border-b border-border/60 px-1 py-2 text-left transition-colors hover:bg-muted/50"
+        className="group/work-segment flex w-full min-w-0 items-center gap-2 px-1 py-2 text-left transition-colors hover:bg-muted/50"
       >
         {processHeader ? (
           <>

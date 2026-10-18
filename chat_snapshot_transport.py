@@ -174,6 +174,24 @@ def chat_digests(chats: list[dict[str, Any]]) -> dict[str, str]:
     }
 
 
+def chat_metadata_shapes(chats: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Expose persisted metadata field/container shape without metadata values."""
+    def shape(value: Any, depth: int = 0) -> Any:
+        if depth >= 64:
+            return True
+        if isinstance(value, dict):
+            return {str(key): shape(child, depth + 1) for key, child in value.items()}
+        return True
+
+    result: dict[str, dict[str, Any]] = {}
+    for chat in chats:
+        chat_id = str(chat.get("id") or "").strip()
+        if not chat_id:
+            continue
+        result[chat_id] = shape({key: value for key, value in chat.items() if key != "items"})
+    return result
+
+
 def _validated_chat_text_paths(snapshot: dict[str, Any]) -> list[str]:
     """Return fixed display-text paths unchanged by the existing privacy scan.
 

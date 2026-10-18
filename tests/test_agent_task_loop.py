@@ -12,6 +12,7 @@ from agent_task_loop import (
     prepare_approval_task_continuation,
     prepare_sub_agent_task_continuation,
     rejected_approval_completion,
+    safe_recoverable_write_failure,
 )
 
 
@@ -335,6 +336,42 @@ def test_failed_approved_write_returns_to_planner_with_failure_diagnosis() -> No
     assert source_error["commitState"] == "unknown"
     assert "privateDump" not in str(observation)
     assert continuation["arguments"] == arguments
+
+
+def test_explicit_prewrite_approval_failure_has_no_terminal_plan_but_keeps_failed_facts() -> None:
+    arguments = {"projectRoot": "D:/Unity/Avatar", "value": "fixture"}
+    loop = AgentTaskLoop("write then continue", session_id="s-prewrite", client_turn_id="t-prewrite")
+    context = approval_task_context(loop.approval_seed(
+        requested_tool="fixture_write", requested_arguments=arguments, continue_after_approval=True,
+    ), tool="fixture_write", arguments=arguments)
+    assert context is not None
+    failure = {
+        "status": "failed", "error": "preflight rejected", "mutationStarted": False,
+        "saved": False, "safeToRetry": True, "committed": False, "commitState": "not_started",
+    }
+    completion = approval_completion(context, raw_result=failure, outcome={
+        "status": "failed", "summary": "preflight rejected", **failure,
+    })
+    assert completion is not None
+    prepared = prepare_approval_task_continuation({"id": "approval-prewrite", "taskContext": context}, {
+        "status": "failed", "taskCompletion": completion, "result": failure,
+        "error": failure["error"], "writeFailure": failure,
+    })
+    assert prepared is not None
+    continuation = prepared["taskContinuation"]
+    assert continuation["terminalPlan"] is None
+    assert continuation["completion"]["status"] == "failed"
+    assert continuation["plannerObservation"]["result"]["mutationStarted"] is False
+    assert continuation["plannerObservation"]["result"]["saved"] is False
+    assert continuation["plannerObservation"]["result"]["safeToRetry"] is True
+
+
+def test_safe_recoverable_failure_requires_unconflicted_explicit_facts() -> None:
+    clean = {"mutationStarted": False, "safeToRetry": True, "committed": False, "commitState": "not_started"}
+    assert safe_recoverable_write_failure(clean)
+    assert not safe_recoverable_write_failure(clean, {"mutationStarted": True})
+    assert not safe_recoverable_write_failure(clean, {"commitState": "unknown"})
+    assert not safe_recoverable_write_failure({"mutationStarted": False, "safeToRetry": True})
 
 
 def test_async_task_seed_preserves_bounded_parent_history_for_resampling() -> None:

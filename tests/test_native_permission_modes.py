@@ -36,7 +36,9 @@ def _question_gateway(tmp_path: Path, replies: list[object]) -> tuple[AgentGatew
     return gateway, model
 
 
-def _write_gateway_for_mode(tmp_path: Path, replies: list[object]) -> tuple[AgentGateway, NativeModel, list[dict]]:
+def _write_gateway_for_mode(
+    tmp_path: Path, replies: list[object], *, handler_result: dict | None = None,
+) -> tuple[AgentGateway, NativeModel, list[dict]]:
     project = tmp_path / "UnityProject"
     for marker in ("Assets", "Packages", "ProjectSettings"):
         (project / marker).mkdir(parents=True, exist_ok=True)
@@ -45,7 +47,7 @@ def _write_gateway_for_mode(tmp_path: Path, replies: list[object]) -> tuple[Agen
 
     def handler(arguments: dict) -> dict:
         invoked.append(dict(arguments))
-        return {"ok": True, "status": "written"}
+        return dict(handler_result) if handler_result is not None else {"ok": True, "status": "written"}
 
     gateway.register_tool(
         "fixture_write",
@@ -140,6 +142,36 @@ def test_native_runtime_write_uses_real_approval_owner_for_each_permission_mode(
         assert initial["plan"]["nextStep"] == "done"
 
     assert invoked == [{"projectRoot": str(tmp_path / "UnityProject"), "value": mode}]
+
+
+def test_native_approved_prewrite_failure_resumes_planner_without_replaying_write(tmp_path: Path) -> None:
+    failure = {
+        "ok": False, "status": "failed", "error": "fixture preflight failure",
+        "mutationStarted": False, "saved": False, "safeToRetry": True,
+        "committed": False, "commitState": "not_started",
+    }
+    gateway, model, invoked = _write_gateway_for_mode(tmp_path, [
+        call("phase-1", "vrcforge_runtime_action", {"action": "enter_execution"}),
+        call("write-1", "fixture_write", {"projectRoot": str(tmp_path / "UnityProject"), "value": "retry"}),
+        {"role": "assistant", "content": "The write was rejected before mutation; I can explain the next step."},
+    ], handler_result=failure)
+    _set_mode(gateway, "approval")
+
+    initial = _run(gateway, tmp_path, clientTurnId="write-approval-recoverable")
+    assert initial["write"]["status"] == "approval_pending"
+    approval_id = initial["approval_id"]
+    approval = gateway._approvals[approval_id]
+    gateway.approval_transactions.approve(approval_id)
+    applied = gateway.approval_transactions.apply_approved({"approval_id": approval_id})
+    assert applied["status"] == "failed"
+    assert applied["writeFailure"]["safeToRetry"] is True
+    assert applied["writeFailure"]["checkpointRecoveryRequired"] is False
+    resumed = gateway.resume_runtime_task_after_approval(approval, applied)
+
+    assert len(model.requests) == 3
+    assert invoked == [{"projectRoot": str(tmp_path / "UnityProject"), "value": "retry"}]
+    assert resumed["plan"]["reply"].startswith("The write was rejected before mutation")
+    assert resumed["plan"].get("completionClaim", {}).get("satisfied") is not True
 
 
 @pytest.mark.parametrize("reviewer_setup", ["missing", "exception", "not_applicable"])

@@ -91,3 +91,13 @@ test('actual local receipt keeps the accepted final and excludes the earlier una
   assert.deepEqual(history(beforeAcceptance), [], 'a stale plan reply cannot promote the unaccepted final');
   assert.deepEqual(response, original, 'replay leaves the raw receipt unchanged');
 });
+
+for (const status of ['tool_failed', 'needs_user_action', 'planner_failed', 'loop_suppressed']) {
+  test(`runtime terminal ${status} preserves the actual reply after commentary`, () => {
+    const response = {plan: {reply: 'The tool failed; the outfit remains unfinished.', nextStep: status}, timeline: [
+      event('comment', 0, 'commentary', 'Checking the outfit.'),
+      {id:'terminal',sequence:1,timestamp:'2026-01-01T00:00:01Z',kind:'assistant',payload:{summary:'The tool failed; the outfit remains unfinished.',status}},
+    ]};
+    assert.equal(visibleAgentDialogueText(response), response.plan.reply);
+  });
+}

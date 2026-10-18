@@ -19,7 +19,7 @@ import { ConversationCard } from "./src/components/chat/conversation-card";
 const event = (id, sequence, kind, payload) => ({
   id,
   sequence,
-  timestamp: \`2026-09-22T00:00:0\${sequence}.000Z\`,
+  timestamp: new Date(Date.UTC(2026, 8, 22) + sequence * 1000).toISOString(),
   kind,
   payload,
 });
@@ -27,6 +27,8 @@ const timeline = [
   event("public-1", 0, "assistant", { summary: "public progress 1", status: "done", phase: "commentary", messageId: "message-commentary-1" }),
   event("call-1", 1, "tool_call", { actionId: "interleaved-1", tool: "vrcforge_list_directory", status: "started" }),
   event("result-1", 2, "tool_result", { actionId: "interleaved-1", tool: "vrcforge_list_directory", status: "ok", summary: "listed" }),
+  event("call-extra", 2.1, "tool_call", { actionId: "interleaved-extra", tool: "vrcforge_execute_shell", status: "started" }),
+  event("result-extra", 2.2, "tool_result", { actionId: "interleaved-extra", tool: "vrcforge_execute_shell", status: "ok", summary: "shell result" }),
   event("public-2", 3, "assistant", { summary: "public progress 2", status: "done", phase: "commentary", messageId: "message-commentary-2" }),
   event("call-2", 4, "tool_call", { actionId: "interleaved-2", tool: "vrcforge_find_files", status: "started" }),
   event("result-2", 5, "tool_result", { actionId: "interleaved-2", tool: "vrcforge_find_files", status: "ok", summary: "found" }),
@@ -41,6 +43,7 @@ const item = {
     timeline,
     steps: [
       { actionId: "interleaved-1", result: { text: "FIRST_FULL_RESULT" } },
+      { actionId: "interleaved-extra", result: { text: "EXTRA_FULL_RESULT" } },
       { actionId: "interleaved-2", result: { text: "SECOND_FULL_RESULT" } },
     ],
   },
@@ -144,7 +147,7 @@ try {
   const expandedKinds = await groups.nth(0).locator("div.mt-3 > div").evaluateAll((rows) => rows.map((row) => (
     row.querySelector("[data-testid='chat-markdown-agent']")
       ? "progress"
-      : Array.from(row.querySelectorAll("button")).some((button) => button.classList.contains("group/run"))
+      : row.hasAttribute("data-agent-tool-call-group")
         ? "tool"
         : "other"
   )));
@@ -155,10 +158,22 @@ try {
   const restoredExpandedText = await restored.innerText();
   assert.ok(restoredExpandedText.includes("public progress 1") && restoredExpandedText.includes("public progress 2"), "serialized process fold expands with its progress rows");
 
-  const firstInvocation = groups.nth(0).locator("button[aria-expanded='false']").first();
+  const toolGroups = groups.nth(0).locator("[data-agent-tool-call-group]");
+  assert.equal(await toolGroups.count(), 2, "assistant prose splits consecutive tool groups");
+  assert.equal(await toolGroups.nth(0).locator("button").first().getAttribute("aria-expanded"), "false", "consecutive tools start collapsed");
+  assert.equal(await toolGroups.nth(0).locator("button.group\\/run").count(), 0, "collapsed group hides individual calls");
+  assert.equal(await streaming.locator("[data-agent-tool-call-group]").count(), 2, "streaming uses the same groups");
+  assert.equal(await streaming.locator("[data-agent-tool-call-group] button").first().getAttribute("aria-expanded"), "false", "streaming does not force tool group open");
+  await toolGroups.nth(0).locator("button").first().click();
+  const calls = toolGroups.nth(0).locator("button.group\\/run");
+  assert.equal(await calls.count(), 2, "mixed tool kinds share one consecutive group");
+  const firstInvocation = calls.first();
   await firstInvocation.click();
   await live.getByText("FIRST_FULL_RESULT", { exact: false }).waitFor();
   assert.equal(await live.locator("[data-agent-invocation-output-card]").count(), 1, "expanded tool result is rendered once");
+  await calls.nth(1).click();
+  await live.getByText("EXTRA_FULL_RESULT", { exact: false }).waitFor();
+  assert.equal(await live.locator("[data-agent-invocation-output-card]").count(), 2, "all grouped results remain inspectable");
   assert.deepEqual(errors, []);
   console.log("interleaved timeline browser: order, expansion, and serialized restore passed");
 } finally {

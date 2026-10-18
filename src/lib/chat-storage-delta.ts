@@ -10,6 +10,7 @@ export type ChatStoragePatch = {
 };
 
 export type ChatStoragePatches = Record<string, ChatStoragePatch>;
+export type ChatMetadataShape = Record<string, unknown>;
 
 const SHA256 = /^[a-f0-9]{64}$/;
 
@@ -22,8 +23,12 @@ export function buildChatStoragePatches(
   chats: ReadonlyArray<ChatThread>,
   baselineFingerprints: Readonly<Record<string, string>>,
   serverDigests: Readonly<Record<string, string>> | undefined,
+  serverShapes: Readonly<Record<string, ChatMetadataShape>> | undefined,
 ): ChatStoragePatches | undefined {
   if (serverDigests === undefined) return undefined;
+  if (serverShapes === undefined) {
+    throw new Error("Chat storage returned no acknowledged metadata shape.");
+  }
   const patches: ChatStoragePatches = {};
   for (const chat of chats) {
     const baseDigest = serverDigests[chat.id];
@@ -39,7 +44,11 @@ export function buildChatStoragePatches(
     if (baseline.id !== chat.id) {
       throw new Error("Chat storage delta baseline does not belong to the current chat.");
     }
-    patches[chat.id] = buildChatStoragePatch(baseline, chat, baseDigest);
+    const shape = serverShapes[chat.id];
+    if (!shape || typeof shape !== "object" || Array.isArray(shape)) {
+      throw new Error("Chat storage delta shape is unavailable for an acknowledged chat.");
+    }
+    patches[chat.id] = buildChatStoragePatch(baseline, chat, baseDigest, shape);
   }
   return patches;
 }
@@ -48,12 +57,13 @@ function buildChatStoragePatch(
   baseline: ChatThread,
   current: ChatThread,
   baseDigest: string,
+  serverShape: ChatMetadataShape,
 ): ChatStoragePatch {
   const baselineItems = requireItems(baseline.items);
   const currentItems = requireItems(current.items);
   const baselineById = uniqueItems(baselineItems);
   uniqueItems(currentItems);
-  const baselineMetadata = withoutItems(baseline);
+  const baselineMetadata = projectMetadataToShape(withoutItems(baseline), serverShape);
   const currentMetadata = withoutItems(current);
   const metadataPatch = compare(baselineMetadata, currentMetadata);
   assertAllowedOperations(metadataPatch, "metadata");
@@ -78,6 +88,22 @@ function buildChatStoragePatch(
         .map((item) => [item.id, structuredClone(item)]),
     ),
   };
+}
+
+/** Keep only fields known to exist in the server's value-free raw shape. */
+function projectMetadataToShape(value: Record<string, unknown>, shape: ChatMetadataShape): Record<string, unknown> {
+  const result: Record<string, unknown> = {};
+  for (const [key, childShape] of Object.entries(shape)) {
+    if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
+    const child = value[key];
+    if (child && typeof child === "object" && !Array.isArray(child)
+      && childShape && typeof childShape === "object" && !Array.isArray(childShape)) {
+      result[key] = projectMetadataToShape(child as Record<string, unknown>, childShape as ChatMetadataShape);
+    } else {
+      result[key] = structuredClone(child);
+    }
+  }
+  return result;
 }
 
 function parseBaseline(fingerprint: string): ChatThread {

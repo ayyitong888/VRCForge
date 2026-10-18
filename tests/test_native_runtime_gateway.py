@@ -478,6 +478,33 @@ def test_native_scope_denial_does_not_block_a_new_user_turn(tmp_path):
     assert second["plan"]["reply"] == "New request accepted"
 
 
+@pytest.mark.parametrize("status", ["needs_user_action", "failed"])
+def test_native_llm_reconsiders_explicit_no_write_failure_once_without_replaying_tool(tmp_path, status):
+    gateway, model, invoked = setup_gateway(tmp_path, [
+        call("recoverable-read", "vrcforge_read_text_file", {"path": "a.txt"}),
+        {"role": "assistant", "content": "The read failed before changing anything; I can explain the limitation."},
+    ])
+    gateway.register_tool(
+        "vrcforge_read_text_file", "When to use: read. When NOT to use: write.", "plan/preview",
+        lambda params: invoked.append(params) or {
+                "ok": False, "status": status, "error": "preflight unavailable",
+                "mutationStarted": False, "saved": False, "safeToRetry": True,
+                "committed": False, "commitState": "not_started",
+        },
+    )
+
+    result = run(gateway, tmp_path)
+
+    assert len(model.requests) == 2
+    assert len(invoked) == 1
+    history = budgeted_request_history(model.requests[1])
+    tool_result = next(message for message in history if message.get("role") == "tool")
+    assert tool_result["tool_call_id"] == "recoverable-read"
+    assert "preflight unavailable" in tool_result["content"]
+    assert result["plan"]["reply"].startswith("The read failed before changing anything")
+    assert result["plan"].get("completionClaim", {}).get("satisfied") is not True
+
+
 @pytest.mark.parametrize("later_tool", ["vrcforge_ask_user", "fixture_write"])
 def test_stale_question_stop_cannot_cancel_a_later_pending_call(tmp_path, later_tool):
     from agent_runtime_native_turn import NativeRuntimeTurn

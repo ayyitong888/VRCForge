@@ -100,7 +100,9 @@ from agent_task_loop import (
     prepare_approval_task_continuation,
     prepare_shell_task_continuation,
     prepare_sub_agent_task_continuation,
+    safe_recoverable_write_failure,
 )
+from checkpoint_user_policy import bind_user_checkpoint_skip
 from agent_tool_result_contract import completion_gate_plan, normalize_agent_tool_result
 from context_compaction import normalize_compaction_recovery
 from stage1_atomic_writes import (
@@ -6809,9 +6811,13 @@ class AgentGateway:
         except ValueError as exc:
             raise AgentGatewayError(str(exc), status_code=409) from exc
 
+        checkpoint_user_policy: dict[str, Any] | None = None
         def runtime_approval_seed(**kwargs: Any) -> dict[str, Any]:
             kwargs.setdefault("usage_parent_turn_id", turn_id)
-            return native_turn.approval_seed(task_loop.approval_seed(**kwargs))
+            seed = native_turn.approval_seed(task_loop.approval_seed(**kwargs))
+            if checkpoint_user_policy:
+                seed["checkpointUserPolicy"] = dict(checkpoint_user_policy)
+            return seed
 
         # Context belongs to this invocation, not to a synthetic executed tool.
         # Keep it stable across model rounds and dispose it with the turn. Its
@@ -7006,6 +7012,7 @@ class AgentGateway:
         repeated_failure_guard = RepeatedFailureGuard()
         shell_scope_denials = 0
         recoverable_block_selection_attempts = 0
+        recoverable_failure_refeeds = 0
         shell_payload: dict[str, Any] | None = None
         skill_payload: dict[str, Any] | None = None
         write_payload: dict[str, Any] | None = (
@@ -8127,6 +8134,34 @@ class AgentGateway:
                     with bind_memory_tool_context(project_root, memory_request_text, tuple(memory_user_texts)):
                         step_payload = self._runtime_skill_executor.execute(step_tool, action_arguments, agent_name)
                 else:
+                    checkpoint_user_policy = None
+                    user_source = params.get("_humanUserMessageSource")
+                    if isinstance(user_source, Mapping):
+                        owner_message = str(user_source.get("message") or "")
+                        supplied_session = str(params.get("session_id") or params.get("sessionId") or "")
+                        supplied_client_turn = str(params.get("client_turn_id") or params.get("clientTurnId") or "")
+                        if (
+                            owner_message == str(params.get("message") or "")
+                            and str(user_source.get("sessionId") or "") == supplied_session
+                            and str(user_source.get("clientTurnId") or "") == supplied_client_turn
+                            and str(user_source.get("projectRoot") or "") == project_root
+                        ):
+                            authority = {
+                                **dict(user_source),
+                                "sessionId": session_id,
+                                "turnId": turn_id,
+                                "clientTurnId": client_turn_id,
+                            }
+                            checkpoint_user_policy = bind_user_checkpoint_skip(
+                                authority,
+                                plan.get("checkpointChoice"),
+                                session_id=session_id,
+                                turn_id=turn_id,
+                                client_turn_id=client_turn_id,
+                                project_root=project_root,
+                                tool=step_tool,
+                                arguments=action_arguments,
+                            )
                     step_payload = self.approval_transactions._execute_write_request(
                         step_tool,
                         action_arguments,
@@ -8687,14 +8722,23 @@ class AgentGateway:
                     step_waits_for_approval
                     or step_tool in {"vrcforge_ask_user", PROJECT_SELECTION_TOOL}
                 )
-                if (
+                safe_failure_recovery = (
                     not requires_direct_user_input
-                    and str(plan.get("planner") or "").strip().casefold() != "llm"
+                    and recoverable_failure_refeeds == 0
+                    and safe_recoverable_write_failure(step_payload, step_outcome)
+                )
+                if (
+                    safe_failure_recovery
+                    or (
+                        not requires_direct_user_input
+                        and str(plan.get("planner") or "").strip().casefold() != "llm"
+                    )
                 ):
-                    # A deterministic first call may discover a structured
-                    # condition that the model can resolve with a different
-                    # read/diagnostic action. Re-feed it once; an LLM-selected
-                    # needs-user-action result remains terminal for this turn.
+                    if safe_failure_recovery:
+                        recoverable_failure_refeeds += 1
+                    # Re-feed only an explicitly no-mutation, unsaved,
+                    # retry-safe failure. The tool result remains failed and
+                    # the completion gate remains unsatisfied.
                     plan["continueLoop"] = True
                 else:
                     gated_plan = completion_gate_plan(plan, step_outcome)
@@ -8722,12 +8766,19 @@ class AgentGateway:
                     and bool(selection_error.get("nextActions") or step_outcome.get("nextAction") or step_outcome.get("nextActions"))
                     and recoverable_block_selection_attempts == 0
                 )
+                safe_failure_recovery = (
+                    recoverable_failure_refeeds == 0
+                    and safe_recoverable_write_failure(step_payload, step_outcome)
+                )
                 if (
                     str(plan.get("planner") or "").strip().casefold() != "llm"
                     or recoverable_block_selection
+                    or safe_failure_recovery
                 ):
                     if recoverable_block_selection:
                         recoverable_block_selection_attempts += 1
+                    if safe_failure_recovery:
+                        recoverable_failure_refeeds += 1
                     # Deterministic routing owns fast first selection, not the
                     # failure verdict. Re-feed the structured result to the
                     # model so it can correct arguments or choose a diagnostic
@@ -9056,6 +9107,7 @@ class AgentGateway:
                 label="Assistant",
                 summary=final_reply,
                 status=str(top_plan.get("nextStep") or "done"),
+                phase="final_answer",
             )
 
         turn = {

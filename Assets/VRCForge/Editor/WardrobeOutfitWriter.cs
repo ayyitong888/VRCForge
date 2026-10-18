@@ -352,11 +352,39 @@ namespace VRCForge.Editor
                 // ---- APPLY -------------------------------------------------------
                 transactionHandle = $"{avatarRootPath}|{parameterName}";
                 var sceneReceipts = new Dictionary<string, TransactionReceipt>(StringComparer.Ordinal);
+                var sceneObjectIds = new Dictionary<string, long>(StringComparer.Ordinal);
+                var prefabObjectIds = new Dictionary<string, PrefabSceneDefaultIdentity>(StringComparer.Ordinal);
                 if (setObjectsDefaultOff)
                 {
                     foreach (var targetTransform in resolvedTargets.Where(item => item.gameObject.activeSelf))
                     {
                         var targetPath = GetTransformPath(targetTransform);
+                        var sceneGuid = AssetDatabase.AssetPathToGUID(descriptor.gameObject.scene.path);
+                        if (PrefabUtility.IsPartOfPrefabInstance(targetTransform.gameObject))
+                        {
+                            var instanceRoot = PrefabUtility.GetNearestPrefabInstanceRoot(targetTransform.gameObject);
+                            var sourceObject = PrefabUtility.GetCorrespondingObjectFromSource(targetTransform.gameObject) as GameObject;
+                            var instanceId = GlobalObjectId.GetGlobalObjectIdSlow(instanceRoot);
+                            if (instanceRoot == null || sourceObject == null || instanceId.identifierType != 2
+                                || instanceId.targetPrefabId == 0
+                                || !string.Equals(instanceId.assetGUID.ToString(), sceneGuid, StringComparison.OrdinalIgnoreCase)
+                                || !AssetDatabase.TryGetGUIDAndLocalFileIdentifier(sourceObject, out var sourceGuid, out long sourceFileId)
+                                || !string.Equals(sourceGuid, AssetDatabase.AssetPathToGUID(AssetDatabase.GetAssetPath(sourceObject)), StringComparison.OrdinalIgnoreCase))
+                                throw new InvalidOperationException("Wardrobe prefab scene target has no stable instance/source identity.");
+                            prefabObjectIds[targetPath] = new PrefabSceneDefaultIdentity
+                            {
+                                instanceRootFileId = instanceId.targetPrefabId,
+                                sourceFileId = sourceFileId,
+                                sourceGuid = sourceGuid
+                            };
+                        }
+                        else
+                        {
+                            if (!AssetDatabase.TryGetGUIDAndLocalFileIdentifier(targetTransform.gameObject, out var sceneObjectGuid, out long sceneObjectId)
+                                || !string.Equals(sceneObjectGuid, sceneGuid, StringComparison.OrdinalIgnoreCase))
+                                throw new InvalidOperationException("Wardrobe scene default target has no stable scene object identity.");
+                            sceneObjectIds[targetPath] = sceneObjectId;
+                        }
                         var receipt = new TransactionReceipt
                         {
                             Asset = $"scene:{targetPath}",
@@ -389,6 +417,9 @@ namespace VRCForge.Editor
                     };
                     receipts.Add(menuReceipt);
                 }
+                var controllerBefore = ExpressionWritePersistence.Capture(fxController);
+                var menuBefore = addMenuToggle && descriptor.expressionsMenu != null
+                    ? ExpressionWritePersistence.Capture(descriptor.expressionsMenu) : null;
                 var saveScope = new WardrobeAssetSaveScope(fxController,
                     addMenuToggle ? descriptor.expressionsMenu : null);
                 var sceneSaveScope = new WardrobeSceneSaveScope(
@@ -421,12 +452,14 @@ namespace VRCForge.Editor
                         if (go.activeSelf)
                         {
                             go.SetActive(false);
+                            if (PrefabUtility.IsPartOfPrefabInstance(go))
+                                PrefabUtility.RecordPrefabInstancePropertyModifications(go);
                         }
                         var objectPath = GetTransformPath(t);
                         if (sceneReceipts.TryGetValue(objectPath, out var sceneReceipt))
                         {
                             sceneReceipt.After = new { activeSelf = go.activeSelf };
-                            sceneReceipt.Status = "succeeded";
+                            sceneReceipt.Status = "pending_verification";
                         }
                         EditorUtility.SetDirty(go);
                     }
@@ -452,7 +485,7 @@ namespace VRCForge.Editor
                 var createdClipPath = AssetDatabase.GetAssetPath(clip);
                 clipReceipt.Asset = createdClipPath;
                 clipReceipt.After = DescribeAsset(clip);
-                clipReceipt.Status = "succeeded";
+                clipReceipt.Status = "pending_verification";
 
                 // c. Add the FX state + Any State -> state Equals N.
                 Undo.RegisterCompleteObjectUndo(fxController, "Add wardrobe FX state");
@@ -470,10 +503,11 @@ namespace VRCForge.Editor
                 EditorUtility.SetDirty(wardrobeMachine);
                 EditorUtility.SetDirty(newState);
                 controllerReceipt.After = DescribeAsset(fxController);
-                controllerReceipt.Status = "succeeded";
+                controllerReceipt.Status = "pending_verification";
 
                 // d. Add the menu toggle (overflow into a nested SubMenu when needed).
                 string appliedMenuPath = "";
+                VRCExpressionsMenu appliedMenuTarget = null;
                 bool menuToggleAdded = false;
                 if (addMenuToggle)
                 {
@@ -481,6 +515,7 @@ namespace VRCForge.Editor
                         descriptor.expressionsMenu, parameterName, menuToggles, subMenuOverflow, subMenuName, menuAssetDir, menuAssetPath, out appliedMenuPath);
                     if (target != null)
                     {
+                        appliedMenuTarget = target;
                         Undo.RegisterCompleteObjectUndo(target, "Add wardrobe menu toggle");
                         if (target.controls == null)
                         {
@@ -498,7 +533,7 @@ namespace VRCForge.Editor
                         if (menuReceipt != null)
                         {
                             menuReceipt.After = DescribeAsset(descriptor.expressionsMenu);
-                            menuReceipt.Status = "succeeded";
+                            menuReceipt.Status = "pending_verification";
                         }
                     }
                 }
@@ -513,14 +548,26 @@ namespace VRCForge.Editor
                 {
                     throw new InvalidOperationException("Wardrobe write readback fingerprint did not advance.");
                 }
-                var readbackController = AssetDatabase.LoadAssetAtPath<AnimatorController>(fxControllerPath);
-                controllerReceipt.After = DescribeAsset(readbackController);
-                var readbackClip = AssetDatabase.LoadAssetAtPath<AnimationClip>(createdClipPath);
+                var readbackClip = VerifyClipReadback(createdClipPath, onObjects, offObjects);
                 clipReceipt.After = DescribeAsset(readbackClip);
-                if (menuReceipt != null)
+                clipReceipt.Status = "succeeded";
+                var controllerReadback = ExpressionWritePersistence.SaveAndVerify(
+                    controllerBefore, fxController, descriptor, false, false);
+                var readbackController = AssetDatabase.LoadAssetAtPath<AnimatorController>(fxControllerPath);
+                VerifyWardrobeFxReadback(readbackController, wardrobeLayer.name, stateName, parameterName, newValue, newWriteDefaults, readbackClip);
+                controllerReceipt.After = DescribeAsset(readbackController);
+                controllerReceipt.Status = "succeeded";
+                object menuReadback = null;
+                if (menuReceipt != null && appliedMenuTarget != null)
                 {
+                    menuReadback = ExpressionWritePersistence.SaveAndVerify(
+                        menuBefore, descriptor.expressionsMenu, descriptor, false, true, appliedMenuTarget);
+                    VerifyMenuReadback(descriptor.expressionsMenu, outfitName, parameterName, newValue);
                     menuReceipt.After = DescribeAsset(AssetDatabase.LoadAssetAtPath<VRCExpressionsMenu>(rootMenuPath));
+                    menuReceipt.Status = "succeeded";
                 }
+                var sceneReadback = VerifySceneDefaultReadback(sceneReceipts, sceneObjectIds, prefabObjectIds, descriptor.gameObject.scene.path);
+                foreach (var receipt in sceneReceipts.Values) receipt.Status = "succeeded";
 
                 return VRCForgeToolResult.Completed(
                     $"Added outfit '{outfitName}' as value {newValue} to wardrobe '{parameterName}' on '{descriptor.name}'.",
@@ -549,14 +596,20 @@ namespace VRCForge.Editor
                         menuPath = appliedMenuPath,
                         continuationConsumed,
                         warnings,
-                        transaction = BuildTransaction(receipts, transactionHandle)
+                        transaction = BuildTransaction(receipts, transactionHandle),
+                        schema = "vrcforge.wardrobe_outfit_write.receipt.v1",
+                        verified = true,
+                        persistedReadback = true,
+                        committed = true,
+                        commitState = "committed",
+                        readback = new { clip = new { path = createdClipPath, verified = true }, controller = controllerReadback, menu = menuReadback, scene = sceneReadback }
                     });
             }
             catch (Exception ex)
             {
                 if (mutationStarted)
                 {
-                    var failed = receipts.FirstOrDefault(item => item.Status == "not_attempted");
+                    var failed = receipts.FirstOrDefault(item => item.Status == "pending_verification") ?? receipts.FirstOrDefault(item => item.Status == "not_attempted");
                     if (failed != null)
                     {
                         failed.Status = "failed";
@@ -577,6 +630,123 @@ namespace VRCForge.Editor
                 }
                 return VRCForgeToolResult.Failed($"Add wardrobe outfit failed: {ex.Message}\n{ex.StackTrace}");
             }
+        }
+
+        private static AnimationClip VerifyClipReadback(string path, IEnumerable<string> onObjects, IEnumerable<string> offObjects)
+        {
+            AssetDatabase.ImportAsset(path, ImportAssetOptions.ForceSynchronousImport | ImportAssetOptions.ForceUpdate);
+            var clip = AssetDatabase.LoadAssetAtPath<AnimationClip>(path);
+            if (clip == null) throw new InvalidOperationException("Persisted wardrobe clip is missing: " + path);
+            var expected = (onObjects ?? Array.Empty<string>()).Select(item => new { path = item, value = 1f })
+                .Concat((offObjects ?? Array.Empty<string>()).Select(item => new { path = item, value = 0f }))
+                .ToDictionary(item => item.path, item => item.value, StringComparer.Ordinal);
+            var bindings = AnimationUtility.GetCurveBindings(clip);
+            if (bindings.Length != expected.Count) throw new InvalidOperationException("Persisted wardrobe clip binding count differs.");
+            foreach (var binding in bindings)
+            {
+                if (binding.type != typeof(GameObject) || binding.propertyName != "m_IsActive" || !expected.TryGetValue(binding.path, out var value))
+                    throw new InvalidOperationException("Persisted wardrobe clip has an unexpected binding.");
+                var curve = AnimationUtility.GetEditorCurve(clip, binding);
+                if (curve == null || curve.length == 0 || curve.keys.Any(key => key.time != 0f || key.value != value))
+                    throw new InvalidOperationException("Persisted wardrobe clip curve differs for " + binding.path);
+            }
+            var stable = SceneObjectCopyCore.ReadStableAssetEvidence(path, "wardrobe clip persisted readback");
+            var guid = AssetDatabase.AssetPathToGUID(path);
+            if (string.IsNullOrWhiteSpace(guid) || stable.Guid != guid) throw new InvalidOperationException("Persisted wardrobe clip GUID differs.");
+            return clip;
+        }
+
+        private static void VerifyWardrobeFxReadback(AnimatorController controller, string layerName, string stateName,
+            string parameterName, int value, bool writeDefaults, AnimationClip clip)
+        {
+            if (controller == null) throw new InvalidOperationException("Persisted wardrobe FX controller is missing.");
+            var layer = controller.layers.SingleOrDefault(item => item.name == layerName);
+            if (layer == null) throw new InvalidOperationException("Persisted wardrobe FX layer is missing.");
+            var states = FindStatesForReceipt(layer.stateMachine);
+            var matches = states.Where(item => item.name == stateName).ToArray();
+            if (matches.Length != 1 || matches[0].motion != clip || matches[0].writeDefaultValues != writeDefaults)
+                throw new InvalidOperationException("Persisted wardrobe FX state/motion/Write Defaults differs.");
+            var transitions = layer.stateMachine.anyStateTransitions.Where(item => item.destinationState == matches[0]).ToArray();
+            if (transitions.Length != 1 || transitions[0].hasExitTime || transitions[0].duration != 0f ||
+                transitions[0].conditions.Length != 1 || transitions[0].conditions[0].mode != AnimatorConditionMode.Equals ||
+                transitions[0].conditions[0].parameter != parameterName || transitions[0].conditions[0].threshold != value)
+                throw new InvalidOperationException("Persisted wardrobe FX Equals transition differs.");
+            var path = AssetDatabase.GetAssetPath(controller);
+            var stable = SceneObjectCopyCore.ReadStableAssetEvidence(path, "wardrobe FX persisted readback");
+            if (stable.Guid != AssetDatabase.AssetPathToGUID(path)) throw new InvalidOperationException("Persisted wardrobe FX GUID differs.");
+        }
+
+        private static List<AnimatorState> FindStatesForReceipt(AnimatorStateMachine machine)
+        {
+            var result = new List<AnimatorState>();
+            result.AddRange(machine.states.Select(item => item.state));
+            foreach (var child in machine.stateMachines) result.AddRange(FindStatesForReceipt(child.stateMachine));
+            return result;
+        }
+
+        private static void VerifyMenuReadback(VRCExpressionsMenu root, string name, string parameter, int value)
+        {
+            var found = new List<VRCExpressionsMenu.Control>();
+            var seen = new HashSet<VRCExpressionsMenu>();
+            Action<VRCExpressionsMenu> visit = null;
+            visit = menu =>
+            {
+                if (menu == null || !seen.Add(menu)) return;
+                foreach (var control in menu.controls ?? new List<VRCExpressionsMenu.Control>())
+                {
+                    if (control.type == VRCExpressionsMenu.Control.ControlType.Toggle && control.name == name &&
+                        control.parameter != null && control.parameter.name == parameter && control.value == value) found.Add(control);
+                    if (control.subMenu != null) visit(control.subMenu);
+                }
+            };
+            visit(root);
+            if (found.Count != 1) throw new InvalidOperationException("Persisted wardrobe menu toggle/value differs.");
+        }
+
+        private static object VerifySceneDefaultReadback(Dictionary<string, TransactionReceipt> receipts, Dictionary<string, long> objectIds, Dictionary<string, PrefabSceneDefaultIdentity> prefabObjectIds, string scenePath)
+        {
+            if (receipts == null || receipts.Count == 0) return null;
+            foreach (var item in receipts)
+            {
+                var receipt = item.Value;
+                if (receipt.After == null || JObject.FromObject(receipt.After)["activeSelf"].Value<bool>())
+                    throw new InvalidOperationException("Wardrobe scene default-off state differs: " + item.Key);
+            }
+            var sceneGuid = AssetDatabase.AssetPathToGUID(scenePath);
+            var evidence = SceneObjectCopyCore.ReadStableAssetEvidence(scenePath, "wardrobe scene default persisted readback", (path, meta) =>
+            {
+                var yaml = File.ReadAllText(path);
+                foreach (var item in objectIds)
+                {
+                    var blocks = System.Text.RegularExpressions.Regex.Matches(yaml,
+                        @"(?m)^--- !u!1 &" + item.Value.ToString(System.Globalization.CultureInfo.InvariantCulture) + @"\r?\n(?<body>[\s\S]*?)(?=^--- !u!|\z)");
+                    if (blocks.Count != 1 || System.Text.RegularExpressions.Regex.Matches(blocks[0].Groups["body"].Value, @"(?m)^  m_IsActive: 0\s*$").Count != 1)
+                        throw new InvalidOperationException("Persisted wardrobe scene default-off YAML differs: " + item.Key);
+                }
+                foreach (var item in prefabObjectIds)
+                {
+                    var identity = item.Value;
+                    var blocks = System.Text.RegularExpressions.Regex.Matches(yaml,
+                        @"(?m)^--- !u!1001 &" + identity.instanceRootFileId.ToString(System.Globalization.CultureInfo.InvariantCulture) + @"\r?\n(?<body>[\s\S]*?)(?=^--- !u!|\z)");
+                    if (blocks.Count != 1)
+                        throw new InvalidOperationException("Persisted wardrobe prefab instance block is missing or ambiguous: " + item.Key);
+                    var body = blocks[0].Groups["body"].Value;
+                    var sourcePattern = @"(?m)^\s*m_SourcePrefab: \{fileID:\s*100100000,\s*guid:\s*" + System.Text.RegularExpressions.Regex.Escape(identity.sourceGuid) + @"[,}]";
+                    if (!System.Text.RegularExpressions.Regex.IsMatch(body, sourcePattern))
+                        throw new InvalidOperationException("Persisted wardrobe prefab source identity differs: " + item.Key);
+                    var modifications = System.Text.RegularExpressions.Regex.Matches(body,
+                        @"(?ms)^\s*- target: \{fileID:\s*" + identity.sourceFileId.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                        + @",\s*guid:\s*" + System.Text.RegularExpressions.Regex.Escape(identity.sourceGuid)
+                        + @",\s*type:\s*\d+\}\r?\n(?<fields>(?:(?!^\s*- target:)[\s\S])*)");
+                    var matching = modifications.Cast<System.Text.RegularExpressions.Match>().Count(match =>
+                        System.Text.RegularExpressions.Regex.IsMatch(match.Groups["fields"].Value,
+                            @"(?m)^\s+propertyPath: m_IsActive\s*$[\r\n]+\s+value: 0\s*$"));
+                    if (matching != 1)
+                        throw new InvalidOperationException("Persisted wardrobe prefab m_IsActive override differs: " + item.Key);
+                }
+            });
+            if (evidence.Guid != sceneGuid) throw new InvalidOperationException("Wardrobe scene GUID differs.");
+            return new { path = scenePath, assetGuid = evidence.Guid, fileDigest = evidence.File.Digest, defaults = receipts.Keys.ToArray() };
         }
 
         private static object DescribeAsset(UnityEngine.Object asset)
@@ -611,6 +781,13 @@ namespace VRCForge.Editor
                 items = transactionItems.Take(20).ToArray(),
                 handle = transactionHandle
             };
+        }
+
+        private sealed class PrefabSceneDefaultIdentity
+        {
+            public ulong instanceRootFileId;
+            public long sourceFileId;
+            public string sourceGuid = "";
         }
 
         private sealed class TransactionReceipt

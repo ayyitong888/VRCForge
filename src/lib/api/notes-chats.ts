@@ -51,6 +51,8 @@ export type StoredChats<T> = {
   recoveries?: ChatRecoveryMarker[];
   writeBlocked?: boolean;
   chatDigests?: Record<string, string>;
+  /** Field/container names only; never includes metadata values or items. */
+  chatMetadataShapes?: Record<string, Record<string, unknown>>;
 };
 
 export type ChatTitleResponse = {
@@ -110,6 +112,7 @@ export async function saveChats<T>(
   projectPaths?: Array<Record<string, unknown>>;
   sourceRevisions?: ChatSourceRevision[];
   chatDigests?: Record<string, string>;
+  chatMetadataShapes?: Record<string, Record<string, unknown>>;
 }> {
   if (hasTauriInternals()) {
     return invokeTauriWithAbort("save_chats", {

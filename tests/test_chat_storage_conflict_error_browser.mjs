@@ -63,7 +63,7 @@ const server = createServer(async (req, res) => {
     }
     const chat = remoteChanged ? remoteChat : localChat;
     res.end(JSON.stringify({ok:true,chats:[chat],count:1,sources:[],recoveries:[],writeBlocked:false,
-      chatDigests:{chat:remoteVersion}}));
+      chatDigests:{chat:remoteVersion},chatMetadataShapes:{chat:Object.fromEntries(Object.keys(chat).filter(key=>key!=='items').map(key=>[key,true]))}}));
     return;
   }
   if (req.url === '/fixture.js') {

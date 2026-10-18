@@ -2896,6 +2896,15 @@ async def app_chat_title(request: ChatTitleRequest) -> dict[str, Any]:
 @app.post("/api/app/agent/message")
 async def app_agent_runtime_message(runtime_request: AgentRuntimeMessageRequest) -> dict[str, Any]:
     runtime_params = agent_runtime_request_payload(runtime_request)
+    # This marker is host-created from the authenticated app request. It is
+    # intentionally absent from the external-agent runtime endpoint.
+    runtime_params["_humanUserMessageSource"] = {
+        "source": "app_user_message",
+        "message": runtime_request.message,
+        "sessionId": runtime_request.session_id or "",
+        "clientTurnId": runtime_request.client_turn_id or "",
+        "projectRoot": str(runtime_request.project_root or runtime_request.project_path or "").strip(),
+    }
     followup_claim_token = ""
     if runtime_request.followup_queue_id:
         followup_lane_id = runtime_request.followup_lane_id or runtime_request.session_id
@@ -4752,6 +4761,7 @@ def read_chat_transcripts(request: Request) -> dict[str, Any]:
     from chat_snapshot_transport import (
         cached_snapshot_page as _cached_snapshot_page,
         chat_digests as _chat_digests,
+        chat_metadata_shapes as _chat_metadata_shapes,
         snapshot_principal_hash as _snapshot_principal_hash,
     )
 
@@ -4904,6 +4914,7 @@ def read_chat_transcripts(request: Request) -> dict[str, Any]:
             "exists": app_path.exists(),
             "chats": chats,
             "chatDigests": _chat_digests(chats),
+            "chatMetadataShapes": _chat_metadata_shapes(chats),
             "count": len(chats),
             "sources": sources,
             "recoveries": recoveries,
@@ -5152,7 +5163,7 @@ def write_chat_transcripts_storage(
     # Delta requests are materialized from raw server records while holding
     # the same lock as the existing whole-snapshot CAS writer.  The recursive
     # call below then reuses all existing source validation and atomic writes.
-    from chat_snapshot_transport import chat_digests as _chat_digests
+    from chat_snapshot_transport import chat_digests as _chat_digests, chat_metadata_shapes as _chat_metadata_shapes
 
     if request.chat_patches is not None:
         from chat_storage_delta import ChatStoragePatchError, materialize_chat_patches
@@ -5429,6 +5440,7 @@ def write_chat_transcripts_storage(
             "projectPaths": project_paths,
             "sourceRevisions": source_revisions,
             "chatDigests": _chat_digests(stored_chats_for_digest),
+            "chatMetadataShapes": _chat_metadata_shapes(stored_chats_for_digest),
         },
         chats,
         automatic_groups,
@@ -20552,8 +20564,10 @@ def finalize_add_modular_avatar_component_verification_sync(
     )
 
 
-def prepare_unity_checkpoint_sync(project_root: Path, checkpoint_asset_paths: list[str] | None = None, *, checkpoint_files: list[str]) -> dict[str, Any]:
-    if not checkpoint_files:
+def prepare_unity_checkpoint_sync(project_root: Path, checkpoint_asset_paths: list[str] | None = None, *, checkpoint_files: list[str] | None) -> dict[str, Any]:
+    # None is an explicit request for the Core's established full-project
+    # snapshot mode. An empty list remains an invalid exact-file scope.
+    if checkpoint_files is not None and not checkpoint_files:
         return {"ok": False, "blocking": True, "code": "checkpoint_scope_unresolved",
                 "error": "The approved write did not establish an exact checkpoint file scope.",
                 "mutationStarted": False, "saved": False}
@@ -21152,6 +21166,43 @@ def prepare_authoritative_unity_checkpoint_sync(
             discover=list_execution_targets_sync, inspect_owner=read_component_property_sync,
             prepare=prepare_unity_checkpoint_sync,
         )
+    if checkpoint_target in {
+        "vrcforge_ensure_expression_parameter",
+        "vrcforge_ensure_expression_menu_control",
+        "vrcforge_ensure_animator_state",
+    }:
+        from unity_planned_checkpoint import prepare_planned_asset_checkpoint
+
+        primitive = {
+            "vrcforge_ensure_expression_parameter": (
+                build_ensure_expression_parameter_request, ensure_expression_parameter_sync,
+                "ensure_expression_parameter",
+            ),
+            "vrcforge_ensure_expression_menu_control": (
+                build_ensure_expression_menu_control_request, ensure_expression_menu_control_sync,
+                "ensure_expression_menu_control",
+            ),
+            "vrcforge_ensure_animator_state": (
+                build_ensure_animator_state_request, ensure_animator_state_sync,
+                "ensure_animator_state",
+            ),
+        }[checkpoint_target]
+        builder, preview_core, expected_action = primitive
+        request = builder(arguments, True)
+        plan_result = ensure_dict(preview_core({**arguments, **request}, preview=True))
+        plan = ensure_dict(plan_result.get("plan"))
+        paths = plan.get("checkpointAssetPaths")
+        expected_paths = arguments.get("expectedCheckpointAssetPaths")
+        if (plan_result.get("ok") is not True or plan_result.get("preview") is not True
+                or plan.get("action") != expected_action
+                or not isinstance(paths, list) or not paths
+                or expected_paths != paths):
+            return {"ok": False, "blocking": True, "code": "checkpoint_scope_unresolved",
+                    "error": "The approved primitive plan did not reproduce its sealed checkpoint asset footprint.",
+                    "mutationStarted": False, "saved": False}
+        return prepare_planned_asset_checkpoint(
+            project_root, paths, prepare=prepare_unity_checkpoint_sync,
+        )
     if checkpoint_target in {"vrcforge_create_wardrobe", "vrcforge_add_wardrobe_outfit"}:
         from unity_wardrobe_checkpoint import prepare_wardrobe_checkpoint
 
@@ -21248,35 +21299,157 @@ def prepare_authoritative_unity_checkpoint_sync(
         return {"ok": True, "projectPath": str(project_root),
                 "mode": "read_only_authoritative_revalidation", "canonicalRevalidated": True,
                 "archiveAssetPaths": [scene_path], "archiveScopeReason": "revalidated_native_component_scene_only"}
+    if checkpoint_target == "vrcforge_toggle_scene_object":
+        target = ensure_dict(arguments.get("executionTarget"))
+        obj = ensure_dict(target.get("object"))
+        scene_path = ensure_dict(target.get("scene")).get("assetPath")
+        project = ensure_dict(target.get("project"))
+        object_path = str(arguments.get("object_path") or arguments.get("objectPath") or "")
+        if (target.get("schema") != "vrcforge.execution_target.v1"
+                or target.get("scope") not in {"object", "avatar"}
+                or target.get("ambiguous") is True or target.get("resolutionCandidateCount") != 1
+                or not obj.get("globalObjectId") or object_path != obj.get("exactHierarchyPath")
+                or Path(str(project.get("root") or "")).resolve() != project_root.resolve()
+                or not isinstance(scene_path, str) or not scene_path.startswith("Assets/")
+                or not scene_path.lower().endswith(".unity") or "\\" in scene_path
+                or any(part in {"", ".", ".."} for part in scene_path.split("/"))):
+            return {"ok": False, "blocking": True, "code": "checkpoint_scope_unresolved",
+                    "error": "The approved visibility write did not establish one exact scene target."}
+        query = {"projectPath": str(project_root), "scope": target["scope"],
+                 "objectGlobalObjectId": obj["globalObjectId"]}
+        if ensure_dict(target.get("avatar")).get("globalObjectId"):
+            query["avatarGlobalObjectId"] = target["avatar"]["globalObjectId"]
+        live = list_execution_targets_sync(query)
+        if live.get("ok") is not True or live.get("targets") != [target]:
+            return {"ok": False, "blocking": True, "code": "checkpoint_scope_unresolved",
+                    "error": "The approved visibility target changed before checkpointing."}
+        return {"ok": True, "projectPath": str(project_root),
+                "mode": "read_only_authoritative_revalidation", "canonicalRevalidated": True,
+                "archiveAssetPaths": [scene_path], "archiveScopeReason": "revalidated_visibility_scene_only"}
     if checkpoint_target == "vrcforge_manage_expression_menu":
         preview = manage_expression_menu_sync(arguments, preview=True)
         plan = ensure_dict(preview.get("plan"))
-        paths = plan.get("checkpointAssetPaths")
-        if preview.get("ok") is not True or not isinstance(paths, list) or not paths or any(not isinstance(path, str) for path in paths):
-            return {"ok": False, "error": "The menu preview did not provide its exact checkpoint asset footprint."}
-        prepared = prepare_unity_checkpoint_sync(project_root, paths, checkpoint_files=paths)
-        baseline = prepared.get("assetBaseline")
-        if (prepared.get("ok") is not True or not isinstance(baseline, list)
-                or any(not isinstance(item, dict) for item in baseline)
-                or [item.get("assetPath") for item in baseline] != paths):
-            return {**prepared, "ok": False, "error": "Unity did not capture the exact approved menu asset baseline."}
-        prepared["assetBaselineRequired"] = True
-        request = _avatar_primitive_request(arguments, preview=True)
-        if (
-            plan.get("action") in {"update", "delete", "reorder"}
-            and plan.get("targetMenuExists") is True
-            and paths == [plan.get("targetMenuAssetPath")]
-            and plan.get("newMenuAssetPaths") == []
-            and not any(key in request for key in ("createSubMenu", "subMenuAssetPath", "iconAssetPath"))
-        ):
-            # Only the authoritative server preview can offer a smaller scope.
-            # The checkpoint owner still validates the files and adds metadata.
-            prepared["archiveAssetPaths"] = list(paths)
-            prepared["archiveScopeReason"] = "existing_menu_asset_only"
-        else:
-            prepared["archiveScopeReason"] = "full_project_menu_scope_not_proven"
-        return prepared
+        if "expectedPlanAssetPaths" not in arguments:
+            # Preserve the read-only checkpoint helper contract used by callers
+            # that do not own approval preparation. Registered writes always
+            # arrive with the sealed plan path list from the request preparer.
+            paths = plan.get("checkpointAssetPaths")
+            if preview.get("ok") is not True or not isinstance(paths, list) or not paths:
+                return {"ok": False, "error": "The menu preview did not provide its exact checkpoint asset footprint."}
+            prepared = prepare_unity_checkpoint_sync(project_root, paths, checkpoint_files=paths)
+            baseline = prepared.get("assetBaseline")
+            if (prepared.get("ok") is not True or not isinstance(baseline, list)
+                    or any(not isinstance(item, dict) for item in baseline)
+                    or [item.get("assetPath") for item in baseline] != paths):
+                return {**prepared, "ok": False, "error": "Unity did not capture the exact approved menu asset baseline."}
+            prepared["assetBaselineRequired"] = True
+            request = _avatar_primitive_request(arguments, preview=True)
+            if (plan.get("action") in {"update", "delete", "reorder"}
+                    and plan.get("targetMenuExists") is True
+                    and paths == [plan.get("targetMenuAssetPath")]
+                    and plan.get("newMenuAssetPaths") == []
+                    and not any(key in request for key in ("createSubMenu", "subMenuAssetPath", "iconAssetPath"))):
+                prepared["archiveAssetPaths"] = list(paths)
+                prepared["archiveScopeReason"] = "existing_menu_asset_only"
+            else:
+                prepared["archiveScopeReason"] = "full_project_menu_scope_not_proven"
+            return prepared
+        try:
+            paths = _expression_menu_plan_paths(plan)
+        except ValueError as exc:
+            return {"ok": False, "blocking": True, "code": "checkpoint_scope_unresolved",
+                    "error": str(exc), "mutationStarted": False, "saved": False}
+        if (preview.get("ok") is not True or preview.get("preview") is not True
+                or arguments.get("expectedPlanAssetPaths") != paths):
+            return {"ok": False, "blocking": True, "code": "checkpoint_scope_unresolved",
+                    "error": "The approved menu plan did not reproduce its sealed asset paths.",
+                    "mutationStarted": False, "saved": False}
+        from unity_planned_checkpoint import prepare_planned_asset_checkpoint
+
+        return prepare_planned_asset_checkpoint(
+            project_root, paths, prepare=prepare_unity_checkpoint_sync,
+        )
     nested_tool = str(arguments.get("toolName") or arguments.get("tool_name") or "").strip()
+
+    if checkpoint_target in {"vrcforge_import_chat_image", "vrcforge_import_chat_archive"}:
+        from prepared_unity_execution import prepared_evidence
+
+        evidence = prepared_evidence(arguments)
+        if checkpoint_target == "vrcforge_import_chat_archive" and ensure_dict(evidence).get("branch") == "unitypackage":
+            nested_evidence = ensure_dict(evidence).get("outfitEvidence")
+            if not isinstance(nested_evidence, dict):
+                return {"ok": False, "blocking": True, "code": "checkpoint_scope_unresolved",
+                        "error": "The sealed UnityPackage import has no nested import plan."}
+            queue = nested_evidence.get("queue")
+            payload_hash = str(ensure_dict(evidence).get("payloadHash") or "")
+            target_hashes = [str(ensure_dict(ensure_dict(item).get("identity")).get("sha256") or "")
+                             for item in (queue if isinstance(queue, list) else [])
+                             if ensure_dict(item).get("role") == "target"]
+            if target_hashes != [payload_hash]:
+                return {"ok": False, "blocking": True, "code": "checkpoint_scope_unresolved",
+                        "error": "The sealed chat archive identity differs from its nested import plan."}
+            nested = {key: value for key, value in arguments.items()
+                      if key != PREPARED_UNITY_EXECUTION_ARGUMENT_KEY}
+            nested = install_prepared_calls(nested, build_prepared_execution_plan(arguments), nested_evidence)
+            from unity_import_checkpoint import prepare_import_asset_checkpoint
+
+            return prepare_import_asset_checkpoint(
+                project_root, nested, verify_project=_verify_prepared_import_project_identity,
+                prepare=prepare_unity_checkpoint_sync,
+            )
+        return {"ok": False, "blocking": True, "code": "checkpoint_scope_unresolved",
+                "error": "This chat import cannot proceed until its writer returns a persisted, identity-checked receipt that passes the created-asset gate.",
+                "mutationStarted": False, "saved": False}
+
+    if checkpoint_target in {
+        "vrcforge_apply_clothing_fx", "vrcforge_apply_parameter_optimization",
+        "vrcforge_install_user_unity_tools", "vrcforge_invoke_user_unity_tool",
+    }:
+        # Core or extension callbacks can author assets beyond a deterministic
+        # file list; retain the established project snapshot checkpoint.
+        request_project = str(arguments.get("projectPath") or arguments.get("project_path") or "").strip()
+        if not request_project or Path(request_project).resolve() != project_root.resolve():
+            return {"ok": False, "blocking": True, "code": "checkpoint_scope_unresolved",
+                    "error": "The approved write did not revalidate one exact Unity project root.",
+                    "mutationStarted": False, "saved": False}
+        try:
+            if checkpoint_target in {"vrcforge_apply_clothing_fx", "vrcforge_apply_parameter_optimization"}:
+                expected = ("vrc_apply_clothing_fx" if checkpoint_target == "vrcforge_apply_clothing_fx"
+                            else "vrc_apply_parameter_optimization")
+                calls = build_tuning_execution_plan(checkpoint_target, arguments)
+                if len(calls) != 1 or calls[0][0] != expected:
+                    raise ValueError("The approved tuning plan changed before checkpointing.")
+            elif checkpoint_target == "vrcforge_install_user_unity_tools":
+                refreshed, _ = prepare_install(
+                    arguments, None,
+                    UserUnityToolService(skill_package_service(), core_tree_identity=_unity_core_tree_identity),
+                )
+                if refreshed != arguments:
+                    raise ValueError("The approved user-tool package plan changed before checkpointing.")
+            else:
+                calls = user_tool_execution_plan(arguments)
+                if len(calls) != 1 or calls[0][0] != "vrc_invoke_user_tool":
+                    raise ValueError("The approved user-tool invocation plan is invalid.")
+        except (AgentGatewayError, RuntimeError, TypeError, ValueError) as exc:
+            return {"ok": False, "blocking": True, "code": "checkpoint_scope_unresolved",
+                    "error": str(exc), "mutationStarted": False, "saved": False}
+        return prepare_unity_checkpoint_sync(project_root, checkpoint_files=None)
+
+    if checkpoint_target == "vrcforge_write_animation_curve":
+        from unity_planned_checkpoint import prepare_planned_asset_checkpoint
+
+        preview = ensure_dict(write_animation_curve_sync(arguments, preview=True))
+        plan = ensure_dict(preview.get("plan"))
+        path = plan.get("clipPath")
+        if (preview.get("ok") is not True or preview.get("preview") is not True
+                or not isinstance(path, str) or not path.startswith("Assets/")
+                or plan.get("action") not in {"set_curve", "delete_curve", "retarget_curve"}):
+            return {"ok": False, "blocking": True, "code": "checkpoint_scope_unresolved",
+                    "error": "The approved curve plan did not identify one exact clip asset.",
+                    "mutationStarted": False, "saved": False}
+        return prepare_planned_asset_checkpoint(
+            project_root, [path], prepare=prepare_unity_checkpoint_sync,
+        )
     if not nested_tool and PREPARED_UNITY_EXECUTION_ARGUMENT_KEY in arguments:
         # Shader tuning wrappers seal the real Core calls instead of exposing a
         # top-level toolName. Validate the sealed material call so the
@@ -22365,6 +22538,52 @@ def ensure_animator_state_sync(params: dict[str, Any], preview: bool = False) ->
     return payload
 
 
+def prepare_ensure_primitive_request(arguments: dict[str, Any], caller_preview: Any, *,
+                                     build_request: Callable[[dict[str, Any], bool], dict[str, Any]],
+                                     preview_core: Callable[..., dict[str, Any]], expected_action: str):
+    """Seal the Core-owned asset plan into a standalone ensure approval."""
+    prepared = copy.deepcopy(arguments or {})
+    caller_scope = prepared.pop("expectedCheckpointAssetPaths", None)
+    request = build_request(prepared, True)
+    preview = ensure_dict(preview_core({**prepared, **request}, preview=True))
+    plan = ensure_dict(preview.get("plan"))
+    paths = plan.get("checkpointAssetPaths")
+    if (preview.get("ok") is not True or preview.get("preview") is not True
+            or plan.get("action") != expected_action or not isinstance(paths, list) or not paths
+            or any(not isinstance(path, str) for path in paths)):
+        raise AgentGatewayError("The Core did not return an exact preview asset footprint for approval.", status_code=409)
+    if caller_scope is not None and caller_scope != paths:
+        raise AgentGatewayError("The expected checkpoint assets differ from the authoritative Core plan.", status_code=409)
+    prepared["expectedCheckpointAssetPaths"] = list(paths)
+    return prepared, caller_preview
+
+
+def _expression_menu_plan_paths(plan: dict[str, Any]) -> list[str]:
+    paths = plan.get("plannedAssetPaths")
+    if (not isinstance(paths, list) or not paths
+            or any(not isinstance(path, str) or not path.startswith("Assets/") for path in paths)):
+        raise ValueError("The expression-menu plan omitted its exact planned asset paths.")
+    return sorted(set(paths))
+
+
+def prepare_expression_menu_request(arguments: dict[str, Any], caller_preview: Any):
+    """Bind menu execution to the exact Core root, owner and create outputs."""
+    prepared = copy.deepcopy(arguments or {})
+    caller_scope = prepared.pop("expectedPlanAssetPaths", None)
+    preview = ensure_dict(manage_expression_menu_sync(prepared, preview=True))
+    plan = ensure_dict(preview.get("plan"))
+    if preview.get("ok") is not True or preview.get("preview") is not True:
+        raise AgentGatewayError("The Core did not return an expression-menu plan for approval.", status_code=409)
+    try:
+        paths = _expression_menu_plan_paths(plan)
+    except ValueError as exc:
+        raise AgentGatewayError(str(exc), status_code=409) from exc
+    if not paths or caller_scope is not None and caller_scope != paths:
+        raise AgentGatewayError("The expected menu assets differ from the authoritative Core plan.", status_code=409)
+    prepared["expectedPlanAssetPaths"] = paths
+    return prepared, caller_preview
+
+
 def _copy_if_present(source: dict[str, Any], target: dict[str, Any], *keys: str, out: str | None = None) -> None:
     for key in keys:
         if key in source:
@@ -22432,6 +22651,7 @@ def _avatar_primitive_request(params: dict[str, Any], preview: bool | None = Non
         "speed",
         "expectedSpeed",
         "expectedStateDigest",
+        "expectedPlanAssetPaths",
         "timeParameterActive",
         "timeParameter",
         "viewPosition",
@@ -27469,18 +27689,30 @@ def register_agent_gateway_tools() -> None:
         "Create or update an avatar expression parameter through VRCForge.",
         "medium",
         lambda params: ensure_expression_parameter_sync(params, preview=False),
+        request_preparer=lambda values, caller_preview: prepare_ensure_primitive_request(
+            values, caller_preview, build_request=build_ensure_expression_parameter_request,
+            preview_core=ensure_expression_parameter_sync, expected_action="ensure_expression_parameter",
+        ),
     )
     register_write_handler(
         "vrcforge_ensure_expression_menu_control",
         "Create or update an avatar expression menu control through VRCForge.",
         "medium",
         lambda params: ensure_expression_menu_control_sync(params, preview=False),
+        request_preparer=lambda values, caller_preview: prepare_ensure_primitive_request(
+            values, caller_preview, build_request=build_ensure_expression_menu_control_request,
+            preview_core=ensure_expression_menu_control_sync, expected_action="ensure_expression_menu_control",
+        ),
     )
     register_write_handler(
         "vrcforge_ensure_animator_state",
         "Create or update an FX animator layer/state/transition through VRCForge.",
         "high",
         lambda params: ensure_animator_state_sync(params, preview=False),
+        request_preparer=lambda values, caller_preview: prepare_ensure_primitive_request(
+            values, caller_preview, build_request=build_ensure_animator_state_request,
+            preview_core=ensure_animator_state_sync, expected_action="ensure_animator_state",
+        ),
     )
     register_write_handler(
         "vrcforge_write_avatar_descriptor",
@@ -27509,6 +27741,7 @@ def register_agent_gateway_tools() -> None:
         "Create, update, delete, or reorder expression menu controls through VRCForge.",
         "high",
         lambda params: manage_expression_menu_sync(params, preview=False),
+        request_preparer=prepare_expression_menu_request,
     )
     register_write_handler(
         "vrcforge_manage_fx_animator",

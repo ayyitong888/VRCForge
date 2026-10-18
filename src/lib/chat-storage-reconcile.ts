@@ -27,6 +27,22 @@ export function chatDigestsFromPayload(
   return Object.fromEntries(chats.map((chat) => [chat.id, value[chat.id]]));
 }
 
+export function chatMetadataShapesFromPayload(
+  value: Record<string, Record<string, unknown>> | undefined,
+  chats: ReadonlyArray<{ id: string }>,
+): Record<string, Record<string, unknown>> | undefined {
+  if (value === undefined) return undefined;
+  const isShape = (shape: unknown): shape is Record<string, unknown> => (
+    !!shape && typeof shape === "object" && !Array.isArray(shape)
+      && Object.values(shape).every((child) => child === true || isShape(child))
+  );
+  if (!value || typeof value !== "object" || Array.isArray(value)
+    || !chats.every((chat) => Object.prototype.hasOwnProperty.call(value, chat.id) && isShape(value[chat.id]))) {
+    throw new Error("Chat storage returned invalid chat metadata shape.");
+  }
+  return Object.fromEntries(chats.map((chat) => [chat.id, value[chat.id]]));
+}
+
 export function sourceRevisionsFromPayload(
   sources: Array<ChatSourceRevision & Record<string, unknown>> | undefined,
 ): ChatSourceRevision[] {

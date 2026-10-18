@@ -101,6 +101,13 @@ const RUNTIME_FAILURE_MESSAGE_KEYS: Record<string, string> = {
   provider_request_failed: "chat.runtimeTerminal.providerRequestFailedMessage",
 };
 
+// Older runtime transcripts use nextStep as the terminal assistant status.
+// Public commentary remains governed by its explicit phase.
+const FINAL_ASSISTANT_STATUSES = new Set([
+  "done", "final", "completed", "failed", "error", "cancelled", "canceled",
+  "tool_failed", "needs_user_action", "planner_failed", "loop_suppressed", "paused", "context_compaction_required",
+]);
+
 const ASSISTANT_PHASES = new Set(["commentary", "final_answer"] as const);
 
 function assistantPhase(value: unknown): "commentary" | "final_answer" | undefined {
@@ -114,7 +121,7 @@ export function isFinalAssistantTimelineEvent(event: ChatTimelineEvent): boolean
   if (event.payload?.status === "completion_unverified") return false;
   const phase = assistantPhase(event.payload?.phase);
   if (phase) return phase === "final_answer";
-  return ["done", "final", "completed", "failed", "error", "cancelled", "canceled"].includes(String(event.payload?.status || "").toLowerCase());
+  return FINAL_ASSISTANT_STATUSES.has(String(event.payload?.status || "").toLowerCase());
 }
 
 export function isFinalAssistantPresentationEntry(
@@ -123,7 +130,7 @@ export function isFinalAssistantPresentationEntry(
   if (entry.type !== "assistant") return false;
   if (entry.status === "completion_unverified") return false;
   if (entry.phase) return entry.phase === "final_answer";
-  return ["done", "final", "completed", "failed", "error", "cancelled", "canceled"].includes(entry.status.toLowerCase());
+  return FINAL_ASSISTANT_STATUSES.has(entry.status.toLowerCase());
 }
 
 /** Resolve an explicit terminal label from structured Runtime state, never assistant prose. */
