@@ -22,6 +22,7 @@ from native_request_composition import copy_native_request
 
 
 _MAX_IMAGE_BYTES = 1024 * 1024
+_MAX_IMAGE_COUNT = 4
 _MAX_IMAGE_EDGE = 1024
 _MAX_BASE64_CHARS = ((_MAX_IMAGE_BYTES + 2) // 3) * 4
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -42,15 +43,17 @@ def collect_tool_images(
     resource_reader: Callable[[Mapping[str, Any], str], Mapping[str, Any]] | None,
     project_path: str,
 ) -> list[dict[str, Any]]:
-    """Return model content for the newest successful tool image, if present.
+    """Keep bounded recent image observations together across tool steps.
 
-    Only current runtime steps are examined. This function never reads a path
-    or fetches a URI itself; preview reads go through the injected
-    session/project-scoped Resource reader.
+    Only current runtime steps are examined. No paths or URLs are opened here;
+    preview reads use the injected session/project-scoped Resource reader.
+    A newer revision replaces the same Resource's older image, while different
+    observations remain visible together in chronological order.
     """
-
     if not isinstance(loop_state, Sequence) or isinstance(loop_state, (str, bytes)):
         return []
+    observations: list[list[dict[str, Any]]] = []
+    seen: set[tuple[str, str]] = set()
     for step in reversed(loop_state):
         if not isinstance(step, Mapping) or not _step_succeeded(step):
             continue
@@ -58,28 +61,45 @@ def collect_tool_images(
         result = step.get("result")
         if not isinstance(result, Mapping):
             continue
-
-        image = _first_image_content(result.get("content"))
-        if image is not None:
-            try:
-                data, mime, digest = _decode_image_content(image)
-            except ValueError:
-                return _unavailable_content(step, "MCP ImageContent failed MIME, size, hash, or dimensions validation.")
-            return _provider_content(step, data, mime, digest, _source_uri(image.get("uri")))
-
+        raw_content = result.get("content")
+        candidates = [("image", item) for item in raw_content
+                      if isinstance(item, Mapping) and item.get("type") == "image"] if isinstance(raw_content, list) else []
         preview = result.get("preview")
         if tool_name == "vrcforge_get_asset_info" and isinstance(preview, Mapping):
-            return _collect_preview(step, preview, resource_reader, project_path, "vrcforge.texture_asset_preview.v1")
+            candidates.append(("vrcforge.texture_asset_preview.v1", preview))
         if tool_name == "vrcforge_capture_screenshot" and isinstance(preview, Mapping):
-            return _collect_preview(step, preview, resource_reader, project_path, "vrcforge.scene_capture_preview.v1")
-        if tool_name == "vrcforge_capture_multi_screenshot":
-            captures = result.get("captures")
-            if isinstance(captures, list):
-                for capture in reversed(captures):
-                    candidate = capture.get("preview") if isinstance(capture, Mapping) else None
-                    if isinstance(candidate, Mapping):
-                        return _collect_preview(step, candidate, resource_reader, project_path, "vrcforge.scene_capture_preview.v1")
-    return []
+            candidates.append(("vrcforge.scene_capture_preview.v1", preview))
+        if tool_name == "vrcforge_capture_multi_screenshot" and isinstance(result.get("captures"), list):
+            candidates.extend(("vrcforge.scene_capture_preview.v1", capture["preview"])
+                              for capture in result["captures"]
+                              if isinstance(capture, Mapping) and isinstance(capture.get("preview"), Mapping))
+        for kind, candidate in reversed(candidates):
+            uri = _source_uri(candidate.get("uri") if kind == "image" else candidate.get("resourceUri"))
+            encoded = candidate.get("data")
+            if uri:
+                identity = ("resource", uri.partition("?")[0])
+            elif kind == "image" and isinstance(encoded, str) and len(encoded) <= _MAX_BASE64_CHARS:
+                identity = ("content", hashlib.sha256(encoded.encode("utf-8")).hexdigest())
+            else:
+                identity = ("unavailable", str(id(candidate)))
+            if identity in seen:
+                continue
+            # A failed latest observation must not silently fall back to an
+            # older revision of the same Resource.
+            seen.add(identity)
+            if kind == "image":
+                try:
+                    data, mime, digest = _decode_image_content(candidate)
+                    content = _provider_content(step, data, mime, digest, uri)
+                except ValueError:
+                    content = _unavailable_content(step, "MCP ImageContent failed MIME, size, hash, or dimensions validation.")
+            else:
+                content = _collect_preview(step, candidate, resource_reader, project_path, kind)
+            observations.append(content)
+            if len(observations) == _MAX_IMAGE_COUNT:
+                return [part for observation in reversed(observations) for part in observation]
+    return [part for observation in reversed(observations) for part in observation]
+
 
 
 def bind_tool_images(
@@ -126,14 +146,6 @@ def _step_succeeded(step: Mapping[str, Any]) -> bool:
         return False
     return bool(statuses & _SUCCESS_STATUSES or isinstance(result, Mapping) and result.get("ok") is True)
 
-
-def _first_image_content(value: Any) -> Mapping[str, Any] | None:
-    if not isinstance(value, list):
-        return None
-    for item in value:
-        if isinstance(item, Mapping) and item.get("type") == "image":
-            return item
-    return None
 
 
 def _collect_preview(

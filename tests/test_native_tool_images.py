@@ -36,7 +36,7 @@ def _successful_step(tool, result, *, action_id="action-1"):
     }
 
 
-def test_collects_latest_mcp_image_content_as_typed_provider_content():
+def test_retains_distinct_recent_mcp_images_as_typed_provider_content():
     older = _png(color=(0, 0, 0, 255))
     latest = _png(color=(255, 0, 0, 255))
     steps = [
@@ -46,13 +46,15 @@ def test_collects_latest_mcp_image_content_as_typed_provider_content():
 
     content = collect_tool_images(steps, resource_reader=None, project_path="D:/Project")
 
-    assert len(content) == 2
-    assert content[0]["type"] == "text"
-    assert "capture_latest" in content[0]["text"]
-    assert "latest" in content[0]["text"]
+    assert len(content) == 4
+    assert "capture_old" in content[0]["text"]
+    assert content[1]["image_url"]["url"].endswith(base64.b64encode(older).decode("ascii"))
+    assert content[2]["type"] == "text"
+    assert "capture_latest" in content[2]["text"]
+    assert "latest" in content[2]["text"]
     digest = hashlib.sha256(latest).hexdigest()
-    assert digest in content[0]["text"]
-    assert content[1] == {
+    assert digest in content[2]["text"]
+    assert content[3] == {
         "type": "image_url",
         "image_url": {"url": "data:image/png;base64," + base64.b64encode(latest).decode("ascii")},
     }
@@ -167,7 +169,7 @@ def test_single_screenshot_preview_uses_only_exact_tool_and_verified_resource():
     assert content[1]["image_url"]["url"] == "data:image/png;base64," + base64.b64encode(png).decode("ascii")
 
 
-def test_multi_screenshot_uses_latest_capture_preview_only():
+def test_multi_screenshot_keeps_distinct_angles_together():
     old_png = _png(color=(0, 0, 0, 255))
     latest_png = _png(color=(250, 120, 30, 255))
     old_preview = _capture_preview("vrcforge://scene-capture/old?revision=1", old_png)
@@ -192,9 +194,11 @@ def test_multi_screenshot_uses_latest_capture_preview_only():
         "D:/Project",
     )
 
-    assert calls == [latest_preview["resourceUri"]]
-    assert latest_preview["resourceUri"] in content[0]["text"]
-    assert content[1]["image_url"]["url"] == "data:image/png;base64," + base64.b64encode(latest_png).decode("ascii")
+    assert calls == [latest_preview["resourceUri"], old_preview["resourceUri"]]
+    assert old_preview["resourceUri"] in content[0]["text"]
+    assert content[1]["image_url"]["url"].endswith(base64.b64encode(old_png).decode("ascii"))
+    assert latest_preview["resourceUri"] in content[2]["text"]
+    assert content[3]["image_url"]["url"] == "data:image/png;base64," + base64.b64encode(latest_png).decode("ascii")
 
 
 def test_capture_preview_rejects_wrong_schema_and_resource_hash():
