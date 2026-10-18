@@ -24685,11 +24685,28 @@ from editor_state_completion import (
     fresh_play_mode_readback_arguments,
     verified_editor_receipt,
 )
-from execution_target import ExecutionTargetError
+from execution_target import ExecutionTargetError, is_execution_target_reference
 
 
 GESTURE_MANAGER_ENTER_PLAY_MODE_TIMEOUT_SECONDS = 45.0
 GESTURE_MANAGER_ENTER_PLAY_MODE_POLL_SECONDS = 0.25
+
+
+def prepare_play_mode_transition_request(
+    params: dict[str, Any], caller_preview: Any, *, required_scope: str,
+) -> tuple[dict[str, Any], Any]:
+    """Retain the pre-transition identity while its session reference is valid."""
+    prepared = copy.deepcopy(params or {})
+    target = prepared.get("executionTarget")
+    if is_execution_target_reference(target):
+        project_root = str(
+            prepared.get("projectPath") or prepared.get("projectRoot")
+            or prepared.get("project_path") or prepared.get("project_root") or ""
+        ).strip()
+        prepared["executionTarget"] = AGENT_GATEWAY.resolve_execution_target_reference(
+            target, project_root=project_root, required_scope=required_scope,
+        )
+    return prepared, caller_preview
 
 
 def gesture_manager_enter_play_mode_sync(params: dict[str, Any]) -> dict[str, Any]:
@@ -27355,6 +27372,9 @@ def register_agent_gateway_tools() -> None:
         "When to use: with exactly one active Gesture Manager, enter Play Mode through Gesture Manager 3.9.9's public editor/runtime path and return the connected manager/avatar identity. Project Play callbacks may save or generate assets; this transition does not claim asset rollback. When NOT to use: do not use generic Play Mode as a substitute, do not create another manager, and do not use this to change runtime parameters. Negative example: do not call it when two active Gesture Managers are present and guess which one should control the avatar.",
         "low",
         gesture_manager_enter_play_mode_sync,
+        request_preparer=lambda args, preview: prepare_play_mode_transition_request(
+            args, preview, required_scope="avatar",
+        ),
         verification_finalize_handler=gesture_manager_enter_play_mode_finalize,
         pre_write_checkpoint_required=False,
     )
@@ -27376,6 +27396,9 @@ def register_agent_gateway_tools() -> None:
         "When to use: request one explicit Unity Play Mode state, then poll capture/status until the requested state is observed. Project Play callbacks may save or generate assets; the inverse transition does not undo those writes. When NOT to use: do not treat transition_scheduled as final verification and do not use it while Unity is compiling or updating. Negative example: do not repeatedly toggle Play Mode when one pending transition has not completed.",
         "low",
         set_play_mode_sync,
+        request_preparer=lambda args, preview: prepare_play_mode_transition_request(
+            args, preview, required_scope="project",
+        ),
         verification_finalize_handler=set_play_mode_finalize,
         pre_write_checkpoint_required=False,
     )
