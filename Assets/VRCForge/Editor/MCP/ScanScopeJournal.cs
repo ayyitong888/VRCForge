@@ -184,7 +184,11 @@ namespace VRCForge.Editor
 
         private static string MemoryHash(Object target)
         {
-            var text = EditorJsonUtility.ToJson(target);
+            // Material inventory reports texture metadata; disk fingerprints
+            // cover asset contents. Serializing pixel buffers is unbounded and
+            // adds data which that reader does not observe.
+            var text = target is Texture texture
+                ? TextureObservation(texture).ToString(Formatting.None) : EditorJsonUtility.ToJson(target);
             // Material inventory observes mesh names and assignments, not mesh
             // vertex buffers. Keep name changes visible on their owning slot.
             var mesh = target is SkinnedMeshRenderer skinned ? skinned.sharedMesh
@@ -204,8 +208,24 @@ namespace VRCForge.Editor
                             .Select(key => new JObject { ["time"] = key.time, ["object"] = key.value == null ? "" : Identity(key.value) })) });
                 text += curves.ToString(Formatting.None);
             }
-            if (Encoding.UTF8.GetByteCount(text) > MaxStateBytes) throw new InvalidDataException("object_too_large");
+            if (Encoding.UTF8.GetByteCount(text) > MaxStateBytes)
+            {
+                var failure = new InvalidDataException("object_too_large");
+                failure.Data["objectType"] = target.GetType().FullName;
+                failure.Data["propertyPath"] = "serialized_object";
+                throw failure;
+            }
             return Hash(text);
+        }
+
+        internal static JObject TextureObservation(Texture texture)
+        {
+            var path = AssetDatabase.GetAssetPath(texture) ?? "";
+            var importer = string.IsNullOrWhiteSpace(path) ? null : AssetImporter.GetAtPath(path) as TextureImporter;
+            return new JObject { ["name"] = texture.name, ["width"] = texture.width, ["height"] = texture.height,
+                ["bytes"] = UnityEngine.Profiling.Profiler.GetRuntimeMemorySizeLong(texture),
+                ["assetPath"] = path, ["importerType"] = importer == null ? "" : importer.textureType.ToString(),
+                ["importerMaxTextureSize"] = importer == null ? 0 : importer.maxTextureSize };
         }
 
         private static bool AssetPath(string path)
@@ -238,9 +258,16 @@ namespace VRCForge.Editor
         {
             if (owner is Renderer) return propertyPath.StartsWith("m_Materials", StringComparison.Ordinal) || propertyPath == "m_Mesh";
             if (owner is MeshFilter) return propertyPath == "m_Mesh";
-            if (owner is Material) return propertyPath == "m_Shader" || propertyPath == "m_Parent"
-                || (includeTextures && propertyPath.StartsWith("m_SavedProperties.m_TexEnvs", StringComparison.Ordinal));
+            if (owner is Material) return propertyPath == "m_Shader" || propertyPath == "m_Parent";
             return false;
+        }
+
+        internal static IEnumerable<Texture> MaterialTextureDependencies(Material material, bool includeTextures)
+        {
+            if (material == null || !includeTextures) return Enumerable.Empty<Texture>();
+            // Match the inventory reader. Serialized TexEnv slots may retain
+            // missing references which GetTexture does not report as textures.
+            return material.GetTexturePropertyNames().Select(material.GetTexture).Where(texture => texture != null);
         }
 
         private static Scope Measure(string[] roots, JObject selector)
@@ -291,6 +318,8 @@ namespace VRCForge.Editor
                     }
                     foreach (Transform child in gameObject.transform) pending.Enqueue(child.gameObject);
                 }
+                if (materialScope && target is Material material)
+                    foreach (var texture in MaterialTextureDependencies(material, includeTextures)) pending.Enqueue(texture);
                 using (var serialized = new SerializedObject(target))
                 {
                     var property = serialized.GetIterator();
