@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Iterator
+from checkpoint_asset_footprint import checkpoint_restore_file_scope
 
 from agent_command_safety import (
     is_path_within,
@@ -1538,7 +1539,7 @@ class AgentCheckpointRecoveryService:
                 )
             pre_restore_probe = self._invoke_restore_prepare(
                 Path(str(checkpoint.get("projectRoot") or "")),
-                checkpoint_files=ensure_string_list(checkpoint.get("archiveFiles")) or None,
+                checkpoint_files=checkpoint_restore_file_scope(checkpoint),
                 capture_evidence_only=True,
                 request_id=request_id,
                 phase="prepare_restore",
@@ -1551,7 +1552,7 @@ class AgentCheckpointRecoveryService:
             recovery = record_unity_recovery_evidence(self, checkpoint, pre_restore_probe) or recovery
             prepared = self._invoke_restore_prepare(
                 Path(str(checkpoint.get("projectRoot") or "")),
-                checkpoint_files=ensure_string_list(checkpoint.get("archiveFiles")) or None,
+                checkpoint_files=checkpoint_restore_file_scope(checkpoint),
                 request_id=request_id,
                 phase="prepare_restore",
             )
@@ -1559,7 +1560,7 @@ class AgentCheckpointRecoveryService:
             if not prepared.get("ok"):
                 probe_before = self._invoke_restore_prepare(
                     Path(str(checkpoint.get("projectRoot") or "")),
-                    checkpoint_files=ensure_string_list(checkpoint.get("archiveFiles")) or None,
+                    checkpoint_files=checkpoint_restore_file_scope(checkpoint),
                     capture_evidence_only=True,
                     request_id=request_id,
                     phase="prepare_restore",
@@ -1596,7 +1597,7 @@ class AgentCheckpointRecoveryService:
             if not recovery_update.get("ok"):
                 post_backup_probe = self._invoke_restore_prepare(
                     Path(str(checkpoint.get("projectRoot") or "")),
-                    checkpoint_files=ensure_string_list(checkpoint.get("archiveFiles")) or None,
+                    checkpoint_files=checkpoint_restore_file_scope(checkpoint),
                     capture_evidence_only=True,
                     request_id=request_id,
                     phase="safety_backup",
@@ -1646,11 +1647,21 @@ class AgentCheckpointRecoveryService:
                 restore_params,
                 internal_restore_prepare=prepared_for_restore,
             )
+        safety = recovery_update.get("safetyBackup") if recovery_safety_required and recovery else None
+        if isinstance(safety, dict):
+            from checkpoint_asset_footprint import is_asset_footprint, capture_created_asset_post_state
+            if is_asset_footprint(safety):
+                try:
+                    self._append_checkpoint(capture_created_asset_post_state(
+                        Path(str(safety["projectRoot"])), safety))
+                except (OSError, ValueError, TypeError) as exc:
+                    result = {**result, "ok": False, "error": f"Restore safety witness capture failed: {exc}",
+                              "status": "restore_safety_witness_failed", "safetyBackup": safety}
         if not result.get("ok"):
             failure_phase = "reload" if str(result.get("status") or "").endswith("reload_failed") else "archive"
             post_restore_probe = self._invoke_restore_prepare(
                 Path(str(checkpoint.get("projectRoot") or "")),
-                checkpoint_files=ensure_string_list(checkpoint.get("archiveFiles")) or None,
+                checkpoint_files=checkpoint_restore_file_scope(checkpoint),
                 capture_evidence_only=True,
                 request_id=request_id,
                 phase=failure_phase,
@@ -1738,10 +1749,18 @@ class AgentCheckpointRecoveryService:
         else:
             # Persisted archiveFiles already includes each asset's .meta file.
             # Recovery must preserve that exact scope, including on failure.
-            exact_files = ensure_string_list(checkpoint.get("archiveFiles"))
-            backup = self._create_archive_checkpoint(
-                project_root, backup_record, exact_files=exact_files or None,
-            )
+            from checkpoint_asset_footprint import is_asset_footprint, asset_footprint_safety_record
+            if is_asset_footprint(checkpoint):
+                try:
+                    backup_record = asset_footprint_safety_record(project_root, checkpoint, backup_record)
+                    backup = self._create_archive_checkpoint(project_root, backup_record)
+                except (OSError, ValueError, TypeError) as exc:
+                    backup = {"ok": False, "error": str(exc)}
+            else:
+                exact_files = ensure_string_list(checkpoint.get("archiveFiles"))
+                backup = self._create_archive_checkpoint(
+                    project_root, backup_record, exact_files=exact_files or None,
+                )
         if not backup.get("ok"):
             return {
                 "ok": False,
@@ -1806,7 +1825,7 @@ class AgentCheckpointRecoveryService:
         ):
             restore_prepare = self._invoke_restore_prepare(
                 project_root,
-                checkpoint_files=ensure_string_list(checkpoint.get("archiveFiles")) or None,
+                checkpoint_files=checkpoint_restore_file_scope(checkpoint),
                 request_id=str(params.get("_restoreRequestId") or ""),
                 phase="prepare_restore",
             )
@@ -2070,9 +2089,24 @@ class AgentCheckpointRecoveryService:
         archive_dir = self._ports.checkpoint_store_dir() / project_key
         archive_path = archive_dir / f"{checkpoint_id}.zip"
         temp_path = archive_path.with_suffix(".zip.tmp")
+        from checkpoint_asset_footprint import is_asset_footprint, validate_asset_footprint
+        footprint = is_asset_footprint(record)
+        footprint_scope = None
+        if footprint or (exact_files is None and record.get("archiveFiles") == []):
+            try:
+                if exact_files is not None:
+                    raise ValueError("Asset footprint and recovery exact_files cannot be combined.")
+                footprint_scope = validate_asset_footprint(project_root, record, preparing=True)
+            except (OSError, ValueError, TypeError) as exc:
+                record.update(ok=False, blocking=True, status="failed", strategy="archive",
+                              archivePath=str(archive_path), error=f"Exact asset footprint checkpoint rejected: {exc}")
+                self._append_checkpoint(record)
+                return record
         requested_files = ensure_string_list(exact_files if exact_files is not None else record.get("archiveFiles"))
         archive_files: list[str] = []
-        if requested_files:
+        if footprint_scope is not None:
+            archive_files = list(footprint_scope["archiveFiles"])
+        elif requested_files:
             expected_files: list[str] = []
             for name in requested_files:
                 normalized = str(PurePosixPath(name.replace("\\", "/")))
@@ -2099,11 +2133,11 @@ class AgentCheckpointRecoveryService:
             })
             self._append_checkpoint(record)
             return record
-        if requested_files and not archive_files:
+        if requested_files and not archive_files and not footprint:
             record.pop("archiveFiles", None)
             record["archiveScopeFallbackReason"] = "target_or_metadata_unavailable"
-        pathspecs = [name for name in ("Assets", "Packages", "ProjectSettings") if (project_root / name).is_dir()]
-        checkpoint_scope = {
+        pathspecs = ["Assets"] if footprint else [name for name in ("Assets", "Packages", "ProjectSettings") if (project_root / name).is_dir()]
+        checkpoint_scope = footprint_scope or {
             "kind": "unity_project_files" if archive_files else "unity_project_top_level",
             "pathspecs": pathspecs,
             **({"archiveFiles": archive_files} if archive_files else {}),
@@ -2119,7 +2153,7 @@ class AgentCheckpointRecoveryService:
             with zipfile.ZipFile(temp_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=1, strict_timestamps=False) as archive:
                 sources = (
                     [(project_root / Path(*PurePosixPath(name).parts), name) for name in archive_files]
-                    if archive_files else
+                    if archive_files or footprint else
                     [(source, source.relative_to(project_root).as_posix())
                      for name in pathspecs
                      for source in sorted((project_root / name).rglob("*"))
@@ -2155,7 +2189,7 @@ class AgentCheckpointRecoveryService:
                     "strategy": "archive",
                     "archivePath": str(archive_path),
                     "pathspecs": pathspecs,
-                    **({"archiveFiles": archive_files} if archive_files else {}),
+                    **({"archiveFiles": archive_files} if archive_files or footprint else {}),
                     "checkpointScope": checkpoint_scope,
                     "archiveStartedAt": archive_started_at,
                     "archiveFinishedAt": utc_now_iso(),
@@ -2174,7 +2208,7 @@ class AgentCheckpointRecoveryService:
                 "strategy": "archive",
                 "archivePath": str(archive_path),
                 "pathspecs": pathspecs,
-                **({"archiveFiles": archive_files} if archive_files else {}),
+                **({"archiveFiles": archive_files} if archive_files or footprint else {}),
                 "checkpointScope": checkpoint_scope,
                 "fileCount": file_count,
                 "uncompressedBytes": total_bytes,
@@ -2437,6 +2471,9 @@ class AgentCheckpointRecoveryService:
         pathspecs = ensure_string_list(checkpoint.get("pathspecs"))
         allowed = set(UNITY_PROJECT_CHECKPOINT_SCOPE)
         try:
+            from checkpoint_asset_footprint import is_asset_footprint, validate_asset_footprint
+            footprint = is_asset_footprint(checkpoint)
+            scope = validate_asset_footprint(Path(str(checkpoint["projectRoot"])), checkpoint) if footprint else None
             with zipfile.ZipFile(archive_path, "r") as archive:
                 archived: dict[str, tuple[int, int]] = {}
                 for info in archive.infolist():
@@ -2446,11 +2483,14 @@ class AgentCheckpointRecoveryService:
                     if name in archived:
                         raise ValueError(f"Duplicate archive member: {name}")
                     archived[name] = (info.file_size, info.CRC)
+            if footprint and set(archived) != set(scope["archiveFiles"]):
+                raise ValueError("Asset footprint ZIP differs from its exact existing-file manifest.")
             current: dict[str, tuple[int, int]] = {}
             archive_files = ensure_string_list(checkpoint.get("archiveFiles"))
             sources = (
-                [(project_root / Path(*PurePosixPath(name).parts), name) for name in archive_files]
-                if archive_files else
+                [(project_root / Path(*PurePosixPath(name).parts), name)
+                 for name in ([*scope["archiveFiles"], *scope["archiveAbsentFiles"]] if footprint else archive_files)]
+                if archive_files or footprint else
                 [(source, source.relative_to(project_root).as_posix())
                  for name in pathspecs
                  for source in sorted((project_root / name).rglob("*"))
@@ -2519,12 +2559,14 @@ class AgentCheckpointRecoveryService:
             archive_path = self._resolve_checkpoint_archive_path(checkpoint, "archive")
             with zipfile.ZipFile(archive_path) as archive:
                 members = {info.filename for info in archive.infolist() if not info.is_dir()}
-            files = set(ensure_string_list(checkpoint.get("archiveFiles")))
+            from checkpoint_asset_footprint import is_asset_footprint
+            footprint = is_asset_footprint(checkpoint)
+            files = set(checkpoint_restore_file_scope(checkpoint) or [])
             roots = set(ensure_string_list(checkpoint.get("pathspecs")))
             project = Path(str(checkpoint["projectRoot"]))
             missing = []
             for scene in scenes:
-                covered = scene in files if files else PurePosixPath(scene).parts[0] in roots
+                covered = scene in files if files or footprint else PurePosixPath(scene).parts[0] in roots
                 if (covered and scene not in members) or (not covered and not (project / scene).is_file()):
                     missing.append(scene)
             if not missing:
@@ -2548,6 +2590,14 @@ class AgentCheckpointRecoveryService:
         if not pathspecs or any(name not in allowed for name in pathspecs):
             return {"ok": False, "checkpoint": checkpoint, "error": "Archive checkpoint pathspecs are unsafe."}
         try:
+            from checkpoint_asset_footprint import (
+                is_asset_footprint, validate_asset_footprint,
+                validate_created_asset_post_state, cleanup_absent_directories,
+            )
+            footprint = is_asset_footprint(checkpoint)
+            footprint_root = Path(str(checkpoint["projectRoot"]))
+            footprint_scope = validate_asset_footprint(footprint_root, checkpoint) if footprint else None
+            footprint_current = validate_created_asset_post_state(footprint_root, checkpoint) if footprint else None
             with zipfile.ZipFile(archive_path, "r") as archive:
                 members = [info for info in archive.infolist() if not info.is_dir()]
                 archived: dict[str, zipfile.ZipInfo] = {}
@@ -2556,9 +2606,13 @@ class AgentCheckpointRecoveryService:
                     if name in archived:
                         raise ValueError(f"Duplicate archive member: {name}")
                     archived[name] = info
+                if footprint and set(archived) != set(footprint_scope["archiveFiles"]):
+                    raise ValueError("Asset footprint ZIP differs from its exact existing-file manifest.")
                 current: dict[str, Path] = {}
                 archive_files = ensure_string_list(checkpoint.get("archiveFiles"))
-                if archive_files:
+                if footprint:
+                    current = footprint_current
+                elif archive_files:
                     for name in archive_files:
                         target = (project_root / Path(*PurePosixPath(name).parts)).resolve()
                         if not name.startswith("Assets/") or not is_path_within(target, project_root):
@@ -2579,7 +2633,9 @@ class AgentCheckpointRecoveryService:
                     archive, archived, current, project_root
                 )
 
-                if not archive_files:
+                if footprint:
+                    cleanup_absent_directories(footprint_root, checkpoint)
+                elif not archive_files:
                     for name in pathspecs:
                         root = project_root / name
                         for directory in sorted((path for path in root.rglob("*") if path.is_dir()), reverse=True):
@@ -3149,7 +3205,8 @@ class AgentCheckpointRecoveryService:
         touches_packages = self._checkpoint_touches_top_level(checkpoint, "Packages")
         touches_project_settings = self._checkpoint_touches_top_level(checkpoint, "ProjectSettings")
         archive_files = ensure_string_list(checkpoint.get("archiveFiles"))
-        scoped_asset_checkpoint = bool(archive_files)
+        from checkpoint_asset_footprint import is_asset_footprint
+        scoped_asset_checkpoint = bool(archive_files) or is_asset_footprint(checkpoint)
         if scoped_asset_checkpoint:
             touches_packages = False
             touches_project_settings = False
@@ -3766,6 +3823,15 @@ class AgentCheckpointRecoveryService:
         strategy = str(checkpoint.get("strategy") or "")
         if strategy not in {"archive", "local_state_archive", "project_chat_archive"}:
             return {"ok": True}
+        from checkpoint_asset_footprint import is_asset_footprint, validate_asset_footprint
+        if strategy == "archive" and is_asset_footprint(checkpoint):
+            try:
+                validate_asset_footprint(Path(str(checkpoint.get("projectRoot") or "")), checkpoint)
+            except (OSError, ValueError, TypeError) as exc:
+                return self._checkpoint_unavailable(
+                    checkpoint, error=f"Exact asset footprint metadata is invalid: {exc}",
+                    reason_code="checkpoint_scope_metadata_invalid",
+                    next_action="Create a new checkpoint before attempting this restore.")
         pathspecs = ensure_string_list(checkpoint.get("pathspecs"))
         archive_files = ensure_string_list(checkpoint.get("archiveFiles"))
         if archive_files and any(
@@ -3831,6 +3897,12 @@ class AgentCheckpointRecoveryService:
                 "uncompressedBytes",
                 "sourceExisted",
                 "sourceDigest",
+                "archiveFiles",
+                "archiveAbsentFiles",
+                "archiveAbsentDirectories",
+                "assetFootprint",
+                "checkpointScope",
+                "createdAssetPostState",
             )
         }
         encoded = json.dumps(

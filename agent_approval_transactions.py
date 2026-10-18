@@ -2076,6 +2076,11 @@ class AgentApprovalTransactionService:
             if completion_status == "failed":
                 failure_layer = "result_verification"
                 raise AgentGatewayError(str(completion_outcome["summary"]))
+            checkpoint = self._finish_created_asset_checkpoint(checkpoint, result, pending=observation_pending)
+            if checkpoint:
+                approval["checkpoint"] = checkpoint
+            if recovery is not None:
+                recovery["checkpoint"] = checkpoint
             failure_layer = "apply_lifecycle_observer"
             self._observe_apply_lifecycle(
                 "handler_returned", approval, checkpoint=checkpoint, result=result
@@ -2589,6 +2594,21 @@ class AgentApprovalTransactionService:
             )
         return result
 
+    def _finish_created_asset_checkpoint(self, checkpoint: Any, result: Any, *, pending: bool = False) -> Any:
+        if not isinstance(checkpoint, dict) or not checkpoint.get("assetFootprint"):
+            return checkpoint
+        receipt = _domain_write_receipt(result)
+        console = result.get("consoleVerification") if isinstance(result, Mapping) else None
+        verified = isinstance(receipt, Mapping) and receipt.get("verified") is True
+        verified = verified or (isinstance(console, Mapping) and console.get("status") in {"passed", "verified"})
+        if pending or not verified:
+            raise AgentGatewayError("Created-asset checkpoint requires verified terminal write completion.", status_code=409)
+        from checkpoint_asset_footprint import capture_created_asset_post_state
+
+        updated = capture_created_asset_post_state(Path(str(checkpoint["projectRoot"])), checkpoint)
+        self._ports.checkpoint.append_checkpoint(updated)
+        return updated
+
     def _create_pre_write_checkpoint(self, approval: dict[str, Any], arguments: dict[str, Any]) -> dict[str, Any] | None:
         with self._ports.state.checkpoint_storage_lock:
             return self._create_pre_write_checkpoint_locked(approval, arguments)
@@ -2703,9 +2723,21 @@ class AgentApprovalTransactionService:
                 )
                 self._ports.checkpoint.append_checkpoint(record)
                 return record
+            if "assetFootprint" in prepare_result:
+                footprint = prepare_result.get("assetFootprint")
+                if not isinstance(footprint, dict) or footprint.get("schema") != "vrcforge.asset_checkpoint_footprint.v1":
+                    record.update(ok=False, blocking=True, status="failed", error="The prepared write has no authoritative asset footprint.")
+                    self._ports.checkpoint.append_checkpoint(record)
+                    return record
+                for key in ("archiveFiles", "archiveAbsentFiles", "archiveAbsentDirectories"):
+                    record[key] = footprint.get(key)
+                record["assetFootprint"] = footprint
+                record["archiveScopeReason"] = prepare_result.get("archiveScopeReason")
+                return self._ports.checkpoint.create_archive_checkpoint(project_root, record)
             if target_tool in {"vrcforge_manage_expression_menu", "vrcforge_set_renderer_material_slot",
                                "vrcforge_add_component", "vrcforge_remove_component", "vrcforge_set_property",
-                               "vrcforge_apply_blendshapes"}:
+                               "vrcforge_apply_blendshapes", "vrcforge_setup_outfit",
+                               "vrcforge_instantiate_prefab", "vrcforge_unpack_prefab", "vrcforge_create_gameobject"}:
                 # Never accept an archive scope directly from caller arguments.
                 archive_files = prepare_result.get("archiveAssetPaths")
                 record["archiveScopeReason"] = prepare_result.get(
@@ -4396,13 +4428,16 @@ class AgentApprovalTransactionService:
                     "readbackState": readback_state,
                 }
             )
+            finalize_verification = (
+                isinstance(result, Mapping)
+                and isinstance(result.get("consoleVerification"), Mapping)
+                and str(result["consoleVerification"].get("status") or "").casefold()
+                in {"passed", "verified"}
+            )
+            checkpoint = self._finish_created_asset_checkpoint(checkpoint, result, pending=operation_pending)
             if recovery is not None:
-                finalize_verification = (
-                    isinstance(result, Mapping)
-                    and isinstance(result.get("consoleVerification"), Mapping)
-                    and str(result["consoleVerification"].get("status") or "").casefold()
-                    in {"passed", "verified"}
-                )
+                recovery["checkpoint"] = checkpoint
+            if recovery is not None:
                 if not gm_entry_pending and not receipt_verified and not finalize_verification:
                     console_verification = (
                         result.get("consoleVerification") if isinstance(result, Mapping) else None

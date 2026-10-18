@@ -21152,6 +21152,30 @@ def prepare_authoritative_unity_checkpoint_sync(
             discover=list_execution_targets_sync, inspect_owner=read_component_property_sync,
             prepare=prepare_unity_checkpoint_sync,
         )
+    if checkpoint_target in {"vrcforge_setup_outfit", "vrcforge_instantiate_prefab",
+                             "vrcforge_unpack_prefab", "vrcforge_create_gameobject"}:
+        from unity_scene_workflow_checkpoint import prepare_scene_workflow_checkpoint
+
+        return prepare_scene_workflow_checkpoint(
+            project_root, arguments, checkpoint_target=checkpoint_target,
+            build_plan=(build_workflow_execution_plan if checkpoint_target in WORKFLOW_EXECUTION_PLAN_TARGETS
+                        else build_scene_execution_plan),
+            discover=list_execution_targets_sync, prepare=prepare_unity_checkpoint_sync,
+        )
+    if checkpoint_target == "vrcforge_import_outfit_package":
+        from unity_import_checkpoint import prepare_import_asset_checkpoint
+
+        return prepare_import_asset_checkpoint(
+            project_root, arguments, verify_project=_verify_prepared_import_project_identity,
+            prepare=prepare_unity_checkpoint_sync,
+        )
+    if checkpoint_target == "vrcforge_duplicate_project_asset":
+        from unity_asset_copy_checkpoint import prepare_asset_copy_checkpoint
+
+        return prepare_asset_copy_checkpoint(
+            project_root, arguments, revalidate=prepare_unity_mcp_write_request,
+            prepare=prepare_unity_checkpoint_sync,
+        )
     if checkpoint_target == "vrcforge_apply_blendshapes":
         from unity_blendshape_checkpoint import prepare_blendshape_checkpoint
         from mcp_tool_descriptor import identity_scope
