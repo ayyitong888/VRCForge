@@ -27487,7 +27487,7 @@ def register_agent_gateway_tools() -> None:
     )
     register_write_handler(
         "vrcforge_import_outfit_package",
-        "Import a direct UnityPackage or copy loose outfit prefab/material/texture assets into the Unity project through VRCForge.",
+        "When to use: import an approved UnityPackage or copy external prefab, material, or PNG/JPG texture files from an unpacked folder into the Unity project's Assets folder. Texture-only folders are supported without a prefab; inspect and plan the import first. When NOT to use: do not change existing texture importer settings, assign material slots, extract a texture-only ZIP, or copy arbitrary project files. Negative example: a PNG already inside Assets needs material assignment rather than another import.",
         "medium",
         WARDROBE_OUTFIT_APPROVED_WRITES.import_package,
         risk_level_resolver=classify_prepared_outfit_import_risk,

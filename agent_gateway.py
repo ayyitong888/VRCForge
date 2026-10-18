@@ -1243,11 +1243,11 @@ BUILTIN_SKILL_OVERRIDES: dict[str, dict[str, Any]] = {
         "tags": ["wardrobe", "modular-avatar", "write"],
     },
     "vrcforge_import_outfit_package": {
-        "title": "Import Outfit Package",
-        "inputs": ["Direct .unitypackage or loose prefab folder path, Unity project path, and target Assets folder."],
-        "outputs": ["Unity import result or copied asset paths plus imported prefab candidates."],
-        "sideEffects": "imports UnityPackage or copies loose outfit assets into Assets after approval and checkpoint",
-        "tags": ["outfit", "unitypackage", "write"],
+        "title": "Import Unity Assets",
+        "inputs": ["External source .unitypackage or unpacked prefab/material/PNG/JPG texture folder, Unity project path, and target Assets folder."],
+        "outputs": ["Imported or copied project asset paths; assigning a texture to a material is a separate operation."],
+        "sideEffects": "imports UnityPackage or copies external asset files into Assets after approval and checkpoint",
+        "tags": ["asset", "import", "copy", "external", "folder", "texture", "image", "png", "unitypackage", "write"],
     },
     "vrcforge_install_vpm_package": {
         "title": "VPM Package Install",

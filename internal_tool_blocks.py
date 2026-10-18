@@ -148,6 +148,9 @@ for _runtime_name, _owner in {
     "vrcforge_scan_avatar_performance": "diagnostics_build/validation_performance",
     "vrcforge_scan_thry_avatar_performance": "diagnostics_build/validation_performance",
     "vrcforge_apply_clothing_fx": "behavior/parameters_menus_layers",
+    "vrcforge_inspect_outfit_package": "project_environment/assets_packages",
+    "vrcforge_plan_outfit_import": "project_environment/assets_packages",
+    "vrcforge_import_outfit_package": "project_environment/assets_packages",
     "vrcforge_apply_tuning_preset": "behavior/face_eye_lipsync",
 }.items():
     _EXACT_TOOL_OWNERS[_runtime_name] = _owner
