@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import shutil
 import stat
 import unicodedata
 import zipfile
@@ -52,9 +53,21 @@ def _safe_member_path(raw: str) -> str:
     return path.as_posix()
 
 
-def _entry_manifest(archive: zipfile.ZipFile) -> list[dict[str, Any]]:
+def _entry_manifest(
+    archive: zipfile.ZipFile,
+    *,
+    selected_paths: set[str] | None = None,
+    max_uncompressed_bytes: int | None = MAX_UNCOMPRESSED_BYTES,
+) -> list[dict[str, Any]]:
     entries: list[dict[str, Any]] = []
     seen: set[str] = set()
+    archive_paths: set[str] = set()
+    selected = (
+        {_safe_member_path(path) for path in selected_paths}
+        if selected_paths is not None
+        else None
+    )
+    found_selected: set[str] = set()
     total = 0
     infos = archive.infolist()
     if len(infos) > MAX_ENTRIES:
@@ -72,11 +85,20 @@ def _entry_manifest(archive: zipfile.ZipFile) -> list[dict[str, Any]]:
         if key in seen:
             raise ValueError(f"Archive has duplicate member path: {name}")
         seen.add(key)
+        archive_paths.add(key)
+        is_selected = selected is None or name in selected
+        if not is_selected:
+            continue
+        found_selected.add(name)
         size = max(0, int(info.file_size))
         compressed = max(0, int(info.compress_size))
         total += size
-        if total > MAX_UNCOMPRESSED_BYTES:
-            raise ValueError("Archive uncompressed size exceeds the extraction cap.")
+        if max_uncompressed_bytes is not None and total > max_uncompressed_bytes:
+            raise ValueError(
+                "Archive uncompressed size exceeds the extraction cap."
+                if selected is None
+                else "Selected archive members exceed the extraction cap."
+            )
         if size > 0 and (compressed == 0 or size / compressed > MAX_COMPRESSION_RATIO):
             raise ValueError(f"Archive member compression ratio exceeds the extraction cap: {name}")
         digest = hashlib.sha256()
@@ -98,7 +120,9 @@ def _entry_manifest(archive: zipfile.ZipFile) -> list[dict[str, Any]]:
             "size": size,
             "sha256": digest.hexdigest(),
         })
-    keys = sorted(seen)
+    if selected is not None and found_selected != selected:
+        raise ValueError("Selected archive member is absent or duplicated.")
+    keys = sorted(archive_paths)
     for index, key in enumerate(keys):
         if index + 1 < len(keys) and keys[index + 1].startswith(f"{key}/"):
             raise ValueError("Archive contains a file/directory prefix collision.")
@@ -272,30 +296,38 @@ def prepare_zip_member_materialization(
     parent_identity = capture_directory(temp_parent, label="Materialization temp parent")
     if not isinstance(selected_members, list) or not selected_members:
         raise ValueError("At least one archive member must be selected.")
-    with source.open("rb") as source_handle:
-        _opened_source_matches(source_handle, source_identity, source_sha256)
-        with zipfile.ZipFile(source_handle) as archive:
-            manifest = _entry_manifest(archive)
-    by_path = {str(entry["path"]): entry for entry in manifest}
-    selected: list[dict[str, Any]] = []
+    requested: list[dict[str, str]] = []
     used_paths: set[str] = set()
     used_targets: set[str] = set()
-    for requested in selected_members:
-        if not isinstance(requested, dict):
+    for item in selected_members:
+        if not isinstance(item, dict):
             raise ValueError("Selected archive member is invalid.")
-        normalized = _safe_member_path(str(requested.get("path") or ""))
-        entry = by_path.get(normalized)
-        if entry is None or normalized in used_paths:
-            raise ValueError("Selected archive member is absent or duplicated.")
-        target_name = _single_target_name(str(requested.get("targetName") or ""))
+        normalized = _safe_member_path(str(item.get("path") or ""))
+        target_name = _single_target_name(str(item.get("targetName") or ""))
         target_key = unicodedata.normalize("NFC", target_name).casefold()
-        if target_key in used_targets:
-            raise ValueError("Materialization target name is duplicated.")
-        target = temp_parent / target_name
-        if target.exists() or target.is_symlink():
+        if normalized in used_paths or target_key in used_targets:
+            raise ValueError("Selected archive member or materialization target is duplicated.")
+        if (temp_parent / target_name).exists() or (temp_parent / target_name).is_symlink():
             raise ValueError("Approval-bound materialization target already exists.")
         used_paths.add(normalized)
         used_targets.add(target_key)
+        requested.append({"path": normalized, "targetName": target_name})
+    with source.open("rb") as source_handle:
+        _opened_source_matches(source_handle, source_identity, source_sha256)
+        with zipfile.ZipFile(source_handle) as archive:
+            manifest = _entry_manifest(
+                archive,
+                selected_paths=used_paths,
+                max_uncompressed_bytes=None,
+            )
+    by_path = {str(entry["path"]): entry for entry in manifest}
+    selected: list[dict[str, Any]] = []
+    for request in requested:
+        normalized = request["path"]
+        entry = by_path.get(normalized)
+        if entry is None:
+            raise ValueError("Selected archive member is absent or duplicated.")
+        target_name = request["targetName"]
         selected.append({
             "path": entry["path"],
             "zipPath": entry["zipPath"],
@@ -306,6 +338,9 @@ def prepare_zip_member_materialization(
             "compressionRatio": entry["compressionRatio"],
             "targetName": target_name,
         })
+    selected_total_size = sum(int(item["size"]) for item in selected)
+    if selected_total_size > shutil.disk_usage(temp_parent).free:
+        raise ValueError("Insufficient free space for selected archive members in the temporary materialization folder.")
     verify_regular_file(source_identity, source_sha256, label="Archive source")
     verify_directory(parent_identity, label="Materialization temp parent")
     return {
@@ -315,6 +350,7 @@ def prepare_zip_member_materialization(
         "tempParent": parent_identity,
         "manifest": manifest,
         "selected": selected,
+        "selectedTotalSizeBytes": selected_total_size,
     }
 
 
@@ -368,13 +404,25 @@ def execute_zip_member_materialization(facts: dict[str, Any]) -> dict[str, Any]:
     selected = facts.get("selected")
     if not isinstance(manifest, list) or not isinstance(selected, list) or not selected:
         raise ValueError("Prepared ZIP materialization facts are invalid.")
+    selected_paths: set[str] = set()
+    for expected in selected:
+        if not isinstance(expected, dict):
+            raise ValueError("Prepared selected archive member is invalid.")
+        path = _safe_member_path(str(expected.get("path") or ""))
+        if path in selected_paths:
+            raise ValueError("Prepared selected archive member is duplicated.")
+        selected_paths.add(path)
     owned: list[dict[str, Any]] = []
     receipt = {"schema": "vrcforge.zip-materialization-receipt.v1", "ownedFiles": owned}
     try:
         with source.open("rb") as source_handle:
             _opened_source_matches(source_handle, facts["sourceIdentity"], facts["sourceSha256"])
             with zipfile.ZipFile(source_handle) as archive:
-                if _entry_manifest(archive) != manifest:
+                if _entry_manifest(
+                    archive,
+                    selected_paths=selected_paths,
+                    max_uncompressed_bytes=None,
+                ) != manifest:
                     raise ValueError("Archive central directory or member content drifted after approval.")
                 manifest_by_path = {str(entry["path"]): entry for entry in manifest}
                 seen_targets: set[str] = set()

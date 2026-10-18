@@ -85,6 +85,68 @@ def test_nested_package_plan_never_treats_outer_loose_assets_as_package_destinat
     assert PreparedOutfitImportPreparer._expected_asset_paths(plan) == []
 
 
+def test_nested_package_plan_reports_size_above_one_gib_without_fixed_limit(tmp_path: Path) -> None:
+    import struct
+
+    project = tmp_path / "Project"
+    make_project(project)
+    source = tmp_path / "MaterialPack.zip"
+    entry = "Product/MaterialPack.unitypackage"
+    with zipfile.ZipFile(source, "w") as archive:
+        archive.writestr(entry, b"package bytes")
+        info = archive.getinfo(entry)
+        local_header = info.header_offset
+        central_directory = archive.start_dir
+        declared_size = 1024 * 1024 * 1024 + 1
+    contents = bytearray(source.read_bytes())
+    struct.pack_into("<I", contents, local_header + 22, declared_size)
+    central_header = contents.find(b"PK\x01\x02", central_directory)
+    assert central_header >= 0
+    struct.pack_into("<I", contents, central_header + 24, declared_size)
+    source.write_bytes(contents)
+
+    result = build_outfit_import_plan(
+        source,
+        project_path=project,
+        base_avatar_name="Milltina",
+        selected_unitypackage=entry,
+        dependency_mode="selected_only",
+    )
+    plan = result["plan"]
+
+    assert result["ok"] is True
+    assert plan["source"]["selectedUnityPackageSizeBytes"] == declared_size
+    assert plan["source"]["nestedUnityPackageImportSizeBytes"] == declared_size
+    assert "maxNestedUnityPackageBytes" not in plan["source"]
+    assert plan["readyToApply"] is True
+    assert plan["writeTarget"] == "vrcforge_import_outfit_package"
+
+
+def test_nested_package_plan_reports_cumulative_import_queue_size(tmp_path: Path) -> None:
+    project = tmp_path / "Project"
+    make_project(project)
+    source = tmp_path / "Bundle.zip"
+    selected = "Product/Dress.unitypackage"
+    with zipfile.ZipFile(source, "w") as archive:
+        archive.writestr("Product/MaterialPack.unitypackage", b"123")
+        archive.writestr(selected, b"456")
+    result = build_outfit_import_plan(
+        source,
+        project_path=project,
+        selected_unitypackage=selected,
+    )
+    plan = result["plan"]
+
+    assert [item["path"] for item in plan["source"]["importQueue"]] == [
+        "Product/MaterialPack.unitypackage",
+        selected,
+    ]
+    assert plan["source"]["nestedUnityPackageImportSizeBytes"] == 6
+    assert "maxNestedUnityPackageBytes" not in plan["source"]
+    assert plan["readyToApply"] is True
+    assert plan["writeTarget"] == "vrcforge_import_outfit_package"
+
+
 def test_direct_unitypackage_plan_is_supervised_and_payload_safe(tmp_path: Path) -> None:
     project = tmp_path / "Project"
     make_project(project)

@@ -25740,7 +25740,6 @@ OUTFIT_IMPORT_ALLOWED_SUFFIXES = {
     ".controller",
     ".anim",
 }
-OUTFIT_IMPORT_MAX_NESTED_UNITYPACKAGE_BYTES = 512 * 1024 * 1024
 OUTFIT_IMPORT_MAX_NESTED_UNITYPACKAGE_RATIO = 100.0
 
 
@@ -25855,8 +25854,11 @@ def _extract_unitypackage_from_zip(container_path: Path, entry_path: str, temp_r
         if raw_name is None:
             raise AgentGatewayError(f"UnityPackage entry was not found in ZIP: {normalized_entry}", status_code=400)
         info = archive.getinfo(raw_name)
-        if info.file_size > OUTFIT_IMPORT_MAX_NESTED_UNITYPACKAGE_BYTES:
-            raise AgentGatewayError("Nested UnityPackage exceeds the import size limit.", status_code=400)
+        if info.file_size > shutil.disk_usage(temp_root).free:
+            raise AgentGatewayError(
+                "Insufficient free space for nested UnityPackage temporary materialization.",
+                status_code=507,
+            )
         compression_ratio = float(info.file_size) / float(max(1, info.compress_size))
         if compression_ratio > OUTFIT_IMPORT_MAX_NESTED_UNITYPACKAGE_RATIO:
             raise AgentGatewayError("Nested UnityPackage compression ratio exceeds the import limit.", status_code=400)
@@ -25870,9 +25872,17 @@ def _extract_unitypackage_from_zip(container_path: Path, entry_path: str, temp_r
                     if not chunk:
                         break
                     written += len(chunk)
-                    if written > OUTFIT_IMPORT_MAX_NESTED_UNITYPACKAGE_BYTES:
-                        raise AgentGatewayError("Nested UnityPackage exceeds the import size limit.", status_code=400)
+                    if written > int(info.file_size):
+                        raise AgentGatewayError(
+                            "Nested UnityPackage exceeded its declared ZIP member size.",
+                            status_code=400,
+                        )
                     destination.write(chunk)
+            if written != int(info.file_size):
+                raise AgentGatewayError(
+                    "Nested UnityPackage size did not match its ZIP central-directory record.",
+                    status_code=400,
+                )
         except Exception:
             target.unlink(missing_ok=True)
             raise

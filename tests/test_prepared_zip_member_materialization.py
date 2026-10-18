@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -79,6 +80,118 @@ def test_ratio_and_tampered_selected_facts_are_rejected_before_output(tmp_path: 
     facts["selected"][0]["compressionRatio"] = 0.0
     with pytest.raises(ValueError, match="matches the manifest"):
         archive_imports.execute_zip_member_materialization(facts)
+    assert not list(temp.iterdir())
+
+
+def test_selected_package_uses_its_bounded_cap_without_expanding_unselected_entries(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    source = tmp_path / "selected-only.zip"
+    selected = "Nested/MaterialPack.unitypackage"
+    with zipfile.ZipFile(source, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(selected, b"123456")
+        archive.writestr("Unused/padding.bin", b"0123456789")
+    temp = tmp_path / "temp"
+    temp.mkdir()
+    monkeypatch.setattr(archive_imports, "MAX_UNCOMPRESSED_BYTES", 4)
+
+    facts = archive_imports.prepare_zip_member_materialization(
+        source=source,
+        temp_parent=temp,
+        selected_members=[{"path": selected, "targetName": "selected.unitypackage"}],
+    )
+    receipt = archive_imports.execute_zip_member_materialization(facts)
+
+    assert facts["selected"][0]["size"] == 6
+    assert [item["path"] for item in facts["manifest"]] == [selected]
+    assert (temp / "selected.unitypackage").read_bytes() == b"123456"
+    assert archive_imports.cleanup_owned_zip_materialization(receipt) == ""
+
+
+def test_selected_package_prepare_rejects_insufficient_temporary_space(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    source = tmp_path / "insufficient-space.zip"
+    _zip(source, {"MaterialPack.unitypackage": b"123456"})
+    temp = tmp_path / "temp"
+    temp.mkdir()
+    monkeypatch.setattr(archive_imports.shutil, "disk_usage", lambda _path: SimpleNamespace(free=5))
+
+    with pytest.raises(ValueError, match="Insufficient free space"):
+        archive_imports.prepare_zip_member_materialization(
+            source=source,
+            temp_parent=temp,
+            selected_members=[{"path": "MaterialPack.unitypackage", "targetName": "selected.unitypackage"}],
+        )
+
+    assert not list(temp.iterdir())
+
+
+def test_selected_package_set_checks_cumulative_temporary_space(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    source = tmp_path / "cumulative-selected.zip"
+    _zip(source, {"one.unitypackage": b"12345", "two.unitypackage": b"67890"})
+    temp = tmp_path / "temp"
+    temp.mkdir()
+    monkeypatch.setattr(archive_imports.shutil, "disk_usage", lambda _path: SimpleNamespace(free=8))
+
+    with pytest.raises(ValueError, match="Insufficient free space"):
+        archive_imports.prepare_zip_member_materialization(
+            source=source,
+            temp_parent=temp,
+            selected_members=[
+                {"path": "one.unitypackage", "targetName": "one.unitypackage"},
+                {"path": "two.unitypackage", "targetName": "two.unitypackage"},
+            ],
+        )
+
+    assert not list(temp.iterdir())
+
+
+def test_selected_member_actual_bytes_must_match_central_directory(tmp_path: Path) -> None:
+    source = tmp_path / "size-mismatch.zip"
+    _zip(source, {"package.unitypackage": b"actual"})
+    with zipfile.ZipFile(source) as archive:
+        info = archive.getinfo("package.unitypackage")
+        local_header = info.header_offset
+        central_directory = archive.start_dir
+    contents = bytearray(source.read_bytes())
+    import struct
+
+    struct.pack_into("<I", contents, local_header + 22, info.file_size + 1)
+    central_header = contents.find(b"PK\x01\x02", central_directory)
+    assert central_header >= 0
+    struct.pack_into("<I", contents, central_header + 24, info.file_size + 1)
+    source.write_bytes(contents)
+    temp = tmp_path / "temp"
+    temp.mkdir()
+
+    with pytest.raises(ValueError, match="did not match its central-directory record"):
+        archive_imports.prepare_zip_member_materialization(
+            source=source,
+            temp_parent=temp,
+            selected_members=[{"path": "package.unitypackage", "targetName": "selected.unitypackage"}],
+        )
+
+    assert not list(temp.iterdir())
+
+
+def test_unselected_path_attack_is_rejected_during_selected_materialization(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "unsafe-unselected.zip"
+    _zip(source, {"safe.unitypackage": b"safe", "../escape.unitypackage": b"outside"})
+    temp = tmp_path / "temp"
+    temp.mkdir()
+
+    with pytest.raises(ValueError, match="Archive member path is unsafe"):
+        archive_imports.prepare_zip_member_materialization(
+            source=source,
+            temp_parent=temp,
+            selected_members=[{"path": "safe.unitypackage", "targetName": "safe.unitypackage"}],
+        )
+
     assert not list(temp.iterdir())
 
 

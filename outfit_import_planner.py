@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -347,6 +348,17 @@ def build_unitypackage_plan(
     queue_can_apply = bool(import_queue) and not bool(package_order.get("requiresManualExtract"))
     needs_extract = actual_package_path is None and not queue_can_apply
     inspection_complete = not bool(inspection.get("summary", {}).get("truncated"))
+    selected_package_size = _nonnegative_int(selected_package.get("size"))
+    nested_queue_size, nested_size_verified = _nested_unitypackage_queue_size(
+        import_queue,
+        inspection=inspection,
+        source_path=source_path,
+    )
+    nested_queue_present = any(
+        isinstance(item, dict) and str(item.get("sourceType") or "").casefold() == "zip"
+        for item in import_queue
+    )
+    nested_size_ready = not nested_queue_present or nested_size_verified
     expected_assets_complete = inspection_complete and all(
         package.get("pathnamesEvidenceComplete") is True
         for package in inspection.get("unityPackages") or []
@@ -354,12 +366,17 @@ def build_unitypackage_plan(
     ready = (
         not needs_extract
         and inspection_complete
+        and nested_size_ready
         and bool(dependency_preflight.get("readyForImport"))
     )
     plan_warnings = list(warnings)
     if not inspection_complete:
         plan_warnings.append(
             "Package inspection evidence was truncated; increase max_entries and inspect the complete package before apply."
+        )
+    if nested_queue_present and not nested_size_verified:
+        plan_warnings.append(
+            "Nested UnityPackage sizes could not be verified from the ZIP central directory; inspect the source before applying."
         )
     expected_assets = expected_asset_paths_from_inspection(inspection)
     if selected_prefab_path and selected_prefab_path not in expected_assets:
@@ -395,6 +412,8 @@ def build_unitypackage_plan(
             "type": source_type,
             "path": str(source_path),
             "selectedUnityPackage": package_entry_path,
+            "selectedUnityPackageSizeBytes": selected_package_size,
+            "nestedUnityPackageImportSizeBytes": nested_queue_size if nested_size_verified else None,
             "actualPackagePath": str(actual_package_path) if actual_package_path else "",
             "importQueue": import_queue,
         },
@@ -426,6 +445,62 @@ def build_unitypackage_plan(
         ],
         "warnings": plan_warnings,
     }
+
+
+def _nonnegative_int(value: Any) -> int | None:
+    try:
+        converted = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return converted if converted >= 0 else None
+
+
+def _nested_unitypackage_queue_size(
+    import_queue: list[Any],
+    *,
+    inspection: dict[str, Any],
+    source_path: Path,
+) -> tuple[int | None, bool]:
+    """Read only central-directory sizes for every queued nested package."""
+    zip_items = [
+        item
+        for item in import_queue
+        if isinstance(item, dict) and str(item.get("sourceType") or "").casefold() == "zip"
+    ]
+    if not zip_items:
+        return None, True
+    inspected_sizes = {
+        str(item.get("path") or "").replace("\\", "/").strip("/"): _nonnegative_int(item.get("size"))
+        for item in inspection.get("unityPackages") or []
+        if isinstance(item, dict)
+    }
+    total = 0
+    for item in zip_items:
+        entry_path = str(item.get("path") or "").replace("\\", "/").strip("/")
+        container_value = str(item.get("containerPath") or "").strip()
+        container_path = Path(container_value).expanduser() if container_value else source_path
+        try:
+            same_source = container_path.resolve() == source_path.resolve()
+        except OSError:
+            return None, False
+        if same_source:
+            size = inspected_sizes.get(entry_path)
+        else:
+            try:
+                with zipfile.ZipFile(container_path) as archive:
+                    matches = [
+                        info
+                        for info in archive.infolist()
+                        if not info.is_dir()
+                        and info.filename.replace("\\", "/").strip("/") == entry_path
+                    ]
+                size = _nonnegative_int(matches[0].file_size) if len(matches) == 1 else None
+            except (OSError, zipfile.BadZipFile, KeyError):
+                size = None
+        if size is None:
+            return None, False
+        total += size
+    return total, True
 
 
 def build_unitypackage_import_risk_facts(
