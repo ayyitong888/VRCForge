@@ -200,7 +200,7 @@ def build_container_result(
     if not unity_packages and prefabs:
         warnings.append("Loose prefab workflow requires explicit user confirmation before copying assets into the Unity project.")
     if textures and not prefabs and not unity_packages:
-        warnings.append("Texture-only input cannot be installed as an outfit without user-selected target materials.")
+        warnings.append("Texture-only assets in an unpacked folder can be copied into the project; assigning them to materials is a separate supervised operation.")
     if not unity_packages and not prefabs and not textures and not materials and not models and not assembly_definitions:
         warnings.append("No UnityPackage or loose outfit assets were detected.")
     if unsafe_entry_count:
