@@ -13,8 +13,7 @@ const workspaceSource = await fs.readFile(path.join(root, "src", "components", "
 assert.match(appSource, /const answerItemId = `question-answer-\$\{questionId\}`/);
 assert.match(appSource, /appendToChat\(answerChatId,\s*\{/);
 assert.match(appSource, /answeredQuestion\?\.question \|\| questionId/);
-assert.match(workspaceSource, /data-question-continuation-status/);
-assert.match(workspaceSource, /data-question-continuation-stop/);
+assert.ok(!workspaceSource.includes("data-question-continuation-status"), "successful answers must not leave a question-specific continuation dock");
 const temp = await fs.mkdtemp(path.join(root, "tests", ".question-answer-browser-"));
 const bundle = path.join(temp, "bundle.mjs");
 const entry = `
@@ -24,19 +23,17 @@ import { AgentQuestionCard } from ${JSON.stringify(path.join(root, "src/componen
 function Fixture() {
   const [question, setQuestion] = useState({ questionId: "q-browser", status: "pending", header: "Repair avatar", question: "Choose a repair", options: [{ id: "safe", label: "Safe repair", value: "Safe repair" }] });
   const [answer, setAnswer] = useState("");
-  const [continuing, setContinuing] = useState(false);
   const [calls, setCalls] = useState(0);
   const [fail, setFail] = useState(true);
   async function answerQuestion(_id, _optionId, value) {
     setCalls((count) => count + 1);
     await new Promise((resolve) => setTimeout(resolve, 40));
     if (fail) { setFail(false); throw new Error("temporary answer failure"); }
-    setAnswer(value); setQuestion((current) => ({ ...current, status: "answered", runtimeContinuation: { status: "running", turnId: "turn-browser" } })); setContinuing(true);
+    setAnswer(value); setQuestion((current) => ({ ...current, status: "answered", runtimeContinuation: { status: "running", turnId: "turn-browser" } }));
   }
   return React.createElement("main", null,
     React.createElement("output", { "data-answer-calls": calls }, String(calls)),
     React.createElement("div", { "data-answer-item": true }, answer ? "Repair avatar\\n\\n" + answer : ""),
-    continuing ? React.createElement("div", { role: "status", "data-question-continuation-status": true }, "Continuing this task…", React.createElement("button", { "data-question-continuation-stop": true, onClick: () => setContinuing(false) }, "Stop")) : null,
     React.createElement(AgentQuestionCard, { questions: [question], onAnswerQuestion: answerQuestion })
   );
 }
@@ -76,13 +73,14 @@ try {
   await page.getByRole("button", { name: "Retry" }).click();
   await page.locator("[data-answer-item]").filter({ hasText: "Repair avatar" }).waitFor();
   assert.equal(await page.getByRole("region", { name: "questionCard.label" }).count(), 0, "successful answer must remove card");
-  assert.equal(await page.locator("[data-question-continuation-status]").count(), 1, "running continuation must remain visible outside question card");
-  await page.locator("[data-question-continuation-stop]").click();
-  assert.equal(await page.locator("[data-question-continuation-status]").count(), 0, "Stop must remain available on unified continuation status");
+  assert.equal(await page.locator("[data-question-continuation-status]").count(), 0, "successful answer must not leave a question-specific running frame");
   assert.equal(await page.locator("[data-answer-calls]").textContent(), "2", "retry must be the only second answer call");
-  console.log("question answer browser: failure retains Retry; success stores answer and removes card");
+  console.log("question answer browser: failure retains Retry; success stores answer and removes card without a continuation frame");
 } finally {
   await browser?.close();
   await new Promise((resolve) => server.close(resolve));
-  await fs.rm(temp, { recursive: true, force: true });
+  const cleanupTarget = await fs.realpath(temp);
+  const testRoot = await fs.realpath(path.join(root, "tests"));
+  assert.ok(cleanupTarget.startsWith(testRoot + path.sep), "cleanup must stay in the test workspace");
+  await fs.rm(cleanupTarget, { recursive: true, force: true });
 }

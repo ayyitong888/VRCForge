@@ -44,6 +44,7 @@ export function Composer({
   permission,
   onSubmit,
   onStop,
+  stopDisabled = false,
   onSwitchMode,
   planMode = false,
   onPlanModeChange,
@@ -72,6 +73,7 @@ export function Composer({
   permission?: PermissionState;
   onSubmit: (event?: FormEvent) => void;
   onStop?: () => void;
+  stopDisabled?: boolean;
   onSwitchMode: (mode: PermissionState["executionMode"]) => void;
   planMode?: boolean;
   onPlanModeChange?: (enabled: boolean) => void;
@@ -455,7 +457,7 @@ export function Composer({
               </>
             ) : sending ? (
               <>
-                <Button type="button" variant="outline" className="h-10 w-10 rounded-full px-0" onClick={onStop} title={t("chat.stop")} data-composer-stop>
+                <Button type="button" variant="outline" className="h-10 w-10 rounded-full px-0" onClick={onStop} disabled={stopDisabled} title={t("chat.stop")} data-composer-stop>
                   <Square className="h-4 w-4" />
                 </Button>
                 {queueAllowed ? (

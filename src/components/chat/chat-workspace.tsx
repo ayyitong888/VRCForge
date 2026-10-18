@@ -14,7 +14,7 @@ import type {
 } from "../../lib/chat-types";
 import { Composer } from "./composer";
 import { AgentQuestionCard } from "./agent-question-card";
-import { projectAgentQuestionContinuation, questionContinuationDisplay } from "../../hooks/use-runtime-turn-continuation";
+import { projectAgentQuestionContinuation, questionContinuationCancelTarget, questionContinuationDisplay } from "../../hooks/use-runtime-turn-continuation";
 import { BackgroundGoalCatchUpCard } from "./background-goal-catch-up-card";
 import { ConversationCard } from "./conversation-card";
 import { SessionHandoffCard } from "./session-handoff-card";
@@ -219,22 +219,15 @@ export function ChatWorkspace({
   const activeQuestionContinuation = pendingAgentQuestions.find(
     (question) => questionContinuationDisplay(question) === "active",
   );
-  const questionContinuationBar = activeQuestionContinuation ? (
-    <div className="mb-3 flex items-center gap-2 rounded-xl border border-border bg-muted/40 px-3 py-2 text-xs" role="status" data-question-continuation-status>
-      <span className="min-w-0 flex-1 truncate">{t("questionCard.continuationRunning", "Continuing this task…")}</span>
-      {onStopQuestionContinuation ? (
-        <button
-          type="button"
-          className="shrink-0 rounded-md border border-border px-2 py-1 font-medium hover:bg-muted disabled:opacity-60"
-          onClick={() => void onStopQuestionContinuation(activeQuestionContinuation)}
-          disabled={!activeQuestionContinuation.runtimeContinuation?.turnId && !activeQuestionContinuation.runtimeContinuation?.clientTurnId}
-          data-question-continuation-stop
-        >
-          {t("questionCard.stopContinuation", "Stop")}
-        </button>
-      ) : null}
-    </div>
-  ) : null;
+  const questionContinuationCanStop = Boolean(activeQuestionContinuation && onStopQuestionContinuation);
+  const composerSending = sending || questionContinuationCanStop;
+  const composerStopDisabled = Boolean(!sending && activeQuestionContinuation && (
+    String(activeQuestionContinuation.runtimeContinuation?.status || "").toLowerCase() === "cancelling"
+    || !questionContinuationCancelTarget(activeQuestionContinuation)
+  ));
+  const composerStop = !sending && activeQuestionContinuation && onStopQuestionContinuation
+    ? () => void onStopQuestionContinuation(activeQuestionContinuation)
+    : onStop;
   const pendingQuestionPrompts = pendingAgentQuestions.filter(
     (question) => questionContinuationDisplay(question) === "pending",
   );
@@ -275,11 +268,12 @@ export function ChatWorkspace({
     <Composer
       input={input}
       setInput={setInput}
-      sending={sending}
+      sending={composerSending}
       queueAllowed={queueAllowed}
       permission={permission}
       onSubmit={onSubmit}
-      onStop={onStop}
+      onStop={composerStop}
+      stopDisabled={composerStopDisabled}
       onSwitchMode={onSwitchMode}
       planMode={planMode}
       onPlanModeChange={onPlanModeChange}
@@ -403,7 +397,6 @@ export function ChatWorkspace({
                 <AgentQuestionCard questions={pendingQuestionPrompts} onAnswerQuestion={onAnswerQuestion} />
               </div>
             ) : null}
-            {questionContinuationBar}
             {queueControls}
             <CompactionStatus state={compaction} onCancel={onCancelCompaction} />
             {activeGoalBar}
@@ -517,7 +510,6 @@ export function ChatWorkspace({
               <AgentQuestionCard questions={pendingQuestionPrompts} onAnswerQuestion={onAnswerQuestion} />
             </div>
           ) : null}
-          {questionContinuationBar}
           {queueControls}
           <CompactionStatus state={compaction} onCancel={onCancelCompaction} />
           {handoffSendOpen ? (
