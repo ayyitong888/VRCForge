@@ -141,6 +141,7 @@ for _runtime_name, _owner in {
     "vrcforge_build_and_upload_avatar": "diagnostics_build/build_runtime",
     "vrcforge_build_test_avatar": "diagnostics_build/build_runtime",
     "vrcforge_scene_transition": "avatar_structure/hierarchy_components",
+    "vrcforge_get_property": "avatar_structure/hierarchy_components",
     "vrcforge_set_play_mode": "diagnostics_build/build_runtime",
     "vrcforge_avatar_encryption_liltoon_apply_request": "behavior/interaction_generated_systems",
     "vrcforge_avatar_encryption_poiyomi_apply_request": "behavior/interaction_generated_systems",
