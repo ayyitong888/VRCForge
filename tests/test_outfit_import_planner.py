@@ -63,6 +63,28 @@ def make_project(root: Path, dependencies: dict[str, str] | None = None) -> None
     (root / "ProjectSettings" / "ProjectVersion.txt").write_text("m_EditorVersion: 2022.3.22f1", encoding="utf-8")
 
 
+def test_nested_package_plan_never_treats_outer_loose_assets_as_package_destinations(tmp_path: Path) -> None:
+    from prepared_outfit_import_workflow_service import PreparedOutfitImportPreparer
+    project = tmp_path / "Project"
+    make_project(project)
+    source = tmp_path / "Dress_Milltina.zip"
+    with zipfile.ZipFile(source, "w") as archive:
+        archive.writestr("Product/Dress_Milltina.unitypackage", b"package bytes")
+        archive.writestr("Product/FBX/Dress.fbx", b"standalone model")
+        archive.writestr("Product/Preview.prefab", b"standalone prefab")
+    result = build_outfit_import_plan(
+        source, project_path=project, base_avatar_name="Milltina",
+        selected_unitypackage="Product/Dress_Milltina.unitypackage",
+    )
+    plan = result["plan"]
+    assert plan["readyToApply"] is True
+    assert plan["expectedAssetPaths"] == []
+    assert plan["selectedPrefab"] == ""
+    assert plan["expectedAssetPathsComplete"] is False
+    assert plan["riskFacts"]["pathnameEvidenceComplete"] is False
+    assert PreparedOutfitImportPreparer._expected_asset_paths(plan) == []
+
+
 def test_direct_unitypackage_plan_is_supervised_and_payload_safe(tmp_path: Path) -> None:
     project = tmp_path / "Project"
     make_project(project)

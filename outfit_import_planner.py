@@ -346,18 +346,25 @@ def build_unitypackage_plan(
     import_queue = package_order.get("importQueue") if isinstance(package_order.get("importQueue"), list) else []
     queue_can_apply = bool(import_queue) and not bool(package_order.get("requiresManualExtract"))
     needs_extract = actual_package_path is None and not queue_can_apply
-    expected_assets_complete = not bool(inspection.get("summary", {}).get("truncated"))
+    inspection_complete = not bool(inspection.get("summary", {}).get("truncated"))
+    expected_assets_complete = inspection_complete and all(
+        package.get("pathnamesEvidenceComplete") is True
+        for package in inspection.get("unityPackages") or []
+    )
     ready = (
         not needs_extract
-        and expected_assets_complete
+        and inspection_complete
         and bool(dependency_preflight.get("readyForImport"))
     )
     plan_warnings = list(warnings)
-    if not expected_assets_complete:
+    if not inspection_complete:
         plan_warnings.append(
             "Package inspection evidence was truncated; increase max_entries and inspect the complete package before apply."
         )
     expected_assets = expected_asset_paths_from_inspection(inspection)
+    if selected_prefab_path and selected_prefab_path not in expected_assets:
+        plan_warnings.append("The container prefab is not a proven destination of the UnityPackage; find the imported prefab after refresh.")
+        selected_prefab_path = ""
     plan_kind = (
         "unitypackage_container_manual_extract"
         if needs_extract
@@ -1304,7 +1311,10 @@ def expected_asset_paths_from_inspection(inspection: dict[str, Any]) -> list[str
                 path = str(item.get("path") or "").replace("\\", "/").strip("/")
                 if path.startswith("Assets/"):
                     paths.append(path)
-    if paths:
+    # A container's loose FBX/prefab entries are not destinations of the
+    # selected UnityPackage. Unknown package pathnames stay unknown until
+    # approval-bound inspection; they cannot fall back to another asset kind.
+    if paths or inspection.get("unityPackages"):
         return sorted(dict.fromkeys(paths), key=str.lower)
     return loose_asset_paths_from_inspection(inspection)
 
@@ -1330,9 +1340,10 @@ def loose_asset_paths_from_inspection(inspection: dict[str, Any]) -> list[str]:
 
 
 def first_prefab_path(inspection: dict[str, Any]) -> str:
-    for item in inspection.get("prefabCandidates") or []:
-        if isinstance(item, dict):
-            return str(item.get("path") or "")
+    if not inspection.get("unityPackages"):
+        for item in inspection.get("prefabCandidates") or []:
+            if isinstance(item, dict):
+                return str(item.get("path") or "")
     for path in expected_asset_paths_from_inspection(inspection):
         if path.lower().endswith(".prefab"):
             return path

@@ -1155,12 +1155,13 @@ class AgentApprovalTransactionService:
             else:
                 outcome = self._ports.call_tool(tool_name, params, agent_name=agent_name)
         except AgentGatewayError as exc:
-            return {
-                "ok": False,
-                "status": "unavailable",
-                "tool": tool_name,
-                "paramsSummary": params_summary,
-                "error": str(exc),
+            error_details = build_external_tool_error(
+                error=str(exc), exception=exc, tool=tool_name, operation_kind="write",
+            )
+            outcome = {
+                "ok": False, "status": "failed", "error": str(exc),
+                "errorDetails": error_details,
+                "writeFailure": external_write_failure_view(error_details),
             }
         outcome = ensure_dict(outcome)
         approval = extract_approval_id(outcome)
@@ -1284,6 +1285,11 @@ class AgentApprovalTransactionService:
                 raise AgentGatewayError(
                     f"Could not prepare the supervised write request for {target_tool}.",
                     status_code=500,
+                    cause_code="write_request_preparation_failed",
+                    failure_layer="write_request_preparation",
+                    failure_phase="request_preparer", operation_kind="write", tool=target_tool,
+                    tool_routing_started=False, mutation_started=False, committed=False,
+                    commit_state="not_started",
                 ) from exc
             if not isinstance(prepared_arguments, dict):
                 raise AgentGatewayError(
