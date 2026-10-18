@@ -343,3 +343,60 @@ def test_prepare_failure_is_returned_without_archive_offer(scene_case):
     )
     assert result == {"ok": False, "code": "checkpoint_failed", "error": "save failed"}
     assert [item[0] for item in observed] == ["discover", "prepare"]
+
+
+@pytest.mark.parametrize("active", [True, False])
+def test_exact_object_visibility_prepares_authoritative_scene_scope(scene_case, monkeypatch, active):
+    import dashboard_server as dashboard
+    target = _target(scene_case, "object")
+    observed = []
+    monkeypatch.setattr(dashboard, "list_execution_targets_sync", lambda query: observed.append(query) or {"ok": True, "targets": [target]})
+    monkeypatch.setattr(dashboard, "prepare_unity_checkpoint_sync", lambda root, **kw: observed.append(kw) or {"ok": True})
+    result = dashboard.prepare_authoritative_unity_checkpoint_sync(scene_case, {
+        "executionTarget": target, "_checkpointTargetTool": "vrcforge_set_gameobject_active",
+        "gameObjectPath": "Avatar/Outfit", "active": active,
+    })
+    assert result.get("ok") is True, result
+    assert result["archiveAssetPaths"] == ["Assets/Main.unity"]
+    assert observed[-1] == {"checkpoint_files": ["Assets/Main.unity"]}
+
+
+@pytest.mark.parametrize("scope,path", [("avatar", "Avatar/Outfit"), ("object", "Avatar/Other")])
+def test_visibility_rejects_nonexact_object_before_discovery(scene_case, scope, path):
+    result, observed = _run(scene_case, "vrcforge_set_gameobject_active", {
+        "executionTarget": _target(scene_case, scope), "gameObjectPath": path, "active": False,
+    })
+    assert result.get("ok") is False and observed == []
+
+
+def test_visibility_revalidates_exact_owner_before_checkpoint(scene_case):
+    target = _target(scene_case, "object")
+    changed = deepcopy(target)
+    changed["object"]["globalObjectId"] = "different-object"
+    result, observed = _run(scene_case, "vrcforge_set_gameobject_active", {
+        "executionTarget": target, "gameObjectPath": "Avatar/Outfit", "active": False,
+    }, fresh={"ok": True, "targets": [changed]})
+    assert result.get("ok") is False
+    assert [item[0] for item in observed] == ["discover"]
+
+
+@pytest.mark.parametrize("core_request", [
+    {"gameObjectPath": "Avatar/Outfit", "preview": False},
+    {"gameObjectPath": "Avatar/Outfit", "active": "false", "preview": False},
+    {"gameObjectPath": "Avatar/Outfit", "active": False, "preview": True},
+    {"gameObjectPath": "Avatar/Outfit", "active": False, "preview": False, "extraCall": {}},
+])
+def test_visibility_rejects_nonexact_core_effect(scene_case, core_request):
+    result, observed = _run(scene_case, "vrcforge_set_gameobject_active", {
+        "executionTarget": _target(scene_case, "object"),
+    }, plan=lambda _tool, _args: [("vrc_set_gameobject_active", core_request)])
+    assert result.get("ok") is False and observed == []
+
+
+def test_visibility_rejects_object_outside_bound_avatar(scene_case):
+    target = _target(scene_case, "object")
+    target["object"]["exactHierarchyPath"] = "Other/Outfit"
+    result, observed = _run(scene_case, "vrcforge_set_gameobject_active", {
+        "executionTarget": target, "gameObjectPath": "Other/Outfit", "active": False,
+    })
+    assert result.get("ok") is False and observed == []

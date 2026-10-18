@@ -21160,7 +21160,8 @@ def prepare_authoritative_unity_checkpoint_sync(
             prepare=prepare_unity_checkpoint_sync,
         )
     if checkpoint_target in {"vrcforge_setup_outfit", "vrcforge_instantiate_prefab",
-                             "vrcforge_unpack_prefab", "vrcforge_create_gameobject"}:
+                             "vrcforge_unpack_prefab", "vrcforge_create_gameobject",
+                             "vrcforge_set_gameobject_active"}:
         from unity_scene_workflow_checkpoint import prepare_scene_workflow_checkpoint
 
         return prepare_scene_workflow_checkpoint(

@@ -11,6 +11,7 @@ _CORE_TOOLS = {
     "vrcforge_instantiate_prefab": "vrc_instantiate_prefab",
     "vrcforge_unpack_prefab": "vrc_unpack_prefab",
     "vrcforge_create_gameobject": "vrc_create_gameobject",
+    "vrcforge_set_gameobject_active": "vrc_set_gameobject_active",
 }
 
 
@@ -232,6 +233,14 @@ def _selector_error(
 ) -> str:
     avatar_path = _hierarchy_path(avatar.get("exactHierarchyPath"))
     object_path = _hierarchy_path(obj.get("exactHierarchyPath"))
+    if checkpoint_target == "vrcforge_set_gameobject_active":
+        if (scope not in {"object", "component"}
+                or not object_path or request.get("gameObjectPath") != object_path
+                or not avatar_path or not (object_path == avatar_path or object_path.startswith(avatar_path + "/"))
+                or set(request) != {"gameObjectPath", "active", "preview"}
+                or type(request.get("active")) is not bool or request.get("preview") is not False):
+            return "Visibility must select one exact freshly bound Avatar object with an explicit Boolean state."
+        return ""
     if checkpoint_target == "vrcforge_setup_outfit":
         outfit_path = _hierarchy_path(request.get("outfitPath"))
         if (
