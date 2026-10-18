@@ -35,7 +35,9 @@ assert.match(source, /processHeader \?/, "the process header keeps its chevron a
 assert.match(source, /invocation\.label[\s\S]*status/, "expanded invocation details retain the real label and status");
 assert.doesNotMatch(source, /statusLabel\}\<\/div\>\{children\}/, "expanded execution details do not repeat the aggregate status");
 assert.match(source, /rows\.unshift\([\s\S]*agent-turn-process/, "one turn owns one outer process fold rather than nested work segments");
-assert.match(source, /!compactExecution \? <span[\s\S]*statusLabel/, "execution status stays inside expanded command/tool rows");
+assert.match(source, /!compactExecution \|\| showCompactStatus \? <span[\s\S]*statusLabel/, "failed tools expose a short status while other compact execution rows stay compact");
+assert.match(source, /showCompactStatus=\{showToolFailure\}/, "only failed tool rows expose the short collapsed-row status");
+assert.doesNotMatch(source, /showStatus=\{(?:failed|processFailed)\}/, "aggregate tool/process rows do not promote an intermediate failure to the turn summary");
 assert.match(source, /invocation\.kind === "process"/, "safe planner commentary must render directly even when adjacent");
 assert.match(source, /data-agent-timeline-invocation="process"/, "non-CoT planner commentary owns a visible timeline row");
 assert.match(source, /<ChatMarkdown text=\{commentary\}/, "safe planner commentary must retain its complete projected text");

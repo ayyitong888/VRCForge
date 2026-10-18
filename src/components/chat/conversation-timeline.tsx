@@ -237,15 +237,13 @@ export function buildDurableTimelineRows(
     if (!pendingCalls.length) return;
     const calls = pendingCalls;
     pendingCalls = [];
-    const failed = calls.some(({ invocation }) => /failed|error|rejected|cancelled|canceled/.test(invocation.status.toLowerCase()));
     processRows.push(
       <div key={`tools-${calls[0].invocation.id}`} data-agent-tool-call-group>
         <WorkSegmentRow
           kind="tool"
           title={i18n.t("agent.timeline.callTools", { count: calls.length })}
-          statusLabel={failed ? i18n.t("skillStatus.failed") : ""}
-          statusTone={failed ? "danger" : "muted"}
-          showStatus={failed}
+          statusLabel=""
+          statusTone="muted"
         >
           {calls.map(({ invocation, detail }) => renderDirectTimelineInvocation(invocation, detail))}
         </WorkSegmentRow>
@@ -293,15 +291,13 @@ export function buildDurableTimelineRows(
   }
   flushToolCalls();
   if (processRows.length) {
-    const processFailed = processInvocations.some((invocation) => ["failed", "error", "rejected", "cancelled", "canceled"].some((value) => invocation.status.toLowerCase().includes(value)));
     rows.unshift(
       <div key="agent-turn-process" data-agent-turn-process-group>
         <WorkSegmentRow
           kind="process"
           title={turnProcessDisplayTitle(turnElapsed, processInvocations, i18n.t)}
-          statusLabel={processFailed ? i18n.t("skillStatus.failed") : ""}
-          statusTone={processFailed ? "danger" : "muted"}
-          showStatus={processFailed}
+          statusLabel=""
+          statusTone="muted"
           openByDefault={Boolean(options.live)}
           processHeader
         >
@@ -352,13 +348,15 @@ function renderDirectTimelineInvocation(invocation: TimelineInvocation, detail?:
     );
   }
   const danger = ["failed", "error"].includes(invocation.status.toLowerCase());
+  const showToolFailure = invocation.kind === "tool" && danger;
   return (
     <RunRow
       key={invocation.id}
       icon={workBatchIcon(invocation.kind)}
       title={[invocationOperationTitle(invocation, i18n.t), invocationTarget(detail)].filter(Boolean).join(" · ")}
       statusTone={danger ? "danger" : invocation.status === "started" ? "warn" : "ok"}
-      statusLabel={invocation.status}
+      statusLabel={showToolFailure ? i18n.t("skillStatus.failed") : invocation.status}
+      showCompactStatus={showToolFailure}
       detailCard
     >
       <InvocationDetailCard invocation={invocation} detail={detail} />
@@ -378,7 +376,9 @@ function invocationOperationTitle(invocation: TimelineInvocation, t: typeof i18n
   const tool = timelineInvocationDisplayLabel(invocation.label);
   const normalizedStatus = invocation.status.toLowerCase();
   if (["failed", "error", "rejected", "cancelled", "canceled"].some((value) => normalizedStatus.includes(value))) {
-    return t("agent.timeline.failedTool", { tool });
+    return invocation.kind === "tool" && ["failed", "error"].includes(normalizedStatus)
+      ? tool
+      : t("agent.timeline.failedTool", { tool });
   }
   if (["started", "running", "pending"].includes(normalizedStatus)) {
     return t("agent.timeline.runningTool", { tool });
@@ -406,9 +406,8 @@ function turnProcessDisplayTitle(
 ): string {
   if (Number.isFinite(elapsedSeconds)) return t("agent.turnDuration", { duration: formatDuration(elapsedSeconds || 0) });
   const kind = invocations[0]?.kind || "process";
-  if (invocations.length === 1) return invocationOperationTitle(invocations[0], t);
   const failed = invocations.filter((invocation) => ["failed", "error", "rejected", "cancelled", "canceled"].some((value) => invocation.status.toLowerCase().includes(value))).length;
-  if (failed) return t("agent.timeline.failedTools", { count: failed });
+  if (invocations.length === 1 && !failed) return invocationOperationTitle(invocations[0], t);
   if (kind === "tool" && invocations.every((invocation) => timelineInvocationDisplayLabel(invocation.label) === "read_text_file")) {
     return t("agent.timeline.readFiles", { count: invocations.length });
   }
@@ -1043,6 +1042,7 @@ export function RunRow({
   children,
   timelineOrder,
   detailCard = false,
+  showCompactStatus = false,
 }: {
   icon: "shell" | "skill" | "plan" | "vision";
   title: string;
@@ -1051,6 +1051,7 @@ export function RunRow({
   children: ReactNode;
   timelineOrder?: number;
   detailCard?: boolean;
+  showCompactStatus?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const Icon = icon === "shell" ? TerminalSquare : icon === "skill" ? Wrench : icon === "vision" ? Eye : ListChecks;
@@ -1065,7 +1066,7 @@ export function RunRow({
       >
         <Icon className="h-3.5 w-3.5 shrink-0" />
         <span className="min-w-0 truncate text-xs" title={title}>{title}</span>
-        {!compactExecution ? <span className={cn("shrink-0 text-xs", statusTone === "danger" ? "text-destructive" : statusTone === "warn" ? "text-amber-600" : statusTone === "ok" ? "text-emerald-600" : "text-muted-foreground")}>
+        {!compactExecution || showCompactStatus ? <span className={cn("shrink-0 text-xs", statusTone === "danger" ? "text-destructive" : statusTone === "warn" ? "text-amber-600" : statusTone === "ok" ? "text-emerald-600" : "text-muted-foreground")}>
           {statusLabel}
         </span> : null}
         <span className="ml-auto shrink-0 opacity-0 transition-opacity group-hover/run:opacity-100 group-focus-visible/run:opacity-100">
