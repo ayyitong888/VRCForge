@@ -3,8 +3,10 @@ from __future__ import annotations
 
 from copy import deepcopy
 import io
+import os
 from pathlib import Path
 import tarfile
+import zipfile
 
 import pytest
 
@@ -15,6 +17,7 @@ from prepared_unity_execution import (
     install_prepared_calls,
 )
 from unity_import_checkpoint import prepare_import_asset_checkpoint
+from prepared_archive_imports import prepare_zip_member_materialization
 
 
 def _project(tmp_path: Path) -> Path:
@@ -257,3 +260,81 @@ def test_package_rejects_tampered_call_seal(tmp_path: Path) -> None:
     result = _prepare(project, arguments)
     assert result["ok"] is False and result["code"] == "checkpoint_scope_unresolved"
     assert "digest is invalid" in result["error"]
+
+
+def _nested_package_fixture(tmp_path: Path, *, package_bytes: bytes | None = None):
+    project = _project(tmp_path)
+    package = _unitypackage(tmp_path / "Dress.unitypackage", ["Assets/Outfits/Dress.prefab"])
+    if package_bytes is not None:
+        package.write_bytes(package_bytes)
+    arguments = _package_fixture(project, [package], kind="unitypackage_import_sequence")
+    source = tmp_path / "Clothes.zip"
+    with zipfile.ZipFile(source, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.write(package, "Nested/Dress.unitypackage")
+    temp_parent = tmp_path / "staging"
+    temp_parent.mkdir()
+    facts = prepare_zip_member_materialization(
+        source=source, temp_parent=temp_parent,
+        selected_members=[{"path": "Nested/Dress.unitypackage", "targetName": "prepared.unitypackage"}],
+    )
+    seal = arguments[PREPARED_UNITY_EXECUTION_ARGUMENT_KEY]
+    evidence = deepcopy(seal["evidence"])
+    selected = facts["selected"][0]
+    identity = {"path": str(temp_parent / selected["targetName"]),
+                "sha256": selected["sha256"], "size": selected["size"]}
+    evidence["queue"] = [{"identity": identity, "materializationIndex": 0}]
+    evidence["materializations"] = [facts]
+    calls = deepcopy(seal["calls"])
+    calls[0]["arguments"]["unityPackagePath"] = identity["path"]
+    return project, source, temp_parent, calls, evidence
+
+
+def test_nested_package_checkpoint_reads_sealed_member_before_materialization(tmp_path: Path) -> None:
+    project, _source, staging, calls, evidence = _nested_package_fixture(tmp_path)
+    assert list(staging.iterdir()) == []
+    result = _prepare(project, install_prepared_calls({}, calls, evidence))
+    assert result["ok"] is True, result
+    assert result["assetFootprint"]["archiveAbsentFiles"] == [
+        "Assets/Outfits.meta", "Assets/Outfits/Dress.prefab", "Assets/Outfits/Dress.prefab.meta",
+    ]
+    assert list(staging.iterdir()) == []  # Checkpoint inspection owns no persistent staging file.
+    assert list((project / "Assets").iterdir()) == []
+
+
+@pytest.mark.parametrize("drift", ["source", "queue_path", "queue_hash", "member", "index", "appeared"])
+def test_nested_package_checkpoint_rejects_source_or_binding_drift(tmp_path: Path, drift: str) -> None:
+    project, source, staging, calls, evidence = _nested_package_fixture(tmp_path)
+    if drift == "source":
+        source.write_bytes(b"changed archive")
+    elif drift == "queue_path":
+        evidence["queue"][0]["identity"]["path"] = str(staging / "another.unitypackage")
+    elif drift == "queue_hash":
+        evidence["queue"][0]["identity"]["sha256"] = "a" * 64
+    elif drift == "member":
+        evidence["materializations"][0]["selected"][0]["path"] = "Other.unitypackage"
+    elif drift == "index":
+        evidence["queue"][0]["materializationIndex"] = 100
+    else:
+        (staging / "prepared.unitypackage").write_bytes(b"foreign")
+    result = _prepare(project, install_prepared_calls({}, calls, evidence))
+    assert result["ok"] is False and result["mutationStarted"] is False
+    assert list((project / "Assets").iterdir()) == []
+    assert list(staging.iterdir()) == ([staging / "prepared.unitypackage"] if drift == "appeared" else [])
+
+
+@pytest.mark.parametrize("valid_tar", [True, False])
+def test_nested_package_disk_spool_cleans_up_on_success_and_parse_failure(tmp_path: Path, valid_tar: bool) -> None:
+    payload = os.urandom(9 * 1024 * 1024)
+    if valid_tar:
+        buffer = io.BytesIO()
+        with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
+            _tar_member(archive, "entry/pathname", b"Assets/Outfits/Texture.png")
+            _tar_member(archive, "entry/asset.meta", b"fileFormatVersion: 2\n")
+            _tar_member(archive, "entry/asset", payload)
+        payload = buffer.getvalue()
+    assert len(payload) > 8 * 1024 * 1024
+    project, _source, staging, calls, evidence = _nested_package_fixture(tmp_path, package_bytes=payload)
+    result = _prepare(project, install_prepared_calls({}, calls, evidence))
+    assert result["ok"] is valid_tar, result
+    assert list(staging.iterdir()) == []
+    assert list((project / "Assets").iterdir()) == []

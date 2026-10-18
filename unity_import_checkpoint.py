@@ -1,7 +1,12 @@
 """Derive bounded asset rollback footprints from approved, sealed imports."""
 from pathlib import Path, PurePosixPath
+from contextlib import ExitStack
+import hashlib
 import tarfile
+import tempfile
+import zipfile
 
+from prepared_archive_imports import _entry_manifest, _opened_source_matches
 from prepared_file_imports import verify_directory, verify_regular_file
 from prepared_unity_execution import build_prepared_execution_plan, prepared_evidence
 
@@ -93,10 +98,7 @@ def prepare_import_asset_checkpoint(project_root: Path, arguments: dict, *, veri
                 raise ValueError("The sealed package queue is incomplete.")
             for index, item in enumerate(queue):
                 identity = item["identity"]
-                package = verify_regular_file(
-                    {key: value for key, value in identity.items() if key != "sha256"},
-                    identity["sha256"], label="Import package",
-                )
+                package = Path(identity["path"])
                 tool, request = calls[index]
                 if (tool != "vrc_import_unitypackage" or request.get("unityPackagePath") != str(package)
                         or request.get("expectedSha256") != identity["sha256"]
@@ -104,7 +106,60 @@ def prepare_import_asset_checkpoint(project_root: Path, arguments: dict, *, veri
                         or request.get("projectPath") != refresh[1]["projectPath"]):
                     raise ValueError("A sealed package call differs from its approved source.")
                 seen = set()
-                with tarfile.open(package, "r:*") as archive:
+                with ExitStack() as resources:
+                    materialization_index = item.get("materializationIndex")
+                    if materialization_index is None:
+                        package = verify_regular_file(
+                            {key: value for key, value in identity.items() if key != "sha256"},
+                            identity["sha256"], label="Import package",
+                        )
+                        archive = resources.enter_context(tarfile.open(package, "r:*"))
+                    else:
+                        facts_list = evidence.get("materializations")
+                        if (type(materialization_index) is not int or not isinstance(facts_list, list)
+                                or not 0 <= materialization_index < len(facts_list)):
+                            raise ValueError("The nested package materialization index is invalid.")
+                        facts = facts_list[materialization_index]
+                        if facts.get("schema") != "vrcforge.prepared-zip-materialization.v1":
+                            raise ValueError("The nested package materialization facts are invalid.")
+                        selected = facts.get("selected")
+                        if not isinstance(selected, list) or len(selected) != 1:
+                            raise ValueError("The nested package must bind exactly one ZIP member.")
+                        selected = selected[0]
+                        parent = verify_directory(facts["tempParent"], label="Materialization temp parent")
+                        target_name = selected["targetName"]
+                        if Path(target_name).name != target_name or target_name in {"", ".", ".."}:
+                            raise ValueError("The nested package target name is invalid.")
+                        expected_identity = {"path": str(parent / target_name),
+                                             "sha256": selected["sha256"], "size": selected["size"]}
+                        if identity != expected_identity or package.exists() or package.is_symlink():
+                            raise ValueError("The nested package target drifted from its sealed ZIP member.")
+                        source = verify_regular_file(facts["sourceIdentity"], facts["sourceSha256"], label="Archive source")
+                        handle = resources.enter_context(source.open("rb"))
+                        _opened_source_matches(handle, facts["sourceIdentity"], facts["sourceSha256"])
+                        container = resources.enter_context(zipfile.ZipFile(handle))
+                        manifest = _entry_manifest(container)
+                        if manifest != facts.get("manifest") or not any(
+                            selected == {**entry, "targetName": target_name} for entry in manifest
+                        ):
+                            raise ValueError("The nested package ZIP member drifted from its sealed manifest.")
+                        # The executor owns the future materialization. Inspection uses only an
+                        # auto-closed spool in the already-owned temp directory, never that path.
+                        spool = resources.enter_context(tempfile.SpooledTemporaryFile(max_size=8 * 1024 * 1024, dir=parent))
+                        digest = hashlib.sha256()
+                        size = 0
+                        with container.open(selected["zipPath"]) as member_source:
+                            while chunk := member_source.read(1024 * 1024):
+                                size += len(chunk)
+                                if size > selected["size"]:
+                                    raise ValueError("The nested package exceeded its sealed size.")
+                                spool.write(chunk)
+                                digest.update(chunk)
+                        if size != selected["size"] or digest.hexdigest() != selected["sha256"]:
+                            raise ValueError("The nested package content drifted from its sealed identity.")
+                        verify_regular_file(facts["sourceIdentity"], facts["sourceSha256"], label="Archive source")
+                        spool.seek(0)
+                        archive = resources.enter_context(tarfile.open(fileobj=spool, mode="r:*"))
                     members = archive.getmembers()
                     if len(members) > 200000:
                         raise ValueError("The package exceeds the bounded footprint scan.")
