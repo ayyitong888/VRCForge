@@ -4,6 +4,7 @@ import type { Components } from "react-markdown";
 import rehypeRaw from "rehype-raw";
 import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
+import remarkCjkFriendly from "remark-cjk-friendly";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
 
@@ -26,7 +27,7 @@ export function ChatMarkdown({ text, variant = "agent" }: { text?: string; varia
       data-testid={`chat-markdown-${variant}`}
     >
       <ReactMarkdown
-        remarkPlugins={[remarkGfm, remarkMath]}
+        remarkPlugins={[remarkGfm, remarkCjkFriendly, remarkMath]}
         remarkRehypeOptions={{ clobberPrefix: "" }}
         rehypePlugins={[rehypeRaw, [rehypeSanitize, sanitizeSchema], [scopeMarkdownFragments, clobberPrefix], [rehypeKatex, { trust: false }]]}
         components={components}
