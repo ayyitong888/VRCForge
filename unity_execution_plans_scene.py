@@ -45,6 +45,16 @@ def _text(value: Any) -> str:
     return str(value or "").strip()
 
 
+def sibling_index_arguments(params: dict[str, Any]) -> dict[str, int]:
+    """Keep the optional exact index identical in direct and approved requests."""
+    value = params.get("sibling_index", params.get("siblingIndex"))
+    if value is None:
+        return {}
+    if type(value) is not int or value < 0:
+        raise ValueError("siblingIndex must be a non-negative integer.")
+    return {"siblingIndex": value}
+
+
 def _bool(value: Any, default: bool) -> bool:
     if value is None:
         return default
@@ -135,7 +145,7 @@ def build_scene_execution_plan(target_name: str, arguments: dict[str, Any]) -> l
 
     gameobject_tools = {
         "vrcforge_rename_gameobject": ("vrc_rename_gameobject", lambda: {"gameObjectPath": _gameobject_target(params), "newName": _text(params.get("new_name") or params.get("newName")), "preview": False}),
-        "vrcforge_reparent_gameobject": ("vrc_reparent_gameobject", lambda: {"gameObjectPath": _gameobject_target(params), "newParentPath": _text(params.get("new_parent_path") or params.get("newParentPath")), "worldPositionStays": bool(params.get("world_position_stays", params.get("worldPositionStays", True))), "preview": False}),
+        "vrcforge_reparent_gameobject": ("vrc_reparent_gameobject", lambda: {"gameObjectPath": _gameobject_target(params), "newParentPath": _text(params.get("new_parent_path") or params.get("newParentPath")), "worldPositionStays": bool(params.get("world_position_stays", params.get("worldPositionStays", True))), "preview": False, **sibling_index_arguments(params)}),
         "vrcforge_delete_gameobject": (
             "vrc_delete_gameobject",
             lambda: {

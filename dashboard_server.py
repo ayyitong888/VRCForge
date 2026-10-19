@@ -361,6 +361,7 @@ from prepared_file_imports import verify_directory, verify_regular_file
 from unity_execution_plans_scene import (
     SCENE_EXECUTION_PLAN_TARGETS,
     build_scene_execution_plan,
+    sibling_index_arguments,
 )
 from unity_execution_plans_tuning import (
     TUNING_EXECUTION_PLAN_TARGETS,
@@ -25358,6 +25359,10 @@ def reparent_gameobject_sync(params: dict[str, Any]) -> dict[str, Any]:
         "worldPositionStays": world_position_stays,
         "preview": preview,
     }
+    try:
+        request.update(sibling_index_arguments(params))
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
     settings = load_dashboard_settings(build_agent_connection_request(params))
     payload = ensure_dict_payload(
         extract_tool_result_payload(invoke_unity_mcp(settings, "vrc_reparent_gameobject", request, preserve_tool_error=True)),
@@ -27902,7 +27907,7 @@ def register_agent_gateway_tools() -> None:
     )
     register_write_handler(
         "vrcforge_reparent_gameobject",
-        "Move a scene GameObject under a new parent (or to the scene root) through VRCForge.",
+        "Move a scene GameObject or set zero-based siblingIndex through VRCForge (Core 175). For sorting without changing animation paths, pass the current parent as newParentPath; empty parent moves to scene root.",
         "medium",
         reparent_gameobject_sync,
         verification_profile="persisted_scene_write_console",

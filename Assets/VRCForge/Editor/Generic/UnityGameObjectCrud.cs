@@ -447,7 +447,7 @@ namespace VRCForge.Editor
 
     [VRCForgeCommand(
         toolId: "vrc_reparent_gameobject",
-        Summary = "Move a scene GameObject under a new parent (or to the scene root) preserving world transform by default (Undo-registered). Supports preview mode."
+        Summary = "Move a scene GameObject or set its zero-based siblingIndex (Undo-registered). For path-preserving sorting pass its current parent as newParentPath; an empty parent moves to scene root. Supports preview mode."
     )]
     public static class ReparentGameObjectTool
     {
@@ -463,6 +463,9 @@ namespace VRCForge.Editor
 
             [VRCForgeInput("Keep the object's world position/rotation/scale (default true).", IsRequired = false)]
             public bool? worldPositionStays { get; set; } = true;
+
+            [VRCForgeInput("Optional zero-based index among destination siblings. For sorting without changing animation paths, pass the current parent as newParentPath. Must be within the destination's final child range; omitted keeps existing reparent behavior.", IsRequired = false)]
+            public int? siblingIndex { get; set; }
 
             [VRCForgeInput("If true, only report what would happen without mutating the scene (default false).", IsRequired = false)]
             public bool? preview { get; set; } = false;
@@ -539,6 +542,16 @@ namespace VRCForge.Editor
 
                 var worldPositionStays = p.worldPositionStays ?? true;
                 var resolvedNewParentPath = newParent != null ? ComponentCrudCore.GetHierarchyPath(newParent.transform) : null;
+                var requestedSiblingIndex = p.siblingIndex;
+                var destinationParent = newParent != null ? newParent.transform : null;
+                var sameParent = oldParent == destinationParent;
+                var destinationCount = toRoot ? target.scene.rootCount : destinationParent.childCount;
+                var maxSiblingIndex = destinationCount - (sameParent ? 1 : 0);
+                if (requestedSiblingIndex.HasValue
+                    && (requestedSiblingIndex.Value < 0 || requestedSiblingIndex.Value > maxSiblingIndex))
+                {
+                    throw new InvalidOperationException($"siblingIndex must be between 0 and {maxSiblingIndex} for the destination parent.");
+                }
 
                 if (p.preview ?? false)
                 {
@@ -553,7 +566,9 @@ namespace VRCForge.Editor
                         gameObjectPath = oldPath,
                         oldParentPath,
                         newParentPath = resolvedNewParentPath,
-                        worldPositionStays
+                        worldPositionStays,
+                        oldSiblingIndex,
+                        requestedSiblingIndex
                     };
                     return VRCForgeToolResult.Completed(
                         toRoot
@@ -567,12 +582,17 @@ namespace VRCForge.Editor
                 {
                     throw new InvalidOperationException("The target saved scene changed before reparenting.");
                 }
-                Undo.SetTransformParent(
-                    target.transform,
-                    toRoot ? null : newParent.transform,
-                    worldPositionStays,
-                    $"Reparent {target.name}");
-                mutationStarted = true;
+                if (!sameParent || !requestedSiblingIndex.HasValue)
+                {
+                    mutationStarted = true;
+                    Undo.SetTransformParent(target.transform, destinationParent, worldPositionStays, $"Reparent {target.name}");
+                }
+                if (requestedSiblingIndex.HasValue)
+                {
+                    mutationStarted = true;
+                    Undo.SetSiblingIndex(target.transform, requestedSiblingIndex.Value, $"Reorder {target.name}");
+                }
+                var expectedSiblingIndex = target.transform.GetSiblingIndex();
                 EditorUtility.SetDirty(target);
                 Undo.FlushUndoRecordObjects();
                 EditorSceneManager.MarkSceneDirty(target.scene);
@@ -596,7 +616,8 @@ namespace VRCForge.Editor
                 {
                     readbackMismatches.Add("parent_path_mismatch");
                 }
-                if (readback.transform.GetSiblingIndex() != target.transform.GetSiblingIndex())
+                if (readback.transform.GetSiblingIndex() != expectedSiblingIndex
+                    || (requestedSiblingIndex.HasValue && readback.transform.GetSiblingIndex() != requestedSiblingIndex.Value))
                 {
                     readbackMismatches.Add("sibling_index_mismatch");
                 }
@@ -608,7 +629,7 @@ namespace VRCForge.Editor
                 {
                     readbackMismatches.Add("scene_handle_changed");
                 }
-                if (!string.Equals(oldPath, newPath, StringComparison.Ordinal)
+                if ((!string.Equals(oldPath, newPath, StringComparison.Ordinal) || oldSiblingIndex != expectedSiblingIndex)
                     && afterScene.FileDigest == beforeScene.FileDigest)
                 {
                     readbackMismatches.Add("scene_file_unchanged");
@@ -636,6 +657,9 @@ namespace VRCForge.Editor
                     oldParentPath,
                     newParentPath = resolvedNewParentPath,
                     worldPositionStays,
+                    oldSiblingIndex,
+                    requestedSiblingIndex,
+                    siblingIndex = readback.transform.GetSiblingIndex(),
                     scenePath = afterScene.Path,
                     sceneSaved = true,
                     persistedReadback = true,
@@ -676,6 +700,7 @@ namespace VRCForge.Editor
                                 : null;
                             restored = ReferenceEquals(restoredObject, target)
                                 && string.Equals(restoredParentPath, oldParentPath, StringComparison.Ordinal)
+                                && restoredObject.transform.GetSiblingIndex() == oldSiblingIndex
                                 && cleanup.Guid == beforeScene.Guid
                                 && cleanup.Handle == beforeScene.Handle
                                 && cleanup.FileDigest == beforeScene.FileDigest

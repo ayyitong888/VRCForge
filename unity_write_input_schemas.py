@@ -393,6 +393,7 @@ EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
             "gameObjectPath": {"type": "string"},
             "newParentPath": {"type": "string"},
             "worldPositionStays": {"type": "boolean", "default": True},
+            "siblingIndex": {"type": "integer", "minimum": 0, "description": "Optional zero-based destination index. For sorting while preserving animation paths, supply the object's current parent as newParentPath. Requires Core contract 175."},
         },
     },
     "vrcforge_set_gameobject_active": {
