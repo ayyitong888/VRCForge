@@ -794,16 +794,94 @@ namespace VRCForge.Editor
                     System.IO.Path.GetDirectoryName(core.Location), StringComparison.OrdinalIgnoreCase);
         }
 
+        private static bool IsPlainSerializedFieldType(Type type, bool allowCollection = true)
+        {
+            if (type == typeof(string) || type == typeof(bool) || type == typeof(byte)
+                || type == typeof(sbyte) || type == typeof(short) || type == typeof(ushort)
+                || type == typeof(int) || type == typeof(uint) || type == typeof(long)
+                || type == typeof(ulong) || type == typeof(float) || type == typeof(double)
+                || type == typeof(char) || type.IsEnum
+                || type == typeof(Vector2) || type == typeof(Vector3) || type == typeof(Vector4)
+                || type == typeof(Quaternion) || type == typeof(Color)
+                || typeof(UnityEngine.Object).IsAssignableFrom(type))
+            {
+                return true;
+            }
+            if (!allowCollection)
+            {
+                return false;
+            }
+            if (type.IsArray)
+            {
+                return type.GetArrayRank() == 1 && IsPlainSerializedFieldType(type.GetElementType(), false);
+            }
+            return type.IsGenericType && type.GetGenericTypeDefinition() == typeof(List<>)
+                && IsPlainSerializedFieldType(type.GetGenericArguments()[0], false);
+        }
+
+        private static bool IsPlainSceneDataField(Component component, MemberInfo member)
+        {
+            var field = member as FieldInfo;
+            if (!(component is MonoBehaviour) || field == null || field.IsStatic
+                || field.IsInitOnly || field.IsLiteral || field.IsNotSerialized
+                || (!field.IsPublic && !field.GetCustomAttributesData().Any(
+                    attribute => attribute.AttributeType == typeof(SerializeField)))
+                || field.GetCustomAttributesData().Any(
+                    attribute => attribute.AttributeType == typeof(SerializeReference))
+                || !IsPlainSerializedFieldType(field.FieldType)
+                || component is ISerializationCallbackReceiver)
+            {
+                return false;
+            }
+            // A data-only type has no declared behavior. This deliberately also
+            // rejects ordinary helper/accessor methods rather than guessing which
+            // Unity/editor callbacks could execute during serialization or Undo.
+            for (var type = component.GetType(); type != typeof(MonoBehaviour); type = type.BaseType)
+            {
+                if (type == null || type.TypeInitializer != null
+                    || type.GetMethods(BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public
+                        | BindingFlags.NonPublic | BindingFlags.DeclaredOnly).Length != 0
+                    || type.GetCustomAttributesData().Any(attribute =>
+                        attribute.AttributeType == typeof(ExecuteAlways)
+                        || attribute.AttributeType == typeof(ExecuteInEditMode)))
+                {
+                    return false;
+                }
+                // Saving serializes the whole component, not just the assigned
+                // field. Do not admit nested custom data/callback graphs through
+                // another serialized field on an otherwise plain component.
+                foreach (var serializedField in type.GetFields(BindingFlags.Instance
+                    | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly))
+                {
+                    if (serializedField.IsStatic || serializedField.IsInitOnly || serializedField.IsNotSerialized
+                        || (!serializedField.IsPublic && !serializedField.GetCustomAttributesData().Any(
+                            attribute => attribute.AttributeType == typeof(SerializeField))))
+                    {
+                        continue;
+                    }
+                    if (!IsPlainSerializedFieldType(serializedField.FieldType)
+                        || serializedField.GetCustomAttributesData().Any(
+                            attribute => attribute.AttributeType == typeof(SerializeReference)))
+                    {
+                        return false;
+                    }
+                }
+            }
+            return true;
+        }
+
         internal static object BuildPropertyCheckpointScope(
             Component component, MemberInfo member, int componentIndex,
             string propertyPath, SavedSceneSnapshot scene)
         {
-            if (component == null || member == null || member.DeclaringType == null || scene == null || component is MonoBehaviour
-                || !IsEngineComponentAssembly(component.GetType().Assembly)
-                || !IsEngineComponentAssembly(member.DeclaringType.Assembly))
+            if (component == null || member == null || member.DeclaringType == null || scene == null
+                || (component is MonoBehaviour
+                    ? !IsPlainSceneDataField(component, member)
+                    : !IsEngineComponentAssembly(component.GetType().Assembly)
+                        || !IsEngineComponentAssembly(member.DeclaringType.Assembly)))
             {
                 throw new InvalidOperationException(
-                    "component_property_checkpoint_scope_unsupported: Generic property writes require a native Unity component/member; custom component setter side effects have no proven checkpoint scope.");
+                    "component_property_checkpoint_scope_unsupported: Generic writes require a native Unity component/member or a data-only MonoBehaviour serialized field; executable component behavior has no proven checkpoint scope.");
             }
             var owner = component.gameObject;
             if (owner == null || owner.scene.path != scene.Path

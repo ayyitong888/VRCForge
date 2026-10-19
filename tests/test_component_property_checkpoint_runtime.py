@@ -40,17 +40,30 @@ def run(tmp_path, program, references=()):
 
 def test_scope_uses_resolved_component_scene_identity_and_rejects_unknown_owner(tmp_path):
     raw = source()
-    helpers = "\n".join(method(raw, signature) for signature in (
-        "private static bool IsEngineComponentAssembly(",
+    signatures = ["private static bool IsEngineComponentAssembly("]
+    for signature in (
+        "private static bool IsPlainSerializedFieldType(",
+        "private static bool IsPlainSceneDataField(",
+    ):
+        if signature in raw:
+            signatures.append(signature)
+    signatures += [
         "internal static object BuildPropertyCheckpointScope(",
-        "internal static void RecordPropertyPrefabOverride("))
+        "internal static void RecordPropertyPrefabOverride(",
+    ]
+    helpers = "\n".join(method(raw, signature) for signature in signatures)
     program = r'''
-using System;using System.Reflection;using Newtonsoft.Json.Linq;using UnityEngine;using UnityEditor;
+using System;using System.Linq;using System.Collections.Generic;using System.Reflection;using Newtonsoft.Json.Linq;using UnityEngine;using UnityEditor;
 namespace UnityEngine {
+ public class Object {}
  public struct Scene {public string path;public int handle;}
  public class GameObject {public Scene scene;public string id="object";}
  public class Component {public GameObject gameObject;public string id="component";public int value;}
  public class MonoBehaviour:Component {public static int setterCalls;public int custom {get{return 0;}set{setterCalls++;}}}
+ public interface ISerializationCallbackReceiver {void OnBeforeSerialize();void OnAfterDeserialize();}
+ public class SerializeField:Attribute {} public class SerializeReference:Attribute {}
+ public class ExecuteAlways:Attribute {} public class ExecuteInEditMode:Attribute {}
+ public struct Vector2{} public struct Vector3{} public struct Vector4{} public struct Quaternion{} public struct Color{}
 }
 namespace UnityEditor {
  public struct GuidValue {public string value;public override string ToString()=>value;}

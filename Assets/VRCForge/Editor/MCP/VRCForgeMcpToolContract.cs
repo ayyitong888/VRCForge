@@ -15,7 +15,7 @@ namespace VRCForge.Editor
         internal const string CoreIdentity = "vrcforge.unity-core";
         internal const string HandshakeProtocol = "vrcforge.core-handshake.v1";
         internal const string ProductVersion = "1.9.2";
-        internal const string ToolContractVersion = "175";
+        internal const string ToolContractVersion = "176";
         internal const int ToolCount = 99;
 
         private static readonly Dictionary<string, string> ExpectedTypes =
