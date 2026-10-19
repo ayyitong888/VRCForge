@@ -39,6 +39,18 @@ def test_undo_spelling_and_face_defaults(catalog):
     assert "instruction" not in face.get("required",[])
     assert "snapshot_path" in tools["vrcforge_rollback_parameters"]["inputSchema"]["properties"]
 
+def test_face_plan_json_contract_describes_local_path(catalog):
+    _,tools=catalog
+    schema=tools["vrcforge_plan_face_tuning"]["inputSchema"]
+    instruction=schema["properties"]["instruction"]["description"].lower()
+    plan_json=schema["properties"]["plan_json"]["description"].lower()
+    assert "required unless plan_json names an existing local plan json file" in instruction
+    assert "path to an existing local plan json file" in plan_json
+    assert "not json contents inline" in plan_json
+    run_schema=tools["vrcforge_run_face_tuning"]["inputSchema"]
+    assert run_schema["properties"]["instruction"]["description"] == schema["properties"]["instruction"]["description"]
+    assert run_schema["properties"]["plan_json"]["description"] == schema["properties"]["plan_json"]["description"]
+
 def test_constraint_preview_reuses_write_and_accepts_nested_request(catalog):
     _,tools=catalog
     schema=tools["vrcforge_preview_constraint_sources"]["inputSchema"]
