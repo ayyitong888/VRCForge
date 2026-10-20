@@ -695,14 +695,14 @@ export function useChatSessions({
   }, [activeProjectPath, customProjectPaths, endpoint, projectPaths, projectPrefsReady, runtimeConnected, t]);
 
   useEffect(() => {
-    if (!chatsLoadedRef.current || !runtimeConnected || !chatsDirtyRef.current || chatPersistenceBlockedRef.current) {
-      return;
-    }
-    const timer = window.setTimeout(() => {
+    if (!runtimeConnected) return;
+    // A stream of renders must not postpone saving until the chat becomes idle.
+    const timer = window.setInterval(() => {
+      if (!chatsLoadedRef.current || !chatsDirtyRef.current || chatPersistenceBlockedRef.current) return;
       enqueueDebouncedChatSave();
     }, 800);
-    return () => window.clearTimeout(timer);
-  }, [chats, runtimeConnected, endpoint]);
+    return () => window.clearInterval(timer);
+  }, [runtimeConnected, endpoint]);
 
   function markChatsDirty() {
     chatsDirtyRef.current = true;

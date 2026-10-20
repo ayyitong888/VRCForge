@@ -5435,6 +5435,28 @@ class AgentLoopP0Tests(unittest.TestCase):
         self.assertNotEqual(captured["turnId"], "")
         self.assertEqual(result["plan"]["nextStep"], "done")
 
+    def test_visible_timeline_is_durable_before_callback(self) -> None:
+        observed_durable = []
+
+        def observe(payload):
+            event_id = payload["timelineEvent"]["id"]
+            observed_durable.append(any(
+                entry.get("timelineEvent", {}).get("id") == event_id
+                for entry in self.gateway.runtime_runs.read_events(limit=0)
+            ))
+
+        with patch.object(self.gateway.runtime_planner, "plan_agent_turn", return_value={
+            "planner": "llm", "reply": "Visible before an abrupt exit.",
+            "summary": "Finished.", "continueLoop": False, "nextStep": "done",
+        }), patch.object(self.gateway, "_runtime_timeline_changed", observe):
+            self.gateway.runtime_message({
+                "message": "Record this reply while the conversation is running.",
+                "session_id": "durable-visible-timeline",
+                "clientTurnId": "durable-visible-client",
+            })
+        self.assertTrue(observed_durable)
+        self.assertTrue(all(observed_durable), "every visible event must already exist on disk")
+
     def test_final_assistant_timeline_preserves_markdown_in_recorded_turn(self) -> None:
         reply = (
             "Declared versions:\n\n- React: `^18.3.1`\n- Vite: `^6.4.3`\n\n"

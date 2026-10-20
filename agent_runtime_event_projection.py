@@ -9,7 +9,7 @@ from typing import Any
 
 RUNTIME_TURN_EVENT_SCHEMA = "vrcforge.runtime_turn_event.v1"
 RUNTIME_CONTINUATION_SOURCES = frozenset(
-    {"approval_finished", "shell_process_finished", "sub_agent_finished", "question_answered", "foreground_completed"}
+    {"approval_finished", "shell_process_finished", "sub_agent_finished", "question_answered", "foreground_completed", "foreground_interrupted"}
 )
 
 _CONTEXT_USAGE_FIELDS = (
@@ -216,6 +216,10 @@ def project_runtime_turn_event(payload: Mapping[str, Any] | None) -> dict[str, A
             },
         },
     }
+    for key in ("provider", "providerLabel", "model", "projectRoot"):
+        bounded = _text(payload.get(key), 1000 if key == "projectRoot" else 160)
+        if bounded:
+            result[key] = bounded
     planner_failure = _project_planner_failure(plan.get("plannerFailure"))
     consumed = payload.get("consumedSteerInputIds")
     if isinstance(consumed, list):

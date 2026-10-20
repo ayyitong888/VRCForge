@@ -5,7 +5,7 @@ import type { AgentRuntimeDeltaEvent } from "../lib/chat-streaming";
 import { applyAgentRuntimeDeltaToStreamingItem } from "../lib/chat-streaming";
 
 const RUNTIME_TURN_EVENT_SCHEMA = "vrcforge.runtime_turn_event.v1";
-const RUNTIME_CONTINUATION_SOURCES = new Set(["approval_finished", "shell_process_finished", "sub_agent_finished", "question_answered", "foreground_completed"]);
+const RUNTIME_CONTINUATION_SOURCES = new Set(["approval_finished", "shell_process_finished", "sub_agent_finished", "question_answered", "foreground_completed", "foreground_interrupted"]);
 const MAX_PENDING_CONTINUATIONS = 32;
 const MAX_DELIVERED_CONTINUATIONS = 512;
 const PLANNER_FAILURE_RETRY_ATTEMPTS_LIMIT = 100;
@@ -315,7 +315,7 @@ export function runtimeContinuationDeliveryState(
   const stored = items.find(matches);
   if (!stored || stored.type !== "agent") return "append";
   if (event.continuationSource === "foreground_completed"
-    && ["cancelled", "failed", "error"].includes(String(stored.response.status || "").toLowerCase())) {
+    && ["cancelled", "failed", "error", "interrupted"].includes(String(stored.response.status || "").toLowerCase())) {
     return "replace-failed";
   }
   return "stored";
@@ -343,6 +343,8 @@ export function responseFromRuntimeTurnEvent(event: RuntimeTurnEvent): AgentRunt
   const plannerFailure = sanitizePlannerFailure(event.plan?.plannerFailure);
   return {
     ok: true,
+    ...(event.continuationSource === "foreground_interrupted" ? { status: "interrupted" } : {}),
+    continuationSource: event.continuationSource,
     session_id: sessionId,
     sessionId,
     turn_id: turnId,

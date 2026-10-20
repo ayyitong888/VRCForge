@@ -164,7 +164,7 @@ type UseChatRunControllerParams = {
   setError: (message: string) => void;
   notifyFailure?: (kind: "vision" | "send", message: string) => void;
   prepareTurnContext?: (input: PrepareTurnContextInput) => Promise<PreparedTurnContext | null>;
-  persistChatsNow?: () => Promise<void>;
+  persistChatsNow: () => Promise<void>;
   traceSteerDelivery?: (event: SteerDeliveryTraceEvent) => void;
   chats?: ChatThread[];
   chatStorageReady?: boolean;
@@ -582,12 +582,8 @@ export function useChatRunController({
       };
       trace("reservation_acquired", { chatId: ownerChatId, sessionId: queuedTurn.sessionId });
       trace("steer_context_resolved", { chatId: ownerChatId, sessionId: queuedTurn.sessionId });
-      // The runtime inbox owns text admission. Only attachment payloads that
-      // still depend on the transcript vault need its snapshot before dispatch.
-      const persistSnapshotBeforeSteer = turn.attachments.some((attachment) => (
-        attachment.payloadKind !== "vault_file"
-        && (Boolean(attachment.payloadHash) || typeof attachment.text === "string" || typeof attachment.dataUrl === "string")
-      ));
+      // The transcript owns the full visible input and its chat/session binding.
+      // Make it durable before any runtime delivery can produce a response.
       const existing = ownerChat?.items.some(
         (item) => item.type === "user" && item.clientTurnId === turn.id,
       );
@@ -615,11 +611,10 @@ export function useChatRunController({
             }],
           };
         });
-        if (persistSnapshotBeforeSteer) {
         const persistStartedAt = performance.now();
         try {
           trace("persist_started");
-          await persistChatsNow?.();
+          await persistChatsNow();
           trace("persist_resolved", { waitMs: performance.now() - persistStartedAt });
         } catch (cause) {
           trace("persist_rejected", {
@@ -639,7 +634,6 @@ export function useChatRunController({
             items: current.items.filter((item) => item.type !== "user" || item.clientTurnId !== turn.id),
           }));
           return "not_accepted";
-        }
         }
       } else {
         trace("persist_skipped_existing", { chatId: ownerChatId, sessionId: queuedTurn.sessionId });
@@ -857,13 +851,6 @@ export function useChatRunController({
     });
     trace("submit_received", { pendingDispatches: queueDispatchPendingRef.current, requestedDeliveryMode: "queue" });
     const existing = ownerChat?.items.some((item) => item.type === "user" && item.clientTurnId === turn.id);
-    // Non-vault attachment payloads live in the transcript payload vault. Keep
-    // their existing snapshot-first path; text-only and already-vaulted turns
-    // can be admitted to the durable queue before the expensive chat snapshot.
-    const persistSnapshotBeforeQueue = turn.attachments.some((attachment) => (
-      attachment.payloadKind !== "vault_file"
-      && (Boolean(attachment.payloadHash) || typeof attachment.text === "string" || typeof attachment.dataUrl === "string")
-    ));
     if (!existing) {
       updateChat(ownerChatId, (current) => {
         const attachmentPayloads = { ...(current.attachmentPayloads || {}) };
@@ -900,11 +887,11 @@ export function useChatRunController({
           }],
         };
       });
-      if (persistSnapshotBeforeQueue) {
+      {
         const persistStartedAt = performance.now();
         try {
           trace("persist_started", { requestedDeliveryMode: "queue" });
-          await persistChatsNow?.();
+          await persistChatsNow();
           trace("persist_resolved", { requestedDeliveryMode: "queue", waitMs: performance.now() - persistStartedAt });
         } catch (cause) {
           trace("persist_rejected", {
@@ -1263,6 +1250,9 @@ export function useChatRunController({
             ],
           };
         });
+        // A recovered runtime reply must have a durable owning chat and the
+        // complete user message even if the app is killed during this turn.
+        await persistChatsNow();
       }
       const computerUseGrant = !background && turn.computerUseRequested
         ? await issueComputerUseTurnGrant(targetEndpoint, {

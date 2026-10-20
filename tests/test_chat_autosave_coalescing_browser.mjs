@@ -55,6 +55,13 @@ createRoot(document.getElementById("root")).render(<Harness />);
             '      void enqueueChatSave(true).catch((cause) => setChatSaveError(cause, t("chat.sessionSaveBlocked")));',
           );
         }
+        if (process.env.VRCFORGE_TEST_LEGACY_AUTOSAVE_INTERVAL === "1") {
+          // Restore just the pre-fix timer to isolate continuous-edit starvation.
+          contents = contents
+            .replace("const timer = window.setInterval(() => {", "const timer = window.setTimeout(() => {")
+            .replace("return () => window.clearInterval(timer);", "return () => window.clearTimeout(timer);")
+            .replace("}, [runtimeConnected, endpoint]);", "}, [chats, runtimeConnected, endpoint]);");
+        }
         return { contents, loader: "tsx" };
       });
     },
@@ -143,13 +150,33 @@ try {
   assert.equal(await page.evaluate(() => window.barrierSettled), false, "explicit persistence remains pending behind the active write");
   releaseFirstPost();
   await page.waitForFunction(() => window.barrierSettled === true);
-  assert.equal(postCount, 2, "the explicit barrier resolves only after its queued write reaches storage");
-  assert.deepEqual(persistedTitles, ["v1", "v5"], "the barrier persisted every mutation made before it was requested");
+  assert.ok(postCount >= 2 && postCount <= 3, "the explicit barrier resolves only after its queued write reaches storage");
+  assert.deepEqual(persistedTitles.slice(0, 2), ["v1", "v5"], "the barrier persisted every mutation made before it was requested");
   await page.waitForFunction(() => window.__storageTrace.filter((event) => event.kind === "save" && event.stage === "resolved").length >= 3);
   await page.waitForTimeout(150);
   assert.equal(postCount, 3, "the explicit barrier and the pending autosave each retain their own write operation");
   assert.deepEqual(persistedTitles, ["v1", "v5", "v5"], "the trailing autosave remains current after the explicit barrier");
   assert.equal(chats[0].title, "v5", "the coalesced write contains the newest chat snapshot");
+  await page.waitForTimeout(1000);
+  await page.evaluate(() => window.sessions.persistChatsNow());
+  await page.waitForTimeout(200);
+
+  // A continuous stream must still produce an interval autosave while edits
+  // keep arriving. A trailing debounce would postpone every write until the
+  // stream stops, leaving the latest messages vulnerable to a tray kill.
+  const streamStartPostCount = postCount;
+  let streamObservedPost = false;
+  const streamStartedAt = Date.now();
+  let streamIndex = 6;
+  while (Date.now() - streamStartedAt < 2200) {
+    await page.evaluate((title) => window.sessions.updateChat("chat-fixture", (chat) => ({ ...chat, title })), `v${streamIndex}`);
+    streamIndex += 1;
+    await page.waitForTimeout(80);
+    if (postCount > streamStartPostCount) streamObservedPost = true;
+  }
+  assert.equal(streamObservedPost, true, "continuous edits receive a save before the stream stops");
+  await page.waitForTimeout(900);
+  assert.ok(postCount > streamStartPostCount, "the stream's latest snapshot reaches storage");
   console.log("chat autosave slow-write coalescing replay: ok");
 } finally {
   releaseFirstPost?.();

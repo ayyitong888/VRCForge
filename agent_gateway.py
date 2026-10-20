@@ -5853,6 +5853,19 @@ class AgentGateway:
                 "payload": payload,
             }
             timeline.append(event)
+            # The callback is a live projection only. Commit the same bounded
+            # visible event first so a tray/process kill cannot lose observed
+            # dialogue or tool activity.
+            self._runtime_run_ledger.append_timeline_event(
+                session_id=session_id,
+                turn_id=turn_id,
+                client_turn_id=client_turn_id,
+                event=event,
+                provider=str(params.get("provider") or ""),
+                provider_label=str(params.get("providerLabel") or params.get("provider_label") or ""),
+                model=str(params.get("model") or ""),
+                project_root=project_root,
+            )
             try:
                 self._runtime_timeline_changed(
                     {

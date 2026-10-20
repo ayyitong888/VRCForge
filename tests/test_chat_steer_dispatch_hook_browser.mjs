@@ -178,6 +178,8 @@ try {
   await page.goto(`http://127.0.0.1:${server.address().port}`);
   await page.locator("#hook-mounted").waitFor({ state: "attached" });
   await page.evaluate(() => window.__startFixture());
+  await page.waitForTimeout(60);
+  await page.evaluate(() => window.__releasePersist());
   await page.waitForFunction(() => window.__providerRequests.length === 1);
   await page.evaluate(() => window.__submitFixtureSteer());
   await page.waitForFunction(() => window.__traceEvents.some((event) => event.stage === "persist_started"));
@@ -198,8 +200,8 @@ try {
     clientTurnId: "console-steer-fixture",
     targetClientTurnId: "active-turn-fixture",
   }, "the native RPC receives the submitted ID and current active target separately");
-  assert.ok(state.events.findIndex((event) => event.stage === "rpc_ack")
-    < state.events.findIndex((event) => event.stage === "persist_started"), "runtime admission precedes the expensive transcript snapshot");
+  assert.ok(state.events.findIndex((event) => event.stage === "persist_resolved")
+    < state.events.findIndex((event) => event.stage === "rpc_started"), "runtime admission waits for the durable transcript snapshot");
   const traceJson = JSON.stringify(state.events);
   assert.equal(traceJson.includes("sensitive fixture text"), false, "diagnostics never retain message text");
   assert.equal(pageErrors.length, 0, pageErrors.join("\n"));
@@ -323,31 +325,18 @@ try {
     window.__setQuestionActivity(true);
     window.__failNextPersist();
   });
-  assert.equal(await page.evaluate(() => window.__queueFixture("idle-question-queue", "idle wait for answer")), "queued", "durable admission completes before a failed transcript snapshot");
+  assert.equal(await page.evaluate(() => window.__queueFixture("idle-question-queue", "idle wait for answer")), "not_accepted", "a failed transcript snapshot blocks durable queue admission");
   await page.waitForFunction(() => window.__traceEvents.some((event) => event.stage === "persist_rejected" && event.requestedDeliveryMode === "queue"));
   const failedSnapshotQueue = await page.evaluate(() => ({
     queued: window.__queuedTurns().find((turn) => turn.id === "idle-question-queue"),
     item: window.__chat.items.find((item) => item.clientTurnId === "idle-question-queue"),
     stages: window.__traceEvents.filter((event) => event.requestedDeliveryMode === "queue" && event.clientTurnId === "idle-question-queue").map((event) => event.stage),
   }));
-  assert.equal(failedSnapshotQueue.queued?.queueId, "queue-idle-question-queue", "accepted turn remains visible in the queue after snapshot failure");
-  assert.equal(failedSnapshotQueue.item?.composerQueued, true, "failed snapshot does not convert the unsent turn to a transcript bubble");
-  assert.ok(failedSnapshotQueue.stages.indexOf("rpc_ack") < failedSnapshotQueue.stages.indexOf("persist_started"), "durable admission precedes the full transcript snapshot");
+  assert.equal(failedSnapshotQueue.queued, undefined, "failed snapshot leaves no durable queue entry");
+  assert.equal(failedSnapshotQueue.item, undefined, "failed snapshot removes the unsent queue bubble");
+  assert.equal(failedSnapshotQueue.stages.includes("rpc_ack"), false, "runtime admission is skipped after a failed transcript snapshot");
   await page.waitForTimeout(80);
   assert.equal(await page.evaluate(() => window.__providerRequests.length), 6, "idle enqueue also waits for a same-session pending question");
-  await page.evaluate(() => {
-    window.__agentQuestions = [];
-    window.__setQuestionActivity(false);
-  });
-  await page.evaluate(() => window.__controller.resumeQueuedTurns());
-  await page.waitForFunction(() => window.__providerRequests.length === 7);
-  assert.equal(await page.evaluate(() => window.__providerRequests.at(-1).followupQueueId), "queue-idle-question-queue");
-  await page.evaluate(() => window.__resolveProvider({
-    ok: true, status: "completed", sessionId: "session-fixture", turnId: "idle-resumed-turn",
-    plan: { reply: "Idle queue resumed", summary: "resumed", nextStep: "done", planner: "fixture", shellNeeded: false },
-    timeline: [],
-  }));
-  await page.waitForFunction(() => window.__isRunning() === false);
 
   await page.evaluate(() => {
     window.__agentQuestions = [{ questionId: "question-fixture", status: "answered", sessionId: "session-fixture", runtimeContinuation: { status: "running", clientTurnId: "question-turn", sessionId: "session-fixture" } }];
@@ -375,8 +364,8 @@ try {
   });
   await page.waitForFunction(() => window.__queuedTurns().some((turn) => turn.id === "idle-question-queue"));
   await page.waitForTimeout(80);
-  assert.equal(await page.evaluate(() => window.__providerRequests.length), 7, "reload recovery keeps a durable follow-up parked while its question is pending");
-  assert.equal(await page.evaluate(() => window.__queueRequests.filter((request) => request.clientTurnId === "idle-question-queue").length), 1, "refresh recovery does not duplicate the durable clientTurnId");
+  assert.equal(await page.evaluate(() => window.__providerRequests.length), 6, "reload recovery keeps a durable follow-up parked while its question is pending");
+  assert.equal(await page.evaluate(() => window.__queueRequests.filter((request) => request.clientTurnId === "idle-question-queue").length), 0, "refresh recovery does not dispatch the parked clientTurnId while its question is pending");
   assert.equal(await page.evaluate(() => window.__chat.items.filter((item) => item.clientTurnId === "idle-question-queue").length), 1, "recovery recreates one visible queued item when the transcript snapshot missed it");
   await page.evaluate(() => window.__mountRestoredController([
     window.__chat.items.find((item) => item.clientTurnId === "idle-question-queue"),
@@ -392,7 +381,7 @@ try {
   });
   await page.evaluate(() => window.__controller.resumeQueuedTurns());
   await page.waitForTimeout(50);
-  assert.equal(await page.evaluate(() => window.__providerRequests.length), 7, "reload recovery also waits while an answered question continuation is still running");
+  assert.equal(await page.evaluate(() => window.__providerRequests.length), 6, "reload recovery also waits while an answered question continuation is still running");
   await page.evaluate(() => {
     window.__agentQuestions = [{
       questionId: "restore-question", status: "answered", sessionId: "session-fixture",
@@ -400,7 +389,7 @@ try {
     }];
   });
   await page.evaluate(() => window.__controller.resumeQueuedTurns());
-  await page.waitForFunction(() => window.__providerRequests.length === 8);
+  await page.waitForFunction(() => window.__providerRequests.length === 7);
   assert.equal(await page.evaluate(() => window.__providerRequests.at(-1).followupQueueId), "queue-idle-question-queue");
   await page.evaluate(() => window.__resolveProvider({
     ok: true, status: "completed", sessionId: "session-fixture", turnId: "restored-resumed-turn",

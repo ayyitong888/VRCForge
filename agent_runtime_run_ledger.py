@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import secrets
 import copy
+from collections import deque
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -29,6 +30,7 @@ def _ensure_list(value: Any) -> list[Any]:
 
 def _public_event(value: dict[str, Any]) -> dict[str, Any]:
     projected = dict(value)
+    projected.pop("runtimeOwnerNonce", None)
     projected.pop("usageReconciliation", None)
     projected.pop("continuationTaskSeed", None)
     projected.pop("continuationTerminalEvent", None)
@@ -90,10 +92,13 @@ class AgentRuntimeRunLedgerPorts:
 class AgentRuntimeRunLedger:
     """Persist and project runtime-run events without owning runtime execution."""
 
-    __slots__ = ("_ports",)
+    __slots__ = ("_ports", "_instance_nonce")
 
     def __init__(self, ports: AgentRuntimeRunLedgerPorts) -> None:
         self._ports = ports
+        # Process-local ownership marker. It is deliberately never exposed in
+        # public projections; a fresh gateway instance cannot claim an old run.
+        self._instance_nonce = secrets.token_hex(16)
 
     @property
     def log_path(self) -> Path:
@@ -114,6 +119,8 @@ class AgentRuntimeRunLedger:
                 "updatedAt": self._ports.now(),
                 **entry,
             }
+        if entry.get("event") == "runtime_turn_started":
+            source_entry["runtimeOwnerNonce"] = self._instance_nonce
         safe_entry = _restore_private_native_snapshot(
             self._ports.redact(source_entry), source_entry
         )
@@ -125,17 +132,130 @@ class AgentRuntimeRunLedger:
                 log_file.write(json.dumps(safe_entry, ensure_ascii=False, sort_keys=True) + "\n")
                 self._ports.flush_and_fsync(log_file)
 
-    def read_events(self, *, limit: int = 400) -> list[dict[str, Any]]:
+    @staticmethod
+    def _turn_key(event: dict[str, Any]) -> str:
+        session = str(event.get("sessionId") or "").strip()
+        client = str(event.get("clientTurnId") or "").strip()
+        turn = str(event.get("turnId") or "").strip()
+        return f"{session}\0{client or turn}" if session and (client or turn) else ""
+
+    def append_timeline_event(
+        self,
+        *,
+        session_id: str,
+        turn_id: str,
+        client_turn_id: str,
+        event: dict[str, Any],
+        provider: str = "",
+        provider_label: str = "",
+        model: str = "",
+        project_root: str = "",
+    ) -> None:
+        """Persist one safe visible event before notifying the live projector."""
+
+        self.append({
+            "event": "runtime_turn_timeline_event",
+            "status": "running",
+            "sessionId": str(session_id or "")[:180],
+            "turnId": str(turn_id or "")[:180],
+            "clientTurnId": str(client_turn_id or "")[:240],
+            "provider": str(provider or "")[:120],
+            "providerLabel": str(provider_label or "")[:160],
+            "model": str(model or "")[:160],
+            "projectRoot": str(project_root or "")[:1000],
+            "timelineEvent": copy.deepcopy(event),
+        })
+
+    def recover_interrupted_runs(self) -> int:
+        """Materialize old, non-terminal runs as durable foreground continuations."""
+        with self.shared_state_lock:
+            starts: dict[str, dict[str, Any]] = {}
+            timelines: dict[str, list[dict[str, Any]]] = {}
+            terminals: set[str] = set()
+            interrupted: set[str] = set()
+            try:
+                source = self.log_path.open("r", encoding="utf-8")
+            except FileNotFoundError:
+                return 0
+            def owned_events():
+                # Existing ledgers can be large. Older records have no live
+                # owner marker; do not parse their full provider/tool payloads.
+                with source:
+                    for line in source:
+                        if not starts and '"runtimeOwnerNonce"' not in line:
+                            continue
+                        try:
+                            event = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        if isinstance(event, dict):
+                            yield event
+            for event in owned_events():
+                key = self._turn_key(event)
+                if not key:
+                    continue
+                name = str(event.get("event") or "")
+                if name == "runtime_turn_started" and event.get("runtimeOwnerNonce"):
+                    starts[key] = event
+                elif name == "runtime_turn_timeline_event":
+                    item = event.get("timelineEvent")
+                    if isinstance(item, dict):
+                        timelines.setdefault(key, []).append(item)
+                elif name == "runtime_turn_completed":
+                    terminals.add(key)
+                elif name == "runtime_turn_interrupted":
+                    interrupted.add(key)
+            created = 0
+            for key, started in starts.items():
+                if key in terminals or key in interrupted or started.get("runtimeOwnerNonce") == self._instance_nonce:
+                    continue
+                # Each event is already bounded by the live projector. Keep
+                # the full visible order rather than dropping early messages.
+                timeline = timelines.get(key, [])
+                continuation = {
+                    "schema": "vrcforge.runtime_turn_event.v1",
+                    "continuationSource": "foreground_interrupted",
+                    "sessionId": str(started.get("sessionId") or ""),
+                    "turnId": str(started.get("turnId") or ""),
+                    "clientTurnId": str(started.get("clientTurnId") or ""),
+                    "provider": str(started.get("provider") or ""),
+                    "providerLabel": str(started.get("providerLabel") or ""),
+                    "model": str(started.get("model") or ""),
+                    "projectRoot": str(started.get("projectRoot") or ""),
+                    "plan": {"nextStep": "needs_user_action", "reason": "runtime_interrupted",
+                             "taskCompletion": {"status": "interrupted"}},
+                }
+                if timeline:
+                    continuation["timeline"] = timeline
+                self.append({
+                    "event": "runtime_turn_interrupted",
+                    "status": "interrupted",
+                    "sessionId": started.get("sessionId") or "",
+                    "turnId": started.get("turnId") or "",
+                    "clientTurnId": started.get("clientTurnId") or "",
+                    "provider": started.get("provider") or "",
+                    "providerLabel": started.get("providerLabel") or "",
+                    "model": started.get("model") or "",
+                    "projectRoot": started.get("projectRoot") or "",
+                    "continuationEvent": continuation,
+                })
+                created += 1
+            return created
+
+    def read_events(self, *, limit: int = 400, contains: str | None = None) -> list[dict[str, Any]]:
         path = self.log_path
         if not path.exists():
             return []
         try:
-            lines = path.read_text(encoding="utf-8").splitlines()
+            with path.open("r", encoding="utf-8") as source:
+                lines = deque(
+                    (line for line in source if contains is None or contains in line),
+                    maxlen=None if int(limit) <= 0 else max(1, min(int(limit), 2000)),
+                )
         except OSError:
             return []
         events: list[dict[str, Any]] = []
-        selected_lines = lines if int(limit) <= 0 else lines[-max(1, min(int(limit), 2000)) :]
-        for line in selected_lines:
+        for line in lines:
             try:
                 payload = json.loads(line)
             except json.JSONDecodeError:
@@ -248,7 +368,9 @@ class AgentRuntimeRunLedger:
     def list_runtime_continuations(self, *, limit: int = 64) -> list[dict[str, Any]]:
         """Return bounded durable chat projections for reconnect replay."""
 
-        events = self.read_events(limit=max(limit * 8, 100))
+        self.recover_interrupted_runs()
+        # Count durable continuations, not the intervening live progress rows.
+        events = self.read_events(limit=max(limit * 8, 100), contains='"continuationEvent"')
         by_key: dict[str, dict[str, Any]] = {}
         order: list[str] = []
         for event in events:
@@ -263,6 +385,9 @@ class AgentRuntimeRunLedger:
             key = f"{session_id}:{client_turn_id or turn_id}"
             if key not in by_key:
                 order.append(key)
+            elif (continuation.get("continuationSource") == "foreground_interrupted"
+                  and by_key[key].get("continuationSource") != "foreground_interrupted"):
+                continue
             by_key[key] = self._ports.redact(public_runtime_payload(continuation))
         selected = order[-max(1, min(int(limit), 200)) :]
         return [by_key[key] for key in selected]

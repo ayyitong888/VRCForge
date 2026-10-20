@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import sys
 import threading
+import time
 from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
@@ -80,6 +83,102 @@ def test_append_repairs_truncated_tail_and_read_skips_invalid_json(tmp_path: Pat
     assert len(events) == 1
     assert events[0]["schema"] == "vrcforge.runtime_run.v1"
     assert events[0]["event"] == "runtime_started"
+
+
+def test_timeline_event_is_durable_before_projection_and_recovers_after_rebuild(tmp_path: Path) -> None:
+    ledger, _lock = make_ledger(tmp_path)
+    ledger.append({
+        "event": "runtime_turn_started", "status": "running",
+        "sessionId": "s", "turnId": "t", "clientTurnId": "c",
+        "provider": "p", "providerLabel": "Provider", "model": "m",
+        "projectRoot": "P",
+    })
+    event = {"id": "timeline-t-0", "sequence": 0, "kind": "assistant",
+             "payload": {"summary": "partial reply", "status": "streaming"}}
+    ledger.append_timeline_event(
+        session_id="s", turn_id="t", client_turn_id="c", event=event,
+        provider="p", provider_label="Provider", model="m", project_root="P",
+    )
+
+    restarted, _ = make_ledger(tmp_path)
+    continuations = restarted.list_runtime_continuations()
+    assert len(continuations) == 1
+    assert continuations[0]["continuationSource"] == "foreground_interrupted"
+    assert continuations[0]["timeline"] == [event]
+    assert restarted.list_runtime_continuations() == continuations
+
+
+def test_live_ledger_is_not_interrupted_and_terminal_supersedes_recovery(tmp_path: Path) -> None:
+    ledger, _lock = make_ledger(tmp_path)
+    started = {"event": "runtime_turn_started", "status": "running",
+               "sessionId": "s", "turnId": "t", "clientTurnId": "c"}
+    ledger.append(started)
+    assert ledger.list_runtime_continuations() == []
+    ledger.append({
+        "event": "runtime_turn_completed", "status": "completed",
+        "sessionId": "s", "turnId": "t", "clientTurnId": "c",
+        "continuationEvent": {
+            "schema": "vrcforge.runtime_turn_event.v1",
+            "continuationSource": "foreground_completed", "sessionId": "s",
+            "turnId": "t", "clientTurnId": "c", "plan": {"reply": "done"},
+        },
+    })
+    assert ledger.list_runtime_continuations()[0]["continuationSource"] == "foreground_completed"
+
+
+def test_long_incomplete_turn_keeps_earlier_visible_messages(tmp_path: Path) -> None:
+    ledger, _ = make_ledger(tmp_path)
+    ledger.append({"event": "runtime_turn_started", "sessionId": "s", "turnId": "t", "clientTurnId": "c"})
+    for index in range(300):
+        ledger.append_timeline_event(session_id="s", turn_id="t", client_turn_id="c", event={
+            "id": f"visible-{index}", "sequence": index, "kind": "assistant",
+            "payload": {"summary": f"Message {index}"},
+        })
+    restored, _ = make_ledger(tmp_path)
+    timeline = restored.list_runtime_continuations()[0]["timeline"]
+    assert [item["id"] for item in timeline] == [f"visible-{index}" for index in range(300)]
+
+
+def test_visible_progress_survives_forced_process_termination(tmp_path: Path) -> None:
+    marker = tmp_path / "visible.json"
+    script = """
+import json, sys, time
+from pathlib import Path
+from agent_gateway import AgentGateway
+root = Path(sys.argv[1])
+gateway = AgentGateway(root / 'config.json', root / 'audit')
+gateway.runtime_runs.append({'event': 'runtime_turn_started', 'status': 'running',
+    'sessionId': 'crash-session', 'turnId': 'crash-turn', 'clientTurnId': 'crash-client'})
+event = {'id': 'visible-before-kill', 'sequence': 0, 'kind': 'assistant',
+    'timestamp': '2026-01-01T00:00:00Z', 'payload': {'summary': 'Already visible before exit'}}
+gateway.runtime_runs.append_timeline_event(session_id='crash-session',
+    turn_id='crash-turn', client_turn_id='crash-client', event=event)
+(root / 'visible.json').write_text(json.dumps(event), encoding='utf-8')
+time.sleep(30)
+"""
+    process = subprocess.Popen(
+        [sys.executable, "-c", script, str(tmp_path)],
+        cwd=Path(__file__).resolve().parents[1],
+        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+    )
+    try:
+        deadline = time.monotonic() + 10
+        while not marker.exists() and process.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert marker.exists(), "writer did not reach the visible-event boundary"
+        visible = json.loads(marker.read_text(encoding="utf-8"))
+        process.kill()
+        process.wait(timeout=5)
+        restored, _ = make_ledger(tmp_path)
+        events = restored.list_runtime_continuations()
+        assert len(events) == 1
+        assert events[0]["timeline"] == [visible]
+        assert events[0]["plan"]["taskCompletion"]["status"] == "interrupted"
+        assert restored.list_runtime_continuations() == events
+    finally:
+        if process.poll() is None:
+            process.kill()
+        process.communicate(timeout=5)
 
 
 def test_usage_reconciliation_is_private_but_durable(tmp_path: Path) -> None:

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { responseFromRuntimeTurnEvent } from "../src/hooks/use-runtime-turn-continuation.ts";
+import { responseFromRuntimeTurnEvent, runtimeContinuationDeliveryState } from "../src/hooks/use-runtime-turn-continuation.ts";
 
 const usage = {
   schema: "vrcforge.context_usage.v1",
@@ -25,6 +25,25 @@ const response = responseFromRuntimeTurnEvent({
 assert.deepEqual(response.contextUsage, usage, "question continuation must retain provider context usage");
 assert.equal(response.plan.reply, "蓝色");
 assert.equal(response.plan.nextStep, "done");
+
+const interruptedEvent = {
+  schema: "vrcforge.runtime_turn_event.v1",
+  continuationSource: "foreground_interrupted",
+  sessionId: "session-interrupted",
+  turnId: "turn-interrupted",
+  clientTurnId: "client-interrupted",
+  plan: { nextStep: "needs_user_action", taskCompletion: { status: "interrupted" } },
+  timeline: [{ id: "visible", sequence: 0, timestamp: "2026-01-01T00:00:00Z", kind: "assistant", payload: { summary: "Already visible before exit" } }],
+};
+const interruptedResponse = responseFromRuntimeTurnEvent(interruptedEvent);
+assert.equal(interruptedResponse.status, "interrupted");
+assert.equal(interruptedResponse.continuationSource, "foreground_interrupted");
+assert.deepEqual(interruptedResponse.timeline, interruptedEvent.timeline);
+assert.equal(interruptedResponse.plan.taskCompletion.status, "interrupted");
+assert.notEqual(interruptedResponse.plan.nextStep, "done", "a recovered partial reply must not claim completion");
+const interruptedItem = { id: "recovered", type: "agent", response: interruptedResponse };
+assert.equal(runtimeContinuationDeliveryState(interruptedEvent, [interruptedItem]), "stored", "reopening must not duplicate the partial reply");
+assert.equal(runtimeContinuationDeliveryState({ ...interruptedEvent, continuationSource: "foreground_completed" }, [interruptedItem]), "replace-failed", "a real final reply supersedes an interrupted snapshot");
 
 const plannerFailure = responseFromRuntimeTurnEvent({
   schema: "vrcforge.runtime_turn_event.v1",
