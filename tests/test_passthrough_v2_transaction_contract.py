@@ -131,7 +131,7 @@ def test_apply_clothing_fx_returns_bounded_multi_asset_transaction() -> None:
     assert "RolledBack = false" in source
 
 
-def test_prepare_checkpoint_reports_scene_and_dirty_asset_transaction_readback() -> None:
+def test_prepare_checkpoint_reports_dirty_editor_state_without_saving() -> None:
     source = (ROOT / "Assets/VRCForge/Editor/CheckpointRecoveryTool.cs").read_text(
         encoding="utf-8"
     )
@@ -140,15 +140,12 @@ def test_prepare_checkpoint_reports_scene_and_dirty_asset_transaction_readback()
         source.index("public static class CheckpointReloadTool")
     ]
     assert "Resources.FindObjectsOfTypeAll<UnityEngine.Object>()" in block
-    save_index = block.index("AssetDatabase.SaveAssets();")
-    readback_index = block.index("ReadAssetAfter", save_index)
-    assert save_index < readback_index
-    assert "assets_touched = transactionItems.Count" in block
-    assert "items = transactionItems.Take(20).ToArray()" in block
-    assert "handle = transactionHandle" in block
-    assert 'Status = "succeeded"' in block
-    assert 'Status = "failed"' in block
-    assert "RolledBack = false" in block
+    assert "EditorSceneManager.SaveScene" not in block
+    assert "AssetDatabase.SaveAssets" not in block
+    assert '? "dirty_editor_state" : ""' in block
+    assert "snapshotIncludesUnsavedState = false" in block
+    assert "saved = false" in block
+    assert "mutationStarted = false" in block
 
 
 def test_checkpoint_reload_reports_bounded_scene_transaction_and_compensation() -> None:

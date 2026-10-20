@@ -178,6 +178,13 @@ def test_add_outfit_preparer_freezes_exact_calls_and_executor_checks_readback(tm
 
     assert result["ok"] is True
     assert result["outfitPath"] == "Avatar/Hoodie"
+    assert result["mutationStarted"] is True
+    assert result["commitState"] == "complete"
+    assert result["checkpointRecoveryRequired"] is False
+    from agent_tool_result_contract import normalize_agent_tool_result
+    outcome = normalize_agent_tool_result(result,write=True,fallback_summary="Add Outfit did not complete")
+    assert outcome["commitState"] == "complete"
+    assert outcome["recovery"] is False
     assert [tool for tool, _arguments in write_calls] == [tool for tool, _arguments in calls]
 
 
@@ -214,7 +221,10 @@ def test_missing_verified_wardrobe_requires_separate_approval(tmp_path: Path, mo
         "projectPath": str(project), "avatarPath": "Avatar", "assetPath": "Assets/Outfits/Hoodie.prefab", "outfitName": "Hoodie",
     })
     assert result["ok"] is False
-    assert "Approve vrcforge_create_wardrobe first" in result["error"]
+    assert "does not prove absence" in result["error"]
+    assert "vrcforge_preview_add_wardrobe_outfit" in result["error"]
+    assert "manageWardrobe=false" in result["error"]
+    assert "Do not repeat" in result["error"]
     assert write_calls == []
 
 
@@ -230,6 +240,186 @@ def test_add_outfit_handler_requires_prepared_one_use_context() -> None:
     ).prepare
     assert handler.requires_approved_execution_context is True
     assert handler.approved_execution_plan_builder is dashboard_server.build_prepared_execution_plan
+
+
+def test_first_outfit_install_without_binding_does_not_require_a_strict_scan(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    project = _project(tmp_path)
+    state = {"created": False, "wardrobe_added": False, "target_drift": False}
+    write_calls: list[tuple[str, dict]] = []
+    invoke = _read_mock(project, state, write_calls)
+
+    def skeleton_only(settings, tool, arguments, **kwargs):
+        assert tool != "vrc_scan_wardrobe", "Installation without binding must not depend on strict recognition"
+        return invoke(settings, tool, arguments, **kwargs)
+
+    monkeypatch.setattr(dashboard_server, "load_dashboard_settings", lambda _request: SimpleNamespace(unity_mcp_timeout_seconds=30))
+    monkeypatch.setattr(dashboard_server, "invoke_unity_mcp", skeleton_only)
+    prepared, preview = dashboard_server.PREPARED_ADD_OUTFIT_PREPARER.prepare({
+        "projectPath": str(project), "avatarPath": "Avatar",
+        "assetPath": "Assets/Outfits/Hoodie.prefab", "outfitName": "Hoodie",
+        "manageWardrobe": False, "setupOutfit": False,
+    }, None)
+    assert preview["ok"] is True
+    assert [tool for tool, _ in build_prepared_execution_plan(prepared)] == ["vrc_instantiate_prefab"]
+    result = dashboard_server.PREPARED_ADD_OUTFIT_APPROVED_WRITE.execute(prepared)
+    assert result["ok"] is True
+    assert [tool for tool, _ in write_calls] == ["vrc_instantiate_prefab"]
+    assert state["created"] is True and state["wardrobe_added"] is False
+
+
+def test_prepared_add_outfit_accepts_core_success_receipt_without_gateway_ok_alias(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The Core success payload has structured success but no historical ok key."""
+    project = _project(tmp_path)
+    state = {"created": False, "wardrobe_added": False, "target_drift": False}
+    write_calls: list[tuple[str, dict]] = []
+    base = _read_mock(project, state, write_calls)
+
+    def core_success_without_ok(settings, tool: str, arguments: dict, **kwargs):
+        result = base(settings, tool, arguments, **kwargs)
+        if tool == "vrc_instantiate_prefab":
+            payload = copy.deepcopy(result.payload["data"])
+            assert payload.pop("ok") is True
+            return dashboard_server.McpResult(
+                0,
+                "",
+                "",
+                {
+                    "structuredContent": {
+                        "success": True,
+                        "message": "Instantiated prefab.",
+                        "data": payload,
+                    }
+                },
+            )
+        return result
+
+    monkeypatch.setattr(
+        dashboard_server,
+        "load_dashboard_settings",
+        lambda _request: SimpleNamespace(unity_mcp_timeout_seconds=30),
+    )
+    monkeypatch.setattr(dashboard_server, "invoke_unity_mcp", core_success_without_ok)
+    prepared, preview = dashboard_server.PREPARED_ADD_OUTFIT_PREPARER.prepare(
+        {
+            "projectPath": str(project),
+            "avatarPath": "Avatar",
+            "assetPath": "Assets/Outfits/Hoodie.prefab",
+            "outfitName": "Hoodie",
+            "manageWardrobe": False,
+            "setupOutfit": False,
+        },
+        None,
+    )
+
+    assert preview["ok"] is True
+    result = dashboard_server.PREPARED_ADD_OUTFIT_APPROVED_WRITE.execute(prepared)
+
+    assert result["ok"] is True
+    assert [tool for tool, _arguments in write_calls] == ["vrc_instantiate_prefab"]
+
+
+def test_prepared_add_outfit_rejects_explicit_core_failure_even_with_domain_payload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An explicit Core failure must not be converted into a successful alias."""
+    project = _project(tmp_path)
+    state = {"created": False, "wardrobe_added": False, "target_drift": False}
+    write_calls: list[tuple[str, dict]] = []
+    base = _read_mock(project, state, write_calls)
+
+    def core_failure_with_payload(settings, tool: str, arguments: dict, **kwargs):
+        result = base(settings, tool, arguments, **kwargs)
+        if tool == "vrc_instantiate_prefab":
+            payload = copy.deepcopy(result.payload["data"])
+            payload["ok"] = False
+            return dashboard_server.McpResult(
+                0,
+                "",
+                "",
+                {
+                    "structuredContent": {
+                        "success": False,
+                        "message": "Instantiate failed.",
+                        "data": payload,
+                    }
+                },
+            )
+        return result
+
+    monkeypatch.setattr(
+        dashboard_server,
+        "load_dashboard_settings",
+        lambda _request: SimpleNamespace(unity_mcp_timeout_seconds=30),
+    )
+    monkeypatch.setattr(dashboard_server, "invoke_unity_mcp", core_failure_with_payload)
+    prepared, preview = dashboard_server.PREPARED_ADD_OUTFIT_PREPARER.prepare(
+        {
+            "projectPath": str(project),
+            "avatarPath": "Avatar",
+            "assetPath": "Assets/Outfits/Hoodie.prefab",
+            "outfitName": "Hoodie",
+            "manageWardrobe": False,
+            "setupOutfit": False,
+        },
+        None,
+    )
+
+    assert preview["ok"] is True
+    result = dashboard_server.PREPARED_ADD_OUTFIT_APPROVED_WRITE.execute(prepared)
+
+    assert result["ok"] is False
+    assert result["committed"] is True
+    assert result["commitState"] == "unknown"
+    assert result["checkpointRecoveryRequired"] is True
+    assert result["steps"] == []
+    assert result["error"] == "vrc_instantiate_prefab failed."
+    assert [tool for tool, _arguments in write_calls] == ["vrc_instantiate_prefab"]
+
+
+def test_prepared_core_payload_maps_structured_failure_without_domain_ok(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def failed_core(_settings, _tool: str, _arguments: dict, **_kwargs):
+        return dashboard_server.McpResult(
+            0,
+            "",
+            "",
+            {"structuredContent": {"success": False, "data": {"error": "failed"}}},
+        )
+
+    monkeypatch.setattr(dashboard_server, "invoke_unity_mcp", failed_core)
+    payload = dashboard_server._prepared_add_outfit_core_payload(  # noqa: SLF001
+        SimpleNamespace(), "vrc_instantiate_prefab", {}, "test failure"
+    )
+
+    assert payload["success"] is False
+    assert payload["ok"] is False
+
+
+def test_prepared_core_payload_preserves_domain_ok_false_on_structured_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def domain_failure(_settings, _tool: str, _arguments: dict, **_kwargs):
+        return dashboard_server.McpResult(
+            0,
+            "",
+            "",
+            {
+                "structuredContent": {
+                    "success": True,
+                    "data": {"ok": False, "error": "domain rejected"},
+                }
+            },
+        )
+
+    monkeypatch.setattr(dashboard_server, "invoke_unity_mcp", domain_failure)
+    payload = dashboard_server._prepared_add_outfit_core_payload(  # noqa: SLF001
+        SimpleNamespace(), "vrc_instantiate_prefab", {}, "test domain failure"
+    )
+
+    assert payload["ok"] is False
 
 
 def test_add_outfit_rejects_caller_supplied_continuation_nonce(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -353,6 +543,8 @@ def test_add_outfit_all_step_combinations_freeze_one_server_nonce_without_empty_
         expected_tools.append("vrc_add_wardrobe_outfit")
 
     assert [tool for tool, _arguments in calls] == expected_tools
+    if unpack_prefab:
+        assert next(arguments for tool, arguments in calls if tool == "vrc_unpack_prefab")["mode"] == "completely"
     nonce = prepared[ADD_OUTFIT_CONTINUATION_NONCE_KEY]
     assert len(nonce) == 64
     continuation_tools = expected_tools[1:]

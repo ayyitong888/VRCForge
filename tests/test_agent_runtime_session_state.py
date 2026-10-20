@@ -284,6 +284,22 @@ def test_cancel_markers_preserve_turn_precedence_and_single_consumption() -> Non
     assert state.consume_cancel_request(session_id="session-only") is False
 
 
+def test_provider_request_indices_are_owned_by_bound_turn_not_usage() -> None:
+    state, _lock = make_state()
+    assert state.next_provider_request_index() is None
+    identity = {"sessionId": "s", "turnId": "t", "clientTurnId": "c"}
+    state.set_stream_context(identity)
+    assert state.next_provider_request_index() == 1
+    state.set_stream_context(identity)
+    assert state.next_provider_request_index() == 2
+    state.clear_stream_context()
+    assert state.next_provider_request_index() is None
+    state.set_stream_context(identity)
+    assert state.next_provider_request_index() == 3
+    state.set_stream_context({**identity, "turnId": "continuation"})
+    assert state.next_provider_request_index() == 1
+
+
 def test_stream_context_is_turn_local_between_threads() -> None:
     state, _lock = make_state()
     barrier = threading.Barrier(3)
@@ -414,6 +430,34 @@ def test_runtime_active_turns_are_exact_pairs_for_concurrent_session_turns() -> 
     assert state.submit_steer(session_id="shared", target_client_turn_id="client-b", input_id="b2", message="b2")['accepted']
     state.mark_cancel_requested(session_id="shared", client_turn_id="client-a")
     assert state.drain_steer(session_id="shared", client_turn_id="client-b")
+
+
+def test_cancel_with_mismatched_session_and_turn_does_not_cancel_other_turn() -> None:
+    state, _lock = make_state()
+    state.begin_turn(session_id="session-a", turn_id="turn-a", client_turn_id="client-a")
+    state.begin_turn(session_id="session-b", turn_id="turn-b", client_turn_id="client-b")
+
+    state.mark_cancel_requested(
+        session_id="session-a", turn_id="turn-b", client_turn_id="client-b"
+    )
+
+    assert state.cancel_requested(
+        session_id="session-b", turn_id="turn-b", client_turn_id="client-b"
+    ) is False
+
+
+def test_future_partial_cancel_requires_shared_identity_and_finish_clears_only_same_turn() -> None:
+    state, _lock = make_state()
+    state.mark_cancel_requested(turn_id="future-turn-a")
+    state.mark_cancel_requested(session_id="session-b", turn_id="future-turn-b")
+
+    assert state.cancel_requested(session_id="session-c", client_turn_id="client-c") is False
+    assert state.cancel_requested(turn_id="future-turn-a") is True
+    assert state.cancel_requested(session_id="session-b", turn_id="future-turn-b") is True
+
+    state.finish_turn(session_id="session-a", turn_id="future-turn-a", client_turn_id="client-a")
+    assert state.cancel_requested(turn_id="future-turn-a") is False
+    assert state.cancel_requested(session_id="session-b", turn_id="future-turn-b") is True
 
 
 def test_discard_session_clears_every_active_turn_and_mailbox() -> None:
@@ -635,7 +679,7 @@ def test_native_completed_prefix_replace_is_atomic_cas_and_preserves_current_suf
         ]
     )
     source = state.native_conversation("s", binding="b")
-    replaced = state.replace_native_completed_prefix(
+    replaced = state.replace_native_compacted_history(
         "s", binding="b", expected_snapshot=source, summary="Older continuity"
     )
     assert replaced["activeTurnStart"] == 1
@@ -644,7 +688,7 @@ def test_native_completed_prefix_replace_is_atomic_cas_and_preserves_current_suf
         {"role": "user", "content": "current"},
     ]
     with pytest.raises(ValueError, match="snapshot"):
-        state.replace_native_completed_prefix(
+        state.replace_native_compacted_history(
             "s", binding="b", expected_snapshot=source, summary="stale"
         )
     assert state.native_conversation("s", binding="b") == replaced
@@ -668,7 +712,7 @@ def test_native_compaction_tail_restores_exact_prefix_policy_in_same_save_and_is
     })
     state.begin_native_turn("s", binding="b", turn_id="t2", message="current")
     source = state.native_conversation("s", binding="b")
-    compacted = state.replace_native_completed_prefix(
+    compacted = state.replace_native_compacted_history(
         "s", binding="b", expected_snapshot=source, summary="summary",
     )
     policy = {"role": "system", "content": SCAN_RESULT_CONTINUATION_POLICY}
@@ -676,7 +720,7 @@ def test_native_compaction_tail_restores_exact_prefix_policy_in_same_save_and_is
     assert compacted["messages"][-1] == policy and compacted["activeTurnStart"] == 1
     state.begin_native_turn("s", binding="b", turn_id="t3", message="next turn")
     next_source = state.native_conversation("s", binding="b")
-    next_compacted = state.replace_native_completed_prefix(
+    next_compacted = state.replace_native_compacted_history(
         "s", binding="b", expected_snapshot=next_source, summary="summary again",
     )
     assert next_compacted["messages"].count(policy) == 1
@@ -692,13 +736,13 @@ def test_native_compaction_tail_restores_exact_prefix_policy_in_same_save_and_is
     before = failed_state.native_conversation("s", binding="b")
     failing_store.fail = True
     with pytest.raises(OSError, match="disk unavailable"):
-        failed_state.replace_native_completed_prefix(
+        failed_state.replace_native_compacted_history(
             "s", binding="b", expected_snapshot=before, summary="summary",
         )
     assert failed_state.native_conversation("s", binding="b") == before
 
 
-def test_native_prefix_cas_preserves_pending_current_suffix_and_rejects_invalid_boundary() -> None:
+def test_native_compaction_rejects_pending_calls_and_invalid_boundary_atomically() -> None:
     state, _lock = make_state()
     state.begin_native_turn(
         "s", binding="b", turn_id="t", message="current", initial_history=[
@@ -714,14 +758,14 @@ def test_native_prefix_cas_preserves_pending_current_suffix_and_rejects_invalid_
         ]}
     )
     source = state.native_conversation("s", binding="b")
-    replaced = state.replace_native_completed_prefix(
-        "s", binding="b", expected_snapshot=source, summary="Older continuity"
-    )
-    assert replaced["messages"][1:] == source["messages"][source["activeTurnStart"]:]
-    assert state._native_pending(replaced) == {"pending"}
-    assert replaced["messages"].count({"role": "system", "content": SCAN_RESULT_CONTINUATION_POLICY}) == 1
-    invalid = dict(replaced)
-    invalid["activeTurnStart"] = 2
+    with pytest.raises(ValueError, match="pending"):
+        state.replace_native_compacted_history(
+            "s", binding="b", expected_snapshot=source, summary="Older continuity"
+        )
+    assert state.native_conversation("s", binding="b") == source
+    assert state._native_pending(source) == {"pending"}
+    invalid = dict(source)
+    invalid["activeTurnStart"] = 3
     with pytest.raises(ValueError, match="active turn"):
         state.restore_native_conversation("other", binding="b", snapshot=invalid)
 
@@ -734,7 +778,7 @@ def test_native_stale_precompaction_snapshot_cannot_expand_owner() -> None:
         ]
     )
     stale = state.native_conversation("s", binding="b")
-    compacted = state.replace_native_completed_prefix(
+    compacted = state.replace_native_compacted_history(
         "s", binding="b", expected_snapshot=stale, summary="Older continuity"
     )
     assert state.restore_native_conversation("s", binding="b", snapshot=stale) == compacted

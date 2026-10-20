@@ -1,8 +1,73 @@
 """Bounded independent readback for asynchronous Editor state changes."""
 from contextlib import contextmanager
+import os
 from uuid import uuid4
+from collections.abc import Callable, Mapping
 from execution_target import validate_runtime_execution_target, execution_target_digest
 from operation_context import bind_operation_context, current_operation_context
+
+
+def fresh_play_mode_readback_arguments(
+    arguments: Mapping[str, object],
+    discover_project_targets: Callable[[dict[str, object]], Mapping[str, object]],
+) -> dict[str, object]:
+    """Refresh only the project-level identity after an approved Play transition."""
+
+    original = arguments.get("executionTarget")
+    if not isinstance(original, Mapping):
+        return dict(arguments)
+    project_path = str(
+        arguments.get("projectPath")
+        or arguments.get("project_path")
+        or arguments.get("projectRoot")
+        or arguments.get("project_root")
+        or ""
+    ).strip()
+    if not project_path:
+        return dict(arguments)
+    original_project = dict(original.get("project") or {})
+    original_editor = dict(original.get("editor") or {})
+    try:
+        discovered = discover_project_targets(
+            {"projectPath": project_path, "scope": "project", "maxItems": 8}
+        )
+    except Exception:
+        return dict(arguments)
+    targets = discovered.get("targets")
+    if (
+        discovered.get("ok") is False
+        or not isinstance(targets, list)
+        or len(targets) != 1
+        or discovered.get("candidateCount", len(targets)) != 1
+        or discovered.get("totalCandidateCount", 1) != 1
+        or discovered.get("hasMore") is True
+        or discovered.get("complete") is False
+        or discovered.get("ambiguous") is True
+    ):
+        return dict(arguments)
+    for candidate in targets:
+        if not isinstance(candidate, Mapping):
+            continue
+        if (
+            str(candidate.get("scope") or "").casefold() != "project"
+            or candidate.get("ambiguous") is True
+            or candidate.get("resolutionCandidateCount") not in (None, 1)
+        ):
+            continue
+        project = dict(candidate.get("project") or {})
+        editor = dict(candidate.get("editor") or {})
+        if (
+            os.path.normcase(os.path.abspath(str(project.get("root") or "")))
+            != os.path.normcase(os.path.abspath(project_path))
+            or str(project.get("projectId") or "") != str(original_project.get("projectId") or "")
+            or str(editor.get("unityPid") or "") != str(original_editor.get("unityPid") or "")
+            or str(editor.get("processStartTime") or "") != str(original_editor.get("processStartTime") or "")
+        ):
+            continue
+        refreshed = dict(arguments)
+        refreshed["executionTarget"] = dict(candidate)
+        return refreshed
+    return dict(arguments)
 
 
 @contextmanager

@@ -22,17 +22,22 @@ const [app, workspace, card, composer, projection, streaming, runController, cap
 
 const userBranch = card.slice(card.indexOf('if (item.type === "user")'), card.indexOf('if (item.type === "error")'));
 const streamingBranch = card.slice(card.indexOf('if (item.type === "streaming")'), card.indexOf('if (item.type === "result")'));
-const sendingActions = composer.slice(composer.indexOf(') : sending ? ('), composer.indexOf("</div>", composer.indexOf(') : sending ? (')));
+const streamingStatus = card.slice(card.indexOf("function StreamingPhaseStatus"), card.indexOf("function currentStreamingOperation"));
 
 assert.match(userBranch, /onCopy=\{\(\) => onCopyItem\?\.\(item\)\}/, "every durable user message must expose copy");
 assert.match(projection, /if \(item\.type === "user"\)[\s\S]*return item\.text/);
-assert.match(userBranch, /relative flex w-full max-w-\[78%\] flex-col items-end gap-2/);
+assert.match(userBranch, /relative flex min-w-0 w-full max-w-\[78%\] flex-col items-end gap-2/);
 
 assert.match(composer, /queueAllowed/);
-assert.match(sendingActions, /data-composer-stop/);
-assert.match(sendingActions, /data-composer-send/);
-assert.match(sendingActions, /type="submit"/);
-assert.match(app, /queueAllowed=\{chatRunSending && !stopRequested\}/, "compaction or a stopping run must not enable queue submission");
+assert.match(composer, /data-composer-primary-action=\{primaryAction\}/);
+assert.match(composer, /data-composer-steer=\{primaryAction === "steer"/);
+assert.match(composer, /primaryAction === "stop" \? onStop : undefined/);
+assert.match(composer, /primaryAction === "stop" \? "button" : "submit"/);
+assert.match(composer, /primaryAction === "stop" \? stopDisabled : !canSubmit/);
+assert.match(composer, /ArrowUp/);
+assert.match(composer, /fill-current/);
+assert.doesNotMatch(streamingStatus, /Loader2|animate-spin/, "the duplicate streaming spinner is removed while the real phase label remains");
+assert.match(app, /queueAllowed=\{\(chatRunSending \|\| pendingQuestionSessionIds\.has\(activeChat\?\.sessionId \|\| ""\)\) && !stopRequested\}/, "foreground and question-continuation runs allow durable Enter queues; compaction alone and stopping runs do not");
 
 assert.match(streaming, /export type AgentRuntimePhase/);
 assert.match(streaming, /normalizeAgentRuntimePhase/);
@@ -52,7 +57,7 @@ assert.match(
   "safe tool events must appear while the turn is still running",
 );
 assert.match(streaming, /phase === "waiting_for_model" && item\.phase !== "waiting_for_model"/, "a new model pass replaces stale wheel-talk instead of appending it forever");
-assert.ok(streamingBranch.indexOf("StreamingPhaseStatus") < streamingBranch.lastIndexOf("item.text"), "spinner must not be restricted to the empty-text branch");
+assert.ok(streamingBranch.indexOf("StreamingPhaseStatus") > streamingBranch.indexOf("item.text ?"), "phase status must render after the optional text block, independently of whether text exists");
 assert.doesNotMatch(streamingBranch, /reasoning|trace|chain.of.thought|cot/i);
 const arb = new RuntimeQueueArbitrator(8);
 const first = arb.reserve("q0", 0);

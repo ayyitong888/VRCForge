@@ -94,6 +94,7 @@ namespace VRCForge.Editor
             if (Directory.Exists(backupPath) || File.Exists(backupPath))
                 throw new IOException("Backup destination already exists: " + backupId);
             var manifestCreated = false;
+            var manifestCreatedSha = "";
             try
             {
             Directory.CreateDirectory(filesRoot);
@@ -111,17 +112,20 @@ namespace VRCForge.Editor
                 item.before_sha256 = item.before_exists ? ComputeSha256(backupFullPath) : "";
                 try
                 {
-                    File.Copy(sourceFullPath, backupFullPath, false);
+                    WriteOwnedBackupFile(backupFullPath, output =>
+                    {
+                        using (var input = File.OpenRead(sourceFullPath)) input.CopyTo(output);
+                    }, out item.created_by_this_operation, out item.after_sha256);
                     item.sha256 = ComputeSha256(sourceFullPath);
                     item.byte_count = new FileInfo(sourceFullPath).Length;
                     item.after_exists = File.Exists(backupFullPath);
-                    item.after_sha256 = ComputeSha256(backupFullPath);
+                    if (item.sha256 != item.after_sha256)
+                        throw new IOException("Source changed while creating backup: " + item.project_relative_path);
                     item.status = "succeeded";
                 }
                 catch (Exception ex)
                 {
                     item.after_exists = File.Exists(backupFullPath);
-                    item.after_sha256 = item.after_exists ? ComputeSha256(backupFullPath) : "";
                     item.status = "failed";
                     item.error = ex.Message;
                     throw new SafeBackupTransactionException(
@@ -160,12 +164,9 @@ namespace VRCForge.Editor
 
             var manifestBeforeExists = File.Exists(manifestPath);
             var manifestBeforeSha = manifestBeforeExists ? ComputeSha256(manifestPath) : "";
-            using (var stream = new FileStream(manifestPath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
-            {
-                manifestCreated = true;
-                using (var writer = new StreamWriter(stream, Encoding.UTF8))
-                writer.Write(JsonConvert.SerializeObject(payload, Formatting.Indented));
-            }
+            var manifestBytes = new UTF8Encoding(false).GetBytes(JsonConvert.SerializeObject(payload, Formatting.Indented));
+            WriteOwnedBackupFile(manifestPath, stream => stream.Write(manifestBytes, 0, manifestBytes.Length),
+                out manifestCreated, out manifestCreatedSha);
             var manifestAfterExists = File.Exists(manifestPath);
             var manifestAfterSha = ComputeSha256(manifestPath);
             payload.transaction = BuildTransaction(
@@ -198,7 +199,7 @@ namespace VRCForge.Editor
                         directories.Add(parent);
                     try
                     {
-                        if (!item.before_exists && item.status != "not_attempted" && File.Exists(path))
+                        if (item.created_by_this_operation && File.Exists(path))
                         {
                             if (string.IsNullOrEmpty(item.after_sha256) || ComputeSha256(path) != item.after_sha256)
                                 throw new IOException("Partial backup changed; preserved: " + path);
@@ -207,19 +208,56 @@ namespace VRCForge.Editor
                     }
                     catch (Exception cleanupError) { cleanupErrors.Add(cleanupError); }
                 }
-                try { if (manifestCreated) File.Delete(manifestPath); }
+                try
+                {
+                    if (manifestCreated && File.Exists(manifestPath))
+                    {
+                        if (string.IsNullOrEmpty(manifestCreatedSha) || ComputeSha256(manifestPath) != manifestCreatedSha)
+                            throw new IOException("Partial manifest changed; preserved: " + manifestPath);
+                        File.Delete(manifestPath);
+                    }
+                }
                 catch (Exception cleanupError) { cleanupErrors.Add(cleanupError); }
                 foreach (var directory in directories.OrderByDescending(path => path.Length))
                 {
                     try { if (Directory.Exists(directory)) Directory.Delete(directory, false); }
                     catch (Exception cleanupError) { cleanupErrors.Add(cleanupError); }
                 }
-                if (cleanupErrors.Count > 0)
+                throw new SafeBackupTransactionException("Backup creation failed: " + failure.Message, new
                 {
-                    cleanupErrors.Insert(0, failure);
-                    throw new AggregateException("Backup creation failed; partial cleanup requires attention at " + backupPath, cleanupErrors);
+                    ok = false, backupPath, sourceAssetsModified = false,
+                    mutationStarted = fileMap.Values.Any(item => item.created_by_this_operation) || manifestCreated,
+                    committed = cleanupErrors.Count == 0 ? (bool?)false : null,
+                    commitState = cleanupErrors.Count == 0 ? "rolled_back" : "unknown",
+                    partialCleanupSucceeded = cleanupErrors.Count == 0,
+                    temporaryCleanupRequired = cleanupErrors.Count > 0,
+                    cleanupErrors = cleanupErrors.Select(error => error.Message).ToArray(),
+                    remainingBackupFiles = fileMap.Values.Where(item => item.created_by_this_operation
+                        && File.Exists(Path.Combine(backupPath, item.backup_relative_path)))
+                        .Select(item => new { path = item.backup_relative_path, expectedSha256 = item.after_sha256 }).ToArray(),
+                    manifestRemaining = manifestCreated && File.Exists(manifestPath),
+                    transaction = BuildTransaction(fileMap.Values, manifestPath, manifestCreated,
+                        false, "", File.Exists(manifestPath), manifestCreatedSha, "failed")
+                });
+            }
+        }
+
+        private static void WriteOwnedBackupFile(string path, Action<Stream> write, out bool created, out string digest)
+        {
+            created = false;
+            digest = "";
+            using (var stream = new FileStream(path, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None))
+            {
+                created = true;
+                try { write(stream); }
+                finally
+                {
+                    // Hash while this operation still owns the exclusive handle, including partial writes.
+                    stream.Flush();
+                    stream.Position = 0;
+                    using (var sha256 = SHA256.Create())
+                        digest = BitConverter.ToString(sha256.ComputeHash(stream)).Replace("-", "").ToLowerInvariant();
                 }
-                throw;
             }
         }
 
@@ -373,7 +411,7 @@ namespace VRCForge.Editor
             fileMap.Add(relativePath, new BackupFileItem
             {
                 project_relative_path = relativePath,
-                backup_relative_path = $"files/{relativePath}",
+                backup_relative_path = $"files/{fileMap.Count:x8}",
                 is_meta = relativePath.EndsWith(".meta", StringComparison.OrdinalIgnoreCase),
                 sha256 = "",
                 byte_count = 0
@@ -582,6 +620,7 @@ namespace VRCForge.Editor
             public string after_sha256 = "";
             public string status = "not_attempted";
             public string error = "";
+            [JsonIgnore] public bool created_by_this_operation;
         }
 
         [Serializable]

@@ -104,7 +104,7 @@ def test_scope_client_checks_capability_each_call_and_unwraps_completed_data(mon
 
     class FakeClient:
         def __init__(self, _project, *, timeout_seconds):
-            assert timeout_seconds == 3.0
+            assert timeout_seconds == 30.0
 
         def core_info(self):
             calls.append(("core_info",))
@@ -332,9 +332,9 @@ def test_random_guid_reference_graph_expands_real_store_fingerprints_and_reader_
     fingerprint_batches = []
     actual_fingerprints = store_module._fingerprints
 
-    def counted_fingerprints(root, selected):
+    def counted_fingerprints(root, selected, metadata_only_paths=()):
         fingerprint_batches.append(set(selected))
-        return actual_fingerprints(root, selected)
+        return actual_fingerprints(root, selected, metadata_only_paths)
 
     monkeypatch.setattr(store_module, "_fingerprints", counted_fingerprints)
     store = ScanResultStore(tmp_path / "result-store")
@@ -390,9 +390,9 @@ def test_known_project_write_uses_exact_scope_while_unknown_global_write_still_e
     unrelated = project / "Assets" / "Graph" / "unrelated.asset"
     unrelated.write_text("outside proof closure", encoding="utf-8")
     unrelated.with_name(unrelated.name + ".meta").write_text("guid: " + uuid.uuid4().hex, encoding="utf-8")
-    store.begin_mutation(project, "vrcforge_set_material_shader")
+    marker = store.begin_mutation(project, "vrcforge_set_material_shader")
     unrelated.write_text("ordinary known write", encoding="utf-8")
-    store.end_mutation(project, "vrcforge_set_material_shader")
+    store.end_mutation(project, "vrcforge_set_material_shader", marker=marker)
     assert store.lookup("session", "turn-b", project, metadata["resultRef"]) == {"step": step}
 
     future_step = {"id": "future-write", "tool": "vrcforge_scan_fx_animator", "status": "ok", "result": {}}
@@ -408,8 +408,8 @@ def test_known_project_write_uses_exact_scope_while_unknown_global_write_still_e
     shell_start = store.start(project, shell_step["tool"], arguments)
     shell_metadata = store.capture("session", "turn-e", project, shell_step, arguments,
                                    expected_generation=shell_start)
-    store.begin_mutation("", "vrcforge_shell_execute")
-    store.end_mutation("", "vrcforge_shell_execute")
+    marker = store.begin_mutation("", "vrcforge_shell_execute")
+    store.end_mutation("", "vrcforge_shell_execute", marker=marker)
     expired = store.lookup("session", "turn-f", project, shell_metadata["resultRef"])
     assert expired["expired"] is True
     assert expired["reason"] == "vrcforge_shell_execute"
@@ -477,8 +477,8 @@ def test_start_rejects_project_generation_change_during_core_capture(tmp_path, g
 
     def mutate_while_capturing(tool, arguments):
         proof = original_capture(tool, arguments)
-        store.begin_mutation(project, "vrcforge_set_property")
-        store.end_mutation(project, "vrcforge_set_property")
+        marker = store.begin_mutation(project, "vrcforge_set_property")
+        store.end_mutation(project, "vrcforge_set_property", marker=marker)
         return proof
 
     core.capture = mutate_while_capturing

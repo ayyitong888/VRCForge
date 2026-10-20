@@ -167,8 +167,16 @@ def select_add_outfit_wardrobe(
         candidates = _wardrobe_candidate_parameter_names(scan)
         detail = f" Candidate groups: {', '.join(candidates)}." if candidates else ""
         raise RuntimeError(
-            "Add Outfit requires an existing verified wardrobe. Approve "
-            "vrcforge_create_wardrobe first, then retry." + detail
+            "Add Outfit with manageWardrobe=true requires an existing verified wardrobe; "
+            "an empty strict scan does not prove absence. Inspect the parameter, menu, FX and clips. "
+            "For a confirmed new wardrobe, create the skeleton only if missing. A one-value "
+            "skeleton is not yet a verified wardrobe. Do not repeat vrcforge_create_wardrobe. "
+            "Install the first outfit separately (preview/add_outfit with manageWardrobe=false, "
+            "or the exposed instantiate/setup tools), verify its exact object paths, then use "
+            "vrcforge_preview_add_wardrobe_outfit and approved vrcforge_add_wardrobe_outfit "
+            "with the explicit approved value. Complete the approved mutual-exclusion curves, "
+            "then fresh vrcforge_scan_wardrobe before using the full workflow for later outfits."
+            + detail
         )
     selected: dict[str, Any] | None = None
     if explicit:
@@ -396,7 +404,7 @@ class PreparedAddOutfitStateBuilder:
             mode = str(
                 normalized.get("unpack_mode")
                 or normalized.get("unpackMode")
-                or "outermost"
+                or "completely"
             ).strip().lower()
             if mode not in {"outermost", "completely"}:
                 raise RuntimeError(
@@ -876,7 +884,10 @@ class PreparedAddOutfitApprovedWriteService:
             return {
                 "ok": True,
                 "preview": False,
+                "mutationStarted": True,
                 "committed": True,
+                "commitState": "complete",
+                "checkpointRecoveryRequired": False,
                 "outfitPath": read_facts["outfitPath"],
                 "steps": steps,
                 "finalObject": final_object,

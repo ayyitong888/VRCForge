@@ -12,6 +12,8 @@ export type ChatAttachment = {
   type: string;
   dataUrl?: string;
   text?: string;
+  /** Original selected text retained when the user edits a quote chip. */
+  originalText?: string;
   /**
    * "vault_file" marks a binary stored in the backend's on-disk attachment
    * vault: the message carries metadata + payloadHash only and the bytes
@@ -118,6 +120,8 @@ export type ChatCompactionState = {
   completedAt?: string;
   failureClass?: string;
   message?: string;
+  /** Aggregated provider usage for compact attempts; never feeds contextUsageCache. */
+  providerUsage?: AgentContextUsage;
 };
 
 /** Durable, non-CoT projection of one runtime occurrence in a turn. */
@@ -147,14 +151,15 @@ export type ChatTimelineEvent = {
     status?: string;
     tool?: string;
     phase?: string;
+    messageId?: string;
     actionId?: string;
     subagentStatus?: "created" | "started" | "completed" | "failed";
   };
 };
 
 export type ConversationItem =
-  | { id: string; type: "user"; text: string; planMode?: boolean; attachments?: ChatAttachment[]; queuedFrom?: boolean; queueStatus?: "steering" | "queued" | "waiting_for_resources" | "delivery_unverified" | "paused" | "cancelled"; clientTurnId?: string; queueEnvelope?: { planMode?: boolean; provider?: string; providerLabel?: string; model?: string; contextLimit?: number; projectPath?: string; projectType?: ProjectType; sessionId?: string; laneId?: string; computerUseRequested?: boolean; computerUseVisualTheme?: "light" | "dark"; computerUseVisualAccent?: string; queueId?: string; sequence?: number }; createdAt?: string }
-  | { id: string; type: "streaming"; clientTurnId: string; text: string; phase?: AgentRuntimePhase; timeline?: ChatTimelineEvent[]; providerLastActivityAt?: string; providerLabel?: string; model?: string; createdAt?: string }
+  | { id: string; type: "user"; text: string; planMode?: boolean; attachments?: ChatAttachment[]; queuedFrom?: boolean; composerQueued?: boolean; queueStatus?: "steering" | "queued" | "waiting_for_resources" | "delivery_unverified" | "paused" | "cancelled"; clientTurnId?: string; queueEnvelope?: { planMode?: boolean; provider?: string; providerLabel?: string; model?: string; contextLimit?: number; projectPath?: string; projectType?: ProjectType; sessionId?: string; laneId?: string; computerUseRequested?: boolean; computerUseVisualTheme?: "light" | "dark"; computerUseVisualAccent?: string; queueId?: string; sequence?: number }; createdAt?: string }
+  | { id: string; type: "streaming"; clientTurnId: string; text: string; phase?: AgentRuntimePhase; timeline?: ChatTimelineEvent[]; providerLastActivityAt?: string; providerRetry?: { attempt: number; max: number; reason?: "connection" | "timeout" | "rate_limit" | "capacity"; statusCode?: number; terminal?: "NO_MORE_RETRY" }; providerLabel?: string; model?: string; createdAt?: string }
   | { id: string; type: "agent"; response: AgentRuntimeResponse; timeline?: ChatTimelineEvent[]; compactionRecovery?: CompactionRecoveryEntry[]; elapsedSeconds?: number; providerLabel?: string; model?: string; createdAt?: string }
   | { id: string; type: "result"; approvalId: string; result?: AgentShellResult; error?: string; createdAt?: string }
   | { id: string; type: "timeline_event"; event: ChatTimelineEvent; createdAt?: string }
@@ -171,7 +176,7 @@ export type ConversationItem =
       createdAt?: string;
     }
   | { id: string; type: "error"; text: string; createdAt?: string }
-  | { id: string; type: "compact"; text: string; detail?: string; status?: "running" | "completed"; compactionRecovery?: CompactionRecoveryEntry[]; entryCount?: number; beforeTokens?: number; afterTokens?: number; contextLimit?: number; createdAt?: string }
+  | { id: string; type: "compact"; text: string; detail?: string; status?: "running" | "completed"; compactionRecovery?: CompactionRecoveryEntry[]; summarizedItemIds?: string[]; contextUsageBoundaryItemId?: string; entryCount?: number; beforeTokens?: number; afterTokens?: number; contextLimit?: number; createdAt?: string }
   | { id: string; type: "subagent"; task: SubAgentTask }
   | { id: string; type: "handoff_card"; cardId: string; handoffId: string; kind: string; payloadDigest: string; sourceChatId?: string; targetChatId?: string; sourceRevision?: number; targetRevision?: number; summary?: Record<string, unknown>; status?: string };
 
@@ -180,6 +185,10 @@ export type ChatThread = {
   id: string;
   sessionId: string;
   title: string;
+  /** Manual titles are user-owned; automatic generation may only fill auto titles. */
+  titleSource?: "auto" | "manual";
+  /** Explicit acceptance-session marker; never inferred from title or prompt text. */
+  isTestChat?: boolean;
   projectPath: string;
   projectType?: "general" | "unity";
   createdAt?: string;

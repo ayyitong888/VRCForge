@@ -666,6 +666,7 @@ def test_dashboard_adoption_skips_bind_probe_acks_then_runs_with_exact_socket() 
     )
     lease = Mock()
     lease.acquire.return_value = True
+    reconcile = Mock(side_effect=lambda: events.append("reconcile") or {"ok": True})
     original_session = dashboard_server.PRIMITIVE_BASIS_LIVE_SESSION
     original_connection = dashboard_server.PRIMITIVE_BASIS_LIVE_CONNECTION
     original_runtime = dashboard_server.PRIMITIVE_BASIS_LIVE_RUNTIME
@@ -705,6 +706,7 @@ def test_dashboard_adoption_skips_bind_probe_acks_then_runs_with_exact_socket() 
                 side_effect=AssertionError("adoption must not probe or bind"),
             ),
             patch("dashboard_server.BACKEND_OWNER_LEASE", lease),
+            patch.object(dashboard_server.AGENT_GATEWAY._scan_results, "reconcile_orphaned_mutations", reconcile),
             patch(
                 "dashboard_server.PrimitiveBasisLiveUnityConnection",
                 side_effect=create_connection,
@@ -719,7 +721,8 @@ def test_dashboard_adoption_skips_bind_probe_acks_then_runs_with_exact_socket() 
             ) as run_server,
         ):
             assert dashboard_server.main() == 0
-        assert events == ["connection", "runtime", "ack", "run", "close"]
+        assert events == ["connection", "runtime", "ack", "reconcile", "run", "close"]
+        reconcile.assert_called_once_with()
         run_server.assert_called_once_with(args.host, args.port, sockets=[listener])
         live_observer.assert_called_once_with("applied", {"requestId": "request-1"})
         assert dashboard_server.PRIMITIVE_BASIS_LIVE_SESSION is None

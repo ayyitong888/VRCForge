@@ -2,7 +2,7 @@
   "id": "com.vrcforge.skills.avatar_breast_physics_audit",
   "name": "VRChat 胸部动态骨骼检查",
   "skill_name": "vrcforge-avatar-breast-physics-audit",
-  "version": "1.0.1",
+  "version": "1.0.3",
   "author": "VRCForge",
   "description": "Read-only audit of existing VRChat breast PhysBones, Marshmallow setup, left/right weighted bones, collider or constraint references and NDMF-generated evidence boundaries; never modify physics assets or claim unsupported generated output.",
   "min_vrcforge_version": "1.7.9",

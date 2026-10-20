@@ -1426,6 +1426,7 @@ namespace VRCForge.Editor
             [VRCForgeInput("Create a submenu when one is not assigned.", IsRequired = false)] public bool? createSubMenu { get; set; }
             [VRCForgeInput("Optional submenu parameter-name array.", IsRequired = false)] public object[] subParameters { get; set; }
             [VRCForgeInput("Ordered control-name array for reorder.", IsRequired = false)] public object[] orderNames { get; set; }
+            [VRCForgeInput("Exact root, existing owner, and new menu asset paths returned by the approved preview.", IsRequired = false)] public string[] expectedPlanAssetPaths { get; set; } = Array.Empty<string>();
         }
 
         public static object HandleCommand(JObject @params)
@@ -1447,6 +1448,19 @@ namespace VRCForge.Editor
                 if (preview)
                 {
                     return VRCForgeToolResult.Completed($"Preview: would manage expression menu ({action}).", new { ok = true, preview = true, plan });
+                }
+
+                var expectedPlanAssetPaths = (@params["expectedPlanAssetPaths"] as JArray)?.Values<string>()
+                    .Where(path => !string.IsNullOrWhiteSpace(path)).Distinct(StringComparer.Ordinal)
+                    .OrderBy(path => path, StringComparer.Ordinal).ToArray() ?? Array.Empty<string>();
+                var actualPlanAssetPaths = (JObject.FromObject(plan)["plannedAssetPaths"] as JArray)
+                    ?.Values<string>().Where(path => !string.IsNullOrWhiteSpace(path))
+                    .Distinct(StringComparer.Ordinal).OrderBy(path => path, StringComparer.Ordinal).ToArray()
+                    ?? Array.Empty<string>();
+                if (expectedPlanAssetPaths.Length == 0
+                    || !expectedPlanAssetPaths.SequenceEqual(actualPlanAssetPaths, StringComparer.Ordinal))
+                {
+                    throw new InvalidOperationException("The approved expression-menu asset plan changed; preview and approve the exact current paths.");
                 }
 
                 var rootWasMissing = root == null;
@@ -1523,6 +1537,10 @@ namespace VRCForge.Editor
                 if (resolved == null) break;
                 existingParent = resolved;
             }
+            var checkpointAssetPaths = existingParent != null ? new[] { AssetDatabase.GetAssetPath(existingParent) } : Array.Empty<string>();
+            var plannedAssetPaths = new[] { rootMenuAssetPath }.Concat(checkpointAssetPaths).Concat(newMenuAssetPaths)
+                .Where(path => !string.IsNullOrWhiteSpace(path)).Distinct(StringComparer.Ordinal)
+                .OrderBy(path => path, StringComparer.Ordinal).ToArray();
             return new
             {
                 action,
@@ -1531,7 +1549,8 @@ namespace VRCForge.Editor
                 rootMenuPath = rootMenuAssetPath,
                 targetMenuAssetPath = targetMenu != null ? AssetDatabase.GetAssetPath(targetMenu) : "",
                 targetMenuExists = targetMenu != null,
-                checkpointAssetPaths = existingParent != null ? new[] { AssetDatabase.GetAssetPath(existingParent) } : Array.Empty<string>(),
+                checkpointAssetPaths,
+                plannedAssetPaths,
                 assetDir,
                 newMenuAssetPaths,
                 menuPath = @params["menuPath"]?.ToString() ?? "",
@@ -1899,6 +1918,10 @@ namespace VRCForge.Editor
             [VRCForgeInput("Optional write-defaults flag.", IsRequired = false)] public bool? writeDefaults { get; set; }
             [VRCForgeInput("Optional motion AnimationClip asset path.", IsRequired = false)] public string motionClipPath { get; set; } = "";
             [VRCForgeInput("Optional state speed.", IsRequired = false)] public float? speed { get; set; }
+            [VRCForgeInput("Expected current state speed; rejects a mismatched or missing state before mutation.", IsRequired = false)] public float? expectedSpeed { get; set; }
+            [VRCForgeInput("Controller state digest returned by preview; rejects drift before mutation.", IsRequired = false)] public string expectedStateDigest { get; set; } = "";
+            [VRCForgeInput("Optional: use an existing Float parameter as normalized motion time.", IsRequired = false)] public bool? timeParameterActive { get; set; }
+            [VRCForgeInput("Optional existing Float Animator parameter used as normalized motion time.", IsRequired = false)] public string timeParameter { get; set; } = "";
             [VRCForgeInput("Optional Any-State transition exit-time flag.", IsRequired = false)] public bool? hasExitTime { get; set; }
             [VRCForgeInput("Optional Any-State transition exit time.", IsRequired = false)] public float? exitTime { get; set; }
             [VRCForgeInput("Optional Any-State transition duration.", IsRequired = false)] public float? duration { get; set; }
@@ -1927,6 +1950,9 @@ namespace VRCForge.Editor
                 var assetDir = AvatarPrimitiveCrudCore.NormalizeAssetDir(@params["assetDir"]?.ToString(), descriptor.name, GeneratedAssetPaths.Controllers);
                 var animationAssetDir = AvatarPrimitiveCrudCore.NormalizeAssetDir(@params["assetDir"]?.ToString(), descriptor.name, GeneratedAssetPaths.Animations);
                 var controller = ResolveAnimatorControllerForPreview(descriptor, @params);
+                if ((@params["expectedSpeed"] != null || @params["expectedStateDigest"] != null)
+                    && action != "ensure_state" && action != "update_state")
+                    throw new InvalidOperationException("State preconditions require ensure_state or update_state.");
                 var controllerPath = controller != null ? AssetDatabase.GetAssetPath(controller)
                     : action == "delete_parameter" ? ""
                     : GeneratedAssetPaths.UniqueAssetPath($"{assetDir}/{AvatarPrimitiveCrudCore.Sanitize(descriptor.name, "Avatar")}_FX.controller");
@@ -1952,6 +1978,8 @@ namespace VRCForge.Editor
                     stateName = @params["stateName"]?.ToString() ?? "",
                     destinationStateName = @params["destinationStateName"]?.ToString() ?? "",
                     sourceStateName = @params["sourceStateName"]?.ToString() ?? "",
+                    timeParameterActive = @params["timeParameterActive"]?.Value<bool?>(),
+                    timeParameter = @params["timeParameter"]?.ToString() ?? "",
                     transitionScope = string.IsNullOrWhiteSpace(@params["sourceStateName"]?.ToString())
                         ? "AnyState"
                         : $"{@params["sourceStateName"]}->{(@params["destinationStateName"]?.ToString() ?? @params["stateName"]?.ToString() ?? "")}",
@@ -1962,13 +1990,23 @@ namespace VRCForge.Editor
                     return HandleDeleteParameter(controller, @params, preview, plan);
                 }
                 ValidateEdit(controller, action, @params);
+                var stateChange = (action == "ensure_state" || action == "update_state")
+                    ? BuildStateChange(controller == null ? null : AvatarPrimitiveCrudCore.FindState(
+                        controller.layers.SingleOrDefault(item => item.name == plan.layerName)?.stateMachine, plan.stateName), @params)
+                    : null;
+                var stateDigest = ControllerStateDigest(controller);
+                var expectedStateDigest = @params["expectedStateDigest"]?.ToString() ?? "";
+                if (expectedStateDigest.Length > 0 && !string.Equals(expectedStateDigest, stateDigest, StringComparison.Ordinal))
+                    throw new InvalidOperationException("FX controller changed since preview; request a new preview.");
                 if (preview)
                 {
                     if (action == "ensure_transition" || action == "delete_transition")
                     {
                         ValidateTransitionPreview(controller, @params);
                     }
-                    return VRCForgeToolResult.Completed($"Preview: would manage FX animator ({action}).", new { ok = true, preview = true, plan });
+                    return VRCForgeToolResult.Completed($"Preview: would manage FX animator ({action}).", new {
+                        ok = true, preview = true, plan, stateChange, expectedStateDigest = stateDigest,
+                        mutationStarted = false, committed = false });
                 }
 
                 var createdController = controller == null;
@@ -2069,6 +2107,16 @@ namespace VRCForge.Editor
                 if (arguments["newName"] != null) Required(arguments, "newName");
                 if (arguments["speed"] != null) WriteAnimationCurveTool.RequireFinite(arguments["speed"].Value<float>(), "speed");
                 if (arguments["writeDefaults"] != null) arguments["writeDefaults"].Value<bool>();
+                var existingTimeParameter = "";
+                if (action == "ensure_state" || action == "update_state")
+                {
+                    var existingLayer = controller?.layers.FirstOrDefault(item => item.name == arguments["layerName"]?.ToString());
+                    var existing = existingLayer == null ? null : AvatarPrimitiveCrudCore.FindState(existingLayer.stateMachine, arguments["stateName"]?.ToString() ?? "");
+                    if (action == "update_state" && existing == null)
+                        throw new InvalidOperationException("State not found for update; ensure_state is required to create a state.");
+                    existingTimeParameter = existing?.timeParameter ?? "";
+                }
+                ValidateTimeParameter(controller, arguments, existingTimeParameter);
             }
             if (action == "delete_layer" || action == "delete_state")
             {
@@ -2096,6 +2144,36 @@ namespace VRCForge.Editor
             }
         }
 
+        internal static JObject BuildStateChange(AnimatorState state, JObject arguments)
+        {
+            if (arguments["expectedSpeed"] != null && (state == null || state.speed != arguments["expectedSpeed"].Value<float>()))
+                throw new InvalidOperationException("FX state speed differs from expectedSpeed; inspect the current preview before writing.");
+            var before = state == null ? null : new JObject {
+                ["name"] = state.name, ["speed"] = state.speed, ["writeDefaultValues"] = state.writeDefaultValues,
+                ["timeParameterActive"] = state.timeParameterActive, ["timeParameter"] = state.timeParameter ?? "",
+                ["motionPath"] = AssetDatabase.GetAssetPath(state.motion) };
+            var after = before == null ? new JObject {
+                ["name"] = arguments["stateName"]?.ToString() ?? "", ["speed"] = 1f,
+                ["writeDefaultValues"] = true, ["timeParameterActive"] = false, ["timeParameter"] = "", ["motionPath"] = "" }
+                : (JObject)before.DeepClone();
+            if (arguments["newName"] != null) after["name"] = arguments["newName"].ToString().Trim();
+            if (arguments["speed"] != null) after["speed"] = arguments["speed"].Value<float>();
+            if (arguments["writeDefaults"] != null) after["writeDefaultValues"] = arguments["writeDefaults"].Value<bool>();
+            if (arguments["timeParameterActive"] != null) after["timeParameterActive"] = arguments["timeParameterActive"].Value<bool>();
+            if (arguments["timeParameter"] != null) after["timeParameter"] = arguments["timeParameter"].ToString().Trim();
+            if (arguments["motionClipPath"] != null) after["motionPath"] = AvatarPrimitiveCrudCore.NormalizeAssetPath(arguments["motionClipPath"].ToString());
+            return new JObject { ["before"] = before == null ? JValue.CreateNull() : (JToken)before, ["after"] = after };
+        }
+
+        private static string ControllerStateDigest(AnimatorController controller)
+        {
+            var path = controller == null ? "" : AssetDatabase.GetAssetPath(controller);
+            var text = path + "\n" + AssetDatabase.AssetPathToGUID(path) + "\n"
+                + (controller == null ? "null" : DescribeController(controller).ToString(Newtonsoft.Json.Formatting.None));
+            using (var sha = System.Security.Cryptography.SHA256.Create())
+                return BitConverter.ToString(sha.ComputeHash(System.Text.Encoding.UTF8.GetBytes(text))).Replace("-", "").ToLowerInvariant();
+        }
+
         private static JToken DescribeController(AnimatorController controller)
         {
             return JToken.FromObject(new
@@ -2118,6 +2196,7 @@ namespace VRCForge.Editor
                 states = machine.states.Select(child => new
                 {
                     child.state.name, child.state.speed, child.state.writeDefaultValues,
+                    child.state.timeParameterActive, child.state.timeParameter,
                     motionPath = AssetDatabase.GetAssetPath(child.state.motion),
                     transitions = (child.state.transitions ?? Array.Empty<AnimatorStateTransition>()).Select(DescribeTransition).ToArray()
                 }).ToArray(),
@@ -2634,6 +2713,33 @@ namespace VRCForge.Editor
             {
                 state.speed = @params["speed"].Value<float>();
             }
+            if (@params["timeParameter"] != null)
+            {
+                state.timeParameter = @params["timeParameter"].ToString().Trim();
+            }
+            if (@params["timeParameterActive"] != null)
+            {
+                state.timeParameterActive = @params["timeParameterActive"].Value<bool>();
+            }
+        }
+
+        internal static void ValidateTimeParameter(AnimatorController controller, JObject arguments, string existingTimeParameter = "")
+        {
+            if (arguments["timeParameterActive"] == null && arguments["timeParameter"] == null) return;
+            if (arguments["timeParameterActive"] != null && arguments["timeParameterActive"].Type != JTokenType.Boolean)
+                throw new InvalidOperationException("timeParameterActive must be boolean.");
+            var requested = arguments["timeParameter"] != null
+                ? arguments["timeParameter"].ToString().Trim()
+                : (existingTimeParameter ?? "").Trim();
+            if (arguments["timeParameter"] != null && requested.Length == 0)
+                throw new InvalidOperationException("timeParameter must be non-empty when provided.");
+            var active = arguments["timeParameterActive"]?.Value<bool>() ?? false;
+            if (active && requested.Length == 0)
+                throw new InvalidOperationException("timeParameter is required when timeParameterActive is true.");
+            if (!active && requested.Length == 0) return;
+            var parameter = controller?.parameters?.SingleOrDefault(item => item.name == requested);
+            if (parameter == null || parameter.type != AnimatorControllerParameterType.Float)
+                throw new InvalidOperationException("timeParameter must reference an existing Float Animator parameter.");
         }
 
         private static AnimationClip LoadOrCreateClip(string rawPath, string assetDir)

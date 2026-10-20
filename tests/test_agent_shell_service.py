@@ -890,6 +890,41 @@ def test_too_large_referenced_script_fails_before_approval(
     assert processes.processes == []
 
 
+def test_large_project_asset_is_stream_bound_and_changes_invalidate_approval(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    shell, approvals, processes, _audits = service(tmp_path)
+    for marker in ("Assets", "Packages", "ProjectSettings"):
+        (tmp_path / marker).mkdir(parents=True, exist_ok=True)
+    asset = tmp_path / "Assets" / "large-model.bin"
+    with asset.open("wb") as stream:
+        for _ in range(17):
+            stream.write(b"x" * (1024 * 1024))
+
+    original_read = Path.read_bytes
+
+    def no_whole_asset_read(path: Path) -> bytes:
+        assert path != asset, "Approval hashing must not load a large asset into memory."
+        return original_read(path)
+
+    monkeypatch.setattr(Path, "read_bytes", no_whole_asset_read)
+    pending = shell.execute({
+        "command": 'Get-FileHash "Assets/large-model.bin"',
+        "cwd": str(tmp_path), "workspace_root": str(tmp_path),
+        "projectRoot": str(tmp_path), "timeout": 30,
+    })
+    assert pending["status"] == "pending_approval"
+    assert len(approvals.requests) == 1
+    assert processes.processes == []
+    # Same size, changed contents: size-only approval binding is insufficient.
+    with asset.open("r+b") as stream:
+        stream.write(b"y")
+    with pytest.raises(AgentShellError, match="binding has changed") as raised:
+        shell.execute_payload(dict(approvals.requests[0].arguments))
+    assert raised.value.status_code == 409
+    assert processes.processes == []
+
+
 def test_generic_apply_cannot_forge_shell_classification_snapshot(tmp_path: Path) -> None:
     gateway = AgentGateway(tmp_path / "agent_gateway.json", tmp_path / "audit")
     config = gateway.ensure_config()

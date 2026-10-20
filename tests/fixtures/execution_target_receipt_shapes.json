@@ -1,0 +1,45 @@
+{
+  "live-material": {
+    "schema": "vrcforge.execution_target.v1",
+    "scope": "avatar",
+    "project": {
+      "projectId": "fixture-project-id",
+      "root": "C:/UnityFixture"
+    },
+    "editor": {
+      "coreInstanceId": "fixture-core-instance",
+      "unityPid": 1234,
+      "processStartTime": "fixture-start-time"
+    },
+    "ambiguous": false,
+    "resolutionCandidateCount": 1,
+    "scene": {
+      "assetPath": "Assets/Fixture.unity",
+      "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "guid": "fixture-scene-guid",
+      "revision": "fixture-scene-revision"
+    },
+    "avatar": {
+      "exactHierarchyPath": "FixtureRoot/FixtureAvatar",
+      "globalObjectId": "fixture-avatar-global-id",
+      "name": "FixtureAvatar"
+    },
+    "namespace": "fixture-namespace"
+  },
+  "live-fx": {
+    "schema": "vrcforge.execution_target.v1",
+    "scope": "project",
+    "namespace": "fixture-namespace",
+    "project": {
+      "projectId": "fixture-project-id",
+      "root": "C:/UnityFixture"
+    },
+    "editor": {
+      "coreInstanceId": "fixture-core-instance",
+      "unityPid": 1234,
+      "processStartTime": "fixture-start-time"
+    },
+    "ambiguous": false,
+    "resolutionCandidateCount": 1
+  }
+}

@@ -51,6 +51,19 @@ def test_three_verified_steps_have_an_aggregate_persisted_receipt():
     assert [step["readback"]["asset"] for step in result["readback"]["steps"]] == [0, 1, 2]
 
 
+def test_created_skeleton_returns_first_outfit_handoff_without_claiming_recognition():
+    result, calls = run([receipt(index) for index in range(3)])
+    assert len(calls) == 3
+    assert result["wardrobeStage"] == "skeleton"
+    assert result["strictWardrobeVerified"] is False
+    guidance = " ".join(result["nextSteps"])
+    assert "vrcforge_preview_add_wardrobe_outfit" in guidance
+    assert "vrcforge_add_wardrobe_outfit" in guidance
+    assert "vrcforge_scan_wardrobe" in guidance
+    assert "mutual-exclusion" in guidance
+    assert "Do not repeat" in guidance
+
+
 @pytest.mark.parametrize("change", [
     {"verified": False}, {"persistedReadback": False}, {"readback": {}},
     {"status": "pending"}, {"preview": True}, {"committed": False},

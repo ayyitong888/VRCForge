@@ -20,6 +20,7 @@ from wardrobe_outfit_workflow_service import (
 )
 
 RESCAN_SCHEMA = "vrcforge.scan_result_equivalence.v1"
+_MATERIAL_SCAN_ALIAS = "vrcforge_scan_materials"
 WHITELIST = frozenset({
     "vrcforge_scan_wardrobe", "vrcforge_scan_animation_bindings",
     "vrcforge_scan_avatar_items", "vrcforge_scan_avatar_controls", "vrcforge_scan_fx_animator",
@@ -64,7 +65,8 @@ def normalized_arguments(tool: str, arguments: dict) -> dict:
                       maxKeysPerBinding=int(_alias(arguments, "max_keys_per_binding", "maxKeysPerBinding", 256)))
         result.update({name: deepcopy(arguments[name]) for name in _SELECTION if name in arguments})
     # Avatar-items defines an empty selector as all loaded scene avatar roots.
-    if tool != "vrcforge_scan_avatar_items" and not avatar and not result.get("controllerPath") and not result.get("clipPaths"):
+    if tool not in {"vrcforge_scan_avatar_items", _MATERIAL_SCAN_ALIAS} and not avatar \
+            and not result.get("controllerPath") and not result.get("clipPaths"):
         raise ValueError("An exact scan target is required for comparison.")
     return result
 
@@ -193,6 +195,11 @@ class ScanRescanVerifier:
             if owned is None:
                 return None
             row, raw, generation, pending = owned
+            if raw["step"].get("tool") == _MATERIAL_SCAN_ALIAS:
+                # A retained full material index is not comparable to a fresh
+                # bounded source page. Recheck its exact Core proof on every
+                # read, and never rescan/replace this result reference.
+                return fallback(session, turn, project, ref, require_proof=True)
             if not eligible(raw["step"], raw["arguments"]):
                 payload = raw["step"].get("result")
                 if row["turn"] != turn and (raw["step"].get("tool") not in WHITELIST

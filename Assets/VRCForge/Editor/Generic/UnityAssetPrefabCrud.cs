@@ -705,29 +705,31 @@ namespace VRCForge.Editor
             var continuationCount = 0;
             var continuationReserved = false;
             var mutationSceneHandle = -1;
+            TransformPreservationSnapshot transformSnapshot = null;
+            TransformPreservationSnapshot.Report transformPreservation = null;
             try
             {
                 var path = AssetPrefabCore.ResolveAssetPath(p.assetPath, p.guid);
                 var asset = AssetDatabase.LoadMainAssetAtPath(path);
                 if (asset == null)
                 {
-                    return VRCForgeToolResult.Failed($"No asset found at '{path}'.");
+                    return PreflightFailure($"No asset found at '{path}'.");
                 }
                 if (!(asset is GameObject) || PrefabUtility.GetPrefabAssetType(asset) == PrefabAssetType.NotAPrefab)
                 {
-                    return VRCForgeToolResult.Failed($"Asset at '{path}' is not a prefab (type '{asset.GetType().Name}').");
+                    return PreflightFailure($"Asset at '{path}' is not a prefab (type '{asset.GetType().Name}').");
                 }
                 var prefabGuid = AssetDatabase.AssetPathToGUID(path);
                 if (!string.IsNullOrWhiteSpace(p.expectedPrefabGuid)
                     && !string.Equals(prefabGuid, p.expectedPrefabGuid.Trim(), StringComparison.OrdinalIgnoreCase))
                 {
-                    return VRCForgeToolResult.Failed("Prefab GUID drifted from the approved expectation.");
+                    return PreflightFailure("Prefab GUID drifted from the approved expectation.");
                 }
                 var dependencyHash = AssetDatabase.GetAssetDependencyHash(path).ToString();
                 if (!string.IsNullOrWhiteSpace(p.expectedAssetDependencyHash)
                     && !string.Equals(dependencyHash, p.expectedAssetDependencyHash.Trim(), StringComparison.Ordinal))
                 {
-                    return VRCForgeToolResult.Failed("Prefab dependency hash drifted from the approved expectation.");
+                    return PreflightFailure("Prefab dependency hash drifted from the approved expectation.");
                 }
 
                 GameObject parent = null;
@@ -742,18 +744,18 @@ namespace VRCForge.Editor
                 var scenePath = scene.path;
                 if (!string.IsNullOrWhiteSpace(p.expectedScenePath) && !string.Equals(scenePath, p.expectedScenePath.Trim(), StringComparison.Ordinal))
                 {
-                    return VRCForgeToolResult.Failed("Target scene drifted from the approved expectation.");
+                    return PreflightFailure("Target scene drifted from the approved expectation.");
                 }
                 var parentGlobalObjectId = parent != null ? GlobalObjectId.GetGlobalObjectIdSlow(parent).ToString() : "";
                 if (!string.IsNullOrWhiteSpace(p.expectedParentGlobalObjectId)
                     && !string.Equals(parentGlobalObjectId, p.expectedParentGlobalObjectId.Trim(), StringComparison.Ordinal))
                 {
-                    return VRCForgeToolResult.Failed("Prefab parent GlobalObjectId drifted from the approved expectation.");
+                    return PreflightFailure("Prefab parent GlobalObjectId drifted from the approved expectation.");
                 }
                 var instanceName = string.IsNullOrWhiteSpace(p.name) ? asset.name : p.name.Trim();
                 if (instanceName.Contains("/"))
                 {
-                    return VRCForgeToolResult.Failed("Prefab instance name cannot contain '/'.");
+                    return PreflightFailure("Prefab instance name cannot contain '/'.");
                 }
                 var expectedResultPath = string.IsNullOrEmpty(resolvedParentPath)
                     ? instanceName
@@ -761,11 +763,11 @@ namespace VRCForge.Editor
                 if (!string.IsNullOrWhiteSpace(p.expectedResultPath)
                     && !string.Equals(expectedResultPath, ComponentCrudCore.NormalizePath(p.expectedResultPath), StringComparison.Ordinal))
                 {
-                    return VRCForgeToolResult.Failed("Prefab result path differs from the approved expectation.");
+                    return PreflightFailure("Prefab result path differs from the approved expectation.");
                 }
                 if (AssetPrefabCore.CountHierarchyPath(expectedResultPath, scene.handle) != 0)
                 {
-                    return VRCForgeToolResult.Failed($"Prefab result path '{expectedResultPath}' already exists; refusing to create an ambiguous duplicate.");
+                    return PreflightFailure($"Prefab result path '{expectedResultPath}' already exists; refusing to create an ambiguous duplicate.");
                 }
                 var before = new
                 {
@@ -812,6 +814,8 @@ namespace VRCForge.Editor
 
                 // Require a clean saved scene and isolate this operation from prior Undo work.
                 beforeScene = SceneObjectCopyCore.ResolveSavedScene(scenePath, "prefab target scene");
+                transformSnapshot = TransformPreservationSnapshot.Capture(
+                    TransformPreservationSnapshot.FindHumanoidOwner(parent != null ? parent.transform : null));
                 Undo.IncrementCurrentGroup();
                 undoGroup = Undo.GetCurrentGroup();
                 Undo.SetCurrentGroupName($"Instantiate {instanceName}");
@@ -837,6 +841,12 @@ namespace VRCForge.Editor
                     instance.name = instanceName;
                 }
                 EditorUtility.SetDirty(instance);
+                transformPreservation = transformSnapshot.Restore(
+                    $"Preserve avatar transforms during instantiate {instanceName}");
+                if (transformPreservation.restoredCount > 0)
+                {
+                    EditorSceneManager.MarkSceneDirty(scene);
+                }
 
                 var goPath = ComponentCrudCore.GetHierarchyPath(instance.transform);
                 mutatedPath = goPath;
@@ -919,6 +929,15 @@ namespace VRCForge.Editor
                     before,
                     after,
                     readback = new { persisted = true, data = after },
+                    transformPreservation = new
+                    {
+                        ownerPath = transformPreservation.ownerPath,
+                        snapshotCount = transformPreservation.snapshotCount,
+                        driftedCount = transformPreservation.driftedCount,
+                        restoredCount = transformPreservation.restoredCount,
+                        skippedCount = transformPreservation.skippedCount,
+                        preserved = transformPreservation.preserved,
+                    },
                     sceneSaved = true,
                     persistedReadback = true,
                     readbackVerified = true,
@@ -942,12 +961,38 @@ namespace VRCForge.Editor
                 {
                     VRCForgeApprovedObjectReceipt.CancelReservation(continuationNonce);
                 }
+                if (mutationStarted && transformPreservation == null && transformSnapshot != null)
+                {
+                    try
+                    {
+                        transformPreservation = transformSnapshot.Restore(
+                            "Preserve avatar transforms after failed prefab instantiate");
+                    }
+                    catch
+                    {
+                        // Scoped Undo cleanup below remains the authoritative failure path.
+                    }
+                }
                 if (mutationStarted)
                 {
                     return CommittedFailure($"Instantiate prefab failed after mutation: {ex.Message}", mutatedPath, mutatedGlobalObjectId, beforeScene, undoGroup, mutationSceneHandle, string.IsNullOrEmpty(mutatedPath) ? "" : mutatedPath);
                 }
                 return VRCForgeToolResult.Failed($"Instantiate prefab failed: {ex.Message}");
             }
+        }
+
+        private static VRCForgeToolResult PreflightFailure(string message)
+        {
+            var result = VRCForgeToolResult.RejectedBeforeMutation(
+                "instantiate_prefab_preflight_rejected",
+                message,
+                "unity_core_tool",
+                "preflight",
+                retryable: true);
+            var facts = result.Payload as JObject;
+            facts["recoveryRequired"] = false;
+            facts["safeToRetry"] = true;
+            return result;
         }
 
         private static VRCForgeToolResult CommittedFailure(string message, string gameObjectPath, string globalObjectId)

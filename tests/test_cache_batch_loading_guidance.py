@@ -4,7 +4,18 @@ from runtime_planner_service import RuntimePlannerService
 from tests.test_native_tool_ordering import Catalog, build
 
 
-def test_instructions_promote_early_batch_loading_and_turn_scoped_result_refs():
+def assert_result_reference_scope_guidance(instructions):
+    assert "resultRef values are valid only within the turn that produced the result" not in instructions
+    assert "Owned scan resultRefs with scope=validated_scope may be read across turns" in instructions
+    assert "same session and project" in instructions
+    assert "host verifies Core scope or the complete observable business result on read" in instructions
+    assert "same target and scan parameters, read the existing reference before rescanning" in instructions
+    assert "If replacementRef is returned, page it instead of scanning again" in instructions
+    assert "current_turn references, including owner_model recovery references, expire when their turn ends" in instructions
+    assert "Failure to verify is not validity" in instructions
+
+
+def test_instructions_promote_early_batch_loading_and_scoped_result_refs():
     planner = RuntimePlannerService(catalog=Catalog(), desktop=None)
     request, _ = build(planner, "execution", False, {}, ["core"])
     instructions = request["instructions"]
@@ -14,8 +25,7 @@ def test_instructions_promote_early_batch_loading_and_turn_scoped_result_refs():
     assert "Load additional tools on demand" in instructions
     assert "loading and unloading never change the native tools array" in instructions
     assert "Use available results before repeating work" in instructions
-    assert "resultRef values are valid only within the turn that produced the result" in instructions
-    assert "in later turns rely on the conversation history" in instructions
+    assert_result_reference_scope_guidance(instructions)
 
 
 def test_native_batch_guidance_keeps_core_and_control_prefix_stable_across_loads():

@@ -13,11 +13,14 @@ export type ChatGptOAuthStatus = {
   error: string;
   activeAccountId?: string | null;
   activeModel?: string | null;
+  activeThinkingLevel?: string | null;
 };
 
 export type ChatGptOAuthModel = {
   id: string;
   name: string;
+  supportedReasoningLevels?: Array<{ effort: string; description?: string }>;
+  defaultReasoningLevel?: string | null;
 };
 
 export type ChatGptOAuthModels = {
@@ -123,17 +126,18 @@ export async function activateChatGptOAuthModel(
   endpoint: string,
   accountId: string,
   model: string,
+  thinkingLevel = "",
 ): Promise<void> {
   if (hasTauriInternals()) {
     await invokeTauriWithAbort<void>("chatgpt_oauth_activate", {
-      request: { accountId, model, timeoutMs: 30000 },
+      request: { accountId, model, thinkingLevel, timeoutMs: 30000 },
     });
     return;
   }
   await requestJson<unknown>(`${endpoint}/api/chatgpt/activate`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ account_id: accountId, model }),
+    body: JSON.stringify({ account_id: accountId, model, thinking_level: thinkingLevel }),
     timeoutMs: 30000,
   });
 }

@@ -141,6 +141,7 @@ for _runtime_name, _owner in {
     "vrcforge_build_and_upload_avatar": "diagnostics_build/build_runtime",
     "vrcforge_build_test_avatar": "diagnostics_build/build_runtime",
     "vrcforge_scene_transition": "avatar_structure/hierarchy_components",
+    "vrcforge_get_property": "avatar_structure/hierarchy_components",
     "vrcforge_set_play_mode": "diagnostics_build/build_runtime",
     "vrcforge_avatar_encryption_liltoon_apply_request": "behavior/interaction_generated_systems",
     "vrcforge_avatar_encryption_poiyomi_apply_request": "behavior/interaction_generated_systems",
@@ -148,6 +149,9 @@ for _runtime_name, _owner in {
     "vrcforge_scan_avatar_performance": "diagnostics_build/validation_performance",
     "vrcforge_scan_thry_avatar_performance": "diagnostics_build/validation_performance",
     "vrcforge_apply_clothing_fx": "behavior/parameters_menus_layers",
+    "vrcforge_inspect_outfit_package": "project_environment/assets_packages",
+    "vrcforge_plan_outfit_import": "project_environment/assets_packages",
+    "vrcforge_import_outfit_package": "project_environment/assets_packages",
     "vrcforge_apply_tuning_preset": "behavior/face_eye_lipsync",
 }.items():
     _EXACT_TOOL_OWNERS[_runtime_name] = _owner

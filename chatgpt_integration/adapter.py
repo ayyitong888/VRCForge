@@ -45,6 +45,7 @@ class ChatGPTNativeResponse:
     finish_reason: str
     usage: dict[str, Any] = field(default_factory=dict)
     reasoning_summary: list[Any] = field(default_factory=list)
+    model: str = ""
 
 
 class ChatGPTResponsesAdapter:
@@ -58,6 +59,7 @@ class ChatGPTResponsesAdapter:
         client_factory: Callable[..., Any] | None = None,
         access_token_provider: Callable[[str], str] | None = None,
         session_id: str = "",
+        native_turn_state: dict[str, str] | None = None,
     ) -> None:
         self._account_id = validate_provider_api_key(api_key)
         if not self._account_id:
@@ -67,6 +69,13 @@ class ChatGPTResponsesAdapter:
         self._client_factory = client_factory
         self._access_token_provider = access_token_provider
         self._session_headers: dict[str, str] = {}
+        self._turn_state = native_turn_state
+        self._turn_binding = hashlib.sha256(json.dumps(
+            [self._account_id, session_id], ensure_ascii=True, separators=(",", ":"),
+        ).encode("utf-8")).hexdigest()
+        if self._turn_state is not None and self._turn_state.get("binding") != self._turn_binding:
+            self._turn_state.clear()
+            self._turn_state["binding"] = self._turn_binding
         if session_id:
             # Stable across turns/token refresh, isolated by selected account.
             identity = hashlib.sha256(json.dumps(
@@ -130,6 +139,8 @@ class ChatGPTResponsesAdapter:
             "stream": True,
             "include": ["reasoning.encrypted_content"],
         }
+        if request.reasoning_effort:
+            payload["reasoning"] = {"effort": request.reasoning_effort}
         if request.mode == "planner":
             payload["tools"] = _namespace_tools([_TOOL_SCHEMA])
         elif request.structured_output:
@@ -157,6 +168,7 @@ class ChatGPTResponsesAdapter:
         stream_callback: Callable[[str], None] | None = None,
         cancel_event: Any | None = None,
         stream_activity_callback: Callable[[dict[str, Any]], None] | None = None,
+        reasoning_effort: str = "",
     ) -> ChatGPTNativeResponse:
         payload: dict[str, Any] = {
             "model": self._require_model(model),
@@ -165,6 +177,8 @@ class ChatGPTResponsesAdapter:
             "stream": True,
             "include": ["reasoning.encrypted_content"],
         }
+        if reasoning_effort:
+            payload["reasoning"] = {"effort": reasoning_effort}
         grouped_tools = _namespace_tools(tools)
         if grouped_tools:
             payload["tools"] = grouped_tools
@@ -234,8 +248,13 @@ class ChatGPTResponsesAdapter:
         if cancel_event is not None and cancel_event.is_set():
             raise RuntimeError("ChatGPT Responses request cancelled.")
         client = self._client()
-        if self._session_headers:
-            payload = {**payload, "extra_headers": dict(self._session_headers)}
+        headers = dict(self._session_headers)
+        if self._turn_state is not None and self._turn_state.get("binding") == self._turn_binding:
+            token = self._turn_state.get("token")
+            if token:
+                headers["x-codex-turn-state"] = token
+        if headers:
+            payload = {**payload, "extra_headers": headers}
         return _stream_native_response(
             client,
             payload,
@@ -244,7 +263,18 @@ class ChatGPTResponsesAdapter:
             activity_callback,
             error_factory=lambda message, response: ChatGPTResponseError(message, response),
             provider_label="ChatGPT Responses",
+            request_observer=activity_callback,
+            response_headers_callback=self._remember_turn_state if self._turn_state is not None else None,
         )
+
+    def _remember_turn_state(self, headers: Mapping[str, str]) -> None:
+        # The first server value is immutable within a turn. A stale callback
+        # cannot repopulate state after its account/session owner has changed.
+        token = headers.get("x-codex-turn-state")
+        if (self._turn_state is not None
+                and self._turn_state.get("binding") == self._turn_binding
+                and isinstance(token, str) and token.strip()):
+            self._turn_state.setdefault("token", token)
 
 
 def build_responses_input(messages: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
@@ -318,4 +348,5 @@ def _parse_native_response(
         finish_reason=parsed.finish_reason,
         usage=parsed.usage,
         reasoning_summary=parsed.reasoning_summary,
+        model=parsed.model,
     )

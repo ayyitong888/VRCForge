@@ -910,7 +910,16 @@ class PackageInstallWorkflowService:
         approval_arguments = {
             "projectPath": plan.get("projectPath"),
             "packageId": plan.get("packageId"),
-            "repository": plan.get("repository") or "",
+            # The plan may expose a repository discovered from optimizer
+            # metadata, but that is diagnostic/source context, not a request
+            # to mutate the sealed package-manager configuration. Preserve
+            # only a repository explicitly supplied by the caller so the
+            # existing sealed-lane rejection remains authoritative.
+            "repository": str(
+                normalized.get("repository")
+                or normalized.get("vpmRepository")
+                or ""
+            ).strip(),
             "preferredManager": str(
                 normalized.get("preferredManager")
                 or normalized.get("preferred_manager")

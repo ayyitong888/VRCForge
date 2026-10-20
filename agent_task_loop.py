@@ -15,8 +15,13 @@ import hashlib
 import json
 from typing import Any
 
-from agent_tool_result_contract import completion_gate_plan, normalize_agent_tool_result
+from agent_tool_result_contract import completion_gate_plan, normalize_agent_tool_result, runtime_observation_receipt
 from agent_budget_policy import AgentBudgetPolicy, freeze_agent_budget_policy
+from checkpoint_user_policy import (
+    checkpoint_skip_authority_for_context,
+    checkpoint_skip_authority_from_policy,
+)
+from request_usage_reconciliation import usage_snapshot_sha256
 
 
 TASK_LOOP_SCHEMA = "vrcforge.agent_task_loop.v2"
@@ -74,6 +79,13 @@ def _bounded_text(value: Any, limit: int | None) -> str:
     return str(value or "").strip()[:limit]
 
 
+def _bounded_snapshot_digest(value: Any) -> str:
+    text = _bounded_text(value, 64).lower()
+    if len(text) != 64 or any(character not in "0123456789abcdef" for character in text):
+        return ""
+    return text
+
+
 def _approval_history(value: Any) -> list[dict[str, str]]:
     """Preserve the accepted textual conversation for approval resumption.
 
@@ -102,7 +114,7 @@ def _bounded_provider_usage(value: Any) -> dict[str, Any]:
     result: dict[str, Any] = {}
     if value.get("exact") is True:
         result["exact"] = True
-    for key in ("inputTokens", "outputTokens", "totalTokens", "cacheReadTokens"):
+    for key in ("inputTokens", "outputTokens", "totalTokens", "cacheReadTokens", "cacheWriteTokens"):
         item = value.get(key)
         if isinstance(item, int) and not isinstance(item, bool) and item >= 0:
             result[key] = item
@@ -119,6 +131,15 @@ def _bounded_provider_usage(value: Any) -> dict[str, Any]:
             and result.get("exact") is True
             and "inputTokens" in result and "cacheReadTokens" in result
         )
+    if "cacheWriteUsageComplete" in value or "cacheWriteUsageRequestCount" in value:
+        count = value.get("cacheWriteUsageRequestCount")
+        result["cacheWriteUsageRequestCount"] = count if type(count) is int and count >= 0 else 0
+        result["cacheWriteUsageComplete"] = (
+            value.get("cacheWriteUsageComplete") is True
+            and result["cacheWriteUsageRequestCount"] > 0
+            and result.get("exact") is True
+            and "inputTokens" in result and "cacheWriteTokens" in result
+        )
     return result
 
 
@@ -133,11 +154,13 @@ def merge_provider_usage(
         return latest
     if not latest:
         return {
-            **{key: previous[key] for key in ("inputTokens", "outputTokens", "totalTokens", "cacheReadTokens") if key in previous},
+            **{key: previous[key] for key in ("inputTokens", "outputTokens", "totalTokens", "cacheReadTokens", "cacheWriteTokens") if key in previous},
             "exact": False,
             "unavailableReason": "provider_usage_missing",
             **({"cacheUsageComplete": False, "cacheUsageRequestCount": previous.get("cacheUsageRequestCount", 0)}
                if "cacheUsageComplete" in previous else {}),
+            **({"cacheWriteUsageComplete": False, "cacheWriteUsageRequestCount": previous.get("cacheWriteUsageRequestCount", 0)}
+               if "cacheWriteUsageComplete" in previous else {}),
         }
     primary_keys = ("inputTokens", "outputTokens", "totalTokens")
     complete = all(key in previous and key in latest for key in primary_keys)
@@ -148,7 +171,7 @@ def merge_provider_usage(
             and latest.get("exact") is True
         ),
     }
-    for key in ("inputTokens", "outputTokens", "totalTokens", "cacheReadTokens"):
+    for key in ("inputTokens", "outputTokens", "totalTokens", "cacheReadTokens", "cacheWriteTokens"):
         if key in previous and key in latest:
             merged[key] = previous[key] + latest[key]
         elif key in previous and key != "cacheReadTokens":
@@ -160,6 +183,9 @@ def merge_provider_usage(
     if "cacheUsageComplete" in previous or "cacheUsageComplete" in latest:
         merged["cacheUsageRequestCount"] = previous.get("cacheUsageRequestCount", 0) + latest.get("cacheUsageRequestCount", 0)
         merged["cacheUsageComplete"] = previous.get("cacheUsageComplete") is True and latest.get("cacheUsageComplete") is True
+    if "cacheWriteUsageComplete" in previous or "cacheWriteUsageComplete" in latest:
+        merged["cacheWriteUsageRequestCount"] = previous.get("cacheWriteUsageRequestCount", 0) + latest.get("cacheWriteUsageRequestCount", 0)
+        merged["cacheWriteUsageComplete"] = previous.get("cacheWriteUsageComplete") is True and latest.get("cacheWriteUsageComplete") is True
     return merged
 
 
@@ -174,9 +200,38 @@ def _canonical_json(value: Any) -> str:
 
 
 def canonical_action_id(kind: str, tool: str, arguments: Any) -> str:
-    payload = [_bounded_text(kind, 32), _bounded_text(tool, 160), arguments]
+    payload = [_bounded_text(kind, 32), _bounded_text(tool, 160), _action_identity_arguments(arguments)]
     digest = hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest()
     return f"action_{digest[:24]}"
+
+
+def _action_identity_arguments(value: Any, _active: set[int] | None = None) -> Any:
+    """Copy public action arguments without runtime task-seed backreferences."""
+    if _active is None:
+        _active = set()
+    if isinstance(value, Mapping):
+        identity = id(value)
+        if identity in _active:
+            raise ValueError("Action arguments contain a circular reference.")
+        _active.add(identity)
+        try:
+            return {
+                str(key): _action_identity_arguments(item, _active)
+                for key, item in value.items()
+                if str(key) != "_taskSeed"
+            }
+        finally:
+            _active.remove(identity)
+    if isinstance(value, (list, tuple)):
+        identity = id(value)
+        if identity in _active:
+            raise ValueError("Action arguments contain a circular reference.")
+        _active.add(identity)
+        try:
+            return [_action_identity_arguments(item, _active) for item in value]
+        finally:
+            _active.remove(identity)
+    return value
 
 
 def canonical_task_id(session_id: str, client_turn_id: str, objective: str) -> str:
@@ -399,6 +454,84 @@ def _bounded_outcome(value: Mapping[str, Any]) -> dict[str, Any]:
     return result
 
 
+def _failure_summary(value: Any, *, depth: int = 0) -> str:
+    """Find the additive plain-language failure summary in a bounded result envelope."""
+    if depth > 5 or not isinstance(value, Mapping):
+        return ""
+    summary = _bounded_text(value.get("failureSummary"), 600)
+    if summary:
+        return summary
+    for key in ("result", "execution", "writeFailure", "recovery", "diagnostics"):
+        found = _failure_summary(value.get(key), depth=depth + 1)
+        if found:
+            return found
+    return ""
+
+
+def _failure_envelope(value: Any, *, depth: int = 0) -> dict[str, Any]:
+    """Collect only bounded machine-failure fields from nested result envelopes."""
+    if depth > 5 or not isinstance(value, Mapping):
+        return {}
+    fields: dict[str, Any] = {}
+    for key in (
+        "status", "error", "code", "failureLayer", "mutationStarted", "saved", "safeToRetry", "committed",
+        "commitState", "checkpointRecoveryRequired", "temporaryCleanupRequired",
+        "failureSummary", "currentStateDigest", "turnControl", "diagnostics",
+    ):
+        if key in value:
+            fields[key] = value[key]
+    for key in ("result", "execution", "writeFailure", "recovery", "diagnostics"):
+        nested = _failure_envelope(value.get(key), depth=depth + 1)
+        for nested_key, nested_value in nested.items():
+            fields.setdefault(nested_key, nested_value)
+    return fields
+
+
+def safe_recoverable_write_failure(*values: Any) -> bool:
+    """Only admit a failed write back to the planner with explicit no-write facts."""
+    candidates: list[Mapping[str, Any]] = []
+
+    def collect(value: Any, depth: int = 0) -> None:
+        if depth > 5 or not isinstance(value, Mapping):
+            return
+        candidates.append(value)
+        for key in ("result", "outcome", "writeFailure", "error", "diagnostics", "sourceError"):
+            collect(value.get(key), depth + 1)
+
+    for value in values:
+        collect(value)
+    if not candidates:
+        return False
+    if any(candidate.get("mutationStarted") is True or candidate.get("saved") is True
+           or candidate.get("safeToRetry") is False
+           or candidate.get("committed") is True
+           or candidate.get("checkpointRecoveryRequired") is True
+           or (candidate.get("commitState") is not None
+               and str(candidate.get("commitState") or "").strip().casefold() != "not_started")
+           for candidate in candidates):
+        return False
+    mutation_facts = {candidate.get("mutationStarted") for candidate in candidates if isinstance(candidate.get("mutationStarted"), bool)}
+    retry_facts = {candidate.get("safeToRetry") for candidate in candidates if isinstance(candidate.get("safeToRetry"), bool)}
+    committed_facts = {candidate.get("committed") for candidate in candidates if isinstance(candidate.get("committed"), bool)}
+    commit_states = {str(candidate.get("commitState") or "").strip().casefold() for candidate in candidates if candidate.get("commitState") is not None}
+    if (mutation_facts != {False} or retry_facts != {True} or committed_facts != {False}
+            or commit_states != {"not_started"}):
+        return False
+    for candidate in candidates:
+        phase = str(candidate.get("failurePhase") or "").strip().casefold()
+        code = str(candidate.get("errorCode") or candidate.get("code") or "").strip().casefold()
+        if "restore" in phase or "rollback" in phase or "restore" in code:
+            return False
+    return any(
+        candidate.get("mutationStarted") is False
+        and candidate.get("committed") is False
+        and str(candidate.get("commitState") or "").strip().casefold() == "not_started"
+        and candidate.get("safeToRetry") is True
+        and candidate.get("saved") is not True
+        for candidate in candidates
+    )
+
+
 def _bounded_action(value: Mapping[str, Any]) -> dict[str, Any] | None:
     action_id = _bounded_text(value.get("actionId"), 80)
     tool = _bounded_text(value.get("tool"), 160)
@@ -430,6 +563,10 @@ def _bounded_action(value: Mapping[str, Any]) -> dict[str, Any] | None:
         result["preProvider"] = True
     if value.get("_nativeReadObservation") is True:
         result["_nativeReadObservation"] = True
+    if isinstance(value.get("_runtimeObservation"), Mapping):
+        result["_runtimeObservation"] = dict(value["_runtimeObservation"])
+        if value.get("runtimeStatus") == "polling":
+            result["runtimeStatus"] = "polling"
     transaction = _bounded_write_transaction(value.get("writeTransaction"))
     if transaction is not None:
         result["writeTransaction"] = transaction
@@ -622,7 +759,9 @@ def apply_declared_verification(
         return {
             "status": "needs_user_action",
             "summary": (
-                "The Unity write returned, but its required persisted readback did not pass: "
+                ("The visual audit did not pass its required checks: "
+                 if profile == "multi_angle_visual" else
+                 "The Unity write returned, but its required persisted readback did not pass: ")
                 + ", ".join(failed)
                 + "."
             ),
@@ -647,9 +786,9 @@ def approval_task_context(
     requested_kind = _bounded_text(seed.get("requestedKind"), 32) or "write"
     requested_tool = seeded_tool or tool
     requested_arguments = (
-        dict(seed.get("requestedArguments"))
+        _action_identity_arguments(seed.get("requestedArguments"))
         if seeded_tool and isinstance(seed.get("requestedArguments"), Mapping)
-        else dict(arguments)
+        else _action_identity_arguments(arguments)
     )
     computed_action_id = canonical_action_id(
         requested_kind,
@@ -683,6 +822,7 @@ def approval_task_context(
         "objective": objective,
         "sessionId": _bounded_text(seed.get("sessionId"), 180),
         "turnId": _bounded_text(seed.get("turnId"), 180),
+        "usageParentTurnId": _bounded_text(seed.get("usageParentTurnId"), 180),
         "clientTurnId": _bounded_text(seed.get("clientTurnId"), 180),
         "projectRoot": _bounded_text(seed.get("projectRoot"), 600),
         "agentName": _bounded_text(seed.get("agentName"), 160),
@@ -700,6 +840,9 @@ def approval_task_context(
             min(int(seed.get("providerRequestCount") or 0), 100),
         ),
         "providerUsage": _bounded_provider_usage(seed.get("providerUsage")),
+        "providerUsageSnapshotSha256": _bounded_snapshot_digest(
+            seed.get("providerUsageSnapshotSha256")
+        ),
         "modelTurnsUsed": max(0, min(int(seed.get("modelTurnsUsed") or 0), 4096)),
         "budgetPolicy": {
             "maxModelTurns": freeze_agent_budget_policy(seed.get("budgetPolicy")).max_model_turns,
@@ -749,6 +892,23 @@ def approval_task_context(
             _TOOL_DEFAULT_VERIFICATION_PROFILE.get(tool, "canonical_tool_result"),
         ),
     }
+    user_checkpoint_policy = seed.get("checkpointUserPolicy")
+    if isinstance(user_checkpoint_policy, Mapping):
+        # This host-attested record is created only by the runtime after it
+        # matches a model quote to the current app user message.
+        context["checkpointUserPolicy"] = copy.deepcopy(dict(user_checkpoint_policy))
+    if "checkpointSkipAuthority" in seed:
+        # A present but invalid/revoked capability must not be recreated from
+        # an older per-write record carried beside it.
+        checkpoint_skip_authority = checkpoint_skip_authority_for_context(
+            seed.get("checkpointSkipAuthority"), context,
+        )
+    else:
+        checkpoint_skip_authority = checkpoint_skip_authority_from_policy(
+            user_checkpoint_policy, context,
+        )
+    if checkpoint_skip_authority is not None:
+        context["checkpointSkipAuthority"] = checkpoint_skip_authority
     native_conversation = seed.get("_nativeConversation")
     if isinstance(native_conversation, Mapping):
         # Private continuation state is frozen outside the normal task-loop
@@ -778,6 +938,8 @@ def approval_completion(
     status = _status(verified.get("status"))
     if status == "ok":
         task_status = "completed"
+    elif status == "pending" and runtime_observation_receipt(raw_result):
+        task_status = "running"
     elif status == "failed":
         task_status = "failed"
     else:
@@ -897,15 +1059,27 @@ def prepare_approval_task_continuation(
             "summary": summary,
             "reply": summary,
             "planner": "runtime",
+            "shellNeeded": False,
             "continueLoop": False,
             "nextStep": "done",
         }
+    elif (
+        task_status == "failed"
+        and not rejected
+        and context.get("continueAfterApproval") is not False
+        and _status(context.get("tool")) != "vrcforge_restore_checkpoint"
+        and safe_recoverable_write_failure(execution, outcome)
+    ):
+        # Preserve the failed write facts and let the owner planner decide
+        # whether to diagnose or choose another action. This does not retry it.
+        terminal_plan = None
     elif task_status != "completed":
         summary = _bounded_text(outcome.get("summary"), 600) or "The approved task needs user action."
         terminal_plan = {
             "summary": summary,
             "reply": summary,
             "planner": "runtime",
+            "shellNeeded": False,
             "continueLoop": False,
             "nextStep": "tool_failed" if task_status == "failed" else "needs_user_action",
             "completionGate": {
@@ -934,8 +1108,7 @@ def prepare_approval_task_continuation(
         "terminalPlan": terminal_plan,
     }
     if task_status == "failed" and not revision_requested:
-        execution_result = execution.get("result")
-        execution_result = execution_result if isinstance(execution_result, Mapping) else {}
+        execution_result = _failure_envelope(execution)
         write_failure = execution.get("writeFailure")
         write_failure = write_failure if isinstance(write_failure, Mapping) else {}
         checkpoint = execution.get("checkpoint")
@@ -947,10 +1120,16 @@ def prepare_approval_task_continuation(
             "code",
             "failureLayer",
             "mutationStarted",
+            "saved",
+            "safeToRetry",
             "committed",
             "commitState",
             "checkpointRecoveryRequired",
             "temporaryCleanupRequired",
+            "failureSummary",
+            "currentStateDigest",
+            "turnControl",
+            "diagnostics",
         ):
             value = execution_result.get(key)
             if isinstance(value, str):
@@ -968,6 +1147,24 @@ def prepare_approval_task_continuation(
             "checkpointId": _bounded_text(checkpoint.get("id"), 180),
             "outcome": _bounded_outcome(outcome),
         }
+        summary = _failure_summary(execution)
+        if summary and terminal_plan is not None:
+            terminal_plan["summary"] = summary
+            terminal_plan["reply"] = summary
+            terminal_plan["failureSummary"] = summary
+        if terminal_plan is not None and execution_result:
+            terminal_plan["restoreFailure"] = dict(execution_result)
+        if (
+            _status(context.get("tool")) == "vrcforge_restore_checkpoint"
+            and terminal_plan is not None
+        ):
+            terminal_plan["restoreFailureTurnStop"] = True
+            terminal_plan["completionGate"] = {
+                **dict(terminal_plan.get("completionGate") or {}),
+                "status": "failed",
+                "reason": "restore_failure_turn_stop",
+                "checkpointRecoveryRequired": True,
+            }
     if revision_requested:
         task_continuation["plannerObservation"] = {
             "tool": _bounded_text(context.get("tool"), 160),
@@ -1371,16 +1568,42 @@ class AgentTaskLoop:
         continue_after_approval: bool = True,
         provider_request_count: int | None = None,
         provider_usage: Mapping[str, Any] | None = None,
+        usage_parent_turn_id: str | None = None,
+        # Kept as a compatibility-shaped argument for callers that adopted
+        # the pre-freeze candidate; it must not alter the task's turnId.
+        turn_id: str | None = None,
+        provider_usage_snapshot_sha256: str | None = None,
     ) -> dict[str, Any]:
         effective_kind = _bounded_text(requested_kind, 32) or "write"
         effective_tool = _bounded_text(requested_tool, 160)
-        effective_arguments = dict(requested_arguments or {})
+        effective_arguments = _action_identity_arguments(requested_arguments or {})
+        effective_provider_request_count = max(
+            0,
+            min(
+                int(
+                    self.provider_request_count
+                    if provider_request_count is None
+                    else provider_request_count
+                ),
+                100,
+            ),
+        )
+        effective_provider_usage = _bounded_provider_usage(
+            self.provider_usage if provider_usage is None else provider_usage
+        )
+        effective_snapshot = _bounded_snapshot_digest(provider_usage_snapshot_sha256)
+        if not effective_snapshot:
+            effective_snapshot = usage_snapshot_sha256(
+                effective_provider_request_count,
+                effective_provider_usage,
+            )
         return {
             "schema": TASK_LOOP_SCHEMA,
             "taskId": self.task_id,
             "objective": _bounded_text(self.objective, None),
             "sessionId": _bounded_text(self.session_id, 180),
             "turnId": _bounded_text(self.turn_id, 180),
+            "usageParentTurnId": _bounded_text(usage_parent_turn_id, 180),
             "clientTurnId": _bounded_text(self.client_turn_id, 180),
             "projectRoot": _bounded_text(self.project_root, 600),
             "agentName": _bounded_text(self.agent_name, 160),
@@ -1391,20 +1614,9 @@ class AgentTaskLoop:
             "toolCallsUsed": max(
                 0, int(self.tool_calls_used if tool_calls_used is None else tool_calls_used)
             ),
-            "providerRequestCount": max(
-                0,
-                min(
-                    int(
-                        self.provider_request_count
-                        if provider_request_count is None
-                        else provider_request_count
-                    ),
-                    100,
-                ),
-            ),
-            "providerUsage": _bounded_provider_usage(
-                self.provider_usage if provider_usage is None else provider_usage
-            ),
+            "providerRequestCount": effective_provider_request_count,
+            "providerUsage": effective_provider_usage,
+            "providerUsageSnapshotSha256": effective_snapshot,
             "modelTurnsUsed": max(0, min(int(self.model_turns_used or 0), 4096)),
             "budgetPolicy": {
                 "maxModelTurns": self.budget_policy.max_model_turns,
@@ -1537,6 +1749,9 @@ class AgentTaskLoop:
         )
         outcome_status = _status(effective.get("status"))
         running_state = _running_state(raw_result)
+        observation = runtime_observation_receipt(raw_result)
+        if outcome_status == "pending" and observation:
+            running_state = "polling"
         if outcome_status == "failed":
             lifecycle = "failed"
         elif outcome_status == "needs_user_action":
@@ -1571,6 +1786,20 @@ class AgentTaskLoop:
             record["_nativeReadObservation"] = True
         if running_state:
             record["runtimeStatus"] = running_state
+        if observation and tool in {"vrcforge_start_runtime_observation", "vrcforge_get_runtime_observation"}:
+            identity = {key: observation[key] for key in ("jobId", "avatarPath", "coreIdentity")}
+            record["_runtimeObservation"] = identity
+            verified_completion = (outcome_status == "ok" and observation.get("status") == "completed"
+                and observation.get("verified") is True and isinstance(observation.get("readback"), Mapping))
+            failed_completion = outcome_status == "failed" and observation.get("status") in {"partial", "failed"}
+            if tool == "vrcforge_get_runtime_observation" and (verified_completion or failed_completion):
+                for prior in self._actions.values():
+                    if (prior.get("tool") == "vrcforge_start_runtime_observation"
+                            and prior.get("status") == "running"
+                            and prior.get("_runtimeObservation") == identity):
+                        terminal_status = "completed" if verified_completion else "failed"
+                        prior.update(status=terminal_status, runtimeStatus=terminal_status, outcome=dict(effective),
+                            completionReadActionId=action_id)
         self._actions[action_id] = record
         corrected_ids = [accepted_correction_id] if accepted_correction_id else []
         if tool == "vrcforge_load_internal_tool_block" and lifecycle == "completed" and outcome_status == "ok":

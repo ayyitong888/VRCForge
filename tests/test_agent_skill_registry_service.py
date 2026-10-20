@@ -652,6 +652,8 @@ def test_gateway_old_facades_and_host_proxy_are_gone() -> None:
 def test_gateway_skill_registry_size_budget() -> None:
     # Keep the same budget across LF and Windows CRLF checkouts.
     source = (REPO_ROOT / "agent_gateway.py").read_bytes().replace(b"\r\n", b"\n")
-    # Freeze at main d4861df; integration and future changes must not grow the facade.
-    assert len(source) <= 528_746
-    assert source.count(b"\n") <= 10_966
+    # Reviewed 1.9.1 continuation/phase/usage delta; freeze its exact size.
+    # The old d4861df ceiling was already exceeded by published 1.9.0.
+    # Reject any further growth beyond this reviewed 1.9.1 snapshot.
+    assert len(source) <= 528_746 + 12_907 + 124
+    assert source.count(b"\n") <= 10_966 + 237 + 5

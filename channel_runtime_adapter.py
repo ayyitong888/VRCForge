@@ -586,8 +586,18 @@ class ChannelRuntimeAdapter:
     @staticmethod
     def _runtime_history(items: list[Any]) -> list[dict[str, str]]:
         history: list[dict[str, str]] = []
+        summarized_item_ids = {
+            item_id
+            for item in items
+            if isinstance(item, dict) and item.get("type") == "compact"
+            and isinstance(item.get("summarizedItemIds"), list)
+            for item_id in item["summarizedItemIds"]
+            if isinstance(item_id, str)
+        }
         for item in items:
             if not isinstance(item, dict):
+                continue
+            if isinstance(item.get("id"), str) and item["id"] in summarized_item_ids:
                 continue
             item_type = str(item.get("type") or "")
             if item_type == "user" and isinstance(item.get("text"), str):

@@ -43,13 +43,21 @@ pub(crate) struct TelegramStatus {
     proxy_url: String,
 }
 
-fn default_proxy_mode() -> String { "environment".to_string() }
+fn default_proxy_mode() -> String {
+    "environment".to_string()
+}
 
 #[tauri::command]
 pub async fn telegram_test_connection(request: TelegramRequest) -> Result<Value, String> {
-    blocking_backend_json_request(move || backend_json_request("POST",
-        "/api/telegram/test-connection".to_string(), None,
-        Some(request.timeout_ms.unwrap_or(20000).clamp(1000, 30000)))).await
+    blocking_backend_json_request(move || {
+        backend_json_request(
+            "POST",
+            "/api/telegram/test-connection".to_string(),
+            None,
+            Some(request.timeout_ms.unwrap_or(20000).clamp(1000, 30000)),
+        )
+    })
+    .await
 }
 
 fn parse_status(value: Value) -> Result<TelegramStatus, String> {

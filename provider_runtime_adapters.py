@@ -70,6 +70,8 @@ class ProviderRuntimeResponse:
     text: str
     usage: dict[str, Any] = field(default_factory=dict)
     reasoning_summary: list[Any] = field(default_factory=list)
+    # Exact model identifier reported by the provider response, when present.
+    model: str = ""
 
 
 _TOOL_NAME = "vrcforge_plan_action"
@@ -196,13 +198,25 @@ class _ResponsesRequestBase:
             cancel_watcher.start()
         try:
             if request.stream_callback is not None:
-                    return self._consume_stream(
-                    client.responses.create(**payload, stream=True), request.stream_callback, planner_mode=request.mode == "planner", activity_callback=request.stream_activity_callback
+                try:
+                    stream = client.responses.create(**payload, stream=True)
+                except Exception as exc:
+                    # The request failed before a stream existed, so replay is
+                    # safe for the planner's bounded pre-response retry gate.
+                    setattr(exc, "stream_started", False)
+                    raise
+                return self._consume_stream(
+                    stream, request.stream_callback, planner_mode=request.mode == "planner", activity_callback=request.stream_activity_callback
                 )
             for attempt in range(2):
                 try:
+                    try:
+                        response = client.responses.create(**payload)
+                    except Exception as exc:
+                        setattr(exc, "stream_started", False)
+                        raise
                     return self.parse_response(
-                        client.responses.create(**payload),
+                        response,
                         planner_mode=request.mode == "planner",
                     )
                 except RuntimeError as exc:
@@ -253,13 +267,13 @@ class _ResponsesProtocolAdapter(_ResponsesRequestBase):
             # multiple calls or any unknown output item.
             if len(tool_calls) != 1 or unexpected:
                 raise RuntimeError(f"{self._provider_label} returned an invalid planner tool call.")
-            return ProviderRuntimeResponse(text=self.parse_tool_call(tool_calls[0]), usage=_usage(response), reasoning_summary=_summaries(output))
+            return ProviderRuntimeResponse(text=self.parse_tool_call(tool_calls[0]), usage=_usage(response), reasoning_summary=_summaries(output), model=str(_value(response, "model") or "").strip())
         text = str(_value(response, "output_text") or "")
         if not text:
             text = "".join(_message_text(item) for item in output if str(_value(item, "type") or "") == "message")
         if not text:
             raise RuntimeError(self._empty_completion_error())
-        return ProviderRuntimeResponse(text=text, usage=_usage(response), reasoning_summary=_summaries(output))
+        return ProviderRuntimeResponse(text=text, usage=_usage(response), reasoning_summary=_summaries(output), model=str(_value(response, "model") or "").strip())
 
     def parse_tool_call(self, item: Any) -> str:
         if str(_value(item, "name") or "") != _TOOL_NAME:
@@ -338,13 +352,23 @@ class _ResponsesProtocolAdapter(_ResponsesRequestBase):
         tool_item: Any = None
         usage: dict[str, Any] = {}
         final_seen = False
-        for event in stream:
+        def stream_error(message: str) -> RuntimeError:
+            error = RuntimeError(message)
+            error.stream_started = bool(text_parts or tool_args or tool_item is not None)
+            return error
+        def events_with_state() -> Any:
+            try:
+                yield from stream
+            except Exception as exc:
+                setattr(exc, "stream_started", bool(text_parts or tool_args or tool_item is not None))
+                raise
+        for event in events_with_state():
             event_type = str(_value(event, "type") or "")
             if "reasoning" in event_type or "summary" in event_type:
                 if activity_callback is not None:
                     activity_callback({"kind": "reasoning_activity"})
             if event_type in {"response.failed", "response.incomplete"}:
-                raise RuntimeError(f"{self._provider_label} stream did not complete.")
+                raise stream_error(f"{self._provider_label} stream did not complete.")
             if event_type == "response.output_text.delta":
                 delta = str(_value(event, "delta") or "")
                 if delta:
@@ -368,20 +392,21 @@ class _ResponsesProtocolAdapter(_ResponsesRequestBase):
                         text=parsed.text,
                         usage=parsed.usage or usage,
                         reasoning_summary=parsed.reasoning_summary,
+                        model=parsed.model or str(_value(final_response, "model") or "").strip(),
                     )
                 if tool_item is not None:
                     if not planner_mode:
-                        raise RuntimeError(f"{self._provider_label} probe returned an unexpected tool call.")
+                        raise stream_error(f"{self._provider_label} probe returned an unexpected tool call.")
                     assembled = {"type": "function_call", "name": _value(tool_item, "name"), "arguments": "".join(tool_args) or _value(tool_item, "arguments")}
-                    return ProviderRuntimeResponse(text=self.parse_tool_call(assembled), usage=usage, reasoning_summary=_summaries(_as_list(_value(final_response, "output"))))
+                    return ProviderRuntimeResponse(text=self.parse_tool_call(assembled), usage=usage, reasoning_summary=_summaries(_as_list(_value(final_response, "output"))), model=str(_value(final_response, "model") or "").strip())
                 final_text = str(_value(final_response, "output_text") or "")
                 completed_text = final_text or "".join(text_parts)
                 if not completed_text:
-                    raise RuntimeError(f"{self._provider_label} stream completed without a message or planner action.")
-                return ProviderRuntimeResponse(text=completed_text, usage=usage, reasoning_summary=_summaries(_as_list(_value(final_response, "output"))))
+                    raise stream_error(f"{self._provider_label} stream completed without a message or planner action.")
+                return ProviderRuntimeResponse(text=completed_text, usage=usage, reasoning_summary=_summaries(_as_list(_value(final_response, "output"))), model=str(_value(final_response, "model") or "").strip())
         if not final_seen:
-            raise RuntimeError(f"{self._provider_label} stream ended before response.completed.")
-        raise RuntimeError(f"{self._provider_label} stream returned no response.")
+            raise stream_error(f"{self._provider_label} stream ended before response.completed.")
+        raise stream_error(f"{self._provider_label} stream returned no response.")
 
 
 class OpenAIResponsesAdapter(_ResponsesProtocolAdapter):

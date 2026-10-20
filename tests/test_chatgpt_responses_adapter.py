@@ -1,6 +1,9 @@
 """Offline tests for the ChatGPT subscription Responses transport."""
 
 from copy import deepcopy
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import json
+import socket
 import threading
 import time
 from types import SimpleNamespace
@@ -86,6 +89,44 @@ def test_planner_request_uses_subscription_token_and_siwc_payload():
     }]
     assert result.text == '{"action": "reply", "reply": "ready"}'
     assert client.closed == 1
+
+
+def test_planner_oauth_responses_payload_carries_selected_reasoning_effort():
+    payloads = []
+    client = FakeClient([completed([{
+        "type": "function_call", "name": "vrcforge_plan_action",
+        "arguments": '{"action":"reply","reply":"ready"}',
+    }])])
+    client.responses.create = lambda **payload: payloads.append(deepcopy(payload)) or iter([completed([{
+        "type": "function_call", "name": "vrcforge_plan_action",
+        "arguments": '{"action":"reply","reply":"ready"}',
+    }])])
+    adapter, _, _ = make_adapter([], client_kwargs=lambda **kwargs: client)
+
+    adapter.send_request(ProviderRuntimeRequest(
+        model="gpt-5.6-sol", prompt="plan", instructions="", reasoning_effort="high",
+    ))
+
+    assert payloads[0]["reasoning"] == {"effort": "high"}
+    assert payloads[0]["tools"]
+
+
+def test_native_oauth_responses_payload_keeps_reasoning_and_tools():
+    payloads = []
+    client = FakeClient([completed([{
+        "type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "ok"}],
+    }], output_text="ok")])
+    client.responses.create = lambda **payload: payloads.append(deepcopy(payload)) or iter([completed([{
+        "type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "ok"}],
+    }], output_text="ok")])
+    adapter, _, _ = make_adapter([], client_kwargs=lambda **kwargs: client)
+    adapter.send_native_request(
+        model="gpt-5.6-sol", messages=[{"role": "user", "content": "hi"}],
+        tools=[{"type": "function", "function": {"name": "vrcforge_read", "parameters": {}}}],
+        reasoning_effort="xhigh",
+    )
+    assert payloads[0]["reasoning"] == {"effort": "xhigh"}
+    assert payloads[0]["tools"]
 
 
 def test_probe_and_image_content_are_raw_responses_inputs():
@@ -243,6 +284,219 @@ def test_stream_requires_successful_completed_event_and_closes_client(events):
     with pytest.raises(RuntimeError):
         adapter.send_request(ProviderRuntimeRequest(model="account-model", prompt="hello", instructions="", mode="probe"))
     assert client.closed == 1
+
+
+def test_native_transport_marks_pre_response_and_partial_stream_state():
+    class ConnectFailureClient:
+        def __init__(self):
+            self.responses = SimpleNamespace(create=self.create)
+            self.closed = 0
+
+        def create(self, **payload):
+            raise ConnectionError("synthetic native connection failure")
+
+        def close(self):
+            self.closed += 1
+
+    client = ConnectFailureClient()
+    adapter, _, _ = make_adapter([], client_kwargs=lambda **kwargs: client)
+    with pytest.raises(ConnectionError) as caught:
+        adapter.send_native_request(model="account-model", messages=[], tools=[])
+    assert caught.value.stream_started is False
+
+    class PartialClient(ConnectFailureClient):
+        def create(self, **payload):
+            def stream():
+                yield {"type": "response.output_text.delta", "delta": "partial"}
+                raise ConnectionError("synthetic drop after output")
+            return stream()
+
+    partial = PartialClient()
+    adapter, _, _ = make_adapter([], client_kwargs=lambda **kwargs: partial)
+    with pytest.raises(ConnectionError) as caught:
+        adapter.send_native_request(model="account-model", messages=[], tools=[])
+    assert caught.value.stream_started is True
+
+
+def test_native_main_request_transmits_image_content_in_same_request():
+    captured = {}
+
+    class CapturingClient:
+        def __init__(self):
+            self.responses = SimpleNamespace(create=self.create)
+            self.closed = 0
+
+        def create(self, **payload):
+            captured.update(payload)
+            return iter([completed([{
+                "type": "message", "role": "assistant",
+                "content": [{"type": "output_text", "text": "seen"}],
+            }])])
+
+        def close(self):
+            self.closed += 1
+
+    client = CapturingClient()
+    adapter, _, _ = make_adapter([], client_kwargs=lambda **kwargs: client)
+    adapter.send_native_request(
+        model="account-model",
+        messages=[{"role": "user", "content": [
+            {"type": "text", "text": "describe this"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+        ]}],
+        tools=[],
+    )
+    assert captured["input"][0]["content"] == [
+        {"type": "input_text", "text": "describe this"},
+        {"type": "input_image", "image_url": "data:image/png;base64,AAAA"},
+    ]
+
+
+def test_native_capacity_status_preserves_no_more_retry_signal():
+    class CapacityClient:
+        def __init__(self):
+            self.responses = SimpleNamespace(create=lambda **payload: iter([{
+                "type": "response.failed",
+                "response": {"headers": {"x-no-more-retry": "true"}, "error": {"code": "capacity"}},
+            }]))
+            self.closed = 0
+
+        def close(self):
+            self.closed += 1
+
+    client = CapacityClient()
+    adapter, _, _ = make_adapter([], client_kwargs=lambda **kwargs: client)
+    with pytest.raises(RuntimeError) as caught:
+        adapter.send_native_request(model="account-model", messages=[], tools=[])
+    assert caught.value.stream_started is False
+    assert caught.value.no_more_retry is True
+
+
+@pytest.mark.parametrize("error_code", ["rate_limit_exceeded", "capacity"])
+@pytest.mark.parametrize(
+    ("event_type", "response_status"),
+    [("response.failed", "failed"), ("response.incomplete", "incomplete")],
+)
+def test_native_stream_failure_preserves_error_code_without_inventing_http_status(
+    error_code, event_type, response_status,
+):
+    class FailedClient:
+        def __init__(self):
+            self.responses = SimpleNamespace(create=lambda **payload: iter([{
+                "type": event_type,
+                "response": {
+                    "status": response_status,
+                    "status_code": 429,
+                    "error": {
+                        "code": error_code,
+                        "message": "capacity is currently unavailable",
+                    },
+                },
+            }]))
+            self.closed = 0
+
+        def close(self):
+            self.closed += 1
+
+    client = FailedClient()
+    adapter, _, _ = make_adapter([], client_kwargs=lambda **kwargs: client)
+    with pytest.raises(RuntimeError) as caught:
+        adapter.send_native_request(model="account-model", messages=[], tools=[])
+
+    assert caught.value.stream_started is False
+    assert caught.value.stream_error_code == error_code
+    assert caught.value.stream_error_message == "capacity is currently unavailable"
+    assert caught.value.stream_error_status == response_status
+    assert caught.value.stream_error_status_code == 429
+    # The embedded event status is not the HTTP status of this stream.
+    assert not hasattr(caught.value, "status_code")
+
+
+class _LoopbackResponseHandler(BaseHTTPRequestHandler):
+    response_mode = "drop"
+
+    def do_POST(self):  # noqa: N802 - stdlib handler API
+        length = int(self.headers.get("content-length", "0"))
+        self.rfile.read(length)
+        if self.response_mode == "drop":
+            self.connection.shutdown(socket.SHUT_RDWR)
+            self.connection.close()
+            return
+        body = json.dumps({
+            "error": {
+                "message": "loopback rate limit",
+                "type": "rate_limit_error",
+                "code": "rate_limit_exceeded",
+            },
+        }).encode("utf-8")
+        self.send_response(429)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Retry-After", "1")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *_args):
+        return
+
+
+def _loopback_openai_factory(mode):
+    import httpx
+    from openai import OpenAI
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _LoopbackResponseHandler)
+    server.RequestHandlerClass.response_mode = mode
+    worker = threading.Thread(target=server.serve_forever, daemon=True)
+    worker.start()
+    base_url = f"http://127.0.0.1:{server.server_port}/v1"
+
+    def factory(**_kwargs):
+        return OpenAI(
+            api_key="loopback-test-token",
+            base_url=base_url,
+            max_retries=0,
+            http_client=httpx.Client(timeout=httpx.Timeout(2.0)),
+        )
+
+    return server, worker, factory
+
+
+def test_native_actual_client_loopback_disconnect_is_pre_response_and_bounded():
+    server, worker, client_factory = _loopback_openai_factory("drop")
+    try:
+        adapter = ChatGPTResponsesAdapter(
+            api_key="selected-account-id",
+            base_url=CHATGPT_RESPONSES_BASE_URL,
+            access_token_provider=lambda _account: "offline-oauth-access-token",
+            client_factory=client_factory,
+        )
+        with pytest.raises(Exception) as caught:
+            adapter.send_native_request(model="account-model", messages=[], tools=[])
+        assert caught.value.stream_started is False
+    finally:
+        server.shutdown()
+        server.server_close()
+        worker.join(1)
+        assert not worker.is_alive()
+
+
+def test_native_actual_client_loopback_http_429_keeps_status_code():
+    server, worker, client_factory = _loopback_openai_factory("429")
+    try:
+        adapter = ChatGPTResponsesAdapter(
+            api_key="selected-account-id",
+            base_url=CHATGPT_RESPONSES_BASE_URL,
+            access_token_provider=lambda _account: "offline-oauth-access-token",
+            client_factory=client_factory,
+        )
+        with pytest.raises(Exception) as caught:
+            adapter.send_native_request(model="account-model", messages=[], tools=[])
+        assert caught.value.status_code == 429
+    finally:
+        server.shutdown()
+        server.server_close()
+        worker.join(1)
+        assert not worker.is_alive()
 
 
 def test_cancel_watcher_closes_request_client():

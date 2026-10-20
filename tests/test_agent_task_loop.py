@@ -12,6 +12,7 @@ from agent_task_loop import (
     prepare_approval_task_continuation,
     prepare_sub_agent_task_continuation,
     rejected_approval_completion,
+    safe_recoverable_write_failure,
 )
 
 
@@ -19,6 +20,47 @@ def test_tool_call_telemetry_is_preserved_past_legacy_256_boundary() -> None:
     loop = AgentTaskLoop("long read-only task", tool_calls_used=257)
     assert loop.tool_calls_used == 257
     assert loop.approval_seed()["toolCallsUsed"] == 257
+
+
+def test_subagent_task_seed_backreference_is_removed_before_action_identity() -> None:
+    from agent_task_loop import AgentTaskLoop
+
+    seed: dict = {
+        "schema": "vrcforge.agent_task_loop.v1",
+        "actions": [{"actionId": "first"}, {"actionId": "second"}],
+    }
+    requested = {
+        "params": {
+            "requestedArguments": {"_taskSeed": seed, "userValue": "preserve-me"}
+        }
+    }
+    seed["actions"].append({"actionId": "third", "params": requested})
+    loop = AgentTaskLoop("continue delegated inspection")
+
+    # Reproduce the persisted stack path: params -> requestedArguments ->
+    # _taskSeed -> actions[2] -> params, which points back into the request.
+    requested["params"]["requestedArguments"]["_taskSeed"] = seed
+    action_id = canonical_action_id("skill", "vrcforge_delegate_subagent", requested)
+    loop.require_action(
+        kind="skill", tool="vrcforge_delegate_subagent", arguments=requested
+    )
+    approval_seed = loop.approval_seed(
+        requested_kind="skill",
+        requested_tool="vrcforge_delegate_subagent",
+        requested_arguments=requested,
+    )
+
+    assert approval_seed["requestedActionId"] == action_id
+    assert "_taskSeed" not in approval_seed["requestedArguments"]["params"]["requestedArguments"]
+    assert approval_seed["requestedArguments"]["params"]["requestedArguments"]["userValue"] == "preserve-me"
+
+
+def test_unrelated_circular_action_argument_is_rejected_explicitly() -> None:
+    args: dict = {"userValue": "preserve"}
+    args["self"] = args
+
+    with pytest.raises(ValueError, match="Action arguments contain a circular reference"):
+        canonical_action_id("skill", "vrcforge_read_text_file", args)
 
 
 def ok_outcome(summary: str = "done") -> dict:
@@ -335,6 +377,42 @@ def test_failed_approved_write_returns_to_planner_with_failure_diagnosis() -> No
     assert source_error["commitState"] == "unknown"
     assert "privateDump" not in str(observation)
     assert continuation["arguments"] == arguments
+
+
+def test_explicit_prewrite_approval_failure_has_no_terminal_plan_but_keeps_failed_facts() -> None:
+    arguments = {"projectRoot": "D:/Unity/Avatar", "value": "fixture"}
+    loop = AgentTaskLoop("write then continue", session_id="s-prewrite", client_turn_id="t-prewrite")
+    context = approval_task_context(loop.approval_seed(
+        requested_tool="fixture_write", requested_arguments=arguments, continue_after_approval=True,
+    ), tool="fixture_write", arguments=arguments)
+    assert context is not None
+    failure = {
+        "status": "failed", "error": "preflight rejected", "mutationStarted": False,
+        "saved": False, "safeToRetry": True, "committed": False, "commitState": "not_started",
+    }
+    completion = approval_completion(context, raw_result=failure, outcome={
+        "status": "failed", "summary": "preflight rejected", **failure,
+    })
+    assert completion is not None
+    prepared = prepare_approval_task_continuation({"id": "approval-prewrite", "taskContext": context}, {
+        "status": "failed", "taskCompletion": completion, "result": failure,
+        "error": failure["error"], "writeFailure": failure,
+    })
+    assert prepared is not None
+    continuation = prepared["taskContinuation"]
+    assert continuation["terminalPlan"] is None
+    assert continuation["completion"]["status"] == "failed"
+    assert continuation["plannerObservation"]["result"]["mutationStarted"] is False
+    assert continuation["plannerObservation"]["result"]["saved"] is False
+    assert continuation["plannerObservation"]["result"]["safeToRetry"] is True
+
+
+def test_safe_recoverable_failure_requires_unconflicted_explicit_facts() -> None:
+    clean = {"mutationStarted": False, "safeToRetry": True, "committed": False, "commitState": "not_started"}
+    assert safe_recoverable_write_failure(clean)
+    assert not safe_recoverable_write_failure(clean, {"mutationStarted": True})
+    assert not safe_recoverable_write_failure(clean, {"commitState": "unknown"})
+    assert not safe_recoverable_write_failure({"mutationStarted": False, "safeToRetry": True})
 
 
 def test_async_task_seed_preserves_bounded_parent_history_for_resampling() -> None:
@@ -874,6 +952,21 @@ def test_unknown_declared_verification_profile_fails_closed() -> None:
     assert gated["nextStep"] == "needs_user_action"
 
 
+def test_failed_visual_verification_is_not_reported_as_a_unity_write_failure() -> None:
+    loop = AgentTaskLoop("inspect the managed views")
+    result = loop.record_action(
+        kind="skill", tool="vrcforge_vision_audit_multi", arguments={"captureReceipt": "managed"},
+        raw_result={"ok": True, "visualVerified": False, "coverageComplete": True,
+                    "captureEvidenceVerified": True},
+        outcome=ok_outcome("visual findings"),
+    )
+    assert result["status"] == "needs_user_action"
+    assert "visual audit" in result["outcome"]["summary"]
+    assert "Unity write" not in result["outcome"]["summary"]
+    assert result["outcome"]["verification"]["checks"][0] == {"kind": "visualVerified", "state": "failed"}
+    assert loop.gate_terminal({"planner": "llm", "nextStep": "done", "reply": "done"})["nextStep"] != "done"
+
+
 def test_approval_context_binds_identity_and_verifies_terminal_result() -> None:
     loop = AgentTaskLoop(
         "create one object",
@@ -1220,6 +1313,93 @@ def test_provider_request_count_survives_an_async_task_boundary() -> None:
 
     assert resumed.provider_request_count == 2
     assert resumed.approval_seed()["providerRequestCount"] == 2
+
+
+def test_usage_seed_preserves_turn_identity_and_binds_separate_runtime_parent() -> None:
+    loop = AgentTaskLoop("continue after approval", session_id="session-seed", turn_id="turn-original")
+    parent_usage = {
+        "exact": True,
+        "inputTokens": 11,
+        "outputTokens": 5,
+        "totalTokens": 16,
+    }
+    seed = loop.approval_seed(
+        requested_tool="vrcforge_capture_multi_screenshot",
+        requested_arguments={"angles": ["front"]},
+        provider_request_count=2,
+        provider_usage=parent_usage,
+        usage_parent_turn_id="turn-parent",
+    )
+    context = approval_task_context(
+        seed,
+        tool="vrcforge_capture_multi_screenshot",
+        arguments={"angles": ["front"]},
+    )
+    assert context is not None
+    assert seed["turnId"] == "turn-original"
+    assert seed["usageParentTurnId"] == "turn-parent"
+    assert context["turnId"] == "turn-original"
+    assert context["usageParentTurnId"] == "turn-parent"
+    assert len(context["providerUsageSnapshotSha256"]) == 64
+
+    resumed = AgentTaskLoop.from_approval_context(
+        context,
+        approval_completion(context, raw_result={"ok": True}, outcome=ok_outcome()),
+    )
+    next_seed = resumed.approval_seed(
+        requested_tool="vrcforge_capture_multi_screenshot",
+        requested_arguments={"angles": ["back"]},
+        provider_request_count=3,
+        provider_usage={
+            "exact": True,
+            "inputTokens": 14,
+            "outputTokens": 6,
+            "totalTokens": 20,
+        },
+        usage_parent_turn_id="turn-current",
+    )
+    assert next_seed["turnId"] == "turn-original"
+    assert next_seed["usageParentTurnId"] == "turn-current"
+    assert next_seed["providerUsageSnapshotSha256"] != seed["providerUsageSnapshotSha256"]
+
+
+def test_malformed_usage_seed_digest_is_preserved_as_unknown_marker() -> None:
+    from request_usage_reconciliation import reconcile_request_usage
+
+    loop = AgentTaskLoop("continue after approval", session_id="session-seed-invalid")
+    seed = loop.approval_seed(provider_request_count=2, provider_usage={
+        "exact": True, "inputTokens": 2, "outputTokens": 1, "totalTokens": 3,
+    }, usage_parent_turn_id="turn-parent")
+    seed["providerUsageSnapshotSha256"] = "not-a-digest"
+    context = approval_task_context(seed, tool="shell", arguments={})
+    assert context is not None
+    assert context["providerUsageSnapshotSha256"] == ""
+    result = reconcile_request_usage(
+        chain_id=context["taskId"],
+        expected_chain_id=context["taskId"],
+        parent_turn_id=context["usageParentTurnId"],
+        expected_parent_turn_id=context["usageParentTurnId"],
+        turn_id="turn-next",
+        parent_request_count=context["providerRequestCount"],
+        parent_usage=context["providerUsage"],
+        observed_delta={
+            "exact": True,
+            "requestCount": 1,
+            "inputTokens": 1,
+            "outputTokens": 1,
+            "totalTokens": 2,
+        },
+        cumulative_usage={
+            "exact": True,
+            "requestCount": 3,
+            "inputTokens": 3,
+            "outputTokens": 2,
+            "totalTokens": 5,
+        },
+        expected_parent_snapshot_sha256=context["providerUsageSnapshotSha256"],
+    )
+    assert result["status"] == "unknown"
+    assert result["reason"] == "parent_snapshot_missing"
 
 
 def test_provider_usage_survives_an_async_task_boundary_without_readding() -> None:

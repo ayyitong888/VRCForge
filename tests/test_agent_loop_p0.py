@@ -14,6 +14,7 @@ path.
 
 import copy
 import json
+import os
 import re
 import tempfile
 import unittest
@@ -39,7 +40,8 @@ from provider_configuration_service import ProviderApiConfig
 from runtime_planner_service import PlannerModelResult
 from vrchat_blendshape_agent import LlmPlanResponse
 from agent_runtime_skill_executor import AgentRuntimeSkillExecutor
-from execution_target import canonical_namespace, project_identity
+from execution_target import EXECUTION_TARGET_REF_SCHEMA, EXECUTION_TARGET_SCHEMA, canonical_namespace, process_start_time, project_identity
+from session_store_integrity import is_valid_chat_record
 
 
 def provider_plan_fixture(test):
@@ -70,7 +72,7 @@ class AgentLoopP0Tests(unittest.TestCase):
                 model="fixture",
             ),
         )
-        self.fixture_provider_config.start()
+        self.fixture_provider_config_mock = self.fixture_provider_config.start()
         # TestClient shutdown closes the process-owned Provider planner. Each
         # unittest method models a fresh live App process, so reopen that owner
         # explicitly instead of weakening production shutdown fail-closed.
@@ -175,6 +177,16 @@ class AgentLoopP0Tests(unittest.TestCase):
             client_turn_id=client_turn_id,
         )
 
+    def _use_deepseek_plan_config(self) -> None:
+        # These cases exercise the legacy planner response seam after valid
+        # provider admission; no real provider request leaves the test.
+        self.fixture_provider_config_mock.return_value = ProviderApiConfig(
+            provider="deepseek",
+            api_key="fixture-deepseek-key",
+            base_url="https://api.deepseek.com",
+            model="deepseek-chat",
+        )
+
     def _unity_project(self) -> Path:
         project = Path(self.temp_dir.name) / "UnityProject"
         (project / "Assets").mkdir(parents=True, exist_ok=True)
@@ -201,7 +213,7 @@ class AgentLoopP0Tests(unittest.TestCase):
             PlannerModelResult(text=json.dumps(wrong), usage={}, reasoning={}, planner_label="fixture"),
         ]) as model:
             result = self.gateway.runtime_message({
-                "message": "Inspect the outfit", "provider": "fixture", "model": "fixture",
+                "message": "Inspect the outfit", "provider": "openai", "model": "fixture",
                 "projectPath": str(project), "projectRoot": str(project),
                 "session_id": "repeated-cross-block-selection", "client_turn_id": "repeated-cross-block-turn",
             })
@@ -283,7 +295,7 @@ class AgentLoopP0Tests(unittest.TestCase):
             result = self.gateway.runtime_message(
                 {
                     "message": "扫描衣物",
-                    "provider": "fixture",
+                    "provider": "openai",
                     "model": "fixture",
                     "projectPath": str(project),
                     "projectRoot": str(project),
@@ -343,7 +355,7 @@ class AgentLoopP0Tests(unittest.TestCase):
             result = self.gateway.runtime_message(
                 {
                     "message": "Load diagnostics and ask before continuing",
-                    "provider": "fixture",
+                    "provider": "openai",
                     "model": "fixture",
                     "projectPath": str(project),
                     "projectRoot": str(project),
@@ -375,7 +387,7 @@ class AgentLoopP0Tests(unittest.TestCase):
         with patch.object(dashboard_server._RUNTIME_PLANNER_MODEL, "plan", side_effect=lambda _prompt:
             PlannerModelResult(text=json.dumps(next(plans)), usage={}, reasoning={}, planner_label="fixture")):
             result = self.gateway.runtime_message({
-                "message": "Discover available diagnostics", "provider": "fixture", "model": "fixture",
+                "message": "Discover available diagnostics", "provider": "openai", "model": "fixture",
                 "projectPath": str(project), "projectRoot": str(project),
                 "session_id": "loader-subset-completion", "client_turn_id": "loader-subset-turn",
             })
@@ -426,7 +438,7 @@ class AgentLoopP0Tests(unittest.TestCase):
         ):
             result = self.gateway.runtime_message({
                 "message": "Load diagnostics and ask before continuing",
-                "provider": "fixture", "model": "fixture",
+                "provider": "openai", "model": "fixture",
                 "projectPath": str(project), "projectRoot": str(project),
                 "session_id": "four-core-three-diagnostics-question",
                 "client_turn_id": "four-core-three-diagnostics-question-turn",
@@ -471,7 +483,7 @@ class AgentLoopP0Tests(unittest.TestCase):
             result = self.gateway.runtime_message(
                 {
                     "message": "扫描衣物",
-                    "provider": "fixture",
+                    "provider": "openai",
                     "model": "fixture",
                     "session_id": "cross-block-no-project",
                     "client_turn_id": "cross-block-no-project-turn",
@@ -695,7 +707,7 @@ class AgentLoopP0Tests(unittest.TestCase):
                 return {
                     "tool": tool,
                     "status": "executed",
-                    "result": {"avatars": [{"avatarPath": "Milltina"}]},
+                    "result": {"avatars": [{"avatarPath": "SampleAvatar"}]},
                 }
             return {"tool": tool, "status": "executed", "result": {}}
 
@@ -733,7 +745,7 @@ class AgentLoopP0Tests(unittest.TestCase):
         self.assertEqual(approval["targetTool"], "vrcforge_create_gameobject")
         self.assertEqual(approval["status"], "pending")
         self.assertEqual(approval["arguments"]["name"], "GameObject")
-        self.assertEqual(approval["arguments"]["parentPath"], "Milltina")
+        self.assertEqual(approval["arguments"]["parentPath"], "SampleAvatar")
         self.assertEqual(approval["arguments"]["projectPath"], str(project))
 
         self.assertTrue(payload["plan"].get("multiStep"))
@@ -746,7 +758,7 @@ class AgentLoopP0Tests(unittest.TestCase):
             payload={
                 "data": {
                     "ok": True,
-                    "gameObjectPath": "Milltina/GameObject",
+                    "gameObjectPath": "SampleAvatar/GameObject",
                     "persistedReadback": True,
                     "sceneSaved": True,
                 }
@@ -772,7 +784,7 @@ class AgentLoopP0Tests(unittest.TestCase):
         _settings, tool_name, arguments = mock_invoke.call_args.args
         self.assertEqual(tool_name, "vrc_create_gameobject")
         self.assertEqual(arguments["name"], "GameObject")
-        self.assertEqual(arguments["parentPath"], "Milltina")
+        self.assertEqual(arguments["parentPath"], "SampleAvatar")
         self.assertFalse(arguments["preview"])
 
     @provider_plan_fixture
@@ -989,6 +1001,125 @@ class AgentLoopP0Tests(unittest.TestCase):
         self.assertEqual(continuation["plan"]["nextStep"], "done", continuation)
         self.assertEqual(continuation["task"]["status"], "completed")
         execute_payload.assert_called_once()
+
+    @provider_plan_fixture
+    def test_native_approval_resume_restores_trusted_session_for_public_execution_target_ref(self) -> None:
+        gateway = self.gateway
+        project = self._unity_project()
+        session_id = "public-ref-approval-resume-session"
+        project_root = str(project.resolve())
+        start_time = process_start_time(os.getpid())
+        descriptor_dir = project / "Library" / "VRCForge"
+        descriptor_dir.mkdir(parents=True)
+        (descriptor_dir / "mcp-core.json").write_text(json.dumps({
+            "projectPath": project_root,
+            "projectId": project_identity(project_root),
+            "processId": os.getpid(),
+            "processStartTime": start_time,
+            "instanceId": "approval-resume-core",
+        }), encoding="utf-8")
+        target = {
+            "schema": EXECUTION_TARGET_SCHEMA,
+            "scope": "project",
+            "project": {"root": project_root, "projectId": project_identity(project_root)},
+            "editor": {
+                "unityPid": os.getpid(),
+                "processStartTime": start_time,
+                "coreInstanceId": "approval-resume-core",
+            },
+        }
+        target["namespace"] = canonical_namespace(target)
+        with gateway.resource_context(f"runtime:{session_id}"):
+            public_reference = gateway.bind_execution_target(target, project_root=project_root)["executionTarget"]
+
+        write_tool = "vrcforge_test_identity_resume_write"
+        probe_tool = "vrcforge_test_identity_resume_probe"
+        previous_write = gateway._write_handlers.get(write_tool)
+        previous_probe = gateway._tools.get(probe_tool)
+        gateway.approval_transactions.register_write_handler(
+            write_tool,
+            "Test-only approval target for public ExecutionTarget resume coverage.",
+            "low",
+            lambda _arguments: {"ok": True, "status": "applied", "result": {"ok": True}},
+            pre_write_checkpoint_required=False,
+        )
+        observed_probe = []
+        gateway.register_tool(
+            probe_tool,
+            "Test-only identity-bound read used after approval resume.",
+            "read/debug",
+            lambda arguments: observed_probe.append({
+                "context": gateway._mcp_resource_context.get(),
+                "target": copy.deepcopy(arguments["executionTarget"]),
+            }) or {"ok": True, "data": {"executionTarget": copy.deepcopy(arguments["executionTarget"])}},
+        )
+        plan_calls = []
+
+        def plan_turn(_message, _params, _observe, *_args, **kwargs):
+            plan_calls.append(kwargs.get("task_continuation"))
+            if len(plan_calls) == 1:
+                return {
+                    "planner": "llm", "writeNeeded": True, "writeTool": write_tool,
+                    "writeParams": {"projectPath": project_root, "executionTarget": public_reference},
+                    "continueLoop": True, "nextStep": "call_tool",
+                }
+            return {
+                "planner": "llm", "skillNeeded": True, "skillTool": probe_tool,
+                "skillParams": {
+                    "projectPath": project_root,
+                    "executionTarget": public_reference,
+                    "sessionId": "model-forged-session",
+                    "_runtimeSessionId": "model-forged-session",
+                },
+                "continueLoop": False, "nextStep": "call_skill",
+            }
+
+        resume_contexts = []
+        original_resume = gateway.resume_runtime_task_after_approval
+
+        def resume_with_context_observation(*args, **kwargs):
+            resume_contexts.append(gateway._mcp_resource_context.get())
+            return original_resume(*args, **kwargs)
+
+        try:
+            with patch.object(gateway.runtime_planner, "plan_agent_turn", side_effect=plan_turn), \
+                 patch.object(gateway, "resume_runtime_task_after_approval", side_effect=resume_with_context_observation), \
+                 TestClient(dashboard_server.app) as client:
+                initial_response = client.post("/api/app/agent/message", json={
+                    "message": "Perform the approved test action and inspect the bound project.",
+                    "projectPath": project_root,
+                    "session_id": session_id,
+                })
+                self.assertEqual(initial_response.status_code, 200, initial_response.text)
+                initial = initial_response.json()
+                approval_id = initial["approval_id"]
+                approval = gateway._approvals[approval_id]
+                self.assertEqual(approval["taskContext"]["sessionId"], session_id)
+                self.assertEqual(approval["arguments"]["executionTarget"], public_reference)
+                approved = client.post(
+                    f"/api/app/agent/approvals/{approval_id}/approve",
+                    json={"expectedProjectRoot": project_root, "globalOnly": False},
+                )
+                self.assertEqual(approved.status_code, 200, approved.text)
+                payload = approved.json()
+        finally:
+            if previous_write is None:
+                gateway._write_handlers.pop(write_tool, None)
+            else:
+                gateway._write_handlers[write_tool] = previous_write
+            if previous_probe is None:
+                gateway._tools.pop(probe_tool, None)
+            else:
+                gateway._tools[probe_tool] = previous_probe
+
+        self.assertEqual(payload["execution"]["status"], "applied")
+        self.assertEqual(resume_contexts, [None])
+        self.assertEqual(len(observed_probe), 1)
+        self.assertEqual(observed_probe[0]["context"], f"runtime:{session_id}")
+        self.assertEqual(observed_probe[0]["target"]["project"]["root"], project_root)
+        continuation = payload["continuation"]
+        self.assertEqual(continuation["sessionId"], session_id)
+        self.assertEqual(continuation["steps"][-1]["result"]["data"]["executionTarget"], public_reference)
 
     @provider_plan_fixture
     def test_rejected_write_returns_to_the_original_task_as_needs_user_action(self) -> None:
@@ -1208,6 +1339,51 @@ class AgentLoopP0Tests(unittest.TestCase):
             )
         )
         planner.assert_called_once()
+
+    def test_timed_out_shell_continuation_persists_a_valid_failed_response(self) -> None:
+        gateway = self.gateway
+        arguments = {"command": "Start-Process vcc", "background": True}
+        loop = AgentTaskLoop(
+            "launch VCC and report its result",
+            session_id="shell-timeout-response-session",
+            client_turn_id="shell-timeout-response-client",
+            agent_name="desktop-agent",
+        )
+        loop.require_action(kind="shell", tool="shell", arguments=arguments)
+        event = {
+            "shellSessionId": "shell-session-timeout-response",
+            "status": "finished",
+            "exitCode": 0,
+            "timedOut": True,
+            "cancelled": False,
+            "terminationFailed": False,
+            "result": {"ok": False, "exitCode": 0, "stdout": "", "stderr": ""},
+            "taskSeed": loop.approval_seed(
+                tool_calls_used=1,
+                exposure_layer="planning",
+                requested_kind="shell",
+                requested_tool="shell",
+                requested_arguments=arguments,
+                continue_after_approval=True,
+            ),
+        }
+
+        with patch.object(
+            type(gateway.shell),
+            "execute",
+            autospec=True,
+            side_effect=AssertionError("a timed-out Shell command must not be replayed"),
+        ):
+            response = gateway.resume_runtime_task_after_shell(event)
+
+        assert response is not None
+        assert response["plan"]["nextStep"] == "tool_failed"
+        assert response["plan"]["shellNeeded"] is False
+        chat = {
+            "id": "shell-timeout-response-chat",
+            "items": [{"id": "agent-timeout-response", "type": "agent", "response": response}],
+        }
+        assert is_valid_chat_record(chat)
 
     def test_loaded_skill_instructions_reenter_planning_without_becoming_completion_evidence(self) -> None:
         gateway = self.gateway
@@ -1826,7 +2002,7 @@ class AgentLoopP0Tests(unittest.TestCase):
             payload = gateway.runtime_message(
                 {
                     "message": "run the worker and then inspect health",
-                    "provider": "fixture",
+                    "provider": "openai",
                     "model": "fixture",
                     "session_id": "shell-llm-session",
                 }
@@ -1908,7 +2084,7 @@ class AgentLoopP0Tests(unittest.TestCase):
             initial = gateway.runtime_message(
                 {
                     "message": "delegate a specialist to find the relevant prefabs",
-                    "provider": "fixture",
+                    "provider": "openai",
                     "model": "fixture",
                     "session_id": "sub-agent-owner-session",
                     "client_turn_id": "sub-agent-owner-turn",
@@ -2753,6 +2929,7 @@ class AgentLoopP0Tests(unittest.TestCase):
         )
 
     def test_post_tool_provider_failure_preserves_skill_result_and_marks_run_failed(self) -> None:
+        self._use_deepseek_plan_config()
         gateway = self.gateway
         llm_results = [
             SimpleNamespace(
@@ -2792,7 +2969,7 @@ class AgentLoopP0Tests(unittest.TestCase):
                             "message": "帮我整理列出未被使用的贴图",
                             "provider": "deepseek",
                             "providerLabel": "DeepSeek",
-                            "model": "fixture-model",
+                            "model": "deepseek-chat",
                             "sessionId": "planner-failure-session",
                             "clientTurnId": "planner-failure-turn",
                             "projectPath": r"C:\Unity\FixtureProject",
@@ -2821,7 +2998,94 @@ class AgentLoopP0Tests(unittest.TestCase):
         self.assertEqual(len(completed), 1)
         self.assertEqual(completed[0]["status"], "failed")
 
+    def test_post_tool_provider_failure_is_not_replaced_by_an_older_shell_failure(self) -> None:
+        self._use_deepseek_plan_config()
+        gateway = self.gateway
+        provider_error = RuntimeError("APIError service unavailable")
+        provider_error.status_code = 503
+        provider_error.body = {
+            "type": "service_unavailable_error",
+            "code": "server_is_overloaded",
+            "message": "Our servers are currently overloaded. Please try again later.",
+            "headers": {"x-retry-metadata": "NO_MORE_RETRY"},
+        }
+        provider_error.stream_started = False
+        llm_results = iter(
+            [
+                LlmPlanResponse(
+                    text='{"action":"shell","shell_command":"python missing.py"}',
+                    usage={}, reasoning={}, model="deepseek-chat",
+                ),
+                LlmPlanResponse(
+                    text='{"action":"skill","skill_tool":"unity_scan_materials","skill_params":{}}',
+                    usage={}, reasoning={}, model="deepseek-chat",
+                ),
+                provider_error,
+            ]
+        )
+
+        def fake_skill(_owner, tool, _params, agent_name=None, owner_id=""):
+            return {
+                "ok": True,
+                "tool": tool,
+                "status": "executed",
+                "result": {"ok": True, "materialCount": 3},
+                "outcome": {
+                    "status": "ok",
+                    "summary": "Material scan completed.",
+                    "verification": {"state": "not_required", "checks": []},
+                },
+            }
+
+        def fake_model(*_args, **_kwargs):
+            response = next(llm_results)
+            if isinstance(response, Exception):
+                raise response
+            return response
+
+        with patch(
+            "dashboard_server.request_llm_plan_with_metadata",
+            side_effect=fake_model,
+        ), patch.object(gateway.shell, "execute", return_value={
+            "ok": False,
+            "status": "failed",
+            "result": {"ok": False, "error": "Command could not be parsed."},
+        }), patch.object(
+            type(gateway.runtime_skills), "execute", autospec=True, side_effect=fake_skill,
+        ):
+            with TestClient(dashboard_server.app) as client:
+                response = client.post(
+                    "/api/app/agent/message",
+                    json={
+                        "message": "检查贴图并报告状态",
+                        "provider": "deepseek",
+                        "providerLabel": "DeepSeek",
+                        "model": "deepseek-chat",
+                        "sessionId": "provider-over-shell-session",
+                        "clientTurnId": "provider-over-shell-turn",
+                        "projectPath": r"C:\Unity\FixtureProject",
+                    },
+                )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        plan = payload["plan"]
+        self.assertEqual(plan["nextStep"], "planner_failed")
+        self.assertEqual(plan.get("completionGate"), {
+            "status": "failed", "reason": "provider_capacity",
+        }, plan)
+        self.assertEqual(plan["plannerFailure"]["code"], "provider_capacity")
+        self.assertEqual(
+            plan["plannerFailure"]["providerError"]["body"]["code"],
+            "server_is_overloaded",
+        )
+        self.assertNotEqual(plan["summary"], "Command could not be parsed.")
+        self.assertEqual(payload["steps"][0]["outcome"]["summary"], "Command could not be parsed.")
+        self.assertEqual(payload["steps"][1]["outcome"]["status"], "ok")
+        self.assertFalse(plan.get("completionClaim", {}).get("satisfied", False))
+
     def test_model_cannot_claim_completion_after_canonical_tool_failure(self) -> None:
+        self._use_deepseek_plan_config()
         gateway = self.gateway
         llm_results = iter(
             [
@@ -2869,7 +3133,7 @@ class AgentLoopP0Tests(unittest.TestCase):
                             "message": "检查材质并确认完成",
                             "provider": "deepseek",
                             "providerLabel": "DeepSeek",
-                            "model": "fixture-model",
+                            "model": "deepseek-chat",
                             "sessionId": "failed-completion-session",
                             "clientTurnId": "failed-completion-turn",
                             "projectPath": r"C:\Unity\FixtureProject",
@@ -2889,6 +3153,7 @@ class AgentLoopP0Tests(unittest.TestCase):
         self.assertEqual(completed[-1]["status"], "failed")
 
     def test_model_cannot_claim_completion_after_shell_failure(self) -> None:
+        self._use_deepseek_plan_config()
         gateway = self.gateway
         llm_results = iter(
             [
@@ -2925,7 +3190,7 @@ class AgentLoopP0Tests(unittest.TestCase):
                             "message": "执行这个主机检查",
                             "provider": "deepseek",
                             "providerLabel": "DeepSeek",
-                            "model": "fixture-model",
+                            "model": "deepseek-chat",
                             "sessionId": "failed-shell-session",
                             "clientTurnId": "failed-shell-turn",
                         },
@@ -2944,6 +3209,7 @@ class AgentLoopP0Tests(unittest.TestCase):
         self.assertEqual(completed[-1]["status"], "failed")
 
     def test_unrelated_success_cannot_clear_an_unresolved_tool_failure(self) -> None:
+        self._use_deepseek_plan_config()
         gateway = self.gateway
         gateway.runtime_sessions.load_internal_tool_block(
             "unrelated-success-session", "unity/materials"
@@ -3013,7 +3279,7 @@ class AgentLoopP0Tests(unittest.TestCase):
                             "message": "完成这个复杂检查",
                             "provider": "deepseek",
                             "providerLabel": "DeepSeek",
-                            "model": "fixture-model",
+                            "model": "deepseek-chat",
                             "sessionId": "unrelated-success-session",
                             "clientTurnId": "unrelated-success-turn",
                             "projectPath": r"C:\Unity\FixtureProject",
@@ -3036,6 +3302,7 @@ class AgentLoopP0Tests(unittest.TestCase):
         self.assertEqual(completed[-1]["status"], "failed")
 
     def test_retrying_one_failed_action_cannot_erase_another_unresolved_failure(self) -> None:
+        self._use_deepseek_plan_config()
         gateway = self.gateway
         llm_results = iter(
             [
@@ -3101,7 +3368,7 @@ class AgentLoopP0Tests(unittest.TestCase):
                             "message": "完成多项检查",
                             "provider": "deepseek",
                             "providerLabel": "DeepSeek",
-                            "model": "fixture-model",
+                            "model": "deepseek-chat",
                             "sessionId": "multiple-failure-session",
                             "clientTurnId": "multiple-failure-turn",
                             "projectPath": r"C:\Unity\FixtureProject",
@@ -3281,7 +3548,7 @@ class AgentLoopP0Tests(unittest.TestCase):
             result = gateway.runtime_message(
                 {
                     "message": "inspect the selected avatar materials",
-                    "provider": "fixture",
+                    "provider": "openai",
                     "model": "fixture",
                     "projectPath": str(project),
                     "projectRoot": str(project),
@@ -3409,7 +3676,7 @@ class AgentLoopP0Tests(unittest.TestCase):
             result = gateway.runtime_message(
                 {
                     "message": "Capture several views and verify their coverage.",
-                    "provider": "fixture",
+                    "provider": "openai",
                     "model": "fixture",
                     "projectPath": str(project),
                     "projectRoot": str(project),
@@ -3451,7 +3718,7 @@ class AgentLoopP0Tests(unittest.TestCase):
             result = gateway.runtime_message(
                 {
                     "message": "Capture front and back views for full coverage.",
-                    "provider": "fixture",
+                    "provider": "openai",
                     "model": "fixture",
                     "projectPath": str(project),
                     "projectRoot": str(project),
@@ -3543,7 +3810,7 @@ class AgentLoopP0Tests(unittest.TestCase):
             return_value=ProviderApiConfig(
                 provider="openai",
                 api_key="fixture-key",
-                base_url="",
+                base_url="https://fixture.invalid/v1",
                 model="gpt-4o",
             ),
         ), patch.object(
@@ -3564,8 +3831,8 @@ class AgentLoopP0Tests(unittest.TestCase):
             initial = gateway.runtime_message(
                 {
                     "message": message,
-                    "provider": "fixture",
-                    "model": "fixture",
+                    "provider": "openai",
+                    "model": "gpt-4o",
                     "projectPath": str(project),
                     "projectRoot": str(project),
                     "session_id": "managed-visual-chain-session",
@@ -3723,6 +3990,131 @@ class AgentLoopP0Tests(unittest.TestCase):
         self.assertEqual(journey["taskId"], initial["task"]["taskId"])
         self.assertEqual(journey["providerRequestCount"], 3)
         self.assertEqual(journey["resultRefeedCount"], 2)
+
+    def test_failed_visual_audit_reenters_planner_once_without_replaying_receipt(self) -> None:
+        gateway = self.gateway
+        session_id = "visual-clipping-correction-session"
+        gateway.runtime_sessions.load_internal_tool_block(session_id, "attachments")
+        project = self._unity_project()
+        plans: list[dict[str, object]] = []
+
+        def plan_agent_turn(*args, **_kwargs):
+            plans.append({"prompt": str(args[1]) if len(args) > 1 else ""})
+            if len(plans) == 1:
+                return {
+                    "planner": "llm",
+                    "skillNeeded": True,
+                    "skillTool": "vision_audit_multi",
+                    "skillParams": {"captureReceipt": "managed-visual-receipt"},
+                    "continueLoop": True,
+                    "nextStep": "call_skill",
+                }
+            return {
+                "planner": "llm",
+                "reply": "仍发现 back 角 clipping，不能宣称完成。",
+                "completionClaim": {"satisfied": False},
+                "continueLoop": False,
+                "nextStep": "done",
+            }
+
+        def failed_visual_audit(_owner, tool_name, _params, agent_name=None, owner_id=""):
+            assert tool_name == "vision_audit_multi"
+            return {
+                "tool": tool_name,
+                "status": "executed",
+                "result": {
+                    "ok": True,
+                    "overallStatus": "clipping",
+                    "coverageComplete": True,
+                    "visualVerified": False,
+                    "captureEvidenceVerified": True,
+                    "results": [{"angle": "back", "status": "clipping"}],
+                    "captureReceipt": "managed-visual-receipt",
+                },
+                "outcome": {"status": "ok", "summary": "back clipping"},
+            }
+
+        with patch.object(
+            gateway.runtime_planner,
+            "plan_agent_turn",
+            side_effect=plan_agent_turn,
+        ), patch.object(
+            type(gateway.runtime_skills),
+            "execute",
+            autospec=True,
+            side_effect=failed_visual_audit,
+        ) as execute_skill:
+            result = gateway.runtime_message(
+                {
+                    "message": "Audit the managed capture and correct any clipping.",
+                    "projectPath": str(project),
+                    "projectRoot": str(project),
+                    "session_id": session_id,
+                    "client_turn_id": "visual-clipping-correction-turn",
+                }
+            )
+
+        assert len(plans) >= 2, result
+        assert execute_skill.call_count == 1
+        assert "overallStatus" in plans[1]["prompt"]
+        assert result["plan"]["nextStep"] in {"needs_user_action", "completion_unverified"}, result
+        assert any(
+            step.get("tool") == "vision_audit_multi"
+            for step in result["steps"]
+        )
+
+
+    def test_visual_correction_continues_after_proven_progress_but_stops_without_it(self) -> None:
+        gateway = self.gateway
+        session_id = "visual-progress-correction-session"
+        gateway.runtime_sessions.load_internal_tool_block(session_id, "attachments")
+        project = self._unity_project()
+        plans: list[dict[str, object]] = []
+
+        def plan_agent_turn(*args, **_kwargs):
+            plans.append({"prompt": str(args[1]) if len(args) > 1 else ""})
+            assert len(plans) <= 3, "An unchanged visual finding must stop before another model call"
+            return {
+                "planner": "llm", "skillNeeded": True,
+                "skillTool": "vrcforge_vision_audit_multi",
+                "skillParams": {"captureReceipt": f"managed-progress-{len(plans)}"},
+                "continueLoop": True, "nextStep": "call_skill",
+            }
+
+        def visual_audit(_owner, tool_name, _params, agent_name=None, owner_id=""):
+            first = len(plans) == 1
+            return {
+                "tool": tool_name, "status": "executed",
+                "result": {
+                    "ok": True, "overallStatus": "clipping",
+                    "coverageComplete": True, "visualVerified": False,
+                    "captureEvidenceVerified": True,
+                    "results": (
+                        [{"angle": "front", "status": "clipping"},
+                         {"angle": "side_left", "status": "pass"}]
+                        if first else
+                        [{"angle": "front", "status": "pass"},
+                         {"angle": "side_left", "status": "pass"},
+                         {"angle": "side_right", "status": "clipping"}]
+                    ),
+                },
+                "outcome": {"status": "needs_user_action", "summary": "structured visual findings"},
+            }
+
+        with patch.object(gateway.runtime_planner, "plan_agent_turn", side_effect=plan_agent_turn), patch.object(
+            type(gateway.runtime_skills), "execute", autospec=True, side_effect=visual_audit,
+        ) as execute_skill:
+            result = gateway.runtime_message({
+                "message": "Inspect the current views and correct the visible problems.",
+                "projectPath": str(project), "projectRoot": str(project),
+                "session_id": session_id, "client_turn_id": "visual-progress-correction-turn",
+            })
+
+        assert execute_skill.call_count == 3, result["plan"]
+        assert len(plans) == 3
+        assert result["plan"]["nextStep"] in {"needs_user_action", "completion_unverified"}
+        assert all(step["result"]["visualVerified"] is False for step in result["steps"])
+        assert result["task"]["status"] != "completed"
 
     def test_permanent_visual_provider_rejection_refeeds_route_and_discards_images(self) -> None:
         gateway = self.gateway
@@ -4088,7 +4480,7 @@ class AgentLoopP0Tests(unittest.TestCase):
             result = gateway.runtime_message(
                 {
                     "message": "Apply the requested project change.",
-                    "provider": "fixture",
+                    "provider": "openai",
                     "model": "fixture",
                     "projectPath": str(project),
                     "projectRoot": str(project),
@@ -4196,7 +4588,7 @@ class AgentLoopP0Tests(unittest.TestCase):
             result = gateway.runtime_message(
                 {
                     "message": "inspect the selected avatar materials",
-                    "provider": "fixture",
+                    "provider": "openai",
                     "model": "fixture",
                     "projectPath": str(project),
                     "projectRoot": str(project),
@@ -4255,7 +4647,7 @@ class AgentLoopP0Tests(unittest.TestCase):
             result = gateway.runtime_message(
                 {
                     "message": "inspect materials with bounded schema correction",
-                    "provider": "fixture",
+                    "provider": "openai",
                     "model": "fixture",
                     "projectPath": str(project),
                     "projectRoot": str(project),
@@ -4300,7 +4692,7 @@ class AgentLoopP0Tests(unittest.TestCase):
         with patch("dashboard_server.request_llm_plan_with_metadata", side_effect=fake_llm), patch.object(
             type(gateway.runtime_skills), "execute", autospec=True, side_effect=execute_skill
         ):
-            result = gateway.runtime_message({"message": "scan avatar", "provider": "fixture", "model": "fixture", "projectPath": str(project), "projectRoot": str(project), "session_id": "schema-reset-session", "client_turn_id": "schema-reset-turn"})
+            result = gateway.runtime_message({"message": "scan avatar", "provider": "openai", "model": "fixture", "projectPath": str(project), "projectRoot": str(project), "session_id": "schema-reset-session", "client_turn_id": "schema-reset-turn"})
 
         self.assertEqual(result["plan"]["nextStep"], "done", result)
         self.assertEqual(len(result["task"]["actions"]), 2)
@@ -4404,6 +4796,65 @@ class AgentLoopP0Tests(unittest.TestCase):
             failed_action_id,
         )
 
+    def test_unverifiable_checkpoint_skip_correction_never_reenters_write_transaction(self) -> None:
+        gateway = self.gateway
+        project = self._unity_project()
+        quote = "Do not create a checkpoint."
+        original = {
+            "projectPath": str(project),
+            "gameObjectPath": "SampleAvatar_Default/SampleAvatar_cloth_bra",
+            "active": True,
+            "executionTarget": self._fixture_execution_target(project),
+        }
+        corrected = dict(original)
+        failed_action_id = canonical_action_id("write", "vrcforge_set_gameobject_active", original)
+        plans = iter([
+            {
+                "planner": "llm", "summary": "Set the bra active.", "writeNeeded": True,
+                "writeTool": "vrcforge_set_gameobject_active", "writeParams": original,
+                "checkpointChoice": {"mode": "skip", "quote": quote},
+                "continueLoop": True, "nextStep": "call_tool",
+            },
+            {
+                "planner": "llm", "summary": "Retry with the refreshed target reference.", "writeNeeded": True,
+                "writeTool": "vrcforge_set_gameobject_active", "writeParams": corrected,
+                "checkpointChoice": {"mode": "skip", "quote": quote},
+                "correctionForActionId": failed_action_id,
+                "continueLoop": False, "nextStep": "call_tool",
+            },
+        ])
+        transaction_calls = []
+        checkpoint_calls = []
+
+        def fail_first_write(*_args, **_kwargs):
+            transaction_calls.append(1)
+            raise dashboard_server.AgentGatewayError("fixture write failure")
+
+        source = {
+            "source": "app_user_message", "message": quote,
+            "sessionId": "checkpoint-correction-session",
+            "turnId": "checkpoint-correction-turn",
+            "clientTurnId": "checkpoint-correction-client-turn",
+            "projectRoot": str(project),
+        }
+        with patch.object(gateway.runtime_planner, "plan_agent_turn", side_effect=lambda *_a, **_k: next(plans)), \
+             patch.object(type(gateway.approval_transactions), "create_apply_request", side_effect=lambda _self, *_a, **_k: fail_first_write(*_a, **_k)), \
+             patch.object(type(gateway.approval_transactions), "_create_pre_write_checkpoint", side_effect=lambda *_a, **_k: checkpoint_calls.append(1)):
+            result = gateway.runtime_message({
+                "message": quote,
+                "projectPath": str(project), "projectRoot": str(project),
+                "session_id": "checkpoint-correction-session",
+                "client_turn_id": "checkpoint-correction-client-turn",
+                "_humanUserMessageSource": source,
+            })
+
+        self.assertEqual(len(transaction_calls), 1, result.get("task", {}).get("actions"))
+        self.assertEqual(checkpoint_calls, [])
+        corrected_action = result["task"]["actions"][-1]
+        self.assertEqual(corrected_action["status"], "needs_user_action")
+        self.assertIn("cannot be proven to be the same", corrected_action["outcome"]["summary"])
+        self.assertIn("not executed and no checkpoint was created", corrected_action["outcome"]["summary"])
+
     def test_outside_project_read_stops_before_cross_tool_or_cwd_retry(self) -> None:
         project = self._unity_project()
         outside = Path(self.temp_dir.name) / "outside.txt"
@@ -4450,6 +4901,67 @@ class AgentLoopP0Tests(unittest.TestCase):
 
     def test_general_source_workspace_is_not_rebound_to_unity_project(self) -> None:
         self._assert_explicit_external_file_scope(True)
+
+    def test_full_permission_reads_absolute_host_path_for_current_turn(self) -> None:
+        project = self._unity_project()
+        outside = Path(self.temp_dir.name) / "full-access-host.txt"
+        outside.write_text("full permission evidence", encoding="utf-8")
+        config = self.gateway.ensure_config()
+        config.execution_mode = "roslyn_full_auto"
+        self.gateway.save_config(config)
+        plan = {
+            "planner": "llm",
+            "skillNeeded": True,
+            "skillTool": "vrcforge_read_text_file",
+            "skillParams": {"path": str(outside)},
+            "continueLoop": False,
+            "nextStep": "call_skill",
+        }
+        with patch.object(self.gateway.runtime_planner, "plan_agent_turn", return_value=plan):
+            result = self.gateway.runtime_message({
+                "message": "Read the host file",
+                "projectRoot": str(project),
+                "session_id": "full-access-host-read",
+            })
+        self.assertEqual(result["steps"][0]["outcome"]["status"], "ok", result)
+        self.assertIn("full permission evidence", str(result["steps"][0]))
+
+    def test_full_permission_scope_does_not_survive_mode_switch(self) -> None:
+        project = self._unity_project()
+        outside = Path(self.temp_dir.name) / "mode-switch-host.txt"
+        outside.write_text("mode switch evidence", encoding="utf-8")
+        plan = {
+            "planner": "llm",
+            "skillNeeded": True,
+            "skillTool": "vrcforge_read_text_file",
+            "skillParams": {"path": str(outside)},
+            "continueLoop": False,
+            "nextStep": "call_skill",
+        }
+        config = self.gateway.ensure_config()
+        config.execution_mode = "roslyn_full_auto"
+        self.gateway.save_config(config)
+        with patch.object(self.gateway.runtime_planner, "plan_agent_turn", return_value=plan):
+            allowed = self.gateway.runtime_message({
+                "message": "Read the host file",
+                "projectRoot": str(project),
+                "session_id": "full-access-mode-switch",
+            })
+        self.assertEqual(allowed["steps"][0]["outcome"]["status"], "ok", allowed)
+        config = self.gateway.ensure_config()
+        config.execution_mode = "approval"
+        self.gateway.save_config(config)
+        with patch.object(self.gateway.runtime_planner, "plan_agent_turn", return_value=plan):
+            denied = self.gateway.runtime_message({
+                "message": "Read the host file again",
+                "projectRoot": str(project),
+                "session_id": "approval-mode-host-read",
+            })
+        self.assertEqual(
+            denied["steps"][0]["outcome"]["error"]["code"],
+            "authorization_scope_denied",
+            denied,
+        )
 
     def _assert_explicit_external_file_scope(self, use_source_workspace: bool) -> None:
         project = self._unity_project()
@@ -5024,6 +5536,7 @@ class AgentLoopP0Tests(unittest.TestCase):
                 },
             }
 
+        emitted = []
         with patch.object(
             gateway.runtime_planner, "plan_agent_turn", side_effect=lambda *_args, **_kwargs: next(plans)
         ), patch.object(
@@ -5031,6 +5544,8 @@ class AgentLoopP0Tests(unittest.TestCase):
             "execute",
             autospec=True,
             side_effect=execute_skill,
+        ), patch.object(
+            gateway, "_runtime_timeline_changed", emitted.append
         ):
             result = gateway.runtime_message(
                 {
@@ -5054,10 +5569,10 @@ class AgentLoopP0Tests(unittest.TestCase):
         self.assertEqual(
             [event.get("kind") for event in timeline],
             [
-                "planner",
+                "assistant",
                 "tool_call",
                 "tool_result",
-                "planner",
+                "assistant",
                 "tool_call",
                 "tool_result",
                 "assistant",
@@ -5070,6 +5585,9 @@ class AgentLoopP0Tests(unittest.TestCase):
         self.assertTrue(all(event.get("timestamp") for event in timeline))
         self.assertNotIn("arguments", json.dumps(timeline))
         self.assertEqual(timeline[-1]["payload"]["summary"], result["plan"]["reply"])
+        recorded = gateway.get_runtime_session("timeline-result-order-session")["session"]["turns"][-1]
+        self.assertEqual(recorded["timeline"], timeline)
+        self.assertEqual([item["timelineEvent"] for item in emitted], timeline)
 
 
 if __name__ == "__main__":

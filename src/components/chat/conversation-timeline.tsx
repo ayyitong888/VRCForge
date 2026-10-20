@@ -8,12 +8,16 @@ import {
   buildRuntimeStepResultQueues,
   buildTimelinePresentation,
   hasDurableExecutionEvents,
+  isFinalAssistantTimelineEvent,
+  isFinalAssistantPresentationEntry,
   runtimeTerminalStatusKey,
   timelineInvocationDisplayLabel,
   type TimelineBatchKind,
   type TimelineInvocation,
+  type TimelinePresentationEntry,
 } from "../../lib/chat-timeline-presentation";
-import type { ApprovalActionState, ChatTimelineEvent } from "../../lib/chat-types";
+import type { ApprovalActionState, ChatTimelineEvent, ConversationItem } from "../../lib/chat-types";
+import { isAgentShellResult } from "../../lib/runtime-parsing";
 import { cn } from "../../lib/utils";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
@@ -29,6 +33,8 @@ type AgentTimelineStep = NonNullable<AgentRuntimeResponse["steps"]>[number] & {
   error?: string;
   historical?: boolean;
 };
+
+type InterleavedUserMessage = Extract<ConversationItem, { type: "user" }>;
 
 export type OrderedAgentStep = {
   step: AgentTimelineStep;
@@ -50,6 +56,11 @@ export function buildAgentTimelineRows({
   providerLine,
   awaitingApproval,
   elapsedSeconds,
+  interleavedUserMessages = [],
+  initialUserContent,
+  interleavedUsersExpanded = false,
+  onInterleavedUsersExpandedChange,
+  renderInterleavedUserMessage,
   t,
 }: {
   response: AgentRuntimeResponse;
@@ -66,6 +77,11 @@ export function buildAgentTimelineRows({
   providerLine: string;
   awaitingApproval: boolean;
   elapsedSeconds?: number;
+  interleavedUserMessages?: InterleavedUserMessage[];
+  initialUserContent?: ReactNode;
+  interleavedUsersExpanded?: boolean;
+  onInterleavedUsersExpandedChange?: (expanded: boolean) => void;
+  renderInterleavedUserMessage?: (message: InterleavedUserMessage) => ReactNode;
   t: typeof i18n.t;
 }): ReactNode[] {
   const durableTimeline = (response.timeline || []) as ChatTimelineEvent[];
@@ -74,10 +90,22 @@ export function buildAgentTimelineRows({
     elapsedSeconds,
     response.plan.plannerFailure?.code,
     response.steps,
+    {
+      providerLine,
+      renderElapsed: true,
+      interleavedUserMessages,
+      initialUserContent,
+      interleavedUsersExpanded,
+      onInterleavedUsersExpandedChange,
+      renderInterleavedUserMessage,
+    },
   );
   const shouldSurfaceModelIdentity = Boolean(response.plan.plannerFailure?.code);
+  const missingFinalAnswer = response.plan.reason === "native_final_answer_missing";
   if (durableRows.length) {
-    const fallbackAnswer = response.plan.reply || response.plan.summary;
+    const phaseTaggedAssistant = durableTimeline.some((event) => event.kind === "assistant" && (
+      event.payload?.phase === "commentary" || event.payload?.phase === "final_answer"
+    ));
     const rows = [...durableRows];
     const orderedSteps = normalizeAgentSteps(response.steps);
     const hasDurableExecution = hasDurableExecutionEvents(durableTimeline);
@@ -102,10 +130,16 @@ export function buildAgentTimelineRows({
     const hasDurableAssistant = durableTimeline.some(
       (event) => event.kind === "assistant" && Boolean(event.payload?.summary),
     );
+    const hasDurableFinalAssistant = durableTimeline.some(isFinalAssistantTimelineEvent);
+    const fallbackAnswer = phaseTaggedAssistant && !hasDurableFinalAssistant
+      ? ""
+      : response.plan.reply || response.plan.summary;
     const hasStepAnswer = orderedSteps.some(({ step }) => isStepKindAnswer(step.kind));
-    if (!hasDurableAssistant && !hasStepAnswer) {
+    if (!hasDurableFinalAssistant && !hasStepAnswer) {
       if (fallbackAnswer) {
         rows.push(renderPlanReplyRow(fallbackAnswer, planLabel, elapsedSeconds, t));
+      } else if (missingFinalAnswer) {
+        rows.push(renderMissingFinalAnswerNotice(t));
       } else if (shouldSurfaceModelIdentity) {
         rows.push(renderPlanIdentityRow(planLabel, elapsedSeconds, t));
       }
@@ -117,7 +151,7 @@ export function buildAgentTimelineRows({
   const orderedSteps = normalizeAgentSteps(response.steps);
   const legacyFallback = orderedSteps.length === 0;
   if (legacyFallback) {
-    return buildLegacyAgentTimelineRows({
+    const legacyRows = buildLegacyAgentTimelineRows({
       response,
       shell,
       vision,
@@ -134,6 +168,9 @@ export function buildAgentTimelineRows({
       elapsedSeconds,
       t,
     });
+    if (Number.isFinite(elapsedSeconds) || providerLine) legacyRows.push(renderTurnMetadataRow(elapsedSeconds, providerLine));
+    if (missingFinalAnswer) legacyRows.push(renderMissingFinalAnswerNotice(t));
+    return legacyRows;
   }
 
   const rows = buildAgentTimelineRowsFromSteps({
@@ -157,11 +194,13 @@ export function buildAgentTimelineRows({
     const fallbackAnswer = response.plan.reply || response.plan.summary;
     if (fallbackAnswer) {
       rows.push(renderPlanReplyRow(fallbackAnswer, planLabel, elapsedSeconds, t));
+    } else if (missingFinalAnswer) {
+      rows.push(renderMissingFinalAnswerNotice(t));
     } else if (shouldSurfaceModelIdentity) {
       rows.push(renderPlanIdentityRow(planLabel, elapsedSeconds, t));
     }
   }
-  return rows.length ? rows : buildLegacyAgentTimelineRows({
+  const fallbackRows = rows.length ? rows : buildLegacyAgentTimelineRows({
     response,
     shell,
     vision,
@@ -178,6 +217,10 @@ export function buildAgentTimelineRows({
     elapsedSeconds,
     t,
   });
+  if (Number.isFinite(elapsedSeconds) && !fallbackRows.some((row) => row && typeof row === "object" && "key" in row && (row as { key?: string }).key === "agent-turn-metadata")) {
+    fallbackRows.push(renderTurnMetadataRow(elapsedSeconds, providerLine));
+  }
+  return fallbackRows;
 }
 
 /** Render the server-owned ordered projection without exposing hidden reasoning. */
@@ -186,11 +229,29 @@ export function buildDurableTimelineRows(
   elapsedSeconds?: number,
   terminalFailureCode = "",
   steps: AgentRuntimeResponse["steps"] = [],
-  options: { includeAssistant?: boolean } = {},
+  options: {
+    includeAssistant?: boolean;
+    live?: boolean;
+    renderElapsed?: boolean;
+    processTitleElapsed?: number;
+    providerLine?: string;
+    suppressTrailingAssistantText?: string;
+    interleavedUserMessages?: InterleavedUserMessage[];
+    initialUserContent?: ReactNode;
+    interleavedUsersExpanded?: boolean;
+    onInterleavedUsersExpandedChange?: (expanded: boolean) => void;
+    renderInterleavedUserMessage?: (message: InterleavedUserMessage) => ReactNode;
+  } = {},
 ): ReactNode[] {
   // Lifecycle evidence stays durable; the right sidebar owns its presentation.
   const presentation = buildTimelinePresentation(events.filter((event) => event.kind !== "subagent"), elapsedSeconds);
-  if (!presentation.entries.length) return [];
+  if (!presentation.entries.length) {
+    return (options.interleavedUserMessages || []).map((message) => options.renderInterleavedUserMessage?.(message) || (
+      <div key={`steer-${message.id}`} data-chat-steering-message={message.id} className="flex justify-end">
+        <div className="max-w-[78%] rounded-2xl bg-muted px-4 py-2.5 text-sm text-foreground">{message.text}</div>
+      </div>
+    ));
+  }
   const resultQueues = buildRuntimeStepResultQueues(steps);
   const takeFullResult = (invocation: TimelineInvocation): unknown => {
     if (!invocation.actionId) return undefined;
@@ -202,79 +263,149 @@ export function buildDurableTimelineRows(
   };
   const rows: ReactNode[] = [];
   const processRows: ReactNode[] = [];
-  const assistantRows: ReactNode[] = [];
-  const includeAssistant = options.includeAssistant !== false;
-  let processEventCount = 0;
-  let processHasFailure = false;
-  let processHasStarted = false;
-  let processGroupIndex = 0;
-  const flushProcessRows = () => {
-    if (!processRows.length) return;
-    rows.push(
-      <div key={`agent-turn-process-${processGroupIndex++}`} data-agent-turn-process-group>
+  const interleavedMessages = [...(options.interleavedUserMessages || [])]
+    .sort((left, right) => parseTimelineTime(left.createdAt) - parseTimelineTime(right.createdAt));
+  let nextInterleavedMessage = 0;
+  const appendMessagesBefore = (timestamp: string) => {
+    const eventTime = parseTimelineTime(timestamp);
+    while (nextInterleavedMessage < interleavedMessages.length) {
+      const message = interleavedMessages[nextInterleavedMessage];
+      if (parseTimelineTime(message.createdAt) > eventTime) break;
+      flushToolCalls();
+      processRows.push(options.renderInterleavedUserMessage?.(message) || (
+        <div key={`steer-${message.id}`} data-chat-steering-message={message.id} className="flex justify-end">
+          <div className="max-w-[78%] rounded-2xl bg-muted px-4 py-2.5 text-sm text-foreground">{message.text}</div>
+        </div>
+      ));
+      nextInterleavedMessage += 1;
+    }
+  };
+  const processInvocations: TimelineInvocation[] = [];
+  let pendingCalls: Array<{ invocation: TimelineInvocation; detail: unknown }> = [];
+  const flushToolCalls = () => {
+    if (!pendingCalls.length) return;
+    const calls = pendingCalls;
+    pendingCalls = [];
+    processRows.push(
+      <div key={`tools-${calls[0].invocation.id}`} data-agent-tool-call-group>
         <WorkSegmentRow
-          kind="process"
-          title={i18n.t("agent.workSegment")}
-          statusLabel={i18n.t("agent.workSegmentItems", { count: processEventCount })}
-          statusTone={processHasFailure ? "danger" : processHasStarted ? "warn" : "muted"}
-          showStatus
+          kind="tool"
+          title={i18n.t("agent.timeline.callTools", { count: calls.length })}
+          statusLabel=""
+          statusTone="muted"
         >
-          {processRows.splice(0)}
+          {calls.map(({ invocation, detail }) => renderDirectTimelineInvocation(invocation, detail))}
         </WorkSegmentRow>
       </div>,
     );
-    processEventCount = 0;
-    processHasFailure = false;
-    processHasStarted = false;
   };
-  if (Number.isFinite(presentation.elapsedSeconds)) {
-    rows.push(
-      <div key="agent-turn-duration" data-agent-turn-duration className="px-1 text-xs text-muted-foreground">
-        {i18n.t("agent.workSegmentElapsed", { duration: formatDuration(presentation.elapsedSeconds || 0) })}
-      </div>,
-    );
-  }
+  const includeAssistant = options.includeAssistant !== false;
+  const turnElapsed = options.processTitleElapsed ?? (options.renderElapsed === false ? undefined : presentation.elapsedSeconds);
+  const finalAssistant = [...presentation.entries].reverse().find((entry) => (
+    (entry.type === "assistant" && entry.status !== "completion_unverified"
+      && !entry.phase && Boolean(terminalFailureCode))
+    || isFinalAssistantPresentationEntry(entry)
+  ));
   for (const entry of presentation.entries) {
+    appendMessagesBefore(entry.startedAt);
     if (entry.type === "assistant") {
+      flushToolCalls();
       if (!includeAssistant) continue;
-      const terminalStatusKey = runtimeTerminalStatusKey(terminalFailureCode);
-      assistantRows.push(terminalStatusKey ? (
-        <div
-          key={entry.id}
-          data-vrcforge-terminal-status={terminalFailureCode}
-          role="status"
-          className="space-y-1.5 rounded-lg border border-destructive/20 bg-destructive/5 px-3 py-2 text-sm leading-relaxed"
-        >
-          <div className="flex items-center gap-1.5 text-xs font-medium text-destructive">
-            <AlertTriangle className="h-3.5 w-3.5" aria-hidden="true" />
-            <span>{i18n.t(terminalStatusKey)}</span>
-          </div>
-          <p className="text-muted-foreground">{entry.text}</p>
-        </div>
-      ) : (
-        <div key={entry.id} className="space-y-1 px-1 text-sm leading-relaxed">
-          <ChatMarkdown text={entry.text} />
-        </div>
-      ));
-      continue;
-    }
-    if (entry.kind === "process") {
-      flushProcessRows();
-      for (const invocation of entry.invocations) {
-        rows.push(renderDirectTimelineInvocation(invocation, takeFullResult(invocation)));
+      if (
+        entry.id === finalAssistant?.id
+        && options.suppressTrailingAssistantText?.trim()
+        && entry.text.trim() === options.suppressTrailingAssistantText.trim()
+      ) {
+        continue;
+      }
+      if (entry.id === finalAssistant?.id) {
+        rows.push(renderFinalAssistantRow(entry, terminalFailureCode));
+      } else {
+        processRows.push(
+          <div key={entry.id} className="space-y-1 px-1 text-sm leading-relaxed" data-chat-quote-content>
+            <ChatMarkdown text={entry.text} />
+          </div>,
+        );
       }
       continue;
     }
     for (const invocation of entry.invocations) {
-      processEventCount += 1;
-      processHasFailure ||= ["failed", "error"].includes(invocation.status.toLowerCase());
-      processHasStarted ||= invocation.status === "started";
-      processRows.push(renderDirectTimelineInvocation(invocation, takeFullResult(invocation)));
+      processInvocations.push(invocation);
+      if (invocation.kind === "process") {
+        flushToolCalls();
+        processRows.push(renderDirectTimelineInvocation(invocation, takeFullResult(invocation)));
+      } else {
+        pendingCalls.push({ invocation, detail: takeFullResult(invocation) });
+      }
     }
   }
-  flushProcessRows();
-  rows.push(...assistantRows);
+  flushToolCalls();
+  while (nextInterleavedMessage < interleavedMessages.length) {
+    const message = interleavedMessages[nextInterleavedMessage++];
+    processRows.push(options.renderInterleavedUserMessage?.(message) || (
+      <div key={`steer-${message.id}`} data-chat-steering-message={message.id} className="flex justify-end">
+        <div className="max-w-[78%] rounded-2xl bg-muted px-4 py-2.5 text-sm text-foreground">{message.text}</div>
+      </div>
+    ));
+  }
+  if (processRows.length) {
+    const group = (
+      <div key="agent-turn-process" data-agent-turn-process-group>
+        <WorkSegmentRow
+          kind="process"
+          title={turnProcessDisplayTitle(turnElapsed, processInvocations, i18n.t)}
+          statusLabel=""
+          statusTone="muted"
+          openByDefault={Boolean(options.live)}
+          controlledOpen={interleavedMessages.length ? options.interleavedUsersExpanded : undefined}
+          onOpenChange={options.onInterleavedUsersExpandedChange}
+          processHeader
+          beforeContent={options.initialUserContent}
+        >
+          {processRows}
+        </WorkSegmentRow>
+      </div>
+    );
+    const collapsedMessages = interleavedMessages.length && !options.interleavedUsersExpanded
+      ? interleavedMessages.map((message) => options.renderInterleavedUserMessage?.(message) || (
+        <div key={`steer-collapsed-${message.id}`} data-chat-steering-message={message.id} className="flex justify-end">
+          <div className="max-w-[78%] rounded-2xl bg-muted px-4 py-2.5 text-sm text-foreground">{message.text}</div>
+        </div>
+      ))
+      : [];
+    rows.unshift(group, ...collapsedMessages);
+  }
+  if (options.providerLine && finalAssistant) {
+    rows.push(<div key="agent-turn-provider" className="mt-2 px-1 text-[10px] leading-relaxed text-muted-foreground/75">{options.providerLine}</div>);
+  }
   return rows;
+}
+
+function renderFinalAssistantRow(entry: Extract<TimelinePresentationEntry, { type: "assistant" }>, terminalFailureCode: string): ReactNode {
+  const terminalStatusKey = runtimeTerminalStatusKey(terminalFailureCode);
+  return terminalStatusKey ? (
+    <div
+      key={entry.id}
+      data-vrcforge-terminal-status={terminalFailureCode}
+      role="status"
+      className="space-y-1.5 rounded-lg border border-destructive/20 bg-destructive/5 px-3 py-2 text-sm leading-relaxed"
+    >
+      <div className="flex items-center gap-1.5 text-xs font-medium text-destructive">
+        <AlertTriangle className="h-3.5 w-3.5" aria-hidden="true" />
+        <span>{i18n.t(terminalStatusKey)}</span>
+      </div>
+      <p className="text-muted-foreground">{entry.text}</p>
+    </div>
+  ) : (
+    <div key={entry.id} className="space-y-1 px-1 text-sm leading-relaxed" data-chat-quote-content>
+      <ChatMarkdown text={entry.text} />
+    </div>
+  );
+}
+
+function parseTimelineTime(value?: string): number {
+  const timestamp = value ? Date.parse(value) : Number.NaN;
+  return Number.isFinite(timestamp) ? timestamp : Number.POSITIVE_INFINITY;
 }
 
 function renderDirectTimelineInvocation(invocation: TimelineInvocation, detail?: unknown): ReactNode {
@@ -291,17 +422,87 @@ function renderDirectTimelineInvocation(invocation: TimelineInvocation, detail?:
     );
   }
   const danger = ["failed", "error"].includes(invocation.status.toLowerCase());
+  const showToolFailure = invocation.kind === "tool" && danger;
   return (
     <RunRow
       key={invocation.id}
       icon={workBatchIcon(invocation.kind)}
-      title={timelineInvocationDisplayLabel(invocation.label)}
+      title={[invocationOperationTitle(invocation, i18n.t), invocationTarget(detail)].filter(Boolean).join(" · ")}
       statusTone={danger ? "danger" : invocation.status === "started" ? "warn" : "ok"}
-      statusLabel={invocation.status}
+      statusLabel={showToolFailure ? i18n.t("skillStatus.failed") : invocation.status}
+      showCompactStatus={showToolFailure}
       detailCard
     >
       <InvocationDetailCard invocation={invocation} detail={detail} />
     </RunRow>
+  );
+}
+
+// Use the persisted result's explicit path, never its prose or file contents,
+// to identify the object. The full path remains in the expandable detail.
+function invocationTarget(detail: unknown): string {
+  if (!detail || typeof detail !== "object" || !("path" in detail)) return "";
+  const path = (detail as { path?: unknown }).path;
+  return typeof path === "string" ? path.trim().replace(/\\/g, "/").split("/").filter(Boolean).pop() || "" : "";
+}
+
+function invocationOperationTitle(invocation: TimelineInvocation, t: typeof i18n.t): string {
+  const tool = timelineInvocationDisplayLabel(invocation.label);
+  const normalizedStatus = invocation.status.toLowerCase();
+  if (["failed", "error", "rejected", "cancelled", "canceled"].some((value) => normalizedStatus.includes(value))) {
+    return invocation.kind === "tool" && ["failed", "error"].includes(normalizedStatus)
+      ? tool
+      : t("agent.timeline.failedTool", { tool });
+  }
+  if (["started", "running", "pending"].includes(normalizedStatus)) {
+    return t("agent.timeline.runningTool", { tool });
+  }
+  switch (tool) {
+    case "read_text_file": return t("agent.timeline.readFile");
+    case "list_directory": return t("agent.timeline.listDirectory");
+    case "find_files": return t("agent.timeline.findFiles");
+    case "search_text": return t("agent.timeline.searchText");
+    case "edit_file": return t("agent.timeline.editFile");
+    case "write_file": return t("agent.timeline.writeFile");
+    case "delete_path": return t("agent.timeline.deletePath");
+    case "move_path": return t("agent.timeline.movePath");
+    case "apply_patch": return t("agent.timeline.applyPatch");
+    case "execute_shell": return t("agent.timeline.runCommand");
+    case "delegate_subagent": return t("agent.timeline.runSubagent");
+    default: return t("agent.timeline.callTool", { tool });
+  }
+}
+
+function turnProcessDisplayTitle(
+  elapsedSeconds: number | undefined,
+  invocations: TimelineInvocation[],
+  t: typeof i18n.t,
+): string {
+  if (Number.isFinite(elapsedSeconds)) return t("agent.turnDuration", { duration: formatDuration(elapsedSeconds || 0) });
+  const kind = invocations[0]?.kind || "process";
+  const failed = invocations.filter((invocation) => ["failed", "error", "rejected", "cancelled", "canceled"].some((value) => invocation.status.toLowerCase().includes(value))).length;
+  if (invocations.length === 1 && !failed) return invocationOperationTitle(invocations[0], t);
+  if (kind === "tool" && invocations.every((invocation) => timelineInvocationDisplayLabel(invocation.label) === "read_text_file")) {
+    return t("agent.timeline.readFiles", { count: invocations.length });
+  }
+  if (kind === "command") return t("agent.timeline.runCommands", { count: invocations.length });
+  if (kind === "subagent") return t("agent.timeline.runSubagents", { count: invocations.length });
+  if (kind === "file_edit") return t("agent.timeline.editFiles", { count: invocations.length });
+  if (kind === "process") return t("agent.timeline.progressUpdates", { count: invocations.length });
+  return t("agent.timeline.callTools", { count: invocations.length });
+}
+
+function renderTurnMetadataRow(elapsedSeconds?: number, providerLine?: string): ReactNode {
+  if (!Number.isFinite(elapsedSeconds) && !providerLine) return null;
+  return (
+    <div
+      key="agent-turn-metadata"
+      data-agent-turn-metadata
+      className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1 border-t border-border/60 px-1 pt-2 text-[10px] leading-relaxed text-muted-foreground"
+    >
+      {Number.isFinite(elapsedSeconds) ? <span>{i18n.t("agent.turnDuration", { duration: formatDuration(elapsedSeconds || 0) })}</span> : null}
+      {providerLine ? <span className="text-muted-foreground/75">{providerLine}</span> : null}
+    </div>
   );
 }
 
@@ -333,7 +534,7 @@ function InvocationDetailCard({ invocation, detail }: { invocation: TimelineInvo
         <div>{title}</div>
         <div className="mt-0.5 break-all font-mono text-[11px] font-normal text-muted-foreground">{invocation.label}</div>
       </div>
-      <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words px-3 py-2.5 font-mono text-xs leading-relaxed text-foreground">
+      <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words select-text px-3 py-2.5 font-mono text-xs leading-relaxed text-foreground">
         {content}
       </pre>
       <div
@@ -347,14 +548,6 @@ function InvocationDetailCard({ invocation, detail }: { invocation: TimelineInvo
       </div>
     </div>
   );
-}
-
-function workBatchTitle(kind: TimelineBatchKind, count: number): string {
-  if (kind === "command") return i18n.t("agent.commandBatch");
-  if (kind === "tool") return i18n.t("agent.toolBatch");
-  if (kind === "file_edit") return i18n.t("agent.workSegmentFiles", { count });
-  if (kind === "subagent") return i18n.t("agent.subagentBatch");
-  return i18n.t("agent.workSegment");
 }
 
 function workBatchIcon(kind: TimelineBatchKind): "shell" | "skill" | "plan" {
@@ -642,15 +835,13 @@ function buildLegacyAgentTimelineRows({
   t: typeof i18n.t;
 }): ReactNode[] {
   const rows: ReactNode[] = [];
+  const shellExecutionResult = shell && isAgentShellResult(shell.result) ? shell.result : undefined;
   const planReply = response.plan.reply || response.plan.summary;
   const shouldSurfaceModelIdentity = Boolean(response.plan.plannerFailure?.code);
   rows.push(
     <div key="reply" className="px-1 text-sm">
-      <ChatMarkdown text={planReply} />
-      <div className="mt-1 flex items-center gap-2 text-[10px] text-muted-foreground">
-        {planLabel ? <span>{planLabel}</span> : null}
-        {elapsedSeconds ? <span>{t("agent.elapsed", { time: formatDuration(elapsedSeconds) })}</span> : null}
-      </div>
+      <div data-chat-quote-content><ChatMarkdown text={planReply} /></div>
+      {planLabel ? <div className="mt-2 text-[10px] leading-relaxed text-muted-foreground/75">{planLabel}</div> : null}
     </div>,
   );
   if (!planReply && shouldSurfaceModelIdentity && planLabel) {
@@ -713,10 +904,10 @@ function buildLegacyAgentTimelineRows({
         key="shell"
         icon="shell"
         title={shell.classification.command}
-        statusTone={shell.result ? (shell.result.ok ? "ok" : "danger") : awaitingApproval ? "warn" : riskTone(shell.classification.risk)}
+        statusTone={shellExecutionResult ? (shellExecutionResult.ok ? "ok" : "danger") : awaitingApproval ? "warn" : riskTone(shell.classification.risk)}
         statusLabel={
-          shell.result
-            ? t("shell.exitCodeDuration", { code: shell.result.exitCode, time: formatDuration(shell.result.durationSeconds) })
+          shellExecutionResult
+            ? t("shell.exitCodeDuration", { code: shellExecutionResult.exitCode, time: formatDuration(shellExecutionResult.durationSeconds) })
             : awaitingApproval
               ? t("shell.awaitConfirmation")
               : t("shell.riskLevel", { level: shell.classification.risk })
@@ -735,11 +926,11 @@ function buildLegacyAgentTimelineRows({
             ))}
           </div>
         ) : null}
-        {shell.result ? (
+        {shellExecutionResult ? (
           <>
-            <DataLine label={t("shell.elapsed")} value={formatDuration(shell.result.durationSeconds)} />
-            <OutputBlock label={t("shell.output")} value={shell.result.stdout} />
-            {shell.result.stderr ? <OutputBlock label={t("shell.errorOutput")} value={shell.result.stderr} danger /> : null}
+            <DataLine label={t("shell.elapsed")} value={formatDuration(shellExecutionResult.durationSeconds)} />
+            <OutputBlock label={t("shell.output")} value={shellExecutionResult.stdout} />
+            {shellExecutionResult.stderr ? <OutputBlock label={t("shell.errorOutput")} value={shellExecutionResult.stderr} danger /> : null}
           </>
         ) : null}
       </RunRow>,
@@ -871,11 +1062,21 @@ function renderPlanReplyRow(
 ) {
   return (
     <div key={key} className="px-1 text-sm">
-      <ChatMarkdown text={answer} />
-      <div className="mt-1 flex items-center gap-2 text-[10px] text-muted-foreground">
-        {planLabel ? <span>{planLabel}</span> : null}
-        {elapsedSeconds ? <span>{t("agent.elapsed", { time: formatDuration(elapsedSeconds) })}</span> : null}
-      </div>
+      <div data-chat-quote-content><ChatMarkdown text={answer} /></div>
+      {planLabel ? <div className="mt-2 text-[10px] leading-relaxed text-muted-foreground/75">{planLabel}</div> : null}
+    </div>
+  );
+}
+
+function renderMissingFinalAnswerNotice(t: typeof i18n.t) {
+  return (
+    <div
+      key="missing-final-answer"
+      data-vrcforge-missing-final-answer
+      role="status"
+      className="mt-2 rounded-lg border border-border bg-muted/30 px-3 py-2 text-sm leading-relaxed text-muted-foreground"
+    >
+      {t("chat.runtimeTerminal.missingFinalAnswerNotice")}
     </div>
   );
 }
@@ -892,7 +1093,6 @@ function renderPlanIdentityRow(
   return (
     <div key={key} className="px-1 text-[10px] text-muted-foreground">
       <span>{planLabel}</span>
-      {elapsedSeconds ? <span className="ml-2">{t("agent.elapsed", { time: formatDuration(elapsedSeconds) })}</span> : null}
     </div>
   );
 }
@@ -917,6 +1117,7 @@ export function RunRow({
   children,
   timelineOrder,
   detailCard = false,
+  showCompactStatus = false,
 }: {
   icon: "shell" | "skill" | "plan" | "vision";
   title: string;
@@ -925,6 +1126,7 @@ export function RunRow({
   children: ReactNode;
   timelineOrder?: number;
   detailCard?: boolean;
+  showCompactStatus?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const Icon = icon === "shell" ? TerminalSquare : icon === "skill" ? Wrench : icon === "vision" ? Eye : ListChecks;
@@ -933,12 +1135,13 @@ export function RunRow({
     <div className="text-muted-foreground" style={timelineOrder !== undefined ? { order: timelineOrder } : undefined}>
       <button
         type="button"
+        aria-expanded={open}
         onClick={() => setOpen((value) => !value)}
         className="group/run flex w-full min-w-0 items-center gap-2 rounded-md px-1 py-1 text-left transition-colors hover:bg-muted/50"
       >
         <Icon className="h-3.5 w-3.5 shrink-0" />
-        <span className="min-w-0 truncate text-xs">{compactExecution ? (icon === "shell" ? i18n.t("agent.runCommand") : i18n.t("agent.callTool")) : title}</span>
-        {!compactExecution ? <span className={cn("shrink-0 text-xs", statusTone === "danger" ? "text-destructive" : statusTone === "warn" ? "text-amber-600" : statusTone === "ok" ? "text-emerald-600" : "text-muted-foreground")}>
+        <span className="min-w-0 truncate text-xs" title={title}>{title}</span>
+        {!compactExecution || showCompactStatus ? <span className={cn("shrink-0 text-xs", statusTone === "danger" ? "text-destructive" : statusTone === "warn" ? "text-amber-600" : statusTone === "ok" ? "text-emerald-600" : "text-muted-foreground")}>
           {statusLabel}
         </span> : null}
         <span className="ml-auto shrink-0 opacity-0 transition-opacity group-hover/run:opacity-100 group-focus-visible/run:opacity-100">
@@ -960,6 +1163,11 @@ function WorkSegmentRow({
   statusLabel,
   statusTone,
   showStatus = false,
+  openByDefault = false,
+  controlledOpen,
+  onOpenChange,
+  processHeader = false,
+  beforeContent,
   children,
 }: {
   kind: TimelineBatchKind;
@@ -967,25 +1175,48 @@ function WorkSegmentRow({
   statusLabel: string;
   statusTone: "danger" | "warn" | "muted";
   showStatus?: boolean;
+  openByDefault?: boolean;
+  controlledOpen?: boolean;
+  onOpenChange?: (open: boolean) => void;
+  processHeader?: boolean;
+  beforeContent?: ReactNode;
   children: ReactNode;
 }) {
-  const [open, setOpen] = useState(false);
+  const [localOpen, setLocalOpen] = useState(openByDefault);
+  const open = controlledOpen ?? localOpen;
   return (
     <div className="text-muted-foreground">
       <button
         type="button"
         aria-expanded={open}
-        onClick={() => setOpen((value) => !value)}
-        className="group/work-segment flex w-full min-w-0 items-center gap-2 rounded-md px-1 py-1 text-left transition-colors hover:bg-muted/50"
+        onClick={() => {
+          const next = !open;
+          if (controlledOpen === undefined) setLocalOpen(next);
+          onOpenChange?.(next);
+        }}
+        className="group/work-segment flex w-full min-w-0 items-center gap-2 px-1 py-2 text-left transition-colors hover:bg-muted/50"
       >
-        {kind === "command" ? <TerminalSquare className="h-3.5 w-3.5 shrink-0" /> : kind === "tool" || kind === "file_edit" ? <Wrench className="h-3.5 w-3.5 shrink-0" /> : <ListChecks className="h-3.5 w-3.5 shrink-0" />}
-        <span className="min-w-0 truncate text-xs">{kind === "command" ? i18n.t("agent.runCommand") : i18n.t("agent.callTool")}</span>
-        {showStatus ? <span className={cn("shrink-0 text-xs", statusTone === "danger" ? "text-destructive" : statusTone === "warn" ? "text-amber-600" : "text-muted-foreground")}>{statusLabel}</span> : null}
-        <span className="ml-auto shrink-0 opacity-0 transition-opacity group-hover/work-segment:opacity-100 group-focus-visible/work-segment:opacity-100">
-          {open ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
-        </span>
+        {processHeader ? (
+          <>
+            <span className="inline-flex min-w-0 items-center gap-1.5 text-sm leading-relaxed">
+              <span className="truncate">{title}</span>
+              {open ? <ChevronDown className="h-3.5 w-3.5 shrink-0" /> : <ChevronRight className="h-3.5 w-3.5 shrink-0" />}
+            </span>
+            {showStatus ? <span className={cn("shrink-0 text-xs", statusTone === "danger" ? "text-destructive" : statusTone === "warn" ? "text-amber-600" : "text-muted-foreground")}>{statusLabel}</span> : null}
+          </>
+        ) : (
+          <>
+            {kind === "command" ? <TerminalSquare className="h-3.5 w-3.5 shrink-0" /> : kind === "tool" || kind === "file_edit" ? <Wrench className="h-3.5 w-3.5 shrink-0" /> : <ListChecks className="h-3.5 w-3.5 shrink-0" />}
+            <span className="min-w-0 truncate text-sm leading-relaxed">{title}</span>
+            {showStatus ? <span className={cn("shrink-0 text-xs", statusTone === "danger" ? "text-destructive" : statusTone === "warn" ? "text-amber-600" : "text-muted-foreground")}>{statusLabel}</span> : null}
+            <span className="ml-auto shrink-0 opacity-0 transition-opacity group-hover/work-segment:opacity-100 group-focus-visible/work-segment:opacity-100">
+              {open ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+            </span>
+          </>
+        )}
       </button>
-      {open ? <div className="mt-1 space-y-1 rounded-lg bg-muted/20 py-1">{children}</div> : null}
+      {beforeContent ? <div className="mt-3">{beforeContent}</div> : null}
+      {open ? <div className="mt-3 space-y-3 py-1" data-agent-process-content>{children}</div> : null}
     </div>
   );
 }

@@ -118,16 +118,16 @@ def test_shader_workflow_capture_redacts_paths_and_exports_vsk(tmp_path: Path) -
         "status": "passed",
         "workflow": "shader_adapter_semantic_tuning",
         "variables": {
-            "projectPath": "E:\\unity\\milltina",
-            "avatarPath": "Milltina",
-            "rendererPath": "Milltina/Milltina_cloth_apron",
+            "projectPath": "E:\\unity\\sample-avatar",
+            "avatarPath": "SampleAvatar",
+            "rendererPath": "SampleAvatar/SampleAvatar_cloth_apron",
             "slotIndex": 0,
         },
         "requirements": {
             "packageId": "com.poiyomi.toon",
             "repository": "https://vpm.poiyomi.com/vpm.json",
             "targetShader": "Poiyomi Toon",
-            "targetShaderAssetPath": "E:\\unity\\milltina\\Packages\\com.poiyomi.toon\\Shaders\\Poiyomi Toon.shader",
+            "targetShaderAssetPath": "E:\\unity\\sample-avatar\\Packages\\com.poiyomi.toon\\Shaders\\Poiyomi Toon.shader",
         },
         "steps": [
             "scan_materials",
@@ -183,15 +183,15 @@ def test_optimizer_capture_uses_variables_for_project_paths() -> None:
     proof = {
         "status": "passed",
         "workflow": "optimizer_conservative_profile",
-        "projectPath": "C:\\Users\\xiao123\\AvatarProject",
+        "projectPath": "C:\\Users\\ExampleUser\\AvatarProject",
         "avatarPath": "AvatarRoot",
         "steps": [
             {
                 "name": "optimizer.apply",
                 "tool": "optimization.meshia.simplify-apply-request",
                 "params": {
-                    "projectRoot": "C:\\Users\\xiao123\\AvatarProject",
-                    "artifactPath": "C:\\Users\\xiao123\\AvatarProject\\Assets\\VRCForge\\proof.json",
+                    "projectRoot": "C:\\Users\\ExampleUser\\AvatarProject",
+                    "artifactPath": "C:\\Users\\ExampleUser\\AvatarProject\\Assets\\VRCForge\\proof.json",
                     "rendererPath": "AvatarRoot/Hat",
                 },
             }

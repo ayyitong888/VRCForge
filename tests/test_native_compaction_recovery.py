@@ -27,7 +27,7 @@ def test_native_recovery_survives_snapshot_cas_begin_and_restore():
     first, second = recovery(), recovery("SECOND_ARCHIVE_TAIL")
     turn.add_recoveries([first, first])
     before = turn.snapshot()
-    turn.replace_completed_prefix(before, "Earlier summary", recovery=second)
+    turn.replace_compacted_history(before, "Earlier summary", recovery=second)
     assert turn.recoveries() == [first, second]
     turn.recoveries()[0]["summary"] = "mutated copy"
     assert turn.recoveries()[0] == first
@@ -98,6 +98,21 @@ def test_archive_without_reader_never_claims_readable_or_enters_prompt():
     assert "compactionRecoveryInformation" not in model.requests[-1]["messages"][-1]["content"]
 
 
+def test_native_recovery_uses_one_bounded_catalog_for_many_archives():
+    _, planner, _, turn = fixture(prior=False)
+    archives = [recovery(f"ARCHIVE_{index}") for index in range(20)]
+    turn.add_recoveries(archives)
+    calls = []
+    turn.retain_recovery = lambda value: (_ for _ in ()).throw(AssertionError("per-archive projection used"))
+    turn.retain_recovery_catalog = lambda values: calls.append(values) or "CATALOG_READER_REF"
+    request = {"messages": [{"role": "system", "content": "Current runtime state (data): {}"}]}
+    rebound = planner._native_recovery_request(request, turn)
+    state = json.loads(rebound["messages"][-1]["content"].split(": ", 1)[1])
+    assert state["compactionRecoveryInformation"] == ["CATALOG_READER_REF"]
+    assert len(calls) == 1 and len(calls[0]) == 20
+    assert len(rebound["messages"][-1]["content"]) < 200
+
+
 def test_recovery_page_is_measured_before_compaction_commits():
     compactor = RecoveringCompactor()
     _, planner, model, turn = fixture(compactor)
@@ -115,7 +130,7 @@ def test_stale_cas_does_not_install_new_archive():
     state.append_native_user("s", binding="b", message="new steer")
     current = turn.snapshot()
     with pytest.raises(ValueError, match="compare-and-replace"):
-        turn.replace_completed_prefix(before, "Summary", recovery=recovery())
+        turn.replace_compacted_history(before, "Summary", recovery=recovery())
     assert turn.snapshot() == current
 
 

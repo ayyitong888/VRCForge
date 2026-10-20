@@ -128,7 +128,14 @@ def compact_chat_items(chat: dict[str, Any], result: dict[str, Any], *, history_
     retained_ids.update(item.get("id") for item in items if item.get("type") in {
         "result", "approval_revision", "subagent", "handoff_card", "error"
     })
-    retained = [item for item in items if item.get("id") in retained_ids]
+    # Keep every persisted item.  The runtime projection understands the
+    # marker below and filters only the source ids covered by this summary;
+    # dropping rows here made a normal channel compact irreversibly erase the
+    # visible transcript after a reload.
+    covered_ids = {
+        item.get("id") for item in items
+        if isinstance(item.get("id"), str) and item.get("id") not in retained_ids
+    }
     # Keep the durable reply/recovery payload, but invalidate provider usage
     # measured against the pre-compaction context window.
     retained = [
@@ -136,7 +143,7 @@ def compact_chat_items(chat: dict[str, Any], result: dict[str, Any], *, history_
                                 if key != "contextUsage"}}
          if item.get("type") == "agent" and isinstance(item.get("response"), dict)
          else item)
-        for item in retained
+        for item in items
     ]
     prior_recovery: list[dict[str, Any]] = []
     for item in items:
@@ -146,12 +153,13 @@ def compact_chat_items(chat: dict[str, Any], result: dict[str, Any], *, history_
     compact_item = {
         "id": f"compact:{result.get('summaryDigest') or 'session'}",
         "type": "compact", "text": "Context compacted", "detail": summary,
+        "summarizedItemIds": sorted(covered_ids),
         "status": "completed", "compactionRecovery": [*prior_recovery, recovery],
         "entryCount": result.get("entryCount"),
         "retainedEntryCount": result.get("retainedEntryCount"),
     }
     updated = {key: value for key, value in chat.items() if key != "contextUsageCache"}
-    updated = {**updated, "sessionId": f"sess_compact_{secrets.token_urlsafe(18)}", "items": [compact_item, *retained],
+    updated = {**updated, "sessionId": f"sess_compact_{secrets.token_urlsafe(18)}", "items": [*retained, compact_item],
             "compaction": {"status": "applied", "summaryDigest": result.get("summaryDigest"),
                            "sourceDigest": result.get("sourceDigest"), "provider": result.get("provider"),
                            "model": result.get("model")}}

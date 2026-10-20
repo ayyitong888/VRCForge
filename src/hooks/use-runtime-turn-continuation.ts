@@ -1,11 +1,66 @@
 import { useCallback, useEffect, useRef } from "react";
 import type { AgentQuestion, AgentRuntimeResponse, AgentRuntimeRun } from "../lib/api";
 import type { ChatThread, ConversationItem } from "../lib/chat-types";
+import type { AgentRuntimeDeltaEvent } from "../lib/chat-streaming";
+import { applyAgentRuntimeDeltaToStreamingItem } from "../lib/chat-streaming";
 
 const RUNTIME_TURN_EVENT_SCHEMA = "vrcforge.runtime_turn_event.v1";
 const RUNTIME_CONTINUATION_SOURCES = new Set(["approval_finished", "shell_process_finished", "sub_agent_finished", "question_answered", "foreground_completed"]);
 const MAX_PENDING_CONTINUATIONS = 32;
 const MAX_DELIVERED_CONTINUATIONS = 512;
+const PLANNER_FAILURE_RETRY_ATTEMPTS_LIMIT = 100;
+const SAFE_IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$/;
+
+type PlannerFailure = NonNullable<AgentRuntimeResponse["plan"]["plannerFailure"]>;
+
+function safePlannerIdentifier(value: unknown): string | undefined {
+  return typeof value === "string" && SAFE_IDENTIFIER.test(value) ? value : undefined;
+}
+
+function plannerFailureRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+function sanitizePlannerFailure(value: unknown): PlannerFailure | undefined {
+  const source = plannerFailureRecord(value);
+  if (!source) return undefined;
+  const result: PlannerFailure = {};
+  for (const key of ["code", "phase", "transportPhase"] as const) {
+    const identifier = safePlannerIdentifier(source[key]);
+    if (identifier) result[key] = identifier;
+  }
+  if (typeof source.retryable === "boolean") result.retryable = source.retryable;
+  if (Number.isInteger(source.retryAttempts)
+    && typeof source.retryAttempts === "number"
+    && source.retryAttempts >= 0
+    && source.retryAttempts <= PLANNER_FAILURE_RETRY_ATTEMPTS_LIMIT) {
+    result.retryAttempts = source.retryAttempts;
+  }
+  if (source.retryDecision === "NO_MORE_RETRY" || source.retryDecision === "CANCELLED") {
+    result.retryDecision = source.retryDecision;
+  }
+  const providerSource = plannerFailureRecord(source.providerError);
+  if (providerSource) {
+    const providerError: NonNullable<PlannerFailure["providerError"]> = {};
+    for (const key of ["type", "code"] as const) {
+      const identifier = safePlannerIdentifier(providerSource[key]);
+      if (identifier) providerError[key] = identifier;
+    }
+    if (Number.isInteger(providerSource.statusCode)
+      && typeof providerSource.statusCode === "number"
+      && providerSource.statusCode >= 100
+      && providerSource.statusCode <= 599) {
+      providerError.statusCode = providerSource.statusCode;
+    }
+    if (typeof providerSource.streamStarted === "boolean") {
+      providerError.streamStarted = providerSource.streamStarted;
+    }
+    if (Object.keys(providerError).length > 0) result.providerError = providerError;
+  }
+  return Object.keys(result).length > 0 ? result : undefined;
+}
 
 export type RuntimeTurnEvent = {
   schema?: string;
@@ -13,11 +68,20 @@ export type RuntimeTurnEvent = {
   sessionId?: string;
   turnId?: string;
   clientTurnId?: string;
+  consumedSteerInputIds?: string[];
+  contextUsage?: AgentRuntimeResponse["contextUsage"];
   plan?: {
     summary?: string;
     reply?: string;
     planner?: string;
     nextStep?: string;
+    reason?: string;
+    publicMessages?: Array<{
+      id: string;
+      text: string;
+      phase?: "commentary" | "final_answer";
+    }>;
+    plannerFailure?: AgentRuntimeResponse["plan"]["plannerFailure"];
     taskCompletion?: Record<string, unknown>;
   };
   timeline?: AgentRuntimeResponse["timeline"];
@@ -78,6 +142,157 @@ export function projectAgentQuestionContinuation(
   };
 }
 
+const QUESTION_CONTINUATION_STREAM_PREFIX = "question-continuation:";
+const ACTIVE_QUESTION_CONTINUATION_STATUSES = new Set(["running", "queued", "cancelling"]);
+
+/** Project only server-confirmed active question continuations into their owning chat. */
+export function projectQuestionContinuationActivity(
+  chat: ChatThread,
+  questions: AgentQuestion[],
+  runs: AgentRuntimeRun[],
+  settledClientTurnIds: ReadonlySet<string> = new Set(),
+  nowIso = new Date().toISOString(),
+): ChatThread {
+  const active = new Map<string, Extract<ConversationItem, { type: "streaming" }>>();
+  for (const source of questions) {
+    const sessionId = source.runtimeContinuation?.sessionId || source.sessionId || "";
+    if (!sessionId || sessionId !== chat.sessionId) continue;
+    const question = projectAgentQuestionContinuation(source, runs);
+    const continuation = question.runtimeContinuation;
+    const status = String(continuation?.status || "").toLowerCase();
+    const clientTurnId = String(continuation?.clientTurnId || "").trim();
+    if (!clientTurnId || settledClientTurnIds.has(clientTurnId) || !ACTIVE_QUESTION_CONTINUATION_STATUSES.has(status)) continue;
+    const turnSessionId = continuation?.sessionId || question.sessionId;
+    if (turnSessionId !== chat.sessionId) continue;
+    const id = `${QUESTION_CONTINUATION_STREAM_PREFIX}${clientTurnId}`;
+    const run = runs.find((candidate) => candidate.sessionId === chat.sessionId && candidate.clientTurnId === clientTurnId);
+    active.set(id, {
+      id,
+      type: "streaming",
+      clientTurnId,
+      text: "",
+      phase: undefined,
+      providerLabel: run?.providerLabel || run?.provider,
+      model: run?.model,
+      createdAt: run?.createdAt || nowIso,
+    });
+  }
+
+  let changed = false;
+  const items = chat.items.filter((item) => {
+    if (item.type !== "streaming" || !item.id.startsWith(QUESTION_CONTINUATION_STREAM_PREFIX)) return true;
+    if (active.has(item.id)) return true;
+    changed = true;
+    return false;
+  });
+  for (const [id, item] of active) {
+    const existingIndex = items.findIndex((candidate) => candidate.type === "streaming" && candidate.id === id);
+    if (existingIndex < 0) {
+      // A completed reply is durable; a stale run snapshot must not resurrect its activity row.
+      const alreadyDelivered = items.some((candidate) => candidate.type === "agent"
+        && (candidate.response.clientTurnId === item.clientTurnId
+          || (candidate.response.turnId || candidate.response.turn_id) === item.clientTurnId));
+      if (!alreadyDelivered) {
+        items.push(item);
+        changed = true;
+      }
+      continue;
+    }
+    const existing = items[existingIndex];
+    if (existing?.type === "streaming" && (existing.providerLabel !== item.providerLabel || existing.model !== item.model)) {
+      items[existingIndex] = { ...existing, providerLabel: item.providerLabel, model: item.model };
+      changed = true;
+    }
+  }
+  return changed ? { ...chat, items } : chat;
+}
+
+export function applyQuestionContinuationDelta(
+  chats: ChatThread[],
+  updateChat: (chatId: string, updater: (chat: ChatThread) => ChatThread) => boolean,
+  delta: AgentRuntimeDeltaEvent,
+): boolean {
+  const clientTurnId = String(delta.clientTurnId || "").trim();
+  const sessionId = String(delta.sessionId || "").trim();
+  if (!clientTurnId || !sessionId) return false;
+  const id = `${QUESTION_CONTINUATION_STREAM_PREFIX}${clientTurnId}`;
+  const ownerChat = chats.find((chat) => chat.sessionId === sessionId
+    && chat.items.some((item) => item.type === "streaming" && item.id === id));
+  if (!ownerChat) return false;
+  return updateChat(ownerChat.id, (chat) => {
+    if (chat.sessionId !== sessionId) return chat;
+    const index = chat.items.findIndex((item) => item.type === "streaming" && item.id === id);
+    const current = chat.items[index];
+    if (index < 0 || current?.type !== "streaming") return chat;
+    const items = [...chat.items];
+    items[index] = applyAgentRuntimeDeltaToStreamingItem(current, delta);
+    return { ...chat, items };
+  });
+}
+
+export function applyRuntimeSteerConsumptionDelta(
+  chats: ChatThread[],
+  updateChat: (chatId: string, updater: (chat: ChatThread) => ChatThread) => boolean,
+  delta: AgentRuntimeDeltaEvent,
+): boolean {
+  const sessionId = String(delta.sessionId || "").trim();
+  const clientTurnId = String(delta.clientTurnId || "").trim();
+  const consumed = new Set((delta.consumedSteerInputIds || [])
+    .filter((id) => typeof id === "string" && /^[A-Za-z0-9_.:-]{1,240}$/.test(id)).slice(0, 256));
+  if (!sessionId || !clientTurnId || !consumed.size) return false;
+  let changed = false;
+  for (const owner of chats.filter((chat) => chat.sessionId === sessionId)) {
+    changed = updateChat(owner.id, (current) => {
+      if (current.sessionId !== sessionId) return current;
+      let updated = false;
+      const items = current.items.map((item) => {
+        if (item.type !== "user" || !consumed.has(item.clientTurnId || "")
+          || (!item.queuedFrom && !item.queueStatus)) return item;
+        updated = true;
+        // Keep this input's same-turn provenance while its stream is active.
+        // The terminal receipt below clears it when the response settles.
+        return { ...item, queuedFrom: true, composerQueued: undefined, queueStatus: undefined, queueEnvelope: undefined };
+      });
+      return updated ? { ...current, items } : current;
+    }) || changed;
+  }
+  return changed;
+}
+
+export function useQuestionContinuationActivity({
+  chats,
+  questions,
+  runs,
+  updateChat,
+  settledClientTurnIds,
+}: {
+  chats: ChatThread[];
+  questions: AgentQuestion[];
+  runs: AgentRuntimeRun[];
+  updateChat: (chatId: string, updater: (chat: ChatThread) => ChatThread) => boolean;
+  settledClientTurnIds: ReadonlySet<string>;
+}) {
+  const chatsRef = useRef(chats);
+  const updateChatRef = useRef(updateChat);
+  chatsRef.current = chats;
+  updateChatRef.current = updateChat;
+
+  useEffect(() => {
+    for (const chat of chats) {
+      const next = projectQuestionContinuationActivity(chat, questions, runs, settledClientTurnIds);
+      if (next !== chat) updateChat(chat.id, (current) => (
+        projectQuestionContinuationActivity(current, questions, runs, settledClientTurnIds)
+      ));
+    }
+  }, [chats, questions, runs, updateChat, settledClientTurnIds]);
+
+  return useCallback((delta: AgentRuntimeDeltaEvent) => {
+    const consumed = applyRuntimeSteerConsumptionDelta(chatsRef.current, updateChatRef.current, delta);
+    const activity = applyQuestionContinuationDelta(chatsRef.current, updateChatRef.current, delta);
+    return consumed || activity;
+  }, []);
+}
+
 type UseRuntimeTurnContinuationParams = {
   chats: ChatThread[];
   appendToChat: (chatId: string, item: ConversationItem) => void;
@@ -122,9 +337,10 @@ function runtimeTurnEvent(value: unknown): RuntimeTurnEvent | null {
   return event;
 }
 
-function responseFromRuntimeTurnEvent(event: RuntimeTurnEvent): AgentRuntimeResponse {
+export function responseFromRuntimeTurnEvent(event: RuntimeTurnEvent): AgentRuntimeResponse {
   const sessionId = event.sessionId!.trim();
   const turnId = event.turnId!.trim();
+  const plannerFailure = sanitizePlannerFailure(event.plan?.plannerFailure);
   return {
     ok: true,
     session_id: sessionId,
@@ -132,6 +348,8 @@ function responseFromRuntimeTurnEvent(event: RuntimeTurnEvent): AgentRuntimeResp
     turn_id: turnId,
     turnId,
     clientTurnId: event.clientTurnId?.trim() || undefined,
+    consumedSteerInputIds: event.consumedSteerInputIds?.filter((id) => typeof id === "string" && /^[A-Za-z0-9_.:-]{1,240}$/.test(id)).slice(0, 256),
+    contextUsage: event.contextUsage,
     observe: {},
     plan: {
       summary: event.plan?.summary || "",
@@ -139,6 +357,9 @@ function responseFromRuntimeTurnEvent(event: RuntimeTurnEvent): AgentRuntimeResp
       planner: event.plan?.planner || "runtime",
       shellNeeded: false,
       nextStep: event.plan?.nextStep || "done",
+      reason: event.plan?.reason,
+      publicMessages: event.plan?.publicMessages,
+      plannerFailure,
       taskCompletion: event.plan?.taskCompletion,
     },
     timeline: event.timeline,
@@ -203,6 +424,15 @@ export function useRuntimeTurnContinuationDelivery({
       }
     }
     pendingRef.current.delete(key);
+    const consumed = new Set(responseFromRuntimeTurnEvent(event).consumedSteerInputIds || []);
+    if (consumed.size) {
+      updateChatRef.current?.(ownerChat.id, (current) => ({
+        ...current,
+        items: current.items.map((item) => item.type === "user" && consumed.has(item.clientTurnId || "")
+          ? { ...item, queuedFrom: false, composerQueued: undefined, queueStatus: undefined, queueEnvelope: undefined }
+          : item),
+      }));
+    }
     if (deliveryState === "replace-failed") {
       const replaced = updateChatRef.current?.(ownerChat.id, (chat) => ({
         ...chat,

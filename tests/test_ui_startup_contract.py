@@ -12,7 +12,7 @@ def _read(relative_path: str) -> str:
 
 def test_startup_restores_project_without_activating_historical_chat() -> None:
     source = _read("src/hooks/use-chat-sessions.ts")
-    start = source.index("restoredChatPathKeyRef.current = restorePathKey;")
+    start = source.index("restoredChatRequestKeyRef.current = restoreRequestKey;")
     end = source.index("const reloadChatStorageState", start)
     restore_effect = source[start:end]
 

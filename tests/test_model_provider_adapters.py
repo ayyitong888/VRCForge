@@ -332,7 +332,6 @@ def test_internal_legacy_config_uses_provider_transport_instead_of_chat_default(
         ("deepseek", "deepseek-v4-pro", None, ("auto", "responses")),
         ("deepseek", "deepseek-v4-flash", "auto", ("auto", "responses")),
         ("deepseek", "deepseek-v4-pro", "auto", ("auto", "responses")),
-        ("deepseek", "deepseek-auto", "auto", ("auto", "responses")),
         ("deepseek", "DeepSeek-V4-Flash", "auto", ("auto", "chat_completions")),
         ("deepseek", "future-model", "auto", ("auto", "chat_completions")),
         ("gemini", "gemini-test", None, ("generate_content", "generate_content")),
@@ -390,9 +389,8 @@ def test_deepseek_registry_descriptor_is_known_only_for_exact_models() -> None:
     assert mixed_case["capabilitySource"] == "unknown"
     assert flash["modelContextWindow"] == 1_000_000
     assert flash["maxOutputTokens"] == 384_000
-    auto = provider_model_descriptor("deepseek", "deepseek-auto", "auto")
-    assert auto["modelContextWindow"] == 1_000_000
-    assert auto["maxOutputTokens"] == 384_000
+    with pytest.raises(ValueError, match="Select a DeepSeek model explicitly"):
+        provider_model_descriptor("deepseek", "deepseek-auto", "auto")
 
 
 def test_official_deepseek_flash_alias_has_registry_metadata_without_renaming() -> None:
@@ -513,3 +511,8 @@ def test_provider_test_saved_key_preserves_requested_responses_transport(
     assert len(probe.configs) == 1
     assert probe.configs[0].api_type == "responses"
     assert probe.configs[0].api_key == "saved-key"
+
+
+def test_provider_api_type_rejects_deepseek_auto_model() -> None:
+    with pytest.raises(ValueError, match="Select a DeepSeek model explicitly"):
+        normalize_provider_api_type("deepseek", "deepseek-auto", "auto")

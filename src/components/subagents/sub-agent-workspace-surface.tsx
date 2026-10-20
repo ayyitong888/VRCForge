@@ -1,5 +1,5 @@
 import { formatPayload } from "../../lib/conversation-utils";
-import { Ban, Check, CornerDownRight, Loader2, RefreshCw, X } from "lucide-react";
+import { Ban, BellOff, Check, CornerDownRight, Loader2, RefreshCw, X } from "lucide-react";
 import { useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import type { SubAgentTask } from "../../lib/api";
@@ -44,6 +44,7 @@ export function SubAgentWorkspaceSurface({
   onCancel,
   onRetry,
   onMerge,
+  onIgnoreNotification,
   onAdoptNextAction,
   busyTaskIds,
   onClose,
@@ -54,6 +55,7 @@ export function SubAgentWorkspaceSurface({
   onCancel: (taskId: string) => void;
   onRetry: (taskId: string) => void;
   onMerge: (task: SubAgentTask, decision: "adopted" | "dismissed") => void;
+  onIgnoreNotification: (task: SubAgentTask) => void;
   onAdoptNextAction: (task: SubAgentTask) => void;
   busyTaskIds: ReadonlySet<string>;
   onClose: () => void;
@@ -70,6 +72,7 @@ export function SubAgentWorkspaceSurface({
   const canRetry = activeTask ? canRetrySubAgentTask(activeTask) : false;
   const canAdopt = activeTask ? canAdoptSubAgentResult(activeTask) : false;
   const canDismiss = activeTask ? canDismissSubAgentResult(activeTask) : false;
+  const canIgnoreNotification = activeTask ? isAwaitingMergeReview(activeTask) : false;
   const actionBusy = activeTask ? busyTaskIds.has(activeTask.id) : false;
   const hasTasks = tasks.length > 0;
   const selectedTaskStatus = activeTask ? displaySubAgentStatus(activeTask.status) : "";
@@ -260,6 +263,17 @@ export function SubAgentWorkspaceSurface({
                     <Ban className="h-3.5 w-3.5" />
                     {t("subagent.mergeDismiss")}
                   </Button>
+              ) : null}
+              {canIgnoreNotification && activeTask ? (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  className="h-7 px-2 text-xs"
+                  onClick={() => onIgnoreNotification(activeTask)}
+                >
+                  <BellOff className="h-3.5 w-3.5" />
+                  {t("subagent.ignoreNotification")}
+                </Button>
               ) : null}
               {activeTaskNextAction && activeTask ? (
                 <Button

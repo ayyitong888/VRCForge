@@ -17,7 +17,7 @@ def load_skill(name):
 
 def test_animation_keeps_timeline_and_only_uses_time_zero_for_approved_static_design():
     skill = load_skill("vrcforge-avatar-animation")
-    assert skill["manifest"]["version"] == "1.0.2"
+    assert skill["manifest"]["version"] == "1.0.3"
     assert skill["manifest"]["author"] == "VRCForge"
     assert skill["manifest"]["description"] == next(line.removeprefix("description: ") for line in skill["skill"].splitlines() if line.startswith("description: "))
     assert "timeline" in skill["reference"].lower()

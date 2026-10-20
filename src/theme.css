@@ -248,7 +248,9 @@
 
   * {
     @apply border-border;
-    scrollbar-color: hsl(var(--scrollbar-thumb)) hsl(var(--scrollbar-track));
+    /* Let each surface provide the track behind its thumb; a fixed global
+       track reads as a bright strip on wallpaper, cards, and overlays. */
+    scrollbar-color: hsl(var(--scrollbar-thumb)) transparent;
     scrollbar-width: thin;
   }
 
@@ -260,19 +262,19 @@
   *::-webkit-scrollbar-track,
   *::-webkit-scrollbar-track-piece,
   *::-webkit-scrollbar-corner {
-    background-color: hsl(var(--scrollbar-track));
+    background-color: transparent;
   }
 
   *::-webkit-scrollbar-button {
     width: 0;
     height: 0;
     display: none;
-    background-color: hsl(var(--scrollbar-track));
+    background-color: transparent;
   }
 
   *::-webkit-scrollbar-thumb {
     min-height: 32px;
-    border: 2px solid hsl(var(--scrollbar-track));
+    border: 2px solid transparent;
     border-radius: 9999px;
     background-color: hsl(var(--scrollbar-thumb));
     background-clip: padding-box;
@@ -295,6 +297,16 @@
     background-position: center;
     background-repeat: no-repeat;
     background-size: cover;
+  }
+
+  /* Let the composer follow the selected wallpaper while retaining enough
+     surface contrast for text and controls. */
+  html[data-vrcforge-wallpaper="active"] [data-chat-composer-dock] {
+    background-color: transparent;
+  }
+
+  html[data-vrcforge-wallpaper="active"] [data-vrcforge-composer-dropzone] {
+    background-color: hsl(var(--muted) / 0.58);
   }
 
   html[data-vrcforge-wallpaper="active"][data-vrcforge-wallpaper-scope="app"] #root > main {
@@ -338,6 +350,30 @@
 }
 
 @layer utilities {
+  .chat-current-activity__label {
+    color: hsl(var(--muted-foreground));
+    background: linear-gradient(100deg, hsl(var(--muted-foreground)) 34%, hsl(var(--foreground) / 0.9) 50%, hsl(var(--muted-foreground)) 66%);
+    background-size: 220% 100%;
+    background-clip: text;
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    animation: chat-current-activity-shimmer 2.8s ease-in-out infinite;
+  }
+
+  @keyframes chat-current-activity-shimmer {
+    0%, 100% { background-position: 100% 50%; opacity: 0.72; }
+    50% { background-position: 0% 50%; opacity: 1; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .chat-current-activity__label {
+      animation: none;
+      background: none;
+      color: hsl(var(--muted-foreground));
+      -webkit-text-fill-color: currentColor;
+    }
+  }
+
   @keyframes transient-failure-toast-enter {
     from {
       opacity: 0;
@@ -522,25 +558,24 @@
 
   .app-scrollbar {
     color-scheme: light;
-    scrollbar-color: hsl(var(--scrollbar-thumb)) hsl(var(--scrollbar-track));
+    scrollbar-color: hsl(var(--scrollbar-thumb)) transparent;
     scrollbar-width: thin;
   }
 
   .dark .app-scrollbar {
     color-scheme: dark;
+    scrollbar-color: hsl(var(--scrollbar-thumb)) transparent;
   }
 
   .sidebar-scrollbar {
-    --scrollbar-local-track: hsl(var(--sidebar));
     --scrollbar-local-thumb: hsl(var(--scrollbar-thumb));
     --scrollbar-local-thumb-hover: hsl(220 10% 48%);
     color-scheme: light;
-    scrollbar-color: var(--scrollbar-local-thumb) var(--scrollbar-local-track);
+    scrollbar-color: var(--scrollbar-local-thumb) transparent;
     scrollbar-width: thin;
   }
 
   .dark .sidebar-scrollbar {
-    --scrollbar-local-track: hsl(var(--sidebar));
     --scrollbar-local-thumb: hsl(224 12% 42%);
     --scrollbar-local-thumb-hover: hsl(224 12% 54%);
     color-scheme: dark;
@@ -555,19 +590,19 @@
   .app-scrollbar::-webkit-scrollbar-track,
   .app-scrollbar::-webkit-scrollbar-track-piece,
   .app-scrollbar::-webkit-scrollbar-corner {
-    background-color: hsl(var(--scrollbar-track));
+    background-color: transparent;
   }
 
   .app-scrollbar::-webkit-scrollbar-button {
     width: 0;
     height: 0;
     display: none;
-    background-color: hsl(var(--scrollbar-track));
+    background-color: transparent;
   }
 
   .app-scrollbar::-webkit-scrollbar-thumb {
     min-height: 32px;
-    border: 2px solid hsl(var(--scrollbar-track));
+    border: 2px solid transparent;
     border-radius: 9999px;
     background-color: hsl(var(--scrollbar-thumb));
     background-clip: padding-box;
@@ -576,19 +611,19 @@
   .sidebar-scrollbar::-webkit-scrollbar-track,
   .sidebar-scrollbar::-webkit-scrollbar-track-piece,
   .sidebar-scrollbar::-webkit-scrollbar-corner {
-    background-color: var(--scrollbar-local-track);
+    background-color: transparent;
   }
 
   .sidebar-scrollbar::-webkit-scrollbar-button {
     width: 0;
     height: 0;
     display: none;
-    background-color: var(--scrollbar-local-track);
+    background-color: transparent;
   }
 
   .sidebar-scrollbar::-webkit-scrollbar-thumb {
     min-height: 32px;
-    border: 2px solid var(--scrollbar-local-track);
+    border: 2px solid transparent;
     border-radius: 9999px;
     background-color: var(--scrollbar-local-thumb);
     background-clip: padding-box;

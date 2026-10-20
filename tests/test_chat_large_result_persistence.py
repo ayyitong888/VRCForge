@@ -65,6 +65,41 @@ def test_archive_transaction_failure_leaves_no_new_payloads(storage):
     assert not list(storage.rglob('*.gz'))
 
 
+def test_storage_oserror_log_is_phase_and_errno_only(storage):
+    chat = large_chat()
+    index = server.chat_project_index_path()
+    events = []
+    original_write = server.atomic_write_bytes
+
+    def fail_index(path, data):
+        if path == index:
+            raise PermissionError(13, "denied", str(path))
+        return original_write(path, data)
+
+    def capture(level, scope, message, data=None, **kwargs):
+        events.append((level, scope, message, data, kwargs))
+
+    with patch.object(server, "atomic_write_bytes", side_effect=fail_index), \
+         patch.object(server.DIAGNOSTIC_LOGGER, "emit", side_effect=capture):
+        with pytest.raises(server.HTTPException) as error:
+            server.write_chat_transcripts_storage(server.ChatTranscriptsRequest(chats=[chat]))
+
+    assert error.value.status_code == 500
+    assert len(events) == 1
+    level, scope, message, data, kwargs = events[0]
+    assert (level, scope, message) == (
+        "error", "chat_storage", "Chat transcript storage write failed."
+    )
+    assert data == {
+        "stage": "project_index_write",
+        "exceptionType": "PermissionError",
+        "errno": 13,
+        "winerror": None,
+    }
+    assert kwargs == {"context": None, "essential": True}
+    assert str(storage) not in repr(events)
+
+
 def test_missing_archive_blocks_read_and_preserves_source(storage):
     from chat_transcript_archive import blob_path, REF_FIELD
     server.write_chat_transcripts_storage(server.ChatTranscriptsRequest(chats=[large_chat()]))

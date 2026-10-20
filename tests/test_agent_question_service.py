@@ -12,6 +12,7 @@ from agent_question_service import (
     AgentQuestionService,
     AgentQuestionServiceError,
     GoalQuestionResolutionPort,
+    RuntimeQuestionResolutionPort,
 )
 
 
@@ -168,3 +169,143 @@ def test_question_answer_preserves_multiline_and_rejects_oversize(tmp_path):
     result = service.answer(qid, {'sessionId': 's', 'answer': text})
     assert result['question']['answer'] == text
     assert text in service._continuation_prompt(result['question'])
+
+
+def test_runtime_answer_keeps_user_supplied_url_and_path_for_model_but_redacts_durable_copy(tmp_path: Path) -> None:
+    from runtime_planner_service import sanitize_planner_observation_text
+
+    continuation_prompts: list[str] = []
+    answer = (
+        "Documentation: https://example.invalid/items/example-outfit. "
+        "Package directory: E:/Packages/Creator/CityNoir."
+        " Authorization: Bearer test-token-123"
+    )
+    service = AgentQuestionService(
+        AgentQuestionPersistence(
+            AgentQuestionPersistencePorts(
+                log_path=lambda: tmp_path / "agent-questions.jsonl",
+                shared_state_lock=threading.RLock(),
+                redact=lambda value: value,
+            )
+        ),
+        AgentQuestionScopePorts(
+            normalize_path=lambda value: value,
+            summarize=_summarize,
+            redact_goal_persistence=lambda value: sanitize_planner_observation_text(
+                value, None, preserve_whitespace=True,
+            ),
+        ),
+        GoalQuestionResolutionPort(resolve=lambda _question_id, _prompt: None),
+        RuntimeQuestionResolutionPort(
+            resolve=lambda _question_id, _seed, prompt: continuation_prompts.append(prompt) or {"ok": True},
+        ),
+    )
+    created = service.create({
+        "question": "Where is the package documentation?",
+        "sessionId": "session-example-outfit",
+        "projectRoot": "E:/unity/TestAvatar",
+        "_runtimeTaskSeed": {"sessionId": "session-example-outfit", "taskId": "task-example-outfit"},
+    })
+
+    answered = service.answer(
+        str(created["question"]["questionId"]),
+        {"sessionId": "session-example-outfit", "projectRoot": "E:/unity/TestAvatar", "answer": answer},
+    )
+
+    assert len(continuation_prompts) == 1
+    assert "https://example.invalid/items/example-outfit" in continuation_prompts[0]
+    assert "E:/Packages/Creator/CityNoir" in continuation_prompts[0]
+    assert "test-token-123" not in continuation_prompts[0]
+    assert "<redacted>" in continuation_prompts[0]
+    assert "<path redacted>" in answered["question"]["answer"]
+    durable = (tmp_path / "agent-questions.jsonl").read_text(encoding="utf-8")
+    assert "https://example.invalid/items/example-outfit" not in durable
+    assert "E:/Packages/Creator/CityNoir" not in durable
+    assert "test-token-123" not in durable
+    assert "<path redacted>" in durable
+
+
+def test_queued_idempotent_retry_uses_resubmitted_answer_for_model_context(tmp_path: Path) -> None:
+    from runtime_planner_service import sanitize_planner_observation_text
+
+    continuation_prompts: list[str] = []
+    answer = "Docs: https://example.invalid/items/creator. Package: E:/Packages/Creator/CityNoir."
+    service = AgentQuestionService(
+        AgentQuestionPersistence(
+            AgentQuestionPersistencePorts(
+                log_path=lambda: tmp_path / "agent-questions.jsonl",
+                shared_state_lock=threading.RLock(),
+                redact=lambda value: value,
+            )
+        ),
+        AgentQuestionScopePorts(
+            normalize_path=lambda value: value,
+            summarize=_summarize,
+            redact_goal_persistence=lambda value: sanitize_planner_observation_text(
+                value, None, preserve_whitespace=True,
+            ),
+        ),
+        GoalQuestionResolutionPort(resolve=lambda _question_id, _prompt: None),
+        RuntimeQuestionResolutionPort(
+            resolve=lambda _question_id, _seed, prompt: continuation_prompts.append(prompt) or {"status": "queued"},
+        ),
+    )
+    created = service.create({
+        "question": "Where are the docs and package?",
+        "sessionId": "session-retry",
+        "projectRoot": "E:/unity/TestAvatar",
+        "_runtimeTaskSeed": {"sessionId": "session-retry", "taskId": "task-retry"},
+    })
+    qid = str(created["question"]["questionId"])
+    request = {"sessionId": "session-retry", "projectRoot": "E:/unity/TestAvatar", "answer": answer}
+
+    service.answer(qid, request)
+    retried = service.answer(qid, request)
+
+    assert retried["idempotent"] is True
+    assert len(continuation_prompts) == 2
+    assert all("https://example.invalid/items/creator" in prompt for prompt in continuation_prompts)
+    assert all("E:/Packages/Creator/CityNoir" in prompt for prompt in continuation_prompts)
+
+
+def test_queued_idempotent_retry_requires_resubmission_if_saved_answer_redacted_location(tmp_path: Path) -> None:
+    from runtime_planner_service import sanitize_planner_observation_text
+
+    continuation_prompts: list[str] = []
+    service = AgentQuestionService(
+        AgentQuestionPersistence(
+            AgentQuestionPersistencePorts(
+                log_path=lambda: tmp_path / "agent-questions.jsonl",
+                shared_state_lock=threading.RLock(),
+                redact=lambda value: value,
+            )
+        ),
+        AgentQuestionScopePorts(
+            normalize_path=lambda value: value,
+            summarize=_summarize,
+            redact_goal_persistence=lambda value: sanitize_planner_observation_text(
+                value, None, preserve_whitespace=True,
+            ),
+        ),
+        GoalQuestionResolutionPort(resolve=lambda _question_id, _prompt: None),
+        RuntimeQuestionResolutionPort(
+            resolve=lambda _question_id, _seed, prompt: continuation_prompts.append(prompt) or {"status": "queued"},
+        ),
+    )
+    created = service.create({
+        "question": "Where is the package?",
+        "sessionId": "session-retry-no-answer",
+        "projectRoot": "E:/unity/TestAvatar",
+        "_runtimeTaskSeed": {"sessionId": "session-retry-no-answer", "taskId": "task-retry-no-answer"},
+    })
+    qid = str(created["question"]["questionId"])
+
+    service.answer(qid, {
+        "sessionId": "session-retry-no-answer",
+        "projectRoot": "E:/unity/TestAvatar",
+        "answer": "Package: E:/Packages/Creator/CityNoir.",
+    })
+    with pytest.raises(AgentQuestionServiceError, match="Resubmit the original answer"):
+        service.answer(qid, {"sessionId": "session-retry-no-answer", "projectRoot": "E:/unity/TestAvatar"})
+
+    assert len(continuation_prompts) == 1

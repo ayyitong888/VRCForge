@@ -53,6 +53,21 @@ not guess or invent tools.
 If any inventory result is truncated, unavailable, ambiguous, or lacks an
 exact cause, stop before mutation and report that blocker.
 
+For structural authoring on a scene Prefab instance, preview
+`vrcforge_unpack_prefab` with `preview=true` and `mode=completely`, binding
+`expectedGlobalObjectId`, `expectedPrefabGuid`, `expectedAssetDependencyHash`,
+and `expectedScenePath`. After separate approval and checkpoint, completely
+unpack the exact instance, rebind its persisted scene identity, and read it
+back before structural writes. Preserve the source Prefab asset and author
+Modular Avatar components, skeleton, animation, and constraint references.
+Read-only inspection and independent material/texture asset writes are exempt
+because they do not structurally edit a Prefab instance.
+
+Ordinary face-tracking installation and serialized configuration readback are
+edit-mode evidence. Play/Gesture Manager and visual runtime acceptance require
+a separate explicitly approved bounded observation; one cannot be reported as
+the other, and runtime observation must not silently rewrite configuration.
+
 ### Community MA route and authority boundary
 
 The user-supplied community sequence is authoritative for the default route:

@@ -10,13 +10,16 @@ import hashlib
 import json
 import os
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
 
-class NativeHistoryStore:
-    MAX_BYTES = 3 * 1024 * 1024
+class NativeHistoryPersistenceError(OSError):
+    """A local durable-history failure, never a Provider transport failure."""
 
+
+class NativeHistoryStore:
     def __init__(self, directory: Path) -> None:
         self.directory = directory
 
@@ -40,11 +43,11 @@ class NativeHistoryStore:
             path = self._path(session_id, binding)
         try:
             with path.open("rb") as stream:
-                raw = stream.read(self.MAX_BYTES + 1)
+                raw = stream.read()
         except FileNotFoundError:
             return None
-        if len(raw) > self.MAX_BYTES:
-            raise ValueError("Saved native history exceeds the size limit")
+        # Parsing can be expensive; do not hold a Windows read handle that
+        # prevents another process from atomically replacing this snapshot.
         value = json.loads(raw)
         if not isinstance(value, dict) or value.get("version") != 1 or value.get("sessionId") != session_id:
             raise ValueError("Saved native history identity is invalid")
@@ -55,8 +58,6 @@ class NativeHistoryStore:
     def save(self, session_id: str, snapshot: dict[str, Any], selections: dict[str, Any]) -> None:
         raw = json.dumps({"version": 1, "sessionId": session_id, "native": snapshot,
                           "selections": selections}, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-        if len(raw) > self.MAX_BYTES:
-            raise ValueError("Saved native history exceeds the size limit")
         self.directory.mkdir(parents=True, exist_ok=True)
         # mkstemp owns a single private handle; close before atomic replacement.
         fd, temporary = tempfile.mkstemp(prefix=".native-", dir=self.directory)
@@ -65,7 +66,17 @@ class NativeHistoryStore:
                 stream.write(raw)
                 stream.flush()
                 os.fsync(stream.fileno())
-            os.replace(temporary, self._path(session_id, snapshot["binding"]))
+            target = self._path(session_id, snapshot["binding"])
+            for attempt in range(3):
+                try:
+                    os.replace(temporary, target)
+                    break
+                except OSError as exc:
+                    # Retry only the same already-written private file, never
+                    # a Provider request or a tool whose side effects occurred.
+                    if getattr(exc, "winerror", None) not in {5, 32, 33} or attempt == 2:
+                        raise NativeHistoryPersistenceError("Could not persist local native history.") from exc
+                    time.sleep(0.025 * (attempt + 1))
         finally:
             if os.path.exists(temporary):
                 os.unlink(temporary)

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Text;
 using Newtonsoft.Json;
@@ -36,6 +37,24 @@ namespace VRCForge.Editor
                 var layerName = Required(edit, "layerName");
                 var layers = ((JArray)result["layers"]).OfType<JObject>().Where(layer => (string)layer["name"] == layerName).ToArray();
                 if (layers.Length != 1) throw new InvalidOperationException("Batch requires one unambiguous existing layer.");
+                if (action == "delete_layer")
+                {
+                    if (edit.Properties().Any(property => !new[] { "action", "layerName" }.Contains(property.Name)))
+                        throw new InvalidOperationException("Layer deletion accepts only action and exact layerName.");
+                    var allLayers = (JArray)result["layers"];
+                    var index = allLayers.IndexOf(layers[0]);
+                    foreach (JObject remaining in allLayers)
+                    {
+                        if (remaining == layers[0]) continue;
+                        var synced = (int?)remaining["syncedLayerIndex"] ?? -1;
+                        if (synced < -1 || synced >= allLayers.Count || synced == index)
+                            throw new InvalidOperationException("Delete synced dependent layers before their target; invalid sync references cannot be preserved.");
+                        if (synced > index) remaining["syncedLayerIndex"] = synced - 1;
+                    }
+                    allLayers.RemoveAt(index);
+                    edit["action"] = action; edit["layerName"] = layerName;
+                    continue;
+                }
                 var machine = (JObject)layers[0]["machine"];
                 var allStates = States(machine).ToArray();
                 if (allStates.GroupBy(state => (string)state["name"]).Any(group => group.Count() > 1))
@@ -44,7 +63,7 @@ namespace VRCForge.Editor
                 var edgeEdit = action == "ensure_transition" || action == "delete_transition";
                 if (!stateEdit && !edgeEdit) throw new InvalidOperationException("Unsupported batch FX action.");
                 var allowed = stateEdit
-                    ? new[] { "action", "layerName", "stateName", "motionClipPath", "writeDefaults", "speed" }
+                    ? new[] { "action", "layerName", "stateName", "motionClipPath", "writeDefaults", "speed", "timeParameterActive", "timeParameter" }
                     : new[] { "action", "layerName", "sourceStateName", "destinationStateName", "transitionIndex", "hasExitTime", "exitTime", "duration", "canTransitionToSelf", "interruptionSource", "orderedInterruption", "conditions" };
                 if (edit.Properties().Any(property => !allowed.Contains(property.Name)))
                     throw new InvalidOperationException("Unsupported field for batch FX action.");
@@ -58,6 +77,7 @@ namespace VRCForge.Editor
                         if (action == "update_state") throw new InvalidOperationException("State not found for update.");
                         Required(edit, "motionClipPath");
                         state = new JObject { ["name"] = name, ["speed"] = 1f, ["writeDefaultValues"] = true,
+                            ["timeParameterActive"] = false, ["timeParameter"] = "",
                             ["motionPath"] = "", ["transitions"] = new JArray() };
                         if (((JArray)machine["states"]).Count == 0 && (string)machine["defaultState"] == "") machine["defaultState"] = name;
                         ((JArray)machine["states"]).Add(state);
@@ -72,6 +92,27 @@ namespace VRCForge.Editor
                     }
                     if (edit["speed"] != null) state["speed"] = Number(edit, "speed", 1f, false);
                     if (edit["writeDefaults"] != null) state["writeDefaultValues"] = Boolean(edit, "writeDefaults", true);
+                    if (edit["timeParameter"] != null)
+                    {
+                        var parameter = Required(edit, "timeParameter");
+                        var definition = ((JArray)result["parameters"]).OfType<JObject>().SingleOrDefault(item => (string)item["name"] == parameter);
+                        if (definition == null || (string)definition["type"] != "Float")
+                            throw new InvalidOperationException("timeParameter must reference an existing Float Animator parameter.");
+                        state["timeParameter"] = parameter;
+                    }
+                    if (edit["timeParameterActive"] != null)
+                    {
+                        state["timeParameterActive"] = Boolean(edit, "timeParameterActive", false);
+                        if ((bool)state["timeParameterActive"])
+                        {
+                            var effectiveParameter = ((string)state["timeParameter"] ?? "").Trim();
+                            if (effectiveParameter.Length == 0)
+                                throw new InvalidOperationException("timeParameter is required when timeParameterActive is true.");
+                            var definition = ((JArray)result["parameters"]).OfType<JObject>().SingleOrDefault(item => (string)item["name"] == effectiveParameter);
+                            if (definition == null || (string)definition["type"] != "Float")
+                                throw new InvalidOperationException("timeParameter must reference an existing Float Animator parameter.");
+                        }
+                    }
                     continue;
                 }
                 var destination = Required(edit, "destinationStateName"); edit["destinationStateName"] = destination;
@@ -179,7 +220,8 @@ namespace VRCForge.Editor
                 if (!path.StartsWith("Assets/", StringComparison.Ordinal)) throw new InvalidOperationException("Controller must be an existing Assets controller.");
                 var controller = AssetDatabase.LoadAssetAtPath<AnimatorController>(path)
                     ?? throw new InvalidOperationException("Controller not found.");
-                if (AssetDatabase.LoadAllAssetsAtPath(path).Any(EditorUtility.IsDirty))
+                var persistenceObjects = LoadPersistenceObjects(path, controller);
+                if (persistenceObjects.Any(EditorUtility.IsDirty))
                     throw new InvalidOperationException("Save or discard existing controller edits before a batch.");
                 var guid = AssetDatabase.AssetPathToGUID(path);
                 var motions = new HashSet<string>(StringComparer.Ordinal);
@@ -197,12 +239,15 @@ namespace VRCForge.Editor
                     return VRCForgeToolResult.Completed("Preview: would apply one controller batch.", new {
                         ok = true, preview = true, batch = true, controllerPath = path, editCount = edits.Count,
                         plan = Projection(expected) });
+                ProbeExclusiveAssetFiles(path);
+                persistenceObjects = LoadPersistenceObjects(path, controller);
                 recovery.Capture(path); recovery.Begin();
-                Undo.RegisterCompleteObjectUndo(AssetDatabase.LoadAllAssetsAtPath(path), "FX animator batch");
+                Undo.RegisterCompleteObjectUndo(persistenceObjects, "FX animator batch");
                 phase = "asset_mutation"; mutated = true;
                 foreach (JObject edit in edits)
                 {
-                    ManageFxAnimatorTool.ApplyForBatch((string)edit["action"], controller, edit);
+                    if ((string)edit["action"] == "delete_layer") ApplyLayerDeletion(controller, (string)edit["layerName"]);
+                    else ManageFxAnimatorTool.ApplyForBatch((string)edit["action"], controller, edit);
                     if ((string)edit["action"] == "ensure_transition")
                     {
                         var layer = controller.layers.Single(item => item.name == (string)edit["layerName"]);
@@ -218,7 +263,8 @@ namespace VRCForge.Editor
                 AssetDatabase.ImportAsset(path, ImportAssetOptions.ForceSynchronousImport | ImportAssetOptions.ForceUpdate);
                 var actual = AssetDatabase.LoadAssetAtPath<AnimatorController>(path)
                     ?? throw new InvalidOperationException("Controller reload failed.");
-                if (AssetDatabase.AssetPathToGUID(path) != guid || AssetDatabase.LoadAllAssetsAtPath(path).Any(EditorUtility.IsDirty))
+                var persistedObjects = LoadPersistenceObjects(path, actual);
+                if (AssetDatabase.AssetPathToGUID(path) != guid || persistedObjects.Any(EditorUtility.IsDirty))
                     throw new InvalidOperationException("Controller identity or saved state changed.");
                 var readback = Snapshot(actual); Verify(expected, readback);
                 var evidence = SceneObjectCopyCore.ReadStableAssetEvidence(path, "FX batch readback");
@@ -235,6 +281,74 @@ namespace VRCForge.Editor
             {
                 return WriteAnimationCurveTool.EditFailure("fx_animator_batch_failed", exception, mutated, phase, recovery);
             }
+        }
+
+        private static UnityEngine.Object[] LoadPersistenceObjects(string path, UnityEngine.Object mainObject)
+        {
+            var objects = AssetDatabase.LoadAllAssetsAtPath(path);
+            ValidatePersistenceObjectSet(path, mainObject, objects);
+            var result = new List<UnityEngine.Object> { mainObject };
+            foreach (var item in objects)
+            {
+                if (item == null || !EditorUtility.IsPersistent(item)) continue;
+                var itemPath = AssetDatabase.GetAssetPath(item);
+                if (itemPath != path)
+                    throw new InvalidOperationException("FX controller has a persistent object from another asset.");
+                if (!result.Any(existing => existing == item)) result.Add(item);
+            }
+            return result.ToArray();
+        }
+
+        private static void ValidatePersistenceObjectSet(string path, UnityEngine.Object mainObject, UnityEngine.Object[] objects)
+        {
+            if (mainObject == null
+                || !EditorUtility.IsPersistent(mainObject)
+                || AssetDatabase.GetAssetPath(mainObject) != path
+                || objects == null
+                || objects.Length == 0)
+            {
+                throw new InvalidOperationException("FX controller main persistence object or object listing is unavailable.");
+            }
+        }
+
+        private static void ProbeExclusiveAssetFiles(string path)
+        {
+            var absolute = SceneObjectCopyCore.ToAbsoluteAssetPath(path);
+            foreach (var candidate in new[] { absolute, absolute + ".meta" })
+            {
+                if (!File.Exists(candidate))
+                    throw new InvalidOperationException("FX controller or metadata is missing.");
+                try
+                {
+                    using (var stream = new FileStream(candidate, FileMode.Open, FileAccess.ReadWrite, FileShare.None)) { }
+                }
+                catch (IOException exception)
+                {
+                    throw new InvalidOperationException("FX controller or metadata is locked by another process.", exception);
+                }
+                catch (UnauthorizedAccessException exception)
+                {
+                    throw new InvalidOperationException("FX controller or metadata is not writable.", exception);
+                }
+            }
+        }
+
+        private static void ApplyLayerDeletion(AnimatorController controller, string layerName)
+        {
+            var layers = controller.layers.ToList();
+            var target = layers.Single(layer => layer.name == layerName);
+            var index = layers.IndexOf(target);
+            foreach (var remaining in layers)
+            {
+                if (remaining == target) continue;
+                if (remaining.syncedLayerIndex < -1 || remaining.syncedLayerIndex >= layers.Count || remaining.syncedLayerIndex == index)
+                    throw new InvalidOperationException("Layer sync references changed since preflight.");
+                if (remaining.syncedLayerIndex > index) remaining.syncedLayerIndex--;
+            }
+            // RemoveLayer clears/destroys its state machine. Keep subassets intact,
+            // including shared machines, behaviours and motions still referenced elsewhere.
+            layers.RemoveAt(index);
+            controller.layers = layers.ToArray();
         }
 
         private static JObject Snapshot(AnimatorController controller)
@@ -306,9 +420,9 @@ namespace VRCForge.Editor
                 throw new InvalidOperationException("FX batch differs from the preflight final plan.");
             var expectedIds = new HashSet<string>(expected.Descendants().OfType<JObject>().Where(item => item["_id"] != null).Select(item => (string)item["_id"]));
             var actualNodes = actual.Descendants().OfType<JObject>().Where(item => item["_id"] != null && expectedIds.Contains((string)item["_id"]))
-                .ToDictionary(item => (string)item["_id"], StringComparer.Ordinal);
+                .ToLookup(item => (string)item["_id"], StringComparer.Ordinal);
             foreach (var node in expected.Descendants().OfType<JObject>().Where(item => item["_id"] != null))
-                if (!actualNodes.TryGetValue((string)node["_id"], out var persisted) || !JToken.DeepEquals(node["_guard"], persisted["_guard"]))
+                if (!actualNodes.Contains((string)node["_id"]) || actualNodes[(string)node["_id"]].Any(persisted => !JToken.DeepEquals(node["_guard"], persisted["_guard"])))
                     throw new InvalidOperationException("An existing FX object's unchanged settings or behaviour references changed.");
         }
     }

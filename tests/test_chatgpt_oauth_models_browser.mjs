@@ -43,6 +43,9 @@ const bundle = await build({
 });
 
 const modelRequests = [];
+const activations = [];
+let activeModel = "o3";
+let activeThinkingLevel = "medium";
 const server = createServer((req, res) => {
   if (req.url === "/api/chatgpt/status" && req.method === "GET") {
     res.setHeader("Content-Type", "application/json");
@@ -54,8 +57,22 @@ const server = createServer((req, res) => {
       pending: false,
       error: "",
       activeAccountId: "account-a",
-      activeModel: "a-model",
+      activeModel,
+      activeThinkingLevel,
     }));
+    return;
+  }
+  if (req.url === "/api/chatgpt/activate" && req.method === "POST") {
+    let body = "";
+    req.on("data", (chunk) => { body += chunk; });
+    req.on("end", () => {
+      const activation = JSON.parse(body);
+      activations.push(activation);
+      activeModel = activation.model;
+      activeThinkingLevel = activation.thinking_level;
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify({ ok: true }));
+    });
     return;
   }
   if (req.url === "/api/chatgpt/models" && req.method === "POST") {
@@ -88,6 +105,13 @@ function replyNext(accountId, payload, status = 200) {
   res.end(JSON.stringify(payload));
 }
 
+const firstCatalog = { models: [
+  { id: "o3", name: "o3", supportedReasoningLevels: ["low", "medium", "high"].map((effort) => ({ effort })), defaultReasoningLevel: "medium" },
+  { id: "gpt-4o", name: "GPT-4o" },
+  { id: "gpt-5.6-sol", name: "GPT-5.6 Sol", supportedReasoningLevels: ["none", "low", "medium", "high", "xhigh", "max"].map((effort) => ({ effort })), defaultReasoningLevel: "low" },
+  { id: "gpt-6.1-sol", name: "GPT-6.1 Sol", supportedReasoningLevels: ["low", "medium", "high", "xhigh", "max", "ultra"].map((effort) => ({ effort })), defaultReasoningLevel: "low" },
+] };
+
 const wait = async (predicate, label) => {
   for (let i = 0; i < 300; i += 1) {
     if (await predicate()) return;
@@ -104,9 +128,36 @@ try {
   await wait(async () => (await page.locator("select").first().inputValue()) === "account-a", "saved active account selection");
   await wait(() => modelRequests.length === 1, "automatic catalog load");
   assert.equal(modelRequests[0].accountId, "account-a");
-  replyNext("account-a", { models: [{ id: "a-model", name: "A Model" }, { id: "a-two", name: "A Two" }] });
-  await wait(async () => (await page.locator("[data-chatgpt-model-select]").inputValue()) === "a-model", "active model selection");
-  assert.equal(await page.locator("[data-chatgpt-model-select] option[value=a-model]").count(), 1);
+  replyNext("account-a", firstCatalog);
+  await wait(async () => (await page.locator("[data-chatgpt-model-select]").inputValue()) === "o3", "active model selection");
+  await wait(async () => (await page.locator("[data-chatgpt-reasoning-select]").count()) === 1, "model-specific reasoning choices");
+  assert.equal(await page.locator("[data-chatgpt-reasoning-select]").inputValue(), "medium", "saved effort is restored when settings open");
+  assert.equal(await page.locator("[data-chatgpt-reasoning-select] option[value=default]").count(), 0, "supported model requires a concrete effort");
+  await page.locator("[data-chatgpt-reasoning-select]").selectOption("high");
+  await page.getByRole("button", { name: "Use this model" }).click();
+  await wait(() => activations.length === 1, "OAuth activation saves selected effort");
+  assert.deepEqual(activations[0], { account_id: "account-a", model: "o3", thinking_level: "high" });
+  await page.reload();
+  await wait(() => modelRequests.length === 1, "model catalog after reopening settings");
+  replyNext("account-a", firstCatalog);
+  await wait(async () => (await page.locator("[data-chatgpt-reasoning-select]").count()) === 1, "persisted reasoning selector after reopen");
+  assert.equal(await page.locator("[data-chatgpt-reasoning-select]").inputValue(), "high", "saved effort survives reopening");
+  await page.locator("[data-chatgpt-model-select]").selectOption("gpt-5.6-sol");
+  await wait(async () => (await page.locator("[data-chatgpt-reasoning-select] option[value=max]").count()) === 1, "GPT-5.6 model-specific maximum effort");
+  assert.equal(await page.locator("[data-chatgpt-reasoning-select]").inputValue(), "", "new model requires an explicit effort selection");
+  assert.equal(await page.getByRole("button", { name: "Use this model" }).isDisabled(), true, "activation remains disabled until effort is selected");
+  await page.locator("[data-chatgpt-reasoning-select]").selectOption("low");
+  await page.locator("[data-chatgpt-model-select]").selectOption("gpt-6.1-sol");
+  await wait(async () => (await page.locator("[data-chatgpt-reasoning-select] option[value=max]").count()) === 1, "GPT-6.1 Sol reasoning choices");
+  assert.equal(await page.locator("[data-chatgpt-reasoning-select] option[value=ultra]").count(), 1, "model-advertised ultra level is preserved");
+  assert.equal(await page.locator("[data-chatgpt-reasoning-select]").inputValue(), "", "another model also requires explicit effort selection");
+  await page.locator("[data-chatgpt-reasoning-select]").selectOption("low");
+  await page.locator("[data-chatgpt-model-select]").selectOption("gpt-4o");
+  await wait(async () => (await page.locator("[data-chatgpt-reasoning-select]").count()) === 0, "unsupported model hides reasoning control");
+  await page.locator("[data-chatgpt-model-select]").selectOption("o3");
+  await wait(async () => (await page.locator("[data-chatgpt-reasoning-select]").count()) === 1, "supported model restores reasoning control");
+  assert.equal(await page.locator("[data-chatgpt-reasoning-select] option[value=max]").count(), 0, "o3 choices differ from GPT-5.6 choices");
+  assert.equal(await page.locator("[data-chatgpt-model-select] option[value=o3]").count(), 1);
   await new Promise((resolveWait) => setTimeout(resolveWait, 100));
   assert.equal(modelRequests.length, 0, "status refreshes do not storm model requests");
 

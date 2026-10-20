@@ -16,6 +16,17 @@ def test_schema_supports_single_controller_edits():
     jsonschema.validate(batch(), MANAGE_FX_ANIMATOR_PUBLIC_INPUT_SCHEMA)
 
 
+def test_schema_supports_exact_layer_deletion_batch():
+    arguments = {"projectPath": "D:/Project", "controllerPath": "Assets/FX.controller",
+                 "edits": [{"action": "delete_layer", "layerName": name} for name in ("Hat", "Hair", "Cuffs")]}
+    jsonschema.validate(arguments, MANAGE_FX_ANIMATOR_PUBLIC_INPUT_SCHEMA)
+    plan = build_scene_execution_plan("vrcforge_manage_fx_animator", arguments)
+    assert len(plan) == 1 and plan[0][1]["edits"] == arguments["edits"]
+    arguments["edits"][0]["stateName"] = "unapproved"
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(arguments, MANAGE_FX_ANIMATOR_PUBLIC_INPUT_SCHEMA)
+
+
 @pytest.mark.parametrize("preview", [True, False])
 def test_handler_and_plan_forward_exact_edits(monkeypatch, preview):
     calls=[]
@@ -57,3 +68,15 @@ def test_batch_ordered_interruption_false_is_schema_and_plan_forwarded():
     jsonschema.validate(arguments, MANAGE_FX_ANIMATOR_PUBLIC_INPUT_SCHEMA)
     plan = build_scene_execution_plan("vrcforge_manage_fx_animator", arguments)
     assert plan[0][1]["edits"][0]["orderedInterruption"] is False
+
+
+def test_time_parameter_fields_are_float_bound_and_forwarded():
+    arguments = {
+        "projectPath": "D:/Project", "controllerPath": "Assets/FX.controller",
+        "edits": [{"action": "update_state", "layerName": "GeneralMotion", "stateName": "Face",
+                   "timeParameterActive": True, "timeParameter": "FaceJaw"}],
+    }
+    jsonschema.validate(arguments, MANAGE_FX_ANIMATOR_PUBLIC_INPUT_SCHEMA)
+    plan = build_scene_execution_plan("vrcforge_manage_fx_animator", arguments)
+    assert plan[0][1]["edits"][0]["timeParameterActive"] is True
+    assert plan[0][1]["edits"][0]["timeParameter"] == "FaceJaw"

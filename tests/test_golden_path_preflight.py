@@ -4,6 +4,7 @@ import tarfile
 import time
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -155,6 +156,59 @@ def test_outfit_zip_queue_blocks_high_ratio_nested_unitypackage(tmp_path: Path) 
 
     with pytest.raises(dashboard_server.AgentGatewayError, match="compression ratio"):
         dashboard_server._extract_unitypackage_from_zip(package, "Dress.unitypackage", temp_root)
+
+
+def test_outfit_zip_helper_has_no_fixed_nested_package_byte_cap(
+    monkeypatch, tmp_path: Path
+) -> None:
+    package = tmp_path / "LargeLocalPackage.zip"
+    temp_root = tmp_path / "extract"
+    temp_root.mkdir()
+    contents = b"locally materialized package"
+    with zipfile.ZipFile(package, mode="w") as archive:
+        archive.writestr("Dress.unitypackage", contents)
+    monkeypatch.setattr(
+        dashboard_server,
+        "OUTFIT_IMPORT_MAX_NESTED_UNITYPACKAGE_BYTES",
+        1,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        dashboard_server.shutil,
+        "disk_usage",
+        lambda _path: SimpleNamespace(free=1024 * 1024),
+    )
+
+    extracted = dashboard_server._extract_unitypackage_from_zip(
+        package, "Dress.unitypackage", temp_root
+    )
+
+    assert extracted.read_bytes() == contents
+    extracted.unlink()
+    assert not list(temp_root.iterdir())
+
+
+def test_outfit_zip_helper_refuses_materialization_when_temp_space_is_low(
+    monkeypatch, tmp_path: Path
+) -> None:
+    package = tmp_path / "LocalPackage.zip"
+    temp_root = tmp_path / "extract"
+    temp_root.mkdir()
+    with zipfile.ZipFile(package, mode="w") as archive:
+        archive.writestr("Dress.unitypackage", b"package")
+    monkeypatch.setattr(
+        dashboard_server.shutil,
+        "disk_usage",
+        lambda _path: SimpleNamespace(free=0),
+    )
+
+    with pytest.raises(dashboard_server.AgentGatewayError, match="Insufficient free space") as error:
+        dashboard_server._extract_unitypackage_from_zip(
+            package, "Dress.unitypackage", temp_root
+        )
+
+    assert error.value.status_code == 507
+    assert not list(temp_root.iterdir())
 
 
 def test_loose_outfit_target_folder_cannot_escape_assets(tmp_path: Path) -> None:

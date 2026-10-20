@@ -151,6 +151,7 @@ export function SidebarChat({
   unreadCount = 0,
   indent = false,
   pinned = false,
+  isTestChat = false,
   renaming = false,
   renameDraft = "",
   onClick,
@@ -168,6 +169,7 @@ export function SidebarChat({
   unreadCount?: number;
   indent?: boolean;
   pinned?: boolean;
+  isTestChat?: boolean;
   renaming?: boolean;
   renameDraft?: string;
   onClick: () => void;
@@ -214,6 +216,15 @@ export function SidebarChat({
       <button onClick={onClick} className="flex h-full min-w-0 flex-1 items-center gap-2 px-3 text-left">
         {indent ? null : <MessageSquare className="h-4 w-4 shrink-0" />}
         <span className="min-w-0 flex-1 truncate">{title}</span>
+        {isTestChat ? (
+          <span
+            className="shrink-0 rounded border border-primary/40 px-1 text-[9px] font-semibold uppercase tracking-wide text-primary"
+            title={t("contextMenu.testChat")}
+            aria-label={t("contextMenu.testChat")}
+          >
+            {t("contextMenu.testChat")}
+          </span>
+        ) : null}
         {unreadCount > 0 ? (
           <span
             className="inline-flex min-w-5 shrink-0 items-center justify-center rounded-full bg-primary px-1.5 text-[10px] font-semibold text-primary-foreground"

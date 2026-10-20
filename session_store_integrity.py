@@ -33,6 +33,7 @@ _SAFE_REASON_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_]{0,63}$")
 _PAYLOAD_HASH_PATTERN = re.compile(r"^[a-f0-9]{64}$")
 _CHAT_ITEM_TYPES = frozenset({"user", "streaming", "agent", "result", "error", "compact", "subagent", "timeline_event"})
 _MAX_JSON_DEPTH = 64
+MAX_STREAMED_JSONL_LINE_BYTES = 8 * 1024 * 1024
 _MAX_SAFE_JSON_INTEGER = 9_007_199_254_740_991
 
 
@@ -62,6 +63,7 @@ class SessionStoreTarget:
     guard_root: Path | None = None
     max_bytes: int = 64 * 1024 * 1024
     max_list_items: int = 0
+    stream_jsonl: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "path", Path(self.path))
@@ -100,6 +102,8 @@ class SessionStoreTarget:
             raise ValueError("max_bytes must be a positive integer")
         if not isinstance(self.max_list_items, int) or isinstance(self.max_list_items, bool) or self.max_list_items < 0:
             raise ValueError("max_list_items must be a non-negative integer")
+        if not isinstance(self.stream_jsonl, bool):
+            raise ValueError("stream_jsonl must be a boolean")
         if self.max_list_items and not self.required_list_field:
             raise ValueError("max_list_items requires required_list_field")
         if any(not isinstance(item, str) or not item.strip() for item in self.known_schemas):
@@ -133,6 +137,16 @@ def scan_session_store(target: SessionStoreTarget) -> dict[str, Any]:
             digest="",
             analysis=_Analysis(status="error", reason="symlink_refused"),
         )
+    if target.format == "jsonl" and target.stream_jsonl:
+        try:
+            if target.path.stat().st_size > target.max_bytes:
+                return _scan_streamed_jsonl(target)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            return _scan_result(
+                target, exists=True, digest="", analysis=_Analysis(status="error", reason="read_error")
+            )
     try:
         if target.path.stat().st_size > target.max_bytes:
             return _scan_result(
@@ -182,6 +196,81 @@ def scan_session_store(target: SessionStoreTarget) -> dict[str, Any]:
     )
 
 
+def _scan_streamed_jsonl(target: SessionStoreTarget) -> dict[str, Any]:
+    """Validate an append-only JSONL store without imposing a total-size cap."""
+
+    try:
+        handle = target.path.open("rb")
+    except FileNotFoundError:
+        return _scan_result(target, exists=False, digest="", analysis=_Analysis(status="missing", reason="missing"))
+    except OSError:
+        return _scan_result(target, exists=True, digest="", analysis=_Analysis(status="error", reason="read_error"))
+
+    digest = hashlib.sha256()
+    record_count = invalid_count = unknown_schema_count = semantic_issue_count = 0
+    try:
+        with handle:
+            while True:
+                raw_line = handle.readline(MAX_STREAMED_JSONL_LINE_BYTES + 1)
+                if not raw_line:
+                    break
+                digest.update(raw_line)
+                oversized = len(raw_line) > MAX_STREAMED_JSONL_LINE_BYTES
+                while b"\n" not in raw_line:
+                    continuation = handle.readline(MAX_STREAMED_JSONL_LINE_BYTES + 1)
+                    if not continuation:
+                        break
+                    digest.update(continuation)
+                    raw_line += continuation if len(raw_line) <= MAX_STREAMED_JSONL_LINE_BYTES else b""
+                    oversized = True
+                if oversized:
+                    invalid_count += 1
+                    continue
+                content = raw_line.rstrip(b"\r\n")
+                if not content.strip(b" \t\r"):
+                    continue
+                try:
+                    payload = load_strict_json(content.decode("utf-8-sig" if record_count == 0 else "utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+                    invalid_count += 1
+                    continue
+                record_count += 1
+                if not _root_type_matches(payload, target.root_type):
+                    semantic_issue_count += 1
+                if _has_required_schema_issue(payload, target):
+                    semantic_issue_count += 1
+                if _has_required_field_issue(payload, target):
+                    semantic_issue_count += 1
+                if _has_unknown_schema(payload, target):
+                    unknown_schema_count += 1
+    except OSError:
+        return _scan_result(target, exists=True, digest="", analysis=_Analysis(status="error", reason="read_error"))
+
+    if invalid_count:
+        status, reason = "needs_repair", "invalid_jsonl_lines"
+    elif unknown_schema_count:
+        status, reason = "unsupported", "unknown_schema"
+    elif semantic_issue_count:
+        status, reason = "unsupported", "invalid_record_shape"
+    else:
+        status, reason = "ok", "ok"
+    return _scan_result(
+        target, exists=True, digest=digest.hexdigest(),
+        analysis=_Analysis(status=status, reason=reason, record_count=record_count,
+                           invalid_count=invalid_count, unknown_schema_count=unknown_schema_count,
+                           semantic_issue_count=semantic_issue_count),
+    )
+
+
+def _stream_target_within_repair_limit(target: SessionStoreTarget) -> bool:
+    if not target.stream_jsonl:
+        return True
+    try:
+        return target.path.stat().st_size <= target.max_bytes
+    except (FileNotFoundError, OSError):
+        return False
+
+
 def scan_session_stores(targets: Sequence[SessionStoreTarget]) -> dict[str, Any]:
     """Read-only batch wrapper with a bounded, path-free public result."""
 
@@ -215,6 +304,8 @@ def repair_session_store(
 
     if path_has_link_like_segment(target.path, target.guard_root):
         return _repair_result(target, status="conflict", reason="symlink_refused")
+    if target.stream_jsonl and not _stream_target_within_repair_limit(target):
+        return _repair_result(target, status="needs_user_action", reason="streamed_jsonl_read_only")
 
     validation_reason = _validate_scan_binding(target, scan)
     if validation_reason:
@@ -503,7 +594,8 @@ def _scan_result(
         "invalidCount": analysis.invalid_count,
         "unknownSchemaCount": analysis.unknown_schema_count,
         "semanticIssueCount": analysis.semantic_issue_count,
-        "repairable": analysis.status == "needs_repair" and target.scope == "app_owned",
+        "repairable": analysis.status == "needs_repair" and target.scope == "app_owned"
+        and (not target.stream_jsonl or _stream_target_within_repair_limit(target)),
         "requiresApproval": requires_approval,
     }
 
@@ -999,9 +1091,18 @@ def _is_json_safe_runtime_value(value: Any) -> bool:
 
 def _is_valid_chat_timeline_event(value: Any) -> bool:
     """Validate the existing public display envelope, never raw runtime data."""
-    if not isinstance(value, dict) or set(value) != {"id", "sequence", "timestamp", "kind", "payload"}:
+    if not isinstance(value, dict) or not set(value).issubset(
+        {"id", "sequence", "timestamp", "kind", "payload", "sessionId", "turnId", "clientTurnId"}
+    ) or not {"id", "sequence", "timestamp", "kind", "payload"}.issubset(value):
         return False
     if any(not isinstance(value.get(key), str) or not value[key].strip() for key in ("id", "timestamp")):
+        return False
+    owner_limits = {"sessionId": 180, "turnId": 180, "clientTurnId": 240}
+    if any(
+        key in value
+        and (not isinstance(value[key], str) or not value[key].strip() or len(value[key]) > limit)
+        for key, limit in owner_limits.items()
+    ):
         return False
     if not _is_safe_nonnegative_integer(value.get("sequence")):
         return False
@@ -1010,7 +1111,7 @@ def _is_valid_chat_timeline_event(value: Any) -> bool:
         return False
     payload = value.get("payload")
     limits = {"label": 160, "summary": 32_000 if kind == "assistant" else 1000,
-              "status": 80, "tool": 160, "phase": 80, "actionId": 96, "subagentStatus": 40}
+              "status": 80, "tool": 160, "phase": 80, "actionId": 96, "messageId": 180, "subagentStatus": 40}
     if not isinstance(payload, dict) or any(key not in limits for key in payload):
         return False
     if any(not isinstance(text, str) or len(text) > limits[key] for key, text in payload.items()):
@@ -1030,7 +1131,9 @@ def is_valid_chat_record(value: Any) -> bool:
         for field in ("sessionId", "title", "projectPath", "createdAt", "updatedAt", "agentName")
     ):
         return False
-    if any(field in value and not isinstance(value.get(field), bool) for field in ("pinned", "archived")):
+    if "titleSource" in value and value.get("titleSource") not in {"auto", "manual"}:
+        return False
+    if any(field in value and not isinstance(value.get(field), bool) for field in ("pinned", "archived", "isTestChat")):
         return False
     if "revision" in value and not _is_safe_nonnegative_integer(value.get("revision")):
         return False
@@ -1273,10 +1376,19 @@ def _is_valid_agent_response(value: Any) -> bool:
         if "result" in write and not _is_json_safe_runtime_value(write.get("result")):
             return False
     if "result" in value and value.get("result") is not None:
-        if write is None and not _is_valid_shell_result(value.get("result")):
-            return False
-        if write is not None and not _is_json_safe_runtime_value(value.get("result")):
-            return False
+        result = value.get("result")
+        if not _is_valid_shell_result(result):
+            has_typed_tool_envelope = (
+                write is not None
+                or isinstance(value.get("shell"), dict)
+                or isinstance(value.get("skill"), dict)
+            )
+            if (
+                not has_typed_tool_envelope
+                or not isinstance(result, dict)
+                or not _is_json_safe_runtime_value(result)
+            ):
+                return False
     plan = value.get("plan")
     if not isinstance(plan, dict):
         return False
@@ -1313,6 +1425,16 @@ def _is_valid_agent_response(value: Any) -> bool:
         return False
     if "skillParams" in plan and not isinstance(plan.get("skillParams"), dict):
         return False
+    if "publicMessages" in plan:
+        messages = plan["publicMessages"]
+        if not isinstance(messages, list) or len(messages) > 256:
+            return False
+        for message in messages:
+            if (not isinstance(message, dict) or set(message) - {"id", "text", "phase"}
+                    or not isinstance(message.get("id"), str) or not 0 < len(message["id"]) <= 180
+                    or not isinstance(message.get("text"), str) or len(message["text"]) > 32_000
+                    or ("phase" in message and message["phase"] not in {"commentary", "final_answer"})):
+                return False
     if "choices" in plan and not _is_valid_string_choices(plan.get("choices")):
         return False
     vision = value.get("vision")
@@ -1357,8 +1479,13 @@ def _is_valid_agent_response(value: Any) -> bool:
             reasons = classification.get("reasons")
             if not isinstance(reasons, list) or any(not isinstance(reason, str) for reason in reasons):
                 return False
-        if "result" in shell and shell.get("result") is not None and not _is_valid_shell_result(shell.get("result")):
-            return False
+        if "result" in shell and shell.get("result") is not None:
+            shell_result = shell.get("result")
+            if (
+                not _is_valid_shell_result(shell_result)
+                and (not isinstance(shell_result, dict) or not _is_json_safe_runtime_value(shell_result))
+            ):
+                return False
     reasoning = value.get("reasoning")
     if reasoning is not None:
         if not isinstance(reasoning, dict):

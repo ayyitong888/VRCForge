@@ -69,6 +69,25 @@ def test_ambiguous_alias_and_missing_loader_do_not_invent_recipes():
     assert skill_read_loads({"allowedTools": ["one"]}, PlannerCatalogSnapshot(visible_tools=ambiguous)) == []
 
 
+def test_skill_read_does_not_recommend_loading_retained_definitions_again():
+    planner = RuntimePlannerService(catalog=Catalog(), desktop=None)
+    result = planner.native_result_observation(
+        skill_step(), project_context_active=True,
+        retained_tool_names={"descriptor", "controls", "fx"},
+    )
+    assert "skillReadLoads" not in result
+
+
+def test_skill_read_only_recommends_missing_tools_from_a_partly_retained_leaf():
+    planner = RuntimePlannerService(catalog=Catalog(), desktop=None)
+    result = planner.native_result_observation(
+        skill_step(), project_context_active=True,
+        retained_tool_names={"vrcforge_descriptor", "fx"},
+    )
+    assert result["skillReadLoads"] == [{"tool": "load_internal_tool_block", "arguments": {
+        "block": "avatar/hierarchy", "tools": ["controls"]}}]
+
+
 @pytest.mark.parametrize("active", [True, False])
 def test_real_gateway_emits_advice_once_without_loading_or_rewriting_history(tmp_path, active):
     import json

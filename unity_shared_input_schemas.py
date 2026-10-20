@@ -431,6 +431,10 @@ MANAGE_FX_ANIMATOR_PUBLIC_INPUT_SCHEMA: dict[str, Any] = {
         "writeDefaults": {"type": "boolean"},
         "motionClipPath": {"type": "string", "pattern": "^Assets/"},
         "speed": {"type": "number"},
+        "expectedSpeed": {"type": "number", "description": "Expected current speed for a single state edit; a mismatch is refused before mutation."},
+        "expectedStateDigest": {"type": "string", "pattern": "^[0-9a-f]{64}$", "description": "Copy from the authoritative FX preview to reject controller changes before writing."},
+        "timeParameterActive": {"type": "boolean", "description": "Optional: use a Float parameter as normalized motion time."},
+        "timeParameter": {"type": "string", "minLength": 1, "description": "Optional existing Float Animator parameter used as normalized motion time."},
         "hasExitTime": {"type": "boolean"},
         "exitTime": {"type": "number"},
         "duration": {"type": "number", "minimum": 0},
@@ -489,7 +493,7 @@ MATERIAL_VARIANT_FLATTEN_PUBLIC_INPUT_SCHEMA: dict[str, Any] = {
 
 # Batch mode extends the existing FX surface without changing single-action fields.
 _FX_BATCH_ITEM_FIELDS = (
-    "layerName", "stateName", "motionClipPath", "writeDefaults", "speed", "destinationStateName",
+    "layerName", "stateName", "motionClipPath", "writeDefaults", "speed", "timeParameterActive", "timeParameter", "destinationStateName",
     "transitionIndex", "hasExitTime", "exitTime", "duration", "canTransitionToSelf", "interruptionSource", "orderedInterruption", "conditions",
 )
 _FX_BATCH_ITEM_SCHEMA = {
@@ -497,12 +501,14 @@ _FX_BATCH_ITEM_SCHEMA = {
     "properties": {
         **{name: MANAGE_FX_ANIMATOR_PUBLIC_INPUT_SCHEMA["properties"][name] for name in _FX_BATCH_ITEM_FIELDS},
         "sourceStateName": {"type": "string"},
-        "action": {"type": "string", "enum": ["ensure_state", "update_state", "ensure_transition", "delete_transition"]},
+        "action": {"type": "string", "enum": ["ensure_state", "update_state", "ensure_transition", "delete_transition", "delete_layer"]},
     },
     "oneOf": [
         {"properties": {"action": {"enum": ["ensure_state", "update_state"]}}, "required": ["stateName"]},
         {"properties": {"action": {"const": "ensure_transition"}}, "required": ["destinationStateName"]},
         {"properties": {"action": {"const": "delete_transition"}}, "required": ["destinationStateName", "transitionIndex"]},
+        {"properties": {"action": {"const": "delete_layer"}},
+         "not": {"anyOf": [{"required": [name]} for name in (*_FX_BATCH_ITEM_FIELDS, "sourceStateName") if name != "layerName"]}},
     ],
 }
 for _fx_single_branch in MANAGE_FX_ANIMATOR_PUBLIC_INPUT_SCHEMA["oneOf"]:
@@ -516,7 +522,7 @@ MANAGE_FX_ANIMATOR_PUBLIC_INPUT_SCHEMA["oneOf"].append({
 })
 MANAGE_FX_ANIMATOR_PUBLIC_INPUT_SCHEMA["properties"]["edits"] = {
     "type": "array", "minItems": 1, "maxItems": 128, "items": _FX_BATCH_ITEM_SCHEMA,
-    "description": "Ordered atomic edits to one existing controller and existing layers, at most 512 KiB. Mutually exclusive with top-level single-action fields. Motion clips must already exist.",
+    "description": "Ordered atomic edits to one existing controller, at most 512 KiB. Supports state/transition edits and delete_layer by exact unique layerName. Delete synced dependent layers before their target. Layer deletion preserves subassets and clips. Mutually exclusive with top-level single-action fields. Motion clips must already exist.",
 }
 
 

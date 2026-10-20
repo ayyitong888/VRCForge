@@ -111,6 +111,38 @@ def _owner(
     )
 
 
+@pytest.mark.parametrize("provider", ["deepseek", "openrouter", "anthropic"])
+def test_save_validates_provider_catalog_after_restoring_key(tmp_path, provider) -> None:
+    calls = []
+    policy = replace(_policy(), catalog_reasoning_efforts=lambda *args: calls.append(args) or ["low", "max"])
+    owner = _owner(tmp_path / "config.json", policy=policy)
+    owner.save_api_config(ProviderApiConfig(provider, "saved-key", "https://catalog.example/v1", "model"))
+    assert owner.resolve_api_request(ApiRequest(provider=provider, model="model", thinking_level="max")).thinking_level == "max"
+    assert calls[-1][1] == "saved-key"
+    with pytest.raises(ValueError, match="not supported"):
+        owner.resolve_api_request(ApiRequest(provider=provider, model="model", thinking_level="high"))
+
+
+@pytest.mark.parametrize("provider", ["deepseek", "openrouter"])
+def test_missing_catalog_keeps_existing_variants_and_default_is_unspecified(tmp_path, provider) -> None:
+    policy = replace(_policy(), normalize_reasoning_effort=lambda v: "" if v == "default" else str(v or ""), catalog_reasoning_efforts=lambda *args: None)
+    owner = _owner(tmp_path / "config.json", policy=policy)
+    assert owner.resolve_api_request(ApiRequest(provider=provider, thinking_level="low")).thinking_level == "low"
+    assert owner.resolve_api_request(ApiRequest(provider=provider, thinking_level="default")).thinking_level == ""
+    with pytest.raises(ValueError, match="not supported"):
+        owner.resolve_api_request(ApiRequest(provider=provider, thinking_level="max"))
+
+
+def test_catalog_rejects_invalid_stored_choice_without_selecting_default(tmp_path) -> None:
+    policy = replace(_policy(), catalog_reasoning_efforts=lambda *args: [])
+    owner = _owner(tmp_path / "config.json", policy=policy)
+    with pytest.raises(ValueError, match="not supported"):
+        owner.resolve_api_request(ApiRequest(provider="openrouter", thinking_level="high"))
+    policy = replace(policy, normalize_reasoning_effort=lambda _value: "")
+    with pytest.raises(ValueError, match="not recognized"):
+        _owner(tmp_path / "unknown.json", policy=policy).resolve_api_request(ApiRequest(provider="deepseek", thinking_level="not-a-level"))
+
+
 def test_native_binding_is_explicit_stable_and_credential_bound() -> None:
     config = ProviderApiConfig(
         provider="custom",
@@ -234,6 +266,19 @@ def test_configuration_loads_both_sections_and_safe_projection_drops_secrets(
     assert "api_key" not in owner.serialize_app_vision_config()
     assert "old-api-key" not in json.dumps(owner.serialize_app_api_config())
     assert "old-vision-key" not in json.dumps(owner.serialize_app_vision_config())
+
+
+def test_vision_profile_requires_explicit_enable_flag(tmp_path: Path) -> None:
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps({"vision": {
+        "provider": "openai",
+        "api_key": "vision-key",
+        "base_url": "https://api.openai.com/v1",
+        "model": "vision-model",
+    }}), encoding="utf-8")
+    owner = _owner(path)
+    assert owner.current_vision_config().configured is True
+    assert owner.current_vision_config().enabled is False
 
 
 def test_configuration_resolves_same_provider_saved_key_then_revalidates(
@@ -545,3 +590,82 @@ def test_reload_replaces_both_sections_under_the_owned_lock(tmp_path: Path) -> N
     assert vision == ProviderVisionConfig()
     assert owner.current_api_config() is api
     assert owner.current_vision_config() is vision
+
+
+def _real_provider_policy() -> ProviderConfigurationPolicyPorts:
+    from model_provider_adapters import normalize_provider_api_type, validate_provider_api_key
+    from vrchat_blendshape_agent import (
+        get_provider_defaults,
+        normalize_base_url,
+        normalize_provider_name,
+        normalize_reasoning_effort,
+        reasoning_effort_variants,
+    )
+
+    return replace(
+        _policy(),
+        normalize_provider_name=normalize_provider_name,
+        get_provider_defaults=get_provider_defaults,
+        normalize_base_url=normalize_base_url,
+        normalize_provider_api_type=normalize_provider_api_type,
+        normalize_reasoning_effort=normalize_reasoning_effort,
+        reasoning_effort_variants=reasoning_effort_variants,
+        validate_provider_api_key=validate_provider_api_key,
+    )
+
+
+@pytest.mark.parametrize("model", ["deepseek-chat", "deepseek-v4-flash"])
+def test_real_policy_cross_provider_session_uses_destination_default_and_saved_key(tmp_path: Path, model: str) -> None:
+    owner = _owner(tmp_path / "providers.json", policy=_real_provider_policy())
+    owner.save_api_config(ProviderApiConfig("deepseek", "fixture-deepseek-key", "https://old-route.invalid/v1", "deepseek-chat"))
+    current = ProviderApiConfig("openai", "fixture-openai-key", "https://current-route.invalid/v1", "gpt-4.1-mini")
+    owner.save_api_config(current)
+    before = owner.config_path.read_bytes()
+
+    selected = owner.resolve_session_config(provider="deepseek", model=model)
+
+    assert selected.provider == "deepseek"
+    assert selected.model == model
+    assert selected.base_url == "https://api.deepseek.com"
+    assert selected.api_key == "fixture-deepseek-key"
+    assert selected.api_type == ("auto" if model == "deepseek-v4-flash" else "chat_completions")
+    assert owner.current_api_config() is current
+    assert owner.config_path.read_bytes() == before
+
+
+def test_real_policy_cross_provider_custom_without_default_endpoint_stays_rejected(tmp_path: Path) -> None:
+    from provider_endpoint_policy import ProviderEndpointError
+
+    owner = _owner(tmp_path / "providers.json", policy=_real_provider_policy())
+    owner.save_api_config(ProviderApiConfig("custom", "fixture-custom-key", "https://custom-route.invalid/v1", "custom-model"))
+    current = ProviderApiConfig("openai", "fixture-openai-key", "https://current-route.invalid/v1", "gpt-4.1-mini")
+    owner.save_api_config(current)
+    before = owner.config_path.read_bytes()
+
+    with pytest.raises(ProviderEndpointError, match="Base URL is empty"):
+        owner.resolve_session_config(provider="custom", model="custom-model")
+
+    assert owner.current_api_config() is current
+    assert owner.config_path.read_bytes() == before
+
+
+def test_real_policy_explicit_empty_endpoint_stays_rejected(tmp_path: Path) -> None:
+    from provider_endpoint_policy import ProviderEndpointError
+
+    owner = _owner(tmp_path / "providers.json", policy=_real_provider_policy())
+    with pytest.raises(ProviderEndpointError, match="Base URL is empty"):
+        owner.resolve_api_request(ApiRequest(provider="deepseek", api_key="fixture-key", base_url="", model="deepseek-v4-flash"))
+    assert not owner.config_path.exists()
+
+
+def test_real_policy_cross_provider_still_requires_a_supported_model(tmp_path: Path) -> None:
+    from model_provider_adapters import ProviderApiTypeError
+
+    owner = _owner(tmp_path / "providers.json", policy=_real_provider_policy())
+    current = ProviderApiConfig("openai", "fixture-openai-key", "https://current-route.invalid/v1", "gpt-4.1-mini")
+    owner.save_api_config(current)
+    before = owner.config_path.read_bytes()
+    with pytest.raises(ProviderApiTypeError):
+        owner.resolve_session_config(provider="deepseek")
+    assert owner.current_api_config() is current
+    assert owner.config_path.read_bytes() == before

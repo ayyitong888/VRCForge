@@ -1,4 +1,4 @@
-import { AlertTriangle, ArrowDown, Loader2, Pause, Play, X } from "lucide-react";
+import { AlertTriangle, ArrowDown, ArrowUp, Loader2, MoreHorizontal, Pause, Play, X } from "lucide-react";
 import { useEffect, useMemo, useState, type FormEvent, type Ref } from "react";
 import { useTranslation } from "react-i18next";
 import { updateAgentGoal } from "../../lib/api";
@@ -14,7 +14,7 @@ import type {
 } from "../../lib/chat-types";
 import { Composer } from "./composer";
 import { AgentQuestionCard } from "./agent-question-card";
-import { projectAgentQuestionContinuation, questionContinuationDisplay } from "../../hooks/use-runtime-turn-continuation";
+import { projectAgentQuestionContinuation, questionContinuationCancelTarget, questionContinuationDisplay } from "../../hooks/use-runtime-turn-continuation";
 import { BackgroundGoalCatchUpCard } from "./background-goal-catch-up-card";
 import { ConversationCard } from "./conversation-card";
 import { SessionHandoffCard } from "./session-handoff-card";
@@ -23,7 +23,9 @@ import { ScopedPendingApprovalCard } from "../approvals/scoped-pending-approval-
 import { Button } from "../ui/button";
 import { matchPathToSkillRuntimeOperation, type PathToSkillOperationSummary } from "../../lib/path-to-skill-context";
 import { mergeConversationTimelineItems } from "../../lib/chat-thread";
+import { projectConversationSteeringMessages } from "../../lib/chat-steering-projection";
 import { conversationItemRenderKey } from "../../lib/conversation-utils";
+import type { AttachmentPayloadVault } from "../../lib/attachment-payloads";
 
 function formatGoalElapsed(totalSeconds: number): string {
   const seconds = Math.max(0, Math.round(totalSeconds));
@@ -38,7 +40,105 @@ export type QueuedChatTurn = {
   text: string;
   attachments: ChatAttachment[];
   queueStatus?: "steering" | "queued" | "waiting_for_resources" | "delivery_unverified" | "paused" | "cancelled";
+  composerQueued?: boolean;
 };
+
+function PendingQueuedTurnCard({
+  turn,
+  sending,
+  onEdit,
+  onRemove,
+  onSteer,
+}: {
+  turn: QueuedChatTurn;
+  sending: boolean;
+  onEdit?: (turnId: string, patch: { text?: string; attachments?: ChatAttachment[] }) => void | Promise<unknown>;
+  onRemove?: (turnId: string) => void;
+  onSteer?: (turnId: string) => void;
+}) {
+  const { t } = useTranslation();
+  const [draftText, setDraftText] = useState(turn.text);
+  const [saving, setSaving] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
+  useEffect(() => setDraftText(turn.text), [turn.id, turn.text]);
+  const dirty = draftText !== turn.text;
+  async function save(patch: { text?: string; attachments?: ChatAttachment[] }) {
+    if (!onEdit || saving) return;
+    setSaving(true);
+    try {
+      await onEdit(turn.id, patch);
+    } finally {
+      setSaving(false);
+    }
+  }
+  return (
+    <div className="relative flex items-start gap-2 rounded-lg border border-border/60 bg-background/80 p-2" data-chat-pending-turn={turn.id}>
+      <div className="min-w-0 flex-1 space-y-1.5">
+        {editing ? (
+          <textarea
+            className="app-scrollbar min-h-10 w-full resize-y rounded-md bg-transparent px-1 py-1 text-sm outline-none focus-visible:ring-1 focus-visible:ring-ring"
+            value={draftText}
+            aria-label={t("chat.editQueued")}
+            onChange={(event) => setDraftText(event.currentTarget.value)}
+            disabled={saving}
+            data-chat-pending-turn-text
+          />
+        ) : (
+          <p className="whitespace-pre-wrap break-words px-1 py-1 text-sm" data-chat-pending-turn-preview>{turn.text || t("chat.pendingQueue")}</p>
+        )}
+        {turn.attachments.length ? (
+          <div className="flex flex-wrap gap-1.5">
+            {turn.attachments.map((attachment) => (
+              <span key={attachment.id} className="inline-flex max-w-full items-center gap-1 rounded-md bg-muted px-2 py-1 text-xs" data-chat-pending-turn-attachment={attachment.id}>
+                <span className="max-w-48 truncate">{attachment.name}</span>
+                  {editing ? <button
+                  type="button"
+                  className="rounded p-0.5 text-muted-foreground hover:bg-background hover:text-foreground"
+                  aria-label={t("attachments.remove")}
+                  title={t("attachments.remove")}
+                  disabled={dirty || saving}
+                  onClick={() => void save({ text: draftText, attachments: turn.attachments.filter((item) => item.id !== attachment.id) })}
+                >
+                  <X className="h-3 w-3" />
+                  </button> : null}
+              </span>
+            ))}
+          </div>
+        ) : null}
+      </div>
+        {editing && dirty ? (
+          <Button type="button" variant="outline" className="h-8 shrink-0 px-2 text-xs" disabled={saving} onClick={() => void save({ text: draftText })} data-chat-pending-turn-save={turn.id}>
+            {t("chat.saveQueued")}
+          </Button>
+        ) : null}
+        {sending ? (
+          <Button type="button" variant="outline" className="h-8 shrink-0 px-2 text-xs" disabled={editing && dirty} onClick={() => onSteer?.(turn.id)} data-chat-pending-turn-steer={turn.id}>
+            <ArrowUp className="mr-1 h-3 w-3" />
+            {t("chat.guideNow")}
+          </Button>
+        ) : null}
+        <Button type="button" variant="ghost" className="h-8 w-8 shrink-0 p-0" aria-label={t("chat.removeQueued")} title={t("chat.removeQueued")} onClick={() => onRemove?.(turn.id)} data-chat-pending-turn-remove={turn.id}>
+          <X className="h-4 w-4" />
+        </Button>
+        <Button type="button" variant="ghost" className="h-8 w-8 shrink-0 p-0" aria-label={t("chat.moreQueued")} title={t("chat.moreQueued")} aria-expanded={menuOpen} onClick={() => setMenuOpen((value) => !value)} data-chat-pending-turn-more={turn.id}>
+          <MoreHorizontal className="h-4 w-4" />
+        </Button>
+        {menuOpen ? (
+          <div role="menu" className="absolute right-2 top-11 z-20 min-w-36 rounded-md border border-border bg-popover p-1 text-popover-foreground shadow-md" data-chat-pending-turn-menu={turn.id}>
+            <button type="button" role="menuitem" className="w-full rounded-sm px-2 py-1.5 text-left text-sm hover:bg-accent" onClick={() => { setEditing(true); setMenuOpen(false); }} data-chat-pending-turn-edit={turn.id}>
+              {t("chat.editQueuedMessage")}
+            </button>
+          </div>
+        ) : null}
+        {editing ? (
+          <Button type="button" variant="ghost" className="h-8 shrink-0 px-2 text-xs" onClick={() => { setDraftText(turn.text); setEditing(false); }} data-chat-pending-turn-edit-cancel={turn.id}>
+            {t("common.cancel")}
+          </Button>
+        ) : null}
+    </div>
+  );
+}
 
 export function ChatWorkspace({
   projectPromptTitle,
@@ -48,9 +148,14 @@ export function ChatWorkspace({
   queueAllowed,
   permission,
   onSubmit,
+  onQueue,
+  onSteerNow,
   onStop,
   onResumeQueue,
   onCancelQueue,
+  onEditQueuedTurn,
+  onRemoveQueuedTurn,
+  onSteerQueuedTurn,
   onSwitchMode,
   planMode = false,
   onPlanModeChange,
@@ -66,12 +171,19 @@ export function ChatWorkspace({
   onCancelCompaction,
   providerLabel,
   model,
+  providerReasoningEndpoint,
+  providerReasoningLevel,
+  onProviderReasoningActivated,
   activeGoal,
   onGoalChanged,
   goalEndpoint,
+  resourceImageEndpoint,
+  resourceChatId,
+  resourceProjectPath,
   projects,
   onBindProject,
   conversation,
+  attachmentPayloads,
   queued,
   agentQuestions,
   backgroundGoalDeliveries,
@@ -93,6 +205,7 @@ export function ChatWorkspace({
   latestEditableUserItemId,
   editingItemId,
   editingText,
+  editSaveDisabledReason,
   editingAttachments,
   onEditItemChangeText,
   onEditItemRemoveAttachment,
@@ -127,9 +240,14 @@ export function ChatWorkspace({
   queueAllowed: boolean;
   permission?: PermissionState;
   onSubmit: (event?: FormEvent) => void;
+  onQueue?: (event?: FormEvent) => void;
+  onSteerNow?: (event?: FormEvent) => void;
   onStop?: () => void;
   onResumeQueue?: () => void;
   onCancelQueue?: () => void;
+  onEditQueuedTurn?: (turnId: string, patch: { text?: string; attachments?: ChatAttachment[] }) => void | Promise<unknown>;
+  onRemoveQueuedTurn?: (turnId: string) => void;
+  onSteerQueuedTurn?: (turnId: string) => void;
   planMode?: boolean;
   onPlanModeChange?: (enabled: boolean) => void;
   onSwitchMode: (mode: PermissionState["executionMode"]) => void;
@@ -145,12 +263,19 @@ export function ChatWorkspace({
   onCancelCompaction?: () => void;
   providerLabel: string;
   model: string;
+  providerReasoningEndpoint?: string;
+  providerReasoningLevel?: string;
+  onProviderReasoningActivated?: () => void | Promise<void>;
   activeGoal: AgentGoal | null;
   onGoalChanged: (goal: AgentGoal) => void;
   goalEndpoint: string;
+  resourceImageEndpoint?: string;
+  resourceChatId?: string;
+  resourceProjectPath?: string;
   projects: Array<{ key: string; name: string }>;
   onBindProject: (path: string) => void;
   conversation: ConversationItem[];
+  attachmentPayloads?: AttachmentPayloadVault;
   queued: QueuedChatTurn[];
   agentQuestions: AgentQuestion[];
   backgroundGoalDeliveries: AgentGoalDelivery[];
@@ -171,6 +296,7 @@ export function ChatWorkspace({
   latestEditableUserItemId: string;
   editingItemId: string;
   editingText: string;
+  editSaveDisabledReason?: string;
   editingAttachments: ChatAttachment[];
   onEditItemChangeText: (value: string) => void;
   onEditItemRemoveAttachment: (attachmentId: string) => void;
@@ -198,6 +324,7 @@ export function ChatWorkspace({
   sessionHandoffTargetChats: SessionHandoffTargetChat[];
   handoffSendOpen: boolean;
   onHandoffSendOpenChange: (open: boolean) => void;
+  developerOptionsEnabled?: boolean;
 }) {
   const { t } = useTranslation();
   const pendingAgentQuestions = useMemo(
@@ -210,7 +337,25 @@ export function ChatWorkspace({
   const waitingForQuestion = pendingAgentQuestions.some(
     (question) => questionContinuationDisplay(question) === "pending",
   );
-  const conversationItems = mergeConversationTimelineItems(conversation);
+  const activeQuestionContinuation = pendingAgentQuestions.find(
+    (question) => questionContinuationDisplay(question) === "active",
+  );
+  const questionContinuationCanStop = Boolean(activeQuestionContinuation && onStopQuestionContinuation);
+  const composerSending = sending || questionContinuationCanStop;
+  const composerStopDisabled = Boolean(!sending && activeQuestionContinuation && (
+    String(activeQuestionContinuation.runtimeContinuation?.status || "").toLowerCase() === "cancelling"
+    || !questionContinuationCancelTarget(activeQuestionContinuation)
+  ));
+  const composerStop = !sending && activeQuestionContinuation && onStopQuestionContinuation
+    ? () => void onStopQuestionContinuation(activeQuestionContinuation)
+    : onStop;
+  const pendingQuestionPrompts = pendingAgentQuestions.filter(
+    (question) => questionContinuationDisplay(question) === "pending",
+  );
+  const steeringProjection = projectConversationSteeringMessages(mergeConversationTimelineItems(conversation.filter(
+    (item) => item.type !== "user" || item.composerQueued !== true,
+  )));
+  const conversationItems = steeringProjection.items;
   const conversationItemKeyOccurrences = new Map<string, number>();
   const conversationRenderScope = sessionHandoffSourceChatId || "chat";
   const [goalActionBusy, setGoalActionBusy] = useState(false);
@@ -247,11 +392,14 @@ export function ChatWorkspace({
     <Composer
       input={input}
       setInput={setInput}
-      sending={sending}
+      sending={composerSending}
       queueAllowed={queueAllowed}
       permission={permission}
       onSubmit={onSubmit}
-      onStop={onStop}
+      onQueue={onQueue}
+      onSteerNow={onSteerNow}
+      onStop={composerStop}
+      stopDisabled={composerStopDisabled}
       onSwitchMode={onSwitchMode}
       planMode={planMode}
       onPlanModeChange={onPlanModeChange}
@@ -266,12 +414,33 @@ export function ChatWorkspace({
       contextUsage={contextUsage}
       providerLabel={providerLabel}
       model={model}
+      providerReasoningEndpoint={providerReasoningEndpoint}
+      providerReasoningLevel={providerReasoningLevel}
+      onProviderReasoningActivated={onProviderReasoningActivated}
       goalEndpoint={goalEndpoint}
       activeGoal={activeGoal}
       projects={projects}
       onBindProject={onBindProject}
     />
   );
+  const pendingQueue = queued.length ? (
+    <section className="mb-3 space-y-2 rounded-xl border border-border/70 bg-muted/30 p-2.5" aria-label={t("chat.pendingQueue")} data-chat-pending-queue>
+      <div className="flex items-center gap-2 px-1 text-xs font-medium text-muted-foreground">
+        <span>{t("chat.pendingQueue")}</span>
+        <span aria-label={String(queued.length)} className="rounded-full bg-muted px-1.5 py-0.5">{queued.length}</span>
+      </div>
+      {queued.map((turn) => (
+        <PendingQueuedTurnCard
+          key={turn.id}
+          turn={turn}
+          sending={sending}
+          onEdit={onEditQueuedTurn}
+          onRemove={onRemoveQueuedTurn}
+          onSteer={onSteerQueuedTurn}
+        />
+      ))}
+    </section>
+  ) : null;
   const approvalComposer = scopedPendingApprovals.length ? (
     <ScopedPendingApprovalCard
       approvals={scopedPendingApprovals}
@@ -370,11 +539,12 @@ export function ChatWorkspace({
         </div>
         <div className="shrink-0 bg-workspace/95 px-4 pb-4 pt-2 md:px-6 md:pb-5 md:pt-2" data-chat-composer-dock>
           <div className="mx-auto max-w-3xl">
-            {pendingAgentQuestions.length ? (
+            {pendingQuestionPrompts.length ? (
               <div className="mb-3">
-                <AgentQuestionCard questions={pendingAgentQuestions} onAnswerQuestion={onAnswerQuestion} onStopContinuation={onStopQuestionContinuation} />
+                <AgentQuestionCard questions={pendingQuestionPrompts} onAnswerQuestion={onAnswerQuestion} />
               </div>
             ) : null}
+            {pendingQueue}
             {queueControls}
             <CompactionStatus state={compaction} onCancel={onCancelCompaction} />
             {activeGoalBar}
@@ -389,7 +559,7 @@ export function ChatWorkspace({
     <div className="relative flex min-h-0 flex-1 flex-col">
       <div className="relative min-h-0 flex-1">
         <div
-          className="h-full overflow-auto px-4 py-6 md:px-6 md:py-8"
+          className="app-scrollbar h-full overflow-auto px-4 py-6 md:px-6 md:py-8"
           data-chat-history-scroll
           onMouseUp={onConversationMouseUp}
           onScroll={(event) => onConversationScroll(event.currentTarget)}
@@ -429,6 +599,8 @@ export function ChatWorkspace({
               );
             }
             const approval = item.type === "agent" ? pendingApprovalForResponse(item.response) : null;
+            const turnId = item.type === "agent" ? item.response.clientTurnId : item.type === "streaming" ? item.clientTurnId : "";
+            const initialUser = turnId ? steeringProjection.initialUsersByTurnId.get(turnId) : undefined;
             const capturedOperation = item.type === "agent"
               ? matchPathToSkillRuntimeOperation(item.response, runtimeRuns)
               : null;
@@ -436,12 +608,42 @@ export function ChatWorkspace({
               <div key={conversationItemRenderKey(item, conversationRenderScope, conversationItemKeyOccurrences)} data-conversation-item-id={item.id}>
                 <ConversationCard
                 item={item}
+                interleavedUserMessages={turnId ? steeringProjection.messagesByTurnId.get(turnId) : undefined}
+                initialUserContent={initialUser ? (
+                  <div data-conversation-item-id={initialUser.id} data-turn-initial-user>
+                    <ConversationCard
+                      item={initialUser}
+                      attachmentPayloads={attachmentPayloads}
+                      canRetry={!sending && queued.length === 0 && initialUser.id === latestRetryableItemId}
+                      canEdit={initialUser.id === latestEditableUserItemId}
+                      editing={editingItemId === initialUser.id}
+                      editingText={editingText}
+                      editSaveDisabledReason={editSaveDisabledReason || (sending || queued.length > 0 ? t("chat.cannotActionWhileRunning") : "")}
+                      editingAttachments={editingAttachments}
+                      onEditTextChange={onEditItemChangeText}
+                      onEditAttachmentRemove={onEditItemRemoveAttachment}
+                      onCopyItem={onCopyItem}
+                      onRetryItem={onRetryItem}
+                      onEditItem={onEditItem}
+                      onEditItemSave={onEditItemSave}
+                      onEditItemCancel={onEditItemCancel}
+                      onImportAttachment={onImportAttachment}
+                    />
+                  </div>
+                ) : undefined}
+                chatResourceImageContext={resourceImageEndpoint && resourceChatId && resourceProjectPath ? {
+                  endpoint: resourceImageEndpoint,
+                  chatId: resourceChatId,
+                  projectPath: resourceProjectPath,
+                } : undefined}
+                attachmentPayloads={attachmentPayloads}
                 approval={approval}
                 approvalAction={approval ? approvalActions[approval.id] : undefined}
                 canRetry={!sending && queued.length === 0 && item.id === latestRetryableItemId}
-                canEdit={!sending && queued.length === 0 && item.id === latestEditableUserItemId}
+                canEdit={item.id === latestEditableUserItemId}
                 editing={editingItemId === item.id}
                 editingText={editingText}
+                editSaveDisabledReason={editSaveDisabledReason || (sending || queued.length > 0 ? t("chat.cannotActionWhileRunning") : "")}
                 editingAttachments={editingAttachments}
                 onEditTextChange={onEditItemChangeText}
                 onEditAttachmentRemove={onEditItemRemoveAttachment}
@@ -481,11 +683,12 @@ export function ChatWorkspace({
       </div>
       <div className="shrink-0 bg-workspace/95 px-4 pb-4 pt-2 md:px-6 md:pb-5 md:pt-2" data-chat-composer-dock>
         <div className="mx-auto max-w-3xl">
-          {pendingAgentQuestions.length ? (
+          {pendingQuestionPrompts.length ? (
             <div className="mb-3">
-              <AgentQuestionCard questions={pendingAgentQuestions} onAnswerQuestion={onAnswerQuestion} onStopContinuation={onStopQuestionContinuation} />
+              <AgentQuestionCard questions={pendingQuestionPrompts} onAnswerQuestion={onAnswerQuestion} />
             </div>
           ) : null}
+          {pendingQueue}
           {queueControls}
           <CompactionStatus state={compaction} onCancel={onCancelCompaction} />
           {handoffSendOpen ? (

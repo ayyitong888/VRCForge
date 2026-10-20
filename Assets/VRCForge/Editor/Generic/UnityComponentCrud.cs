@@ -572,45 +572,157 @@ namespace VRCForge.Editor
             int maxItems,
             out int returnedItemCount,
             out int valueItemCount,
-            out bool valueTruncated)
+            out bool valueTruncated,
+            out bool valueIncomplete)
         {
             returnedItemCount = -1;
             valueItemCount = -1;
             valueTruncated = false;
-            // UnityEngine.Object references such as Transform also implement
-            // IEnumerable.  They are scalar object references for MCP
-            // property reads and must not be expanded into child transforms.
-            if (value is UnityEngine.Object || !(value is IEnumerable enumerable) || value is string)
+            valueIncomplete = false;
+            var nodesRemaining = 2048;
+            var activeObjects = new HashSet<object>(ReferenceEqualityComparer.Instance);
+            // UnityEngine.Object values remain scalar; preserve the existing
+            // collection dispatch contract: value is UnityEngine.Object || !(value is IEnumerable enumerable) || value is string.
+            var described = DescribeValueBounded(value, maxItems, 0, ref nodesRemaining, activeObjects, ref valueTruncated, ref valueIncomplete);
+            if (value is IEnumerable && !(value is string) && !(value is UnityEngine.Object))
+            {
+                var collection = value as ICollection;
+                if (collection != null)
+                {
+                    valueItemCount = collection.Count;
+                    returnedItemCount = Math.Min(collection.Count, maxItems);
+                    valueTruncated = valueTruncated || collection.Count > returnedItemCount;
+                }
+                else if (described is IList list)
+                {
+                    returnedItemCount = list.Count;
+                    valueItemCount = valueTruncated ? -1 : returnedItemCount;
+                }
+            }
+            return described;
+        }
+
+        private sealed class ReferenceEqualityComparer : IEqualityComparer<object>
+        {
+            internal static readonly ReferenceEqualityComparer Instance = new ReferenceEqualityComparer();
+            public new bool Equals(object left, object right) => ReferenceEquals(left, right);
+            public int GetHashCode(object value) => System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(value);
+        }
+
+        private static object DescribeValueBounded(
+            object value,
+            int maxItems,
+            int depth,
+            ref int nodesRemaining,
+            HashSet<object> activeObjects,
+            ref bool truncated,
+            ref bool incomplete)
+        {
+            if (nodesRemaining-- <= 0)
+            {
+                truncated = true;
+                incomplete = true;
+                return new Dictionary<string, object> { ["__incomplete"] = true, ["__truncated"] = true };
+            }
+            if (value == null || value is string || value is bool || value is Enum
+                || value.GetType().IsPrimitive || value is Vector2 || value is Vector3
+                || value is Vector4 || value is Quaternion || value is Color
+                || value is Bounds || value is Matrix4x4 || value is UnityEngine.Object)
             {
                 return DescribeValue(value);
             }
-
-            var items = new List<object>();
-            var collection = value as ICollection;
-            var totalKnown = collection != null;
-            if (collection != null)
+            if (depth >= 4)
             {
-                valueItemCount = collection.Count;
+                truncated = true;
+                incomplete = true;
+                return new Dictionary<string, object> { ["__incomplete"] = true, ["__truncated"] = true };
             }
-            foreach (var item in enumerable)
+            if (!value.GetType().IsValueType && !activeObjects.Add(value))
             {
-                if (items.Count >= maxItems)
+                incomplete = true;
+                return new Dictionary<string, object> { ["__incomplete"] = true, ["__cycle"] = true };
+            }
+            try
+            {
+                if (value is IEnumerable enumerable)
                 {
-                    valueTruncated = true;
-                    break;
+                    var items = new List<object>();
+                    foreach (var item in enumerable)
+                    {
+                        if (items.Count >= maxItems)
+                        {
+                            truncated = true;
+                            incomplete = true;
+                            break;
+                        }
+                        items.Add(DescribeValueBounded(item, maxItems, depth + 1, ref nodesRemaining, activeObjects, ref truncated, ref incomplete));
+                        if (nodesRemaining <= 0)
+                            break;
+                    }
+                    return items;
                 }
-                items.Add(DescribeValue(item));
+
+                var fields = new Dictionary<string, object>();
+                var fieldType = value.GetType();
+                if (!fieldType.IsDefined(typeof(SerializableAttribute), false))
+                {
+                    incomplete = true;
+                    return new Dictionary<string, object>
+                    {
+                        ["__type"] = fieldType.FullName,
+                        ["__incomplete"] = true
+                    };
+                }
+                while (fieldType != null && fieldType != typeof(object))
+                {
+                    foreach (var field in fieldType.GetFields(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly))
+                    {
+                        if (field.IsStatic || field.IsNotSerialized || field.IsInitOnly
+                            || (!field.IsPublic && field.GetCustomAttribute<SerializeField>() == null))
+                            continue;
+                        if (fields.ContainsKey(field.Name))
+                        {
+                            incomplete = true;
+                            fields["__duplicateField"] = field.Name;
+                            continue;
+                        }
+                        fields[field.Name] = DescribeValueBounded(field.GetValue(value), maxItems, depth + 1, ref nodesRemaining, activeObjects, ref truncated, ref incomplete);
+                        if (nodesRemaining <= 0)
+                            break;
+                    }
+                    if (nodesRemaining <= 0)
+                        break;
+                    fieldType = fieldType.BaseType;
+                }
+                if (fields.Count == 0)
+                {
+                    incomplete = true;
+                    fields["__type"] = value.GetType().FullName;
+                    fields["__incomplete"] = true;
+                }
+                else if (incomplete)
+                {
+                    fields["__incomplete"] = true;
+                }
+                if (truncated)
+                    fields["__truncated"] = true;
+                return fields;
             }
-            returnedItemCount = items.Count;
-            if (!totalKnown && !valueTruncated)
+            finally
             {
-                valueItemCount = returnedItemCount;
+                if (!value.GetType().IsValueType)
+                    activeObjects.Remove(value);
             }
-            else if (totalKnown)
-            {
-                valueTruncated = valueItemCount > returnedItemCount;
-            }
-            return items;
+        }
+
+        internal static object DescribeValue(
+            object value,
+            int maxItems,
+            out int returnedItemCount,
+            out int valueItemCount,
+            out bool valueTruncated)
+        {
+            return DescribeValue(value, maxItems, out returnedItemCount, out valueItemCount, out valueTruncated, out _);
         }
 
         internal static Type FindType(string fullName)
@@ -660,6 +772,154 @@ namespace VRCForge.Editor
                 throw new InvalidOperationException("Component writes require one loaded saved scene object.");
             }
             return SceneObjectCopyCore.ResolveSavedScene(gameObject.scene.path, "component target scene");
+        }
+
+        private static bool IsEngineComponentAssembly(Assembly assembly)
+        {
+            var core = typeof(Component).Assembly;
+            if (assembly == core)
+            {
+                return true;
+            }
+            if (assembly == null || assembly.IsDynamic)
+            {
+                return false;
+            }
+            var name = assembly.GetName().Name;
+            // Engine modules are loaded beside the actual CoreModule, not from
+            // project/plugin assemblies that merely use a UnityEngine name.
+            return name.StartsWith("UnityEngine.", StringComparison.Ordinal)
+                && string.Equals(System.IO.Path.GetFileName(assembly.Location), name + ".dll", StringComparison.OrdinalIgnoreCase)
+                && string.Equals(System.IO.Path.GetDirectoryName(assembly.Location),
+                    System.IO.Path.GetDirectoryName(core.Location), StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool IsPlainSerializedFieldType(Type type, bool allowCollection = true)
+        {
+            if (type == typeof(string) || type == typeof(bool) || type == typeof(byte)
+                || type == typeof(sbyte) || type == typeof(short) || type == typeof(ushort)
+                || type == typeof(int) || type == typeof(uint) || type == typeof(long)
+                || type == typeof(ulong) || type == typeof(float) || type == typeof(double)
+                || type == typeof(char) || type.IsEnum
+                || type == typeof(Vector2) || type == typeof(Vector3) || type == typeof(Vector4)
+                || type == typeof(Quaternion) || type == typeof(Color)
+                || typeof(UnityEngine.Object).IsAssignableFrom(type))
+            {
+                return true;
+            }
+            if (!allowCollection)
+            {
+                return false;
+            }
+            if (type.IsArray)
+            {
+                return type.GetArrayRank() == 1 && IsPlainSerializedFieldType(type.GetElementType(), false);
+            }
+            return type.IsGenericType && type.GetGenericTypeDefinition() == typeof(List<>)
+                && IsPlainSerializedFieldType(type.GetGenericArguments()[0], false);
+        }
+
+        private static bool IsPlainSceneDataField(Component component, MemberInfo member)
+        {
+            var field = member as FieldInfo;
+            if (!(component is MonoBehaviour) || field == null || field.IsStatic
+                || field.IsInitOnly || field.IsLiteral || field.IsNotSerialized
+                || (!field.IsPublic && !field.GetCustomAttributesData().Any(
+                    attribute => attribute.AttributeType == typeof(SerializeField)))
+                || field.GetCustomAttributesData().Any(
+                    attribute => attribute.AttributeType == typeof(SerializeReference))
+                || !IsPlainSerializedFieldType(field.FieldType)
+                || component is ISerializationCallbackReceiver)
+            {
+                return false;
+            }
+            // A data-only type has no declared behavior. This deliberately also
+            // rejects ordinary helper/accessor methods rather than guessing which
+            // Unity/editor callbacks could execute during serialization or Undo.
+            for (var type = component.GetType(); type != typeof(MonoBehaviour); type = type.BaseType)
+            {
+                if (type == null || type.TypeInitializer != null
+                    || type.GetMethods(BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public
+                        | BindingFlags.NonPublic | BindingFlags.DeclaredOnly).Length != 0
+                    || type.GetCustomAttributesData().Any(attribute =>
+                        attribute.AttributeType == typeof(ExecuteAlways)
+                        || attribute.AttributeType == typeof(ExecuteInEditMode)))
+                {
+                    return false;
+                }
+                // Saving serializes the whole component, not just the assigned
+                // field. Do not admit nested custom data/callback graphs through
+                // another serialized field on an otherwise plain component.
+                foreach (var serializedField in type.GetFields(BindingFlags.Instance
+                    | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly))
+                {
+                    if (serializedField.IsStatic || serializedField.IsInitOnly || serializedField.IsNotSerialized
+                        || (!serializedField.IsPublic && !serializedField.GetCustomAttributesData().Any(
+                            attribute => attribute.AttributeType == typeof(SerializeField))))
+                    {
+                        continue;
+                    }
+                    if (!IsPlainSerializedFieldType(serializedField.FieldType)
+                        || serializedField.GetCustomAttributesData().Any(
+                            attribute => attribute.AttributeType == typeof(SerializeReference)))
+                    {
+                        return false;
+                    }
+                }
+            }
+            return true;
+        }
+
+        internal static object BuildPropertyCheckpointScope(
+            Component component, MemberInfo member, int componentIndex,
+            string propertyPath, SavedSceneSnapshot scene)
+        {
+            if (component == null || member == null || member.DeclaringType == null || scene == null
+                || (component is MonoBehaviour
+                    ? !IsPlainSceneDataField(component, member)
+                    : !IsEngineComponentAssembly(component.GetType().Assembly)
+                        || !IsEngineComponentAssembly(member.DeclaringType.Assembly)))
+            {
+                throw new InvalidOperationException(
+                    "component_property_checkpoint_scope_unsupported: Generic writes require a native Unity component/member or a data-only MonoBehaviour serialized field; executable component behavior has no proven checkpoint scope.");
+            }
+            var owner = component.gameObject;
+            if (owner == null || owner.scene.path != scene.Path
+                || owner.scene.handle != scene.Handle || componentIndex < 0)
+            {
+                throw new InvalidOperationException("component_property_checkpoint_owner_invalid: The resolved component has no unique saved scene owner.");
+            }
+            var objectId = GlobalObjectId.GetGlobalObjectIdSlow(owner);
+            var componentId = GlobalObjectId.GetGlobalObjectIdSlow(component);
+            if (objectId.identifierType != 2 || componentId.identifierType != 2
+                || objectId.targetObjectId == 0 || componentId.targetObjectId == 0
+                || !string.Equals(objectId.assetGUID.ToString(), scene.Guid, StringComparison.OrdinalIgnoreCase)
+                || !string.Equals(componentId.assetGUID.ToString(), scene.Guid, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException("component_property_checkpoint_owner_invalid: The resolved component and object must belong to the saved scene identity.");
+            }
+            return new
+            {
+                schema = "vrcforge.component_property_checkpoint.v1",
+                ownerKind = "scene",
+                scenePath = scene.Path,
+                sceneGuid = scene.Guid,
+                sceneDigest = scene.FileDigest,
+                objectGlobalObjectId = objectId.ToString(),
+                componentGlobalObjectId = componentId.ToString(),
+                componentType = component.GetType().FullName,
+                componentIndex,
+                propertyPath,
+                archiveAssetPaths = new[] { scene.Path }
+            };
+        }
+
+        internal static void RecordPropertyPrefabOverride(Component component)
+        {
+            if (PrefabUtility.IsPartOfPrefabInstance(component))
+            {
+                PrefabUtility.RecordPrefabInstancePropertyModifications(component);
+            }
         }
 
         internal static SavedSceneSnapshot SaveAndResolveScene(SavedSceneSnapshot beforeScene)
@@ -985,12 +1245,19 @@ namespace VRCForge.Editor
 
             [VRCForgeInput("Maximum collection items to return (1-2000, default 50). The result reports total/returned counts and truncation.", IsRequired = false)]
             public int? maxItems { get; set; } = 50;
+
+            [VRCForgeInput("If true, return only the authoritative saved-scene checkpoint scope for this scalar component property without invoking its getter. Not supported with queries.", IsRequired = false)]
+            public bool? includeCheckpointScope { get; set; } = false;
         }
 
         public static object HandleCommand(JObject @params)
         {
             if (@params != null && @params.ContainsKey("queries"))
+            {
+                if (@params.Value<bool?>("includeCheckpointScope") == true)
+                    return VRCForgeToolResult.Failed("includeCheckpointScope requires one scalar component property; it cannot be combined with queries.");
                 return UnityComponentPropertyBatch.Handle(@params);
+            }
             var p = (@params ?? new JObject()).ToObject<GetPropertyParameters>() ?? new GetPropertyParameters();
             try
             {
@@ -998,6 +1265,20 @@ namespace VRCForge.Editor
                 var type = ComponentCrudCore.ResolveComponentType(p.componentType);
                 var component = ComponentCrudCore.ResolveComponent(go, type, p.componentIndex ?? 0);
                 var member = ComponentCrudCore.ResolveMember(component.GetType(), p.propertyPath);
+                if (p.includeCheckpointScope == true)
+                {
+                    var checkpointScope = ComponentCrudCore.BuildPropertyCheckpointScope(
+                        component, member, p.componentIndex ?? 0, p.propertyPath,
+                        ComponentCrudCore.ResolveSavedSceneFor(component.gameObject));
+                    return VRCForgeToolResult.Completed("Read the resolved component property's checkpoint scope without invoking its getter.", new
+                    {
+                        gameObjectPath = ComponentCrudCore.GetHierarchyPath(component.gameObject.transform),
+                        componentType = component.GetType().FullName,
+                        componentIndex = p.componentIndex ?? 0,
+                        propertyPath = p.propertyPath,
+                        checkpointScope
+                    });
+                }
                 var value = ComponentCrudCore.GetReadOnlyMemberValue(component, member);
                 var maxItems = p.maxItems ?? 50;
                 if (maxItems < 1 || maxItems > 2000)
@@ -1009,7 +1290,8 @@ namespace VRCForge.Editor
                     maxItems,
                     out var returnedItemCount,
                     out var valueItemCount,
-                    out var valueTruncated);
+                    out var valueTruncated,
+                    out var valueIncomplete);
 
                 var payload = new
                 {
@@ -1021,7 +1303,8 @@ namespace VRCForge.Editor
                     propertyValue,
                     returnedItemCount = returnedItemCount >= 0 ? (int?)returnedItemCount : null,
                     valueItemCount = valueItemCount >= 0 ? (int?)valueItemCount : null,
-                    valueTruncated
+                    valueTruncated,
+                    valueIncomplete
                 };
 
                 return VRCForgeToolResult.Completed(
@@ -2014,6 +2297,8 @@ namespace VRCForge.Editor
                 goPath = ComponentCrudCore.GetHierarchyPath(go.transform);
                 beforeScene = ComponentCrudCore.ResolveSavedSceneFor(go);
                 var objectId = GlobalObjectId.GetGlobalObjectIdSlow(go).ToString();
+                var checkpointScope = ComponentCrudCore.BuildPropertyCheckpointScope(
+                    component, member, componentIndex, p.propertyPath, beforeScene);
 
                 oldValue = ComponentCrudCore.GetMemberValue(component, member);
                 var newValue = ComponentCrudCore.ConvertValue(valueToken, memberType);
@@ -2028,6 +2313,7 @@ namespace VRCForge.Editor
                         componentType = component.GetType().FullName,
                         componentIndex = p.componentIndex ?? 0,
                         propertyPath = p.propertyPath,
+                        checkpointScope,
                         valueType = memberType.FullName,
                         oldValue = ComponentCrudCore.DescribeValue(oldValue),
                         newValue = ComponentCrudCore.DescribeValue(newValue)
@@ -2095,6 +2381,7 @@ namespace VRCForge.Editor
                 mutationStarted = true;
                 failureStage = "unity_mutation";
                 ComponentCrudCore.SetMemberValue(component, member, newValue);
+                ComponentCrudCore.RecordPropertyPrefabOverride(component);
                 mutationApplied = true;
                 EditorUtility.SetDirty(component);
                 EditorUtility.SetDirty(go);

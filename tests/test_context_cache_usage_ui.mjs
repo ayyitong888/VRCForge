@@ -33,33 +33,59 @@ function nodes(node) {
   return node && typeof node === "object" ? [node, ...nodes(node.props?.children)] : [];
 }
 
+test("switching models never reuses another model's occupancy or cache rate", () => {
+  assert.equal(buildContextUsageFromRuntime({ ...base, provider: "chatgpt", model: "old" }, "chatgpt", "new", undefined, t), undefined);
+  assert.equal(buildContextUsageFromRuntime({ ...base, provider: "other", model: "new" }, "chatgpt", "new", undefined, t), undefined);
+  const usage = buildContextUsageFromRuntime({ ...base, provider: "chatgpt", model: "new" }, "chatgpt", "new", { contextWindow: 2000 }, t);
+  assert.equal(usage.limit, 2000);
+  assert.equal(usage.limitKnown, true);
+});
+
+test("known capacity remains visible when the provider omits usage", () => {
+  const usage = buildContextUsageFromRuntime(undefined, "fixture", "fixture", undefined, t, 2000);
+  assert.equal(usage.used, 0);
+  assert.equal(usage.limit, 2000);
+  assert.equal(usage.limitKnown, true);
+  assert.equal(usage.exact, false);
+  const meter = exports.ContextUsageMeter({ usage });
+  assert.match(meter.props["aria-label"], /Known capacity 2000; current usage unavailable/);
+});
+
+test("mismatched usage never leaks old occupancy but retains current capacity", () => {
+  const usage = buildContextUsageFromRuntime({ ...base, provider: "other", model: "old" }, "fixture", "fixture", undefined, t, 2000);
+  assert.equal(usage.used, 0);
+  assert.equal(usage.limit, 2000);
+  assert.equal(usage.exact, false);
+  assert.match(usage.label, /Capacity 2,000/);
+});
+
 test("complete cache uses cumulative input and preserves peak context occupancy", () => {
   const { usage, meter } = render();
   assert.equal(usage.cacheHitRatio, 0.25);
   assert.equal(usage.used, 600);
   assert.equal(meter.props["data-context-percent"], "30");
-  assert.match(meter.props.title, /Cache hit rate \(all requests\): 25%/);
-  assert.equal(meter.props["aria-label"], meter.props.title);
+  assert.match(meter.props["aria-label"], /Cache hit rate \(all requests\): 25%/);
+  assert.equal(meter.props.title, undefined, "custom hover must not also request a native tooltip");
   assert.match(nodes(meter).find((node) => "data-context-cache-hit-rate" in node.props).props.children, /25%/);
 });
 
 test("explicit zero is a valid rate", () => {
   const { usage, meter } = render({ cacheReadTokens: 0 });
   assert.equal(usage.cacheHitRatio, 0);
-  assert.match(meter.props.title, /Cache hit rate \(all requests\): 0%/);
+  assert.match(meter.props["aria-label"], /Cache hit rate \(all requests\): 0%/);
 });
 
 test("cache rate preserves up to two decimal places", () => {
   for (const [cacheReadTokens, percent] of [[448, "4.48"], [9448, "94.48"], [450, "4.5"]]) {
     const { meter } = render({ inputTokens: 10000, cacheReadTokens });
-    assert.ok(meter.props.title.includes(`Cache hit rate (all requests): ${percent}%`));
+    assert.ok(meter.props["aria-label"].includes(`Cache hit rate (all requests): ${percent}%`));
   }
 });
 
 test("legacy missing cache information stays unknown", () => {
   const { usage, meter } = render({ cacheReadTokens: undefined, cacheUsageComplete: undefined, cacheUsageRequestCount: undefined });
   assert.equal(usage.cacheHitRatio, undefined);
-  assert.match(meter.props.title, /Cache hit rate: unknown/);
+  assert.match(meter.props["aria-label"], /Cache hit rate: unknown/);
 });
 
 test("partial, mismatched, malformed, and zero denominator data never show a rate", () => {
@@ -74,8 +100,8 @@ test("partial, mismatched, malformed, and zero denominator data never show a rat
   ]) {
     const { usage, meter } = render(changes);
     assert.equal(usage.cacheHitRatio, undefined, JSON.stringify(changes));
-    assert.match(meter.props.title, /Cache hit rate: incomplete data/);
-    assert.doesNotMatch(meter.props.title, /Cache hit rate \(all requests\): .*%/);
+    assert.match(meter.props["aria-label"], /Cache hit rate: incomplete data/);
+    assert.doesNotMatch(meter.props["aria-label"], /Cache hit rate \(all requests\): .*%/);
   }
 });
 
@@ -83,8 +109,8 @@ test("component rejects invalid ratios and retains cached-session wording", () =
   for (const ratio of [NaN, Infinity, -0.1, 1.1]) {
     const { usage } = render();
     const meter = exports.ContextUsageMeter({ usage: { ...usage, cached: true, cacheHitRatio: ratio } });
-    assert.match(meter.props.title, /incomplete data/);
-    assert.doesNotMatch(meter.props.title, /Cache hit rate \(all requests\): .*%/);
+    assert.match(meter.props["aria-label"], /incomplete data/);
+    assert.doesNotMatch(meter.props["aria-label"], /Cache hit rate \(all requests\): .*%/);
   }
 });
 

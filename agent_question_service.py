@@ -258,6 +258,7 @@ class AgentQuestionService:
         resolved_id = str(question_id or "").strip()
         if not resolved_id:
             raise AgentQuestionServiceError("questionId is required.", status_code=400)
+        continuation_answer: str | None = None
         with _locked(self._persistence.shared_state_lock):
             current = self._project(include_answered=True)
             existing = current.get(resolved_id)
@@ -270,6 +271,15 @@ class AgentQuestionService:
             runtime_seed = existing.get("runtimeTaskSeed")
             if str(existing.get("status") or "") == "answered":
                 payload: dict[str, object] = {"ok": True, "question": self._redact(existing), "idempotent": True}
+                if runtime_seed and not goal_delivery_id and str(existing.get("runtimeContinuationStatus") or "") == "queued":
+                    retry_answer = _question_text(values.get("answer") or values.get("value"), "answer", 2000)
+                    if retry_answer:
+                        continuation_answer = self._sanitize_answer_for_model(retry_answer)
+                    elif "<path redacted>" in str(existing.get("answer") or "").casefold():
+                        raise AgentQuestionServiceError(
+                            "This queued answer contains a redacted location. Resubmit the original answer to resume the task.",
+                            status_code=409,
+                        )
             else:
                 selected_option_id = _question_text(
                     values.get("selectedOptionId") or values.get("optionId"),
@@ -285,6 +295,7 @@ class AgentQuestionService:
                         break
                 if not answer_text:
                     raise AgentQuestionServiceError("An answer is required.", status_code=400)
+                continuation_answer = self._sanitize_answer_for_model(answer_text)
                 safe_answer = self._scope.redact_goal_persistence(answer_text)
                 event = {
                     "event": "question_answered",
@@ -307,14 +318,20 @@ class AgentQuestionService:
         if goal_delivery_id:
             payload["goalDelivery"] = self._goal_resolution.resolve(
                 resolved_id,
-                self._continuation_prompt(payload["question"]),
+                self._continuation_prompt(payload["question"], answer_text=continuation_answer),
             )
         if (runtime_seed and not goal_delivery_id and self._runtime_resolution is not None
                 and (not payload.get("idempotent") or existing.get("runtimeContinuationStatus") == "queued")):
+            # This copy is ephemeral: durable Question records keep the stricter
+            # redacted answer, while the trusted runtime handoff can bind an
+            # explicit user instruction to the resumed action.
+            dispatch_seed = dict(runtime_seed) if isinstance(runtime_seed, Mapping) else {}
+            if continuation_answer:
+                dispatch_seed["_authenticatedUserAnswer"] = continuation_answer
             payload["runtimeContinuation"] = self._runtime_resolution.resolve(
                 resolved_id,
-                runtime_seed if isinstance(runtime_seed, Mapping) else {},
-                self._continuation_prompt(payload["question"]),
+                dispatch_seed,
+                self._continuation_prompt(payload["question"], answer_text=continuation_answer),
             )
         return payload
 
@@ -454,16 +471,26 @@ class AgentQuestionService:
         if requested_project and self._scope.normalize_path(requested_project) != self._scope.normalize_path(existing_project):
             raise AgentQuestionServiceError("Question does not belong to this project.", status_code=404)
 
-    def _continuation_prompt(self, question: object) -> str:
+    def _continuation_prompt(self, question: object, *, answer_text: str | None = None) -> str:
         values = question if isinstance(question, Mapping) else {}
         question_text = str(values.get("question") or "Pending question").strip()
-        answer_text = str(values.get("answer") or "").strip()
+        answer = str(answer_text if answer_text is not None else values.get("answer") or "").strip()
         selected_option_id = str(values.get("selectedOptionId") or "").strip()
         return (
             "Continue the same task after the user answered a pending question.\n"
             f"Question: {question_text}\n"
-            f"User answer: {answer_text or selected_option_id or 'No text provided.'}\n"
+            f"User answer: {answer or selected_option_id or 'No text provided.'}\n"
             "Resume the unfinished work under the existing constraints and do not repeat completed steps."
+        )
+
+    @staticmethod
+    def _sanitize_answer_for_model(answer: str) -> str:
+        # Reuse the planner's established credential scrubber while allowing
+        # the user-supplied URL/path locators needed to resume the task.
+        from runtime_planner_service import sanitize_planner_observation_text
+
+        return sanitize_planner_observation_text(
+            answer, None, preserve_whitespace=True, preserve_urls=True, preserve_paths=True,
         )
 
     def _scope_text(self, values: Mapping[str, object], *names: str) -> str:

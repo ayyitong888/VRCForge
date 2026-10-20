@@ -90,6 +90,20 @@ class ProviderModelCatalogService:
             return self.fetch_anthropic_models(config)
         return self.fetch_openai_compatible_models(config)
 
+    def supported_reasoning_efforts(self, config: ProviderApiConfig) -> list[str] | None:
+        """Return catalog effort support, or None when metadata is unavailable."""
+        if config.provider not in {"anthropic", "deepseek", "openrouter"}:
+            return None
+        for model in self.fetch_provider_models(config):
+            if model.get("id") == config.model:
+                if "reasoningEfforts" in model:
+                    efforts = list(model["reasoningEfforts"])
+                    if model.get("reasoningDisabledSupported") and "none" not in efforts:
+                        efforts.insert(0, "none")
+                    return efforts
+                return None
+        return None
+
     def fetch_openai_compatible_models(
         self,
         config: ProviderApiConfig,
@@ -259,7 +273,81 @@ class ProviderModelCatalogService:
             value = self.coerce_positive_int(self.read_model_attr(item, *candidates))
             if value is not None:
                 info[out_key] = value
+        # DeepSeek's ordered enum excludes the separately supported off toggle.
+        levels = self.read_model_attr(self.read_model_attr(item, "effort"), "supported_levels")
+        if isinstance(levels, list):
+            info["reasoningEfforts"] = self._effort_keys(levels)
+            info["reasoningDisabledSupported"] = True
+        reasoning = self.read_model_attr(item, "reasoning")
+        if reasoning is not None:
+            fields = dict(self._mapping_items(reasoning))
+            levels = fields.get("supported_efforts", [])
+            if levels is None:
+                # Explicit null accepts every gateway protocol effort; this is
+                # the protocol enum, not inferred model capability or a default.
+                levels = ["max", "xhigh", "high", "medium", "low", "minimal", "none"]
+            if isinstance(levels, list):
+                info["reasoningEfforts"] = [
+                    level for level in self._effort_keys(levels)
+                    if level != "none" or fields.get("mandatory") is not True
+                ]
+        capabilities = self.read_model_attr(item, "capabilities")
+        effort = self.read_model_attr(capabilities, "effort")
+        if effort is not None:
+            supported_efforts = sorted(
+                str(level).strip().lower()
+                for level, capability in self._mapping_items(effort)
+                if str(level).strip()
+                and self.read_model_attr(capability, "supported") is True
+            )
+            if supported_efforts:
+                info["reasoningEfforts"] = supported_efforts
+        thinking = self.read_model_attr(capabilities, "thinking")
+        thinking_types = self.read_model_attr(thinking, "types")
+        if thinking_types is not None:
+            supported_types = sorted(
+                str(kind).strip().lower()
+                for kind, capability in self._mapping_items(thinking_types)
+                if str(kind).strip()
+                and self.read_model_attr(capability, "supported") is True
+            )
+            if supported_types:
+                info["thinkingTypes"] = supported_types
         return info
+
+    @staticmethod
+    def _effort_keys(levels: list[Any]) -> list[str]:
+        return list(dict.fromkeys(level.strip().lower() for level in levels if isinstance(level, str) and level.strip()))
+
+    @staticmethod
+    def _mapping_items(value: Any) -> list[tuple[str, Any]]:
+        if isinstance(value, dict):
+            return [(str(key), item) for key, item in value.items()]
+        dump = getattr(value, "model_dump", None)
+        if callable(dump):
+            try:
+                dumped = dump(mode="python")
+                if isinstance(dumped, dict):
+                    return [(str(key), item) for key, item in dumped.items()]
+            except (TypeError, ValueError):
+                pass
+        items = getattr(value, "items", None)
+        if callable(items):
+            try:
+                return [(str(key), item) for key, item in items()]
+            except (TypeError, ValueError):
+                return []
+        try:
+            return [(str(key), item) for key, item in vars(value).items() if not str(key).startswith("_")]
+        except TypeError:
+            fields = getattr(type(value), "model_fields", None) or getattr(type(value), "__fields__", None)
+            if isinstance(fields, dict):
+                return [
+                    (str(name), getattr(value, name))
+                    for name in fields
+                    if getattr(value, name, None) is not None
+                ]
+        return []
 
 
 def default_provider_model_catalog_sdk_ports() -> ProviderModelCatalogSdkPorts:

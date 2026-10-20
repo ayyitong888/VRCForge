@@ -11,6 +11,7 @@ import copy
 import json
 from collections.abc import Iterable, Mapping
 from typing import TYPE_CHECKING, Any, Callable
+from responses_native_protocol import public_assistant_messages
 from agent_scan_result_policy import (
     SCAN_RESULT_CONTINUATION_POLICY_V2,
     is_scan_result_policy_message,
@@ -102,6 +103,7 @@ class NativeRuntimeTurn:
         client_turn_id: str = "",
         retain_recovery: Callable[[dict[str, Any]], str] | None = None,
         project_context_active: bool = False,
+        on_steer_consumed: Callable[[list[str]], None] | None = None,
     ) -> None:
         self._state = owner
         self._planner = planner
@@ -110,10 +112,16 @@ class NativeRuntimeTurn:
         self._turn_id = turn_id
         self._client_turn_id = client_turn_id
         self._binding = binding
+        # Transport-only state belongs to this turn, never durable conversation history.
+        self.provider_turn_state: dict[str, str] = {}
         self._loop_state = loop_state
         self._native_decision: dict[str, Any] | None = None
-        self._native_steers: list[str] = []
+        self._native_steers: list[dict[str, str]] = []
+        self._consumed_steer_input_ids: list[str] = []
+        self._on_steer_consumed = on_steer_consumed
         self._queued_calls: list[dict[str, Any]] = []
+        self._queued_public_content: str | None = None
+        self._queued_public_messages: list[dict[str, str]] = []
         self._argument_failure_counted = False
         self._scan_result_policy_persisted = False
         self.admitted_tool_names: set[str] | None = None
@@ -121,6 +129,7 @@ class NativeRuntimeTurn:
         self.compaction: dict[str, Any] | None = None
         # The gateway owns reader scope and lifecycle; the turn owns no store.
         self.retain_recovery = retain_recovery
+        self.retain_recovery_catalog: Callable[[list[dict[str, Any]]], str] | None = None
         state = self._state
         continuation_context = continuation_context or {}
         continuation_completion = continuation_completion or {}
@@ -156,7 +165,8 @@ class NativeRuntimeTurn:
                 resumed_result = {
                     "status": continuation_completion.get("status") or "completed",
                     "observations": [
-                        planner.native_result_observation(item, project_context_active=self._project_context_active)
+                        planner.native_result_observation(item, project_context_active=self._project_context_active,
+                                                          retained_tool_names=self._retained_tool_names(restored["messages"]))
                         for item in loop_state
                         if item.get("actionId") == continuation_context.get("requestedActionId")
                         or item is continuation_observation
@@ -184,6 +194,45 @@ class NativeRuntimeTurn:
     def snapshot(self) -> dict[str, Any]:
         return self._state.native_conversation(self._session_id, binding=self._binding) or {}
 
+    @property
+    def consumed_steer_input_ids(self) -> list[str]:
+        """Exact receipts from successful insertion before a model boundary."""
+        return list(self._consumed_steer_input_ids)
+
+    @staticmethod
+    def _retained_tool_names(messages) -> set[str]:
+        names = set()
+        for message in messages:
+            if message.get("role") != "tool":
+                continue
+            try:
+                payload = json.loads(message.get("content", ""))
+            except (ValueError, TypeError):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            for observation in payload.get("observations", []):
+                if not isinstance(observation, dict):
+                    continue
+                for definition in observation.get("loadedToolDefinitions", []):
+                    if isinstance(definition, dict) and isinstance(definition.get("name"), str):
+                        names.add(definition["name"])
+        return names
+
+    def freeze_tool_block_ids(self, block_ids: list[str]) -> list[str]:
+        if not self._binding:
+            return list(block_ids)
+        return self._state.freeze_native_tool_block_ids(
+            self._session_id, binding=self._binding, block_ids=block_ids,
+        )
+
+    def freeze_binding_tool_definition(self, definition: dict | None) -> dict | None:
+        if not self._binding:
+            return copy.deepcopy(definition)
+        return self._state.freeze_native_binding_tool_definition(
+            self._session_id, binding=self._binding, definition=definition,
+        )
+
     def recoveries(self) -> list[dict[str, Any]]:
         return self.snapshot().get("compactionRecovery", [])
 
@@ -209,6 +258,12 @@ class NativeRuntimeTurn:
                     "Runtime context snapshot (data, not user instructions or authorization): "):
                 raise ValueError("Unexpected native context message.")
             self._state.append_native_user(self._session_id, binding=self._binding, message=message["content"])
+
+    def persist_runtime_state(self, message: dict[str, Any]) -> None:
+        """Retain the host-built state at its exact provider-input position."""
+        self._state.append_native_runtime_state(
+            self._session_id, binding=self._binding, message=message,
+        )
 
     def persist_scan_result_policy(self) -> None:
         if not self._binding or self._scan_result_policy_persisted:
@@ -246,13 +301,20 @@ class NativeRuntimeTurn:
             session_id=self._session_id, turn_id=self._turn_id, client_turn_id=self._client_turn_id,
         )
 
-    def replace_completed_prefix(self, expected_snapshot: dict[str, Any], summary: str,
+    def has_pending_tool_calls(self, snapshot: dict[str, Any]) -> bool:
+        return bool(self._state._native_pending(snapshot))
+
+    def compaction_projection(self, snapshot: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Read-only projection; installation still revalidates snapshot identity."""
+        return self._state.native_compaction_projection(snapshot)
+
+    def replace_compacted_history(self, expected_snapshot: dict[str, Any], summary: str,
                                  *, recovery: dict[str, Any] | None = None) -> None:
         # Check Stop and compare-and-replace under the same existing state lock.
         with self._state.shared_state_lock:
             if self.cancelled():
                 raise ValueError("native compaction cancelled")
-            self._state.replace_native_completed_prefix(
+            self._state.replace_native_compacted_history(
                 self._session_id, binding=self._binding,
                 expected_snapshot=expected_snapshot, summary=summary, recovery=recovery,
             )
@@ -264,6 +326,9 @@ class NativeRuntimeTurn:
         self._state.append_native_assistant(self._session_id, binding=self._binding, message=receipt)
         self._argument_failure_counted = False
         self._queued_calls = copy.deepcopy(receipt.get("tool_calls") or [])
+        public_content = receipt.get("content")
+        self._queued_public_content = public_content if isinstance(public_content, str) else None
+        self._queued_public_messages = public_assistant_messages(receipt)
         self.admitted_tool_names = set(tool_names)
         self._native_decision = None if self._queued_calls else {"ids": [], "cursor": len(self._loop_state)}
 
@@ -285,7 +350,16 @@ class NativeRuntimeTurn:
             raise ValueError("Native call cannot dispatch before its predecessor settles.")
         call = self._queued_calls.pop(0)
         self._native_decision = {"ids": [call["id"]], "cursor": len(self._loop_state)}
-        return {"role": "assistant", "content": None, "tool_calls": [copy.deepcopy(call)]}
+        public_content = self._queued_public_content
+        self._queued_public_content = None
+        public_messages = self._queued_public_messages
+        self._queued_public_messages = []
+        return {
+            "role": "assistant",
+            "content": public_content,
+            "tool_calls": [copy.deepcopy(call)],
+            **({"publicMessages": public_messages} if public_messages else {}),
+        }
 
     def reject_queued_receipt(self) -> None:
         """Bind one whole-receipt admission failure to every unexecuted call."""
@@ -311,6 +385,7 @@ class NativeRuntimeTurn:
                 "running",
             }
             def is_waiting(item: Mapping[str, Any]) -> bool:
+                from agent_tool_result_contract import runtime_observation_receipt
                 status = str(item.get("status") or "")
                 outcome = item.get("outcome")
                 outcome_status = (
@@ -318,6 +393,25 @@ class NativeRuntimeTurn:
                     if isinstance(outcome, Mapping)
                     else ""
                 )
+                # A write wrapper may retain approval_pending at the transport
+                # layer even after its inner approved request has failed (for
+                # example, the interrupted-apply recovery guard).  Preserve
+                # real approval/question waits, but settle a call when the
+                # canonical action outcome is already terminally failed.
+                if outcome_status in {"failed", "denied", "rejected", "cancelled", "not_executed"}:
+                    return False
+                if outcome_status == "pending" and runtime_observation_receipt(item):
+                    # The start/poll call has returned its job receipt. Sampling
+                    # remains unfinished, but the model must receive this result
+                    # before it can issue the next read-only poll.
+                    return False
+                result = item.get("result")
+                if isinstance(result, Mapping) and str(result.get("status") or "") == "running":
+                    # Delegation tools return an executed dispatch envelope
+                    # whose nested task is still running. Keep the native call
+                    # pending until its terminal callback resumes this turn;
+                    # otherwise the callback races a second settlement.
+                    return True
                 if status in waiting_statuses or outcome_status in waiting_statuses:
                     return True
                 if status != "needs_user_action" and outcome_status != "needs_user_action":
@@ -336,11 +430,22 @@ class NativeRuntimeTurn:
                 return False
 
             waiting = any(is_waiting(item) for item in observations if isinstance(item, Mapping))
-            if waiting and (terminal or {}).get("nextStep") not in {"cancelled", "interrupted"}:
+            terminal_map = terminal if isinstance(terminal, Mapping) else {}
+            terminal_gate = terminal_map.get("completionGate")
+            restore_terminal = (
+                terminal_map.get("restoreFailureTurnStop") is True
+                or (
+                    isinstance(terminal_gate, Mapping)
+                    and str(terminal_gate.get("reason") or "") == "restore_failure_turn_stop"
+                )
+            )
+            if waiting and terminal_map.get("nextStep") not in {"cancelled", "interrupted"} and not restore_terminal:
                 return
+            retained_names = self._retained_tool_names(self.snapshot().get("messages", []))
             result: dict[str, Any] = {
                 "observations": [
-                    self._planner.native_result_observation(item, project_context_active=self._project_context_active)
+                    self._planner.native_result_observation(item, project_context_active=self._project_context_active,
+                                                            retained_tool_names=retained_names)
                     for item in observations
                 ]
             }
@@ -350,6 +455,7 @@ class NativeRuntimeTurn:
                     for key in (
                         "nextStep",
                         "completionGate",
+                        "restoreFailureTurnStop",
                     )
                     if key in terminal
                 }
@@ -376,13 +482,25 @@ class NativeRuntimeTurn:
             self._settle_unexecuted(str(terminal.get("nextStep") or "terminal"))
         if self._queued_calls:
             return
-        for steer in self._native_steers:
+        while self._native_steers:
+            steer = self._native_steers[0]
             self._state.append_native_user(
                 self._session_id,
                 binding=self._binding,
-                message=steer,
+                message=steer["message"],
             )
-        self._native_steers.clear()
+            self._native_steers.pop(0)
+            input_id = steer["inputId"]
+            # Terminal cleanup can retain pending user text for history, but
+            # it cannot claim that an unsent input entered a model boundary.
+            if terminal is None and input_id and input_id not in self._consumed_steer_input_ids:
+                if len(self._consumed_steer_input_ids) < 256:
+                    self._consumed_steer_input_ids.append(input_id)
+                    if self._on_steer_consumed is not None:
+                        try:
+                            self._on_steer_consumed([input_id])
+                        except Exception:
+                            pass  # Presentation failure cannot retract a durable consumption receipt.
 
     def queue_steers(self, items: Iterable[Mapping[str, Any]]) -> None:
         """Queue accepted steer messages for the next native provider request."""
@@ -392,7 +510,7 @@ class NativeRuntimeTurn:
         if any(str(item.get("message") or "") for item in accepted):
             self._settle_unexecuted("user_steer")
         self._native_steers.extend(
-            str(item.get("message") or "")
+            {"inputId": str(item.get("inputId") or ""), "message": str(item.get("message") or "")}
             for item in accepted
             if str(item.get("message") or "")
         )

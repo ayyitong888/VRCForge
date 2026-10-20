@@ -15,10 +15,12 @@ import {
   resolveContextInputTokens,
   resolveContextLimit,
   mergeCompactionRecovery,
+  latestContextWindowUsage,
 } from "./context-compaction";
 import { subAgentAdoptedHistoryText } from "./subagent-merge";
 import { formatCount } from "./utils";
 import type { CompactionRecoveryEntry } from "./api/types";
+import { buildTimelinePresentation, materializeRuntimeTimeline, isFinalAssistantPresentationEntry } from "./chat-timeline-presentation";
 
 const CONTEXT_TOKEN_LIMIT_DISPLAY_ESTIMATE = 128000;
 export const MAX_ATTACHMENT_PAYLOAD_BYTES = 4 * 1024 * 1024;
@@ -82,10 +84,29 @@ export function buildContextUsageFromRuntime(
   t: TFunction,
   userContextWindow?: number,
 ): ContextUsage | undefined {
-  if (!usage) {
-    return undefined;
-  }
   const contextLimit = resolveContextLimit(provider, model, modelInfo, userContextWindow);
+  const capacityOnly = () => ({
+    used: 0,
+    limit: contextLimit.limit,
+    limitKnown: true as const,
+    source: "unavailable" as const,
+    exact: false,
+    ratio: 0,
+    label: t("chat.contextMeterCapacityOnly", { limit: formatCount(contextLimit.limit) }),
+    title: t("chat.contextUsageUnavailableTitle", { model: model || provider || t("chat.currentModel") }),
+    warning: false,
+    cacheUsageStatus: "unknown" as const,
+  });
+  if (!usage) {
+    if (!contextLimit.known) {
+      return undefined;
+    }
+    return capacityOnly();
+  }
+  if ((usage.model && normalizeModelId(usage.model) !== normalizeModelId(model))
+      || (usage.provider && normalizeContextProvider(usage.provider) !== normalizeContextProvider(provider))) {
+    return contextLimit.known ? capacityOnly() : undefined;
+  }
   // Cache counters are cumulative across requests; context occupancy uses the peak.
   const cacheInput = numberOrNull(usage.inputTokens);
   const cacheRead = numberOrNull(usage.cacheReadTokens);
@@ -152,18 +173,18 @@ export function buildContextUsageFromRuntime(
 }
 
 export function latestAgentContextUsage(items: ConversationItem[]): AgentContextUsage | undefined {
-  for (let index = items.length - 1; index >= 0; index -= 1) {
-    const item = items[index];
-    if (item.type === "agent" && item.response.contextUsage) {
-      return item.response.contextUsage;
-    }
-  }
-  return undefined;
+  return latestContextWindowUsage(items);
 }
 
 export function buildChatHistory(items: ConversationItem[], t: TFunction): ChatHistoryEntry[] {
   const history: ChatHistoryEntry[] = [];
+  const summarizedItemIds = new Set(items.flatMap((item) => (
+    item.type === "compact" ? item.summarizedItemIds || [] : []
+  )));
   for (const item of items) {
+    if (summarizedItemIds.has(item.id)) {
+      continue;
+    }
     if (item.type === "user") {
       const text = appendAttachmentSummary(item.text, item.attachments || [], t).trim();
       if (text) {
@@ -197,6 +218,25 @@ export function collectCompactionRecovery(items: ConversationItem[]): Compaction
 }
 
 export function visibleAgentDialogueText(response: AgentRuntimeResponse): string {
+  const assistantEntries = buildTimelinePresentation(materializeRuntimeTimeline(response)).entries.filter(
+    (entry) => entry.type === "assistant",
+  );
+  const finalEntry = [...assistantEntries].reverse().find(isFinalAssistantPresentationEntry);
+  const hasUnacceptedFinal = assistantEntries.some((entry) => entry.status === "completion_unverified");
+  const hasStructuredPhases = assistantEntries.some((entry) => entry.phase === "commentary" || entry.phase === "final_answer");
+  // A structured timeline may terminate with status=done without repeating
+  // final_answer; legacy unphased timelines retain the plan.reply fallback.
+  if (finalEntry && (finalEntry.phase === "final_answer" || hasStructuredPhases)) return finalEntry.text;
+  // A durable unaccepted final must not reappear through the model-only fallback.
+  if (hasUnacceptedFinal) return "";
+
+  const publicMessages = response.plan?.publicMessages || [];
+  const finalMessage = [...publicMessages].reverse().find((message) => message.phase === "final_answer");
+  if (finalMessage) return String(finalMessage.text || "");
+
+  // Match the visible timeline: progress without an explicit final is not an answer.
+  if (assistantEntries.some((entry) => entry.phase === "commentary")
+    || publicMessages.some((message) => message.phase === "commentary")) return "";
   return String(response.plan?.reply || response.plan?.summary || "");
 }
 
@@ -207,9 +247,9 @@ export function appendAttachmentSummary(text: string, attachments: ChatAttachmen
   const summary = attachments
     .map((attachment) => {
       const payload =
-        attachment.payloadKind === "data_url"
+        attachment.payloadKind === "data_url" && attachment.type.toLowerCase().startsWith("image/")
           ? t("attachments.payloadAttached")
-          : attachment.payloadKind === "text"
+          : attachment.payloadKind === "text" && typeof attachment.text === "string"
             ? t("attachments.textAttached")
             : attachment.payloadKind === "vault_file"
               ? t("attachments.vaultStored")
@@ -329,12 +369,39 @@ export function readChatAttachment(file: File, t: TFunction): Promise<ChatAttach
       error: t("attachments.payloadLimitError", { limit: formatAttachmentSize(MAX_ATTACHMENT_PAYLOAD_BYTES) }),
     });
   }
-  if (file.type.startsWith("text/") && file.size <= MAX_TEXT_ATTACHMENT_BYTES) {
+  const mimeType = file.type.split(";", 1)[0].trim().toLowerCase();
+  const isText = mimeType.startsWith("text/")
+    || /^application\/(?:json|[a-z0-9!#$&^_.+-]+\+json)$/.test(mimeType);
+  if (isText && file.size > MAX_TEXT_ATTACHMENT_BYTES) {
+    return Promise.resolve({
+      ...base,
+      payloadKind: "metadata",
+      truncated: true,
+      error: t("attachments.textLimitError", { limit: formatAttachmentSize(MAX_TEXT_ATTACHMENT_BYTES) }),
+    });
+  }
+  if (!isText && !mimeType.startsWith("image/")) {
+    return Promise.resolve({
+      ...base,
+      payloadKind: "metadata",
+      error: t("attachments.inlineUnsupported"),
+    });
+  }
+  if (isText) {
     return new Promise((resolve) => {
       const reader = new FileReader();
-      reader.onload = () => resolve({ ...base, text: typeof reader.result === "string" ? reader.result : "", payloadKind: "text" });
+      reader.onload = () => {
+        try {
+          if (!(reader.result instanceof ArrayBuffer)) throw new Error("Missing text bytes.");
+          const text = new TextDecoder("utf-8", { fatal: true }).decode(reader.result);
+          if (text.includes("\0")) throw new Error("Text contains NUL bytes.");
+          resolve({ ...base, text, payloadKind: "text" });
+        } catch {
+          resolve({ ...base, payloadKind: "metadata", error: t("attachments.readTextFailed") });
+        }
+      };
       reader.onerror = () => resolve({ ...base, payloadKind: "metadata", error: t("attachments.readTextFailed") });
-      reader.readAsText(file);
+      reader.readAsArrayBuffer(file);
     });
   }
   return new Promise((resolve) => {

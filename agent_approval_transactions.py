@@ -82,6 +82,7 @@ from operation_context import bind_operation_context
 from execution_target import (
     ExecutionTargetError,
     execution_target_digest,
+    is_execution_target_reference,
     validate_runtime_execution_target,
 )
 from mcp_tool_descriptor import identity_scope
@@ -91,8 +92,21 @@ def _noop_scan_invalidation(_project_root: str, _reason: str) -> None:
     return None
 
 
+def _noop_scan_completion(
+    _project_root: str,
+    _reason: str,
+    _outcome: Any,
+    _marker: Any,
+) -> None:
+    return None
+
+
 PATCH_SET_SCHEMA = "vrcforge.modular_patch_set.v1"
 _UNITY_SERIALIZED_SUFFIXES = frozenset({".unity", ".prefab", ".asset", ".mat", ".controller", ".overridecontroller", ".anim", ".playable", ".mask"})
+# Scene-save checkpoint preparation is authoritative revalidation only. The
+# actual handler retains the mutation fence; fencing this preflight would
+# expire a prior scan before a verified no-change receipt can preserve it.
+_READ_ONLY_CHECKPOINT_PREPARE_TARGETS = frozenset({"vrcforge_scene_save"})
 
 
 def _checkpoint_archive_files_for_write(target_tool: str, arguments: Mapping[str, Any]) -> list[str]:
@@ -113,6 +127,11 @@ def _checkpoint_archive_files_for_write(target_tool: str, arguments: Mapping[str
             paths.add(row["clipPath"])
     elif target_tool == "vrcforge_manage_fx_animator":
         edits = nested.get("edits")
+        if "edits" not in nested:
+            action = nested.get("action")
+            if not isinstance(action, str) or not action.strip():
+                return []
+            edits = [nested]
         controller = nested.get("controllerPath")
         if not isinstance(edits, list) or not edits or not isinstance(controller, str):
             return []
@@ -427,13 +446,17 @@ CHECKPOINT_RESTORE_MANUAL_APPROVAL_REASON = (
     "Checkpoint restore always requires manual user approval because it can remove "
     "or replace project files."
 )
+from checkpoint_user_policy import bind_approved_write, checkpoint_skip_matches
+CHECKPOINT_RESTORE_AUTO_LAUNCH_BLOCKED_REASON = (
+    "Checkpoint restore automatic launch is blocked after three proven zero-effect failures; "
+    "a new invocation requires explicit manual user approval."
+)
 AVATAR_UPLOAD_MANUAL_APPROVAL_REASON = (
     "VRChat avatar upload always requires one exact user confirmation because remote metadata, "
     "visibility, thumbnail, or bundle changes cannot be undone by a local checkpoint."
 )
 ROLLBACK_MANUAL_APPROVAL_TOOLS = frozenset(
     {
-        "vrcforge_restore_checkpoint",
         "vrcforge_rollback_parameters",
         "vrcforge_rollback_project_lifecycle",
         "vrcforge_rollback_project_catalog_registration",
@@ -446,7 +469,7 @@ def _always_manual_approval_reason(target_tool: str, full_permission: bool, hand
     """Share the protected-action exceptions between internal and external approval."""
     if target_tool == "vrcforge_install_user_unity_tools":
         return handler_reason
-    if target_tool == "vrcforge_restore_checkpoint":
+    if target_tool == "vrcforge_restore_checkpoint" and not full_permission:
         return CHECKPOINT_RESTORE_MANUAL_APPROVAL_REASON
     if target_tool in ROLLBACK_MANUAL_APPROVAL_TOOLS:
         return ROLLBACK_MANUAL_APPROVAL_REASON
@@ -462,14 +485,23 @@ def _write_failure_facts(
     checkpoint: Mapping[str, Any],
     recovery: Mapping[str, Any],
     no_write_conflict: bool,
+    exception: BaseException | None = None,
 ) -> dict[str, Any]:
     """Compatibility projection from the one external error constructor."""
 
     result = dict(failure_result) if isinstance(failure_result, Mapping) else {}
     checkpoint_failed = checkpoint.get("ok") is False
+    confirmed_prewrite_no_mutation = bool(
+        result.get("mutationStarted") is False
+        and result.get("committed") is False
+        and result.get("commitState") == "not_started"
+        and result.get("safeToRetry") is True
+        and ("saved" not in result or result.get("saved") is False)
+    )
     clean_pre_write_failure = bool(
         checkpoint_failed
         or no_write_conflict
+        or confirmed_prewrite_no_mutation
         or (not checkpoint and failure_layer == "completion_verification_baseline")
     )
     after_console = result.get("consoleVerification")
@@ -484,6 +516,7 @@ def _write_failure_facts(
         "recovery_id": str(recovery.get("id") or "")[:180],
         "console_before": redact_sensitive(dict(verification_baseline)),
         "console_after": after_console,
+        "exception": exception,
     }
     if clean_pre_write_failure:
         constructor_args.update(
@@ -496,6 +529,11 @@ def _write_failure_facts(
                 "temporary_cleanup_required": False,
             }
         )
+    if confirmed_prewrite_no_mutation:
+        # The handler supplied a complete, explicit retry-safe no-write tuple.
+        # Keep that decision ahead of the generic wrapper exception's
+        # retryable=False default in the canonical error projection.
+        constructor_args["retryable"] = True
     elif "checkpointRecoveryRequired" not in result:
         constructor_args["checkpoint_recovery_required"] = bool(recovery)
     error_object = build_external_tool_error(**constructor_args)
@@ -641,7 +679,9 @@ class ApprovalTransactionPorts:
     read_user_constraints: Callable[[], UserConstraintsSnapshot]
     roslyn_available: Callable[[AgentGatewayConfig | None], bool]
     save_config: Callable[[AgentGatewayConfig], None]
-    invalidate_scan_results: Callable[[str, str], None] = _noop_scan_invalidation
+    resolve_execution_target_reference: Callable[..., dict[str, Any]]
+    invalidate_scan_results: Callable[[str, str], Any] = _noop_scan_invalidation
+    complete_scan_mutation: Callable[[str, str, Any, Any], None] = _noop_scan_completion
 
 
 class AgentApprovalTransactionService:
@@ -691,14 +731,24 @@ class AgentApprovalTransactionService:
         self._restore_pending_approvals()
 
     @contextmanager
-    def _scan_mutation(self, project_root: Any, reason: str) -> Iterator[None]:
+    def _scan_mutation(
+        self,
+        project_root: Any,
+        reason: str,
+        recovery: dict[str, Any] | None = None,
+    ) -> Iterator[dict[str, Any]]:
         root = str(project_root or "").strip()
         callback = self._ports.invalidate_scan_results
-        callback(root, f"{reason}:starting")
+        marker = callback(root, f"{reason}:starting")
+        state: dict[str, Any] = {}
         try:
-            yield
+            yield state
         finally:
-            callback(root, f"{reason}:finished")
+            completion = self._ports.complete_scan_mutation
+            if completion is _noop_scan_completion or marker is None:
+                callback(root, f"{reason}:finished")
+            else:
+                completion(root, reason, state.get("outcome"), marker)
 
     def validate_patch_set(self, value: Any) -> dict[str, Any]:
         return validate_modular_patch_set(value)
@@ -1006,7 +1056,10 @@ class AgentApprovalTransactionService:
         config = config or self._ports.ensure_config()
         mode = normalize_execution_mode(config.execution_mode)
         explicit_reason = str(approval.get("explicitApprovalReason") or "").strip()
-        if str(approval.get("targetTool") or "") == "vrcforge_restore_checkpoint":
+        if (
+            str(approval.get("targetTool") or "") == "vrcforge_restore_checkpoint"
+            and mode != "roslyn_full_auto"
+        ):
             return explicit_reason or CHECKPOINT_RESTORE_MANUAL_APPROVAL_REASON
         if mode == "roslyn_full_auto":
             return ""
@@ -1120,12 +1173,13 @@ class AgentApprovalTransactionService:
             else:
                 outcome = self._ports.call_tool(tool_name, params, agent_name=agent_name)
         except AgentGatewayError as exc:
-            return {
-                "ok": False,
-                "status": "unavailable",
-                "tool": tool_name,
-                "paramsSummary": params_summary,
-                "error": str(exc),
+            error_details = build_external_tool_error(
+                error=str(exc), exception=exc, tool=tool_name, operation_kind="write",
+            )
+            outcome = {
+                "ok": False, "status": "failed", "error": str(exc),
+                "errorDetails": error_details,
+                "writeFailure": external_write_failure_view(error_details),
             }
         outcome = ensure_dict(outcome)
         approval = extract_approval_id(outcome)
@@ -1178,6 +1232,27 @@ class AgentApprovalTransactionService:
             payload["error"] = outcome["error"]
         return payload
 
+    def _matching_restore_recovery(self, arguments: Mapping[str, Any]) -> dict[str, Any] | None:
+        requested_recovery_id = str(
+            arguments.get("recoveryId") or arguments.get("recovery_id") or ""
+        ).strip()
+        requested_checkpoint_id = str(
+            arguments.get("checkpointId") or arguments.get("checkpoint_id") or ""
+        ).strip()
+        for recovery in self._ports.checkpoint.active_apply_recoveries():
+            recovery_id = str(recovery.get("id") or "").strip()
+            checkpoint_id = str(recovery.get("checkpointId") or "").strip()
+            if requested_recovery_id:
+                if recovery_id != requested_recovery_id:
+                    continue
+                return recovery if not requested_checkpoint_id or checkpoint_id == requested_checkpoint_id else None
+            if requested_checkpoint_id and checkpoint_id == requested_checkpoint_id:
+                return recovery
+        return None
+
+    def _restore_request_is_incident_bound(self, arguments: Mapping[str, Any]) -> bool:
+        return self._matching_restore_recovery(arguments) is not None
+
     def create_apply_request(
         self,
         params: dict[str, Any],
@@ -1204,6 +1279,8 @@ class AgentApprovalTransactionService:
             raise AgentGatewayError(f"Unknown or unavailable write target: {target_tool}", status_code=404)
 
         arguments = ensure_dict(params.get("arguments") or params.get("params") or {})
+        arguments.pop("_vrcforge_incident_restore_auto", None)
+        arguments.pop("_restorePrepareForRecovery", None)
         if write_handler.requires_approved_execution_context and arguments.get("preview") is True:
             raise AgentGatewayError(
                 f"{target_tool} is an execution entry that performs the requested change; "
@@ -1212,6 +1289,14 @@ class AgentApprovalTransactionService:
             )
         user_constraints = self._ports.read_user_constraints()
         arguments = self._inject_user_constraints_for_apply(arguments, user_constraints)
+        execution_target = arguments.get("executionTarget")
+        if is_execution_target_reference(execution_target):
+            project_root = str(arguments.get("projectPath") or arguments.get("projectRoot") or "").strip()
+            arguments["executionTarget"] = self._ports.resolve_execution_target_reference(
+                execution_target,
+                project_root=project_root,
+                required_scope=identity_scope(target_tool, write=True, arguments=arguments),
+            )
         preview = params.get("preview")
         if write_handler.request_preparer is not None:
             explicit_preconditions = _explicit_write_preconditions(arguments)
@@ -1226,6 +1311,11 @@ class AgentApprovalTransactionService:
                 raise AgentGatewayError(
                     f"Could not prepare the supervised write request for {target_tool}.",
                     status_code=500,
+                    cause_code="write_request_preparation_failed",
+                    failure_layer="write_request_preparation",
+                    failure_phase="request_preparer", operation_kind="write", tool=target_tool,
+                    tool_routing_started=False, mutation_started=False, committed=False,
+                    commit_state="not_started",
                 ) from exc
             if not isinstance(prepared_arguments, dict):
                 raise AgentGatewayError(
@@ -1289,6 +1379,14 @@ class AgentApprovalTransactionService:
         always_manual_reason = _always_manual_approval_reason(
             target_tool, full_permission_auto, mandatory_manual_approval_reason,
         )
+        if target_tool == "vrcforge_restore_checkpoint" and full_permission_auto:
+            matching_recovery = self._matching_restore_recovery(arguments)
+            if matching_recovery is None:
+                always_manual_reason = CHECKPOINT_RESTORE_MANUAL_APPROVAL_REASON
+            elif matching_recovery.get("zeroEffectAutoLaunchBlocked"):
+                always_manual_reason = CHECKPOINT_RESTORE_AUTO_LAUNCH_BLOCKED_REASON
+            else:
+                arguments["_vrcforge_incident_restore_auto"] = True
         requires_explicit_for_mode = bool(always_manual_reason) or (
             False if full_permission_auto else (
                 never_auto_approve
@@ -1328,6 +1426,27 @@ class AgentApprovalTransactionService:
                     f"Could not freeze the exact Core execution plan for {target_tool}.",
                     status_code=409,
                 ) from exc
+        normalized_task_context = approval_task_context(
+            task_context,
+            tool=target_tool,
+            arguments=arguments,
+        )
+        if normalized_task_context is not None and isinstance(
+            normalized_task_context.get("checkpointUserPolicy"), Mapping
+        ):
+            bound_policy = bind_approved_write(
+                normalized_task_context.get("checkpointUserPolicy"),
+                normalized_task_context,
+                target_tool=target_tool,
+                requested_arguments=ensure_dict(normalized_task_context.get("requestedArguments")),
+                approved_arguments=arguments,
+                approved_project_root=str(extract_project_root(arguments) or ""),
+                plan_digest=str(ensure_dict(approved_execution_plan).get("planDigest") or ""),
+            )
+            if bound_policy is None:
+                normalized_task_context.pop("checkpointUserPolicy", None)
+            else:
+                normalized_task_context["checkpointUserPolicy"] = bound_policy
         approval = self._new_approval(
             agent_name=str(params.get("agent_name") or params.get("agentName") or "external-agent"),
             target_tool=target_tool,
@@ -1348,11 +1467,7 @@ class AgentApprovalTransactionService:
                     "requiresExplicitApproval": requires_explicit_for_mode,
                 },
             ),
-            task_context=approval_task_context(
-                task_context,
-                tool=target_tool,
-                arguments=arguments,
-            ),
+            task_context=normalized_task_context,
         )
         if include_arguments_digest:
             approval["argumentsDigest"] = stable_hash(
@@ -1802,7 +1917,33 @@ class AgentApprovalTransactionService:
                 )
             failure_layer = "checkpoint"
             classification = ensure_dict(arguments.get("classification_snapshot"))
-            requires_checkpoint = _requires_pre_write_checkpoint(write_handler, arguments) and not (
+            task_context = ensure_dict(approval.get("taskContext"))
+            checkpoint_user_skip = checkpoint_skip_matches(
+                task_context.get("checkpointUserPolicy"),
+                task_context,
+                tool=target_tool,
+                arguments=ensure_dict(approval.get("arguments")),
+                plan_digest=str(ensure_dict(approval.get("approvedUnityExecutionPlan")).get("planDigest") or ""),
+            )
+            if checkpoint_user_skip:
+                task_context["checkpointSkipApplied"] = True
+                approval["taskContext"] = task_context
+                self._ports.append_audit({
+                    "event": "approval_checkpoint_skipped_by_user",
+                    "status": "skipped_by_user",
+                    "source": "user_message",
+                    "sourceQuote": str(ensure_dict(task_context.get("checkpointUserPolicy")).get("sourceQuote") or ""),
+                    "sessionId": str(task_context.get("sessionId") or ""),
+                    "turnId": str(task_context.get("turnId") or ""),
+                    "clientTurnId": str(task_context.get("clientTurnId") or ""),
+                    "projectRoot": str(task_context.get("projectRoot") or ""),
+                    "tool": target_tool,
+                    "argumentsSha256": str(ensure_dict(task_context.get("checkpointUserPolicy")).get("argumentsSha256") or ""),
+                    "approvedArgumentsSha256": str(ensure_dict(task_context.get("checkpointUserPolicy")).get("approvedArgumentsSha256") or ""),
+                    "approvedPlanDigest": str(ensure_dict(task_context.get("checkpointUserPolicy")).get("approvedPlanDigest") or ""),
+                    "rollbackAvailable": False,
+                })
+            requires_checkpoint = _requires_pre_write_checkpoint(write_handler, arguments) and not checkpoint_user_skip and not (
                 target_tool == "vrcforge_shell_execute" and classification.get("readOnly") is True
             )
             if requires_checkpoint and target_tool == PROJECT_CHAT_CHECKPOINT_TARGET:
@@ -1847,6 +1988,7 @@ class AgentApprovalTransactionService:
                                 ensure_dict(approval.get("approvedUnityExecutionPlan")),
                                 verification_baseline,
                                 ensure_dict(approval.get("taskContext")),
+                                recovery=recovery,
                             )
             elif requires_checkpoint and target_tool in LOCAL_STATE_CHECKPOINT_TARGETS:
                 if not self._ports.state.skill_package_write_lock_bound:
@@ -1912,6 +2054,7 @@ class AgentApprovalTransactionService:
                                     ),
                                     verification_baseline,
                                     ensure_dict(approval.get("taskContext")),
+                                    recovery=recovery,
                                 )
             else:
                 if requires_checkpoint:
@@ -1951,6 +2094,7 @@ class AgentApprovalTransactionService:
                         ensure_dict(approval.get("approvedUnityExecutionPlan")),
                         verification_baseline,
                         ensure_dict(approval.get("taskContext")),
+                        recovery=recovery,
                     )
             if core_call_audits:
                 request_trace = {
@@ -2007,6 +2151,12 @@ class AgentApprovalTransactionService:
             if completion_status == "failed":
                 failure_layer = "result_verification"
                 raise AgentGatewayError(str(completion_outcome["summary"]))
+            failure_layer = "checkpoint_finalize"
+            checkpoint = self._finish_created_asset_checkpoint(checkpoint, result, pending=observation_pending)
+            if checkpoint:
+                approval["checkpoint"] = checkpoint
+            if recovery is not None:
+                recovery["checkpoint"] = checkpoint
             failure_layer = "apply_lifecycle_observer"
             self._observe_apply_lifecycle(
                 "handler_returned", approval, checkpoint=checkpoint, result=result
@@ -2133,6 +2283,7 @@ class AgentApprovalTransactionService:
                 checkpoint=ensure_dict(checkpoint),
                 recovery=ensure_dict(recovery),
                 no_write_conflict=no_write_conflict,
+                exception=exc,
             )
             redacted_failure_result = redact_sensitive(
                 dict(failure_result)
@@ -2155,12 +2306,11 @@ class AgentApprovalTransactionService:
                     "summary": f"{write_handler.description} failed.",
                     "verification": {"state": "failed", "checks": []},
                 }
-            if task_completion is None:
-                task_completion = approval_completion(
-                    ensure_dict(approval.get("taskContext")),
-                    raw_result=failure_result,
-                    outcome=completion_outcome,
-                )
+            task_completion = approval_completion(
+                ensure_dict(approval.get("taskContext")),
+                raw_result=failure_result,
+                outcome=completion_outcome,
+            )
             with self._ports.state.shared_state_lock:
                 approval["status"] = "failed"
                 approval["failedAt"] = utc_now_iso()
@@ -2407,14 +2557,16 @@ class AgentApprovalTransactionService:
         frozen_execution_plan: dict[str, Any],
         verification_baseline: dict[str, Any],
         task_context: dict[str, Any],
+        recovery: dict[str, Any] | None = None,
     ) -> Any:
         handler_arguments = dict(arguments)
         handler_arguments.pop("_vrcforge_approved_execution", None)
         if not write_handler.requires_approved_execution_context:
             with self._scan_mutation(
-                extract_project_root(handler_arguments), target_tool
-            ):
+                extract_project_root(handler_arguments), target_tool, recovery
+            ) as mutation:
                 result = write_handler.handler(handler_arguments)
+                mutation["outcome"] = _domain_write_receipt(result)
             observation_pending = (
                 target_tool == "vrcforge_start_runtime_observation"
                 and isinstance(result, Mapping)
@@ -2429,7 +2581,12 @@ class AgentApprovalTransactionService:
                     result,
                 )
             return result
-        checkpoint_required = _requires_pre_write_checkpoint(write_handler, handler_arguments)
+        checkpoint_policy = ensure_dict(task_context.get("checkpointUserPolicy"))
+        checkpoint_required = _requires_pre_write_checkpoint(write_handler, handler_arguments) and not (
+            task_context.get("checkpointSkipApplied") is True
+            and checkpoint_policy.get("status") == "skipped_by_user"
+            and str(checkpoint_policy.get("targetTool") or "") == target_tool
+        )
         checkpoint_id = str(ensure_dict(checkpoint).get("id") or "").strip()
         if checkpoint_required and (not checkpoint or checkpoint.get("ok") is not True or not checkpoint_id):
             raise AgentGatewayError(
@@ -2491,8 +2648,9 @@ class AgentApprovalTransactionService:
         )
         try:
             with bind_approved_unity_execution(execution_plan):
-                with self._scan_mutation(project_root, target_tool):
+                with self._scan_mutation(project_root, target_tool, recovery) as mutation:
                     result = write_handler.handler(handler_arguments)
+                    mutation["outcome"] = _domain_write_receipt(result)
         finally:
             if not execution_plan.consumed:
                 execution_plan.burn()
@@ -2516,6 +2674,21 @@ class AgentApprovalTransactionService:
                 result,
             )
         return result
+
+    def _finish_created_asset_checkpoint(self, checkpoint: Any, result: Any, *, pending: bool = False) -> Any:
+        if not isinstance(checkpoint, dict) or not checkpoint.get("assetFootprint"):
+            return checkpoint
+        receipt = _domain_write_receipt(result)
+        console = result.get("consoleVerification") if isinstance(result, Mapping) else None
+        verified = isinstance(receipt, Mapping) and receipt.get("verified") is True
+        verified = verified or (isinstance(console, Mapping) and console.get("status") in {"passed", "verified"})
+        if pending or not verified:
+            raise AgentGatewayError("Created-asset checkpoint requires verified terminal write completion.", status_code=409)
+        from checkpoint_asset_footprint import capture_created_asset_post_state
+
+        updated = capture_created_asset_post_state(Path(str(checkpoint["projectRoot"])), checkpoint)
+        self._ports.checkpoint.append_checkpoint(updated)
+        return updated
 
     def _create_pre_write_checkpoint(self, approval: dict[str, Any], arguments: dict[str, Any]) -> dict[str, Any] | None:
         with self._ports.state.checkpoint_storage_lock:
@@ -2565,6 +2738,8 @@ class AgentApprovalTransactionService:
         project_root = project_root.resolve()
         record = {**base_record, "projectRoot": str(project_root)}
         archive_files = _checkpoint_archive_files_for_write(target_tool, arguments)
+        if archive_files and not all(is_path_within((project_root / path).resolve(), project_root) and (project_root / path).is_file() and (project_root / (path + ".meta")).is_file() for path in archive_files):
+            archive_files = []
         if not self._ports.is_unity_project_root(project_root):
             record.update(
                 {
@@ -2587,16 +2762,33 @@ class AgentApprovalTransactionService:
             else None
         )
         if dedicated_checkpoint_prepare is not None:
-            with self._scan_mutation(project_root, target_tool):
+            # Checkpoint preparation inspects state; it must never save editor changes.
+            checkpoint_mutation = nullcontext({})
+            with checkpoint_mutation as mutation:
                 try:
                     prepare_result = ensure_dict(
                         dedicated_checkpoint_prepare(project_root, {**dict(arguments), "_checkpointTargetTool": target_tool})
                     )
-                except Exception:  # noqa: BLE001 - dedicated preflight details stay internal.
+                except Exception as exc:  # noqa: BLE001 - dedicated preflight details stay internal.
+                    try:
+                        import sys
+                        import traceback
+                        from diagnostic_privacy import redact_public_evidence
+
+                        print(
+                            "ERROR: checkpoint_preflight_exception " + json.dumps({
+                                "exceptionType": type(exc).__name__,
+                                "traceback": [redact_public_evidence(line) for line in traceback.format_exception(exc)],
+                            }, ensure_ascii=True),
+                            file=sys.stderr, flush=True,
+                        )
+                    except Exception:  # noqa: BLE001 - diagnostics must not alter the failed preflight.
+                        pass
                     prepare_result = {
                         "ok": False,
                         "error": "The dedicated checkpoint preflight failed.",
                     }
+                mutation["outcome"] = prepare_result
             record["unityPrepare"] = prepare_result
             if not prepare_result.get("ok"):
                 record.update(
@@ -2612,19 +2804,31 @@ class AgentApprovalTransactionService:
                 )
                 self._ports.checkpoint.append_checkpoint(record)
                 return record
-            if target_tool in {"vrcforge_manage_expression_menu", "vrcforge_set_renderer_material_slot",
-                               "vrcforge_add_component", "vrcforge_remove_component"}:
+            if "assetFootprint" in prepare_result:
+                footprint = prepare_result.get("assetFootprint")
+                if not isinstance(footprint, dict) or footprint.get("schema") != "vrcforge.asset_checkpoint_footprint.v1":
+                    record.update(ok=False, blocking=True, status="failed", error="The prepared write has no authoritative asset footprint.")
+                    self._ports.checkpoint.append_checkpoint(record)
+                    return record
+                for key in ("archiveFiles", "archiveAbsentFiles", "archiveAbsentDirectories"):
+                    record[key] = footprint.get(key)
+                record["assetFootprint"] = footprint
+                record["archiveScopeReason"] = prepare_result.get("archiveScopeReason")
+                return self._ports.checkpoint.create_archive_checkpoint(project_root, record)
+            if "archiveAssetPaths" in prepare_result:
                 # Never accept an archive scope directly from caller arguments.
                 archive_files = prepare_result.get("archiveAssetPaths")
                 record["archiveScopeReason"] = prepare_result.get(
                     "archiveScopeReason", "full_project_prepared_scope_not_proven"
                 )
         elif self._checkpoint_prepare_handler is not None:
-            with self._scan_mutation(project_root, target_tool):
+            # Disk snapshot preparation never persists unsaved editor state.
+            with nullcontext({}) as mutation:
                 try:
-                    prepare_result = ensure_dict(self._checkpoint_prepare_handler(project_root))
+                    prepare_result = ensure_dict(self._checkpoint_prepare_handler(project_root, checkpoint_files=archive_files) if archive_files else self._checkpoint_prepare_handler(project_root))
                 except Exception as exc:  # noqa: BLE001
-                    prepare_result = {"ok": False, "error": str(exc)}
+                    prepare_result = {"ok": False, "blocking": True, "error": str(exc)}
+                mutation["outcome"] = prepare_result
             record["unityPrepare"] = prepare_result
             if not prepare_result.get("ok"):
                 warning = str(prepare_result.get("error") or "Unity could not prepare a rollback checkpoint.")
@@ -2664,6 +2868,12 @@ class AgentApprovalTransactionService:
         elif target_tool in {"vrcforge_manage_expression_menu", "vrcforge_set_renderer_material_slot"} and archive_files is not None:
             record["archiveScopeReason"] = "full_project_prepared_asset_scope_invalid"
 
+        if archive_files and dedicated_checkpoint_prepare is None and not record.get("archiveFiles"):
+            record.update(ok=False, blocking=True, status="failed", error="Exact checkpoint files changed after preparation.")
+            self._ports.checkpoint.append_checkpoint(record)
+            return record
+        if record.get("archiveFiles"):
+            return self._ports.checkpoint.create_archive_checkpoint(project_root, record)
         git_root_result = self._ports.run_git(project_root, ["rev-parse", "--show-toplevel"])
         if not git_root_result["ok"]:
             return self._ports.checkpoint.create_archive_checkpoint(project_root, record)
@@ -2799,6 +3009,10 @@ class AgentApprovalTransactionService:
             "restoreTool": "vrcforge_restore_checkpoint",
             "resolveTool": "vrcforge_resolve_interrupted_apply_recovery",
             "blockingWrites": True,
+            "restoreAttemptCount": 0,
+            "restoreAttemptLimit": 3,
+            "restoreSafetyCheckpointId": "",
+            "restoreSafetyCheckpointIds": [],
         }
         saved = self._ports.checkpoint.append_apply_recovery_entry(record)
         self._ports.append_audit({"event": "apply_recovery_started", "recovery": saved})
@@ -2843,6 +3057,23 @@ class AgentApprovalTransactionService:
             "resolveTool": "vrcforge_resolve_interrupted_apply_recovery",
             "blockingWrites": status in APPLY_RECOVERY_ACTIVE_STATUSES,
         }
+        for key in (
+            "restoreAttemptCount",
+            "restoreAttemptLimit",
+            "restoreSafetyCheckpointId",
+            "restoreSafetyCheckpointIds",
+            "restoreSafetyCheckpoint",
+            "recoveryIncidentKey",
+            "unityEvidenceReferences",
+            "unityEvidenceWarnings",
+        ):
+            if key in recovery:
+                record[key] = recovery[key]
+        latest_evidence = next((item for item in self._ports.checkpoint.active_apply_recoveries()
+                                if item.get("id") == record["id"]), {})
+        for key in ("unityEvidenceReferences", "unityEvidenceWarnings"):
+            if key in latest_evidence:
+                record[key] = latest_evidence[key]
         if error:
             record["error"] = error
         if note:
@@ -2852,6 +3083,12 @@ class AgentApprovalTransactionService:
         if write_failure is not None:
             record["writeFailure"] = write_failure
         saved = self._ports.checkpoint.append_apply_recovery_entry(record)
+        if status not in APPLY_RECOVERY_ACTIVE_STATUSES and saved.get("unityEvidenceReferences"):
+            from checkpoint_unity_evidence import cleanup_recovery_evidence
+            saved = self._ports.checkpoint.append_apply_recovery_entry({
+                **saved,
+                "unityEvidenceCleanup": cleanup_recovery_evidence(saved),
+            })
         self._ports.append_audit({"event": "apply_recovery_updated", "recovery": saved})
         return saved
 
@@ -2890,6 +3127,9 @@ class AgentApprovalTransactionService:
             or status.get("error")
             or status.get("errorCode")
             or status.get("isPlayMode") is not True
+            or status.get("enterPlayModePending") is not False
+            or status.get("enterPlayModeErrorCode")
+            or status.get("enterPlayModeError")
             or not isinstance(status.get("managers"), list)
         ):
             return []
@@ -2899,7 +3139,11 @@ class AgentApprovalTransactionService:
         avatar_path = str(
             arguments.get("avatar_path") or arguments.get("avatarPath") or ""
         ).strip().strip("/")
-        if not project_root or not avatar_path or not isinstance(execution_target, Mapping):
+        transition = status.get("playModeTransition")
+        completed_target = (
+            transition.get("completedExecutionTarget") if isinstance(transition, Mapping) else None
+        )
+        if not project_root or not avatar_path:
             return []
         if not any(
             isinstance(manager, Mapping)
@@ -2908,7 +3152,6 @@ class AgentApprovalTransactionService:
             for manager in status["managers"]
         ):
             return []
-        target_digest = execution_target_digest(execution_target)
         resolved: list[dict[str, Any]] = []
         for recovery in self._ports.checkpoint.active_apply_recoveries():
             if str(recovery.get("targetTool") or "") != "vrcforge_gesture_manager_enter_play_mode":
@@ -2922,14 +3165,49 @@ class AgentApprovalTransactionService:
                 continue
             if not isinstance(recovery.get("executionTarget"), Mapping):
                 continue
-            if execution_target_digest(recovery["executionTarget"]) != target_digest:
-                continue
             pending_summary = recovery.get("resultSummary")
             if not isinstance(pending_summary, Mapping) or not (
                 pending_summary.get("enterPlayModePending") is True
                 and pending_summary.get("isPlayMode") is False
                 and pending_summary.get("moduleConnected") is False
                 and pending_summary.get("commitState") == "enter_play_mode_requested"
+            ):
+                continue
+            if isinstance(transition, Mapping):
+                source = transition.get("sourceExecutionTarget")
+                if (
+                    transition.get("status") != "completed"
+                    or not transition.get("id")
+                    or transition.get("id") != pending_summary.get("playModeTransitionId")
+                    or not isinstance(source, Mapping)
+                    or not isinstance(completed_target, Mapping)
+                    or execution_target_digest(source) != execution_target_digest(recovery["executionTarget"])
+                    or source.get("project") != completed_target.get("project")
+                    or source.get("scene") != completed_target.get("scene")
+                    or any(ensure_dict(source.get("editor")).get(key) != ensure_dict(completed_target.get("editor")).get(key)
+                           for key in ("unityPid", "processStartTime"))
+                    or ensure_dict(source.get("avatar")).get("exactHierarchyPath") != avatar_path
+                    or ensure_dict(completed_target.get("avatar")).get("exactHierarchyPath") != avatar_path
+                    or transition.get("avatarPath") != avatar_path
+                    or (isinstance(execution_target, Mapping)
+                        and execution_target_digest(execution_target) != execution_target_digest(completed_target))
+                ):
+                    continue
+                managers = [item for item in status["managers"] if isinstance(item, Mapping)]
+                if len(managers) != 1 or not (
+                    managers[0].get("moduleConnected") is True
+                    and managers[0].get("managerPath") == transition.get("managerPath")
+                    and managers[0].get("avatarGlobalObjectId") == ensure_dict(completed_target.get("avatar")).get("globalObjectId")
+                ):
+                    continue
+                # The Core-owned transition is not a replacement for current
+                # process/scene authority. An unbound read must pass that gate too.
+                try:
+                    validate_runtime_execution_target(completed_target, project_root=project_root, required_scope="avatar")
+                except (ExecutionTargetError, OSError, ValueError, TypeError):
+                    continue
+            elif not isinstance(execution_target, Mapping) or (
+                execution_target_digest(recovery["executionTarget"]) != execution_target_digest(execution_target)
             ):
                 continue
             resolved.append(
@@ -2991,6 +3269,21 @@ class AgentApprovalTransactionService:
                 "coverageAudit": "vrcforge.project_catalog_registration_receipt.v1",
                 "postRestoreValidationRequired": True,
                 "note": "The exact VCC, ALCOM, or Unity Hub catalogue bytes are receipt-bound before registration.",
+            }
+        if handler.name == "vrcforge_create_safe_backup":
+            return {
+                "schema": ROLLBACK_POLICY_SCHEMA,
+                "required": False,
+                "kind": "create_new_backup_artifact",
+                "approvalRequired": True,
+                "preWriteCheckpointRequired": False,
+                "checkpointScope": [],
+                "restoreTool": "",
+                "coverageAudit": "",
+                "postRestoreValidationRequired": False,
+                "note": "Creates a new project-owned backup directory and manifest without changing source assets. "
+                        "Unsaved editor memory is not captured. Failed creation cleans its own unchanged partial files; "
+                        "a completed backup is retained, and restoring source assets is a separate approved write.",
             }
         if handler.name == "vrcforge_install_unity_core":
             return {
@@ -3064,8 +3357,8 @@ class AgentApprovalTransactionService:
                 "postRestoreValidationRequired": True,
                 "note": (
                     "This operation changes transient Unity Editor or Play Mode state. "
-                    "Entering Play retains a project snapshot before mutation; runtime parameter changes and "
-                    "Play Mode exit use their explicit inverse/readback path without claiming a scene checkpoint. "
+                    "Play transitions use their explicit inverse/readback path without saving or claiming an asset checkpoint. "
+                    "Project Play callbacks may save or generate persistent assets; the inverse transition does not undo those writes. "
                     "Runtime observation additionally creates bounded managed artifacts with create-new semantics; "
                     "the parameter is never automatically restored and partial artifacts are retained as evidence."
                 ),
@@ -3153,6 +3446,25 @@ class AgentApprovalTransactionService:
                     "No Unity checkpoint or automatic rollback is provided."
                 ),
             }
+        if handler.name == "vrcforge_refresh_asset_database":
+            return {
+                "schema": ROLLBACK_POLICY_SCHEMA,
+                "required": True,
+                "kind": "conditional_refresh_checkpoint",
+                "approvalRequired": True,
+                "preWriteCheckpointRequired": True,
+                "preWriteCheckpointConditional": True,
+                "checkpointScope": [*UNITY_PROJECT_CHECKPOINT_SCOPE],
+                "restoreTool": "vrcforge_restore_checkpoint",
+                "coverageAudit": ROLLBACK_COVERAGE_AUDIT_SCHEMA,
+                "postRestoreValidationRequired": True,
+                "note": (
+                    "Package resolution and importer-reference restoration retain a project checkpoint. "
+                    "Schema-valid refresh or exact reimport without package resolution or metadata restoration does not save dirty "
+                    "scenes/assets and requires no checkpoint. The execution receipt reports whether a checkpoint "
+                    "was actually created; reimport completion does not claim a global backup or persistence proof."
+                ),
+            }
         if not handler.pre_write_checkpoint_required:
             raise ValueError(f"Write handler {handler.name!r} has no truthful rollback policy.")
         if handler.name == "vrcforge_restore_checkpoint":
@@ -3180,7 +3492,7 @@ class AgentApprovalTransactionService:
                 "coverageAudit": ROLLBACK_COVERAGE_AUDIT_SCHEMA,
                 "recoveryLedger": APPLY_RECOVERY_SCHEMA,
                 "postRestoreValidationRequired": False,
-                "note": "Marks a persisted interrupted-write recovery as manually resolved after the user confirms the Unity project state was handled.",
+                "note": "Marks a persisted interrupted-write recovery resolved from the supplied confirmation note; this operation does not assert an independent readback.",
             }
         if handler.name in LOCAL_STATE_CHECKPOINT_TARGETS:
             return {
@@ -3444,6 +3756,8 @@ class AgentApprovalTransactionService:
             )
 
         arguments = ensure_dict(params or {})
+        arguments.pop("_vrcforge_incident_restore_auto", None)
+        arguments.pop("_restorePrepareForRecovery", None)
         caller_requested_preview = arguments.get("preview") is True
         user_constraints = self._ports.read_user_constraints()
         arguments = self._inject_user_constraints_for_apply(arguments, user_constraints)
@@ -3517,6 +3831,26 @@ class AgentApprovalTransactionService:
         always_manual_reason = _always_manual_approval_reason(
             normalized_target, full_permission, mandatory_confirmation_reason,
         )
+        matching_recovery = (
+            self._matching_restore_recovery(arguments)
+            if normalized_target == "vrcforge_restore_checkpoint" and full_permission
+            else None
+        )
+        if (
+            normalized_target == "vrcforge_restore_checkpoint"
+            and full_permission
+            and matching_recovery is None
+        ):
+            always_manual_reason = CHECKPOINT_RESTORE_MANUAL_APPROVAL_REASON
+        elif (
+            normalized_target == "vrcforge_restore_checkpoint"
+            and full_permission
+            and matching_recovery is not None
+            and matching_recovery.get("zeroEffectAutoLaunchBlocked")
+        ):
+            always_manual_reason = CHECKPOINT_RESTORE_AUTO_LAUNCH_BLOCKED_REASON
+        elif normalized_target == "vrcforge_restore_checkpoint" and full_permission:
+            arguments["_vrcforge_incident_restore_auto"] = True
         confirmation_reason = str(always_manual_reason or (
             (
                 mandatory_confirmation_reason
@@ -3621,6 +3955,7 @@ class AgentApprovalTransactionService:
         arguments: dict[str, Any],
         handler_arguments_digest: str,
         frozen_execution_plan: Mapping[str, Any],
+        recovery: dict[str, Any] | None = None,
     ) -> Any:
         """Run one external handler with only the shared exact Core authority."""
 
@@ -3630,7 +3965,7 @@ class AgentApprovalTransactionService:
         if not write_handler.requires_approved_execution_context:
             with bind_operation_context(operation_id, execution_target if isinstance(execution_target, Mapping) else None):
                 with (nullcontext() if arguments.get("preview") is True else self._scan_mutation(
-                    extract_project_root(handler_arguments), target_tool
+                    extract_project_root(handler_arguments), target_tool, recovery
                 )):
                     return write_handler.handler(handler_arguments)
 
@@ -3720,9 +4055,11 @@ class AgentApprovalTransactionService:
             with bind_approved_unity_execution(execution_plan):
                 with bind_operation_context(operation_id, execution_target if isinstance(execution_target, Mapping) else None):
                     with (nullcontext() if arguments.get("preview") is True else self._scan_mutation(
-                        project_root, target_tool
-                    )):
+                        project_root, target_tool, recovery
+                    )) as mutation:
                         result = write_handler.handler(handler_arguments)
+                        if isinstance(mutation, dict):
+                            mutation["outcome"] = _domain_write_receipt(result)
         finally:
             if not execution_plan.consumed:
                 execution_plan.burn()
@@ -4025,6 +4362,7 @@ class AgentApprovalTransactionService:
                     arguments,
                     handler_arguments_digest,
                     frozen_execution_plan,
+                    recovery=recovery,
                 )
             source_tool_result = result
             # Runtime observation owns a finite Unity sampling job.  Its start
@@ -4090,6 +4428,7 @@ class AgentApprovalTransactionService:
                         "isPlayMode",
                         "moduleConnected",
                         "enterPlayModePending",
+                        "playModeTransitionId",
                         "commitState",
                     ):
                         if key in result:
@@ -4167,13 +4506,16 @@ class AgentApprovalTransactionService:
                     "readbackState": readback_state,
                 }
             )
+            finalize_verification = (
+                isinstance(result, Mapping)
+                and isinstance(result.get("consoleVerification"), Mapping)
+                and str(result["consoleVerification"].get("status") or "").casefold()
+                in {"passed", "verified"}
+            )
+            checkpoint = self._finish_created_asset_checkpoint(checkpoint, result, pending=operation_pending)
             if recovery is not None:
-                finalize_verification = (
-                    isinstance(result, Mapping)
-                    and isinstance(result.get("consoleVerification"), Mapping)
-                    and str(result["consoleVerification"].get("status") or "").casefold()
-                    in {"passed", "verified"}
-                )
+                recovery["checkpoint"] = checkpoint
+            if recovery is not None:
                 if not gm_entry_pending and not receipt_verified and not finalize_verification:
                     console_verification = (
                         result.get("consoleVerification") if isinstance(result, Mapping) else None

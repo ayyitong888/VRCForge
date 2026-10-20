@@ -77,3 +77,36 @@ def test_runtime_failure_exposes_accountable_usage(monkeypatch):
     assert len(calls) == 1
     assert caught.value.provider_usage["cacheReadTokens"] == 8832
     assert caught.value.provider_usage["inputTokens"] == 10000
+
+
+@pytest.mark.parametrize(
+    ("usage", "expected"),
+    [
+        ({"input_tokens": 10, "output_tokens": 2,
+          "input_tokens_details": {"cache_write_tokens": 512}}, 512),
+        (SimpleNamespace(input_tokens=10, output_tokens=2,
+                         input_tokens_details=SimpleNamespace(cache_write_tokens=0)), 0),
+        ({"input_tokens": 10, "output_tokens": 2,
+          "cache_creation_input_tokens": 2048}, 2048),
+        (SimpleNamespace(input_tokens=10, output_tokens=2,
+                         cache_creation_input_tokens=0), 0),
+    ],
+)
+def test_extracts_cache_write_from_provider_shapes_without_estimating(usage, expected):
+    response = SimpleNamespace(usage=usage)
+    trace = extract_llm_token_usage(
+        response, SimpleNamespace(llm_provider="custom", llm_model="fixture")
+    )
+    assert trace["cacheWriteTokens"] == expected
+
+
+@pytest.mark.parametrize(
+    "value", [True, False, -1, 1.5, "not-a-count", "-1"]
+)
+def test_invalid_cache_write_is_missing_not_zero(value):
+    response = {"usage": {"input_tokens": 10, "output_tokens": 2,
+                           "input_tokens_details": {"cache_write_tokens": value}}}
+    trace = extract_llm_token_usage(
+        response, SimpleNamespace(llm_provider="custom", llm_model="fixture")
+    )
+    assert "cacheWriteTokens" not in trace

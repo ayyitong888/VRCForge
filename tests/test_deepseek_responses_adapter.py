@@ -531,9 +531,9 @@ def test_runtime_missing_api_type_migrates_flash_to_responses_without_chat(monke
     assert response.text == '{"reply":"ok"}'
 
 
-def test_runtime_deepseek_auto_model_falls_back_once_on_explicit_preoutput_protocol_error(monkeypatch) -> None:
+def test_runtime_explicit_deepseek_model_falls_back_once_on_preoutput_protocol_error(monkeypatch) -> None:
     configured = settings(api_type="auto")
-    configured.llm_model = "deepseek-auto"
+    configured.llm_model = "deepseek-v4-pro"
     calls: list[tuple[str, str]] = []
 
     def responses(candidate, *_args, **_kwargs):
@@ -587,7 +587,7 @@ def test_deepseek_responses_adapter_accepts_both_ga_v4_models() -> None:
     ("requested", "sent"),
     [
         ("none", "none"),
-        ("minimal", ""),
+        ("minimal", "minimal"),
         ("low", "low"),
         ("medium", "high"),
         ("high", "high"),
@@ -595,7 +595,7 @@ def test_deepseek_responses_adapter_accepts_both_ga_v4_models() -> None:
         ("max", "max"),
     ],
 )
-def test_deepseek_responses_production_maps_only_documented_effort_values(
+def test_deepseek_responses_production_keeps_validated_canonical_effort_values(
     requested: str, sent: str
 ) -> None:
     observed: dict[str, FakeClient] = {}
@@ -700,9 +700,9 @@ def test_deepseek_messages_production_error_preserves_provider_model_key_origin_
 
 
 @pytest.mark.parametrize("status", [401, 429, 500])
-def test_runtime_auto_model_does_not_replay_on_auth_rate_limit_or_server_error(monkeypatch, status: int) -> None:
+def test_runtime_explicit_model_does_not_replay_on_auth_rate_limit_or_server_error(monkeypatch, status: int) -> None:
     configured = settings(api_type="auto")
-    configured.llm_model = "deepseek-auto"
+    configured.llm_model = "deepseek-v4-pro"
     chat_calls: list[str] = []
 
     def responses(*_args, **_kwargs):
@@ -711,6 +711,10 @@ def test_runtime_auto_model_does_not_replay_on_auth_rate_limit_or_server_error(m
         raise error
 
     monkeypatch.setattr("vrchat_blendshape_agent.request_responses_plan_with_metadata", responses)
+    monkeypatch.setattr(
+        "vrchat_blendshape_agent.request_anthropic_plan_with_metadata",
+        lambda *_args, **_kwargs: chat_calls.append("messages"),
+    )
     monkeypatch.setattr(
         "vrchat_blendshape_agent.request_openai_compatible_plan_with_metadata",
         lambda *_args, **_kwargs: chat_calls.append("chat"),
@@ -721,9 +725,9 @@ def test_runtime_auto_model_does_not_replay_on_auth_rate_limit_or_server_error(m
     assert chat_calls == []
 
 
-def test_runtime_auto_model_does_not_fallback_after_stream_output(monkeypatch) -> None:
+def test_runtime_explicit_model_does_not_fallback_after_stream_output(monkeypatch) -> None:
     configured = settings(api_type="auto")
-    configured.llm_model = "deepseek-auto"
+    configured.llm_model = "deepseek-v4-pro"
     chat_calls: list[str] = []
 
     def responses(_settings, _prompt, *, stream_callback=None, **_kwargs):
@@ -734,6 +738,10 @@ def test_runtime_auto_model_does_not_fallback_after_stream_output(monkeypatch) -
         raise error
 
     monkeypatch.setattr("vrchat_blendshape_agent.request_responses_plan_with_metadata", responses)
+    monkeypatch.setattr(
+        "vrchat_blendshape_agent.request_anthropic_plan_with_metadata",
+        lambda *_args, **_kwargs: chat_calls.append("messages"),
+    )
     monkeypatch.setattr(
         "vrchat_blendshape_agent.request_openai_compatible_plan_with_metadata",
         lambda *_args, **_kwargs: chat_calls.append("chat"),
@@ -826,3 +834,21 @@ def test_responses_adapter_passes_only_the_configured_sdk_retry_boundary(max_ret
 def test_adapter_rejects_invalid_retry_limit(invalid) -> None:
     with pytest.raises(ValueError, match="max retries"):
         DeepSeekResponsesAdapter(api_key="safe-key", base_url="https://api.deepseek.example", max_retries=invalid)
+
+
+def test_runtime_rejects_deepseek_auto_model_before_any_protocol_request(monkeypatch) -> None:
+    configured = settings(api_type="auto")
+    configured.llm_model = "deepseek-auto"
+    calls: list[str] = []
+    for request_name in (
+        "request_responses_plan_with_metadata",
+        "request_anthropic_plan_with_metadata",
+        "request_openai_compatible_plan_with_metadata",
+    ):
+        monkeypatch.setattr(
+            "vrchat_blendshape_agent." + request_name,
+            lambda *_args, **_kwargs: calls.append("unexpected-protocol-request"),
+        )
+    with pytest.raises(ValueError, match="Select a DeepSeek model explicitly"):
+        request_llm_plan_with_metadata(configured, "p")
+    assert calls == []

@@ -14,7 +14,7 @@ def test_rename_reparent_success_and_preview_receipts(tmp_path):
             body=section[start:section.index(";",start)+1]
             bodies.append("{"+body+" Console.WriteLine(JsonConvert.SerializeObject("+variable+"));}")
         assert section.index("persisted readback was not exact") < section.index("var payload = new")
-    program='using System; using Newtonsoft.Json; class Probe { static void Main(){\nstring oldName="Old",newName="New",oldPath="Avatar/Old",newPath="Avatar/New",oldParentPath="Avatar",resolvedNewParentPath="Avatar/Next";\nbool worldPositionStays=true; var readback=new {name="New"}; var beforeScene=new {FileDigest="before"}; var afterScene=new {Path="Assets/Main.unity",FileDigest="after"};\n'+"".join(bodies)+"}}"
+    program='using System; using Newtonsoft.Json; class TransformStub { public int GetSiblingIndex() {return 0;} } class Probe { static void Main(){\nstring oldName="Old",newName="New",oldPath="Avatar/Old",newPath="Avatar/New",oldParentPath="Avatar",resolvedNewParentPath="Avatar/Next";\nint oldSiblingIndex=1; int? requestedSiblingIndex=0; bool worldPositionStays=true; var readback=new {name="New",transform=new TransformStub()}; var beforeScene=new {FileDigest="before"}; var afterScene=new {Path="Assets/Main.unity",FileDigest="after"};\n'+"".join(bodies)+"}}"
     base=Path(os.environ.get("ProgramFiles","C:/Program Files"))/"dotnet"
     compiler=sorted((base/"sdk").glob("*/Roslyn/bincore/csc.dll"))[-1]
     refs=sorted((base/"packs/Microsoft.NETCore.App.Ref").glob("*/ref/netcoreapp3.1"))[-1]

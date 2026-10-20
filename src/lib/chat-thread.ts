@@ -1,5 +1,6 @@
 import type { AgentContextUsage } from "./api";
 import type { ChatThread, ConversationItem } from "./chat-types";
+import { latestContextWindowUsage } from "./context-compaction";
 export {
   materializeRuntimeTimeline,
   mergeConversationTimelineItems,
@@ -14,6 +15,7 @@ import {
 } from "./attachment-payloads";
 
 export type ChatSidebarGroups = {
+  testChats: ChatThread[];
   temporaryChats: ChatThread[];
   projectChatsByPath: Map<string, ChatThread[]>;
 };
@@ -26,6 +28,7 @@ export function groupSidebarChats(
   list: ChatThread[],
   normalizeProjectPath: (value: string) => string,
 ): ChatSidebarGroups {
+  const testChats: ChatThread[] = [];
   const temporaryChats: ChatThread[] = [];
   const projectChatsByPath = new Map<string, ChatThread[]>();
   for (const chat of list) {
@@ -33,6 +36,10 @@ export function groupSidebarChats(
       continue;
     }
     if (isUnstartedChat(chat)) {
+      continue;
+    }
+    if (chat.isTestChat === true) {
+      testChats.push(chat);
       continue;
     }
     const key = normalizeProjectPath(chat.projectPath || "");
@@ -47,11 +54,12 @@ export function groupSidebarChats(
       projectChatsByPath.set(key, [chat]);
     }
   }
+  testChats.sort(compareChatsForSidebar);
   temporaryChats.sort(compareChatsForSidebar);
   for (const group of projectChatsByPath.values()) {
     group.sort(compareChatsForSidebar);
   }
-  return { temporaryChats, projectChatsByPath };
+  return { testChats, temporaryChats, projectChatsByPath };
 }
 
 export function cacheChatTimestampsFast(chat: ChatThread): ChatThread {
@@ -66,7 +74,7 @@ export function cacheChatTimestampsFast(chat: ChatThread): ChatThread {
 }
 
 export function cacheChatContextUsageFast(chat: ChatThread): ChatThread {
-  const latestUsage = latestExactAgentContextUsage(chat.items);
+  const latestUsage = latestContextWindowUsage(chat.items, true);
   if (!latestUsage) {
     if (chat.contextUsageCache) {
       const { contextUsageCache: _contextUsageCache, ...rest } = chat;
@@ -117,7 +125,10 @@ export function stripTransientConversationItems(items: ConversationItem[]): Conv
 export function stripSupersededStreamingItems(items: ConversationItem[]): ConversationItem[] {
   let lastDurableIndex = -1;
   for (let index = items.length - 1; index >= 0; index -= 1) {
-    if (items[index]?.type !== "streaming") {
+    const item = items[index];
+    // Queued and same-turn steering inputs belong to the current response.
+    // Only a delivered new turn may supersede an earlier live response.
+    if (item?.type !== "streaming" && !(item?.type === "user" && (item.composerQueued === true || item.queuedFrom === true))) {
       lastDurableIndex = index;
       break;
     }
@@ -142,19 +153,6 @@ export function normalizeChatContextUsage(value: unknown): AgentContextUsage | u
     typeof usage.totalTokens === "number" ||
     typeof usage.outputTokens === "number";
   return hasTokenCount ? usage : undefined;
-}
-
-function latestExactAgentContextUsage(items: ConversationItem[]): AgentContextUsage | undefined {
-  for (let index = items.length - 1; index >= 0; index -= 1) {
-    const item = items[index];
-    if (item.type === "agent") {
-      const usage = normalizeChatContextUsage(item.response.contextUsage);
-      if (usage) {
-        return usage;
-      }
-    }
-  }
-  return undefined;
 }
 
 function isUnstartedChat(chat: ChatThread): boolean {

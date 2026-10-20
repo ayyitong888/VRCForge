@@ -757,6 +757,7 @@ namespace VRCForge.Editor
     )]
     public static class AssetDatabaseRefreshTool
     {
+        internal const bool SavesDirtyAssets = false;
         internal const string ToolName = "vrc_refresh_asset_database";
         private const double RefreshResponseGraceSeconds = 0.25d;
         private static bool refreshScheduled;
@@ -1214,7 +1215,6 @@ namespace VRCForge.Editor
                 }
                 else
                 {
-                    AssetDatabase.SaveAssets();
                     AssetDatabase.Refresh();
                 }
                 UnityEngine.Debug.Log($"[VRCForge] Scheduled AssetDatabase refresh completed ({requestId}).");

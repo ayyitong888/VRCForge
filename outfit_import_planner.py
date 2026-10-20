@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -228,6 +229,12 @@ def build_outfit_import_plan(
         resolved_single_package = False
     selected_prefab_entry = select_entry(inspection.get("prefabCandidates"), selected_prefab)
     selected_loose_entry = selected_prefab_entry or select_entry(inspection.get("assemblyDefinitions"), None)
+    textures = inspection.get("textures") or []
+    summary = inspection.get("summary") or {}
+    complete_texture_folder = (
+        source_type == "folder" and bool(textures)
+        and summary.get("textureCount") == len(textures)
+    )
     selected_package_for_queue = explicit_selected_package or resolved_single_package
     selected_package_path = (
         resolve_selected_unitypackage_path(source_path, source_type, str(selected_package.get("path") or ""))
@@ -288,10 +295,10 @@ def build_outfit_import_plan(
             dependency_preflight=dependency_preflight,
             selected_prefab_path=str((selected_prefab_entry or {}).get("path") or ""),
         )
-    elif selected_loose_entry:
+    elif selected_loose_entry or complete_texture_folder:
         plan = build_loose_prefab_plan(
             source_path=source_path,
-            selected_prefab=selected_loose_entry,
+            selected_prefab=selected_loose_entry or {},
             project_root=project_root,
             target_root=target_root,
             base_avatar_name=effective_base_avatar_name,
@@ -340,18 +347,41 @@ def build_unitypackage_plan(
     import_queue = package_order.get("importQueue") if isinstance(package_order.get("importQueue"), list) else []
     queue_can_apply = bool(import_queue) and not bool(package_order.get("requiresManualExtract"))
     needs_extract = actual_package_path is None and not queue_can_apply
-    expected_assets_complete = not bool(inspection.get("summary", {}).get("truncated"))
+    inspection_complete = not bool(inspection.get("summary", {}).get("truncated"))
+    selected_package_size = _nonnegative_int(selected_package.get("size"))
+    nested_queue_size, nested_size_verified = _nested_unitypackage_queue_size(
+        import_queue,
+        inspection=inspection,
+        source_path=source_path,
+    )
+    nested_queue_present = any(
+        isinstance(item, dict) and str(item.get("sourceType") or "").casefold() == "zip"
+        for item in import_queue
+    )
+    nested_size_ready = not nested_queue_present or nested_size_verified
+    expected_assets_complete = inspection_complete and all(
+        package.get("pathnamesEvidenceComplete") is True
+        for package in inspection.get("unityPackages") or []
+    )
     ready = (
         not needs_extract
-        and expected_assets_complete
+        and inspection_complete
+        and nested_size_ready
         and bool(dependency_preflight.get("readyForImport"))
     )
     plan_warnings = list(warnings)
-    if not expected_assets_complete:
+    if not inspection_complete:
         plan_warnings.append(
             "Package inspection evidence was truncated; increase max_entries and inspect the complete package before apply."
         )
+    if nested_queue_present and not nested_size_verified:
+        plan_warnings.append(
+            "Nested UnityPackage sizes could not be verified from the ZIP central directory; inspect the source before applying."
+        )
     expected_assets = expected_asset_paths_from_inspection(inspection)
+    if selected_prefab_path and selected_prefab_path not in expected_assets:
+        plan_warnings.append("The container prefab is not a proven destination of the UnityPackage; find the imported prefab after refresh.")
+        selected_prefab_path = ""
     plan_kind = (
         "unitypackage_container_manual_extract"
         if needs_extract
@@ -382,6 +412,8 @@ def build_unitypackage_plan(
             "type": source_type,
             "path": str(source_path),
             "selectedUnityPackage": package_entry_path,
+            "selectedUnityPackageSizeBytes": selected_package_size,
+            "nestedUnityPackageImportSizeBytes": nested_queue_size if nested_size_verified else None,
             "actualPackagePath": str(actual_package_path) if actual_package_path else "",
             "importQueue": import_queue,
         },
@@ -404,7 +436,7 @@ def build_unitypackage_plan(
             ),
             step("plan", "preview", "vrcforge_plan_outfit_import", "Show import plan, affected package entries, and safety requirements."),
             step("approval", "approval", "vrcforge_request_apply", "User approves the import request in VRCForge Desktop."),
-            step("checkpoint", "checkpoint", "vrc_prepare_checkpoint", "Save scenes/assets and create a pre-import rollback checkpoint."),
+            step("checkpoint", "checkpoint", "vrc_prepare_checkpoint", "Inspect saved state and create a disk rollback checkpoint without saving; explicitly save intended unsaved changes before import."),
             step("import", "write", "vrc_import_unitypackage", "Import the UnityPackage queue through Unity AssetDatabase in dependency order.", enabled=ready),
             step("scan", "read", "vrcforge_find_assets", "Find imported prefab candidates after Unity refresh.", enabled=ready),
             step("setup", "write", "vrcforge_add_outfit", "Continue Setup Outfit and wardrobe binding as a separate supervised plan.", enabled=False),
@@ -413,6 +445,62 @@ def build_unitypackage_plan(
         ],
         "warnings": plan_warnings,
     }
+
+
+def _nonnegative_int(value: Any) -> int | None:
+    try:
+        converted = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return converted if converted >= 0 else None
+
+
+def _nested_unitypackage_queue_size(
+    import_queue: list[Any],
+    *,
+    inspection: dict[str, Any],
+    source_path: Path,
+) -> tuple[int | None, bool]:
+    """Read only central-directory sizes for every queued nested package."""
+    zip_items = [
+        item
+        for item in import_queue
+        if isinstance(item, dict) and str(item.get("sourceType") or "").casefold() == "zip"
+    ]
+    if not zip_items:
+        return None, True
+    inspected_sizes = {
+        str(item.get("path") or "").replace("\\", "/").strip("/"): _nonnegative_int(item.get("size"))
+        for item in inspection.get("unityPackages") or []
+        if isinstance(item, dict)
+    }
+    total = 0
+    for item in zip_items:
+        entry_path = str(item.get("path") or "").replace("\\", "/").strip("/")
+        container_value = str(item.get("containerPath") or "").strip()
+        container_path = Path(container_value).expanduser() if container_value else source_path
+        try:
+            same_source = container_path.resolve() == source_path.resolve()
+        except OSError:
+            return None, False
+        if same_source:
+            size = inspected_sizes.get(entry_path)
+        else:
+            try:
+                with zipfile.ZipFile(container_path) as archive:
+                    matches = [
+                        info
+                        for info in archive.infolist()
+                        if not info.is_dir()
+                        and info.filename.replace("\\", "/").strip("/") == entry_path
+                    ]
+                size = _nonnegative_int(matches[0].file_size) if len(matches) == 1 else None
+            except (OSError, zipfile.BadZipFile, KeyError):
+                size = None
+        if size is None:
+            return None, False
+        total += size
+    return total, True
 
 
 def build_unitypackage_import_risk_facts(
@@ -572,7 +660,7 @@ def build_loose_prefab_plan(
             ),
             step("plan", "preview", "vrcforge_plan_outfit_import", "Show the copy plan and safety requirements."),
             step("approval", "approval", "vrcforge_request_apply", "User approves the copy/import request in VRCForge Desktop."),
-            step("checkpoint", "checkpoint", "vrc_prepare_checkpoint", "Save scenes/assets and create a pre-import rollback checkpoint."),
+            step("checkpoint", "checkpoint", "vrc_prepare_checkpoint", "Inspect saved state and create a disk rollback checkpoint without saving; explicitly save intended unsaved changes before import."),
             step("copy", "write", "vrcforge_import_outfit_package", f"Copy loose outfit files into {target_root}.", enabled=ready),
             step("refresh", "write", "vrc_refresh_asset_database", "Refresh Unity AssetDatabase after copied assets.", enabled=ready),
             step("setup", "write", "vrcforge_add_outfit", "Continue Setup Outfit and wardrobe binding as a separate supervised plan.", enabled=False),
@@ -1298,7 +1386,10 @@ def expected_asset_paths_from_inspection(inspection: dict[str, Any]) -> list[str
                 path = str(item.get("path") or "").replace("\\", "/").strip("/")
                 if path.startswith("Assets/"):
                     paths.append(path)
-    if paths:
+    # A container's loose FBX/prefab entries are not destinations of the
+    # selected UnityPackage. Unknown package pathnames stay unknown until
+    # approval-bound inspection; they cannot fall back to another asset kind.
+    if paths or inspection.get("unityPackages"):
         return sorted(dict.fromkeys(paths), key=str.lower)
     return loose_asset_paths_from_inspection(inspection)
 
@@ -1324,9 +1415,10 @@ def loose_asset_paths_from_inspection(inspection: dict[str, Any]) -> list[str]:
 
 
 def first_prefab_path(inspection: dict[str, Any]) -> str:
-    for item in inspection.get("prefabCandidates") or []:
-        if isinstance(item, dict):
-            return str(item.get("path") or "")
+    if not inspection.get("unityPackages"):
+        for item in inspection.get("prefabCandidates") or []:
+            if isinstance(item, dict):
+                return str(item.get("path") or "")
     for path in expected_asset_paths_from_inspection(inspection):
         if path.lower().endswith(".prefab"):
             return path

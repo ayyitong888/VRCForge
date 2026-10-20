@@ -51,6 +51,7 @@ export function ChatGptOAuthSettings({
   const [modelsAccountId, setModelsAccountId] = useState("");
   const [modelLoadFailed, setModelLoadFailed] = useState(false);
   const [selectedModel, setSelectedModel] = useState("");
+  const [thinkingLevel, setThinkingLevel] = useState("");
   const [busy, setBusy] = useState("");
   const [statusLoading, setStatusLoading] = useState(false);
   const [error, setError] = useState("");
@@ -177,10 +178,27 @@ export function ChatGptOAuthSettings({
     ? status.accounts.find((account) => account.id === status.activeAccountId)
     : undefined;
   const activeModel = status?.activeModel || "";
+  const activeThinkingLevel = status?.activeThinkingLevel || "";
+  const selectedModelRecord = models.find((model) => model.id === selectedModel);
+  const reasoningLevels = selectedModelRecord?.supportedReasoningLevels ?? [];
   const active = Boolean(status?.activeAccountId && activeModel);
   const activeConnectionVerified = Boolean(
     active && apiProvider === "chatgpt" && providerTestPassed && activeAccount?.connected,
   );
+
+  useEffect(() => {
+    if (!selectedModel || !selectedModelRecord || !reasoningLevels.length) {
+      setThinkingLevel("");
+      return;
+    }
+    const supported = reasoningLevels.map((item) => item.effort);
+    setThinkingLevel(() => {
+      if (selectedModel === activeModel && activeThinkingLevel && supported.includes(activeThinkingLevel)) {
+        return activeThinkingLevel;
+      }
+      return "";
+    });
+  }, [activeModel, activeThinkingLevel, reasoningLevels, selectedModel, selectedModelRecord]);
 
   useEffect(() => {
     const account = selectedAccount;
@@ -465,14 +483,31 @@ export function ChatGptOAuthSettings({
               {displayedModels.map((model) => <option key={model.id} value={model.id}>{model.name || model.id}</option>)}
             </select>
           </label>
+          {reasoningLevels.length ? (
+            <label className="grid min-w-0 gap-2 text-sm font-medium text-muted-foreground">
+              {t("provider.reasoningEffort")}
+              <select
+                value={thinkingLevel}
+                onChange={(event) => setThinkingLevel(event.target.value)}
+                disabled={Boolean(busy) || !modelChoicesAvailable}
+                data-chatgpt-reasoning-select
+                className="h-10 w-full min-w-0 rounded-md border border-border bg-background px-3 text-sm font-normal text-foreground outline-none focus:border-primary"
+              >
+                <option value="">{t("chatgptOAuth.reasoningSelect")}</option>
+                {reasoningLevels.map((variant) => (
+                  <option key={variant.effort} value={variant.effort}>{t(`provider.reasoning_${variant.effort}`, variant.effort)}</option>
+                ))}
+              </select>
+            </label>
+          ) : null}
           <Button
             type="button"
             className="w-full sm:w-auto"
-            disabled={!runtimeConnected || !selectedAccount?.connected || !selectedModel || Boolean(busy) || savingApiConfig}
+            disabled={!runtimeConnected || !selectedAccount?.connected || !selectedModel || Boolean(busy) || savingApiConfig || (reasoningLevels.length > 0 && !thinkingLevel)}
             onClick={() => void runAction(
               "activate",
               async () => {
-                await activateChatGptOAuthModel(endpoint, selectedAccountId, selectedModel);
+                await activateChatGptOAuthModel(endpoint, selectedAccountId, selectedModel, thinkingLevel);
                 await onProviderConfigChanged();
               },
               t("chatgptOAuth.activated"),

@@ -25,6 +25,8 @@ export type TimelinePresentationEntry =
   | {
       type: "assistant";
       id: string;
+      messageId?: string;
+      phase?: "commentary" | "final_answer";
       startedAt: string;
       text: string;
       status: string;
@@ -92,7 +94,44 @@ type RuntimePresentationTranslator = (key: string) => string;
 const RUNTIME_FAILURE_MESSAGE_KEYS: Record<string, string> = {
   planner_no_progress: "chat.runtimeTerminal.noProgressMessage",
   provider_timeout: "chat.providerResponseTimedOut",
+  provider_connection_failed: "chat.runtimeTerminal.providerConnectionFailedMessage",
+  provider_rate_limited: "chat.runtimeTerminal.providerRateLimitedMessage",
+  provider_capacity: "chat.runtimeTerminal.providerCapacityMessage",
+  provider_auth_failed: "chat.runtimeTerminal.providerAuthFailedMessage",
+  provider_request_failed: "chat.runtimeTerminal.providerRequestFailedMessage",
 };
+
+// Older runtime transcripts use nextStep as the terminal assistant status.
+// Public commentary remains governed by its explicit phase.
+const FINAL_ASSISTANT_STATUSES = new Set([
+  "done", "final", "completed", "failed", "error", "cancelled", "canceled",
+  "tool_failed", "needs_user_action", "planner_failed", "loop_suppressed", "paused", "context_compaction_required",
+]);
+
+const ASSISTANT_PHASES = new Set(["commentary", "final_answer"] as const);
+
+function assistantPhase(value: unknown): "commentary" | "final_answer" | undefined {
+  return typeof value === "string" && ASSISTANT_PHASES.has(value as "commentary" | "final_answer")
+    ? value as "commentary" | "final_answer"
+    : undefined;
+}
+
+export function isFinalAssistantTimelineEvent(event: ChatTimelineEvent): boolean {
+  if (event.kind !== "assistant") return false;
+  if (event.payload?.status === "completion_unverified") return false;
+  const phase = assistantPhase(event.payload?.phase);
+  if (phase) return phase === "final_answer";
+  return FINAL_ASSISTANT_STATUSES.has(String(event.payload?.status || "").toLowerCase());
+}
+
+export function isFinalAssistantPresentationEntry(
+  entry: TimelinePresentationEntry,
+): entry is Extract<TimelinePresentationEntry, { type: "assistant" }> {
+  if (entry.type !== "assistant") return false;
+  if (entry.status === "completion_unverified") return false;
+  if (entry.phase) return entry.phase === "final_answer";
+  return FINAL_ASSISTANT_STATUSES.has(entry.status.toLowerCase());
+}
 
 /** Resolve an explicit terminal label from structured Runtime state, never assistant prose. */
 export function runtimeTerminalStatusKey(failureCode = ""): string | undefined {
@@ -102,6 +141,11 @@ export function runtimeTerminalStatusKey(failureCode = ""): string | undefined {
   if (failureCode === "provider_timeout") {
     return "chat.runtimeTerminal.providerTimeoutStatus";
   }
+  if (failureCode === "provider_connection_failed") return "chat.runtimeTerminal.providerConnectionFailedStatus";
+  if (failureCode === "provider_rate_limited") return "chat.runtimeTerminal.providerRateLimitedStatus";
+  if (failureCode === "provider_capacity") return "chat.runtimeTerminal.providerCapacityStatus";
+  if (failureCode === "provider_auth_failed") return "chat.runtimeTerminal.providerAuthFailedStatus";
+  if (failureCode === "provider_request_failed") return "chat.runtimeTerminal.providerRequestFailedStatus";
   return undefined;
 }
 
@@ -115,15 +159,27 @@ export function projectRuntimeResponseForDisplay(
   translate: RuntimePresentationTranslator,
 ): AgentRuntimeResponse {
   const failureCode = String(response.plan.plannerFailure?.code || "");
-  const messageKey = RUNTIME_FAILURE_MESSAGE_KEYS[failureCode];
-  if (!messageKey) return response;
+  const failureMessageKey = RUNTIME_FAILURE_MESSAGE_KEYS[failureCode];
+  if (!failureMessageKey) return response;
+  // A later planning failure cannot erase already executed tools. Missing phase
+  // is unknown, so the code-specific messages must not claim zero execution.
+  const messageKey = failureCode.startsWith("provider_")
+    && response.plan.plannerFailure?.phase === "post_tool"
+    ? "chat.runtimeTerminal.providerPostToolFailureMessage"
+    : failureMessageKey;
 
-  const displayText = translate(messageKey);
+  const providerStatus = response.plan.plannerFailure?.providerError?.statusCode;
+  const displayText = `${translate(messageKey)}${typeof providerStatus === "number" ? ` (HTTP ${providerStatus})` : ""}`;
   const timeline = response.timeline;
+  const hasPhaseTaggedAssistant = Array.isArray(timeline) && timeline.some((event) => (
+    event?.kind === "assistant" && Boolean(assistantPhase(event.payload?.phase))
+  ));
   let finalAssistantIndex = -1;
   if (Array.isArray(timeline)) {
     for (let index = timeline.length - 1; index >= 0; index -= 1) {
-      if (timeline[index]?.kind === "assistant") {
+      const candidate = timeline[index] as ChatTimelineEvent | undefined;
+      if (candidate && (isFinalAssistantTimelineEvent(candidate)
+        || (candidate.kind === "assistant" && !assistantPhase(candidate.payload?.phase) && Boolean(failureCode)))) {
         finalAssistantIndex = index;
         break;
       }
@@ -132,10 +188,12 @@ export function projectRuntimeResponseForDisplay(
 
   return {
     ...response,
-    plan: {
-      ...response.plan,
-      reply: displayText,
-    },
+    ...(finalAssistantIndex >= 0 || !hasPhaseTaggedAssistant ? {
+      plan: {
+        ...response.plan,
+        reply: displayText,
+      },
+    } : {}),
     ...(Array.isArray(timeline) && finalAssistantIndex >= 0
       ? {
           timeline: timeline.map((event, index) => index === finalAssistantIndex
@@ -273,55 +331,73 @@ function materializeInvocations(events: ChatTimelineEvent[]): TimelineInvocation
     });
 }
 
-function contiguousExecutionBatches(invocations: TimelineInvocation[]): TimelinePresentationEntry[] {
+function interleavedTimelineEntries(
+  ordered: ChatTimelineEvent[],
+  invocations: TimelineInvocation[],
+): TimelinePresentationEntry[] {
   const entries: TimelinePresentationEntry[] = [];
-  for (const invocation of invocations) {
-    const previous = entries.at(-1);
-    if (previous?.type === "batch" && previous.kind === invocation.kind) {
-      previous.invocations.push(invocation);
+  const invocationsByFirstEvent = new Map(invocations.map((invocation) => [invocation.id, invocation]));
+  let currentBatch: Extract<TimelinePresentationEntry, { type: "batch" }> | undefined;
+  const flushBatch = () => {
+    if (currentBatch) entries.push(currentBatch);
+    currentBatch = undefined;
+  };
+  for (const event of ordered) {
+      if (event.kind === "assistant" && event.payload?.summary) {
+        flushBatch();
+      const phase = assistantPhase(event.payload?.phase);
+        entries.push({
+          type: "assistant",
+          id: event.id,
+          ...(event.payload?.messageId ? { messageId: event.payload.messageId } : {}),
+          ...(phase ? { phase } : {}),
+          startedAt: event.timestamp,
+          text: event.payload.summary,
+        status: event.payload.status || "done",
+      });
       continue;
     }
-    entries.push({
-      type: "batch",
-      id: `timeline-batch-${invocation.kind}-${invocation.id}`,
-      kind: invocation.kind,
-      startedAt: invocation.startedAt,
-      invocations: [invocation],
-    });
+    const invocation = invocationsByFirstEvent.get(event.id);
+    if (!invocation) continue;
+    if (currentBatch?.kind !== invocation.kind) {
+      flushBatch();
+      currentBatch = {
+        type: "batch",
+        id: `timeline-batch-${invocation.kind}-${invocation.id}`,
+        kind: invocation.kind,
+        startedAt: invocation.startedAt,
+        invocations: [],
+      };
+    }
+    currentBatch.invocations.push(invocation);
   }
+  flushBatch();
   return entries;
 }
 
 /**
- * Build a Codex-style turn projection: one elapsed marker, one final answer,
- * and expandable semantic batches whose invocation rows retain real order.
- * Planner/phase updates are safe summaries, never raw model reasoning.
+ * Build a Codex-style turn projection: one elapsed marker, ordered public
+ * assistant updates, and expandable semantic batches whose invocation rows
+ * retain real order. Planner/phase updates are safe summaries, never raw
+ * model reasoning.
  */
 export function buildTimelinePresentation(events: ChatTimelineEvent[] = [], elapsedSeconds?: number): TimelinePresentation {
   const ordered = sortAndDedupeTimelineEvents(events);
   if (!ordered.length) return { entries: [] };
   const invocations = materializeInvocations(ordered);
-  const entries = contiguousExecutionBatches(invocations);
-  const finalAssistant = [...ordered].reverse().find((event) => event.kind === "assistant" && event.payload?.summary);
-  if (finalAssistant) {
-    entries.push({
-      type: "assistant",
-      id: finalAssistant.id,
-      startedAt: finalAssistant.timestamp,
-      text: finalAssistant.payload.summary || "",
-      status: finalAssistant.payload.status || "done",
-    });
-  }
-  entries.sort((left, right) => timestampValue(left.startedAt) - timestampValue(right.startedAt) || left.id.localeCompare(right.id));
+  const entries = interleavedTimelineEntries(ordered, invocations);
+  const hasProcess = invocations.length > 0 || entries.some((entry) => (
+    entry.type === "assistant" && entry.phase === "commentary"
+  ));
   const firstTime = timestampValue(ordered[0].timestamp);
   const lastTime = timestampValue(ordered.at(-1)?.timestamp || "");
   const derivedElapsed = Number.isFinite(firstTime) && Number.isFinite(lastTime) && lastTime >= firstTime
     ? (lastTime - firstTime) / 1000
     : undefined;
   return {
-    ...(invocations.length && Number.isFinite(elapsedSeconds)
+    ...(hasProcess && Number.isFinite(elapsedSeconds)
       ? { elapsedSeconds }
-      : invocations.length && derivedElapsed !== undefined
+      : hasProcess && derivedElapsed !== undefined
         ? { elapsedSeconds: derivedElapsed }
         : {}),
     entries,
@@ -358,6 +434,7 @@ export function materializeRuntimeTimeline(response: AgentRuntimeResponse, fallb
         ...(typeof payload.status === "string" ? { status: payload.status.slice(0, 80) } : {}),
         ...(typeof payload.tool === "string" ? { tool: payload.tool.slice(0, 160) } : {}),
         ...(typeof payload.phase === "string" ? { phase: payload.phase.slice(0, 80) } : {}),
+        ...(typeof payload.messageId === "string" && payload.messageId ? { messageId: payload.messageId.slice(0, 180) } : {}),
         ...(typeof payload.actionId === "string" ? { actionId: payload.actionId.slice(0, 96) } : {}),
         ...(payload.subagentStatus ? { subagentStatus: payload.subagentStatus } : {}),
       },

@@ -10,6 +10,16 @@ export type AgentRuntimeDeltaEvent = {
   timelineEvent?: unknown;
   activity?: boolean;
   done?: boolean;
+  providerRetry?: AgentProviderRetryState;
+  consumedSteerInputIds?: string[];
+};
+
+export type AgentProviderRetryState = {
+  attempt: number;
+  max: number;
+  reason?: "connection" | "timeout" | "rate_limit" | "capacity";
+  statusCode?: number;
+  terminal?: "NO_MORE_RETRY";
 };
 
 export type AgentRuntimePhase =
@@ -80,6 +90,7 @@ export function normalizeAgentRuntimeTimelineEvent(value: unknown): ChatTimeline
       ...(boundedTimelineText(rawPayload.status, 80) ? { status: boundedTimelineText(rawPayload.status, 80) } : {}),
       ...(boundedTimelineText(rawPayload.tool, 160) ? { tool: boundedTimelineText(rawPayload.tool, 160) } : {}),
       ...(boundedTimelineText(rawPayload.phase, 80) ? { phase: boundedTimelineText(rawPayload.phase, 80) } : {}),
+      ...(boundedTimelineText(rawPayload.messageId, 180) ? { messageId: boundedTimelineText(rawPayload.messageId, 180) } : {}),
       ...(boundedTimelineText(rawPayload.actionId, 96) ? { actionId: boundedTimelineText(rawPayload.actionId, 96) } : {}),
       ...(subagentStatus && SUBAGENT_STATUSES.has(subagentStatus as "created" | "started" | "completed" | "failed")
         ? { subagentStatus: subagentStatus as "created" | "started" | "completed" | "failed" }
@@ -91,24 +102,23 @@ export function normalizeAgentRuntimeTimelineEvent(value: unknown): ChatTimeline
 type StreamingConversationItem = Extract<ConversationItem, { type: "streaming" }>;
 type AgentConversationItem = Extract<ConversationItem, { type: "agent" }>;
 
+const PROVIDER_WAIT_WINDOW_MS = 60_000;
+const PROVIDER_WAIT_WINDOW_MAX = 5;
+
+/** Time fallback only: this never claims that a provider retry occurred. */
+export function providerWaitingWindow(startedAt: string | undefined, nowMs = Date.now()): number | undefined {
+  const startedMs = startedAt ? Date.parse(startedAt) : Number.NaN;
+  if (!Number.isFinite(startedMs)) return undefined;
+  const windows = Math.floor(Math.max(0, nowMs - startedMs) / PROVIDER_WAIT_WINDOW_MS);
+  return windows > 0 ? Math.min(PROVIDER_WAIT_WINDOW_MAX, windows) : undefined;
+}
+
 export type CancelledStreamingTurnOptions = {
   sessionId?: string;
   cancelledText: string;
   elapsedSeconds: number;
   completedAt?: string;
 };
-
-const PROVIDER_RECONNECT_WINDOW_MS = 60_000;
-const PROVIDER_RECONNECT_WINDOW_COUNT = 5;
-
-/** Display-only progress for one 300 second Provider inactivity window. */
-export function providerReconnectAttempt(startedAt: string | undefined, nowMs = Date.now()): number | undefined {
-  const startedMs = startedAt ? Date.parse(startedAt) : Number.NaN;
-  if (!Number.isFinite(startedMs)) return undefined;
-  const completedWindows = Math.floor(Math.max(0, nowMs - startedMs) / PROVIDER_RECONNECT_WINDOW_MS);
-  if (completedWindows < 1) return undefined;
-  return Math.min(PROVIDER_RECONNECT_WINDOW_COUNT, completedWindows);
-}
 
 /** Whole-turn wall-clock duration used by the transient conversation card. */
 export function elapsedSecondsSince(startedAt: string | undefined, nowMs = Date.now()): number | undefined {
@@ -151,7 +161,7 @@ export function applyAgentRuntimeDeltaToStreamingItem(
   const executionEvent = timelineEvent && ["tool_call", "tool_result", "command", "file_edit", "subagent"].includes(timelineEvent.kind);
   const effectivePhase = phase || item.phase;
   const enteringProviderCall = effectivePhase === "waiting_for_model" && item.phase !== "waiting_for_model";
-  const safeProviderActivity = delta.activity === true || Boolean(timelineEvent);
+  const safeProviderActivity = delta.activity === true || Boolean(timelineEvent) || Boolean(delta.providerRetry);
   const providerLastActivityAt = executionEvent
     ? undefined
     : effectivePhase === "waiting_for_model"
@@ -169,6 +179,7 @@ export function applyAgentRuntimeDeltaToStreamingItem(
     phase: phase || (delta.textDelta ? "receiving_response" : item.phase),
     timeline,
     providerLastActivityAt,
+    providerRetry: delta.providerRetry || (delta.activity === true || (phase && phase !== "waiting_for_model") ? undefined : item.providerRetry),
   };
 }
 

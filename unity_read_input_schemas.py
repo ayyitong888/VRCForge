@@ -31,6 +31,7 @@ from checkpoint_recovery_input_schemas import (
     INTERRUPTED_APPLY_RESOLVE_INPUT_SCHEMA,
 )
 from package_input_schemas import PACKAGE_INSTALL_INPUT_SCHEMA
+from local_image_reader import INPUT_SCHEMA as LOCAL_IMAGE_READ_INPUT_SCHEMA
 
 
 _BLENDSHAPE_PREVIEW_ITEM: dict[str, Any] = {
@@ -110,10 +111,20 @@ UNITY_READ_TOOL_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
             },
         },
     },
+    "vrcforge_get_setup_outfit_status": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["projectPath", "jobId", "executionTarget"],
+        "properties": {
+            "projectPath": _PROJECT_PATH_PROPERTY,
+            "jobId": {"type": "string", "pattern": "^[0-9a-fA-F]{32}$", "description": "Exact existing Setup Outfit job id; read-only status polling only."},
+            "executionTarget": {"type": "object", "description": "Current project-scoped execution target used to validate the active Unity Core identity.", "required": ["schema", "namespace", "scope", "project", "editor"], "additionalProperties": True},
+        },
+    },
     "vrcforge_inspect_outfit_package": {
         "type": "object", "additionalProperties": False, "required": ["packagePath"],
         "properties": {
-            "packagePath": {"type": "string", "minLength": 1, "description": "Exact existing UnityPackage or loose outfit folder path; loose folders may include prefab, material, texture, model, and Editor assembly definition (.asmdef) files."},
+            "packagePath": {"type": "string", "minLength": 1, "description": "Exact existing UnityPackage, Booth ZIP, or loose outfit folder path. ZIP inspection lists outer entries and, for bounded nested UnityPackages, reads only UnityPackage pathname metadata; it never extracts assets or reads asset payloads."},
             "maxEntries": {"type": "integer", "minimum": 1, "maximum": 50000, "default": 5000},
         },
     },
@@ -323,7 +334,7 @@ UNITY_READ_TOOL_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
         "required": ["projectPath", "scope"],
         "properties": {
             "projectPath": _PROJECT_PATH_PROPERTY,
-            "scope": {"type": "string", "enum": ["project", "scene", "avatar", "object", "component"]},
+            "scope": {"type": "string", "enum": ["project", "scene", "avatar", "object", "component"], "description": "Use avatar to bind the current Avatar directly; candidate discovery is performed by the bind tool and must be complete and unique."},
             "avatarGlobalObjectId": {"type": "string"},
             "objectGlobalObjectId": {"type": "string"},
             "componentGlobalObjectId": {"type": "string"},
@@ -333,11 +344,19 @@ UNITY_READ_TOOL_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
     "vrcforge_refresh_execution_target": {
         "type": "object",
         "additionalProperties": False,
-        "required": ["projectPath", "executionTargetHandle", "executionTarget"],
+        "required": ["projectPath", "executionTarget"],
         "properties": {
             "projectPath": _PROJECT_PATH_PROPERTY,
-            "executionTargetHandle": {"type": "string", "minLength": 16},
-            "executionTarget": {"type": "object", "additionalProperties": True},
+            "executionTarget": {
+                "type": "object",
+                "properties": {
+                    "schema": {"const": "vrcforge.execution_target_ref.v1"},
+                    "ref": {"type": "string", "minLength": 16},
+                },
+                "required": ["schema", "ref"],
+                "additionalProperties": False,
+                "description": "The public reference returned by bind_execution_target for this same project and session.",
+            },
         },
     },
     "vrcforge_get_property": {
@@ -417,9 +436,9 @@ UNITY_READ_TOOL_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
             },
             "scope": {
                 "type": "string",
-                "enum": ["face", "all"],
+                "enum": ["face", "face_static", "face_unknown", "all"],
                 "default": "face",
-                "description": "Use all to inspect body, clothing and accessory shapes; omission preserves the face-editor filter.",
+                "description": "face returns face-related shapes, including expression controls, and is not a static-sculpt filter. face_static returns all evidence-classified static sculpt candidates plus a bounded unknown preview; use face_unknown to inspect the full ambiguous set. all preserves the complete avatar shape inventory, including authored section markers.",
             },
             "rendererPaths": {
                 "type": "array",
@@ -908,18 +927,18 @@ FACE_TUNING_PUBLIC_INPUT_SCHEMA = {
     "properties": {
         "projectPath": {**_PROJECT_PATH_PROPERTY, "type": ["string", "null"], "description": "Optional project root. Alias: project_path."},
         "avatar": {"type": ["string", "null"], "description": "Target avatar path/name. Aliases avatar_path and avatarPath must agree when supplied together."},
-        "instruction": {"type": ["string", "null"], "description": "Requested face adjustment; an existing plan_json may supply a plan instead."},
+        "instruction": {"type": ["string", "null"], "description": "Requested face adjustment. Required unless plan_json names an existing local plan JSON file."},
         "source_mode": {"type": "string", "default": "unity_live_export", "description": "Existing input modes: unity_live_export, configured_export, custom_export, mvp_sample. This does not change the execution approval policy."},
         "mock_execute": {"type": ["boolean", "number", "string"], "default": False, "description": "Mock planning only; an approved run rejects mock execution. Preserves existing Pydantic boolean conversion including 0/1 and boolean strings."},
         "min_confidence": {"type": ["number", "string", "boolean", "null"], "description": "Optional planning confidence threshold; existing float conversion accepts numeric strings and booleans."},
         "allow_low_confidence": {"type": ["boolean", "number", "string"], "default": False, "description": "Preserves existing Pydantic boolean conversion including 0/1 and boolean strings."},
         "save_artifacts": {"type": ["boolean", "number", "string"], "default": True, "description": "Preserves existing Pydantic boolean conversion including 0/1 and boolean strings."},
         "export_json": {"type": ["string", "null"], "description": "Existing export JSON for the selected input mode."},
-        "plan_json": {"type": ["string", "null"], "description": "Optional existing plan JSON."},
+        "plan_json": {"type": ["string", "null"], "description": "Path to an existing local plan JSON file; pass a filesystem path, not JSON contents inline."},
         "reference_image_path": {"type": ["string", "null"], "description": "Optional reference image path or artifact URL."},
         "reference_image_data_url": {"type": ["string", "null"], "description": "Optional uploaded reference image data URL."},
         **{name: {"type": "array", "items": {"type": "string"}, "default": [], "description": "User-supplied source/target reference images for planning."} for name in ("source_reference_image_paths", "source_reference_image_data_urls", "target_reference_image_paths", "target_reference_image_data_urls")},
-        "scope": {"type": ["string", "null"], "description": "Optional Blendshape scan scope."},
+        "scope": {"type": ["string", "null"], "description": "Face planning scope: use face_static for static sculpting; face_unknown only for explicitly reviewing ambiguous candidates. Omit for the existing face/expression editor. Uses the same authored-section classifier as scan_blendshapes."},
         "filterScope": {"type": ["string", "null"], "description": "Optional scan filter; alias filter_scope."},
     },
 }
@@ -1061,6 +1080,8 @@ for _general_read_tool, _general_read_properties in {
         'required': ['path', 'query'] if _general_read_tool == 'vrcforge_search_text' else ['path'],
         'properties': _general_read_properties,
     }
+
+UNITY_READ_TOOL_INPUT_SCHEMAS["vrcforge_read_local_image"] = LOCAL_IMAGE_READ_INPUT_SCHEMA
 
 
 # Session TODO mutations are ordinary runtime tools, not Unity asset writes.

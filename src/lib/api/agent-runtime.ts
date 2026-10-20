@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { hasTauriInternals, invokeTauriWithAbort, requestJson } from "./http";
 import { ApiError } from "./http";
-import type { AgentApproval, AgentApprovalExecution, AgentDesktopAction, AgentGoal, AgentGoalBackgroundAcknowledgement, AgentGoalBackgroundState, AgentGoalDelivery, AgentMemory, AgentMessageAttachment, AgentProgress, AgentQuestion, AgentRuntimeContinuation, AgentRuntimeResponse, AgentRuntimeRun, AgentRuntimeRunLedger, AgentTurnResponseRecovery, CompactionRecoveryEntry, DesktopBridgeStatus, DesktopRuntimeSnapshot } from "./types";
+import type { AgentApproval, AgentApprovalExecution, AgentContextUsage, AgentDesktopAction, AgentGoal, AgentGoalBackgroundAcknowledgement, AgentGoalBackgroundState, AgentGoalDelivery, AgentMemory, AgentMessageAttachment, AgentProgress, AgentQuestion, AgentRuntimeContinuation, AgentRuntimeResponse, AgentRuntimeRun, AgentRuntimeRunLedger, AgentTurnResponseRecovery, CompactionRecoveryEntry, DesktopBridgeStatus, DesktopRuntimeSnapshot } from "./types";
 
 /** Finite model-turn budget required for unattended/background delivery. */
 export const DEFAULT_BACKGROUND_MAX_AGENTIC_TURNS = 25;
@@ -60,6 +60,8 @@ export type AgentHistoryCompactionDetails = {
   targetTokens?: number;
   realContextLimit?: number | null;
   estimatedInputTokens?: number;
+  /** Provider-reported compact calls, kept separate from current-window usage. */
+  providerUsage?: AgentContextUsage;
   attempts?: number;
   providerAttempts?: number;
   failureClass?: string;
@@ -183,6 +185,15 @@ function recoveryReader(endpoint: string): AgentTurnResponseReader {
       { signal, timeoutMs: 10000, preferTauriIpc: true },
     );
   };
+}
+
+/** Read one turn's live execution state; historical ledger events are not liveness. */
+export function fetchAgentTurnResponse(
+  endpoint: string,
+  sessionId: string,
+  clientTurnId: string,
+): Promise<AgentTurnResponseRecovery> {
+  return recoveryReader(endpoint)(sessionId, clientTurnId);
 }
 
 export async function sendAgentMessage(
@@ -361,6 +372,39 @@ export async function recordAgentRunQueued(
     body: JSON.stringify(payload),
     timeoutMs: 30000,
   });
+}
+
+export type AgentRuntimeFollowup = {
+  queueId: string;
+  sequence: number;
+  sessionId: string;
+  clientTurnId: string;
+  targetClientTurnId?: string;
+  message: string;
+  attachments?: AgentMessageAttachment[];
+  status: string;
+  runtimeSessionId?: string;
+  provider?: string;
+  providerLabel?: string;
+  model?: string;
+  projectPath?: string;
+  projectRoot?: string;
+  projectType?: "general" | "unity";
+  planMode?: boolean;
+};
+
+export async function listAgentRunFollowups(
+  endpoint: string,
+  options: { sessionId?: string; includeTerminal?: boolean } = {},
+): Promise<{ ok: boolean; items: AgentRuntimeFollowup[] }> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort("list_agent_run_followups", {
+      request: { ...options, includeTerminal: options.includeTerminal === true, timeoutMs: 30000 },
+    });
+  }
+  const query = new URLSearchParams({ includeTerminal: String(options.includeTerminal === true) });
+  if (options.sessionId?.trim()) query.set("sessionId", options.sessionId.trim());
+  return requestJson(`${endpoint}/api/app/agent/runs/queue?${query.toString()}`, { timeoutMs: 30000 });
 }
 
 export async function cancelAgentRunFollowup(

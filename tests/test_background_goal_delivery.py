@@ -170,6 +170,40 @@ class BackgroundGoalDeliveryCoordinatorTests(unittest.TestCase):
         self.assertEqual(lanes.snapshot()["total"], 0)
         self.assertEqual(states[-1]["delivery"]["status"], "completed")
 
+    def test_delivery_owner_keeps_cache_write_measurements_and_coverage(self):
+        for count, complete in [(0, True), (8, False)]:
+            with self.subTest(count=count, complete=complete):
+                usage = {"exact": True, "inputTokens": 100, "outputTokens": 2,
+                         "totalTokens": 102, "cacheWriteTokens": count,
+                         "cacheWriteUsageRequestCount": 2 if complete else 1,
+                         "cacheWriteUsageComplete": complete, "requestCount": 2}
+                gateway = FakeGoalService(runtime_result={
+                    "ok": True, "plan": {"nextStep": "done"}, "contextUsage": usage})
+                coordinator, lanes, _ = self.coordinator(gateway)
+                execute(coordinator)
+                completion = next(call for call in gateway.calls if call[0] == "complete")
+                self.assertEqual(completion[3]["cacheWriteTokens"], count)
+                self.assertEqual(completion[3]["cacheWriteUsageRequestCount"], 2 if complete else 1)
+                self.assertEqual(completion[3]["cacheWriteUsageComplete"], complete)
+                self.assertEqual(lanes.snapshot()["total"], 0)
+
+    def test_delivery_owner_keeps_cache_read_coverage(self):
+        for covered, declared, complete in [(2, True, True), (1, False, False), (1, True, False)]:
+            with self.subTest(covered=covered, declared=declared):
+                usage = {"exact": True, "inputTokens": 100, "outputTokens": 2,
+                         "totalTokens": 102, "cachedTokens": 0,
+                         "cacheUsageRequestCount": covered,
+                         "cacheUsageComplete": declared, "requestCount": 2}
+                gateway = FakeGoalService(runtime_result={
+                    "ok": True, "plan": {"nextStep": "done"}, "contextUsage": usage})
+                coordinator, lanes, _ = self.coordinator(gateway)
+                execute(coordinator)
+                completion = next(call for call in gateway.calls if call[0] == "complete")
+                self.assertEqual(completion[3]["cachedTokens"], 0)
+                self.assertEqual(completion[3]["cacheUsageRequestCount"], covered)
+                self.assertIs(completion[3]["cacheUsageComplete"], complete)
+                self.assertEqual(lanes.snapshot()["total"], 0)
+
     def test_unreachable_local_provider_skips_without_starting(self):
         gateway = FakeGoalService()
         coordinator, lanes, _states = self.coordinator(gateway, probe=lambda _provider, _url: False)

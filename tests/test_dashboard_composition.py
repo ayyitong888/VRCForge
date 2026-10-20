@@ -23,6 +23,11 @@ REVIEWED_ROUTES = (
     ("/api/app/agent/chats/{chat_id}", "DELETE", "app_delete_agent_chat"),
     ("/api/app/support-feedback/preview", "POST", "preview_app_support_feedback"),
     ("/api/app/support-feedback/bundle-preview", "GET", "preview_app_support_bundle"),
+    ("/api/telegram/status", "GET", "status"),
+    ("/api/telegram/config", "PUT", "configure"),
+    ("/api/telegram/start", "POST", "start"),
+    ("/api/telegram/test-connection", "POST", "test_connection"),
+    ("/api/telegram/stop", "POST", "stop"),
     ("/api/chatgpt/status", "GET", "status"),
     ("/api/chatgpt/login", "POST", "login"),
     ("/api/chatgpt/cancel", "POST", "cancel"),
@@ -37,21 +42,23 @@ def _without_reviewed_openapi_additions(openapi: dict) -> dict:
     # Freeze the reviewed additions separately; every old field must still
     # match the original baseline, not a freshly regenerated whole-app hash.
     paths = {path: openapi["paths"].pop(path) for path in sorted(REVIEWED_PATHS)}
-    assert _canonical_sha256(paths) == "4bdca7b01091b2e36819b6e49492abdb371dde70bc1b7a3f324d97a813afe03a"
+    assert _canonical_sha256(paths) == "04675d31d2617ce4bce757859f8f001ba208b7066c356bbb4fb53bc8afa81baa"
     schemas = openapi["components"]["schemas"]
     additions = {
         "schemas": {name: schemas.pop(name) for name in (
             "ChatGPTAccountRequest", "ChatGPTActivationRequest", "DataRootUpdateRequest", "SupportFeedbackPreviewRequest",
+            "TelegramConfigurationRequest", "ChatSnapshotPatch",
         )},
         "fields": {},
     }
     for name, fields in (
         ("AgentRuntimeMessageRequest", ("planMode", "compactionRecovery")),
         ("AgentRuntimeQueueRequest", ("planMode",)),
+        ("ChatTranscriptsRequest", ("chatPatches",)),
     ):
         assert not set(fields).intersection(schemas[name].get("required", []))
         additions["fields"][name] = {field: schemas[name]["properties"].pop(field) for field in fields}
-    assert _canonical_sha256(additions) == "336a6aad82863216a9cdb29108172dc6598f3c8f6b8216d78430421638262d23"
+    assert _canonical_sha256(additions) == "f427954f6b949f264231ed24ae5a8ba60308db16ae560d0d3e6b626396471ad4"
     return openapi
 
 

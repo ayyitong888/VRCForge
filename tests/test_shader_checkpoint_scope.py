@@ -60,13 +60,15 @@ def test_semantic_restore_prepared_checkpoint_uses_the_same_scoped_revalidation(
     save_prepare.assert_not_called()
 
 
-def test_non_material_prepared_checkpoint_keeps_existing_behavior(tmp_path: Path) -> None:
+def test_non_material_prepared_checkpoint_rejects_unproven_file_scope(tmp_path: Path) -> None:
     arguments = install_prepared_calls(
         {"projectPath": str(tmp_path)}, [("vrc_apply_blendshapes", {"changes": []})], {}
     )
     with patch("dashboard_server.prepare_unity_checkpoint_sync", return_value={"ok": True}) as prepare:
-        assert dashboard_server.prepare_authoritative_unity_checkpoint_sync(tmp_path, arguments) == {"ok": True}
-    prepare.assert_called_once_with(tmp_path)
+        result = dashboard_server.prepare_authoritative_unity_checkpoint_sync(tmp_path, arguments)
+    assert result['ok'] is False and result['blocking'] is True
+    assert result['code'] == 'checkpoint_scope_unresolved'
+    prepare.assert_not_called()
 
 
 def test_material_seal_cannot_checkpoint_another_project(tmp_path: Path) -> None:

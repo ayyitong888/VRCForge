@@ -27,11 +27,17 @@ const timelineTranspiled = ts.transpileModule(timelineSource, {
   fileName: path.join(root, "src/lib/chat-timeline-presentation.ts"),
 }).outputText;
 const timelineModuleUrl = `data:text/javascript;base64,${Buffer.from(timelineTranspiled).toString("base64")}`;
+const contextSource = await readFile(path.join(root, "src/lib/context-compaction.ts"), "utf8");
+const contextTranspiled = ts.transpileModule(contextSource, {
+  compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2020 },
+}).outputText;
+const contextModuleUrl = `data:text/javascript;base64,${Buffer.from(contextTranspiled).toString("base64")}`;
 const chatThreadTranspiled = ts.transpileModule(chatThreadSource, {
   compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2020 },
   fileName: path.join(root, "src/lib/chat-thread.ts"),
 }).outputText
   .replace('from "./attachment-payloads"', `from "${payloadModuleUrl}"`)
+  .replace('from "./context-compaction"', `from "${contextModuleUrl}"`)
   .replace('from "./chat-timeline-presentation"', `from "${timelineModuleUrl}"`);
 const chatThreads = await import(`data:text/javascript;base64,${Buffer.from(chatThreadTranspiled).toString("base64")}`);
 

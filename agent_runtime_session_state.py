@@ -33,12 +33,14 @@ class AgentRuntimeSessionState:
 
     MAX_STEER_MAILBOX = 20
     MAX_FINAL_RESPONSES = 8
-    MAX_NATIVE_CONVERSATION_BYTES = 2 * 1024 * 1024
+    # Bound an individual provider receipt, not the accumulated local session.
+    # Model request capacity is enforced by the planner's verified token guard.
+    MAX_NATIVE_RESPONSE_BYTES = 2 * 1024 * 1024
 
     __slots__ = (
         "_ports",
         "_sessions",
-        "_cancelled_ids",
+        "_cancelled_targets",
         "_active_turns",
         "_finalizing_turns",
         "_final_responses",
@@ -53,7 +55,10 @@ class AgentRuntimeSessionState:
     def __init__(self, ports: AgentRuntimeSessionStatePorts) -> None:
         self._ports = ports
         self._sessions: dict[str, dict[str, Any]] = {}
-        self._cancelled_ids: set[str] = set()
+        # Cancellation is scoped to one identity tuple.  A session-only target
+        # is represented with empty turn/client fields and intentionally keeps
+        # the supported "stop every turn in this session" behavior.
+        self._cancelled_targets: set[tuple[str, str, str]] = set()
         self._active_turns: dict[tuple[str, str], str] = {}
         self._finalizing_turns: set[tuple[str, str]] = set()
         self._final_responses: dict[str, list[dict[str, Any]]] = {}
@@ -113,7 +118,7 @@ class AgentRuntimeSessionState:
     def clear(self) -> None:
         with self._ports.shared_state_lock:
             self._sessions.clear()
-            self._cancelled_ids.clear()
+            self._cancelled_targets.clear()
             self._active_turns.clear()
             self._finalizing_turns.clear()
             self._final_responses.clear()
@@ -151,6 +156,9 @@ class AgentRuntimeSessionState:
                 self._finalizing_turns.discard(key)
                 self._steer_mailboxes.pop(key, None)
                 self._steer_seen_ids.pop(key, None)
+            self._cancelled_targets = {
+                target for target in self._cancelled_targets if target[0] != session_id
+            }
             self._final_responses.pop(session_id, None)
 
     def get_session(self, session_id: str) -> dict[str, Any] | None:
@@ -176,9 +184,12 @@ class AgentRuntimeSessionState:
 
     @classmethod
     def _native_size_ok(cls, snapshot: dict[str, Any]) -> None:
-        encoded = json.dumps(snapshot, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-        if len(encoded) > cls.MAX_NATIVE_CONVERSATION_BYTES:
-            raise ValueError("Conversation context size exceeds 2MiB. Use Compact conversation or start a new conversation before retrying.")
+        # Complete local history must remain saveable after a tool has run.
+        # Do not conflate its serialized size with the model context window.
+        for message in snapshot.get("messages", []):
+            encoded = json.dumps(message, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")
+            if len(encoded) > cls.MAX_NATIVE_RESPONSE_BYTES:
+                raise ValueError("Individual native message exceeds the size limit")
 
     @staticmethod
     def _native_pending(snapshot: dict[str, Any]) -> set[str]:
@@ -306,7 +317,7 @@ class AgentRuntimeSessionState:
                 serialized = json.dumps(responses_output, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
             except (TypeError, ValueError) as exc:
                 raise ValueError("native Responses output items are not JSON-safe") from exc
-            if len(serialized.encode("utf-8")) > cls.MAX_NATIVE_CONVERSATION_BYTES:
+            if len(serialized.encode("utf-8")) > cls.MAX_NATIVE_RESPONSE_BYTES:
                 raise ValueError("native Responses output items exceed the size limit")
         return normalized
 
@@ -315,8 +326,20 @@ class AgentRuntimeSessionState:
         cls, snapshot: dict[str, Any], *, binding: str,
     ) -> dict[str, Any]:
         required = {"binding", "turnId", "messages", "activeTurnStart"}
-        if not isinstance(snapshot, dict) or not required <= set(snapshot) or set(snapshot) - required - {"toolOrder", "compactionRecovery"}:
+        if not isinstance(snapshot, dict) or not required <= set(snapshot) or set(snapshot) - required - {"toolOrder", "compactionRecovery", "toolBlockIds", "bindingToolDefinition"}:
             raise ValueError("native snapshot fields are invalid")
+        if "bindingToolDefinition" in snapshot:
+            definition = snapshot["bindingToolDefinition"]
+            if definition is not None and (not isinstance(definition, dict)
+                    or set(definition) != {"name", "description", "parameters"}
+                    or not isinstance(definition["name"], str) or not definition["name"]
+                    or not isinstance(definition["description"], str)
+                    or not isinstance(definition["parameters"], dict)):
+                raise ValueError("native binding tool definition is invalid")
+        if "toolBlockIds" in snapshot:
+            ids = snapshot["toolBlockIds"]
+            if not isinstance(ids, list) or not ids or any(not isinstance(x, str) or not x for x in ids) or len(ids) != len(set(ids)):
+                raise ValueError("native tool block snapshot is invalid")
         if "toolOrder" in snapshot:
             order = snapshot["toolOrder"]
             if not isinstance(order, list) or any(not isinstance(name, str) or not name.strip() for name in order) or len(set(order)) != len(order):
@@ -367,6 +390,11 @@ class AgentRuntimeSessionState:
                 pending.remove(call_id)
                 normalized_messages.append(copy.deepcopy(message))
             elif role == "system":
+                if cls._is_native_runtime_state_message(message):
+                    if pending:
+                        raise ValueError("native runtime state cannot interrupt pending tool calls")
+                    normalized_messages.append(copy.deepcopy(message))
+                    continue
                 if not is_scan_result_policy_message(message):
                     raise ValueError("native system message is not a host scan policy")
                 if message["content"] in scan_policies_seen or pending or (
@@ -383,8 +411,12 @@ class AgentRuntimeSessionState:
             "messages": normalized_messages,
             "activeTurnStart": active_turn_start,
         }
+        if "bindingToolDefinition" in snapshot:
+            normalized["bindingToolDefinition"] = copy.deepcopy(snapshot["bindingToolDefinition"])
         if "toolOrder" in snapshot:
             normalized["toolOrder"] = list(snapshot["toolOrder"])
+        if "toolBlockIds" in snapshot:
+            normalized["toolBlockIds"] = list(snapshot["toolBlockIds"])
         if "compactionRecovery" in snapshot:
             normalized["compactionRecovery"] = cls._merge_native_recoveries([], snapshot["compactionRecovery"])
         if normalized_messages[active_turn_start].get("role") != "user":
@@ -529,7 +561,22 @@ class AgentRuntimeSessionState:
                 return restored(existing)
             raise ValueError("native snapshot conflicts with current conversation")
 
-    def replace_native_completed_prefix(
+    @classmethod
+    def native_compaction_projection(cls, snapshot: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        # Every pending call (including approval/question waits) blocks replacement.
+        if cls._native_pending(snapshot):
+            raise ValueError("native compaction has pending calls")
+        start = snapshot["activeTurnStart"]
+        retained = [copy.deepcopy(item) for item in snapshot["messages"][start:]
+                    if item["role"] == "user"]
+        source = [copy.deepcopy(item) for index, item in enumerate(snapshot["messages"])
+                  if index < start or item["role"] != "user"]
+        if not retained or not source:
+            raise ValueError("native compaction source is unavailable")
+        retained.extend(restored_scan_result_policy(snapshot["messages"], retained))
+        return source, retained
+
+    def replace_native_compacted_history(
         self,
         session_id: str,
         *,
@@ -546,19 +593,16 @@ class AgentRuntimeSessionState:
             current = self._native_conversations.get(session_id)
             if current is None or current["binding"] != binding or current != expected:
                 raise ValueError("native snapshot compare-and-replace mismatch")
-            cut = current["activeTurnStart"]
-            if cut <= 0 or self._native_pending({"messages": current["messages"][:cut]}):
-                raise ValueError("native completed prefix is unavailable")
-            retained_messages = copy.deepcopy(current["messages"][cut:])
-            retained_messages.extend(restored_scan_result_policy(current["messages"], retained_messages))
+            _source, retained_messages = self.native_compaction_projection(current)
             candidate = {
                 "binding": binding,
                 "turnId": current["turnId"],
                 "messages": [{"role": "assistant", "content": summary}] + retained_messages,
                 "activeTurnStart": 1,
             }
-            if "toolOrder" in current:
-                candidate["toolOrder"] = list(current["toolOrder"])
+            for key in ("toolOrder", "toolBlockIds", "bindingToolDefinition"):
+                if key in current:
+                    candidate[key] = copy.deepcopy(current[key])
             if recovery is not None or "compactionRecovery" in current:
                 candidate["compactionRecovery"] = self._merge_native_recoveries(
                     current.get("compactionRecovery", []), [recovery] if recovery is not None else [])
@@ -580,6 +624,49 @@ class AgentRuntimeSessionState:
             candidate["messages"].append({"role": "user", "content": message})
             self._native_size_ok(candidate)
             self._save_native(session_id, candidate)
+
+    @staticmethod
+    def _is_native_runtime_state_message(message: dict[str, Any]) -> bool:
+        prefix = "Current runtime state (data): "
+        if set(message) != {"role", "content"} or message.get("role") != "system":
+            return False
+        content = message.get("content")
+        if not isinstance(content, str) or not content.startswith(prefix):
+            return False
+        try:
+            state = json.loads(content[len(prefix):])
+        except (TypeError, ValueError):
+            return False
+        required = {"exposureLayer", "projectContextActive", "allowedRuntimeActions", "availableToolNames"}
+        optional = {"planMode", "modeConstraint", "projectPath", "loadedToolBlocks", "shellExecutor", "compactionRecoveryInformation"}
+        if not isinstance(state, dict) or not required <= state.keys() or state.keys() - required - optional:
+            return False
+        if not isinstance(state["exposureLayer"], str) or state["exposureLayer"] not in {"planning", "execution"} or not isinstance(state["projectContextActive"], bool):
+            return False
+        for key in ("allowedRuntimeActions", "availableToolNames", "loadedToolBlocks", "compactionRecoveryInformation"):
+            if key in state and (not isinstance(state[key], list) or any(not isinstance(item, str) for item in state[key])):
+                return False
+        return (all(isinstance(state[key], str) for key in ("modeConstraint", "projectPath") if key in state)
+                and ("planMode" not in state or isinstance(state["planMode"], bool))
+                and ("shellExecutor" not in state or isinstance(state["shellExecutor"], dict)))
+
+    def append_native_runtime_state(
+        self, session_id: str, *, binding: str, message: dict[str, Any],
+    ) -> None:
+        session_id = self._native_required(session_id, "session id")
+        binding = self._native_required(binding, "binding")
+        if not self._is_native_runtime_state_message(message):
+            raise ValueError("native runtime state must be host-built structured data")
+        with self._ports.shared_state_lock:
+            snapshot = self._native_conversations.get(session_id)
+            if snapshot is None or snapshot["binding"] != binding:
+                raise ValueError("native conversation binding mismatch")
+            if self._native_pending(snapshot):
+                raise ValueError("native conversation has pending tool calls")
+            candidate = copy.deepcopy(snapshot)
+            candidate["messages"].append(copy.deepcopy(message))
+            normalized = self._validate_native_snapshot(candidate, binding=binding)
+            self._save_native(session_id, normalized)
 
     def append_native_scan_result_policy_once(
         self, session_id: str, *, binding: str, message: dict[str, Any],
@@ -639,6 +726,35 @@ class AgentRuntimeSessionState:
             candidate["messages"].append({"role": "tool", "tool_call_id": call_id, "content": content})
             self._native_size_ok(candidate)
             self._save_native(session_id, candidate)
+
+    def freeze_native_tool_block_ids(self, session_id: str, *, binding: str, block_ids: list[str]) -> list[str]:
+        """Keep the first discovery enum for this stored session/binding."""
+        with self._ports.shared_state_lock:
+            self._load_native(session_id, binding)
+            snapshot = self._native_conversations.get(session_id)
+            if snapshot is None or snapshot["binding"] != binding:
+                raise ValueError("native conversation binding mismatch")
+            if "toolBlockIds" not in snapshot:
+                candidate = copy.deepcopy(snapshot)
+                candidate["toolBlockIds"] = sorted(set(block_ids))
+                candidate = self._validate_native_snapshot(candidate, binding=binding)
+                self._save_native(session_id, candidate)
+                snapshot = candidate
+            return list(snapshot["toolBlockIds"])
+
+    def freeze_native_binding_tool_definition(self, session_id: str, *, binding: str, definition: dict | None) -> dict | None:
+        """Retain the first Unity binding definition, independently of admission."""
+        with self._ports.shared_state_lock:
+            self._load_native(session_id, binding)
+            snapshot = self._native_conversations.get(session_id)
+            if snapshot is None or snapshot["binding"] != binding:
+                raise ValueError("native conversation binding mismatch")
+            if "bindingToolDefinition" not in snapshot:
+                candidate = {**snapshot, "bindingToolDefinition": copy.deepcopy(definition)}
+                candidate = self._validate_native_snapshot(candidate, binding=binding)
+                self._save_native(session_id, candidate)
+                snapshot = candidate
+            return copy.deepcopy(snapshot["bindingToolDefinition"])
 
     def internal_tool_blocks(self, session_id: str) -> frozenset[str]:
         with self._ports.shared_state_lock:
@@ -792,7 +908,10 @@ class AgentRuntimeSessionState:
         session_id: str = "",
         turn_id: str = "",
         client_turn_id: str = "",
-    ) -> None:
+    ) -> bool:
+        session_id = str(session_id or "").strip()
+        turn_id = str(turn_id or "").strip()
+        client_turn_id = str(client_turn_id or "").strip()
         with self._ports.shared_state_lock:
             if session_id and not (turn_id or client_turn_id):
                 active = [
@@ -802,20 +921,46 @@ class AgentRuntimeSessionState:
                 ]
                 if active:
                     for (_active_session_id, active_client_turn_id), active_turn_id in active:
-                        if active_turn_id:
-                            self._cancelled_ids.add(active_turn_id)
-                        if active_client_turn_id:
-                            self._cancelled_ids.add(active_client_turn_id)
+                        self._cancelled_targets.add(
+                            (session_id, active_turn_id, active_client_turn_id)
+                        )
                 else:
                     # Preserve the supported "stop before the turn starts"
                     # behavior; the next turn consumes this session marker.
-                    self._cancelled_ids.add(session_id)
-            if turn_id:
-                self._cancelled_ids.add(turn_id)
-            if client_turn_id:
-                self._cancelled_ids.add(client_turn_id)
+                    self._cancelled_targets.add((session_id, "", ""))
+                return True
+
+            # When one or more turn identities are supplied, all of them must
+            # resolve to one active target.  A known partial collision is
+            # rejected instead of allowing an OR match to cancel another turn;
+            # an entirely unknown tuple is retained for a turn that is about
+            # to begin.
+            active_targets = [
+                (active_session_id, active_turn_id, active_client_id)
+                for (active_session_id, active_client_id), active_turn_id in self._active_turns.items()
+                if active_turn_id and active_client_id
+            ]
+            matching = [
+                target for target in active_targets
+                if (not session_id or target[0] == session_id)
+                and (not turn_id or target[1] == turn_id)
+                and (not client_turn_id or target[2] == client_turn_id)
+            ]
+            colliding = [
+                target for target in active_targets
+                if (session_id and target[0] == session_id)
+                or (turn_id and target[1] == turn_id)
+                or (client_turn_id and target[2] == client_turn_id)
+            ]
+            if colliding and len(matching) != 1:
+                return False
+            if matching:
+                self._cancelled_targets.add(matching[0])
+            else:
+                self._cancelled_targets.add((session_id, turn_id, client_turn_id))
             if session_id and client_turn_id:
                 self._steer_mailboxes.pop((session_id, client_turn_id), None)
+            return True
 
     def begin_turn(
         self,
@@ -841,7 +986,7 @@ class AgentRuntimeSessionState:
         with self._ports.shared_state_lock:
             key = (session_id, client_turn_id)
             active_turn_id = self._active_turns.get(key)
-            if turn_id and active_turn_id != turn_id:
+            if turn_id and active_turn_id is not None and active_turn_id != turn_id:
                 return []
             undrained = copy.deepcopy(self._steer_mailboxes.get(key, []))
             if active_turn_id:
@@ -851,9 +996,19 @@ class AgentRuntimeSessionState:
             self._steer_seen_ids.pop(key, None)
             # A completed turn must not leave cancellation/steer state behind
             # that could affect a later turn reusing either identifier.
-            self._cancelled_ids.discard(client_turn_id)
-            if active_turn_id:
-                self._cancelled_ids.discard(active_turn_id)
+            self._cancelled_targets = {
+                target
+                for target in self._cancelled_targets
+                if not (
+                    (target[1] or target[2])
+                    and self._cancel_target_matches(
+                        target,
+                        session_id=session_id,
+                        turn_id=turn_id,
+                        client_turn_id=client_turn_id,
+                    )
+                )
+            }
             return undrained
 
     def owns_turn(self, *, session_id: str, turn_id: str, client_turn_id: str) -> bool:
@@ -924,6 +1079,30 @@ class AgentRuntimeSessionState:
                 return result
         return {"ok": True, "sessionId": session_id, "clientTurnId": client_turn_id, "status": "missing"}
 
+    def runtime_waiting_for_configuration(self) -> bool:
+        """Only live-process waits hold settings; historical pending calls do not."""
+        with self._ports.shared_state_lock:
+            for session_id, entries in self._final_responses.items():
+                if not entries:
+                    continue
+                item = entries[-1]
+                if item.get("status") == "failed":
+                    continue
+                response = item.get("response") or {}
+                if self.cancel_requested(session_id=session_id, turn_id=str(response.get("turnId") or response.get("turn_id") or ""),
+                                         client_turn_id=str(item.get("clientTurnId") or "")):
+                    continue
+                plan = response.get("plan") or {}
+                if plan.get("nextStep") in {"cancelled", "interrupted", "failed", "done"}:
+                    continue
+                if (plan.get("completionGate") or {}).get("reason") == "question_pending":
+                    return True
+                for field in ("write", "shell", "skill"):
+                    payload = response.get(field) or {}
+                    if payload.get("status") in {"approval_pending", "pending_approval", "pending", "running", "accepted", "queued"}:
+                        return True
+            return False
+
     def submit_steer(
         self,
         *,
@@ -988,11 +1167,22 @@ class AgentRuntimeSessionState:
         turn_id: str = "",
         client_turn_id: str = "",
     ) -> bool:
+        session_id = str(session_id or "").strip()
+        turn_id = str(turn_id or "").strip()
+        client_turn_id = str(client_turn_id or "").strip()
         candidates = [item for item in (session_id, turn_id, client_turn_id) if item]
         if not candidates:
             return False
         with self._ports.shared_state_lock:
-            return any(item in self._cancelled_ids for item in candidates)
+            return any(
+                self._cancel_target_matches(
+                    target,
+                    session_id=session_id,
+                    turn_id=turn_id,
+                    client_turn_id=client_turn_id,
+                )
+                for target in self._cancelled_targets
+            )
 
     def consume_cancel_request(
         self,
@@ -1001,14 +1191,62 @@ class AgentRuntimeSessionState:
         turn_id: str = "",
         client_turn_id: str = "",
     ) -> bool:
+        session_id = str(session_id or "").strip()
+        turn_id = str(turn_id or "").strip()
+        client_turn_id = str(client_turn_id or "").strip()
         candidates = [item for item in (client_turn_id, turn_id, session_id) if item]
         if not candidates:
             return False
         with self._ports.shared_state_lock:
-            matched = [item for item in candidates if item in self._cancelled_ids]
-            for item in matched:
-                self._cancelled_ids.discard(item)
+            matched = {
+                target
+                for target in self._cancelled_targets
+                if self._cancel_target_matches(
+                    target,
+                    session_id=session_id,
+                    turn_id=turn_id,
+                    client_turn_id=client_turn_id,
+                )
+            }
+            self._cancelled_targets.difference_update(matched)
             return bool(matched)
+
+    @staticmethod
+    def _cancel_target_matches(
+        target: tuple[str, str, str],
+        *,
+        session_id: str,
+        turn_id: str,
+        client_turn_id: str,
+    ) -> bool:
+        target_session, target_turn, target_client = target
+        provided = sum(bool(item) for item in (session_id, turn_id, client_turn_id))
+        if not provided:
+            return False
+        # A session-only marker intentionally applies to every later turn in
+        # that session, including a full identity supplied when the turn begins.
+        if target_session and not target_turn and not target_client:
+            return bool(session_id and target_session == session_id)
+        # A session-only query must not accidentally match a turn-specific
+        # target; it means "stop the whole session" only when such a marker was
+        # explicitly created.
+        if provided == 1 and session_id:
+            return False
+        shared_identity = any(
+            query and stored and query == stored
+            for query, stored in (
+                (session_id, target_session),
+                (turn_id, target_turn),
+                (client_turn_id, target_client),
+            )
+        )
+        if not shared_identity:
+            return False
+        return (
+            (not session_id or not target_session or target_session == session_id)
+            and (not turn_id or not target_turn or target_turn == turn_id)
+            and (not client_turn_id or not target_client or target_client == client_turn_id)
+        )
 
     def set_stream_context(self, value: dict[str, str]) -> None:
         self._stream_context.value = dict(value)
@@ -1018,3 +1256,20 @@ class AgentRuntimeSessionState:
 
     def stream_context(self) -> dict[str, str]:
         return dict(getattr(self._stream_context, "value", {}) or {})
+
+    def next_provider_request_index(self) -> int | None:
+        """Allocate on the bound runtime owner thread, independently of usage.
+
+        The existing turn owner admits calls serially. Provider worker callbacks
+        receive this value by closure; no cross-turn map or global counter exists.
+        Unbound probes have no turn index. Request UUIDs remain globally unique.
+        """
+        context = self.stream_context()
+        identity = tuple(context.get(key) or "" for key in ("sessionId", "turnId", "clientTurnId"))
+        if not all(identity):
+            return None
+        if getattr(self._stream_context, "request_identity", None) != identity:
+            self._stream_context.request_identity = identity
+            self._stream_context.request_index = 0
+        self._stream_context.request_index += 1
+        return self._stream_context.request_index

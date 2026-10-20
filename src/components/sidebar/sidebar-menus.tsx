@@ -1,6 +1,7 @@
 import {
   Archive,
   Bot,
+  Bug,
   ChevronDown,
   ChevronRight,
   EyeOff,
@@ -46,6 +47,7 @@ type SidebarMenusProps = {
   onAddSelectionToComposer: (text: string) => void;
   onCloseChatMenu: () => void;
   onTogglePinChat: (chatId: string) => void;
+  onToggleTestChat: (chatId: string) => void;
   onStartRenameChat: (chat: ChatThread) => void;
   onDeleteChat: (chatId: string) => void;
   onCancelDeleteChat: () => void;
@@ -75,6 +77,7 @@ export function SidebarMenus({
   onAddSelectionToComposer,
   onCloseChatMenu,
   onTogglePinChat,
+  onToggleTestChat,
   onStartRenameChat,
   onDeleteChat,
   onCancelDeleteChat,
@@ -138,6 +141,7 @@ export function SidebarMenus({
           chat={menuChat}
           onClose={onCloseChatMenu}
           onTogglePinChat={onTogglePinChat}
+          onToggleTestChat={onToggleTestChat}
           onStartRenameChat={onStartRenameChat}
           onDeleteChat={onDeleteChat}
         />
@@ -298,6 +302,7 @@ function ChatContextMenu({
   chat,
   onClose,
   onTogglePinChat,
+  onToggleTestChat,
   onStartRenameChat,
   onDeleteChat,
 }: {
@@ -305,6 +310,7 @@ function ChatContextMenu({
   chat: ChatThread;
   onClose: () => void;
   onTogglePinChat: (chatId: string) => void;
+  onToggleTestChat: (chatId: string) => void;
   onStartRenameChat: (chat: ChatThread) => void;
   onDeleteChat: (chatId: string) => void;
 }) {
@@ -313,10 +319,10 @@ function ChatContextMenu({
     <>
       <MenuScrim onClose={onClose} />
       <div
-        className="fixed z-50 w-44 rounded-lg border border-border bg-card p-1.5 shadow-panel"
+        className="fixed z-50 w-48 rounded-lg border border-border bg-card p-1.5 shadow-panel"
         style={{
-          left: Math.min(menu.x, window.innerWidth - 190),
-          top: Math.min(menu.y, window.innerHeight - 140),
+          left: Math.min(menu.x, window.innerWidth - 210),
+          top: Math.min(menu.y, window.innerHeight - 190),
         }}
       >
         <MenuButton
@@ -332,6 +338,16 @@ function ChatContextMenu({
           label={t("contextMenu.renameChat")}
           onClick={() => {
             onStartRenameChat(chat);
+            onClose();
+          }}
+        />
+        <MenuButton
+          icon={<Bug className={cn("h-4 w-4 shrink-0", chat.isTestChat ? "text-primary" : "")} />}
+          label={chat.isTestChat
+            ? t("contextMenu.unmarkTestChat")
+            : t("contextMenu.markTestChat")}
+          onClick={() => {
+            onToggleTestChat(chat.id);
             onClose();
           }}
         />

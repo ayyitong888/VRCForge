@@ -415,7 +415,7 @@ def _build_prompt(
         "Do not reconstruct, guess, or emit secrets, raw absolute paths, home directory names, "
         "private keys, tokens, or Avatar Blueprint IDs. Preserve concrete decisions and pending work. "
         f"Write in language '{language or 'auto'}'. Trigger={trigger}; phase={phase}. "
-        f"Keep the result comfortably below {max(256, target_tokens)} tokens. "
+        f"Keep the result comfortably below {target_tokens} tokens. "
         "Return exactly one JSON object matching this schema (all keys required): "
         f"{json.dumps(contract, ensure_ascii=False, separators=(',', ':'))}. "
         "Each list item must be a string. Do not use Markdown fences.\n"
@@ -659,12 +659,12 @@ def compact_context(
         phase=phase,
         target_tokens=budget,
     )
-    # targetTokens keeps its source-input meaning. Separately reserve room for
-    # framing and output under the verified context limit (when supplied).
+    # targetTokens is the summary output goal, not the source page size.
+    # Reserve room for framing and output under the verified context limit.
     request_budget = min(MAX_INPUT_BUDGET_TOKENS,
                          normalized_real_context_limit // 2 if normalized_real_context_limit else MAX_INPUT_BUDGET_TOKENS)
     overhead = _estimate_entry_tokens({"role": "user", "text": _build_prompt([], **prompt_options)}) + 256
-    source_budget = min(budget, request_budget - overhead)
+    source_budget = request_budget - overhead
     def fits_request(rows: Sequence[dict[str, str]]) -> bool:
         # Account for JSON escapes in the actual framed prompt as well as the
         # source entry budget. Leave bounded room for continuous-page metadata.

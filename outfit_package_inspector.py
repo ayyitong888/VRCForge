@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tarfile
 import zipfile
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -13,6 +14,28 @@ ASSEMBLY_DEFINITION_EXTENSIONS = {".asmdef"}
 TEXTURE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".tga", ".psd", ".exr"}
 MATERIAL_EXTENSIONS = {".mat"}
 MODEL_EXTENSIONS = {".fbx", ".blend", ".obj"}
+MAX_NESTED_UNITYPACKAGE_BYTES = 256 * 1024 * 1024
+MAX_UNITYPACKAGE_UNCOMPRESSED_BYTES = 512 * 1024 * 1024
+MAX_UNITYPACKAGE_MEMBERS = 200_000
+
+
+class _BoundedArchiveReader:
+    def __init__(self, reader: Any, limit: int) -> None:
+        self._reader = reader
+        self._limit = limit
+        self.bytes_read = 0
+
+    def read(self, size: int = -1) -> bytes:
+        if size < 0:
+            size = self._limit - self.bytes_read + 1
+        data = self._reader.read(size)
+        self.bytes_read += len(data)
+        if self.bytes_read > self._limit:
+            raise tarfile.ReadError("UnityPackage uncompressed byte limit exceeded")
+        return data
+
+    def tell(self) -> int:
+        return self.bytes_read
 
 
 def inspect_outfit_package(path_value: str | Path, max_entries: int = 5000) -> dict[str, Any]:
@@ -104,6 +127,11 @@ def inspect_zip(path: Path, max_entries: int) -> dict[str, Any]:
     unsafe_entry_count = 0
     duplicate_entry_count = 0
     seen_paths: set[str] = set()
+    nested_pathnames: list[dict[str, Any]] = []
+    nested_package_results: list[dict[str, Any]] = []
+    nested_warnings: list[str] = []
+    parsed_nested_count = 0
+    nested_truncated = False
     with zipfile.ZipFile(path) as archive:
         for index, info in enumerate(sorted(archive.infolist(), key=lambda item: item.filename.lower())):
             if info.is_dir():
@@ -121,40 +149,120 @@ def inspect_zip(path: Path, max_entries: int) -> dict[str, Any]:
                 continue
             seen_paths.add(lower)
             entries.append(file_entry(normalized, int(info.file_size)))
-    return build_container_result(
+            if normalized.lower().endswith(".unitypackage"):
+                if info.file_size > MAX_NESTED_UNITYPACKAGE_BYTES:
+                    nested_warnings.append(
+                        f"Skipped pathname inspection for oversized nested UnityPackage {normalized} ({info.file_size} bytes; limit {MAX_NESTED_UNITYPACKAGE_BYTES})."
+                    )
+                    nested_package_results.append({
+                        "path": normalized,
+                        "size": int(info.file_size),
+                        "parsedPathnameCount": 0,
+                        "pathnamesEvidenceComplete": False,
+                        "inspectionSkipped": "nested_package_size_limit",
+                    })
+                    continue
+                remaining = max(0, max_entries - len(nested_pathnames))
+                try:
+                    with archive.open(info, "r") as nested_file:
+                        bounded_nested_file = _BoundedArchiveReader(
+                            nested_file,
+                            MAX_UNITYPACKAGE_UNCOMPRESSED_BYTES,
+                        )
+                        parsed = inspect_unitypackage_stream(
+                            bounded_nested_file,
+                            max_entries=remaining,
+                            package_path=normalized,
+                        )
+                except (OSError, EOFError, tarfile.TarError, zipfile.BadZipFile) as exc:
+                    nested_warnings.append(f"Could not inspect nested UnityPackage {normalized}: {exc}")
+                    nested_package_results.append({
+                        "path": normalized,
+                        "size": int(info.file_size),
+                        "parsedPathnameCount": 0,
+                        "pathnamesEvidenceComplete": False,
+                        "inspectionSkipped": "invalid_nested_package",
+                    })
+                    continue
+                parsed_nested_count += 1
+                nested_pathnames.extend(parsed["pathnamesEvidence"])
+                nested_truncated = nested_truncated or parsed["truncated"]
+                nested_warnings.extend(parsed["warnings"])
+                nested_package_results.append({
+                    "path": normalized,
+                    "size": int(info.file_size),
+                    "parsedPathnameCount": len(parsed["pathnamesEvidence"]),
+                    "archiveMemberCount": parsed["archiveMemberCount"],
+                    "pathnames": parsed["pathnamesEvidence"][:200],
+                    "pathnamesEvidence": parsed["pathnamesEvidence"],
+                    "pathnamesEvidenceCount": len(parsed["pathnamesEvidence"]),
+                    "pathnamesEvidenceComplete": not parsed["truncated"],
+                    "pathnamesReturnedCount": min(len(parsed["pathnamesEvidence"]), 200),
+                    "pathnamesReturnedTruncated": len(parsed["pathnamesEvidence"]) > 200,
+                    "unsafePathnameCount": parsed["unsafePathnameCount"],
+                })
+    result = build_container_result(
         path,
         "zip",
         entries,
         truncated,
-        can_parse_unitypackage=False,
+        can_parse_unitypackage=parsed_nested_count > 0,
         unsafe_entry_count=unsafe_entry_count,
         duplicate_entry_count=duplicate_entry_count,
     )
+    nested_entries = [
+        file_entry(f"{item['packagePath']}!/{item['path']}", 0)
+        for item in nested_pathnames
+    ]
+    for entry in nested_entries:
+        target = {
+            "prefab": "prefabCandidates",
+            "texture": "textures",
+            "material": "materials",
+            "model": "models",
+            "assembly_definition": "assemblyDefinitions",
+        }.get(entry["category"])
+        if target:
+            result[target].append(entry)
+    counts = Counter(item["category"] for item in nested_pathnames)
+    result["summary"]["outerEntryCount"] = len(entries)
+    result["summary"]["nestedUnityPackageCount"] = parsed_nested_count
+    result["summary"]["nestedPathnameCount"] = len(nested_pathnames)
+    result["summary"]["nestedPathnamesTruncated"] = nested_truncated
+    result["summary"]["unsafePathnameCount"] = sum(
+        int(package.get("unsafePathnameCount") or 0) for package in nested_package_results
+    )
+    result["summary"]["prefabCandidateCount"] += counts["prefab"]
+    result["summary"]["textureCount"] += counts["texture"]
+    result["summary"]["materialCount"] += counts["material"]
+    result["summary"]["modelCount"] += counts["model"]
+    result["summary"]["assemblyDefinitionCount"] += counts["assembly_definition"]
+    result["summary"]["canParseUnityPackagePathnames"] = parsed_nested_count > 0
+    result["unityPackages"] = nested_package_results or result["unityPackages"]
+    result["prefabCandidates"] = result["prefabCandidates"][:200]
+    result["textures"] = result["textures"][:200]
+    result["materials"] = result["materials"][:200]
+    result["models"] = result["models"][:200]
+    result["assemblyDefinitions"] = result["assemblyDefinitions"][:200]
+    if nested_warnings:
+        result["warnings"].extend(nested_warnings)
+    if nested_package_results:
+        result["summary"]["assetCountScope"] = "outer ZIP assets plus parsed nested UnityPackage pathnames"
+        result["summary"]["entryCountScope"] = "outer ZIP direct entries; nested pathnames counted separately"
+    return result
 
 
 def inspect_unitypackage(path: Path, max_entries: int) -> dict[str, Any]:
-    pathnames: list[dict[str, Any]] = []
-    truncated = False
-    member_count = 0
-    unsafe_pathname_count = 0
-    with tarfile.open(path, mode="r:*") as archive:
-        members = archive.getmembers()
-        pathname_members = [member for member in members if member.isfile() and member.name.replace("\\", "/").endswith("/pathname")]
-        for member in sorted(pathname_members, key=lambda item: item.name.lower()):
-            if len(pathnames) >= max_entries:
-                truncated = True
-                break
-            extracted = archive.extractfile(member)
-            if extracted is None:
-                continue
-            raw = extracted.read(16384)
-            name = raw.decode("utf-8", errors="replace").strip().replace("\\", "/")
-            if name:
-                if not is_safe_archive_path(normalize_archive_name(name)):
-                    unsafe_pathname_count += 1
-                    continue
-                pathnames.append({"path": name, "category": classify_asset_name(name)})
-        member_count = len(members)
+    with path.open("rb") as package_file:
+        parsed = inspect_unitypackage_stream(
+            _BoundedArchiveReader(package_file, MAX_UNITYPACKAGE_UNCOMPRESSED_BYTES),
+            max_entries=max_entries,
+            package_path=path.name,
+        )
+    pathnames = parsed["pathnamesEvidence"]
+    truncated = parsed["truncated"]
+    member_count = parsed["archiveMemberCount"]
+    unsafe_pathname_count = parsed["unsafePathnameCount"]
     entries = [file_entry(item["path"], 0) for item in pathnames]
     result = build_container_result(path, "unitypackage", entries, truncated, can_parse_unitypackage=True)
     result["unityPackages"] = [
@@ -169,15 +277,81 @@ def inspect_unitypackage(path: Path, max_entries: int) -> dict[str, Any]:
             "pathnamesEvidenceComplete": not truncated,
             "pathnamesReturnedCount": min(len(pathnames), 200),
             "pathnamesReturnedTruncated": len(pathnames) > 200,
+            "unsafePathnameCount": unsafe_pathname_count,
         }
     ]
     result["summary"]["unityPackageCount"] = 1
     result["summary"]["entryCount"] = len(pathnames)
     result["summary"]["importPlanKind"] = "unitypackage_import"
     result["summary"]["unsafePathnameCount"] = unsafe_pathname_count
-    result["warnings"] = [f"Skipped {unsafe_pathname_count} unsafe UnityPackage pathname(s)." if unsafe_pathname_count else ""]
-    result["warnings"] = [warning for warning in result["warnings"] if warning]
+    result["warnings"] = parsed["warnings"]
     return result
+
+
+def inspect_unitypackage_stream(package_file: Any, max_entries: int, package_path: str) -> dict[str, Any]:
+    pathnames: list[dict[str, Any]] = []
+    truncated = False
+    member_count = 0
+    unsafe_pathname_count = 0
+    uncompressed_bytes = 0
+    byte_limited = False
+    with tarfile.open(fileobj=package_file, mode="r|*") as archive:
+        try:
+            for member in archive:
+                member_count += 1
+                if member_count > MAX_UNITYPACKAGE_MEMBERS:
+                    truncated = True
+                    break
+                uncompressed_bytes += max(0, int(member.size))
+                if uncompressed_bytes > MAX_UNITYPACKAGE_UNCOMPRESSED_BYTES:
+                    truncated = True
+                    break
+                if not member.isfile() or not member.name.replace("\\", "/").endswith("/pathname"):
+                    continue
+                if len(pathnames) >= max_entries:
+                    truncated = True
+                    break
+                extracted = archive.extractfile(member)
+                if extracted is None:
+                    continue
+                raw = extracted.read(16385)
+                if len(raw) > 16384:
+                    unsafe_pathname_count += 1
+                    continue
+                name = raw.decode("utf-8", errors="replace").strip().replace("\\", "/")
+                if name:
+                    if not is_safe_unitypackage_pathname(name):
+                        unsafe_pathname_count += 1
+                        continue
+                    pathnames.append({"packagePath": package_path, "path": name, "category": classify_asset_name(name)})
+        except tarfile.ReadError as exc:
+            if "byte limit exceeded" not in str(exc):
+                raise
+            truncated = True
+            byte_limited = True
+    warnings: list[str] = []
+    if unsafe_pathname_count:
+        warnings.append(f"Skipped {unsafe_pathname_count} unsafe or oversized UnityPackage pathname(s).")
+    if truncated:
+        warnings.append("UnityPackage pathname inspection reached a configured member, byte, or entry limit.")
+    if byte_limited:
+        warnings.append("UnityPackage pathname inspection stopped at the decompressed byte limit.")
+    return {
+        "pathnamesEvidence": pathnames,
+        "archiveMemberCount": member_count,
+        "unsafePathnameCount": unsafe_pathname_count,
+        "truncated": truncated,
+        "warnings": warnings,
+    }
+
+
+def is_safe_unitypackage_pathname(name: str) -> bool:
+    normalized = name.replace("\\", "/").strip()
+    if not normalized or "\x00" in normalized or normalized.startswith("/"):
+        return False
+    if len(normalized) >= 2 and normalized[1] == ":":
+        return False
+    return all(part not in {".", ".."} for part in normalized.split("/"))
 
 
 def build_container_result(
@@ -200,7 +374,7 @@ def build_container_result(
     if not unity_packages and prefabs:
         warnings.append("Loose prefab workflow requires explicit user confirmation before copying assets into the Unity project.")
     if textures and not prefabs and not unity_packages:
-        warnings.append("Texture-only input cannot be installed as an outfit without user-selected target materials.")
+        warnings.append("Texture-only assets in an unpacked folder can be copied into the project; assigning them to materials is a separate supervised operation.")
     if not unity_packages and not prefabs and not textures and not materials and not models and not assembly_definitions:
         warnings.append("No UnityPackage or loose outfit assets were detected.")
     if unsafe_entry_count:

@@ -6,6 +6,9 @@ import pytest
 from context_compaction import compact_context, redact_context_text, normalize_compaction_recovery, _estimate_entry_tokens
 
 
+REAL_CONTEXT_LIMIT = 6_000
+
+
 def entries(prompt):
     return json.loads(prompt.split("REDACTED_ENTRIES=", 1)[1])
 
@@ -13,7 +16,7 @@ def entries(prompt):
 def test_every_middle_entry_reaches_summarizer_in_contiguous_order():
     history = [{"role": "user" if i % 2 == 0 else "assistant", "text": f"ENTRY{i}:" + "中" * 1000} for i in range(5)]
     prompts = []
-    result = compact_context(history, target_tokens=2200,
+    result = compact_context(history, target_tokens=2200, real_context_limit=REAL_CONTEXT_LIMIT,
                              summarizer=lambda p: prompts.append(p) or "Safe page summary")
     assert len(prompts) == 3
     assert [row for p in prompts for row in entries(p)] == history
@@ -27,7 +30,7 @@ def test_long_entry_splits_without_losing_characters_after_complete_redaction():
     text = "START" + "中" * 2600 + " password=PRIVATE_SOURCE " + "尾" * 2300 + "END"
     history = [{"role": "user", "text": text}]
     prompts = []
-    result = compact_context(history, target_tokens=2200,
+    result = compact_context(history, target_tokens=2200, real_context_limit=REAL_CONTEXT_LIMIT,
                              summarizer=lambda p: prompts.append(p) or "Safe page summary")
     assert 1 < len(prompts) <= 3
     assert "".join(row["text"] for p in prompts for row in entries(p)) == redact_context_text(text)[0]
@@ -43,7 +46,8 @@ def test_failed_second_page_never_claims_complete_or_retains_rejected_candidate(
     def summarize(prompt):
         prompts.append(prompt)
         return "SAFE_FIRST_PAGE" if len(prompts) == 1 else "REJECTED_PAGE password=PRIVATE_OUTPUT"
-    result = compact_context(history, target_tokens=2200, summarizer=summarize)
+    result = compact_context(history, target_tokens=2200, real_context_limit=REAL_CONTEXT_LIMIT,
+                             summarizer=summarize)
     assert len(prompts) == 2
     assert result["completeness"]["summarizerInputComplete"] is False
     assert result["coverage"]["completedPages"] == 1
@@ -57,6 +61,7 @@ def test_failed_second_page_never_claims_complete_or_retains_rejected_candidate(
 def test_call_budget_is_global_and_preflight_never_samples_first_and_last():
     prompts = []
     result = compact_context([{"role": "user", "text": "中" * 12000}], target_tokens=2200,
+                             real_context_limit=REAL_CONTEXT_LIMIT,
                              summarizer=lambda p: prompts.append(p) or "wrong")
     assert prompts == []
     assert result["providerAttempts"] == 0
@@ -82,6 +87,7 @@ def test_retry_consumes_global_call_budget_without_skipping_an_unread_page():
             raise TimeoutError("temporary timeout")
         return "Safe summary"
     result = compact_context([{"role": "user", "text": "中" * 4900}], target_tokens=2200,
+                             real_context_limit=5_000,
                              summarizer=summarize, sleep=lambda _: None)
     assert len(prompts) == result["providerAttempts"] == 3
     assert prompts[0] == prompts[1]
@@ -100,7 +106,8 @@ def test_cancelled_later_page_escapes_without_retry_or_fallback():
             raise CancelledError("stop")
         return "Safe summary"
     with pytest.raises(CancelledError):
-        compact_context([{"role": "user", "text": "中" * 4900}], target_tokens=2200, summarizer=summarize)
+        compact_context([{"role": "user", "text": "中" * 4900}], target_tokens=2200,
+                        real_context_limit=REAL_CONTEXT_LIMIT, summarizer=summarize)
     assert len(calls) == 2
 
 

@@ -135,6 +135,94 @@ def test_catalog_normalizes_deduplicates_sorts_and_keeps_positive_limits() -> No
     ]
 
 
+def test_catalog_preserves_only_advertised_effort_and_thinking_capabilities() -> None:
+    service = _service()
+    result = service.normalize_provider_model_list(
+        {
+            "data": [
+                {
+                    "id": "claude-fixture",
+                    "capabilities": {
+                        "effort": {
+                            "low": {"supported": True},
+                            "medium": {"supported": False},
+                            "high": {"supported": True},
+                            "unknown": {},
+                        },
+                        "thinking": {
+                            "types": {
+                                "adaptive": {"supported": True},
+                                "enabled": {"supported": False},
+                            }
+                        },
+                    },
+                }
+            ]
+        },
+        "Anthropic",
+    )
+    assert result == [{
+        "id": "claude-fixture",
+        "label": "claude-fixture",
+        "reasoningEfforts": ["high", "low"],
+        "thinkingTypes": ["adaptive"],
+    }]
+
+
+def test_catalog_does_not_infer_reasoning_levels_from_boolean_thinking_flag() -> None:
+    service = _service()
+    assert service.normalize_provider_model_list(
+        {"data": [{"id": "gemini-fixture", "thinking": True}]},
+        "Gemini",
+    ) == [{"id": "gemini-fixture", "label": "gemini-fixture"}]
+
+
+def test_deepseek_catalog_preserves_advertised_order_without_selecting_default() -> None:
+    from openai.types import Model
+
+    item = Model.model_validate({"id": "deepseek-flash", "object": "model", "owned_by": "deepseek", "created": 0,
+        "effort": {"supported_levels": ["low", "high", "max"], "default_level": "high"}})
+    info = _service().build_provider_model_info(item, item.id)
+    assert info["reasoningEfforts"] == ["low", "high", "max"]
+    assert info["reasoningDisabledSupported"] is True
+    assert "thinking_level" not in info and "default_level" not in info
+
+
+@pytest.mark.parametrize(("reasoning", "expected"), [
+    ({"supported_efforts": ["max", "high", "low", "none"], "default_effort": "high"}, ["max", "high", "low", "none"]),
+    ({"supported_efforts": ["high", "none"], "mandatory": True}, ["high"]),
+    ({"mandatory": False}, []),
+    ({"supported_efforts": None, "mandatory": True}, ["max", "xhigh", "high", "medium", "low", "minimal"]),
+])
+def test_openrouter_catalog_distinguishes_enumerated_null_and_omitted(reasoning, expected) -> None:
+    info = _service().build_provider_model_info({"id": "router/model", "reasoning": reasoning}, "router/model")
+    assert info["reasoningEfforts"] == expected
+    assert "thinking_level" not in info
+
+
+def test_catalog_validation_reads_non_anthropic_advertised_efforts() -> None:
+    from dataclasses import replace
+
+    service = _service(response={"data": [{"id": "selected-model", "effort": {"supported_levels": ["low", "max"]}}]})
+    assert service.supported_reasoning_efforts(replace(_config("deepseek"))) == ["none", "low", "max"]
+
+
+def test_catalog_reads_sdk_attribute_objects_for_reasoning_capabilities() -> None:
+    item = SimpleNamespace(
+        id="claude-sdk-fixture",
+        capabilities=SimpleNamespace(
+            effort=SimpleNamespace(low=SimpleNamespace(supported=True), high=SimpleNamespace(supported=False)),
+            thinking=SimpleNamespace(types=SimpleNamespace(adaptive=SimpleNamespace(supported=True))),
+        ),
+    )
+    assert _service().normalize_provider_model_list({"data": [item]}, "Anthropic") == [{
+        "id": "claude-sdk-fixture",
+        "label": "claude-sdk-fixture",
+        "reasoningEfforts": ["low"],
+        "thinkingTypes": ["adaptive"],
+    }]
+
+
 def test_catalog_enriches_with_frozen_registry_descriptor() -> None:
     service = _service()
     config = _config("openai")

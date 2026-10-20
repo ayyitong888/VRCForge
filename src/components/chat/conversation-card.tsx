@@ -4,20 +4,20 @@ import {
   Copy,
   FilePlus2,
   Loader2,
-  MessageSquare,
   Pencil,
   Save,
   RotateCcw,
   Wrench,
   X,
 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { isValidElement, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import i18n from "../../i18n";
 import type { AgentApproval } from "../../lib/api";
+import { resolveAttachmentPayloadReferences, type AttachmentPayloadVault } from "../../lib/attachment-payloads";
 import { projectRuntimeResponseForDisplay } from "../../lib/chat-timeline-presentation";
 import type { ApprovalActionState, ChatAttachment, ConversationItem } from "../../lib/chat-types";
-import { elapsedSecondsSince, providerReconnectAttempt, type AgentRuntimePhase } from "../../lib/chat-streaming";
+import { elapsedSecondsSince, providerWaitingWindow, type AgentRuntimePhase } from "../../lib/chat-streaming";
 import { copyableAgentDialogueText } from "../../lib/conversation-utils";
 import type { PathToSkillOperationSummary } from "../../lib/path-to-skill-context";
 import { cn, formatCount } from "../../lib/utils";
@@ -25,18 +25,24 @@ import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { DataLine } from "../ui/data-line";
 import { OutputBlock } from "../ui/output-block";
-import { ChatMarkdown } from "./chat-markdown";
+import { ChatMarkdown, ChatResourceImageContext } from "./chat-markdown";
+import type { ChatResourceImageContext as ChatResourceImageContextValue } from "../../lib/api/chat-resource-image";
 import { AttachmentStrip } from "./composer";
 import { RunRow, buildAgentTimelineRows, buildDurableTimelineRows, displayPlanner, formatPayload, formatRuntimeModelLine } from "./conversation-timeline";
 
 export function ConversationCard({
   item,
+  interleavedUserMessages = [],
+  initialUserContent,
+  chatResourceImageContext,
+  attachmentPayloads,
   approval,
   approvalAction,
   canRetry,
   canEdit,
   editing,
   editingText,
+  editSaveDisabledReason,
   editingAttachments,
   onEditTextChange,
   onEditAttachmentRemove,
@@ -53,10 +59,15 @@ export function ConversationCard({
   onSaveOperationAsSkill,
 }: {
   item: Exclude<ConversationItem, { type: "handoff_card" }>;
+  interleavedUserMessages?: Extract<ConversationItem, { type: "user" }>[];
+  initialUserContent?: ReactNode;
+  chatResourceImageContext?: Pick<ChatResourceImageContextValue, "endpoint" | "chatId" | "projectPath">;
+  attachmentPayloads?: AttachmentPayloadVault;
   approval?: AgentApproval | null;
   approvalAction?: ApprovalActionState;
   editing?: boolean;
   editingText?: string;
+  editSaveDisabledReason?: string;
   editingAttachments?: ChatAttachment[];
   onEditTextChange?: (value: string) => void;
   onEditAttachmentRemove?: (attachmentId: string) => void;
@@ -77,8 +88,14 @@ export function ConversationCard({
   onSaveOperationAsSkill?: (summary: PathToSkillOperationSummary) => void;
 }) {
   const { t } = useTranslation();
+  const storedAttachments = item.type === "user" ? item.attachments : undefined;
+  const restoredAttachments = useMemo(
+    () => resolveAttachmentPayloadReferences(storedAttachments || [], attachmentPayloads),
+    [storedAttachments, attachmentPayloads],
+  );
   const streamingCreatedAt = item.type === "streaming" ? item.createdAt : undefined;
   const [streamingNowMs, setStreamingNowMs] = useState(() => Date.now());
+  const [interleavedUsersExpanded, setInterleavedUsersExpanded] = useState(item.type === "streaming");
   useEffect(() => {
     if (!streamingCreatedAt) return undefined;
     setStreamingNowMs(Date.now());
@@ -86,23 +103,34 @@ export function ConversationCard({
     return () => window.clearInterval(timer);
   }, [streamingCreatedAt]);
   if (item.type === "user") {
-    const attachments = item.attachments || [];
+    const attachments = restoredAttachments;
     const displayedText = editing ? editingText : item.text;
-    const draftAttachments = editingAttachments || attachments;
+    const draftAttachments = editing ? editingAttachments || attachments : attachments;
     const imageAttachments = draftAttachments.filter((attachment) => attachment.dataUrl && attachment.type.startsWith("image/"));
     const otherAttachments = draftAttachments.filter((attachment) => !attachment.dataUrl || !attachment.type.startsWith("image/"));
     const hasEditingState = Boolean(editing);
+    const deliveryLabel = item.queueStatus === "steering" ? t("chat.steering")
+      : item.queueStatus === "waiting_for_resources" ? t("chat.waitingForResources")
+      : item.queueStatus === "delivery_unverified" ? t("chat.deliveryUnverified")
+      : item.queueStatus === "paused" ? t("chat.paused")
+      : item.queueStatus === "cancelled" ? t("chat.cancelled") : t("chat.queued");
+    const deliveryMetadata = item.queueStatus ? (
+      <span
+        className="inline-flex items-center gap-1 text-[11px] text-muted-foreground/80"
+        data-user-message-status={item.queueStatus}
+        role="status"
+        title={deliveryLabel}
+        aria-label={deliveryLabel}
+      >
+        {item.queueStatus === "steering" ? <Loader2 className="h-3 w-3 animate-spin motion-reduce:animate-none" aria-hidden="true" /> : null}
+        {item.queueStatus === "delivery_unverified" ? t("chat.deliveryUnverifiedShort") : deliveryLabel}
+      </span>
+    ) : undefined;
 
     if (hasEditingState) {
       return (
-        <div className="group flex justify-end">
-          <div className="relative flex w-full max-w-[78%] flex-col items-end gap-2">
-            {item.queuedFrom ? (
-              <div className="flex items-center gap-1 rounded-full bg-muted/70 px-2 py-1 text-[11px] text-muted-foreground">
-                <MessageSquare className="h-3 w-3" />
-                {t("chat.queuedSent")}
-              </div>
-            ) : null}
+        <div className="group flex min-w-0 justify-end">
+          <div className="relative flex min-w-0 w-full max-w-[78%] flex-col items-end gap-2">
             <textarea
               value={displayedText}
               onChange={(event) => onEditTextChange?.(event.target.value)}
@@ -141,15 +169,18 @@ export function ConversationCard({
               </div>
             ) : null}
             <div className="flex items-center gap-1 pt-1">
+              {deliveryMetadata}
               <button
                 type="button"
                 className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
                 onClick={onEditItemSave}
-                title={t("chat.saveEdit")}
+                disabled={Boolean(editSaveDisabledReason)}
+                title={editSaveDisabledReason || t("chat.saveEdit")}
                 aria-label={t("chat.saveEdit")}
               >
                 <Save className="h-3.5 w-3.5" />
               </button>
+              {editSaveDisabledReason ? <span role="status" className="text-xs text-muted-foreground">{editSaveDisabledReason}</span> : null}
               <button
                 type="button"
                 className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
@@ -166,18 +197,12 @@ export function ConversationCard({
     }
 
     return (
-      <div className="group flex justify-end">
-        <div className="relative flex max-w-[78%] flex-col items-end gap-2">
-          {item.queuedFrom || item.queueStatus ? (
-            <div className="flex items-center gap-1 rounded-full bg-muted/70 px-2 py-1 text-[11px] text-muted-foreground">
-              <MessageSquare className="h-3 w-3" />
-              {item.queueStatus === "steering" ? t("chat.steering") : item.queueStatus === "waiting_for_resources" ? t("chat.waitingForResources") : item.queueStatus === "delivery_unverified" ? t("chat.deliveryUnverified") : item.queueStatus === "paused" ? t("chat.paused") : item.queueStatus === "cancelled" ? t("chat.cancelled") : t("chat.queued")}
-            </div>
-          ) : null}
+      <div className="group flex min-w-0 justify-end">
+        <div className="relative flex min-w-0 max-w-[78%] flex-col items-end gap-2">
           {imageAttachments.length ? <UserImageAttachments messageId={item.id} attachments={imageAttachments} onImport={onImportAttachment} /> : null}
           {item.text ? (
-            <div className="rounded-2xl bg-muted px-4 py-2.5 text-sm text-foreground">
-              <ChatMarkdown text={item.text} />
+            <div className="min-w-0 max-w-full rounded-2xl bg-muted px-4 py-2.5 text-sm text-foreground [&_.chat-markdown]:[overflow-wrap:anywhere]" data-user-message-bubble data-chat-quote-content>
+              <UserMessageText text={item.text} />
             </div>
           ) : null}
           {otherAttachments.length ? (
@@ -188,6 +213,7 @@ export function ConversationCard({
           <MessageActions
             align="right"
             createdAt={item.createdAt || item.id}
+            metadata={deliveryMetadata}
             onCopy={() => onCopyItem?.(item)}
             onRetry={canRetry ? () => onRetryItem?.(item.id) : undefined}
             onEdit={canEdit ? () => onEditItem?.(item.id) : undefined}
@@ -216,21 +242,41 @@ export function ConversationCard({
 
   if (item.type === "streaming") {
     const runtimeModelLabel = formatRuntimeModelLine(item.providerLabel, item.model);
-    // The streaming text is the complete live answer. Keep it visible while
-    // the durable process group supplies the execution history, but do not
-    // render the same assistant event a second time when the turn closes.
-    const timelineRows = buildDurableTimelineRows(item.timeline, elapsedSecondsSince(item.createdAt, streamingNowMs), "", [], { includeAssistant: false });
+    const streamingElapsed = elapsedSecondsSince(item.createdAt, streamingNowMs);
+    // Keep public assistant updates at their durable timeline position. The
+    // trailing event is suppressed only when it is the same text as the live
+    // buffer, so progress updates remain visible without duplicating the tail.
+    const timelineRows = buildDurableTimelineRows(item.timeline, undefined, "", [], {
+      live: true,
+      renderElapsed: false,
+      processTitleElapsed: streamingElapsed,
+      providerLine: runtimeModelLabel,
+      suppressTrailingAssistantText: item.text,
+      interleavedUserMessages,
+      initialUserContent,
+      interleavedUsersExpanded,
+      onInterleavedUsersExpandedChange: setInterleavedUsersExpanded,
+      renderInterleavedUserMessage: (message) => renderInterleavedUserMessage(message, attachmentPayloads, onImportAttachment),
+    });
+    const hasTimelineProcessRows = timelineRows.some((row) => (
+      isValidElement(row)
+      && Boolean((row.props as { "data-agent-turn-process-group"?: boolean })["data-agent-turn-process-group"])
+    ));
     return (
       <div className="group flex justify-start" data-conversation-streaming-turn={item.clientTurnId}>
-        <div className="relative w-full max-w-[85%] space-y-1.5 px-1 text-sm">
-          <StreamingPhaseStatus item={item} nowMs={streamingNowMs} showElapsed={!timelineRows.length} />
-          {timelineRows.length ? <div data-vrcforge-live-runtime-timeline>{timelineRows}</div> : null}
-          {item.text ? <ChatMarkdown text={item.text} /> : null}
-          <div className="mt-1 flex items-center gap-2 text-[10px] text-muted-foreground">
-            {runtimeModelLabel ? (
-              <span>{runtimeModelLabel}</span>
-            ) : null}
-          </div>
+        <div className="relative flex w-full flex-col gap-3 text-sm leading-relaxed">
+          {!hasTimelineProcessRows ? initialUserContent : null}
+          {timelineRows.length ? <div className="space-y-3" data-vrcforge-live-runtime-timeline>{timelineRows}</div> : null}
+          {item.text ? <div className="leading-relaxed" data-chat-quote-content><ChatMarkdown text={item.text} /></div> : null}
+          {!hasTimelineProcessRows && streamingElapsed !== undefined || runtimeModelLabel ? (
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-1 border-t border-border/60 pt-2 text-[10px] leading-relaxed text-muted-foreground">
+              {!hasTimelineProcessRows && streamingElapsed !== undefined ? (
+                <span>{t("agent.turnDuration", { duration: `${streamingElapsed}s` })}</span>
+              ) : null}
+              {runtimeModelLabel ? <span className="text-muted-foreground/75">{runtimeModelLabel}</span> : null}
+            </div>
+          ) : null}
+          <StreamingPhaseStatus item={item} nowMs={streamingNowMs} showElapsed={false} />
         </div>
       </div>
     );
@@ -301,7 +347,7 @@ export function ConversationCard({
   }
 
   if (item.type === "timeline_event") {
-    const timelineRows = buildDurableTimelineRows([item.event]);
+    const timelineRows = buildDurableTimelineRows([item.event], undefined, "", [], { live: true });
     if (!timelineRows.length) return null;
     return (
       <div className="group flex justify-start" data-vrcforge-timeline-event={item.event.kind}>
@@ -313,12 +359,20 @@ export function ConversationCard({
   }
 
   const response = projectRuntimeResponseForDisplay(item.response, (key) => t(key));
+  const sessionId = response.sessionId || response.session_id;
+  const clientTurnId = response.clientTurnId || "";
+  const resourceImageContext = chatResourceImageContext && sessionId && clientTurnId
+    ? { ...chatResourceImageContext, sessionId, clientTurnId }
+    : null;
   const shell = response.shell;
   const skill = response.skill;
   const vision = response.vision;
   const write = response.write;
   const copyableReply = copyableAgentDialogueText(response);
-  const providerLine = formatRuntimeModelLine(item.providerLabel, item.model);
+  // The requested turn model is not proof of the model that answered. Keep
+  // historical labels tied to response metadata and omit them when the
+  // backend does not report an actual model.
+  const providerLine = formatRuntimeModelLine("", response.model);
   const replySource = providerLine;
   const awaitingApproval = shell?.status === "pending_approval";
   const nextStep = response.plan.nextStep || "";
@@ -338,21 +392,61 @@ export function ConversationCard({
     providerLine,
     awaitingApproval,
     elapsedSeconds: item.elapsedSeconds,
+    interleavedUserMessages,
+    initialUserContent,
+    interleavedUsersExpanded,
+    onInterleavedUsersExpandedChange: setInterleavedUsersExpanded,
+    renderInterleavedUserMessage: (message) => renderInterleavedUserMessage(message, attachmentPayloads, onImportAttachment),
     t,
   });
 
+  const hasTimelineProcessRows = timelineRows.some((row) => (
+    isValidElement(row)
+    && Boolean((row.props as { "data-agent-turn-process-group"?: boolean })["data-agent-turn-process-group"])
+  ));
+
   return (
-    <div className="group flex justify-start" data-vrcforge-agent-client-turn={response.clientTurnId || undefined}>
-      <div className="relative flex w-full max-w-[85%] flex-col gap-1.5">
-        {timelineRows}
-        <MessageActions
-          onCopy={copyableReply ? () => onCopyItem?.({ ...item, response }) : undefined}
-          onRetry={canRetry ? () => onRetryItem?.(item.id) : undefined}
-          onEdit={canEdit ? () => onEditItem?.(item.id) : undefined}
-          onSaveAsSkill={saveOperationSummary ? () => onSaveOperationAsSkill?.(saveOperationSummary) : undefined}
-          saveOperationTool={saveOperationTool}
-          saveOperationClientTurnId={response.clientTurnId}
-        />
+    <ChatResourceImageContext.Provider value={resourceImageContext}>
+      <div className="group flex justify-start" data-vrcforge-agent-client-turn={response.clientTurnId || undefined}>
+        <div className="relative flex w-full flex-col gap-3 text-sm leading-relaxed">
+          {!hasTimelineProcessRows ? initialUserContent : null}
+          {timelineRows}
+          <MessageActions
+            onCopy={copyableReply ? () => onCopyItem?.({ ...item, response }) : undefined}
+            onRetry={canRetry ? () => onRetryItem?.(item.id) : undefined}
+            onEdit={canEdit ? () => onEditItem?.(item.id) : undefined}
+            onSaveAsSkill={saveOperationSummary ? () => onSaveOperationAsSkill?.(saveOperationSummary) : undefined}
+            saveOperationTool={saveOperationTool}
+            saveOperationClientTurnId={response.clientTurnId}
+          />
+        </div>
+      </div>
+    </ChatResourceImageContext.Provider>
+  );
+}
+
+function renderInterleavedUserMessage(
+  message: Extract<ConversationItem, { type: "user" }>,
+  attachmentPayloads?: AttachmentPayloadVault,
+  onImportAttachment?: (attachment: ChatAttachment) => void,
+) {
+  const attachments = resolveAttachmentPayloadReferences(message.attachments || [], attachmentPayloads);
+  const images = attachments.filter((attachment) => attachment.dataUrl && attachment.type.startsWith("image/"));
+  const otherAttachments = attachments.filter((attachment) => !attachment.dataUrl || !attachment.type.startsWith("image/"));
+  return (
+    <div key={`steering-${message.id}`} className="group flex min-w-0 justify-end" data-chat-steering-message={message.id}>
+      <div className="relative flex min-w-0 max-w-[78%] flex-col items-end gap-2">
+        {images.length ? <UserImageAttachments messageId={message.id} attachments={images} onImport={onImportAttachment} /> : null}
+        {message.text ? (
+          <div className="min-w-0 max-w-full rounded-2xl bg-muted px-4 py-2.5 text-sm text-foreground [&_.chat-markdown]:[overflow-wrap:anywhere]" data-user-message-bubble data-chat-quote-content>
+            <UserMessageText text={message.text} />
+          </div>
+        ) : null}
+        {otherAttachments.length ? (
+          <div className="max-w-full rounded-xl bg-muted/70 px-3 py-2 text-sm">
+            <AttachmentStrip attachments={otherAttachments} onImport={onImportAttachment} compact />
+          </div>
+        ) : null}
       </div>
     </div>
   );
@@ -459,39 +553,88 @@ export function UserImageAttachments({
   );
 }
 
-function StreamingPhaseStatus({ item, nowMs, showElapsed }: { item: Extract<ConversationItem, { type: "streaming" }>; nowMs: number; showElapsed: boolean }) {
+export function StreamingPhaseStatus({ item, nowMs, showElapsed }: { item: Extract<ConversationItem, { type: "streaming" }>; nowMs: number; showElapsed: boolean }) {
   const { t } = useTranslation();
   const elapsedSeconds = elapsedSecondsSince(item.createdAt, nowMs);
-  const reconnectAttempt = item.phase === "waiting_for_model"
-    ? providerReconnectAttempt(item.providerLastActivityAt, nowMs)
+  const reconnectAttempt = item.providerRetry?.attempt;
+  const waitingWindow = !reconnectAttempt && item.phase === "waiting_for_model"
+    ? providerWaitingWindow(item.providerLastActivityAt, nowMs)
     : undefined;
-  const label = reconnectAttempt
-    ? t("chat.runtimePhase.reconnecting", { attempt: reconnectAttempt, max: 5 })
+  const phaseLabel = reconnectAttempt
+    ? t("chat.runtimePhase.reconnecting", { attempt: reconnectAttempt, max: item.providerRetry?.max || 5 })
+    : waitingWindow
+      ? t("chat.runtimePhase.waitingForModelProgress", { window: waitingWindow, max: 5 })
     : streamingPhaseLabel(item.phase, t);
+  const activeOperation = item.phase === "running_tool" ? currentStreamingOperation(item.timeline || []) : undefined;
+  const label = activeOperation
+    ? t("agent.timeline.runningTool", { tool: activeOperation })
+    : phaseLabel;
   const reconnecting = reconnectAttempt !== undefined;
-  const reconnectDetail = reconnectAttempt === 5
+  const waiting = waitingWindow !== undefined;
+  const reconnectDetail = reconnectAttempt === item.providerRetry?.max
     ? t("chat.runtimePhase.reconnectingRetry")
-    : t("chat.runtimePhase.reconnectingDetail");
+    : waitingWindow !== undefined
+      ? waitingWindow === 5
+        ? t("chat.runtimePhase.waitingForModelTimeout")
+        : t("chat.runtimePhase.waitingForModelDetail")
+      : t("chat.runtimePhase.reconnectingDetail");
   return (
-    <div className="text-muted-foreground" data-vrcforge-streaming-phase={item.phase || "unknown"}>
-      {reconnecting ? (
+    <div className="chat-current-activity text-muted-foreground" data-chat-current-activity data-vrcforge-streaming-phase={item.phase || "unknown"} role="status" aria-live="polite" aria-atomic="true">
+      {reconnecting || waiting ? (
         <details className="group">
           <summary className="group flex cursor-pointer list-none items-center gap-2 text-left [&::-webkit-details-marker]:hidden">
             <ChevronRight className="h-3.5 w-3.5 transition-transform group-open:rotate-90" aria-hidden="true" />
-            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-            <span>{label}</span>
+            <span className="chat-current-activity__label">{label}</span>
             {showElapsed && elapsedSeconds !== undefined ? <span>{t("agent.elapsed", { time: `${elapsedSeconds}s` })}</span> : null}
           </summary>
           <p className="mt-1 pl-5 text-xs text-muted-foreground/80">{reconnectDetail}</p>
         </details>
       ) : (
         <div className="flex items-center gap-2">
-          <Loader2 className="h-3.5 w-3.5 animate-spin" />
-          <span>{label}</span>
+          <span className="chat-current-activity__label">{label}</span>
           {showElapsed && elapsedSeconds !== undefined ? <span>{t("agent.elapsed", { time: `${elapsedSeconds}s` })}</span> : null}
         </div>
       )}
     </div>
+  );
+}
+
+function currentStreamingOperation(timeline: NonNullable<Extract<ConversationItem, { type: "streaming" }>['timeline']>): string | undefined {
+  const events = [...timeline].sort((left, right) => left.sequence - right.sequence);
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index];
+    if (!["tool_call", "command", "file_edit", "subagent"].includes(event.kind)) continue;
+    const status = String(event.payload.status || event.payload.subagentStatus || "").toLowerCase();
+    if (["ok", "success", "succeeded", "done", "applied", "completed", "complete", "failed", "denied", "blocked", "cancelled", "canceled"].includes(status)) continue;
+    const actionId = event.payload.actionId;
+    if (actionId && events.some((candidate) => candidate.sequence > event.sequence
+      && candidate.kind === "tool_result"
+      && candidate.payload.actionId === actionId)) continue;
+    const label = event.payload.label || event.payload.tool;
+    if (label) return label;
+  }
+  return undefined;
+}
+
+function UserMessageText({ text }: { text: string }) {
+  const { t } = useTranslation();
+  // Presentation only: the original item remains the source for copy/edit/history.
+  const longMessage = text.length > 600 || text.split("\n").length > 8;
+  if (!longMessage) return <ChatMarkdown text={text} />;
+  return (
+    <details className="group/message min-w-0" data-user-message-disclosure>
+      <summary className="cursor-pointer list-none rounded-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring [&::-webkit-details-marker]:hidden">
+        <span className="mb-2 line-clamp-6 whitespace-pre-wrap leading-relaxed [overflow-wrap:anywhere] group-open/message:hidden">
+          {text.slice(0, 600)}{text.length > 600 ? "…" : ""}
+        </span>
+        <span className="flex items-center gap-1 text-xs text-muted-foreground">
+          <ChevronRight className="h-3.5 w-3.5 shrink-0 transition-transform group-open/message:rotate-90" aria-hidden="true" />
+          <span className="group-open/message:hidden">{t("common.expand")}</span>
+          <span className="hidden group-open/message:inline">{t("common.collapse")}</span>
+        </span>
+      </summary>
+      <div className="mt-2 min-w-0"><ChatMarkdown text={text} /></div>
+    </details>
   );
 }
 
@@ -517,6 +660,7 @@ function streamingPhaseLabel(phase: AgentRuntimePhase | undefined, t: typeof i18
 function MessageActions({
   align = "left",
   createdAt,
+  metadata,
   onCopy,
   onRetry,
   onEdit,
@@ -526,6 +670,7 @@ function MessageActions({
 }: {
   align?: "left" | "right";
   createdAt?: string;
+  metadata?: ReactNode;
   onCopy?: () => void;
   onRetry?: () => void;
   onEdit?: () => void;
@@ -535,18 +680,20 @@ function MessageActions({
 }) {
   const { t } = useTranslation();
   const timeLabel = formatMessageTime(createdAt, i18n.language);
-  const hasActions = Boolean(timeLabel || onCopy || onRetry || onEdit || onSaveAsSkill);
+  const hasActions = Boolean(metadata || timeLabel || onCopy || onRetry || onEdit || onSaveAsSkill);
   if (!hasActions) {
     return null;
   }
   return (
     <div
+      data-chat-message-actions
       className={cn(
         "order-last mt-1 flex items-center gap-1 px-1 text-muted-foreground",
         align === "right" ? "justify-end" : "justify-start",
       )}
     >
       {timeLabel ? <span className="px-1 text-xs text-muted-foreground/80">{timeLabel}</span> : null}
+      {metadata}
       {onCopy ? (
         <button
           type="button"

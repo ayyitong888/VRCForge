@@ -13,10 +13,13 @@ def test_scene_component_write_does_not_save_unrelated_assets(tmp_path):
     program=r'''using System;using Newtonsoft.Json.Linq;
     static class EditorUtility {public static void SetDirty(object value){}}
     static class AssetDatabase {public static bool UnrelatedDirty=true,UnrelatedSaved=false;public static void SaveAssets(){UnrelatedSaved=UnrelatedDirty;UnrelatedDirty=false;}}
-    static class ComponentCrudCore {public static void SetMemberValue(object a,object b,object c){} public static bool SceneSaved; public static object SaveAndResolveScene(object s){SceneSaved=true;return s;}}
+    static class ComponentCrudCore {public static string trace="";public static bool PrefabOverride,PrefabOverrideSaved;
+     public static void SetMemberValue(object a,object b,object c){trace+="set;";}
+     public static void RecordPropertyPrefabOverride(object c){trace+="prefab;";PrefabOverride=true;}
+     public static bool SceneSaved; public static object SaveAndResolveScene(object s){trace+="save;";PrefabOverrideSaved=PrefabOverride;SceneSaved=true;return s;}}
     class Probe{static void Main(){object component=new object(),member=new object(),newValue=true,go=new object(),beforeScene=new object();bool mutationApplied=false;string failureStage="";
     SLICE
-    Console.WriteLine(new JObject{["sceneSaved"]=ComponentCrudCore.SceneSaved,["unrelatedAssetSaved"]=AssetDatabase.UnrelatedSaved,["unrelatedAssetDirty"]=AssetDatabase.UnrelatedDirty,["mutationApplied"]=mutationApplied}.ToString(Newtonsoft.Json.Formatting.None));}}
+    Console.WriteLine(new JObject{["sceneSaved"]=ComponentCrudCore.SceneSaved,["prefabOverrideSaved"]=ComponentCrudCore.PrefabOverrideSaved,["trace"]=ComponentCrudCore.trace,["unrelatedAssetSaved"]=AssetDatabase.UnrelatedSaved,["unrelatedAssetDirty"]=AssetDatabase.UnrelatedDirty,["mutationApplied"]=mutationApplied}.ToString(Newtonsoft.Json.Formatting.None));}}
     '''.replace("SLICE",slice)
     base=Path(os.environ.get("ProgramFiles","C:/Program Files"))/"dotnet";csc=sorted((base/"sdk").glob("*/Roslyn/bincore/csc.dll"))[-1];refs=sorted((base/"packs/Microsoft.NETCore.App.Ref").glob("*/ref/netcoreapp3.1"))[-1];dotnet=shutil.which("dotnet");n=csc.parents[2]/"Newtonsoft.Json.dll"
     cs=out/"Probe.cs";cs.write_text(program,encoding="utf-8");dll=out/"Probe.dll"
@@ -25,5 +28,7 @@ def test_scene_component_write_does_not_save_unrelated_assets(tmp_path):
     r=subprocess.run([dotnet,str(dll)],capture_output=True,text=True);assert r.returncode==0,r.stdout+r.stderr
     result=json.loads(r.stdout)
     assert result["sceneSaved"] is True
+    assert result["prefabOverrideSaved"] is True, result
+    assert result["trace"] == "set;prefab;save;", result
     assert result["unrelatedAssetSaved"] is False, result
     assert result["unrelatedAssetDirty"] is True, result

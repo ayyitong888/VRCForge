@@ -55,6 +55,8 @@ def run_project_index_review(
 ) -> dict[str, Any]:
     _checkpoint(cancel_event)
     project_path = str(payload.get("projectPath") or "").strip()
+    if not project_path:
+        raise RuntimeError("project_index_review requires projectPath (or projectRoot/project_path).")
     result = _dispatch(
         gateway,
         "vrcforge_scan_project_index",
@@ -96,6 +98,8 @@ def run_outfit_package_inspection(
 ) -> dict[str, Any]:
     _checkpoint(cancel_event)
     package_path = str(payload.get("packagePath") or payload.get("package_path") or "").strip()
+    if not package_path:
+        raise RuntimeError("outfit_package_inspection requires params.packagePath.")
     result = _dispatch(
         gateway,
         "vrcforge_inspect_outfit_package",
@@ -239,6 +243,9 @@ def run_outfit_import_plan_review(
     cancel_event: Any,
 ) -> dict[str, Any]:
     _checkpoint(cancel_event)
+    package_path = str(payload.get("packagePath") or "").strip()
+    if not package_path:
+        raise RuntimeError("outfit_import_plan_review requires params.packagePath.")
     result = _dispatch(
         gateway,
         "vrcforge_plan_outfit_import",
@@ -299,7 +306,7 @@ def run_skill_delegate(
     _checkpoint(cancel_event)
     tool_name = str(payload.get("toolName") or payload.get("tool_name") or "").strip()
     if not tool_name:
-        raise RuntimeError("skill_delegate requires params.toolName.")
+        raise RuntimeError("skill_delegate requires params.toolName (or params.tool_name).")
     explicit_params = payload.get("skillParams") if isinstance(payload.get("skillParams"), dict) else None
     tool_params = dict(explicit_params) if explicit_params is not None else {
         key: value for key, value in (payload or {}).items() if key not in _DELEGATE_CONTROL_KEYS
@@ -338,13 +345,13 @@ def build_sub_agent_roles() -> list[SubAgentRole]:
         SubAgentRole(
             id="project_index_review",
             title="Project index review",
-            description="Scan the local Unity project index and summarize changed scanner families.",
+            description="Scan the local Unity project index and summarize changed scanner families. Required: projectPath, projectRoot, or project_path.",
             tool_profile="local-index-only",
         ),
         SubAgentRole(
             id="outfit_package_inspection",
             title="Outfit package inspection",
-            description="Inspect a UnityPackage, Booth ZIP/folder, or loose prefab folder without reading asset payload bytes.",
+            description="Inspect a UnityPackage, Booth ZIP/folder, or loose prefab folder without reading asset payload bytes. Required in params: packagePath or package_path.",
             tool_profile="read-only",
         ),
         SubAgentRole(
@@ -368,16 +375,62 @@ def build_sub_agent_roles() -> list[SubAgentRole]:
         SubAgentRole(
             id="outfit_import_plan_review",
             title="Outfit import plan review",
-            description="Inspect a package and build a supervised import plan without writing to Unity.",
+            description="Inspect a package and build a supervised import plan without writing to Unity. Required in params: packagePath.",
             tool_profile="plan-only",
         ),
         SubAgentRole(
             id="skill_delegate",
             title="Skill delegate",
-            description="Run one allowlisted read-only or plan-only runtime skill by name and report its output.",
+            description="Run one allowlisted read-only or plan-only runtime skill by name and report its output. Required in params: toolName or tool_name; pass skill inputs in skillParams when needed.",
             tool_profile="runtime-allowlist",
         ),
     ]
+
+
+def build_sub_agent_input_schema() -> dict[str, Any]:
+    """Build the public delegate schema from the executable role catalogue."""
+
+    roles = build_sub_agent_roles()
+    role_ids = [role.id for role in roles]
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "role": {
+                "type": "string",
+                "enum": role_ids,
+                "description": "Optional; omit to use project_index_review. Choose a role ID from the catalogue: " + "; ".join(
+                    f"{role.id} ({role.title}): {role.description}" for role in roles
+                ),
+            },
+            "task": {"type": "string", "description": "Bounded task for the selected role."},
+            "prompt": {"type": "string", "description": "Alias for task."},
+            "displayName": {"type": "string"},
+            "display_name": {"type": "string"},
+            "parentChatId": {"type": "string"},
+            "parent_chat_id": {"type": "string"},
+            "parentSessionId": {"type": "string"},
+            "parent_session_id": {"type": "string"},
+            "projectPath": {"type": "string"},
+            "projectRoot": {"type": "string"},
+            "project_path": {"type": "string"},
+            "params": {
+                "type": "object",
+                "additionalProperties": True,
+                "properties": {
+                    "packagePath": {"type": "string", "description": "Required by outfit_package_inspection and outfit_import_plan_review."},
+                    "package_path": {"type": "string", "description": "Existing alias accepted by outfit_package_inspection."},
+                    "maxEntries": {"type": "integer", "minimum": 1, "maximum": 50000},
+                    "toolName": {"type": "string", "description": "Required by skill_delegate; exact allowlisted tool or Skill name."},
+                    "tool_name": {"type": "string", "description": "Existing alias of toolName."},
+                    "skillParams": {"type": "object", "additionalProperties": True},
+                    "skill_params": {"type": "object", "additionalProperties": True},
+                    "skillArguments": {"type": "string"},
+                    "skill_arguments": {"type": "string"},
+                },
+            },
+        },
+    }
 
 
 def build_sub_agent_role_handlers(

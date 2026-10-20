@@ -39,6 +39,8 @@ from agent_gateway import (
     redact_background_goal_persistence,
     redact_sensitive,
     summarize_text,
+    summarize_skill_registry,
+    build_runtime_skill_payload,
 )
 from agent_shell_service import (
     SHELL_RUNNER_NATIVE,
@@ -74,6 +76,7 @@ from package_install_workflow_service import (
 )
 from provider_configuration_service import (
     ProviderApiConfig,
+    ProviderVisionConfig,
     ProviderConfigurationPersistencePorts,
     ProviderConfigurationService,
 )
@@ -701,6 +704,29 @@ class DashboardServerTests(unittest.TestCase):
                 read_response = client.get("/api/app/chats", params=[("projectPath", str(project))])
                 self.assertEqual(read_response.status_code, 200)
                 self.assertEqual([chat["id"] for chat in read_response.json()["chats"]], ["temp-chat"])
+
+    def test_chat_storage_write_echoes_precise_origin(self) -> None:
+        origin_id = "00000000-0000-4000-8000-000000000001"
+        vault = SimpleNamespace(retain=lambda _references: {})
+        with (
+            patch.object(dashboard_server, "write_chat_transcripts_storage", return_value=({"ok": True}, [], [])),
+            patch.object(dashboard_server, "chat_attachment_vault_store", return_value=vault),
+            patch.object(dashboard_server, "capture_automatic_memory_after_chat_storage", return_value={}),
+            patch.object(dashboard_server.EVENT_BUS, "broadcast", new_callable=AsyncMock) as broadcast,
+            TestClient(dashboard_server.app) as client,
+        ):
+            response = client.post("/api/app/chats", json={"chats": [], "chatOriginId": origin_id})
+
+        self.assertEqual(response.status_code, 200)
+        chat_storage_events = [
+            call for call in broadcast.await_args_list
+            if call.args and call.args[0] == "chatStorageChanged"
+        ]
+        self.assertEqual(len(chat_storage_events), 1)
+        self.assertEqual(
+            chat_storage_events[0].args,
+            ("chatStorageChanged", {"source": "app", "originId": origin_id}),
+        )
 
     def test_chat_save_bounds_each_source_without_rejecting_aggregate(self) -> None:
         """Independent project stores may each use the full durable size budget."""
@@ -1986,7 +2012,17 @@ class DashboardServerTests(unittest.TestCase):
 
         try:
             dashboard_server.AGENT_GATEWAY.vision_analyze_fn = fake_vision
-            with TestClient(dashboard_server.app) as client:
+            with (
+                patch.object(
+                    dashboard_server.PROVIDER_CONFIGURATION,
+                    "current_vision_config",
+                    return_value=ProviderVisionConfig(
+                        provider="openai", api_key="fixture-vision-key",
+                        base_url="https://fixture.invalid/v1", model="gpt-4o", enabled=True,
+                    ),
+                ),
+                TestClient(dashboard_server.app) as client,
+            ):
                 response = client.post(
                     "/api/app/agent/message",
                     json={
@@ -2033,7 +2069,17 @@ class DashboardServerTests(unittest.TestCase):
 
         try:
             dashboard_server.AGENT_GATEWAY.vision_analyze_fn = fake_vision
-            with TestClient(dashboard_server.app) as client:
+            with (
+                patch.object(
+                    dashboard_server.PROVIDER_CONFIGURATION,
+                    "current_vision_config",
+                    return_value=ProviderVisionConfig(
+                        provider="openai", api_key="fixture-vision-key",
+                        base_url="https://fixture.invalid/v1", model="gpt-4o", enabled=True,
+                    ),
+                ),
+                TestClient(dashboard_server.app) as client,
+            ):
                 response = client.post(
                     "/api/app/agent/message",
                     json={
@@ -2086,7 +2132,17 @@ class DashboardServerTests(unittest.TestCase):
 
         try:
             dashboard_server.AGENT_GATEWAY.vision_analyze_fn = fake_vision
-            with TestClient(dashboard_server.app) as client:
+            with (
+                patch.object(
+                    dashboard_server.PROVIDER_CONFIGURATION,
+                    "current_vision_config",
+                    return_value=ProviderVisionConfig(
+                        provider="openai", api_key="fixture-vision-key",
+                        base_url="https://fixture.invalid/v1", model="gpt-4o", enabled=True,
+                    ),
+                ),
+                TestClient(dashboard_server.app) as client,
+            ):
                 response = client.post(
                     "/api/app/agent/message",
                     json={
@@ -4634,9 +4690,17 @@ class DashboardServerTests(unittest.TestCase):
                     "contextLimit": 64_000,
                 }
             )
-            with dashboard_server.RUNTIME_PLANNER.bind_turn(
-                dashboard_server.agent_runtime_request_payload(mismatched)
-            ) as mismatched_metadata:
+            selected_params = dashboard_server.agent_runtime_request_payload(mismatched)
+            with dashboard_server.RUNTIME_PLANNER.bind_turn(selected_params) as selected_metadata:
+                self.assertEqual(selected_metadata.verified_context_limit, 64_000)
+
+            # A valid session model override is not a binding mismatch. Exercise
+            # the negative case against the model the resolver actually binds.
+            with patch.object(
+                dashboard_server.PROVIDER_CONFIGURATION,
+                "resolve_session_config",
+                return_value=configured,
+            ), dashboard_server.RUNTIME_PLANNER.bind_turn(selected_params) as mismatched_metadata:
                 self.assertIsNone(mismatched_metadata.verified_context_limit)
 
         self.assertEqual(response.status_code, 200)
@@ -6578,7 +6642,10 @@ class DashboardServerTests(unittest.TestCase):
             patch.object(
                 dashboard_server.PROVIDER_CONFIGURATION,
                 "current_api_config",
-                return_value=_test_runtime_provider_config(),
+                return_value=ProviderApiConfig(
+                    provider="deepseek", api_key="fixture-deepseek-key",
+                    base_url="https://api.deepseek.com", model="deepseek-v4-pro",
+                ),
             ),
             patch(
                 "dashboard_server.request_llm_plan_with_metadata",
@@ -10756,6 +10823,15 @@ class DashboardServerTests(unittest.TestCase):
         self.assertFalse(parameter["networkSynced"])
         self.assertFalse(animator["writeDefaults"])
 
+    def test_ensure_animator_state_forwards_optional_time_parameter_fields(self) -> None:
+        request = dashboard_server.build_ensure_animator_state_request(
+            {"layerName": "Face", "stateName": "Jaw", "parameterName": "Jaw", "parameterType": "Float",
+             "time_parameter_active": True, "time_parameter": "Jaw"},
+            preview=True,
+        )
+        self.assertTrue(request["timeParameterActive"])
+        self.assertEqual(request["timeParameter"], "Jaw")
+
     @patch("dashboard_server.invoke_unity_mcp")
     @patch("dashboard_server.load_dashboard_settings")
     def test_create_wardrobe_preview_forwards_with_flag(self, mock_load_settings, mock_invoke) -> None:
@@ -11325,6 +11401,39 @@ class DashboardServerTests(unittest.TestCase):
         self.assertIn("VRCAvatarDescriptor", source)
         self.assertIn("VRCExpressionsMenu", source)
         self.assertIn("AnimatorController", source)
+
+    def test_face_tuning_skill_exposes_refresh_after_save_to_provider(self) -> None:
+        config = dashboard_server.AGENT_GATEWAY.ensure_config()
+        config.enabled = True
+        dashboard_server.AGENT_GATEWAY.save_config(config)
+        headers = {"Authorization": f"Bearer {config.token}"}
+
+        with TestClient(dashboard_server.app) as client:
+            payload = client.get("/api/agent/manifest?exposure_layer=execution", headers=headers).json()
+
+        skill = next(item for item in payload["skills"] if item["name"] == "face-tuning-workflow")
+        tool_names = {item["name"] for item in payload["tools"]}
+        self.assertIn("vrcforge_refresh_execution_target", tool_names)
+        self.assertIn("vrcforge_refresh_execution_target", skill["allowedTools"])
+        self.assertIn("refresh", skill["description"].casefold())
+        self.assertTrue(any("same-target refresh after a successful save before any later Unity read" in item for item in skill["outputs"]))
+        runtime_skill = build_runtime_skill_payload(skill, {})
+        self.assertIn("vrcforge_refresh_execution_target", runtime_skill["allowedTools"])
+        self.assertTrue(any("stop if refresh fails" in item for item in runtime_skill["outputs"]))
+
+        observed_registry = summarize_skill_registry(
+            dashboard_server.AGENT_GATEWAY.skills.build_skill_registry()
+        )
+        observed_skill = next(item for item in observed_registry["skills"] if item["name"] == "face-tuning-workflow")
+        self.assertIn("vrcforge_refresh_execution_target", observed_skill["allowedTools"])
+
+        planner_catalog = dashboard_server._RuntimePlannerCatalog().read(
+            "execution", project_context_active=True
+        )
+        planner_tool_names = {item.name for item in planner_catalog.visible_tools}
+        self.assertIn("unity_refresh_execution_target", planner_tool_names)
+        planner_skill = next(item for item in planner_catalog.skills if item.name == "face-tuning-workflow")
+        self.assertIn("same public executionTarget", planner_skill.description)
 
     def test_avatar_primitive_tools_registered_with_safe_exposure(self) -> None:
         config = dashboard_server.AGENT_GATEWAY.ensure_config()
@@ -12839,17 +12948,14 @@ class DashboardServerTests(unittest.TestCase):
         gm_enter_policy = targets["vrcforge_gesture_manager_enter_play_mode"]["rollbackPolicy"]
         self.assertEqual(gm_enter_policy["kind"], "ephemeral_editor_state_inverse")
         self.assertEqual(gm_enter_policy["restoreTool"], "vrcforge_set_play_mode")
-        self.assertTrue(gm_enter_policy["preWriteCheckpointRequired"])
+        self.assertFalse(gm_enter_policy["preWriteCheckpointRequired"])
 
         gm_runtime_policy = targets["vrcforge_gesture_manager_set_parameter"]["rollbackPolicy"]
         self.assertFalse(gm_runtime_policy["preWriteCheckpointRequired"])
         play_exit_policy = targets["vrcforge_set_play_mode"]["rollbackPolicy"]
-        # The published rollback summary is conservative for this conditional
-        # policy because it is evaluated without the requested isPlaying value.
-        self.assertTrue(play_exit_policy["preWriteCheckpointRequired"])
+        self.assertFalse(play_exit_policy["preWriteCheckpointRequired"])
         play_policy = dashboard_server.AGENT_GATEWAY._write_handlers["vrcforge_set_play_mode"].pre_write_checkpoint_required
-        self.assertTrue(callable(play_policy))
-        self.assertFalse(play_policy({"isPlaying": False}))
+        self.assertFalse(play_policy)
 
         restore_policy = targets["vrcforge_restore_checkpoint"]["rollbackPolicy"]
         self.assertEqual(restore_policy["kind"], "checkpoint_restore")
@@ -12889,17 +12995,16 @@ class DashboardServerTests(unittest.TestCase):
         self.assertIn("closedScenes", source)
         self.assertIn("reopenErrors", source)
         self.assertIn("recoveryRequired = true", source)
-        self.assertIn("EditorSceneManager.SaveScene(scene)", source)
-        self.assertIn(
-            "if (scene.isDirty)\n"
-            "                    {\n"
-            "                        if (!EditorSceneManager.SaveScene(scene))",
-            source,
-        )
-        self.assertLess(
-            source.index('"unsaved_open_scene"'),
-            source.index("AssetDatabase.SaveAssets()"),
-        )
+        prepare_source = source[
+            source.index("public static class CheckpointPrepareTool") :
+            source.index("public static class CheckpointReloadTool")
+        ]
+        self.assertNotIn("EditorSceneManager.SaveScene", prepare_source)
+        self.assertNotIn("AssetDatabase.SaveAssets", prepare_source)
+        self.assertIn('? "dirty_editor_state" : ""', prepare_source)
+        self.assertIn("snapshotIncludesUnsavedState = false", prepare_source)
+        self.assertIn("saved = false", prepare_source)
+        self.assertIn("mutationStarted = false", prepare_source)
         self.assertIn("EditorSceneManager.OpenScene", source)
         self.assertIn("NewSceneSetup.EmptyScene", source)
         self.assertIn("EditorSceneManager.CloseScene(scene, true)", source)
@@ -13697,7 +13802,7 @@ class DashboardServerTests(unittest.TestCase):
         self.assertIn("valueTruncated", get_property_source)
         # Keep ICollection definite assignment explicit for Unity's C# compiler.
         self.assertIn("var collection = value as ICollection;", source)
-        self.assertIn("var totalKnown = collection != null;", source)
+        self.assertIn("if (collection != null)", source)
         self.assertNotIn("value is ICollection collection", source)
         self.assertIn(
             "value is UnityEngine.Object || !(value is IEnumerable enumerable) || value is string",
@@ -14499,6 +14604,61 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(
             result["errorCode"], "unitypackage_import_job_id_invalid"
         )
+        mock_invoke.assert_not_called()
+
+    @patch("dashboard_server.invoke_unity_mcp")
+    @patch("dashboard_server.load_dashboard_settings")
+    @patch("execution_target.validate_runtime_execution_target")
+    def test_setup_outfit_status_uses_read_only_backend_poll_lane(
+        self, mock_validate_target, mock_load_settings, mock_invoke
+    ) -> None:
+        mock_load_settings.return_value = SimpleNamespace()
+        mock_invoke.return_value = dashboard_server.McpResult(
+            exit_code=0,
+            stdout="ok",
+            stderr="",
+            payload={"data": {"ok": True, "status": "pending", "jobId": "b" * 32, "mutationStarted": False}},
+        )
+
+        result = dashboard_server.get_setup_outfit_status_sync(
+            {"projectPath": r"C:\Project", "jobId": "B" * 32, "executionTarget": {"schema": "vrcforge.execution_target.v1"}}
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], "pending")
+        mock_validate_target.assert_called_once()
+        _settings, tool_name, arguments = mock_invoke.call_args.args
+        self.assertEqual(tool_name, "vrc_setup_outfit")
+        self.assertEqual(arguments, {"jobId": "b" * 32})
+        self.assertEqual(mock_invoke.call_args.kwargs["execution_context"], {"lane": dashboard_server.SETUP_OUTFIT_POLL_LANE})
+        self.assertTrue(mock_invoke.call_args.kwargs["preserve_tool_error"])
+
+    @patch("dashboard_server.invoke_unity_mcp")
+    def test_setup_outfit_status_rejects_missing_execution_target_before_core(self, mock_invoke) -> None:
+        result = dashboard_server.get_setup_outfit_status_sync(
+            {"projectPath": r"C:\Project", "jobId": "a" * 32}
+        )
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["errorCode"], "setup_outfit_execution_target_required")
+        mock_invoke.assert_not_called()
+
+    @patch("dashboard_server.invoke_unity_mcp")
+    def test_setup_outfit_status_rejects_invalid_job_before_target_or_core(self, mock_invoke) -> None:
+        result = dashboard_server.get_setup_outfit_status_sync(
+            {"projectPath": r"C:\Project", "jobId": "not-a-job", "executionTarget": {}}
+        )
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["errorCode"], "setup_outfit_job_id_invalid")
+        mock_invoke.assert_not_called()
+
+    @patch("dashboard_server.invoke_unity_mcp")
+    @patch("execution_target.validate_runtime_execution_target", side_effect=RuntimeError("project_root_drifted"))
+    def test_setup_outfit_status_rejects_wrong_project_target_before_core(self, _mock_validate, mock_invoke) -> None:
+        result = dashboard_server.get_setup_outfit_status_sync(
+            {"projectPath": r"C:\Project", "jobId": "a" * 32, "executionTarget": {"schema": "vrcforge.execution_target.v1"}}
+        )
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["errorCode"], "setup_outfit_execution_target_invalid")
         mock_invoke.assert_not_called()
 
     @patch("dashboard_server.invoke_unity_mcp")
@@ -17264,6 +17424,7 @@ namespace VRCForge.Editor
                 patch("dashboard_server.parse_args", return_value=args),
                 patch("dashboard_server.backend_bind_target_occupied", return_value=False),
                 patch("dashboard_server.BACKEND_OWNER_LEASE", lease),
+                patch.object(dashboard_server.AGENT_GATEWAY._scan_results, "reconcile_orphaned_mutations", return_value={"ok": True}) as reconcile,
                 patch("dashboard_server.run_owned_uvicorn_server") as run_server,
             ):
                 result = dashboard_server.main()
@@ -17271,10 +17432,33 @@ namespace VRCForge.Editor
             self.assertEqual(result, 0)
             self.assertTrue(worker.is_alive())
             run_server.assert_called_once_with(args.host, args.port)
+            reconcile.assert_called_once_with()
             lease.release.assert_not_called()
         finally:
             stop_worker.set()
             worker.join(timeout=2)
+
+    def test_backend_main_releases_owner_when_scan_reconcile_fails(self) -> None:
+        args = dashboard_server.parse_args([])
+        lease = Mock()
+        lease.acquire.return_value = True
+        with (
+            patch("dashboard_server.parse_args", return_value=args),
+            patch("dashboard_server.backend_bind_target_occupied", return_value=False),
+            patch("dashboard_server.BACKEND_OWNER_LEASE", lease),
+            patch.object(
+                dashboard_server.AGENT_GATEWAY._scan_results,
+                "reconcile_orphaned_mutations",
+                side_effect=RuntimeError("reconcile failed"),
+            ),
+            patch("dashboard_server.run_owned_uvicorn_server") as run_server,
+            patch("builtins.print"),
+        ):
+            result = dashboard_server.main()
+
+        self.assertEqual(result, 1)
+        lease.release.assert_called_once_with()
+        run_server.assert_not_called()
 
     def test_shader_plan_validation_respects_locked_materials_and_properties(self) -> None:
         validation = dashboard_server.validate_shader_material_tuning_plan(

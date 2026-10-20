@@ -49,12 +49,12 @@ class ContextCompactionTests(unittest.TestCase):
 
     def test_full_and_paged_boundaries_preserve_every_entry(self) -> None:
         history = [
-            {"role": "user", "text": "original goal " + "g" * 40},
-            {"role": "assistant", "text": "first answer " + "a" * 40},
-            {"role": "user", "text": "middle request " + "m" * 40},
-            {"role": "assistant", "text": "middle answer " + "n" * 40},
-            {"role": "user", "text": "latest request " + "r" * 40},
-            {"role": "assistant", "text": "latest answer " + "z" * 40},
+            {"role": "user", "text": "original goal " + "中" * 1000},
+            {"role": "assistant", "text": "first answer " + "a" * 1000},
+            {"role": "user", "text": "middle request " + "中" * 1000},
+            {"role": "assistant", "text": "middle answer " + "n" * 1000},
+            {"role": "user", "text": "latest request " + "中" * 1000},
+            {"role": "assistant", "text": "latest answer " + "z" * 1000},
         ]
         prompts: list[str] = []
 
@@ -73,6 +73,7 @@ class ContextCompactionTests(unittest.TestCase):
             history,
             summarizer=lambda prompt: prompts.append(prompt) or {"summary": "fitted"},
             target_tokens=full_cost - 1,
+            real_context_limit=6_000,
         )
 
         self.assertEqual(full["fidelity"], "full")
@@ -82,6 +83,26 @@ class ContextCompactionTests(unittest.TestCase):
         self.assertEqual(retained, history)
         self.assertEqual(fitted["retainedEntryCount"], fitted["entryCount"])
         self.assertTrue(fitted["completeness"]["summarizerInputComplete"])
+
+    def test_small_summary_target_does_not_page_small_history(self) -> None:
+        history = [
+            {"role": "user", "text": "Keep the approved release path " + "x" * 60},
+            {"role": "assistant", "text": "The checkpoint is durable " + "y" * 60},
+            {"role": "user", "text": "Continue with the next action " + "z" * 60},
+        ]
+        prompts: list[str] = []
+
+        result = compact_context(
+            history,
+            target_tokens=64,
+            summarizer=lambda prompt: prompts.append(prompt) or "small safe summary",
+        )
+
+        self.assertEqual(len(prompts), 1)
+        self.assertEqual(result["fidelity"], "full")
+        self.assertEqual(result["coverage"]["pageCount"], 1)
+        self.assertEqual(result["retainedEntryCount"], result["entryCount"])
+        self.assertTrue(result["completeness"]["summarizerInputComplete"])
 
     def test_redacts_paths_secrets_and_avatar_ids_before_provider(self) -> None:
         raw_secret = "sk-proj-supersecret123456"
@@ -265,6 +286,7 @@ class ContextCompactionTests(unittest.TestCase):
             ],
             summarizer=should_not_run,
             target_tokens=64,
+            real_context_limit=6_000,
         )
 
         self.assertFalse(provider_called)
@@ -282,12 +304,12 @@ class ContextCompactionTests(unittest.TestCase):
 
     def test_paged_provider_input_keeps_goal_middle_and_latest_stateful_block(self) -> None:
         history = [
-            {"role": "user", "text": "Goal: preserve the approved release path."},
-            {"role": "assistant", "text": "Older discussion can be fitted out."},
-            {"role": "user", "text": "Continue from the saved state."},
-            {"role": "assistant", "text": "Latest response keeps the next action explicit."},
+            {"role": "user", "text": "Goal: preserve the approved release path. " + "中" * 900},
+            {"role": "assistant", "text": "Older discussion can be fitted out. " + "中" * 900},
+            {"role": "user", "text": "Continue from the saved state. " + "中" * 900},
+            {"role": "assistant", "text": "Latest response keeps the next action explicit. " + "中" * 900},
             {"role": "assistant", "text": "Durable approval state; approvalId=approval-42; status=pending"},
-            {"role": "assistant", "text": "Durable runtime references; checkpointId=checkpoint-42"},
+            {"role": "assistant", "text": "Durable runtime references; checkpointId=checkpoint-42 " + "中" * 200},
             {"role": "assistant", "text": "Durable sub-agent ownership; taskId=task-42; status=completed"},
         ]
         prompts: list[str] = []
@@ -296,6 +318,7 @@ class ContextCompactionTests(unittest.TestCase):
             history,
             summarizer=lambda prompt: prompts.append(prompt) or "fitted",
             target_tokens=int(full["estimatedInputTokens"]) - 1,
+            real_context_limit=6_000,
         )
 
         retained = [entry for prompt in prompts for entry in _prompt_entries(prompt)]
@@ -319,6 +342,7 @@ class ContextCompactionTests(unittest.TestCase):
             ],
             summarizer=should_not_run,
             target_tokens=128,
+            real_context_limit=6_000,
         )
         inline = json.dumps({key: value for key, value in result.items() if key != "recovery"}, ensure_ascii=False)
 
@@ -383,8 +407,8 @@ class ContextCompactionTests(unittest.TestCase):
     def test_schema_failure_falls_closed_after_fitted_input_without_leaking_provider_metadata(self) -> None:
         history = [
             {"role": "user", "text": "Goal: keep the original plan."},
-            {"role": "assistant", "text": "Older discussion " + "x" * 300},
-            {"role": "user", "text": "Latest request " + "y" * 300},
+            {"role": "assistant", "text": "Older discussion " + "中" * 1_500},
+            {"role": "user", "text": "Latest request " + "中" * 1_500},
         ]
         full = compact_context(history, target_tokens=10_000)
         result = compact_context(
@@ -393,6 +417,7 @@ class ContextCompactionTests(unittest.TestCase):
             provider="Bearer unsafe-provider-token",
             model="model-safe",
             target_tokens=int(full["estimatedInputTokens"]) - 1,
+            real_context_limit=6_000,
         )
 
         self.assertEqual(result["fidelity"], "fallback")

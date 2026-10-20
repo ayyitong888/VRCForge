@@ -9,6 +9,7 @@ from typing import Any
 
 from unity_mcp_core_client import UnityMcpCoreClient
 from agent_scan_scope_budget import capture_admission_reason, scope_request
+from execution_target import validate_runtime_execution_target
 
 
 SCAN_SCOPE_SCHEMA = "vrcforge.scan_scope.v1"
@@ -22,11 +23,15 @@ SCOPED_SCAN_TOOLS = frozenset({
     "vrcforge_scan_avatar_controls",
     "vrcforge_scan_avatar_parameters",
     "vrcforge_scan_avatar_materials",
+    "vrcforge_scan_materials",
     "vrcforge_scan_avatar_items",
     "vrcforge_read_avatar_descriptor",
 })
-CORE_TIMEOUT_SECONDS = 3.0
+# Scope measurement includes dependency hashes, not just a bootstrap probe.
+# Keep one bounded read deadline; failed captures remain suppressed by the store.
+CORE_TIMEOUT_SECONDS = 30.0
 MAX_SCOPE_PATHS = 256
+_MATERIAL_SCAN_ALIAS = "vrcforge_scan_materials"
 _TOKEN = re.compile(r"scope_[0-9a-f]{32}\Z")
 
 
@@ -85,16 +90,35 @@ class AgentScanScopeClient:
                 return {"schema": SCAN_SCOPE_SCHEMA, "verified": False, "reason": "invalid_scan_request"}
             if scan_tool not in SCOPED_SCAN_TOOLS:
                 return {"schema": SCAN_SCOPE_SCHEMA, "verified": False, "reason": "scan_scope_undeclared"}
+            is_material_alias = scan_tool == _MATERIAL_SCAN_ALIAS
             request = scope_request(scan_tool, arguments)
-            if self.capture_budget is not None:
+            if self.capture_budget is not None and not is_material_alias:
                 reason = capture_admission_reason(request)
                 if reason:
                     return {"schema": SCAN_SCOPE_SCHEMA, "verified": False, "reason": reason}
             client = self._client_with_capability()
             if client is None:
                 return {"schema": SCAN_SCOPE_SCHEMA, "verified": False, "reason": "capability_unavailable"}
+            material_target = self._material_target(client, arguments) if is_material_alias else None
+            if is_material_alias:
+                if material_target is None:
+                    return {"schema": SCAN_SCOPE_SCHEMA, "verified": False,
+                            "reason": "scope_capture_identity_unavailable"}
+                avatar = material_target["avatar"]
+                object_id = avatar["globalObjectId"]
+                request = scope_request(
+                    scan_tool,
+                    {**arguments, "avatarPath": avatar["exactHierarchyPath"]},
+                    host_object_ids=["global:" + object_id],
+                )
+                if self.capture_budget is not None:
+                    reason = capture_admission_reason(request, trusted_object_root=True)
+                    if reason:
+                        return {"schema": SCAN_SCOPE_SCHEMA, "verified": False, "reason": reason}
             if self.capture_budget is not None:
-                info = {**self._core_info, "captureRootIdentity": self._capture_identity(client, request)}
+                capture_identity = (self._target_capture_identity(material_target) if is_material_alias
+                                    else self._capture_identity(client, request))
+                info = {**self._core_info, "captureRootIdentity": capture_identity}
                 return self.capture_budget.capture(self._project_root, info, request,
                                                    lambda: self._capture_request(client, request))
             return self._capture_request(client, request)
@@ -102,6 +126,65 @@ class AgentScanScopeClient:
             code = getattr(exc, "cause_code", None)
             return {"schema": SCAN_SCOPE_SCHEMA, "verified": False,
                     "reason": _reason(code, "core_unavailable")}
+
+    def _material_target(self, client, arguments):
+        """Resolve one fresh, exact Avatar target; caller roots are not authority."""
+        envelope = client.call_tool("vrc_get_execution_targets", {"scope": "avatar"})
+        structured = envelope.get("structuredContent") if isinstance(envelope, dict) else None
+        if not isinstance(structured, dict) or structured.get("success") is not True \
+                or not isinstance(structured.get("data"), dict):
+            return None
+        data = structured["data"]
+        targets = data.get("targets")
+        if targets is None:
+            if data.get("schema") != "vrcforge.execution_target.v1" \
+                    or data.get("ambiguous") is not False \
+                    or data.get("resolutionCandidateCount") != 1:
+                return None
+            targets = [data]
+        else:
+            candidate_count = data.get("totalCandidateCount", data.get("resolutionCandidateCount"))
+            if data.get("ambiguous") is not False or type(candidate_count) is not int \
+                    or candidate_count != len(targets):
+                return None
+        if not isinstance(targets, list) or data.get("ambiguous") is True \
+                or data.get("hasMore") is True or data.get("complete") is False:
+            return None
+        if len(targets) != 1:
+            return None
+        target = targets[0]
+        try:
+            verified = validate_runtime_execution_target(
+                target, project_root=str(self._project_root), required_scope="avatar",
+            )
+        except Exception:
+            return None
+        if verified.get("scope") != "avatar":
+            return None
+        avatar = verified.get("avatar")
+        scene = verified.get("scene")
+        if not isinstance(avatar, dict) or not isinstance(scene, dict):
+            return None
+        hierarchy_path = avatar.get("exactHierarchyPath")
+        object_id = avatar.get("globalObjectId")
+        scene_guid = scene.get("guid")
+        if not isinstance(hierarchy_path, str) or not hierarchy_path.strip() \
+                or not isinstance(object_id, str) or not object_id.startswith("GlobalObjectId_V1-") \
+                or not isinstance(scene_guid, str) or not scene_guid.strip():
+            return None
+        selector = arguments.get("avatarPath") or arguments.get("avatar_path") or ""
+        if selector and selector not in (hierarchy_path, avatar.get("name")):
+            return None
+        return {"avatar": avatar, "scene": scene}
+
+    @staticmethod
+    def _target_capture_identity(target):
+        if not isinstance(target, dict):
+            return None
+        avatar, scene = target.get("avatar"), target.get("scene")
+        if not isinstance(avatar, dict) or not isinstance(scene, dict):
+            return None
+        return [["avatar", scene.get("guid"), avatar.get("globalObjectId")]]
 
     def _capture_identity(self, client, request):
         args = request["arguments"]
@@ -180,6 +263,10 @@ class AgentScanScopeClient:
         normalized_paths = sorted(set(paths))
         if len(normalized_paths) != len(paths):
             return {"schema": SCAN_SCOPE_SCHEMA, "verified": False, "reason": "invalid_scope_response"}
+        metadata_paths = content.get("metadataOnlyAssetPaths", [])
+        if not isinstance(metadata_paths, list) or any(not isinstance(path, str) for path in metadata_paths) \
+                or len(set(metadata_paths)) != len(metadata_paths) or not set(metadata_paths).issubset(normalized_paths):
+            return {"schema": SCAN_SCOPE_SCHEMA, "verified": False, "reason": "invalid_scope_response"}
         return {
             "schema": SCAN_SCOPE_SCHEMA,
             "verified": True,
@@ -188,6 +275,7 @@ class AgentScanScopeClient:
             "assetPaths": normalized_paths,
             "capturedAt": captured_at,
             "dependencyCoverage": "complete",
+            **({"metadataOnlyAssetPaths": sorted(metadata_paths)} if metadata_paths else {}),
         }
 
     def validate(self, token: str) -> dict[str, Any]:

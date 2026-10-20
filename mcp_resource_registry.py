@@ -318,7 +318,7 @@ class McpResourceRegistry:
                     "uri": item["uri"],
                     "name": item["name"],
                     "description": item["description"],
-                    "mimeType": "image/png" if item["resourceType"] in {"runtime_observation_frame", "texture_asset_preview"} else RESOURCE_MIME_TYPE,
+                    "mimeType": "image/png" if item["resourceType"] in {"runtime_observation_frame", "texture_asset_preview", "scene_capture_preview"} else RESOURCE_MIME_TYPE,
                     "_meta": {
                         "resourceType": item["resourceType"],
                         "revision": item["revision"],
@@ -356,6 +356,9 @@ class McpResourceRegistry:
         if envelope["resourceType"] == "texture_asset_preview":
             from texture_preview_resources import read_texture_preview
             return read_texture_preview(envelope)
+        if envelope["resourceType"] == "scene_capture_preview":
+            from scene_capture_preview import read_scene_capture_preview
+            return read_scene_capture_preview(envelope)
         if envelope["resourceType"] == "runtime_observation_state_page":
             from runtime_state_resources import read_state_page
             return read_state_page(envelope)

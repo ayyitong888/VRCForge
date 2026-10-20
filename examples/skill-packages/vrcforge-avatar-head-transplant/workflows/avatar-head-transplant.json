@@ -28,6 +28,24 @@
     "matrixPolicy": {"default": "prohibited", "requiresSeparateExplicitUserAuthorization": true, "forbiddenByDefault": ["skin_matrix_analysis", "determinant_checks", "bindpose_comparison", "programmatic_transform_guessing", "sub_millimeter_vertex_comparison"], "neverCountsTowardVisualAcceptance": true, "authorizedDiagnosticsRemainDiagnosticOnly": true},
     "visibleCandidateTimebox": {"minutesPerStep": 20, "onNoVisibleCandidate": "stop_report_current_state_with_screenshot_and_ask_for_direction", "mustNot": "continue_exploring_after_timebox"},
     "visualAcceptance": {"authority": "free_camera_pixels_at_normal_vrchat_viewing_distance", "normalViewingDistanceMeters": [1.0, 2.0], "failIf": ["visible_gap", "floating_geometry", "visible_distortion"], "matrixNormalMapOrSubMillimeterEvidenceCannotPass": true, "remoteScreenshotWithoutVerifiedCameraEvidenceCannotPass": true},
+    "prefabInstanceAuthoring": {
+      "appliesOnlyTo": "structural_scene_writes_on_prefab_instances",
+      "tool": "vrcforge_unpack_prefab",
+      "preview": {"preview": true, "mode": "completely"},
+      "identityFields": ["expectedGlobalObjectId", "expectedPrefabGuid", "expectedAssetDependencyHash", "expectedScenePath"],
+      "approvalAndCheckpointRequired": true,
+      "rebindAfterUnpack": true,
+      "persistedReadbackRequired": true,
+      "preserveSourcePrefabAsset": true,
+      "preserveAuthorComponentsAndReferences": true,
+      "readOnlyAndIndependentMaterialAssetsExempt": true
+    },
+    "faceTrackingAcceptance": {
+      "serializedInstallAndConfiguration": "edit_mode_persisted_readback",
+      "playRuntimeAndVisualAcceptance": "separate_explicitly_approved_bounded_observation",
+      "configurationDoesNotProveRuntime": true,
+      "runtimeEvidenceDoesNotRewriteConfiguration": true
+    },
     "headSwap": {
       "classification": "full_head_transplant_not_rigid_or_independent_accessory_or_clothing_part_route",
       "mergeArmatureScope": "full_head_community_route_only_does_not_authorize_setup_outfit_for_rigid_or_independent_accessories",
@@ -301,6 +319,18 @@
   },
   "steps": [
     {
+      "name": "completely_unpack_structural_prefab_instance_before_head_authoring",
+      "tool": "vrcforge_unpack_prefab",
+      "tools": ["vrcforge_unpack_prefab"],
+      "writes": true,
+      "runtimeApprovalRequired": true,
+      "checkpointRequired": true,
+      "conditional": "structural_scene_write_target_is_prefab_instance",
+      "arguments": {"preview": true, "mode": "completely"},
+      "identityFields": ["expectedGlobalObjectId", "expectedPrefabGuid", "expectedAssetDependencyHash", "expectedScenePath"],
+      "guidance": "Preview and completely unpack the exact instance, then rebind persisted scene identity and read it back before structural writes; preserve the source Prefab asset and author components/references. Read-only scans and independent material/texture assets do not require unpacking."
+    },
+    {
       "name": "inventory_and_select_branch",
       "tool": "vrcforge_read_avatar_descriptor",
       "tools": [
@@ -354,6 +384,8 @@
       "runtimeApprovalRequired": true,
       "onePreviewBoundMutationPerApproval": true,
       "conditional": "visible_neck_lighting_or_texture_seam",
+      "prefabUnpackRequired": false,
+      "unpackException": "independent_material_or_texture_asset_write_does_not_structurally_edit_a_prefab_instance",
       "preserve": ["target_body_material", "target_body_texture", "donor_face_texture_identity", "eyes_and_expression_material_slots"],
       "whenExternalUvAuthoringRequired": {"capabilityGap": true, "ready": false, "failureCause": "seam_authoring_atom_unavailable"}
     },
@@ -364,6 +396,15 @@
       "writes": false,
       "required": ["active_renderer_paths_and_active_states", "resolved_lip_sync_mode_specific_target_readback", "each_expected_viseme_gesture_expression_binding_resolves_to_its_actual_active_renderer", "no_inactive_or_donor_sole_required_consumer"],
       "faceTrackedRequired": ["parameter_menu_controller_blendshape_closure", "every_controller_blendshape_exists_on_active_renderer", "zero_inactive_or_donor_only_face_consumers"]
+    },
+    {
+      "name": "read_back_serialized_face_tracking_configuration_before_play_acceptance",
+      "tool": "vrcforge_read_avatar_descriptor",
+      "tools": ["vrcforge_read_avatar_descriptor", "vrcforge_scan_parameters", "vrcforge_scan_avatar_controls", "vrcforge_scan_fx_animator", "vrcforge_scan_animation_bindings"],
+      "writes": false,
+      "conditional": "face_tracked_branch",
+      "acceptance": "edit_mode_serialized_configuration_readback_only",
+      "runtimeAcceptance": "separate_explicitly_approved_bounded_play_observation"
     },
     {
       "name": "read_rest_delta_and_gate_single_slot_remap",

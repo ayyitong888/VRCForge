@@ -21,6 +21,23 @@ const stateTranspiled = ts.transpileModule(stateSource, {
 }).outputText;
 const statePolicy = await import(`data:text/javascript;base64,${Buffer.from(stateTranspiled).toString("base64")}`);
 
+const boundaryStart = source.indexOf("export function contextUsageBoundaryItemId");
+const usageStart = source.indexOf("export function latestContextWindowUsage");
+const usageEnd = source.indexOf("export function projectRuntimeCompactionItems", usageStart);
+const usageHarness = boundaryStart >= 0 && usageStart >= 0
+  ? `${source.slice(boundaryStart, usageEnd)}
+export { contextUsageBoundaryItemId, latestContextWindowUsage };
+`
+  : `function contextUsageBoundaryItemId() { throw new Error("RED: contextUsageBoundaryItemId is not implemented"); }
+function latestContextWindowUsage() { throw new Error("RED: latestContextWindowUsage is not implemented"); }
+export { contextUsageBoundaryItemId, latestContextWindowUsage };
+`;
+const usageCompiled = ts.transpileModule(usageHarness, {
+  compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2020 },
+  fileName: "conversation-utils.ts",
+}).outputText;
+const conversationPolicy = await import(`data:text/javascript;base64,${Buffer.from(usageCompiled).toString("base64")}`);
+
 const knownWindow = (limit = 1000) => ({ limit, known: true, source: "provider" });
 const decisionAt = (tokens, options = {}) => policy.evaluateCompactionBudget({
   usage: { exact: true, peakInputTokens: tokens },
@@ -302,7 +319,7 @@ test("bounded fallback keeps the primary goal and newest complete turns without 
   assert.equal(indivisiblePrimary.overTarget, true);
 });
 
-test("mid-turn projection replaces only the summarized dialogue and preserves live ownership state", () => {
+test("mid-turn projection marks summarized dialogue and preserves the full durable order", () => {
   const items = [
     { id: "old-user", type: "user", text: "old request" },
     { id: "task", type: "subagent", task: { id: "task", status: "running" } },
@@ -325,11 +342,14 @@ test("mid-turn projection replaces only the summarized dialogue and preserves li
   assert.equal(projected.replacedCount, 2);
   assert.deepEqual(projected.items.map((item) => item.id), [
     "compact-window",
+    "old-user",
     "task",
+    "old-agent",
     "approval",
     "current-user",
   ]);
   assert.equal(projected.items[0].detail, "safe successor summary");
+  assert.deepEqual(projected.items[0].summarizedItemIds, ["old-user", "old-agent"]);
 
   const stale = policy.projectRuntimeCompactionItems(items, new Set(["missing"]), compactItem);
   assert.equal(stale.replacedCount, 0);
@@ -404,22 +424,62 @@ test("durable compaction state carries only bounded ownership references", () =>
   assert.ok(bounded[23].text.includes("approval-39"));
 });
 
-test("a replaced context window cannot reuse the old high-water usage sample", () => {
+test("current occupancy excludes retained pre-compaction usage and accepts a post-boundary receipt", () => {
+  const oldUsage = { exact: true, inputTokens: 9500, totalTokens: 9500 };
+  const newUsage = { exact: true, inputTokens: 1200, totalTokens: 1200 };
   const items = [
-    { id: "user", type: "user", text: "latest request" },
-    {
-      id: "agent",
-      type: "agent",
-      response: {
-        plan: { reply: "latest reply" },
-        contextUsage: { exact: true, peakInputTokens: 9500, inputTokens: 9500 },
-      },
-    },
+    { id: "compact-1", type: "compact", text: "compressed", createdAt: "2026-10-14T02:24:00.000Z", contextUsageBoundaryItemId: "retained-agent", summarizedItemIds: [] },
+    { id: "retained-agent", type: "agent", createdAt: "2026-10-14T02:23:59.000Z", response: { contextUsage: oldUsage } },
   ];
-  const invalidated = policy.invalidateCompactedWindowUsage(items);
-  assert.equal(invalidated[0], items[0]);
-  assert.equal(invalidated[1].response.contextUsage, undefined);
-  assert.equal(invalidated[1].response.plan.reply, "latest reply");
+  assert.equal(conversationPolicy.latestContextWindowUsage(items), undefined,
+    "a retained pre-compaction receipt must not become current occupancy");
+  items.push({ id: "new-agent", type: "agent", createdAt: "2026-10-14T02:24:01.000Z", response: { contextUsage: newUsage } });
+  assert.deepEqual(conversationPolicy.latestContextWindowUsage(items), newUsage);
+});
+
+test("explicit boundary ids work without item timestamps", () => {
+  const newUsage = { exact: true, inputTokens: 1200 };
+  const items = [
+    { id: "compact-1", type: "compact", text: "compressed", contextUsageBoundaryItemId: "retained-agent", summarizedItemIds: [] },
+    { id: "retained-agent", type: "agent", response: { contextUsage: { exact: true, inputTokens: 9500 } } },
+    { id: "new-agent", type: "agent", response: { contextUsage: newUsage } },
+  ];
+  assert.deepEqual(conversationPolicy.latestContextWindowUsage(items), newUsage);
+});
+
+test("clock order and same-millisecond markers do not override boundary position", () => {
+  const oldUsage = { exact: true, inputTokens: 9000 };
+  const newUsage = { exact: true, inputTokens: 1200 };
+  const items = [
+    { id: "new-marker", type: "compact", text: "new", createdAt: "2026-10-14T02:25:00.000Z", contextUsageBoundaryItemId: "new-agent", summarizedItemIds: [] },
+    { id: "new-agent", type: "agent", createdAt: "2026-10-14T02:24:00.000Z", response: { contextUsage: newUsage } },
+    { id: "old-marker", type: "compact", text: "old", createdAt: "2026-10-14T02:24:00.000Z", contextUsageBoundaryItemId: "old-agent", summarizedItemIds: [] },
+    { id: "old-agent", type: "agent", createdAt: "2026-10-14T02:23:59.000Z", response: { contextUsage: oldUsage } },
+  ];
+  assert.deepEqual(conversationPolicy.latestContextWindowUsage(items), undefined,
+    "max boundary position wins even when marker clocks are reversed");
+  items.push({ id: "after-new-marker", type: "agent", createdAt: "2026-10-14T02:24:00.001Z", response: { contextUsage: newUsage } });
+  assert.deepEqual(conversationPolicy.latestContextWindowUsage(items), newUsage);
+});
+
+test("a superseded legacy marker without a boundary does not block a newer generation", () => {
+  const usage = { exact: true, inputTokens: 1200 };
+  const items = [
+    { id: "new-marker", type: "compact", text: "new", contextUsageBoundaryItemId: "old-agent", summarizedItemIds: ["old-marker"] },
+    { id: "old-marker", type: "compact", text: "legacy", summarizedItemIds: [] },
+    { id: "old-agent", type: "agent", response: { contextUsage: { exact: true, inputTokens: 9000 } } },
+    { id: "new-agent", type: "agent", response: { contextUsage: usage } },
+  ];
+  assert.deepEqual(conversationPolicy.latestContextWindowUsage(items), usage);
+});
+
+test("no agent produces an explicit empty boundary and no occupancy", () => {
+  const items = [{ id: "user", type: "user", text: "no agent" }];
+  assert.equal(conversationPolicy.contextUsageBoundaryItemId(items), "");
+  assert.equal(conversationPolicy.latestContextWindowUsage([
+    { id: "compact", type: "compact", text: "empty", createdAt: "2026-10-14T02:24:00.000Z", contextUsageBoundaryItemId: "", summarizedItemIds: [] },
+    ...items,
+  ]), undefined);
 });
 
 test("revision CAS rejects stale summaries and restart recovery keeps the original items", () => {
@@ -491,6 +551,89 @@ test("compaction telemetry is bounded and restart normalization rejects unbounde
   assert.equal(restored.prefireOutcome, undefined);
   assert.equal(restored.suppressionReason.length, 80);
   assert.equal("summary" in restored, false);
+});
+
+test("compaction provider usage sums operations once and preserves unknown without zero fill", () => {
+  const first = statePolicy.mergeCompactionProviderUsage(undefined, {
+    exact: true, inputTokens: 100, outputTokens: 10, totalTokens: 110,
+    cacheReadTokens: 40, cacheWriteTokens: 5, cacheUsageComplete: true, cacheUsageRequestCount: 1,
+  });
+  const second = statePolicy.mergeCompactionProviderUsage(first, {
+    exact: true, inputTokens: 50, outputTokens: 5, totalTokens: 55,
+    cacheReadTokens: 20, cacheWriteTokens: 3, cacheUsageComplete: true, cacheUsageRequestCount: 1,
+  });
+  assert.deepEqual(second, {
+    exact: true, inputTokens: 150, outputTokens: 15, totalTokens: 165,
+    cacheReadTokens: 60, cacheWriteTokens: 8, cacheUsageComplete: true, cacheUsageRequestCount: 2,
+  });
+  const unknown = statePolicy.mergeCompactionProviderUsage(second, {
+    exact: false, unavailableReason: "provider_usage_missing",
+  });
+  assert.equal(unknown.exact, false);
+  assert.equal(unknown.inputTokens, 150);
+  assert.equal(unknown.outputTokens, 15);
+  assert.equal(unknown.totalTokens, 165);
+  assert.equal(unknown.unavailableReason, "provider_usage_missing");
+  const partialCache = statePolicy.mergeCompactionProviderUsage(second, {
+    exact: true, inputTokens: 20, outputTokens: 2, totalTokens: 22,
+    cacheWriteTokens: 4, cacheUsageComplete: false, cacheUsageRequestCount: 1,
+  });
+  assert.equal(partialCache.cacheReadTokens, 60);
+  assert.equal(partialCache.cacheWriteTokens, 12);
+  assert.equal(partialCache.cacheUsageComplete, false);
+  const empty = statePolicy.mergeCompactionProviderUsage(undefined, {
+    exact: false, unavailableReason: "provider_usage_missing",
+  });
+  assert.deepEqual(empty, { exact: false, unavailableReason: "provider_usage_missing" });
+});
+
+test("compact protocol coverage survives a known generation plus an unknown receipt", () => {
+  const known = {
+    schema: "vrcforge.provider_usage.v1", source: "compaction", exact: true, requestCount: 1,
+    inputTokens: 100, outputTokens: 10, totalTokens: 110, cacheReadTokens: 40, cacheWriteTokens: 5,
+    coverage: {
+      inputTokens: { requestCount: 1, reportedRequestCount: 1, complete: true },
+      outputTokens: { requestCount: 1, reportedRequestCount: 1, complete: true },
+      totalTokens: { requestCount: 1, reportedRequestCount: 1, complete: true },
+      cacheReadTokens: { requestCount: 1, reportedRequestCount: 1, complete: true },
+      cacheWriteTokens: { requestCount: 1, reportedRequestCount: 1, complete: true },
+    },
+    cacheCoverage: {
+      requestCount: 1,
+      read: { requestCount: 1, reportedRequestCount: 1, complete: true },
+      write: { requestCount: 1, reportedRequestCount: 1, complete: true },
+    },
+  };
+  const unknown = {
+    schema: "vrcforge.provider_usage.v1", source: "compaction", exact: false, requestCount: 1,
+    inputTokens: 20, outputTokens: 2, totalTokens: 22, cacheWriteTokens: 3,
+    partial: true, unavailableReason: "provider_usage_missing",
+    coverage: {
+      inputTokens: { requestCount: 1, reportedRequestCount: 0, complete: false },
+      outputTokens: { requestCount: 1, reportedRequestCount: 0, complete: false },
+      totalTokens: { requestCount: 1, reportedRequestCount: 0, complete: false },
+      cacheReadTokens: { requestCount: 1, reportedRequestCount: 0, complete: false },
+      cacheWriteTokens: { requestCount: 1, reportedRequestCount: 0, complete: false },
+    },
+    cacheCoverage: {
+      requestCount: 1,
+      read: { requestCount: 1, reportedRequestCount: 0, complete: false },
+      write: { requestCount: 1, reportedRequestCount: 0, complete: false },
+    },
+  };
+  const merged = statePolicy.mergeCompactionProviderUsage(known, unknown);
+  assert.equal(merged.requestCount, 2);
+  assert.equal(merged.inputTokens, 120);
+  assert.equal(merged.cacheReadTokens, 40);
+  assert.equal(merged.cacheWriteTokens, 8);
+  assert.equal(merged.exact, false);
+  assert.equal(merged.partial, true);
+  assert.deepEqual(merged.coverage.inputTokens, { requestCount: 2, reportedRequestCount: 1, complete: false });
+  assert.deepEqual(merged.cacheCoverage.read, { requestCount: 2, reportedRequestCount: 1, complete: false });
+  const legacyUnknown = statePolicy.mergeCompactionProviderUsage(known, undefined);
+  assert.equal(legacyUnknown.partial, true);
+  assert.equal(legacyUnknown.coverage.inputTokens.complete, false);
+  assert.equal(legacyUnknown.cacheCoverage.read.complete, false);
 });
 
 test("conversation meter delegates occupancy and threshold semantics to the pure policy", async () => {

@@ -12,6 +12,7 @@ import json
 import os
 import secrets
 import threading
+from copy import deepcopy
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -22,6 +23,7 @@ except ImportError:  # pragma: no cover - the packaged desktop runtime includes 
 
 
 EXECUTION_TARGET_SCHEMA = "vrcforge.execution_target.v1"
+EXECUTION_TARGET_REF_SCHEMA = "vrcforge.execution_target_ref.v1"
 EXECUTION_NAMESPACE_PREFIX = "vrcforge://"
 RESOURCE_PROVENANCE_SCHEMA = "vrcforge.resource_provenance.v1"
 PROMPT_PROVENANCE_SCHEMA = "vrcforge.prompt_skill_provenance.v1"
@@ -33,6 +35,16 @@ class ExecutionTargetError(ValueError):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
+
+
+def is_execution_target_reference(value: Any) -> bool:
+    return (
+        isinstance(value, Mapping)
+        and value.get("schema") == EXECUTION_TARGET_REF_SCHEMA
+        and isinstance(value.get("ref"), str)
+        and bool(value.get("ref").strip())
+        and set(value) == {"schema", "ref"}
+    )
 
 
 def normalize_project_root(value: Any) -> str:
@@ -86,6 +98,21 @@ def _under_root(value: Any, root: str, field: str) -> str:
     except ValueError as exc:
         raise ExecutionTargetError("identity_path_outside_project", f"ExecutionTarget {field} is outside the bound project.") from exc
     return path
+
+
+def _scene_absolute_path(scene: Mapping[str, Any], root: str) -> str:
+    """Resolve a Core scene identity that may expose only its assetPath."""
+
+    explicit = scene.get("absolutePath") or scene.get("path")
+    if explicit:
+        return _under_root(explicit, root, "scene.absolutePath")
+    asset_path = scene.get("assetPath")
+    if isinstance(asset_path, str) and asset_path.strip():
+        # Keep containment and extension checks below authoritative; this only
+        # supplies the filesystem candidate when Core omitted absolutePath.
+        candidate = Path(root) / asset_path.replace("/", os.sep)
+        return _under_root(str(candidate), root, "scene.assetPath")
+    return _under_root(None, root, "scene.absolutePath")
 
 
 def _identity_scope_for_target(target: Mapping[str, Any]) -> str:
@@ -162,7 +189,7 @@ def validate_execution_target(
 
     if scope in {"scene", "avatar", "object", "component"}:
         scene = dict(_mapping(target.get("scene"), "scene"))
-        scene_path = _under_root(scene.get("absolutePath") or scene.get("path"), root, "scene.absolutePath")
+        scene_path = _scene_absolute_path(scene, root)
         if not scene_path.casefold().endswith(".unity"):
             raise ExecutionTargetError("scene_path_invalid", "ExecutionTarget scene must be a Unity scene asset.")
         _required_string(scene.get("guid"), "scene.guid")
@@ -288,7 +315,7 @@ def validate_runtime_execution_target(
     target_scope = _identity_scope_for_target(target_mapping)
     if target_scope != "project":
         scene = _mapping(target_mapping.get("scene"), "scene")
-        scene_path = _under_root(scene.get("absolutePath") or scene.get("path"), root, "scene.absolutePath")
+        scene_path = _scene_absolute_path(scene, root)
         try:
             stat = Path(scene_path).stat()
             digest = hashlib.sha256(Path(scene_path).read_bytes()).hexdigest()
@@ -344,54 +371,244 @@ def execution_target_digest(value: Mapping[str, Any]) -> str:
 
 
 class ExecutionTargetBindingRegistry:
-    """Bounded process-owned handles for exact, already verified targets."""
+    """Bounded process-owned public references to exact, verified targets."""
 
     def __init__(self, *, max_bindings: int = 64, lock: threading.RLock | None = None) -> None:
         self._max_bindings = max(1, int(max_bindings))
         self._lock = lock or threading.RLock()
         self._bindings: dict[str, dict[str, Any]] = {}
 
-    def bind(self, target: Mapping[str, Any], *, project_root: str) -> dict[str, Any]:
+    @staticmethod
+    def _reference(handle: str) -> dict[str, str]:
+        return {"schema": EXECUTION_TARGET_REF_SCHEMA, "ref": handle}
+
+    @staticmethod
+    def _normalized_session(value: Any) -> str:
+        session = str(value or "").strip()
+        if not session:
+            raise ExecutionTargetError(
+                "execution_target_session_missing",
+                "ExecutionTarget references require the current trusted session.",
+            )
+        return session
+
+    def bind(
+        self,
+        target: Mapping[str, Any],
+        *,
+        project_root: str,
+        session_context: str,
+    ) -> dict[str, Any]:
+        normalized_root = normalize_project_root(project_root)
+        normalized_session = self._normalized_session(session_context)
         verified = validate_runtime_execution_target(
             target,
-            project_root=project_root,
+            project_root=normalized_root,
             required_scope=str(target.get("scope") or "project"),
         )
         digest = execution_target_digest(verified)
-        handle = "vrcforge-target-" + secrets.token_urlsafe(24)
         with self._lock:
+            for handle, current in self._bindings.items():
+                if (
+                    current.get("digest") == digest
+                    and current.get("sessionContext") == normalized_session
+                    and os.path.normcase(str(current.get("projectRoot") or ""))
+                    == os.path.normcase(normalized_root)
+                ):
+                    return {
+                        "executionTarget": self._reference(handle),
+                        "executionTargetDigest": digest,
+                        "scope": verified.get("scope"),
+                        "lifetime": "gateway_process_or_explicit_refresh",
+                    }
+            handle = "vrcforge-target-" + secrets.token_urlsafe(24)
             self._bindings[handle] = {
                 "target": verified,
                 "digest": digest,
-                "projectRoot": normalize_project_root(project_root),
+                "projectRoot": normalized_root,
+                "sessionContext": normalized_session,
             }
             while len(self._bindings) > self._max_bindings:
                 self._bindings.pop(next(iter(self._bindings)))
         return {
-            "executionTargetHandle": handle,
-            "executionTarget": verified,
+            "executionTarget": self._reference(handle),
             "executionTargetDigest": digest,
+            "scope": verified.get("scope"),
             "lifetime": "gateway_process_or_explicit_refresh",
         }
 
+    def _owned_binding(
+        self,
+        reference: Mapping[str, Any],
+        *,
+        session_context: str,
+        project_root: str | None = None,
+    ) -> dict[str, Any]:
+        if not is_execution_target_reference(reference):
+            raise ExecutionTargetError(
+                "execution_target_reference_invalid",
+                "ExecutionTarget reference is invalid.",
+            )
+        handle = str(reference["ref"])
+        normalized_root = normalize_project_root(project_root) if project_root is not None else None
+        normalized_session = self._normalized_session(session_context)
+        with self._lock:
+            prior = dict(self._bindings.get(handle) or {})
+        if not prior:
+            raise ExecutionTargetError(
+                "execution_target_handle_invalid",
+                "ExecutionTarget reference is unknown or expired.",
+            )
+        if prior.get("sessionContext") != normalized_session:
+            raise ExecutionTargetError(
+                "execution_target_session_mismatch",
+                "ExecutionTarget reference belongs to another session.",
+            )
+        if normalized_root is not None and (
+            os.path.normcase(str(prior.get("projectRoot") or "")) != os.path.normcase(normalized_root)
+        ):
+            raise ExecutionTargetError(
+                "project_root_drifted",
+                "ExecutionTarget reference belongs to another project.",
+            )
+        target = prior.get("target")
+        if not isinstance(target, Mapping):
+            raise ExecutionTargetError(
+                "execution_target_handle_invalid",
+                "ExecutionTarget reference has no verified identity.",
+            )
+        return prior
+
+    def bound_scope(
+        self,
+        reference: Mapping[str, Any],
+        *,
+        session_context: str,
+        project_root: str | None = None,
+    ) -> str:
+        """Read owner-bound snapshot metadata, not current operation authority.
+
+        Publishing an immutable receipt must not revalidate a pre-write scene
+        after that write changed it. Tool dispatch and current-identity reads
+        still use resolve() and its complete live identity checks.
+        """
+        prior = self._owned_binding(
+            reference, session_context=session_context, project_root=project_root,
+        )
+        target = prior["target"]
+        if execution_target_digest(target) != prior.get("digest"):
+            raise ExecutionTargetError(
+                "execution_target_identity_drifted",
+                "ExecutionTarget reference identity changed; bind a new target explicitly.",
+            )
+        return _identity_scope_for_target(target)
+
+    def bound_target_snapshot(
+        self,
+        reference: Mapping[str, Any],
+        *,
+        session_context: str,
+        project_root: str,
+    ) -> dict[str, Any]:
+        """Return the immutable host-verified binding snapshot without live revalidation.
+
+        This is for comparing a failed action's original identity with a newly
+        resolved target. It does not authorize dispatch; writes must still use
+        ``resolve`` with their current required scope.
+        """
+        prior = self._owned_binding(
+            reference, session_context=session_context, project_root=project_root,
+        )
+        target = prior.get("target")
+        if not isinstance(target, Mapping) or execution_target_digest(target) != prior.get("digest"):
+            raise ExecutionTargetError(
+                "execution_target_identity_drifted",
+                "ExecutionTarget reference identity changed; bind a new target explicitly.",
+            )
+        return deepcopy(dict(target))
+
+    def resolve(
+        self,
+        reference: Mapping[str, Any],
+        *,
+        project_root: str,
+        session_context: str,
+        required_scope: str | None = None,
+    ) -> dict[str, Any]:
+        """Restore a bound identity; an explicit operation scope stays strict."""
+        normalized_root = normalize_project_root(project_root)
+        prior = self._owned_binding(
+            reference, session_context=session_context, project_root=normalized_root,
+        )
+        target = prior["target"]
+        verified = validate_runtime_execution_target(
+            target,
+            project_root=normalized_root,
+            required_scope=_identity_scope_for_target(target) if required_scope is None else required_scope,
+        )
+        if execution_target_digest(verified) != prior.get("digest"):
+            raise ExecutionTargetError(
+                "execution_target_identity_drifted",
+                "ExecutionTarget reference identity changed; bind a new target explicitly.",
+            )
+        return verified
+
+    def resolve_in_current_session(
+        self,
+        reference: Mapping[str, Any],
+        *,
+        session_context: str,
+    ) -> dict[str, Any]:
+        """Resolve a ref for its owning session without exposing its project root."""
+
+        prior = self._owned_binding(reference, session_context=session_context)
+        return self.resolve(
+            reference,
+            project_root=str(prior.get("projectRoot") or ""),
+            session_context=session_context,
+        )
+
     def refresh(
         self,
-        handle: str,
+        reference: Mapping[str, Any],
         observed_target: Mapping[str, Any],
         *,
         project_root: str,
+        session_context: str,
     ) -> dict[str, Any]:
-        normalized_handle = str(handle or "").strip()
+        if not is_execution_target_reference(reference):
+            raise ExecutionTargetError(
+                "execution_target_reference_invalid",
+                "ExecutionTarget reference is invalid.",
+            )
+        normalized_handle = str(reference["ref"])
+        normalized_session = self._normalized_session(session_context)
+        normalized_root = normalize_project_root(project_root)
         with self._lock:
             prior = dict(self._bindings.get(normalized_handle) or {})
         if not prior:
             raise ExecutionTargetError("execution_target_handle_invalid", "ExecutionTarget handle is unknown or expired.")
+        if prior.get("sessionContext") != normalized_session:
+            raise ExecutionTargetError(
+                "execution_target_session_mismatch",
+                "ExecutionTarget reference belongs to another session.",
+            )
+        if os.path.normcase(str(prior.get("projectRoot") or "")) != os.path.normcase(normalized_root):
+            raise ExecutionTargetError(
+                "project_root_drifted",
+                "ExecutionTarget reference belongs to another project.",
+            )
         verified = validate_runtime_execution_target(
             observed_target,
-            project_root=project_root,
+            project_root=normalized_root,
             required_scope=str(observed_target.get("scope") or "project"),
         )
         prior_target = prior.get("target") if isinstance(prior.get("target"), Mapping) else {}
+        if str(prior_target.get("scope") or "project") != str(verified.get("scope") or "project"):
+            raise ExecutionTargetError(
+                "execution_target_identity_drifted",
+                "ExecutionTarget scope changed; bind a new target explicitly.",
+            )
         for section, field in (
             ("project", "projectId"),
             ("editor", "unityPid"),
@@ -415,16 +632,26 @@ class ExecutionTargetBindingRegistry:
             self._bindings[normalized_handle] = {
                 "target": verified,
                 "digest": digest,
-                "projectRoot": normalize_project_root(project_root),
+                "projectRoot": normalized_root,
+                "sessionContext": normalized_session,
             }
         return {
-            "executionTargetHandle": normalized_handle,
-            "executionTarget": verified,
+            "executionTarget": self._reference(normalized_handle),
             "executionTargetDigest": digest,
             "previousExecutionTargetDigest": prior.get("digest"),
             "changed": digest != prior.get("digest"),
             "lifetime": "gateway_process_or_explicit_refresh",
         }
+
+    def discard_session(self, session_context: str) -> None:
+        normalized_session = self._normalized_session(session_context)
+        with self._lock:
+            for handle in [
+                handle
+                for handle, record in self._bindings.items()
+                if record.get("sessionContext") == normalized_session
+            ]:
+                self._bindings.pop(handle, None)
 
 
 def standard_identity_metadata(*, scope: str, write: bool) -> dict[str, Any]:

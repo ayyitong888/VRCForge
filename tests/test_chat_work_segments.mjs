@@ -13,40 +13,39 @@ const helper = await readFile(resolve(import.meta.dirname, "..", "src", "lib", "
 assert.match(source, /buildTimelinePresentation/);
 assert.match(helper, /materializeInvocations/);
 assert.match(helper, /invocationIdentity/, "call and result must merge into one invocation row");
-assert.match(source, /commandBatch/);
-assert.match(source, /toolBatch/);
-assert.match(source, /subagentBatch/);
-assert.match(source, /data-agent-turn-duration/, "one turn-level elapsed marker must sit above semantic batches");
-assert.match(source, /workSegment/);
-assert.match(source, /workSegmentElapsed/);
+assert.match(source, /data-agent-turn-process-group/, "one turn-level process fold owns the intermediate work");
+assert.match(source, /turnProcessDisplayTitle/, "the process fold exposes a concrete duration title");
+assert.match(source, /openByDefault=\{Boolean\(options\.live\)\}/, "live work stays expanded while completed work starts folded");
+assert.match(source, /renderFinalAssistantRow/, "the final assistant summary remains outside the process fold");
 assert.match(helper, /timestamp/);
 assert.match(helper, /tool_call|tool_result|file_edit|command|subagent/);
-assert.match(helper, /finalAssistant/, "only the final assistant answer stays expanded");
+assert.match(helper, /function interleavedTimelineEntries\(/, "assistant updates and work batches share one ordered presentation");
 assert.match(source, /renderDirectTimelineInvocation/, "single invocations must not hide behind a generic semantic batch");
 assert.match(source, /compactExecution = icon === "shell" \|\| icon === "skill"/, "all command and tool rows use compact execution presentation");
-assert.match(source, /compactExecution \? \(icon === "shell" \? i18n\.t\("agent\.runCommand"\) : i18n\.t\("agent\.callTool"\)\)/, "collapsed invocation rows use generic labels");
-assert.match(source, /<span className="min-w-0 truncate text-xs">\{compactExecution \?/,
-  "collapsed command and tool summaries use the shared proportional text style");
+assert.match(source, /<span className="min-w-0 truncate text-xs" title=\{title\}>\{title\}<\/span>/, "collapsed invocation rows expose the actual invocation title");
+assert.match(source, /<span className="min-w-0 truncate text-sm leading-relaxed">\{title\}<\/span>/,
+  "collapsed work summaries use the shared proportional text style");
 assert.doesNotMatch(source, /<span className=\{cn\("min-w-0 truncate text-xs", icon === "shell" \? "font-mono"/,
   "collapsed command summaries must not use a code font");
-assert.match(source, /<pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words px-3 py-2\.5 font-mono text-xs/,
+assert.match(source, /<pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words[^\"]*font-mono text-xs/,
   "expanded invocation output remains monospaced");
 assert.match(source, /group-hover\/run:opacity-100 group-focus-visible\/run:opacity-100/, "invocation chevrons stay hidden until hover or keyboard focus");
-assert.match(source, /group-hover\/work-segment:opacity-100 group-focus-visible\/work-segment:opacity-100/, "work segment chevrons stay hidden until hover or keyboard focus");
+assert.match(source, /processHeader/, "the turn process header has a dedicated compact presentation");
+assert.match(source, /processHeader \?/, "the process header keeps its chevron adjacent to the elapsed title");
 assert.match(source, /invocation\.label[\s\S]*status/, "expanded invocation details retain the real label and status");
 assert.doesNotMatch(source, /statusLabel\}\<\/div\>\{children\}/, "expanded execution details do not repeat the aggregate status");
-assert.doesNotMatch(source, /key=\{entry\.id\}[\s\S]*?<WorkSegmentRow/, "one contiguous execution segment must not nest another work segment");
-assert.match(source, /!compactExecution \? <span[\s\S]*statusLabel/, "execution status stays inside expanded command/tool rows");
-assert.match(source, /entry\.kind === "process"/, "safe planner commentary must render directly even when adjacent");
+assert.match(source, /rows\.unshift\(group,\s*\.\.\.collapsedMessages\)/, "one turn owns one outer process fold ahead of collapsed messages");
+assert.match(source, /!compactExecution \|\| showCompactStatus \? <span[\s\S]*statusLabel/, "failed tools expose a short status while other compact execution rows stay compact");
+assert.match(source, /showCompactStatus=\{showToolFailure\}/, "only failed tool rows expose the short collapsed-row status");
+assert.doesNotMatch(source, /showStatus=\{(?:failed|processFailed)\}/, "aggregate tool/process rows do not promote an intermediate failure to the turn summary");
+assert.match(source, /invocation\.kind === "process"/, "safe planner commentary must render directly even when adjacent");
 assert.match(source, /data-agent-timeline-invocation="process"/, "non-CoT planner commentary owns a visible timeline row");
 assert.match(source, /<ChatMarkdown text=\{commentary\}/, "safe planner commentary must retain its complete projected text");
 assert.match(source, /const processRows: ReactNode\[\] = \[\]/, "one Agent turn owns one outer process group");
-assert.match(source, /const flushProcessRows = \(\) =>/, "execution segments can flush before direct planner commentary");
-assert.match(source, /flushProcessRows\(\);[\s\S]*rows\.push\(renderDirectTimelineInvocation/, "planner commentary is emitted at its original timeline position");
-assert.match(source, /key=\{`agent-turn-process-\$\{processGroupIndex\+\+\}`\}/, "each contiguous tool segment owns one collapsible group");
-assert.match(source, /rows\.push\(\.\.\.assistantRows\)/, "the final assistant answer stays outside the process group");
-assert.match(source, /showStatus/, "the outer process group exposes a compact running or failed status");
-assert.match(source, /processEventCount/, "the process summary counts actual invocations rather than rendered batch rows");
+assert.match(source, /processRows\.push\(renderDirectTimelineInvocation/, "tool rows stay in their original timeline order inside the process fold");
+assert.match(source, /processRows\.push\([\s\S]*ChatMarkdown/, "public progress rows stay in the process fold");
+assert.match(source, /showStatus/, "the process fold keeps an internal status contract");
+assert.match(source, /processInvocations/, "the process title is based on actual invocations rather than event wording");
 assert.doesNotMatch(source, /<time|toLocaleTimeString/, "expanded invocation rows must not repeat timestamps");
 
 const timeline = [
@@ -70,6 +69,23 @@ const toolBatches = presentation.entries.filter((entry) => entry.type === "batch
 assert.deepEqual(toolBatches.map((batch) => batch.invocations.map((entry) => entry.actionId)), [["action-a"], ["action-b"], ["action-d"]], "every safe update splits tool batches at its real occurrence");
 assert.deepEqual(toolBatches.map((batch) => batch.invocations.map((entry) => entry.status)), [["ok"], ["ok"], ["ok"]], "call/result pairs merge into one terminal invocation each");
 assert.equal(presentation.entries.filter((entry) => entry.type === "assistant").length, 1);
+
+const interleavedAssistantTimeline = buildTimelinePresentation([
+  { id: "public-1", sequence: 0, timestamp: "2026-08-14T00:02:00.000Z", kind: "assistant", payload: { summary: "public progress 1", status: "progress" } },
+  { id: "call-1", sequence: 1, timestamp: "2026-08-14T00:02:01.000Z", kind: "tool_call", payload: { actionId: "interleaved-1", tool: "vrcforge_list_directory", status: "started" } },
+  { id: "result-1", sequence: 2, timestamp: "2026-08-14T00:02:02.000Z", kind: "tool_result", payload: { actionId: "interleaved-1", tool: "vrcforge_list_directory", status: "ok", summary: "listed" } },
+  { id: "public-2", sequence: 3, timestamp: "2026-08-14T00:02:03.000Z", kind: "assistant", payload: { summary: "public progress 2", status: "progress" } },
+  { id: "call-2", sequence: 4, timestamp: "2026-08-14T00:02:04.000Z", kind: "tool_call", payload: { actionId: "interleaved-2", tool: "vrcforge_find_files", status: "started" } },
+  { id: "result-2", sequence: 5, timestamp: "2026-08-14T00:02:05.000Z", kind: "tool_result", payload: { actionId: "interleaved-2", tool: "vrcforge_find_files", status: "ok", summary: "found" } },
+  { id: "public-final", sequence: 6, timestamp: "2026-08-14T00:02:06.000Z", kind: "assistant", payload: { summary: "final summary", status: "done" } },
+]);
+assert.deepEqual(
+  interleavedAssistantTimeline.entries.map((entry) => entry.type === "batch" ? entry.kind : `${entry.type}:${entry.text}`),
+  ["assistant:public progress 1", "tool", "assistant:public progress 2", "tool", "assistant:final summary"],
+  "all public assistant updates must remain in their original timeline order",
+);
+const assistantBranch = source.slice(source.indexOf('if (entry.type === "assistant")'), source.indexOf("for (const invocation", source.indexOf('if (entry.type === "assistant")')));
+assert.match(assistantBranch, /processRows\.push/, "a public progress update must remain inside the process fold before the final summary");
 assert.equal(hasDurableExecutionEvents(timeline), true);
 assert.equal(hasDurableExecutionEvents(timeline.filter((event) => ["planner", "assistant"].includes(event.kind))), false);
 assert.equal(timelineInvocationDisplayLabel("vrcforge_list_directory"), "list_directory");

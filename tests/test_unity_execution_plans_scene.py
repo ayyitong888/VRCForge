@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pytest
 
+import dashboard_server
 from unity_execution_plans_scene import build_scene_execution_plan
 
 
@@ -21,11 +22,65 @@ from unity_execution_plans_scene import build_scene_execution_plan
     ("vrcforge_set_gameobject_active", {"object_path": "A", "isActive": False}, ("vrc_set_gameobject_active", {"gameObjectPath": "A", "active": False, "preview": False})),
     ("vrcforge_instantiate_prefab", {"asset_path": "Assets/X.prefab", "world_position_stays": False}, ("vrc_instantiate_prefab", {"assetPath": "Assets/X.prefab", "guid": "", "parentPath": "", "name": "", "worldPositionStays": False, "preview": False})),
     ("vrcforge_duplicate_scene_object", {"projectPath": "D:/Project", "sourceScenePath": "Assets/A.unity", "sourceObjectPath": "Avatar/Body", "targetParentScenePath": "Assets/A.unity", "targetParentPath": "Avatar", "targetName": "BodyCopy", "preserveWorldTransform": True}, ("vrc_duplicate_scene_object", {"sourceScenePath": "Assets/A.unity", "sourceObjectPath": "Avatar/Body", "targetParentScenePath": "Assets/A.unity", "targetParentPath": "Avatar", "targetName": "BodyCopy", "preserveWorldTransform": True, "preview": False, "saveScene": True, "overwrite": False})),
-    ("vrcforge_unpack_prefab", {"gameObjectPath": "A"}, ("vrc_unpack_prefab", {"gameObjectPath": "A", "mode": "outermost", "preview": False})),
+    ("vrcforge_unpack_prefab", {"gameObjectPath": "A"}, ("vrc_unpack_prefab", {"gameObjectPath": "A", "mode": "completely", "preview": False})),
     ("vrcforge_toggle_scene_object", {"object_path": "A", "active": True}, ("vrc_toggle_scene_object", {"objectPath": "A", "active": True, "saveAssets": True})),
 ])
 def test_scene_handler_argument_projection(target, arguments, expected):
     assert build_scene_execution_plan(target, arguments) == [expected]
+
+
+def test_ensure_animator_state_freezes_time_parameter_fields() -> None:
+    plan = build_scene_execution_plan(
+        "vrcforge_ensure_animator_state",
+        {
+            "avatarPath": "SampleAvatar_Alt",
+            "layerName": "SampleFT_LeftEye",
+            "stateName": "Continuous",
+            "parameterName": "v2/EyeLidLeft",
+            "parameterType": "Float",
+            "conditionMode": "Greater",
+            "threshold": -1,
+            "writeDefaults": True,
+            "timeParameterActive": True,
+            "timeParameter": "v2/EyeLidLeft",
+            "assetDir": "Assets/SampleAvatar/FaceTracking/Controllers",
+        },
+    )
+    assert plan == [
+        (
+            "vrc_ensure_animator_state",
+            {
+                "avatarPath": "SampleAvatar_Alt",
+                "layerName": "SampleFT_LeftEye",
+                "stateName": "Continuous",
+                "parameterName": "v2/EyeLidLeft",
+                "parameterType": "Float",
+                "conditionMode": "Greater",
+                "threshold": -1,
+                "writeDefaults": True,
+                "timeParameterActive": True,
+                "timeParameter": "v2/EyeLidLeft",
+                "assetDir": "Assets/SampleAvatar/FaceTracking/Controllers",
+                "preview": False,
+            },
+        )
+    ]
+    assert plan[0][1] == dashboard_server.build_ensure_animator_state_request(
+        {
+            "avatarPath": "SampleAvatar_Alt",
+            "layerName": "SampleFT_LeftEye",
+            "stateName": "Continuous",
+            "parameterName": "v2/EyeLidLeft",
+            "parameterType": "Float",
+            "conditionMode": "Greater",
+            "threshold": -1,
+            "writeDefaults": True,
+            "timeParameterActive": True,
+            "timeParameter": "v2/EyeLidLeft",
+            "assetDir": "Assets/SampleAvatar/FaceTracking/Controllers",
+        },
+        False,
+    )
 
 
 def test_expression_builders_preserve_aliases_defaults_and_non_preview():

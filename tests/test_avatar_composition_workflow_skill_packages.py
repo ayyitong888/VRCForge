@@ -228,6 +228,41 @@ def test_head_vsk_has_two_branches_and_exact_static_dynamic_neck_views() -> None
     assert "overrides generic matrix_bindpose_neck_ring diagnostic gates" in community["precedence"]
     assert community["matrixPolicy"]["default"] == "prohibited"
     assert community["matrixPolicy"]["requiresSeparateExplicitUserAuthorization"] is True
+
+
+def test_head_package_validation_exposes_prefab_unpack_and_face_tracking_split() -> None:
+    source = PACKAGE_ROOT / "vrcforge-avatar-head-transplant"
+    manifest = _load_json(source / "manifest.json")
+    workflow = _load_json(source / manifest["entrypoints"]["workflow"])
+    skill = parse_skill_markdown(source / "SKILL.md")
+    service = SkillPackageService(skill_store=REPOSITORY_ROOT / ".test-skill-store")
+    community = workflow["communityAvatarModificationContract"]
+
+    # Exercise the package parser/manifest validator, then inspect the same
+    # fixed workflow that the installed package exposes to its reader.
+    service.validate_manifest(manifest, package_root=source)
+    assert "vrcforge_unpack_prefab" in skill["allowedTools"]
+    unpack = next(
+        step
+        for step in workflow["steps"]
+        if step["name"] == "completely_unpack_structural_prefab_instance_before_head_authoring"
+    )
+    assert unpack["tool"] in skill["allowedTools"]
+    assert unpack["arguments"] == {"preview": True, "mode": "completely"}
+    assert "unpackMode" not in unpack
+    assert workflow["communityAvatarModificationContract"]["prefabInstanceAuthoring"][
+        "readOnlyAndIndependentMaterialAssetsExempt"
+    ] is True
+    assert workflow["communityAvatarModificationContract"]["faceTrackingAcceptance"][
+        "configurationDoesNotProveRuntime"
+    ] is True
+    serialized = next(
+        step
+        for step in workflow["steps"]
+        if step["name"] == "read_back_serialized_face_tracking_configuration_before_play_acceptance"
+    )
+    assert serialized["tool"] in skill["allowedTools"]
+    assert serialized["writes"] is False
     assert community["matrixPolicy"]["neverCountsTowardVisualAcceptance"] is True
     assert community["visibleCandidateTimebox"]["minutesPerStep"] == 20
     assert community["visualAcceptance"]["normalViewingDistanceMeters"] == [1.0, 2.0]

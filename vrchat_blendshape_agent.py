@@ -160,6 +160,16 @@ class LlmPlanResponse:
     usage: dict[str, Any] = field(default_factory=dict)
     assistant_message: dict[str, Any] = field(default_factory=dict, repr=False)
     finish_reason: str = ""
+    model: str = ""
+
+
+def actual_response_model(value: Any) -> str:
+    """Read only a model identifier reported by the provider response."""
+    for key in ("model", "model_version", "modelVersion"):
+        candidate = str(get_value(value, key) or "").strip()
+        if candidate:
+            return candidate
+    return ""
 
 
 class UnityMcpError(RuntimeError):
@@ -1002,8 +1012,92 @@ ARKIT_TRACKING_COMPACT_NAMES = (
     "tongueout",
 )
 
+_BLENDSHAPE_SECTION_MARKER = re.compile(r"^[-=_]{2,}\s*(.*?)\s*[-=_]{2,}$")
+_STATIC_SHAPE_TERMS = (
+    "option", "morph", "shape", "contour", "size", "wide", "narrow", "big", "small",
+    "long", "short", "thick", "thin", "horizontal", "vertical", "position", "angle",
+)
+_FACIAL_EXPRESSION_TERMS = (
+    "close", "open", "joy", "happy", "anger", "angry", "sad", "surpris", "smile", "frown",
+    "wink", "grimace", "pleasure", "tear", "sweat", "dead", "nervous", "unwilling", "sexy",
+    "expression", "bikkuri", "doya", "guruguru",
+)
 
-def filter_planning_payload_to_face_blendshapes(export_payload: dict[str, Any]) -> dict[str, Any]:
+
+def parse_blendshape_section_marker(name: str) -> str | None:
+    """Return an authored section heading embedded between separator characters."""
+    match = _BLENDSHAPE_SECTION_MARKER.fullmatch(str(name or "").strip())
+    return match.group(1).strip() if match and match.group(1).strip() else None
+
+
+def classify_face_blendshape_usage(
+    renderer: dict[str, Any],
+    blendshape: dict[str, Any],
+    author_section: str | None = None,
+) -> dict[str, str]:
+    """Classify sculpt candidates conservatively; preserve ambiguous rows for explicit review."""
+    name = str(blendshape.get("name") or "")
+    normalized_name = name.casefold().replace("-", "_").replace(".", "_")
+    section = str(author_section or "").casefold().replace("_", " ").strip()
+
+    if parse_blendshape_section_marker(name):
+        return {
+            "usageCategory": "section_marker",
+            "classificationSource": "blendshape_name_separator",
+            "classificationConfidence": "high",
+            "classificationReason": "This is an authored section label, not an editable face sculpt candidate.",
+        }
+    if is_facial_tracking_blendshape_name(normalized_name):
+        return {
+            "usageCategory": "tracking",
+            "classificationSource": "blendshape_name_tracking_rule",
+            "classificationConfidence": "high",
+            "classificationReason": "The name matches a known VRC/viseme/face-tracking naming pattern.",
+        }
+    if not is_face_related_blendshape(renderer, blendshape):
+        return {
+            "usageCategory": "non_face",
+            "classificationSource": "existing_face_relevance_filter",
+            "classificationConfidence": "high",
+            "classificationReason": "The existing face relevance filter does not identify this as a face blendshape.",
+        }
+
+    if any(term in section for term in ("expression", "mmd", "viseme", "tracking")):
+        return {
+            "usageCategory": "expression",
+            "classificationSource": "author_section",
+            "classificationConfidence": "high",
+            "classificationReason": f"The authored section '{author_section}' identifies expression or tracking controls.",
+        }
+    if any(term in normalized_name for term in _FACIAL_EXPRESSION_TERMS):
+        return {
+            "usageCategory": "expression",
+            "classificationSource": "blendshape_name_expression_rule",
+            "classificationConfidence": "medium",
+            "classificationReason": "The name indicates a posed facial expression; review the exact mesh if this seems wrong.",
+        }
+
+    has_shape_language = any(term in normalized_name for term in _STATIC_SHAPE_TERMS)
+    has_shape_section = any(term in section for term in ("option", "morph", "shape", "oral cavity"))
+    if has_shape_language and has_shape_section:
+        return {
+            "usageCategory": "static_shape",
+            "classificationSource": "author_section_and_blendshape_name",
+            "classificationConfidence": "medium",
+            "classificationReason": f"The authored section '{author_section}' and the name both suggest an anatomical or shape adjustment.",
+        }
+
+    return {
+        "usageCategory": "unknown",
+        "classificationSource": "insufficient_name_or_section_evidence",
+        "classificationConfidence": "low",
+        "classificationReason": "The available name and authored section do not establish whether this is sculpting or expression control.",
+    }
+
+
+def filter_planning_payload_to_face_blendshapes(
+    export_payload: dict[str, Any], *, scope: str = "face",
+) -> dict[str, Any]:
     filtered_avatars: list[dict[str, Any]] = []
     renderer_count = 0
     blendshape_count = 0
@@ -1011,11 +1105,21 @@ def filter_planning_payload_to_face_blendshapes(export_payload: dict[str, Any]) 
     for avatar in export_payload.get("avatars") or []:
         filtered_renderers: list[dict[str, Any]] = []
         for renderer in avatar.get("renderers") or []:
-            filtered_blendshapes = [
-                blendshape
-                for blendshape in renderer.get("blendshapes") or []
-                if is_face_related_blendshape(renderer, blendshape)
-            ]
+            filtered_blendshapes = []
+            author_section = None
+            for blendshape in renderer.get("blendshapes") or []:
+                if scope in {"face_static", "face_unknown"}:
+                    marker = parse_blendshape_section_marker(blendshape.get("name", ""))
+                    if marker:
+                        author_section = marker
+                        continue
+                    category = classify_face_blendshape_usage(renderer, blendshape, author_section)["usageCategory"]
+                    wanted = "static_shape" if scope == "face_static" else "unknown"
+                    if category != wanted:
+                        continue
+                elif not is_face_related_blendshape(renderer, blendshape):
+                    continue
+                filtered_blendshapes.append(blendshape)
             if not filtered_blendshapes:
                 continue
 
@@ -1039,8 +1143,14 @@ def filter_planning_payload_to_face_blendshapes(export_payload: dict[str, Any]) 
     summary["blendshapeCount"] = blendshape_count
     payload["summary"] = summary
     payload["planningFilter"] = {
-        "scope": "face",
-        "note": "Only face-related blendshapes are exposed to the natural-language face editor.",
+        "scope": scope if scope in {"face_static", "face_unknown"} else "face",
+        "note": (
+            "Only classified static sculpt candidates are exposed; ambiguous shapes require explicit face_unknown review."
+            if scope == "face_static" else
+            "Only ambiguous face candidates explicitly requested for review are exposed."
+            if scope == "face_unknown" else
+            "Only face-related blendshapes are exposed to the natural-language face editor."
+        ),
     }
     return payload
 
@@ -1433,6 +1543,7 @@ def request_llm_plan_with_metadata(
     native_messages: Sequence[Mapping[str, Any]] | None = None,
     native_tools: Sequence[Mapping[str, Any]] | None = None,
     session_id: str = "",
+    native_turn_state: dict[str, str] | None = None,
 ) -> LlmPlanResponse:
     provider = normalize_provider_name(settings.llm_provider)
     if provider != "chatgpt" and (native_messages is not None or native_tools is not None):
@@ -1476,6 +1587,7 @@ def request_llm_plan_with_metadata(
             native_messages,
             native_tools,
             session_id,
+            native_turn_state,
         )
 
     try:
@@ -1502,6 +1614,7 @@ def _request_llm_protocol_with_metadata(
     native_messages: Sequence[Mapping[str, Any]] | None = None,
     native_tools: Sequence[Mapping[str, Any]] | None = None,
     session_id: str = "",
+    native_turn_state: dict[str, str] | None = None,
 ) -> LlmPlanResponse:
     if api_type == "responses":
         return request_responses_plan_with_metadata(
@@ -1514,6 +1627,7 @@ def _request_llm_protocol_with_metadata(
             native_messages=native_messages,
             native_tools=native_tools,
             session_id=session_id,
+            native_turn_state=native_turn_state,
         )
     if api_type == "generate_content":
         if normalize_provider_name(settings.llm_provider) == "vertexai":
@@ -1550,6 +1664,7 @@ def request_responses_plan_with_metadata(
     native_messages: Sequence[Mapping[str, Any]] | None = None,
     native_tools: Sequence[Mapping[str, Any]] | None = None,
     session_id: str = "",
+    native_turn_state: dict[str, str] | None = None,
 ) -> LlmPlanResponse:
     """Use one configured Responses endpoint without executing returned calls."""
 
@@ -1562,7 +1677,9 @@ def request_responses_plan_with_metadata(
             api_key=settings.llm_api_key,
             base_url=settings.llm_base_url,
             client_factory=client_factory,
-            **(_llm_sdk_retry_kwargs(settings) if provider == "deepseek" else {"session_id": session_id}),
+            **(_llm_sdk_retry_kwargs(settings) if provider == "deepseek" else {
+                "session_id": session_id, "native_turn_state": native_turn_state,
+            }),
         )
         source = f"{provider}-responses"
         if native_requested:
@@ -1577,6 +1694,7 @@ def request_responses_plan_with_metadata(
                 stream_activity_callback=stream_activity_callback,
                 **({"reasoning_effort": _responses_reasoning_effort(settings),
                     "max_output_tokens": llm_max_output_tokens(settings)} if provider == "deepseek" else {}),
+                **({"reasoning_effort": _responses_reasoning_effort(settings)} if provider == "chatgpt" else {}),
             )
             parsed = _native_chat_response(
                 settings,
@@ -1588,6 +1706,7 @@ def request_responses_plan_with_metadata(
                     "usage": native_response.usage,
                 },
                 source=source,
+                response_model=native_response.model,
             )
             parsed.reasoning = extract_llm_reasoning_trace(
                 {"output": [{"type": "reasoning", "summary": summary} for summary in native_response.reasoning_summary]},
@@ -1600,6 +1719,7 @@ def request_responses_plan_with_metadata(
                 model=settings.llm_model,
                 prompt=prompt,
                 instructions=llm_system_instruction(settings),
+                reasoning_effort=_responses_reasoning_effort(settings),
                 reference_image_paths=tuple(str(path) for path in image_paths),
                 stream_callback=stream_callback,
                 mode="planner",
@@ -1613,19 +1733,22 @@ def request_responses_plan_with_metadata(
             source=source,
         )
         usage = extract_llm_token_usage({"usage": response.usage}, settings, source=source)
-        return LlmPlanResponse(text=response.text, reasoning=reasoning, usage=usage)
+        return LlmPlanResponse(text=response.text, reasoning=reasoning, usage=usage, model=str(getattr(response, "model", "") or "").strip())
     if native_messages is not None or native_tools is not None:
         raise ValueError("Native Responses history requires a supported native Responses adapter.")
-    adapter_type = (
-        DeepSeekResponsesAdapter
-        if normalize_provider_name(settings.llm_provider) == "deepseek"
-        else OpenAIResponsesAdapter
-    )
+    provider = normalize_provider_name(settings.llm_provider)
+    retry_kwargs = _llm_sdk_retry_kwargs(settings)
+    if provider not in {"deepseek", "openrouter"} and "max_retries" not in retry_kwargs:
+        # Generic/custom Responses requests already have a bounded planner
+        # retry loop; leave the SDK's implicit retries disabled unless the
+        # caller explicitly opts in through Settings.
+        retry_kwargs["max_retries"] = 0
+    adapter_type = DeepSeekResponsesAdapter if provider == "deepseek" else OpenAIResponsesAdapter
     adapter = adapter_type(
         api_key=settings.llm_api_key,
         base_url=settings.llm_base_url,
         client_factory=client_factory,
-        **(_llm_sdk_retry_kwargs(settings) | _openrouter_transport_kwargs(settings)),
+        **(retry_kwargs | _openrouter_transport_kwargs(settings)),
     )
     response = adapter.send_request(
         ProviderRuntimeRequest(
@@ -1647,7 +1770,7 @@ def request_responses_plan_with_metadata(
         source=source,
     )
     usage = extract_llm_token_usage({"usage": response.usage}, settings, source=source)
-    return LlmPlanResponse(text=response.text, reasoning=reasoning, usage=usage)
+    return LlmPlanResponse(text=response.text, reasoning=reasoning, usage=usage, model=str(getattr(response, "model", "") or "").strip())
 
 
 def request_deepseek_responses_plan_with_metadata(
@@ -1667,12 +1790,14 @@ def request_deepseek_responses_plan_with_metadata(
 
 
 def _responses_reasoning_effort(settings: Settings) -> str:
-    if normalize_provider_name(settings.llm_provider) != "deepseek":
+    provider = normalize_provider_name(settings.llm_provider)
+    if provider == "chatgpt":
+        return normalize_reasoning_effort(settings.gemini_thinking_level)
+    if provider != "deepseek":
         return ""
     level = normalize_reasoning_effort(settings.gemini_thinking_level)
-    supported = reasoning_effort_variants("deepseek", settings.llm_model, settings.llm_api_type)
-    if level not in supported:
-        return ""
+    # The configuration boundary validates catalog support. Model-name tables
+    # here would silently discard newly advertised, explicitly chosen efforts.
     return _deepseek_documented_effort(level)
 
 
@@ -1782,6 +1907,7 @@ def request_gemini_plan_with_metadata(
                 text="".join(chunks),
                 reasoning=extract_llm_reasoning_trace(final_chunk, settings, source="gemini") if final_chunk is not None else {"itemCount": 0, "items": [], "provider": settings.llm_provider, "model": settings.llm_model, "source": "gemini"},
                 usage=extract_llm_token_usage(final_chunk, settings, source="gemini") if final_chunk is not None else provider_stream_usage_missing(settings, "gemini"),
+                model=actual_response_model(final_chunk),
             )
         response = client.models.generate_content(
             model=settings.llm_model,
@@ -1792,6 +1918,7 @@ def request_gemini_plan_with_metadata(
             text=getattr(response, "text", "") or "",
             reasoning=extract_llm_reasoning_trace(response, settings, source="gemini"),
             usage=extract_llm_token_usage(response, settings, source="gemini"),
+            model=actual_response_model(response),
         )
     except Exception as exc:  # noqa: BLE001
         raise RuntimeError(format_multimodal_error(exc, settings, bool(image_paths), "Gemini")) from exc
@@ -1879,6 +2006,7 @@ def request_vertex_ai_plan_with_metadata(
                     text="".join(chunks),
                     reasoning=extract_llm_reasoning_trace(final_chunk, settings, source="vertexai") if final_chunk is not None else {"itemCount": 0, "items": [], "provider": settings.llm_provider, "model": settings.llm_model, "source": "vertexai"},
                     usage=extract_llm_token_usage(final_chunk, settings, source="vertexai") if final_chunk is not None else provider_stream_usage_missing(settings, "vertexai"),
+                    model=actual_response_model(final_chunk),
                 )
             response = client.models.generate_content(
                 model=settings.llm_model,
@@ -1889,6 +2017,7 @@ def request_vertex_ai_plan_with_metadata(
                 text=getattr(response, "text", "") or "",
                 reasoning=extract_llm_reasoning_trace(response, settings, source="vertexai"),
                 usage=extract_llm_token_usage(response, settings, source="vertexai"),
+                model=actual_response_model(response),
             )
         finally:
             watcher_stop.set()
@@ -1980,7 +2109,7 @@ def should_retry_without_streaming(exc: Exception, settings: Settings) -> bool:
 # provider lane). Empty means provider default; unknown/custom lanes send
 # nothing.
 
-REASONING_EFFORT_LEVELS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
+REASONING_EFFORT_LEVELS = ("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra")
 REASONING_THINKING_BUDGET_TOKENS = {
     "minimal": 1024,
     "low": 2048,
@@ -2253,7 +2382,8 @@ def build_openai_compatible_request_payload(
         payload["response_format"] = {"type": "json_object"}
     level = normalize_reasoning_effort(settings.gemini_thinking_level)
     supported = reasoning_effort_variants(settings.llm_provider, settings.llm_model)
-    active_level = level if level in supported else ""
+    provider = normalize_provider_name(settings.llm_provider)
+    active_level = level if provider in {"deepseek", "openrouter"} or level in supported else ""
     if not model_rejects_fixed_temperature(settings.llm_model) and not (
         normalize_provider_name(settings.llm_provider) == "deepseek" and active_level
     ):
@@ -2283,8 +2413,8 @@ def build_openai_compatible_request_payload(
         payload["reasoning_effort"] = active_level
     elif active_level and provider == "deepseek":
         payload["extra_body"] = {"thinking": {"type": "disabled" if active_level == "none" else "enabled"}}
-        if (bare_provider_model_id(settings.llm_model) in DEEPSEEK_FLASH_MODELS
-                or bare_provider_model_id(settings.llm_model) == DEEPSEEK_PRO_MODEL) and active_level != "none":
+        # Legacy chat/reasoner expose an on/off switch without an effort field.
+        if not re.match(r"^deepseek-(?:chat|reasoner)(?:[-.]|$)", bare_provider_model_id(settings.llm_model)) and active_level != "none":
             payload["reasoning_effort"] = active_level
     elif active_level and provider == "openrouter":
         payload["extra_body"] = {"reasoning": {"effort": active_level}}
@@ -2302,8 +2432,7 @@ def build_anthropic_request_payload(settings: Settings, user_content: Any) -> di
     }
     if normalize_provider_name(settings.llm_provider) == "deepseek":
         level = normalize_reasoning_effort(settings.gemini_thinking_level)
-        supported = reasoning_effort_variants("deepseek", payload["model"], "messages")
-        if level in supported and level != "none":
+        if level and level != "none":
             payload["thinking"] = {"type": "enabled"}
             payload["output_config"] = {"effort": _deepseek_documented_effort(level)}
         return payload
@@ -2471,9 +2600,10 @@ def request_openai_compatible_plan_with_metadata(
             native_tool_calls: dict[int, dict[str, Any]] = {}
             native_finish_reason = ""
             usage_event: Any = None
+            response_model = ""
 
             def consume_stream(stream: Any) -> None:
-                nonlocal usage_event, native_finish_reason
+                nonlocal usage_event, native_finish_reason, response_model
                 terminal_seen = False
                 for event in stream:
                     if cancel_event is not None and cancel_event.is_set():
@@ -2483,6 +2613,7 @@ def request_openai_compatible_plan_with_metadata(
                         raise RuntimeError(f"{provider_display_name(settings.llm_provider)} stream error: {stringify_provider_error(error)}")
                     if get_value(event, "usage") is not None:
                         usage_event = event
+                    response_model = actual_response_model(event) or response_model
                     choices = get_value(event, "choices") or []
                     if not choices:
                         continue
@@ -2542,6 +2673,7 @@ def request_openai_compatible_plan_with_metadata(
                         settings,
                         {"choices": [{"message": {"role": "assistant", "content": "".join(chunks), "tool_calls": [native_tool_calls[index] for index in sorted(native_tool_calls)], "reasoning_content": "".join(native_reasoning_content)}, "finish_reason": native_finish_reason}], "usage": get_value(usage_event, "usage") if usage_event is not None else {}},
                         source="openai-compatible",
+                        response_model=response_model,
                     )
                 return LlmPlanResponse(
                     text="".join(chunks),
@@ -2555,6 +2687,7 @@ def request_openai_compatible_plan_with_metadata(
                         if usage_event is not None
                         else provider_stream_usage_missing(settings, "openai-compatible")
                     ),
+                    model=response_model,
                 )
 
             try:
@@ -2608,6 +2741,7 @@ def request_openai_compatible_plan_with_metadata(
             text=extract_openai_message_text(response),
             reasoning=extract_llm_reasoning_trace(response, settings, source="openai-compatible"),
             usage=extract_llm_token_usage(response, settings, source="openai-compatible"),
+            model=actual_response_model(response),
         )
     except ProviderTokenLimitError:
         raise
@@ -2716,6 +2850,7 @@ def request_anthropic_plan_with_metadata(
                 text="".join(chunks) or extract_anthropic_message_text(final_message),
                 reasoning=extract_llm_reasoning_trace(final_message, settings, source=response_source),
                 usage=extract_llm_token_usage(final_message, settings, source=response_source),
+                model=actual_response_model(final_message),
             )
         response = client.messages.create(
             **request_payload,
@@ -2724,6 +2859,7 @@ def request_anthropic_plan_with_metadata(
             text=extract_anthropic_message_text(response),
             reasoning=extract_llm_reasoning_trace(response, settings, source=response_source),
             usage=extract_llm_token_usage(response, settings, source=response_source),
+            model=actual_response_model(response),
         )
     except Exception as exc:  # noqa: BLE001
         if image_paths:
@@ -2872,7 +3008,7 @@ def resolve_vertex_ai_project_location(base_url: str) -> tuple[str, str]:
     return project, location or "us-central1"
 
 
-def _native_chat_response(settings: Settings, response: Any, *, source: str) -> LlmPlanResponse:
+def _native_chat_response(settings: Settings, response: Any, *, source: str, response_model: str = "") -> LlmPlanResponse:
     choices = as_list(get_value(response, "choices"))
     choice = choices[0] if choices else {}
     message = get_value(choice, "message") or {}
@@ -2910,6 +3046,7 @@ def _native_chat_response(settings: Settings, response: Any, *, source: str) -> 
         usage=extract_llm_token_usage(response, settings, source=source),
         assistant_message=receipt,
         finish_reason=finish_reason,
+        model=response_model or actual_response_model(response),
     )
 
 
@@ -3098,6 +3235,28 @@ def extract_llm_token_usage(response: Any, settings: Settings, source: str = "")
             cache_read_tokens = first_usage_int(get_value(usage, details_key), ("cached_tokens",))
             if cache_read_tokens is not None:
                 break
+    cache_write_tokens = first_nonnegative_usage_int(
+        usage,
+        (
+            "cache_write_tokens",
+            "cacheWriteTokens",
+            "cache_creation_input_tokens",
+            "cacheCreationInputTokens",
+        ),
+    )
+    if cache_write_tokens is None:
+        for details_key in ("prompt_tokens_details", "input_tokens_details"):
+            cache_write_tokens = first_nonnegative_usage_int(
+                get_value(usage, details_key),
+                (
+                    "cache_write_tokens",
+                    "cacheWriteTokens",
+                    "cache_creation_input_tokens",
+                    "cacheCreationInputTokens",
+                ),
+            )
+            if cache_write_tokens is not None:
+                break
     if total_tokens is None and input_tokens is not None and output_tokens is not None:
         total_tokens = input_tokens + output_tokens
 
@@ -3118,6 +3277,8 @@ def extract_llm_token_usage(response: Any, settings: Settings, source: str = "")
         payload["totalTokens"] = total_tokens
     if cache_read_tokens is not None:
         payload["cacheReadTokens"] = cache_read_tokens
+    if cache_write_tokens is not None:
+        payload["cacheWriteTokens"] = cache_write_tokens
     if not exact:
         payload["unavailableReason"] = "provider_usage_missing"
     return payload
@@ -3134,6 +3295,17 @@ def first_usage_int(container: Any, keys: Sequence[str]) -> int | None:
             return max(0, int(value))
         if isinstance(value, str) and value.strip().isdigit():
             return max(0, int(value.strip()))
+    return None
+
+
+def first_nonnegative_usage_int(container: Any, keys: Sequence[str]) -> int | None:
+    """Read a provider count only when it is a genuine non-negative integer."""
+    for key in keys:
+        value = get_value(container, key)
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, int) and value >= 0:
+            return value
     return None
 
 

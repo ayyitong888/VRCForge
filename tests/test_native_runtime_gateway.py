@@ -62,10 +62,15 @@ def budgeted_request_history(request):
     assert messages[-1]["role"] == "system"
     assert "modelTurnBudget" not in json.loads(messages[-1]["content"].split(": ", 1)[1])
     from agent_scan_result_policy import is_scan_result_policy_message
-    policies = [message for message in messages[:-1] if message.get("role") == "system"]
+    from agent_runtime_session_state import AgentRuntimeSessionState
+    # These callers inspect conversational/tool history; retained state is
+    # covered independently by the complete wire-prefix regression.
+    history = [message for message in messages[:-1]
+               if not AgentRuntimeSessionState._is_native_runtime_state_message(message)]
+    policies = [message for message in history if message.get("role") == "system"]
     assert len(policies) <= 1
     assert all(is_scan_result_policy_message(message) for message in policies)
-    return messages[:-1]
+    return history
 
 
 def runtime_state(request):
@@ -108,6 +113,24 @@ def run_planning_continuation(gateway, tmp_path):
         )
 
 
+def test_normal_turn_direct_image_reaches_native_provider_without_vision_runner(tmp_path):
+    gateway, model, _ = setup_gateway(tmp_path, [
+        call("read-1", "vrcforge_read_text_file", {"path": "a.txt"}), finish,
+    ])
+    gateway._vision_profile_enabled = lambda: False
+    gateway.vision_analyze_fn = lambda *_args: (_ for _ in ()).throw(AssertionError("vision runner must not run"))
+    result = run(gateway, tmp_path, attachments=[{
+        "id": "image-1", "name": "probe.png", "type": "image/png", "size": 68,
+        "dataUrl": "data:image/png;base64,iVBORw0KGgo=", "payloadKind": "data_url",
+    }])
+    assert model.requests, result
+    assert len(model.requests) == 2
+    for request in model.requests:
+        user = next(message for message in request["messages"] if message.get("role") == "user")
+        assert {item["type"] for item in user["content"]} == {"text", "image_url"}
+        assert user["content"][1]["image_url"]["url"].startswith("data:image/png;base64,")
+
+
 def test_native_default_exposes_write_immediately_and_preserves_approval(tmp_path):
     from tests.test_native_permission_modes import _set_mode, _write_gateway_for_mode
 
@@ -148,6 +171,32 @@ def test_native_gateway_pairs_actual_tool_result_and_keeps_receipt_private(tmp_p
     assert result["plan"]["nextStep"] == "done"
     assert "private-fixture-replay" not in json.dumps(result)
     assert "private-fixture-replay" not in json.dumps(gateway._runtime_session_state.get_session("native-session"))
+
+
+def test_native_provider_public_reply_precedes_tool_without_leaking_action_json(tmp_path):
+    public_reply = "I will inspect the file before summarizing it."
+
+    def progress_receipt():
+        receipt = call("read-1", "vrcforge_read_text_file", {"path": "a.txt"})
+        receipt["content"] = public_reply
+        receipt["reasoning_content"] = "private-native-reasoning"
+        return receipt
+
+    gateway, model, _ = setup_gateway(tmp_path, [progress_receipt(), finish])
+    emitted = []
+    gateway._runtime_timeline_changed = emitted.append
+
+    result = run(gateway, tmp_path)
+
+    timeline = result["timeline"]
+    assert [event["kind"] for event in timeline] == [
+        "assistant", "tool_call", "tool_result", "assistant",
+    ]
+    assert timeline[0]["payload"]["summary"] == public_reply
+    assert "private-native-reasoning" not in json.dumps(result)
+    assert '"path": "a.txt"' not in json.dumps(timeline)
+    assert [item["timelineEvent"] for item in emitted] == timeline
+    assert len(model.requests) == 2
 
 
 @pytest.mark.parametrize("kind", ["hidden", "invalid"])
@@ -427,6 +476,33 @@ def test_native_scope_denial_does_not_block_a_new_user_turn(tmp_path):
     second = run(gateway, tmp_path, clientTurnId="second-turn", message="Just reply")
     assert len(model.requests) == 2
     assert second["plan"]["reply"] == "New request accepted"
+
+
+@pytest.mark.parametrize("status", ["needs_user_action", "failed"])
+def test_native_llm_reconsiders_explicit_no_write_failure_once_without_replaying_tool(tmp_path, status):
+    gateway, model, invoked = setup_gateway(tmp_path, [
+        call("recoverable-read", "vrcforge_read_text_file", {"path": "a.txt"}),
+        {"role": "assistant", "content": "The read failed before changing anything; I can explain the limitation."},
+    ])
+    gateway.register_tool(
+        "vrcforge_read_text_file", "When to use: read. When NOT to use: write.", "plan/preview",
+        lambda params: invoked.append(params) or {
+                "ok": False, "status": status, "error": "preflight unavailable",
+                "mutationStarted": False, "saved": False, "safeToRetry": True,
+                "committed": False, "commitState": "not_started",
+        },
+    )
+
+    result = run(gateway, tmp_path)
+
+    assert len(model.requests) == 2
+    assert len(invoked) == 1
+    history = budgeted_request_history(model.requests[1])
+    tool_result = next(message for message in history if message.get("role") == "tool")
+    assert tool_result["tool_call_id"] == "recoverable-read"
+    assert "preflight unavailable" in tool_result["content"]
+    assert result["plan"]["reply"].startswith("The read failed before changing anything")
+    assert result["plan"].get("completionClaim", {}).get("satisfied") is not True
 
 
 @pytest.mark.parametrize("later_tool", ["vrcforge_ask_user", "fixture_write"])

@@ -144,7 +144,10 @@ def encode_chats(chats: Sequence[Mapping[str, Any]]) -> tuple[list[dict[str, Any
             if not isinstance(item, Mapping) or item.get("type") != "agent":
                 packed_items.append(item)
                 continue
-            item_copy = copy.deepcopy(dict(item))
+            # `chat` is already a recursive copy, so this shallow copy keeps
+            # the packed item detached from caller-owned data without walking
+            # large response payloads a second time.
+            item_copy = dict(item)
             raw = _canonical_bytes(item_copy)
             if len(raw) <= ARCHIVE_INLINE_ITEM_MAX_BYTES:
                 packed_items.append(item_copy)

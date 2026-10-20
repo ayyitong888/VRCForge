@@ -143,6 +143,70 @@ def test_property_binding_rejects_tampered_shared_impact_commitment():
         assignment.bind_authoritative_preview(assignment.build_wrapper_arguments(REQUEST), p)
 
 
+def test_property_preview_accepts_identical_duplicate_core_rows():
+    p = receipt()
+    duplicate = {"name": "_DummyProperty", "type": "Float", "value": 0, "attributes": ["Hidden"]}
+    p["before"]["state"]["properties"].insert(1, deepcopy(duplicate))
+    p["before"]["state"]["properties"].insert(2, deepcopy(duplicate))
+    p["after"]["properties"].insert(1, deepcopy(duplicate))
+    p["after"]["properties"].insert(2, deepcopy(duplicate))
+    canonical, _ = assignment.bind_authoritative_preview(assignment.build_wrapper_arguments(REQUEST), p)
+    assert canonical["arguments"]["expectedPropertyEvidence"] == p["before"]
+
+
+def test_property_preview_rejects_conflicting_duplicate_core_rows():
+    p = receipt()
+    duplicate = deepcopy(p["before"]["state"]["properties"][0])
+    duplicate["value"] = 2
+    p["before"]["state"]["properties"].insert(1, duplicate)
+    with pytest.raises(ValueError, match="ambiguous|malformed"):
+        assignment.bind_authoritative_preview(assignment.build_wrapper_arguments(REQUEST), p)
+
+
+def test_property_preview_rejects_identical_duplicate_requested_row():
+    p = receipt()
+    duplicate = deepcopy(p["before"]["state"]["properties"][0])
+    p["before"]["state"]["properties"].insert(1, duplicate)
+    with pytest.raises(ValueError, match="ambiguous"):
+        assignment.bind_authoritative_preview(assignment.build_wrapper_arguments(REQUEST), p)
+
+
+@pytest.mark.parametrize("field_mutation", [
+    lambda row: row.update(type="Int", value=0),
+    lambda row: row.update(attributes=["Different"]),
+    lambda row: row.update(range=[0.1, 1]),
+])
+def test_property_preview_preserves_non_target_duplicate_core_rows(field_mutation):
+    p = receipt()
+    first = {"name": "_DummyProperty", "type": "Range", "value": 0.5, "range": [0, 1], "attributes": ["Hidden"]}
+    second = deepcopy(first)
+    field_mutation(second)
+    p["before"]["state"]["properties"].extend([first, second])
+    p["after"]["properties"].extend([deepcopy(first), deepcopy(second)])
+    canonical, _ = assignment.bind_authoritative_preview(assignment.build_wrapper_arguments(REQUEST), p)
+    assert canonical["arguments"]["expectedPropertyEvidence"] == p["before"]
+
+
+def test_property_preview_rejects_unrequested_duplicate_row_drift():
+    p = receipt()
+    first = {"name": "_DummyProperty", "type": "Float", "value": 0, "attributes": ["Hidden"]}
+    second = deepcopy(first)
+    p["before"]["state"]["properties"].extend([first, second])
+    p["after"]["properties"].extend([deepcopy(first), deepcopy(second)])
+    p["after"]["properties"][-1]["attributes"] = ["Drifted"]
+    with pytest.raises(ValueError, match="differs"):
+        assignment.bind_authoritative_preview(assignment.build_wrapper_arguments(REQUEST), p)
+
+
+def test_property_preview_rejects_malformed_duplicate_core_row():
+    p = receipt()
+    malformed = deepcopy(p["before"]["state"]["properties"][0])
+    malformed.pop("type")
+    p["before"]["state"]["properties"].insert(1, malformed)
+    with pytest.raises(ValueError, match="ambiguous"):
+        assignment.bind_authoritative_preview(assignment.build_wrapper_arguments(REQUEST), p)
+
+
 @pytest.mark.parametrize("case", ["success", "nochange"])
 def test_real_scalar_core_receipt_through_public_approval_boundary(compiled_scalar, tmp_path, case):
     result = run_scalar(compiled_scalar, tmp_path, case)

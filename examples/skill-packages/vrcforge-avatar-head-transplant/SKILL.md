@@ -29,6 +29,7 @@ allowed-tools:
   - vrcforge_inspect_skinned_mesh_deformation
   - vrcforge_preview_scene_object_duplicate
   - vrcforge_duplicate_scene_object
+  - vrcforge_unpack_prefab
   - vrcforge_reparent_gameobject
   - vrcforge_set_property
   - vrcforge_set_gameobject_active
@@ -115,6 +116,23 @@ available, stop with `capabilityGap=true`, `ready=false` for that exact
 manual/external step—never substitute a guessed reference rewrite. Mark the
 original target head/face `EditorOnly`, reconfigure EyeBone, viseme LipSync,
 Eyelids, and ViewPoint, then repair every changed FX animation path.
+
+For a structural write whose exact scene target is a Prefab instance, first
+preview `vrcforge_unpack_prefab` with `preview=true` and `mode=completely`,
+binding `expectedGlobalObjectId`, `expectedPrefabGuid`,
+`expectedAssetDependencyHash`, and `expectedScenePath`. After separate
+approval and checkpoint, completely unpack that instance, rebind the persisted
+scene identity, and read it back before the structural write. Preserve the
+source Prefab asset and author Modular Avatar components, skeleton, animation,
+and constraint references. Read-only scans and writes to an independent
+material or texture asset do not require unpacking; this rule applies only to
+structural scene writes on Prefab instances.
+
+Ordinary face-tracking installation and serialized configuration readback are
+edit-mode evidence. Play/Gesture Manager and visual runtime acceptance are a
+separate explicitly approved bounded observation; configuration must not be
+reported as runtime proof, and runtime observation must not silently rewrite
+the serialized configuration.
 
 Diagnose the neck in order: visible geometry, pose-dependent attachment,
 lighting/shader differences, exact renderer/material-slot ownership, and only

@@ -14,6 +14,7 @@ def test_consecutive_backups_preserve_every_snapshot(tmp_path, fail_copy=False):
     source = (ROOT / 'Assets/VRCForge/Editor/ConsoleTools.cs').read_text(encoding='utf-8')
     bodies = '\n'.join(method(source, signature) for signature in (
         'private static SafeBackupPayload CreateBackup', 'private static object BuildTransaction',
+        'private static void WriteOwnedBackupFile',
         'private static string ComputeSha256', 'private static bool IsInside', 'private class SafeBackupPayload',
         'private class ProjectIdentity', 'private class BackupFileItem',
         'private class SafeBackupSummary', 'private sealed class SafeBackupTransactionException',

@@ -214,6 +214,15 @@ pub(crate) struct DesktopAgentRunQueueTransitionRequest {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopAgentRunQueueListRequest {
+    session_id: Option<String>,
+    #[serde(default)]
+    include_terminal: bool,
+    timeout_ms: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct DesktopApprovalScopeRequest {
     approval_id: String,
     expected_project_root: Option<String>,
@@ -880,6 +889,26 @@ pub async fn send_agent_message(
     .await
 }
 
+#[tauri::command]
+pub async fn generate_chat_title(
+    request: DesktopJsonBodyRequest,
+) -> Result<serde_json::Value, String> {
+    blocking_backend_json_request(move || {
+        post_json_body_command("/api/app/chat-title", request, 16_000)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn fetch_agent_resource_image(
+    request: DesktopJsonBodyRequest,
+) -> Result<serde_json::Value, String> {
+    blocking_backend_json_request(move || {
+        post_json_body_command("/api/app/agent/resource-image", request, 10_000)
+    })
+    .await
+}
+
 #[cfg(test)]
 mod agent_message_transport_tests {
     use super::DesktopAgentMessageRequest;
@@ -922,11 +951,13 @@ mod agent_message_transport_tests {
 
     #[test]
     fn plan_mode_requires_explicit_boolean_selection() {
-        let request = request_with(serde_json::json!({"message": "plan the change", "planMode": true}));
+        let request =
+            request_with(serde_json::json!({"message": "plan the change", "planMode": true}));
         assert!(request.plan_mode);
         assert!(serde_json::from_value::<DesktopAgentMessageRequest>(
             serde_json::json!({"message": "inspect", "planMode": "true"})
-        ).is_err());
+        )
+        .is_err());
     }
 }
 
@@ -988,6 +1019,22 @@ pub fn record_agent_run_queued(
             "projectRoot": request.project_root,
             "projectType": request.project_type,
         })),
+        request.timeout_ms.or(Some(30_000)),
+    )
+}
+
+#[tauri::command]
+pub fn list_agent_run_followups(
+    request: DesktopAgentRunQueueListRequest,
+) -> Result<serde_json::Value, String> {
+    let mut query = vec![format!("includeTerminal={}", request.include_terminal)];
+    if let Some(session_id) = request.session_id.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+        query.push(format!("sessionId={}", percent_encode_query_component(session_id)));
+    }
+    backend_json_request(
+        "GET",
+        format!("/api/app/agent/runs/queue?{}", query.join("&")),
+        None,
         request.timeout_ms.or(Some(30_000)),
     )
 }
@@ -2260,15 +2307,37 @@ pub fn open_support_feedback_url() -> Result<(), String> {
     #[cfg(windows)]
     {
         use windows_sys::Win32::UI::Shell::ShellExecuteW;
-        let wide_url = URL.encode_utf16().chain(std::iter::once(0)).collect::<Vec<_>>();
-        let result = unsafe { ShellExecuteW(std::ptr::null_mut(), std::ptr::null(), wide_url.as_ptr(), std::ptr::null(), std::ptr::null(), 1) };
-        if result as isize <= 32 { return Err("Unable to open the VRCForge feedback page.".to_string()); }
+        let wide_url = URL
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>();
+        let result = unsafe {
+            ShellExecuteW(
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                wide_url.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                1,
+            )
+        };
+        if result as isize <= 32 {
+            return Err("Unable to open the VRCForge feedback page.".to_string());
+        }
         return Ok(());
     }
     #[cfg(not(windows))]
     {
-        let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
-        Command::new(opener).arg(URL).spawn().map(|_| ()).map_err(|_| "Unable to open the VRCForge feedback page.".to_string())
+        let opener = if cfg!(target_os = "macos") {
+            "open"
+        } else {
+            "xdg-open"
+        };
+        Command::new(opener)
+            .arg(URL)
+            .spawn()
+            .map(|_| ())
+            .map_err(|_| "Unable to open the VRCForge feedback page.".to_string())
     }
 }
 
@@ -3132,7 +3201,13 @@ pub async fn compact_agent_history(
     request: DesktopJsonBodyRequest,
 ) -> Result<serde_json::Value, String> {
     blocking_backend_json_request(move || {
-        post_json_body_command("/api/app/agent/compact", request, 120_000)
+        backend_json_request(
+            "POST",
+            "/api/app/agent/compact".to_string(),
+            Some(request.body),
+            request.timeout_ms.or(Some(120_000)),
+        )
+        .map(sanitize_compaction_response)
     })
     .await
 }
@@ -3281,7 +3356,7 @@ pub async fn fetch_chats(request: DesktopChatListRequest) -> Result<serde_json::
         if Instant::now() >= deadline {
             return Err("chat snapshot request timed out".to_string());
         }
-        Ok(sanitize_webview_response(chats))
+        Ok(sanitize_chat_snapshot_response(chats))
     })
     .await
 }
@@ -3729,9 +3804,7 @@ pub async fn delete_chat_permanently(
 
 /// GET /api/app/settings/data-root - read the current user data root.
 #[tauri::command]
-pub async fn fetch_data_root(
-    request: DesktopTimeoutRequest,
-) -> Result<serde_json::Value, String> {
+pub async fn fetch_data_root(request: DesktopTimeoutRequest) -> Result<serde_json::Value, String> {
     blocking_backend_json_request(move || {
         backend_json_request(
             "GET",

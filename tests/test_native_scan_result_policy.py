@@ -9,6 +9,7 @@ from agent_runtime_session_state import AgentRuntimeSessionState, AgentRuntimeSe
 from agent_scan_result_policy import SCAN_RESULT_CONTINUATION_POLICY_V2 as SCAN_RESULT_CONTINUATION_POLICY, is_scan_result_policy_message
 from tests.native_planner_fixture import NativePlannerFixture
 from tests.test_native_runtime_gateway import budgeted_request_history, setup_gateway
+from tests.test_cache_batch_loading_guidance import assert_result_reference_scope_guidance
 
 
 def owner(path):
@@ -136,7 +137,7 @@ def test_policy_stays_at_history_boundary_across_native_request_restart(tmp_path
     assert sum(is_scan_result_policy_message(message) for message in request_after_policy["messages"][:-1]) == 1
     assert request_after_policy["instructions"] == before_request["instructions"]
     assert request_after_policy["tools"] == before_request["tools"]
-    assert "resultRef values are valid only within the turn that produced the result" in request_after_policy["instructions"]
+    assert_result_reference_scope_guidance(request_after_policy["instructions"])
     assert "scope=validated_scope only" in policy_message()["content"]
     assert "Old, unverified, and current_turn references remain current-turn only." in policy_message()["content"]
 

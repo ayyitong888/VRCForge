@@ -509,6 +509,13 @@ def build_add_wardrobe_outfit_request(
     params: dict[str, Any],
     preview: bool,
 ) -> dict[str, Any]:
+    if not preview and "_vrcforge_prepared_unity_execution" in params:
+        from prepared_unity_execution import build_prepared_execution_plan, prepared_evidence
+        if prepared_evidence(params).get("schema") == "vrcforge.prepared-add-wardrobe-outfit.v1":
+            calls = build_prepared_execution_plan(params)
+            if len(calls) != 1 or calls[0][0] != "vrc_add_wardrobe_outfit":
+                raise ValueError("The prepared outfit binding has an invalid Core call.")
+            return calls[0][1]
     request: dict[str, Any] = {
         "avatarPath": str(
             params.get("avatar_path") or params.get("avatarPath") or ""
@@ -983,6 +990,10 @@ def build_create_wardrobe_core_calls(
     params: dict[str, Any],
     preview: bool,
 ) -> list[tuple[str, dict[str, Any]]]:
+    if not preview and "_vrcforge_prepared_unity_execution" in params:
+        from prepared_unity_execution import build_prepared_execution_plan, prepared_evidence
+        if prepared_evidence(params).get("schema") == "vrcforge.prepared-create-wardrobe.v1":
+            return build_prepared_execution_plan(params)
     request = build_create_wardrobe_request(params, preview)
     invalid = validate_create_wardrobe_request(request)
     if invalid is not None:
@@ -1328,10 +1339,9 @@ def finalize_add_modular_avatar_component_verification(
         }
     references = inspected.get("references")
     if not isinstance(references, list) or any(
-        not isinstance(reference, dict) or reference.get("resolved") is not True
-        for reference in references
+        not isinstance(reference, dict) for reference in references
     ):
-        return {**source, "ok": False, "error": "Independent Modular Avatar readback found an unresolved reference."}
+        return {**source, "ok": False, "error": "Independent Modular Avatar readback returned malformed reference evidence."}
     requested_references = arguments.get("references")
     inspected_count = int(inspected.get("count") or 0)
     after = source.get("after")
@@ -1341,19 +1351,51 @@ def finalize_add_modular_avatar_component_verification(
         return {**source, "ok": False, "error": "Independent Modular Avatar readback count differs from the write receipt."}
     if source.get("addedComponent") is True and isinstance(before, dict) and isinstance(before.get("count"), int) and inspected_count < before["count"] + 1:
         return {**source, "ok": False, "error": "Independent Modular Avatar readback did not confirm the added component count."}
+    reference_readback: dict[str, Any] = {}
     if isinstance(requested_references, dict):
-        by_member = {
-            str(item.get("member")): item
-            for item in references
+        component_references = [
+            item for item in references
             if item.get("componentIndex") == expected_component_index
-        }
+        ]
         for member, expected in requested_references.items():
-            observed = by_member.get(str(member))
-            if not isinstance(observed, dict) or not any(
+            member_name = str(member)
+            observed_items = [
+                item for item in component_references
+                if str(item.get("member")) == member_name
+            ]
+            # The public request contract uses a string for both reference kinds.
+            # An inspector row identifies AvatarObjectReference; an absent requested
+            # member is verified as a direct Unity Object through get_property.
+            if not observed_items:
+                if read_property is None:
+                    return {**source, "ok": False, "error": f"Independent direct Unity Object readback cannot verify reference '{member_name}'."}
+                field_result = read_property({
+                    **request,
+                    "componentType": inspected.get("type") or request.get("componentType"),
+                    "propertyPath": member_name,
+                    "componentIndex": expected_component_index,
+                    "maxItems": 50,
+                })
+                observed_value = field_result.get("propertyValue") if isinstance(field_result, dict) else None
+                if (
+                    not isinstance(field_result, dict)
+                    or field_result.get("ok") is False
+                    or field_result.get("valueTruncated") is True
+                    or field_result.get("valueIncomplete") is True
+                    or not _direct_unity_object_matches(observed_value, expected)
+                ):
+                    return {**source, "ok": False, "error": f"Independent direct Unity Object readback did not confirm reference '{member_name}'."}
+                reference_readback[member_name] = observed_value
+                continue
+            if len(observed_items) != 1:
+                return {**source, "ok": False, "error": f"Independent Modular Avatar readback did not confirm reference '{member_name}'."}
+            observed = observed_items[0]
+            if observed.get("resolved") is not True or not any(
                 _normalize_reference_path(observed.get(key)) == _normalize_reference_path(expected)
                 for key in ("referencePath", "resolvedPath")
             ):
-                return {**source, "ok": False, "error": f"Independent Modular Avatar readback did not confirm reference '{member}'."}
+                return {**source, "ok": False, "error": f"Independent Modular Avatar readback did not confirm reference '{member_name}'."}
+            reference_readback[member_name] = observed
     if inspected.get("present") is not True or int(inspected.get("count") or 0) < 1:
         return {**source, "ok": False, "error": "Independent Modular Avatar readback found no added component."}
     save_scene = arguments.get("saveScene") is True
@@ -1364,23 +1406,33 @@ def finalize_add_modular_avatar_component_verification(
         if read_property is None:
             return {**source, "ok": False, "error": "Independent Modular Avatar readback cannot verify scalar fields."}
         for property_path, expected in fields.items():
+            max_items = max(50, len(expected)) if isinstance(expected, list) else 50
             field_result = read_property({
                 **request,
                 "componentType": inspected.get("type") or request.get("componentType"),
                 "propertyPath": str(property_path),
                 "componentIndex": expected_component_index,
+                "maxItems": max_items,
             })
-            if not isinstance(field_result, dict) or field_result.get("ok") is False or "value" not in field_result:
+            if (
+                not isinstance(field_result, dict)
+                or field_result.get("ok") is False
+                or "propertyValue" not in field_result
+                or field_result.get("valueTruncated") is True
+                or field_result.get("valueIncomplete") is True
+            ):
                 return {**source, "ok": False, "error": f"Independent scalar readback failed for field '{property_path}'."}
-            if field_result["value"] != expected:
+            observed = field_result["propertyValue"]
+            if not _requested_value_matches(observed, expected):
                 return {**source, "ok": False, "error": f"Independent scalar readback mismatched field '{property_path}'."}
-            field_readback[str(property_path)] = field_result["value"]
+            field_readback[str(property_path)] = observed
     readback = {
         "gameObjectPath": inspected.get("gameObjectPath"),
         "componentType": inspected.get("type"),
         "present": True,
         "count": inspected.get("count"),
         "references": references,
+        "referenceReadback": reference_readback,
         "sceneDirty": inspected.get("sceneDirty"),
         "fields": field_readback,
     }
@@ -1397,6 +1449,46 @@ def finalize_add_modular_avatar_component_verification(
 
 def _normalize_reference_path(value: Any) -> str:
     return str(value or "").replace("\\", "/").strip("/")
+
+
+def _direct_unity_object_matches(observed: Any, expected: Any) -> bool:
+    if not isinstance(observed, dict) or not isinstance(expected, str):
+        return False
+    expected_path = _normalize_reference_path(expected)
+    return bool(expected_path) and (
+        _normalize_reference_path(observed.get("assetPath")) == expected_path
+        or _normalize_reference_path(observed.get("hierarchyPath")) == expected_path
+    )
+
+
+def _requested_value_matches(observed: Any, expected: Any) -> bool:
+    """Compare requested field content while allowing typed default members.
+
+    Component property reads describe the complete CLR value.  A write request
+    may intentionally provide only selected members of a structured element;
+    those requested members must match exactly, while Unity-filled defaults may
+    remain in the observed object.
+    """
+    if isinstance(expected, dict):
+        if not isinstance(observed, dict):
+            return False
+        if any(observed.get(marker) is True for marker in ("__incomplete", "__truncated", "__cycle")):
+            return False
+        return all(
+            key in observed and _requested_value_matches(observed[key], value)
+            for key, value in expected.items()
+        )
+    if isinstance(expected, list):
+        return (
+            isinstance(observed, list)
+            and len(observed) == len(expected)
+            and all(_requested_value_matches(actual, wanted) for actual, wanted in zip(observed, expected))
+        )
+    if isinstance(expected, bool):
+        return isinstance(observed, bool) and observed is expected
+    if isinstance(expected, (int, float)) and not isinstance(expected, bool):
+        return isinstance(observed, (int, float)) and not isinstance(observed, bool) and observed == expected
+    return observed == expected
 
 
 ManageWardrobeRequestBuilder = Callable[
@@ -1507,6 +1599,23 @@ class CreateWardrobePreviewPorts:
     ensure_menu: CreateWardrobeStepPort
 
 
+def _create_wardrobe_step_arguments(
+    params: dict[str, Any], arguments: dict[str, Any],
+) -> dict[str, Any]:
+    # These selectors belong to the primitive handler, not its frozen Core
+    # arguments. Keep an explicit target from falling back to dashboard state.
+    connection = {
+        key: params[key]
+        for key in (
+            "projectPath", "project_path", "projectRoot", "project_root",
+            "settings_path", "unity_host", "unity_port", "unity_instance",
+            "executionTarget",
+        )
+        if key in params
+    }
+    return {**arguments, **connection}
+
+
 class CreateWardrobePreviewService:
     """Own the complete read/preview Wardrobe creation sequence."""
 
@@ -1521,9 +1630,9 @@ class CreateWardrobePreviewService:
             return invalid
         calls = self._ports.build_calls(normalized, True)
         results = (
-            self._ports.ensure_parameter(calls[0][1]),
-            self._ports.ensure_animator(calls[1][1]),
-            self._ports.ensure_menu(calls[2][1]),
+            self._ports.ensure_parameter(_create_wardrobe_step_arguments(normalized, calls[0][1])),
+            self._ports.ensure_animator(_create_wardrobe_step_arguments(normalized, calls[1][1])),
+            self._ports.ensure_menu(_create_wardrobe_step_arguments(normalized, calls[2][1])),
         )
         steps = [
             {"tool": calls[index][0], "result": result}
@@ -1580,7 +1689,7 @@ class CreateWardrobeApprovedWriteService:
         steps: list[dict[str, Any]] = []
         for index, invoke in enumerate(step_ports):
             try:
-                result = invoke(calls[index][1])
+                result = invoke(_create_wardrobe_step_arguments(normalized, calls[index][1]))
             except Exception as exc:
                 result = {"ok": False, "error": str(exc), "commitState": "unknown"}
             steps.append({"tool": calls[index][0], "result": result})
@@ -1652,6 +1761,20 @@ class CreateWardrobeApprovedWriteService:
             "preview": False,
             "action": "create_wardrobe",
             "parameterName": request["parameterName"],
+            "wardrobeStage": "skeleton",
+            "strictWardrobeVerified": False,
+            "nextSteps": [
+                "The verified receipt covers the parameter, default FX state and menu only; "
+                "a one-value skeleton is not a verified wardrobe. Do not repeat create_wardrobe.",
+                "Install the first outfit separately using preview/add_outfit with manageWardrobe=false "
+                "or the exposed instantiate/setup tools; read back its exact object paths and setup result.",
+                "Use vrcforge_preview_add_wardrobe_outfit and approved vrcforge_add_wardrobe_outfit "
+                "with the existing Int parameter, verified object paths and explicit approved value.",
+                "The add primitive preserves existing clips. Complete approved mutual-exclusion "
+                "curves in every affected state, including default, then fresh vrcforge_scan_wardrobe. "
+                "Only a strict scan match permits the full add_outfit workflow for later outfits; "
+                "configuration recognition does not prove runtime or visual acceptance.",
+            ],
             "steps": steps,
         }
 

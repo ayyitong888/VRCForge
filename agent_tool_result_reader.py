@@ -19,6 +19,20 @@ from planner_structured_tool_evidence import _identity_key, _private_or_opaque, 
 TOOL_NAME = "vrcforge_read_tool_result"
 PAGE_SCHEMA = "vrcforge.tool_result_page.v1"
 MAX_PAGE_CHARS = 12000
+MAX_SCAN_SUMMARY_CHARS = 6000
+MAX_INLINE_SCAN_CHARS = 4000
+_SCAN_PAGING_FIELDS = ("paging", "pagination", "nextRequest", "nextKeyRequest",
+                       "nextOffset", "hasMore", "total", "totalCount", "returned", "complete", "readHints")
+
+
+class _ResultFieldUnavailable(ValueError):
+    def __init__(self, pointer: str, parent_pointer: str, fields: list[tuple[str, object]]) -> None:
+        super().__init__("Requested result field is unavailable")
+        self.pointer = pointer
+        self.parent_pointer = parent_pointer
+        self.fields = fields
+
+
 INPUT_SCHEMA = {
     "type": "object",
     "required": ["resultRef"],
@@ -110,6 +124,59 @@ def scan_result_continuation(step: Mapping[str, Any]) -> dict[str, Any]:
     return descriptor if isinstance(descriptor, dict) else {}
 
 
+def observation_result_continuation(step: Mapping[str, Any], visible_result: object,
+                                    sanitize: Callable[[object, int], str]) -> tuple[Any, dict[str, Any]]:
+    """Align reader hints with delivered rows, without changing retained source pages."""
+    fields = deepcopy(visible_result)
+    descriptor = scan_result_continuation(step)
+    request = descriptor.get("nextRequest")
+    if not isinstance(request, dict) or request.get("tool") not in {TOOL_NAME, "read_tool_result"}:
+        return fields, descriptor
+    args = request.get("arguments")
+    if (not isinstance(args, dict) or args.get("resultRef") != descriptor.get("resultRef")
+            or args.get("source", "result") != "result" or args.get("textOffset") is not None
+            or not isinstance(args.get("jsonPointer"), str) or not args["jsonPointer"]):
+        return fields, descriptor
+    pointer = args["jsonPointer"]
+    following = 0
+    try:
+        source = _select(step.get("result"), pointer, sanitize)
+        visible = _select(fields, pointer, sanitize)
+        parent = _select(step.get("result"), pointer.rsplit("/", 1)[0], sanitize)
+        base = parent.get("paging", {}).get("offset", 0) if isinstance(parent, Mapping) else 0
+        if isinstance(source, list) and isinstance(visible, list) and type(base) is int and base >= 0:
+            # Projection may drop array members. Only an exact continuous
+            # source prefix proves that the model received those positions.
+            delivered = 0
+            for original, observed in zip(source, visible):
+                if original != observed:
+                    break
+                delivered += 1
+            if delivered:
+                following = base + delivered
+    except (ValueError, PermissionError, TypeError, AttributeError):
+        pass  # Missing or hidden collection: no delivered prefix, start at zero.
+    replacement = deepcopy(request)
+    replacement["arguments"]["offset"] = following
+    descriptor["nextRequest"] = replacement
+
+    def align(value: object) -> None:
+        if isinstance(value, dict):
+            for key, child in value.items():
+                if (key == "nextRequest" and isinstance(child, dict) and set(child) == set(request)
+                        and child.get("tool") in {TOOL_NAME, "read_tool_result"}
+                        and child.get("arguments") == args):
+                    value[key] = deepcopy(replacement)
+                else:
+                    align(child)
+        elif isinstance(value, list):
+            for child in value:
+                align(child)
+
+    align(fields)
+    return fields, descriptor
+
+
 def scan_result_summary(step: Mapping[str, Any], sanitize: Callable[[object, int], str]) -> dict[str, Any] | None:
     """Project new owner-captured scans; never rewrite earlier native history."""
     result, snapshot = step.get("result"), step.get("scanSnapshot")
@@ -133,17 +200,57 @@ def scan_result_summary(step: Mapping[str, Any], sanitize: Callable[[object, int
     # retained evidence text or the first large text page.
     if _size(completeness) > 1600:
         completeness = [{"facts": {"coverageDetailsOmitted": True}}]
-    return {"authority": "untrusted_tool_output", "fields": fields,
+    summary = {"authority": "untrusted_tool_output", "fields": fields,
             "capturedAt": snapshot.get("capturedAt"), "persisted": snapshot.get("persisted") is True,
             "scope": "validated_scope" if _validated_scan_snapshot(step) else "current_turn",
             "freshness": "validated_on_read" if _validated_scan_snapshot(step) else "unverified",
             "expired": snapshot.get("expired") is True,
             "status": "needs_rescan" if snapshot.get("expired") is True else "snapshot",
             "reason": sanitize(snapshot.get("reason", ""), 160),
-            "scanScopePreview": scope_preview, "detailsOmitted": True,
+            "scanScopePreview": scope_preview, "detailsOmitted": True, "inlineComplete": False,
             "sourceCompleteness": completeness, "sourceConstraints": constraints,
             "sourceConstraintsTruncated": truncated,
             "interpretation": "Summary only; missing details are not evidence of absence. Page the exact reference. Paging completion is not scan completeness or freshness verification."}
+    # A small complete public page needs no second read. Use the same redactor
+    # and exact-selector rules as the reader; never label a partial projection
+    # complete, nor confuse a complete page with an exhaustive source scan.
+    if _size(result) <= MAX_INLINE_SCAN_CHARS:
+        public = project_structured_tool_evidence(result, sanitize_text=sanitize, mode="runtimecomplete")
+        candidate = {**summary, "fields": public["data"], "detailsOmitted": False, "inlineComplete": True,
+                     "interpretation": "Complete public result page; hidden private fields are not evidence of absence. Paging completion is not scan completeness or freshness verification."}
+        if not public["truncated"] and _size(candidate) <= MAX_SCAN_SUMMARY_CHARS:
+            return candidate
+    # Source cursors belong to the control plane. Do not force a separate
+    # reader call merely to discover the authoritative next offset, and never
+    # publish a shortened/partially projected continuation request.
+    incomplete = False
+    if isinstance(result, Mapping):
+        for name in _SCAN_PAGING_FIELDS:
+            if name not in result:
+                continue
+            raw = {name: result[name]}
+            if _size(raw) > 1800:
+                incomplete = True
+                continue
+            public = project_structured_tool_evidence(raw, sanitize_text=sanitize, mode="runtimecomplete")
+            value = result[name]
+            if name in {"nextRequest", "nextKeyRequest"} and isinstance(value, dict) and set(value) == {"tool", "arguments"}:
+                # Only this source-owned continuation envelope can carry an
+                # argument map. Project its values normally and require an
+                # exact match; generic argument/output fields stay opaque.
+                arguments = value["arguments"]
+                tool = value["tool"]
+                if isinstance(arguments, dict) and isinstance(tool, str) and sanitize(tool, 160) == tool:
+                    safe_args = project_structured_tool_evidence(arguments, sanitize_text=sanitize, mode="runtimecomplete")
+                    if not safe_args["truncated"] and not safe_args["redactedFields"] and safe_args["data"] == arguments:
+                        public = {"data": raw, "truncated": False, "redactedFields": 0}
+            candidate = {**summary, "fields": {**summary["fields"], **public["data"]}}
+            if public["truncated"] or public["redactedFields"] or public["data"] != raw or _size(candidate) > MAX_SCAN_SUMMARY_CHARS - 64:
+                incomplete = True
+                continue
+            summary = candidate
+    summary["pagingControlsIncomplete"] = incomplete
+    return summary
 
 
 def result_reference(session_id: str, turn_id: str, project_root: str, step: Mapping[str, Any]) -> str:
@@ -325,6 +432,42 @@ def retain_model_information(session_id: str, turn_id: str, project_root: str,
             "modelInformationRead": {**descriptor, "page": first_page}}
 
 
+def _unavailable_field_page(
+    error: _ResultFieldUnavailable,
+    *,
+    result_ref: str,
+    source: str,
+    step: Mapping[str, Any],
+    sanitize: Callable[[object, int], str],
+) -> dict[str, Any]:
+    fields: list[dict[str, Any]] = []
+    for name, value in error.fields:
+        if not _safe_key(name, value, sanitize):
+            continue
+        pointer = _pointer(error.parent_pointer, name)
+        if len(pointer) > 1024:
+            continue
+        fields.append({"jsonPointer": pointer,
+                       "type": "array" if isinstance(value, list) else "object" if isinstance(value, dict) else "value"})
+        if len(fields) >= 12 or _size(fields) > 1200:
+            break
+    return {
+        "schema": PAGE_SCHEMA,
+        "ok": False,
+        "status": "failed",
+        "authority": "untrusted_tool_output",
+        "resultRef": result_ref,
+        "source": source,
+        "sourceStep": step["index"],
+        "sourceTool": step["tool"],
+        "jsonPointer": error.pointer,
+        "errorCode": "result_pointer_unavailable",
+        "error": "Requested result field is unavailable",
+        "availableFields": fields,
+        "interpretation": "Choose one of the bounded availableFields pointers and retry the same resultRef. No result values were returned.",
+    }
+
+
 def _select(root: object, pointer: str, sanitize: Callable[[object, int], str]) -> object:
     if not isinstance(pointer, str) or len(pointer) > 1024 or (pointer and not pointer.startswith("/")):
         raise ValueError("jsonPointer must be a bounded RFC6901 pointer")
@@ -332,12 +475,15 @@ def _select(root: object, pointer: str, sanitize: Callable[[object, int], str]) 
     if len(parts) > 32:
         raise ValueError("jsonPointer is too deep")
     value = root
-    for part in parts:
+    for depth, part in enumerate(parts):
         if re.search(r"~(?![01])", part):
             raise ValueError("Invalid JSON pointer escape")
         key = part.replace("~1", "/").replace("~0", "~")
         if isinstance(value, dict):
-            if key not in value or not _safe_key(key, value[key], sanitize):
+            if key not in value:
+                parent_pointer = "" if depth == 0 else "/" + "/".join(parts[:depth])
+                raise _ResultFieldUnavailable(pointer, parent_pointer, list(value.items()))
+            if not _safe_key(key, value[key], sanitize):
                 raise PermissionError("Requested result field is unavailable")
             value = value[key]
         elif isinstance(value, list) and re.fullmatch(r"0|[1-9][0-9]*", key):
@@ -476,7 +622,12 @@ def read_tool_result(params: Mapping[str, Any], *, sanitize: Callable[[object, i
     else:
         root = step["result"]
     pointer = params.get("jsonPointer", "")
-    value = _select(root, pointer, sanitize)
+    try:
+        value = _select(root, pointer, sanitize)
+    except _ResultFieldUnavailable as exc:
+        return _unavailable_field_page(
+            exc, result_ref=ref, source=source, step=step, sanitize=sanitize,
+        )
     offset, limit = params.get("offset", 0), params.get("limit", 6)
     if type(offset) is not int or offset < 0 or type(limit) is not int or not 1 <= limit <= 20:
         raise ValueError("offset must be nonnegative and limit must be between 1 and 20")

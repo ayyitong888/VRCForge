@@ -207,6 +207,19 @@ def test_json_pointer_escaping_and_no_owner_argument_override():
                 read(step, jsonPointer=pointer)
 
 
+def test_missing_result_field_returns_bounded_legal_pointer_hints():
+    step = retained({"preferredCommandInstaller": {"path": "safe"}, "other": [1, 2]})
+    with bind_tool_result_context("session", "turn", "project", [step]):
+        page = read(step, jsonPointer="/commandInstaller")
+    assert page["ok"] is False
+    assert page["errorCode"] == "result_pointer_unavailable"
+    assert page["error"] == "Requested result field is unavailable"
+    assert {item["jsonPointer"] for item in page["availableFields"]} == {
+        "/preferredCommandInstaller", "/other",
+    }
+    assert "safe" not in json.dumps(page)
+
+
 def test_live_reader_schema_exposes_executable_bounds_and_rejects_r2_mistakes():
     import dashboard_server
     from runtime_planner_service import validate_planner_tool_arguments
@@ -229,24 +242,25 @@ def test_live_reader_schema_exposes_executable_bounds_and_rejects_r2_mistakes():
 
 
 def test_reader_next_request_survives_real_gateway_redaction_and_observation():
-    from agent_gateway import redact_sensitive
+    from agent_gateway import redact_runtime_tool_result, redact_sensitive
 
     step = retained({"parameters": scan_result()["parameters"], "layers": [{"states": [1, 2, 3]}]})
     with bind_tool_result_context("session", "turn", "project", [step]):
         for pointer in ("/parameters", "/layers/0/states"):
             first = read(step, jsonPointer=pointer, limit=1)
-            persisted = redact_sensitive(first)
-            assert persisted["nextRequest"]["arguments"]["jsonPointer"] == pointer
-            following = read_tool_result(persisted["nextRequest"]["arguments"], sanitize=sanitize)
-            assert following["offset"] == 1
-            observation = RuntimePlannerService._llm_loop_step_observation(
-                None, {"tool": TOOL_NAME, "status": "executed", "result": persisted})
-            assert json.dumps(persisted["nextRequest"], ensure_ascii=False, separators=(",", ":")) in observation
+            for redact in (redact_sensitive, redact_runtime_tool_result):
+                persisted = redact(first)
+                assert persisted["nextRequest"]["arguments"]["jsonPointer"] == pointer
+                following = read_tool_result(persisted["nextRequest"]["arguments"], sanitize=sanitize)
+                assert following["offset"] == 1
+                observation = RuntimePlannerService._llm_loop_step_observation(
+                    None, {"tool": TOOL_NAME, "status": "executed", "result": persisted})
+                assert json.dumps(persisted["nextRequest"], ensure_ascii=False, separators=(",", ":")) in observation
 
 
 def test_page_marker_cannot_bypass_redaction_for_arbitrary_arguments():
     from copy import deepcopy
-    from agent_gateway import redact_sensitive
+    from agent_gateway import redact_runtime_tool_result, redact_sensitive
     from agent_tool_result_reader import page_next_request_arguments
 
     step = retained(scan_result())
@@ -257,9 +271,10 @@ def test_page_marker_cannot_bypass_redaction_for_arbitrary_arguments():
         forged = deepcopy(page)
         forged["nextRequest"]["arguments"][key] = value
         assert page_next_request_arguments(forged) is None
-        redacted = redact_sensitive(forged)
-        assert redacted["nextRequest"]["arguments"]["jsonPointer"] != forged["nextRequest"]["arguments"]["jsonPointer"]
-        assert "sentinel" not in json.dumps(redacted) and "C:/private" not in json.dumps(redacted)
+        for redact in (redact_sensitive, redact_runtime_tool_result):
+            redacted = redact(forged)
+            assert redacted["nextRequest"]["arguments"]["jsonPointer"] != forged["nextRequest"]["arguments"]["jsonPointer"]
+            assert "sentinel" not in json.dumps(redacted) and "C:/private" not in json.dumps(redacted)
 
 
 def test_completed_outer_page_keeps_complete_nested_collection_and_exact_readback():

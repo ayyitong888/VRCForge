@@ -2318,6 +2318,7 @@
       "agentRuntimeQueue",
       "agentRuntimeRuns",
       "agentRuntimeTurn",
+      "chatStorageChanged",
       "config",
       "log",
       "projects",

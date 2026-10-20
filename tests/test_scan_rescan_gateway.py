@@ -51,9 +51,11 @@ def test_changed_rescan_flows_through_public_reader_and_model_projection(tmp_pat
 
     assert page["status"] == "replaced"
     assert page["expired"] is True
-    assert page["replacementSummary"]["detailsOmitted"] is True
+    assert page["replacementSummary"]["detailsOmitted"] is False
+    assert page["replacementSummary"]["inlineComplete"] is True
+    assert page["replacementSummary"]["fields"] == fresh
     assert page["replacementRef"]
-    assert "PRIVATE_DETAIL_MARKER" not in str(page)
+    assert page["replacementSummary"]["fields"]["rows"][0]["name"] == "PRIVATE_DETAIL_MARKER"
     assert replacement_page["items"][0]["value"] == fresh["rows"][0]
     assert len(scan_calls) == 1
     replacement_raw = store._connection
@@ -152,8 +154,8 @@ def test_generation_change_between_cas_and_receipt_is_rejected(tmp_path, monkeyp
             latest = original_owned(session, turn, project_root, result_ref)
             owned_calls.append(result_ref)
             if len(owned_calls) == 2:
-                store.begin_mutation(project, "shell")
-                store.end_mutation(project, "shell")
+                marker = store.begin_mutation(project, "shell")
+                store.end_mutation(project, "shell", marker=marker)
             return latest
 
         monkeypatch.setattr(verifier, "_owned", mutate_after_final_read)

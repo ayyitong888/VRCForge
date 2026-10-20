@@ -385,6 +385,9 @@ class UnityMcpCoreClient:
             if name != "vrc_build_test_avatar" or not _is_strict_build_test_job_poll(arguments):
                 raise ValueError("Build & Test job polling requires exact jobId arguments.")
         call_arguments = arguments or {}
+        if (name == "vrc_reparent_gameobject" and "siblingIndex" in call_arguments
+                and self._connection.tool_contract_version != TOOL_CONTRACT_VERSION):
+            raise UnityMcpCoreError("siblingIndex requires the current Core tool contract; update Core before sorting siblings.")
         request_id = _new_request_id()
         started_at = time.perf_counter()
         audit_base = {

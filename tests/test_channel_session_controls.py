@@ -102,8 +102,30 @@ def test_compact_projection_reduces_next_turn_history_and_keeps_state_cards():
         try:
             result = await a.compact("c", "")
             assert result["status"] == "applied"
-            assert [item["id"] for item in store.chats[0]["items"]] == ["compact:d", "r1", "u2"]
+            assert [item["id"] for item in store.chats[0]["items"]] == ["u1", "a1", "r1", "u2", "compact:d"]
+            assert store.chats[0]["items"][-1]["summarizedItemIds"] == ["a1", "u1"]
             assert store.chats[0]["sessionId"].startswith("sess_compact_")
         finally:
             await a.shutdown()
     asyncio.run(run())
+
+
+def test_compact_projection_round_trips_all_rows_and_filters_only_marked_ids():
+    from channel_session_controls import compact_chat_items
+    chat = {"id": "c", "sessionId": "before", "items": [
+        {"id": "old-user", "type": "user", "text": "old"},
+        {"id": "old-agent", "type": "agent", "response": {"plan": {"reply": "old answer"}}},
+        {"id": "state", "type": "result", "approvalId": "keep"},
+        {"id": "latest", "type": "user", "text": "latest"},
+    ]}
+    result = {"summary": "old context", "summaryDigest": "roundtrip", "sourceDigest": "source",
+              "recovery": {"schema": "vrcforge.context_compaction_recovery.v1",
+                  "sourceEntries": [{"role": "user", "text": "old"}]}}
+    updated = compact_chat_items(chat, result)
+    assert updated is not None
+    reloaded = copy.deepcopy(updated)
+    assert [item["id"] for item in reloaded["items"]] == ["old-user", "old-agent", "state", "latest", "compact:roundtrip"]
+    assert reloaded["items"][-1]["summarizedItemIds"] == ["old-agent", "old-user"]
+    assert ChannelRuntimeAdapter._runtime_history(reloaded["items"]) == [
+        {"role": "user", "text": "latest"}, {"role": "agent", "text": "old context"},
+    ]

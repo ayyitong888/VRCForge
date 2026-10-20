@@ -1,4 +1,5 @@
 import jsonschema
+import pytest
 
 from unity_tool_schema_projection import (
     canonical_unity_read_tool_input_schema,
@@ -33,3 +34,20 @@ def test_interrupted_apply_recovery_public_schemas_expose_real_handler_fields():
     jsonschema.validate({"recoveryId": "recovery-1", "confirmResolved": True}, write)
     assert write["properties"]["recoveryId"]["minLength"] == 1
     assert write["anyOf"] == resolve["anyOf"]
+
+
+def test_checkpoint_restore_schema_declares_recovery_id_and_rejects_internal_prepare_marker():
+    restore = canonical_unity_write_tool_input_schema("vrcforge_restore_checkpoint")
+    jsonschema.validate(
+        {"checkpointId": "checkpoint-1", "recoveryId": "recovery-1", "confirmRestore": True},
+        restore,
+    )
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(
+            {
+                "checkpointId": "checkpoint-1",
+                "confirmRestore": True,
+                "_restorePrepareForRecovery": {"ok": True},
+            },
+            restore,
+        )

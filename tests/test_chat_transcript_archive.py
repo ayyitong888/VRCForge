@@ -44,6 +44,28 @@ def test_identical_item_is_content_addressed_once(tmp_path):
     assert decode_chats(packed, store) == chats
 
 
+def test_encode_archived_agent_item_does_not_deepcopy_payload_twice(monkeypatch):
+    chat = large_chat()[0]
+    chat["items"].append({"id": "inline", "type": "agent", "response": {"plan": {"reply": "done"}}})
+    original_deepcopy = archive.copy.deepcopy
+    calls = []
+
+    def tracked_deepcopy(value, memo=None):
+        calls.append(value)
+        return original_deepcopy(value, memo)
+
+    monkeypatch.setattr(archive.copy, "deepcopy", tracked_deepcopy)
+    packed, _pending = encode_chats([chat])
+
+    # The chat-level copy already recursively detaches each item from caller
+    # input. Re-copying each large agent item duplicates the expensive walk.
+    assert len(calls) == 1
+    assert packed[0] is not chat
+    assert packed[0]["items"][0] is not chat["items"][0]
+    packed[0]["items"][1]["response"]["plan"]["reply"] = "changed"
+    assert chat["items"][1]["response"]["plan"]["reply"] == "done"
+
+
 def test_cross_chat_reference_is_rejected(tmp_path):
     store = tmp_path / "chat-transcripts.json"
     packed, pending = encode_chats(large_chat("chat-a")); write_pending(store, pending)

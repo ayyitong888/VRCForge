@@ -22,6 +22,7 @@ from runtime_planner_service import (
     PlannerTool,
     PlannerTurnMetadata,
     RuntimePlannerService,
+    RUNTIME_PUBLIC_COMMUNICATION_INSTRUCTION,
     sanitize_planner_observation_text,
     latest_loop_step_needs_model_correction,
     parse_llm_plan_response,
@@ -47,6 +48,76 @@ def test_shell_observation_binds_output_to_executed_input_without_leaking_secret
     assert "Set-Content" in observation and "D:/workspace/hello.txt" in observation
     assert "hello" in observation and "exitCode=0" in observation
     assert "fixture-secret" not in observation
+
+
+@pytest.mark.parametrize("tool_name", ["vrcforge_vision_audit", "vrcforge_vision_audit_multi"])
+def test_native_vision_audit_observation_preserves_bounded_judgment(tool_name):
+    observation = service()._llm_loop_step_observation({
+        "tool": tool_name,
+        "kind": "skill",
+        "status": "executed",
+        "actionId": "action-vision",
+        "result": {
+            "ok": True,
+            "audit": {
+                "status": "clipping",
+                "summary": "Sleeve intersects the torso.",
+                "issues": ["sleeve clipping"],
+                "annotations": [{
+                    "label": "sleeve",
+                    "reason": "mesh overlap",
+                    "severity": "high",
+                    "box": {"x": 0.1, "y": 0.2, "width": 0.3, "height": 0.4},
+                }],
+                "contractComplete": True,
+                "providerRaw": "Bearer should-never-cross-boundary",
+            },
+        },
+        "outcome": {"status": "ok"},
+    }, native_contract=True)
+
+    assert "visionAudit=" in observation
+    assert '"status":"clipping"' in observation
+    assert "Sleeve intersects the torso." in observation
+    assert "sleeve clipping" in observation
+    assert "mesh overlap" in observation
+    assert "should-never-cross-boundary" not in observation
+    assert "providerRaw" not in observation
+
+
+def test_native_top_level_multi_vision_audit_observation_preserves_findings():
+    observation = service()._llm_loop_step_observation({
+        "tool": "vrcforge_vision_audit_multi",
+        "kind": "skill",
+        "status": "executed",
+        "actionId": "action-vision-top-level",
+        "result": {
+            "ok": True,
+            "overallStatus": "clipping",
+            "coverageComplete": True,
+            "visualVerified": False,
+            "captureEvidenceVerified": True,
+            "angles": ["front", "back"],
+            "results": [{
+                "angle": "back",
+                "status": "clipping",
+                "summary": "Sleeve intersects the torso.",
+                "providerRaw": "must-not-cross-boundary",
+            }],
+            "imagePath": "D:/private/capture.png",
+        },
+        "outcome": {"status": "needs_user_action"},
+    }, native_contract=True)
+
+    assert "visionAudit=" in observation
+    assert '"overallStatus":"clipping"' in observation
+    assert '"visualVerified":false' in observation
+    assert '"coverageComplete":true' in observation
+    assert '"captureEvidenceVerified":true' in observation
+    assert "Sleeve intersects the torso." in observation
+    assert '"angle":"back"' in observation
+    assert "providerRaw" not in observation
+    assert "D:/private/capture.png" not in observation
 
 
 @pytest.mark.parametrize("active", [True, False])
@@ -182,6 +253,20 @@ class FakeModel:
         return self.result
 
 
+class RetrySequenceModel:
+    def __init__(self, failures: list[Exception], result: PlannerModelResult) -> None:
+        self.failures = list(failures)
+        self.result = result
+        self.calls = 0
+
+    def plan(self, prompt: str) -> PlannerModelResult:
+        _ = prompt
+        self.calls += 1
+        if self.failures:
+            raise self.failures.pop(0)
+        return self.result
+
+
 @dataclass
 class NativeModel:
     message: dict
@@ -284,6 +369,48 @@ def test_native_request_reuses_unity_scope_routing_rules_and_general_exception()
     assert "A Unity project is explicitly bound to this turn" not in general_request["instructions"]
 
 
+def test_native_request_projects_direct_images_into_main_user_message() -> None:
+    planner = service()
+    request, _ = planner._build_native_plan_request(
+        [{"role": "user", "content": "describe this"}],
+        observe={"turn": {"directImageInput": True, "attachments": [
+            {"type": "image/png", "dataUrl": "data:image/png;base64,AAAA"},
+        ]}},
+        exposure_layer="planning", project_context_active=False, project_path="",
+        internal_tool_blocks=None, global_instructions="", project_instructions="",
+    )
+    user = next(item for item in request["messages"] if item.get("role") == "user")
+    assert user["content"] == [
+        {"type": "text", "text": "describe this"},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+    ]
+
+
+def test_native_direct_image_projection_preserves_existing_multimodal_history() -> None:
+    prior = {"role": "user", "content": [
+        {"type": "text", "text": "older image"},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,OLD"}},
+    ]}
+    current = {"role": "user", "content": "describe current"}
+    history = [prior, current]
+    model = NativeModel({"role": "assistant", "content": "ok"})
+    plan = service(model=model).plan_agent_turn(
+        "describe current",
+        {},
+        {"turn": {"directImageInput": True, "attachments": [
+            {"type": "image/png", "dataUrl": "data:image/png;base64,CURRENT"},
+        ]}},
+        native_turn=NativePlannerFixture(history),
+    )
+    assert plan["nextStep"] == "done"
+    request = model.requests[0]
+    assert request["messages"][0] == prior
+    assert request["messages"][1]["content"] == [
+        {"type": "text", "text": "describe current"},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,CURRENT"}},
+    ]
+
+
 @pytest.mark.parametrize("name,arguments,issue", [
     ("call_tool", "{broken", "invalid_json"),
     ("call_tool", '{"tool":"read_file","arguments":[]}', "wrong_type"),
@@ -317,6 +444,28 @@ def test_native_action_payload_does_not_execute_runtime_alias_and_reports_curren
     assert rejection["issues"][0]["code"] == "tool_not_visible"
     assert "Use call_tool with tool=unity_create_gameobject" in rejection["summary"]
     assert "loadCall" not in rejection["summary"]
+
+
+def test_native_write_receipt_carries_structured_checkpoint_choice_through_dispatch():
+    tool = PlannerTool("write_file", "Write one file.", "write", write=True,
+                       input_schema={"type": "object", "properties": {"path": {"type": "string"}},
+                                     "required": ["path"], "additionalProperties": False})
+    catalog = FakeCatalog(execution=PlannerCatalogSnapshot(visible_tools=(tool,), routable_tools=(tool,)))
+    quote = "Please skip the checkpoint for this write"
+    model = NativeModel(native_call("call_tool", json.dumps({
+        "tool": "write_file", "arguments": {"path": "Assets/item.asset"},
+        "checkpoint_choice": {"mode": "skip", "quote": quote},
+    })))
+    native = NativePlannerFixture([{"role": "user", "content": quote}])
+    plan = service(catalog=catalog, model=model).plan_agent_turn(
+        quote, {}, {}, exposure_layer=EXPOSURE_LAYER_EXECUTION, native_turn=native,
+    )
+    assert plan["writeNeeded"] is True
+    assert plan["writeTool"] == "write_file"
+    assert plan["checkpointChoice"] == {"mode": "skip", "quote": quote}
+    dispatcher = next(item for item in model.requests[0]["tools"]
+                      if item["function"]["name"] == "call_tool")
+    assert "checkpoint_choice" in dispatcher["function"]["parameters"]["properties"]
 
 
 def test_native_action_payload_rejects_ambiguous_exact_catalog_names() -> None:
@@ -389,6 +538,24 @@ def test_native_planning_control_advertises_phase_entry_without_executing_embedd
     assert plan["nextStep"] == "enter_execution" and plan["enterExecution"] is True
     assert not plan["writeNeeded"] and not plan["skillNeeded"]
     assert plan["nativeCallIds"] == ["call-read"]
+
+
+@pytest.mark.parametrize("layer", ["planning", "execution"])
+def test_native_instructions_require_public_updates_without_user_prompt_or_host_invention(layer):
+    model = NativeModel({"role": "assistant", "content": "Read result."})
+    plan = service(model=model).plan_agent_turn(
+        "inspect project", {}, {}, exposure_layer=layer,
+        native_turn=NativePlannerFixture([{"role": "user", "content": "inspect project"}]),
+    )
+    instructions = model.requests[0]["instructions"]
+    assert instructions.count(RUNTIME_PUBLIC_COMMUNICATION_INSTRUCTION) == 1
+    assert "ordinary public assistant content" in instructions
+    assert 'phase="commentary" only when the protocol supports it' in instructions
+    assert "include the next tool call in the same response" in instructions
+    assert "Do not use action=reply for a progress update" in instructions
+    assert "Keep routine calls quiet" not in instructions
+    assert "Non-final action commentary is optional" not in instructions
+    assert not plan.get("publicMessages")  # Instructions do not manufacture model output.
 
 
 def test_native_followup_preserves_exact_history_without_reprinting_it_as_instructions():
@@ -520,6 +687,116 @@ def service(
         turn=turn,
         global_instructions=global_instructions,
     )
+
+
+def test_provider_retries_only_pre_response_connection_failures() -> None:
+    error = ConnectionError("synthetic connection drop before first byte")
+    error.stream_started = False
+    model = RetrySequenceModel([error], PlannerModelResult('{"action":"reply","reply":"ok"}'))
+    planner = service(model=model)
+    events: list[dict[str, object]] = []
+    plan = planner.plan_agent_turn(
+        "reply",
+        {},
+        {},
+        provider_retry_callback=events.append,
+    )
+    assert plan["nextStep"] == "done"
+    assert model.calls == 2
+    assert events == [{"attempt": 1, "max": 5, "reason": "connection"}]
+
+    started = ConnectionError("synthetic drop after output")
+    started.stream_started = True
+    model = RetrySequenceModel([started], PlannerModelResult('{"action":"reply","reply":"ok"}'))
+    plan = service(model=model).plan_agent_turn("reply", {}, {}, provider_retry_callback=events.append)
+    assert plan["plannerFailed"] is True
+    assert model.calls == 1
+
+    for status_code, message, reason, code in (
+        (429, "rate limited", "rate_limit", "provider_rate_limited"),
+        (503, "capacity unavailable", "capacity", "provider_capacity"),
+    ):
+        transient = RuntimeError(message)
+        transient.status_code = status_code
+        transient.stream_started = False
+        model = RetrySequenceModel([transient], PlannerModelResult('{"action":"reply","reply":"ok"}'))
+        retry_events: list[dict[str, object]] = []
+        result = service(model=model).plan_agent_turn("reply", {}, {}, provider_retry_callback=retry_events.append)
+        assert result["nextStep"] == "done"
+        assert retry_events[0]["reason"] == reason
+        assert RuntimePlannerService._planner_failure_code(transient) == code
+
+    for stream_code, reason, code in (
+        ("rate_limit_exceeded", "rate_limit", "provider_rate_limited"),
+        ("capacity", "capacity", "provider_capacity"),
+    ):
+        stream_failure = RuntimeError(f"Responses stream failed ({stream_code})")
+        stream_failure.stream_started = False
+        stream_failure.stream_error_code = stream_code
+        stream_failure.stream_error_message = "provider supplied stream error"
+        stream_failure.stream_error_status = "failed"
+        stream_failure.stream_error_status_code = 429
+        assert RuntimePlannerService._planner_failure_code(stream_failure) == code
+        assert RuntimePlannerService._provider_retry_reason(stream_failure) == reason
+        details = RuntimePlannerService._planner_provider_error_details(stream_failure)
+        assert details["streamErrorCode"] == stream_code
+        assert details["streamErrorMessage"] == "provider supplied stream error"
+        assert details["streamErrorStatus"] == "failed"
+        assert details["streamErrorStatusCode"] == 429
+        assert "statusCode" not in details
+
+    auth = RuntimeError("unauthorized")
+    auth.status_code = 401
+    auth.stream_started = False
+    model = RetrySequenceModel([auth], PlannerModelResult('{"action":"reply","reply":"ok"}'))
+    auth_events: list[dict[str, object]] = []
+    result = service(model=model).plan_agent_turn("reply", {}, {}, provider_retry_callback=auth_events.append)
+    assert result["plannerFailed"] is True
+    assert auth_events == []
+
+    no_more = RuntimeError("capacity unavailable")
+    no_more.status_code = 503
+    no_more.stream_started = False
+    no_more.no_more_retry = True
+    model = RetrySequenceModel([no_more], PlannerModelResult('{"action":"reply","reply":"ok"}'))
+    result = service(model=model).plan_agent_turn("reply", {}, {})
+    assert result["plannerFailure"]["retryDecision"] == "NO_MORE_RETRY"
+    assert model.calls == 1
+
+    cancellable = RuntimeError("temporary connection")
+    cancellable.stream_started = False
+    model = RetrySequenceModel([cancellable], PlannerModelResult('{"action":"reply","reply":"ok"}'))
+    waits: list[float] = []
+    result = service(model=model).plan_agent_turn(
+        "reply", {}, {}, provider_retry_wait=lambda delay: waits.append(delay) or False,
+    )
+    assert result["plannerFailure"]["retryDecision"] == "CANCELLED"
+    assert model.calls == 1
+    assert waits and waits[0] > 0
+
+    original = RuntimeError("APIError service unavailable")
+    original.status_code = 503
+    original.body = {"type": "service_unavailable_error", "code": "server_is_overloaded", "headers": {"x-retry-metadata": "NO_MORE_RETRY"}}
+    original.stream_started = False
+    model = RetrySequenceModel([original], PlannerModelResult('{"action":"reply","reply":"ok"}'))
+    events = []
+    result = service(model=model).plan_agent_turn("reply", {}, {}, provider_retry_callback=events.append)
+    assert result["plannerFailure"]["retryDecision"] == "NO_MORE_RETRY"
+    assert result["plannerFailure"]["providerError"]["body"]["headers"]["x-retry-metadata"] == "NO_MORE_RETRY"
+    assert model.calls == 1
+
+    failures = []
+    for _ in range(6):
+        failure = ConnectionError("synthetic connection before first byte")
+        failure.stream_started = False
+        failures.append(failure)
+    model = RetrySequenceModel(failures, PlannerModelResult('{"action":"reply","reply":"ok"}'))
+    events = []
+    result = service(model=model).plan_agent_turn("reply", {}, {}, provider_retry_callback=events.append, provider_retry_wait=lambda delay: True)
+    assert result["plannerFailure"]["retryDecision"] == "NO_MORE_RETRY"
+    assert model.calls == 6, "five retries means five reconnect attempts plus the initial request"
+    assert [event["attempt"] for event in events] == [1, 2, 3, 4, 5, 5]
+    assert events[-1]["terminal"] == "NO_MORE_RETRY"
 
 
 def test_plan_agent_turn_without_provider_fails_without_local_fallback() -> None:
@@ -3099,10 +3376,25 @@ def test_owner_surface_has_no_dynamic_host_or_execution_authority() -> None:
     ]
     assert sorted(metadata_accesses) == sorted([
         "getattr(native_turn, 'retain_recovery', None)",
+        "getattr(native_turn, 'retain_recovery_catalog', None)",
         "getattr(native_turn, 'persist_scan_result_policy', None)",
+        "getattr(exc, '__dict__', {})",
+        "getattr(exc, 'body', None)",
+        "getattr(exc, 'headers', None)",
+        "getattr(exc, 'no_more_retry', False)",
+        "getattr(exc, 'response', None)",
+        "getattr(exc, 'response', None)",
+        "getattr(exc, 'stream_started', None)",
+        "getattr(response, 'body', None)",
+        "getattr(response, 'headers', None)",
+        "getattr(response, 'status_code', None)",
+        "getattr(provider_exc, 'provider_usage', None)",
         "getattr(exc, 'provider_usage', {})",
         "getattr(exc, 'provider_usage', None)",
         "getattr(self, '_catalog', None)",
+        "getattr(exc, 'status_code', None)",
+        "getattr(exc, 'response', None)",
+        "getattr(getattr(exc, 'response', None), 'status_code', None)",
     ])
     assert "__getattr__" not in source
     assert "_impl" not in source
@@ -3150,3 +3442,27 @@ def test_schema_projection_keeps_absent_or_invalid_schema_compatibility():
     from runtime_planner_service import bounded_planner_tool_schema
     for value in (None, [], "text", False):
         assert bounded_planner_tool_schema(value) == {}
+
+
+@pytest.mark.parametrize("layer", ["planning", "execution"])
+def test_legacy_prompt_uses_shared_public_behavior_with_json_action_format(layer):
+    prompt = service()._build_llm_plan_prompt("inspect project", [], exposure_layer=layer)
+    assert prompt.count(RUNTIME_PUBLIC_COMMUNICATION_INSTRUCTION) == 1
+    assert "reply field of the same JSON action object and continue that action" in prompt
+    assert "do not add a preamble outside the JSON object" in prompt
+    assert "Reserve action=reply for the final answer" in prompt
+    assert 'phase="commentary"' not in prompt
+    assert "Non-final action commentary is optional" not in prompt
+    assert "Give a brief update only" not in prompt
+    assert "只返回一个 JSON 对象" in prompt
+
+
+def test_shared_public_behavior_covers_opening_milestones_cadence_and_final():
+    instruction = RUNTIME_PUBLIC_COMMUNICATION_INSTRUCTION
+    assert "before the first tool call explaining the immediate work" in instruction
+    assert "state the finding and next step" in instruction
+    assert "a changed approach, a blocker, or a long wait" in instruction
+    assert "after tool results return" in instruction and "about a minute" in instruction
+    assert "do not narrate every tool call" in instruction
+    assert "reveal private reasoning, or invent progress" in instruction
+    assert "final answer self-contained and complete" in instruction

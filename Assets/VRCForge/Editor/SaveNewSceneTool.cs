@@ -1,5 +1,6 @@
 using System;
 using System.Globalization;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Security.Cryptography;
@@ -32,6 +33,8 @@ namespace VRCForge.Editor
             [VRCForgeInput("Expected unsaved-scene dirty flag.", IsRequired = false)] public bool? expectedSceneWasDirty { get; set; }
             [VRCForgeInput("Expected root object count.", IsRequired = false)] public int? expectedRootObjectCount { get; set; }
             [VRCForgeInput("Expected complete scene hierarchy digest.", IsRequired = false)] public string expectedSceneHierarchyDigest { get; set; } = "";
+            [VRCForgeInput("Expected project-wide dirty asset paths captured by preview.", IsRequired = false)] public string[] expectedDirtyAssetPaths { get; set; } = Array.Empty<string>();
+            [VRCForgeInput("Expected dirty asset set digest.", IsRequired = false)] public string expectedDirtyAssetDigest { get; set; } = "";
             [VRCForgeInput("Expected authoritative preview digest.", IsRequired = false)] public string expectedPreviewDigest { get; set; } = "";
         }
 
@@ -62,6 +65,7 @@ namespace VRCForge.Editor
                         mutationStarted);
                 }
                 mutationStarted = true;
+                AssetDatabase.SaveAssets();
                 AssetDatabase.ImportAsset(
                     snapshot.ScenePath,
                     ImportAssetOptions.ForceSynchronousImport | ImportAssetOptions.ForceUpdate);
@@ -102,6 +106,10 @@ namespace VRCForge.Editor
                         sceneHandle = loaded.handle,
                         sceneName = loaded.name ?? string.Empty,
                         sceneWasDirty = snapshot.SceneWasDirty,
+                        dirtyAssetCount = snapshot.DirtyAssetPaths.Count,
+                        dirtyAssetPaths = snapshot.DirtyAssetPaths,
+                        dirtyAssetDigest = snapshot.DirtyAssetDigest,
+                        saveScope = "scene_and_project_wide_assets",
                         rootObjectCount = loaded.rootCount,
                         sceneHierarchyDigest = snapshot.SceneHierarchyDigest,
                         sceneFileDigest = evidence.File.Digest,
@@ -172,8 +180,10 @@ namespace VRCForge.Editor
                 SceneWasDirty = active.isDirty,
                 RootObjectCount = active.rootCount,
                 SceneHierarchyDigest = ComputeSceneHierarchyDigest(active),
+                DirtyAssetPaths = CaptureDirtyAssetPaths(),
                 ProjectPath = ProjectRoot()
             };
+            snapshot.DirtyAssetDigest = ComputeDirtyAssetDigest(snapshot.DirtyAssetPaths);
             snapshot.PreviewDigest = ComputePreviewDigest(snapshot);
             return snapshot;
         }
@@ -191,6 +201,10 @@ namespace VRCForge.Editor
                 || parameters["expectedRootObjectCount"].Value<int>() != snapshot.RootObjectCount
                 || !IsLowerHex(parameters["expectedSceneHierarchyDigest"]?.ToString(), 64)
                 || parameters["expectedSceneHierarchyDigest"].ToString() != snapshot.SceneHierarchyDigest
+                || parameters["expectedDirtyAssetPaths"]?.Type != JTokenType.Array
+                || !parameters["expectedDirtyAssetPaths"].Values<string>().SequenceEqual(snapshot.DirtyAssetPaths)
+                || !IsLowerHex(parameters["expectedDirtyAssetDigest"]?.ToString(), 64)
+                || parameters["expectedDirtyAssetDigest"].ToString() != snapshot.DirtyAssetDigest
                 || !IsLowerHex(parameters["expectedPreviewDigest"]?.ToString(), 64)
                 || parameters["expectedPreviewDigest"].ToString() != snapshot.PreviewDigest)
             {
@@ -245,8 +259,28 @@ namespace VRCForge.Editor
             AppendDigestField(value, snapshot.SceneWasDirty ? "true" : "false");
             AppendDigestField(value, snapshot.RootObjectCount.ToString(CultureInfo.InvariantCulture));
             AppendDigestField(value, snapshot.SceneHierarchyDigest);
+            AppendDigestField(value, snapshot.DirtyAssetPaths.Count.ToString(CultureInfo.InvariantCulture));
+            foreach (var path in snapshot.DirtyAssetPaths) AppendDigestField(value, path);
+            AppendDigestField(value, snapshot.DirtyAssetDigest);
             AppendDigestField(value, "false");
             AppendDigestField(value, "false");
+            return Sha256(value.ToString());
+        }
+
+        private static List<string> CaptureDirtyAssetPaths()
+        {
+            return AssetDatabase.GetAllAssetPaths()
+                .Where(path => path.StartsWith("Assets/", StringComparison.Ordinal)
+                    && AssetDatabase.LoadAllAssetsAtPath(path).Any(EditorUtility.IsDirty))
+                .OrderBy(path => path, StringComparer.Ordinal)
+                .ToList();
+        }
+
+        private static string ComputeDirtyAssetDigest(IEnumerable<string> paths)
+        {
+            var value = new StringBuilder();
+            AppendDigestField(value, "vrcforge.dirty_asset_set.v1");
+            foreach (var path in paths) AppendDigestField(value, path);
             return Sha256(value.ToString());
         }
 
@@ -292,6 +326,8 @@ namespace VRCForge.Editor
             internal bool SceneWasDirty;
             internal int RootObjectCount;
             internal string SceneHierarchyDigest = string.Empty;
+            internal List<string> DirtyAssetPaths = new List<string>();
+            internal string DirtyAssetDigest = string.Empty;
             internal string PreviewDigest = string.Empty;
 
             internal object ToPayload(bool preview)
@@ -316,6 +352,10 @@ namespace VRCForge.Editor
                     sceneWasDirty = SceneWasDirty,
                     rootObjectCount = RootObjectCount,
                     sceneHierarchyDigest = SceneHierarchyDigest,
+                    dirtyAssetCount = DirtyAssetPaths.Count,
+                    dirtyAssetPaths = DirtyAssetPaths,
+                    dirtyAssetDigest = DirtyAssetDigest,
+                    saveScope = "scene_and_project_wide_assets",
                     targetExists = false,
                     targetMetaExists = false,
                     previewDigest = PreviewDigest

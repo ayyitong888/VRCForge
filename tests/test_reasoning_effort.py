@@ -6,6 +6,7 @@ temperature exemption matrix, and dashboard config plumbing.
 """
 
 import json
+from dataclasses import replace
 from pathlib import Path
 from threading import RLock
 from types import SimpleNamespace
@@ -58,6 +59,8 @@ from vrchat_blendshape_agent import (
     reasoning_effort_variants,
     reasoning_variants_descriptor,
     reasoning_thinking_budget,
+    _responses_reasoning_effort,
+    request_responses_plan_with_metadata,
 )
 
 
@@ -174,6 +177,7 @@ def test_normalize_reasoning_effort_matrix():
     assert normalize_reasoning_effort("HIGH") == "high"
     assert normalize_reasoning_effort("xhigh") == "xhigh"
     assert normalize_reasoning_effort("max") == "max"
+    assert normalize_reasoning_effort("ultra") == "ultra"
     assert normalize_reasoning_effort("") == ""
     assert normalize_reasoning_effort("off") == ""
     assert normalize_reasoning_effort("weird") == ""
@@ -195,6 +199,7 @@ def test_reasoning_variants_are_provider_and_model_aware():
     assert reasoning_effort_variants("openai", "o3") == ["low", "medium", "high"]
     assert reasoning_effort_variants("openai", "gpt-5.2-codex") == ["low", "medium", "high", "xhigh"]
     assert reasoning_effort_variants("openai", "gpt-5.6-sol") == ["none", "low", "medium", "high", "xhigh", "max"]
+    assert reasoning_effort_variants("openai", "gpt-6.1-sol") == []  # OAuth uses advertised model metadata.
     assert reasoning_effort_variants("openai", "gpt-5.4-pro") == []
     assert reasoning_effort_variants("openai", "gpt-5.2-chat-latest") == []
     assert reasoning_effort_variants("deepseek", "deepseek-reasoner") == ["none", "high"]
@@ -280,11 +285,49 @@ def test_openrouter_payload_uses_unified_reasoning_object():
     assert "reasoning_effort" not in payload
 
 
+def test_catalog_validated_efforts_reach_request_builders_without_static_refilter():
+    router = build_openai_compatible_request_payload(make_settings("openrouter", "router/new-model", "max"), "hello")
+    assert router["extra_body"] == {"reasoning": {"effort": "max"}}
+    configured = make_settings("deepseek", "deepseek-new-catalog-model", "max")
+    assert build_openai_compatible_request_payload(configured, "hello")["reasoning_effort"] == "max"
+    assert _responses_reasoning_effort(configured) == "max"
+    assert build_anthropic_request_payload(configured, "hello")["output_config"] == {"effort": "max"}
+    configured.gemini_thinking_level = ""
+    assert "reasoning_effort" not in build_openai_compatible_request_payload(configured, "hello")
+    assert _responses_reasoning_effort(configured) == ""
+    assert "output_config" not in build_anthropic_request_payload(configured, "hello")
+
+
 def test_openai_non_reasoning_model_does_not_receive_reasoning_effort():
     payload = build_openai_compatible_request_payload(
         make_settings("openai", model="gpt-4o", thinking_level="high"), "hello"
     )
     assert "reasoning_effort" not in payload
+
+
+def test_chatgpt_oauth_responses_effort_uses_the_selected_metadata_validated_level():
+    assert _responses_reasoning_effort(make_settings("chatgpt", "gpt-5.6-sol", "high")) == "high"
+    assert _responses_reasoning_effort(make_settings("chatgpt", "gpt-6.1-sol", "low")) == "low"
+    assert _responses_reasoning_effort(make_settings("chatgpt", "gpt-6.1-sol", "ultra")) == "ultra"
+
+
+def test_chatgpt_planner_request_receives_selected_effort_without_external_call(monkeypatch):
+    captured = []
+
+    class OfflineAdapter:
+        def __init__(self, **_kwargs):
+            pass
+
+        def send_request(self, request):
+            captured.append(request)
+            return SimpleNamespace(text="ok", usage={}, reasoning_summary=[], model="gpt-5.6-sol")
+
+    monkeypatch.setattr("vrchat_blendshape_agent.ChatGPTResponsesAdapter", OfflineAdapter)
+    result = request_responses_plan_with_metadata(
+        make_settings("chatgpt", "gpt-6.1-sol", "low"), "offline fixture",
+    )
+    assert result.text == "ok"
+    assert captured[0].reasoning_effort == "low"
 
 
 def test_openai_compatible_payload_off_sends_nothing():
@@ -376,7 +419,7 @@ def test_deepseek_anthropic_payload_maps_product_effort_to_documented_values(
     assert payload["output_config"] == {"effort": sent}
 
 
-def test_deepseek_anthropic_payload_never_sends_undocumented_minimal():
+def test_deepseek_anthropic_payload_keeps_explicit_canonical_choice():
     configured = make_settings(
         "deepseek", model="deepseek-v4-pro", thinking_level="minimal"
     )
@@ -384,8 +427,10 @@ def test_deepseek_anthropic_payload_never_sends_undocumented_minimal():
 
     payload = build_anthropic_request_payload(configured, "hello")
 
-    assert "thinking" not in payload
-    assert "output_config" not in payload
+    # Capability validation belongs to the catalog/configuration boundary;
+    # the request builder must not repeat a stale model-name capability table.
+    assert payload["thinking"] == {"type": "enabled"}
+    assert payload["output_config"] == {"effort": "minimal"}
 
 
 def test_anthropic_adaptive_payload_raises_response_budget_per_level():
@@ -523,6 +568,50 @@ def test_normalize_api_config_rejects_unsupported_variant_instead_of_clamping(tm
     request = ApiConfigRequest(provider="openai", api_key="k", model="gpt-4o", thinking_level="high")
     with pytest.raises(ValueError, match="not supported"):
         owner.normalize_api_request(request)
+
+
+def test_resolve_anthropic_reasoning_uses_server_catalog_capabilities(tmp_path: Path):
+    owner = make_configuration_owner(tmp_path)
+    catalog_calls = []
+    owner._policy = replace(
+        owner._policy,
+        catalog_reasoning_efforts=lambda provider, key, base_url, model: (
+            catalog_calls.append((provider, key, base_url, model)) or ["low", "xhigh"]
+        ),
+    )
+    request = ApiConfigRequest(
+        provider="anthropic", api_key="server-key", model="claude-fixture",
+        thinking_level="xhigh",
+    )
+    config = owner.resolve_api_request(request)
+    assert config.thinking_level == "xhigh"
+    assert catalog_calls == [("anthropic", "server-key", "", "claude-fixture")]
+
+    request.thinking_level = "medium"
+    with pytest.raises(ValueError, match="supported: low, xhigh"):
+        owner.resolve_api_request(request)
+
+    owner._policy = replace(
+        owner._policy,
+        catalog_reasoning_efforts=lambda *_args: None,
+    )
+    with pytest.raises(ValueError, match="not supported"):
+        owner.resolve_api_request(request)
+
+
+def test_chatgpt_oauth_config_reuses_openai_model_variant_validation(tmp_path: Path):
+    owner = make_configuration_owner(tmp_path)
+    accepted = ApiConfigRequest(
+        provider="chatgpt", api_key="account", model="gpt-5.6-sol",
+        api_type="responses", thinking_level="high",
+    )
+    assert owner.normalize_api_request(accepted).thinking_level == "high"
+    unsupported = ApiConfigRequest(
+        provider="chatgpt", api_key="account", model="gpt-4o",
+        api_type="responses", thinking_level="high",
+    )
+    with pytest.raises(ValueError, match="not supported"):
+        owner.normalize_api_request(unsupported)
 
 
 def test_reasoning_variants_api_is_backend_owned_and_secret_free():

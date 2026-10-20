@@ -95,7 +95,23 @@ export function ProviderSetup({
   onSubmit,
 }: ProviderSetupProps) {
   const requiresBaseUrl = PROVIDERS_REQUIRING_BASE_URL.includes(provider);
-  const supportedReasoningVariants = reasoningVariants?.variants ?? [];
+  const selectedModelInfo = models.find((item) => item.id === model);
+  const catalogEfforts = selectedModelInfo?.reasoningEfforts;
+  const catalogChoices = catalogEfforts === undefined ? undefined
+    : selectedModelInfo?.reasoningDisabledSupported && !catalogEfforts.includes("none")
+      ? ["none", ...catalogEfforts] : catalogEfforts;
+  const supportedReasoningVariants = catalogChoices !== undefined
+    ? catalogChoices.map((level) => ({
+      key: level,
+      level,
+      displayKey: `provider.reasoning_${level}`,
+      requestMode: selectedModelInfo?.thinkingTypes?.includes("adaptive")
+        ? "adaptive_thinking_effort"
+        : selectedModelInfo?.thinkingTypes?.includes("enabled")
+          ? "manual_thinking_effort"
+          : "",
+    }))
+    : reasoningVariants?.variants ?? [];
   const supportsReasoning = supportedReasoningVariants.length > 0;
   const hasUnsupportedReasoningVariant =
     thinkingLevel !== "default" && !supportedReasoningVariants.some((variant) => variant.key === thinkingLevel);
@@ -103,7 +119,6 @@ export function ProviderSetup({
   const hasModelList = models.length > 0;
   const capabilities = providerCapabilities(modelCapabilities, capabilitySource);
   const apiTypeOptions = supportedApiTypeOptions(provider, model);
-  const selectedModelInfo = models.find((item) => item.id === model);
   const knownContextWindow = resolveContextLimit(provider, model, selectedModelInfo);
   const detectedContextWindow = firstPositiveContextWindow(selectedModelInfo)
     ?? (knownContextWindow.known ? knownContextWindow.limit : undefined);
@@ -347,7 +362,7 @@ export function ProviderSetup({
           {testingProvider === "vision" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Eye className="h-4 w-4" />}
           {i18n.t("provider.testVision")}
         </Button>
-        <Button disabled={!runtimeConnected || saving || !contextWindowValid || (providerNeedsApiKey(provider) && !apiKey.trim() && !keySaved) || !model.trim() || model === "deepseek-auto"} type="submit">
+        <Button disabled={!runtimeConnected || saving || !contextWindowValid || hasUnsupportedReasoningVariant || (providerNeedsApiKey(provider) && !apiKey.trim() && !keySaved) || !model.trim() || model === "deepseek-auto"} type="submit">
           {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
           {i18n.t("common.save")}
         </Button>
@@ -385,11 +400,23 @@ export function VisionProfileSetup({
 }: VisionProfileSetupProps) {
   const requiresBaseUrl = PROVIDERS_REQUIRING_BASE_URL.includes(provider);
   const saveDisabled =
-    !runtimeConnected || saving || !provider || !model.trim() || (providerNeedsApiKey(provider) && !apiKey.trim() && !keySaved);
+    !runtimeConnected || saving || Boolean(enabled && provider && (!model.trim() || (providerNeedsApiKey(provider) && !apiKey.trim() && !keySaved)));
 
   return (
     <form onSubmit={onSubmit} className="rounded-2xl border border-border bg-card p-5 shadow-composer">
       <div className="grid gap-4">
+        <label className="flex cursor-pointer items-start gap-2 text-sm">
+          <input
+            type="checkbox"
+            checked={enabled}
+            onChange={(event) => onEnabledChange(event.target.checked)}
+            className="mt-0.5 h-4 w-4 accent-primary"
+          />
+          <span>
+            <span className="block font-medium text-foreground">{i18n.t("vision.enabledLabel")}</span>
+            {!enabled ? <span className="block text-muted-foreground">{i18n.t("vision.disabledDescription")}</span> : null}
+          </span>
+        </label>
         <SettingsFieldLabel label={i18n.t("provider.apiProvider")}>
           <select
             value={provider}
@@ -407,7 +434,7 @@ export function VisionProfileSetup({
             <option value="custom">{i18n.t("provider.customEndpoint")}</option>
           </select>
         </SettingsFieldLabel>
-        {provider ? (
+        {provider && enabled ? (
           <>
             <SettingsFieldLabel label={i18n.t("provider.apiKey")}>
               {providerNeedsApiKey(provider) ? (
@@ -444,15 +471,6 @@ export function VisionProfileSetup({
                 className="h-10 w-full rounded-md border border-border bg-background px-3 text-sm outline-none placeholder:text-muted-foreground/60 focus:border-primary"
               />
             </SettingsFieldLabel>
-            <label className="flex cursor-pointer items-center gap-2 text-sm">
-              <input
-                type="checkbox"
-                checked={enabled}
-                onChange={(event) => onEnabledChange(event.target.checked)}
-                className="h-4 w-4 accent-primary"
-              />
-              {i18n.t("vision.enabledLabel")}
-            </label>
           </>
         ) : null}
       </div>

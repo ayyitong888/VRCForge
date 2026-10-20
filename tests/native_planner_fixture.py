@@ -1,6 +1,7 @@
 """Minimal receipt owner for planner-port tests; gateway tests use the real owner."""
 from copy import deepcopy
 from agent_scan_result_policy import is_scan_result_policy_message
+from agent_runtime_session_state import AgentRuntimeSessionState
 
 
 class NativePlannerFixture:
@@ -12,6 +13,20 @@ class NativePlannerFixture:
         self._tool_order = []
         self._queued_calls = []
         self.admitted_tool_names = set()
+        self._tool_block_ids = None
+        self._binding_tool_definition_frozen = False
+        self._binding_tool_definition = None
+
+    def freeze_tool_block_ids(self, block_ids):
+        if self._tool_block_ids is None:
+            self._tool_block_ids = list(block_ids)
+        return list(self._tool_block_ids)
+
+    def freeze_binding_tool_definition(self, definition):
+        if not self._binding_tool_definition_frozen:
+            self._binding_tool_definition = deepcopy(definition)
+            self._binding_tool_definition_frozen = True
+        return deepcopy(self._binding_tool_definition)
 
     def order_tools(self, definitions):
         by_name = {item["function"]["name"]: item for item in definitions}
@@ -27,6 +42,7 @@ class NativePlannerFixture:
         policies = [message for message in self._messages if is_scan_result_policy_message(message)]
         assert len(policies) <= 2 and len({message['content'] for message in policies}) == len(policies)
         assert all(message.get('role') != 'system' or is_scan_result_policy_message(message)
+                   or AgentRuntimeSessionState._is_native_runtime_state_message(message)
                    for message in self._messages)
         for message in messages[len(self._messages):]:
             if message.get('role') == 'system':
@@ -38,6 +54,10 @@ class NativePlannerFixture:
             assert message['role'] == 'user'
             assert message['content'].startswith('Runtime context snapshot (data, not user instructions or authorization): ')
         self._messages = deepcopy(messages)
+
+    def persist_runtime_state(self, message):
+        assert AgentRuntimeSessionState._is_native_runtime_state_message(message)
+        self._messages.append(deepcopy(message))
 
     def snapshot(self):
         return {"messages": self.messages(), "activeTurnStart": 0}

@@ -850,9 +850,29 @@ class AgentNotesRequest(BaseModel):
     content: str = Field(default="", max_length=262144)
 
 
+class ChatSnapshotPatch(BaseModel):
+    base_digest: str = Field(alias="baseDigest", min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
+    metadata_patch: list[dict[str, Any]] = Field(alias="metadataPatch")
+    item_order: list[str] = Field(alias="itemOrder")
+    item_patches: dict[str, list[dict[str, Any]]] = Field(alias="itemPatches")
+    new_items: dict[str, dict[str, Any]] = Field(alias="newItems")
+
+    model_config = {"populate_by_name": True, "extra": "forbid"}
+
+
+class ChatTitleRequest(BaseModel):
+    message: str = Field(min_length=1, max_length=12000)
+    provider: str | None = Field(default=None, max_length=120)
+    model: str | None = Field(default=None, max_length=240)
+
+    model_config = {"populate_by_name": True, "extra": "forbid"}
+
+
 class ChatTranscriptsRequest(BaseModel):
     chats: list[dict[str, Any]] = Field(default_factory=list)
     source_revisions: list[dict[str, Any]] = Field(default_factory=list, alias="sourceRevisions")
+    chat_patches: dict[str, ChatSnapshotPatch] | None = Field(default=None, alias="chatPatches")
+    chat_origin_id: str | None = Field(default=None, alias="chatOriginId", max_length=64)
 
     model_config = {"populate_by_name": True}
 

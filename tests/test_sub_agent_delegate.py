@@ -129,6 +129,34 @@ def test_preset_roles_route_to_expected_tools():
         assert result["schema"].startswith("vrcforge.sub_agent.")
 
 
+def test_missing_required_role_params_fail_before_runtime_tool_dispatch():
+    gateway = FakeGateway({"ok": True})
+    with pytest.raises(RuntimeError, match="project_index_review requires projectPath"):
+        run_project_index_review(gateway, {"projectPath": ""}, _idle_event())
+    with pytest.raises(RuntimeError, match="outfit_import_plan_review requires params.packagePath"):
+        run_outfit_import_plan_review(gateway, {"task": "Build an import plan"}, _idle_event())
+    with pytest.raises(RuntimeError, match="outfit_package_inspection requires params.packagePath"):
+        run_outfit_package_inspection(
+            gateway,
+            {"task": "Inspect E:/.../Example_Outfit_SampleAvatar_V1.00_6431583.zip"},
+            _idle_event(),
+        )
+    assert gateway.calls == []
+
+    run_outfit_package_inspection(
+        gateway,
+        {"task": "Inspect the package", "packagePath": "E:/.../Example_Outfit_SampleAvatar_V1.00_6431583.zip"},
+        _idle_event(),
+    )
+    assert gateway.calls == [
+        (
+            "vrcforge_inspect_outfit_package",
+            {"packagePath": "E:/.../Example_Outfit_SampleAvatar_V1.00_6431583.zip", "maxEntries": 5000},
+            "sub-agent:outfit_package_inspection",
+        )
+    ]
+
+
 def test_blocked_skill_surfaces_block_reason_as_failure():
     gateway = FakeGateway(blocked=True, error="Tool category is not runtime-executable: supervised-write")
     with pytest.raises(RuntimeError) as exc_info:

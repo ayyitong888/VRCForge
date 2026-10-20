@@ -78,12 +78,18 @@ def _evidence(value, path):
 
 def _expected_state(before, args):
     state = deepcopy(before["state"])
-    properties = state["properties"]
+    properties = state.get("properties")
+    if not isinstance(properties, list):
+        raise ValueError("Material property evidence is ambiguous.")
+    requested = {edit["propertyName"] for edit in args["propertyChanges"]}
     index = {}
     for row in properties:
-        if not isinstance(row, dict) or not isinstance(row.get("name"), str) or row["name"] in index:
+        if not isinstance(row, dict) or not isinstance(row.get("name"), str):
             raise ValueError("Material property evidence is ambiguous.")
-        index[row["name"]] = row
+        if row["name"] in requested:
+            if row["name"] in index:
+                raise ValueError("Material property evidence is ambiguous.")
+            index[row["name"]] = row
     for edit in args["propertyChanges"]:
         row = index.get(edit["propertyName"])
         if row is None or row.get("type") not in ("Float", "Range", "Int"):

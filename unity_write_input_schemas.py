@@ -69,7 +69,7 @@ EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
         "properties": {
             "projectPath": _PROJECT_PATH_PROPERTY,
             "gameObjectPath": {"type": "string", "description": "Exact prefab instance hierarchy path."},
-            "mode": {"type": "string", "default": "outermost", "description": "Prefab unpack mode accepted by the installed Core."},
+            "mode": {"type": "string", "default": "completely", "description": "Defaults to completely so nested prefab instances can be modified too. Explicit outermost remains available for a deliberately limited unpack."},
             "preview": {"type": "boolean", "default": False},
         },
     },
@@ -393,6 +393,7 @@ EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
             "gameObjectPath": {"type": "string"},
             "newParentPath": {"type": "string"},
             "worldPositionStays": {"type": "boolean", "default": True},
+            "siblingIndex": {"type": "integer", "minimum": 0, "description": "Optional zero-based destination index. For sorting while preserving animation paths, supply the object's current parent as newParentPath. Requires Core contract 175."},
         },
     },
     "vrcforge_set_gameobject_active": {
@@ -855,8 +856,11 @@ EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS["vrcforge_apply_parameter_optimization"] =
 
 EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS["vrcforge_restore_checkpoint"] = {
     **UNITY_READ_TOOL_INPUT_SCHEMAS["vrcforge_preview_restore_checkpoint"],
+    "additionalProperties": False,
     "properties": {
         **UNITY_READ_TOOL_INPUT_SCHEMAS["vrcforge_preview_restore_checkpoint"]["properties"],
+        "recoveryId": {"type": "string", "minLength": 1, "description": "Optional active interrupted-apply recovery id. In full-permission mode it must identify the selected checkpoint's active incident for autonomous recovery."},
+        "recovery_id": {"type": "string", "minLength": 1, "description": "Existing alias of recoveryId."},
         "confirmRestore": {"type": "boolean", "description": "Must be true, or confirm_restore must be true, to confirm restoring the selected checkpoint. The normal approval flow still applies."},
         "confirm_restore": {"type": "boolean", "description": "Existing alias of confirmRestore."},
     },
@@ -1221,8 +1225,8 @@ _ADD_OUTFIT_PROPERTIES = {
     'folder': {'type': ['string', 'null'], 'default': '', 'description': 'Optional asset-search folder used only for query resolution.'},
     'parentPath': {'type': ['string', 'null'], 'description': 'Existing parent hierarchy path; defaults to avatarPath.'},
     'outfitName': {'type': ['string', 'null'], 'description': 'New single-segment object name; defaults to prefab name, then Outfit. Existing target objects are rejected.'},
-    'parameterName': {'type': ['string', 'null'], 'description': 'Optional wardrobe selector. Omission starts with Clothes and the existing wardrobe-selection policy; an explicit value selects that exact wardrobe.'},
-    'unpackMode': {'type': ['string', 'null'], 'default': 'outermost', 'description': 'Used only when unpackPrefab is enabled: outermost or completely, compared case-insensitively.'},
+    'parameterName': {'type': ['string', 'null'], 'description': 'Selector for an existing strict verified wardrobe when manageWardrobe=true. A newly created one-value skeleton is insufficient; first install without binding, then add via preview_add_wardrobe_outfit/add_wardrobe_outfit. Omission uses the existing wardrobe-selection policy.'},
+    'unpackMode': {'type': ['string', 'null'], 'default': 'completely', 'description': 'Used only when unpackPrefab is enabled. Defaults to completely, including nested instances; explicit outermost remains available, compared case-insensitively.'},
     'offObjectPaths': {'description': 'Optional array of paths, or one scalar path, switched off by the wardrobe entry. Existing values are converted to text and de-duplicated; both spellings are combined.'},
     'subMenuName': {'type': ['string', 'null'], 'default': 'Wardrobe', 'description': 'Menu group used when manageWardrobe is enabled.'},
     'clipOutputDir': {'type': ['string', 'null'], 'description': 'Optional wardrobe animation output directory; omission preserves the wardrobe tool default.'},
@@ -1236,6 +1240,7 @@ for _outfit_flag, _outfit_default in (
         'default': _outfit_default,
         'description': 'Optional boolean. Existing conversion accepts numbers and strings true/false, 1/0, yes/no, y/n, on/off; null or unrecognized values use the default. ' + ('Omission preserves the wardrobe tool default; only forwarded when explicitly provided.' if _outfit_flag == 'writeDefaults' else ''),
     }
+_ADD_OUTFIT_PROPERTIES['manageWardrobe']['description'] += ' True requires an existing strict scan. False installs/setup only, without wardrobe scanning, creation or binding; use for the first outfit before the separate approved add_wardrobe_outfit primitive.'
 for _outfit_alias, _outfit_canonical in {
     'avatar_path': 'avatarPath', 'asset_path': 'assetPath', 'query': 'assetQuery', 'asset_query': 'assetQuery',
     'type_name': 'typeName', 'parent_path': 'parentPath', 'outfit_name': 'outfitName', 'name': 'outfitName',

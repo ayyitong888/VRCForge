@@ -31,7 +31,7 @@ support-files:
 
 ## 什么时候不使用
 
-没有现成专用 PhysBone / Marshmallow 写原子；禁止用通用字段工具冒充修复，禁止创建、删除或改动任何骨骼、物理、约束、prefab 或 Avatar。
+没有现成专用 PhysBone / Marshmallow 写原子；本 Skill 内禁止用通用字段工具冒充 PhysBone/Marshmallow 修复，禁止创建、删除或改动任何骨骼、物理、约束、prefab 或 Avatar。审计退出后若用户另行授权已确认的 serialized 字段，只能转交独立的通用 Core 176 配置流程，不能把它称作本 Skill 的物理修复。
 
 ## 社区证据与安全边界
 
@@ -39,3 +39,5 @@ support-files:
 
 详细步骤见 [操作说明](references/workflow.md) 和受签名保护的 [社区操作指引](workflows/breast-physics-audit.json)；由 Agent 根据现场证据选择适用路线与真实原子工具。
 本 Skill 严格只读：不创建、修改、删除、播放、上传或恢复任何资产。
+
+审计退出后，如用户另行明确授权配置已确认的 serialized 字段，可转交通用 Core 176 组件/属性工具的独立写入流程；该转交不属于本 Skill 的审计写入。必须重新绑定目标、建立 approval 与 checkpoint、preview 后写入并持久读回。只允许实际工具契约支持的字段，禁止调用作者任意方法、动态 C#、专用物理猜测或把审计结果当作写入授权。

@@ -310,6 +310,28 @@ export function useProjectManagement({
     return projectUiPrefs.aliases[normalizeProjectPathKey(key)] || project.name || project.path || "Unity Project";
   }
 
+  function projectDisplayLabel(project?: { path?: string; name?: string }): string {
+    const base = projectDisplayName(project);
+    if (!project?.path || !base) {
+      return base;
+    }
+    const duplicatePaths = projectItems
+      .filter((candidate) => projectDisplayName(candidate) === base && candidate.path)
+      .map((candidate) => candidate.path as string);
+    if (duplicatePaths.length < 2) {
+      return base;
+    }
+    const normalizedParts = project.path.replace(/\\/g, "/").split("/").filter(Boolean);
+    for (let depth = 1; depth <= normalizedParts.length; depth += 1) {
+      const suffix = normalizedParts.slice(-depth).join("/");
+      const matches = duplicatePaths.filter((candidate) => candidate.replace(/\\/g, "/").split("/").filter(Boolean).slice(-depth).join("/") === suffix);
+      if (matches.length === 1) {
+        return `${base} (${suffix})`;
+      }
+    }
+    return `${base} (${project.path})`;
+  }
+
   function togglePinProject(path: string) {
     const key = normalizeProjectPathKey(path);
     if (!key) {
@@ -537,6 +559,7 @@ export function useProjectManagement({
     hideProject,
     unhideProject,
     projectDisplayName,
+    projectDisplayLabel,
     togglePinProject,
     startRenameProject,
     commitRenameProject,

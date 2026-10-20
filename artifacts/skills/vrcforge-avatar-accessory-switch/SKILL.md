@@ -10,6 +10,7 @@ allowed-tools:
   - vrcforge_read_avatar_descriptor
   - vrcforge_get_gameobject
   - vrcforge_get_property
+  - vrcforge_unpack_prefab
   - vrcforge_inspect_skinned_mesh_bone_usage
   - vrcforge_scan_modular_avatar
   - vrcforge_scan_inbound_reference_closure
@@ -57,4 +58,8 @@ support-files:
 对应技术或作者资产行为拿不准时，先查成熟 VRChat 社区教程、资产作者说明和官方文档；证据或现有精确原子不足时停止并返回 `capabilityGap=true`，不得猜测、虚构工具、复制未授权资产或修改任务范围外的 Avatar。
 
 详细步骤见 [操作说明](references/workflow.md) 和受签名保护的 [社区操作指引](workflows/accessory-switch.json)；不对已有饰品套用固定 Bool、菜单路径或动画时序，由 Agent 根据现场证据选择适用路线与真实原子工具。
+
+修改场景中的 Prefab instance 前，必须先对精确 instance 执行 `vrcforge_unpack_prefab` preview，核对 GlobalObjectId、源 prefab GUID、依赖 hash 和场景路径，再在批准与 checkpoint 边界内使用 `mode=completely` 完全解包。解包后重新绑定并读回新的场景对象身份；源 prefab 资产、作者 Modular Avatar 组件、骨架、动画与约束来源必须保留。普通材质属性按实际材质工具契约处理，不把材质字段写入错误地描述为必须破坏源 prefab。
+
+面捕的普通安装/serialized 配置读回与 Play 运行验收是两条独立证据链。配置完成只证明编辑态字段、参数、FX、曲线或菜单持久化；Play/视觉验收必须有单独的明确批准、有限预算和原状态恢复，不得把未运行误报为失败或通过。
 每项写入通过用户当前配置的权限策略、现有监督通道、精确 preview 和检查点；回滚需要单独确认。

@@ -308,6 +308,44 @@ def test_head_swap_has_two_executable_branches_and_generic_part_transplant() -> 
     assert "static and gm motion" in transplant_acceptance
 
 
+def test_face_installation_and_head_swap_runtime_acceptance_are_task_scoped() -> None:
+    by_name = {skill["name"]: skill for skill in AVATAR_COMPOSITION_WORKFLOW_SKILLS}
+
+    face = by_name["face-tracking-four-piece-merge"]
+    assert face["taskScope"] == "face_tracking_installation_and_serialized_configuration"
+    assert face["runtimeAcceptance"] == {
+        "separateFromInstallation": True,
+        "selection": "user_task",
+        "requiredForThisSkill": False,
+        "entry": "face_tracking_play_runtime_acceptance",
+    }
+    assert any(
+        step.get("phase") == "serialized_install_configuration_readback"
+        and step.get("runtimeRequired") is False
+        for step in face["steps"]
+    )
+    face_runtime = next(
+        step for step in face["steps"] if step.get("phase") == "face_tracking_play_runtime_acceptance"
+    )
+    assert face_runtime["runtimeRequired"] is False
+    assert "Optionally" in face_runtime["goal"]
+
+    head = by_name["avatar-head-swap-face-tracked"]
+    assert head["taskScope"] == "complete_head_transplant_with_face_tracking"
+    assert head["runtimeAcceptance"]["requiredForThisSkill"] is True
+    assert any(
+        step.get("phase") == "serialized_install_configuration_readback"
+        for step in head["steps"]
+    )
+    head_runtime = next(
+        step
+        for step in head["steps"]
+        if step.get("phase") == "head_swap_play_runtime_and_visual_acceptance"
+    )
+    assert head_runtime["runtimeRequired"] is True
+    assert "Bottom" in head_runtime["goal"]
+
+
 def test_head_workflows_require_active_renderer_consumer_and_face_contract_closure() -> None:
     by_name = {skill["name"]: skill for skill in AVATAR_COMPOSITION_WORKFLOW_SKILLS}
     for name in (

@@ -13,6 +13,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol
@@ -127,6 +129,11 @@ class ProviderConfigurationPolicyPorts:
     provider_auth_label: Callable[[str], str]
     provider_requires_api_key: Callable[[str], bool]
     provider_config_descriptor: Callable[[ProviderApiConfig], dict[str, Any]]
+    catalog_reasoning_efforts: Callable[[str, str, str, str], list[str] | None] | None = None
+
+
+class ProviderConfigurationBusyError(RuntimeError):
+    """A live task owns the model configuration until its current lifecycle exits."""
 
 
 class ProviderConfigurationService:
@@ -143,6 +150,48 @@ class ProviderConfigurationService:
         self._lock = lock
         self._api_config: ProviderApiConfig | None = None
         self._vision_config: ProviderVisionConfig | None = None
+        self._runtime_bindings = 0
+        self._configuration_changes = 0
+        self._configuration_change_owner: ContextVar[bool] = ContextVar("provider_configuration_change", default=False)
+        self.runtime_waiting: Callable[[], bool] = lambda: False
+
+    def runtime_configuration_locked(self) -> bool:
+        with self._lock:
+            return bool(self._runtime_bindings or self.runtime_waiting())
+
+    def _assert_configuration_idle(self) -> None:
+        if self.runtime_configuration_locked() or (self._configuration_changes and not self._configuration_change_owner.get()):
+            raise ProviderConfigurationBusyError(
+                "Model settings are locked while a task is running or waiting for approval or an answer. Finish or stop the task before changing them."
+            )
+
+    @contextmanager
+    def configuration_change(self):
+        """Reserve one async account/config mutation without holding a lock across awaits."""
+        with self._lock:
+            self._assert_configuration_idle()
+            self._configuration_changes += 1
+        token = self._configuration_change_owner.set(True)
+        try:
+            yield
+        finally:
+            self._configuration_change_owner.reset(token)
+            with self._lock:
+                self._configuration_changes -= 1
+
+    @contextmanager
+    def bind_runtime_config(self, *, provider: str = "", model: str = ""):
+        """Bind before turn admission; every exit releases this process-only lease."""
+        with self._lock:
+            if self._configuration_changes:
+                raise ProviderConfigurationBusyError("Model settings are being changed. Try again when the change finishes.")
+            config = self.resolve_session_config(provider=provider, model=model)
+            self._runtime_bindings += 1
+        try:
+            yield config
+        finally:
+            with self._lock:
+                self._runtime_bindings -= 1
 
     @property
     def config_path(self) -> Path:
@@ -184,7 +233,7 @@ class ProviderConfigurationService:
         if same_provider:
             request = replace(current, model=selected_model)
         else:
-            request = ProviderApiConfig(provider=selected_provider, api_key="", base_url="", model=selected_model)
+            request = ProviderApiConfig(provider=selected_provider, api_key="", base_url=self._policy.get_provider_defaults(selected_provider)["base_url"], model=selected_model)
         return self.resolve_api_request(request)
 
     def current_vision_config(self) -> ProviderVisionConfig:
@@ -294,7 +343,9 @@ class ProviderConfigurationService:
                     defaults["base_url"],
                 ),
                 model=str(vision_section.get("model") or "").strip(),
-                enabled=bool(vision_section.get("enabled", True)),
+                # An existing vision profile must be explicitly enabled before
+                # it can receive image bytes; omitted legacy fields stay off.
+                enabled=bool(vision_section.get("enabled", False)),
             )
         except (AttributeError, RuntimeError, TypeError, ValueError):
             return ProviderVisionConfig()
@@ -302,29 +353,39 @@ class ProviderConfigurationService:
     def normalize_api_request(
         self,
         request: ProviderApiConfigRequestPort,
+        *,
+        catalog_only: bool = False,
     ) -> ProviderApiConfig:
         provider = self._policy.normalize_provider_name(request.provider)
         defaults = self._policy.get_provider_defaults(provider)
-        model = str(request.model or defaults["model"]).strip() or defaults["model"]
+        model = "" if catalog_only else (str(request.model or defaults["model"]).strip() or defaults["model"])
         base_url = self._policy.normalize_base_url(
             request.base_url,
             provider,
             defaults["base_url"],
         )
-        requested_api_type, _resolved_api_type = self._policy.normalize_provider_api_type(
-            provider,
-            model,
-            request.api_type,
-        )
-        thinking_level = self._policy.normalize_reasoning_effort(request.thinking_level)
-        raw_thinking_level = str(request.thinking_level or "").strip()
-        if raw_thinking_level and raw_thinking_level.lower() not in {"off", "default"}:
-            supported = self._policy.reasoning_effort_variants(
-                provider,
-                model,
-                request.api_type,
+        # Model discovery precedes selecting a model and its execution protocol.
+        requested_api_type = None
+        if not catalog_only:
+            requested_api_type, _resolved_api_type = self._policy.normalize_provider_api_type(
+                provider, model, request.api_type,
             )
-            if not thinking_level or thinking_level not in supported:
+        thinking_level = "" if catalog_only else self._policy.normalize_reasoning_effort(request.thinking_level)
+        raw_thinking_level = "" if catalog_only else str(request.thinking_level or "").strip()
+        if raw_thinking_level and raw_thinking_level.lower() not in {"off", "default"}:
+            if not thinking_level:
+                raise ValueError(f"Reasoning variant '{raw_thinking_level}' is not recognized; select a supported variant.")
+            reasoning_provider = "openai" if provider == "chatgpt" else provider
+            supported = self._policy.reasoning_effort_variants(
+                reasoning_provider,
+                model,
+                "responses" if provider == "chatgpt" else request.api_type,
+            )
+            # Provider catalog capabilities are checked in resolve_api_request,
+            # after the saved credential has been restored. Keep this pure
+            # normalizer network-free for callers and tests.
+            catalog_validation_deferred = provider in {"anthropic", "deepseek", "openrouter"} and self._policy.catalog_reasoning_efforts is not None
+            if not catalog_validation_deferred and (not thinking_level or thinking_level not in supported):
                 supported_text = ", ".join(supported) if supported else "provider default only"
                 raise ValueError(
                     f"Reasoning variant '{raw_thinking_level}' is not supported by "
@@ -367,10 +428,12 @@ class ProviderConfigurationService:
     def resolve_api_request(
         self,
         request: ProviderApiConfigRequestPort,
+        *,
+        catalog_only: bool = False,
     ) -> ProviderApiConfig:
         """Normalize a request, reuse the provider's saved key, then revalidate."""
 
-        config = self.normalize_api_request(request)
+        config = self.normalize_api_request(request, catalog_only=catalog_only)
         if not config.api_key.strip():
             with self._lock:
                 saved = self.current_api_config()
@@ -383,6 +446,33 @@ class ProviderConfigurationService:
             if saved_key:
                 config = replace(config, api_key=saved_key)
         self._policy.validate_provider_api_key(config.api_key)
+        if (
+            config.provider in {"anthropic", "deepseek", "openrouter"}
+            and config.thinking_level
+            and self._policy.catalog_reasoning_efforts is not None
+        ):
+            try:
+                catalog_supported = self._policy.catalog_reasoning_efforts(
+                    config.provider,
+                    config.api_key,
+                    config.base_url,
+                    config.model,
+                )
+            except Exception as exc:  # noqa: BLE001
+                raise ValueError(
+                    f"Could not verify {self._policy.provider_display_name(config.provider)} reasoning support for {config.model} from the provider model catalog."
+                ) from exc
+            supported = catalog_supported
+            if supported is None:
+                supported = self._policy.reasoning_effort_variants(
+                    config.provider, config.model, config.api_type
+                )
+            if config.thinking_level not in supported:
+                supported_text = ", ".join(supported) if supported else "provider default only"
+                raise ValueError(
+                    f"Reasoning variant '{config.thinking_level}' is not supported by "
+                    f"{config.provider}/{config.model}; supported: {supported_text}."
+                )
         return config
 
     def resolve_vision_request(
@@ -517,6 +607,8 @@ class ProviderConfigurationService:
             committed_vision = self._vision_config or self._load_initial_vision_config_locked()
             api = api_config if api_config is not None else committed_api
             vision = vision_config if vision_config is not None else committed_vision
+            if api != committed_api or _clear_chatgpt_account_id:
+                self._assert_configuration_idle()
             api_keys, vision_keys = self._load_provider_key_maps_locked(document)
             for target, config in (
                 (api_keys, committed_api),
@@ -605,6 +697,7 @@ class ProviderConfigurationService:
             "authHeader": self._policy.provider_auth_label(config.provider),
             "apiKeyRequired": requires_key,
             "configured": not requires_key or bool(config.api_key),
+            "runtimeLocked": self.runtime_configuration_locked(),
             "savedKeyProviders": self._saved_key_providers(),
         }
 

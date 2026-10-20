@@ -114,7 +114,7 @@ def test_wardrobe_skill_preserves_capabilities_without_project_presets() -> None
     manifest = _json(root / "manifest.json")
     workflow = _json(root / manifest["entrypoints"]["workflow"])
     skill = parse_skill_markdown(root / "SKILL.md")
-    assert manifest["version"] == "1.1.10"
+    assert manifest["version"] == "1.1.17"
     assert {
         "vrcforge_setup_outfit", "vrcforge_add_wardrobe_outfit",
         "vrcforge_ensure_expression_parameter", "vrcforge_ensure_animator_state",
@@ -136,6 +136,32 @@ def test_wardrobe_skill_preserves_capabilities_without_project_presets() -> None
     assert contract["replacementCleanup"]["neverDeleteSourceAvatarOrSourceAsset"] is True
     assert contract["runtimeEvidence"]["observationLifecycle"]["completedDoesNotMeanVisualAcceptance"] is True
     assert workflow["requiresOtherSkills"] == []
+
+
+def test_new_wardrobe_guidance_requires_reference_and_bounded_delivery_checks() -> None:
+    root = ARTIFACTS / "vrcforge-avatar-wardrobe"
+    body = (root / "SKILL.md").read_text(encoding="utf-8")
+    guide = (root / "references/workflow.md").read_text(encoding="utf-8")
+    assert "新建前必须读取" in body
+    assert "references/workflow.md" in body and "workflows/wardrobe-authoring.json" in body
+    assert "新建前的组织与验收" in body
+    for boundary in ("相似名称不等于同名冲突", "不盲目重命名或重设父级", "Modular Avatar", "动画路径", "视觉验收"):
+        assert boundary in body + guide
+    assert "检查、扩展、修复不进入此分支" in guide
+    assert "读取失败或未找到结构不能触发本分支" in guide
+    assert "不是整套成品已验证的证明" in guide
+
+
+def test_animation_replacement_guidance_requires_driver_retirement_and_runtime_checks() -> None:
+    root = ARTIFACTS / "vrcforge-avatar-animation"
+    body = (root / "SKILL.md").read_text(encoding="utf-8")
+    guide = (root / "references/workflow.md").read_text(encoding="utf-8")
+    assert "替换同一功能" in body and "替换同一功能" in guide
+    for boundary in ("旧/新驱动", "临时共存", "结束条件", "新链路验证后", "bindings", "neutral", "开/关", "手势", "运行冲突"):
+        assert boundary in guide
+    assert "schema 明确支持" in guide and "delete_layer" in guide
+    assert "不改无关层、参数域或源资产" in guide
+    assert "运行控制仍需批准" in guide
 
 
 @pytest.mark.parametrize("slug,package_id,title,read_only", CASES, ids=[case[0] for case in CASES])

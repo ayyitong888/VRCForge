@@ -1689,6 +1689,40 @@ def test_package_install_request_creates_checkpointed_approval_with_cli(monkeypa
     assert "Optimizer package install requests" in captured["params"]["explicit_approval_reason"]
 
 
+def test_catalog_repository_is_plan_metadata_only_when_building_install_approval(tmp_path: Path) -> None:
+    project = tmp_path / "UnityProject"
+    make_unity_project(project)
+    captured: dict[str, object] = {}
+
+    def fake_create_apply_request(params, *, internal_wrapper=False):
+        captured["params"] = params
+        captured["internalWrapper"] = internal_wrapper
+        return {"ok": True, "approval": {"status": "pending", "arguments": params["arguments"]}}
+
+    workflow = package_workflow_for_test(
+        project,
+        [{
+            "name": "vrc-get",
+            "path": "C:/tools/vrc-get.exe",
+            "kind": "managed-cli",
+            "label": "VRCForge managed vrc-get CLI",
+            "supportsCommandInstall": True,
+            "supportsUiHandoff": False,
+            "source": "vrcforge-managed",
+        }],
+        fake_create_apply_request,
+    )
+
+    payload = workflow.request_install(
+        {"projectPath": str(project), "packageId": "com.anatawa12.avatar-optimizer"},
+        agent_name="test-agent",
+    )
+
+    assert payload["ok"] is True
+    assert payload["approval"]["arguments"]["repository"] == ""
+    assert workflow.plan_install({"projectPath": str(project), "packageId": "com.anatawa12.avatar-optimizer"})["repository"]
+
+
 def test_vrc_get_install_rejects_unprepared_direct_execution(monkeypatch, tmp_path: Path) -> None:
     project = tmp_path / "UnityProject"
     make_unity_project(project)

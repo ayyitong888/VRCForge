@@ -33,7 +33,8 @@ def test_over_call_budget_source_is_complete_in_recovery_without_sampling():
         {"role": "assistant", "text": "middle detail " * 1500 + TAIL},
         {"role": "user", "text": "Latest question"}, {"role": "assistant", "text": "Latest answer"}]
     prompts = []
-    result = compact_context(history, summarizer=lambda prompt: prompts.append(prompt) or "Fitted summary", target_tokens=100)
+    result = compact_context(history, summarizer=lambda prompt: prompts.append(prompt) or "Fitted summary",
+                             target_tokens=100, real_context_limit=4_000)
     assert prompts == []
     assert result["recovery"]["sourceEntries"] == history
     assert result["recovery"]["sourceDigest"] == result["sourceDigest"]
@@ -46,7 +47,8 @@ def test_over_call_budget_source_is_complete_in_recovery_without_sampling():
 
 def test_fallback_keeps_all_sanitized_source_without_provider_or_store():
     source = "ordinary source " * 1500 + TAIL + " password=PRIVATE_INPUT_SECRET"
-    result = compact_context([{"role": "user", "text": source}], target_tokens=64)
+    result = compact_context([{"role": "user", "text": source}], target_tokens=64,
+                             real_context_limit=4_000)
     recovery = result["recovery"]
     assert TAIL in recovery["sourceEntries"][0]["text"]
     assert "PRIVATE_INPUT_SECRET" not in json.dumps(result)

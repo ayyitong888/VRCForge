@@ -231,7 +231,7 @@ class ChatGPTAuthService:
         except OAuthStorageError:
             raise ChatGPTAuthError("Local credentials are unavailable.") from None
 
-    def models(self, account_id: str) -> list[dict[str, str]]:
+    def models(self, account_id: str) -> list[dict[str, Any]]:
         token = self.access_token(account_id)
         try:
             response = self._http.get(
@@ -250,14 +250,44 @@ class ChatGPTAuthService:
         models = payload.get("models") if isinstance(payload, dict) else None
         if not isinstance(models, list):
             raise ChatGPTAuthError("The ChatGPT model list is invalid.")
-        result: list[dict[str, str]] = []
+        result: list[dict[str, Any]] = []
         for item in models:
             if not isinstance(item, dict) or item.get("visibility") != "list":
                 continue
             slug = item.get("slug")
             display_name = item.get("display_name")
             if isinstance(slug, str) and slug and isinstance(display_name, str) and display_name:
-                result.append({"id": slug, "name": display_name})
+                model: dict[str, Any] = {"id": slug, "name": display_name}
+                raw_levels = item.get("supported_reasoning_levels")
+                if isinstance(raw_levels, list):
+                    levels = []
+                    for entry in raw_levels[:32]:
+                        if not isinstance(entry, dict):
+                            continue
+                        effort = entry.get("effort")
+                        if not isinstance(effort, str) or not effort.strip() or len(effort) > 32:
+                            continue
+                        level = {"effort": effort.strip().lower()}
+                        description = entry.get("description")
+                        if isinstance(description, str) and len(description) <= 240:
+                            level["description"] = description
+                        levels.append(level)
+                    model["supportedReasoningLevels"] = levels
+                    default_level = item.get("default_reasoning_level")
+                    if isinstance(default_level, str) and default_level.strip():
+                        model["defaultReasoningLevel"] = default_level.strip().lower()
+                # Preserve advertised capacity; do not infer it from the name.
+                for target, keys in {
+                    "contextWindow": ("context_window", "contextWindow"),
+                    "inputTokenLimit": ("input_token_limit", "inputTokenLimit"),
+                    "maxOutputTokens": ("max_output_tokens", "maxOutputTokens"),
+                }.items():
+                    for key in keys:
+                        value = item.get(key)
+                        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+                            model[target] = value
+                            break
+                result.append(model)
         return result
 
     def logout(self, account_id: str) -> dict[str, bool]:

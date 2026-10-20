@@ -104,12 +104,18 @@ def describe_scan_scope(step: dict, arguments: dict) -> dict:
             "dependencyCoverage": "unverified"}
 
 
-def _file_fingerprint(path: Path, project: Path, budget: list[int]) -> dict | None:
+def _file_fingerprint(path: Path, project: Path, budget: list[int], *, metadata_only: bool = False) -> dict | None:
     try:
         resolved = path.resolve(strict=True)
         if not resolved.is_relative_to(project / "Assets") or not resolved.is_file():
             return None
         before = resolved.stat()
+        if metadata_only:
+            # Core declares this exact source as metadata-only. Imported metadata
+            # is covered by Core validation; importer .meta still uses content SHA.
+            stat = {name: getattr(before, name) for name in ("st_size", "st_mtime_ns", "st_ctime_ns", "st_ino", "st_dev")}
+            return {"kind": "metadata", "stat": stat,
+                    "mtime_ns": before.st_mtime_ns, "size": before.st_size}
         if before.st_size > budget[0]:
             return None
         digest = hashlib.sha256()
@@ -128,22 +134,29 @@ def _file_fingerprint(path: Path, project: Path, budget: list[int]) -> dict | No
         return None
 
 
-def _fingerprints(project: str, paths: list[str]) -> dict:
+def _fingerprints(project: str, paths: list[str], metadata_only_paths: Iterable[str] = ()) -> dict:
     root, budget = Path(project), [MAX_HASH_BYTES]
-    return {p: {"asset": _file_fingerprint(root / p, root, budget),
+    metadata_only = set(metadata_only_paths)
+    return {p: {"asset": _file_fingerprint(root / p, root, budget, metadata_only=p in metadata_only),
                 "meta": _file_fingerprint(root / (p + ".meta"), root, budget)} for p in paths}
 
 
-def _valid_fingerprint(value: Any) -> bool:
-    return isinstance(value, dict) and all(
-        isinstance(value.get(part), dict)
-        and isinstance(value[part].get("sha256"), str)
-        and len(value[part]["sha256"]) == 64
-        and all(c in "0123456789abcdef" for c in value[part]["sha256"])
-        and type(value[part].get("mtime_ns")) is int
-        and type(value[part].get("size")) is int
-        for part in ("asset", "meta")
-    )
+def _valid_fingerprint(value: Any, metadata_only: bool = False) -> bool:
+    if not isinstance(value, dict):
+        return False
+    for part in ("asset", "meta"):
+        entry = value.get(part)
+        if not isinstance(entry, dict) or type(entry.get("mtime_ns")) is not int or type(entry.get("size")) is not int:
+            return False
+        if part == "asset" and metadata_only:
+            stat = entry.get("stat")
+            if entry.get("kind") != "metadata" or "sha256" in entry or not isinstance(stat, dict) \
+                    or any(type(stat.get(key)) is not int for key in ("st_size", "st_mtime_ns", "st_ctime_ns", "st_ino", "st_dev")):
+                return False
+        elif entry.get("kind") == "metadata" or not isinstance(entry.get("sha256"), str) \
+                or len(entry["sha256"]) != 64 or any(c not in "0123456789abcdef" for c in entry["sha256"]):
+            return False
+    return True
 
 
 def _valid_scope_proof(proof: Any, expected_token: str | None = None) -> bool:
@@ -162,6 +175,11 @@ def _valid_scope_proof(proof: Any, expected_token: str | None = None) -> bool:
     except (ValueError, AttributeError):
         return False
     paths, captured_at = proof.get("assetPaths"), proof.get("capturedAt")
+    metadata_paths = proof.get("metadataOnlyAssetPaths", [])
+    if not isinstance(metadata_paths, list) or any(not isinstance(path, str) for path in metadata_paths) \
+            or len(set(metadata_paths)) != len(metadata_paths) or not isinstance(paths, list) \
+            or any(not isinstance(path, str) for path in paths) or not set(metadata_paths).issubset(paths):
+        return False
     return (
         isinstance(paths, list)
         and len(paths) <= MAX_ASSET_PATHS
@@ -216,6 +234,35 @@ class ScanResultStore:
     @staticmethod
     def _generation(connection, project: str) -> int:
         return connection.execute("SELECT COALESCE(SUM(epoch), 0) FROM mutations WHERE project IN (?, '')", (project,)).fetchone()[0]
+
+    @staticmethod
+    def _verified_no_change(outcome: Any) -> bool:
+        """Accept only the complete, authoritative no-op transaction receipt."""
+        if not isinstance(outcome, dict) or not all(
+            (
+                outcome.get("ok") is True,
+                outcome.get("verified") is True,
+                outcome.get("changed") is False,
+                outcome.get("cleanNoChange") is True,
+                outcome.get("mutationStarted") is False,
+                outcome.get("commitState") == "no_change",
+            )
+        ):
+            return False
+        binding = outcome.get("applyBinding")
+        readback = outcome.get("readback")
+        if not isinstance(binding, dict) or not isinstance(readback, dict):
+            return False
+        for expected, actual in (
+            ("expectedSceneGuid", "guid"),
+            ("expectedSceneFileDigest", "fileDigest"),
+            ("expectedSceneFileIdentity", "fileIdentity"),
+            ("expectedSceneMetaDigest", "metaDigest"),
+            ("expectedSceneMetaIdentity", "metaIdentity"),
+        ):
+            if binding.get(expected) != readback.get(actual):
+                return False
+        return True
 
     def generation(self, project_root: str | Path) -> int:
         project = _project(project_root, global_allowed=True)
@@ -443,11 +490,11 @@ class ScanResultStore:
                     prior_fingerprints = {}
                 if proof is not None and set(prior_fingerprints) != set(paths):
                     proof = None
-                if reason:
+                if reason and reason != "mutation_in_progress":
                     self._expire(connection, ref, reason)
             else:
-                observed = _fingerprints(project, paths)
-                if not reason and any(not _valid_fingerprint(observed[p]) for p in paths):
+                observed = _fingerprints(project, paths, (proof or {}).get("metadataOnlyAssetPaths", []))
+                if not reason and any(not _valid_fingerprint(observed[p], p in (proof or {}).get("metadataOnlyAssetPaths", [])) for p in paths):
                     reason = "fingerprint_unavailable"
                 fingerprints = _json(observed)
                 size = len(raw) + len(scope.encode()) + len(fingerprints.encode())
@@ -476,9 +523,9 @@ class ScanResultStore:
                     if not validation_reason:
                         try:
                             saved = json.loads(latest["fingerprints"])
-                            current = _fingerprints(project, paths)
-                            if set(saved) != set(paths) or any(not _valid_fingerprint(saved[p]) for p in paths) \
-                                    or any(not _valid_fingerprint(current[p]) for p in paths):
+                            current = _fingerprints(project, paths, proof.get("metadataOnlyAssetPaths", []))
+                            if set(saved) != set(paths) or any(not _valid_fingerprint(saved[p], p in proof.get("metadataOnlyAssetPaths", [])) for p in paths) \
+                                    or any(not _valid_fingerprint(current[p], p in proof.get("metadataOnlyAssetPaths", [])) for p in paths):
                                 validation_reason = "fingerprint_unavailable"
                             elif saved != current:
                                 validation_reason = "asset_fingerprint_changed"
@@ -514,6 +561,10 @@ class ScanResultStore:
             metadata = self._metadata(
                 row, row["reason"], linked_proof if proof_validated else None, validation_changed_paths
             )
+        if step.get("tool") == "vrcforge_scan_materials":
+            # Material index reuse is authorized by its exact Core scope proof,
+            # not by observable comparison to a bounded first source page.
+            return metadata
         if eligible(step, arguments) and row["reason"] not in {"mutation_in_progress", "mutation_during_scan"}:
             return comparison_metadata(metadata)
         if step.get("tool") not in WHITELIST or (isinstance(step.get("result"), dict)
@@ -544,6 +595,8 @@ class ScanResultStore:
             reason = row["reason"]
             if not reason and self._pending(connection, project):
                 reason = "mutation_in_progress"
+            if not reason and require_proof and proof is None:
+                reason = "core_scope_unavailable"
             if not reason and proof is None and row["boot"] != self._boot_id:
                 reason = "runtime_observation_gap"
             if not reason and proof is None and row["turn"] != turn_id:
@@ -554,18 +607,18 @@ class ScanResultStore:
                     if proof is not None:
                         paths = sorted(set(paths) | set(proof["assetPaths"]))
                     saved = json.loads(row["fingerprints"])
-                    if not isinstance(paths, list) or any(_asset_hint(p) != p for p in paths) or not isinstance(saved, dict) or set(saved) != set(paths) or any(not _valid_fingerprint(saved[p]) for p in paths):
+                    if not isinstance(paths, list) or any(_asset_hint(p) != p for p in paths) or not isinstance(saved, dict) or set(saved) != set(paths) or any(not _valid_fingerprint(saved[p], p in (proof or {}).get("metadataOnlyAssetPaths", [])) for p in paths):
                         reason = "fingerprint_unavailable"
                     else:
-                        current = _fingerprints(project, paths)
-                        if any(not _valid_fingerprint(current[p]) for p in paths):
+                        current = _fingerprints(project, paths, (proof or {}).get("metadataOnlyAssetPaths", []))
+                        if any(not _valid_fingerprint(current[p], p in (proof or {}).get("metadataOnlyAssetPaths", [])) for p in paths):
                             reason = "fingerprint_unavailable"
                         elif current != saved:
                             reason = "asset_fingerprint_changed"
                 except (ValueError, KeyError, TypeError):
                     reason = "fingerprint_unavailable"
             if reason:
-                if not (proof is not None and reason == "mutation_in_progress"):
+                if reason != "mutation_in_progress":
                     self._expire(connection, result_ref, reason)
                 result = self._expiry(row, reason, proof, changed_paths)
             else:
@@ -581,7 +634,8 @@ class ScanResultStore:
         if not valid:
             validation_reason = validation.get("reason") or "scope_invalid"
             transient = validation_reason in _TRANSIENT_SCOPE_FAILURES
-            if transient and boot == self._boot_id and turn == turn_id:
+            if transient and boot == self._boot_id and turn == turn_id and not require_proof \
+                    and not proof.get("metadataOnlyAssetPaths"):
                 return result
             reason = validation_reason if not transient else (
                 "runtime_observation_gap" if boot != self._boot_id else "core_scope_unavailable"
@@ -601,8 +655,8 @@ class ScanResultStore:
             reason = latest["reason"] or ("mutation_in_progress" if self._pending(connection, project) else "")
             if not reason:
                 try:
-                    current = _fingerprints(project, paths)
-                    if any(not _valid_fingerprint(current[path]) for path in paths):
+                    current = _fingerprints(project, paths, proof.get("metadataOnlyAssetPaths", []))
+                    if any(not _valid_fingerprint(current[path], path in proof.get("metadataOnlyAssetPaths", [])) for path in paths):
                         reason = "fingerprint_unavailable"
                     elif current != saved:
                         reason = "asset_fingerprint_changed"
@@ -634,17 +688,75 @@ class ScanResultStore:
             connection.execute("INSERT INTO mutations VALUES (?, 0, 1) ON CONFLICT(project) DO UPDATE SET epoch=epoch+1", (project,))
             self._invalidate(connection, project, reason)
 
-    def begin_mutation(self, project_root: str | Path, reason: str) -> None:
+    def begin_mutation(self, project_root: str | Path, reason: str) -> dict[str, int | str]:
         project, reason = _project(project_root, global_allowed=True), _owner(reason)
         with self._lock, self._connection(create=True) as connection:
             connection.execute("INSERT INTO mutations VALUES (?, 1, 1) ON CONFLICT(project) DO UPDATE SET pending=pending+1, epoch=epoch+1", (project,))
-            self._invalidate(connection, project, reason)
+            return {"project": project, "generation": self._generation(connection, project)}
 
-    def end_mutation(self, project_root: str | Path, reason: str) -> None:
+    def end_mutation(
+        self,
+        project_root: str | Path,
+        reason: str,
+        outcome: Any = None,
+        marker: Any = None,
+    ) -> None:
         project, reason = _project(project_root, global_allowed=True), _owner(reason)
         with self._lock, self._connection(create=True) as connection:
-            self._invalidate(connection, project, reason)
-            connection.execute("INSERT INTO mutations VALUES (?, 0, 1) ON CONFLICT(project) DO UPDATE SET pending=MAX(0, pending-1), epoch=epoch+1", (project,))
+            pending = connection.execute(
+                "SELECT COALESCE(SUM(pending), 0) FROM mutations WHERE project IN (?, '')",
+                (project,),
+            ).fetchone()[0]
+            current_generation = self._generation(connection, project)
+            marker_generation = marker.get("generation") if isinstance(marker, dict) else None
+            preserve = (
+                self._verified_no_change(outcome)
+                and pending == 1
+                and marker_generation == current_generation
+            )
+            if not preserve:
+                self._invalidate(connection, project, reason)
+            connection.execute(
+                "INSERT INTO mutations VALUES (?, 0, 1) ON CONFLICT(project) DO UPDATE SET pending=MAX(0, pending-1), epoch=epoch+?",
+                (project, 0 if preserve else 1),
+            )
+
+    def reconcile_orphaned_mutations(self, reason: str = "backend_owner_start_reconcile") -> dict[str, Any]:
+        """Clear pending mutations left by a backend that no longer owns its lock.
+
+        The caller invokes this once after acquiring the process-wide backend
+        owner lease and before accepting requests. Recovery ledgers are kept
+        untouched; active-process completion remains paired by the normal
+        mutation context.
+        """
+        reason = _owner(reason)
+        with self._lock, self._connection(create=True) as connection:
+            mutation_rows = connection.execute(
+                "SELECT project, pending FROM mutations WHERE pending > 0"
+            ).fetchall()
+            projects = {str(row["project"]) for row in mutation_rows}
+            cleared_pending = 0
+            for project in sorted(projects):
+                pending_row = connection.execute(
+                    "SELECT pending FROM mutations WHERE project=?",
+                    (project,),
+                ).fetchone()
+                pending = int(pending_row["pending"]) if pending_row is not None else 0
+                if pending <= 0:
+                    continue
+                self._invalidate(connection, project, reason)
+                if pending > 0:
+                    connection.execute(
+                        "UPDATE mutations SET pending=0, epoch=epoch+1 WHERE project=?",
+                        (project,),
+                    )
+                    cleared_pending += pending
+            return {
+                "ok": True,
+                "reason": reason,
+                "clearedProjects": sorted(projects),
+                "clearedPending": cleared_pending,
+            }
 
     def delete(self, session_id: str) -> None:
         session_id = _owner(session_id)

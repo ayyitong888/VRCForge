@@ -1,0 +1,54 @@
+{
+  "schema": "vrcforge.fx_animator_write.v1",
+  "ok": true,
+  "preview": false,
+  "verified": true,
+  "persistedReadback": true,
+  "mutationApplied": true,
+  "committed": true,
+  "commitState": "committed",
+  "commitStateKnown": true,
+  "checkpointRecoveryRequired": false,
+  "temporaryCleanupRequired": false,
+  "action": "update_state",
+  "readback": {
+    "persisted": true,
+    "controllerPath": "Assets/Fixture/FX.controller",
+    "state": {
+      "layers": [
+        {
+          "name": "Base",
+          "machine": {
+            "name": "Base",
+            "states": [
+              {
+                "name": "Idle",
+                "speed": 1.0,
+                "writeDefaultValues": true,
+                "timeParameterActive": false,
+                "timeParameter": ""
+              }
+            ],
+            "machines": []
+          }
+        },
+        {
+          "name": "Left Hand",
+          "machine": {
+            "name": "Left Hand",
+            "states": [
+              {
+                "name": "Fist",
+                "speed": 0.75,
+                "writeDefaultValues": true,
+                "timeParameterActive": true,
+                "timeParameter": "GestureLeftWeight"
+              }
+            ],
+            "machines": []
+          }
+        }
+      ]
+    }
+  }
+}

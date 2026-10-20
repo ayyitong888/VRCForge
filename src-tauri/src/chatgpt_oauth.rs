@@ -29,6 +29,8 @@ pub(crate) struct DesktopChatGptOAuthAccountRequest {
 pub(crate) struct DesktopChatGptOAuthActivationRequest {
     account_id: String,
     model: String,
+    #[serde(default)]
+    thinking_level: String,
     timeout_ms: Option<u64>,
 }
 
@@ -54,6 +56,8 @@ pub(crate) struct ChatGptOAuthStatus {
     active_account_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     active_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    active_thinking_level: Option<String>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -61,6 +65,18 @@ pub(crate) struct ChatGptOAuthStatus {
 pub(crate) struct ChatGptOAuthModel {
     id: String,
     name: String,
+    #[serde(default)]
+    supported_reasoning_levels: Vec<ChatGptOAuthReasoningLevel>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    default_reasoning_level: Option<String>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ChatGptOAuthReasoningLevel {
+    effort: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -186,7 +202,7 @@ pub async fn chatgpt_oauth_activate(
         backend_json_request(
             "POST",
             ACTIVATE_PATH.to_string(),
-            Some(json!({ "account_id": request.account_id, "model": request.model })),
+            Some(json!({ "account_id": request.account_id, "model": request.model, "thinking_level": request.thinking_level })),
             request.timeout_ms,
         )
     })
@@ -196,17 +212,43 @@ pub async fn chatgpt_oauth_activate(
 
 #[cfg(test)]
 mod tests {
-    use super::{validate_authorization_url, ChatGptOAuthStatus};
+    use super::{
+        validate_authorization_url, ChatGptOAuthModels, ChatGptOAuthStatus,
+        DesktopChatGptOAuthActivationRequest,
+    };
+
+    #[test]
+    fn activation_request_preserves_reasoning_level_for_backend_proxy() {
+        let request: DesktopChatGptOAuthActivationRequest =
+            serde_json::from_value(serde_json::json!({
+                "accountId": "offline-account",
+                "model": "gpt-5.6-sol",
+                "thinkingLevel": "high",
+            }))
+            .expect("activation request should deserialize");
+        assert_eq!(request.thinking_level, "high");
+    }
 
     #[test]
     fn status_preserves_persisted_active_account_and_model() {
         let status: ChatGptOAuthStatus = serde_json::from_str(
-            r#"{"accounts":[],"pending":false,"error":"","activeAccountId":"account-1","activeModel":"gpt-test"}"#,
+            r#"{"accounts":[],"pending":false,"error":"","activeAccountId":"account-1","activeModel":"gpt-test","activeThinkingLevel":"low"}"#,
         )
         .expect("backend status should deserialize");
 
         assert_eq!(status.active_account_id.as_deref(), Some("account-1"));
         assert_eq!(status.active_model.as_deref(), Some("gpt-test"));
+        assert_eq!(status.active_thinking_level.as_deref(), Some("low"));
+    }
+
+    #[test]
+    fn model_preserves_provider_reasoning_metadata() {
+        let models: ChatGptOAuthModels = serde_json::from_str(
+            r#"{"models":[{"id":"gpt-test","name":"GPT Test","supportedReasoningLevels":[{"effort":"low","description":"Fast"}],"defaultReasoningLevel":"low"}]}"#,
+        )
+        .expect("model capabilities should deserialize");
+        assert_eq!(models.models[0].supported_reasoning_levels[0].effort, "low");
+        assert_eq!(models.models[0].default_reasoning_level.as_deref(), Some("low"));
     }
 
     #[test]

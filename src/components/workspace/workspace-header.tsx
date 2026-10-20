@@ -42,6 +42,8 @@ export function WorkspaceHeader({
   onStartRuntime: () => void;
 }) {
   const { t } = useTranslation();
+  const showErrorBanner = Boolean(error.trim())
+    && (!showDoctorStartupPrompt || error.trim() !== startupIssue.trim());
   const activeTitle =
     activeView === "doctor"
       ? t("sidebar.doctor")
@@ -94,9 +96,9 @@ export function WorkspaceHeader({
         </div>
       ) : null}
 
-      {error && !showDoctorStartupPrompt ? (
+      {showErrorBanner ? (
         <div className="mx-auto mt-3 w-full max-w-4xl px-4">
-          <div className="flex items-center gap-3 rounded-md border border-destructive/15 bg-destructive/5 px-3 py-2 text-xs text-destructive/75">
+          <div className="flex items-center gap-3 rounded-md border border-destructive/15 bg-destructive/5 px-3 py-2 text-xs text-destructive/75" role="alert" data-workspace-error>
             <span className="break-words">{error}</span>
             <Button
               variant="ghost"

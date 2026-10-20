@@ -1,5 +1,34 @@
 @import "./theme.css";
+@import "katex/dist/katex.min.css";
+@import "./components/chat/markdown-code-block.css";
 
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+body {
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+input,
+textarea,
+[contenteditable="true"],
+[data-chat-quote-content] {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+button,
+[role="button"],
+[data-chat-selection-excluded] {
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.chat-markdown .katex-display {
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding-block: 0.25rem;
+}

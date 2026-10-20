@@ -209,6 +209,32 @@ namespace VRCForge.Editor
             return GeneratedAssetPaths.ResolveDirectory(value, avatarName, category, categorizeExplicit: true);
         }
 
+        internal static string[] CheckpointAssetPaths(IEnumerable<string> paths)
+        {
+            return (paths ?? Enumerable.Empty<string>())
+                .Select(path => (path ?? string.Empty).Trim())
+                .Where(path => path.Length > 0)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(path => path, StringComparer.Ordinal)
+                .ToArray();
+        }
+
+        internal static void RequireExpectedCheckpointAssetPaths(string[] actual, string[] expected)
+        {
+            if (expected == null)
+            {
+                return;
+            }
+
+            if (actual == null
+                || actual.Length != expected.Length
+                || !actual.SequenceEqual(expected, StringComparer.Ordinal))
+            {
+                throw new InvalidOperationException(
+                    "The planned checkpointAssetPaths no longer match the approved preview.");
+            }
+        }
+
         internal static string Sanitize(string value, string fallback)
         {
             var cleaned = new string((value ?? string.Empty).Select(c => char.IsLetterOrDigit(c) || c == '_' ? c : '_').ToArray()).Trim('_');
@@ -345,6 +371,7 @@ namespace VRCForge.Editor
             [VRCForgeInput("Synchronize the parameter over the network.", IsRequired = false)] public bool? networkSynced { get; set; } = true;
             [VRCForgeInput("Return a non-mutating preview.", IsRequired = false)] public bool? preview { get; set; } = false;
             [VRCForgeInput("Asset directory for a newly created expression-parameters asset.", IsRequired = false)] public string assetDir { get; set; } = "";
+            [VRCForgeInput("Exact checkpointAssetPaths returned by the approved preview.", IsRequired = false)] public string[] expectedCheckpointAssetPaths { get; set; } = Array.Empty<string>();
         }
 
         public static object HandleCommand(JObject @params)
@@ -363,6 +390,7 @@ namespace VRCForge.Editor
                 var saved = @params["saved"]?.Value<bool?>() ?? true;
                 var networkSynced = @params["networkSynced"]?.Value<bool?>() ?? true;
                 var preview = @params["preview"]?.Value<bool?>() ?? false;
+                var expectedCheckpointAssetPaths = @params["expectedCheckpointAssetPaths"]?.ToObject<string[]>();
                 if (string.IsNullOrWhiteSpace(parameterName))
                 {
                     return VRCForgeToolResult.Failed("parameterName is required.");
@@ -391,12 +419,16 @@ namespace VRCForge.Editor
                     willCreateParameter = existing == null,
                     existingValueType = existing != null ? existing.valueType.ToString() : null,
                     assetDir,
-                    assetPath
+                    assetPath,
+                    checkpointAssetPaths = AvatarAuthoringCrudCore.CheckpointAssetPaths(
+                        new[] { assetPath, asset == null ? descriptor.gameObject.scene.path : null })
                 };
                 if (preview)
                 {
                     return VRCForgeToolResult.Completed($"Preview: would ensure expression parameter '{parameterName}'.", new { ok = true, preview = true, plan });
                 }
+                AvatarAuthoringCrudCore.RequireExpectedCheckpointAssetPaths(
+                    plan.checkpointAssetPaths, expectedCheckpointAssetPaths);
 
                 var assetWasMissing = asset == null;
                 ExpressionWritePersistence.RequireCleanSceneForNewReference(descriptor, assetWasMissing);
@@ -567,6 +599,7 @@ namespace VRCForge.Editor
             [VRCForgeInput("Control parameter value.", IsRequired = false)] public float? controlValue { get; set; } = 0f;
             [VRCForgeInput("Return a non-mutating preview.", IsRequired = false)] public bool? preview { get; set; } = false;
             [VRCForgeInput("Asset directory for a newly created expression menu.", IsRequired = false)] public string assetDir { get; set; } = "";
+            [VRCForgeInput("Exact checkpointAssetPaths returned by the approved preview.", IsRequired = false)] public string[] expectedCheckpointAssetPaths { get; set; } = Array.Empty<string>();
         }
 
         public static object HandleCommand(JObject @params)
@@ -587,6 +620,7 @@ namespace VRCForge.Editor
                 var parameterName = (@params["parameterName"]?.ToString() ?? "").Trim();
                 var controlValue = @params["controlValue"]?.Value<float?>() ?? 0f;
                 var preview = @params["preview"]?.Value<bool?>() ?? false;
+                var expectedCheckpointAssetPaths = @params["expectedCheckpointAssetPaths"]?.ToObject<string[]>();
                 if (string.IsNullOrWhiteSpace(controlName))
                 {
                     return VRCForgeToolResult.Failed("controlName is required.");
@@ -600,6 +634,11 @@ namespace VRCForge.Editor
                 var type = ParseMenuControlType(controlTypeText);
                 var exists = MenuContainsControl(root, menuPath, controlName, parameterName, Mathf.RoundToInt(controlValue), new HashSet<int>(), 0);
                 var newMenuAssetPaths = PlanMenuAssetPaths(root, menuPath, assetDir, rootMenuAssetPath, controlName, type, exists);
+                var checkpointAssetPaths = AvatarAuthoringCrudCore.CheckpointAssetPaths(
+                    ExpressionWritePersistence.Capture(root).Keys
+                        .Concat(new[] { rootMenuAssetPath })
+                        .Concat(newMenuAssetPaths)
+                        .Concat(root == null ? new[] { descriptor.gameObject.scene.path } : Array.Empty<string>()));
                 var plan = new
                 {
                     action = "ensure_expression_menu_control",
@@ -614,12 +653,15 @@ namespace VRCForge.Editor
                     willCreateControl = !exists,
                     assetDir,
                     rootMenuAssetPath,
-                    newMenuAssetPaths
+                    newMenuAssetPaths,
+                    checkpointAssetPaths
                 };
                 if (preview)
                 {
                     return VRCForgeToolResult.Completed($"Preview: would ensure menu control '{controlName}'.", new { ok = true, preview = true, plan });
                 }
+                AvatarAuthoringCrudCore.RequireExpectedCheckpointAssetPaths(
+                    checkpointAssetPaths, expectedCheckpointAssetPaths);
 
                 rootWasMissing = root == null;
                 ExpressionWritePersistence.RequireCleanSceneForNewReference(descriptor, rootWasMissing);
@@ -995,8 +1037,11 @@ namespace VRCForge.Editor
             [VRCForgeInput("Animator condition mode.", IsRequired = false)] public string conditionMode { get; set; } = "Equals";
             [VRCForgeInput("Animator condition threshold.", IsRequired = false)] public float? threshold { get; set; } = 0f;
             [VRCForgeInput("Set Write Defaults on the ensured state.", IsRequired = false)] public bool? writeDefaults { get; set; } = true;
+            [VRCForgeInput("Optional: use an existing Float parameter as normalized motion time.", IsRequired = false)] public bool? timeParameterActive { get; set; }
+            [VRCForgeInput("Optional existing Float Animator parameter used as normalized motion time.", IsRequired = false)] public string timeParameter { get; set; } = "";
             [VRCForgeInput("Return a non-mutating preview.", IsRequired = false)] public bool? preview { get; set; } = false;
             [VRCForgeInput("Asset directory for a newly created FX controller.", IsRequired = false)] public string assetDir { get; set; } = "";
+            [VRCForgeInput("Exact checkpointAssetPaths returned by the approved preview.", IsRequired = false)] public string[] expectedCheckpointAssetPaths { get; set; } = Array.Empty<string>();
         }
 
         public static object HandleCommand(JObject @params)
@@ -1016,7 +1061,10 @@ namespace VRCForge.Editor
                 var conditionMode = AvatarAuthoringCrudCore.ParseConditionMode(@params["conditionMode"]?.ToString() ?? "Equals");
                 var threshold = @params["threshold"]?.Value<float?>() ?? 0f;
                 var writeDefaults = @params["writeDefaults"]?.Value<bool?>() ?? true;
+                var timeParameterActive = @params["timeParameterActive"]?.Value<bool?>();
+                var timeParameter = (@params["timeParameter"]?.ToString() ?? "").Trim();
                 var preview = @params["preview"]?.Value<bool?>() ?? false;
+                var expectedCheckpointAssetPaths = @params["expectedCheckpointAssetPaths"]?.ToObject<string[]>();
                 if (string.IsNullOrWhiteSpace(layerName)) return VRCForgeToolResult.Failed("layerName is required.");
                 if (string.IsNullOrWhiteSpace(stateName)) return VRCForgeToolResult.Failed("stateName is required.");
                 if (string.IsNullOrWhiteSpace(parameterName)) return VRCForgeToolResult.Failed("parameterName is required.");
@@ -1028,6 +1076,20 @@ namespace VRCForge.Editor
                 ValidateTargetIdentity(controller, layerName, stateName, parameterName, parameterType);
                 var layerExists = controller != null && controller.layers.Any(layer => string.Equals(layer.name, layerName, StringComparison.Ordinal));
                 var existingState = layerExists ? FindState(controller.layers.First(layer => layer.name == layerName).stateMachine, stateName) : null;
+                if (timeParameterActive == true && timeParameter.Length == 0 && existingState == null)
+                    throw new InvalidOperationException("timeParameter is required when timeParameterActive is true for a new state.");
+                var effectiveTimeParameter = timeParameter.Length > 0 ? timeParameter : (existingState?.timeParameter ?? "");
+                if (timeParameter.Length > 0 || timeParameterActive == true)
+                {
+                    if (effectiveTimeParameter.Length == 0)
+                        throw new InvalidOperationException("timeParameter is required when timeParameterActive is true.");
+                    var requestedParameter = controller?.parameters?.SingleOrDefault(item => item.name == effectiveTimeParameter);
+                    var willCreateFloatParameter = requestedParameter == null
+                        && string.Equals(effectiveTimeParameter, parameterName, StringComparison.Ordinal)
+                        && parameterType == AnimatorControllerParameterType.Float;
+                    if (!willCreateFloatParameter && (requestedParameter == null || requestedParameter.type != AnimatorControllerParameterType.Float))
+                        throw new InvalidOperationException("timeParameter must reference an existing Float Animator parameter.");
+                }
                 var stateExists = existingState != null;
                 var plannedControllerPath = controller != null ? AssetDatabase.GetAssetPath(controller)
                     : GeneratedAssetPaths.UniqueAssetPath($"{assetDir}/{AvatarAuthoringCrudCore.Sanitize(descriptor.name, "Avatar")}_FX.controller");
@@ -1045,18 +1107,29 @@ namespace VRCForge.Editor
                     conditionMode = conditionMode.ToString(),
                     threshold,
                     writeDefaults,
+                    timeParameterActive,
+                    timeParameter,
                     willCreateFxController = controller == null,
                     willCreateLayer = !layerExists,
                     willCreateState = !stateExists,
                     assetDir,
                     animationAssetDir,
                     controllerPath = plannedControllerPath,
-                    clipPath
+                    clipPath,
+                    checkpointAssetPaths = AvatarAuthoringCrudCore.CheckpointAssetPaths(
+                        new[]
+                        {
+                            plannedControllerPath,
+                            existingState?.motion == null ? clipPath : null,
+                            controller == null ? descriptor.gameObject.scene.path : null
+                        })
                 };
                 if (preview)
                 {
                     return VRCForgeToolResult.Completed($"Preview: would ensure animator state '{stateName}'.", new { ok = true, preview = true, plan });
                 }
+                AvatarAuthoringCrudCore.RequireExpectedCheckpointAssetPaths(
+                    plan.checkpointAssetPaths, expectedCheckpointAssetPaths);
 
                 var controllerWasMissing = controller == null;
                 ulong descriptorId = 0;
@@ -1121,6 +1194,10 @@ namespace VRCForge.Editor
                     stateCreated = true;
                 }
                 state.writeDefaultValues = writeDefaults;
+                if (timeParameter.Length > 0) state.timeParameter = timeParameter;
+                if (timeParameterActive.HasValue) state.timeParameterActive = timeParameterActive.Value;
+                if (state.timeParameterActive && string.IsNullOrWhiteSpace(state.timeParameter))
+                    throw new InvalidOperationException("timeParameter is required when timeParameterActive is true.");
                 if (state.motion == null)
                 {
                     clipReceipt = new AnimatorTransactionReceipt
@@ -1291,6 +1368,8 @@ namespace VRCForge.Editor
                 {
                     state.name,
                     state.writeDefaultValues,
+                    state.timeParameterActive,
+                    state.timeParameter,
                     motionPath = AssetDatabase.GetAssetPath(state.motion)
                 }
             };

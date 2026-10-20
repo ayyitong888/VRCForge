@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from agent_gateway import AgentGateway
 
@@ -151,7 +152,6 @@ class InterruptedApplyRecoveryTests(unittest.TestCase):
             resolved = restarted_gateway.approval_transactions.apply_approved({"approval_id": resolve_id})
             self.assertTrue(resolved["ok"])
             self.assertFalse(restarted_gateway.checkpoint_recovery.list_interrupted_apply_recoveries()["blockingWrites"])
-
             unblocked = restarted_gateway.approval_transactions.apply_approved({"approval_id": approval_id})
             self.assertTrue(unblocked["ok"])
             self.assertEqual(len(calls), 1)
@@ -191,6 +191,214 @@ class InterruptedApplyRecoveryTests(unittest.TestCase):
             restored = gateway.checkpoint_recovery.restore_checkpoint({"checkpointId": checkpoint["id"], "confirmRestore": True})
             self.assertTrue(restored["ok"])
             self.assertFalse((project / "Assets" / "generated-after-prepare-warning.txt").exists())
+
+    def test_restore_recovery_persists_safety_backup_and_stops_after_three_attempts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project = create_unity_project(root)
+            gateway = AgentGateway(root / "config" / "agent_gateway.json", root / "audit")
+            gateway.approval_transactions.checkpoint_prepare_handler = lambda _path: {"ok": True}
+            prepare_calls: list[Path] = []
+            gateway.checkpoint_recovery.checkpoint_restore_prepare_handler = (
+                lambda path, *, checkpoint_files=None: prepare_calls.append(path) or {"ok": True, "scenes": [], "activeScenePath": ""}
+            )
+            gateway.checkpoint_recovery.checkpoint_restore_handler = (
+                lambda _path, _context: {"ok": False, "error": "Unity reload is still blocked."}
+            )
+            approval = {"id": "approval-recovery-limit", "targetTool": "vrcforge_test_write", "riskLevel": "high"}
+            arguments = {"projectRoot": str(project)}
+            checkpoint = gateway.approval_transactions._create_pre_write_checkpoint(approval, arguments)
+            self.assertTrue(checkpoint["ok"])
+            recovery = gateway.approval_transactions._start_apply_recovery(approval, arguments, checkpoint)
+
+            for expected_count in (1, 2, 3):
+                result = gateway.checkpoint_recovery.restore_checkpoint(
+                    {
+                        "checkpointId": checkpoint["id"],
+                        "recoveryId": recovery["id"],
+                        "confirmRestore": True,
+                    }
+                )
+                self.assertFalse(result["ok"])
+                self.assertEqual(result["status"], "restored_unity_reload_failed")
+                current = gateway.checkpoint_recovery.list_interrupted_apply_recoveries()["recoveries"][0]
+                self.assertEqual(current["restoreAttemptCount"], expected_count)
+                safety_id = current["restoreSafetyCheckpointId"]
+                self.assertTrue(safety_id)
+                safety = current["restoreSafetyCheckpoint"]
+                self.assertEqual(safety["id"], safety_id)
+                self.assertTrue(Path(safety["archivePath"]).is_file())
+                self.assertEqual(len(current["restoreSafetyCheckpointIds"]), expected_count)
+                self.assertTrue(
+                    all(
+                        Path(item["archivePath"]).is_file()
+                        for item in [
+                            gateway.checkpoint_recovery._load_checkpoint(safety_checkpoint_id)
+                            for safety_checkpoint_id in current["restoreSafetyCheckpointIds"]
+                        ]
+                        if item
+                    )
+                )
+
+            blocked = gateway.checkpoint_recovery.restore_checkpoint(
+                {
+                    "checkpointId": checkpoint["id"],
+                    "recoveryId": recovery["id"],
+                    "confirmRestore": True,
+                }
+            )
+            self.assertFalse(blocked["ok"])
+            self.assertEqual(blocked["errorCode"], "recovery_restore_attempt_limit")
+            self.assertEqual(
+                gateway.checkpoint_recovery.list_interrupted_apply_recoveries()["recoveries"][0]["restoreAttemptCount"],
+                3,
+            )
+            self.assertEqual(len(prepare_calls), 3)
+
+    def test_restore_recovery_limit_survives_gateway_reconstruction(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project = create_unity_project(root)
+            config_path = root / "config" / "agent_gateway.json"
+            audit_path = root / "audit"
+            gateway = AgentGateway(config_path, audit_path)
+            gateway.approval_transactions.checkpoint_prepare_handler = lambda _path: {"ok": True}
+            checkpoint = gateway.approval_transactions._create_pre_write_checkpoint(
+                {"id": "approval-restart-limit", "targetTool": "vrcforge_test_write", "riskLevel": "high"},
+                {"projectRoot": str(project)},
+            )
+            recovery = gateway.approval_transactions._start_apply_recovery(
+                {"id": "approval-restart-limit", "targetTool": "vrcforge_test_write", "riskLevel": "high"},
+                {"projectRoot": str(project)},
+                checkpoint,
+            )
+
+            for expected_count in (1, 2, 3):
+                gateway = AgentGateway(config_path, audit_path)
+                gateway.checkpoint_recovery.checkpoint_restore_prepare_handler = (
+                    lambda _path, *, checkpoint_files=None: {"ok": True, "scenes": [], "activeScenePath": ""}
+                )
+                gateway.checkpoint_recovery.checkpoint_restore_handler = (
+                    lambda _path, _context: {"ok": False, "error": "Unity reload is still blocked."}
+                )
+                result = gateway.checkpoint_recovery.restore_checkpoint(
+                    {
+                        "checkpointId": checkpoint["id"],
+                        "recoveryId": recovery["id"],
+                        "confirmRestore": True,
+                    }
+                )
+                self.assertFalse(result["ok"])
+                self.assertEqual(result["status"], "restored_unity_reload_failed")
+                current = gateway.checkpoint_recovery.list_interrupted_apply_recoveries()["recoveries"][0]
+                self.assertEqual(current["restoreAttemptCount"], expected_count)
+                self.assertEqual(len(current["restoreSafetyCheckpointIds"]), expected_count)
+                for safety_id in current["restoreSafetyCheckpointIds"]:
+                    safety = gateway.checkpoint_recovery._load_checkpoint(safety_id)
+                    self.assertIsNotNone(safety)
+                    self.assertTrue(Path(safety["archivePath"]).is_file())
+
+            gateway = AgentGateway(config_path, audit_path)
+            prepare_calls: list[Path] = []
+            gateway.checkpoint_recovery.checkpoint_restore_prepare_handler = (
+                lambda path, *, checkpoint_files=None: prepare_calls.append(path) or {"ok": True}
+            )
+            gateway.checkpoint_recovery.checkpoint_restore_handler = (
+                lambda _path, _context: {"ok": True}
+            )
+            blocked = gateway.checkpoint_recovery.restore_checkpoint(
+                {
+                    "checkpointId": checkpoint["id"],
+                    "recoveryId": recovery["id"],
+                    "confirmRestore": True,
+                }
+            )
+            self.assertFalse(blocked["ok"])
+            self.assertEqual(blocked["errorCode"], "recovery_restore_attempt_limit")
+            self.assertEqual(prepare_calls, [])
+
+    def test_external_prepare_marker_cannot_skip_real_unity_prepare(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project = create_unity_project(root)
+            gateway = AgentGateway(root / "config" / "agent_gateway.json", root / "audit")
+            gateway.approval_transactions.checkpoint_prepare_handler = lambda _path: {"ok": True}
+            prepare_calls: list[Path] = []
+            gateway.checkpoint_recovery.checkpoint_restore_prepare_handler = (
+                lambda path, *, checkpoint_files=None: prepare_calls.append(path) or {"ok": True, "scenes": [], "activeScenePath": ""}
+            )
+            gateway.checkpoint_recovery.checkpoint_restore_handler = (
+                lambda _path, _context: {"ok": False, "error": "Unity reload is still blocked."}
+            )
+            approval = {"id": "approval-marker-bound", "targetTool": "vrcforge_test_write", "riskLevel": "high"}
+            arguments = {"projectRoot": str(project)}
+            checkpoint = gateway.approval_transactions._create_pre_write_checkpoint(approval, arguments)
+            recovery = gateway.approval_transactions._start_apply_recovery(approval, arguments, checkpoint)
+
+            result = gateway.checkpoint_recovery.restore_checkpoint(
+                {
+                    "checkpointId": checkpoint["id"],
+                    "recoveryId": recovery["id"],
+                    "confirmRestore": True,
+                    "_restorePrepareForRecovery": {"ok": True, "scenes": ["forged-scene"]},
+                }
+            )
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["status"], "restored_unity_reload_failed")
+            self.assertEqual(len(prepare_calls), 1)
+            self.assertNotEqual(result["unityRestorePrepare"]["scenes"], ["forged-scene"])
+
+    def test_injected_auto_restore_marker_without_active_incident_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project = create_unity_project(root)
+            gateway = AgentGateway(root / "config" / "agent_gateway.json", root / "audit")
+            checkpoint = gateway.approval_transactions._create_pre_write_checkpoint(
+                {"id": "approval-unbound-marker", "targetTool": "vrcforge_test_write", "riskLevel": "high"},
+                {"projectRoot": str(project)},
+            )
+            result = gateway.checkpoint_recovery.restore_checkpoint(
+                {
+                    "checkpointId": checkpoint["id"],
+                    "confirmRestore": True,
+                    "_vrcforge_incident_restore_auto": True,
+                }
+            )
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["errorCode"], "recovery_incident_unbound")
+
+    def test_restore_backup_failure_does_not_start_restore(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project = create_unity_project(root)
+            gateway = AgentGateway(root / "config" / "agent_gateway.json", root / "audit")
+            gateway.approval_transactions.checkpoint_prepare_handler = lambda _path: {"ok": True}
+            gateway.checkpoint_recovery.checkpoint_restore_prepare_handler = (
+                lambda _path, *, checkpoint_files=None: {"ok": True, "scenes": [], "activeScenePath": ""}
+            )
+            gateway.checkpoint_recovery.checkpoint_restore_handler = (
+                lambda _path, _context: {"ok": True}
+            )
+            approval = {"id": "approval-backup-failure", "targetTool": "vrcforge_test_write", "riskLevel": "high"}
+            arguments = {"projectRoot": str(project)}
+            checkpoint = gateway.approval_transactions._create_pre_write_checkpoint(approval, arguments)
+            gateway.approval_transactions._start_apply_recovery(approval, arguments, checkpoint)
+            with patch.object(
+                type(gateway.checkpoint_recovery),
+                "_create_archive_checkpoint",
+                return_value={"ok": False, "error": "safety backup unavailable"},
+            ):
+                result = gateway.checkpoint_recovery.restore_checkpoint(
+                    {
+                        "checkpointId": checkpoint["id"],
+                        "confirmRestore": True,
+                        "_vrcforge_incident_restore_auto": True,
+                    }
+                )
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["errorCode"], "recovery_safety_backup_failed")
+            self.assertEqual(result["status"], "restore_safety_backup_failed")
+            self.assertFalse((project / "Assets" / "generated-before-fail.txt").exists())
 
     def test_nonrecoverable_unity_prepare_failure_blocks_before_archive_or_write(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

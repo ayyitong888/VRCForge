@@ -152,17 +152,17 @@ def test_unscoped_project_write_invalidates_every_snapshot_in_project(tmp_path, 
 def test_begin_mutation_expires_old_records_and_blocks_capture_until_end(tmp_path, capture_data):
     store = store_at(tmp_path)
     before = capture(store, capture_data)
-    store.begin_mutation(str(capture_data[0]), "write_started")
+    marker = store.begin_mutation(str(capture_data[0]), "write_started")
     expired = store.lookup("session-a", "turn-a", str(capture_data[0]), before["resultRef"])
     assert expired["expired"] is True
-    assert expired["reason"] == "write_started"
+    assert expired["reason"] == "mutation_in_progress"
 
     during = store.capture("session-a", "turn-b", str(capture_data[0]), capture_data[1], capture_data[2])
     assert during["expired"] is True
     assert during["reason"] == "mutation_in_progress"
     assert store.lookup("session-a", "turn-b", str(capture_data[0]), during["resultRef"])["reason"] == "mutation_in_progress"
 
-    store.end_mutation(str(capture_data[0]), "write_finished")
+    store.end_mutation(str(capture_data[0]), "write_finished", marker=marker)
     after = capture(store, capture_data, turn="turn-c")
     assert store.lookup("session-a", "turn-c", str(capture_data[0]), after["resultRef"]) == {
         "step": capture_data[1]
@@ -173,7 +173,7 @@ def test_begin_mutation_expires_old_records_and_blocks_capture_until_end(tmp_pat
 def test_pending_mutation_survives_store_restart_and_end_never_goes_negative(tmp_path, capture_data, monkeypatch):
     store = store_at(tmp_path)
     prior = capture(store, capture_data)
-    store.begin_mutation(str(capture_data[0]), "shell_write_started")
+    marker = store.begin_mutation(str(capture_data[0]), "shell_write_started")
     restarted_id = "restarted-process"
     monkeypatch.setattr(store_module, "_PROCESS_BOOT_ID", restarted_id)
     restarted = store_at(tmp_path)
@@ -182,23 +182,56 @@ def test_pending_mutation_survives_store_restart_and_end_never_goes_negative(tmp
     assert during["reason"] == "mutation_in_progress"
     assert restarted.lookup("session-a", "turn-a", str(capture_data[0]), prior["resultRef"])["expired"] is True
 
-    restarted.end_mutation(str(capture_data[0]), "shell_write_finished")
-    restarted.end_mutation(str(capture_data[0]), "extra_end")
+    restarted.end_mutation(str(capture_data[0]), "shell_write_finished", marker=marker)
+    restarted.end_mutation(str(capture_data[0]), "extra_end", marker=marker)
     after = capture(restarted, capture_data, turn="turn-c")
     assert restarted.lookup("session-a", "turn-c", str(capture_data[0]), after["resultRef"]) == {
         "step": capture_data[1]
     }
 
 
+def test_owner_start_reconcile_clears_legacy_pending_after_restart(tmp_path, capture_data):
+    store = store_at(tmp_path)
+    project_root = str(capture_data[0])
+    metadata = capture(store, capture_data)
+    with sqlite3.connect(store._path) as connection:
+        connection.execute(
+            "INSERT INTO mutations(project, pending, epoch) VALUES (?, 1, 1)",
+            (project_root.casefold(),),
+        )
+    restarted = store_at(tmp_path)
+    report = restarted.reconcile_orphaned_mutations()
+    assert report["clearedPending"] == 1
+    assert restarted.lookup("session-a", "turn-a", project_root, metadata["resultRef"])["reason"] == "backend_owner_start_reconcile"
+    with sqlite3.connect(restarted._path) as connection:
+        assert connection.execute("SELECT pending FROM mutations WHERE project=?", (project_root.casefold(),)).fetchone()[0] == 0
+
+
+def test_owner_start_reconcile_preserves_recovery_ledger_boundary(tmp_path, capture_data):
+    store = store_at(tmp_path)
+    project_root = str(capture_data[0])
+    ledger = tmp_path / "apply-recoveries.jsonl"
+    ledger.write_text('{"id":"recovery-1","status":"applying"}\n', encoding="utf-8")
+    capture(store, capture_data)
+    with sqlite3.connect(store._path) as connection:
+        connection.execute(
+            "INSERT INTO mutations(project, pending, epoch) VALUES (?, 1, 1)",
+            (project_root.casefold(),),
+        )
+    report = store.reconcile_orphaned_mutations()
+    assert report["clearedPending"] == 1
+    assert ledger.read_text(encoding="utf-8").startswith('{"id":"recovery-1"')
+
+
 def test_nested_mutation_counter_keeps_project_blocked_until_all_ends(tmp_path, capture_data):
     store = store_at(tmp_path)
-    store.begin_mutation(str(capture_data[0]), "outer")
-    store.begin_mutation(str(capture_data[0]), "inner")
-    store.end_mutation(str(capture_data[0]), "inner_done")
+    outer = store.begin_mutation(str(capture_data[0]), "outer")
+    inner = store.begin_mutation(str(capture_data[0]), "inner")
+    store.end_mutation(str(capture_data[0]), "inner_done", marker=inner)
     metadata = capture(store, capture_data)
     assert metadata["expired"] is True
     assert metadata["reason"] == "mutation_in_progress"
-    store.end_mutation(str(capture_data[0]), "outer_done")
+    store.end_mutation(str(capture_data[0]), "outer_done", marker=outer)
     metadata = capture(store, capture_data, turn="turn-after")
     assert "expired" not in metadata
 
@@ -218,11 +251,11 @@ def test_empty_project_invalidation_and_mutation_are_global(tmp_path, capture_da
     assert store.lookup("session-a", "turn-a", str(capture_data[0]), first["resultRef"])["reason"] == "unknown_project_write"
     assert store.lookup("session-b", "turn-b", str(other_project), second["resultRef"])["reason"] == "unknown_project_write"
 
-    store.begin_mutation("", "unknown_shell_write")
+    marker = store.begin_mutation("", "unknown_shell_write")
     blocked = store.capture("session-b", "turn-c", str(other_project), other_step, {"controllerPath": "Assets/FX.controller"})
     assert blocked["expired"] is True
     assert blocked["reason"] == "mutation_in_progress"
-    store.end_mutation("", "unknown_shell_finished")
+    store.end_mutation("", "unknown_shell_finished", marker=marker)
     clear = store.capture("session-b", "turn-d", str(other_project), other_step, {"controllerPath": "Assets/FX.controller"})
     assert "expired" not in clear
 
@@ -300,8 +333,8 @@ def test_completed_mutation_between_scan_and_capture_expires_opaque_result(tmp_p
     generation = store.generation(project_root)
     writer = store_at(tmp_path)
     mutation_root = project_root if mutation_project == "same" else ""
-    writer.begin_mutation(mutation_root, "write_started")
-    writer.end_mutation(mutation_root, "write_finished")
+    marker = writer.begin_mutation(mutation_root, "write_started")
+    writer.end_mutation(mutation_root, "write_finished", marker=marker)
     metadata = store.capture("session-a", "turn-a", project_root, capture_data[1], {}, expected_generation=generation)
     assert metadata["reason"] == "mutation_during_scan"
     assert store.lookup("session-a", "turn-a", project_root, metadata["resultRef"])["reason"] == "mutation_during_scan"
@@ -315,15 +348,104 @@ def test_generation_sums_matching_project_and_global_epochs_only(tmp_path, captu
     project_root = str(capture_data[0])
     assert store.generation(project_root) == 0
     assert not (tmp_path / "store").exists()
-    store.begin_mutation(project_root, "local_begin")
-    store.end_mutation(project_root, "local_end")
+    local = store.begin_mutation(project_root, "local_begin")
+    store.end_mutation(project_root, "local_end", marker=local)
     assert store.generation(project_root) == 2
-    store.begin_mutation("", "global_begin")
-    store.end_mutation("", "global_end")
+    global_marker = store.begin_mutation("", "global_begin")
+    store.end_mutation("", "global_end", marker=global_marker)
     assert store.generation(project_root) == 4
     store.begin_mutation(str(tmp_path / "unrelated"), "other_begin")
     assert store.generation(project_root) == 4
     assert store_at(tmp_path).generation(project_root) == 4
+
+
+def test_verified_no_change_mutation_preserves_prior_scan(tmp_path, capture_data):
+    store = store_at(tmp_path)
+    project_root = str(capture_data[0])
+    metadata = capture(store, capture_data)
+    marker = store.begin_mutation(project_root, "vrcforge_scene_save")
+    assert store.lookup("session-a", "turn-a", project_root, metadata["resultRef"])["reason"] == "mutation_in_progress"
+
+    store.end_mutation(
+        project_root,
+        "vrcforge_scene_save",
+        outcome={
+            "ok": True,
+            "verified": True,
+            "changed": False,
+            "cleanNoChange": True,
+            "mutationStarted": False,
+            "commitState": "no_change",
+            "applyBinding": {
+                "expectedSceneGuid": "guid",
+                "expectedSceneFileDigest": "file-digest",
+                "expectedSceneFileIdentity": "file-identity",
+                "expectedSceneMetaDigest": "meta-digest",
+                "expectedSceneMetaIdentity": "meta-identity",
+            },
+            "readback": {
+                "guid": "guid",
+                "fileDigest": "file-digest",
+                "fileIdentity": "file-identity",
+                "metaDigest": "meta-digest",
+                "metaIdentity": "meta-identity",
+            },
+        },
+        marker=marker,
+    )
+
+    assert store.lookup("session-a", "turn-a", project_root, metadata["resultRef"]) == {
+        "step": capture_data[1]
+    }
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        {"ok": True, "changed": True, "mutationStarted": True, "commitState": "committed"},
+        {"ok": True, "changed": False, "mutationStarted": False, "commitState": "unknown"},
+    ],
+)
+def test_unproven_mutation_outcome_still_expires_prior_scan(tmp_path, capture_data, outcome):
+    store = store_at(tmp_path)
+    project_root = str(capture_data[0])
+    metadata = capture(store, capture_data)
+    marker = store.begin_mutation(project_root, "write")
+    store.end_mutation(project_root, "write", outcome=outcome, marker=marker)
+    assert store.lookup("session-a", "turn-a", project_root, metadata["resultRef"])["reason"] == "write"
+
+
+def test_overlapping_no_change_mutation_cannot_revive_scan(tmp_path, capture_data):
+    store = store_at(tmp_path)
+    project_root = str(capture_data[0])
+    metadata = capture(store, capture_data)
+    outer = store.begin_mutation(project_root, "outer")
+    inner = store.begin_mutation(project_root, "inner")
+    no_change = {
+        "ok": True,
+        "verified": True,
+        "changed": False,
+        "cleanNoChange": True,
+        "mutationStarted": False,
+        "commitState": "no_change",
+        "applyBinding": {
+            "expectedSceneGuid": "guid",
+            "expectedSceneFileDigest": "file-digest",
+            "expectedSceneFileIdentity": "file-identity",
+            "expectedSceneMetaDigest": "meta-digest",
+            "expectedSceneMetaIdentity": "meta-identity",
+        },
+        "readback": {
+            "guid": "guid",
+            "fileDigest": "file-digest",
+            "fileIdentity": "file-identity",
+            "metaDigest": "meta-digest",
+            "metaIdentity": "meta-identity",
+        },
+    }
+    store.end_mutation(project_root, "inner", outcome=no_change, marker=inner)
+    store.end_mutation(project_root, "outer", outcome=no_change, marker=outer)
+    assert store.lookup("session-a", "turn-a", project_root, metadata["resultRef"])["reason"] == "inner"
 
 
 def test_capture_fingerprints_are_computed_with_shared_lock_and_transaction(tmp_path, capture_data, monkeypatch):
@@ -331,7 +453,7 @@ def test_capture_fingerprints_are_computed_with_shared_lock_and_transaction(tmp_
     store = ScanResultStore(tmp_path / "store", lock)
     original = store_module._fingerprints
 
-    def checked(project_root, paths):
+    def checked(project_root, paths, metadata_only_paths=()):
         assert lock._is_owned()
         connection = sqlite3.connect(store._path, timeout=0)
         try:
@@ -339,7 +461,7 @@ def test_capture_fingerprints_are_computed_with_shared_lock_and_transaction(tmp_
                 connection.execute("BEGIN IMMEDIATE")
         finally:
             connection.close()
-        return original(project_root, paths)
+        return original(project_root, paths, metadata_only_paths)
 
     monkeypatch.setattr(store_module, "_fingerprints", checked)
     assert capture(store, capture_data)["persisted"] is True

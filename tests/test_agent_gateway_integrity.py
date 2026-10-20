@@ -76,6 +76,49 @@ def test_runtime_cancel_requests_only_matching_active_subagents(tmp_path: Path) 
     assert result["cancelledSubAgentTaskIds"] == ["same-owner"]
 
 
+def test_runtime_cancel_rejects_mixed_identity_tuple(tmp_path: Path) -> None:
+    gateway = _gateway(tmp_path)
+    gateway.runtime_sessions.begin_turn(
+        session_id="session-a", turn_id="turn-a", client_turn_id="client-a"
+    )
+    gateway.runtime_sessions.begin_turn(
+        session_id="session-b", turn_id="turn-b", client_turn_id="client-b"
+    )
+
+    with pytest.raises(AgentGatewayError, match="identity") as raised:
+        gateway.request_runtime_cancel(
+            {"sessionId": "session-a", "turnId": "turn-b", "clientTurnId": "client-b"}
+        )
+
+    assert raised.value.status_code == 409
+    assert gateway.runtime_sessions.cancel_requested(
+        session_id="session-a", turn_id="turn-a", client_turn_id="client-a"
+    ) is False
+    assert gateway.runtime_sessions.cancel_requested(
+        session_id="session-b", turn_id="turn-b", client_turn_id="client-b"
+    ) is False
+
+
+def test_runtime_cancel_by_session_keeps_full_session_stop_behavior(tmp_path: Path) -> None:
+    gateway = _gateway(tmp_path)
+    gateway.runtime_sessions.begin_turn(
+        session_id="session-a", turn_id="turn-a", client_turn_id="client-a"
+    )
+    gateway.runtime_sessions.begin_turn(
+        session_id="session-b", turn_id="turn-b", client_turn_id="client-b"
+    )
+
+    result = gateway.request_runtime_cancel({"sessionId": "session-a"})
+
+    assert result["ok"] is True
+    assert gateway.runtime_sessions.cancel_requested(
+        session_id="session-a", turn_id="turn-a", client_turn_id="client-a"
+    ) is True
+    assert gateway.runtime_sessions.cancel_requested(
+        session_id="session-b", turn_id="turn-b", client_turn_id="client-b"
+    ) is False
+
+
 def test_runtime_cancel_stops_only_matching_registry_worker(tmp_path: Path) -> None:
     entered: dict[str, threading.Event] = {}
     released = threading.Event()
@@ -1118,6 +1161,7 @@ def test_public_mcp_gesture_manager_pending_receipt_projects_pending_operation(t
     connected_status = {
         "ok": True,
         "isPlayMode": True,
+        "enterPlayModePending": False,
         "managers": [
             {
                 "avatarPath": "Avatar",

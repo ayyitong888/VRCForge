@@ -9,12 +9,24 @@ from copy import deepcopy
 import hashlib
 import json
 from pathlib import Path
+import re
 import sqlite3
 import threading
 
 
-def scope_request(tool, arguments):
+_SCAN_TOOL_ALIASES = {
+    "vrcforge_scan_materials": "vrcforge_scan_avatar_materials",
+}
+
+
+def scope_request(tool, arguments, *, host_object_ids=None):
     args = deepcopy(arguments)
+    canonical_tool = _SCAN_TOOL_ALIASES.get(tool, tool)
+    if tool == "vrcforge_scan_materials":
+        # Material roots come only from the host's validated ExecutionTarget.
+        # Model-supplied roots are never forwarded to Core.
+        for name in ("objectIds", "object_ids", "assetPaths", "asset_paths", "assetPath", "asset_path"):
+            args.pop(name, None)
     avatar = (args.get("avatar_path") or args.get("avatarPath") or "") if tool == "vrcforge_scan_avatar_controls" else (
         args.get("source_avatar_path") or args.get("sourceAvatarPath")
         or args.get("avatar_path") or args.get("avatarPath") or "")
@@ -25,14 +37,29 @@ def scope_request(tool, arguments):
             args[camel] = args.get(snake) or args.get(camel)
     if "include_all_project_clips" in args or "includeAllProjectClips" in args:
         args["includeAllProjectClips"] = bool(args.get("include_all_project_clips") or args.get("includeAllProjectClips"))
-    return {"scanTool": tool, "arguments": args}
+    request = {"scanTool": canonical_tool, "arguments": args}
+    if host_object_ids is not None:
+        request["objectIds"] = list(host_object_ids)
+    return request
 
 
-def capture_admission_reason(request):
+_GLOBAL_OBJECT_ROOT = re.compile(r"global:GlobalObjectId_V1-[^\x00\\/:]{1,500}\Z")
+
+
+def capture_admission_reason(request, *, trusted_object_root=False):
     """Avoid unbounded scene capture before it can enter Core's uncancellable queue."""
     args = request["arguments"]
     asset_roots = any(args.get(name) for name in ("assetPath", "controllerPath", "clipPath", "clipPaths"))
-    if args.get("includeAllProjectClips") or not asset_roots or (
+    object_ids = request.get("objectIds")
+    bounded_material_object_root = (
+        trusted_object_root is True
+        and request.get("scanTool") == "vrcforge_scan_avatar_materials"
+        and isinstance(object_ids, list)
+        and len(object_ids) == 1
+        and isinstance(object_ids[0], str)
+        and _GLOBAL_OBJECT_ROOT.fullmatch(object_ids[0]) is not None
+    )
+    if args.get("includeAllProjectClips") or (not asset_roots and not bounded_material_object_root) or (
             request["scanTool"] == "vrcforge_scan_animation_bindings" and args.get("avatarPath")):
         return "scope_capture_unbounded"
     return None
@@ -94,6 +121,14 @@ class ScopeCaptureBudget:
         roots = {"paths": sorted(set(paths)), "avatar": avatar,
                  "allProjectClips": args.get("includeAllProjectClips", False),
                  "identity": info.get("captureRootIdentity")}
+        if request["scanTool"] == "vrcforge_scan_avatar_materials":
+            # The same Avatar can have distinct full-inventory and selected-detail
+            # scopes. A failed broad capture must not suppress a bounded selection.
+            selected = args.get("materialIds")
+            roots["materialSelection"] = (sorted({value.strip().casefold() for value in selected
+                                                   if isinstance(value, str) and value.strip()})
+                                          if isinstance(selected, list) and selected else None)
+            roots["includeTextures"] = args.get("includeTextures", True)
         if not roots["identity"]:
             return None
         digest = hashlib.sha256(json.dumps(roots, sort_keys=True, separators=(",", ":")).encode()).hexdigest()

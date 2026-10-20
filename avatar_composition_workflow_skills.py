@@ -164,6 +164,13 @@ AVATAR_COMPOSITION_WORKFLOW_SKILLS: tuple[dict[str, Any], ...] = (
         "whenNotToUse": "do not use when the retained head has no face-tracking assets; keep its compatible gesture FX instead",
         "inputs": ["Final avatar path, retained face mesh path, source face-tracking assets, and body controls that must remain."],
         "outputs": ["One descriptor whose Mesh, FX, Parameters, and Menu agree, with gesture fallback and body controls retained."],
+        "taskScope": "face_tracking_installation_and_serialized_configuration",
+        "runtimeAcceptance": {
+            "separateFromInstallation": True,
+            "selection": "user_task",
+            "requiredForThisSkill": False,
+            "entry": "face_tracking_play_runtime_acceptance",
+        },
         "sideEffects": "can update descriptor, animation bindings, FX, expression parameters, and expression menus after authorization",
         "backupRestore": "Checkpoints precede animation-path remap and merged FX/Parameters/Menu/descriptor writes; every restore is separately approved.",
         "entrypointTool": "vrcforge_read_avatar_descriptor",
@@ -201,7 +208,19 @@ AVATAR_COMPOSITION_WORKFLOW_SKILLS: tuple[dict[str, Any], ...] = (
                 ],
             },
             {
-                "goal": "Exercise face, gesture fallback, body, and wardrobe in GM; validate the final merged GM/Build state.",
+                "goal": "Read back the serialized Descriptor, active renderer, Mesh/BlendShapes, FX, Parameters, Menu, and animation closure after installation; this is edit-mode configuration evidence only.",
+                "phase": "serialized_install_configuration_readback",
+                "runtimeRequired": False,
+                "tools": [
+                    "vrcforge_read_avatar_descriptor", "vrcforge_scan_blendshapes",
+                    "vrcforge_scan_parameters", "vrcforge_scan_avatar_controls",
+                    "vrcforge_scan_fx_animator", "vrcforge_scan_animation_bindings",
+                ],
+            },
+            {
+                "goal": "Optionally exercise face, gesture fallback, body, and wardrobe in GM; validate the final merged GM/Build state only when the user selects separate Play/runtime acceptance.",
+                "phase": "face_tracking_play_runtime_acceptance",
+                "runtimeRequired": False,
                 "tools": [
                     "vrcforge_gesture_manager_enter_play_mode",
                     "vrcforge_gesture_manager_set_parameter",
@@ -303,6 +322,13 @@ AVATAR_COMPOSITION_WORKFLOW_SKILLS: tuple[dict[str, Any], ...] = (
         "whenNotToUse": "do not use when the retained head has no face-tracking Mesh/FX/Parameters/Menu contract",
         "inputs": ["Face-tracked source head, target avatar, and retained body/wardrobe controls."],
         "outputs": ["One fitted avatar with a coherent face-tracking four-piece contract and gesture fallback."],
+        "taskScope": "complete_head_transplant_with_face_tracking",
+        "runtimeAcceptance": {
+            "separateFromInstallation": True,
+            "selection": "user_task",
+            "requiredForThisSkill": True,
+            "entry": "head_swap_play_runtime_and_visual_acceptance",
+        },
         "sideEffects": "can duplicate/reparent the head and atomically update animation, FX, Parameters, Menu, and descriptor references after authorization",
         "backupRestore": "Checkpoints precede head duplication, reference remap, and four-piece descriptor writes; every restore is separately approved.",
         "entrypointTool": "vrcforge_read_avatar_descriptor",
@@ -344,6 +370,8 @@ AVATAR_COMPOSITION_WORKFLOW_SKILLS: tuple[dict[str, Any], ...] = (
             },
             {
                 "goal": "Read back the active renderer path, Descriptor.VisemeSkinnedMesh/lipsync, all expected expression animation bindings, BlendShape names, FX controller consumers, Parameters, and Menu. Require complete closure on the active renderer and zero inactive/donor-only Descriptor or Animator targets.",
+                "phase": "serialized_install_configuration_readback",
+                "runtimeRequired": False,
                 "tools": [
                     "vrcforge_read_avatar_descriptor", "vrcforge_get_gameobject",
                     "vrcforge_scan_blendshapes", "vrcforge_scan_animation_bindings",
@@ -353,6 +381,8 @@ AVATAR_COMPOSITION_WORKFLOW_SKILLS: tuple[dict[str, Any], ...] = (
             },
             {
                 "goal": "Run final merged GM/Build face, gesture fallback, body, wardrobe, and neck views: Front (0,0,0), Side Left (0,+90,0), Side Right (0,-90,0), Back (0,180,0), Bottom (-90,0,0), before old-head removal.",
+                "phase": "head_swap_play_runtime_and_visual_acceptance",
+                "runtimeRequired": True,
                 "tools": [
                     "vrcforge_gesture_manager_enter_play_mode",
                     "vrcforge_gesture_manager_set_parameter",

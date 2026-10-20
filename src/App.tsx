@@ -1,4 +1,5 @@
 import { projectDiscoveryState } from "./lib/project-discovery-state";
+import { conversationQuoteFromSelection } from "./lib/chat-selection-quote";
 import { hasRecentConnectorSelfTest } from "./lib/connector-verification";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -80,7 +81,7 @@ import { useOptimizationWorkspaceController } from "./hooks/use-optimization-wor
 import { useProtectionWorkspaceController } from "./hooks/use-protection-workspace-controller";
 import { useProviderSettings } from "./hooks/use-provider-settings";
 import { useRuntimeWorkspace } from "./hooks/use-runtime-workspace";
-import { questionContinuationCancelTarget, questionContinuationStatus, type RuntimeTurnEvent, useRuntimeTurnContinuationDelivery } from "./hooks/use-runtime-turn-continuation";
+import { projectAgentQuestionContinuation, questionContinuationCancelTarget, questionContinuationDisplay, questionContinuationStatus, type RuntimeTurnEvent, useQuestionContinuationActivity, useRuntimeTurnContinuationDelivery } from "./hooks/use-runtime-turn-continuation";
 import { useSettingsWorkspaceController } from "./hooks/use-settings-workspace-controller";
 import { useSessionHandoff } from "./hooks/use-session-handoff";
 import { useSkillsWorkspaceController } from "./hooks/use-skills-workspace-controller";
@@ -129,7 +130,7 @@ import {
   selectedTextAttachment,
 } from "./lib/conversation-utils";
 import { ingestChatAttachment } from "./lib/attachment-ingest";
-import { resolveContextLimit } from "./lib/context-compaction";
+import { latestContextWindowUsage, resolveContextLimit } from "./lib/context-compaction";
 import { thinkingTraceLabel } from "./lib/provider-ui";
 import type { ChatAttachment, ComposerAction, ComposerActionId, ContextUsage, ConversationItem } from "./lib/chat-types";
 import { executionModeLabel, permissionVisualState } from "./lib/permission-ui";
@@ -142,8 +143,10 @@ import { buildEmptyProjectState } from "./lib/sidebar-view";
 import { localizeRuntimeHealthMessage } from "./lib/runtime-workspace-view";
 import { resolveRuntimeAuthorizationStatus } from "./lib/runtime-authorization-status";
 import {
+  loadSubAgentReviewNotificationIds,
   parseApprovalNotificationAction,
   parseSubAgentReviewNotificationAction,
+  saveSubAgentReviewNotificationIds,
   showApprovalNotification,
   showSubAgentReviewNotification,
   SUB_AGENT_REVIEW_NOTIFICATION_ACTION_EVENT,
@@ -183,7 +186,7 @@ import {
   fetchAgentGoals,
   fetchAgentMemory,
   fetchAgentApprovals,
-  fetchAgentRuns,
+  fetchAgentTurnResponse,
   fetchAppSession,
   fetchAppHealth,
   fetchSubAgent,
@@ -218,6 +221,7 @@ type BackendStartStatus = {
 
 type BackendEventMessage = {
   type?: string;
+  originId?: string;
   sessionId?: string;
   turnId?: string;
   clientTurnId?: string;
@@ -381,6 +385,9 @@ export default function App() {
   const [subAgentActionBusyTaskIds, setSubAgentActionBusyTaskIds] = useState<Set<string>>(() => new Set());
   const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
   const [editingMessage, setEditingMessage] = useState<EditingMessageDraft | null>(null);
+  const [savingMessageEdit, setSavingMessageEdit] = useState(false);
+  const messageEditSaveInFlightRef = useRef(false);
+  const messageEditSnapshotRef = useRef<{ draft: EditingMessageDraft | null; chatId: string; busy: boolean }>({ draft: null, chatId: "", busy: false });
   const [selectionMenu, setSelectionMenu] = useState<{ x: number; y: number; text: string } | null>(null);
   const [doctorReport, setDoctorReport] = useState<DoctorReport | null>(null);
   const [loadingDoctor, setLoadingDoctor] = useState(false);
@@ -402,7 +409,9 @@ export default function App() {
   const pendingApprovalsRef = useRef<AgentApproval[]>([]);
   const knownApprovalNotificationIdsRef = useRef<Set<string>>(new Set());
   const exhaustedApprovalNotificationIdsRef = useRef<Set<string>>(new Set());
-  const knownSubAgentReviewNotificationIdsRef = useRef<Set<string>>(new Set());
+  const deliveredSubAgentReviewNotificationIdsRef = useRef<Set<string>>(loadSubAgentReviewNotificationIds());
+  const knownSubAgentReviewNotificationIdsRef = useRef<Set<string>>(new Set(deliveredSubAgentReviewNotificationIdsRef.current));
+  const inFlightSubAgentReviewNotificationIdsRef = useRef<Set<string>>(new Set());
   const handledSubAgentReviewNotificationIdsRef = useRef<Set<string>>(new Set());
   const exhaustedSubAgentReviewNotificationIdsRef = useRef<Set<string>>(new Set());
   const subAgentReviewNotificationActionHandlerRef = useRef<(payload: unknown) => void>(() => undefined);
@@ -783,6 +792,7 @@ export default function App() {
     hideProject,
     unhideProject,
     projectDisplayName,
+    projectDisplayLabel,
     togglePinProject,
     startRenameProject,
     commitRenameProject,
@@ -820,6 +830,7 @@ export default function App() {
   const chatSessionProjectPaths = useMemo(() => projectItems.map((project) => projectKey(project)).filter(Boolean), [projectItems]);
   const {
     chats,
+    chatStorageReady,
     activeChat,
     activeChatId,
     setActiveChatId,
@@ -846,6 +857,7 @@ export default function App() {
     getChatById,
     newConversation,
     togglePinChat,
+    toggleTestChat,
     startRenameChat,
     commitRenameChat,
     deleteChatPermanently,
@@ -915,6 +927,7 @@ export default function App() {
     projectPath,
     projectPath ? projectTypeForPath(projectPath) : "general",
   );
+  const settledQuestionContinuationIdsRef = useRef(new Set<string>());
   const deliverRuntimeTurnContinuation = useRuntimeTurnContinuationDelivery({
     chats,
     appendToChat,
@@ -923,6 +936,18 @@ export default function App() {
       if (event.continuationSource !== "question_answered") return;
       const questionId = event.clientTurnId?.split(":question:")[1]?.trim();
       if (!questionId) return;
+      const clientTurnId = event.clientTurnId?.trim();
+      if (clientTurnId) {
+        settledQuestionContinuationIdsRef.current.add(clientTurnId);
+        const ownerChat = chats.find((chat) => chat.sessionId === event.sessionId
+          && chat.items.some((item) => item.type === "streaming" && item.id === `question-continuation:${clientTurnId}`));
+        if (ownerChat) {
+          updateChat(ownerChat.id, (current) => ({
+            ...current,
+            items: current.items.filter((item) => item.id !== `question-continuation:${clientTurnId}`),
+          }));
+        }
+      }
       const nextStep = String(event.plan?.nextStep || "").toLowerCase();
       const status = questionContinuationStatus("delivered", nextStep);
       updateAgentQuestionContinuation(questionId, {
@@ -1006,6 +1031,9 @@ export default function App() {
     stopRequested,
     isRunning: isChatRunActive,
     submitTurn,
+    editQueuedTurn,
+    removeQueuedTurn,
+    steerQueuedTurn,
     runTurnNow,
     runBackgroundTurn,
     stopCurrentRun,
@@ -1031,7 +1059,11 @@ export default function App() {
     notifyFailure: showTransientFailure,
     prepareTurnContext,
     persistChatsNow,
+    traceSteerDelivery: developerOptionsEnabled
+      ? (event) => console.debug("[vrcforge:steer-delivery]", event)
+      : undefined,
     chats,
+    chatStorageReady,
   });
   const sending = chatRunSending || compacting;
   const visibleQueued = useMemo(
@@ -1081,6 +1113,36 @@ export default function App() {
     setAgentApprovals,
     setError,
   });
+  const applyQuestionRuntimeDelta = useQuestionContinuationActivity({
+    chats,
+    questions: agentQuestions,
+    runs: runtimeRuns,
+    updateChat,
+    settledClientTurnIds: settledQuestionContinuationIdsRef.current,
+  });
+  const queuedQuestionSessionIds = useMemo(() => new Set(queued.map((turn) => (
+    turn.sessionId || chats.find((chat) => chat.id === turn.chatId)?.sessionId || ""
+  )).filter(Boolean)), [chats, queued]);
+  const pendingQuestionSessionIds = useMemo(() => new Set(agentQuestions.flatMap((question) => {
+    const projected = projectAgentQuestionContinuation(question, runtimeRuns);
+    const status = questionContinuationDisplay(projected);
+    const questionSessionId = projected.runtimeContinuation?.sessionId || projected.sessionId || "";
+    return questionSessionId && status !== "settled" ? [questionSessionId] : [];
+  })), [agentQuestions, runtimeRuns]);
+  const previousPendingQuestionSessionIdsRef = useRef(new Set<string>());
+  const resumeQueuedTurnsRef = useRef(resumeQueuedTurns);
+  resumeQueuedTurnsRef.current = resumeQueuedTurns;
+  const queuedQuestionSessionKey = [...queuedQuestionSessionIds].sort().join("|");
+  const pendingQuestionSessionKey = [...pendingQuestionSessionIds].sort().join("|");
+  useEffect(() => {
+    const wasPending = previousPendingQuestionSessionIdsRef.current;
+    const settledQueuedQuestion = [...wasPending].some((targetSessionId) => (
+      queuedQuestionSessionIds.has(targetSessionId)
+      && !pendingQuestionSessionIds.has(targetSessionId)
+    ));
+    previousPendingQuestionSessionIdsRef.current = new Set(pendingQuestionSessionIds);
+    if (settledQueuedQuestion) void resumeQueuedTurnsRef.current();
+  }, [pendingQuestionSessionKey, queuedQuestionSessionKey]);
   const activeAgentGoal = useMemo(() => {
     const currentSessionId = activeChat?.sessionId || sessionId;
     return agentGoals.find((goal) => {
@@ -1307,7 +1369,27 @@ export default function App() {
     if (!isTauriRuntime() || !runtimeConnected) {
       return;
     }
-    const reviewTasks = (subAgentList?.tasks || []).filter((task) => {
+    // Wait for the first task snapshot; an empty reconnect snapshot must not
+    // erase persisted delivery markers and cause a duplicate toast.
+    if (!subAgentList) {
+      return;
+    }
+    const taskSnapshot = subAgentList.tasks || [];
+    // An empty reconnect response is temporarily unavailable state. Do not
+    // interpret it as evidence that persisted notifications were resolved.
+    if (!taskSnapshot.length) {
+      return;
+    }
+    const allReviewTasks = taskSnapshot.filter((task) => {
+      return (
+        isAwaitingMergeReview(task)
+        && typeof task.revision === "number"
+        && Number.isInteger(task.revision)
+        && task.revision > 0
+        && Boolean(task.parentChatId)
+      );
+    });
+    const reviewTasks = allReviewTasks.filter((task) => {
       return (
         isAwaitingMergeReview(task)
         && typeof task.revision === "number"
@@ -1317,10 +1399,14 @@ export default function App() {
         && getChatById(task.parentChatId || "")
       );
     });
-    const pendingReviewNotificationIds = new Set(reviewTasks.map((task) => toReviewNotificationId(task)));
+    const pendingReviewNotificationIds = new Set(allReviewTasks.map((task) => toReviewNotificationId(task)));
+    const snapshotTaskIds = new Set(taskSnapshot.map((task) => task.id));
     for (const notificationId of knownSubAgentReviewNotificationIdsRef.current) {
-      if (!pendingReviewNotificationIds.has(notificationId)) {
+      const taskId = notificationId.split(":", 1)[0];
+      if (snapshotTaskIds.has(taskId) && !pendingReviewNotificationIds.has(notificationId)) {
         knownSubAgentReviewNotificationIdsRef.current.delete(notificationId);
+        inFlightSubAgentReviewNotificationIdsRef.current.delete(notificationId);
+        deliveredSubAgentReviewNotificationIdsRef.current.delete(notificationId);
       }
     }
     for (const notificationId of handledSubAgentReviewNotificationIdsRef.current) {
@@ -1333,6 +1419,7 @@ export default function App() {
         exhaustedSubAgentReviewNotificationIdsRef.current.delete(notificationId);
       }
     }
+    saveSubAgentReviewNotificationIds(deliveredSubAgentReviewNotificationIdsRef.current);
 
     for (const task of reviewTasks) {
       const reviewNotificationId = toReviewNotificationId(task);
@@ -1343,6 +1430,7 @@ export default function App() {
         continue;
       }
       knownSubAgentReviewNotificationIdsRef.current.add(reviewNotificationId);
+      inFlightSubAgentReviewNotificationIdsRef.current.add(reviewNotificationId);
       const notify = () =>
         showSubAgentReviewNotification({
           taskId: task.id,
@@ -1352,7 +1440,12 @@ export default function App() {
           body: `${task.displayName || t("subagent.taskLabel")} · ${t("subagent.awaitingReview")} (${task.revision})`,
           openLabel: t("subagent.inspect"),
         });
-      void notify().catch(() =>
+      const deliver = () => notify().then(() => {
+        inFlightSubAgentReviewNotificationIdsRef.current.delete(reviewNotificationId);
+        deliveredSubAgentReviewNotificationIdsRef.current.add(reviewNotificationId);
+        saveSubAgentReviewNotificationIds(deliveredSubAgentReviewNotificationIdsRef.current);
+      });
+      void deliver().catch(() =>
         new Promise<void>((resolve) => window.setTimeout(resolve, 1_500))
           .then(() => {
             const currentTask = subAgentTasksRef.current.find((current) => current.id === task.id);
@@ -1365,18 +1458,20 @@ export default function App() {
               || !getChatById(currentTask.parentChatId || "")
             ) {
               knownSubAgentReviewNotificationIdsRef.current.delete(reviewNotificationId);
+              inFlightSubAgentReviewNotificationIdsRef.current.delete(reviewNotificationId);
               return;
             }
-            return notify();
+            return deliver();
           })
           .catch((cause) => {
             knownSubAgentReviewNotificationIdsRef.current.delete(reviewNotificationId);
+            inFlightSubAgentReviewNotificationIdsRef.current.delete(reviewNotificationId);
             exhaustedSubAgentReviewNotificationIdsRef.current.add(reviewNotificationId);
             setError(cause instanceof Error ? cause.message : String(cause));
           }),
       );
     }
-  }, [getChatById, runtimeConnected, subAgentList?.tasks, t, toReviewNotificationId]);
+  }, [getChatById, runtimeConnected, subAgentList, t, toReviewNotificationId]);
 
   useLayoutEffect(() => {
     subAgentReviewRuntimeConnectedRef.current = runtimeConnected;
@@ -1441,7 +1536,6 @@ export default function App() {
     if (runtimeConnected) {
       return;
     }
-    knownSubAgentReviewNotificationIdsRef.current.clear();
     handledSubAgentReviewNotificationIdsRef.current.clear();
     exhaustedSubAgentReviewNotificationIdsRef.current.clear();
   }, [runtimeConnected]);
@@ -1580,7 +1674,8 @@ export default function App() {
       return nextUsage;
     }
     const cachedUsage = buildContextUsageFromRuntime(
-      activeChat?.contextUsageCache,
+      conversation.some((item) => item.type === "compact")
+        ? latestContextWindowUsage(conversation, true) : activeChat?.contextUsageCache,
       providerSnapshot.provider,
       providerSnapshot.model,
       currentModelInfo,
@@ -1591,7 +1686,7 @@ export default function App() {
       return { ...cachedUsage, cached: true };
     }
     return nextUsage;
-  }, [activeChat?.contextUsageCache, apiConfig, currentModelInfo, latestContextUsage, providerSnapshot.model, providerSnapshot.provider, smokeMode, t]);
+  }, [activeChat?.contextUsageCache, conversation, apiConfig, currentModelInfo, latestContextUsage, providerSnapshot.model, providerSnapshot.provider, smokeMode, t]);
   const compactDebugEntries = useMemo(
     () =>
       (activeChat?.items || [])
@@ -1698,7 +1793,7 @@ export default function App() {
   }, [selectedSubAgent?.id]);
   const hasRunningSubAgents = subAgentTasks.some((task) => ["queued", "running", "cancelling"].includes(task.status));
   const activeProjectName =
-    projectDisplayName(projectItems.find((project) => normalizeProjectPathKey(projectKey(project)) === normalizeProjectPathKey(activeProjectPath))) ||
+    projectDisplayLabel(projectItems.find((project) => normalizeProjectPathKey(projectKey(project)) === normalizeProjectPathKey(activeProjectPath))) ||
     (activeProjectPath ? shortPath(activeProjectPath) : "");
   const effectiveLeftPaneWidth = layoutPaneWidths.left;
   const effectiveRightPaneWidth = rightSidebarCollapsed ? 44 : layoutPaneWidths.right;
@@ -1782,18 +1877,19 @@ export default function App() {
     (message?: string) => localizeRuntimeHealthMessage(t, message),
     [t],
   );
-  const authoritativeProjectName = projectDisplayName(
+  const authoritativeProjectName = projectDisplayLabel(
     projectItems.find(
       (project) => normalizeProjectPathKey(projectKey(project)) === normalizeProjectPathKey(authoritativeSelectedProjectPath),
     ),
   );
   const workspaceProjectLabel = workspaceProjectPath
-    ? projectDisplayName(projectItems.find(
+    ? projectDisplayLabel(projectItems.find(
         (project) => normalizeProjectPathKey(projectKey(project)) === normalizeProjectPathKey(workspaceProjectPath),
       )) || shortPath(workspaceProjectPath)
     : t("workspace.noProjectSelected");
   const answerRuntimeQuestion = async (questionId: string, optionId: string, value: string) => {
     setActiveView("chat");
+    const answeredQuestion = agentQuestions.find((item) => item.questionId === questionId);
     try {
       const payload = await answerAgentQuestion(endpoint, questionId, {
         answer: value,
@@ -1807,6 +1903,20 @@ export default function App() {
           ? { ...payload.runtimeContinuation, sessionId: payload.runtimeContinuation.sessionId || sessionId }
           : agentQuestions.find((item) => item.questionId === questionId)?.runtimeContinuation,
       });
+      const answerItemId = `question-answer-${questionId}`;
+      const answerChatId = activeChatId || ensureActiveChat();
+      const answerChat = getChatById(answerChatId);
+      if (answerChat && !answerChat.items.some((item) => item.id === answerItemId)) {
+        appendToChat(answerChatId, {
+          id: answerItemId,
+          type: "user",
+          text: `${answeredQuestion?.header ? `${answeredQuestion.header}\n` : ""}${answeredQuestion?.question || questionId}\n\n${value}`,
+          createdAt: new Date().toISOString(),
+        });
+        void persistChatsNow().catch((cause) => {
+          setError(cause instanceof Error ? cause.message : String(cause));
+        });
+      }
       void refreshRuntimeRuns(false);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -2070,6 +2180,12 @@ export default function App() {
   }, [endpoint]);
 
   useEffect(() => {
+    // Refresh the authoritative config lease at request/terminal boundaries,
+    // including a foreground reply that becomes an approval/question wait.
+    if (runtimeConnected) void refreshSilently();
+  }, [chatRunSending, runtimeConnected, endpoint]);
+
+  useEffect(() => {
     if (!runtimeConnected || !isTauriRuntime()) {
       return;
     }
@@ -2091,7 +2207,7 @@ export default function App() {
       "agentRuntimeRuns",
       "agentRuntimeTurn",
     ]);
-    const bootstrapEvents = new Set(["advancedSettings", "agentApprovals", "agentPermission", "hello", "projects", "unity_status"]);
+    const bootstrapEvents = new Set(["advancedSettings", "agentApprovals", "agentPermission", "agentQuestions", "agentRuntimeCancel", "agentRuntimeTurn", "config", "hello", "projects", "unity_status"]);
     const scheduleBootstrapRefresh = () => {
       if (desktopEventBootstrapTimerRef.current !== null) {
         window.clearTimeout(desktopEventBootstrapTimerRef.current);
@@ -2131,14 +2247,16 @@ export default function App() {
         return;
       }
       if (eventType === "agentRuntimeDelta") {
-        applyRuntimeDelta(event.payload as AgentRuntimeDeltaEvent);
+        const delta = event.payload as AgentRuntimeDeltaEvent;
+        applyRuntimeDelta(delta);
+        applyQuestionRuntimeDelta(delta);
         return;
       }
       if (eventType === "agentRuntimeTurn") {
         deliverRuntimeTurnContinuation(event.payload?.payload);
       }
       if (eventType === "chatStorageChanged") {
-        notifyChatStorageChanged();
+        notifyChatStorageChanged(event.payload?.originId);
       }
       if (eventType === "agentQuestions") {
         const payload = event.payload as { question?: AgentQuestion; questions?: AgentQuestion[] } | undefined;
@@ -2197,7 +2315,7 @@ export default function App() {
         desktopEventSubAgentTimerRef.current = null;
       }
     };
-  }, [runtimeConnected, endpoint, sessionId, activeRuntimeProjectPath, activeProjectPath, workspaceDiffReviewOpen, deliverRuntimeTurnContinuation]);
+  }, [runtimeConnected, endpoint, sessionId, activeRuntimeProjectPath, activeProjectPath, workspaceDiffReviewOpen, deliverRuntimeTurnContinuation, applyQuestionRuntimeDelta]);
 
   useEffect(() => {
     if (!runtimeConnected || bootstrap?.health.deferredDiagnostics !== true) {
@@ -2721,11 +2839,14 @@ export default function App() {
     );
   }
 
+  messageEditSnapshotRef.current = {
+    draft: editingMessage,
+    chatId: activeChatId,
+    busy: isChatRunActive() || compacting || visibleQueued.length > 0
+      || Boolean(editingMessage && hasUnresolvedRuntimeState(editingMessage.chatId, getChatById(editingMessage.chatId)?.sessionId || "")),
+  };
+
   function editConversationMessage(itemId: string) {
-    if (isChatRunActive() || compacting || visibleQueued.length > 0) {
-      setError(t("chat.cannotActionWhileRunning"));
-      return;
-    }
     const chat = getChatById(activeChatId);
     if (!chat) {
       return;
@@ -2792,58 +2913,81 @@ export default function App() {
   }
 
   async function saveMessageEdit() {
-    if (!editingMessage) {
-      return false;
-    }
-    if (isChatRunActive() || compacting || visibleQueued.length > 0) {
+    const draft = editingMessage;
+    if (!draft || messageEditSaveInFlightRef.current) return false;
+    if (isChatRunActive() || compacting || visibleQueued.length > 0
+      || hasUnresolvedRuntimeState(draft.chatId, getChatById(draft.chatId)?.sessionId || "")) {
       setError(t("chat.cannotActionWhileRunning"));
       return true;
     }
-    const chat = getChatById(editingMessage.chatId);
-    if (!chat || chat.id !== activeChatId) {
+    const originalChat = getChatById(draft.chatId);
+    if (!originalChat || originalChat.id !== activeChatId) {
       discardMessageEdit();
       return true;
     }
-    const index = chat.items.findIndex((item) => item.id === editingMessage.itemId);
-    const item = index >= 0 ? chat.items[index] : null;
-    if (!item || item.type !== "user") {
-      discardMessageEdit();
-      return true;
-    }
-    if (latestConversationItemId(chat.items, (entry) => entry.type === "user") !== editingMessage.itemId) {
-      setError(t("chat.latestMessageActionOnly", { defaultValue: "Only the latest message can be changed." }));
-      return true;
-    }
-    const nextText = editingMessage.draftText.trim();
-    const nextAttachments = cloneChatAttachments(editingMessage.draftAttachments);
+    const nextText = draft.draftText.trim();
+    const nextAttachments = cloneChatAttachments(draft.draftAttachments);
     if (!nextText && nextAttachments.length === 0) {
       discardMessageEdit();
       return true;
     }
-    const turnContextLimit = resolveContextLimit(providerSnapshot.provider, providerSnapshot.model, currentModelInfo, apiConfig?.contextWindow);
-    const turn: QueuedTurn = {
-      id: `edit-${Date.now()}-${Math.random().toString(16).slice(2)}`,
-      text: nextText,
-      planMode: item.planMode === true,
-      attachments: nextAttachments,
-      providerLabel: providerSnapshot.providerLabel,
-      provider: providerSnapshot.provider,
-      model: providerSnapshot.model,
-      contextLimit: turnContextLimit.known ? turnContextLimit.limit : undefined,
-    };
-    setEditingMessage(null);
-    setInput(editingMessage.priorInput);
-    setAttachments(cloneChatAttachments(editingMessage.priorAttachments));
-    await runTurnNow(chat.id, turn, {
-      baseItems: chat.items.slice(0, index),
-      sessionId: "",
-      restoreOnFailure: {
-        items: chat.items,
-        sessionId: chat.sessionId,
-        title: chat.title,
-        updatedAt: chat.updatedAt,
-      },
-    });
+    messageEditSaveInFlightRef.current = true;
+    setSavingMessageEdit(true);
+    try {
+      // Read the exact turn's live owner, not the ledger's historical tool and
+      // approval events. "missing" also means no active/finalizing turn after
+      // restart or recovery-cache expiry; it does not mean execution is pending.
+      const originalItem = originalChat.items.find((item) => item.id === draft.itemId);
+      const clientTurnId = originalItem?.type === "user" ? originalItem.clientTurnId : undefined;
+      if (originalChat.sessionId && clientTurnId) {
+        const state = await fetchAgentTurnResponse(endpoint, originalChat.sessionId, clientTurnId);
+        if (!state.ok || state.sessionId !== originalChat.sessionId || state.clientTurnId !== clientTurnId
+          || !["completed", "failed", "missing"].includes(state.status)) {
+          setError(t("chat.cannotActionWhileRunning"));
+          return true;
+        }
+      }
+      const current = messageEditSnapshotRef.current;
+      if (current.draft !== draft || current.chatId !== draft.chatId || current.busy || isChatRunActive()) return true;
+      const chat = getChatById(draft.chatId);
+      if (!chat || chat.sessionId !== originalChat.sessionId) return true;
+      const index = chat.items.findIndex((item) => item.id === draft.itemId);
+      const item = index >= 0 ? chat.items[index] : null;
+      if (!item || item.type !== "user") return true;
+      if (latestConversationItemId(chat.items, (entry) => entry.type === "user") !== draft.itemId) {
+        setError(t("chat.latestMessageActionOnly", { defaultValue: "Only the latest message can be changed." }));
+        return true;
+      }
+      const turnContextLimit = resolveContextLimit(providerSnapshot.provider, providerSnapshot.model, currentModelInfo, apiConfig?.contextWindow);
+      const turn: QueuedTurn = {
+        id: `edit-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+        text: nextText,
+        planMode: item.planMode === true,
+        attachments: nextAttachments,
+        providerLabel: providerSnapshot.providerLabel,
+        provider: providerSnapshot.provider,
+        model: providerSnapshot.model,
+        contextLimit: turnContextLimit.known ? turnContextLimit.limit : undefined,
+      };
+      setEditingMessage(null);
+      setInput(draft.priorInput);
+      setAttachments(cloneChatAttachments(draft.priorAttachments));
+      await runTurnNow(chat.id, turn, {
+        baseItems: chat.items.slice(0, index),
+        sessionId: "",
+        restoreOnFailure: {
+          items: chat.items,
+          sessionId: chat.sessionId,
+          title: chat.title,
+          updatedAt: chat.updatedAt,
+        },
+      });
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      messageEditSaveInFlightRef.current = false;
+      setSavingMessageEdit(false);
+    }
     return true;
   }
 
@@ -3100,7 +3244,7 @@ export default function App() {
     }
   }
 
-  async function submitMessage(event?: FormEvent) {
+  async function submitMessage(event?: FormEvent, deliveryMode: "steer" | "queue" = "steer") {
     event?.preventDefault();
     const composerMessage = input.trim();
     let message = composerMessage;
@@ -3115,20 +3259,20 @@ export default function App() {
       showTransientFailure("send", message);
       return;
     }
-    if (message === "/compact" || message.startsWith("/compact ")) {
+    if (deliveryMode === "steer" && (message === "/compact" || message.startsWith("/compact "))) {
       void compactChat();
       setInput("");
       return;
     }
-    if (message === "/goal" || message.startsWith("/goal ")) {
+    if (deliveryMode === "steer" && (message === "/goal" || message.startsWith("/goal "))) {
       void handleGoalSlashCommand(message);
       return;
     }
-    if (message === "/memory" || message.startsWith("/memory ")) {
+    if (deliveryMode === "steer" && (message === "/memory" || message.startsWith("/memory "))) {
       void createMemoryFromSlash(message);
       return;
     }
-    if (message === "/delegate" || message.startsWith("/delegate ")) {
+    if (deliveryMode === "steer" && (message === "/delegate" || message.startsWith("/delegate "))) {
       const command = parseDelegateCommand(
         message,
         skills.map((skill) => skill.name),
@@ -3142,12 +3286,12 @@ export default function App() {
       setInput("");
       return;
     }
-    if (message === "/handoff" || message.startsWith("/handoff ")) {
+    if (deliveryMode === "steer" && (message === "/handoff" || message.startsWith("/handoff "))) {
       setHandoffSendOpen((current) => !current);
       setInput("");
       return;
     }
-    if (message === "/desktop" || message.startsWith("/desktop ")) {
+    if (deliveryMode === "steer" && (message === "/desktop" || message.startsWith("/desktop "))) {
       if (!developerOptionsEnabled || !computerUseEnabled) {
         setError(t("computerUse.disabled"));
         return;
@@ -3193,7 +3337,7 @@ export default function App() {
     };
     setInput("");
     setAttachments([]);
-    const result = await submitTurn(turn);
+    const result = await submitTurn(turn, { deliveryMode });
     if (result === "not_accepted") {
       setInput(composerMessage);
       setAttachments(turn.attachments);
@@ -3576,6 +3720,20 @@ export default function App() {
     }
   }
 
+  function ignoreSubAgentReviewNotification(task: SubAgentTask) {
+    if (!task.parentChatId || typeof task.revision !== "number" || !Number.isInteger(task.revision) || task.revision <= 0) {
+      return;
+    }
+    const notificationId = toReviewNotificationId(task);
+    knownSubAgentReviewNotificationIdsRef.current.add(notificationId);
+    inFlightSubAgentReviewNotificationIdsRef.current.delete(notificationId);
+    deliveredSubAgentReviewNotificationIdsRef.current.add(notificationId);
+    saveSubAgentReviewNotificationIds(deliveredSubAgentReviewNotificationIdsRef.current);
+    setSelectedSubAgent(null);
+    setSelectedSubAgentPanelOpen(false);
+    setSubAgentError("");
+  }
+
   function adoptSubAgentNextAction(task: SubAgentTask) {
     const nextAction = subAgentProposedNextAction(task);
     if (!nextAction) {
@@ -3587,14 +3745,12 @@ export default function App() {
 
   function handleConversationMouseUp() {
     window.setTimeout(() => {
-      const selection = window.getSelection();
-      const text = selection?.toString().trim() ?? "";
-      if (!text || !selection || selection.rangeCount === 0) {
+      const quote = conversationQuoteFromSelection(window.getSelection());
+      if (!quote) {
         setSelectionMenu(null);
         return;
       }
-      const rect = selection.getRangeAt(0).getBoundingClientRect();
-      setSelectionMenu({ x: rect.left + rect.width / 2, y: rect.top, text });
+      setSelectionMenu(quote);
     }, 0);
   }
 
@@ -3811,6 +3967,7 @@ export default function App() {
           onCancel={(taskId) => void cancelSubAgentTask(taskId)}
           onRetry={(taskId) => void retrySubAgentTask(taskId)}
           onMerge={(task, decision) => void mergeSubAgentTask(task, decision)}
+          onIgnoreNotification={ignoreSubAgentReviewNotification}
           onAdoptNextAction={adoptSubAgentNextAction}
           busyTaskIds={subAgentActionBusyTaskIds}
           onClose={() => setSelectedSubAgentPanelOpen(false)}
@@ -3846,7 +4003,7 @@ export default function App() {
           projectRenameDraft={projectRenameDraft}
           renamingChatId={renamingChatId}
           renameDraft={renameDraft}
-          projectDisplayName={projectDisplayName}
+          projectDisplayName={projectDisplayLabel}
           onNewTemporaryChat={openTemporaryChat}
           onOpenProjectPicker={() => {
             setProjectModalError("");
@@ -4098,6 +4255,7 @@ export default function App() {
               reasoningVariants={reasoningVariants}
               apiKeySaved={apiKeySaved}
               savingApiConfig={savingApiConfig}
+              providerConfigurationLocked={chatRunSending || Boolean(apiConfig?.runtimeLocked)}
               modelOptions={modelOptions}
               loadingModels={loadingModels}
               modelsError={modelsError}
@@ -4186,12 +4344,17 @@ export default function App() {
               input={input}
               setInput={setInput}
               sending={sending}
-              queueAllowed={chatRunSending && !stopRequested}
+              queueAllowed={(chatRunSending || pendingQuestionSessionIds.has(activeChat?.sessionId || "")) && !stopRequested}
               permission={permission}
               onSubmit={submitMessage}
+              onQueue={() => void submitMessage(undefined, "queue")}
+              onSteerNow={() => void submitMessage(undefined, "steer")}
               onStop={stopInteractiveActivity}
               onResumeQueue={() => void resumeQueuedTurns()}
               onCancelQueue={() => void cancelQueuedTurns()}
+              onEditQueuedTurn={(turnId, patch) => editQueuedTurn(turnId, patch)}
+              onRemoveQueuedTurn={(turnId) => void removeQueuedTurn(turnId)}
+              onSteerQueuedTurn={(turnId) => void steerQueuedTurn(turnId)}
               onSwitchMode={switchMode}
               commands={slashCommands}
               planMode={activeChat?.planMode === true}
@@ -4205,20 +4368,28 @@ export default function App() {
               attachments={attachments}
               onAttachFiles={(files) => void addComposerFiles(files)}
               onRemoveAttachment={removeAttachment}
+              developerOptionsEnabled={developerOptionsEnabled}
               contextUsage={contextUsage}
               compaction={activeChat?.compaction}
               onCancelCompaction={activeChatId ? () => cancelCompaction(activeChatId) : undefined}
               providerLabel={providerSnapshot.providerLabel}
               model={providerSnapshot.model}
+              providerReasoningEndpoint={providerSnapshot.provider === "chatgpt" ? endpoint : undefined}
+              providerReasoningLevel={apiConfig?.thinking_level || ""}
+              onProviderReasoningActivated={() => refresh(endpoint)}
               activeGoal={activeAgentGoal}
               onGoalChanged={upsertAgentGoal}
               goalEndpoint={endpoint}
+              resourceImageEndpoint={endpoint}
+              resourceChatId={activeChatId || undefined}
+              resourceProjectPath={activeChat?.projectPath || activeProjectPath || undefined}
               projects={projectItems.map((project) => ({
                 key: projectKey(project),
                 name: project.name || shortPath(project.path || ""),
               }))}
               onBindProject={bindProject}
               conversation={conversation}
+              attachmentPayloads={activeChat?.attachmentPayloads}
               queued={visibleQueued}
               agentQuestions={hasAgentRuntimeScope
                 ? agentQuestions.filter((item) => questionBelongsToRuntimeScope(item, runtimeScope, { requireSession: true }))
@@ -4253,6 +4424,7 @@ export default function App() {
               approvalActions={approvalActions}
               editingItemId={editingMessage?.chatId === activeChatId ? editingMessage.itemId : ""}
               editingText={editingMessage?.draftText || ""}
+              editSaveDisabledReason={editingMessage && (savingMessageEdit || sending || compacting || visibleQueued.length > 0 || hasUnresolvedRuntimeState(editingMessage.chatId, getChatById(editingMessage.chatId)?.sessionId || "")) ? t("chat.cannotActionWhileRunning") : ""}
               editingAttachments={editingMessage?.draftAttachments || []}
               onEditItemChangeText={updateEditingMessageText}
               onEditItemRemoveAttachment={removeEditingMessageAttachment}
@@ -4352,6 +4524,8 @@ export default function App() {
               workspaceSummary={workspaceDiff}
               activeDesktopActions={activeDesktopActions}
               refreshUnityStatus={refreshUnityStatus}
+              onTestAgentConnection={() => void runProviderTest("text")}
+              providerTestAttempted={Boolean(providerTestMessage.trim())}
               onHideSidebar={() => setRightSidebarCollapsed(true)}
               onOpenPendingApprovals={() => {
                 setPendingApprovalPanelOpen(true);
@@ -4489,6 +4663,7 @@ export default function App() {
         onAddSelectionToComposer={addSelectionToComposer}
         onCloseChatMenu={() => setChatMenu(null)}
         onTogglePinChat={togglePinChat}
+        onToggleTestChat={toggleTestChat}
         onStartRenameChat={startRenameChat}
         onDeleteChat={setDeleteTargetId}
         onCancelDeleteChat={() => setDeleteTargetId("")}

@@ -59,4 +59,10 @@ def test_setup_outfit_persists_domain_reload_terminal_truth_without_nonce_materi
     )[0]
     assert "approvedObjectReceiptNonce" not in persisted_block
     assert "JobSessionIndexKey" in SETUP
+
+
+def test_setup_outfit_confirmed_job_uses_core_editor_dispatch_once():
+    assert "TryPostToEditor" in SETUP
+    assert "ScheduledJobIds" in SETUP
+    assert "EditorApplication.delayCall += () => RunSetupJob(jobId)" not in SETUP
     assert ".Where(jobId => LoadPersistedJob(jobId) != null)" in SETUP

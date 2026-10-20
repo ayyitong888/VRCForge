@@ -48,6 +48,8 @@ export function RightRuntimeSidebar({
   workspaceSummary,
   activeDesktopActions,
   refreshUnityStatus,
+  onTestAgentConnection,
+  providerTestAttempted,
   onHideSidebar,
   onOpenPendingApprovals,
   localizeHealthMessage,
@@ -78,6 +80,8 @@ export function RightRuntimeSidebar({
   workspaceSummary: WorkspaceDiffSummary | null;
   activeDesktopActions: AgentDesktopAction[];
   refreshUnityStatus: () => void | Promise<void>;
+  onTestAgentConnection?: () => void | Promise<void>;
+  providerTestAttempted: boolean;
   onHideSidebar: () => void;
   onOpenPendingApprovals: () => void;
   localizeHealthMessage: (message?: string) => string;
@@ -155,6 +159,8 @@ export function RightRuntimeSidebar({
             pendingApprovals={pendingApprovals}
             workspaceSummary={workspaceSummary}
             activeDesktopActions={activeDesktopActions}
+            onTestAgentConnection={onTestAgentConnection}
+            providerTestAttempted={providerTestAttempted}
             onOpenPendingApprovals={onOpenPendingApprovals}
           />
         ) : (
@@ -178,12 +184,25 @@ export function RightRuntimeSidebar({
                 />
               </div>
               <div data-vrcforge-status="external-agent">
-                <RuntimeInfoRow
-                  icon={<Bot className="h-4 w-4" />}
-                  label={t(authorizationStatus.source === "external" ? "workspace.externalAgent" : runtimeAuthorizationLabelKey(authorizationStatus))}
-                  value={t(runtimeAuthorizationMessageKey(authorizationStatus))}
-                  suffix={<StatusDot status={authorizationStatus.status} />}
-                />
+                {authorizationStatus.internalConfigured && !providerTestAttempted && authorizationStatus.source !== "external" && authorizationStatus.status === "warning" && onTestAgentConnection ? (
+                  <button type="button" className="w-full text-left" title={t("workspace.testInternalAgentConnection")} onClick={() => void onTestAgentConnection()}>
+                    <RuntimeInfoRow
+                      icon={<Bot className="h-4 w-4" />}
+                      label={t(runtimeAuthorizationLabelKey(authorizationStatus))}
+                      value={t("workspace.internalAgentNotTested")}
+                      suffix={<StatusDot status={authorizationStatus.status} />}
+                    />
+                  </button>
+                ) : (
+                  <RuntimeInfoRow
+                    icon={<Bot className="h-4 w-4" />}
+                    label={t(authorizationStatus.source === "external" ? "workspace.externalAgent" : runtimeAuthorizationLabelKey(authorizationStatus))}
+                    value={authorizationStatus.internalConfigured && providerTestAttempted
+                      ? t(authorizationStatus.internalKind === "oauth" ? "workspace.internalOAuthTestFailed" : "workspace.internalApiTestFailed")
+                      : t(runtimeAuthorizationMessageKey(authorizationStatus))}
+                    suffix={<StatusDot status={authorizationStatus.status} />}
+                  />
+                )}
               </div>
               {workspaceProjectType === "unity" ? (
                 <>

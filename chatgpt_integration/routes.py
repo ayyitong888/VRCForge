@@ -8,12 +8,13 @@ and single-use state, never by weakening dashboard authentication.
 from __future__ import annotations
 
 import asyncio
+from contextlib import nullcontext
 from typing import Any, Awaitable, Callable
 
 from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 
-from provider_configuration_service import ProviderApiConfig
+from provider_configuration_service import ProviderApiConfig, ProviderConfigurationBusyError
 from .service import ChatGPTAuthError
 
 
@@ -24,6 +25,7 @@ class ChatGPTAccountRequest(BaseModel):
 
 class ChatGPTActivationRequest(ChatGPTAccountRequest):
     model: str = Field(min_length=1, max_length=256)
+    thinking_level: str = Field(default="", max_length=32)
 
 
 def build_chatgpt_oauth_router(
@@ -33,6 +35,7 @@ def build_chatgpt_oauth_router(
     service_factory: Callable[[], Any] | None = None,
     current_config: Callable[[], ProviderApiConfig] | None = None,
     deactivate: Callable[[str], Awaitable[None]] | None = None,
+    configuration_change: Callable[[], Any] = nullcontext,
 ) -> APIRouter:
     router = APIRouter(prefix="/api/chatgpt")
     service: Any = None
@@ -79,6 +82,7 @@ def build_chatgpt_oauth_router(
             **payload,
             "activeAccountId": active_account_id,
             "activeModel": config.model if active_account_id else "",
+            "activeThinkingLevel": config.thinking_level if active_account_id else "",
         }
 
     @router.post("/login")
@@ -95,16 +99,17 @@ def build_chatgpt_oauth_router(
     @router.post("/logout")
     async def logout(body: ChatGPTAccountRequest, request: Request, response: Response) -> Any:
         check(request, response)
-        result = await call("logout", body.account_id)
-        if deactivate is not None and result.get("localCleared"):
-            try:
-                await deactivate(body.account_id)
-            except Exception as exc:
-                raise HTTPException(
-                    500,
-                    "ChatGPT sign-out cleared the account locally, but the active provider configuration could not be cleared.",
-                ) from exc
-        return result
+        try:
+            with configuration_change():
+                result = await call("logout", body.account_id)
+                if deactivate is not None and result.get("localCleared"):
+                    try:
+                        await deactivate(body.account_id)
+                    except Exception as exc:
+                        raise HTTPException(500, "ChatGPT sign-out cleared the account locally, but the active provider configuration could not be cleared.") from exc
+                return result
+        except ProviderConfigurationBusyError as exc:
+            raise HTTPException(409, str(exc)) from exc
 
     @router.post("/models")
     async def models(body: ChatGPTAccountRequest, request: Request, response: Response) -> Any:
@@ -115,13 +120,29 @@ def build_chatgpt_oauth_router(
     async def select(body: ChatGPTActivationRequest, request: Request, response: Response) -> Any:
         check(request, response)
         catalog = await call("models", body.account_id)
-        if body.model not in {item["id"] for item in catalog}:
+        selected = next((item for item in catalog if item.get("id") == body.model), None)
+        if selected is None:
             raise HTTPException(400, "Select a model from this ChatGPT account's catalog.")
-        return await activate(ProviderApiConfig(
+        raw_levels = selected.get("supportedReasoningLevels")
+        supported_levels = [
+            entry.get("effort") for entry in raw_levels
+            if isinstance(entry, dict) and isinstance(entry.get("effort"), str)
+        ] if isinstance(raw_levels, list) else []
+        requested_level = body.thinking_level.strip().lower()
+        if supported_levels and requested_level not in supported_levels:
+            raise HTTPException(400, "Choose a supported reasoning level for this ChatGPT model.")
+        if requested_level and not supported_levels:
+            raise HTTPException(400, "This ChatGPT model does not advertise configurable reasoning levels.")
+        config = ProviderApiConfig(
             provider="chatgpt", api_key=body.account_id,
             base_url="https://api.openai.com/v1", model=body.model,
-            api_type="responses",
-        ))
+            api_type="responses", thinking_level=requested_level,
+        )
+        try:
+            with configuration_change():
+                return await activate(config)
+        except ProviderConfigurationBusyError as exc:
+            raise HTTPException(409, str(exc)) from exc
 
     @router.on_event("shutdown")
     async def close() -> None:

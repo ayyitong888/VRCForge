@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 import hashlib
 import json
 import math
@@ -28,6 +29,7 @@ def target(
     required_list_field: str = "",
     required_list_item_kind: str = "any",
     max_list_items: int = 0,
+    stream_jsonl: bool = False,
 ) -> SessionStoreTarget:
     return SessionStoreTarget(
         store_id=store_id,
@@ -38,6 +40,7 @@ def target(
         required_list_field=required_list_field,
         required_list_item_kind=required_list_item_kind,  # type: ignore[arg-type]
         max_list_items=max_list_items,
+        stream_jsonl=stream_jsonl,
     )
 
 
@@ -252,6 +255,35 @@ def test_agent_steps_require_ui_safe_field_shapes(tmp_path: Path) -> None:
     assert scan["reason"] == "invalid_list_records"
 
 
+def test_timeline_event_allows_bounded_owner_fields_but_rejects_invalid_or_unknown_fields() -> None:
+    event = {
+        "id": "timeline-1",
+        "sequence": 1,
+        "timestamp": "2026-10-15T00:00:00Z",
+        "kind": "subagent",
+        "sessionId": "session-1",
+        "turnId": "turn-1",
+        "clientTurnId": "client-turn-1",
+        "payload": {"label": "worker", "status": "completed"},
+    }
+    chat = {"id": "chat-timeline-owner", "items": [{"id": "item-1", "type": "timeline_event", "event": event}]}
+
+    assert is_valid_chat_record(chat)
+
+    for field, value in (
+        ("sessionId", " "),
+        ("turnId", 1),
+        ("clientTurnId", "x" * 241),
+    ):
+        malformed = json.loads(json.dumps(chat))
+        malformed["items"][0]["event"][field] = value
+        assert not is_valid_chat_record(malformed), field
+
+    malformed = json.loads(json.dumps(chat))
+    malformed["items"][0]["event"]["runtimeState"] = "unexpected"
+    assert not is_valid_chat_record(malformed)
+
+
 def test_attachment_vault_and_compacted_references_require_ui_safe_shapes() -> None:
     body = "attachment body"
     payload_hash = hashlib.sha256(body.encode()).hexdigest()
@@ -404,6 +436,40 @@ def test_pending_supervised_write_result_is_valid_non_shell_history() -> None:
     assert not is_valid_chat_record(malformed)
 
 
+def test_generic_runtime_result_is_valid_with_a_typed_tool_envelope() -> None:
+    result = {
+        "ok": False,
+        "status": "failed",
+        "error": {"type": "checkpoint", "code": "fixture_blocked", "summary": "Preparation failed."},
+    }
+    chat = {
+        "id": "generic-tool-result-chat",
+        "items": [{
+            "id": "turn-1",
+            "type": "agent",
+            "response": {
+                "plan": {"summary": "The operation failed safely.", "planner": "runtime", "shellNeeded": False},
+                "shell": {"ok": False, "status": "failed", "error": "Preparation failed.", "result": result},
+                "result": result,
+            },
+        }],
+    }
+
+    assert is_valid_chat_record(chat)
+
+    malformed_result = deepcopy(chat)
+    malformed_result["items"][0]["response"]["result"]["ratio"] = float("inf")
+    assert not is_valid_chat_record(malformed_result)
+
+    malformed_shell_result = deepcopy(chat)
+    malformed_shell_result["items"][0]["response"]["shell"]["result"]["ratio"] = float("inf")
+    assert not is_valid_chat_record(malformed_shell_result)
+
+    untyped_result = deepcopy(chat)
+    del untyped_result["items"][0]["response"]["shell"]
+    assert not is_valid_chat_record(untyped_result)
+
+
 def test_project_owned_repair_requires_supervision_and_writes_nothing(tmp_path: Path) -> None:
     project = tmp_path / "AvatarProject"
     path = project / ".vrcforge" / "chat-transcripts.json"
@@ -484,6 +550,47 @@ def test_jsonl_repair_preserves_valid_lines_and_future_schema_bytes(tmp_path: Pa
     assert after_scan["invalidCount"] == 0
     assert after_scan["unknownSchemaCount"] == 1
 
+
+def test_small_streamed_runtime_jsonl_keeps_existing_authorized_repair(tmp_path: Path) -> None:
+    path = tmp_path / "runtime-runs.jsonl"
+    first = b'{"schema":"known.v1","id":"first"}\n'
+    invalid = b'{"schema":"known.v1","id":\n'
+    last = b'{"schema":"known.v1","id":"last"}'
+    original = first + invalid + last
+    path.write_bytes(original)
+    store = target(path, store_id="runtime.runs", format="jsonl",
+                   known_schemas=("known.v1",), stream_jsonl=True)
+
+    scan = scan_session_store(store)
+    assert scan["repairable"] is True
+    repaired = repair_session_store(store, scan)
+
+    assert repaired["status"] == "repaired"
+    assert path.read_bytes() == first + last
+    assert sidecar(path, "quarantine", scan["digest"]).read_bytes() == invalid
+
+
+def test_streamed_runtime_jsonl_integrity_keeps_full_history_beyond_64mib(tmp_path: Path) -> None:
+    path = tmp_path / "runtime-runs.jsonl"
+    line = b'{"schema":"known.v1","id":"x","createdAt":"t","event":"noop"}\n'
+    with path.open("wb") as handle:
+        for _ in range((64 * 1024 * 1024) // len(line) + 2):
+            handle.write(line)
+        handle.write(b'{"schema":"known.v1","id":"tail","createdAt":"t","event":\n')
+    original_size = path.stat().st_size
+    scan = scan_session_store(target(path, store_id="runtime.runs", format="jsonl",
+                                     known_schemas=("known.v1",), stream_jsonl=True))
+    assert path.stat().st_size == original_size
+    assert scan["status"] == "needs_repair"
+    assert scan["invalidCount"] == 1
+    assert scan["recordCount"] > 1_000_000
+    assert scan["digest"]
+    assert scan["repairable"] is False
+    repaired = repair_session_store(store := target(path, store_id="runtime.runs", format="jsonl",
+                                                    known_schemas=("known.v1",), stream_jsonl=True), scan)
+    assert repaired["status"] == "needs_user_action"
+    assert repaired["reason"] == "streamed_jsonl_read_only"
+    assert path.stat().st_size == original_size
 
 def test_jsonl_bom_is_allowed_only_at_document_start_and_bytes_are_preserved(tmp_path: Path) -> None:
     path = tmp_path / "bom.jsonl"

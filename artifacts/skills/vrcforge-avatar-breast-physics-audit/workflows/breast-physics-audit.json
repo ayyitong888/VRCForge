@@ -43,6 +43,14 @@
     "noDedicatedPhysBoneOrMarshmallowWriteAtom": true,
     "preserveExistingPhysicsConstraintsCollidersAndSetup": true
   },
+  "postAuditHandoff": {
+    "auditRemainsReadOnly": true,
+    "requiresSeparateExplicitUserAuthorization": true,
+    "allowedWriteSurface": "confirmed_serialized_fields_only",
+    "toolSurface": "existing_generic_core176_component_or_property_tools",
+    "requiresFreshIdentityApprovalCheckpointPreviewAndPersistedReadback": true,
+    "forbidden": ["author_arbitrary_methods", "dynamic_csharp", "guessed_physics_values", "treat_audit_as_write_authorization"]
+  },
   "steps": [
     {
       "name": "bind_exact_project_and_avatar",

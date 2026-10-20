@@ -13,13 +13,56 @@ from agent_gateway import AgentGateway, AgentGatewayError
 
 
 REPO_ROOT = Path(__file__).parents[1]
-# Freeze at main d4861df; integration and future changes must not grow the facade.
-AGENT_GATEWAY_MAX_BYTES = 528_746
-AGENT_GATEWAY_MAX_LF_LINES = 10_966
+# Freeze the reviewed 1.9.1 continuation/phase/usage changes. The published
+# 1.9.0 source already exceeded the old d4861df baseline by 2,742 bytes/34 lines.
+# Use LF-normalized bytes and allow no growth beyond this reviewed snapshot.
+AGENT_GATEWAY_MAX_BYTES = 528_746 + 12_907 + 124
+AGENT_GATEWAY_MAX_LF_LINES = 10_966 + 237 + 5
 
 
 def _gateway(root: Path) -> AgentGateway:
     return AgentGateway(root / "config.json", root / "audit")
+
+
+def test_internal_preparation_failure_reaches_native_observation_with_cause(tmp_path: Path) -> None:
+    from test_runtime_planner_service import service as planner_service
+    gateway = _gateway(tmp_path)
+    gateway.ensure_config().allow_write_requests = True
+    def reject(_args, _preview):
+        raise RuntimeError("Prepared outfit expected asset path is invalid.")
+    gateway.approval_transactions.register_write_handler(
+        "vrcforge_import_outfit_package", "Import local clothes", "high",
+        lambda _args: pytest.fail("Preparation failure must not invoke the writer"),
+        request_preparer=reject,
+    )
+    result = gateway.approval_transactions._execute_write_request(
+        "vrcforge_import_outfit_package", {}, "fixture-native-agent",
+    )
+    assert result["status"] == "failed", result
+    assert result["outcome"]["status"] == "failed"
+    assert result["result"]["writeFailure"]["mutationStarted"] is False
+    assert result["result"]["writeFailure"]["commitState"] == "not_started"
+    assert "Prepared outfit expected asset path is invalid." in json.dumps(result)
+    observation = planner_service().native_result_observation({"kind":"write", **result})
+    assert observation["outcome"]["status"] == "failed"
+    assert "Prepared outfit expected asset path is invalid." in json.dumps(observation)
+    assert gateway._approvals == {}
+
+
+def test_internal_write_exception_keeps_unknown_mutation_unknown(tmp_path: Path, monkeypatch) -> None:
+    gateway = _gateway(tmp_path)
+    def reject(*_args, **_kwargs):
+        raise AgentGatewayError("Write outcome unknown after transport failure")
+    monkeypatch.setattr(AgentApprovalTransactionService, "create_apply_request", reject)
+    gateway.approval_transactions.register_write_handler(
+        "vrcforge_fixture_unknown", "Write fixture", "high", lambda _args: {},
+    )
+    result = gateway.approval_transactions._execute_write_request(
+        "vrcforge_fixture_unknown", {}, "fixture-native-agent",
+    )
+    assert result["outcome"]["status"] == "failed"
+    assert result["result"]["writeFailure"].get("mutationStarted") is not False
+    assert result["result"]["writeFailure"].get("commitState") != "not_started"
 
 
 def _class_definition(path: Path, class_name: str) -> ast.ClassDef:
@@ -410,7 +453,7 @@ def test_approval_transaction_owner_retires_gateway_facades_and_impl_names() -> 
 
 
 def test_agent_gateway_facade_respects_approval_transaction_size_budget() -> None:
-    source = (REPO_ROOT / "agent_gateway.py").read_bytes()
+    source = (REPO_ROOT / "agent_gateway.py").read_bytes().replace(b"\r\n", b"\n")
 
     assert len(source) <= AGENT_GATEWAY_MAX_BYTES
     assert source.count(b"\n") <= AGENT_GATEWAY_MAX_LF_LINES

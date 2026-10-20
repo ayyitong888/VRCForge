@@ -245,19 +245,27 @@ def full_pytest_step() -> StepResult:
     targets = tracked_pytest_targets()
     temp_root = Path(tempfile.mkdtemp(prefix="vrcforge-release-gate-pytest-"))
     xml_path = temp_root / "pytest.xml"
+    targets_path = temp_root / "targets.txt"
+    runner_path = temp_root / "run_pytest.py"
+    targets_path.write_text("\n".join(targets) + "\n", encoding="utf-8")
+    # Keep the exact tracked target set while avoiding Windows command-line limits.
+    runner_path.write_text(
+        "\n".join(
+            [
+                "from pathlib import Path",
+                "import sys",
+                "sys.path.insert(0, str(Path.cwd()))",
+                "import pytest",
+                "targets = Path(sys.argv[1]).read_text(encoding='utf-8').splitlines()",
+                "xml_path, basetemp = sys.argv[2], sys.argv[3]",
+                "raise SystemExit(pytest.main(['-p', 'no:cacheprovider', '--basetemp', basetemp, '--junitxml', xml_path, *targets]))",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     result = run_command(
-        [
-            sys.executable,
-            "-m",
-            "pytest",
-            "-p",
-            "no:cacheprovider",
-            "--basetemp",
-            str(temp_root / "pytest-temp"),
-            "--junitxml",
-            str(xml_path),
-            *targets,
-        ],
+        [sys.executable, str(runner_path), str(targets_path), str(xml_path), str(temp_root / "pytest-temp")],
         env={
             "LOCALAPPDATA": str(temp_root / "localappdata"),
             "PYTHONDONTWRITEBYTECODE": "1",

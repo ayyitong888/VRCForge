@@ -24,7 +24,13 @@ class FakeAuth:
         self.calls.append(("models", account))
         if account == "bad":
             raise RuntimeError("secret-token-do-not-expose")
-        return [{"id": "available-model", "name": "Available Model"}]
+        return [{
+            "id": "available-model", "name": "Available Model",
+            "supportedReasoningLevels": [
+                {"effort": "low"}, {"effort": "high"}, {"effort": "ultra"},
+            ],
+            "defaultReasoningLevel": "low",
+        }]
 
     def cancel(self):
         self.calls.append("cancel")
@@ -91,15 +97,32 @@ async def _record_deactivation(target, account):
 def test_status_does_not_advertise_removed_active_account():
     app, auth, _ = setup_app(
         auth=AccountStatusFake(),
-        current_config=lambda: SimpleNamespace(provider="chatgpt", api_key="removed-account", model="removed-model"),
+        current_config=lambda: SimpleNamespace(
+            provider="chatgpt", api_key="removed-account", model="removed-model", thinking_level="high",
+        ),
     )
     with TestClient(app, headers=HEADERS) as client:
         response = client.get("/api/chatgpt/status")
         assert response.status_code == 200
         assert response.json()["activeAccountId"] == ""
         assert response.json()["activeModel"] == ""
+        assert response.json()["activeThinkingLevel"] == ""
     assert auth.calls[0] == "status"
     assert auth.calls[-1] == "close"
+
+
+def test_status_restores_active_reasoning_level():
+    app, _, _ = setup_app(
+        auth=AccountStatusFake(),
+        current_config=lambda: SimpleNamespace(
+            provider="chatgpt", api_key="kept-account", model="gpt-5.6-sol", thinking_level="xhigh",
+        ),
+    )
+    with TestClient(app, headers=HEADERS) as client:
+        response = client.get("/api/chatgpt/status")
+        assert response.status_code == 200
+        assert response.json()["activeModel"] == "gpt-5.6-sol"
+        assert response.json()["activeThinkingLevel"] == "xhigh"
 
 
 HEADERS = {"Authorization": "Bearer app-session"}
@@ -133,7 +156,7 @@ def test_login_is_explicit_no_model_calls_and_callback_url_not_cached():
 def test_activate_pins_account_model_protocol_and_official_endpoint():
     app, auth, saved = setup_app()
     with TestClient(app, headers=HEADERS) as client:
-        response = client.post("/api/chatgpt/activate", json={"account_id": "account", "model": "available-model"})
+        response = client.post("/api/chatgpt/activate", json={"account_id": "account", "model": "available-model", "thinking_level": "low"})
         assert response.status_code == 200
         config = saved[0]
         assert (config.provider, config.api_key, config.api_type, config.base_url) == (
@@ -143,6 +166,43 @@ def test_activate_pins_account_model_protocol_and_official_endpoint():
         assert client.post("/api/chatgpt/activate", json={"account_id": "account", "model": "not-available"}).status_code == 400
         assert len(saved) == 1
         assert client.post("/api/chatgpt/activate", json={"account_id": "account", "model": "available-model", "base_url": "https://other.invalid"}).status_code == 422
+
+
+def test_activate_persists_model_aware_reasoning_effort():
+    app, _, saved = setup_app()
+    with TestClient(app, headers=HEADERS) as client:
+        response = client.post("/api/chatgpt/activate", json={
+            "account_id": "account", "model": "available-model", "thinking_level": "high",
+        })
+        assert response.status_code == 200
+        assert saved[0].thinking_level == "high"
+
+
+def test_activate_uses_model_discovery_reasoning_metadata_and_rejects_unsupported_levels():
+    app, _, saved = setup_app()
+    with TestClient(app, headers=HEADERS) as client:
+        response = client.post("/api/chatgpt/activate", json={
+            "account_id": "account", "model": "available-model", "thinking_level": "ultra",
+        })
+        assert response.status_code == 200
+        assert saved[0].thinking_level == "ultra"
+        rejected = client.post("/api/chatgpt/activate", json={
+            "account_id": "account", "model": "available-model", "thinking_level": "max",
+        })
+        assert rejected.status_code == 400
+        assert len(saved) == 1
+
+
+def test_models_preserve_reasoning_metadata_from_oauth_catalog():
+    app, _, _ = setup_app()
+    with TestClient(app, headers=HEADERS) as client:
+        response = client.post("/api/chatgpt/models", json={"account_id": "account"})
+        assert response.status_code == 200
+        model = response.json()["models"][0]
+        assert model["supportedReasoningLevels"] == [
+            {"effort": "low"}, {"effort": "high"}, {"effort": "ultra"},
+        ]
+        assert model["defaultReasoningLevel"] == "low"
 
 
 def test_provider_error_body_never_reaches_ui():

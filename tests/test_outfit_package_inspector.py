@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import io
 import tarfile
 import zipfile
 from pathlib import Path
@@ -79,9 +80,99 @@ def test_booth_zip_lists_nested_unitypackage_without_reading_payload(tmp_path: P
     assert result["source"]["type"] == "zip"
     assert result["summary"]["unityPackageCount"] == 1
     assert result["summary"]["textureCount"] == 1
+    assert result["summary"]["nestedUnityPackageCount"] == 0
     assert result["unityPackages"][0]["path"] == "Product/Dress.unitypackage"
+    assert result["unityPackages"][0]["inspectionSkipped"] == "invalid_nested_package"
     assert "SECRET_NESTED_PACKAGE_PAYLOAD" not in rendered
     assert "SECRET_PREVIEW_BYTES" not in rendered
+
+
+def test_booth_zip_inspects_nested_unitypackage_pathnames_without_asset_payload(tmp_path: Path) -> None:
+    unitypackage = io.BytesIO()
+    with tarfile.open(fileobj=unitypackage, mode="w:gz") as archive:
+        write_tar_member(archive, "0001/pathname", b"Assets/Outfits/Dress.prefab")
+        write_tar_member(archive, "0001/asset", b"SECRET_PREFAB_PAYLOAD")
+        write_tar_member(archive, "0002/pathname", b"Assets/Outfits/Textures/body.png")
+        write_tar_member(archive, "0002/asset", b"SECRET_TEXTURE_PAYLOAD")
+
+    package = tmp_path / "product.zip"
+    with zipfile.ZipFile(package, mode="w") as outer:
+        outer.writestr("Product/Dress.unitypackage", unitypackage.getvalue())
+        outer.writestr("Product/preview.png", b"SECRET_PREVIEW_BYTES")
+
+    result = inspect_outfit_package(package)
+    rendered = json.dumps(result, ensure_ascii=False)
+
+    assert result["summary"]["unityPackageCount"] == 1
+    assert result["summary"]["outerEntryCount"] == 2
+    assert result["summary"]["nestedUnityPackageCount"] == 1
+    assert result["summary"]["nestedPathnameCount"] == 2
+    assert result["summary"]["prefabCandidateCount"] == 1
+    assert result["summary"]["textureCount"] == 2  # outer preview plus nested texture
+    assert result["summary"]["canParseUnityPackagePathnames"] is True
+    assert result["prefabCandidates"][0]["path"] == "Product/Dress.unitypackage!/Assets/Outfits/Dress.prefab"
+    nested = result["unityPackages"][0]
+    assert nested["pathnamesEvidenceComplete"] is True
+    assert [item["path"] for item in nested["pathnamesEvidence"]] == [
+        "Assets/Outfits/Dress.prefab",
+        "Assets/Outfits/Textures/body.png",
+    ]
+    assert "SECRET_PREFAB_PAYLOAD" not in rendered
+    assert "SECRET_TEXTURE_PAYLOAD" not in rendered
+    assert "SECRET_PREVIEW_BYTES" not in rendered
+
+
+def test_nested_unitypackage_inspection_respects_size_limit(tmp_path: Path, monkeypatch) -> None:
+    package = tmp_path / "oversized.zip"
+    with zipfile.ZipFile(package, mode="w") as archive:
+        archive.writestr("Product/Dress.unitypackage", b"not-read")
+
+    monkeypatch.setattr("outfit_package_inspector.MAX_NESTED_UNITYPACKAGE_BYTES", 1)
+    result = inspect_outfit_package(package)
+
+    assert result["summary"]["nestedUnityPackageCount"] == 0
+    assert result["unityPackages"][0]["inspectionSkipped"] == "nested_package_size_limit"
+    assert any("pathname inspection for oversized" in warning for warning in result["warnings"])
+
+
+def test_nested_unitypackage_inspection_stops_at_decompressed_byte_limit(tmp_path: Path, monkeypatch) -> None:
+    unitypackage = io.BytesIO()
+    with tarfile.open(fileobj=unitypackage, mode="w:gz") as archive:
+        write_tar_member(archive, "0001/pathname", b"Assets/Outfits/BeforeLimit.prefab")
+        write_tar_member(archive, "0002/asset", b"X" * 30000)
+        write_tar_member(archive, "0003/pathname", b"Assets/Outfits/AfterLimit.prefab")
+
+    package = tmp_path / "byte-limited.zip"
+    with zipfile.ZipFile(package, mode="w") as outer:
+        outer.writestr("Product/Large.unitypackage", unitypackage.getvalue())
+
+    monkeypatch.setattr("outfit_package_inspector.MAX_UNITYPACKAGE_UNCOMPRESSED_BYTES", 20000)
+    result = inspect_outfit_package(package)
+
+    assert result["summary"]["nestedUnityPackageCount"] == 1
+    assert result["summary"]["nestedPathnamesTruncated"] is True
+    assert result["prefabCandidates"]
+    assert all("AfterLimit" not in item["path"] for item in result["prefabCandidates"])
+    assert any("configured member, byte, or entry limit" in warning for warning in result["warnings"])
+
+
+def test_nested_unitypackage_pathname_traversal_is_rejected(tmp_path: Path) -> None:
+    unitypackage = io.BytesIO()
+    with tarfile.open(fileobj=unitypackage, mode="w:gz") as archive:
+        write_tar_member(archive, "0001/pathname", b"../../outside.prefab")
+        write_tar_member(archive, "0002/pathname", b"/Assets/absolute.prefab")
+        write_tar_member(archive, "0003/pathname", b"Assets/Outfits/Valid.prefab")
+
+    package = tmp_path / "unsafe-inner.zip"
+    with zipfile.ZipFile(package, mode="w") as outer:
+        outer.writestr("Product/Unsafe.unitypackage", unitypackage.getvalue())
+
+    result = inspect_outfit_package(package)
+
+    assert result["summary"]["unsafePathnameCount"] == 2
+    assert result["summary"]["prefabCandidateCount"] == 1
+    assert result["prefabCandidates"][0]["path"].endswith("!/Assets/Outfits/Valid.prefab")
+    assert all("outside.prefab" not in item["path"] for item in result["unityPackages"][0]["pathnamesEvidence"])
 
 
 def test_zip_inspection_skips_unsafe_and_duplicate_entries(tmp_path: Path) -> None:

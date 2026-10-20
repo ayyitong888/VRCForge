@@ -1,0 +1,27 @@
+.markdown-code-block code {
+  display: block;
+  white-space: pre;
+  tab-size: 2;
+}
+.markdown-code-block code .hljs-comment,
+.markdown-code-block code .hljs-quote { color: hsl(var(--muted-foreground)); }
+.markdown-code-block code .hljs-keyword,
+.markdown-code-block code .hljs-selector-tag,
+.markdown-code-block code .hljs-built_in { color: #7c3aed; }
+.markdown-code-block code .hljs-string,
+.markdown-code-block code .hljs-attr,
+.markdown-code-block code .hljs-addition { color: #047857; }
+.markdown-code-block code .hljs-number,
+.markdown-code-block code .hljs-literal { color: #b45309; }
+.markdown-code-block code .hljs-deletion { color: #b91c1c; background: rgb(185 28 28 / 0.12); }
+.markdown-code-block code .hljs-addition { background: rgb(4 120 87 / 0.12); }
+.dark .markdown-code-block code .hljs-keyword,
+.dark .markdown-code-block code .hljs-selector-tag,
+.dark .markdown-code-block code .hljs-built_in { color: #c4b5fd; }
+.dark .markdown-code-block code .hljs-string,
+.dark .markdown-code-block code .hljs-attr,
+.dark .markdown-code-block code .hljs-addition { color: #6ee7b7; }
+.dark .markdown-code-block code .hljs-number,
+.dark .markdown-code-block code .hljs-literal { color: #fbbf24; }
+.dark .markdown-code-block code .hljs-deletion { color: #fca5a5; background: rgb(252 165 165 / 0.16); }
+.dark .markdown-code-block code .hljs-addition { background: rgb(110 231 183 / 0.14); }

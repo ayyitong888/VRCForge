@@ -43,5 +43,8 @@ support-files:
 
 保留现有 AnimationClip 的真实关键帧时间线；仅当用户批准的新设计明确为静态值时，才可将新曲线设在 `time=0`。OFF motion 不作统一预设：结合 Write Defaults、现有恢复曲线与过渡证据判断，只按用户明确批准的改动执行。写后精确回读受影响的 state、clip、binding 与值。Build & Test readiness 是就绪检查而非实际构建或运行时证明。
 
+替换同一功能时，先读 `references/workflow.md` 的替换分支，列旧/新驱动、目标 bindings、参数及临时共存结束条件；新组件存在不代表替换完成，也不证明重复驱动已造成运行冲突。新链路验证后按批准差异精确退役旧驱动，并核对 neutral、开/关及受影响的手势/表情。仅对同一 controller 且实际 schema 支持的 action 合批，不构造未支持的 batch。
+
 详细步骤见 [操作说明](references/workflow.md) 和受签名保护的 [工作流指引](workflows/animation.json)；由 Agent 根据现场证据选择适用路线与真实原子工具。
+同一 controller 删除多个精确层时，加载当前工具 schema；支持 `edits[].action=delete_layer` 时使用一个有序批次，先删同步依赖层再删目标层。整批 preview、批准、检查点和写后回读一次完成；不要拆成多个并发写入或擅自清理共享子资产。
 每项写入通过用户当前配置的权限策略、现有监督通道、精确 preview 和检查点；回滚需要单独确认。

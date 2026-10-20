@@ -783,11 +783,22 @@ def extract_archive_entry_text(path: Path, kind: str, entry_path: str) -> dict[s
     else:
         raise ChatAttachmentVaultError("Entry text extract only supports zip and unitypackage.", reason="unsupported_kind")
     truncated = len(raw) > ENTRY_TEXT_MAX_BYTES
-    text = raw[:ENTRY_TEXT_MAX_BYTES].decode("utf-8", errors="replace")
+    bounded = raw[:ENTRY_TEXT_MAX_BYTES]
+    if b"\x00" in bounded:
+        raise ChatAttachmentVaultError("Archive entry is binary, not UTF-8 text.", reason="binary_entry")
+    # Match the local text reader's strict UTF-8 boundary. A bounded read may
+    # split a valid final codepoint; the incremental decoder retains that tail
+    # rather than manufacturing a replacement character or rejecting the page.
+    import codecs
+
+    try:
+        text = codecs.getincrementaldecoder("utf-8")().decode(bounded, final=not truncated)
+    except UnicodeDecodeError as exc:
+        raise ChatAttachmentVaultError("Archive entry is binary, not UTF-8 text.", reason="binary_entry") from exc
     return {
         "entryPath": target,
         "text": text,
         "textBytes": min(len(raw), ENTRY_TEXT_MAX_BYTES),
         "truncated": truncated,
-        "binaryLikely": raw[: ENTRY_TEXT_MAX_BYTES].count(0) > 0,
+        "binaryLikely": False,
     }

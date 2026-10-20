@@ -1,7 +1,7 @@
-import { Archive, Camera, Check, ChevronDown, ClipboardList, Globe, MessageSquare, MousePointer2, Paperclip, Pencil, Plus, Send, Shield, Square, Target, X } from "lucide-react";
+import { Archive, ArrowUp, Camera, Check, ChevronDown, ClipboardList, Globe, MessageSquare, MousePointer2, Paperclip, Pencil, Plus, Shield, Square, Target, X } from "lucide-react";
 import { getCurrentWebview, type DragDropEvent } from "@tauri-apps/api/webview";
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { type ClipboardEvent, type DragEvent, type FormEvent, type ReactNode, useEffect, useRef, useState } from "react";
+import { Fragment, type ClipboardEvent, type DragEvent, type FormEvent, type ReactNode, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import i18n from "../../i18n";
 import { executionModeLabel, EXECUTION_MODES, permissionVisualState } from "../../lib/permission-ui";
@@ -12,6 +12,7 @@ import { SELECTED_TEXT_ATTACHMENT_NAME } from "../../lib/chat-types";
 import type { AgentGoal, PermissionState, ExecutionMode } from "../../lib/api";
 import { Button } from "../ui/button";
 import { hasTauriInternals } from "../../lib/api/http";
+import { ChatGptOAuthComposerReasoningControl } from "../../features/chatgpt-oauth/composer-reasoning-control";
 
 function composerActionIcon(action: ComposerActionId): ReactNode {
   switch (action) {
@@ -43,7 +44,10 @@ export function Composer({
   queueAllowed = false,
   permission,
   onSubmit,
+  onQueue,
+  onSteerNow,
   onStop,
+  stopDisabled = false,
   onSwitchMode,
   planMode = false,
   onPlanModeChange,
@@ -58,6 +62,9 @@ export function Composer({
   contextUsage,
   providerLabel,
   model,
+  providerReasoningEndpoint,
+  providerReasoningLevel,
+  onProviderReasoningActivated,
   goalEndpoint,
   activeGoal,
   editing = false,
@@ -71,7 +78,10 @@ export function Composer({
   queueAllowed?: boolean;
   permission?: PermissionState;
   onSubmit: (event?: FormEvent) => void;
+  onQueue?: (event?: FormEvent) => void;
+  onSteerNow?: (event?: FormEvent) => void;
   onStop?: () => void;
+  stopDisabled?: boolean;
   onSwitchMode: (mode: PermissionState["executionMode"]) => void;
   planMode?: boolean;
   onPlanModeChange?: (enabled: boolean) => void;
@@ -86,6 +96,9 @@ export function Composer({
   contextUsage?: ContextUsage;
   providerLabel?: string;
   model?: string;
+  providerReasoningEndpoint?: string;
+  providerReasoningLevel?: string;
+  onProviderReasoningActivated?: () => void | Promise<void>;
   goalEndpoint?: string;
   activeGoal?: AgentGoal | null;
   editing?: boolean;
@@ -104,6 +117,14 @@ export function Composer({
   const currentMode = (permission?.executionMode || "approval") as ExecutionMode;
   const currentModeVisual = permissionVisualState(permission, currentMode);
   const canSubmit = !disabledReason && (input.trim().length > 0 || attachments.length > 0);
+  const primaryAction = sending ? (queueAllowed && canSubmit ? "steer" : "stop") : "send";
+  const primaryActionLabel = primaryAction === "steer"
+    ? t("chat.steer")
+    : primaryAction === "stop"
+      ? t("chat.stop")
+      : t("chat.send");
+  const selectedTextAttachments = attachments.filter((attachment) => attachment.name === SELECTED_TEXT_ATTACHMENT_NAME);
+  const regularAttachments = attachments.filter((attachment) => attachment.name !== SELECTED_TEXT_ATTACHMENT_NAME);
   const availableActions: ComposerAction[] = actions.length ? actions : [{ id: "attach", label: t("composerAction.attach"), description: t("composerAction.attachDesc") }];
   const commandActions: ComposerSlashCommand[] = [...availableActions, ...(onPlanModeChange && !editing ? [{
     id: "plan" as const,
@@ -291,11 +312,17 @@ export function Composer({
           ))}
         </div>
       ) : null}
-      <div className={cn("rounded-3xl border bg-card transition-colors", dragActive ? "border-primary/50 bg-primary/5" : "border-border", compact ? "p-3" : "p-4")}>
+      <div className={cn("rounded-3xl border bg-card/80 transition-colors", dragActive ? "border-primary/50 bg-primary/5" : "border-border", compact ? "p-3" : "p-4")}>
+        {selectedTextAttachments.length ? (
+          <SelectedTextQuoteChip
+            attachments={selectedTextAttachments}
+            onRemove={onRemoveAttachment}
+          />
+        ) : null}
         <textarea
           value={input}
           onChange={(event) => { setPaletteDismissed(false); setInput(event.target.value); }}
-          className="min-h-[76px] w-full resize-none bg-transparent px-1 text-base outline-none placeholder:text-muted-foreground"
+          className="app-scrollbar min-h-[76px] w-full resize-none bg-transparent px-1 text-base outline-none placeholder:text-muted-foreground"
           placeholder={disabledReason || t(planMode ? "composerAction.planPlaceholder" : "chat.inputPlaceholder")}
           disabled={Boolean(disabledReason)}
           onKeyDown={(event) => {
@@ -333,13 +360,20 @@ export function Composer({
             }
             if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
               event.preventDefault();
-              onSubmit();
+              if (sending && !queueAllowed) return;
+              if (sending && (event.ctrlKey || event.metaKey)) {
+                (onSteerNow || onSubmit)();
+              } else if (sending) {
+                (onQueue || onSubmit)();
+              } else {
+                onSubmit();
+              }
             }
           }}
         />
-        {attachments.length ? (
+        {regularAttachments.length ? (
           <div className="mt-3">
-            <AttachmentStrip attachments={attachments} onRemove={onRemoveAttachment} />
+            <AttachmentStrip attachments={regularAttachments} onRemove={onRemoveAttachment} />
           </div>
         ) : null}
         <div className="mt-3 grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-2 xl:grid-cols-[auto_minmax(0,1fr)_auto]">
@@ -445,45 +479,38 @@ export function Composer({
                   {t("chat.saveEdit")}
                 </Button>
               </>
-            ) : sending ? (
-              <>
-                <Button type="button" variant="outline" className="h-10 w-10 rounded-full px-0" onClick={onStop} title={t("chat.stop")} data-composer-stop>
-                  <Square className="h-4 w-4" />
-                </Button>
-                {queueAllowed ? (
-                  <Button
-                    className="h-10 min-w-10 rounded-full px-3"
-                    disabled={!canSubmit}
-                    type="submit"
-                    title={t("chat.queue")}
-                    aria-label={t("chat.queue")}
-                    data-composer-send
-                  >
-                    <Send className="h-4 w-4" />
-                  </Button>
-                ) : null}
-              </>
             ) : (
               <Button
-                className="h-10 min-w-10 rounded-full px-3"
-                disabled={!canSubmit}
-                type="submit"
-                title={t("chat.send")}
-                aria-label={t("chat.send")}
-                data-composer-send
+                className="h-10 w-10 rounded-full p-0"
+                disabled={primaryAction === "stop" ? stopDisabled : !canSubmit}
+                type={primaryAction === "stop" ? "button" : "submit"}
+                onClick={primaryAction === "stop" ? onStop : undefined}
+                title={primaryActionLabel}
+                aria-label={primaryActionLabel}
+                data-composer-primary-action={primaryAction}
+                data-composer-stop={primaryAction === "stop" ? true : undefined}
+                data-composer-steer={primaryAction === "steer" ? true : undefined}
+                data-composer-send={primaryAction === "send" ? true : undefined}
               >
-                <Send className="h-4 w-4" />
+                {primaryAction === "stop" ? <Square className="h-3.5 w-3.5 fill-current" /> : <ArrowUp className="h-4 w-4" />}
               </Button>
             )}
           </div>
           {providerModelLabel ? (
-            <span
-              className="col-span-2 col-start-1 row-start-2 min-w-0 break-words px-1 text-sm text-muted-foreground xl:col-span-1 xl:col-start-2 xl:row-start-1 xl:whitespace-nowrap"
-              title={providerModelLabel}
-              aria-label={providerModelLabel}
-            >
-              {providerModelLabel}
-            </span>
+            <div className="col-span-2 col-start-1 row-start-2 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 px-1 xl:col-span-1 xl:col-start-2 xl:row-start-1 xl:flex-nowrap xl:whitespace-nowrap">
+              <span className="min-w-0 break-words text-sm text-muted-foreground" title={providerModelLabel} aria-label={providerModelLabel}>
+                {providerModelLabel}
+              </span>
+              {providerReasoningEndpoint && onProviderReasoningActivated ? (
+                <ChatGptOAuthComposerReasoningControl
+                  endpoint={providerReasoningEndpoint}
+                  model={model || ""}
+                  thinkingLevel={providerReasoningLevel || ""}
+                  disabled={sending || editing}
+                  onActivated={onProviderReasoningActivated}
+                />
+              ) : null}
+            </div>
           ) : null}
         </div>
       </div>
@@ -504,7 +531,9 @@ export function ContextUsageMeter({ usage, className = "" }: { usage: ContextUsa
       : i18n.t("chat.contextUsageUnavailable");
   const tooltipDetail = knownRatio
     ? i18n.t("chat.contextMeterTokenDetail", { used: formatCount(usage.used), limit: formatCount(usage.limit) })
-    : "";
+    : usage.limitKnown
+      ? i18n.t("chat.contextMeterCapacityDetail", { limit: formatCount(usage.limit) })
+      : "";
   const cacheRatio = usage.cacheHitRatio;
   const cacheKnown = usage.cacheUsageStatus === "complete" && typeof cacheRatio === "number"
     && Number.isFinite(cacheRatio) && cacheRatio >= 0 && cacheRatio <= 1;
@@ -512,13 +541,12 @@ export function ContextUsageMeter({ usage, className = "" }: { usage: ContextUsa
     ? i18n.t("chat.contextCacheHitRate", { percent: Number((cacheRatio * 100).toFixed(2)) })
     : i18n.t(usage.cacheUsageStatus === "incomplete" || usage.cacheUsageStatus === "complete"
       ? "chat.contextCacheHitRateIncomplete" : "chat.contextCacheHitRateUnknown");
-  const nativeTitle = [tooltipTitle, tooltipDetail, cacheDetail].filter(Boolean).join("\n");
+  const accessibleLabel = [tooltipTitle, tooltipDetail, cacheDetail].filter(Boolean).join("\n");
   return (
     <div
       className={cn("group relative flex h-8 w-8 shrink-0 items-center justify-center rounded-full", className)}
       tabIndex={0}
-      aria-label={nativeTitle}
-      title={nativeTitle}
+      aria-label={accessibleLabel}
       data-context-meter="true"
       data-context-percent={knownRatio ? String(percent) : "unknown"}
     >
@@ -561,6 +589,90 @@ export function ContextUsageMeter({ usage, className = "" }: { usage: ContextUsa
 }
 
 
+function SelectedTextQuoteChip({
+  attachments,
+  onRemove,
+}: {
+  attachments: ChatAttachment[];
+  onRemove?: (id: string) => void;
+}) {
+  const { t } = useTranslation();
+  const selectedPreview = attachments.map((attachment) => attachment.text || "").filter(Boolean).join("\n\n");
+  const removeSelectedText = () => {
+    attachments.forEach((attachment) => onRemove?.(attachment.id));
+  };
+  return (
+    <div
+      className="relative mb-3 inline-flex min-w-0 max-w-full items-center"
+      data-composer-selected-text-chip
+    >
+      <SelectedTextHoverPreview text={selectedPreview}>
+        <span
+          className="flex min-w-0 max-w-full cursor-default items-center gap-2 overflow-hidden rounded-full border border-border/70 bg-background/75 px-3 py-1.5 pr-9 text-left text-xs text-foreground shadow-sm"
+          data-composer-selected-text-trigger
+        >
+          <MessageSquare className="h-4 w-4 shrink-0 text-muted-foreground" />
+          <span className="min-w-0 flex-1 truncate whitespace-nowrap">
+            {t("attachments.selectedText", { count: attachments.length })}
+          </span>
+        </span>
+      </SelectedTextHoverPreview>
+      {onRemove ? (
+        <button
+          type="button"
+          className="absolute right-1 top-1/2 flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+          onClick={removeSelectedText}
+          title={t("attachments.remove")}
+          aria-label={t("attachments.remove")}
+          data-composer-selected-text-remove
+        >
+          <X className="h-3.5 w-3.5" />
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
+function SelectedTextHoverPreview({ text, children }: { text: string; children: ReactNode }) {
+  const anchorRef = useRef<HTMLSpanElement | null>(null);
+  const [position, setPosition] = useState<{ left: number; top: number; below: boolean; maxHeight: number } | null>(null);
+  const preview = text.trim();
+  if (!preview) return <>{children}</>;
+  const updatePosition = () => {
+    const rect = anchorRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const maxWidth = Math.min(512, Math.max(0, window.innerWidth - 16));
+    const left = Math.min(Math.max(8, rect.left), Math.max(8, window.innerWidth - maxWidth - 8));
+    const above = Math.max(0, rect.top - 16);
+    const belowSpace = Math.max(0, window.innerHeight - rect.bottom - 16);
+    const below = above < Math.min(288, window.innerHeight / 2) && belowSpace > above;
+    setPosition({ left, top: below ? rect.bottom : rect.top, below,
+      maxHeight: Math.min(288, window.innerHeight / 2, below ? belowSpace : above) });
+  };
+  return (
+    <span ref={anchorRef} className="relative inline-flex min-w-0 max-w-full" onMouseEnter={updatePosition} onMouseLeave={() => setPosition(null)} onFocus={updatePosition}>
+      {children}
+      {position ? (
+        <span
+          className="fixed z-[60] w-[min(32rem,calc(100vw-1rem))] max-w-[calc(100vw-1rem)]"
+          style={{ left: position.left, top: position.top, transform: position.below ? undefined : "translateY(-100%)",
+            paddingTop: position.below ? 8 : 0, paddingBottom: position.below ? 0 : 8 }}
+        >
+          {/* Padding bridges the hover gap; the text stays read-only but accepts scrolling. */}
+          <span
+            className="block overflow-y-auto overscroll-contain whitespace-pre-wrap break-words rounded-lg border border-border bg-card px-3 py-2 text-sm leading-relaxed text-foreground shadow-panel"
+            style={{ maxHeight: position.maxHeight }}
+            aria-hidden="true"
+          >
+            {preview}
+          </span>
+        </span>
+      ) : null}
+    </span>
+  );
+}
+
+
 
 export function AttachmentStrip({
   attachments,
@@ -585,17 +697,20 @@ export function AttachmentStrip({
           const isSelectedText = attachment.name === SELECTED_TEXT_ATTACHMENT_NAME;
           const isImage = Boolean(attachment.dataUrl && attachment.type.startsWith("image/"));
           const isVaultFile = attachment.payloadKind === "vault_file" || Boolean(attachment.vaultPayloadHash);
+          const metadataOnly = attachment.payloadKind === "metadata"
+            || (attachment.payloadKind === "data_url" && !isImage);
+          const capabilityReason = attachment.error || (metadataOnly ? t("attachments.metadataOnly") : "");
           const extension = attachmentExtension(attachment, t("attachments.fileTypeFallback"));
-          const selectedPreview = isSelectedText ? (attachment.text || "").replace(/\s+/g, " ").trim().slice(0, 260) : "";
-          return (
+          const selectedPreview = isSelectedText ? (attachment.text || "").trim().slice(0, 260) : "";
+          const attachmentCard = (
             <div
-              key={attachment.id}
               className={cn(
-                "group relative overflow-hidden rounded-xl border border-border bg-background text-foreground shadow-sm",
+                "group relative rounded-xl border border-border text-foreground shadow-sm",
+                isSelectedText ? "overflow-visible bg-background/75" : "overflow-hidden bg-background",
                 isImage ? "h-28 w-28" : "h-[72px] w-[220px]",
                 isSelectedText && "h-auto min-h-10 w-auto max-w-full rounded-full px-3 py-2",
               )}
-              title={isSelectedText ? undefined : `${attachment.name} · ${formatAttachmentSize(attachment.size)}`}
+              title={isSelectedText ? undefined : `${attachment.name} · ${formatAttachmentSize(attachment.size)}${capabilityReason ? ` · ${capabilityReason}` : ""}`}
             >
               {isImage && attachment.dataUrl ? (
                 <img src={attachment.dataUrl} alt={attachment.name} className="h-full w-full object-cover" />
@@ -613,7 +728,7 @@ export function AttachmentStrip({
                     <div className="truncate text-sm font-medium">{attachment.name}</div>
                     <div className="mt-0.5 flex items-center gap-2 text-xs uppercase text-muted-foreground">
                       <span>{extension}</span>
-                      {attachment.truncated ? <span className="normal-case text-amber-700">{t("attachments.metadataOnly")}</span> : null}
+                      {capabilityReason ? <span data-attachment-capability className="truncate normal-case text-amber-700" title={capabilityReason}>{capabilityReason}</span> : null}
                       {isVaultFile ? <span className="normal-case text-sky-700">{t("attachments.vaultStored")}</span> : null}
                       {isVaultFile && onImport ? (
                         <button
@@ -629,12 +744,6 @@ export function AttachmentStrip({
                   </div>
                 </div>
               )}
-              {isSelectedText && selectedPreview ? (
-                <div className="pointer-events-none absolute bottom-[calc(100%+0.5rem)] left-0 z-50 hidden w-max max-w-[min(32rem,calc(100vw-3rem))] rounded-lg border border-border bg-popover px-3 py-2 text-sm leading-relaxed text-popover-foreground shadow-panel group-hover:block">
-                  {selectedPreview}
-                  {attachment.text && attachment.text.length > selectedPreview.length ? "..." : ""}
-                </div>
-              ) : null}
               {isImage && isVaultFile && onImport ? (
                 <button
                   type="button"
@@ -654,7 +763,7 @@ export function AttachmentStrip({
                     isSelectedText && "static ml-2 inline-flex align-middle",
                   )}
                   onClick={() => onRemove(attachment.id)}
-                  title={t("attachments.remove")}
+                  title={isSelectedText ? undefined : t("attachments.remove")}
                   aria-label={t("attachments.remove")}
                 >
                   <X className="h-3.5 w-3.5" />
@@ -662,6 +771,9 @@ export function AttachmentStrip({
               ) : null}
             </div>
           );
+          return isSelectedText && selectedPreview
+            ? <SelectedTextHoverPreview key={attachment.id} text={attachment.text || ""}>{attachmentCard}</SelectedTextHoverPreview>
+            : <Fragment key={attachment.id}>{attachmentCard}</Fragment>;
         })}
       </div>
     );
@@ -671,12 +783,14 @@ export function AttachmentStrip({
       {attachments.map((attachment) => {
         const isSelectedText = attachment.name === SELECTED_TEXT_ATTACHMENT_NAME;
         const isVaultFile = attachment.payloadKind === "vault_file" || Boolean(attachment.vaultPayloadHash);
-        const selectedPreview = isSelectedText ? (attachment.text || "").replace(/\s+/g, " ").trim().slice(0, 260) : "";
-        return (
+        const metadataOnly = attachment.payloadKind === "metadata"
+          || (attachment.payloadKind === "data_url" && !attachment.type.toLowerCase().startsWith("image/"));
+        const capabilityReason = attachment.error || (metadataOnly ? t("attachments.metadataOnly") : "");
+        const selectedPreview = isSelectedText ? (attachment.text || "").trim().slice(0, 260) : "";
+        const attachmentCard = (
           <div
-            key={attachment.id}
-            className={cn("group relative flex max-w-full min-w-0 items-center gap-2 rounded-md border border-border/70 bg-background/75 px-2 py-1 text-xs text-foreground shadow-sm", isSelectedText && "rounded-full")}
-            title={isSelectedText ? undefined : `${attachment.name} · ${formatAttachmentSize(attachment.size)}`}
+            className={cn("group relative flex max-w-full min-w-0 items-center gap-2 rounded-md border border-border/70 px-2 py-1 text-xs text-foreground shadow-sm", isSelectedText ? "rounded-full bg-background/75" : "bg-background/75")}
+            title={isSelectedText ? undefined : `${attachment.name} · ${formatAttachmentSize(attachment.size)}${capabilityReason ? ` · ${capabilityReason}` : ""}`}
           >
             {attachment.dataUrl && attachment.type.startsWith("image/") ? (
               <img src={attachment.dataUrl} alt="" className="h-8 w-8 shrink-0 rounded object-cover" />
@@ -687,7 +801,7 @@ export function AttachmentStrip({
             )}
             <span className="min-w-0 max-w-[220px] truncate">{isSelectedText ? t("attachments.selectedText", { count: 1 }) : attachment.name}</span>
             {!isSelectedText ? <span className="shrink-0 text-muted-foreground">{formatAttachmentSize(attachment.size)}</span> : null}
-            {attachment.truncated ? <span className="shrink-0 text-amber-700">{t("attachments.metadataOnly")}</span> : null}
+            {capabilityReason ? <span data-attachment-capability className="max-w-[260px] truncate text-amber-700" title={capabilityReason}>{capabilityReason}</span> : null}
             {isVaultFile ? <span className="shrink-0 text-sky-700">{t("attachments.vaultStored")}</span> : null}
             {isVaultFile && onImport ? (
               <button
@@ -699,18 +813,12 @@ export function AttachmentStrip({
                 {t("attachments.importToProject")}
               </button>
             ) : null}
-            {isSelectedText && selectedPreview ? (
-              <div className="pointer-events-none absolute bottom-[calc(100%+0.5rem)] left-0 z-50 hidden w-max max-w-[min(32rem,calc(100vw-3rem))] rounded-lg border border-border bg-popover px-3 py-2 text-sm leading-relaxed text-popover-foreground shadow-panel group-hover:block">
-                {selectedPreview}
-                {attachment.text && attachment.text.length > selectedPreview.length ? "..." : ""}
-              </div>
-            ) : null}
             {onRemove ? (
               <button
                 type="button"
                 className="shrink-0 rounded p-0.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
                 onClick={() => onRemove(attachment.id)}
-                title={t("attachments.remove")}
+                title={isSelectedText ? undefined : t("attachments.remove")}
                 aria-label={t("attachments.remove")}
               >
                 <X className="h-3.5 w-3.5" />
@@ -718,6 +826,9 @@ export function AttachmentStrip({
             ) : null}
           </div>
         );
+        return isSelectedText && selectedPreview
+          ? <SelectedTextHoverPreview key={attachment.id} text={attachment.text || ""}>{attachmentCard}</SelectedTextHoverPreview>
+          : <Fragment key={attachment.id}>{attachmentCard}</Fragment>;
       })}
     </div>
   );

@@ -42,6 +42,10 @@ def preview_payload(project: Path) -> dict[str, object]:
         "sceneWasDirty": True,
         "rootObjectCount": 2,
         "sceneHierarchyDigest": "a" * 64,
+        "dirtyAssetCount": 1,
+        "dirtyAssetPaths": ["Assets/Dirty.asset"],
+        "dirtyAssetDigest": "1" * 64,
+        "saveScope": "scene_and_project_wide_assets",
         "targetExists": False,
         "targetMetaExists": False,
     }
@@ -77,6 +81,10 @@ def apply_payload(prepared: dict) -> dict[str, object]:
         "sceneGuid": "b" * 32,
         "sceneHandle": arguments["expectedSceneHandle"],
         "sceneHierarchyDigest": arguments["expectedSceneHierarchyDigest"],
+        "dirtyAssetCount": 1,
+        "dirtyAssetPaths": arguments["expectedDirtyAssetPaths"],
+        "dirtyAssetDigest": arguments["expectedDirtyAssetDigest"],
+        "saveScope": "scene_and_project_wide_assets",
         "sceneFileDigest": "c" * 64,
         "sceneFileIdentity": "d" * 64,
         "sceneMetaDigest": "e" * 64,
@@ -99,6 +107,8 @@ def test_preview_binds_exact_unsaved_scene_and_create_new_destination(tmp_path: 
         "expectedSceneWasDirty": True,
         "expectedRootObjectCount": 2,
         "expectedSceneHierarchyDigest": "a" * 64,
+        "expectedDirtyAssetPaths": ["Assets/Dirty.asset"],
+        "expectedDirtyAssetDigest": "1" * 64,
         "expectedPreviewDigest": preview_payload(tmp_path)["previewDigest"],
     }
     assert approval["schema"] == APPROVAL_SCHEMA
@@ -196,6 +206,8 @@ def test_unity_source_saves_existing_unsaved_scene_without_replacing_it() -> Non
     ).read_text(encoding="utf-8-sig")
     assert 'toolId: "vrc_save_new_scene"' in source
     assert "EditorSceneManager.SaveScene(snapshot.Scene, snapshot.ScenePath, false)" in source
+    assert "AssetDatabase.SaveAssets();" in source[source.index("public static class SaveNewSceneTool"):source.index("public static class SaveCurrentSceneTool")]
+    assert 'saveScope = "scene_and_project_wide_assets"' in source
     assert "NewScene(" not in source
     assert "AssetDatabase.DeleteAsset" not in source
     assert "AssetOrMetaExists" in source

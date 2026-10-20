@@ -25,6 +25,7 @@ namespace VRCForge.Editor
             "nadena.dev.modular_avatar.core.editor.ESOErrorWindow";
         private static readonly object JobLock = new object();
         private static readonly Dictionary<string, SetupOutfitJob> Jobs = new Dictionary<string, SetupOutfitJob>();
+        private static readonly HashSet<string> ScheduledJobIds = new HashSet<string>(StringComparer.Ordinal);
         private static readonly TimeSpan CompletedJobRetention = TimeSpan.FromMinutes(10);
         private const string JobSessionPrefix = "VRCForge.SetupOutfit.Job.";
         private const string JobSessionIndexKey = "VRCForge.SetupOutfit.JobIndex.v1";
@@ -127,7 +128,7 @@ namespace VRCForge.Editor
             }
             PersistJob(job);
 
-            EditorApplication.delayCall += () => RunSetupJob(jobId);
+            ScheduleSetupJob(jobId);
 
             var payload = (JObject)previewPayload.DeepClone();
             payload["confirmed"] = true;
@@ -137,6 +138,47 @@ namespace VRCForge.Editor
             payload["createdUtc"] = job.createdUtc.ToString("o");
             payload["sceneSaved"] = false;
             return payload;
+        }
+
+        private static void ScheduleSetupJob(string jobId)
+        {
+            lock (JobLock)
+            {
+                SetupOutfitJob job;
+                if (!Jobs.TryGetValue(jobId, out job)
+                    || job.status != "pending"
+                    || !ScheduledJobIds.Add(jobId))
+                {
+                    return;
+                }
+            }
+
+            Action run = () =>
+            {
+                try
+                {
+                    RunSetupJob(jobId);
+                }
+                finally
+                {
+                    lock (JobLock)
+                    {
+                        ScheduledJobIds.Remove(jobId);
+                    }
+                }
+            };
+            if (VRCForgeMcpCoreServer.TryPostToEditor(run))
+            {
+                return;
+            }
+
+            EditorApplication.CallbackFunction fallback = null;
+            fallback = () =>
+            {
+                EditorApplication.update -= fallback;
+                run();
+            };
+            EditorApplication.update += fallback;
         }
 
         private static void RunSetupJob(string jobId)
@@ -205,6 +247,8 @@ namespace VRCForge.Editor
                 ?? throw new InvalidOperationException(
                     "Modular Avatar runtime types were not found. Install the Modular Avatar package first.");
             var payload = BuildPreviewPayload(parameters, mergeArmatureType, out var outfit, out var existingMerge);
+            var avatarRoot = ResolveAvatarDescriptor(parameters.avatarPath ?? "").transform;
+            var transformSnapshot = TransformPreservationSnapshot.Capture(avatarRoot, outfit);
             if (string.IsNullOrWhiteSpace(job.outfitGlobalObjectId)
                 || !string.Equals(
                     GlobalObjectId.GetGlobalObjectIdSlow(outfit.gameObject).ToString(),
@@ -225,7 +269,21 @@ namespace VRCForge.Editor
             }
             job.mutationStarted = true;
             PersistJob(job);
-            var setupEntryPoint = ExecuteSetupOutfit(outfit.gameObject);
+            TransformPreservationSnapshot.Report transformPreservation = null;
+            var setupEntryPoint = "";
+            try
+            {
+                setupEntryPoint = ExecuteSetupOutfit(outfit.gameObject);
+            }
+            finally
+            {
+                transformPreservation = transformSnapshot.Restore(
+                    "Preserve avatar transforms during Modular Avatar Setup Outfit");
+                if (transformPreservation.restoredCount > 0)
+                {
+                    EditorSceneManager.MarkSceneDirty(outfit.gameObject.scene);
+                }
+            }
 
             var mergeAfter = outfit.GetComponentsInChildren(mergeArmatureType, true).Length;
             var componentTypes = outfit.GetComponentsInChildren<Component>(true)
@@ -245,6 +303,16 @@ namespace VRCForge.Editor
 
             payload["confirmed"] = true;
             payload["setupEntryPoint"] = setupEntryPoint;
+            payload["transformPreservation"] = new JObject
+            {
+                ["ownerPath"] = transformPreservation.ownerPath,
+                ["excludedSubtreePath"] = GetTransformPath(outfit),
+                ["snapshotCount"] = transformPreservation.snapshotCount,
+                ["driftedCount"] = transformPreservation.driftedCount,
+                ["restoredCount"] = transformPreservation.restoredCount,
+                ["skippedCount"] = transformPreservation.skippedCount,
+                ["preserved"] = transformPreservation.preserved,
+            };
             payload["mergeArmaturesBefore"] = existingMerge;
             payload["mergeArmaturesAfter"] = mergeAfter;
             payload["modularAvatarComponents"] = JObject.FromObject(componentTypes);
@@ -331,9 +399,18 @@ namespace VRCForge.Editor
                 throw new InvalidOperationException(
                     "Outfit target scene has not been saved to disk; save the scene once before running Setup Outfit with saveScene=true.");
             }
+            // Setup Outfit records Undo changes which otherwise finalize after
+            // this same-frame save and can mark the scene dirty again.
+            Undo.FlushUndoRecordObjects();
             if (!EditorSceneManager.SaveScene(scene))
             {
                 throw new InvalidOperationException($"Could not save target scene: {scene.path}");
+            }
+            var savedScene = SceneObjectCopyCore.ResolveSavedScene(
+                scene.path, "Setup Outfit saved scene readback");
+            if (savedScene.Scene.handle != scene.handle)
+            {
+                throw new InvalidOperationException("Setup Outfit saved scene identity changed.");
             }
             return true;
         }

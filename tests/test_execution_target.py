@@ -3,11 +3,13 @@ import hashlib
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from execution_target import (
     EXECUTION_TARGET_SCHEMA,
+    EXECUTION_TARGET_REF_SCHEMA,
     ExecutionTargetBindingRegistry,
     ExecutionTargetError,
     canonical_namespace,
@@ -18,6 +20,23 @@ from execution_target import (
     validate_execution_target,
     validate_runtime_execution_target,
 )
+from agent_gateway import AgentGateway
+from planner_structured_tool_evidence import project_structured_tool_evidence
+
+
+def _assert_no_project_path(value, project_root):
+    normalized = str(project_root).replace("\\", "/").casefold()
+    def check(item):
+        if isinstance(item, str):
+            assert normalized not in item.replace("\\", "/").casefold()
+        elif isinstance(item, dict):
+            for key, child in item.items():
+                check(str(key))
+                check(child)
+        elif isinstance(item, list):
+            for child in item:
+                check(child)
+    check(value)
 
 
 def _target(tmp_path: Path, *, scope: str = "component") -> dict:
@@ -159,32 +178,224 @@ def test_runtime_target_rechecks_descriptor_and_scene_file_identity(tmp_path: Pa
     assert exc_info.value.code == "scene_identity_mismatch"
 
 
+def test_runtime_target_resolves_core_asset_path_when_absolute_path_is_omitted(tmp_path: Path):
+    target = _live_runtime_target(tmp_path)
+    target["scene"].pop("absolutePath")
+
+    validated = validate_runtime_execution_target(
+        target,
+        project_root=str(tmp_path),
+        required_scope="avatar",
+    )
+
+    assert validated["scene"]["absolutePath"] == str((tmp_path / "Assets" / "Main.unity").resolve())
+
+
 def test_binding_refresh_allows_display_change_but_rejects_avatar_replacement(tmp_path: Path):
     target = _live_runtime_target(tmp_path)
     registry = ExecutionTargetBindingRegistry()
-    bound = registry.bind(target, project_root=str(tmp_path))
+    bound = registry.bind(target, project_root=str(tmp_path), session_context="runtime:session-a")
+    reference = bound["executionTarget"]
+    assert reference["schema"] == EXECUTION_TARGET_REF_SCHEMA
+    assert set(reference) == {"schema", "ref"}
+    assert "executionTargetHandle" not in bound
+    _assert_no_project_path(bound, tmp_path)
+
+    repeated = registry.bind(target, project_root=str(tmp_path), session_context="runtime:session-a")
+    assert repeated["executionTarget"] == reference
+    isolated = registry.bind(target, project_root=str(tmp_path), session_context="runtime:session-b")
+    assert isolated["executionTarget"] != reference
+    other_project_root = tmp_path / "another-project"
+    other_project_root.mkdir()
+    other_project = registry.bind(
+        _live_runtime_target(other_project_root),
+        project_root=str(other_project_root),
+        session_context="runtime:session-a",
+    )
+    assert other_project["executionTarget"] != reference
+
+    resolved = registry.resolve(
+        reference,
+        project_root=str(tmp_path),
+        session_context="runtime:session-a",
+        required_scope="avatar",
+    )
+    assert execution_target_digest(resolved) == bound["executionTargetDigest"]
+    with pytest.raises(ExecutionTargetError) as exc_info:
+        registry.resolve(
+            reference,
+            project_root=str(tmp_path),
+            session_context="runtime:session-b",
+            required_scope="avatar",
+        )
+    assert exc_info.value.code == "execution_target_session_mismatch"
+    with pytest.raises(ExecutionTargetError) as exc_info:
+        registry.resolve(
+            reference,
+            project_root=str(tmp_path / "another-project"),
+            session_context="runtime:session-a",
+            required_scope="avatar",
+        )
+    assert exc_info.value.code == "project_root_drifted"
 
     display_only = copy.deepcopy(target)
     display_only["avatar"]["exactHierarchyPath"] = "Renamed/Avatar"
     display_only["avatar"]["name"] = "Avatar Renamed"
     refreshed = registry.refresh(
-        bound["executionTargetHandle"],
+        reference,
         display_only,
         project_root=str(tmp_path),
+        session_context="runtime:session-a",
     )
     assert refreshed["changed"] is False
     assert refreshed["executionTargetDigest"] == bound["executionTargetDigest"]
+    assert refreshed["executionTarget"] == reference
 
     replaced = copy.deepcopy(target)
     replaced["avatar"]["globalObjectId"] = "GlobalObjectId_V1-2-replacement"
     replaced["namespace"] = canonical_namespace(replaced)
     with pytest.raises(ExecutionTargetError) as exc_info:
         registry.refresh(
-            bound["executionTargetHandle"],
+            reference,
             replaced,
             project_root=str(tmp_path),
+            session_context="runtime:session-a",
         )
     assert exc_info.value.code == "execution_target_identity_drifted"
+
+
+def test_public_reference_rejects_scene_drift_and_ambiguous_capture(tmp_path: Path):
+    target = _live_runtime_target(tmp_path)
+    registry = ExecutionTargetBindingRegistry()
+    bound = registry.bind(target, project_root=str(tmp_path), session_context="runtime:session-a")
+    scene = Path(target["scene"]["absolutePath"])
+    scene.write_bytes(scene.read_bytes() + b"# changed after binding\n")
+    with pytest.raises(ExecutionTargetError) as exc_info:
+        registry.resolve(
+            bound["executionTarget"],
+            project_root=str(tmp_path),
+            session_context="runtime:session-a",
+            required_scope="avatar",
+        )
+    assert exc_info.value.code == "scene_identity_mismatch"
+
+    ambiguous_root = tmp_path / "ambiguous"
+    ambiguous_root.mkdir()
+    ambiguous = copy.deepcopy(_live_runtime_target(ambiguous_root))
+    ambiguous["ambiguous"] = True
+    ambiguous["resolutionCandidateCount"] = 2
+    ambiguous_registry = ExecutionTargetBindingRegistry()
+    with pytest.raises(ExecutionTargetError) as exc_info:
+        ambiguous_registry.bind(
+            ambiguous,
+            project_root=ambiguous["project"]["root"],
+            session_context="runtime:session-a",
+        )
+    assert exc_info.value.code == "identity_ambiguous"
+
+
+def test_public_reference_rejects_core_instance_drift(tmp_path: Path):
+    target = _live_runtime_target(tmp_path)
+    registry = ExecutionTargetBindingRegistry()
+    bound = registry.bind(target, project_root=str(tmp_path), session_context="runtime:session-a")
+    descriptor_path = tmp_path / "Library" / "VRCForge" / "mcp-core.json"
+    descriptor = json.loads(descriptor_path.read_text(encoding="utf-8"))
+    descriptor["instanceId"] = "replacement-core"
+    descriptor_path.write_text(json.dumps(descriptor), encoding="utf-8")
+
+    with pytest.raises(ExecutionTargetError) as exc_info:
+        registry.resolve(
+            bound["executionTarget"],
+            project_root=str(tmp_path),
+            session_context="runtime:session-a",
+            required_scope="avatar",
+        )
+    assert exc_info.value.code == "editor_identity_mismatch"
+
+
+def test_public_reference_keeps_paths_private_through_external_read_and_resource(tmp_path: Path, monkeypatch):
+    target = _live_runtime_target(tmp_path)
+    gateway = AgentGateway(tmp_path / "config" / "gateway.json", tmp_path / "audit")
+    handler_arguments = []
+    gateway.register_tool(
+        "vrcforge_scan_animator",
+        "Read an identity-bound Animator fixture.",
+        "unity",
+        lambda arguments: handler_arguments.append(copy.deepcopy(arguments))
+        or {"ok": True, "result": {"executionTarget": copy.deepcopy(arguments["executionTarget"])}},
+    )
+    monkeypatch.setattr(gateway, "ensure_config", lambda: SimpleNamespace(enabled=True))
+    monkeypatch.setattr(gateway, "_external_mcp_read_tool_visible", lambda *_args: True)
+
+    with gateway.resource_context("external:session-a"):
+        bound = gateway.bind_execution_target(target, project_root=str(tmp_path))
+        reference = bound["executionTarget"]
+        result = gateway.call_external_mcp_tool(
+            "vrcforge_scan_animator",
+            {"projectPath": str(tmp_path), "executionTarget": reference},
+        )
+        assert handler_arguments[0]["executionTarget"]["project"]["root"] == str(tmp_path)
+        assert result["executionTarget"] == reference
+        assert result["result"]["result"]["executionTarget"] == reference
+        projected = project_structured_tool_evidence(
+            {"executionTarget": reference},
+            sanitize_text=lambda value, limit=None: str(value) if limit is None else str(value)[:limit],
+        )
+        assert projected["data"]["executionTarget"] == reference
+        _assert_no_project_path(bound, tmp_path)
+        _assert_no_project_path(result, tmp_path)
+        gateway.publish_mcp_tool_result_resource(
+            "vrcforge_scan_animator",
+            {"projectPath": str(tmp_path), "executionTarget": reference},
+            result,
+            source_mode="test",
+        )
+        _assert_no_project_path(result, tmp_path)
+        identity_uri = result["resources"]["identityLockUri"]
+        identity_resource = gateway._validate_mcp_prompt_resource(
+            identity_uri,
+            "session_identity_lock",
+        )
+        assert identity_resource["data"]["exactExecutionTarget"] == reference
+        assert identity_resource["identity"] == {
+            "executionTarget": reference,
+            "executionTargetDigest": bound["executionTargetDigest"],
+        }
+        _assert_no_project_path(identity_resource, tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("capture_group", "scope"),
+    [("live-material", "avatar"), ("live-fx", "project")],
+)
+def test_material_and_fx_receipt_identity_shapes_bind_to_path_free_refs(
+    tmp_path: Path,
+    capture_group: str,
+    scope: str,
+):
+    fixture_path = Path(__file__).parent / "fixtures" / "execution_target_receipt_shapes.json"
+    captured = json.loads(fixture_path.read_text(encoding="utf-8"))[capture_group]
+    assert captured["scope"] == scope
+    live = _live_runtime_target(tmp_path)
+    captured["project"] = copy.deepcopy(live["project"])
+    captured["editor"] = copy.deepcopy(live["editor"])
+    captured["scope"] = scope
+    if scope == "avatar":
+        captured["scene"] = copy.deepcopy(live["scene"])
+    else:
+        for section in ("scene", "avatar", "object", "component"):
+            captured.pop(section, None)
+    captured["namespace"] = canonical_namespace(captured)
+
+    bound = ExecutionTargetBindingRegistry().bind(
+        captured,
+        project_root=str(tmp_path),
+        session_context="runtime:captured-fixture-session",
+    )
+    assert bound["executionTarget"]["schema"] == EXECUTION_TARGET_REF_SCHEMA
+    assert set(bound["executionTarget"]) == {"schema", "ref"}
+    assert "executionTargetHandle" not in bound
+    _assert_no_project_path(bound, tmp_path)
 
 
 def test_runtime_target_rejects_descriptor_from_another_project(tmp_path: Path):

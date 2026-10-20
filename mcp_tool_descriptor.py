@@ -77,6 +77,11 @@ def identity_scope(name: str, *, write: bool = False, arguments: Mapping[str, An
     if "user_adjustment_handoff" in normalized:
         # The handoff binds both the Avatar and the exact target GameObject.
         return "object"
+    if normalized.endswith("create_gameobject"):
+        # Bind the existing container: an explicit parent, or the active saved
+        # scene for a root object. The new object cannot have an identity yet.
+        parent = str(values.get("parent_path") or values.get("parentPath") or "").strip()
+        return "object" if parent else "scene"
     if normalized in {
         "vrcforge_add_component",
         "vrcforge_add_modular_avatar_component",

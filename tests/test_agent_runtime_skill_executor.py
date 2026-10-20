@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from dataclasses import dataclass, fields
+import json
+from dataclasses import dataclass, fields, replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable
 
 import dashboard_server
+import pytest
 
-from agent_gateway import AgentGateway
+from agent_gateway import AgentGateway, redact_runtime_tool_result, redact_sensitive
 from agent_runtime_skill_executor import AgentRuntimeSkillExecutor, AgentRuntimeSkillExecutorPorts
+from agent_tool_result_contract import normalize_agent_tool_result
+from runtime_planner_service import RuntimePlannerService
 
 
 @dataclass
@@ -58,7 +62,12 @@ def make_executor(
             read_user_constraints=lambda: "constraints",
             inject_user_constraints=lambda params, _tool, constraints: {**params, "constraint": constraints},
             append_audit=lambda event: events.append(("audit", event)),
-            redact=lambda value: {"redacted": value} if not isinstance(value, dict) else value,
+            redact=lambda value: (
+                {"redacted": value} if not isinstance(value, dict) else redact_sensitive(value)
+            ),
+            redact_runtime_result=lambda value: (
+                {"redacted": value} if not isinstance(value, dict) else redact_runtime_tool_result(value)
+            ),
             summarize_params=lambda params: {"keys": sorted(params)},
             ensure_string_list=lambda value: value if isinstance(value, list) else ([] if value is None else [str(value)]),
             build_runtime_skill_payload=lambda skill, params, support_files: {
@@ -100,6 +109,7 @@ def test_gateway_and_subagents_share_one_least_authority_runtime_skill_owner(tmp
         "inject_user_constraints",
         "append_audit",
         "redact",
+        "redact_runtime_result",
         "summarize_params",
         "ensure_string_list",
         "build_runtime_skill_payload",
@@ -163,6 +173,109 @@ def test_direct_tool_allowlist_injection_audit_and_failure_shapes() -> None:
     assert denied_result["failureClass"] == "permission_denied"
     assert denied_result["retryable"] is False
     assert denied_result["error"] == r"path is outside every authorized root: C:\logs"
+
+
+def test_runtime_result_preserves_executable_arguments_and_directory_cursor(tmp_path: Path) -> None:
+    project = tmp_path / "Avatar synthetic project"
+    other_root = tmp_path / "Other authorized root"
+    project.mkdir()
+    other_root.mkdir()
+    for index in range(61):
+        (project / f"entry-{index:03}.zip").write_text("fixture", encoding="utf-8")
+
+    registered = dashboard_server.AGENT_GATEWAY._tools["vrcforge_list_directory"]
+    assert dashboard_server.AGENT_GATEWAY._runtime_skill_executor._ports.redact_runtime_result is redact_runtime_tool_result
+    tool = FakeTool(name=registered.name, handler=registered.handler)
+    executor, _events = make_executor(tools={tool.name: tool})
+    allowed_roots = [str(project.resolve()), str(other_root.resolve())]
+
+    def invoke(_tool: FakeTool, params: dict[str, Any], _agent: str, _owner: str) -> Any:
+        execution_args = dict(params)
+        source_root = str(execution_args.get("projectPath") or "").strip()
+        source_path = str(execution_args.get("path") or "").strip()
+        if source_root and source_path and not Path(source_path).is_absolute():
+            execution_args["path"] = str(Path(source_root) / source_path)
+        execution_args["_generalAllowedRoots"] = allowed_roots
+        return registered.handler(execution_args)
+
+    executor._ports = replace(executor._ports, invoke_tool=invoke)
+    params = {
+        "projectPath": str(project.resolve()),
+        "path": ".",
+        "maxDepth": 2,
+        "maxCount": 60,
+    }
+
+    # RED: the former runtime wiring used the UI/audit redactor, shortening
+    # the actual handler cursor before returning it to the model.
+    red_executor, _red_events = make_executor(tools={tool.name: tool})
+    red_executor._ports = replace(
+        red_executor._ports,
+        invoke_tool=invoke,
+        redact_runtime_result=redact_sensitive,
+    )
+    red_result = red_executor.execute(tool.name, params, "agent")
+    red_cursor = red_result["result"]["nextRequest"]["arguments"]
+    assert red_cursor["path"] == project.name
+    assert red_cursor["projectPath"] == project.name
+    with pytest.raises(PermissionError, match="exactly one authorized root"):
+        registered.handler({**red_cursor, "_generalAllowedRoots": allowed_roots})
+
+    # GREEN: the runtime executor uses shape-preserving secret redaction,
+    # then the normal result contract/view and planner observation expose
+    # a callable absolute cursor without host-owned authorization roots.
+    executed = executor.execute(tool.name, params, "agent")
+    assert executed["ok"] is True
+    runtime_page = executed["result"]
+    cursor = runtime_page["nextRequest"]["arguments"]
+    assert cursor["path"] == str(project.resolve())
+    assert cursor["projectPath"] == str(project.resolve())
+    assert "_generalAllowedRoots" not in cursor
+    outcome = normalize_agent_tool_result(
+        {"status": "succeeded", "result": runtime_page},
+        fallback_summary="directory page",
+        write=False,
+    )
+    observation = RuntimePlannerService._llm_loop_step_observation(
+        object.__new__(RuntimePlannerService),
+        {"tool": tool.name, "status": "succeeded", "actionId": "synthetic", "result": runtime_page, "outcome": outcome},
+    )
+    evidence = json.loads(observation.split("; readEvidence=", 1)[1])
+    model_cursor = evidence["nextRequest"]["arguments"]
+    assert model_cursor["path"] == str(project.resolve())
+    assert model_cursor["projectPath"] == str(project.resolve())
+
+    next_page = registered.handler({**model_cursor, "_generalAllowedRoots": allowed_roots})
+    assert next_page["offset"] == 60
+    assert next_page["entries"][0]["name"] == "entry-060.zip"
+
+
+def test_runtime_redaction_preserves_pending_protocol_and_filters_host_and_secrets() -> None:
+    source = {
+        "arguments": {
+            "path": r"C:\workspace\Avatar",
+            "token": "top-secret",
+            "authorization": "Bearer abc.def",
+            "_generalAllowedRoots": [r"C:\workspace"],
+        },
+        "_mcp_status": "pending",
+        "_mcp_job": {"id": "job-1", "status": "pending"},
+        "_generalAllowedRoots": [r"C:\workspace"],
+        "_nativeReadObservation": True,
+    }
+
+    runtime = redact_runtime_tool_result(source)
+    display = redact_sensitive(source)
+
+    assert runtime["arguments"]["path"] == r"C:\workspace\Avatar"
+    assert runtime["arguments"]["token"] == "<redacted>"
+    assert runtime["arguments"]["authorization"] == "<redacted>"
+    assert "_generalAllowedRoots" not in runtime["arguments"]
+    assert "_generalAllowedRoots" not in runtime
+    assert runtime["_mcp_status"] == "pending"
+    assert runtime["_mcp_job"]["status"] == "pending"
+    assert "_nativeReadObservation" not in runtime
+    assert display["arguments"]["path"] == "Avatar"
 
 
 def test_direct_tool_result_contract_rejects_inner_failure_and_unverified_completion() -> None:

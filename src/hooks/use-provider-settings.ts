@@ -63,7 +63,9 @@ export function useProviderSettings({
   const [visionApiKey, setVisionApiKey] = useState("");
   const [visionBaseUrl, setVisionBaseUrl] = useState("");
   const [visionModel, setVisionModel] = useState("");
-  const [visionEnabled, setVisionEnabled] = useState(true);
+  // Dedicated image routing is opt-in. When disabled, the current chat model
+  // receives image attachments directly.
+  const [visionEnabled, setVisionEnabled] = useState(false);
   const [savingVisionConfig, setSavingVisionConfig] = useState(false);
   const [modelOptions, setModelOptions] = useState<ProviderModelInfo[]>([]);
   const [modelOptionsScope, setModelOptionsScope] = useState<ModelOptionsScope | null>(null);
@@ -115,6 +117,24 @@ export function useProviderSettings({
   }, [endpoint, runtimeConnected]);
 
   useEffect(() => {
+    if (!runtimeConnected || !apiConfig?.configured || apiProvider !== apiConfig.provider
+        || apiModel !== apiConfig.model) return;
+    let active = true;
+    // Capacity is metadata, not a generation probe. Load it for the saved model
+    // so the chat meter works without opening Settings and pressing Load models.
+    void fetchProviderModels(endpoint, {
+      provider: apiConfig.provider, api_key: "", base_url: apiConfig.base_url || "",
+      model: apiConfig.model, api_type: apiConfig.api_type || apiConfig.apiType,
+    }).then((payload) => {
+      if (!active) return;
+      setModelOptions(payload.models || []);
+      setModelOptionsScope({ provider: payload.provider || apiConfig.provider, baseUrl: payload.baseUrl || apiConfig.base_url || "" });
+    }).catch(() => { /* Unavailable metadata remains unknown; never invent a cap. */ });
+    return () => { active = false; };
+  }, [endpoint, runtimeConnected, apiConfig?.configured, apiConfig?.provider, apiConfig?.model,
+    apiConfig?.base_url, apiConfig?.api_type, apiConfig?.apiType, apiConfig?.credentialFingerprint, apiProvider, apiModel]);
+
+  useEffect(() => {
     let cancelled = false;
     if (!runtimeConnected || !endpoint || !apiProvider || apiProvider === "chatgpt" || !apiModel.trim()) {
       setReasoningVariants(null);
@@ -146,7 +166,7 @@ export function useProviderSettings({
     setVisionProvider(visionConfig.provider || "");
     setVisionBaseUrl(visionConfig.base_url || "");
     setVisionModel(visionConfig.model || "");
-    setVisionEnabled(visionConfig.enabled !== false);
+    setVisionEnabled(visionConfig.enabled === true);
   }, [visionConfig?.provider, visionConfig?.base_url, visionConfig?.model, visionConfig?.enabled]);
 
   const apiKeySaved = hasSavedProviderKey(apiProvider, apiConfig, visionConfig);
@@ -295,10 +315,10 @@ export function useProviderSettings({
   async function saveVisionProfile(event?: FormEvent) {
     event?.preventDefault();
     const visionKeySaved = hasSavedProviderKey(visionProvider, visionConfig, apiConfig);
-    if (visionProvider && !visionModel.trim()) {
+    if (visionEnabled && visionProvider && !visionModel.trim()) {
       return;
     }
-    if (visionProvider && providerNeedsApiKey(visionProvider) && !visionApiKey.trim() && !visionKeySaved) {
+    if (visionEnabled && visionProvider && providerNeedsApiKey(visionProvider) && !visionApiKey.trim() && !visionKeySaved) {
       return;
     }
     setSavingVisionConfig(true);
@@ -333,7 +353,7 @@ export function useProviderSettings({
       setVisionApiKey("");
       setVisionBaseUrl("");
       setVisionModel("");
-      setVisionEnabled(true);
+      setVisionEnabled(false);
       await refresh(endpoint);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));

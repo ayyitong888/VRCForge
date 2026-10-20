@@ -1,12 +1,12 @@
 use crate::backend::user_data_dir;
 use sha2::{Digest, Sha256};
-use tauri::Manager;
 use std::{
     fs,
     io::{self, Read},
     path::{Path, PathBuf},
     sync::Mutex,
 };
+use tauri::Manager;
 
 const THEME_BACKGROUND_DIRECTORY: &str = "theme";
 const THEME_BACKGROUND_PREFIX: &str = "background-";
@@ -27,10 +27,12 @@ pub(crate) fn pick_theme_background(app: tauri::AppHandle) -> Result<Option<Stri
             .pick_file();
         let _guard = theme_background_lock()?;
         selected
-            .map(|path| persist_theme_background_file(&path).and_then(|saved| {
-                register_theme_background_asset(&app, &saved)?;
-                Ok(saved)
-            }))
+            .map(|path| {
+                persist_theme_background_file(&path).and_then(|saved| {
+                    register_theme_background_asset(&app, &saved)?;
+                    Ok(saved)
+                })
+            })
             .transpose()
             .map(|path| path.map(|value| value.display().to_string()))
     }
@@ -84,8 +86,11 @@ fn validate_managed_background_path(path: &Path, user_data: &Path) -> Result<Pat
         .map_err(|error| format!("Unable to inspect the theme background directory: {error}"))?;
     let canonical_path = fs::canonicalize(path)
         .map_err(|error| format!("The saved background image is unavailable: {error}"))?;
-    if !canonical_path.starts_with(&canonical_theme_dir) || !is_managed_background(&canonical_path) {
-        return Err("The saved background image is outside the managed theme directory.".to_string());
+    if !canonical_path.starts_with(&canonical_theme_dir) || !is_managed_background(&canonical_path)
+    {
+        return Err(
+            "The saved background image is outside the managed theme directory.".to_string(),
+        );
     }
     Ok(canonical_path)
 }
@@ -397,7 +402,10 @@ mod tests {
         fs::create_dir_all(&theme).expect("theme dir");
         let managed = theme.join("background-0123456789abcdef.png");
         fs::write(&managed, b"\x89PNG\r\n\x1a\n").expect("managed file");
-        assert_eq!(validate_managed_background_path(&managed, &root).unwrap(), fs::canonicalize(&managed).unwrap());
+        assert_eq!(
+            validate_managed_background_path(&managed, &root).unwrap(),
+            fs::canonicalize(&managed).unwrap()
+        );
         let outside = root.join("outside.png");
         fs::write(&outside, b"\x89PNG\r\n\x1a\n").expect("outside file");
         assert!(validate_managed_background_path(&outside, &root).is_err());

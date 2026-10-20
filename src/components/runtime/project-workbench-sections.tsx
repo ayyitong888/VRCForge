@@ -139,6 +139,8 @@ export function ProjectWorkbenchSections({
   pendingApprovals,
   workspaceSummary,
   activeDesktopActions,
+  onTestAgentConnection,
+  providerTestAttempted,
   onOpenPendingApprovals,
 }: {
   workspaceProjectLabel: string;
@@ -165,6 +167,8 @@ export function ProjectWorkbenchSections({
   pendingApprovals: number;
   workspaceSummary: WorkspaceDiffSummary | null;
   activeDesktopActions: AgentDesktopAction[];
+  onTestAgentConnection?: () => void | Promise<void>;
+  providerTestAttempted: boolean;
   onOpenPendingApprovals: () => void;
 }) {
   const { t } = useTranslation();
@@ -344,12 +348,25 @@ export function ProjectWorkbenchSections({
                   />
                 </div>
                 <div data-vrcforge-status="external-agent">
-                  <RuntimeInfoRow
-                    icon={<Bot className="h-4 w-4" />}
-                    label={t(authorizationStatus.source === "external" ? "workspace.externalAgent" : runtimeAuthorizationLabelKey(authorizationStatus))}
-                    value={t(runtimeAuthorizationMessageKey(authorizationStatus))}
-                    suffix={<StatusDot status={authorizationStatus.status} />}
-                  />
+                  {authorizationStatus.internalConfigured && !providerTestAttempted && authorizationStatus.source !== "external" && authorizationStatus.status === "warning" && onTestAgentConnection ? (
+                    <button type="button" className="w-full text-left" title={t("workspace.testInternalAgentConnection")} onClick={() => void onTestAgentConnection()}>
+                      <RuntimeInfoRow
+                        icon={<Bot className="h-4 w-4" />}
+                        label={t(runtimeAuthorizationLabelKey(authorizationStatus))}
+                        value={t("workspace.internalAgentNotTested")}
+                        suffix={<StatusDot status={authorizationStatus.status} />}
+                      />
+                    </button>
+                  ) : (
+                    <RuntimeInfoRow
+                      icon={<Bot className="h-4 w-4" />}
+                      label={t(authorizationStatus.source === "external" ? "workspace.externalAgent" : runtimeAuthorizationLabelKey(authorizationStatus))}
+                      value={authorizationStatus.internalConfigured && providerTestAttempted
+                        ? t(authorizationStatus.internalKind === "oauth" ? "workspace.internalOAuthTestFailed" : "workspace.internalApiTestFailed")
+                        : t(runtimeAuthorizationMessageKey(authorizationStatus))}
+                      suffix={<StatusDot status={authorizationStatus.status} />}
+                    />
+                  )}
                 </div>
                 <div data-vrcforge-status="mcp-core">
                   <RuntimeInfoRow

@@ -45,6 +45,16 @@ def _text(value: Any) -> str:
     return str(value or "").strip()
 
 
+def sibling_index_arguments(params: dict[str, Any]) -> dict[str, int]:
+    """Keep the optional exact index identical in direct and approved requests."""
+    value = params.get("sibling_index", params.get("siblingIndex"))
+    if value is None:
+        return {}
+    if type(value) is not int or value < 0:
+        raise ValueError("siblingIndex must be a non-negative integer.")
+    return {"siblingIndex": value}
+
+
 def _bool(value: Any, default: bool) -> bool:
     if value is None:
         return default
@@ -72,15 +82,17 @@ def _gameobject_target(params: dict[str, Any]) -> str:
 
 
 _AVATAR_KEYS = (
+    "expectedSpeed", "expectedStateDigest",
+    "expectedPlanAssetPaths",
     "edits",
     "curves", "clips",
     "sourceStateName",
     "orderedInterruption",
-    "action", "avatarPath", "clipPath", "bindingPath", "objectPath", "componentType", "propertyName", "sourceBindingPath", "sourceComponentType", "sourcePropertyName", "deleteSource", "overwriteExisting", "constantFloat", "keys", "parameterName", "newName", "orderNames", "valueType", "defaultValue", "saved", "networkSynced", "menuPath", "controlName", "controlIndex", "controlType", "controlFloat", "value", "iconAssetPath", "subMenuAssetPath", "createSubMenu", "subParameters", "assetDir", "controllerPath", "fxControllerPath", "layerName", "stateName", "destinationStateName", "transitionIndex", "hasExitTime", "exitTime", "duration", "canTransitionToSelf", "interruptionSource", "conditions", "parameterType", "conditionMode", "threshold", "writeDefaults", "motionClipPath", "speed", "viewPosition", "lipSync", "visemeSkinnedMeshPath", "visemeBlendShapes", "expressionParametersPath", "expressionsMenuPath", "baseAnimationLayers", "specialAnimationLayers", "eyeLookSettingsSourceAvatarPath", "eyeLookEnabled",
+    "action", "avatarPath", "clipPath", "bindingPath", "objectPath", "componentType", "propertyName", "sourceBindingPath", "sourceComponentType", "sourcePropertyName", "deleteSource", "overwriteExisting", "constantFloat", "keys", "parameterName", "newName", "orderNames", "valueType", "defaultValue", "saved", "networkSynced", "menuPath", "controlName", "controlIndex", "controlType", "controlFloat", "value", "iconAssetPath", "subMenuAssetPath", "createSubMenu", "subParameters", "assetDir", "controllerPath", "fxControllerPath", "layerName", "stateName", "destinationStateName", "transitionIndex", "hasExitTime", "exitTime", "duration", "canTransitionToSelf", "interruptionSource", "conditions", "parameterType", "conditionMode", "threshold", "writeDefaults", "motionClipPath", "speed", "timeParameterActive", "timeParameter", "viewPosition", "lipSync", "visemeSkinnedMeshPath", "visemeBlendShapes", "expressionParametersPath", "expressionsMenuPath", "baseAnimationLayers", "specialAnimationLayers", "eyeLookSettingsSourceAvatarPath", "eyeLookEnabled",
 )
 _AVATAR_ALIASES = {
     "sourceStateName": ("source_state_name",),
-    "avatarPath": ("avatar_path",), "clipPath": ("clip_path",), "bindingPath": ("binding_path",), "componentType": ("component_type",), "propertyName": ("property_name",), "sourceBindingPath": ("source_binding_path",), "sourceComponentType": ("source_component_type",), "sourcePropertyName": ("source_property_name",), "deleteSource": ("delete_source",), "overwriteExisting": ("overwrite_existing",), "constantFloat": ("constant_float",), "parameterName": ("parameter_name",), "newName": ("new_name",), "orderNames": ("order_names",), "valueType": ("value_type",), "defaultValue": ("default_value",), "networkSynced": ("network_synced",), "menuPath": ("menu_path",), "controlName": ("control_name",), "controlIndex": ("control_index",), "controlType": ("control_type",), "controlFloat": ("control_float", "control_value"), "iconAssetPath": ("icon_asset_path",), "subMenuAssetPath": ("sub_menu_asset_path",), "createSubMenu": ("create_sub_menu",), "subParameters": ("sub_parameters",), "assetDir": ("asset_dir",), "controllerPath": ("controller_path",), "fxControllerPath": ("fx_controller_path",), "layerName": ("layer_name",), "stateName": ("state_name",), "destinationStateName": ("destination_state_name",), "transitionIndex": ("transition_index",), "hasExitTime": ("has_exit_time",), "exitTime": ("exit_time",), "canTransitionToSelf": ("can_transition_to_self",), "parameterType": ("parameter_type",), "conditionMode": ("condition_mode",), "writeDefaults": ("write_defaults",), "motionClipPath": ("motion_clip_path",), "viewPosition": ("view_position",), "visemeSkinnedMeshPath": ("viseme_skinned_mesh_path",), "visemeBlendShapes": ("viseme_blend_shapes",), "expressionParametersPath": ("expression_parameters_path",), "expressionsMenuPath": ("expressions_menu_path",), "baseAnimationLayers": ("base_animation_layers",), "specialAnimationLayers": ("special_animation_layers",), "eyeLookSettingsSourceAvatarPath": ("eye_look_settings_source_avatar_path",), "eyeLookEnabled": ("eye_look_enabled",),
+    "avatarPath": ("avatar_path",), "clipPath": ("clip_path",), "bindingPath": ("binding_path",), "componentType": ("component_type",), "propertyName": ("property_name",), "sourceBindingPath": ("source_binding_path",), "sourceComponentType": ("source_component_type",), "sourcePropertyName": ("source_property_name",), "deleteSource": ("delete_source",), "overwriteExisting": ("overwrite_existing",), "constantFloat": ("constant_float",), "parameterName": ("parameter_name",), "newName": ("new_name",), "orderNames": ("order_names",), "valueType": ("value_type",), "defaultValue": ("default_value",), "networkSynced": ("network_synced",), "menuPath": ("menu_path",), "controlName": ("control_name",), "controlIndex": ("control_index",), "controlType": ("control_type",), "controlFloat": ("control_float", "control_value"), "iconAssetPath": ("icon_asset_path",), "subMenuAssetPath": ("sub_menu_asset_path",), "createSubMenu": ("create_sub_menu",), "subParameters": ("sub_parameters",), "assetDir": ("asset_dir",), "controllerPath": ("controller_path",), "fxControllerPath": ("fx_controller_path",), "layerName": ("layer_name",), "stateName": ("state_name",), "destinationStateName": ("destination_state_name",), "transitionIndex": ("transition_index",), "hasExitTime": ("has_exit_time",), "exitTime": ("exit_time",), "canTransitionToSelf": ("can_transition_to_self",), "parameterType": ("parameter_type",), "conditionMode": ("condition_mode",), "writeDefaults": ("write_defaults",), "motionClipPath": ("motion_clip_path",), "timeParameterActive": ("time_parameter_active",), "timeParameter": ("time_parameter",), "viewPosition": ("view_position",), "visemeSkinnedMeshPath": ("viseme_skinned_mesh_path",), "visemeBlendShapes": ("viseme_blend_shapes",), "expressionParametersPath": ("expression_parameters_path",), "expressionsMenuPath": ("expressions_menu_path",), "baseAnimationLayers": ("base_animation_layers",), "specialAnimationLayers": ("special_animation_layers",), "eyeLookSettingsSourceAvatarPath": ("eye_look_settings_source_avatar_path",), "eyeLookEnabled": ("eye_look_enabled",),
 }
 
 
@@ -134,7 +146,7 @@ def build_scene_execution_plan(target_name: str, arguments: dict[str, Any]) -> l
 
     gameobject_tools = {
         "vrcforge_rename_gameobject": ("vrc_rename_gameobject", lambda: {"gameObjectPath": _gameobject_target(params), "newName": _text(params.get("new_name") or params.get("newName")), "preview": False}),
-        "vrcforge_reparent_gameobject": ("vrc_reparent_gameobject", lambda: {"gameObjectPath": _gameobject_target(params), "newParentPath": _text(params.get("new_parent_path") or params.get("newParentPath")), "worldPositionStays": bool(params.get("world_position_stays", params.get("worldPositionStays", True))), "preview": False}),
+        "vrcforge_reparent_gameobject": ("vrc_reparent_gameobject", lambda: {"gameObjectPath": _gameobject_target(params), "newParentPath": _text(params.get("new_parent_path") or params.get("newParentPath")), "worldPositionStays": bool(params.get("world_position_stays", params.get("worldPositionStays", True))), "preview": False, **sibling_index_arguments(params)}),
         "vrcforge_delete_gameobject": (
             "vrc_delete_gameobject",
             lambda: {
@@ -144,7 +156,7 @@ def build_scene_execution_plan(target_name: str, arguments: dict[str, Any]) -> l
             },
         ),
         "vrcforge_set_gameobject_active": ("vrc_set_gameobject_active", lambda: {"gameObjectPath": _gameobject_target(params), "active": bool(params.get("active", params.get("isActive"))), "preview": False}),
-        "vrcforge_unpack_prefab": ("vrc_unpack_prefab", lambda: {"gameObjectPath": _gameobject_target(params), "mode": _text(params.get("mode") or "outermost"), "preview": False}),
+        "vrcforge_unpack_prefab": ("vrc_unpack_prefab", lambda: {"gameObjectPath": _gameobject_target(params), "mode": _text(params.get("mode") or "completely"), "preview": False}),
     }
     if target_name in gameobject_tools:
         tool, factory = gameobject_tools[target_name]
@@ -197,6 +209,10 @@ def build_scene_execution_plan(target_name: str, arguments: dict[str, Any]) -> l
         return [("vrc_ensure_expression_menu_control", request)]
     if target_name == "vrcforge_ensure_animator_state":
         request = {"avatarPath": _text(params.get("avatar_path") or params.get("avatarPath")), "layerName": _text(params.get("layer_name") or params.get("layerName")), "stateName": _text(params.get("state_name") or params.get("stateName")), "parameterName": _text(params.get("parameter_name") or params.get("parameterName")), "parameterType": _text(params.get("parameter_type") or params.get("parameterType") or "Int") or "Int", "conditionMode": _text(params.get("condition_mode") or params.get("conditionMode") or "Equals") or "Equals", "threshold": float(params.get("threshold", 0) or 0), "writeDefaults": _bool(params.get("write_defaults", params.get("writeDefaults")), True), "preview": False}
+        if "time_parameter_active" in params or "timeParameterActive" in params:
+            request["timeParameterActive"] = _bool(params.get("time_parameter_active", params.get("timeParameterActive")), False)
+        if "time_parameter" in params or "timeParameter" in params:
+            request["timeParameter"] = _text(params.get("time_parameter") or params.get("timeParameter"))
         if _text(params.get("asset_dir") or params.get("assetDir")):
             request["assetDir"] = _text(params.get("asset_dir") or params.get("assetDir"))
         return [("vrc_ensure_animator_state", request)]
