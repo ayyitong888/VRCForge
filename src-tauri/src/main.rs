@@ -191,9 +191,9 @@ fn main() {
                         let _ = app.emit("vrcforge-tray-check-update", ());
                     }
                     "quit" => {
-                        // Let the WebView flush its in-memory chat snapshot before
-                        // the backend owner is stopped. The listener invokes the
-                        // confirmed quit command after persistence completes.
+                        #[cfg(windows)]
+                        force_exit_desktop();
+                        #[cfg(not(windows))]
                         let _ = app.emit("vrcforge-app-quit-requested", ());
                     }
                     _ => {}
@@ -431,7 +431,7 @@ fn show_main_window(app: &tauri::AppHandle) {
 /// Permission is limited to the local Tauri WebView IPC command registry; no
 /// network endpoint or ambient process handle is added. The caller must first
 /// receive this acknowledgement, then invoke `confirm_app_quit`; the confirmed
-/// command owns the remaining app lifetime and reuses the tray Quit sequence.
+/// command owns a graceful shutdown; Windows tray Quit exits immediately.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct AppQuitReceipt {
@@ -449,6 +449,23 @@ fn confirm_app_quit(app: tauri::AppHandle) {
         let _ = window.hide();
     }
     shutdown_and_exit_app(&app);
+}
+
+#[cfg(windows)]
+fn force_exit_desktop() -> ! {
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, TerminateProcess};
+
+    // Explicit tray Quit must not wait on the WebView, a save, or a runtime lock.
+    // Windows closes our non-inherited BackendJob handle on process exit;
+    // KILL_ON_JOB_CLOSE terminates only the backend tree we started. An attached
+    // backend has no owned job and is left running. Bypass Rust Drop as well,
+    // because BackendState::drop performs the graceful shutdown used elsewhere.
+    // Self-termination also bypasses DLL detach handlers on blocked UI threads.
+    unsafe {
+        TerminateProcess(GetCurrentProcess(), 0);
+    }
+    // Self-termination does not return on success.
+    std::process::exit(0)
 }
 
 fn shutdown_and_exit_app(app: &tauri::AppHandle) {

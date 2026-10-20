@@ -194,7 +194,23 @@ def test_main_window_close_hides_to_tray_while_explicit_quit_stops_backend() -> 
     quit_start = source.index('"quit" => {')
     quit_end = source.index("_ => {}", quit_start)
     quit_handler = source[quit_start:quit_end]
-    assert 'app.emit("vrcforge-app-quit-requested", ())' in quit_handler
+    assert "#[cfg(windows)]" in quit_handler
+    assert "force_exit_desktop();" in quit_handler
+    windows_quit, other_quit = quit_handler.split("#[cfg(not(windows))]")
+    assert "app.emit" not in windows_quit
+    assert 'app.emit("vrcforge-app-quit-requested", ())' in other_quit
+    force_start = source.index("fn force_exit_desktop() -> !")
+    force_end = source.index("fn shutdown_and_exit_app", force_start)
+    force_exit = source[force_start:force_end]
+    assert "TerminateProcess(GetCurrentProcess(), 0)" in force_exit
+    assert "std::process::exit(0)" in force_exit
+    assert "shutdown_managed_backend" not in force_exit
+    assert "thread::" not in force_exit
+    assert ".lock()" not in force_exit
+    backend = _read("src-tauri/src/backend.rs")
+    assert "JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_BREAKAWAY_OK" in backend
+    assert "AssignProcessToJobObject(handle, child.as_raw_handle() as HANDLE)" in backend
+    assert "CreateJobObjectW(std::ptr::null(), std::ptr::null())" in backend
     prepare_start = source.index("fn prepare_app_quit")
     prepare_end = source.index("fn confirm_app_quit", prepare_start)
     prepare_command = source[prepare_start:prepare_end]
