@@ -543,6 +543,8 @@ def test_add_outfit_all_step_combinations_freeze_one_server_nonce_without_empty_
         expected_tools.append("vrc_add_wardrobe_outfit")
 
     assert [tool for tool, _arguments in calls] == expected_tools
+    if unpack_prefab:
+        assert next(arguments for tool, arguments in calls if tool == "vrc_unpack_prefab")["mode"] == "completely"
     nonce = prepared[ADD_OUTFIT_CONTINUATION_NONCE_KEY]
     assert len(nonce) == 64
     continuation_tools = expected_tools[1:]

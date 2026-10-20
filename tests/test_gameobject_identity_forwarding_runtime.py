@@ -38,8 +38,11 @@ def test_unpack_public_callback_preserves_identity_guards(preview):
     for key, value in identities.items():
         assert calls[0][1].get(key) == value, f"Public callback discarded {key}"
     assert calls[0][1]["preview"] is preview
+    assert calls[0][1]["mode"] == "completely", "Nested prefab instances must be editable too"
     env["unpack_prefab_sync"]({"gameObjectPath": "Avatar/Clothing"})
     assert not any(key in calls[1][1] for key in identities), "optional guards were invented"
+    env["unpack_prefab_sync"]({"gameObjectPath": "Avatar/Clothing", "mode": "outermost"})
+    assert calls[2][1]["mode"] == "outermost", "Keep explicit mode selection available"
 
 
 def test_prefab_is_created_in_resolved_parent_scene(tmp_path):

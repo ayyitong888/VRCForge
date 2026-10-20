@@ -54,7 +54,27 @@
     "preserveSourceOrderWeightsOffsetsWorldPoseAndDynamicChain": true,
     "doNotSubstituteAttachmentRoute": true,
     "doNotCreateUnsupportedModularAvatarConstraint": true,
-    "animationTiming": "preserve_existing_or_use_user_confirmed_new_design"
+    "animationTiming": "preserve_existing_or_use_user_confirmed_new_design",
+    "prefabInstanceAuthoring": {
+      "beforeAnyInstanceModification": "preview_and_completely_unpack_exact_instance",
+      "tool": "vrcforge_unpack_prefab",
+      "previewRequired": true,
+      "mode": "completely",
+      "identityFields": ["expectedGlobalObjectId", "expectedPrefabGuid", "expectedAssetDependencyHash", "expectedScenePath"],
+      "approvalAndCheckpointRequired": true,
+      "rebindAfterUnpack": true,
+      "persistedReadbackRequired": true,
+      "preserveSourcePrefabAsset": true,
+      "preserveAuthorModularAvatarComponents": true,
+      "preserveAuthorSkeletonAnimationAndConstraintReferences": true,
+      "materialPropertyWritesUseTheirOwnContract": true
+    },
+    "faceTrackingAcceptance": {
+      "serializedInstallAndConfiguration": "independent_edit_mode_readback",
+      "playRuntimeAndVisualAcceptance": "separate_explicitly_approved_bounded_observation",
+      "configurationDoesNotProveRuntime": true,
+      "runtimeEvidenceDoesNotRewriteConfiguration": true
+    }
   },
   "steps": [
     {
@@ -73,6 +93,19 @@
         "vrcforge_scan_avatar_controls"
       ],
       "writes": false
+    },
+    {
+      "name": "completely_unpack_prefab_instance_before_attachment_write",
+      "tool": "vrcforge_unpack_prefab",
+      "guidance": "Before modifying any prefab instance, preview the exact instance with expectedGlobalObjectId, expectedPrefabGuid, expectedAssetDependencyHash and expectedScenePath, then approve and run mode=completely. Rebind the unpacked scene identity and require persisted readback before attachment, selector, FX, curve or menu writes. Preserve the source prefab and author components/references; material property writes follow their own contract.",
+      "writes": true,
+      "conditional": "affected_target_is_prefab_instance_and_attachment_or_configuration_write_is_requested",
+      "runtimePermissionGateRequired": true,
+      "runtimeApprovalRequired": true,
+      "checkpointRequired": true,
+      "identityRebindRequired": true,
+      "persistedReadbackRequired": true,
+      "unpackMode": "completely"
     },
     {
       "name": "add_modular_avatar_component_through_current_permission_policy",

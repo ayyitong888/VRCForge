@@ -22,6 +22,8 @@
 
 只有明确请求 Bone Proxy 时使用对应 MA component 原子；只有明确请求修改现有 VRChat constraint source 时使用 `vrcforge_preview_constraint_sources` / `vrcforge_set_constraint_sources`；Unity constraint 转换必须另行明确授权；缺少 MA constraint 写原子时返回 `capabilityGap=true`。
 
+若写入目标是场景中的 Prefab instance，先对精确根对象执行 `vrcforge_unpack_prefab` preview，核对 GlobalObjectId、源 prefab GUID、依赖 hash 和 scene path；批准后以 `mode=completely` 完全解包，重新绑定并持久读回新的对象身份。源 prefab 资产、作者 Modular Avatar 组件、骨架、动画和约束引用保留。普通材质属性写入遵循材质工具自己的身份和保存契约。
+
 ## 4. 执行边界与读取结果
 
 新建时按用户确认的参数类型/同步方式、菜单路径与动画时序制作开关；不得默认强制独立 Bool、固定 `换装 / 配饰` 路径或 time=0。维护现有饰品时按 Write Defaults、恢复路径及动画证据保留有效参数、菜单路径、FX/动画时序和 OFF 空 Motion；若证实其中有错误，只在用户批准的精确差异范围内修复。初始场景基线及未涉及对象保持不变。
@@ -31,3 +33,5 @@
 回读 `绑定/骨骼 → 用户确认的选择器 → FX → 动画 → 菜单`；不把饰品未经用户设计并入其他选择器，也不改其他服装、发型和饰品。FX、恢复状态与 OFF 动画是否保留/修复按同一证据和批准差异规则处理。
 
 **每笔写入都遵守当前用户配置的权限策略，并绑定精确目标、preview、checkpoint 和写后回读；回滚必须单独确认。**
+
+面捕相关的安装/serialized 配置读回与 Play 运行验收分开；运行验收必须有单独明确授权、有限预算和原 Play 状态恢复。

@@ -936,7 +936,7 @@ def test_no_project_planner_can_select_know_yourself_readiness() -> None:
     assert plan["skillTool"] == "vrcforge_know_yourself"
 
 
-def test_connection_help_prompt_requires_know_yourself_before_generic_tools() -> None:
+def test_connection_help_prompt_uses_docs_without_a_fixed_readiness_entrypoint() -> None:
     planner = dashboard_server.RuntimePlannerService(
         catalog=dashboard_server._RuntimePlannerCatalog(),
         desktop=dashboard_server._RuntimePlannerDesktopObservation(),
@@ -950,6 +950,9 @@ def test_connection_help_prompt_requires_know_yourself_before_generic_tools() ->
 
     assert "诊断 VRCForge 自身启动、连接或历史日志时" in prompt
     assert "know_yourself" in prompt
+    assert "vrcforge-docs" in prompt
+    assert "it is not a prerequisite" in prompt
+    assert "does not complete an authorized installation or repair" in prompt
     assert "先发现并加载相应的只读诊断工具块" in prompt
     assert "不可调用未列出的工具或用普通 Shell 代替这条诊断路径" in prompt
 

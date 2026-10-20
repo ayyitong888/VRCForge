@@ -50,6 +50,14 @@ foreach ($relativePath in $bundledGuideFiles) {
         throw "Bundled setup guide file is missing: $relativePath"
     }
 }
+$bundledDocs = Join-Path $repoRoot "examples\skill-packages\vrcforge-docs"
+$bundledDocsManifest = Get-Content -LiteralPath (Join-Path $bundledDocs "manifest.json") -Raw -Encoding UTF8 | ConvertFrom-Json
+$bundledDocsFiles = @("manifest.json") + @($bundledDocsManifest.entrypoints.PSObject.Properties.Value)
+foreach ($relativePath in $bundledDocsFiles) {
+    if (-not (Test-Path -LiteralPath (Join-Path $bundledDocs $relativePath) -PathType Leaf)) {
+        throw "Bundled VRCForge Docs file is missing: $relativePath"
+    }
+}
 
 & $pyinstaller.Source `
     --noconfirm `
@@ -66,6 +74,7 @@ foreach ($relativePath in $bundledGuideFiles) {
     --hidden-import tools.vrcforge_agent_mcp_stdio `
     --hidden-import tools.vrcforge_cli `
     --add-data "$bundledGuide;examples/skill-packages/vrcforge-first-run-guide" `
+    --add-data "$bundledDocs;examples/skill-packages/vrcforge-docs" `
     @excludeArgs `
     --distpath $tempDist `
     --specpath (Join-Path $repoRoot "build\pyinstaller") `
@@ -87,6 +96,15 @@ foreach ($relativePath in $bundledGuideFiles) {
     }
     if ((Get-FileHash -LiteralPath $collectedPath).Hash -ne (Get-FileHash -LiteralPath (Join-Path $bundledGuide $relativePath)).Hash) {
         throw "Bundled setup guide differs from its source: $relativePath"
+    }
+}
+foreach ($relativePath in $bundledDocsFiles) {
+    $collectedPath = Join-Path $sourceOutputDir "_internal\examples\skill-packages\vrcforge-docs\$relativePath"
+    if (-not (Test-Path -LiteralPath $collectedPath -PathType Leaf)) {
+        throw "PyInstaller did not collect VRCForge Docs: $relativePath"
+    }
+    if ((Get-FileHash -LiteralPath $collectedPath).Hash -ne (Get-FileHash -LiteralPath (Join-Path $bundledDocs $relativePath)).Hash) {
+        throw "Bundled VRCForge Docs differs from its source: $relativePath"
     }
 }
 $requiredWinPtyFiles = @(

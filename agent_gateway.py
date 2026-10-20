@@ -772,7 +772,7 @@ BUILTIN_SKILL_OVERRIDES: dict[str, dict[str, Any]] = {
         "sideEffects": "none",
     },
     "vrcforge_know_yourself": {
-        "title": "Know Yourself",
+        "title": "VRCForge Readiness Snapshot",
         "inputs": [
             "Optional editorFocusConfirmed plus the report's editorFocusScope after "
             "the user explicitly activates the intended Unity editor."
@@ -1415,66 +1415,6 @@ for _optimization_apply_tool in STABLE_OPTIMIZATION_APPLY_REQUEST_GATEWAY_NAMES:
 BUILTIN_SKILL_GROUPS: list[dict[str, Any]] = [
     *AVATAR_COMPOSITION_WORKFLOW_SKILLS,
     {
-        "name": "know-yourself",
-        "title": "Know Yourself",
-        "description": (
-            "Understand VRCForge readiness, current capabilities, missing preparation, "
-            "and safe operating boundaries before starting Unity project work."
-        ),
-        "category": "work-start",
-        "permissionMode": "read_only",
-        "riskLevel": "low",
-        "whenToUse": (
-            "after connecting a provider, before opening or changing a Unity project, "
-            "after dependency installation, whenever the agent must explain what it "
-            "can and cannot currently do, or for any VRCForge, Unity, MCP, bridge, "
-            "editor-plugin, or Provider connection problem such as 'cannot connect', "
-            "'not connected', or 'what should I do'"
-        ),
-        "inputs": [
-            "Optional editorFocusConfirmed and the current editorFocusScope only after "
-            "the user explicitly clicks inside the intended Unity editor window."
-        ],
-        "outputs": [
-            "One ordered readiness sequence, evidence freshness, current and post-baseline "
-            "abilities, bounded tool and capability groups, structured gaps, write "
-            "boundaries, and one next safe action."
-        ],
-        "sideEffects": (
-            "none; this Skill only reads existing VRCForge, Doctor, registry, and Unity "
-            "MCP state"
-        ),
-        "backupRestore": "not required; the Skill never writes, installs, launches, closes, or repairs",
-        "allowedTools": ["vrcforge_know_yourself"],
-        "entrypointTool": "vrcforge_know_yourself",
-        "instructions": (
-            "Run this Skill before the first project operation and whenever the selected "
-            "project, dependencies, Unity process, connection, permissions, or Skill "
-            "registry changes. When the user asks what to do about a VRCForge-stack "
-            "connection problem, run this Skill before filesystem, Shell, or repair tools. "
-            "Do not use it for ordinary Internet, GitHub, or unrelated network support. "
-            "Treat only observed evidence in the current report as fact. "
-            "Use projectDiscovery for project-list status and the normal startup workflow. "
-            "A completed empty scan means no projects were found; distinguish it from "
-            "pending scans, source read errors, and unsupported catalogue formats. "
-            "Offer adding an existing project folder; never invent a project or treat "
-            "a Hub, VCC or ALCOM catalogue entry as a live Unity connection. "
-            "If dependencies are installed and the report requests editor activation, ask "
-            "the user to click once inside the intended Unity editor window, then run the "
-            "Skill again with editorFocusConfirmed=true and the exact editorFocusScope "
-            "returned by the prior report. A stale or claimed acknowledgement never proves "
-            "readiness: require fresh bridge, selected-instance, compile, and required-tool "
-            "readback. Complete the recommended read-only baseline before task planning or "
-            "any guarded write request. Explain abilities only from the returned bounded "
-            "tools and capability groups, state structured blockers and unavailable "
-            "reasons, and preserve approval, checkpoint, validation, and rollback "
-            "boundaries for every later write. If the user explicitly requests setup "
-            "or repair, continue with the existing supervised tools within the "
-            "already authorized scope; this diagnostic Skill does not perform repair."
-        ),
-        "tags": ["builtin", "group", "self-check", "work-start", "unity", "mcp", "connection", "readiness"],
-    },
-    {
         "name": "runtime-diagnostics",
         "title": "Runtime Diagnostics",
         "description": "Inspect backend, agent runtime, logs, and gateway skill state.",
@@ -1659,7 +1599,16 @@ BUILTIN_SKILL_GROUPS: list[dict[str, Any]] = [
             "vrcforge_restore_last_backup",
             "vrcforge_refresh_execution_target",
         ],
-        "entrypointTool": "vrcforge_plan_face_tuning",
+        "entrypointTool": "",
+        "instructions": (
+            "Loading this workflow only supplies guidance; it does not run a planner. "
+            "For known exact adjustments, use the existing batch preview and approved apply without a second model-generated plan. "
+            "For static sculpting, inspect scope=face_static; review face_unknown only when the requested target is ambiguous. "
+            "Reuse current target evidence and retained result pages when they already cover the requested values; "
+            "do not repeat discovery or scan solely to recover them. For natural-language goals requiring semantic selection, "
+            "explicitly call vrcforge_plan_face_tuning with the matching scope. Keep approval, checkpoint, "
+            "persisted readback and the same-target refresh after saving."
+        ),
         "tags": ["builtin", "group", "face", "blendshape", "write"],
     },
     {
@@ -1684,7 +1633,16 @@ BUILTIN_SKILL_GROUPS: list[dict[str, Any]] = [
             "vrcforge_restore_shader_tuning",
             "vrcforge_restore_last_backup",
         ],
-        "entrypointTool": "vrcforge_plan_shader_tuning",
+        "entrypointTool": "",
+        "instructions": (
+            "Loading this workflow only supplies guidance; it does not run a planner. "
+            "If target IDs are unknown, discover with indexOnly=true, then read details for exact materialIds. "
+            "Reuse still-validated inventory and retained result pages covering the same Avatar, Scene identity and scope; "
+            "do not repeat full scans, delivered pages or loaded tool definitions. A changed scope or rejected freshness "
+            "requires fresh evidence. For known exact changes, use the existing batch preview and approved apply; "
+            "only call vrcforge_plan_shader_tuning when the user's goal needs semantic planning. "
+            "Keep exact target validation, shared-material impact, approval, checkpoint and persisted readback."
+        ),
         "tags": ["builtin", "group", "shader", "material", "write"],
     },
     {

@@ -10,8 +10,7 @@
     },
     {
       "id": "diagnose",
-      "readTool": "vrcforge_know_yourself",
-      "instruction": "Discover and load first; expand omitted workflow through the returned Resource."
+      "instruction": "For exe-only beginners read references/zero-start.md, preserve/choose VCC or ALCOM, and guide the official Unity/Avatar-project route. Agent downloads may use available host tools with verified official sources, not the text-only web reader. Otherwise choose narrow current diagnostics; vrcforge_know_yourself is optional when multiple readiness layers remain unknown."
     },
     {
       "id": "select_project",

@@ -23,6 +23,8 @@ from skill_packages import (
 
 SKILL_NAME = "vrcforge-first-run-guide"
 PACKAGE_ID = "com.vrcforge.workflows.first_run_guide"
+DOCS_SKILL_NAME = "vrcforge-docs"
+DOCS_PACKAGE_ID = "com.vrcforge.workflows.docs"
 
 
 def bundled_source_dir() -> Path:
@@ -30,15 +32,15 @@ def bundled_source_dir() -> Path:
     return Path(__file__).resolve().parent / "examples" / "skill-packages" / SKILL_NAME
 
 
-def _manifest(source: Path, version: str) -> dict[str, Any]:
+def _manifest(source: Path, version: str, *, name: str = SKILL_NAME, package_id: str = PACKAGE_ID) -> dict[str, Any]:
     service = SkillPackageService(source.parent, vrcforge_version=version)
     manifest = service.validate_manifest(
         json.loads((source / "manifest.json").read_text(encoding="utf-8")),
         package_root=source,
     )
     if (
-        manifest["id"] != PACKAGE_ID
-        or manifest.get("skill_name") != SKILL_NAME
+        manifest["id"] != package_id
+        or manifest.get("skill_name") != name
         or manifest.get("execution", "agentic") != "agentic"
     ):
         raise SkillPackageError("Bundled guide identity or execution mode is invalid.")
@@ -54,12 +56,29 @@ def deliver_bundled_guide(
     version: str,
 ) -> dict[str, Any]:
     """Seed a new profile; never replace an existing or disabled user Skill."""
-    source = bundled_source_dir()
-    manifest = _manifest(source, version)
+    return _deliver(projection, skills_root, bundled_source_dir(), version=version, name=SKILL_NAME, package_id=PACKAGE_ID)
+
+
+def bundled_docs_source_dir() -> Path:
+    return Path(__file__).resolve().parent / "examples" / "skill-packages" / DOCS_SKILL_NAME
+
+
+def deliver_bundled_docs(
+    projection: SkillPackageProjectionService, skills_root: Path, *, version: str,
+) -> dict[str, Any]:
+    """Use the same atomic projection and preserve existing user content."""
+    return _deliver(projection, skills_root, bundled_docs_source_dir(), version=version, name=DOCS_SKILL_NAME, package_id=DOCS_PACKAGE_ID)
+
+
+def _deliver(
+    projection: SkillPackageProjectionService, skills_root: Path, source: Path,
+    *, version: str, name: str, package_id: str,
+) -> dict[str, Any]:
+    manifest = _manifest(source, version, name=name, package_id=package_id)
     # Hold the same lock across the absence check and the projection publish.
     # The caller owns this lock (the package and user-Skill lock in the App).
-    if os.path.lexists(skills_root / SKILL_NAME):
-        return {"status": "preserved", "name": SKILL_NAME}
+    if os.path.lexists(skills_root / name):
+        return {"status": "preserved", "name": name}
     projected = projection.project_installed(source, manifest, enabled=True)
     return {"status": "installed", "distribution": "bundled", "skill": projected}
 
@@ -73,16 +92,19 @@ def bundled_guide_audit_context(
     This identity is only for the shipped agentic instructions, never a signed
     package claim or deterministic execution authorization.
     """
-    if skill.get("name") != SKILL_NAME or skill.get("packageId") != PACKAGE_ID:
+    if skill.get("name") == SKILL_NAME and skill.get("packageId") == PACKAGE_ID:
+        name, package_id, source = SKILL_NAME, PACKAGE_ID, bundled_source_dir()
+    elif skill.get("name") == DOCS_SKILL_NAME and skill.get("packageId") == DOCS_PACKAGE_ID:
+        name, package_id, source = DOCS_SKILL_NAME, DOCS_PACKAGE_ID, bundled_docs_source_dir()
+    else:
         return {}
     try:
-        source = bundled_source_dir()
         raw_manifest = json.loads((source / "manifest.json").read_text(encoding="utf-8"))
-        manifest = _manifest(source, raw_manifest["min_vrcforge_version"])
+        manifest = _manifest(source, raw_manifest["min_vrcforge_version"], name=name, package_id=package_id)
         service = SkillPackageService(package_store, vrcforge_version=manifest["min_vrcforge_version"])
-        if PACKAGE_ID in service.load_registry()["skills"]:
+        if package_id in service.load_registry()["skills"]:
             return {}
-        target = skills_root / SKILL_NAME
+        target = skills_root / name
         if Path(str(skill.get("storagePath") or "")) != target / "SKILL.md":
             return {}
         declared = set(manifest["entrypoints"].values()) - {manifest["entrypoints"]["skill"]}
@@ -101,7 +123,7 @@ def bundled_guide_audit_context(
                 return {}
             digests[projected_relative] = hashlib.sha256(content).hexdigest()
         return {
-            "packageId": PACKAGE_ID,
+            "packageId": package_id,
             "packageVersion": manifest["version"],
             "authorId": manifest["author"],
             "distribution": "bundled",

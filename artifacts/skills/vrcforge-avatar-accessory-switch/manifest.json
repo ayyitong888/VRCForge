@@ -2,7 +2,7 @@
   "id": "com.vrcforge.skills.avatar_accessory_switch",
   "name": "VRChat 饰品安装与开关",
   "skill_name": "vrcforge-avatar-accessory-switch",
-  "version": "1.0.2",
+  "version": "1.0.4",
   "author": "VRCForge",
   "description": "Install or maintain one VRChat accessory switch using the user's confirmed design for new work and preserving existing Avatar parameters, menu paths, animation timing and proven attachment structure.",
   "min_vrcforge_version": "1.7.9",

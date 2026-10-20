@@ -1095,7 +1095,9 @@ def classify_face_blendshape_usage(
     }
 
 
-def filter_planning_payload_to_face_blendshapes(export_payload: dict[str, Any]) -> dict[str, Any]:
+def filter_planning_payload_to_face_blendshapes(
+    export_payload: dict[str, Any], *, scope: str = "face",
+) -> dict[str, Any]:
     filtered_avatars: list[dict[str, Any]] = []
     renderer_count = 0
     blendshape_count = 0
@@ -1103,11 +1105,21 @@ def filter_planning_payload_to_face_blendshapes(export_payload: dict[str, Any]) 
     for avatar in export_payload.get("avatars") or []:
         filtered_renderers: list[dict[str, Any]] = []
         for renderer in avatar.get("renderers") or []:
-            filtered_blendshapes = [
-                blendshape
-                for blendshape in renderer.get("blendshapes") or []
-                if is_face_related_blendshape(renderer, blendshape)
-            ]
+            filtered_blendshapes = []
+            author_section = None
+            for blendshape in renderer.get("blendshapes") or []:
+                if scope in {"face_static", "face_unknown"}:
+                    marker = parse_blendshape_section_marker(blendshape.get("name", ""))
+                    if marker:
+                        author_section = marker
+                        continue
+                    category = classify_face_blendshape_usage(renderer, blendshape, author_section)["usageCategory"]
+                    wanted = "static_shape" if scope == "face_static" else "unknown"
+                    if category != wanted:
+                        continue
+                elif not is_face_related_blendshape(renderer, blendshape):
+                    continue
+                filtered_blendshapes.append(blendshape)
             if not filtered_blendshapes:
                 continue
 
@@ -1131,8 +1143,14 @@ def filter_planning_payload_to_face_blendshapes(export_payload: dict[str, Any]) 
     summary["blendshapeCount"] = blendshape_count
     payload["summary"] = summary
     payload["planningFilter"] = {
-        "scope": "face",
-        "note": "Only face-related blendshapes are exposed to the natural-language face editor.",
+        "scope": scope if scope in {"face_static", "face_unknown"} else "face",
+        "note": (
+            "Only classified static sculpt candidates are exposed; ambiguous shapes require explicit face_unknown review."
+            if scope == "face_static" else
+            "Only ambiguous face candidates explicitly requested for review are exposed."
+            if scope == "face_unknown" else
+            "Only face-related blendshapes are exposed to the natural-language face editor."
+        ),
     }
     return payload
 

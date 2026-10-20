@@ -937,7 +937,7 @@ FACE_TUNING_PUBLIC_INPUT_SCHEMA = {
         "reference_image_path": {"type": ["string", "null"], "description": "Optional reference image path or artifact URL."},
         "reference_image_data_url": {"type": ["string", "null"], "description": "Optional uploaded reference image data URL."},
         **{name: {"type": "array", "items": {"type": "string"}, "default": [], "description": "User-supplied source/target reference images for planning."} for name in ("source_reference_image_paths", "source_reference_image_data_urls", "target_reference_image_paths", "target_reference_image_data_urls")},
-        "scope": {"type": ["string", "null"], "description": "Optional Blendshape scan scope."},
+        "scope": {"type": ["string", "null"], "description": "Face planning scope: use face_static for static sculpting; face_unknown only for explicitly reviewing ambiguous candidates. Omit for the existing face/expression editor. Uses the same authored-section classifier as scan_blendshapes."},
         "filterScope": {"type": ["string", "null"], "description": "Optional scan filter; alias filter_scope."},
     },
 }

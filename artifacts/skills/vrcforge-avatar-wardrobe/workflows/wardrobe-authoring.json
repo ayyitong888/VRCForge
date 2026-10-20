@@ -190,6 +190,20 @@
       "everyToolCallRequiresAbsoluteProjectPath": true,
       "projectPathMustRemainConstant": true
     },
+    "prefabInstanceAuthoring": {
+      "beforeAnyInstanceModification": "preview_and_completely_unpack_exact_instance",
+      "tool": "vrcforge_unpack_prefab",
+      "previewRequired": true,
+      "mode": "completely",
+      "identityFields": ["expectedGlobalObjectId", "expectedPrefabGuid", "expectedAssetDependencyHash", "expectedScenePath"],
+      "approvalAndCheckpointRequired": true,
+      "rebindAfterUnpack": true,
+      "persistedReadbackRequired": true,
+      "preserveSourcePrefabAsset": true,
+      "preserveAuthorModularAvatarComponents": true,
+      "preserveAuthorSkeletonAndAnimationReferences": true,
+      "materialPropertyWritesUseTheirOwnContract": true
+    },
     "outfitAttachment": "select_tool_compatible_with_approved_design",
     "selector": {
       "source": "observed_evidence_and_explicit_user_approved_changes",
@@ -267,6 +281,12 @@
         "cleanup": "restore_user_approved_play_state_and_read_back"
       }
     },
+    "faceTrackingAcceptance": {
+      "serializedInstallAndConfiguration": "independent_edit_mode_readback",
+      "playRuntimeAndVisualAcceptance": "separate_explicitly_approved_bounded_observation",
+      "configurationDoesNotProveRuntime": true,
+      "runtimeEvidenceDoesNotRewriteConfiguration": true
+    },
     "perOutfitGate": {
       "scope": "actual_approved_change_and_affected_dependencies",
       "independentReadbackRequired": true
@@ -337,6 +357,20 @@
         "vrcforge_inspect_skinned_mesh_deformation"
       ],
       "writes": false,
+      "optional": true
+    },
+    {
+      "name": "completely_unpack_prefab_instance_before_authoring",
+      "tool": "vrcforge_unpack_prefab",
+      "guidance": "For any planned write to a prefab instance, preview the exact instance first with expectedGlobalObjectId, expectedPrefabGuid, expectedAssetDependencyHash and expectedScenePath, then approve and run mode=completely. Rebind the returned unpacked scene identity and require persisted readback before any other write. Preserve the source prefab asset and author Modular Avatar components, skeleton and animation references; ordinary material-property writes follow their own tool contract.",
+      "writes": true,
+      "conditional": "affected_target_is_prefab_instance_and_authoring_write_is_requested",
+      "runtimePermissionGateRequired": true,
+      "runtimeApprovalRequired": true,
+      "checkpointRequired": true,
+      "identityRebindRequired": true,
+      "persistedReadbackRequired": true,
+      "unpackMode": "completely",
       "optional": true
     },
     {

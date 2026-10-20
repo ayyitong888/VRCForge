@@ -69,7 +69,7 @@ EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
         "properties": {
             "projectPath": _PROJECT_PATH_PROPERTY,
             "gameObjectPath": {"type": "string", "description": "Exact prefab instance hierarchy path."},
-            "mode": {"type": "string", "default": "outermost", "description": "Prefab unpack mode accepted by the installed Core."},
+            "mode": {"type": "string", "default": "completely", "description": "Defaults to completely so nested prefab instances can be modified too. Explicit outermost remains available for a deliberately limited unpack."},
             "preview": {"type": "boolean", "default": False},
         },
     },
@@ -1226,7 +1226,7 @@ _ADD_OUTFIT_PROPERTIES = {
     'parentPath': {'type': ['string', 'null'], 'description': 'Existing parent hierarchy path; defaults to avatarPath.'},
     'outfitName': {'type': ['string', 'null'], 'description': 'New single-segment object name; defaults to prefab name, then Outfit. Existing target objects are rejected.'},
     'parameterName': {'type': ['string', 'null'], 'description': 'Selector for an existing strict verified wardrobe when manageWardrobe=true. A newly created one-value skeleton is insufficient; first install without binding, then add via preview_add_wardrobe_outfit/add_wardrobe_outfit. Omission uses the existing wardrobe-selection policy.'},
-    'unpackMode': {'type': ['string', 'null'], 'default': 'outermost', 'description': 'Used only when unpackPrefab is enabled: outermost or completely, compared case-insensitively.'},
+    'unpackMode': {'type': ['string', 'null'], 'default': 'completely', 'description': 'Used only when unpackPrefab is enabled. Defaults to completely, including nested instances; explicit outermost remains available, compared case-insensitively.'},
     'offObjectPaths': {'description': 'Optional array of paths, or one scalar path, switched off by the wardrobe entry. Existing values are converted to text and de-duplicated; both spellings are combined.'},
     'subMenuName': {'type': ['string', 'null'], 'default': 'Wardrobe', 'description': 'Menu group used when manageWardrobe is enabled.'},
     'clipOutputDir': {'type': ['string', 'null'], 'description': 'Optional wardrobe animation output directory; omission preserves the wardrobe tool default.'},

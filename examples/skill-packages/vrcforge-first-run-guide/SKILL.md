@@ -10,6 +10,10 @@ game-only-acceptance: []
 allowed-tools:
   - vrcforge_load_internal_tool_block
   - vrcforge_read_installed_skill
+  - vrcforge_classify_shell
+  - vrcforge_execute_shell
+  - vrcforge_shell_process
+  - vrcforge_execute_approved_shell
   - vrcforge_know_yourself
   - vrcforge_health
   - vrcforge_unity_status
@@ -33,6 +37,7 @@ allowed-tools:
   - vrcforge_list_avatars
 support-files:
   - workflows/first-run.json
+  - references/zero-start.md
   - references/repair-guide.md
   - references/user-tool-author-guide.md
 ---
@@ -60,6 +65,8 @@ Bundled delivery seeds only an absent guide. On an existing profile it returns `
 
 Use the user's language. Keep technical fields in tool calls; explain to the user what to choose or click. Ask only for facts or choices that cannot be safely observed. Preserve the original editing task and resume it after readiness is verified.
 
+If the user has downloaded only an exe and has no Unity, project, SDK or model yet, read `references/zero-start.md` first. Guide the official installer and VCC or ALCOM Avatar-project route from that actual starting point. Use available host tools to download official installers when authorized, retaining their source and local result; do not treat the text-only web reader as a binary downloader. Do not assume a source checkout or an existing project. New project creation is appropriate only for this explicit zero-start intent, not as a workaround for a broken existing project.
+
 ## 1. Establish which Agent is helping
 
 - If the user has not chosen a mode, explain the two App choices: use AI inside VRCForge, or connect an existing external AI client. Let the user choose; never require both. For external mode use the App Connectors page to select the actual client and follow its generated configuration/install instructions. Verify an authenticated MCP tool call after the client reloads; enabling Gateway or copying configuration alone is not a connection.
@@ -77,7 +84,7 @@ Read only the relevant branch in `references/repair-guide.md`. Distinguish a fai
 
 Read current tools/resources/installed Skill-backed Prompts. For the lazy STDIO tree, use the exposed discovery and load controls; load the relevant leaf and inspect its returned schema. Names below are current 1.8.1 routes, not authority to invoke an absent tool. Carry exact returned activation handles and Prompt provenance when required.
 
-Run `vrcforge_know_yourself`. Read its `nextAction`, `projectDiscovery`, gaps and live evidence. If compact output omits the workflow or diagnostics, use the returned `operationResource` with `resources/read`; never replay a write to expand a result.
+Choose the narrowest current evidence for the failing layer. `vrcforge_know_yourself` is an optional broad readiness snapshot when several prerequisite layers are unknown; it is not a mandatory first call. If exact project and missing-Core evidence already establish the next step, go directly to that supervised branch without repeating the snapshot. When a snapshot is useful, read its `nextAction`, `projectDiscovery`, gaps and live evidence. If compact output omits the workflow or diagnostics, use the returned `operationResource` with `resources/read`; never replay a write to expand a result.
 
 For diagnosis-only requests, explain the result and stop. For an explicit setup/repair request, treat diagnosis as a checkpoint: continue with the relevant supervised setup tools, preserving approval. A report's instruction to stop and reply must not be interpreted as evidence that the user's requested repair was completed.
 

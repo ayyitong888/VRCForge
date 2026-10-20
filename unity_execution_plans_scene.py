@@ -155,7 +155,7 @@ def build_scene_execution_plan(target_name: str, arguments: dict[str, Any]) -> l
             },
         ),
         "vrcforge_set_gameobject_active": ("vrc_set_gameobject_active", lambda: {"gameObjectPath": _gameobject_target(params), "active": bool(params.get("active", params.get("isActive"))), "preview": False}),
-        "vrcforge_unpack_prefab": ("vrc_unpack_prefab", lambda: {"gameObjectPath": _gameobject_target(params), "mode": _text(params.get("mode") or "outermost"), "preview": False}),
+        "vrcforge_unpack_prefab": ("vrc_unpack_prefab", lambda: {"gameObjectPath": _gameobject_target(params), "mode": _text(params.get("mode") or "completely"), "preview": False}),
     }
     if target_name in gameobject_tools:
         tool, factory = gameobject_tools[target_name]

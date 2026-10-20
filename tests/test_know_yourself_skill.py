@@ -922,7 +922,7 @@ def test_dashboard_process_discovery_unavailable_or_failed_stays_blocked(
         assert report["gaps"] == ["selected_unity_project_process_unknown"]
 
 
-def test_dashboard_registers_read_only_know_yourself_skill(monkeypatch: Any) -> None:
+def test_dashboard_preserves_optional_read_only_readiness_tool(monkeypatch: Any) -> None:
     import dashboard_server
 
     monkeypatch.setattr(dashboard_server, "build_agent_connection_request", lambda _params: object())
@@ -963,29 +963,20 @@ def test_dashboard_registers_read_only_know_yourself_skill(monkeypatch: Any) -> 
 
     report = dashboard_server.KNOW_YOURSELF_READINESS.know_yourself_sync({"editorFocusConfirmed": "true"})
     executed = dashboard_server.AGENT_GATEWAY.runtime_skills.execute(
-        "know-yourself",
+        "vrcforge_know_yourself",
         {"editorFocusConfirmed": True},
         "know-yourself-contract-test",
     )
     tool = dashboard_server.AGENT_GATEWAY._tools["vrcforge_know_yourself"]
-    group = next(
-        item
-        for item in dashboard_server.AGENT_GATEWAY.skills.build_skill_registry()["skills"]
-        if item["name"] == "know-yourself"
-    )
+    registry = dashboard_server.AGENT_GATEWAY.skills.build_skill_registry()["skills"]
 
     assert report["readyForUnityWork"] is True
     assert executed["status"] == "executed"
-    assert executed["entrypointTool"] == "vrcforge_know_yourself"
-    assert executed["entrypoint"]["result"]["readyForUnityWork"] is True
+    assert executed["result"]["readyForUnityWork"] is True
     assert tool.write is False
     assert tool.category == "read/debug"
     assert tool.handler.__self__ is dashboard_server.KNOW_YOURSELF_READINESS
     assert tool.handler.__func__ is dashboard_server.KNOW_YOURSELF_READINESS.know_yourself_sync.__func__
-    assert group["entrypointTool"] == "vrcforge_know_yourself"
-    assert group["available"] is True
-    assert group["permissionMode"] == "read_only"
-    assert "connection problem" in group["whenToUse"]
-    assert "acknowledgement never proves readiness" in group["instructions"]
+    assert not any(item["name"] == "know-yourself" and item["source"] == "builtin" for item in registry)
     assert "connection problem" in tool.description
     assert "When NOT to use" in tool.description

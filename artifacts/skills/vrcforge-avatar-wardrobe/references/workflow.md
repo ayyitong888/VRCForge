@@ -29,6 +29,7 @@
 ## 通用写入约束
 
 - 修改前保存受影响事实和 checkpoint，执行权限与精确 preview 批准缺一不可。
+- 场景目标属于 Prefab instance 时，任何 authoring write 前先对精确 instance 调用 `vrcforge_unpack_prefab` preview，核对 GlobalObjectId、源 prefab GUID、依赖 hash 和 scene path；批准后使用 `mode=completely`，重新绑定解包后的对象身份并确认 persisted readback。源 prefab 资产、作者 Modular Avatar 组件、骨架和动画引用保留；普通材质属性按其自身工具契约判断，不把材质写入等同于破坏源 prefab。
 - 只修证据证明与批准目标不符的内容，保留正确行为与源时间线。
 - 修改后回读真实结果，与批准差异比较；验证范围包含实际受影响的依赖，而不是固定服装矩阵。
 - 参数、开关、曲线、形态键、菜单路径和过渡语义均不由此 Skill 提供默认答案。
@@ -42,6 +43,8 @@
 核对采样覆盖、输入回执、frame/step 身份、stateSetHash 与 source/selected counts。采集 completed 不等于行为或视觉验收通过；只确认实际证据支持的结论。完成或失败后恢复用户批准的 Play 状态并独立回读，不默认退出原有会话。
 
 这些是安全依赖，不构成某种衣柜的行为规范。未发生对应操作时，不要求走完安装、观察、清理或其他分支。
+
+面捕安装/serialized 配置的编辑态读回与 Play/视觉运行验收分开记录；前者完成不代表后者通过，后者必须另有明确批准和有限观察预算。
 
 ## 从零新建与个人偏好
 

@@ -404,7 +404,7 @@ class PreparedAddOutfitStateBuilder:
             mode = str(
                 normalized.get("unpack_mode")
                 or normalized.get("unpackMode")
-                or "outermost"
+                or "completely"
             ).strip().lower()
             if mode not in {"outermost", "completely"}:
                 raise RuntimeError(
