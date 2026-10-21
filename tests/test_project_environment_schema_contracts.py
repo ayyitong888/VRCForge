@@ -45,10 +45,12 @@ def test_receipt_selectors_and_restore_exact_fields(catalog):
     assert {'projectPath','backupPath','backupSha256','installedSha256'} <= set(restore['required'])
 
 def test_application_project_writes_preserve_registered_identity_policy(catalog):
-    from unity_tool_schema_projection import _PROJECT_APPLICATION_WRITE_TOOLS
+    from mcp_tool_descriptor import _APPLICATION_OWNED_WRITE_TOOLS
     gateway,tools=catalog
-    for name in _PROJECT_APPLICATION_WRITE_TOOLS:
+    for name in _APPLICATION_OWNED_WRITE_TOOLS:
         assert gateway._write_handlers[name].requires_approved_execution_context is False
         assert 'executionTarget' not in tools[name]['inputSchema'].get('required',[])
+        assert tools[name]['_meta']['inputEnvelopeExtension']['requiredAtRuntime'] is False
+        assert tools[name]['requiredIdentity']['writeBinding'] == 'handler_managed'
     Draft202012Validator(tools['vrcforge_create_project']['inputSchema']).validate({'projectRoot':'D:/NotCreated','template':'Avatar'})
     Draft202012Validator(tools['vrcforge_select_project']['inputSchema']).validate({'project_root':'D:/Existing'})

@@ -54,6 +54,11 @@ _BLENDSHAPE_PREVIEW_ITEM: dict[str, Any] = {
 
 
 UNITY_READ_TOOL_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
+    "vrcforge_inspect_unity_editor_dialogs": {
+        "type": "object", "additionalProperties": False,
+        "required": ["projectPath"],
+        "properties": {"projectPath": {"type": "string", "description": "Exact selected Unity project whose native dialogs should be inspected."}},
+    },
     **{name: {
         "type": "object", "additionalProperties": False,
         "properties": {

@@ -76,6 +76,7 @@ EXTERNAL_MCP_READ_TOOL_BLOCKS: dict[str, frozenset[str]] = {
             "vrcforge_core_upgrade_status",
             "vrcforge_package_install_plan",
             "vrcforge_package_manager_status",
+            "vrcforge_inspect_unity_editor_dialogs",
             "vrcforge_project_lifecycle_status",
             "vrcforge_project_create_plan",
             "vrcforge_project_catalog_registration_status",
@@ -261,6 +262,7 @@ EXTERNAL_MCP_WRITE_TOOL_BLOCKS: dict[str, frozenset[str]] = {
             "vrcforge_select_project",
             "vrcforge_set_play_mode",
             "vrcforge_confirm_unity_reload_dialog",
+            "vrcforge_handle_unity_editor_dialog",
             "vrcforge_scene_transition",
         }
     ),

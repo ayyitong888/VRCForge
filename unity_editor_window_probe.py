@@ -13,7 +13,7 @@ from typing import Any
 
 _RELOAD_LABELS = {"reload", "重新加载", "重新載入", "リロード"}
 _RELOAD_CONFIRMATION_SCHEMA = "vrcforge.unity_editor_reload_confirmation.v1"
-_BUTTON_CLICK_MESSAGE = 0x00F5
+_BUTTON_COMMAND_MESSAGE = 0x0111
 
 
 class UnityReloadDialogError(ValueError):
@@ -194,20 +194,10 @@ def confirm_unity_reload_dialog(params: dict[str, Any]) -> dict[str, Any]:
     deadline = time.monotonic() + 2.0
     while True:
         after = probe_unity_reload_dialog(project_root)
+        verification_error = None
         if after.get("available") is not True or after.get("probeError") or after.get("unityProcessId") != process_id:
-            return {
-                "schema": _RELOAD_CONFIRMATION_SCHEMA,
-                "ok": False,
-                "projectPath": str(project_root),
-                "unityProcessId": process_id,
-                "reloadClicked": True,
-                "dialogClosed": None,
-                "mutationStarted": True,
-                "commitState": "unknown",
-                "error": "Reload message was dispatched, but the same Unity process could not be inspected to verify dialog closure.",
-                "retryable": False,
-            }
-        if not after.get("blocked"):
+            verification_error = "Reload message was dispatched, but the same Unity process could not be inspected to verify dialog closure."
+        elif not after.get("blocked"):
             return {
                 "schema": _RELOAD_CONFIRMATION_SCHEMA,
                 "ok": True,
@@ -218,8 +208,21 @@ def confirm_unity_reload_dialog(params: dict[str, Any]) -> dict[str, Any]:
                 "reloadClicked": True,
                 "dialogClosed": True,
             }
-        if time.monotonic() >= deadline:
-            raise UnityReloadDialogError("Reload message was dispatched, but the dialog did not close within two seconds.")
+        elif time.monotonic() >= deadline:
+            verification_error = "Reload message was dispatched, but the dialog did not close within two seconds."
+        if verification_error:
+            return {
+                "schema": _RELOAD_CONFIRMATION_SCHEMA,
+                "ok": False,
+                "projectPath": str(project_root),
+                "unityProcessId": process_id,
+                "reloadClicked": True,
+                "dialogClosed": None,
+                "mutationStarted": True,
+                "commitState": "unknown",
+                "error": verification_error,
+                "retryable": False,
+            }
         time.sleep(0.05)
 
 
@@ -230,7 +233,18 @@ def _positive_handle(value: Any, label: str) -> int:
 
 
 def _post_reload_button_click(process_id: int, window_handle: int, button_handle: int) -> None:
-    """Post BM_CLICK only after live Win32 parent, process, class, and label checks."""
+    post_native_dialog_button_click(process_id, window_handle, button_handle, _RELOAD_LABELS)
+
+
+def post_native_dialog_button_click(
+    process_id: int, window_handle: int, button_handle: int,
+    expected_button_text: str | set[str],
+) -> None:
+    """Notify the exact native push-button parent without foreground/input capture.
+
+    The caller owns project/dialog approval and must verify the resulting state.
+    This dispatch owns no handles or input attachments and sends exactly once.
+    """
 
     if os.name != "nt":
         raise UnityReloadDialogError("Unity Reload confirmation requires Windows.")
@@ -249,10 +263,12 @@ def _post_reload_button_click(process_id: int, window_handle: int, button_handle
     user32.GetClassNameW.restype = ctypes.c_int
     user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
     user32.GetWindowTextW.restype = ctypes.c_int
-    user32.SetForegroundWindow.argtypes = [wintypes.HWND]
-    user32.SetForegroundWindow.restype = wintypes.BOOL
-    user32.GetForegroundWindow.argtypes = []
-    user32.GetForegroundWindow.restype = wintypes.HWND
+    user32.GetDlgCtrlID.argtypes = [wintypes.HWND]
+    user32.GetDlgCtrlID.restype = ctypes.c_int
+    user32.GetDlgItem.argtypes = [wintypes.HWND, ctypes.c_int]
+    user32.GetDlgItem.restype = wintypes.HWND
+    user32.GetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int]
+    user32.GetWindowLongW.restype = wintypes.LONG
     user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
     user32.PostMessageW.restype = wintypes.BOOL
 
@@ -272,28 +288,26 @@ def _post_reload_button_click(process_id: int, window_handle: int, button_handle
     user32.GetClassNameW(button_handle, class_name, len(class_name))
     label = ctypes.create_unicode_buffer(256)
     user32.GetWindowTextW(button_handle, label, len(label))
-    if class_name.value.casefold() != "button" or _normalize_control_label(label.value) not in _RELOAD_LABELS:
-        raise UnityReloadDialogError("The approved control is no longer the exact Unity Reload button.")
-    _activate_reload_dialog(user32, window_handle)
+    expected_labels = expected_button_text if isinstance(expected_button_text, set) else {expected_button_text}
+    if class_name.value.casefold() != "button" or _normalize_control_label(label.value) not in {_normalize_control_label(text) for text in expected_labels}:
+        raise UnityReloadDialogError("The approved control is no longer the exact native dialog button.")
+    # Button class also contains checkboxes/radios: only standard push buttons
+    # (BS_PUSHBUTTON / BS_DEFPUSHBUTTON) have this one-click command contract.
+    if int(user32.GetWindowLongW(button_handle, -16)) & 0xF not in {0, 1}:
+        raise UnityReloadDialogError("The approved native control is not a standard push button.")
+    control_id = int(user32.GetDlgCtrlID(button_handle))
+    if not 0 < control_id <= 0xFFFF or int(user32.GetDlgItem(window_handle, control_id) or 0) != button_handle:
+        raise UnityReloadDialogError("The approved native button control identifier changed.")
+    # Standard background notification used by native dialog procedures and
+    # established Win32 control wrappers; BN_CLICKED=0, LOWORD=control ID,
+    # LPARAM=the checked button HWND. BM_CLICK can be ignored by inactive dialogs.
+    # https://learn.microsoft.com/windows/win32/controls/bn-clicked
     ctypes.set_last_error(0)
-    if not user32.PostMessageW(button_handle, _BUTTON_CLICK_MESSAGE, 0, 0):
+    if not user32.PostMessageW(window_handle, _BUTTON_COMMAND_MESSAGE, control_id, button_handle):
         error_code = ctypes.get_last_error()
         raise UnityReloadDialogError(
             f"The approved Unity Reload button could not be clicked: Windows error {error_code}."
         )
-
-
-def _activate_reload_dialog(user32: Any, window_handle: int) -> None:
-    """Activate the approved modal before BM_CLICK; inactive dialogs may ignore it."""
-
-    ctypes.set_last_error(0)
-    if not user32.SetForegroundWindow(window_handle):
-        error_code = ctypes.get_last_error()
-        raise UnityReloadDialogError(
-            f"The approved Unity Reload dialog could not be activated: Windows error {error_code}."
-        )
-    if int(user32.GetForegroundWindow() or 0) != window_handle:
-        raise UnityReloadDialogError("The approved Unity Reload dialog did not become the foreground window.")
 
 
 def _enumerate_process_windows(process_id: int) -> list[dict[str, Any]]:
@@ -319,6 +333,10 @@ def _enumerate_process_windows(process_id: int) -> list[dict[str, Any]]:
     user32.IsWindowEnabled.restype = wintypes.BOOL
     user32.GetWindow.argtypes = [wintypes.HWND, wintypes.UINT]
     user32.GetWindow.restype = wintypes.HWND
+    user32.GetParent.argtypes = [wintypes.HWND]
+    user32.GetParent.restype = wintypes.HWND
+    user32.GetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int]
+    user32.GetWindowLongW.restype = wintypes.LONG
 
     def read_text(hwnd: int) -> str:
         length = min(max(int(user32.GetWindowTextLengthW(hwnd)), 0), 4096)
@@ -350,7 +368,12 @@ def _enumerate_process_windows(process_id: int) -> list[dict[str, Any]]:
                     {
                         "windowHandle": int(child),
                         "text": text[:512],
+                        "textTruncated": int(user32.GetWindowTextLengthW(child)) > 512,
                         "className": class_name[:128],
+                        "visible": bool(user32.IsWindowVisible(child)),
+                        "enabled": bool(user32.IsWindowEnabled(child)),
+                        "parentWindow": int(user32.GetParent(child) or 0),
+                        **({"buttonStyle": int(user32.GetWindowLongW(child, -16)) & 0xF} if class_name.casefold() == "button" else {}),
                     }
                 )
             return True
@@ -362,6 +385,7 @@ def _enumerate_process_windows(process_id: int) -> list[dict[str, Any]]:
                     "windowHandle": int(hwnd),
                     "ownerWindow": int(user32.GetWindow(hwnd, 4) or 0),
                     "title": read_text(hwnd)[:512],
+                    "titleTruncated": int(user32.GetWindowTextLengthW(hwnd)) > 512,
                     "className": read_class(hwnd)[:128],
                     "visible": True,
                     "enabled": bool(user32.IsWindowEnabled(hwnd)),

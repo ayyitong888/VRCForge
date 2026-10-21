@@ -290,6 +290,7 @@ EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
         "properties": {
             "projectPath": _PROJECT_PATH_PROPERTY,
             "action": {"type": "string", "enum": ["save", "save_as"]},
+            "saveProjectAssets": {"type": "boolean", "default": False, "description": "False saves only the active scene. True explicitly also saves all modified project assets; preview lists those assets."},
             "scenePath": {"type": "string", "pattern": "^Assets/.*\\.unity$", "description": "Exact active scene identity; never a hierarchy-path fallback."},
             "destinationScenePath": {"type": "string", "pattern": "^Assets/.*\\.unity$", "description": "Required only for save_as and must not exist."},
         },
@@ -762,6 +763,17 @@ EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
         "properties": {
             "projectPath": {"type": "string", "description": "Exact existing Unity project root bound to this external write call."},
             "isPlaying": {"type": "boolean", "description": "True to enter Play Mode; false to exit Play Mode."},
+        },
+    },
+    "vrcforge_handle_unity_editor_dialog": {
+        "type": "object", "additionalProperties": False,
+        "required": ["projectPath", "dialogId", "buttonHandle", "buttonText", "sourceApprovalId"],
+        "properties": {
+            "projectPath": {"type": "string"},
+            "dialogId": {"type": "string", "description": "Exact current ID returned by inspect_unity_editor_dialogs."},
+            "buttonHandle": {"type": "integer", "minimum": 1},
+            "buttonText": {"type": "string", "minLength": 1, "description": "Exact observed button text, including any accelerator marker."},
+            "sourceApprovalId": {"type": "string", "description": "The active original operation whose approved write and ready checkpoint this confirmation continues."},
         },
     },
     "vrcforge_confirm_unity_reload_dialog": {

@@ -1792,6 +1792,12 @@ class AgentApprovalTransactionService:
                     or self._project_lock_key(project_root) == "__global__"
                 )
             ]
+            dialog_source = (
+                self.get_native_dialog_source_approval(str(ensure_dict(ensure_dict(approval.get("arguments")).get("expectedSource")).get("sourceApprovalId") or ""))
+                if target_tool == "vrcforge_handle_unity_editor_dialog" else None
+            )
+            if dialog_source:
+                in_flight_writes = [entry for entry in in_flight_writes if entry.get("approvalId") != dialog_source["sourceApprovalId"]]
             if in_flight_writes:
                 self._ports.append_audit(
                     {
@@ -1809,8 +1815,13 @@ class AgentApprovalTransactionService:
                     "error": "Another approved write is still applying. Wait for it to finish (or fail into recovery) before running this write.",
                 }
 
-            project_lock_key, project_lock_acquired = self._try_acquire_project_write(project_root)
-            if not project_lock_acquired:
+            if dialog_source:
+                # This button continues the same approved operation; its parent
+                # retains the project lock and the original asset checkpoint.
+                project_lock_key, project_lock_acquired = self._project_lock_key(project_root), False
+            else:
+                project_lock_key, project_lock_acquired = self._try_acquire_project_write(project_root)
+            if not project_lock_acquired and not dialog_source:
                 self._ports.append_audit(
                     {
                         "event": "approval_blocked_by_project_write_lock",
@@ -1833,6 +1844,8 @@ class AgentApprovalTransactionService:
                 if self._entry_project_key(recovery) in {self._project_lock_key(project_root), "__global__"}
                 or self._project_lock_key(project_root) == "__global__"
             ]
+            if dialog_source:
+                active_recoveries = [recovery for recovery in active_recoveries if str(recovery.get("checkpointId") or "") != dialog_source["checkpointId"]]
             if active_recoveries and target_tool not in APPLY_RECOVERY_EXEMPT_WRITE_TARGETS:
                 self._ports.append_audit(
                     {
@@ -2455,6 +2468,24 @@ class AgentApprovalTransactionService:
                 if item.get("status") != "expired"
             ]
             return [redact_sensitive(item) for item in filtered]
+
+    def get_native_dialog_source_approval(self, approval_id: str) -> dict[str, Any] | None:
+        """Return the active parent operation's existing checkpoint, never an old approval."""
+        with self._ports.state.shared_state_lock:
+            approval = self._ports.state.approvals.get(str(approval_id or ""))
+            in_flight = self._ports.state.in_flight_apply_writes.get(str(approval_id or ""))
+            if not isinstance(approval, Mapping) or approval.get("status") != "applying" or not isinstance(in_flight, Mapping):
+                return None
+            checkpoint = ensure_dict(approval.get("checkpoint"))
+            if checkpoint.get("status") != "ready" or not checkpoint.get("id"):
+                return None
+            return {
+                "approved": True, "sourceApprovalId": str(approval_id),
+                "projectPath": self._approval_project_root(dict(approval)),
+                "checkpointReady": True, "checkpointId": str(checkpoint["id"]),
+                "sourceTool": str(approval.get("targetTool") or ""),
+                "operationId": str(in_flight.get("operationId") or approval_id),
+            }
 
     def get_trusted_task_context(self, approval_id: str) -> dict[str, Any] | None:
         """Read one approval's persisted task context under the shared lock."""
@@ -3384,6 +3415,15 @@ class AgentApprovalTransactionService:
                     "Runtime observation additionally creates bounded managed artifacts with create-new semantics; "
                     "the parameter is never automatically restored and partial artifacts are retained as evidence."
                 ),
+            }
+        if handler.name == "vrcforge_handle_unity_editor_dialog":
+            return {
+                "schema": ROLLBACK_POLICY_SCHEMA, "required": False,
+                "kind": "native_dialog_continues_approved_operation", "approvalRequired": True,
+                "preWriteCheckpointRequired": False, "checkpointScope": ["original-approved-operation"],
+                "restoreTool": "vrcforge_restore_checkpoint", "postRestoreValidationRequired": True,
+                "coverageAudit": "vrcforge.unity_editor_dialog_action.v1",
+                "note": "The exact button continues an active approved operation under its existing lock and checkpoint. Dialog closure does not verify asset success or enlarge the original write scope.",
             }
         if handler.name == "vrcforge_confirm_unity_reload_dialog":
             return {

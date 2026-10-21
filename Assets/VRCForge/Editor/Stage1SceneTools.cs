@@ -159,7 +159,7 @@ namespace VRCForge.Editor
         }
     }
 
-    [VRCForgeCommand(toolId: "vrc_scene_save", Summary = "when-to-use: explicitly save the active scene and modified project assets, or save-as one new scene, with preview and approval binding. when-NOT-to-use: never save implicitly or overwrite a save-as destination. Negative example: checkpoint preparation is not a save request.")]
+    [VRCForgeCommand(toolId: "vrc_scene_save", Summary = "when-to-use: explicitly save only the active scene, or save-as one new scene, with preview and approval binding. Set saveProjectAssets=true only when modified project assets are also explicitly requested. when-NOT-to-use: never save implicitly or overwrite a save-as destination. Negative example: checkpoint preparation is not a save request.")]
     public static class SceneSaveTool
     {
         public class Parameters
@@ -167,6 +167,7 @@ namespace VRCForge.Editor
             [VRCForgeInput("save or save_as.", IsRequired = true)] public string action { get; set; } = "save";
             [VRCForgeInput("Exact active saved scene path for save, or source scene path for save_as.", IsRequired = true)] public string scenePath { get; set; } = "";
             [VRCForgeInput("Absent destination scene path for save_as.", IsRequired = false)] public string destinationScenePath { get; set; } = "";
+            [VRCForgeInput("Also save all modified project assets. Default false saves only the active scene.", IsRequired = false)] public bool? saveProjectAssets { get; set; } = false;
             [VRCForgeInput("Return a non-mutating preview.", IsRequired = false)] public bool? preview { get; set; } = false;
             [VRCForgeInput("Expected active Unity project root from preview.", IsRequired = false)] public string expectedProjectPath { get; set; } = "";
             [VRCForgeInput("Expected preview digest.", IsRequired = false)] public string expectedPreviewDigest { get; set; } = "";
@@ -186,6 +187,7 @@ namespace VRCForge.Editor
             var parameters = p ?? new JObject();
             var preview = parameters["preview"]?.Value<bool?>() ?? false;
             var action = (parameters["action"]?.ToString() ?? "").Trim().ToLowerInvariant();
+            var saveProjectAssets = parameters["saveProjectAssets"]?.Value<bool?>() ?? false;
             var project = Stage1SceneToolCore.ProjectPath();
             var mutationStarted = false;
             try
@@ -204,9 +206,9 @@ namespace VRCForge.Editor
                 var hierarchy = Stage1SceneToolCore.HierarchyDigest(scene);
                 var setup = Stage1SceneToolCore.SetupDigest();
                 var open = Stage1SceneToolCore.OpenStateDigest();
-                var dirtyAssets = DirtyAssets();
+                var dirtyAssets = saveProjectAssets ? DirtyAssets() : Array.Empty<UnityEngine.Object>();
                 var assetState = string.Join("|", dirtyAssets.Select(asset => AssetDatabase.GetAssetPath(asset) + ":" + asset.GetInstanceID() + ":" + EditorUtility.GetDirtyCount(asset)));
-                var digest = Stage1SceneToolCore.Digest(new[] { Stage1SceneToolCore.SaveSchema, action, project, scenePath, destination, scene.handle.ToString(CultureInfo.InvariantCulture), scene.isDirty ? "true" : "false", evidence.Guid, evidence.File.Digest, evidence.File.Identity, evidence.Meta.Digest, evidence.Meta.Identity, hierarchy, setup, open, assetState });
+                var digest = Stage1SceneToolCore.Digest(new[] { Stage1SceneToolCore.SaveSchema, action, project, scenePath, destination, saveProjectAssets ? "true" : "false", scene.handle.ToString(CultureInfo.InvariantCulture), scene.isDirty ? "true" : "false", evidence.Guid, evidence.File.Digest, evidence.File.Identity, evidence.Meta.Digest, evidence.Meta.Identity, hierarchy, setup, open, assetState });
                 var binding = new Dictionary<string, object>
                 {
                     ["expectedSceneHandle"] = scene.handle, ["expectedSceneGuid"] = evidence.Guid,
@@ -217,7 +219,7 @@ namespace VRCForge.Editor
                     ["expectedOpenSceneStateDigest"] = open
                 };
                 if (preview)
-                    return VRCForgeToolResult.Completed("Scene save preview completed.", SavePayload(action, project, scenePath, destination, digest, binding, scene, evidence, hierarchy, setup, open));
+                    return VRCForgeToolResult.Completed("Scene save preview completed.", SavePayload(action, project, scenePath, destination, digest, binding, scene, evidence, hierarchy, setup, open, saveProjectAssets));
 
                 Stage1SceneToolCore.RequireExpected(parameters, "ProjectPath", project);
                 Stage1SceneToolCore.RequireExpected(parameters, "PreviewDigest", digest, 64);
@@ -231,19 +233,26 @@ namespace VRCForge.Editor
                 Stage1SceneToolCore.RequireExpected(parameters, "OpenSceneStateDigest", open);
                 Stage1SceneToolCore.RequireExpectedBool(parameters, "SceneDirty", scene.isDirty);
                 if (action == "save" && !scene.isDirty && dirtyAssets.Length == 0)
-                    return VRCForgeToolResult.Completed("No scene or project assets need saving.", SavePayload(action, project, scenePath, destination, digest, binding, scene, evidence, hierarchy, setup, open, false, true));
+                    return VRCForgeToolResult.Completed("No requested scene or project assets need saving.", SavePayload(action, project, scenePath, destination, digest, binding, scene, evidence, hierarchy, setup, open, saveProjectAssets, false, true));
                 if (action == "save_as" && SceneObjectCopyCore.AssetOrMetaExists(destination)) throw new SceneObjectCopyException("The save_as destination appeared after preview; overwrite is unsupported.");
                 mutationStarted = true;
                 if ((action == "save_as" || scene.isDirty) && !EditorSceneManager.SaveScene(scene, action == "save_as" ? destination : scenePath, false))
                     throw new SceneObjectCopyException("Unity did not confirm the scene save.");
-                // Explicitly approved save of current scene/project assets, including a clean scene with dirty assets.
-                AssetDatabase.SaveAssets();
-                AssetDatabase.Refresh(ImportAssetOptions.ForceSynchronousImport);
+                // Project-wide asset saves require their own explicit scope in the approved preview.
+                if (saveProjectAssets)
+                {
+                    AssetDatabase.SaveAssets();
+                    AssetDatabase.Refresh(ImportAssetOptions.ForceSynchronousImport);
+                }
+                else
+                {
+                    AssetDatabase.ImportAsset(action == "save_as" ? destination : scenePath, ImportAssetOptions.ForceSynchronousImport);
+                }
                 var loaded = SceneManager.GetSceneByPath(action == "save_as" ? destination : scenePath);
                 var afterEvidence = SceneObjectCopyCore.ReadStableAssetEvidence(action == "save_as" ? destination : scenePath, "saved scene asset");
                 if (!loaded.IsValid() || !loaded.isLoaded || loaded.isDirty || Stage1SceneToolCore.HierarchyDigest(loaded) != hierarchy)
                     throw new SceneObjectCopyException("Scene save readback did not match the approved scene.");
-                return VRCForgeToolResult.Completed("Scene save committed and verified.", SavePayload(action, project, scenePath, destination, digest, binding, loaded, afterEvidence, hierarchy, Stage1SceneToolCore.SetupDigest(), Stage1SceneToolCore.OpenStateDigest(), true, false));
+                return VRCForgeToolResult.Completed("Scene save committed and verified.", SavePayload(action, project, scenePath, destination, digest, binding, loaded, afterEvidence, hierarchy, Stage1SceneToolCore.SetupDigest(), Stage1SceneToolCore.OpenStateDigest(), saveProjectAssets, true, false));
             }
             catch (Exception ex)
             {
@@ -265,14 +274,14 @@ namespace VRCForge.Editor
                 .OrderBy(AssetDatabase.GetAssetPath, StringComparer.Ordinal).ThenBy(asset => asset.GetInstanceID()).ToArray();
         }
 
-        private static object SavePayload(string action, string project, string scenePath, string destination, string digest, Dictionary<string, object> binding, Scene scene, StableAssetEvidence evidence, string hierarchy, string setup, string open, bool changed = false, bool noChange = false)
+        private static object SavePayload(string action, string project, string scenePath, string destination, string digest, Dictionary<string, object> binding, Scene scene, StableAssetEvidence evidence, string hierarchy, string setup, string open, bool saveProjectAssets, bool changed = false, bool noChange = false)
         {
             var actual = action == "save_as" ? destination : scenePath;
             return new { schema = Stage1SceneToolCore.SaveSchema, operation = "scene_save_" + action, ok = true, preview = !changed && !noChange, verified = true, changed, mutationStarted = changed, commitState = changed ? "committed" : noChange ? "no_change" : "not_started", projectPath = project, previewDigest = digest, applyBinding = Stage1SceneToolCore.Binding(binding), readback = new { path = actual, guid = evidence.Guid, fileDigest = evidence.File.Digest, fileIdentity = evidence.File.Identity, metaDigest = evidence.Meta.Digest, metaIdentity = evidence.Meta.Identity, scene = Stage1SceneToolCore.Readback(scene), hierarchyDigest = hierarchy, sceneSetupDigest = setup, openSceneStateDigest = open }, scenePath, destinationScenePath = destination, cleanNoChange = noChange,
-                effect = new { savesActiveScene = true, savesProjectAssets = true,
-                    dirtyAssetPaths = DirtyAssets().Select(AssetDatabase.GetAssetPath).Distinct().ToArray(),
-                    saveCallbacksMayAffectOtherAssets = true, snapshotIncludesUnsavedState = false },
-                assetsSaveInvoked = changed,
+                effect = new { savesActiveScene = true, savesProjectAssets = saveProjectAssets,
+                    dirtyAssetPaths = (saveProjectAssets ? DirtyAssets() : Array.Empty<UnityEngine.Object>()).Select(AssetDatabase.GetAssetPath).Distinct().ToArray(),
+                    saveCallbacksMayAffectOtherAssets = saveProjectAssets, snapshotIncludesUnsavedState = false },
+                assetsSaveInvoked = changed && saveProjectAssets,
                 remainingDirtyAssetPaths = changed ? DirtyAssets().Select(AssetDatabase.GetAssetPath).Distinct().ToArray() : null,
                 message = noChange ? "no change" : "verified" };
         }

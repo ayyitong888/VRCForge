@@ -24,8 +24,8 @@ def _source(name):
     return (ROOT / path).read_text(encoding="utf-8-sig")
 
 
-@pytest.mark.parametrize("kind", ["new", "save", "save_clean", "save_as"])
-def test_explicit_save_and_save_as_persist_project_assets(tmp_path, kind):
+@pytest.mark.parametrize("kind,save_project_assets", [("new", True), ("save", False), ("save_as", False), ("save", True), ("save_clean", True), ("save_as", True)])
+def test_explicit_save_preserves_unrelated_assets_unless_requested(tmp_path, kind, save_project_assets):
     if kind == "new":
         source = _source("SaveNewSceneTool")
         begin = source.index("if (!EditorSceneManager.SaveScene(")
@@ -35,7 +35,7 @@ def test_explicit_save_and_save_as_persist_project_assets(tmp_path, kind):
         source = _source("Stage1SceneTools")
         begin = source.index("mutationStarted = true;", source.index("public static class SceneSaveTool"))
         end = source.index('return VRCForgeToolResult.Completed("Scene save committed', begin)
-        setup = 'var scene = new Scene { path="Assets/Existing.unity", isDirty='+("false" if kind == "save_clean" else "true")+' }; Probe.saved=scene; Probe.savedPath=scene.path; string action="'+("save" if kind == "save_clean" else kind)+'", scenePath=scene.path, destination="Assets/Copy.unity";'
+        setup = 'bool saveProjectAssets='+str(save_project_assets).lower()+'; var scene = new Scene { path="Assets/Existing.unity", isDirty='+("false" if kind == "save_clean" else "true")+' }; Probe.saved=scene; Probe.savedPath=scene.path; string action="'+("save" if kind == "save_clean" else kind)+'", scenePath=scene.path, destination="Assets/Copy.unity";'
     segment = source[begin:end]
     program = r'''
 using System;
@@ -66,13 +66,13 @@ class Probe {
  return null;}
  static void Run(bool corrupt){globalSaves=sceneWrites=imports=evidenceReads=sceneReads=0;unrelatedDiskValue=1;unrelatedMemoryValue=2;unrelatedDirty=true;badReadback=corrupt;bool rejected=false;
  try{Save();}catch(SceneObjectCopyException){rejected=true;}
- if(globalSaves!=EXPECTED_SAVE||unrelatedDiskValue!=EXPECTED_DISK||unrelatedDirty!=EXPECTED_DIRTY)throw new Exception("explicit save project asset semantics regressed");
+ if(globalSaves!=EXPECTED_SAVE||unrelatedDiskValue!=EXPECTED_DISK||unrelatedDirty!=EXPECTED_DIRTY)throw new Exception("scene-only save wrote unrelated dirty assets or explicit project-save behavior regressed");
  if(sceneWrites!=EXPECTED_SCENE||imports!=1||evidenceReads!=1||sceneReads!=1||saved.isDirty)throw new Exception("scene save/import/readback regressed");
  if(rejected!=corrupt)throw new Exception("scene hierarchy readback guard regressed");
  Console.WriteLine("PASS scoped scene save; unrelated asset retained; corruptReadback="+corrupt);}
  static void Main(){Run(false);Run(true);}
 }
-'''.replace('//SETUP', setup).replace('//SEGMENT', segment).replace('EXPECTED_SAVE', '1' if kind in {'new','save','save_clean','save_as'} else '0').replace('EXPECTED_DISK', '2' if kind in {'new','save','save_clean','save_as'} else '1').replace('EXPECTED_DIRTY', 'false' if kind in {'new','save','save_clean','save_as'} else 'true').replace('EXPECTED_SCENE', '0' if kind == 'save_clean' else '1')
+'''.replace('//SETUP', setup).replace('//SEGMENT', segment).replace('EXPECTED_SAVE', '1' if save_project_assets else '0').replace('EXPECTED_DISK', '2' if save_project_assets else '1').replace('EXPECTED_DIRTY', 'false' if save_project_assets else 'true').replace('EXPECTED_SCENE', '0' if kind == 'save_clean' else '1')
     dotnet = shutil.which('dotnet')
     base = Path(os.environ.get('ProgramFiles', 'C:/Program Files')) / 'dotnet'
     compilers = sorted((base/'sdk').glob('*/Roslyn/bincore/csc.dll'))
@@ -86,3 +86,39 @@ class Probe {
     run=subprocess.run([dotnet,str(dll)],capture_output=True,text=True,timeout=30)
     assert run.returncode==0,run.stdout+run.stderr
     assert run.stdout.count('PASS')==2
+
+
+def test_scene_only_save_scope_is_default_and_digest_bound():
+    source = _source("Stage1SceneTools")
+    block = source[source.index("public static class SceneSaveTool"):source.index("public static class SceneTransitionTool")]
+    assert 'public bool? saveProjectAssets { get; set; } = false;' in block
+    assert 'var saveProjectAssets = parameters["saveProjectAssets"]?.Value<bool?>() ?? false;' in block
+    assert 'var dirtyAssets = saveProjectAssets ? DirtyAssets() : Array.Empty<UnityEngine.Object>();' in block
+    assert 'saveProjectAssets ? "true" : "false"' in block
+    assert 'savesProjectAssets = saveProjectAssets' in block
+    assert 'assetsSaveInvoked = changed && saveProjectAssets' in block
+    assert 'action == "save" && !scene.isDirty && dirtyAssets.Length == 0' in block
+
+
+def test_scene_save_public_schema_exposes_explicit_project_save_scope():
+    import unity_write_input_schemas
+    schemas = [v for v in vars(unity_write_input_schemas).values() if isinstance(v, dict) and "vrcforge_scene_save" in v]
+    assert schemas
+    prop = schemas[0]["vrcforge_scene_save"]["properties"]["saveProjectAssets"]
+    assert prop["type"] == "boolean" and prop["default"] is False
+
+
+@pytest.mark.parametrize("save_project_assets", [False, True])
+def test_scene_save_scope_survives_preview_and_approval_binding(tmp_path, save_project_assets):
+    from stage1_atomic_writes import SCENE_SAVE_TOOL, build_wrapper_arguments, build_preview_arguments, bind_authoritative_preview
+    (tmp_path / "Assets").mkdir()
+    request = {"projectPath": str(tmp_path), "action": "save", "scenePath": "Assets/Target.unity", "saveProjectAssets": save_project_assets}
+    wrapper = build_wrapper_arguments(request, SCENE_SAVE_TOOL)
+    preview = build_preview_arguments(wrapper["arguments"])
+    assert preview["saveProjectAssets"] is save_project_assets
+    assert preview["preview"] is True
+    receipt = {"schema": "vrcforge.scene_save.v1", "operation": "scene_save_save", "ok": True, "preview": True, "verified": True, "mutationStarted": False, "commitState": "not_started", "projectPath": str(tmp_path), "previewDigest": "a" * 64, "applyBinding": {"expectedSceneHandle": 7}, "effect": {"savesActiveScene": True, "savesProjectAssets": save_project_assets}}
+    prepared, approval = bind_authoritative_preview(wrapper, receipt)
+    assert prepared["arguments"]["saveProjectAssets"] is save_project_assets
+    assert prepared["arguments"]["expectedPreviewDigest"] == "a" * 64
+    assert approval["effect"]["savesProjectAssets"] is save_project_assets

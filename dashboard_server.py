@@ -278,6 +278,11 @@ from unity_editor_window_probe import (
     confirm_unity_reload_dialog,
     prepare_unity_reload_confirmation,
 )
+from unity_editor_dialog_tools import (
+    inspect_unity_editor_dialogs,
+    prepare_unity_editor_dialog_action,
+    handle_unity_editor_dialog,
+)
 from project_asset_copy import (
     TOOL_NAME as PROJECT_ASSET_COPY_TOOL,
     build_wrapper_arguments as build_project_asset_copy_wrapper_arguments,
@@ -27585,9 +27590,22 @@ def register_agent_gateway_tools() -> None:
         verification_finalize_handler=set_play_mode_finalize,
         pre_write_checkpoint_required=False,
     )
+    AGENT_GATEWAY.register_tool(
+        "vrcforge_inspect_unity_editor_dialogs",
+        "When to use: inspect the selected Unity project's current native dialog text and exact enabled buttons, including save/import/overwrite/retry/continue/OK/Cancel confirmations. When NOT to use: do not infer that a title alone is readable content or claim custom-drawn controls are supported. Negative example: never guess a button from an old screenshot.",
+        "read/debug", inspect_unity_editor_dialogs,
+    )
+    register_write_handler(
+        "vrcforge_handle_unity_editor_dialog",
+        "When to use: press one exact observed native Unity dialog button to continue its active approved operation, using that operation's sourceApprovalId and existing checkpoint. Inspect the dialog first. In full-permission mode, handle ordinary confirmations yourself within the approved task. When NOT to use: do not use an old approval, enlarge asset write scope, guess a button, or claim dialog closure proves asset success. Negative example: never confirm an unrelated overwrite using another operation's checkpoint; use the dedicated Reload tool for a standalone Reload prompt.",
+        "high",
+        lambda params: handle_unity_editor_dialog(params, source_approval_lookup=AGENT_GATEWAY.approval_transactions.get_native_dialog_source_approval),
+        request_preparer=lambda params, preview: prepare_unity_editor_dialog_action(params, preview, source_approval_lookup=AGENT_GATEWAY.approval_transactions.get_native_dialog_source_approval),
+        pre_write_checkpoint_required=False,
+    )
     register_write_handler(
         "vrcforge_confirm_unity_reload_dialog",
-        "When to use: after explicit confirmation, click only the exact Reload button on the selected Unity project's verified external-modification dialog. When NOT to use: do not dismiss another dialog, click Ignore, target a different Unity Editor, or treat Reload as safe for unsaved changes. Negative example: never accept an unbound Reload dialog while multiple Unity projects are open.",
+        "When to use: resolve the selected Unity project's verified external-modification dialog after confirming the intended scene edits were saved and no newer edits need preserving. In full-permission mode, call this tool yourself with confirmReload=true; other permission modes use the normal approval flow. Do not ask the user to click Reload manually when this tool can handle it. When NOT to use: do not dismiss another dialog, click Ignore, target a different Unity Editor, or reload while unsaved scene changes still need preserving. Negative example: never accept an unbound Reload dialog while multiple Unity projects are open.",
         "high",
         confirm_unity_reload_dialog,
         request_preparer=prepare_unity_reload_confirmation,
@@ -28171,7 +28189,7 @@ def register_agent_gateway_tools() -> None:
     )
     register_write_handler(
         "vrcforge_scene_save",
-        "When to use: explicitly save current work (the exact active scene plus modified project assets), or save_as to one new non-existing Assets scene plus modified project assets, after a bound preview and approval. Both actions persist project assets; save also does so when the scene is clean; the preview lists dirty assets and project save callbacks may affect other assets. When NOT to use: do not implicitly save, open, unload, replace, or overwrite a different scene. Negative example: do not call save_as with an existing destination or use save merely because another tool reports unsaved changes.",
+        "When to use: explicitly save only the exact active scene, or save_as to one new non-existing Assets scene, after a bound preview and approval. Both actions leave unrelated modified project assets unsaved by default. Set saveProjectAssets=true only when saving all modified project assets is explicitly requested; that preview lists dirty assets and project save callbacks may affect other assets. When NOT to use: do not implicitly save, open, unload, replace, or overwrite a different scene. Negative example: do not call save_as with an existing destination or use save merely because another tool reports unsaved changes.",
         "high",
         unity_mcp_write_sync,
         request_preparer=lambda params, preview: prepare_stage1_atomic_request(params, preview, SCENE_SAVE_TOOL),

@@ -5,22 +5,9 @@ from copy import deepcopy
 from typing import Any, Mapping
 
 import runtime_planner_service as planner_policy
-from mcp_tool_descriptor import read_runtime_identity_required
+from mcp_tool_descriptor import read_runtime_identity_required, write_runtime_identity_required
 from unity_read_input_schemas import UNITY_READ_TOOL_INPUT_SCHEMAS
 from unity_write_input_schemas import EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS
-
-
-# Application-owned project operations have always used their own preparation
-# and receipts, with requires_approved_execution_context=False. Adding their
-# discoverable projectPath must not introduce an Editor identity prerequisite.
-_PROJECT_APPLICATION_WRITE_TOOLS = {
-    "vrcforge_create_project", "vrcforge_register_project",
-    "vrcforge_register_project_catalog", "vrcforge_restore_unity_core",
-    "vrcforge_install_unity_core",
-    "vrcforge_rollback_project_catalog_registration",
-    "vrcforge_rollback_project_lifecycle", "vrcforge_select_project",
-    "vrcforge_restore_checkpoint",
-}
 
 
 _DESKTOP_ACTION_SCHEMA = {
@@ -175,5 +162,5 @@ def canonical_unity_write_tool_input_schema(tool_name: str) -> dict[str, Any]:
     # decoration. Internal and external Agents must reason over the exact same
     # namespace lock contract even though their visible Tool projections differ.
     return _with_execution_target_schema(
-        schema, required=name not in _PROJECT_APPLICATION_WRITE_TOOLS,
+        schema, required=write_runtime_identity_required(name),
     )

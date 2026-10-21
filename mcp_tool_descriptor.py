@@ -104,7 +104,17 @@ def identity_scope(name: str, *, write: bool = False, arguments: Mapping[str, An
 
 
 _READ_RUNTIME_IDENTITY_SCOPES = frozenset({"scene", "avatar", "object", "component"})
+_APPLICATION_OWNED_WRITE_TOOLS = frozenset({
+    "vrcforge_create_project", "vrcforge_register_project",
+    "vrcforge_register_project_catalog", "vrcforge_restore_unity_core",
+    "vrcforge_install_unity_core",
+    "vrcforge_rollback_project_catalog_registration",
+    "vrcforge_rollback_project_lifecycle", "vrcforge_select_project",
+    "vrcforge_restore_checkpoint", "vrcforge_confirm_unity_reload_dialog",
+    "vrcforge_handle_unity_editor_dialog",
+})
 _READ_IDENTITY_BOOTSTRAP_TOOLS = frozenset({
+    "vrcforge_inspect_unity_editor_dialogs",
     "vrcforge_list_execution_targets",
     "vrcforge_bind_execution_target",
     "vrcforge_refresh_execution_target",
@@ -118,6 +128,12 @@ def read_runtime_identity_required(name: str) -> bool:
     if normalized in _READ_IDENTITY_BOOTSTRAP_TOOLS:
         return False
     return identity_scope(normalized, write=False) in _READ_RUNTIME_IDENTITY_SCOPES
+
+
+def write_runtime_identity_required(name: str) -> bool:
+    """Application-owned preparations/receipts do not depend on a Core binding."""
+
+    return str(name or "").strip() not in _APPLICATION_OWNED_WRITE_TOOLS
 
 
 def _result_schema(write: bool) -> dict[str, Any]:
@@ -182,6 +198,7 @@ def standardize_tool_descriptor(
     name = str(result.get("name") or "").strip()
     canonical = canonical_tool_name(name)
     scope = identity_scope(name, write=write)
+    runtime_identity_required = write_runtime_identity_required(name) if write else read_runtime_identity_required(name)
     metadata = dict(result.get("_meta") or {}) if isinstance(result.get("_meta"), Mapping) else {}
     description = str(result.get("description") or name)
     when_to_use = description.split("When NOT to use:", 1)[0].removeprefix("When to use:").strip()
@@ -209,6 +226,13 @@ def standardize_tool_descriptor(
         "freshReadback": {"required": bool(write), "mustUseExactTarget": True},
         "errorModel": "vrcforge.tool_result.v1 with fail-closed identity errors",
     })
+    if write and not runtime_identity_required:
+        result["requiredIdentity"] = {
+            "scope": "project",
+            "required": list(dict(result.get("inputSchema") or {}).get("required") or []),
+            "writeBinding": "handler_managed",
+            "validation": "request_preparer_or_receipt",
+        }
     conditional_identity = None
     if "renderer_material_slot" in name:
         conditional_identity = {"if": {"required": ["assignments"]}, "then": {"properties": {"executionTarget": {"properties": {"scope": {"enum": ["scene", "avatar"]}}}}}, "else": {"properties": {"executionTarget": {"properties": {"scope": {"const": "component"}}}}}}
@@ -241,7 +265,7 @@ def standardize_tool_descriptor(
         "inputEnvelopeExtension": {
             "field": "executionTarget",
             "schema": "vrcforge.execution_target.v1",
-            "requiredAtRuntime": bool(write or read_runtime_identity_required(name)),
+            "requiredAtRuntime": runtime_identity_required,
             "acceptedWithoutChangingLegacyRequired": True,
         },
         "approval": result["approval"],
