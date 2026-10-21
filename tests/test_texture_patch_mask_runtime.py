@@ -118,9 +118,12 @@ def test_production_texture_tool_mask_and_receipts(tmp_path):
     assert run.stdout.count("PASS ") == 17
     for line in run.stdout.splitlines():
         if line.startswith("APPLIED "):
-            import hashlib
             payload = json.loads(line.removeprefix("APPLIED "))["data"]
-            assert payload["changedPixelMaskHash"] == hashlib.sha256(bytes(int(i in (0, 2, 4, 6)) for i in range(12))).hexdigest()
+            assert payload["changedPixelCount"] == 4
+            assert payload["changedBounds"] == [0, 0, 3, 2]
+            assert "changedPixelMaskHash" not in payload
+            assert "targetFileHash" not in payload
+            assert "fileHash" not in payload["readback"]
 
 
 def test_public_texture_schema_exposes_optional_mask():

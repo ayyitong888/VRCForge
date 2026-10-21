@@ -94,13 +94,15 @@ namespace VRCForge.Editor
                     throw new InvalidOperationException("The selected Unity project does not match the active editor instance.");
                 }
 
-                var sourcePixels = ReadPngPixels(sourceFilePath, out var sourceWidth, out var sourceHeight);
+                // Pixel evidence and approval hashes must describe one file snapshot.
+                var sourceBytes = File.ReadAllBytes(sourceFilePath);
+                var sourcePixels = ReadPngPixels(sourceBytes, out var sourceWidth, out var sourceHeight);
                 if (sourceWidth <= 0 || sourceHeight <= 0)
                 {
                     throw new InvalidOperationException("The source PNG has invalid dimensions.");
                 }
 
-                var sourceHash = ComputeSha256(sourceFilePath);
+                var sourceHash = ComputeSha256(sourceBytes);
                 var maskTexturePath = string.Empty;
                 var maskFileHash = string.Empty;
                 Color32[] maskPixels = null;
@@ -113,8 +115,7 @@ namespace VRCForge.Editor
                     var maskBytes = File.ReadAllBytes(maskFilePath);
                     maskPixels = ReadPngPixels(maskBytes, out var maskWidth, out var maskHeight);
                     ValidateMask(maskPixels, maskWidth, maskHeight, sourceWidth, sourceHeight);
-                    using (var sha256 = SHA256.Create())
-                        maskFileHash = Hex(sha256.ComputeHash(maskBytes));
+                    maskFileHash = ComputeSha256(maskBytes);
                 }
                 var sourceGuid = AssetDatabase.AssetPathToGUID(sourceTexturePath) ?? string.Empty;
                 if (sourceGuid.Length != 0)
@@ -174,7 +175,7 @@ namespace VRCForge.Editor
                     request.MaskPixels,
                     out var changedPixelCountForPreview);
                 MeasurePixelChanges(sourcePixels, patchedPixelsForPreview, sourceWidth,
-                    out request.ChangedPixelCount, out request.ChangedBounds, out request.ChangedPixelMaskHash);
+                    out request.ChangedPixelCount, out request.ChangedBounds);
                 var wouldChange = changedPixelCountForPreview > 0;
                 var wouldPatchPixels = CountPatchPixels(sourceWidth, sourceHeight, request.Region, request.ProtectedRegions, request.MaskPixels);
                 if (wouldPatchPixels == 0)
@@ -259,9 +260,8 @@ namespace VRCForge.Editor
                     var alphaUnchanged = false;
                     VerifyReadback(request, patchedPixels, sourcePixels, sourceWidth, sourceHeight, readbackPixels, out outsideAndProtectedPixelsUnchanged, out alphaUnchanged);
                     MeasurePixelChanges(sourcePixels, readbackPixels, sourceWidth,
-                        out var changedPixelCount, out var changedBounds, out var changedPixelMaskHash);
+                        out var changedPixelCount, out var changedBounds);
 
-                    var targetHash = ComputeSha256(request.TargetFilePath);
                     return VRCForgeToolResult.Completed(
                         "Texture patch applied.",
                         new
@@ -275,7 +275,6 @@ namespace VRCForge.Editor
                             wouldChange,
                             changedPixelCount,
                             changedBounds,
-                            changedPixelMaskHash,
                             pixelOrder = "bottom-left; x increases first; changed mask hashes one 0/1 byte per pixel",
                             saved = true,
                             persistedReadback = true,
@@ -288,7 +287,6 @@ namespace VRCForge.Editor
                             sourceWidth = request.SourceWidth,
                             sourceHeight = request.SourceHeight,
                             targetTexturePath = request.TargetTexturePath,
-                            targetFileHash = targetHash,
                             region = RectangleToPayload(request.Region),
                             protectedRegions = request.ProtectedRegions.Select(RectangleToPayload).ToArray(),
                             red = request.Patch.R,
@@ -305,7 +303,6 @@ namespace VRCForge.Editor
                             ,readback = new
                             {
                                 path = request.TargetTexturePath,
-                                fileHash = targetHash,
                                 width = reloadedWidth,
                                 height = reloadedHeight,
                                 sourceHash = request.SourceFileHash,
@@ -366,7 +363,6 @@ namespace VRCForge.Editor
                 wouldChange,
                 changedPixelCount = request.ChangedPixelCount,
                 changedBounds = request.ChangedBounds,
-                changedPixelMaskHash = request.ChangedPixelMaskHash,
                 pixelOrder = "bottom-left; x increases first; changed mask hashes one 0/1 byte per pixel",
                 saved = false,
                 persistedReadback = false,
@@ -531,9 +527,8 @@ namespace VRCForge.Editor
         }
 
         private static void MeasurePixelChanges(Color32[] before, Color32[] after, int width,
-            out int changedPixelCount, out int[] changedBounds, out string changedPixelMaskHash)
+            out int changedPixelCount, out int[] changedBounds)
         {
-            var changed = new byte[before.Length];
             changedPixelCount = 0;
             var minX = width;
             var minY = before.Length / width;
@@ -542,7 +537,6 @@ namespace VRCForge.Editor
             for (var index = 0; index < before.Length; index++)
             {
                 if (ColorsEqual(before[index], after[index])) continue;
-                changed[index] = 1;
                 changedPixelCount++;
                 minX = Math.Min(minX, index % width);
                 maxX = Math.Max(maxX, index % width);
@@ -550,8 +544,6 @@ namespace VRCForge.Editor
                 maxY = Math.Max(maxY, index / width);
             }
             changedBounds = changedPixelCount == 0 ? null : new[] { minX, minY, maxX - minX + 1, maxY - minY + 1 };
-            using (var sha256 = SHA256.Create())
-                changedPixelMaskHash = Hex(sha256.ComputeHash(changed));
         }
 
         private static bool[] BuildProtectedMask(int width, int height, Rectangle[] protectedRegions)
@@ -1135,6 +1127,14 @@ namespace VRCForge.Editor
             return normalized;
         }
 
+        private static string ComputeSha256(byte[] bytes)
+        {
+            using (var sha256 = SHA256.Create())
+            {
+                return Hex(sha256.ComputeHash(bytes));
+            }
+        }
+
         private static string ComputeSha256(string filePath)
         {
             using (var stream = File.OpenRead(filePath))
@@ -1189,7 +1189,6 @@ namespace VRCForge.Editor
             internal Color32[] MaskPixels;
             internal int ChangedPixelCount;
             internal int[] ChangedBounds;
-            internal string ChangedPixelMaskHash;
         }
 
         private sealed class Rectangle
