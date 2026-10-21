@@ -61,7 +61,7 @@ After this Skill's diagnosis and verification branch is complete, explicitly lea
 
 Call the existing internal `vrcforge_exit_skill` with that exact active Skill name. This exits only the guide policy; it does not claim the repair or original task is complete, and pending approvals or actions must be handled first. For user-tool authoring, read `references/user-tool-author-guide.md` first, exit this diagnosis scope, then use the general file/package workflow to prepare the package; installation and invocation still use the existing approval path.
 
-Bundled delivery seeds only an absent guide. On an existing profile it returns `preserved` and must not overwrite the user's projected guide. To intentionally update that profile, export the reviewed guide source as a `.vsk` with the existing `SkillPackageService.export_dev`, then use the existing package import route with `projectToUserSkills: true`, and read back `/api/app/skills` plus `vrcforge_read_installed_skill`. Do not call bundled delivery as an update mechanism.
+This guide is read directly from VRCForge's application-owned bundled source. Do not copy it into user Skills or update it through user package import. If a user Skill has the same name, keep its files intact, use the application guide, and ask the user to rename their Skill to remove the conflict. An untouched prior app-owned projection is recognized by its package owner and stored content digest, then left in place without overriding this source.
 
 Use the user's language. Keep technical fields in tool calls; explain to the user what to choose or click. Ask only for facts or choices that cannot be safely observed. Preserve the original editing task and resume it after readiness is verified.
 

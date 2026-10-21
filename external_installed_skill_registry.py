@@ -25,8 +25,11 @@ class ExternalInstalledSkillRegistryService:
     def _visible(skill: object, *, include_disabled: bool = False) -> bool:
         return bool(
             isinstance(skill, dict)
-            and skill.get("source") == "user"
             and skill.get("skillType") == "package"
+            and (
+                skill.get("source") == "user"
+                or (skill.get("source") == "builtin" and skill.get("distribution") == "bundled")
+            )
             and (
                 (skill.get("enabled") and skill.get("available"))
                 or (
@@ -48,6 +51,8 @@ class ExternalInstalledSkillRegistryService:
                 "name": str(skill.get("name") or ""),
                 "title": str(skill.get("title") or ""),
                 "description": str(skill.get("description") or ""),
+                "source": str(skill.get("source") or ""),
+                **({"distribution": str(skill["distribution"])} if skill.get("distribution") else {}),
                 "enabled": bool(skill.get("enabled")),
                 "nativePrompt": {
                     "method": "prompts/get",
@@ -96,6 +101,9 @@ class ExternalInstalledSkillRegistryService:
         *,
         include_sequence: bool,
     ) -> dict[str, Any]:
+        if skill.get("source") == "builtin" and skill.get("distribution") == "bundled":
+            execution = str(skill.get("execution") or skill.get("executionMode") or "agentic")
+            return {"execution": execution, "executionMode": execution}
         package = packages.get(str(skill.get("packageId") or ""), {})
         execution = str(package.get("execution") or package.get("executionMode") or "agentic")
         result: dict[str, Any] = {"execution": execution, "executionMode": execution}
@@ -162,6 +170,8 @@ class ExternalInstalledSkillRegistryService:
                 "name": name,
                 "title": str(skill.get("title") or ""),
                 "description": str(skill.get("description") or ""),
+                "source": str(skill.get("source") or ""),
+                **({"distribution": str(skill["distribution"])} if skill.get("distribution") else {}),
                 "instructions": str(skill.get("instructions") or ""),
                 "allowedTools": ensure_string_list(skill.get("allowedTools")),
                 "supportFiles": support_files,

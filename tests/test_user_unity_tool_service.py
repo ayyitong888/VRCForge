@@ -11,7 +11,7 @@ from skill_packages import PackageIntegrityError, PackageSecurityError, SkillPac
 from user_unity_tool_gateway import list_user_tools, invoke_user_tool
 
 
-def _package(tmp_path: Path, *, description: str = "when-to-use: invoke. when-NOT-to-use: offline.", repairs=None) -> Path:
+def _package(tmp_path: Path, *, description: str = "when-to-use: invoke. when-NOT-to-use: offline.", repairs=None, tool_id="example.tool") -> Path:
     source = tmp_path / "source"
     source.mkdir()
     manifest = {
@@ -19,7 +19,7 @@ def _package(tmp_path: Path, *, description: str = "when-to-use: invoke. when-NO
         "description": "A tool", "min_vrcforge_version": "1.0.0", "permissions": [],
         "entrypoints": {"skill": "SKILL.md", "unityTools": "descriptor.json", "unity_tool_source": "Tool.cs"},
     }
-    descriptor = {"schema": "vrcforge.user_unity_tools.v1", "tools": [{"toolId": "example.tool", "typeName": "Example.Tool", "source": "Tool.cs", "description": description, "inputSchema": {"type": "object"}}]}
+    descriptor = {"schema": "vrcforge.user_unity_tools.v1", "tools": [{"toolId": tool_id, "typeName": "Example.Tool", "source": "Tool.cs", "description": description, "inputSchema": {"type": "object"}}]}
     if repairs is not None:
         descriptor["repairs"] = repairs
     (source / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
@@ -29,15 +29,129 @@ def _package(tmp_path: Path, *, description: str = "when-to-use: invoke. when-NO
     return SkillPackageService(tmp_path / "store", vrcforge_version="1.0.0").export_dev(source, tmp_path / "tool.vsk").package_path
 
 
-def _installed(tmp_path: Path, *, description="when-to-use: invoke. when-NOT-to-use: offline.", repairs=None, core_tree_identity=None):
-    archive = _package(tmp_path, description=description, repairs=repairs)
+def _installed(tmp_path: Path, *, description="when-to-use: invoke. when-NOT-to-use: offline.", repairs=None, core_tree_identity=None, tool_id="example.tool", official_tool_names=None):
+    archive = _package(tmp_path, description=description, repairs=repairs, tool_id=tool_id)
     packages = SkillPackageService(tmp_path / "store", vrcforge_version="1.0.0")
     packages.install(archive)
     packages.set_enabled("com.example.tool", True)
     archive.unlink()  # Deployment must not depend on the original import archive.
     project = tmp_path / "project"
     (project / "Assets").mkdir(parents=True)
-    return UserUnityToolService(packages, core_tree_identity=core_tree_identity), project
+    return UserUnityToolService(
+        packages,
+        core_tree_identity=core_tree_identity,
+        official_tool_names=official_tool_names,
+    ), project
+
+
+def test_official_tool_name_collision_blocks_install_and_preserves_user_package(tmp_path, monkeypatch):
+    import unity_mcp_tool_contract
+
+    official = unity_mcp_tool_contract.EXPECTED_TOOL_NAMES
+    collision = "vrc_future_official_tool"
+    assert collision not in official
+    service, project = _installed(tmp_path, tool_id=collision)
+    approved_plan = service.prepare_installed("com.example.tool", project)
+    monkeypatch.setattr(unity_mcp_tool_contract, "EXPECTED_TOOL_NAMES", official | {collision})
+
+    with pytest.raises(ValueError, match=rf"{collision}.*请重命名用户工具"):
+        service.apply(approved_plan)
+
+    with pytest.raises(ValueError, match=rf"{collision}.*请重命名用户工具"):
+        service.prepare_installed("com.example.tool", project)
+
+    metadata, _ = service.package_service.verified_installed_entrypoint_bytes(
+        "com.example.tool", "manifest.json"
+    )
+    assert metadata["manifest"]["id"] == "com.example.tool"
+    assert list((project / "Assets").iterdir()) == []
+
+
+def test_new_official_tool_collision_rechecked_on_discovery_and_each_call(tmp_path, monkeypatch):
+    import unity_mcp_tool_contract
+
+    official = unity_mcp_tool_contract.EXPECTED_TOOL_NAMES
+    collision = "vrc_future_official_tool"
+    assert collision not in official
+    service, project = _installed(tmp_path, tool_id=collision)
+    plan = service.prepare_installed("com.example.tool", project)
+    installed = service.apply(plan)
+    assert installed["verified"] is True
+
+    metadata, _ = service.package_service.verified_installed_entrypoint_bytes(
+        "com.example.tool", "manifest.json"
+    )
+    monkeypatch.setattr(unity_mcp_tool_contract, "EXPECTED_TOOL_NAMES", official | {collision})
+    core_catalog = Mock(return_value={"tools": [{
+        "packageId": "com.example.tool", "packageDigest": metadata["package_sha256"],
+        "available": True, "status": "ready", "tools": [{"toolId": collision, "available": True}],
+    }]})
+    listed = list_user_tools({"projectPath": str(project)}, service, core_catalog)
+    assert listed["tools"][0]["available"] is False
+    assert "请重命名用户工具" in listed["tools"][0]["reasons"][0]
+
+    invoke = Mock()
+    with pytest.raises(ValueError, match=rf"{collision}.*请重命名用户工具"):
+        invoke_user_tool({
+            "projectPath": str(project), "packageId": "com.example.tool",
+            "packageDigest": metadata["package_sha256"], "toolId": collision, "arguments": {},
+        }, service, invoke)
+    invoke.assert_not_called()
+    target = project / "Assets/VRCForgeUserTools/com.example.tool/Editor"
+    assert (target / "Tool.cs").is_file()
+    assert (target / "tool-package.json").is_file()
+
+
+@pytest.mark.parametrize("tool_id", ["vrc_capture_scan_scope", "vrc_validate_scan_scope"])
+def test_core_contract_auxiliary_tools_are_reserved_without_duplicate_name_table(tmp_path, tool_id):
+    service, project = _installed(tmp_path, tool_id=tool_id)
+    with pytest.raises(ValueError, match=rf"{tool_id}.*请重命名用户工具"):
+        service.prepare_installed("com.example.tool", project)
+
+
+def test_new_official_app_registration_rechecked_on_discovery_and_each_call(tmp_path):
+    app_registry: set[str] = set()
+    tool_id = "vrcforge_read_text_file"
+    service, project = _installed(
+        tmp_path,
+        tool_id=tool_id,
+        official_tool_names=lambda: tuple(app_registry),
+    )
+    plan = service.prepare_installed("com.example.tool", project)
+    service.apply(plan)
+    metadata, _ = service.package_service.verified_installed_entrypoint_bytes(
+        "com.example.tool", "manifest.json"
+    )
+
+    app_registry.add(tool_id)
+    core_catalog = Mock(return_value={"tools": [{
+        "packageId": "com.example.tool", "packageDigest": metadata["package_sha256"],
+        "available": True, "status": "ready", "tools": [{"toolId": tool_id, "available": True}],
+    }]})
+    listed = list_user_tools({"projectPath": str(project)}, service, core_catalog)
+    assert listed["tools"][0]["available"] is False
+    assert tool_id in listed["tools"][0]["reasons"][0]
+    assert "请重命名用户工具" in listed["tools"][0]["reasons"][0]
+
+    invoke = Mock()
+    with pytest.raises(ValueError, match=rf"{tool_id}.*请重命名用户工具"):
+        invoke_user_tool({
+            "projectPath": str(project), "packageId": "com.example.tool",
+            "packageDigest": metadata["package_sha256"], "toolId": tool_id, "arguments": {},
+        }, service, invoke)
+    invoke.assert_not_called()
+
+
+def test_unavailable_official_app_registry_fails_closed(tmp_path):
+    def unavailable():
+        raise RuntimeError("registry unavailable")
+
+    service, project = _installed(
+        tmp_path,
+        official_tool_names=unavailable,
+    )
+    with pytest.raises(ValueError, match="官方工具名当前无法验证"):
+        service.prepare_installed("com.example.tool", project)
 
 
 def test_prepare_and_apply_is_pending_compile(tmp_path):
@@ -58,7 +172,30 @@ def test_prepare_and_apply_is_pending_compile(tmp_path):
     assert record["stampType"].split(".")[-1].split("+", 1)[0] in stamp
     assert "class DigestStamp" in stamp
     assert record["tools"][0]["source"] == "Assets/VRCForgeUserTools/com.example.tool/Editor/Tool.cs"
-    assert record["tools"][0]["sourceSha256"] == hashlib.sha256((target / "Tool.cs").read_bytes()).hexdigest()
+    projection_sha = hashlib.sha256((target / "Tool.cs").read_bytes()).hexdigest()
+    assert record["tools"][0]["sourceSha256"] == projection_sha
+    assert record["tools"][0]["sourceProvenance"] == {
+        "authority": "verified_installed_user_tool_package",
+        "sourceRelativePath": "Tool.cs",
+        "sourceSha256": projection_sha,
+        "projectionSha256": projection_sha,
+    }
+    assert result["sourceProvenance"] == {
+        **record["tools"][0]["sourceProvenance"],
+        "packageId": record["packageId"],
+        "packageVersion": record["packageVersion"],
+        "packageDigest": record["packageDigest"],
+        "recordAssetPath": f"{plan['targetFolder']}/tool-package.json",
+        "projectionPath": record["tools"][0]["source"],
+        "expectedProjectionSha256": projection_sha,
+        "projectionReadbackSha256": projection_sha,
+        "projectionReadbackVerified": True,
+    }
+    assert 'public const string PackageVersion = "1.0.0";' in stamp
+    assert 'public const string SourceRelativePath = "Tool.cs";' in stamp
+    assert f'public const string SourceSha256 = "{projection_sha}";' in stamp
+    assert f'public const string ProjectionSha256 = "{projection_sha}";' in stamp
+    assert str(tmp_path) not in stamp
     assert "repairs" not in record
 
 

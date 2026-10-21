@@ -564,10 +564,15 @@ def test_builtin_group_names_are_reserved_for_crud_projection_and_existing_rows(
             render_skill_markdown({"name": "runtime-diagnostics", "instructions": "legacy"}),
             encoding="utf-8",
         )
-        row = next(item for item in service.build_skill_registry()["skills"] if item.get("source") == "user")
-        assert row["name"] == "runtime-diagnostics"
-        assert row["available"] is False
-        assert row["validation"]["status"] == "error"
+        registry = service.build_skill_registry()
+        row = next(item for item in registry["skills"] if item.get("name") == "runtime-diagnostics")
+        assert row["source"] == "builtin"
+        assert registry["sourceConflicts"] == [{
+            "name": "runtime-diagnostics", "status": "rename_required",
+            "userPath": str(skill_dir / "SKILL.md"),
+            "message": "A user Skill has the same name as an application Skill; rename the user Skill: runtime-diagnostics",
+        }]
+        assert (skill_dir / "SKILL.md").read_text(encoding="utf-8").endswith("\n")
 
 
 def test_manifest_name_mismatch_cannot_update_or_delete_another_directory(tmp_path: Path) -> None:

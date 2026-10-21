@@ -33,6 +33,7 @@ from unity_mcp_tool_contract import (
     PREVIOUS_CORE_TOOL_NAMES,
     PRODUCT_VERSION,
     READ_ONLY_TOOL_NAMES,
+    SCAN_SCOPE_TOOL_NAMES,
     TOOL_CONTRACT_VERSION,
 )
 
@@ -46,7 +47,6 @@ MAX_RESPONSE_FRAME_BYTES = 8 * 1024 * 1024
 DEFAULT_TIMEOUT_SECONDS = 5.0
 PROJECT_CORE_MAX_CONCURRENT = 3
 PROJECT_CORE_BUSY_WAIT_SECONDS = 0.25
-SCAN_SCOPE_TOOL_NAMES = frozenset({"vrc_capture_scan_scope", "vrc_validate_scan_scope"})
 _ACTIVE_CALL_AUDIT_CAPTURE: ContextVar[list[dict[str, Any]] | None] = ContextVar(
     "vrcforge_unity_mcp_call_audit_capture",
     default=None,

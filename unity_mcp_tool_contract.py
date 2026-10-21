@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import re
+from typing import Any
+
 CORE_IDENTITY = "vrcforge.unity-core"
 HANDSHAKE_PROTOCOL = "vrcforge.core-handshake.v1"
 PRODUCT_VERSION = "1.9.2"
-TOOL_CONTRACT_VERSION = "176"
+TOOL_CONTRACT_VERSION = "177"
 PREVIOUS_CORE_TOOL_CONTRACT_VERSION = "87"
 
 EXPECTED_TOOL_NAMES = frozenset(
@@ -31,6 +34,7 @@ EXPECTED_TOOL_NAMES = frozenset(
         "vrc_list_user_tools", "vrc_invoke_user_tool",
     }
 )
+SCAN_SCOPE_TOOL_NAMES = frozenset({"vrc_capture_scan_scope", "vrc_validate_scan_scope"})
 EXPECTED_TOOL_COUNT = 97
 
 # Contract revisions describe the discovered tool surface; protocol-range
@@ -88,6 +92,85 @@ PLANNING_TOOL_NAMES = READ_ONLY_TOOL_NAMES | frozenset(
         "vrc_scan_wardrobe",
     }
 )
+
+
+def is_direct_read_call(tool_name: str, arguments: dict[str, Any]) -> bool:
+    """Mirror Core's strict direct-read contract, never grant write authority.
+
+    Mixed tools are reads only for the complete no-output/no-refresh payload
+    accepted by VRCForgeMcpCoreServer.IsStrictNoWritePayloadRead. Core validates
+    again at dispatch. Unknown fields and write variants retain exact claims.
+    """
+    if tool_name in READ_ONLY_TOOL_NAMES:
+        return True
+    if not isinstance(arguments, dict):
+        return False
+    a = arguments
+
+    def exact(*keys: str) -> bool:
+        return set(a) == set(keys)
+
+    def string(key: str) -> bool:
+        return isinstance(a.get(key), str)
+
+    def boolean(key: str) -> bool:
+        return type(a.get(key)) is bool
+
+    def integer(key: str, minimum: int, maximum: int) -> bool:
+        return type(a.get(key)) is int and minimum <= a[key] <= maximum
+
+    def strings(key: str, maximum: int = 2000) -> bool:
+        return isinstance(a.get(key), list) and len(a[key]) <= maximum and all(isinstance(v, str) for v in a[key])
+
+    def digest(key: str) -> bool:
+        return string(key) and re.fullmatch(r"[0-9a-fA-F]{64}", a[key]) is not None
+
+    if tool_name == "vrc_export_blendshapes":
+        return exact("outputPath", "refreshAssets", "returnPayloadOnly") and a.get("outputPath") == "" and a.get("refreshAssets") is False and a.get("returnPayloadOnly") is True
+    if tool_name in {"vrc_scan_avatar_controls", "vrc_scan_avatar_parameters", "vrc_scan_wardrobe", "vrc_scan_thry_avatar_performance"}:
+        return exact("avatarPath", "outputPath") and string("avatarPath") and a.get("outputPath") == ""
+    if tool_name == "vrc_scan_avatar_materials":
+        shape = exact("avatarPath", "outputPath", "refreshAssets") or (
+            exact("avatarPath", "outputPath", "refreshAssets", "includeTextures") and boolean("includeTextures")) or (
+            exact("avatarPath", "outputPath", "refreshAssets", "materialIds", "includeTextures") and strings("materialIds") and boolean("includeTextures"))
+        return shape and string("avatarPath") and a.get("outputPath") == "" and a.get("refreshAssets") is False
+    if tool_name == "vrc_scan_avatar_items":
+        required = {"avatarPath", "outputPath", "maxItems", "refreshAssets"}
+        return required <= set(a) <= required | {"offset", "expectedSnapshotDigest"} and string("avatarPath") and a.get("outputPath") == "" and integer("maxItems", 1, 2000) and (
+            "offset" not in a or integer("offset", 0, 2**31 - 1)) and (
+            "expectedSnapshotDigest" not in a or digest("expectedSnapshotDigest")) and a.get("refreshAssets") is False
+    if tool_name == "vrc_scan_fx_animator":
+        return exact("avatarPath", "outputPath", "controllerPath", "refreshAssets") and string("avatarPath") and a.get("outputPath") == "" and string("controllerPath") and a.get("refreshAssets") is False
+    if tool_name == "vrc_scan_animation_bindings":
+        selection_fields = {"bindingView", "bindingSelectors", "bindingOffset", "bindingLimit", "clipOffset", "keyOffset", "maxTotalKeys", "expectedSnapshotDigest"}
+        if selection_fields.intersection(a):
+            if a.get("bindingView", "details") not in ("summary", "index", "details"):
+                return False
+            selectors = a.get("bindingSelectors", [])
+            if not isinstance(selectors, list) or len(selectors) > 32:
+                return False
+            for row in selectors:
+                if not isinstance(row, dict) or not row or not set(row) <= {"path", "propertyName", "componentType"} or not {"path", "propertyName"}.intersection(row):
+                    return False
+                if any(not isinstance(v, str) or len(v.encode("utf-16-le")) // 2 > 1024 or (k != "path" and not v) for k, v in row.items()):
+                    return False
+            for key, lower, upper in (("bindingOffset", 0, 2**31-1), ("bindingLimit", 1, 256), ("clipOffset", 0, 2**31-1), ("keyOffset", 0, 2**31-1), ("maxTotalKeys", 1, 4096)):
+                if key in a and not integer(key, lower, upper):
+                    return False
+            if "expectedSnapshotDigest" in a and not digest("expectedSnapshotDigest"):
+                return False
+            a = {k: v for k, v in a.items() if k not in selection_fields}
+        required = {"avatarPath", "outputPath", "controllerPath", "clipPaths", "includeAllProjectClips", "includeBindingDetails", "maxClips", "refreshAssets"}
+        return required <= set(a) <= required | {"maxKeysPerBinding"} and (
+            "maxKeysPerBinding" not in a or integer("maxKeysPerBinding", 1, 2000)) and string("avatarPath") and a.get("outputPath") == "" and string("controllerPath") and strings("clipPaths") and boolean("includeAllProjectClips") and boolean("includeBindingDetails") and integer("maxClips", 1, 2000) and a.get("refreshAssets") is False
+    if tool_name == "vrc_scan_avatar_performance":
+        return exact("avatarPath", "outputPath", "isMobile") and string("avatarPath") and a.get("outputPath") == "" and boolean("isMobile")
+    if tool_name == "vrc_capture_scene_view":
+        shape = exact("statusOnly", "requirePlayMode") or (
+            exact("statusOnly", "requirePlayMode", "captureMode") and string("captureMode") and a["captureMode"].strip().lower() in {"auto", "scene_view", "game_view"}) or (
+            exact("statusOnly", "requirePlayMode", "avatarPath", "includeGestureManagerParameters", "gestureManagerParameterNames", "gestureManagerParameterPrefix") and string("avatarPath") and boolean("includeGestureManagerParameters") and strings("gestureManagerParameterNames", 128) and string("gestureManagerParameterPrefix") and len(a["gestureManagerParameterPrefix"].encode("utf-16-le")) // 2 <= 256)
+        return shape and a.get("statusOnly") is True and boolean("requirePlayMode")
+    return False
 
 if len(EXPECTED_TOOL_NAMES) != EXPECTED_TOOL_COUNT:  # pragma: no cover - source-contract invariant.
     raise RuntimeError("VRCForge Unity MCP tool contract is incomplete.")

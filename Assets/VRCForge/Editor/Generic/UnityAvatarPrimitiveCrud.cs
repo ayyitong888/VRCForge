@@ -449,7 +449,6 @@ namespace VRCForge.Editor
 
                 EditorUtility.SetDirty(descriptor);
                 EditorUtility.SetDirty(descriptor.gameObject);
-                AssetDatabase.SaveAssets();
                 failureStage = "scene_save";
                 var afterScene = ComponentCrudCore.SaveAndResolveScene(beforeScene);
                 failureStage = "persisted_readback";

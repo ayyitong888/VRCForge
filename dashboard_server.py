@@ -16855,6 +16855,7 @@ class _RuntimePlannerCatalog:
                 name=str(skill.get("name") or ""),
                 title=str(skill.get("title") or ""),
                 source=str(skill.get("source") or ""),
+                distribution=str(skill.get("distribution") or ""),
                 skill_type=str(skill.get("skillType") or ""),
                 category=str(skill.get("category") or ""),
                 description=str(skill.get("description") or ""),
@@ -16865,7 +16866,16 @@ class _RuntimePlannerCatalog:
             )
             for skill in skill_payloads
             if isinstance(skill, dict) and str(skill.get("name") or "").strip()
-            and (project_context_active or (skill.get("source") == "user" and skill.get("skillType") == "package"))
+            and (
+                project_context_active
+                or (
+                    skill.get("skillType") == "package"
+                    and (
+                        skill.get("source") == "user"
+                        or (skill.get("source") == "builtin" and skill.get("distribution") == "bundled")
+                    )
+                )
+            )
         )
         return PlannerCatalogSnapshot(
             visible_tools=visible_tools,
@@ -21589,6 +21599,24 @@ def prepare_authoritative_unity_checkpoint_sync(
             prepared_calls = build_prepared_execution_plan(arguments)
         except (RuntimeError, ValueError, TypeError):
             return {"ok": False, "error": "The prepared Unity execution plan is invalid."}
+        # Route by the verified Core operation in the approval-bound seal. Face
+        # wrappers derive this call at runtime, so their outer arguments do not
+        # carry an exact file list for the generic archive helper.
+        if any(name == "vrc_apply_blendshapes" for name, _ in prepared_calls):
+            from unity_blendshape_checkpoint import prepare_blendshape_checkpoint
+            from mcp_tool_descriptor import identity_scope
+
+            return prepare_blendshape_checkpoint(
+                project_root, arguments,
+                build_plan=lambda _values: prepared_calls,
+                resolve_reference=lambda reference, **kwargs: AGENT_GATEWAY.resolve_execution_target_reference(
+                    reference, **kwargs
+                ),
+                discover=list_execution_targets_sync,
+                inspect_owner=read_component_property_sync,
+                prepare=prepare_unity_checkpoint_sync,
+                required_scope=identity_scope(checkpoint_target, write=True),
+            )
         material_calls = [
             (name, call_arguments)
             for name, call_arguments in prepared_calls
@@ -21607,6 +21635,45 @@ def prepare_authoritative_unity_checkpoint_sync(
                 "toolName": "vrc_apply_material_tuning",
                 "mode": "sealed_plan_checkpoint", "preparedPlanValidated": True,
             }
+    if checkpoint_target == "vrcforge_write_avatar_descriptor":
+        target = ensure_dict(arguments.get("executionTarget"))
+        avatar = ensure_dict(target.get("avatar"))
+        scene = ensure_dict(target.get("scene"))
+        project = ensure_dict(target.get("project"))
+        scene_path = scene.get("assetPath")
+        avatar_id = avatar.get("globalObjectId")
+        exact_scene = (
+            target.get("schema") == "vrcforge.execution_target.v1"
+            and target.get("scope") == "avatar"
+            and target.get("ambiguous") is False
+            and target.get("resolutionCandidateCount") == 1
+            and bool(avatar_id)
+            and bool(avatar.get("exactHierarchyPath"))
+            and Path(str(project.get("root") or "")).resolve() == project_root.resolve()
+            and isinstance(scene_path, str) and scene_path.startswith("Assets/")
+            and scene_path.lower().endswith(".unity") and "\\" not in scene_path
+            and all(part not in {"", ".", ".."} for part in scene_path.split("/"))
+        )
+        if not exact_scene:
+            return {"ok": False, "blocking": True, "code": "checkpoint_scope_unresolved",
+                    "error": "The approved descriptor write did not establish an exact saved-scene identity.",
+                    "mutationStarted": False, "saved": False}
+        live = list_execution_targets_sync({
+            "projectPath": str(project_root), "scope": "avatar",
+            "avatarGlobalObjectId": avatar_id,
+        })
+        if live.get("ok") is not True or live.get("targets") != [target]:
+            return {"ok": False, "blocking": True, "code": "checkpoint_scope_unresolved",
+                    "error": "The approved descriptor scene identity changed before checkpointing.",
+                    "mutationStarted": False, "saved": False}
+        prepared = prepare_unity_checkpoint_sync(project_root, checkpoint_files=[scene_path])
+        if prepared.get("ok") is not True:
+            return prepared
+        return {**prepared, "projectPath": str(project_root),
+                "mode": "read_only_authoritative_revalidation", "canonicalRevalidated": True,
+                "archiveAssetPaths": [scene_path],
+                "archiveScopeReason": "revalidated_avatar_descriptor_scene_only"}
+
     if nested_tool not in {
         PARAMETER_BIT_PACKING_TOOL,
         ATOMIC_REFERENCE_RENAME_TOOL,
@@ -26500,7 +26567,18 @@ def register_agent_gateway_tools() -> None:
         )
 
     def user_tool_service() -> UserUnityToolService:
-        return UserUnityToolService(skill_package_service(), core_tree_identity=_unity_core_tree_identity)
+        def official_app_tool_names() -> set[str]:
+            # These are the same application-owned registries projected to
+            # Agent manifests; user C# tools remain behind the single typed
+            # vrc_invoke_user_tool entry and are never inserted here.
+            with AGENT_GATEWAY._lock:
+                return set(AGENT_GATEWAY._tools) | set(AGENT_GATEWAY._write_handlers)
+
+        return UserUnityToolService(
+            skill_package_service(),
+            core_tree_identity=_unity_core_tree_identity,
+            official_tool_names=official_app_tool_names,
+        )
 
     def invoke_user_core(args: dict[str, Any], name: str, payload: dict[str, Any]) -> Any:
         return invoke_unity_mcp(load_dashboard_settings(build_agent_connection_request(args)), name, payload)
@@ -26970,7 +27048,7 @@ def register_agent_gateway_tools() -> None:
         "read/debug",
         inspect_chat_attachment_sync,
     )
-    AGENT_GATEWAY.register_tool("vrcforge_plan_outfit_import", "Build a supervised import plan for a UnityPackage, Booth folder, or loose prefab/texture folder without writing Unity project files.", "plan/preview", WARDROBE_OUTFIT_WORKFLOWS.plan_outfit_import)
+    AGENT_GATEWAY.register_tool("vrcforge_plan_outfit_import", "When to use: preview a supervised import for a UnityPackage, Booth folder, loose prefab/texture folder, or an unpacked folder containing one explicit FBX model, without writing Unity project files. When NOT to use: do not guess among multiple standalone FBX models or treat a lone FBX file as a complete source folder. Negative example: put a newly generated FBX in its own output folder and inspect that folder before importing; do not fabricate a prefab selection.", "plan/preview", WARDROBE_OUTFIT_WORKFLOWS.plan_outfit_import)
     AGENT_GATEWAY.register_tool("vrcforge_health", "Read VRCForge backend and component health.", "read/debug", lambda _params: build_full_health_payload())
     AGENT_GATEWAY.register_tool(
         "vrcforge_know_yourself",
@@ -27947,7 +28025,7 @@ def register_agent_gateway_tools() -> None:
     )
     register_write_handler(
         "vrcforge_import_outfit_package",
-        "When to use: import an approved UnityPackage or copy external prefab, material, or PNG/JPG texture files from an unpacked folder into the Unity project's Assets folder. Texture-only folders are supported without a prefab; inspect and plan the import first. When NOT to use: do not change existing texture importer settings, assign material slots, extract a texture-only ZIP, or copy arbitrary project files. Negative example: a PNG already inside Assets needs material assignment rather than another import.",
+        "When to use: import an approved UnityPackage or copy external prefab, material, PNG/JPG texture files, or a single standalone FBX model from an unpacked folder into the Unity project's Assets folder. Texture-only and single-FBX folders are supported without a prefab; inspect and plan first, then use the sealed exact-file checkpoint. When NOT to use: do not guess among multiple standalone FBX models, change existing importer settings, assign material slots, extract a texture-only ZIP, or copy arbitrary project files. Negative example: a generated FBX needs its own output folder, not a fabricated prefab; a PNG already inside Assets needs material assignment rather than another import.",
         "medium",
         WARDROBE_OUTFIT_APPROVED_WRITES.import_package,
         risk_level_resolver=classify_prepared_outfit_import_risk,

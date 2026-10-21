@@ -19,6 +19,15 @@ MAX_UNITYPACKAGE_UNCOMPRESSED_BYTES = 512 * 1024 * 1024
 MAX_UNITYPACKAGE_MEMBERS = 200_000
 
 
+def is_single_fbx_folder(source_type: str, models: list[dict[str, Any]], *, model_count: int, truncated: bool) -> bool:
+    """Shared inspection/planning fact; no prefab or model choice is invented."""
+    return (
+        source_type == "folder" and not truncated
+        and len(models) == 1 and model_count == 1
+        and str(models[0].get("path") or "").lower().endswith(".fbx")
+    )
+
+
 class _BoundedArchiveReader:
     def __init__(self, reader: Any, limit: int) -> None:
         self._reader = reader
@@ -382,7 +391,8 @@ def build_container_result(
     if duplicate_entry_count:
         warnings.append(f"Skipped {duplicate_entry_count} duplicate archive entr{'y' if duplicate_entry_count == 1 else 'ies'}.")
     warnings.extend(warning for warning in (extra_warnings or []) if warning)
-    import_plan_kind = "unitypackage_import" if unity_packages else "loose_prefab_assets" if (prefabs or assembly_definitions) else "manual_review"
+    single_fbx = is_single_fbx_folder(source_type, models, model_count=len(models), truncated=truncated)
+    import_plan_kind = "unitypackage_import" if unity_packages else "loose_prefab_assets" if (prefabs or assembly_definitions or single_fbx) else "manual_review"
     return {
         "ok": True,
         "schema": INSPECTION_SCHEMA,

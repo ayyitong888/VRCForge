@@ -261,6 +261,10 @@ def _selector_error(
         if request.get("parentPath") == "":
             return ""
         return "A scene-root prefab instance must target the exact bound scene without a parent."
+    if checkpoint_target == "vrcforge_create_gameobject" and scope == "scene":
+        if request.get("parentPath") == "":
+            return ""
+        return "A scene-root GameObject must target the exact bound scene without a parent."
     parent_path = _hierarchy_path(request.get("parentPath"))
     if not parent_path:
         return "Creating a scene object requires an exact non-empty bound parent."

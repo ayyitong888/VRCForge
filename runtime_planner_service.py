@@ -569,6 +569,7 @@ class PlannerSkill:
     name: str
     title: str = ""
     source: str = ""
+    distribution: str = ""
     skill_type: str = ""
     category: str = ""
     description: str = ""
@@ -3718,7 +3719,12 @@ class RuntimePlannerService:
             if catalog is not None:
                 skills = [{"name": skill.name, "title": skill.title,
                            "description": skill.description or skill.when_to_use}
-                          for skill in catalog.skills if skill.source == "user" and skill.skill_type == "package"
+                          for skill in catalog.skills
+                          if skill.skill_type == "package"
+                          and (
+                              skill.source == "user"
+                              or (skill.source == "builtin" and skill.distribution == "bundled")
+                          )
                           and skill.enabled and skill.available and not skill.disable_model_invocation]
                 if skills:
                     lines.append("\nInstalled Skill guides (metadata only; reading a guide does not grant tools or write approval):")

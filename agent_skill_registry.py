@@ -49,6 +49,8 @@ from agent_gateway import (
     tool_usage_description,
 )
 
+_parse_application_skill_markdown = parse_skill_markdown
+
 
 USER_SKILL_MANIFEST_MAX_BYTES = 1024 * 1024
 
@@ -146,8 +148,10 @@ class AgentSkillRegistryService:
 
     def _reserved_skill_ids(self, inputs: _SkillRegistryInputs | None = None) -> set[str]:
         inputs = inputs if inputs is not None else self._registry_inputs()
+        from bundled_skill_delivery import DOCS_SKILL_NAME, SKILL_NAME
         return {
             *(normalize_skill_id(str(group.get("name") or "")) for group in BUILTIN_SKILL_GROUPS),
+            normalize_skill_id(SKILL_NAME), normalize_skill_id(DOCS_SKILL_NAME),
             *inputs.known_tools,
         }
 
@@ -433,6 +437,26 @@ class AgentSkillRegistryService:
             except Exception as exc:  # noqa: BLE001 - one broken user skill must not break startup.
                 skills.append(self._invalid_user_skill(skill_file, exc))
         return skills
+
+    def _load_application_skills(self) -> list[dict[str, Any]]:
+        """Read the fixed application-owned agentic Skills without copying them to user data."""
+        from bundled_skill_delivery import application_skills
+
+        result: list[dict[str, Any]] = []
+        for source in application_skills():
+            parsed = _parse_application_skill_markdown(Path(source["storagePath"]))
+            skill = self._normalize_user_skill(parsed, existing_id=str(parsed.get("name") or ""))
+            skill.update({
+                "source": "builtin", "distribution": "bundled", "skillType": "package",
+                "packageId": source["packageId"], "packageVersion": source["packageVersion"],
+                "storagePath": source["storagePath"], "bundleRoot": source["bundleRoot"],
+                "contentDigest": source["contentDigest"], "category": "builtin",
+                "execution": "agentic", "executionMode": "agentic",
+                "supportFiles": source["supportFiles"],
+                "tags": sorted((set(skill.get("tags", [])) - {"user"}) | {"builtin", "bundled"}),
+            })
+            result.append(skill)
+        return result
 
     @staticmethod
     def _invalid_user_skill(skill_file: Path, exc: Exception) -> dict[str, Any]:
@@ -878,11 +902,17 @@ class AgentSkillRegistryService:
         try:
             storage_resolved = storage_path.resolve(strict=True)
             support_root = storage_resolved.parent
-            user_skills_root = self._validated_user_skills_root(create=False)
-            if user_skills_root is None:
-                raise FileNotFoundError("user skill store is missing")
-            user_skills_root = user_skills_root.resolve(strict=True)
-            support_root.relative_to(user_skills_root)
+            if skill.get("source") == "builtin" and skill.get("distribution") == "bundled":
+                from bundled_skill_delivery import validate_application_skill_source
+                bundle_root = validate_application_skill_source(skill)
+                if support_root != bundle_root.resolve(strict=True):
+                    raise ValueError("application Skill path does not match its fixed bundle root")
+            else:
+                user_skills_root = self._validated_user_skills_root(create=False)
+                if user_skills_root is None:
+                    raise FileNotFoundError("user skill store is missing")
+                user_skills_root = user_skills_root.resolve(strict=True)
+                support_root.relative_to(user_skills_root)
         except (OSError, ValueError) as exc:
             raise AgentGatewayError("skill support root is missing or outside the user skill store", status_code=400) from exc
         if _path_is_link_like(storage_path) or not storage_resolved.is_file():
@@ -1075,8 +1105,32 @@ class AgentSkillRegistryService:
         config = config or self._ports.ensure_config()
         inputs = self._registry_inputs()
         builtin_skills = self._builtin_skill_definitions(config, inputs)
+        application_skills = self._load_application_skills()
         user_skills = self._load_user_skills()
-        skills = [*builtin_skills, *user_skills]
+        official_ids = {normalize_skill_id(str(item.get("name") or "")) for item in [*builtin_skills, *application_skills]}
+        conflicts: dict[str, list[str]] = {}
+        source_conflicts: list[dict[str, Any]] = []
+        visible_user_skills = []
+        for user_skill in user_skills:
+            user_id = normalize_skill_id(str(user_skill.get("name") or ""))
+            if user_id not in official_ids:
+                visible_user_skills.append(user_skill)
+                continue
+            from bundled_skill_delivery import is_exact_legacy_projection
+            package_store = self.user_skills_dir.parent / "skill-packages"
+            if any(item.get("name") == user_id and is_exact_legacy_projection(user_skill, package_store) for item in application_skills):
+                continue
+            conflicts.setdefault(user_id, []).append(str(user_skill.get("storagePath") or ""))
+            source_conflicts.append({
+                "name": user_id, "status": "rename_required", "userPath": str(user_skill.get("storagePath") or ""),
+                "message": f"A user Skill has the same name as an application Skill; rename the user Skill: {user_id}",
+            })
+        for skill in application_skills:
+            paths = conflicts.get(normalize_skill_id(str(skill.get("name") or "")), [])
+            if paths:
+                skill["sourceConflict"] = {"status": "rename_required", "userPaths": paths}
+                skill["availabilityReasons"] = [f"A user Skill has the same name; rename the user Skill: {Path(paths[0]).parent.name}"]
+        skills = [*builtin_skills, *application_skills, *visible_user_skills]
         skills = [self._decorate_skill_validation(skill, config, inputs) for skill in skills]
         if exposure_layer == EXPOSURE_LAYER_PLANNING:
             skills = [skill for skill in skills if not bool(skill.get("write"))]
@@ -1091,7 +1145,9 @@ class AgentSkillRegistryService:
             "count": len(skills),
             "availableCount": available_count,
             "builtinCount": len(builtin_skills),
-            "userCount": len(user_skills),
+            "userCount": len(visible_user_skills),
+            "sourceConflictCount": sum(len(paths) for paths in conflicts.values()),
+            "sourceConflicts": source_conflicts,
             "warningCount": warning_count,
             "errorCount": error_count,
             "storage": {

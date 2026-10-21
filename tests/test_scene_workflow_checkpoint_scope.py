@@ -189,6 +189,12 @@ def test_installation_checkpoint_archive_does_not_fall_back_to_whole_project(sce
         ),
         (
             "vrcforge_create_gameobject",
+            "scene",
+            {"name": "Root Light", "parentPath": ""},
+            {},
+        ),
+        (
+            "vrcforge_create_gameobject",
             "avatar",
             {"name": "Child", "parentPath": "Avatar"},
             {"avatarGlobalObjectId": "avatar-id"},
@@ -249,8 +255,8 @@ def test_scene_only_workflow_prepares_exact_revalidated_scene(
         ("vrcforge_setup_outfit", "avatar", {"avatarPath": "Other", "outfitPath": "Other/Outfit"}),
         ("vrcforge_setup_outfit", "avatar", {"avatarPath": "Avatar", "outfitPath": "Other/Outfit"}),
         ("vrcforge_setup_outfit", "avatar", {"avatarPath": "Avatar", "outfitPath": "Avatar/Outfit", "saveScene": False}),
-        ("vrcforge_create_gameobject", "scene", {"name": "Child", "parentPath": ""}),
         ("vrcforge_create_gameobject", "avatar", {"name": "Child", "parentPath": "Other"}),
+        ("vrcforge_create_gameobject", "object", {"name": "Child", "parentPath": ""}),
         ("vrcforge_instantiate_prefab", "avatar", {"assetPath": "Assets/Item.prefab", "parentPath": ""}),
         ("vrcforge_instantiate_prefab", "scene", {"assetPath": "Assets/Item.prefab", "parentPath": "Avatar"}),
         ("vrcforge_instantiate_prefab", "object", {"assetPath": "Assets/Item.prefab", "parentPath": "Avatar/Other"}),

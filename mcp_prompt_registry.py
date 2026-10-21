@@ -106,8 +106,11 @@ class McpPromptRegistry:
         return [
             item
             for item in skills
-            if item.get("source") == "user"
-            and item.get("skillType") == "package"
+            if item.get("skillType") == "package"
+            and (
+                item.get("source") == "user"
+                or (item.get("source") == "builtin" and item.get("distribution") == "bundled")
+            )
             and item.get("enabled", True)
             and item.get("available", True)
             and not item.get("disableModelInvocation", False)

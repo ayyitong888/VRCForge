@@ -38,7 +38,7 @@ from approved_unity_execution import (
 )
 from external_tool_result_contract import build_external_tool_error
 from unity_mcp_core_client import APP_UNITYPACKAGE_IMPORT_POLL_LANE, UnityMcpCoreClient, UnityMcpCoreError
-from unity_mcp_tool_contract import READ_ONLY_TOOL_NAMES
+from unity_mcp_tool_contract import READ_ONLY_TOOL_NAMES, is_direct_read_call
 from unity_editor_window_probe import probe_unity_reload_dialog
 
 
@@ -3815,6 +3815,7 @@ def invoke_unity_mcp(
             failure_phase="gateway_policy",
         )
     active_plan = current_approved_unity_execution()
+    direct_read = is_direct_read_call(tool_name, params)
     transport_context = execution_context
     core_project = str(
         params.get("projectPath")
@@ -3882,7 +3883,13 @@ def invoke_unity_mcp(
     if (
         isinstance(active_plan, ApprovedUnityExecutionPlan)
         and execution_context is None
-        and tool_name not in READ_ONLY_TOOL_NAMES
+        # A prepared workflow may deliberately freeze a read before its write
+        # (for example shader scope validation). Consume that exact entry;
+        # incidental strict reads must not consume the next, different write.
+        and (
+            not direct_read
+            or active_plan.diagnostic_context().get("unityToolName") == tool_name
+        )
     ):
         try:
             if core_descriptor is None or not core_descriptor.is_file():
@@ -4045,7 +4052,7 @@ def invoke_unity_mcp(
                         failure_layer="unity_core_pre_route",
                         failure_phase="core_handshake",
                         operation_kind=(
-                            "read" if tool_name in READ_ONLY_TOOL_NAMES else "write"
+                            "read" if direct_read else "write"
                         ),
                         tool_routing_started=False,
                         mutation_started=False,
@@ -4109,11 +4116,11 @@ def invoke_unity_mcp(
                     failure_layer="unity_core_transport",
                     failure_phase="tool_dispatch_or_response",
                     operation_kind=(
-                        "read" if tool_name in READ_ONLY_TOOL_NAMES else "write"
+                        "read" if direct_read else "write"
                     ),
                     tool_routing_started=None,
-                    mutation_started=(False if tool_name in READ_ONLY_TOOL_NAMES else None),
-                    committed=(False if tool_name in READ_ONLY_TOOL_NAMES else None),
+                    mutation_started=(False if direct_read else None),
+                    committed=(False if direct_read else None),
                 ) from exc
             last_error = exc
             if attempt >= settings.unity_mcp_retries:

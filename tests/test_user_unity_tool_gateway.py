@@ -34,7 +34,21 @@ def test_install_registration_uses_application_store_and_requires_manual_approva
     monkeypatch.setattr(dashboard, "UserUnityToolService", factory)
     handler = dashboard.AGENT_GATEWAY._write_handlers["vrcforge_install_user_unity_tools"]
     args, preview = handler.request_preparer({"packageId": "user.test", "projectPath": "project", "preparedPlan": {"forged": True}}, None)
-    factory.assert_called_once_with(package_store, core_tree_identity=dashboard._unity_core_tree_identity)
+    factory.assert_called_once_with(
+        package_store,
+        core_tree_identity=dashboard._unity_core_tree_identity,
+        official_tool_names=factory.call_args.kwargs["official_tool_names"],
+    )
+    official_names = factory.call_args.kwargs["official_tool_names"]()
+    assert "vrcforge_list_directory" in official_names
+    assert "vrcforge_invoke_user_unity_tool" in official_names
+    with dashboard.AGENT_GATEWAY._lock:
+        monkeypatch.setitem(
+            dashboard.AGENT_GATEWAY._tools,
+            "vrcforge_future_official_tool",
+            object(),
+        )
+    assert "vrcforge_future_official_tool" in factory.call_args.kwargs["official_tool_names"]()
     assert args["preparedPlan"].get("forged") is None
     assert preview["files"][0]["sha256"] == "source-digest"
     assert handler.manual_approval_resolver(args, preview)

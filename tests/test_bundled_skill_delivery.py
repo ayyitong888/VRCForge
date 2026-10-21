@@ -5,6 +5,7 @@ import os
 import re
 import shutil
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -40,7 +41,8 @@ def _deliver(app, gateway, version="1.8.1"):
 
 def test_fresh_normal_profile_loads_complete_guide_internally_and_external_prompt(app_profile):
     app, gateway, root = app_profile
-    assert _deliver(app, gateway)["status"] == "installed"
+    assert _deliver(app, gateway)["status"] == "application-owned"
+    assert not (gateway.skills.user_skills_dir / delivery.SKILL_NAME).exists()
     skill = next(item for item in gateway.skills.build_skill_registry()["skills"] if item["name"] == delivery.SKILL_NAME)
     assert skill["enabled"] and skill["available"]
     assert skill["packageId"] == delivery.PACKAGE_ID
@@ -61,14 +63,7 @@ def test_fresh_normal_profile_loads_complete_guide_internally_and_external_promp
     assert context["signerFingerprint"] is None
     assert not (root / "skill-packages" / "registry.json").exists()
 
-    assert delivery.SKILL_NAME in {item["name"] for item in gateway.list_mcp_prompts()["prompts"]}
-    prompt = gateway.get_mcp_prompt(delivery.SKILL_NAME)["structuredContent"]
-    assert prompt["skill"]["instructions"] == skill["instructions"]
-    assert prompt["context"]["status"] == "ready_for_planning"
-    assert prompt["context"]["missingRequiredResources"] == []
-    assert prompt["context"]["gmCases"] == []
-    assert prompt["context"]["gameOnlyAcceptance"] == []
-    support = {item["path"]: item["content"] for item in prompt["skill"]["supportFiles"]}
+    support = {item["path"]: item["content"] for item in result["result"]["supportFiles"]}
     assert set(support) == {
         "references/zero-start.md",
         "workflows/first-run.json",
@@ -77,41 +72,145 @@ def test_fresh_normal_profile_loads_complete_guide_internally_and_external_promp
     }
     for relative, content in support.items():
         assert content == (delivery.bundled_source_dir() / relative).read_bytes().decode("utf-8")
-    installed = ExternalInstalledSkillRegistryService(gateway.skills)
-    assert delivery.SKILL_NAME in {item["name"] for item in installed.list_installed_skills()["skills"]}
-    read = installed.read_installed_skill({"name": delivery.SKILL_NAME, "file": "references/repair-guide.md"})
-    assert read["content"] == support["references/repair-guide.md"]
-    external = gateway.call_external_mcp_tool("vrcforge_read_installed_skill", {
-        "name": delivery.SKILL_NAME, "file": "references/repair-guide.md",
-    })
-    assert external["ok"]
-    assert external["result"]["content"] == support["references/repair-guide.md"]
+    assert all(item["source"] == "builtin" for item in gateway.skills.build_skill_registry()["skills"] if item["name"] in {delivery.SKILL_NAME, delivery.DOCS_SKILL_NAME})
+    assert not (root / "skill-packages" / "registry.json").exists()
 
 
 def test_startup_preserves_user_edits_and_disabled_state(app_profile):
     app, gateway, root = app_profile
-    _deliver(app, gateway)
     target = gateway.skills.user_skills_dir / delivery.SKILL_NAME
-    manifest = json.loads((delivery.bundled_source_dir() / "manifest.json").read_text(encoding="utf-8"))
-    app.SKILL_PACKAGE_PROJECTION.set_enabled_batch([manifest], False)
-    guide = target / "references" / "repair-guide.md"
-    guide.write_text("User's repair notes", encoding="utf-8")
-    before = {p.relative_to(target).as_posix(): p.read_bytes() for p in target.rglob("*") if p.is_file()}
-    assert _deliver(app, gateway)["status"] == "preserved"
-    assert before == {p.relative_to(target).as_posix(): p.read_bytes() for p in target.rglob("*") if p.is_file()}
-    skill = gateway.skills.find_user_skill(delivery.SKILL_NAME)
-    assert skill["enabled"] is False
-    assert delivery.bundled_guide_audit_context(skill, gateway.skills.user_skills_dir, root / "skill-packages") == {}
+    target.mkdir(parents=True)
+    (target / "SKILL.md").write_text("---\nname: vrcforge-first-run-guide\ntitle: My notes\n---\nUser's repair notes\n", encoding="utf-8")
+    before = (target / "SKILL.md").read_bytes()
+    assert _deliver(app, gateway)["status"] == "application-owned"
+    registry = gateway.skills.build_skill_registry()
+    official = next(item for item in registry["skills"] if item["name"] == delivery.SKILL_NAME)
+    assert official["source"] == "builtin" and official["sourceConflict"]["status"] == "rename_required"
+    assert registry["sourceConflictCount"] == 1
+    assert (target / "SKILL.md").read_bytes() == before
 
 
 def test_content_tamper_is_not_authorized_by_projection_marker(app_profile):
-    app, gateway, _ = app_profile
-    _deliver(app, gateway)
-    target = gateway.skills.user_skills_dir / delivery.SKILL_NAME / "SKILL.md"
-    target.write_text(target.read_text(encoding="utf-8") + "\nUnapproved replacement\n", encoding="utf-8")
+    _app, gateway, _ = app_profile
+    target = gateway.skills.user_skills_dir / delivery.SKILL_NAME
+    target.mkdir(parents=True)
+    target.joinpath("SKILL.md").write_text("---\nname: vrcforge-first-run-guide\ntitle: User copy\n---\nUnapproved replacement\n", encoding="utf-8")
     result = gateway.runtime_skills.execute(delivery.SKILL_NAME, {}, "test")
-    assert not result["ok"]
-    assert "identity could not be verified" in result["error"]
+    assert result["ok"] and result["status"] == "loaded"
+    assert result["result"]["source"] == "builtin"
+    assert "Unapproved replacement" not in result["result"]["instructions"]
+    assert target.joinpath("SKILL.md").read_text(encoding="utf-8").endswith("Unapproved replacement\n")
+
+
+def test_app_upgrade_uses_new_source_and_preserves_owned_old_projection(app_profile, monkeypatch):
+    app, gateway, root = app_profile
+    old_source = delivery.bundled_source_dir()
+    manifest = delivery._manifest(old_source, "1.9.1")
+    projection_ports = app.SKILL_PACKAGE_PROJECTION._ports
+    app.SKILL_PACKAGE_PROJECTION._ports = replace(projection_ports, validate_projection_name=lambda _name: None)
+    app.SKILL_PACKAGE_PROJECTION.project_installed(old_source, manifest, enabled=True)
+    app.SKILL_PACKAGE_PROJECTION._ports = projection_ports
+    old_projection = gateway.skills.user_skills_dir / delivery.SKILL_NAME
+    old_bytes = (old_projection / "SKILL.md").read_bytes()
+    sentinel = gateway.skills.user_skills_dir / "keep-user-data.txt"
+    sentinel.write_text("user-owned sentinel", encoding="utf-8")
+
+    upgraded = root / "application-upgrade" / delivery.SKILL_NAME
+    shutil.copytree(old_source, upgraded)
+    skill_file = upgraded / "SKILL.md"
+    skill_file.write_text(skill_file.read_text(encoding="utf-8") + "\nUpgrade-only instruction.\n", encoding="utf-8")
+    monkeypatch.setattr(delivery, "bundled_source_dir", lambda: upgraded)
+
+    registry = gateway.skills.build_skill_registry()
+    official = next(item for item in registry["skills"] if item["name"] == delivery.SKILL_NAME)
+    assert official["source"] == "builtin"
+    assert not registry["sourceConflicts"]
+    assert (old_projection / "SKILL.md").read_bytes() == old_bytes
+    assert sentinel.read_text(encoding="utf-8") == "user-owned sentinel"
+    replay = gateway.runtime_skills.execute(delivery.SKILL_NAME, {}, "upgrade-readback")
+    assert replay["ok"] and "Upgrade-only instruction." in replay["result"]["instructions"]
+    assert replay["result"]["supportFiles"]
+    assert all(
+        item["content"] == (upgraded / item["path"]).read_text(encoding="utf-8")
+        for item in replay["result"]["supportFiles"]
+    )
+
+
+def test_signed_trusted_installed_projection_is_verified_before_exemption(app_profile, tmp_path):
+    app, gateway, root = app_profile
+    source = delivery.bundled_source_dir()
+    version = app.read_vrcforge_version()
+    service = SkillPackageService(root / "skill-packages", vrcforge_version=version)
+    key_pair = service.generate_signing_keypair()
+    package = service.export_release(source, tmp_path / "official.vsk", key_pair.private_key_pem).package_path
+    service.trust_signer(key_pair.fingerprint, reason="focused regression fixture")
+    service.install(package, source="focused-test")
+    service.set_enabled(delivery.PACKAGE_ID, True)
+    manifest = delivery._manifest(source, version)
+    ports = app.SKILL_PACKAGE_PROJECTION._ports
+    app.SKILL_PACKAGE_PROJECTION._ports = replace(ports, validate_projection_name=lambda _name: None)
+    app.SKILL_PACKAGE_PROJECTION.project_installed(source, manifest, enabled=True)
+    app.SKILL_PACKAGE_PROJECTION._ports = ports
+
+    projected = gateway.skills.user_skills_dir / delivery.SKILL_NAME / "SKILL.md"
+    skill = {
+        **next(item for item in delivery.application_skills(version) if item["packageId"] == delivery.PACKAGE_ID),
+        "storagePath": str(projected),
+    }
+    verified, _ = service.verified_installed_entrypoint_bytes(delivery.PACKAGE_ID, "manifest.json")
+    assert verified["signature_status"] == "signed"
+    assert verified["governance"]["signer_trust_status"] == "trusted"
+    # A community-trusted signer is not an application publisher.
+    assert not delivery.is_exact_legacy_projection(skill, root / "skill-packages")
+    service.designate_official_signer(key_pair.fingerprint, reason="focused regression fixture")
+    assert delivery.is_exact_legacy_projection(skill, root / "skill-packages")
+
+    projected.write_bytes(projected.read_bytes() + b"\nuser edit\n")
+    assert not delivery.is_exact_legacy_projection(skill, root / "skill-packages")
+
+
+def test_forged_registry_row_cannot_authorize_legacy_projection(app_profile):
+    app, gateway, root = app_profile
+    source = delivery.bundled_source_dir()
+    manifest = delivery._manifest(source, app.read_vrcforge_version())
+    ports = app.SKILL_PACKAGE_PROJECTION._ports
+    app.SKILL_PACKAGE_PROJECTION._ports = replace(ports, validate_projection_name=lambda _name: None)
+    app.SKILL_PACKAGE_PROJECTION.project_installed(source, manifest, enabled=True)
+    app.SKILL_PACKAGE_PROJECTION._ports = ports
+    service = SkillPackageService(root / "skill-packages", vrcforge_version=app.read_vrcforge_version())
+    registry = service.load_registry()
+    registry["skills"][delivery.PACKAGE_ID] = {
+        "id": delivery.PACKAGE_ID, "version": manifest["version"], "enabled": True,
+        "signature_status": "signed", "signer_trust_status": "trusted",
+    }
+    service.registry_path.parent.mkdir(parents=True, exist_ok=True)
+    service.registry_path.write_text(json.dumps(registry), encoding="utf-8")
+    projected = gateway.skills.user_skills_dir / delivery.SKILL_NAME / "SKILL.md"
+    skill = {
+        **next(item for item in delivery.application_skills(app.read_vrcforge_version()) if item["packageId"] == delivery.PACKAGE_ID),
+        "storagePath": str(projected),
+    }
+    assert not delivery.is_exact_legacy_projection(skill, root / "skill-packages")
+
+
+def test_modified_old_official_projection_is_preserved_and_reports_rename(app_profile):
+    app, gateway, _root = app_profile
+    source = delivery.bundled_source_dir()
+    manifest = delivery._manifest(source, "1.9.1")
+    projection_ports = app.SKILL_PACKAGE_PROJECTION._ports
+    app.SKILL_PACKAGE_PROJECTION._ports = replace(projection_ports, validate_projection_name=lambda _name: None)
+    app.SKILL_PACKAGE_PROJECTION.project_installed(source, manifest, enabled=True)
+    app.SKILL_PACKAGE_PROJECTION._ports = projection_ports
+    projected = gateway.skills.user_skills_dir / delivery.SKILL_NAME / "SKILL.md"
+    projected.write_text(projected.read_text(encoding="utf-8") + "\nUser change\n", encoding="utf-8")
+    modified = projected.read_bytes()
+
+    registry = gateway.skills.build_skill_registry()
+    official = next(item for item in registry["skills"] if item["name"] == delivery.SKILL_NAME)
+    assert official["source"] == "builtin"
+    assert official["sourceConflict"]["status"] == "rename_required"
+    assert registry["sourceConflictCount"] == 1
+    assert projected.read_bytes() == modified
 
 
 def test_existing_package_governance_remains_authoritative(app_profile, tmp_path):
@@ -120,8 +219,11 @@ def test_existing_package_governance_remains_authoritative(app_profile, tmp_path
     service = SkillPackageService(root / "skill-packages", vrcforge_version="1.8.1")
     archive = service.export_dev(delivery.bundled_source_dir(), tmp_path / "guide.vsk").package_path
     service.install(archive, dev_mode=True)
-    skill = gateway.skills.find_user_skill(delivery.SKILL_NAME)
-    assert delivery.bundled_guide_audit_context(skill, gateway.skills.user_skills_dir, root / "skill-packages") == {}
+    registry = gateway.skills.build_skill_registry()
+    skill = next(item for item in registry["skills"] if item["name"] == delivery.SKILL_NAME)
+    assert skill["source"] == "builtin"
+    assert delivery.bundled_guide_audit_context(skill, gateway.skills.user_skills_dir, root / "skill-packages")["distribution"] == "bundled"
+    assert registry["sourceConflictCount"] == 0
 
 
 def test_reviewed_guide_version_import_updates_prior_immutable_version(app_profile, tmp_path):
@@ -134,16 +236,15 @@ def test_reviewed_guide_version_import_updates_prior_immutable_version(app_profi
     old_manifest_path.write_text(json.dumps(old_manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     service = SkillPackageService(gateway.user_constraints_path.parent / "skill-packages", vrcforge_version="1.8.5")
     old_archive = service.export_dev(old_source, tmp_path / "guide-1.0.2.vsk").package_path
-    old_result = app.SKILL_PACKAGE_CONTROLLER.import_package({"packagePath": str(old_archive), "devMode": True, "projectToUserSkills": True})
-    assert old_result["ok"] and old_result["projectedSkill"]["name"] == delivery.SKILL_NAME
+    old_result = app.SKILL_PACKAGE_CONTROLLER.import_package({"packagePath": str(old_archive), "devMode": True, "projectToUserSkills": False})
+    assert old_result["ok"]
 
     current_archive = service.export_dev(delivery.bundled_source_dir(), tmp_path / "guide-1.0.5.vsk").package_path
-    current_result = app.SKILL_PACKAGE_CONTROLLER.import_package({"packagePath": str(current_archive), "devMode": True, "projectToUserSkills": True})
-    assert current_result["ok"] and current_result["projectedSkill"]["name"] == delivery.SKILL_NAME
+    current_result = app.SKILL_PACKAGE_CONTROLLER.import_package({"packagePath": str(current_archive), "devMode": True, "projectToUserSkills": False})
+    assert current_result["ok"]
     installed = service.load_registry()["skills"][delivery.PACKAGE_ID]
     assert installed["version"] == "1.0.5"
-    projected = gateway.skills.user_skills_dir / delivery.SKILL_NAME / "references" / "user-tool-author-guide.md"
-    assert projected.read_bytes() == (delivery.bundled_source_dir() / "references" / "user-tool-author-guide.md").read_bytes()
+    assert not (gateway.skills.user_skills_dir / delivery.SKILL_NAME).exists()
 
 
 @pytest.mark.parametrize("failure", ["minimum_version", "missing_support"])

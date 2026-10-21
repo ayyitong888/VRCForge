@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from outfit_package_inspector import inspect_outfit_package
+from outfit_package_inspector import inspect_outfit_package, is_single_fbx_folder
 
 
 IMPORT_PLAN_SCHEMA = "vrcforge.outfit_import_plan.v1"
@@ -235,6 +235,14 @@ def build_outfit_import_plan(
         source_type == "folder" and bool(textures)
         and summary.get("textureCount") == len(textures)
     )
+    models = inspection.get("models") or []
+    # A standalone generated FBX needs no prefab selection. Multiple models
+    # retain manual selection; the writer still seals the complete folder.
+    single_fbx_folder = (
+        not explicit_selected_prefab and not explicit_selected_package
+        and is_single_fbx_folder(source_type, models,
+            model_count=summary.get("modelCount"), truncated=bool(summary.get("truncated")))
+    )
     selected_package_for_queue = explicit_selected_package or resolved_single_package
     selected_package_path = (
         resolve_selected_unitypackage_path(source_path, source_type, str(selected_package.get("path") or ""))
@@ -295,7 +303,7 @@ def build_outfit_import_plan(
             dependency_preflight=dependency_preflight,
             selected_prefab_path=str((selected_prefab_entry or {}).get("path") or ""),
         )
-    elif selected_loose_entry or complete_texture_folder:
+    elif selected_loose_entry or complete_texture_folder or single_fbx_folder:
         plan = build_loose_prefab_plan(
             source_path=source_path,
             selected_prefab=selected_loose_entry or {},
