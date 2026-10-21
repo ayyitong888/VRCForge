@@ -50,6 +50,9 @@
     "fewerChats": "收起对话",
     "moreProjects": "更多项目 ({{count}})",
     "fewerProjects": "收起项目",
+    "dragChat": "长按拖动调整聊天顺序",
+    "dragProject": "长按拖动调整项目顺序",
+    "sortProjectsByConversation": "按最后对话排序",
     "noTempChats": "暂无临时对话",
     "expandSidebar": "展开侧边栏",
     "collapseSidebar": "收起侧边栏"

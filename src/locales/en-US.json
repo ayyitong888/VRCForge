@@ -50,6 +50,9 @@
     "fewerChats": "Show fewer conversations",
     "moreProjects": "More projects ({{count}})",
     "fewerProjects": "Show fewer projects",
+    "dragChat": "Press and hold to reorder conversations",
+    "dragProject": "Press and hold to reorder projects",
+    "sortProjectsByConversation": "Sort by last conversation",
     "noTempChats": "No quick chats yet",
     "expandSidebar": "Expand sidebar",
     "collapseSidebar": "Collapse sidebar"

@@ -17,6 +17,17 @@ This software is provided without warranty. Users should back up their Unity / V
 
 Bundled third-party components and notices:
 
+* dnd kit frontend sorting components
+  * Upstream: https://github.com/clauderic/dnd-kit
+  * License: MIT
+  * The core, sortable, utilities and accessibility licenses are preserved in
+    binary release payloads under `licenses/`.
+* tslib frontend helpers
+  * Upstream: https://github.com/microsoft/tslib
+  * License: 0BSD
+  * The upstream license and copyright notice are preserved in binary release
+    payloads under `licenses/`.
+
 * uv Windows runtime
   * Upstream: https://github.com/astral-sh/uv
   * License: MIT OR Apache-2.0

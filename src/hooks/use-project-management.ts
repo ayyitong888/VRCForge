@@ -99,6 +99,7 @@ export function useProjectManagement({
     () => new Set(projectUiPrefs.pinnedPaths.map(normalizeProjectPathKey)),
     [projectUiPrefs.pinnedPaths],
   );
+  const projectOrder = useMemo(() => projectUiPrefs.projectOrder || [], [projectUiPrefs.projectOrder]);
   const allProjectItems = useMemo(() => {
     const byPath = new Map(
       projects
@@ -123,23 +124,13 @@ export function useProjectManagement({
     () =>
       allProjectItems
         .filter((project) => !hiddenPathSet.has(normalizeProjectPathKey(project.path || "")))
-        .map((project) => ({ ...project, lastOpenedAt: projectUiPrefs.lastOpenedAt?.[normalizeProjectPathKey(projectKey(project))] }))
         .sort((a, b) => Number(pinnedProjectSet.has(normalizeProjectPathKey(projectKey(b)))) - Number(pinnedProjectSet.has(normalizeProjectPathKey(projectKey(a))))),
-    [allProjectItems, hiddenPathSet, pinnedProjectSet, projectUiPrefs.lastOpenedAt],
+    [allProjectItems, hiddenPathSet, pinnedProjectSet],
   );
   const hiddenProjects = useMemo(
     () => allProjectItems.filter((project) => hiddenPathSet.has(normalizeProjectPathKey(project.path || ""))),
     [allProjectItems, hiddenPathSet],
   );
-
-  useEffect(() => {
-    const key = normalizeProjectPathKey(activeProjectPath);
-    if (!key) return;
-    setProjectUiPrefs((current) => ({
-      ...current,
-      lastOpenedAt: { ...current.lastOpenedAt, [key]: new Date().toISOString() },
-    }));
-  }, [activeProjectPath]);
 
   useEffect(() => {
     try {
@@ -358,6 +349,23 @@ export function useProjectManagement({
     });
   }
 
+  function reorderProjects(orderedPaths: string[]) {
+    const available = new Set(projectItems.map((project) => normalizeProjectPathKey(projectKey(project))));
+    const ordered = Array.from(new Set(orderedPaths.map(normalizeProjectPathKey))).filter((key) => available.has(key));
+    if (ordered.length < 2) return;
+    const moved = new Set(ordered);
+    setProjectUiPrefs((current) => ({ ...current,
+      projectOrder: [...ordered, ...(current.projectOrder || []).filter((key) => !moved.has(normalizeProjectPathKey(key)))],
+    }));
+  }
+
+  function resetProjectOrder(paths: string[]) {
+    const reset = new Set(paths.map(normalizeProjectPathKey));
+    setProjectUiPrefs((current) => ({ ...current,
+      projectOrder: (current.projectOrder || []).filter((key) => !reset.has(normalizeProjectPathKey(key))),
+    }));
+  }
+
   function startRenameProject(path: string) {
     setRenamingProjectPath(path);
     const project = projectItems.find((item) => normalizeProjectPathKey(projectKey(item)) === normalizeProjectPathKey(path));
@@ -562,6 +570,9 @@ export function useProjectManagement({
     collapsedProjects,
     customPathSet,
     pinnedProjectSet,
+    projectOrder,
+    reorderProjects,
+    resetProjectOrder,
     projectItems,
     hiddenProjects,
     addProjectPath,

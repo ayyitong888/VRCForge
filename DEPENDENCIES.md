@@ -30,6 +30,11 @@ users receive it from the platform-qualified requirement.
 
 ## Optional local tools / 可选本地工具
 
+The desktop frontend uses `@dnd-kit/core`, `@dnd-kit/sortable` and
+`@dnd-kit/utilities` for project sorting with pointer and keyboard input.
+Their accessibility dependency is MIT licensed; their `tslib` helper is 0BSD.
+These frontend components do not change the native file attachment drop path.
+
 | Tool | Used for | 用途 |
 | --- | --- | --- |
 | `git` | Preferred checkpoint backend for Unity projects already using Git | 已使用 Git 的 Unity 工程优先 checkpoint 后端 |

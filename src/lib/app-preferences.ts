@@ -1,7 +1,7 @@
 export type ProjectUiPrefs = {
   pinnedPaths: string[];
   aliases: Record<string, string>;
-  lastOpenedAt?: Record<string, string>;
+  projectOrder?: string[];
 };
 
 export type LayoutPaneWidths = {
@@ -50,12 +50,10 @@ export function loadProjectUiPrefs(): ProjectUiPrefs {
             ),
           )
         : {};
-    const lastOpenedAt = parsed.lastOpenedAt && typeof parsed.lastOpenedAt === "object"
-      ? Object.fromEntries(Object.entries(parsed.lastOpenedAt).filter(
-          (entry): entry is [string, string] => typeof entry[1] === "string" && Number.isFinite(Date.parse(entry[1])),
-        ))
-      : {};
-    return { pinnedPaths, aliases, lastOpenedAt };
+    const projectOrder = Array.isArray(parsed.projectOrder)
+      ? parsed.projectOrder.filter((item: unknown): item is string => typeof item === "string" && item.trim().length > 0)
+      : [];
+    return { pinnedPaths, aliases, projectOrder };
   } catch {
     return { pinnedPaths: [], aliases: {} };
   }

@@ -1,6 +1,9 @@
 import { ChevronDown, ChevronRight, Folder, Loader2, MessageSquare, MoreHorizontal, Pin, Trash2 } from "lucide-react";
 import { MouseEvent as ReactMouseEvent, ReactNode, useId, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { DndContext, KeyboardSensor, PointerSensor, closestCenter, useSensor, useSensors, type DragEndEvent } from "@dnd-kit/core";
+import { SortableContext, arrayMove, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy } from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
 import i18n from "../../i18n";
 import type { ChatThread } from "../../lib/chat-types";
 import type { SidebarChatActivity } from "../../lib/sidebar-view";
@@ -8,37 +11,133 @@ import { normalizeProjectPathKey, projectKey } from "../../lib/project-path";
 import { cn } from "../../lib/utils";
 
 const SIDEBAR_PREVIEW_COUNT = 5;
+const SIDEBAR_DRAG_ACTIVATION = { delay: 200, tolerance: 6 };
 
 export function SidebarChatList({
   chats,
   activeChatId,
   indent = false,
+  onReorderChats,
+  onResetOrder,
   renderChat,
 }: {
   chats: ChatThread[];
   activeChatId: string;
   indent?: boolean;
-  renderChat: (chat: ChatThread) => ReactNode;
+  onReorderChats?: (ids: string[]) => void;
+  onResetOrder?: () => void;
+  renderChat: (chat: ChatThread, dragHandle: DragHandleProps) => ReactNode;
 }) {
   const { t } = useTranslation();
-  return <SidebarOverflowList items={chats} isActive={(chat) => chat.id === activeChatId}
-    indent={indent} renderItem={renderChat}
-    moreLabel={(count) => t("sidebar.moreChats", { count })} fewerLabel={t("sidebar.fewerChats")} />;
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: SIDEBAR_DRAG_ACTIVATION }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+  );
+  const handleDragEnd = ({ active, over }: DragEndEvent) => {
+    if (!onReorderChats || !over || active.id === over.id) return;
+    const from = chats.findIndex((chat) => chat.id === active.id);
+    const to = chats.findIndex((chat) => chat.id === over.id);
+    if (from < 0 || to < 0 || Boolean(chats[from].pinned) !== Boolean(chats[to].pinned)) return;
+    onReorderChats(arrayMove(chats, from, to).map((chat) => chat.id));
+  };
+  return <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
+    <div data-vrcforge-chat-list className="min-w-0">
+    <SortableContext items={chats.map((chat) => chat.id)} strategy={verticalListSortingStrategy}>
+      <SidebarOverflowList items={chats} isActive={(chat) => chat.id === activeChatId}
+        indent={indent} renderItem={(chat) => <SortableChatRow key={chat.id} chat={chat} disabled={!onReorderChats} render={renderChat} />}
+        moreLabel={(count) => t("sidebar.moreChats", { count })} fewerLabel={t("sidebar.fewerChats")} />
+    </SortableContext>
+    {onResetOrder ? <button type="button" onClick={onResetOrder} className={cn("flex h-7 w-full items-center text-left text-xs text-muted-foreground hover:text-foreground", indent ? "pl-9 pr-3" : "px-3")}>
+      {t("sidebar.sortProjectsByConversation")}
+    </button> : null}
+    </div>
+  </DndContext>;
+}
+
+function SortableChatRow({ chat, disabled, render }: {
+  chat: ChatThread;
+  disabled: boolean;
+  render: (chat: ChatThread, dragHandle: DragHandleProps) => ReactNode;
+}) {
+  const sortable = useSortable({ id: chat.id, disabled });
+  return <div ref={sortable.setNodeRef} style={{ transform: CSS.Transform.toString(sortable.transform), transition: sortable.transition }} className={cn("min-w-0", sortable.isDragging && "z-10 opacity-70")}>
+    {render(chat, { setActivatorNodeRef: sortable.setActivatorNodeRef, attributes: sortable.attributes, listeners: sortable.listeners, disabled })}
+  </div>;
 }
 
 export function SidebarProjectList<T extends { name?: string; path?: string }>({
-  projects, activeProjectPath, renderProject,
+  projects, activeProjectPath, pinnedProjectSet, onReorderProjects, renderProject,
 }: {
   projects: T[];
   activeProjectPath: string;
-  renderProject: (project: T, index: number) => ReactNode;
+  pinnedProjectSet?: ReadonlySet<string>;
+  onReorderProjects?: (orderedPaths: string[]) => void;
+  renderProject: (project: T, index: number, dragHandle: DragHandleProps) => ReactNode;
 }) {
   const { t } = useTranslation();
   const activeKey = normalizeProjectPathKey(activeProjectPath);
-  return <SidebarOverflowList items={projects}
-    isActive={(project) => Boolean(activeKey) && normalizeProjectPathKey(projectKey(project)) === activeKey}
-    renderItem={renderProject}
-    moreLabel={(count) => t("sidebar.moreProjects", { count })} fewerLabel={t("sidebar.fewerProjects")} />;
+  const [expanded, setExpanded] = useState(false);
+  const listId = useId();
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: SIDEBAR_DRAG_ACTIVATION }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+  );
+  const visibleProjects = projects.length <= SIDEBAR_PREVIEW_COUNT || expanded
+    ? projects
+    : projects.filter((project, index) => index < SIDEBAR_PREVIEW_COUNT || (Boolean(activeKey) && normalizeProjectPathKey(projectKey(project)) === activeKey));
+  const hiddenCount = projects.length - visibleProjects.length;
+  const pinned = projects.filter((project) => Boolean(pinnedProjectSet?.has(normalizeProjectPathKey(projectKey(project)))));
+  const unpinned = projects.filter((project) => !pinnedProjectSet?.has(normalizeProjectPathKey(projectKey(project))));
+  const visiblePinned = visibleProjects.filter((project) => pinned.includes(project));
+  const visibleUnpinned = visibleProjects.filter((project) => unpinned.includes(project));
+  const renderGroup = (group: T[]) => group.length === 0 ? null : (
+    <SortableContext items={group.map((project) => projectKey(project))} strategy={verticalListSortingStrategy}>
+      {group.map((project) => {
+        const index = projects.indexOf(project);
+        return <SortableProjectRow key={projectKey(project) || `project-${index}`} id={projectKey(project)} disabled={!onReorderProjects} render={(dragHandle) => renderProject(project, index, dragHandle)} />;
+      })}
+    </SortableContext>
+  );
+  const handleDragEnd = (event: DragEndEvent) => {
+    const { active, over } = event;
+    if (!over || active.id === over.id || !onReorderProjects) return;
+    const activeProject = projects.find((project) => projectKey(project) === active.id);
+    const overProject = projects.find((project) => projectKey(project) === over.id);
+    if (!activeProject || !overProject) return;
+    const activePinned = pinnedProjectSet?.has(normalizeProjectPathKey(projectKey(activeProject))) ?? false;
+    const overPinned = pinnedProjectSet?.has(normalizeProjectPathKey(projectKey(overProject))) ?? false;
+    if (activePinned !== overPinned) return;
+    const from = projects.indexOf(activeProject);
+    const to = projects.indexOf(overProject);
+    if (from < 0 || to < 0) return;
+    onReorderProjects(arrayMove(projects, from, to).map((project) => projectKey(project)).filter(Boolean));
+  };
+  return <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
+    <div id={`sidebar-project-list-${listId}`} className="space-y-1">
+    {renderGroup(visiblePinned)}
+    {renderGroup(visibleUnpinned)}
+    </div>
+    {expanded || hiddenCount > 0 ? (
+      <button type="button" aria-controls={`sidebar-project-list-${listId}`} aria-expanded={expanded} onClick={() => setExpanded((value) => !value)} className="flex h-8 w-full min-w-0 items-center rounded-md px-3 py-1 text-left text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground">
+        {expanded ? t("sidebar.fewerProjects") : t("sidebar.moreProjects", { count: hiddenCount })}
+      </button>
+    ) : null}
+  </DndContext>;
+}
+
+export type DragHandleProps = Pick<ReturnType<typeof useSortable>, "setActivatorNodeRef" | "attributes" | "listeners"> & { disabled: boolean };
+
+function SortableProjectRow({ id, disabled = false, render }: { id: string; disabled?: boolean; render: (dragHandle: DragHandleProps) => ReactNode }) {
+  const sortable = useSortable({ id, disabled });
+  const dragHandle: DragHandleProps = {
+    setActivatorNodeRef: sortable.setActivatorNodeRef,
+    attributes: sortable.attributes,
+    listeners: sortable.listeners,
+    disabled,
+  };
+  return <div ref={sortable.setNodeRef} data-vrcforge-project-path={id} style={{ transform: CSS.Transform.toString(sortable.transform), transition: sortable.transition }} className={cn("min-w-0", sortable.isDragging && "z-10 opacity-70")}>
+    {render(dragHandle)}
+  </div>;
 }
 
 function SidebarOverflowList<T>({ items, isActive, renderItem, moreLabel, fewerLabel, indent = false }: {
@@ -138,6 +237,7 @@ export function SidebarProject({
   onContextMenu,
   onRenameChange,
   onRenameCommit,
+  dragHandle,
 }: {
   name: string;
   meta?: string;
@@ -153,6 +253,7 @@ export function SidebarProject({
   onContextMenu?: (event: ReactMouseEvent) => void;
   onRenameChange?: (value: string) => void;
   onRenameCommit?: (cancel?: boolean) => void;
+  dragHandle?: DragHandleProps;
 }) {
   if (renaming) {
     return (
@@ -185,7 +286,15 @@ export function SidebarProject({
         onClick ? "hover:bg-muted hover:text-foreground" : "cursor-default",
       )}
     >
-      <button onClick={onClick} disabled={!onClick} className="flex h-full min-w-0 flex-1 items-center gap-3 px-3 text-left">
+      <button
+        ref={dragHandle && !dragHandle.disabled ? dragHandle.setActivatorNodeRef : undefined}
+        {...(dragHandle && !dragHandle.disabled ? dragHandle.attributes : {})}
+        {...(dragHandle && !dragHandle.disabled ? dragHandle.listeners : {})}
+        data-vrcforge-project-drag-row={dragHandle && !dragHandle.disabled ? name : undefined}
+        title={dragHandle && !dragHandle.disabled ? i18n.t("sidebar.dragProject") : undefined}
+        onClick={onClick} disabled={!onClick}
+        className="flex h-full min-w-0 flex-1 touch-pan-y select-none items-center gap-3 px-3 text-left active:cursor-grabbing"
+      >
         <Folder className="h-4 w-4 shrink-0" />
         <span className="min-w-0 flex-1 truncate">{name}</span>
         {pinned ? <Pin className="h-3.5 w-3.5 shrink-0 text-primary/60" /> : null}
@@ -239,6 +348,7 @@ export function SidebarChat({
   onContextMenu,
   onRenameChange,
   onRenameCommit,
+  dragHandle,
 }: {
   chatId?: string;
   title: string;
@@ -257,6 +367,7 @@ export function SidebarChat({
   onContextMenu?: (event: ReactMouseEvent) => void;
   onRenameChange?: (value: string) => void;
   onRenameCommit?: (cancel?: boolean) => void;
+  dragHandle?: DragHandleProps;
 }) {
   const { t } = useTranslation();
   if (renaming) {
@@ -292,7 +403,14 @@ export function SidebarChat({
         active ? "bg-muted text-foreground" : "text-muted-foreground hover:bg-muted hover:text-foreground",
       )}
     >
-      <button onClick={onClick} className="flex h-full min-w-0 flex-1 items-center gap-2 px-3 text-left">
+      <button
+        ref={dragHandle && !dragHandle.disabled ? dragHandle.setActivatorNodeRef : undefined}
+        {...(dragHandle && !dragHandle.disabled ? dragHandle.attributes : {})}
+        {...(dragHandle && !dragHandle.disabled ? dragHandle.listeners : {})}
+        data-vrcforge-chat-drag-row={dragHandle && !dragHandle.disabled ? chatId : undefined}
+        title={dragHandle && !dragHandle.disabled ? t("sidebar.dragChat") : undefined}
+        onClick={onClick} className="flex h-full min-w-0 flex-1 touch-pan-y select-none items-center gap-2 px-3 text-left active:cursor-grabbing"
+      >
         {indent ? null : <MessageSquare className="h-4 w-4 shrink-0" />}
         <span className="min-w-0 flex-1 truncate">{title}</span>
         {isTestChat ? (

@@ -785,6 +785,9 @@ export default function App() {
     collapsedProjects,
     customPathSet,
     pinnedProjectSet,
+    projectOrder,
+    reorderProjects,
+    resetProjectOrder,
     projectItems,
     hiddenProjects,
     addProjectPath,
@@ -908,8 +911,8 @@ export default function App() {
     void replyToSessionHandoff(endpoint, card.targetChatId, card.sourceChatId, handoffId, text);
   };
   const sidebarProjectItems = useMemo(
-    () => sortSidebarProjects(projectItems, chats, pinnedProjectSet),
-    [chats, pinnedProjectSet, projectItems],
+    () => sortSidebarProjects(projectItems, chats, pinnedProjectSet, projectOrder),
+    [chats, pinnedProjectSet, projectItems, projectOrder],
   );
   chatSessionActionsRef.current = { selectProject, newConversation };
   const projectTypeForPath = (projectPath: string): ProjectType => {
@@ -4019,6 +4022,8 @@ export default function App() {
           onBackFromSettings={returnFromOnboardingSettings}
           onRefreshProjects={() => void refreshProjectList()}
           onSelectProject={newConversationForProject}
+          onReorderProjects={reorderProjects}
+          onResetProjectOrder={resetProjectOrder}
           onToggleProjectCollapse={toggleProjectCollapse}
           onProjectMenu={(projectPath, event) => {
             event.preventDefault();

@@ -44,6 +44,40 @@
         "licenses/pywinpty-LICENSE-MIT.txt"
       ],
       "releaseDistributionNotes": "licenses/pywinpty-DISTRIBUTION-NOTES.txt"
+    },
+    {
+      "name": "dnd kit frontend sorting",
+      "path": "node_modules/@dnd-kit",
+      "license": "MIT",
+      "requiredLicenseFiles": [
+        { "file": "core/LICENSE", "requiredText": ["MIT License", "Claudéric Demers"] },
+        { "file": "sortable/LICENSE", "requiredText": ["MIT License", "Claudéric Demers"] },
+        { "file": "utilities/LICENSE", "requiredText": ["MIT License", "Claudéric Demers"] },
+        { "file": "accessibility/LICENSE", "requiredText": ["MIT License", "Claudéric Demers"] }
+      ],
+      "requiredDistributionNotes": "",
+      "releaseLicenseFiles": [
+        "licenses/dnd-kit-core-LICENSE-MIT.txt",
+        "licenses/dnd-kit-sortable-LICENSE-MIT.txt",
+        "licenses/dnd-kit-utilities-LICENSE-MIT.txt",
+        "licenses/dnd-kit-accessibility-LICENSE-MIT.txt"
+      ],
+      "releaseDistributionNotes": ""
+    },
+    {
+      "name": "tslib frontend helpers",
+      "path": "node_modules/tslib",
+      "license": "0BSD",
+      "requiredLicenseFiles": [
+        { "file": "LICENSE.txt", "requiredText": ["Copyright (c) Microsoft Corporation.", "Permission to use, copy, modify"] },
+        { "file": "CopyrightNotice.txt", "requiredText": ["Copyright (c) Microsoft Corporation."] }
+      ],
+      "requiredDistributionNotes": "",
+      "releaseLicenseFiles": [
+        "licenses/tslib-LICENSE-0BSD.txt",
+        "licenses/tslib-CopyrightNotice.txt"
+      ],
+      "releaseDistributionNotes": ""
     }
   ]
 }

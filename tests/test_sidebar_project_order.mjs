@@ -80,7 +80,7 @@ test("projects are separated into General and Unity groups while legacy entries 
   assert.deepEqual(groups.unity.map((item) => item.path), ["C:\\General", "C:\\Unity", "C:\\Legacy"]);
 });
 
-test("recently opened projects and conversations share descending activity order", () => {
+test("opening a project never overrides the latest conversation order", () => {
   const projects = [
     { ...project("C:\\Alpha"), lastOpenedAt: "2026-10-20T10:00:00Z" },
     { ...project("C:\\Zulu"), lastOpenedAt: "2026-10-21T10:00:00Z" },
@@ -89,6 +89,18 @@ test("recently opened projects and conversations share descending activity order
   ];
   const chats = [chat("C:\\Middle", { updatedAt: "2026-10-22T10:00:00Z" })];
   const ordered = projectOrder.sortSidebarProjects(projects, chats, new Set());
-  assert.deepEqual(ordered.map((item) => item.name), ["Middle", "Zulu", "Alpha", "Unknown"]);
+  assert.deepEqual(ordered.map((item) => item.name), ["Middle", "Alpha", "Zulu", "Unknown"]);
   assert.deepEqual(projects.map((item) => item.name), ["Alpha", "Zulu", "Middle", "Unknown"]);
+});
+
+test("manual order persists within pinned groups and resetting restores conversation order", () => {
+  const projects = [project("C:\\Alpha"), project("C:\\Zulu"), project("C:\\Middle"), project("C:\\Pinned")];
+  const chats = [chat("C:\\Middle", { updatedAt: "2026-10-22T10:00:00Z" })];
+  const pinned = new Set(["c:/pinned"]);
+  const manual = ["c:/zulu", "c:/alpha", "c:/middle", "c:/pinned"];
+  assert.deepEqual(projectOrder.sortSidebarProjects(projects, chats, pinned, manual).map(p => p.name),
+    ["Pinned", "Zulu", "Alpha", "Middle"]);
+  assert.deepEqual(projectOrder.sortSidebarProjects(projects, chats, pinned, []).map(p => p.name),
+    ["Pinned", "Middle", "Alpha", "Zulu"]);
+  assert.deepEqual(projects.map(p => p.name), ["Alpha", "Zulu", "Middle", "Pinned"]);
 });

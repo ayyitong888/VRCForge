@@ -6,7 +6,6 @@ type SidebarProjectItem = {
   name?: string;
   path?: string;
   projectType?: ProjectType;
-  lastOpenedAt?: string;
 };
 
 export type SidebarProjectGroups<TProject extends SidebarProjectItem> = {
@@ -29,34 +28,35 @@ type IndexedProject<TProject extends SidebarProjectItem> = {
   index: number;
   pinned: boolean;
   latestChatTime: number | null;
+  manualIndex: number;
 };
 
 /**
  * Orders the sidebar-only project view without mutating project state.
  *
  * Pinned projects form the first group. Within each group, the most recently
- * opened project or updated conversation wins; a missing updatedAt falls back
- * to createdAt. Projects without a usable activity timestamp retain their
+ * updated conversation wins unless the user has arranged that group by hand.
+ * A missing updatedAt falls back to createdAt. Projects without a usable timestamp retain their
  * incoming order.
  */
 export function sortSidebarProjects<TProject extends SidebarProjectItem>(
   projects: readonly TProject[],
   chats: readonly ChatThread[],
   pinnedProjectSet: ReadonlySet<string>,
+  projectOrder: readonly string[] = [],
 ): TProject[] {
   const latestChatTimeByProject = latestChatTimeByProjectPath(chats);
   const pinnedProjectKeys = new Set(Array.from(pinnedProjectSet, normalizeProjectPathKey));
+  const manualOrder = new Map(projectOrder.map((path, index) => [normalizeProjectPathKey(path), index]));
   return projects
     .map((project, index): IndexedProject<TProject> => {
       const key = normalizeProjectPathKey(projectKey(project));
-      const openedAt = Date.parse(project.lastOpenedAt || "");
-      const chatAt = key ? latestChatTimeByProject.get(key) : undefined;
-      const activityTime = Math.max(Number.isFinite(openedAt) ? openedAt : Number.NEGATIVE_INFINITY, chatAt ?? Number.NEGATIVE_INFINITY);
       return {
         project,
         index,
         pinned: pinnedProjectKeys.has(key),
-        latestChatTime: Number.isFinite(activityTime) ? activityTime : null,
+        latestChatTime: key ? latestChatTimeByProject.get(key) ?? null : null,
+        manualIndex: manualOrder.get(key) ?? Number.POSITIVE_INFINITY,
       };
     })
     .sort(compareSidebarProjects)
@@ -93,6 +93,9 @@ function compareSidebarProjects<TProject extends SidebarProjectItem>(
   const pinDelta = Number(right.pinned) - Number(left.pinned);
   if (pinDelta !== 0) {
     return pinDelta;
+  }
+  if (left.manualIndex !== right.manualIndex) {
+    return left.manualIndex < right.manualIndex ? -1 : 1;
   }
   if (left.latestChatTime !== null && right.latestChatTime !== null && left.latestChatTime !== right.latestChatTime) {
     return right.latestChatTime - left.latestChatTime;

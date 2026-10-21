@@ -8,6 +8,7 @@ import {
   FolderPlus,
   Gauge,
   History,
+  ListFilter,
   MessageSquare,
   Plug,
   RefreshCw,
@@ -24,7 +25,8 @@ import type { SidebarChatGroupsWithTimes } from "../../lib/sidebar-view";
 import { normalizeProjectPathKey, projectKey } from "../../lib/project-path";
 import { groupSidebarProjects } from "../../lib/sidebar-project-order";
 import { cn } from "../../lib/utils";
-import { SidebarChat, SidebarChatList, SidebarProject, SidebarProjectList, SidebarSection } from "./sidebar";
+import { useSidebarChatOrder } from "../../hooks/use-sidebar-chat-order";
+import { SidebarChat, SidebarChatList, SidebarProject, SidebarProjectList, SidebarSection, type DragHandleProps } from "./sidebar";
 
 type SidebarProjectItem = {
   name?: string;
@@ -68,6 +70,8 @@ type AppSidebarProps = {
   onOpenSettingsSection: (section: SettingsSection) => void;
   onBackFromSettings: () => void;
   onRefreshProjects: () => void;
+  onReorderProjects?: (orderedPaths: string[]) => void;
+  onResetProjectOrder?: (paths: string[]) => void;
   onSelectProject: (path: string) => void;
   onToggleProjectCollapse: (path: string) => void;
   onProjectMenu: (projectPath: string, event: ReactMouseEvent) => void;
@@ -92,7 +96,7 @@ export function AppSidebar({
   runtimeConnected,
   loadingProjects,
   projectItems,
-  chatSidebar,
+  chatSidebar: unorderedChatSidebar,
   backgroundGoalUnreadByChat,
   emptyProjectState,
   collapsedProjects,
@@ -114,6 +118,8 @@ export function AppSidebar({
   onOpenSettingsSection,
   onBackFromSettings,
   onRefreshProjects,
+  onReorderProjects,
+  onResetProjectOrder,
   onSelectProject,
   onToggleProjectCollapse,
   onProjectMenu,
@@ -127,6 +133,7 @@ export function AppSidebar({
   onChatRenameCommit,
 }: AppSidebarProps) {
   const { t } = useTranslation();
+  const { orderedGroups: chatSidebar, reorderChats, resetChatOrder, manualChatIds } = useSidebarChatOrder(unorderedChatSidebar);
   const projectGroups = groupSidebarProjects(projectItems);
   const settingsNavItems = ([
     { section: "general", label: t("settings.navGeneral"), icon: <SlidersHorizontal className="h-4 w-4 shrink-0" /> },
@@ -208,8 +215,12 @@ export function AppSidebar({
       </nav>
 
       {collapsed ? null : (
-        <SidebarSection title={t("project.generalProject")}>
-          <SidebarProjectList projects={projectGroups.general} activeProjectPath={activeProjectPath} renderProject={(project, index) => {
+        <SidebarSection title={t("project.generalProject")} action={onResetProjectOrder ? (
+          <button type="button" onClick={() => onResetProjectOrder(projectGroups.general.map((project) => projectKey(project)).filter(Boolean))} title={t("sidebar.sortProjectsByConversation")} aria-label={t("sidebar.sortProjectsByConversation")} className="flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground">
+            <ListFilter className="h-3.5 w-3.5" />
+          </button>
+        ) : undefined}>
+          <SidebarProjectList projects={projectGroups.general} activeProjectPath={activeProjectPath} pinnedProjectSet={pinnedProjectSet} onReorderProjects={onReorderProjects} renderProject={(project, index, dragHandle: DragHandleProps) => {
               const key = projectKey(project) || `project-${index}`;
               const projectChats = chatSidebar.projectChatsByPath.get(normalizeProjectPathKey(key)) || [];
               const projectCollapsed = Boolean(collapsedProjects[key]);
@@ -233,12 +244,14 @@ export function AppSidebar({
                       event.preventDefault();
                       onProjectMenu(key, event);
                     }}
+                    dragHandle={dragHandle}
                   />
                   {projectCollapsed ? null : (
-                    <SidebarChatList chats={projectChats} activeChatId={activeChatId} indent renderChat={(chat) => (
+                    <SidebarChatList chats={projectChats} activeChatId={activeChatId} onReorderChats={reorderChats} onResetOrder={projectChats.some((chat) => manualChatIds.has(chat.id)) ? () => resetChatOrder(projectChats.map((chat) => chat.id)) : undefined} indent renderChat={(chat, dragHandle) => (
                       <SidebarChat
                         key={chat.id}
                         chatId={chat.id}
+                        dragHandle={dragHandle}
                         title={chat.title || t("sidebar.newChat")}
                         meta={chatSidebar.times.get(chat.id) || ""}
                         activity={chatSidebar.activityByChat.get(chat.id)}
@@ -270,21 +283,23 @@ export function AppSidebar({
       {collapsed ? null : (
         <SidebarSection
           title={t("project.unityProject")}
-          action={
-            <button
-              type="button"
-              onClick={onRefreshProjects}
-              disabled={!runtimeConnected || loadingProjects}
-              title={t("workspace.refreshStatus")}
-              aria-label={t("workspace.refreshStatus")}
-              className="flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-50"
-            >
+          action={onResetProjectOrder ? (
+            <div className="flex items-center gap-0.5">
+              <button type="button" onClick={() => onResetProjectOrder(projectGroups.unity.map((project) => projectKey(project)).filter(Boolean))} title={t("sidebar.sortProjectsByConversation")} aria-label={t("sidebar.sortProjectsByConversation")} className="flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground">
+                <ListFilter className="h-3.5 w-3.5" />
+              </button>
+              <button type="button" onClick={onRefreshProjects} disabled={!runtimeConnected || loadingProjects} title={t("workspace.refreshStatus")} aria-label={t("workspace.refreshStatus")} className="flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-50">
+                <RefreshCw className={cn("h-3.5 w-3.5", loadingProjects && "animate-spin")} />
+              </button>
+            </div>
+          ) : (
+            <button type="button" onClick={onRefreshProjects} disabled={!runtimeConnected || loadingProjects} title={t("workspace.refreshStatus")} aria-label={t("workspace.refreshStatus")} className="flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-50">
               <RefreshCw className={cn("h-3.5 w-3.5", loadingProjects && "animate-spin")} />
             </button>
-          }
+          )}
         >
           {projectGroups.unity.length > 0 ? (
-            <SidebarProjectList projects={projectGroups.unity} activeProjectPath={activeProjectPath} renderProject={(project, index) => {
+            <SidebarProjectList projects={projectGroups.unity} activeProjectPath={activeProjectPath} pinnedProjectSet={pinnedProjectSet} onReorderProjects={onReorderProjects} renderProject={(project, index, dragHandle: DragHandleProps) => {
               const key = projectKey(project) || `project-unity-${index}`;
               const projectChats = chatSidebar.projectChatsByPath.get(normalizeProjectPathKey(key)) || [];
               const projectCollapsed = Boolean(collapsedProjects[key]);
@@ -308,12 +323,14 @@ export function AppSidebar({
                       event.preventDefault();
                       onProjectMenu(key, event);
                     }}
+                    dragHandle={dragHandle}
                   />
                   {projectCollapsed ? null : (
-                    <SidebarChatList chats={projectChats} activeChatId={activeChatId} indent renderChat={(chat) => (
+                    <SidebarChatList chats={projectChats} activeChatId={activeChatId} onReorderChats={reorderChats} onResetOrder={projectChats.some((chat) => manualChatIds.has(chat.id)) ? () => resetChatOrder(projectChats.map((chat) => chat.id)) : undefined} indent renderChat={(chat, dragHandle) => (
                       <SidebarChat
                         key={chat.id}
                         chatId={chat.id}
+                        dragHandle={dragHandle}
                         title={chat.title || t("sidebar.newChat")}
                         meta={chatSidebar.times.get(chat.id) || ""}
                         activity={chatSidebar.activityByChat.get(chat.id)}
@@ -348,10 +365,11 @@ export function AppSidebar({
       {collapsed ? null : (
         <SidebarSection title={t("sidebar.chats")} collapsed={temporaryChatsCollapsed} onToggleCollapse={() => onToggleProjectCollapse(TEMP_CHATS_COLLAPSE_KEY)}>
           {chatSidebar.temporaryChats.length > 0 ? (
-            <SidebarChatList chats={chatSidebar.temporaryChats} activeChatId={activeChatId} renderChat={(chat) => (
+            <SidebarChatList chats={chatSidebar.temporaryChats} activeChatId={activeChatId} onReorderChats={reorderChats} onResetOrder={chatSidebar.temporaryChats.some((chat) => manualChatIds.has(chat.id)) ? () => resetChatOrder(chatSidebar.temporaryChats.map((chat) => chat.id)) : undefined} renderChat={(chat, dragHandle) => (
               <SidebarChat
                 key={chat.id}
                 chatId={chat.id}
+                dragHandle={dragHandle}
                 title={chat.title || t("sidebar.newChat")}
                 meta={chatSidebar.times.get(chat.id) || ""}
                 activity={chatSidebar.activityByChat.get(chat.id)}
@@ -380,10 +398,11 @@ export function AppSidebar({
 
       {collapsed ? null : chatSidebar.testChats.length > 0 ? (
         <SidebarSection title={t("sidebar.testChats")}>
-          <SidebarChatList chats={chatSidebar.testChats} activeChatId={activeChatId} renderChat={(chat) => (
+          <SidebarChatList chats={chatSidebar.testChats} activeChatId={activeChatId} onReorderChats={reorderChats} onResetOrder={chatSidebar.testChats.some((chat) => manualChatIds.has(chat.id)) ? () => resetChatOrder(chatSidebar.testChats.map((chat) => chat.id)) : undefined} renderChat={(chat, dragHandle) => (
             <SidebarChat
               key={chat.id}
               chatId={chat.id}
+              dragHandle={dragHandle}
               title={chat.title || t("sidebar.newChat")}
               meta={chatSidebar.times.get(chat.id) || ""}
               activity={chatSidebar.activityByChat.get(chat.id)}

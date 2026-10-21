@@ -991,6 +991,11 @@ try {
     Copy-Item -LiteralPath (Join-Path $repoRoot "third_party\litedb\VRCFORGE_DISTRIBUTION_NOTES.txt") -Destination (Join-Path $payloadRoot "licenses\LiteDB-DISTRIBUTION-NOTES.txt") -Force
     Copy-Item -LiteralPath (Join-Path $repoRoot "third_party\pywinpty\LICENSE.txt") -Destination (Join-Path $payloadRoot "licenses\pywinpty-LICENSE-MIT.txt") -Force
     Copy-Item -LiteralPath (Join-Path $repoRoot "third_party\pywinpty\VRCFORGE_DISTRIBUTION_NOTES.txt") -Destination (Join-Path $payloadRoot "licenses\pywinpty-DISTRIBUTION-NOTES.txt") -Force
+    foreach ($dndPackage in @("core", "sortable", "utilities", "accessibility")) {
+        Copy-Item -LiteralPath (Join-Path $repoRoot "node_modules\@dnd-kit\$dndPackage\LICENSE") -Destination (Join-Path $payloadRoot "licenses\dnd-kit-$dndPackage-LICENSE-MIT.txt") -Force
+    }
+    Copy-Item -LiteralPath (Join-Path $repoRoot "node_modules\tslib\LICENSE.txt") -Destination (Join-Path $payloadRoot "licenses\tslib-LICENSE-0BSD.txt") -Force
+    Copy-Item -LiteralPath (Join-Path $repoRoot "node_modules\tslib\CopyrightNotice.txt") -Destination (Join-Path $payloadRoot "licenses\tslib-CopyrightNotice.txt") -Force
 
     $payloadIntegrityManifest = [ordered]@{
         schema = "vrcforge.payload-integrity.v1"

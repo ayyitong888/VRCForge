@@ -50,6 +50,9 @@
     "fewerChats": "会話を折りたたむ",
     "moreProjects": "他のプロジェクトを表示 ({{count}})",
     "fewerProjects": "プロジェクトを折りたたむ",
+    "dragChat": "長押しして会話を並べ替え",
+    "dragProject": "長押ししてプロジェクトを並べ替え",
+    "sortProjectsByConversation": "最後の会話順に並べ替え",
     "noTempChats": "一時チャットはありません",
     "expandSidebar": "サイドバーを展開",
     "collapseSidebar": "サイドバーを折りたたむ"
