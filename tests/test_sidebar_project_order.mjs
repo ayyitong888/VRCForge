@@ -79,3 +79,16 @@ test("projects are separated into General and Unity groups while legacy entries 
   assert.deepEqual(groups.general.map((item) => item.path), ["C:\\GeneralTwo"]);
   assert.deepEqual(groups.unity.map((item) => item.path), ["C:\\General", "C:\\Unity", "C:\\Legacy"]);
 });
+
+test("recently opened projects and conversations share descending activity order", () => {
+  const projects = [
+    { ...project("C:\\Alpha"), lastOpenedAt: "2026-10-20T10:00:00Z" },
+    { ...project("C:\\Zulu"), lastOpenedAt: "2026-10-21T10:00:00Z" },
+    { ...project("C:\\Middle"), lastOpenedAt: "2026-10-19T10:00:00Z" },
+    { ...project("C:\\Unknown"), lastOpenedAt: "invalid" },
+  ];
+  const chats = [chat("C:\\Middle", { updatedAt: "2026-10-22T10:00:00Z" })];
+  const ordered = projectOrder.sortSidebarProjects(projects, chats, new Set());
+  assert.deepEqual(ordered.map((item) => item.name), ["Middle", "Zulu", "Alpha", "Unknown"]);
+  assert.deepEqual(projects.map((item) => item.name), ["Alpha", "Zulu", "Middle", "Unknown"]);
+});

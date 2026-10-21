@@ -46,6 +46,10 @@
     "chats": "对话",
     "testChats": "测试对话",
     "newChat": "新对话",
+    "moreChats": "更多对话 ({{count}})",
+    "fewerChats": "收起对话",
+    "moreProjects": "更多项目 ({{count}})",
+    "fewerProjects": "收起项目",
     "noTempChats": "暂无临时对话",
     "expandSidebar": "展开侧边栏",
     "collapseSidebar": "收起侧边栏"

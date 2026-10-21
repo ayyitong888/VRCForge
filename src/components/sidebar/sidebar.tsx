@@ -1,9 +1,88 @@
 import { ChevronDown, ChevronRight, Folder, Loader2, MessageSquare, MoreHorizontal, Pin, Trash2 } from "lucide-react";
-import { MouseEvent as ReactMouseEvent, ReactNode } from "react";
+import { MouseEvent as ReactMouseEvent, ReactNode, useId, useState } from "react";
 import { useTranslation } from "react-i18next";
 import i18n from "../../i18n";
+import type { ChatThread } from "../../lib/chat-types";
 import type { SidebarChatActivity } from "../../lib/sidebar-view";
+import { normalizeProjectPathKey, projectKey } from "../../lib/project-path";
 import { cn } from "../../lib/utils";
+
+const SIDEBAR_PREVIEW_COUNT = 5;
+
+export function SidebarChatList({
+  chats,
+  activeChatId,
+  indent = false,
+  renderChat,
+}: {
+  chats: ChatThread[];
+  activeChatId: string;
+  indent?: boolean;
+  renderChat: (chat: ChatThread) => ReactNode;
+}) {
+  const { t } = useTranslation();
+  return <SidebarOverflowList items={chats} isActive={(chat) => chat.id === activeChatId}
+    indent={indent} renderItem={renderChat}
+    moreLabel={(count) => t("sidebar.moreChats", { count })} fewerLabel={t("sidebar.fewerChats")} />;
+}
+
+export function SidebarProjectList<T extends { name?: string; path?: string }>({
+  projects, activeProjectPath, renderProject,
+}: {
+  projects: T[];
+  activeProjectPath: string;
+  renderProject: (project: T, index: number) => ReactNode;
+}) {
+  const { t } = useTranslation();
+  const activeKey = normalizeProjectPathKey(activeProjectPath);
+  return <SidebarOverflowList items={projects}
+    isActive={(project) => Boolean(activeKey) && normalizeProjectPathKey(projectKey(project)) === activeKey}
+    renderItem={renderProject}
+    moreLabel={(count) => t("sidebar.moreProjects", { count })} fewerLabel={t("sidebar.fewerProjects")} />;
+}
+
+function SidebarOverflowList<T>({ items, isActive, renderItem, moreLabel, fewerLabel, indent = false }: {
+  items: T[];
+  isActive: (item: T) => boolean;
+  renderItem: (item: T, index: number) => ReactNode;
+  moreLabel: (count: number) => string;
+  fewerLabel: string;
+  indent?: boolean;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const listId = useId();
+
+  if (items.length <= SIDEBAR_PREVIEW_COUNT) {
+    return <>{items.map(renderItem)}</>;
+  }
+
+  const visibleItems = expanded
+    ? items
+    : items.filter((item, index) => index < SIDEBAR_PREVIEW_COUNT || isActive(item));
+  const hiddenCount = items.length - visibleItems.length;
+
+  return (
+    <>
+      <div id={`sidebar-list-${listId}`} className="space-y-1">
+        {visibleItems.map(renderItem)}
+      </div>
+      {expanded || hiddenCount > 0 ? (
+        <button
+          type="button"
+          aria-controls={`sidebar-list-${listId}`}
+          aria-expanded={expanded}
+          onClick={() => setExpanded((value) => !value)}
+          className={cn(
+            "flex h-8 w-full min-w-0 items-center rounded-md py-1 text-left text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground",
+            indent ? "pl-9 pr-3" : "px-3",
+          )}
+        >
+          {expanded ? fewerLabel : moreLabel(hiddenCount)}
+        </button>
+      ) : null}
+    </>
+  );
+}
 
 export function SidebarSection({
   title,

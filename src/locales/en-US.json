@@ -46,6 +46,10 @@
     "chats": "Chats",
     "testChats": "Test chats",
     "newChat": "New Chat",
+    "moreChats": "More conversations ({{count}})",
+    "fewerChats": "Show fewer conversations",
+    "moreProjects": "More projects ({{count}})",
+    "fewerProjects": "Show fewer projects",
     "noTempChats": "No quick chats yet",
     "expandSidebar": "Expand sidebar",
     "collapseSidebar": "Collapse sidebar"

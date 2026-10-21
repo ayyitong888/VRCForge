@@ -28,8 +28,8 @@ test("project rows start a project conversation while chat rows restore history"
   );
   assert.equal(
     sidebarSource.match(/onClick=\{\(\) => onOpenChat\(chat\)\}/g)?.length,
-    3,
-    "General, Unity, and temporary chat rows must restore the selected chat",
+    4,
+    "General, Unity, temporary, and test chat rows must restore the selected chat",
   );
 
   const newConversationBody = functionBody(sessionsSource, "newConversation", "togglePinChat");

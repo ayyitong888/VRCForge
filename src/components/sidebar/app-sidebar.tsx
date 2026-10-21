@@ -24,7 +24,7 @@ import type { SidebarChatGroupsWithTimes } from "../../lib/sidebar-view";
 import { normalizeProjectPathKey, projectKey } from "../../lib/project-path";
 import { groupSidebarProjects } from "../../lib/sidebar-project-order";
 import { cn } from "../../lib/utils";
-import { SidebarChat, SidebarProject, SidebarSection } from "./sidebar";
+import { SidebarChat, SidebarChatList, SidebarProject, SidebarProjectList, SidebarSection } from "./sidebar";
 
 type SidebarProjectItem = {
   name?: string;
@@ -209,7 +209,7 @@ export function AppSidebar({
 
       {collapsed ? null : (
         <SidebarSection title={t("project.generalProject")}>
-          {projectGroups.general.map((project, index) => {
+          <SidebarProjectList projects={projectGroups.general} activeProjectPath={activeProjectPath} renderProject={(project, index) => {
               const key = projectKey(project) || `project-${index}`;
               const projectChats = chatSidebar.projectChatsByPath.get(normalizeProjectPathKey(key)) || [];
               const projectCollapsed = Boolean(collapsedProjects[key]);
@@ -234,36 +234,36 @@ export function AppSidebar({
                       onProjectMenu(key, event);
                     }}
                   />
-                  {projectCollapsed
-                    ? null
-                    : projectChats.map((chat) => (
-                        <SidebarChat
-                          key={chat.id}
-                          chatId={chat.id}
-                          title={chat.title || t("sidebar.newChat")}
-                          meta={chatSidebar.times.get(chat.id) || ""}
-                          activity={chatSidebar.activityByChat.get(chat.id)}
-                          active={activeView === "chat" && chat.id === activeChatId}
-                          unreadCount={backgroundGoalUnreadByChat[chat.id] || 0}
-                          indent
-                          pinned={chat.pinned}
-                          isTestChat={chat.isTestChat}
-                          renaming={renamingChatId === chat.id}
-                          renameDraft={renameDraft}
-                          onRenameChange={onChatRenameChange}
-                          onRenameCommit={onChatRenameCommit}
-                          onClick={() => onOpenChat(chat)}
-                          onTogglePin={() => onTogglePinChat(chat.id)}
-                          onDelete={() => onDeleteChat(chat.id)}
-                          onContextMenu={(event) => {
-                            event.preventDefault();
-                            onChatMenu(chat.id, event);
-                          }}
-                        />
-                      ))}
+                  {projectCollapsed ? null : (
+                    <SidebarChatList chats={projectChats} activeChatId={activeChatId} indent renderChat={(chat) => (
+                      <SidebarChat
+                        key={chat.id}
+                        chatId={chat.id}
+                        title={chat.title || t("sidebar.newChat")}
+                        meta={chatSidebar.times.get(chat.id) || ""}
+                        activity={chatSidebar.activityByChat.get(chat.id)}
+                        active={activeView === "chat" && chat.id === activeChatId}
+                        unreadCount={backgroundGoalUnreadByChat[chat.id] || 0}
+                        indent
+                        pinned={chat.pinned}
+                        isTestChat={chat.isTestChat}
+                        renaming={renamingChatId === chat.id}
+                        renameDraft={renameDraft}
+                        onRenameChange={onChatRenameChange}
+                        onRenameCommit={onChatRenameCommit}
+                        onClick={() => onOpenChat(chat)}
+                        onTogglePin={() => onTogglePinChat(chat.id)}
+                        onDelete={() => onDeleteChat(chat.id)}
+                        onContextMenu={(event) => {
+                          event.preventDefault();
+                          onChatMenu(chat.id, event);
+                        }}
+                      />
+                    )} />
+                  )}
                 </div>
               );
-            })}
+            }} />
         </SidebarSection>
       )}
 
@@ -284,7 +284,7 @@ export function AppSidebar({
           }
         >
           {projectGroups.unity.length > 0 ? (
-            projectGroups.unity.map((project, index) => {
+            <SidebarProjectList projects={projectGroups.unity} activeProjectPath={activeProjectPath} renderProject={(project, index) => {
               const key = projectKey(project) || `project-unity-${index}`;
               const projectChats = chatSidebar.projectChatsByPath.get(normalizeProjectPathKey(key)) || [];
               const projectCollapsed = Boolean(collapsedProjects[key]);
@@ -309,34 +309,36 @@ export function AppSidebar({
                       onProjectMenu(key, event);
                     }}
                   />
-                  {projectCollapsed ? null : projectChats.map((chat) => (
-                    <SidebarChat
-                      key={chat.id}
-                      chatId={chat.id}
-                      title={chat.title || t("sidebar.newChat")}
-                      meta={chatSidebar.times.get(chat.id) || ""}
-                      activity={chatSidebar.activityByChat.get(chat.id)}
-                      active={activeView === "chat" && chat.id === activeChatId}
-                      unreadCount={backgroundGoalUnreadByChat[chat.id] || 0}
-                      indent
-                      pinned={chat.pinned}
-                      isTestChat={chat.isTestChat}
-                      renaming={renamingChatId === chat.id}
-                      renameDraft={renameDraft}
-                      onRenameChange={onChatRenameChange}
-                      onRenameCommit={onChatRenameCommit}
-                      onClick={() => onOpenChat(chat)}
-                      onTogglePin={() => onTogglePinChat(chat.id)}
-                      onDelete={() => onDeleteChat(chat.id)}
-                      onContextMenu={(event) => {
-                        event.preventDefault();
-                        onChatMenu(chat.id, event);
-                      }}
-                    />
-                  ))}
+                  {projectCollapsed ? null : (
+                    <SidebarChatList chats={projectChats} activeChatId={activeChatId} indent renderChat={(chat) => (
+                      <SidebarChat
+                        key={chat.id}
+                        chatId={chat.id}
+                        title={chat.title || t("sidebar.newChat")}
+                        meta={chatSidebar.times.get(chat.id) || ""}
+                        activity={chatSidebar.activityByChat.get(chat.id)}
+                        active={activeView === "chat" && chat.id === activeChatId}
+                        unreadCount={backgroundGoalUnreadByChat[chat.id] || 0}
+                        indent
+                        pinned={chat.pinned}
+                        isTestChat={chat.isTestChat}
+                        renaming={renamingChatId === chat.id}
+                        renameDraft={renameDraft}
+                        onRenameChange={onChatRenameChange}
+                        onRenameCommit={onChatRenameCommit}
+                        onClick={() => onOpenChat(chat)}
+                        onTogglePin={() => onTogglePinChat(chat.id)}
+                        onDelete={() => onDeleteChat(chat.id)}
+                        onContextMenu={(event) => {
+                          event.preventDefault();
+                          onChatMenu(chat.id, event);
+                        }}
+                      />
+                    )} />
+                  )}
                 </div>
               );
-            })
+            }} />
           ) : projectItems.length === 0 ? (
             <SidebarProject name={emptyProjectState?.name || t("agent.emptyProjectState.noUnityProject")} meta={emptyProjectState?.meta} active />
           ) : null}
@@ -346,7 +348,7 @@ export function AppSidebar({
       {collapsed ? null : (
         <SidebarSection title={t("sidebar.chats")} collapsed={temporaryChatsCollapsed} onToggleCollapse={() => onToggleProjectCollapse(TEMP_CHATS_COLLAPSE_KEY)}>
           {chatSidebar.temporaryChats.length > 0 ? (
-            chatSidebar.temporaryChats.map((chat) => (
+            <SidebarChatList chats={chatSidebar.temporaryChats} activeChatId={activeChatId} renderChat={(chat) => (
               <SidebarChat
                 key={chat.id}
                 chatId={chat.id}
@@ -369,7 +371,7 @@ export function AppSidebar({
                   onChatMenu(chat.id, event);
                 }}
               />
-            ))
+            )} />
           ) : (
             <div className="px-3 py-1 text-xs text-muted-foreground/70">{t("sidebar.noTempChats")}</div>
           )}
@@ -378,7 +380,7 @@ export function AppSidebar({
 
       {collapsed ? null : chatSidebar.testChats.length > 0 ? (
         <SidebarSection title={t("sidebar.testChats")}>
-          {chatSidebar.testChats.map((chat) => (
+          <SidebarChatList chats={chatSidebar.testChats} activeChatId={activeChatId} renderChat={(chat) => (
             <SidebarChat
               key={chat.id}
               chatId={chat.id}
@@ -401,7 +403,7 @@ export function AppSidebar({
                 onChatMenu(chat.id, event);
               }}
             />
-          ))}
+          )} />
         </SidebarSection>
       ) : null}
 

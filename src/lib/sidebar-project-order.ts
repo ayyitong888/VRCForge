@@ -6,6 +6,7 @@ type SidebarProjectItem = {
   name?: string;
   path?: string;
   projectType?: ProjectType;
+  lastOpenedAt?: string;
 };
 
 export type SidebarProjectGroups<TProject extends SidebarProjectItem> = {
@@ -34,8 +35,8 @@ type IndexedProject<TProject extends SidebarProjectItem> = {
  * Orders the sidebar-only project view without mutating project state.
  *
  * Pinned projects form the first group. Within each group, the most recently
- * updated project conversation wins; a missing updatedAt falls back to
- * createdAt. Projects without a usable conversation timestamp retain their
+ * opened project or updated conversation wins; a missing updatedAt falls back
+ * to createdAt. Projects without a usable activity timestamp retain their
  * incoming order.
  */
 export function sortSidebarProjects<TProject extends SidebarProjectItem>(
@@ -48,11 +49,14 @@ export function sortSidebarProjects<TProject extends SidebarProjectItem>(
   return projects
     .map((project, index): IndexedProject<TProject> => {
       const key = normalizeProjectPathKey(projectKey(project));
+      const openedAt = Date.parse(project.lastOpenedAt || "");
+      const chatAt = key ? latestChatTimeByProject.get(key) : undefined;
+      const activityTime = Math.max(Number.isFinite(openedAt) ? openedAt : Number.NEGATIVE_INFINITY, chatAt ?? Number.NEGATIVE_INFINITY);
       return {
         project,
         index,
         pinned: pinnedProjectKeys.has(key),
-        latestChatTime: key ? latestChatTimeByProject.get(key) ?? null : null,
+        latestChatTime: Number.isFinite(activityTime) ? activityTime : null,
       };
     })
     .sort(compareSidebarProjects)

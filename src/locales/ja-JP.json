@@ -46,6 +46,10 @@
     "chats": "チャット",
     "testChats": "テストチャット",
     "newChat": "新規チャット",
+    "moreChats": "他の会話を表示 ({{count}})",
+    "fewerChats": "会話を折りたたむ",
+    "moreProjects": "他のプロジェクトを表示 ({{count}})",
+    "fewerProjects": "プロジェクトを折りたたむ",
     "noTempChats": "一時チャットはありません",
     "expandSidebar": "サイドバーを展開",
     "collapseSidebar": "サイドバーを折りたたむ"
