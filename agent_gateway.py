@@ -6258,6 +6258,7 @@ class AgentGateway:
                     "summary": "Runtime turn was cancelled by the user.",
                     "reply": "Request cancelled.",
                     "planner": "runtime",
+                    "shellNeeded": False,
                     "nextStep": "cancelled",
                 }
                 break
@@ -6300,6 +6301,7 @@ class AgentGateway:
                         "summary": "Runtime turn was cancelled by the user.",
                         "reply": "Request cancelled.",
                         "planner": "runtime",
+                        "shellNeeded": False,
                         "nextStep": "cancelled",
                     }
                     break
@@ -6308,6 +6310,7 @@ class AgentGateway:
                         "summary": "Context compaction could not create enough safe headroom.",
                         "reply": "VRCForge paused before another model request because the context was at its safety limit and compaction did not create enough headroom. The original conversation is still intact; retry manual compaction or switch to a model with a larger verified context window.",
                         "planner": "runtime",
+                        "shellNeeded": False,
                         "nextStep": "context_compaction_required",
                     }
                     iterations += 1
@@ -6405,6 +6408,7 @@ class AgentGateway:
                     "summary": "Runtime turn was cancelled by the user.",
                     "reply": "Request cancelled.",
                     "planner": "runtime",
+                    "shellNeeded": False,
                     "nextStep": "cancelled",
                 }
                 break
@@ -6429,6 +6433,8 @@ class AgentGateway:
                 last_plan = {
                     "summary": "Plan mode permits read-only inspection only.",
                     "reply": "Plan mode cannot execute changes or Shell commands. Turn off Plan to execute.",
+                    "planner": "runtime",
+                    "shellNeeded": False,
                     "nextStep": "plan_mode_blocked",
                     "continueLoop": False,
                 }
