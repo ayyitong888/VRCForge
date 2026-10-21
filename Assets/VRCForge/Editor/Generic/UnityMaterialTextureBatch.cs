@@ -27,6 +27,7 @@ namespace VRCForge.Editor
             internal Texture BeforeTexture;
             internal MaterialShaderTool.MaterialAssetEvidence Evidence;
             internal byte[] BeforeBytes;
+            internal string BeforeBytesDigest;
             internal string BeforeTexturePath;
             internal string BeforeTextureGuid;
             internal string TextureGuid = string.Empty;
@@ -142,7 +143,6 @@ namespace VRCForge.Editor
             item.BeforeJson = EditorJsonUtility.ToJson(item.Material);
             if (item.Material.shader == null) throw new InvalidOperationException("Material shader is missing.");
             item.ShaderDependency = AssetDatabase.GetAssetDependencyHash(AssetDatabase.GetAssetPath(item.Material.shader)).ToString();
-            item.BeforeBytes = File.ReadAllBytes(item.Evidence.filePath);
             item.BeforeTexture = item.Material.GetTexture(item.PropertyName);
             item.HasScale = row.Property("textureScale") != null;
             item.HasOffset = row.Property("textureOffset") != null;
@@ -186,9 +186,33 @@ namespace VRCForge.Editor
             return result;
         }
 
-        private static List<Item> Build(JArray rows, out JArray evidence)
+        private static string Digest(byte[] bytes)
+        {
+            using (var hash = System.Security.Cryptography.SHA256.Create())
+            {
+                return BitConverter.ToString(hash.ComputeHash(bytes)).Replace("-", "").ToLowerInvariant();
+            }
+        }
+
+        private static List<Item> Build(JArray rows, out JArray evidence, bool captureBeforeBytes)
         {
             var items = rows.OfType<JObject>().Select(BuildItem).ToList();
+            if (captureBeforeBytes)
+            {
+                foreach (var group in items.GroupBy(i => i.MaterialPath, StringComparer.Ordinal))
+                {
+                    var first = group.First();
+                    var beforeBytes = File.ReadAllBytes(first.Evidence.filePath);
+                    var beforeBytesDigest = Digest(beforeBytes);
+                    if (!string.Equals(beforeBytesDigest, first.Stable.File.Digest, StringComparison.OrdinalIgnoreCase))
+                        throw new InvalidOperationException("Material snapshot digest changed during final apply preflight.");
+                    foreach (var item in group)
+                    {
+                        item.BeforeBytes = beforeBytes;
+                        item.BeforeBytesDigest = beforeBytesDigest;
+                    }
+                }
+            }
             evidence = new JArray(items.Select(Evidence));
             return items;
         }
@@ -203,13 +227,13 @@ namespace VRCForge.Editor
                 var rows = ValidateEnvelope(request);
                 if (!MaterialShaderTool.MatchesCurrentProject(request["expectedProjectPath"]?.ToString() ?? string.Empty)) throw new InvalidOperationException("The selected Unity project does not match the active Editor.");
                 JArray planRows;
-                items = Build(rows, out planRows);
+                items = Build(rows, out planRows, captureBeforeBytes: false);
                 var plan = new JObject { ["assignments"] = planRows };
                 var sealedRequest = (JObject)request.DeepClone(); sealedRequest["expectedBatchPlan"] = plan;
                 if (Encoding.UTF8.GetByteCount(sealedRequest.ToString(Formatting.None)) > MaxBytes) throw new InvalidOperationException("Sealed texture assignments exceed 512 KiB; split the batch.");
                 if (request["preview"]?.Value<bool>() == true) return VRCForgeToolResult.Completed("Material texture assignments fully preflighted; no mutation.", new { schema = Schema, batch = true, ok = true, preview = true, verified = true, changed = false, saved = false, persistedReadback = false, mutationStarted = false, committed = false, commitState = "not_started", projectPath = Path.GetFullPath(Path.Combine(Application.dataPath, "..")), assignments = planRows });
                 if (!(request["expectedBatchPlan"] is JObject) || !JToken.DeepEquals(request["expectedBatchPlan"], plan)) throw new InvalidOperationException("A sealed expectedBatchPlan from preview is required.");
-                var fresh = Build(rows, out var freshRows);
+                var fresh = Build(rows, out var freshRows, captureBeforeBytes: true);
                 if (!JToken.DeepEquals(planRows, freshRows)) throw new InvalidOperationException("Texture assignment preconditions changed since preview.");
                 items = fresh;
                 var changed = false;
@@ -274,7 +298,7 @@ namespace VRCForge.Editor
                         var current = SceneObjectCopyCore.ReadStableAssetEvidence(item.MaterialPath, "texture batch rollback ownership");
                         var owned = item.Owned ?? item.Stable;
                         if (current.Guid != owned.Guid || current.Meta.Digest != owned.Meta.Digest || current.File.Digest != owned.File.Digest || EditorJsonUtility.ToJson(item.Material) != item.ExpectedJson) { restored = false; continue; }
-                        if (current.File.Digest != item.Stable.File.Digest)
+                        if (current.File.Digest != item.BeforeBytesDigest)
                         {
                             var temp = item.Evidence.filePath + ".vrcforge-restore-" + Guid.NewGuid().ToString("N") + ".tmp";
                             try { File.WriteAllBytes(temp, item.BeforeBytes); File.Replace(temp, item.Evidence.filePath, null); }
@@ -284,7 +308,7 @@ namespace VRCForge.Editor
                         AssetDatabase.ImportAsset(item.MaterialPath, ImportAssetOptions.ForceSynchronousImport | ImportAssetOptions.ForceUpdate);
                         var final = SceneObjectCopyCore.ReadStableAssetEvidence(item.MaterialPath, "restored texture batch");
                         var reloaded = AssetDatabase.LoadAssetAtPath<Material>(item.MaterialPath);
-                        if (reloaded == null || EditorUtility.IsDirty(reloaded) || EditorJsonUtility.ToJson(reloaded) != item.BeforeJson || final.Guid != item.Stable.Guid || final.Meta.Digest != item.Stable.Meta.Digest || final.File.Digest != item.Stable.File.Digest) restored = false;
+                        if (reloaded == null || EditorUtility.IsDirty(reloaded) || EditorJsonUtility.ToJson(reloaded) != item.BeforeJson || final.Guid != item.Stable.Guid || final.Meta.Digest != item.Stable.Meta.Digest || final.File.Digest != item.BeforeBytesDigest) restored = false;
                     }
                     catch { restored = false; }
                 }

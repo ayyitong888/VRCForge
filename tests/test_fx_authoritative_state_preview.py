@@ -56,9 +56,30 @@ def compile_probe(tmp_path, program, expected_checks):
     assert compiled.returncode == 0, compiled.stdout + compiled.stderr
     shutil.copy2(newtonsoft, tmp_path / "Newtonsoft.Json.dll")
     (tmp_path / "Probe.runtimeconfig.json").write_text(json.dumps({"runtimeOptions": {"tfm": "net8.0", "framework": {"name": "Microsoft.NETCore.App", "version": "8.0.0"}}}), encoding="utf-8")
-    result = subprocess.run([str(dotnet), str(dll)], capture_output=True, text=True, timeout=30)
+    result = subprocess.run([str(dotnet), str(dll)], cwd=tmp_path, capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr
     assert result.stdout.count("PASS ") == expected_checks
+
+
+def test_compiled_probe_does_not_write_to_its_callers_assets(tmp_path, monkeypatch):
+    caller = tmp_path / "caller"
+    owned = tmp_path / "probe"
+    (caller / "Assets").mkdir(parents=True)
+    owned.mkdir()
+    sentinel = caller / "Assets/Texture.png"
+    sentinel.write_bytes(b"preserve-the-caller-file")
+    monkeypatch.chdir(caller)
+    compile_probe(owned, r'''
+using System; using System.IO;
+class Probe { static int Main() {
+ Directory.CreateDirectory("Assets");
+ File.WriteAllText("Assets/Texture.png", "fixture-only");
+ File.Delete("Assets/Texture.png");
+ Console.WriteLine("PASS isolated fixture"); return 0;
+} }
+''', 1)
+    assert sentinel.read_bytes() == b"preserve-the-caller-file"
+    assert (owned / "Assets").is_dir()
 
 
 def test_state_precondition_reaches_preview_and_frozen_write(monkeypatch):

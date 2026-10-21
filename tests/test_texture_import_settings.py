@@ -438,8 +438,10 @@ def test_csharp_domain_module_keeps_preview_zero_write_and_apply_exact() -> None
     preview_branch = after_preview_guard.split("if (!wouldChange)", 1)[0]
     assert "SetPlatformTextureSettings" not in preview_branch
     assert "SaveAndReimport" not in preview_branch
-    assert "sourceFileDigestAfter = ComputeFileSha256" in preview_prefix
-    assert "metaFileDigestAfter = ComputeFileSha256" in preview_prefix
+    assert "sourceFileDigestAfter = ComputeFileSha256" in preview_branch
+    assert "metaFileDigestAfter = ComputeFileSha256" in preview_branch
+    assert "importerSettingsDigestAfter = ComputeSettingsDigest" in preview_branch
+    assert "sourceFileDigestAfter = ComputeFileSha256" not in preview_prefix
     assert source.index("if (preview)") < source.index("SetPlatformTextureSettings")
 
 

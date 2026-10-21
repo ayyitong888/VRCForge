@@ -273,13 +273,16 @@ def test_native_reused_projection_only_defines_missing_tools():
         },
     }
 
+    loaded_step = {**step, "result": {**step["result"], "status": "loaded"}}
+    loaded = planner.native_result_observation(loaded_step)
+    retained = {item["name"]: item for item in loaded["loadedToolDefinitions"]}
     complete = planner.native_result_observation(
-        step, retained_tool_names={"preview_fx_animator", "manage_fx_animator"}
+        step, retained_tool_definitions=retained
     )
     assert "loadedToolDefinitions" not in complete
 
     partial = planner.native_result_observation(
-        step, retained_tool_names={"preview_fx_animator"}
+        step, retained_tool_definitions={"preview_fx_animator": retained["preview_fx_animator"]}
     )
     assert [item["name"] for item in partial["loadedToolDefinitions"]] == ["manage_fx_animator"]
 

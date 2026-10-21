@@ -261,16 +261,15 @@ namespace VRCForge.Editor
                     );
                 }
 
-                var sourceFileDigestAfter = ComputeFileSha256(evidence.sourceFilePath);
-                var metaFileDigestAfter = ComputeFileSha256(evidence.metaFilePath);
-                var importerSettingsDigestAfter = ComputeSettingsDigest(
-                    importerType,
-                    ReadSettings(evidence.importer, platformSpec)
-                );
-                var importerDirtyAfter = EditorUtility.IsDirty(evidence.importer);
-
                 if (preview)
                 {
+                    var sourceFileDigestAfter = ComputeFileSha256(evidence.sourceFilePath);
+                    var metaFileDigestAfter = ComputeFileSha256(evidence.metaFilePath);
+                    var importerSettingsDigestAfter = ComputeSettingsDigest(
+                        importerType,
+                        ReadSettings(evidence.importer, platformSpec)
+                    );
+                    var importerDirtyAfter = EditorUtility.IsDirty(evidence.importer);
                     if (sourceFileDigestAfter != evidence.sourceFileDigest
                         || metaFileDigestAfter != evidence.metaFileDigest
                         || importerSettingsDigestAfter != beforeSettingsDigest

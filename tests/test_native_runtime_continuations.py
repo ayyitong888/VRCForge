@@ -77,7 +77,7 @@ def test_native_delegate_running_result_remains_pending_for_terminal_callback(tm
 
     class Planner:
         @staticmethod
-        def native_result_observation(item, *, project_context_active=False, retained_tool_names=None):
+        def native_result_observation(item, *, project_context_active=False, retained_tool_definitions=None):
             return item
 
     turn = NativeRuntimeTurn(
@@ -118,7 +118,7 @@ def test_native_receipt_public_content_is_emitted_once_for_queued_calls(tmp_path
 
     class Planner:
         @staticmethod
-        def native_result_observation(item, *, project_context_active=False):
+        def native_result_observation(item, *, project_context_active=False, retained_tool_definitions=None):
             return item
 
     turn = NativeRuntimeTurn(
@@ -161,7 +161,7 @@ def test_native_settles_approval_wrapper_when_inner_write_result_is_terminal_fai
     terminal_error = "A previous write did not finish cleanly."
     class Planner:
         @staticmethod
-        def native_result_observation(item, *, project_context_active=False):
+        def native_result_observation(item, *, project_context_active=False, retained_tool_definitions=None):
             return item
 
     turn = NativeRuntimeTurn(

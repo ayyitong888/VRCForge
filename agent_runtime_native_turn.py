@@ -166,7 +166,7 @@ class NativeRuntimeTurn:
                     "status": continuation_completion.get("status") or "completed",
                     "observations": [
                         planner.native_result_observation(item, project_context_active=self._project_context_active,
-                                                          retained_tool_names=self._retained_tool_names(restored["messages"]))
+                                                          retained_tool_definitions=self._retained_tool_definitions(restored["messages"]))
                         for item in loop_state
                         if item.get("actionId") == continuation_context.get("requestedActionId")
                         or item is continuation_observation
@@ -200,10 +200,10 @@ class NativeRuntimeTurn:
         return list(self._consumed_steer_input_ids)
 
     @staticmethod
-    def _retained_tool_names(messages) -> set[str]:
-        names = set()
+    def _retained_tool_definitions(messages) -> dict[str, dict[str, Any]]:
+        definitions: dict[str, dict[str, Any]] = {}
         for message in messages:
-            if message.get("role") != "tool":
+            if not isinstance(message, Mapping) or message.get("role") != "tool":
                 continue
             try:
                 payload = json.loads(message.get("content", ""))
@@ -216,8 +216,11 @@ class NativeRuntimeTurn:
                     continue
                 for definition in observation.get("loadedToolDefinitions", []):
                     if isinstance(definition, dict) and isinstance(definition.get("name"), str):
-                        names.add(definition["name"])
-        return names
+                        # The latest retained occurrence is authoritative when a
+                        # same-name definition was refreshed after a permission
+                        # or catalog change.
+                        definitions[definition["name"]] = copy.deepcopy(definition)
+        return definitions
 
     def freeze_tool_block_ids(self, block_ids: list[str]) -> list[str]:
         if not self._binding:
@@ -441,11 +444,11 @@ class NativeRuntimeTurn:
             )
             if waiting and terminal_map.get("nextStep") not in {"cancelled", "interrupted"} and not restore_terminal:
                 return
-            retained_names = self._retained_tool_names(self.snapshot().get("messages", []))
+            retained_definitions = self._retained_tool_definitions(self.snapshot().get("messages", []))
             result: dict[str, Any] = {
                 "observations": [
                     self._planner.native_result_observation(item, project_context_active=self._project_context_active,
-                                                            retained_tool_names=retained_names)
+                                                            retained_tool_definitions=retained_definitions)
                     for item in observations
                 ]
             }

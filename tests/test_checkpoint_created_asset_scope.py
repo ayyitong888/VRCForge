@@ -57,6 +57,46 @@ def test_create_only_empty_zip_and_exact_restore_preserve_unrelated(tmp_path):
     assert (project / "Assets/Unrelated.txt").read_bytes() == b"keep"
 
 
+@pytest.mark.parametrize("unrelated_child", [False, True])
+def test_restore_after_failed_create_needs_no_witness_when_created_files_are_absent(tmp_path, unrelated_child):
+    service, project, record = case(tmp_path)
+    checkpoint = create(service, project, record)
+    assert "createdAssetPostState" not in checkpoint
+    if unrelated_child:
+        (project / "Assets/New").mkdir()
+        (project / "Assets/New/User.txt").write_bytes(b"preserve-user-content")
+    result = service._restore_archive_checkpoint(checkpoint)
+    assert result["ok"], result
+    assert (project / "Assets/Unrelated.txt").read_bytes() == b"keep"
+    assert not (project / "Assets/New/A.txt").exists()
+    if unrelated_child:
+        assert (project / "Assets/New/User.txt").read_bytes() == b"preserve-user-content"
+
+
+@pytest.mark.parametrize("before_exists,after_exists", [(False, False), (False, True), (True, False), (True, True)])
+def test_restore_before_and_after_file_existence_matrix(tmp_path, before_exists, after_exists):
+    service, project, record = case(tmp_path)
+    name = "Assets/Subject.txt"
+    target = project / name
+    if before_exists:
+        target.write_bytes(b"original")
+    record.update(archiveFiles=[name] if before_exists else [],
+                  archiveAbsentFiles=[] if before_exists else [name], archiveAbsentDirectories=[])
+    checkpoint = create(service, project, record)
+    if after_exists:
+        target.write_bytes(b"changed" if before_exists else b"created")
+    elif target.exists():
+        target.unlink()
+    if after_exists and not before_exists:
+        checkpoint = capture(project, checkpoint)
+    result = service._restore_archive_checkpoint(checkpoint)
+    assert result["ok"], result
+    assert target.exists() is before_exists
+    if before_exists:
+        assert target.read_bytes() == b"original"
+    assert (project / "Assets/Unrelated.txt").read_bytes() == b"keep"
+
+
 def test_mixed_exact_files_no_automatic_meta_and_unknown_directory_content_kept(tmp_path):
     service, project, record = case(tmp_path, ["Assets/Existing.mat", "Assets/Existing.mat.meta"])
     checkpoint = create(service, project, record)

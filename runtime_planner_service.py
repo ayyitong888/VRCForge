@@ -1801,7 +1801,7 @@ class RuntimePlannerService:
             return ""
         return hashlib.sha256((route + "\n" + ntpath.normcase(ntpath.normpath(project_root or ""))).encode()).hexdigest()
 
-    def native_result_observation(self, step: Mapping[str, object], *, project_context_active: bool = False, retained_tool_names: set[str] | None = None) -> dict[str, object]:
+    def native_result_observation(self, step: Mapping[str, object], *, project_context_active: bool = False, retained_tool_definitions: Mapping[str, Mapping[str, object]] | None = None) -> dict[str, object]:
         """Use the established bounded, trust-labelled observation/readback projection."""
         result = ensure_dict(step.get("result"))
         observation = {**{key: sanitize_planner_observation_text(step[key], 180) for key in ("kind", "status", "actionId") if key in step},
@@ -1823,16 +1823,27 @@ class RuntimePlannerService:
             catalog = self._catalog.read(normalize_exposure_layer(result.get("exposureLayer")),
                                          project_context_active=project_context_active)
             names = result.get("selectedTools")
-            observation["loadedToolDefinitions"] = [
-                {"name": tool.name,
-                 "description": planner_tool_usage_description(tool.name, tool.description, write=tool.write),
-                 "parameters": deepcopy(dict(tool.input_schema))}
-                for tool in catalog.visible_tools
-                if tool.block == result.get("block")
-                and (names is None or isinstance(names, list) and tool.name in names)
-                and (result.get("status") != "reused" or tool.name not in (retained_tool_names or set()))
-                and (not tool.requires_user_activation or catalog.computer_use_model_invocable)
-            ]
+            retained_definitions = retained_tool_definitions or {}
+            loaded_definitions = []
+            for tool in catalog.visible_tools:
+                if tool.block != result.get("block"):
+                    continue
+                if names is not None and (not isinstance(names, list) or tool.name not in names):
+                    continue
+                if tool.requires_user_activation and not catalog.computer_use_model_invocable:
+                    continue
+                definition = {
+                    "name": tool.name,
+                    "description": planner_tool_usage_description(tool.name, tool.description, write=tool.write),
+                    "parameters": deepcopy(dict(tool.input_schema)),
+                }
+                # A loaded response can carry the whole monotonic leaf
+                # selection.  Only an exact retained definition is omitted;
+                # a same-name schema/description change is re-projected.
+                if retained_definitions.get(tool.name) == definition:
+                    continue
+                loaded_definitions.append(definition)
+            observation["loadedToolDefinitions"] = loaded_definitions
             if not observation["loadedToolDefinitions"]:
                 observation.pop("loadedToolDefinitions")
             observation["dispatchPolicy"] = (
@@ -1846,7 +1857,7 @@ class RuntimePlannerService:
             from skill_tool_load_plan import skill_read_loads
             loads = skill_read_loads(result, self._catalog.read(
                 EXPOSURE_LAYER_PLANNING, project_context_active=project_context_active),
-                retained_tool_names=retained_tool_names)
+                retained_tool_definitions=retained_tool_definitions)
             if loads:
                 observation["skillReadLoads"] = loads
                 observation["skillReadLoadPolicy"] = (

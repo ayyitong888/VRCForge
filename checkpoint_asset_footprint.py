@@ -123,16 +123,22 @@ def capture_created_asset_post_state(project_root: Path, record: dict[str, Any])
 
 def validate_created_asset_post_state(project_root: Path, record: dict[str, Any]) -> dict[str, Path]:
     scope = validate_asset_footprint(project_root, record)
+    paths = {name: _regular_path(project_root, name)
+             for name in [*scope["archiveFiles"], *scope["archiveAbsentFiles"]]}
+    current = {name: path for name, path in paths.items() if path.is_file()}
     witness = record.get("createdAssetPostState")
+    # A failed create can leave nothing to delete. There is no created-file
+    # ownership claim to verify in that case; unrelated paths remain untouched.
+    if witness is None and not any(name in current for name in scope["archiveAbsentFiles"]):
+        return current
     if not isinstance(witness, dict) or set(witness) != set(scope["archiveAbsentFiles"]):
         raise ValueError("Created asset rollback requires a complete post-write witness.")
     for name, expected in witness.items():
         if expected is not None and (not isinstance(expected, str) or re.fullmatch(r"[0-9a-f]{64}", expected) is None):
             raise ValueError("Created asset rollback witness is invalid.")
-        if _sha256(_regular_path(project_root, name)) != expected:
+        if _sha256(paths[name]) != expected:
             raise ValueError(f"Created asset changed after its post-write witness; preserving all files: {name}")
-    return {name: target for name in [*scope["archiveFiles"], *scope["archiveAbsentFiles"]]
-            if (target := _regular_path(project_root, name)).is_file()}
+    return current
 
 
 def cleanup_absent_directories(project_root: Path, record: dict[str, Any]) -> None:
