@@ -2,7 +2,7 @@
   "id": "com.vrcforge.workflows.avatar_head_transplant",
   "name": "VRChat 换头",
   "skill_name": "vrcforge-avatar-head-transplant",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "author": "VRCForge",
   "description": "Approval-gated head transplant workflow with separate face-tracked and gesture-only branches.",
   "min_vrcforge_version": "1.7.9",

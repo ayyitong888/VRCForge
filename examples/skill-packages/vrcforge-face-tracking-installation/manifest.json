@@ -1,0 +1,25 @@
+{
+  "id": "com.vrcforge.workflows.face_tracking_installation",
+  "name": "VRChat 面捕安装与配置",
+  "skill_name": "vrcforge-face-tracking-installation",
+  "version": "1.0.0",
+  "author": "VRCForge",
+  "description": "Bounded ordinary VRChat face-tracking installation from author documentation and an existing Scene or Variant.",
+  "min_vrcforge_version": "1.7.9",
+  "execution": "agentic",
+  "permissions": [
+    "read_project",
+    "unity_scan_scene",
+    "unity_modify_components",
+    "unity_run_validation",
+    "write_project_files"
+  ],
+  "entrypoints": {
+    "skill": "SKILL.md"
+  },
+  "targets": {
+    "runtime": "VRCForge",
+    "agents": ["internal", "external-mcp"],
+    "avatarType": "VRChat"
+  }
+}

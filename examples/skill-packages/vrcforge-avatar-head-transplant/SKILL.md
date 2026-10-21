@@ -1,7 +1,7 @@
 ---
 name: vrcforge-avatar-head-transplant
 title: VRChat 换头
-description: Transplant a VRChat avatar head onto another body, branching explicitly between face-tracked and gesture-only heads; use for full head replacement, not ordinary face tuning or outfit work.
+description: Transplant a VRChat avatar head onto another body, branching explicitly between face-tracked and gesture-only heads; use for full head replacement, not ordinary face-tracking installation, face tuning or outfit work.
 permission-mode: approval_required
 risk-level: high
 allowed-tools:
@@ -59,6 +59,11 @@ support-files:
 ---
 
 ## Uncertainty rule
+
+Ordinary face-tracking installation is a separate route. Do not load this
+head-transplant Skill for an author-documented Patch plus an existing Scene or
+Variant. Use `face-tracking-installation` for that bounded installation path;
+this Skill retains the full head replacement and four-piece merge routes.
 
 If skeletons, neck seams, materials, accessories, PhysBones, Modular Avatar,
 or VRCFury behavior is unclear, first consult relevant mature community

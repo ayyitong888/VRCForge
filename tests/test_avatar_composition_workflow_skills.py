@@ -18,6 +18,7 @@ from tests.planner_schema_assertions import assert_internal_write_schema
 
 
 EXPECTED_NAMES = (
+    "face-tracking-installation",
     "avatar-head-swap",
     "face-tracking-four-piece-merge",
     "original-avatar-part-extraction",
@@ -27,7 +28,7 @@ EXPECTED_NAMES = (
 )
 
 
-def test_composition_workflows_are_six_compact_vrcforge_skills() -> None:
+def test_composition_workflows_are_compact_vrcforge_skills() -> None:
     assert AVATAR_COMPOSITION_WORKFLOW_SKILL_NAMES == EXPECTED_NAMES
     for skill in AVATAR_COMPOSITION_WORKFLOW_SKILLS:
         assert skill["category"] == "avatar-composition"
@@ -47,6 +48,19 @@ def test_composition_workflows_are_six_compact_vrcforge_skills() -> None:
             "vrcforge_ask_user",
             "vrcforge_request_apply",
         }.intersection(skill["allowedTools"])
+
+
+def test_ordinary_face_tracking_installation_is_separate_from_head_transplant() -> None:
+    by_name = {skill["name"]: skill for skill in AVATAR_COMPOSITION_WORKFLOW_SKILLS}
+    ordinary = by_name["face-tracking-installation"]
+    head = by_name["avatar-head-swap"]
+    assert ordinary["entrypointTool"] == "vrcforge_list_directory"
+    assert "vrcforge_read_text_file" in ordinary["allowedTools"]
+    assert "vrcforge_find_files" in ordinary["allowedTools"]
+    assert "full head replacement" in ordinary["whenNotToUse"]
+    assert "face-tracking-four-piece-merge" in ordinary["whenNotToUse"]
+    assert "ordinary face-tracking installation" in head["whenNotToUse"]
+    assert "vrcforge_gesture_manager_enter_play_mode" not in ordinary["allowedTools"]
 
 
 def test_composition_workflows_are_valid_internal_skills_and_share_only_external_unity_tools() -> None:

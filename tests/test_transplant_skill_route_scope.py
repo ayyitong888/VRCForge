@@ -5,6 +5,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 HEAD = ROOT / "examples/skill-packages/vrcforge-avatar-head-transplant"
 PART = ROOT / "examples/skill-packages/vrcforge-avatar-part-transplant"
+FACE = ROOT / "examples/skill-packages/vrcforge-face-tracking-installation"
 
 
 def read_skill(package: Path) -> str:
@@ -19,8 +20,21 @@ def read_workflow(package: Path) -> dict:
 def test_transplant_packages_bump_minor_patch_without_author_change():
     for package in (HEAD, PART):
         manifest = json.loads((package / "manifest.json").read_text(encoding="utf-8"))
-        assert manifest["version"] == "1.0.2"
+        assert manifest["version"] == ("1.0.5" if package is HEAD else "1.0.2")
         assert manifest["author"] == "VRCForge"
+
+
+def test_face_tracking_installation_is_a_short_docs_first_route():
+    manifest = json.loads((FACE / "manifest.json").read_text(encoding="utf-8"))
+    skill = read_skill(FACE)
+    assert manifest["version"] == "1.0.0"
+    assert manifest["entrypoints"] == {"skill": "SKILL.md"}
+    assert "面捕安装与配置" in skill
+    assert "patch" in skill
+    assert "scene or variant" in skill
+    assert "full head transplant" in skill
+    assert "play mode" in skill
+    assert "gesture manager" in skill
 
 
 def test_head_lipsync_acceptance_is_mode_specific_and_missing_jaw_read_is_a_gap():
