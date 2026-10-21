@@ -257,6 +257,10 @@ def _selector_error(
         if not selected_path or selected_path != (object_path or avatar_path):
             return "Unpack Prefab must select the exact freshly bound object."
         return ""
+    if checkpoint_target == "vrcforge_instantiate_prefab" and scope == "scene":
+        if request.get("parentPath") == "":
+            return ""
+        return "A scene-root prefab instance must target the exact bound scene without a parent."
     parent_path = _hierarchy_path(request.get("parentPath"))
     if not parent_path:
         return "Creating a scene object requires an exact non-empty bound parent."

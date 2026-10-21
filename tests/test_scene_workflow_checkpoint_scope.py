@@ -22,11 +22,13 @@ def _target(root, scope="avatar"):
             "revision": "1",
             "digest": "a" * 64,
         },
-        "avatar": {"globalObjectId": "avatar-id", "exactHierarchyPath": "Avatar"},
         "ambiguous": False,
         "resolutionCandidateCount": 1,
-        "namespace": "vrcforge://projects/project-id/scenes/scene-guid/avatars/avatar-id",
+        "namespace": "vrcforge://projects/project-id/scenes/scene-guid",
     }
+    if scope in {"avatar", "object", "component"}:
+        target["avatar"] = {"globalObjectId": "avatar-id", "exactHierarchyPath": "Avatar"}
+        target["namespace"] += "/avatars/avatar-id"
     if scope in {"object", "component"}:
         target["object"] = {
             "globalObjectId": "object-id",
@@ -198,6 +200,12 @@ def test_installation_checkpoint_archive_does_not_fall_back_to_whole_project(sce
             {"avatarGlobalObjectId": "avatar-id", "objectGlobalObjectId": "object-id"},
         ),
         (
+            "vrcforge_instantiate_prefab",
+            "scene",
+            {"assetPath": "Assets/Item.prefab", "parentPath": ""},
+            {},
+        ),
+        (
             "vrcforge_unpack_prefab",
             "component",
             {"gameObjectPath": "Avatar/Outfit"},
@@ -244,6 +252,7 @@ def test_scene_only_workflow_prepares_exact_revalidated_scene(
         ("vrcforge_create_gameobject", "scene", {"name": "Child", "parentPath": ""}),
         ("vrcforge_create_gameobject", "avatar", {"name": "Child", "parentPath": "Other"}),
         ("vrcforge_instantiate_prefab", "avatar", {"assetPath": "Assets/Item.prefab", "parentPath": ""}),
+        ("vrcforge_instantiate_prefab", "scene", {"assetPath": "Assets/Item.prefab", "parentPath": "Avatar"}),
         ("vrcforge_instantiate_prefab", "object", {"assetPath": "Assets/Item.prefab", "parentPath": "Avatar/Other"}),
         ("vrcforge_unpack_prefab", "avatar", {"gameObjectPath": "Avatar/Outfit"}),
         ("vrcforge_unpack_prefab", "object", {"gameObjectPath": "Avatar/Other"}),
@@ -300,6 +309,36 @@ def test_fresh_identity_or_scene_owner_drift_blocks_checkpoint(scene_case, drift
     )
     assert result["ok"] is False and "archiveAssetPaths" not in result
     assert [item[0] for item in observed] == ["discover"]
+
+
+@pytest.mark.parametrize("drift", ["path", "digest"])
+def test_scene_root_instantiate_rejects_scene_identity_drift(scene_case, drift):
+    target = _target(scene_case, "scene")
+    changed = deepcopy(target)
+    if drift == "path":
+        changed["scene"]["assetPath"] = "Assets/Other.unity"
+        changed["scene"]["absolutePath"] = str((scene_case / "Assets/Other.unity").resolve())
+    else:
+        changed["scene"]["digest"] = "b" * 64
+    result, observed = _run(
+        scene_case,
+        "vrcforge_instantiate_prefab",
+        {"executionTarget": target, "assetPath": "Assets/Item.prefab", "parentPath": ""},
+        fresh={"ok": True, "targets": [changed]},
+    )
+    assert result["ok"] is False and "archiveAssetPaths" not in result
+    assert [item[0] for item in observed] == ["discover"]
+
+
+def test_scene_root_instantiate_preserves_dirty_scene_checkpoint_refusal(scene_case):
+    result, observed = _run(
+        scene_case,
+        "vrcforge_instantiate_prefab",
+        {"executionTarget": _target(scene_case, "scene"), "assetPath": "Assets/Item.prefab", "parentPath": ""},
+        prepared={"ok": False, "code": "unity_scene_dirty", "error": "The bound scene is dirty."},
+    )
+    assert result == {"ok": False, "code": "unity_scene_dirty", "error": "The bound scene is dirty."}
+    assert [item[0] for item in observed] == ["discover", "prepare"]
 
 
 @pytest.mark.parametrize(
