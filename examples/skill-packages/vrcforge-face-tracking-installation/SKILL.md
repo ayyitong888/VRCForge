@@ -30,3 +30,7 @@ allowed-tools:
 作者要求 Patch 时，Patch 必须先被实际读取并验证，再使用作者说明中的现成 Scene 或 Variant。仅看到同名文件、路径或资产存在，不证明 Patch 已应用或面捕已配置。已有 Variant 已满足作者约定时，按其作者路径执行必要的 instantiate、完全 unpack、身份绑定、读对象和 scene save；不重新制作完整 Mesh/FX/Parameters/Menu 四件套。
 
 这是编辑态配置路径：按实际说明读取 Descriptor、BlendShapes、Parameters、FX、绑定和目标字段；每个获批写入都要 checkpoint、精确回读，并将 serialized configuration 与 Play/Gesture Manager、视觉或 NDMF 运行验收分开报告。默认不进入 Play Mode，不调用 Gesture Manager，不做全换头，不加载完整换头指南。
+
+## 安装成功的判定
+
+作者明确写了适配所选模型时，按随包说明选对目标、正确安装并保存，过程无报错，就判定安装成功。不要额外做整套兼容性审计、逐项枚举 BlendShape 或动画目标来卡安装验收。只有出现实际报错或安装结果不符合作者说明时，才针对具体问题排查；运行和硬件测试按用户要求另做，不作为普通安装成功的前提。

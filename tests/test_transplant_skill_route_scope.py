@@ -27,7 +27,7 @@ def test_transplant_packages_bump_minor_patch_without_author_change():
 def test_face_tracking_installation_is_a_short_docs_first_route():
     manifest = json.loads((FACE / "manifest.json").read_text(encoding="utf-8"))
     skill = read_skill(FACE)
-    assert manifest["version"] == "1.0.0"
+    assert manifest["version"] == "1.0.1"
     assert manifest["entrypoints"] == {"skill": "SKILL.md"}
     assert "面捕安装与配置" in skill
     assert "patch" in skill

@@ -2,7 +2,7 @@
   "id": "com.vrcforge.workflows.face_tracking_installation",
   "name": "VRChat 面捕安装与配置",
   "skill_name": "vrcforge-face-tracking-installation",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "author": "VRCForge",
   "description": "Bounded ordinary VRChat face-tracking installation from author documentation and an existing Scene or Variant.",
   "min_vrcforge_version": "1.7.9",
