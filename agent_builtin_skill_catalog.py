@@ -988,7 +988,7 @@ BUILTIN_SKILL_GROUPS: list[dict[str, Any]] = [
         "entrypointTool": "",
         "instructions": (
             "Confirm the intended Scene, Avatar, face renderer and exact Shape names from current evidence; "
-            "then adjust the requested Shapes and inspect the actual face from the front and a 45-degree three-quarter view, "
+            "then adjust the requested Shapes and inspect the actual face from the front and both left and right 45-degree three-quarter views, "
             "both with a perspective camera. Use vrcforge_capture_screenshot in Scene View with cameraMode=free "
             "and projection=perspective, aiming its position/target/up and field of view at the selected face. "
             "Do not combine free-camera fields with named angles or captureScope=face. "
