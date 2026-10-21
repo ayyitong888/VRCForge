@@ -31,8 +31,9 @@ namespace UnityEditor.SceneManagement {public static class EditorSceneManager {
  public static void MarkSceneDirty(UnityEngine.Scene s){} public static bool SaveScene(UnityEngine.Scene s)=>true;
  
 }}
-class VRCAvatarDescriptor {public UnityEngine.GameObject gameObject;public UnityEngine.Transform transform;public VRCExpressionsMenu expressionsMenu;public UnityEngine.Object expressionParameters;}
-class VRCExpressionsMenu:UnityEngine.Object {public List<Control> controls=new List<Control>();public class Control{public VRCExpressionsMenu subMenu;}}
+class VRCAvatarDescriptor {public string name="Avatar";public UnityEngine.GameObject gameObject;public UnityEngine.Transform transform;public VRCExpressionsMenu expressionsMenu;public UnityEngine.Object expressionParameters;}
+class VRCExpressionsMenu:UnityEngine.Object {public List<Control> controls=new List<Control>();public class Control{public enum ControlType{Toggle,SubMenu} public string name;public ControlType type;public VRCExpressionsMenu subMenu;}}
+static class AvatarPrimitiveCrudCore {public static string GetTransformPath(UnityEngine.Transform t)=>t.path;public static string NormalizePath(string p)=>p;}
 static class AvatarAuthoringCrudCore {public static string GetTransformPath(UnityEngine.Transform t)=>t.path;}
 class GlobalObjectId {public ulong targetObjectId=1;public static GlobalObjectId GetGlobalObjectIdSlow(object o)=>new GlobalObjectId();}
 static class Undo {public static void FlushUndoRecordObjects(){}}
@@ -63,20 +64,45 @@ class Probe {
  public static int Main(){
   var target=Make("Assets/P.asset","{\"parameters\":[1]}");var neighbor=Make("Assets/Unrelated.mat","{}");neighbor.dirty=true;
   var before=ExpressionWritePersistence.Capture(target);target.json="{\"parameters\":[2]}";
-  var receipt=JObject.FromObject(ExpressionWritePersistence.SaveAndVerify(before,target,null,false,false));
+  var receipt=JObject.FromObject(ExpressionWritePersistence.SaveAndVerify(before,target,null,false,false,new[]{target.path}));
   Check(AssetDatabase.saved.SequenceEqual(new[]{target.path})&&neighbor.dirty&&AssetDatabase.disk[neighbor.path]=="{}","only intended asset saved, unrelated dirty asset untouched");
   Check((bool)receipt["persisted"]&&((JArray)receipt["assets"]).Count==1&&(string)receipt["assets"][0]["assetGuid"]=="guid:"+target.path,"verified persisted receipt includes exact GUID/hash state");
   before=ExpressionWritePersistence.Capture(target);target.json="{\"parameters\":[3]}";AssetDatabase.corruptPath=target.path;
-  Check(Reject(()=>ExpressionWritePersistence.SaveAndVerify(before,target,null,false,false)),"corrupt imported disk state rejects instead of verified success");
+  Check(Reject(()=>ExpressionWritePersistence.SaveAndVerify(before,target,null,false,false,new[]{target.path})),"corrupt imported disk state rejects instead of verified success");
   AssetDatabase.corruptPath=null;target.json="{}";before=ExpressionWritePersistence.Capture(target);AssetDatabase.wrongGuidPath=target.path;
-  Check(Reject(()=>ExpressionWritePersistence.SaveAndVerify(before,target,null,false,false)),"changed GUID rejects");AssetDatabase.wrongGuidPath=null;
+  Check(Reject(()=>ExpressionWritePersistence.SaveAndVerify(before,target,null,false,false,new[]{target.path})),"changed GUID rejects");AssetDatabase.wrongGuidPath=null;
   var child=new VRCExpressionsMenu{path="Assets/Child.asset",json="{}"};var root=new VRCExpressionsMenu{path="Assets/Root.asset",json="{}"};root.controls.Add(new VRCExpressionsMenu.Control{subMenu=child});
   AssetDatabase.live[root.path]=root;AssetDatabase.live[child.path]=child;AssetDatabase.disk[root.path]="{}";AssetDatabase.disk[child.path]="{}";
   before=ExpressionWritePersistence.Capture(root);root.json="{\"linkChanged\":true}";child.json="{\"name\":\"new\"}";AssetDatabase.saved.Clear();
-  ExpressionWritePersistence.SaveAndVerify(before,root,null,false,true,child);
+  ExpressionWritePersistence.SaveAndVerify(before,root,null,false,true,new[]{root.path,child.path},child);
   Check(AssetDatabase.saved.Count==2&&AssetDatabase.saved.Contains(root.path)&&AssetDatabase.saved.Contains(child.path),"changed parent and target submenu both saved");
-  before=ExpressionWritePersistence.Capture(root);AssetDatabase.saved.Clear();ExpressionWritePersistence.SaveAndVerify(before,root,null,false,true,child);
+  before=ExpressionWritePersistence.Capture(root);AssetDatabase.saved.Clear();ExpressionWritePersistence.SaveAndVerify(before,root,null,false,true,new[]{root.path,child.path},child);
   Check(AssetDatabase.saved.SequenceEqual(new[]{child.path}),"no-op still independently verifies exact target, not unrelated root");
+  var linked=new VRCExpressionsMenu{path="Assets/AuthorMenu.asset",json="{\"unsaved\":true}",dirty=true};
+  var linkRoot=new VRCExpressionsMenu{path="Assets/IndependentMenu.asset",json="{}"};
+  AssetDatabase.live[linked.path]=linked;AssetDatabase.disk[linked.path]="{}";
+  AssetDatabase.live[linkRoot.path]=linkRoot;AssetDatabase.disk[linkRoot.path]="{}";
+  before=ExpressionWritePersistence.Capture(linkRoot);
+  linkRoot.controls.Add(new VRCExpressionsMenu.Control{subMenu=linked});linkRoot.json="{\"linked\":true}";
+  AssetDatabase.saved.Clear();ExpressionWritePersistence.SaveAndVerify(before,linkRoot,null,false,true,new[]{linkRoot.path},linkRoot);
+  Check(AssetDatabase.saved.SequenceEqual(new[]{linkRoot.path})&&linked.dirty&&AssetDatabase.disk[linked.path]=="{}","new reference never saves an existing external menu or its dirty edits");
+  before=ExpressionWritePersistence.Capture(linkRoot);AssetDatabase.saved.Clear();
+  ExpressionWritePersistence.SaveAndVerify(before,linkRoot,null,false,true,new[]{linkRoot.path},linkRoot);
+  Check(AssetDatabase.saved.SequenceEqual(new[]{linkRoot.path})&&linked.dirty,"existing unchanged dirty reference remains unsaved");
+  before=ExpressionWritePersistence.Capture(linkRoot);linked.json="{\"unexpectedEdit\":true}";AssetDatabase.saved.Clear();
+  Check(Reject(()=>ExpressionWritePersistence.SaveAndVerify(before,linkRoot,null,false,true,new[]{linkRoot.path},linkRoot))&&AssetDatabase.saved.Count==0,"existing referenced object changed outside plan rejects before any save");
+  before=ExpressionWritePersistence.Capture(linkRoot);AssetDatabase.saved.Clear();
+  Check(Reject(()=>ExpressionWritePersistence.SaveAndVerify(before,linkRoot,null,false,true,new[]{linkRoot.path},linked))&&AssetDatabase.saved.Count==0,"explicit target outside write plan rejects before any save");
+  Check(Reject(()=>ExpressionWritePersistence.SaveAndVerify(before,linkRoot,null,false,true,new[]{linked.path},linked))&&AssetDatabase.saved.Count==0,"root outside write plan rejects before any save");
+  var newParent=new VRCExpressionsMenu{path="Assets/NewParent.asset",json="{\"child\":true}"};
+  var newLeaf=new VRCExpressionsMenu{path="Assets/NewLeaf.asset",json="{}"};
+  AssetDatabase.live[newParent.path]=newParent;AssetDatabase.disk[newParent.path]="{}";
+  AssetDatabase.live[newLeaf.path]=newLeaf;AssetDatabase.disk[newLeaf.path]="{}";
+  before=ExpressionWritePersistence.Capture(linkRoot);linkRoot.json="{\"newParent\":true}";
+  linkRoot.controls.Add(new VRCExpressionsMenu.Control{subMenu=newParent});newParent.controls.Add(new VRCExpressionsMenu.Control{subMenu=newLeaf});
+  newLeaf.controls.Add(new VRCExpressionsMenu.Control{subMenu=linked});
+  AssetDatabase.saved.Clear();ExpressionWritePersistence.SaveAndVerify(before,linkRoot,null,false,true,new[]{linkRoot.path,newParent.path,newLeaf.path},newLeaf);
+  Check(AssetDatabase.saved.OrderBy(x=>x).SequenceEqual(new[]{linkRoot.path,newParent.path,newLeaf.path}.OrderBy(x=>x))&&linked.dirty,"all planned newly created levels saved while external reference remains untouched");
   var d=new VRCAvatarDescriptor{gameObject=new UnityEngine.GameObject{scene=new UnityEngine.Scene{isDirty=true}}};
   Check(Reject(()=>ExpressionWritePersistence.RequireCleanSceneForNewReference(d,true)),"new reference rejects dirty scene before mutation");
   ExpressionWritePersistence.RequireCleanSceneForNewReference(d,false);Check(true,"existing asset edit need not save dirty scene");
@@ -88,11 +114,20 @@ class Probe {
   Check(Reject(()=>ExpressionWritePersistence.ReadDescriptorReference(yaml,44,"expressionsMenu")),"missing exact descriptor rejects");
   Check(Reject(()=>ExpressionWritePersistence.ReadDescriptorReference(yaml+yaml,42,"expressionsMenu")),"duplicate exact descriptor rejects");
   Check(Reject(()=>ExpressionWritePersistence.ReadDescriptorReference(yaml.Replace("&42\n","&42 stripped\n"),42,"expressionsMenu")),"prefab stripped descriptor rejects before unsupported reference write");
+  d.gameObject.scene.isDirty=false;d.transform=new UnityEngine.Transform();
+  var plan=MenuPlanProbe.Plan(null,d);
+  Check(((JArray)plan["plannedAssetPaths"]).Values<string>().Contains(d.gameObject.scene.path),"new root plan checkpoints descriptor scene before assigning reference");
+  plan=MenuPlanProbe.Plan(linkRoot,d);
+  Check(((JArray)plan["plannedAssetPaths"]).Values<string>().SequenceEqual(new[]{linkRoot.path}),"existing root plan keeps newly referenced external menu outside exact write scope");
+  AssetDatabase.saved.Clear();
+  Check(Reject(()=>ExpressionWritePersistence.SaveAndVerify(before,linkRoot,d,true,true,new[]{linkRoot.path},linkRoot))&&AssetDatabase.saved.Count==0,"unplanned descriptor scene rejects before asset saves");
   return failures==0?0:1;
  }
 }
 '''
-    program="using System;using System.IO;using System.Linq;using System.Collections.Generic;using Newtonsoft.Json.Linq;"+stubs+helper+runner
+    menu_source=(ROOT/"Assets/VRCForge/Editor/Generic/UnityAvatarPrimitiveCrud.cs").read_text(encoding="utf-8").split("public static class ManageExpressionMenuTool",1)[1].split("public static class ManageFxAnimatorTool",1)[0]
+    plan_probe="static class MenuPlanProbe {"+method(menu_source,"private static object BuildPlan")+method(menu_source,"private static VRCExpressionsMenu TryResolveMenu")+'public static JObject Plan(VRCExpressionsMenu root, VRCAvatarDescriptor d)=>JObject.FromObject(BuildPlan("create",d,root,new JObject(),"Assets",root?.path??"Assets/NewRoot.asset",new List<string>()));}'
+    program="using System;using System.IO;using System.Linq;using System.Collections.Generic;using Newtonsoft.Json.Linq;"+stubs+helper+plan_probe+runner
     cs=tmp_path/"Probe.cs";cs.write_text(program,encoding="utf-8");dll=tmp_path/"Probe.dll"
     command=[dotnet,str(compiler),"-nologo","-target:exe","-nostdlib+","-langversion:8.0",f"-out:{dll}"]+[f"-r:{p}" for p in refs[-1].glob("*.dll")]+[f"-r:{newtonsoft}",str(cs)]
     compiled=subprocess.run(command,capture_output=True,text=True,timeout=60)
@@ -101,4 +136,4 @@ class Probe {
     (tmp_path/"Probe.runtimeconfig.json").write_text(json.dumps({"runtimeOptions":{"tfm":"netcoreapp3.1","framework":{"name":"Microsoft.NETCore.App","version":"3.1.0"}}}),encoding="utf-8")
     result=subprocess.run([dotnet,str(dll)],capture_output=True,text=True,timeout=30)
     assert result.returncode==0,result.stdout+result.stderr
-    assert result.stdout.count("PASS ")==13
+    assert result.stdout.count("PASS ")==22

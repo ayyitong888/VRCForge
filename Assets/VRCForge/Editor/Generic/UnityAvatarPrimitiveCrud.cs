@@ -1229,7 +1229,7 @@ namespace VRCForge.Editor
                 Undo.RegisterCompleteObjectUndo(asset, "Manage expression parameters");
                 Apply(action, asset, @params);
                 EditorUtility.SetDirty(asset);
-                var persistedReadback = ExpressionWritePersistence.SaveAndVerify(persistenceBefore, asset, descriptor, false, false);
+                var persistedReadback = ExpressionWritePersistence.SaveAndVerify(persistenceBefore, asset, descriptor, false, false, new[] { AssetDatabase.GetAssetPath(asset) });
                 var assetPath = AssetDatabase.GetAssetPath(asset);
                 AssetDatabase.ImportAsset(
                     assetPath,
@@ -1478,7 +1478,7 @@ namespace VRCForge.Editor
                 Apply(action, target, @params, assetDir, plannedMenuPaths);
                 EditorUtility.SetDirty(target);
                 EditorUtility.SetDirty(root);
-                var persistedReadback = ExpressionWritePersistence.SaveAndVerify(persistenceBefore, root, descriptor, rootWasMissing, true, target);
+                var persistedReadback = ExpressionWritePersistence.SaveAndVerify(persistenceBefore, root, descriptor, rootWasMissing, true, actualPlanAssetPaths, target);
                 var rootAssetPath = AssetDatabase.GetAssetPath(root);
                 AssetDatabase.ImportAsset(rootAssetPath, ImportAssetOptions.ForceSynchronousImport);
                 var readbackRoot = AssetDatabase.LoadAssetAtPath<VRCExpressionsMenu>(rootAssetPath);
@@ -1538,6 +1538,7 @@ namespace VRCForge.Editor
             }
             var checkpointAssetPaths = existingParent != null ? new[] { AssetDatabase.GetAssetPath(existingParent) } : Array.Empty<string>();
             var plannedAssetPaths = new[] { rootMenuAssetPath }.Concat(checkpointAssetPaths).Concat(newMenuAssetPaths)
+                .Concat(root == null ? new[] { descriptor.gameObject.scene.path } : Array.Empty<string>())
                 .Where(path => !string.IsNullOrWhiteSpace(path)).Distinct(StringComparer.Ordinal)
                 .OrderBy(path => path, StringComparer.Ordinal).ToArray();
             return new

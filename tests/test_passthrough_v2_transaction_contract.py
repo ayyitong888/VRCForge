@@ -45,7 +45,7 @@ def test_ensure_expression_parameter_returns_transaction_from_persisted_readback
         source.index("public static class EnsureExpressionMenuControlTool")
     ]
     assert "AssetDatabase.SaveAssets();" not in block
-    save_index = block.index("ExpressionWritePersistence.SaveAndVerify(persistenceBefore, asset, descriptor, assetWasMissing, false)")
+    save_index = block.index("ExpressionWritePersistence.SaveAndVerify(persistenceBefore, asset, descriptor, assetWasMissing, false, plan.checkpointAssetPaths)")
     readback_index = block.index("LoadAssetAtPath<VRCExpressionParameters>", save_index)
     assert save_index < readback_index
     assert "assets_touched = transactionItems.Count" in block
@@ -82,7 +82,7 @@ def test_ensure_expression_menu_control_returns_changed_asset_transaction() -> N
         source.index("public static class EnsureAnimatorStateTool")
     ]
     assert "AssetDatabase.SaveAssets();" not in block
-    save_index = block.index("ExpressionWritePersistence.SaveAndVerify(persistenceBefore, root, descriptor, rootWasMissing, true, target)")
+    save_index = block.index("ExpressionWritePersistence.SaveAndVerify(persistenceBefore, root, descriptor, rootWasMissing, true, checkpointAssetPaths, target)")
     readback_index = block.index("LoadAssetAtPath<VRCExpressionsMenu>", save_index)
     assert save_index < readback_index
     assert "CaptureMenuGraph(root)" in block

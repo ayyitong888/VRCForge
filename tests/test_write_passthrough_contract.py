@@ -128,7 +128,7 @@ def test_manage_expression_parameters_returns_reimported_state() -> None:
     )
 
     assert "AssetDatabase.SaveAssets();" not in block
-    save_index = block.index("ExpressionWritePersistence.SaveAndVerify(persistenceBefore, asset, descriptor, false, false)")
+    save_index = block.index("ExpressionWritePersistence.SaveAndVerify(persistenceBefore, asset, descriptor, false, false, new[] { AssetDatabase.GetAssetPath(asset) })")
     import_index = block.index("ImportAssetOptions.ForceSynchronousImport")
     readback_index = block.index("LoadAssetAtPath<VRCExpressionParameters>")
     assert save_index < import_index < readback_index
@@ -211,7 +211,7 @@ def test_manage_expression_menu_returns_reimported_state() -> None:
     )
 
     assert "AssetDatabase.SaveAssets();" not in block
-    save_index = block.index("ExpressionWritePersistence.SaveAndVerify(persistenceBefore, root, descriptor, rootWasMissing, true, target)")
+    save_index = block.index("ExpressionWritePersistence.SaveAndVerify(persistenceBefore, root, descriptor, rootWasMissing, true, actualPlanAssetPaths, target)")
     import_index = block.index("ImportAssetOptions.ForceSynchronousImport")
     readback_index = block.index("LoadAssetAtPath<VRCExpressionsMenu>")
     assert save_index < import_index < readback_index

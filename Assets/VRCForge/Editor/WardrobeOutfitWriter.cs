@@ -552,7 +552,7 @@ namespace VRCForge.Editor
                 clipReceipt.After = DescribeAsset(readbackClip);
                 clipReceipt.Status = "succeeded";
                 var controllerReadback = ExpressionWritePersistence.SaveAndVerify(
-                    controllerBefore, fxController, descriptor, false, false);
+                    controllerBefore, fxController, descriptor, false, false, checkpointAssetPaths);
                 var readbackController = AssetDatabase.LoadAssetAtPath<AnimatorController>(fxControllerPath);
                 VerifyWardrobeFxReadback(readbackController, wardrobeLayer.name, stateName, parameterName, newValue, newWriteDefaults, readbackClip);
                 controllerReceipt.After = DescribeAsset(readbackController);
@@ -561,7 +561,7 @@ namespace VRCForge.Editor
                 if (menuReceipt != null && appliedMenuTarget != null)
                 {
                     menuReadback = ExpressionWritePersistence.SaveAndVerify(
-                        menuBefore, descriptor.expressionsMenu, descriptor, false, true, appliedMenuTarget);
+                        menuBefore, descriptor.expressionsMenu, descriptor, false, true, checkpointAssetPaths, appliedMenuTarget);
                     VerifyMenuReadback(descriptor.expressionsMenu, outfitName, parameterName, newValue);
                     menuReceipt.After = DescribeAsset(AssetDatabase.LoadAssetAtPath<VRCExpressionsMenu>(rootMenuPath));
                     menuReceipt.Status = "succeeded";

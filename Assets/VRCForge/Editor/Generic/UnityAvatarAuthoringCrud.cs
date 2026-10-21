@@ -76,12 +76,26 @@ namespace VRCForge.Editor
         }
 
         internal static object SaveAndVerify(Dictionary<string, JToken> before, UnityEngine.Object root,
-            VRCAvatarDescriptor descriptor, bool assignedReference, bool isMenu, UnityEngine.Object target = null)
+            VRCAvatarDescriptor descriptor, bool assignedReference, bool isMenu,
+            IEnumerable<string> plannedAssetPaths, UnityEngine.Object target = null)
         {
+            if (plannedAssetPaths == null) throw new InvalidOperationException("Expression save requires an explicit asset write plan.");
+            var writable = new HashSet<string>(plannedAssetPaths, StringComparer.OrdinalIgnoreCase);
+            var rootPath = AssetDatabase.GetAssetPath(root);
+            var targetPath = AssetDatabase.GetAssetPath(target ?? root);
+            if (!writable.Contains(rootPath) || !writable.Contains(targetPath)
+                || (assignedReference && !writable.Contains(descriptor.gameObject.scene.path)))
+                throw new InvalidOperationException("Expression save target is outside the approved asset write plan.");
             var expected = Capture(root);
-            var changed = expected.Keys.Where(path => !before.TryGetValue(path, out var old)
-                || !JToken.DeepEquals(old, expected[path])).Concat(new[] { AssetDatabase.GetAssetPath(target ?? root) })
+            // Reachability grants read access, not write ownership: a newly linked
+            // existing submenu is not a newly created asset. Only planned paths
+            // can be new writes; existing unexpected changes fail before any save.
+            var changed = expected.Keys.Where(path => before.TryGetValue(path, out var old)
+                ? !JToken.DeepEquals(old, expected[path]) : writable.Contains(path))
+                .Concat(new[] { targetPath })
                 .Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(path => path, StringComparer.Ordinal).ToArray();
+            if (changed.Any(path => !writable.Contains(path)))
+                throw new InvalidOperationException("Expression asset changed outside the approved asset write plan.");
             var guids = changed.ToDictionary(path => path, path => AssetDatabase.AssetPathToGUID(path));
             foreach (var path in changed)
             {
@@ -486,7 +500,7 @@ namespace VRCForge.Editor
                 }
                 asset.parameters = parameters.ToArray();
                 EditorUtility.SetDirty(asset);
-                var persistedReadback = ExpressionWritePersistence.SaveAndVerify(persistenceBefore, asset, descriptor, assetWasMissing, false);
+                var persistedReadback = ExpressionWritePersistence.SaveAndVerify(persistenceBefore, asset, descriptor, assetWasMissing, false, plan.checkpointAssetPaths);
                 var readbackAsset = AssetDatabase.LoadAssetAtPath<VRCExpressionParameters>(assetPath);
                 if (readbackAsset == null)
                 {
@@ -711,7 +725,7 @@ namespace VRCForge.Editor
                 }
                 EditorUtility.SetDirty(root);
                 EditorUtility.SetDirty(target);
-                var persistedReadback = ExpressionWritePersistence.SaveAndVerify(persistenceBefore, root, descriptor, rootWasMissing, true, target);
+                var persistedReadback = ExpressionWritePersistence.SaveAndVerify(persistenceBefore, root, descriptor, rootWasMissing, true, checkpointAssetPaths, target);
                 var readbackRoot = AssetDatabase.LoadAssetAtPath<VRCExpressionsMenu>(transactionHandle);
                 if (readbackRoot == null)
                 {

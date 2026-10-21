@@ -90,7 +90,7 @@ namespace VRCForge.Editor
 
                 parametersAsset.parameters = parameters;
                 var persistence = ExpressionWritePersistence.SaveAndVerify(
-                    persistedBefore, parametersAsset, descriptor, false, false);
+                    persistedBefore, parametersAsset, descriptor, false, false, new[] { AssetDatabase.GetAssetPath(parametersAsset) });
                 var assetPath = AssetDatabase.GetAssetPath(parametersAsset);
                 var readbackAsset = AssetDatabase.LoadAssetAtPath<VRCExpressionParameters>(assetPath);
                 if (readbackAsset == null || readbackAsset.parameters == null)
@@ -282,7 +282,7 @@ namespace VRCForge.Editor
                 mutationStarted = true;
                 parametersAsset.parameters = restored.ToArray();
                 var persistence = ExpressionWritePersistence.SaveAndVerify(
-                    persistedBefore, parametersAsset, descriptor, false, false);
+                    persistedBefore, parametersAsset, descriptor, false, false, new[] { AssetDatabase.GetAssetPath(parametersAsset) });
                 var assetPath = AssetDatabase.GetAssetPath(parametersAsset);
                 var readbackAsset = AssetDatabase.LoadAssetAtPath<VRCExpressionParameters>(assetPath);
                 if (readbackAsset == null || readbackAsset.parameters == null)

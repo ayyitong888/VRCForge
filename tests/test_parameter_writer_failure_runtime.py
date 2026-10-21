@@ -70,7 +70,7 @@ namespace VRC.SDK3.Avatars.ScriptableObjects { public class VRCExpressionParamet
 namespace VRC.SDK3.Avatars.Components { public class VRCAvatarDescriptor:UnityEngine.Object {public UnityEngine.GameObject gameObject=new UnityEngine.GameObject();public UnityEngine.Transform transform=new UnityEngine.Transform();public VRC.SDK3.Avatars.ScriptableObjects.VRCExpressionParameters expressionParameters;} }
 namespace VRCForge.Editor {
  using UnityEngine;using UnityEditor;using VRC.SDK3.Avatars.Components;using VRC.SDK3.Avatars.ScriptableObjects;
- internal static class ExpressionWritePersistence {public static bool Throw;public static int Calls;public static object Capture(Object o)=>o;public static object SaveAndVerify(object b,Object a,VRCAvatarDescriptor d,bool n,bool m){Calls++;if(Throw)throw new InvalidOperationException("save failed");a.dirty=false;return new JObject{{"persisted",true},{"verified",true}};}}
+ internal static class ExpressionWritePersistence {public static bool Throw;public static int Calls;public static object Capture(Object o)=>o;public static object SaveAndVerify(object b,Object a,VRCAvatarDescriptor d,bool n,bool m,IEnumerable<string> paths){Calls++;if(Throw)throw new InvalidOperationException("save failed");a.dirty=false;return new JObject{{"persisted",true},{"verified",true}};}}
  public static class WriteAnimationCurveTool {internal sealed class AssetEditRecovery {string path;public void Capture(string p){path=p;AssetDatabase.Backup(p);}public void Begin(){}public void Complete(){}public bool Restore(){AssetDatabase.Restore(path);return true;}}}
 }
 '''
