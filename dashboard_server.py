@@ -368,6 +368,9 @@ from prepared_file_imports import verify_directory, verify_regular_file
 from unity_execution_plans_scene import (
     SCENE_EXECUTION_PLAN_TARGETS,
     build_scene_execution_plan,
+    build_ensure_expression_parameter_request,
+    build_ensure_expression_menu_control_request,
+    build_ensure_animator_state_request,
     sibling_index_arguments,
 )
 from unity_execution_plans_tuning import (
@@ -22608,24 +22611,6 @@ def scan_inbound_reference_closure_sync(params: dict[str, Any]) -> dict[str, Any
     return payload
 
 
-def build_ensure_expression_parameter_request(params: dict[str, Any], preview: bool) -> dict[str, Any]:
-    request: dict[str, Any] = {
-        "avatarPath": str(params.get("avatar_path") or params.get("avatarPath") or "").strip(),
-        "parameterName": str(params.get("parameter_name") or params.get("parameterName") or "").strip(),
-        "valueType": str(params.get("value_type") or params.get("valueType") or "Int").strip() or "Int",
-        "defaultValue": float(params.get("default_value", params.get("defaultValue", 0)) or 0),
-        "saved": _coerce_gateway_bool(params.get("saved"), True),
-        "networkSynced": _coerce_gateway_bool(params.get("network_synced", params.get("networkSynced")), True),
-        "preview": preview,
-    }
-    asset_dir = str(params.get("asset_dir") or params.get("assetDir") or "").strip()
-    if asset_dir:
-        request["assetDir"] = asset_dir
-    if "expectedCheckpointAssetPaths" in params:
-        request["expectedCheckpointAssetPaths"] = params["expectedCheckpointAssetPaths"]
-    return request
-
-
 def ensure_expression_parameter_sync(params: dict[str, Any], preview: bool = False) -> dict[str, Any]:
     params = params or {}
     request = build_ensure_expression_parameter_request(params, preview)
@@ -22647,24 +22632,6 @@ def ensure_expression_parameter_sync(params: dict[str, Any], preview: bool = Fal
     return payload
 
 
-def build_ensure_expression_menu_control_request(params: dict[str, Any], preview: bool) -> dict[str, Any]:
-    request: dict[str, Any] = {
-        "avatarPath": str(params.get("avatar_path") or params.get("avatarPath") or "").strip(),
-        "menuPath": str(params.get("menu_path") or params.get("menuPath") or "").strip(),
-        "controlName": str(params.get("control_name") or params.get("controlName") or "").strip(),
-        "controlType": str(params.get("control_type") or params.get("controlType") or "Toggle").strip() or "Toggle",
-        "parameterName": str(params.get("parameter_name") or params.get("parameterName") or "").strip(),
-        "controlValue": float(params.get("control_value", params.get("controlValue", 0)) or 0),
-        "preview": preview,
-    }
-    asset_dir = str(params.get("asset_dir") or params.get("assetDir") or "").strip()
-    if asset_dir:
-        request["assetDir"] = asset_dir
-    if "expectedCheckpointAssetPaths" in params:
-        request["expectedCheckpointAssetPaths"] = params["expectedCheckpointAssetPaths"]
-    return request
-
-
 def ensure_expression_menu_control_sync(params: dict[str, Any], preview: bool = False) -> dict[str, Any]:
     params = params or {}
     request = build_ensure_expression_menu_control_request(params, preview)
@@ -22684,32 +22651,6 @@ def ensure_expression_menu_control_sync(params: dict[str, Any], preview: bool = 
     )
     payload.setdefault("ok", True)
     return payload
-
-
-def build_ensure_animator_state_request(params: dict[str, Any], preview: bool) -> dict[str, Any]:
-    request: dict[str, Any] = {
-        "avatarPath": str(params.get("avatar_path") or params.get("avatarPath") or "").strip(),
-        "layerName": str(params.get("layer_name") or params.get("layerName") or "").strip(),
-        "stateName": str(params.get("state_name") or params.get("stateName") or "").strip(),
-        "parameterName": str(params.get("parameter_name") or params.get("parameterName") or "").strip(),
-        "parameterType": str(params.get("parameter_type") or params.get("parameterType") or "Int").strip() or "Int",
-        "conditionMode": str(params.get("condition_mode") or params.get("conditionMode") or "Equals").strip() or "Equals",
-        "threshold": float(params.get("threshold", 0) or 0),
-        "writeDefaults": _coerce_gateway_bool(params.get("write_defaults", params.get("writeDefaults")), True),
-        "preview": preview,
-    }
-    if params.get("time_parameter_active", params.get("timeParameterActive")) is not None:
-        request["timeParameterActive"] = _coerce_gateway_bool(
-            params.get("time_parameter_active", params.get("timeParameterActive")), False
-        )
-    if params.get("time_parameter", params.get("timeParameter")) is not None:
-        request["timeParameter"] = str(params.get("time_parameter", params.get("timeParameter")) or "").strip()
-    asset_dir = str(params.get("asset_dir") or params.get("assetDir") or "").strip()
-    if asset_dir:
-        request["assetDir"] = asset_dir
-    if "expectedCheckpointAssetPaths" in params:
-        request["expectedCheckpointAssetPaths"] = params["expectedCheckpointAssetPaths"]
-    return request
 
 
 def ensure_animator_state_sync(params: dict[str, Any], preview: bool = False) -> dict[str, Any]:

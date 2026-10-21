@@ -486,6 +486,7 @@ def _write_failure_facts(
     recovery: Mapping[str, Any],
     no_write_conflict: bool,
     exception: BaseException | None = None,
+    core_call_audits: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Compatibility projection from the one external error constructor."""
 
@@ -534,9 +535,29 @@ def _write_failure_facts(
         # Keep that decision ahead of the generic wrapper exception's
         # retryable=False default in the canonical error projection.
         constructor_args["retryable"] = True
-    elif "checkpointRecoveryRequired" not in result:
-        constructor_args["checkpoint_recovery_required"] = bool(recovery)
     error_object = build_external_tool_error(**constructor_args)
+    if (
+        core_call_audits
+        and error_object.get("toolRoutingStarted") is False
+        and error_object.get("mutationStarted") is False
+        and error_object.get("committed") is False
+        and error_object.get("commitState") == "not_started"
+    ):
+        # A rejected call proves nothing about earlier calls in this handler.
+        # Preserve its cause, but report the enclosing operation conservatively.
+        error_object = build_external_tool_error(
+            **{**constructor_args, "tool_routing_started": True,
+               "mutation_started": None, "committed": None, "commit_state": "unknown",
+               "retryable": False, "checkpoint_recovery_required": bool(recovery)},
+        )
+        error_object["recovery"] = {
+            "required": bool(recovery),
+            "reason": "Earlier Core calls prevent confirming that the operation made no changes.",
+        }
+    elif error_object.get("checkpointRecoveryRequired") is None:
+        # A pre-created recovery record is only the fallback for unknown facts;
+        # it must not overwrite an exception's explicit no-mutation evidence.
+        error_object["checkpointRecoveryRequired"] = bool(recovery)
     return external_write_failure_view(error_object)
 
 
@@ -2284,6 +2305,7 @@ class AgentApprovalTransactionService:
                 recovery=ensure_dict(recovery),
                 no_write_conflict=no_write_conflict,
                 exception=exc,
+                core_call_audits=core_call_audits,
             )
             redacted_failure_result = redact_sensitive(
                 dict(failure_result)

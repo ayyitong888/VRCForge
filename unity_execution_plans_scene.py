@@ -108,6 +108,68 @@ def _avatar_primitive(params: dict[str, Any]) -> dict[str, Any]:
     return request
 
 
+def build_ensure_expression_parameter_request(params: dict[str, Any], preview: bool) -> dict[str, Any]:
+    request: dict[str, Any] = {
+        "avatarPath": str(params.get("avatar_path") or params.get("avatarPath") or "").strip(),
+        "parameterName": str(params.get("parameter_name") or params.get("parameterName") or "").strip(),
+        "valueType": str(params.get("value_type") or params.get("valueType") or "Int").strip() or "Int",
+        "defaultValue": float(params.get("default_value", params.get("defaultValue", 0)) or 0),
+        "saved": _bool(params.get("saved"), True),
+        "networkSynced": _bool(params.get("network_synced", params.get("networkSynced")), True),
+        "preview": preview,
+    }
+    asset_dir = str(params.get("asset_dir") or params.get("assetDir") or "").strip()
+    if asset_dir:
+        request["assetDir"] = asset_dir
+    if "expectedCheckpointAssetPaths" in params:
+        request["expectedCheckpointAssetPaths"] = params["expectedCheckpointAssetPaths"]
+    return request
+
+
+def build_ensure_expression_menu_control_request(params: dict[str, Any], preview: bool) -> dict[str, Any]:
+    request: dict[str, Any] = {
+        "avatarPath": str(params.get("avatar_path") or params.get("avatarPath") or "").strip(),
+        "menuPath": str(params.get("menu_path") or params.get("menuPath") or "").strip(),
+        "controlName": str(params.get("control_name") or params.get("controlName") or "").strip(),
+        "controlType": str(params.get("control_type") or params.get("controlType") or "Toggle").strip() or "Toggle",
+        "parameterName": str(params.get("parameter_name") or params.get("parameterName") or "").strip(),
+        "controlValue": float(params.get("control_value", params.get("controlValue", 0)) or 0),
+        "preview": preview,
+    }
+    asset_dir = str(params.get("asset_dir") or params.get("assetDir") or "").strip()
+    if asset_dir:
+        request["assetDir"] = asset_dir
+    if "expectedCheckpointAssetPaths" in params:
+        request["expectedCheckpointAssetPaths"] = params["expectedCheckpointAssetPaths"]
+    return request
+
+
+def build_ensure_animator_state_request(params: dict[str, Any], preview: bool) -> dict[str, Any]:
+    request: dict[str, Any] = {
+        "avatarPath": str(params.get("avatar_path") or params.get("avatarPath") or "").strip(),
+        "layerName": str(params.get("layer_name") or params.get("layerName") or "").strip(),
+        "stateName": str(params.get("state_name") or params.get("stateName") or "").strip(),
+        "parameterName": str(params.get("parameter_name") or params.get("parameterName") or "").strip(),
+        "parameterType": str(params.get("parameter_type") or params.get("parameterType") or "Int").strip() or "Int",
+        "conditionMode": str(params.get("condition_mode") or params.get("conditionMode") or "Equals").strip() or "Equals",
+        "threshold": float(params.get("threshold", 0) or 0),
+        "writeDefaults": _bool(params.get("write_defaults", params.get("writeDefaults")), True),
+        "preview": preview,
+    }
+    if params.get("time_parameter_active", params.get("timeParameterActive")) is not None:
+        request["timeParameterActive"] = _bool(
+            params.get("time_parameter_active", params.get("timeParameterActive")), False
+        )
+    if params.get("time_parameter", params.get("timeParameter")) is not None:
+        request["timeParameter"] = str(params.get("time_parameter", params.get("timeParameter")) or "").strip()
+    asset_dir = str(params.get("asset_dir") or params.get("assetDir") or "").strip()
+    if asset_dir:
+        request["assetDir"] = asset_dir
+    if "expectedCheckpointAssetPaths" in params:
+        request["expectedCheckpointAssetPaths"] = params["expectedCheckpointAssetPaths"]
+    return request
+
+
 def build_scene_execution_plan(target_name: str, arguments: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
     """Map one dashboard write target to its exact non-preview Core invocation."""
     params = dict(arguments or {})
@@ -198,24 +260,11 @@ def build_scene_execution_plan(target_name: str, arguments: dict[str, Any]) -> l
         })]
 
     if target_name == "vrcforge_ensure_expression_parameter":
-        request = {"avatarPath": _text(params.get("avatar_path") or params.get("avatarPath")), "parameterName": _text(params.get("parameter_name") or params.get("parameterName")), "valueType": _text(params.get("value_type") or params.get("valueType") or "Int") or "Int", "defaultValue": float(params.get("default_value", params.get("defaultValue", 0)) or 0), "saved": _bool(params.get("saved"), True), "networkSynced": _bool(params.get("network_synced", params.get("networkSynced")), True), "preview": False}
-        if _text(params.get("asset_dir") or params.get("assetDir")):
-            request["assetDir"] = _text(params.get("asset_dir") or params.get("assetDir"))
-        return [("vrc_ensure_expression_parameter", request)]
+        return [("vrc_ensure_expression_parameter", build_ensure_expression_parameter_request(params, False))]
     if target_name == "vrcforge_ensure_expression_menu_control":
-        request = {"avatarPath": _text(params.get("avatar_path") or params.get("avatarPath")), "menuPath": _text(params.get("menu_path") or params.get("menuPath")), "controlName": _text(params.get("control_name") or params.get("controlName")), "controlType": _text(params.get("control_type") or params.get("controlType") or "Toggle") or "Toggle", "parameterName": _text(params.get("parameter_name") or params.get("parameterName")), "controlValue": float(params.get("control_value", params.get("controlValue", 0)) or 0), "preview": False}
-        if _text(params.get("asset_dir") or params.get("assetDir")):
-            request["assetDir"] = _text(params.get("asset_dir") or params.get("assetDir"))
-        return [("vrc_ensure_expression_menu_control", request)]
+        return [("vrc_ensure_expression_menu_control", build_ensure_expression_menu_control_request(params, False))]
     if target_name == "vrcforge_ensure_animator_state":
-        request = {"avatarPath": _text(params.get("avatar_path") or params.get("avatarPath")), "layerName": _text(params.get("layer_name") or params.get("layerName")), "stateName": _text(params.get("state_name") or params.get("stateName")), "parameterName": _text(params.get("parameter_name") or params.get("parameterName")), "parameterType": _text(params.get("parameter_type") or params.get("parameterType") or "Int") or "Int", "conditionMode": _text(params.get("condition_mode") or params.get("conditionMode") or "Equals") or "Equals", "threshold": float(params.get("threshold", 0) or 0), "writeDefaults": _bool(params.get("write_defaults", params.get("writeDefaults")), True), "preview": False}
-        if "time_parameter_active" in params or "timeParameterActive" in params:
-            request["timeParameterActive"] = _bool(params.get("time_parameter_active", params.get("timeParameterActive")), False)
-        if "time_parameter" in params or "timeParameter" in params:
-            request["timeParameter"] = _text(params.get("time_parameter") or params.get("timeParameter"))
-        if _text(params.get("asset_dir") or params.get("assetDir")):
-            request["assetDir"] = _text(params.get("asset_dir") or params.get("assetDir"))
-        return [("vrc_ensure_animator_state", request)]
+        return [("vrc_ensure_animator_state", build_ensure_animator_state_request(params, False))]
 
     primitive_tools = {"vrcforge_write_avatar_descriptor": "vrc_write_avatar_descriptor", "vrcforge_write_animation_curve": "vrc_write_animation_curve", "vrcforge_manage_expression_parameters": "vrc_manage_expression_parameters", "vrcforge_manage_expression_menu": "vrc_manage_expression_menu", "vrcforge_manage_fx_animator": "vrc_manage_fx_animator"}
     if target_name in primitive_tools:
