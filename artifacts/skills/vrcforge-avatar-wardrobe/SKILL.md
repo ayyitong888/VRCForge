@@ -27,6 +27,8 @@ allowed-tools:
   - vrcforge_set_play_mode
   - vrcforge_scan_modular_avatar
   - vrcforge_inspect_modular_avatar_component
+  - vrcforge_preview_add_modular_avatar_component
+  - vrcforge_add_modular_avatar_component
   - vrcforge_inspect_skinned_mesh_bone_usage
   - vrcforge_inspect_skinned_mesh_deformation
   - vrcforge_scan_inbound_reference_closure
@@ -128,6 +130,8 @@ support-files:
 首次搭建与已有衣柜追加使用不同入口。只有用户明确批准采用 Int 选择器时，才使用 `create_wardrobe` 生成单值 Int 骨架；成功回执不代表严格扫描已识别衣柜，不得因扫描为空重复创建。若批准的是独立 Bool、Float 或其他拓扑，直接按批准设计使用现有 `ensure_expression_parameter`、`ensure_animator_state`、`manage_fx_animator`、`write_animation_curve` 和 `ensure_expression_menu_control` 等原子工具，分别 preview、批准、写入和独立回读，不经过 Int 骨架衔接。采用 Int 设计时，首套服装用 `preview_add_outfit` / `add_outfit` 的 `manageWardrobe=false`，或实际暴露的实例化与安装工具；对象已经存在时不再安装。核对对象路径和安装结果后，使用 `preview_add_wardrobe_outfit` / `add_wardrobe_outfit` 衔接骨架，显式传入批准的值。这个追加工具保留旧 clip，仍需按批准设计补齐默认态及其他受影响状态的完整互斥曲线，再 fresh scan。只有 strict `wardrobes` 里存在目标时，才使用 `manageWardrobe=true` 的整套追加流程；具体分支见参考中的首次衔接说明。
 
 形态键、对象适配和材质属性改动以受影响对象的实际证据与批准目标为准，不从固定名称推测数值，不扩大到未授权的身体、骨架或物理系统。曲线身份及 renderer-wide 属性遵循工具实际契约，不复制无关绑定。
+
+衣服有与身体同名的胸型或体型 BlendShape 时，使用 **Modular Avatar Blendshape Sync**，由身体 Renderer 同步到各衣服 Renderer，保留已有正确绑定；不要只拉一次衣服权重就当完成。先读双方真实 Shape 名称和作者适配说明，只同步相关体型键，不把所有同名表情键或 Animator 参数一起同步。组件配置与简单验证见[身体与衣服形态同步](references/workflow.md#身体与衣服形态同步)。
 
 运行控制需要另有明确批准的方案和有限 duration/frame 预算。记录原 Play 状态，保留观察 jobId；pending 或超时只回读原 job，不能重启同一观察。completed 只表示采集结束，必须核对采样范围、输入回执、状态身份与实际效果。结束或失败后恢复用户批准的 Play 状态并独立回读，不默认退出用户已有会话。
 

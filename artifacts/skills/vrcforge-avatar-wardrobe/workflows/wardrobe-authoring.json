@@ -380,7 +380,9 @@
       "tools": [
         "vrcforge_setup_outfit",
         "vrcforge_preview_add_outfit",
-        "vrcforge_add_outfit"
+        "vrcforge_add_outfit",
+        "vrcforge_preview_add_modular_avatar_component",
+        "vrcforge_add_modular_avatar_component"
       ],
       "writes": true,
       "runtimePermissionGateRequired": true,
