@@ -333,7 +333,7 @@ def test_dashboard_keeps_only_approved_execution_roots_and_raw_capture_request_p
     capture_source = ast.get_source_segment(source, capture_adapter) or ""
     assert "AGENT_GATEWAY.approval_transactions.create_apply_request" in capture_source
     assert '"target_tool": target_tool' in capture_source
-    assert '"arguments": request.model_dump()' in capture_source
+    assert '"arguments": request.model_dump(by_alias=True)' in capture_source
     assert '"reason": reason' in capture_source
     assert "request_supervised_unity_write" not in capture_source
 

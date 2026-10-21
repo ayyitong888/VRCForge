@@ -963,15 +963,15 @@ BUILTIN_SKILL_GROUPS: list[dict[str, Any]] = [
     {
         "name": "face-tuning-workflow",
         "title": "Face Tuning Workflow",
-        "description": "Plan, preview, approve, apply, and restore face Blendshape tuning. After a successful save, explicitly call vrcforge_refresh_execution_target with the same public executionTarget before any later Unity read; if refresh fails, stop and preserve the revision check instead of retrying with the stale reference.",
+        "description": "Adjust the selected avatar's face Blendshapes and inspect the visible result. Confirm the intended Avatar, renderer and Shape before editing. After a successful save, explicitly call vrcforge_refresh_execution_target with the same public executionTarget before any later Unity read; if refresh fails, stop instead of reusing a stale reference.",
         "category": "face",
         "permissionMode": "approval_required",
         "riskLevel": "high",
         "whenToUse": "face tuning, expression tuning, blendshape edit, face restore",
         "inputs": ["Avatar path, tuning request, blendshape targets, and approval id."],
-        "outputs": ["Plan, dry-run preview, approval request, apply result, same-target refresh after a successful save before any later Unity read (stop if refresh fails), and restore result."],
+        "outputs": ["Selected face targets, approved adjustments, visual review, saved result, and same-target refresh after a successful save before any later Unity read (stop if refresh fails)."],
         "sideEffects": "can write Unity avatar Blendshape values after approval",
-        "backupRestore": "requires preview, backup, apply, validate, restore path",
+        "backupRestore": "approved writes retain their checkpoint and restore path; undo is only performed when requested",
         "allowedTools": [
             "vrcforge_scan_blendshapes",
             "vrcforge_plan_face_tuning",
@@ -983,16 +983,24 @@ BUILTIN_SKILL_GROUPS: list[dict[str, Any]] = [
             "vrcforge_undo_blendshapes",
             "vrcforge_restore_last_backup",
             "vrcforge_refresh_execution_target",
+            "vrcforge_capture_screenshot",
         ],
         "entrypointTool": "",
         "instructions": (
-            "Loading this workflow only supplies guidance; it does not run a planner. "
-            "For known exact adjustments, use the existing batch preview and approved apply without a second model-generated plan. "
-            "For static sculpting, inspect scope=face_static; review face_unknown only when the requested target is ambiguous. "
-            "Reuse current target evidence and retained result pages when they already cover the requested values; "
-            "do not repeat discovery or scan solely to recover them. For natural-language goals requiring semantic selection, "
-            "explicitly call vrcforge_plan_face_tuning with the matching scope. Keep approval, checkpoint, "
-            "persisted readback and the same-target refresh after saving."
+            "Confirm the intended Scene, Avatar, face renderer and exact Shape names from current evidence; "
+            "then adjust the requested Shapes and inspect the actual face from the front and a 45-degree three-quarter view, "
+            "both with a perspective camera. Use vrcforge_capture_screenshot in Scene View with cameraMode=free "
+            "and projection=perspective, aiming its position/target/up and field of view at the selected face. "
+            "Do not combine free-camera fields with named angles or captureScope=face. "
+            "ordinary sculpting does not need Play Mode, Gesture Manager, a full mesh inventory or a face-tracking audit. "
+            "If the target is already clear, reuse that evidence and use the existing batch preview and approved apply; "
+            "a natural-language request alone does not require a second model-generated plan. "
+            "Use scope=face_static or face_unknown only to resolve a target that is still unclear, and call "
+            "vrcforge_plan_face_tuning only when that extra planning is actually needed. "
+            "After visual review, save and reuse the apply receipt's persisted values; do not repeat discovery or "
+            "build an additional numerical acceptance audit. Keep the approved write's checkpoint and same-target "
+            "refresh after saving. If the image has not been seen, say visual review is unverified rather than "
+            "claiming success from parameter values alone."
         ),
         "tags": ["builtin", "group", "face", "blendshape", "write"],
     },

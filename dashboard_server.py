@@ -6596,7 +6596,7 @@ def request_supervised_vision_capture(
     return AGENT_GATEWAY.approval_transactions.create_apply_request(
         {
             "target_tool": target_tool,
-            "arguments": request.model_dump(),
+            "arguments": request.model_dump(by_alias=True),
             "reason": reason,
         }
     )
