@@ -6,6 +6,7 @@ using VRCForge.Core.MCP;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using UnityEditor;
+using UnityEditor.SceneManagement;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 
@@ -160,8 +161,7 @@ namespace VRCForge.Editor
             if (descriptorType != null)
             {
                 foreach (var descriptor in Resources.FindObjectsOfTypeAll(descriptorType).OfType<Component>()
-                    .Where(item => item != null && item.gameObject.scene.IsValid()
-                        && item.gameObject.scene.isLoaded && !EditorUtility.IsPersistent(item)))
+                    .Where(item => IsAuthoredSceneObject(item)))
                 {
                     AddAvatarRoot(avatarGroups, avatarRoots, descriptor.transform);
                     sceneNames.Add(descriptor.gameObject.scene.name);
@@ -249,10 +249,41 @@ namespace VRCForge.Editor
 
         private static bool IsSceneObject(SkinnedMeshRenderer renderer)
         {
-            return renderer != null
-                && renderer.gameObject.scene.IsValid()
-                && renderer.gameObject.scene.isLoaded
-                && !EditorUtility.IsPersistent(renderer);
+            return IsAuthoredSceneObject(renderer);
+        }
+
+        private static bool IsAuthoredSceneObject(Component component)
+        {
+            if (component == null || component.gameObject == null
+                || !component.gameObject.scene.IsValid()
+                || !component.gameObject.scene.isLoaded
+                || EditorSceneManager.IsPreviewScene(component.gameObject.scene)
+                || EditorUtility.IsPersistent(component))
+            {
+                return false;
+            }
+
+            // Editor preview proxies are transient scene objects. Their DontSaveInEditor
+            // flag is the generic ownership boundary; keep inactive authored objects.
+            if (HasDontSaveInEditor(component) || HasDontSaveInEditor(component.gameObject))
+            {
+                return false;
+            }
+
+            for (var current = component.transform; current != null; current = current.parent)
+            {
+                if (HasDontSaveInEditor(current.gameObject))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        private static bool HasDontSaveInEditor(UnityEngine.Object target)
+        {
+            return target != null && (target.hideFlags & HideFlags.DontSaveInEditor) != 0;
         }
 
         private static Transform FindAvatarRoot(Transform source)

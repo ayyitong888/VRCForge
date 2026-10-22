@@ -3730,6 +3730,7 @@ async def app_answer_agent_question(question_id: str, request: AgentQuestionAnsw
             {
                 "answer": request.answer,
                 "resolution": request.resolution,
+                "settleOnly": request.settle_only,
                 "attachments": request.attachments,
                 "value": request.value,
                 "optionId": request.option_id,
@@ -17350,7 +17351,7 @@ def reconcile_parameter_optimization_suggestions_with_controls(
     return parameter_payload
 
 
-def toggle_scene_object_direct(settings: Settings, object_path: str, active: bool) -> Any:
+def toggle_scene_object_direct(settings: Settings, object_path: str, active: bool, save_assets: bool = True) -> Any:
     return extract_tool_result_payload(
         invoke_unity_mcp(
             settings,
@@ -17358,7 +17359,7 @@ def toggle_scene_object_direct(settings: Settings, object_path: str, active: boo
             {
                 "objectPath": object_path,
                 "active": active,
-                "saveAssets": True,
+                "saveAssets": save_assets,
             },
         )
     )
@@ -23166,11 +23167,19 @@ def toggle_scene_object_sync(params: dict[str, Any]) -> dict[str, Any]:
         return {"ok": False, "error": "objectPath is required."}
     if "active" not in params:
         return {"ok": False, "error": "active (true/false) is required."}
+    save_assets = params.get("save_assets", params.get("saveAssets", True))
+    if type(save_assets) is not bool:
+        return {"ok": False, "error": "saveAssets (true/false) must be an explicit boolean."}
     active = bool(params.get("active"))
     settings = load_dashboard_settings(build_agent_connection_request(params))
-    payload = toggle_scene_object_direct(settings, object_path, active)
-    emit_log("info", "wardrobe", "Scene object toggled.", {"objectPath": object_path, "active": active})
-    return {**ensure_dict_payload(payload, "scene object toggle"), "ok": True, "objectPath": object_path, "active": active, "result": payload}
+    payload = toggle_scene_object_direct(settings, object_path, active, save_assets)
+    emit_log("info", "wardrobe", "Scene object toggled.", {"objectPath": object_path, "active": active, "saveAssets": save_assets})
+    return {**ensure_dict_payload(payload, "scene object toggle"), "ok": True, "objectPath": object_path, "active": active, "saveAssets": save_assets, "result": payload}
+
+
+def _scene_toggle_checkpoint_required(params: dict[str, Any]) -> bool:
+    """Disk checkpoints protect persisted toggles, not explicit ephemeral previews."""
+    return params.get("save_assets", params.get("saveAssets", True)) is not False
 
 
 def build_inspect_modular_avatar_component_request(params: dict[str, Any]) -> dict[str, Any]:
@@ -28147,7 +28156,9 @@ def register_agent_gateway_tools() -> None:
     )
     register_write_handler(
         "vrcforge_set_gameobject_active",
-        "Set a scene GameObject's active-self state through VRCForge.",
+        "When to use: persist one exact scene GameObject active-self change after approval and a disk checkpoint. "
+        "When NOT to use: do not use for temporary screenshot or Editor preview toggles; use "
+        "vrcforge_toggle_scene_object with saveAssets=false for that explicitly authorized ephemeral state.",
         "low",
         set_gameobject_active_sync,
         verification_profile="persisted_scene_write_console",
@@ -28335,9 +28346,11 @@ def register_agent_gateway_tools() -> None:
     )
     register_write_handler(
         "vrcforge_toggle_scene_object",
-        "Toggle a scene object's active state (for example wardrobe items) through VRCForge.",
+        "When to use: toggle one exact scene object such as a wardrobe item; use saveAssets=false only for an explicitly authorized temporary Editor preview, keeping the in-memory before/after state pending for later restoration. "
+        "When NOT to use: do not use saveAssets=false for authoring or persisted wardrobe changes; use saveAssets=true for a normal saved change, or use vrcforge_set_gameobject_active when the requested operation is a persisted active-self write.",
         "medium",
         toggle_scene_object_sync,
+        pre_write_checkpoint_required=_scene_toggle_checkpoint_required,
     )
     register_write_handler(
         "vrcforge_remap_skinned_mesh_bone",

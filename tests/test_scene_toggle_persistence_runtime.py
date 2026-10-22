@@ -16,12 +16,106 @@ def test_public_toggle_preserves_verified_core_receipt(monkeypatch):
                'verified': True, 'persistedReadback': True,
                'readback': {'persisted': True, 'data': {'active': True}}}
     monkeypatch.setattr(server, 'load_dashboard_settings', lambda *_: object())
-    monkeypatch.setattr(server, 'toggle_scene_object_direct', lambda *_: payload)
+    calls = []
+    monkeypatch.setattr(server, 'toggle_scene_object_direct', lambda *args: (calls.append(args) or payload))
     monkeypatch.setattr(server, 'emit_log', lambda *_: None)
     result = server.toggle_scene_object_sync({'objectPath': 'Avatar/Hat', 'active': True})
     assert result['verified'] is True
     assert result['readback'] == payload['readback']
     assert result['result'] == payload
+    assert calls[0][2:] == (True, True)
+
+
+def test_public_toggle_can_explicitly_use_ephemeral_editor_state(monkeypatch):
+    import dashboard_server as server
+    payload = {'objectPath': 'Avatar/Hat', 'active': False, 'saved': False, 'pending': True}
+    calls = []
+    monkeypatch.setattr(server, 'load_dashboard_settings', lambda *_: object())
+    monkeypatch.setattr(server, 'toggle_scene_object_direct', lambda *args: (calls.append(args) or payload))
+    monkeypatch.setattr(server, 'emit_log', lambda *_: None)
+    result = server.toggle_scene_object_sync({'objectPath': 'Avatar/Hat', 'active': False, 'saveAssets': False})
+    assert result['ok'] is True
+    assert result['saveAssets'] is False
+    assert result['result']['pending'] is True
+    assert calls[0][2:] == (False, False)
+    assert server.AGENT_GATEWAY._write_handlers['vrcforge_toggle_scene_object'].pre_write_checkpoint_required({'saveAssets': False}) is False
+    assert server.AGENT_GATEWAY._write_handlers['vrcforge_toggle_scene_object'].pre_write_checkpoint_required({'saveAssets': True}) is True
+
+
+def test_ephemeral_toggle_uses_real_approval_apply_without_checkpoint(tmp_path, monkeypatch):
+    import dashboard_server as server
+    from agent_gateway import AgentGateway
+
+    project = tmp_path / "UnityProject"
+    (project / "Assets").mkdir(parents=True)
+    (project / "Packages").mkdir()
+    (project / "ProjectSettings").mkdir()
+    (project / "Packages" / "manifest.json").write_text("{}", encoding="utf-8")
+    (project / "ProjectSettings" / "ProjectVersion.txt").write_text("m_EditorVersion: 2022.3.22f1\n", encoding="utf-8")
+    gateway = AgentGateway(tmp_path / "config" / "gateway.json", tmp_path / "audit")
+    checkpoint_calls = []
+    unity_calls = []
+
+    monkeypatch.setattr(server, "load_dashboard_settings", lambda *_: object())
+    monkeypatch.setattr(server, "toggle_scene_object_direct", lambda *args: (
+        unity_calls.append(args) or {"objectPath": args[1], "active": args[2], "saved": args[3], "pending": not args[3]}
+    ))
+    gateway.approval_transactions.checkpoint_prepare_handler = lambda *_: (
+        checkpoint_calls.append(True) or {"ok": True}
+    )
+    gateway.approval_transactions.register_write_handler(
+        "vrcforge_toggle_scene_object",
+        "When to use: temporary toggle. When NOT to use: persisted authoring.",
+        "medium",
+        server.toggle_scene_object_sync,
+        pre_write_checkpoint_required=server._scene_toggle_checkpoint_required,
+    )
+
+    def apply(save_assets: bool):
+        requested = gateway.approval_transactions.create_apply_request({
+            "target_tool": "vrcforge_toggle_scene_object",
+            "arguments": {
+                "projectPath": str(project), "objectPath": "Avatar/Hat",
+                "active": not save_assets, "saveAssets": save_assets,
+            },
+        })
+        approval_id = requested["approval"]["id"]
+        gateway.approval_transactions.approve(approval_id)
+        return gateway.approval_transactions.apply_approved({"approval_id": approval_id})
+
+    ephemeral = apply(False)
+    assert ephemeral["ok"] is True
+    assert ephemeral["result"]["saved"] is False
+    assert ephemeral["result"]["pending"] is True
+    assert checkpoint_calls == []
+    assert unity_calls[-1][3] is False
+
+    persisted = apply(True)
+    assert persisted["ok"] is True
+    assert persisted["result"]["saved"] is True
+    assert persisted["result"]["pending"] is False
+    assert checkpoint_calls == [True]
+    assert unity_calls[-1][3] is True
+
+
+def test_toggle_schema_and_descriptions_reach_internal_and_external_agents():
+    import dashboard_server as server
+
+    external = {
+        tool["name"]: tool
+        for tool in server.AGENT_GATEWAY.build_external_mcp_tools("execution", tool_blocks=["*"])
+    }
+    internal = {tool["name"]: tool for tool in server.AGENT_GATEWAY.build_tool_registry()["tools"]}
+    for name in ("vrcforge_toggle_scene_object", "vrcforge_set_gameobject_active"):
+        assert name in external
+        assert name in internal
+        assert external[name]["inputSchema"] == internal[name]["inputsSchema"]
+        description = external[name]["description"]
+        assert "When to use:" in description
+        assert "When NOT to use:" in description
+    assert "saveAssets" in external["vrcforge_toggle_scene_object"]["inputSchema"]["properties"]
+    assert "saveAssets=false" in external["vrcforge_toggle_scene_object"]["description"]
+    assert "saveAssets=false" in external["vrcforge_set_gameobject_active"]["description"]
 
 
 def test_toggle_uses_scoped_verified_save_and_preserves_unsaved_mode(tmp_path):

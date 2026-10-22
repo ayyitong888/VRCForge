@@ -62,6 +62,7 @@ EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
             "projectPath": _PROJECT_PATH_PROPERTY,
             "objectPath": {"type": "string", "description": "Exact scene object hierarchy path."},
             "active": {"type": "boolean", "description": "Desired active state; send a JSON boolean."},
+            "saveAssets": {"type": "boolean", "default": True, "description": "Persist the active state to the scene. Set false only for an explicitly authorized temporary Editor preview; the change remains in memory and is reported as pending."},
         },
     },
     "vrcforge_unpack_prefab": {

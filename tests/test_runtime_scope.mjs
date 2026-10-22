@@ -29,4 +29,17 @@ assert.equal(exports.approvalBelongsToRuntimeScope(approval("other-session"), sc
 assert.equal(exports.approvalBelongsToRuntimeScope(approval("session-owner"), { sessionId: "", projectRoot: scope.projectRoot }, { requireSession: true }), false);
 assert.equal(exports.questionBelongsToRuntimeScope({ questionId: "q", sessionId: "session-owner", projectRoot: scope.projectRoot }, scope, { requireSession: true }), true);
 assert.equal(exports.questionBelongsToRuntimeScope({ questionId: "q", sessionId: "other-session", projectRoot: scope.projectRoot }, scope, { requireSession: true }), false);
+assert.deepEqual(
+  exports.filterQuestionsForRuntimeScope([
+    { questionId: "current", sessionId: "session-owner", projectRoot: scope.projectRoot },
+    { questionId: "other", sessionId: "other-session", projectRoot: scope.projectRoot },
+  ], scope).map((question) => question.questionId),
+  ["current"],
+);
+assert.deepEqual(
+  Array.from(exports.filterQuestionsForRuntimeScope([
+    { questionId: "other", sessionId: "other-session", projectRoot: scope.projectRoot },
+  ], { sessionId: "", projectRoot: scope.projectRoot })),
+  [],
+);
 console.log("runtime scope behavior passed");

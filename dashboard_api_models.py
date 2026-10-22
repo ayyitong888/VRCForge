@@ -772,6 +772,11 @@ class AgentQuestionCreateRequest(BaseModel):
 class AgentQuestionAnswerRequest(BaseModel):
     answer: str = ""
     resolution: Literal["", "pass", "fail", "uncertain", "later"] = ""
+    settle_only: bool = Field(
+        default=False,
+        alias="settleOnly",
+        description="Record a decision already delivered through another conversation turn; do not resume the old task.",
+    )
     attachments: list[dict[str, Any]] = Field(default_factory=list)
     value: str = ""
     option_id: str = Field(default="", alias="optionId")

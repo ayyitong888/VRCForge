@@ -247,7 +247,8 @@ def build_scene_execution_plan(target_name: str, arguments: dict[str, Any]) -> l
         request.update({"preview": False, "saveScene": True, "overwrite": False})
         return [("vrc_duplicate_scene_object", request)]
     if target_name == "vrcforge_toggle_scene_object":
-        return [("vrc_toggle_scene_object", {"objectPath": _text(params.get("object_path") or params.get("objectPath")), "active": bool(params.get("active")), "saveAssets": True})]
+        save_assets = params.get("save_assets", params.get("saveAssets", True))
+        return [("vrc_toggle_scene_object", {"objectPath": _text(params.get("object_path") or params.get("objectPath")), "active": bool(params.get("active")), "saveAssets": save_assets is not False})]
     if target_name == "vrcforge_remap_skinned_mesh_bone":
         return [("vrc_remap_skinned_mesh_bone", {
             "gameObjectPath": _gameobject_target(params),

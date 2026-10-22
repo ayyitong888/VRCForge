@@ -284,6 +284,7 @@ class AgentQuestionService:
             raise AgentQuestionServiceError("questionId is required.", status_code=400)
         continuation_answer: str | None = None
         feedback_pending = False
+        settle_only = bool(values.get("settleOnly") or values.get("settle_only"))
         feedback_attachments = _question_attachments(values.get("attachments"))
         with _locked(self._persistence.shared_state_lock):
             current = self._project(include_answered=True)
@@ -295,6 +296,14 @@ class AgentQuestionService:
                 raise AgentQuestionServiceError("The task that asked this Question was stopped.", status_code=409)
             goal_delivery_id = str(existing.get("goalDeliveryId") or "").strip()
             runtime_seed = existing.get("runtimeTaskSeed")
+            if settle_only:
+                if goal_delivery_id:
+                    raise AgentQuestionServiceError("settleOnly is not available for Goal-owned Questions.", status_code=409)
+                if str(existing.get("kind") or "decision").strip().lower() != "visual_checkpoint":
+                    raise AgentQuestionServiceError("settleOnly requires a visual checkpoint Question.", status_code=400)
+                explicit_resolution = str(values.get("resolution") or "").strip().lower()
+                if explicit_resolution not in {"pass", "fail"}:
+                    raise AgentQuestionServiceError("settleOnly requires an explicit pass or fail resolution.", status_code=400)
             if str(existing.get("status") or "") == "answered":
                 payload: dict[str, object] = {"ok": True, "question": self._redact(existing), "idempotent": True}
                 if runtime_seed and not goal_delivery_id and str(existing.get("runtimeContinuationStatus") or "") == "queued":
@@ -313,6 +322,8 @@ class AgentQuestionService:
                     120,
                 )
                 answer_text = _question_text(values.get("answer") or values.get("value"), "answer", 2000)
+                if settle_only and not answer_text:
+                    answer_text = explicit_resolution
                 if not answer_text and selected_option_id:
                     for option in _as_list(existing.get("options")):
                         if not isinstance(option, Mapping) or str(option.get("id") or "") != selected_option_id:
@@ -378,9 +389,11 @@ class AgentQuestionService:
                         event["resolution"] = resolution
                         event["questionFeedbackRevision"] = feedback_revision
                         event["runtimeQuestionFeedbackPending"] = False
+                    if settle_only:
+                        event["runtimeContinuationStatus"] = "settled_without_dispatch"
                     if feedback_attachments:
                         event["attachments"] = feedback_attachments
-                    if runtime_seed and not goal_delivery_id:
+                    if runtime_seed and not goal_delivery_id and not settle_only:
                         # The saved answer and the not-yet-dispatched marker are
                         # one durable event, so a restart cannot lose the handoff.
                         event["runtimeContinuationStatus"] = "queued"
@@ -394,7 +407,7 @@ class AgentQuestionService:
                 resolved_id,
                 self._continuation_prompt(payload["question"], answer_text=continuation_answer),
             )
-        if (runtime_seed and not goal_delivery_id and self._runtime_resolution is not None
+        if (runtime_seed and not goal_delivery_id and not settle_only and self._runtime_resolution is not None
                 and (not payload.get("idempotent") or existing.get("runtimeContinuationStatus") == "queued")):
             # This copy is ephemeral: durable Question records keep the stricter
             # redacted answer, while the trusted runtime handoff can bind an

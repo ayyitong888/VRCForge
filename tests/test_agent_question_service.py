@@ -178,6 +178,43 @@ def test_visual_checkpoint_rejects_inferred_or_unknown_resolution(tmp_path: Path
     assert feedback["question"]["status"] == "pending"
 
 
+def test_visual_checkpoint_settle_only_records_superseded_fail_without_dispatch(tmp_path: Path) -> None:
+    dispatches: list[str] = []
+    service = AgentQuestionService(
+        AgentQuestionPersistence(AgentQuestionPersistencePorts(
+            log_path=lambda: tmp_path / "agent-questions.jsonl",
+            shared_state_lock=threading.RLock(), redact=lambda value: value,
+        )),
+        AgentQuestionScopePorts(
+            normalize_path=lambda value: value,
+            summarize=_summarize,
+            redact_goal_persistence=lambda value: value,
+        ),
+        GoalQuestionResolutionPort(resolve=lambda _question_id, _prompt: None),
+        RuntimeQuestionResolutionPort(
+            resolve=lambda question_id, _seed, _prompt: dispatches.append(question_id) or {"status": "queued"},
+        ),
+    )
+    question = service.create({
+        "kind": "visual_checkpoint", "question": "Inspect the old preview", "sessionId": "s",
+        "_runtimeTaskSeed": {"sessionId": "s", "taskId": "old-task"},
+    })["question"]
+    qid = str(question["questionId"])
+    service.answer(qid, {"sessionId": "s", "answer": "The old preview needs repair."})
+    service.record_runtime_continuation(qid, "interrupted", error="superseded by a later foreground turn")
+    settled = service.answer(qid, {
+        "sessionId": "s", "resolution": "fail", "settleOnly": True,
+        "answer": "Rejected; repair was handled in the later turn.",
+    })
+    assert settled["question"]["status"] == "answered"
+    assert settled["question"]["resolution"] == "fail"
+    assert settled["question"]["runtimeContinuationStatus"] == "settled_without_dispatch"
+    assert len(dispatches) == 1
+    repeated = service.answer(qid, {"sessionId": "s", "resolution": "fail", "settleOnly": True})
+    assert repeated["idempotent"] is True
+    assert len(dispatches) == 1
+
+
 def test_question_dedup_is_call_user_scoped_and_persists_source(tmp_path: Path) -> None:
     service = _service(tmp_path, threading.RLock(), [])
     params = {"question": "Confirm once", "sessionId": "s", "sourceTool": "call_user"}

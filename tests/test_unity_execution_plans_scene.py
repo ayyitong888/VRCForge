@@ -24,6 +24,7 @@ from unity_execution_plans_scene import build_scene_execution_plan
     ("vrcforge_duplicate_scene_object", {"projectPath": "D:/Project", "sourceScenePath": "Assets/A.unity", "sourceObjectPath": "Avatar/Body", "targetParentScenePath": "Assets/A.unity", "targetParentPath": "Avatar", "targetName": "BodyCopy", "preserveWorldTransform": True}, ("vrc_duplicate_scene_object", {"sourceScenePath": "Assets/A.unity", "sourceObjectPath": "Avatar/Body", "targetParentScenePath": "Assets/A.unity", "targetParentPath": "Avatar", "targetName": "BodyCopy", "preserveWorldTransform": True, "preview": False, "saveScene": True, "overwrite": False})),
     ("vrcforge_unpack_prefab", {"gameObjectPath": "A"}, ("vrc_unpack_prefab", {"gameObjectPath": "A", "mode": "completely", "preview": False})),
     ("vrcforge_toggle_scene_object", {"object_path": "A", "active": True}, ("vrc_toggle_scene_object", {"objectPath": "A", "active": True, "saveAssets": True})),
+    ("vrcforge_toggle_scene_object", {"object_path": "A", "active": False, "saveAssets": False}, ("vrc_toggle_scene_object", {"objectPath": "A", "active": False, "saveAssets": False})),
 ])
 def test_scene_handler_argument_projection(target, arguments, expected):
     assert build_scene_execution_plan(target, arguments) == [expected]

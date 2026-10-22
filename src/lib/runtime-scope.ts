@@ -36,3 +36,11 @@ export function questionBelongsToRuntimeScope(
   }
   return sameProject(question.projectRoot, scope.projectRoot);
 }
+
+export function filterQuestionsForRuntimeScope(
+  questions: AgentQuestion[],
+  scope: RuntimeScope,
+): AgentQuestion[] {
+  if (!scope.sessionId.trim()) return [];
+  return questions.filter((question) => questionBelongsToRuntimeScope(question, scope, { requireSession: true }));
+}

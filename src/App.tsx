@@ -89,7 +89,7 @@ import { useTransientFailureNotice } from "./hooks/use-transient-failure-notice"
 import { useThemeCustomization } from "./hooks/use-theme-customization";
 import { TEMP_CHATS_COLLAPSE_KEY, type ActiveView, type SettingsSection } from "./lib/app-view";
 import { presentApproval } from "./lib/approval-presentation";
-import { approvalBelongsToRuntimeScope, questionBelongsToRuntimeScope } from "./lib/runtime-scope";
+import { approvalBelongsToRuntimeScope, filterQuestionsForRuntimeScope, questionBelongsToRuntimeScope } from "./lib/runtime-scope";
 import { replyToSessionHandoff } from "./lib/api/session-handoff";
 import { flushChatsBeforeQuit } from "./lib/app-quit";
 import {
@@ -4533,10 +4533,7 @@ export default function App() {
               conversation={conversation}
               attachmentPayloads={activeChat?.attachmentPayloads}
               queued={visibleQueued}
-              agentQuestions={hasAgentRuntimeScope
-                ? agentQuestions.filter((item) => questionBelongsToRuntimeScope(item, runtimeScope, { requireSession: true })
-                  || !chats.some((chat) => chat.sessionId === item.sessionId))
-                : agentQuestions}
+              agentQuestions={hasAgentRuntimeScope ? filterQuestionsForRuntimeScope(agentQuestions, runtimeScope) : []}
               backgroundGoalDeliveries={
                 activeChatId
                   ? (backgroundGoalState?.recent || []).filter((delivery) => delivery.chatId === activeChatId)
