@@ -21,6 +21,7 @@ import {
 import { isTauriRuntime } from "../lib/app-runtime";
 import {
   isCallUserQuestion,
+  isBlockingAgentQuestion,
   loadAgentQuestionNotificationIds,
   markAgentQuestionNotificationDelivered,
   normalizeAgentQuestionNotificationBody,
@@ -28,6 +29,7 @@ import {
   shouldStartAgentQuestionNotification,
   showAgentQuestionNotification,
 } from "../lib/agent-question-notifications";
+import { playNotificationSoundOnce } from "../lib/notification-sound-delivery";
 import { isProjectWorkbenchSmokeMode, markdownSmokeGoals, markdownSmokeMemories, markdownSmokeProgress, markdownSmokeRuns } from "../lib/markdown-smoke";
 import { normalizeProjectPathKey } from "../lib/project-path";
 
@@ -122,11 +124,15 @@ export function useRuntimeWorkspace({
       const chatId = chatIdForSessionId?.(String(question.sessionId || "").trim()) || "";
       const notificationChatId = chatId || `question-${questionId.replace(/[^a-zA-Z0-9_-]+/g, "-").slice(0, 96)}`;
       agentQuestionNotificationInflightRef.current.add(questionId);
-      void showAgentQuestionNotification({
-        questionId,
-        chatId: notificationChatId,
-        title: t("questionCard.label"),
-        body: normalizeAgentQuestionNotificationBody(question.question || question.header || questionId),
+      const blocking = isBlockingAgentQuestion(question);
+      void playNotificationSoundOnce(`question:${questionId}`, blocking ? "blocking" : "ordinary").then((soundPlayed) => {
+        return showAgentQuestionNotification({
+          questionId,
+          chatId: notificationChatId,
+          title: t("questionCard.label"),
+          body: normalizeAgentQuestionNotificationBody(question.question || question.header || questionId),
+          silent: soundPlayed,
+        });
       }).then(() => {
         if (agentQuestionNotificationStatusRef.current.get(questionId) === "pending") {
           markAgentQuestionNotificationDelivered(questionId, agentQuestionNotificationIdsRef.current);

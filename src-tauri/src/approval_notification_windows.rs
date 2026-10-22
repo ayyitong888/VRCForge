@@ -88,6 +88,17 @@ pub(crate) struct DesktopApprovalNotificationRequest {
     approval_id: String,
     title: String,
     body: String,
+    #[serde(default)]
+    silent: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopBackgroundGoalNotificationRequest {
+    title: String,
+    body: String,
+    #[serde(default)]
+    silent: bool,
 }
 
 #[derive(Deserialize)]
@@ -97,6 +108,8 @@ pub(crate) struct DesktopAgentQuestionNotificationRequest {
     chat_id: String,
     title: String,
     body: String,
+    #[serde(default)]
+    silent: bool,
 }
 
 #[derive(Deserialize)]
@@ -108,6 +121,8 @@ pub(crate) struct DesktopSubAgentReviewNotificationRequest {
     title: String,
     body: String,
     open_label: String,
+    #[serde(default)]
+    silent: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -160,6 +175,7 @@ pub(crate) fn show_approval_notification(
         tauri_winrt_notification::Toast::new(APPROVAL_NOTIFICATION_APP_ID)
             .title(&request.title)
             .text1(&request.body)
+            .sound(if request.silent { None } else { Some(tauri_winrt_notification::Sound::Default) })
             .icon(
                 &icon_path,
                 tauri_winrt_notification::IconCrop::Square,
@@ -194,6 +210,32 @@ pub(crate) fn show_approval_notification(
     }
 }
 
+/// Displays a display-only background goal toast using the same product identity.
+#[tauri::command]
+pub(crate) fn show_background_goal_notification(
+    app: AppHandle,
+    request: DesktopBackgroundGoalNotificationRequest,
+) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        validate_background_goal_notification_request(&request)?;
+        if !bind_approval_notification_identity() { return Err("Unable to bind the VRCForge notification identity.".to_string()); }
+        let executable = std::env::current_exe().map_err(|_| "Unable to resolve the VRCForge notification icon.".to_string())?;
+        let icon_path = approval_notification_icon_path(&executable).filter(|path| path.is_file()).ok_or_else(|| "Unable to resolve the VRCForge notification icon.".to_string())?;
+        let callback_app = app.clone();
+        tauri_winrt_notification::Toast::new(APPROVAL_NOTIFICATION_APP_ID)
+            .title(&request.title)
+            .text1(&request.body)
+            .sound(if request.silent { None } else { Some(tauri_winrt_notification::Sound::Default) })
+            .icon(&icon_path, tauri_winrt_notification::IconCrop::Square, APPROVAL_NOTIFICATION_ICON_ALT_TEXT)
+            .on_activated(move |_| { focus_main_window(&callback_app); Ok(()) })
+            .show()
+            .map_err(|_| "Unable to show the background goal notification.".to_string())
+    }
+    #[cfg(not(windows))]
+    { let _ = app; let _ = request; Err("Background goal notifications are only supported on Windows.".to_string()) }
+}
+
 /// Displays a display-only pending question toast. Clicking only wakes the
 /// app and identifies the question; the frontend re-reads pending authority
 /// and opens the matching chat/question without answering it.
@@ -222,6 +264,7 @@ pub(crate) fn show_agent_question_notification(
         tauri_winrt_notification::Toast::new(APPROVAL_NOTIFICATION_APP_ID)
             .title(&request.title)
             .text1(&request.body)
+            .sound(if request.silent { None } else { Some(tauri_winrt_notification::Sound::Default) })
             .icon(
                 &icon_path,
                 tauri_winrt_notification::IconCrop::Square,
@@ -281,6 +324,7 @@ pub(crate) fn show_sub_agent_review_notification(
         tauri_winrt_notification::Toast::new(APPROVAL_NOTIFICATION_APP_ID)
             .title(&request.title)
             .text1(&request.body)
+            .sound(if request.silent { None } else { Some(tauri_winrt_notification::Sound::Default) })
             .icon(
                 &icon_path,
                 tauri_winrt_notification::IconCrop::Square,
@@ -431,6 +475,12 @@ fn validate_notification_request(
     Ok(())
 }
 
+fn validate_background_goal_notification_request(request: &DesktopBackgroundGoalNotificationRequest) -> Result<(), String> {
+    validate_display_text(&request.title, MAX_TITLE_LENGTH, "title")?;
+    validate_display_text(&request.body, MAX_BODY_LENGTH, "body")?;
+    Ok(())
+}
+
 fn validate_agent_question_notification_request(
     request: &DesktopAgentQuestionNotificationRequest,
 ) -> Result<(), String> {
@@ -505,6 +555,7 @@ mod tests {
             approval_id: "approval_123-abc".to_string(),
             title: "Approval required".to_string(),
             body: "Review this pending operation in VRCForge.".to_string(),
+            silent: false,
         }
     }
 
@@ -514,6 +565,7 @@ mod tests {
             chat_id: "chat_123-abc".to_string(),
             title: "Agent question".to_string(),
             body: "Choose how to continue in VRCForge.".to_string(),
+            silent: false,
         }
     }
 

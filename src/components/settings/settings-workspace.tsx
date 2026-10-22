@@ -34,6 +34,7 @@ import type { ThemeCustomization } from "../../lib/theme-customization";
 import { DataRootSettingsPanel } from "./data-root-settings-panel";
 import { ChatGptOAuthSettings } from "../../features/chatgpt-oauth/settings";
 import { TelegramSettingsPanel } from "./telegram-settings-panel";
+import { AgentQuestionNotificationSoundSettings } from "./agent-question-notification-sound";
 
 type SettingsWorkspaceProps = {
   activeSection: SettingsSection;
@@ -309,6 +310,10 @@ export function SettingsWorkspace({
                 runtimeConnected={runtimeConnected}
                 onChange={onBackgroundGoalNotificationsChange}
               />
+            </section>
+
+            <section className="mt-10">
+              <AgentQuestionNotificationSoundSettings />
             </section>
 
             <section className="mt-10">

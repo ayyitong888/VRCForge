@@ -50,6 +50,31 @@ def test_question_service_is_a_narrow_independent_owner(tmp_path: Path) -> None:
     assert service.log_path == tmp_path / "agent-questions.jsonl"
 
 
+def test_question_notification_urgency_comes_from_runtime_wait_not_caller_label(tmp_path: Path) -> None:
+    service = _service(tmp_path, threading.RLock(), [])
+    ordinary = service.create({
+        "question": "Optional feedback", "sessionId": "external-session",
+        "sourceTool": "call_user", "needsUserAction": True,
+    })["question"]
+    assert ordinary["needsUserAction"] is False
+    blocked = service.create({
+        "question": "Please inspect before continuing", "sessionId": "runtime-session",
+        "_runtimeTaskSeed": {"taskId": "task-a", "sessionId": "runtime-session"},
+    })["question"]
+    assert blocked["needsUserAction"] is True
+    assert "runtimeTaskSeed" not in blocked
+    qid = blocked["questionId"]
+    service.record_runtime_continuation(qid, "claimed")
+    current = next(q for q in service.list(include_answered=True)["questions"] if q["questionId"] == qid)
+    assert current["needsUserAction"] is False
+    service.record_runtime_continuation(qid, "delivered")
+    current = next(q for q in service.list(include_answered=True)["questions"] if q["questionId"] == qid)
+    assert current["needsUserAction"] is True
+    service.answer(qid, {"answer": "Done"})
+    current = next(q for q in service.list(include_answered=True)["questions"] if q["questionId"] == qid)
+    assert current["needsUserAction"] is False
+
+
 def test_question_service_preserves_scope_and_answer_exactly_once(tmp_path: Path) -> None:
     shared_lock = threading.RLock()
     resolutions: list[tuple[str, str]] = []

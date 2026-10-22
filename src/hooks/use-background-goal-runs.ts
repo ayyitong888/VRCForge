@@ -490,7 +490,7 @@ export function useBackgroundGoalRuns({
       toastInFlightKeys.current.add(key);
       void (async () => {
         try {
-          const sent = await notifyBackgroundGoal(delivery, notificationsEnabled, t);
+          const sent = await notifyBackgroundGoal(delivery, notificationsEnabled, t, key);
           if (!sent) {
             return;
           }

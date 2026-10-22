@@ -616,6 +616,14 @@ class AgentQuestionService:
     def _redact(self, value: object) -> dict[str, object]:
         redacted = self._persistence.redact(value)
         result = dict(redacted) if isinstance(redacted, Mapping) else {}
+        # Publish only whether this question holds an owned task for a human.
+        # Caller-supplied urgency cannot turn an ordinary question into an alert.
+        source = value if isinstance(value, Mapping) else {}
+        result["needsUserAction"] = bool(
+            source.get("status") == "pending"
+            and (source.get("runtimeTaskSeed") or source.get("goalDeliveryId"))
+            and source.get("runtimeContinuationStatus") not in {"queued", "claimed", "running"}
+        )
         for key in ("runtimeTaskSeed", "runtimeSessionId", "runtimeClientTurnId", "runtimeTaskId"):
             result.pop(key, None)
         return result

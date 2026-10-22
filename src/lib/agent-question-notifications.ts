@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import type { AgentQuestion } from "./api";
 
 /** Native question notifications only wake the app; they never answer a question. */
 export const AGENT_QUESTION_NOTIFICATION_ACTION_EVENT =
@@ -11,6 +12,7 @@ export type AgentQuestionNotificationRequest = {
   chatId: string;
   title: string;
   body: string;
+  silent?: boolean;
 };
 
 export type AgentQuestionNotificationActionPayload = {
@@ -24,6 +26,13 @@ export function isCallUserQuestion(question: { kind?: unknown; sourceTool?: unkn
   return sourceTool === "call_user";
 }
 
+/** The server derives this from the real runtime association; callers cannot mark urgency themselves. */
+export function isBlockingAgentQuestion(question: AgentQuestion): boolean {
+  return question.status === "pending"
+    && question.needsUserAction === true
+    && Boolean(String(question.sessionId || "").trim());
+}
+
 export function questionNotificationKey(questionId: string): string {
   return questionId.trim();
 }
@@ -31,6 +40,14 @@ export function questionNotificationKey(questionId: string): string {
 /** Toasts use one line; the full question remains available in the chat card. */
 export function normalizeAgentQuestionNotificationBody(value: unknown): string {
   return String(value || "").replace(/\s+/g, " ").trim().slice(0, MAX_NOTIFICATION_BODY_LENGTH);
+}
+
+export function shouldSilenceNativeNotification(customSoundPlayed: boolean): boolean {
+  return customSoundPlayed;
+}
+
+export function shouldRetainAgentQuestionNotificationAfterSound(customSoundPlayed: boolean): boolean {
+  return customSoundPlayed;
 }
 
 export function loadAgentQuestionNotificationIds(): Set<string> {

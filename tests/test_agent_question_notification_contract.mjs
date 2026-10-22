@@ -12,6 +12,7 @@ test("question notification is display-only and carries exact chat/question iden
   assert.match(rust, /vrcforge-agent-question-notification-action/);
   assert.match(rust, /question_id: request\.question_id\.clone\(\)/);
   assert.match(rust, /chat_id: request\.chat_id\.clone\(\)/);
+  assert.match(rust, /request\.silent/);
   assert.doesNotMatch(rust, /approve_agent_approval|answer_agent_question/);
 
   const source = await readFile(path.join(root, "src/lib/agent-question-notifications.ts"), "utf8");
@@ -50,8 +51,22 @@ test("production notification helpers suppress delivered and concurrent deliveri
   assert.equal(module.shouldStartAgentQuestionNotification("q-1", delivered, inflight), false);
   assert.equal(module.normalizeAgentQuestionNotificationBody("line one\nline two\t"), "line one line two");
   assert.equal(module.normalizeAgentQuestionNotificationBody("x".repeat(1000)).length, 512);
+  assert.equal(module.shouldSilenceNativeNotification(true), true);
+  assert.equal(module.shouldSilenceNativeNotification(false), false);
+  assert.equal(module.shouldRetainAgentQuestionNotificationAfterSound(true), true);
+  assert.equal(module.shouldRetainAgentQuestionNotificationAfterSound(false), false);
   inflight.delete("q-1");
   module.markAgentQuestionNotificationDelivered("q-1", delivered);
   assert.equal(module.shouldStartAgentQuestionNotification("q-1", delivered, inflight), false);
+});
+
+test("question sound gate requires server blocking authority and an agent association", async () => {
+  const module = await import(pathToFileURL(path.join(root, "src/lib/agent-question-notifications.ts")).href);
+  const ordinary = { questionId: "q-ordinary", sourceTool: "call_user", sessionId: "s1", status: "pending" };
+  assert.equal(module.isBlockingAgentQuestion(ordinary), false);
+  assert.equal(module.isBlockingAgentQuestion({ ...ordinary, needsUserAction: true }), true);
+  assert.equal(module.isBlockingAgentQuestion({ ...ordinary, needsUserAction: true, sessionId: "" }), false);
+  assert.equal(module.isBlockingAgentQuestion({ ...ordinary, needsUserAction: true, status: "answered" }), false);
+  assert.equal(module.isBlockingAgentQuestion({ ...ordinary, runtimeContinuation: { status: "blocked" } }), false);
 });
 

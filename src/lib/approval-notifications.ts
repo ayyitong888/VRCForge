@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { AgentApproval } from "./api";
+import { playNotificationSoundOnce } from "./notification-sound-delivery";
 
 /** Native notifications are detail-first: clicking only wakes/deep-links the app. */
 export type ApprovalNotificationAction = "open";
@@ -53,11 +54,13 @@ export async function showApprovalNotification(
   title: string,
   body: string,
 ): Promise<void> {
+  const silent = await playNotificationSoundOnce(`approval:${approval.id}`, "blocking");
   await invoke("show_approval_notification", {
     request: {
       approvalId: approval.id,
       title,
       body,
+      silent,
     },
   });
 }
@@ -69,6 +72,7 @@ export async function showSubAgentReviewNotification(
     openLabel: string;
   },
 ): Promise<void> {
+  const silent = await playNotificationSoundOnce(`review:${request.taskId}:${request.revision}`, "ordinary");
   await invoke("show_sub_agent_review_notification", {
     request: {
       taskId: request.taskId,
@@ -77,6 +81,7 @@ export async function showSubAgentReviewNotification(
       title: request.title,
       body: request.body,
       openLabel: request.openLabel,
+      silent,
     },
   });
 }

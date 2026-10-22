@@ -224,6 +224,7 @@ fn main() {
             answer_agent_question,
             approve_agent_approval,
             show_approval_notification,
+            show_background_goal_notification,
             show_agent_question_notification,
             show_sub_agent_review_notification,
             begin_developer_options_challenge,

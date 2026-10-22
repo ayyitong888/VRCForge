@@ -1042,6 +1042,8 @@ export type AgentQuestion = {
   question?: string;
   options?: AgentQuestionOption[];
   status?: "pending" | "answered" | "cancelled" | string;
+  /** Server-derived authority that this question currently blocks its agent run. */
+  needsUserAction?: boolean;
   answer?: string;
   selectedOptionId?: string;
   projectRoot?: string;

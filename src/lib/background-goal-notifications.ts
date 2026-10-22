@@ -1,9 +1,6 @@
-import {
-  isPermissionGranted,
-  requestPermission,
-  sendNotification,
-} from "@tauri-apps/plugin-notification";
 import { hasTauriInternals } from "./api/http";
+import { invoke } from "@tauri-apps/api/core";
+import { playNotificationSoundOnce } from "./notification-sound-delivery";
 
 export type BackgroundGoalNotificationEvent = {
   status?: string;
@@ -47,24 +44,26 @@ export function backgroundGoalNotificationCopy(
     : null;
 }
 
+export function backgroundGoalNotificationIsBlocking(event: BackgroundGoalNotificationEvent): boolean {
+  const status = String(event.state || event.status || "").trim().toLowerCase();
+  const blockedKind = String(event.blockedKind || "").trim().toLowerCase();
+  return status === "blocked_question" || status === "blocked_approval"
+    || (status === "blocked" && (blockedKind === "question" || blockedKind === "approval"));
+}
+
 export async function notifyBackgroundGoal(
   event: BackgroundGoalNotificationEvent,
   enabled: boolean,
   translate: BackgroundGoalNotificationTranslator,
+  deliveryKey: string,
 ): Promise<boolean> {
   const copy = enabled ? backgroundGoalNotificationCopy(event, translate) : null;
   if (!copy || !hasTauriInternals()) {
     return false;
   }
   try {
-    let granted = await isPermissionGranted();
-    if (!granted) {
-      granted = (await requestPermission()) === "granted";
-    }
-    if (!granted) {
-      return false;
-    }
-    sendNotification(copy);
+    const silent = await playNotificationSoundOnce(`goal:${deliveryKey}`, backgroundGoalNotificationIsBlocking(event) ? "blocking" : "ordinary");
+    await invoke("show_background_goal_notification", { request: { ...copy, silent } });
     return true;
   } catch {
     return false;

@@ -27,7 +27,7 @@ assert.match(hook, /useGoalWake\(\{/);
 assert.match(hook, /fetchAgentGoalBackgroundState\(endpoint\)/);
 assert.match(hook, /delivery\.chatId === activeChatId/);
 assert.match(hook, /acknowledgeAgentGoalBackgroundState/);
-assert.match(hook, /notifyBackgroundGoal\(delivery, notificationsEnabled, t\)/);
+assert.match(hook, /notifyBackgroundGoal\(delivery, notificationsEnabled, t, key\)/);
 assert.match(hook, /document\.visibilityState !== "visible"/);
 assert.match(hook, /!document\.hasFocus\(\)/);
 assert.match(hook, /document\.querySelectorAll<HTMLElement>\("\[data-background-goal-recap-key\]"\)/);
@@ -67,9 +67,8 @@ const acknowledgementMerge = hook.slice(
 );
 assert.doesNotMatch(acknowledgementMerge, /recent:|deliveries:|providerWarnings:/);
 
-assert.match(notification, /isPermissionGranted/);
-assert.match(notification, /requestPermission/);
-assert.match(notification, /sendNotification\(copy\)/);
+assert.match(notification, /show_background_goal_notification/);
+assert.match(notification, /playNotificationSoundOnce/);
 assert.match(notification, /backgroundGoalNotificationBodyKey/);
 assert.match(notification, /status === "parked" && blockedKind === "question"/);
 assert.doesNotMatch(notification, /if \(status === "parked"\) return/);
