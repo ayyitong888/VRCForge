@@ -352,7 +352,7 @@ namespace VRCForge.Editor
                 // ---- APPLY -------------------------------------------------------
                 transactionHandle = $"{avatarRootPath}|{parameterName}";
                 var sceneReceipts = new Dictionary<string, TransactionReceipt>(StringComparer.Ordinal);
-                var sceneObjectIds = new Dictionary<string, long>(StringComparer.Ordinal);
+                var sceneObjectIds = new Dictionary<string, ulong>(StringComparer.Ordinal);
                 var prefabObjectIds = new Dictionary<string, PrefabSceneDefaultIdentity>(StringComparer.Ordinal);
                 if (setObjectsDefaultOff)
                 {
@@ -380,10 +380,11 @@ namespace VRCForge.Editor
                         }
                         else
                         {
-                            if (!AssetDatabase.TryGetGUIDAndLocalFileIdentifier(targetTransform.gameObject, out var sceneObjectGuid, out long sceneObjectId)
-                                || !string.Equals(sceneObjectGuid, sceneGuid, StringComparison.OrdinalIgnoreCase))
+                            var sceneObjectId = GlobalObjectId.GetGlobalObjectIdSlow(targetTransform.gameObject);
+                            if (sceneObjectId.identifierType != 2 || sceneObjectId.targetObjectId == 0
+                                || !string.Equals(sceneObjectId.assetGUID.ToString(), sceneGuid, StringComparison.OrdinalIgnoreCase))
                                 throw new InvalidOperationException("Wardrobe scene default target has no stable scene object identity.");
-                            sceneObjectIds[targetPath] = sceneObjectId;
+                            sceneObjectIds[targetPath] = sceneObjectId.targetObjectId;
                         }
                         var receipt = new TransactionReceipt
                         {
@@ -703,7 +704,7 @@ namespace VRCForge.Editor
             if (found.Count != 1) throw new InvalidOperationException("Persisted wardrobe menu toggle/value differs.");
         }
 
-        private static object VerifySceneDefaultReadback(Dictionary<string, TransactionReceipt> receipts, Dictionary<string, long> objectIds, Dictionary<string, PrefabSceneDefaultIdentity> prefabObjectIds, string scenePath)
+        private static object VerifySceneDefaultReadback(Dictionary<string, TransactionReceipt> receipts, Dictionary<string, ulong> objectIds, Dictionary<string, PrefabSceneDefaultIdentity> prefabObjectIds, string scenePath)
         {
             if (receipts == null || receipts.Count == 0) return null;
             foreach (var item in receipts)
