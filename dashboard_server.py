@@ -27257,7 +27257,7 @@ def register_agent_gateway_tools() -> None:
     AGENT_GATEWAY.register_tool("vrcforge_preview_setup_outfit", "Check Modular Avatar Setup Outfit readiness for an outfit object, without writing.", "plan/preview", WARDROBE_OUTFIT_WORKFLOWS.preview_setup_outfit)
     AGENT_GATEWAY.register_tool("vrcforge_preview_add_wardrobe_outfit", "when-to-use: preview adding an already installed outfit to an existing Int parameter and FX Equals layer, including the first outfit on a newly created skeleton; supply verified object paths and the approved explicit value. Existing clips are preserved, so inspect mutual-exclusion curves separately. when-NOT-to-use: do not use to instantiate or fit a prefab, infer object paths, or treat preview as runtime acceptance. Negative example: an empty strict scan is not permission to recreate an existing skeleton.", "plan/preview", WARDROBE_OUTFIT_WORKFLOWS.preview_add_wardrobe_outfit)
     AGENT_GATEWAY.register_tool("vrcforge_preview_add_outfit_part", "Preview adding an int-gated part toggle (e.g. a hat) to one outfit value of an int-exclusive wardrobe: Bool parameter, dedicated FX layer (int Equals N AND bool gating), on/off clips, and menu toggle, without writing.", "plan/preview", WARDROBE_OUTFIT_WORKFLOWS.preview_add_outfit_part)
-    AGENT_GATEWAY.register_tool("vrcforge_preview_add_modular_avatar_component", "Preview adding a common Modular Avatar component (MergeArmature, BoneProxy, MenuInstaller, MergeAnimator, Parameters) to a scene object, resolving references and fields, without writing.", "plan/preview", WARDROBE_OUTFIT_WORKFLOWS.preview_add_modular_avatar_component)
+    AGENT_GATEWAY.register_tool("vrcforge_preview_add_modular_avatar_component", "When to use: preview adding an installed Modular Avatar component by supported alias or fully-qualified nadena.dev.modular_avatar.core type to a scene object, resolving supported references and fields, without writing. Use this domain-specific tool for Modular Avatar components. When NOT to use: do not use it for VRCFury features, other namespaces, or bulk avatar conversion. Negative example: do not send a Modular Avatar type to the generic add_component tool.", "plan/preview", WARDROBE_OUTFIT_WORKFLOWS.preview_add_modular_avatar_component)
     AGENT_GATEWAY.register_tool("vrcforge_preview_manage_wardrobe", "Preview destructive or structural wardrobe management actions (remove/rename/reorder outfits, set default value, delete wardrobe) without writing.", "plan/preview", WARDROBE_OUTFIT_WORKFLOWS.preview_manage_wardrobe)
     AGENT_GATEWAY.register_tool("vrcforge_preview_create_wardrobe", "when-to-use: preview an explicitly requested new one-value wardrobe skeleton (Int parameter, default FX state and menu). It is not a strict verified wardrobe; install the first outfit separately and use preview_add_wardrobe_outfit/add_wardrobe_outfit. when-NOT-to-use: do not repeat creation after a zero strict scan or assume the skeleton permits full add_outfit. Negative example: existing menu/FX evidence must not be overwritten because no wardrobe was recognized.", "plan/preview", WARDROBE_OUTFIT_WORKFLOWS.preview_create_wardrobe)
     AGENT_GATEWAY.register_tool("vrcforge_preview_add_outfit", "when-to-use: preview exact prefab installation and optional Setup Outfit. manageWardrobe=true requires an existing strict verified wardrobe; manageWardrobe=false installs without binding and supports first-outfit preparation. No wardrobe is auto-created. For a new skeleton, follow installation with preview_add_wardrobe_outfit/add_wardrobe_outfit and complete approved mutual-exclusion curves before a fresh scan. when-NOT-to-use: do not use to bind an already installed outfit or bootstrap a skeleton with manageWardrobe=true. Negative example: repeating create_wardrobe cannot satisfy the strict scan.", "plan/preview", WARDROBE_OUTFIT_WORKFLOWS.preview_add_outfit)
@@ -27918,7 +27918,7 @@ def register_agent_gateway_tools() -> None:
     )
     register_write_handler(
         "vrcforge_add_modular_avatar_component",
-        "When to use: add one common Modular Avatar component (MergeArmature, BoneProxy, MenuInstaller, MergeAnimator, or Parameters) to an exact scene object, resolving AvatarObjectReference, asset references, and scalar fields. When NOT to use: do not use it for VRCFury components, arbitrary MonoBehaviours, or bulk avatar conversion. Negative example: do not call it to create a VRCFury Toggle.",
+        "When to use: add one installed Modular Avatar component by supported alias or fully-qualified nadena.dev.modular_avatar.core type to an exact scene object, resolving supported AvatarObjectReference, asset references, and scalar fields. Prefer this domain-specific tool for Modular Avatar components. When NOT to use: do not use it for VRCFury features, types outside the Modular Avatar namespace, or bulk avatar conversion. Negative example: do not send a Modular Avatar component to generic add_component or call this to create a VRCFury Toggle.",
         "medium",
         WARDROBE_OUTFIT_APPROVED_WRITES.add_modular_avatar_component,
         verification_finalize_handler=finalize_add_modular_avatar_component_verification_sync,
@@ -28055,7 +28055,7 @@ def register_agent_gateway_tools() -> None:
     )
     register_write_handler(
         "vrcforge_add_component",
-        "Add a component of a given type to a scene GameObject through VRCForge.",
+        "When to use: add UnityEngine.CanvasGroup to an exact scene GameObject through the approval-bound generic component lane, which has a proven scene-only checkpoint. When NOT to use: do not use this generic lane for other built-in or custom component types because their callbacks are not proven scene-only; use the domain-specific Modular Avatar or VRCFury tool when applicable. Negative example: do not send nadena.dev.modular_avatar.core types here; use vrcforge_preview_add_modular_avatar_component then vrcforge_add_modular_avatar_component.",
         "medium",
         add_component_sync,
         verification_profile="persisted_scene_write_console",
@@ -28064,7 +28064,7 @@ def register_agent_gateway_tools() -> None:
     )
     register_write_handler(
         "vrcforge_remove_component",
-        "Remove a component of a given type from a scene GameObject through VRCForge.",
+        "When to use: remove one exact UnityEngine.CanvasGroup component from a freshly bound scene GameObject through the approval-bound generic component lane. When NOT to use: do not use this lane for other component types; use the owning domain-specific workflow when available. Negative example: do not use generic remove_component for a Modular Avatar component or any component without exact type and instance identity.",
         "medium",
         remove_component_sync,
         verification_profile="persisted_scene_write_console",
