@@ -136,13 +136,13 @@ support-files:
 
 首次搭建与已有衣柜追加使用不同入口。只有用户明确批准采用 Int 选择器时，才使用 `create_wardrobe` 生成单值 Int 骨架；成功回执不代表严格扫描已识别衣柜，不得因扫描为空重复创建。若批准的是独立 Bool、Float 或其他拓扑，直接按批准设计使用现有 `ensure_expression_parameter`、`ensure_animator_state`、`manage_fx_animator`、`write_animation_curve` 和 `ensure_expression_menu_control` 等原子工具，分别 preview、批准、写入和独立回读，不经过 Int 骨架衔接。采用 Int 设计时，首套服装用 `preview_add_outfit` / `add_outfit` 的 `manageWardrobe=false`，或实际暴露的实例化与安装工具；对象已经存在时不再安装。核对对象路径和安装结果后，使用 `preview_add_wardrobe_outfit` / `add_wardrobe_outfit` 衔接骨架，显式传入批准的值。这个追加工具保留旧 clip，仍需按批准设计补齐默认态及其他受影响状态的完整互斥曲线，再 fresh scan。只有 strict `wardrobes` 里存在目标时，才使用 `manageWardrobe=true` 的整套追加流程；具体分支见参考中的首次衔接说明。
 
-形态键、对象适配和材质属性改动以受影响对象的实际证据与批准目标为准，不从固定名称推测数值，不扩大到未授权的身体、骨架或物理系统。胸型键描述胸部形态，不代表全身缩放；需要改变胸型时只操作获批的胸部键与其衣柜状态恢复曲线，不用整体缩小身体代替。曲线身份及 renderer-wide 属性遵循工具实际契约，不复制无关绑定。
+不同衣服可能需要不同的身体形态适配。按实际需要与用户授权，在该衣服已有换装动画中同时加入精确绑定的身体 BlendShape，使衣服与身体适配同步生效；可涉及胸型、袜口／大腿、脚／鞋或局部遮体。只写相关 Renderer 与 Shape，不清空全部形态键、不把局部胸型改动替换成全身 Shrink，也不改无关服装。检查已有默认／退出恢复机制；仅在证据确认切换后恢复缺失时提出最小补充。已正确的 Modular Avatar 同名体型同步继续保留，避免与动画重复驱动同一属性。曲线身份及 renderer-wide 属性遵循工具实际契约，不复制无关绑定。
 
 换衣前先看身体当前的遮体／Shrink 形态键、脚／手／躯干形态和控制它们的衣柜动画：作者原装衣服可能把遮住的身体部位缩进去，关闭旧衣服不一定会恢复。读取相关权重及作者组件／衣柜动画的控制关系，分清遮体与用户体型；不要把缩进去的部位当作网格缺失，也不要把所有形态键清零。按新衣服实际覆盖范围处理遮体，并让切回原装或其他衣服时恢复各自需要的状态，保留用户体型与面捕；确认露出的手脚和躯干完整。只检查本次换装相关键，已有有效读回可复用。
 
 衣服有与身体同名的胸型或体型 BlendShape 时，使用 **Modular Avatar Blendshape Sync**，由身体 Renderer 同步到各衣服 Renderer，保留已有正确绑定；不要只拉一次衣服权重就当完成。先读双方真实 Shape 名称和作者适配说明，只同步相关体型键，不把所有同名表情键或 Animator 参数一起同步。组件配置与简单验证见[身体与衣服形态同步](references/workflow.md#身体与衣服形态同步)。
 
-用户要求单件衣服局部缩胸时，只在该衣服已有 clip 加入获批胸型值，其他衣服曲线与状态保持原样。先核对衣柜已有的退出／默认恢复机制；只有证据确认目标衣服退出后胸型无法恢复时，才提出最小恢复补充，不默认改其他衣服曲线。检查 Modular Avatar 同步与动画是否重复驱动同一属性。更新已有 Modular Avatar 组件时用 `vrcforge_preview_add_modular_avatar_component` 的 `action=update` 与 `vrcforge_add_modular_avatar_component`；先由组件检查取得精确 `componentIndex` 和 `expectedComponentGlobalObjectId`。不要重复新增组件，也不改用通用 `set_property` 绕过。材质不匹配先按需读作者安装说明，核对材质槽及贴图来源后再改。
+更新已有 Modular Avatar 组件时用 `vrcforge_preview_add_modular_avatar_component` 的 `action=update` 与 `vrcforge_add_modular_avatar_component`；先由组件检查取得精确 `componentIndex` 和 `expectedComponentGlobalObjectId`。不要重复新增组件，也不改用通用 `set_property` 绕过。材质不匹配先按需读作者安装说明，核对材质槽及贴图来源后再改。
 
 运行控制需要另有明确批准的方案和有限 duration/frame 预算。记录原 Play 状态，保留观察 jobId；pending 或超时只回读原 job，不能重启同一观察。completed 只表示采集结束，必须核对采样范围、输入回执、状态身份与实际效果。结束或失败后恢复用户批准的 Play 状态并独立回读，不默认退出用户已有会话。
 
