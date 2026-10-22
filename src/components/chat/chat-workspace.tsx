@@ -17,6 +17,7 @@ import { AgentQuestionCard } from "./agent-question-card";
 import { projectAgentQuestionContinuation, questionContinuationCancelTarget, questionContinuationDisplay } from "../../hooks/use-runtime-turn-continuation";
 import { BackgroundGoalCatchUpCard } from "./background-goal-catch-up-card";
 import { ConversationCard } from "./conversation-card";
+import { MessageDateSeparator } from "./conversation-card";
 import { SessionHandoffCard } from "./session-handoff-card";
 import { SessionHandoffSend, type SessionHandoffTargetChat } from "./session-handoff-send";
 import { ScopedPendingApprovalCard } from "../approvals/scoped-pending-approval-card";
@@ -26,6 +27,7 @@ import { mergeConversationTimelineItems } from "../../lib/chat-thread";
 import { projectConversationSteeringMessages } from "../../lib/chat-steering-projection";
 import { conversationItemRenderKey } from "../../lib/conversation-utils";
 import type { AttachmentPayloadVault } from "../../lib/attachment-payloads";
+import { conversationItemTimestamp, shouldShowMessageDateSeparator } from "../../lib/message-time";
 
 function formatGoalElapsed(totalSeconds: number): string {
   const seconds = Math.max(0, Math.round(totalSeconds));
@@ -192,6 +194,10 @@ export function ChatWorkspace({
   onBackgroundGoalProviderWarningsRendered,
   onBackgroundGoalCatchUpDismiss,
   onAnswerQuestion,
+  onReplyInChat,
+  focusInput = false,
+  onCancelReply,
+  pendingReplyQuestionId = "",
   onStopQuestionContinuation,
   conversationEndRef,
   onConversationMouseUp,
@@ -284,6 +290,10 @@ export function ChatWorkspace({
   onBackgroundGoalProviderWarningsRendered: (warnings: AgentGoalBackgroundAcknowledgement[]) => void;
   onBackgroundGoalCatchUpDismiss: () => void;
   onAnswerQuestion: (questionId: string, optionId: string, value: string) => void | Promise<void>;
+  onReplyInChat?: (questionId: string) => void;
+  focusInput?: boolean;
+  onCancelReply?: () => void;
+  pendingReplyQuestionId?: string;
   onStopQuestionContinuation?: (question: AgentQuestion) => void | Promise<void>;
   conversationEndRef: Ref<HTMLDivElement>;
   onConversationMouseUp: () => void;
@@ -352,6 +362,13 @@ export function ChatWorkspace({
   const pendingQuestionPrompts = pendingAgentQuestions.filter(
     (question) => questionContinuationDisplay(question) === "pending",
   );
+  const pendingReplyQuestion = pendingQuestionPrompts.find((question) => question.questionId === pendingReplyQuestionId);
+  const replyBanner = pendingReplyQuestion ? (
+    <div className="mb-2 flex items-center gap-2 rounded-lg border border-primary/30 bg-primary/5 px-2.5 py-2 text-xs" data-question-reply-mode>
+      <span className="min-w-0 flex-1 truncate">{t("questionCard.replyInChat")}: {pendingReplyQuestion.header || pendingReplyQuestion.question || pendingReplyQuestion.questionId}</span>
+      <button type="button" className="shrink-0 rounded border border-border px-2 py-1 hover:bg-muted" onClick={onCancelReply}>{t("common.cancel")}</button>
+    </div>
+  ) : null;
   const steeringProjection = projectConversationSteeringMessages(mergeConversationTimelineItems(conversation.filter(
     (item) => item.type !== "user" || item.composerQueued !== true,
   )));
@@ -421,6 +438,8 @@ export function ChatWorkspace({
       activeGoal={activeGoal}
       projects={projects}
       onBindProject={onBindProject}
+      focusInput={focusInput}
+      onCancelReply={onCancelReply}
     />
   );
   const pendingQueue = queued.length ? (
@@ -539,16 +558,17 @@ export function ChatWorkspace({
         </div>
         <div className="shrink-0 bg-workspace/95 px-4 pb-4 pt-2 md:px-6 md:pb-5 md:pt-2" data-chat-composer-dock>
           <div className="mx-auto max-w-3xl">
-            {pendingQuestionPrompts.length ? (
+            {replyBanner}
+            {pendingQuestionPrompts.length && !pendingReplyQuestion ? (
               <div className="mb-3">
-                <AgentQuestionCard questions={pendingQuestionPrompts} onAnswerQuestion={onAnswerQuestion} />
+                <AgentQuestionCard questions={pendingQuestionPrompts} onAnswerQuestion={onAnswerQuestion} onReplyInChat={onReplyInChat} />
               </div>
             ) : null}
             {pendingQueue}
             {queueControls}
             <CompactionStatus state={compaction} onCancel={onCancelCompaction} />
             {activeGoalBar}
-            {approvalComposer || (waitingForQuestion ? null : composer(false))}
+            {pendingReplyQuestion ? composer(false) : approvalComposer || (waitingForQuestion ? null : composer(false))}
           </div>
         </div>
       </div>
@@ -572,11 +592,17 @@ export function ChatWorkspace({
             onProviderWarningsRendered={onBackgroundGoalProviderWarningsRendered}
             onDismiss={onBackgroundGoalCatchUpDismiss}
           />
-          {conversationItems.map((item) => {
+          {(() => {
+            let previousMessageAt: number | undefined;
+            return conversationItems.map((item) => {
+            const currentMessageAt = conversationItemTimestamp(item);
+            const showDateSeparator = shouldShowMessageDateSeparator(previousMessageAt, currentMessageAt);
+            if (currentMessageAt !== undefined) previousMessageAt = currentMessageAt;
             if (item.type === "handoff_card") {
               return (
+                <div key={item.id}>
+                {showDateSeparator ? <MessageDateSeparator timestamp={currentMessageAt} /> : null}
                 <SessionHandoffCard
-                  key={item.id}
                   handoff={{
                     id: item.handoffId,
                     status: item.status || "pending_review",
@@ -596,6 +622,7 @@ export function ChatWorkspace({
                   onReply={(text) => onReplyHandoff?.(item.handoffId, text)}
                   busy={handoffBusyId === item.handoffId}
                 />
+                </div>
               );
             }
             const approval = item.type === "agent" ? pendingApprovalForResponse(item.response) : null;
@@ -606,6 +633,7 @@ export function ChatWorkspace({
               : null;
             return (
               <div key={conversationItemRenderKey(item, conversationRenderScope, conversationItemKeyOccurrences)} data-conversation-item-id={item.id}>
+                {showDateSeparator ? <MessageDateSeparator timestamp={currentMessageAt} /> : null}
                 <ConversationCard
                 item={item}
                 interleavedUserMessages={turnId ? steeringProjection.messagesByTurnId.get(turnId) : undefined}
@@ -663,7 +691,8 @@ export function ChatWorkspace({
                 />
               </div>
             );
-          })}
+            });
+          })()}
             <div ref={conversationEndRef} />
           </div>
         </div>
@@ -683,9 +712,10 @@ export function ChatWorkspace({
       </div>
       <div className="shrink-0 bg-workspace/95 px-4 pb-4 pt-2 md:px-6 md:pb-5 md:pt-2" data-chat-composer-dock>
         <div className="mx-auto max-w-3xl">
-          {pendingQuestionPrompts.length ? (
+          {replyBanner}
+          {pendingQuestionPrompts.length && !pendingReplyQuestion ? (
             <div className="mb-3">
-              <AgentQuestionCard questions={pendingQuestionPrompts} onAnswerQuestion={onAnswerQuestion} />
+            <AgentQuestionCard questions={pendingQuestionPrompts} onAnswerQuestion={onAnswerQuestion} onReplyInChat={onReplyInChat} />
             </div>
           ) : null}
           {pendingQueue}
@@ -703,7 +733,7 @@ export function ChatWorkspace({
             </div>
           ) : null}
           {activeGoalBar}
-          {approvalComposer || (waitingForQuestion ? null : composer(true))}
+          {pendingReplyQuestion ? composer(true) : approvalComposer || (waitingForQuestion ? null : composer(true))}
         </div>
       </div>
     </div>

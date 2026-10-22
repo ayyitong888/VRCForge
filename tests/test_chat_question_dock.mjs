@@ -5,12 +5,20 @@ import { pathToFileURL } from "node:url";
 import { build } from "esbuild";
 
 const root = process.cwd();
+for (const locale of ["en-US", "zh-CN", "zh-TW", "ja-JP"]) {
+  const messages = JSON.parse(await fs.readFile(path.join(root, "src", "locales", `${locale}.json`), "utf8"));
+  assert.ok(messages.questionCard?.visualCheckpoint?.options, `${locale} visual checkpoint options must live under questionCard`);
+  for (const key of ["pass", "fail", "uncertain", "later"]) {
+    assert.equal(typeof messages.questionCard.visualCheckpoint.options[key], "string", `${locale} missing questionCard visual option ${key}`);
+    assert.equal(messages.encryption?.visualCheckpoint?.options?.[key], undefined, `${locale} must not source visual options from encryption`);
+  }
+}
 const temp = await fs.mkdtemp(path.join(root, "tests", ".question-dock-"));
 const output = path.join(temp, "render.mjs");
 const mocks = {
-  "./composer": 'export const Composer=(props)=>{globalThis.__questionDockComposerProps=props; return React.createElement(React.Fragment,null,React.createElement("textarea",{"data-ordinary-composer":true,defaultValue:props.input}),props.sending?React.createElement("button",{"data-composer-stop":true,disabled:props.stopDisabled,onClick:props.onStop},"Stop"):null);};',
+  "./composer": 'export const Composer=(props)=>{globalThis.__questionDockComposerProps=props; return React.createElement(React.Fragment,null,React.createElement("textarea",{"data-ordinary-composer":true,defaultValue:props.input}),React.createElement("input",{type:"file","data-composer-attachment":true,onChange:()=>{}}),props.sending?React.createElement("button",{"data-composer-stop":true,disabled:props.stopDisabled,onClick:props.onStop},"Stop"):null);};',
   "./background-goal-catch-up-card": "export const BackgroundGoalCatchUpCard=()=>null;",
-  "./conversation-card": 'export const ConversationCard=()=>React.createElement("p",null,"Earlier conversation");',
+  "./conversation-card": 'export const ConversationCard=()=>React.createElement("p",null,"Earlier conversation"); export const MessageDateSeparator=()=>null;',
   "./session-handoff-card": "export const SessionHandoffCard=()=>null;",
   "./session-handoff-send": "export const SessionHandoffSend=()=>null;",
   "../approvals/scoped-pending-approval-card": 'export const ScopedPendingApprovalCard=()=>React.createElement("section",{"data-approval-card":true},"Approve or reject");',
@@ -23,11 +31,12 @@ const entry = `
 import React from 'react';
 import {renderToStaticMarkup} from 'react-dom/server';
 import {ChatWorkspace} from ${JSON.stringify(path.join(root, "src/components/chat/chat-workspace.tsx"))};
-export function render(questions=[],approvals=[],hasHistory=true,sending=false){
+export function render(questions=[],approvals=[],hasHistory=true,sending=false,pendingReplyQuestionId=''){
   let stoppedQuestionId=''; let ordinaryStopCount=0; globalThis.__questionDockComposerProps=undefined;
   const html=renderToStaticMarkup(React.createElement(ChatWorkspace,{
   input:'Keep my draft',sending,queueAllowed:sending,conversation:hasHistory?[{id:'old',type:'user',text:'Earlier conversation'}]:[],
   queued:[],agentQuestions:questions,runtimeRuns:[],scopedPendingApprovals:approvals,approvalActions:{},activeGoal:null,
+  pendingReplyQuestionId,onReplyInChat:()=>{},onCancelReply:()=>{},focusInput:Boolean(pendingReplyQuestionId),
   attachments:[],commands:[],actions:[],projects:[],backgroundGoalDeliveries:[],backgroundGoalProviderWarnings:[],
   pendingApprovalForResponse:()=>null,onAnswerQuestion:()=>{},onStopQuestionContinuation:(question)=>{stoppedQuestionId=question.questionId;},onStop:()=>{ordinaryStopCount++;},
 }));
@@ -93,6 +102,14 @@ try {
   const cancelling = render([{ ...pending, status: "answered", runtimeContinuation: { status: "cancelling", turnId: "t" } }]);
   assert.equal(cancelling.composer.sending, true, "cancelling continuation remains in the shared Composer busy state");
   assert.equal(cancelling.composer.stopDisabled, true, "a second stop is disabled while cancellation is pending");
+  const replying = render([pending], [], true, false, "q");
+  assert.match(replying.html, /data-question-reply-mode/);
+  assert.match(replying.html, /data-ordinary-composer/);
+  assert.match(replying.html, /data-composer-attachment/);
+  assert.ok(!replying.html.includes("Reinstall"), "reply mode hides the option card while retaining the composer");
+  const restored = render([pending], [], true, false, "");
+  assert.match(restored.html, /Reinstall/);
+  assert.ok(!restored.html.includes("data-question-reply-mode"));
   console.log("question dock: pending replaces composer; custom reply editable; success exits; continuation uses shared Composer Stop");
 } finally {
   assert.ok(path.resolve(temp).startsWith(path.join(root, "tests", ".question-dock-")));

@@ -10,6 +10,7 @@ from __future__ import annotations
 from copy import deepcopy
 
 import json
+import hashlib
 import os
 import secrets
 from dataclasses import dataclass
@@ -20,10 +21,13 @@ from typing import Callable, Mapping, Protocol
 
 AGENT_QUESTION_SCHEMA = "vrcforge.agent_question.v1"
 AGENT_QUESTION_MAX_ITEMS = 60
+QUESTION_KINDS = frozenset({"decision", "visual_checkpoint"})
+VISUAL_RESOLUTIONS = frozenset({"pass", "fail", "uncertain", "later"})
 QUESTION_INPUT_SCHEMA = {
     "type": "object", "required": ["question"], "additionalProperties": True,
     "properties": {
         "header": {"type": "string", "maxLength": 120},
+        "kind": {"type": "string", "enum": ["decision", "visual_checkpoint"]},
         "question": {
             "type": "string", "minLength": 1, "maxLength": 1000,
             "description": "One short decision question. Put alternatives in options, not in a long diagnosis here.",
@@ -193,6 +197,10 @@ class AgentQuestionService:
 
     def create(self, params: Mapping[str, object] | None = None) -> dict[str, object]:
         values = dict(params or {})
+        source_tool = str(values.get("sourceTool") or values.get("source_tool") or "").strip().lower()
+        kind = str(values.get("kind") or values.get("questionKind") or "decision").strip().lower()
+        if kind not in QUESTION_KINDS:
+            raise AgentQuestionServiceError("Unsupported Question kind.", status_code=400)
         question = _question_text(values.get("question") or values.get("prompt"), "question", 1000)
         if not question:
             raise AgentQuestionServiceError("Question is required.", status_code=400)
@@ -215,19 +223,24 @@ class AgentQuestionService:
                 options.append({"id": option_id, "label": label, "value": value, "description": description})
         if len(options) == 1:
             raise AgentQuestionServiceError("Question choices require at least two options.", status_code=400)
+        project_root = self._scope_text(values, "projectRoot", "project_root", "projectPath")
+        session_id = self._scope_text(values, "sessionId", "session_id")
         question_id = f"question_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')}_{secrets.token_hex(3)}"
         event: dict[str, object] = {
             "event": "question_created",
             "status": "pending",
             "questionId": question_id,
+            "kind": kind,
             "header": _question_text(values.get("header"), "header", 120),
             "question": question,
             "options": options,
-            "projectRoot": self._scope_text(values, "projectRoot", "project_root", "projectPath"),
-            "sessionId": self._scope_text(values, "sessionId", "session_id"),
+            "projectRoot": project_root,
+            "sessionId": session_id,
             "owner": self._summarize(values.get("owner") or "agent", 80),
             "goalDeliveryId": str(values.get("goalDeliveryId") or values.get("goal_delivery_id") or "").strip(),
         }
+        if source_tool:
+            event["sourceTool"] = source_tool
         runtime_seed = values.get("_runtimeTaskSeed")
         if isinstance(runtime_seed, Mapping) and runtime_seed:
             event["runtimeTaskSeed"] = dict(runtime_seed)
@@ -235,6 +248,17 @@ class AgentQuestionService:
             event["runtimeClientTurnId"] = str(values.get("_runtimeClientTurnId") or "").strip()
             event["runtimeTaskId"] = str(runtime_seed.get("taskId") or "").strip()
         with _locked(self._persistence.shared_state_lock):
+            if source_tool == "call_user":
+                for existing in self._project(include_answered=False).values():
+                    if (
+                        str(existing.get("sourceTool") or "") == source_tool
+                        and str(existing.get("kind") or "decision") == kind
+                        and str(existing.get("question") or "") == question
+                        and str(existing.get("sessionId") or "") == session_id
+                        and self._scope.normalize_path(str(existing.get("projectRoot") or ""))
+                        == self._scope.normalize_path(project_root)
+                    ):
+                        return {"ok": True, "question": self._redact(existing), "deduplicated": True}
             self._persistence.append(event)
             created = self._project(include_answered=True).get(question_id)
         if created is None:
@@ -259,6 +283,8 @@ class AgentQuestionService:
         if not resolved_id:
             raise AgentQuestionServiceError("questionId is required.", status_code=400)
         continuation_answer: str | None = None
+        feedback_pending = False
+        feedback_attachments = _question_attachments(values.get("attachments"))
         with _locked(self._persistence.shared_state_lock):
             current = self._project(include_answered=True)
             existing = current.get(resolved_id)
@@ -293,11 +319,53 @@ class AgentQuestionService:
                             continue
                         answer_text = _question_text(option.get("value") or option.get("label"), "answer", 2000)
                         break
-                if not answer_text:
+                if not answer_text and not feedback_attachments:
                     raise AgentQuestionServiceError("An answer is required.", status_code=400)
-                continuation_answer = self._sanitize_answer_for_model(answer_text)
-                safe_answer = self._scope.redact_goal_persistence(answer_text)
-                event = {
+                kind = str(existing.get("kind") or "decision").strip().lower()
+                resolution = str(values.get("resolution") or "").strip().lower()
+                if kind == "visual_checkpoint":
+                    try:
+                        feedback_revision = int(existing.get("questionFeedbackRevision") or 0) + 1
+                    except (TypeError, ValueError):
+                        feedback_revision = 1
+                    if not resolution:
+                        resolution = _visual_resolution(selected_option_id, answer_text)
+                    if resolution not in VISUAL_RESOLUTIONS:
+                        feedback_pending = True
+                        continuation_answer = self._sanitize_answer_for_model(
+                            answer_text or "The user attached feedback without an acceptance decision."
+                        )
+                        self._persistence.append({
+                            "event": "question_feedback",
+                            "status": "pending",
+                            "questionId": resolved_id,
+                            "runtimeContinuationStatus": "queued" if runtime_seed and not goal_delivery_id else "",
+                            "runtimeQuestionFeedbackPending": bool(runtime_seed and not goal_delivery_id),
+                            "answer": str(self._scope.redact_goal_persistence(answer_text) or ""),
+                            "attachments": feedback_attachments,
+                            "questionFeedbackRevision": feedback_revision,
+                        })
+                        pending = self._project(include_answered=True).get(resolved_id)
+                        if pending is None:
+                            raise OSError("Question storage did not preserve the pending feedback.")
+                        payload = {"ok": True, "question": self._redact(pending), "feedback": True}
+                    if resolution in {"uncertain", "later"}:
+                        deferred = {
+                            "event": "question_deferred",
+                            "status": "pending",
+                            "questionId": resolved_id,
+                            "resolution": resolution,
+                            "answer": str(self._scope.redact_goal_persistence(answer_text) or ""),
+                        }
+                        self._persistence.append(deferred)
+                        pending = self._project(include_answered=True).get(resolved_id)
+                        if pending is None:
+                            raise OSError("Question storage did not preserve the deferred Question.")
+                        return {"ok": True, "question": self._redact(pending), "deferred": True}
+                if not feedback_pending:
+                    continuation_answer = self._sanitize_answer_for_model(answer_text)
+                    safe_answer = self._scope.redact_goal_persistence(answer_text)
+                    event = {
                     "event": "question_answered",
                     "status": "answered",
                     "questionId": resolved_id,
@@ -306,15 +374,21 @@ class AgentQuestionService:
                     "projectRoot": str(values.get("projectRoot") or existing.get("projectRoot") or ""),
                     "sessionId": str(values.get("sessionId") or existing.get("sessionId") or ""),
                 }
-                if runtime_seed and not goal_delivery_id:
-                    # The saved answer and the not-yet-dispatched marker are
-                    # one durable event, so a restart cannot lose the handoff.
-                    event["runtimeContinuationStatus"] = "queued"
-                self._persistence.append(event)
-                answered = self._project(include_answered=True).get(resolved_id)
-                if answered is None:
-                    raise OSError("Question storage did not preserve the answer.")
-                payload = {"ok": True, "question": self._redact(answered)}
+                    if kind == "visual_checkpoint":
+                        event["resolution"] = resolution
+                        event["questionFeedbackRevision"] = feedback_revision
+                        event["runtimeQuestionFeedbackPending"] = False
+                    if feedback_attachments:
+                        event["attachments"] = feedback_attachments
+                    if runtime_seed and not goal_delivery_id:
+                        # The saved answer and the not-yet-dispatched marker are
+                        # one durable event, so a restart cannot lose the handoff.
+                        event["runtimeContinuationStatus"] = "queued"
+                    self._persistence.append(event)
+                    answered = self._project(include_answered=True).get(resolved_id)
+                    if answered is None:
+                        raise OSError("Question storage did not preserve the answer.")
+                    payload = {"ok": True, "question": self._redact(answered)}
         if goal_delivery_id:
             payload["goalDelivery"] = self._goal_resolution.resolve(
                 resolved_id,
@@ -328,6 +402,17 @@ class AgentQuestionService:
             dispatch_seed = dict(runtime_seed) if isinstance(runtime_seed, Mapping) else {}
             if continuation_answer:
                 dispatch_seed["_authenticatedUserAnswer"] = continuation_answer
+            if feedback_attachments:
+                dispatch_seed["_authenticatedUserAttachments"] = feedback_attachments
+            if feedback_pending:
+                dispatch_seed["_authenticatedQuestionFeedbackPending"] = True
+            question_snapshot = payload.get("question")
+            if isinstance(question_snapshot, Mapping):
+                revision = question_snapshot.get("questionFeedbackRevision")
+                if revision is not None:
+                    dispatch_seed["_questionFeedbackRevision"] = revision
+                if str(question_snapshot.get("kind") or "") == "visual_checkpoint":
+                    dispatch_seed["_questionKind"] = "visual_checkpoint"
             payload["runtimeContinuation"] = self._runtime_resolution.resolve(
                 resolved_id,
                 dispatch_seed,
@@ -337,6 +422,13 @@ class AgentQuestionService:
 
     def record_runtime_continuation(self, question_id: str, status: str, **fields: object) -> None:
         """Persist the lifecycle marker used by the app-owned dispatcher."""
+        # A newer answer may have queued another continuation while the prior
+        # provider turn was still unwinding.  Its queued marker is authoritative;
+        # an older worker must not overwrite it with delivered.
+        if str(status or "") == "delivered":
+            current = self._project(include_answered=True).get(str(question_id or "").strip(), {})
+            if current.get("runtimeContinuationStatus") == "queued":
+                return
         self._persistence.append({
             "event": "question_runtime_continuation_" + str(status or "unknown"),
             "runtimeContinuationStatus": str(status or "unknown")[:40],
@@ -348,7 +440,7 @@ class AgentQuestionService:
         """Only an unanswered dispatch claim can cross into the runtime."""
         with _locked(self._persistence.shared_state_lock):
             question = self._project(include_answered=True).get(question_id, {})
-            if question.get("status") != "answered" or question.get("runtimeContinuationStatus") != "queued":
+            if question.get("status") not in {"answered", "pending"} or question.get("runtimeContinuationStatus") != "queued":
                 return False
             self.record_runtime_continuation(question_id, "claimed")
             return True
@@ -392,12 +484,34 @@ class AgentQuestionService:
                         "Your answer was saved. VRCForge restarted after continuation began; inspect the current task before continuing.",
                     )
             for question in queued:
-                self._runtime_resolution.resolve(
-                    str(question["questionId"]),
-                    dict(question.get("runtimeTaskSeed") or {}),
-                    self._continuation_prompt(question),
-                )
+                self._resolve_queued_question(question)
         return {"queued": len(queued), "interrupted": len(interrupted)}
+
+    def reconcile_runtime_continuation(self, question_id: str) -> bool:
+        """Retry only a newer queued answer for one question during runtime."""
+        with _locked(self._persistence.shared_state_lock):
+            question = self._project(include_answered=True).get(str(question_id or "").strip())
+            if not isinstance(question, Mapping) or question.get("runtimeContinuationStatus") != "queued":
+                return False
+        return self._resolve_queued_question(question)
+
+    def _resolve_queued_question(self, question: Mapping[str, object]) -> bool:
+        if self._runtime_resolution is None:
+            return False
+        seed = dict(question.get("runtimeTaskSeed") or {})
+        attachments = question.get("attachments")
+        if isinstance(attachments, list) and attachments:
+            seed["_authenticatedUserAttachments"] = deepcopy(attachments)
+        if question.get("runtimeQuestionFeedbackPending"):
+            seed["_authenticatedQuestionFeedbackPending"] = True
+        if question.get("questionFeedbackRevision") is not None:
+            seed["_questionFeedbackRevision"] = question.get("questionFeedbackRevision")
+        if str(question.get("kind") or "") == "visual_checkpoint":
+            seed["_questionKind"] = "visual_checkpoint"
+        result = self._runtime_resolution.resolve(
+            str(question["questionId"]), seed, self._continuation_prompt(question),
+        )
+        return isinstance(result, Mapping) and result.get("status") in {"queued", "ok"}
 
     def list(
         self,
@@ -515,6 +629,55 @@ def _question_text(value: object, field: str, limit: int) -> str:
             status_code=400,
         )
     return text
+
+
+def _visual_resolution(option_id: str, answer: str) -> str:
+    """Map only explicit human checkpoint vocabulary; never infer pass/fail from prose."""
+    for candidate in (option_id, answer):
+        value = str(candidate or "").strip().lower().replace("_", "-")
+        if value in VISUAL_RESOLUTIONS:
+            return value
+        if value in {"passed", "成功", "通过"}:
+            return "pass"
+        if value in {"failed", "失败", "不通过"}:
+            return "fail"
+    return ""
+
+
+def _question_attachments(value: object) -> list[dict[str, object]]:
+    """Keep only admitted content-addressed attachment references.
+
+    Question answers never accept arbitrary local paths or inline upload bytes;
+    the existing chat attachment admission owns those operations.
+    """
+    attachments: list[dict[str, object]] = []
+    for raw in _as_list(value)[:16]:
+        if not isinstance(raw, Mapping):
+            raise AgentQuestionServiceError("Attachment reference is invalid.", status_code=400)
+        payload_hash = str(raw.get("payloadHash") or raw.get("payload_hash") or "").strip().lower()
+        inline_value = str(raw.get("dataUrl") or raw.get("data_url") or raw.get("text") or "")
+        if not payload_hash and inline_value:
+            payload_hash = hashlib.sha256(inline_value.encode("utf-8")).hexdigest()
+        if len(payload_hash) != 64 or any(char not in "0123456789abcdef" for char in payload_hash):
+            raise AgentQuestionServiceError("Attachment must be an admitted content reference.", status_code=400)
+        item: dict[str, object] = {
+            "id": str(raw.get("id") or "")[:120],
+            "name": str(raw.get("name") or "attachment")[:240],
+            "type": str(raw.get("type") or "application/octet-stream")[:120],
+            "size": max(0, int(raw.get("size") or 0)) if str(raw.get("size") or "0").isdigit() else 0,
+            "payloadHash": payload_hash,
+            "payloadKind": str(raw.get("payloadKind") or raw.get("payload_kind") or "metadata")[:32],
+        }
+        for key in ("vaultPayloadHash", "vaultKind", "replayable"):
+            if key in raw:
+                item[key] = raw[key]
+        # These are already bounded by the chat admission normalizer; retain
+        # them for the next model request instead of converting them to metadata.
+        for key in ("dataUrl", "text"):
+            if raw.get(key):
+                item[key] = str(raw[key])
+        attachments.append(item)
+    return attachments
 
 
 class _locked:

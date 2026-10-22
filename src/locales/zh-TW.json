@@ -1763,6 +1763,10 @@
     }
   },
   "questionCard": {
+    "visualCheckpoint": {
+      "options": { "pass": "通過", "fail": "不通過", "uncertain": "不確定", "later": "稍後處理" },
+      "notePlaceholder": "可補充視覺檢查說明…"
+    },
     "label": "智慧體提問",
     "title": "問題",
     "position": "{{current}} / {{total}}",
@@ -1773,6 +1777,7 @@
     "customPlaceholder": "輸入其他回答...",
     "clear": "清空",
     "answer": "回答",
+    "replyInChat": "在聊天中回覆",
     "retry": "重試",
     "skip": "跳過",
     "skipAnswer": "已跳過",

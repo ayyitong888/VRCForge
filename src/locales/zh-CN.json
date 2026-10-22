@@ -1769,6 +1769,10 @@
     }
   },
   "questionCard": {
+    "visualCheckpoint": {
+      "options": { "pass": "通过", "fail": "不通过", "uncertain": "不确定", "later": "稍后处理" },
+      "notePlaceholder": "可补充视觉检查说明…"
+    },
     "label": "智能体提问",
     "title": "问题",
     "position": "{{current}} / {{total}}",
@@ -1779,6 +1783,7 @@
     "customPlaceholder": "输入其他回答...",
     "clear": "清空",
     "answer": "回答",
+    "replyInChat": "在聊天中回复",
     "retry": "重试",
     "skip": "跳过",
     "skipAnswer": "已跳过",

@@ -240,6 +240,7 @@ _CORE_TOOLS = frozenset(
         "vrcforge_progress_update",
         "vrcforge_progress_delete",
         "vrcforge_ask_user",
+        "vrcforge_call_user",
         "vrcforge_request_project_selection",
         "vrcforge_delegate_subagent",
         "vrcforge_list_internal_tool_blocks",

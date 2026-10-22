@@ -391,11 +391,11 @@ export function buildTimelinePresentation(events: ChatTimelineEvent[] = [], elap
   ));
   const firstTime = timestampValue(ordered[0].timestamp);
   const lastTime = timestampValue(ordered.at(-1)?.timestamp || "");
-  const derivedElapsed = Number.isFinite(firstTime) && Number.isFinite(lastTime) && lastTime >= firstTime
+  const derivedElapsed = Number.isFinite(firstTime) && Number.isFinite(lastTime) && lastTime > firstTime
     ? (lastTime - firstTime) / 1000
     : undefined;
   return {
-    ...(hasProcess && Number.isFinite(elapsedSeconds)
+    ...(hasProcess && typeof elapsedSeconds === "number" && Number.isFinite(elapsedSeconds) && elapsedSeconds > 0
       ? { elapsedSeconds }
       : hasProcess && derivedElapsed !== undefined
         ? { elapsedSeconds: derivedElapsed }

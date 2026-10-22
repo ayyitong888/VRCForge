@@ -1769,6 +1769,10 @@
     }
   },
   "questionCard": {
+    "visualCheckpoint": {
+      "options": { "pass": "Pass", "fail": "Fail", "uncertain": "Uncertain", "later": "Later" },
+      "notePlaceholder": "Optional visual-checkpoint note..."
+    },
     "label": "Agent question",
     "title": "Question",
     "position": "{{current}} of {{total}}",
@@ -1779,6 +1783,7 @@
     "customPlaceholder": "Type another answer...",
     "clear": "Clear",
     "answer": "Answer",
+    "replyInChat": "Reply in chat",
     "retry": "Retry",
     "skip": "Skip",
     "skipAnswer": "Skipped",

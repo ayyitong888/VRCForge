@@ -797,7 +797,7 @@ def _validate_structured_operation_summary(
             raise PathToSkillValidationError(
                 "Structured operation summaries cannot replay repeated tools without their private call arguments."
             )
-        if tool in {"vrcforge_agent_desktop_action", "vrcforge_ask_user"} or tool.startswith(
+        if tool in {"vrcforge_agent_desktop_action", "vrcforge_ask_user", "vrcforge_call_user"} or tool.startswith(
             "vrcforge_progress_"
         ):
             raise PathToSkillValidationError(f"Structured operation step {index} is an internal control, not a skill path.")

@@ -60,7 +60,7 @@ class NativeRuntimeTurn:
                     except (TypeError, ValueError):
                         continue
                     name = args.get("tool") if isinstance(args, dict) else None
-                if name not in {"vrcforge_ask_user", "ask_user"}:
+                if name not in {"vrcforge_ask_user", "vrcforge_call_user", "ask_user", "call_user"}:
                     continue
                 call_id = str(tool_call.get("id") or "").strip()
                 if call_id:
@@ -422,7 +422,7 @@ class NativeRuntimeTurn:
                 # Only the explicit question tool owns a user-answer wait.
                 # Other needs_user_action outcomes (for example a scope
                 # denial) are terminal and must not block the next turn.
-                if str(item.get("tool") or "") != "vrcforge_ask_user":
+                if str(item.get("tool") or "") not in {"vrcforge_ask_user", "vrcforge_call_user"}:
                     return False
                 for candidate in (item.get("result"), item.get("resultRead"), outcome):
                     if isinstance(candidate, Mapping) and str(candidate.get("questionId") or "").strip():

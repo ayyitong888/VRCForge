@@ -18,6 +18,7 @@ import {
   type ProjectUiPrefs,
 } from "../lib/app-preferences";
 import { normalizeProjectPathKey, projectKey, shortPath } from "../lib/project-path";
+import { loadProjectPrefsCache, saveProjectPrefsCache } from "../lib/project-prefs-cache";
 
 const PROJECT_INDEX_BACKGROUND_DELAY_MS = 1200;
 
@@ -58,7 +59,7 @@ export function useProjectManagement({
   const [newProjectType, setNewProjectType] = useState<ProjectType>("unity");
   const [savingProjectPrefs, setSavingProjectPrefs] = useState(false);
   const [projectModalError, setProjectModalError] = useState("");
-  const [projectPrefs, setProjectPrefs] = useState<ProjectPrefs>({ customPaths: [], customProjects: [], hiddenPaths: [] });
+  const [projectPrefs, setProjectPrefs] = useState<ProjectPrefs>(() => loadProjectPrefsCache());
   const [projectPrefsReady, setProjectPrefsReady] = useState(false);
   const [loadingProjects, setLoadingProjects] = useState(false);
   const [projectListError, setProjectListError] = useState("");
@@ -172,6 +173,7 @@ export function useProjectManagement({
     try {
       const prefs = await fetchProjectPrefs(endpoint);
       setProjectPrefs(prefs);
+      saveProjectPrefsCache(prefs);
     } finally {
       setProjectPrefsReady(true);
     }
@@ -191,6 +193,7 @@ export function useProjectManagement({
       }
       const saved = await saveProjectPrefs(targetEndpoint, next);
       setProjectPrefs(saved);
+      saveProjectPrefsCache(saved);
       return saved;
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : String(cause);

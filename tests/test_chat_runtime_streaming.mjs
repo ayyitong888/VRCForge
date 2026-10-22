@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import {
   applyAgentRuntimeDeltaToStreamingItem,
   elapsedSecondsSince,
+  elapsedSecondsFromTimeline,
   finalizeCancelledStreamingTurn,
   providerWaitingWindow,
 } from "../src/lib/chat-streaming.ts";
@@ -24,6 +25,9 @@ const startedAt = "2026-08-14T00:00:00.000Z";
 const startedMs = Date.parse(startedAt);
 assert.equal(elapsedSecondsSince(startedAt, startedMs + 1_499), 1, "running elapsed time advances from the local turn start");
 assert.equal(elapsedSecondsSince(startedAt, startedMs + 2_501), 3, "running elapsed time uses the real wall clock");
+assert.equal(elapsedSecondsFromTimeline([{ timestamp: startedAt }]), undefined, "one runtime event cannot prove a duration");
+assert.equal(elapsedSecondsFromTimeline([{ timestamp: startedAt }, { timestamp: startedAt }]), undefined, "same-time runtime events cannot prove a duration");
+assert.equal(elapsedSecondsFromTimeline([{ timestamp: startedAt }, { timestamp: "2026-08-14T00:00:02.000Z" }]), 2, "runtime event timestamps provide the durable duration");
 
 const foregroundReplay = {
   schema: "vrcforge.runtime_turn_event.v1",

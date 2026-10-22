@@ -1986,7 +1986,7 @@ class AgentTaskLoop:
         }
         question_wait = any(
             _status(item.get("status")) == "needs_user_action"
-            and str(item.get("tool") or "") == "vrcforge_ask_user"
+            and str(item.get("tool") or "") in {"vrcforge_ask_user", "vrcforge_call_user"}
             for item in self._actions.values()
         )
         if "cancelled" in statuses:
@@ -2064,7 +2064,7 @@ class AgentTaskLoop:
         actions = list(self._actions.values())
         question_wait = any(
             _status(item.get("status")) == "needs_user_action"
-            and str(item.get("tool") or "") == "vrcforge_ask_user"
+            and str(item.get("tool") or "") in {"vrcforge_ask_user", "vrcforge_call_user"}
             for item in actions
         )
         if question_wait:
@@ -2072,7 +2072,7 @@ class AgentTaskLoop:
                 key=lambda item: 0
                 if (
                     _status(item.get("status")) == "needs_user_action"
-                    and str(item.get("tool") or "") == "vrcforge_ask_user"
+                    and str(item.get("tool") or "") in {"vrcforge_ask_user", "vrcforge_call_user"}
                 )
                 else 1
             )
@@ -2085,7 +2085,7 @@ class AgentTaskLoop:
             outcome = action.get("outcome")
             is_question_wait = (
                 status == "needs_user_action"
-                and str(action.get("tool") or "") == "vrcforge_ask_user"
+                and str(action.get("tool") or "") in {"vrcforge_ask_user", "vrcforge_call_user"}
             )
             eligible = (
                 status == "failed" or is_question_wait

@@ -201,6 +201,7 @@ _TOOLS_BY_PHASE = {
         'vision_audit_multi',
         'vrcforge_agent_observe',
         'vrcforge_ask_user',
+        'vrcforge_call_user',
         'vrcforge_avatar_encryption_addon_status',
         'vrcforge_avatar_encryption_plan',
         'vrcforge_avatar_encryption_preview',

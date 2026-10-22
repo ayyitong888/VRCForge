@@ -97,6 +97,113 @@ def test_question_service_preserves_scope_and_answer_exactly_once(tmp_path: Path
     assert first.list(session_id="session-a", project_root="D:/ProjectA", include_answered=True)["count"] == 1
 
 
+def test_visual_checkpoint_has_explicit_resolution_and_replays_defer(tmp_path: Path) -> None:
+    resolutions: list[tuple[str, str]] = []
+    service = _service(tmp_path, threading.RLock(), resolutions)
+    values = {
+        "kind": "visual_checkpoint",
+        "question": "Does the avatar preview pass the visual gate?",
+        "options": ["pass", "fail", "uncertain", "later"],
+        "sessionId": "visual-session",
+        "projectRoot": "D:/ProjectA",
+        "goalDeliveryId": "visual-delivery",
+        "sourceTool": "call_user",
+    }
+    created = service.create(values)
+    duplicate = service.create(values)
+    question_id = str(created["question"]["questionId"])
+    assert created["question"]["kind"] == "visual_checkpoint"
+    assert duplicate["deduplicated"] is True
+    assert duplicate["question"]["questionId"] == question_id
+
+    deferred = service.answer(
+        question_id,
+        {
+            "sessionId": "visual-session",
+            "projectRoot": "D:/ProjectA",
+            "resolution": "uncertain",
+            "answer": "The screenshot is ambiguous.",
+        },
+    )
+    assert deferred["deferred"] is True
+    assert deferred["question"]["status"] == "pending"
+    assert deferred["question"]["resolution"] == "uncertain"
+    assert resolutions == []
+    assert '"event": "question_deferred"' in (tmp_path / "agent-questions.jsonl").read_text(encoding="utf-8")
+
+    passed = service.answer(
+        question_id,
+        {
+            "sessionId": "visual-session",
+            "projectRoot": "D:/ProjectA",
+            "resolution": "pass",
+            "answer": "Confirmed by the user.",
+        },
+    )
+    assert passed["question"]["status"] == "answered"
+    assert passed["question"]["resolution"] == "pass"
+    assert len(resolutions) == 1
+
+
+def test_visual_checkpoint_rejects_inferred_or_unknown_resolution(tmp_path: Path) -> None:
+    service = _service(tmp_path, threading.RLock(), [])
+    created = service.create({"kind": "visual_checkpoint", "question": "Inspect the preview", "sessionId": "s"})
+    feedback = service.answer(created["question"]["questionId"], {"sessionId": "s", "answer": "Looks okay"})
+    assert feedback["feedback"] is True
+    assert feedback["question"]["status"] == "pending"
+
+
+def test_question_dedup_is_call_user_scoped_and_persists_source(tmp_path: Path) -> None:
+    service = _service(tmp_path, threading.RLock(), [])
+    params = {"question": "Confirm once", "sessionId": "s", "sourceTool": "call_user"}
+    first = service.create(params)
+    second = service.create(params)
+    legacy = service.create({"question": "Confirm once", "sessionId": "s"})
+    assert second["deduplicated"] is True
+    assert legacy["question"]["questionId"] != first["question"]["questionId"]
+    assert '"sourceTool": "call_user"' in (tmp_path / "agent-questions.jsonl").read_text(encoding="utf-8")
+
+
+def test_visual_feedback_attachment_reaches_runtime_without_resolving_acceptance(tmp_path: Path) -> None:
+    dispatched: list[tuple[str, dict, str]] = []
+    service = AgentQuestionService(
+        AgentQuestionPersistence(AgentQuestionPersistencePorts(
+            log_path=lambda: tmp_path / "agent-questions.jsonl",
+            shared_state_lock=threading.RLock(), redact=lambda value: value,
+        )),
+        AgentQuestionScopePorts(
+            normalize_path=lambda value: value,
+            summarize=_summarize,
+            redact_goal_persistence=lambda value: value,
+        ),
+        GoalQuestionResolutionPort(resolve=lambda _question_id, _prompt: None),
+        RuntimeQuestionResolutionPort(
+            resolve=lambda question_id, seed, prompt: dispatched.append((question_id, dict(seed), prompt)) or {"ok": True},
+        ),
+    )
+    created = service.create({
+        "kind": "visual_checkpoint", "sourceTool": "call_user",
+        "question": "Inspect the preview", "sessionId": "s", "projectRoot": "D:/P",
+        "_runtimeTaskSeed": {"sessionId": "s", "taskId": "task-1"},
+    })
+    feedback = service.answer(created["question"]["questionId"], {
+        "sessionId": "s", "projectRoot": "D:/P", "answer": "Please inspect this image.",
+        "attachments": [{"name": "preview.png", "payloadHash": "a" * 64, "payloadKind": "vault_file"}],
+    })
+    assert feedback["feedback"] is True
+    assert feedback["question"]["status"] == "pending"
+    assert dispatched[0][1]["_authenticatedUserAttachments"][0]["payloadHash"] == "a" * 64
+    assert '"event": "question_feedback"' in (tmp_path / "agent-questions.jsonl").read_text(encoding="utf-8")
+    replayed: list[dict] = []
+    restarted = AgentQuestionService(
+        service._persistence, service._scope, GoalQuestionResolutionPort(resolve=lambda _id, _prompt: None),
+        RuntimeQuestionResolutionPort(resolve=lambda _id, seed, _prompt: replayed.append(dict(seed)) or {"ok": True}),
+    )
+    assert restarted.reconcile_runtime_continuations()["queued"] == 1
+    assert replayed[0]["_authenticatedUserAttachments"][0]["payloadHash"] == "a" * 64
+    assert service.claim_runtime_continuation(created["question"]["questionId"]) is True
+
+
 def test_question_service_allows_free_text_and_rejects_single_option_or_empty_answer(tmp_path: Path) -> None:
     service = _service(tmp_path, threading.RLock(), [])
     created = service.create({"question": "Describe the proof", "sessionId": "s"})
@@ -110,6 +217,40 @@ def test_question_service_allows_free_text_and_rejects_single_option_or_empty_an
     second = service.create({"question": "Answer required", "sessionId": "s"})
     with pytest.raises(AgentQuestionServiceError, match="answer is required"):
         service.answer(str(second["question"]["questionId"]), {"sessionId": "s"})
+
+
+def test_runtime_retry_for_one_question_does_not_interrupt_other_claimed_question(tmp_path: Path) -> None:
+    dispatched: list[str] = []
+    service = AgentQuestionService(
+        AgentQuestionPersistence(AgentQuestionPersistencePorts(
+            log_path=lambda: tmp_path / "agent-questions.jsonl",
+            shared_state_lock=threading.RLock(), redact=lambda value: value,
+        )),
+        AgentQuestionScopePorts(
+            normalize_path=lambda value: value, summarize=_summarize,
+            redact_goal_persistence=lambda value: value,
+        ),
+        GoalQuestionResolutionPort(resolve=lambda _id, _prompt: None),
+        RuntimeQuestionResolutionPort(
+            resolve=lambda question_id, _seed, _prompt: dispatched.append(question_id)
+            or {"ok": True, "status": "queued"},
+        ),
+    )
+    question_a = service.create({
+        "kind": "visual_checkpoint", "sourceTool": "call_user", "question": "A?",
+        "sessionId": "s", "projectRoot": "P", "_runtimeTaskSeed": {"taskId": "A"},
+    })["question"]
+    question_b = service.create({
+        "kind": "visual_checkpoint", "sourceTool": "call_user", "question": "B?",
+        "sessionId": "s", "projectRoot": "P", "_runtimeTaskSeed": {"taskId": "B"},
+    })["question"]
+    service.answer(question_a["questionId"], {"sessionId": "s", "answer": "more detail"})
+    service.answer(question_b["questionId"], {"sessionId": "s", "answer": "more detail"})
+    service.record_runtime_continuation(question_b["questionId"], "claimed")
+    assert service.reconcile_runtime_continuation(question_a["questionId"])
+    current = service._project(include_answered=True)
+    assert current[question_b["questionId"]]["runtimeContinuationStatus"] == "claimed"
+    assert dispatched == [question_a["questionId"], question_b["questionId"], question_a["questionId"]]
 
 
 def test_answered_history_cannot_hide_pending_or_running_questions(tmp_path: Path) -> None:
@@ -146,7 +287,9 @@ def test_question_rejects_oversize_choice_without_changing_decision(tmp_path, fi
 def test_question_preserves_multiline_choices_and_has_model_schema(tmp_path):
     from runtime_planner_service import planner_tool_input_schema
     schema = planner_tool_input_schema('vrcforge_ask_user')
+    call_user_schema = planner_tool_input_schema('vrcforge_call_user')
     assert 'question' in schema['properties']
+    assert call_user_schema == schema
     assert 'options' in schema['properties']
     option_schema = schema['properties']['options']['items']['anyOf'][1]
     assert {'id','label','description','value'} <= set(option_schema['properties'])

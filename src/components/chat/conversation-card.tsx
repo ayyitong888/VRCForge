@@ -21,6 +21,7 @@ import { elapsedSecondsSince, providerWaitingWindow, type AgentRuntimePhase } fr
 import { copyableAgentDialogueText } from "../../lib/conversation-utils";
 import type { PathToSkillOperationSummary } from "../../lib/path-to-skill-context";
 import { cn, formatCount } from "../../lib/utils";
+import { formatLocalMessageTime, formatMessageDateSeparator } from "../../lib/message-time";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { DataLine } from "../ui/data-line";
@@ -212,7 +213,7 @@ export function ConversationCard({
           ) : null}
           <MessageActions
             align="right"
-            createdAt={item.createdAt || item.id}
+            createdAt={item.createdAt}
             metadata={deliveryMetadata}
             onCopy={() => onCopyItem?.(item)}
             onRetry={canRetry ? () => onRetryItem?.(item.id) : undefined}
@@ -276,6 +277,7 @@ export function ConversationCard({
               {runtimeModelLabel ? <span className="text-muted-foreground/75">{runtimeModelLabel}</span> : null}
             </div>
           ) : null}
+          <MessageActions createdAt={item.createdAt} />
           <StreamingPhaseStatus item={item} nowMs={streamingNowMs} showElapsed={false} />
         </div>
       </div>
@@ -302,7 +304,7 @@ export function ConversationCard({
             ) : null}
           </RunRow>
           <MessageActions
-            createdAt={item.createdAt || item.id}
+            createdAt={item.createdAt}
             onRetry={canRetry ? () => onRetryItem?.(item.id) : undefined}
           />
         </div>
@@ -318,7 +320,7 @@ export function ConversationCard({
           <p className="mt-1">{t("approval.revisionRequestedDescription", { target: item.targetTool || t("approval.thisApproval") })}</p>
           <p className="mt-1">{t("approval.revisionRetrying")}</p>
           {item.reason ? <p className="mt-1" data-approval-revision-reason>{t("approval.revisionReasonLabel")}: {item.reason}</p> : null}
-          <MessageActions createdAt={item.createdAt || item.id} />
+          <MessageActions createdAt={item.createdAt} />
         </div>
       </div>
     );
@@ -412,6 +414,7 @@ export function ConversationCard({
           {!hasTimelineProcessRows ? initialUserContent : null}
           {timelineRows}
           <MessageActions
+            createdAt={item.createdAt}
             onCopy={copyableReply ? () => onCopyItem?.({ ...item, response }) : undefined}
             onRetry={canRetry ? () => onRetryItem?.(item.id) : undefined}
             onEdit={canEdit ? () => onEditItem?.(item.id) : undefined}
@@ -447,6 +450,7 @@ function renderInterleavedUserMessage(
             <AttachmentStrip attachments={otherAttachments} onImport={onImportAttachment} compact />
           </div>
         ) : null}
+        <MessageActions createdAt={message.createdAt} />
       </div>
     </div>
   );
@@ -679,7 +683,7 @@ function MessageActions({
   saveOperationClientTurnId?: string;
 }) {
   const { t } = useTranslation();
-  const timeLabel = formatMessageTime(createdAt, i18n.language);
+  const timeLabel = formatLocalMessageTime(createdAt, i18n.language);
   const hasActions = Boolean(metadata || timeLabel || onCopy || onRetry || onEdit || onSaveAsSkill);
   if (!hasActions) {
     return null;
@@ -745,44 +749,16 @@ function MessageActions({
   );
 }
 
-function formatMessageTime(value: string | undefined, language: string): string {
-  const ms = parseMessageTime(value);
-  if (!ms) {
-    return "";
-  }
-  const now = new Date();
-  const date = new Date(ms);
-  const sameDay = now.toDateString() === date.toDateString();
-  if (sameDay) {
-    return new Intl.DateTimeFormat(language || undefined, { hour: "2-digit", minute: "2-digit" }).format(date);
-  }
-  const yesterday = new Date(now);
-  yesterday.setDate(now.getDate() - 1);
-  if (yesterday.toDateString() === date.toDateString()) {
-    const normalizedLanguage = language.toLowerCase();
-    if (normalizedLanguage.startsWith("zh")) {
-      return "昨天";
-    }
-    if (normalizedLanguage.startsWith("ja")) {
-      return "昨日";
-    }
-    return "yesterday";
-  }
-  return new Intl.DateTimeFormat(language || undefined, { month: "short", day: "numeric" }).format(date);
-}
-
-function parseMessageTime(value: string | undefined): number {
-  if (!value) {
-    return 0;
-  }
-  const parsed = Date.parse(value);
-  if (Number.isFinite(parsed)) {
-    return parsed;
-  }
-  const match = value.match(/(?:^|[^0-9])([0-9]{13})(?:[^0-9]|$)/);
-  if (!match) {
-    return 0;
-  }
-  const timestamp = Number(match[1]);
-  return Number.isFinite(timestamp) ? timestamp : 0;
+export function MessageDateSeparator({ timestamp }: { timestamp?: string | number }) {
+  const label = formatMessageDateSeparator(timestamp, i18n.language);
+  if (!label) return null;
+  return (
+    <div className="flex items-center gap-3 py-1 text-[11px] text-muted-foreground" data-chat-date-separator>
+      <div className="h-px flex-1 bg-border/60" />
+      <time dateTime={typeof timestamp === "number" ? new Date(timestamp).toISOString() : timestamp} className="shrink-0 px-1" data-chat-message-date>
+        {label}
+      </time>
+      <div className="h-px flex-1 bg-border/60" />
+    </div>
+  );
 }

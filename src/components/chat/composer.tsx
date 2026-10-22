@@ -71,6 +71,8 @@ export function Composer({
   onCancelEdit,
   projects: _projects = [],
   onBindProject: _onBindProject,
+  focusInput = false,
+  onCancelReply,
 }: {
   input: string;
   setInput: (value: string) => void;
@@ -105,6 +107,8 @@ export function Composer({
   onCancelEdit?: () => void;
   projects?: Array<{ key: string; name: string }>;
   onBindProject?: (path: string) => void;
+  focusInput?: boolean;
+  onCancelReply?: () => void;
 }) {
   const { t } = useTranslation();
   const [modeMenuOpen, setModeMenuOpen] = useState(false);
@@ -114,6 +118,19 @@ export function Composer({
   const [dragDepth, setDragDepth] = useState(0);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const composerRef = useRef<HTMLFormElement | null>(null);
+  useEffect(() => {
+    if (focusInput) {
+      composerRef.current?.querySelector<HTMLTextAreaElement>("textarea")?.focus();
+    }
+  }, [focusInput]);
+  useEffect(() => {
+    if (!focusInput || !onCancelReply) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onCancelReply();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [focusInput, onCancelReply]);
   const currentMode = (permission?.executionMode || "approval") as ExecutionMode;
   const currentModeVisual = permissionVisualState(permission, currentMode);
   const canSubmit = !disabledReason && (input.trim().length > 0 || attachments.length > 0);

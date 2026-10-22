@@ -32,6 +32,8 @@ const APPROVAL_NOTIFICATION_ICON_BACKGROUND_COLOR: &str = "0";
 const APPROVAL_NOTIFICATION_ICON_FILE_NAME: &str = "VRCForge.png";
 const APPROVAL_NOTIFICATION_ICON_ALT_TEXT: &str = "VRCForge";
 const APPROVAL_NOTIFICATION_ACTION_EVENT: &str = "vrcforge-approval-notification-action";
+const AGENT_QUESTION_NOTIFICATION_ACTION_EVENT: &str =
+    "vrcforge-agent-question-notification-action";
 const MAX_NOTIFICATION_ID_LENGTH: usize = 128;
 const MAX_TITLE_LENGTH: usize = 120;
 const MAX_BODY_LENGTH: usize = 512;
@@ -90,6 +92,15 @@ pub(crate) struct DesktopApprovalNotificationRequest {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopAgentQuestionNotificationRequest {
+    question_id: String,
+    chat_id: String,
+    title: String,
+    body: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct DesktopSubAgentReviewNotificationRequest {
     task_id: String,
     revision: u64,
@@ -103,6 +114,14 @@ pub(crate) struct DesktopSubAgentReviewNotificationRequest {
 #[serde(rename_all = "camelCase")]
 struct ApprovalNotificationActionEvent {
     approval_id: String,
+    action: &'static str,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentQuestionNotificationActionEvent {
+    question_id: String,
+    chat_id: String,
     action: &'static str,
 }
 
@@ -172,6 +191,62 @@ pub(crate) fn show_approval_notification(
         let _ = app;
         let _ = request;
         Err("Approval notifications are only supported on Windows.".to_string())
+    }
+}
+
+/// Displays a display-only pending question toast. Clicking only wakes the
+/// app and identifies the question; the frontend re-reads pending authority
+/// and opens the matching chat/question without answering it.
+#[tauri::command]
+pub(crate) fn show_agent_question_notification(
+    app: AppHandle,
+    request: DesktopAgentQuestionNotificationRequest,
+) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        validate_agent_question_notification_request(&request)?;
+        if !bind_approval_notification_identity() {
+            return Err("Unable to bind the VRCForge notification identity.".to_string());
+        }
+        let executable = std::env::current_exe()
+            .map_err(|_| "Unable to resolve the question notification icon.".to_string())?;
+        let icon_path = approval_notification_icon_path(&executable)
+            .filter(|path| path.is_file())
+            .ok_or_else(|| "Unable to resolve the question notification icon.".to_string())?;
+        let event = AgentQuestionNotificationActionEvent {
+            question_id: request.question_id.clone(),
+            chat_id: request.chat_id.clone(),
+            action: "open",
+        };
+        let callback_app = app.clone();
+        tauri_winrt_notification::Toast::new(APPROVAL_NOTIFICATION_APP_ID)
+            .title(&request.title)
+            .text1(&request.body)
+            .icon(
+                &icon_path,
+                tauri_winrt_notification::IconCrop::Square,
+                APPROVAL_NOTIFICATION_ICON_ALT_TEXT,
+            )
+            .on_activated(move |activation| {
+                if !is_approval_notification_activation(activation.as_deref()) {
+                    return Ok(());
+                }
+                let _ = callback_app.emit(
+                    AGENT_QUESTION_NOTIFICATION_ACTION_EVENT,
+                    event.clone(),
+                );
+                focus_main_window(&callback_app);
+                Ok(())
+            })
+            .show()
+            .map_err(|_| "Unable to show the agent question notification.".to_string())
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = app;
+        let _ = request;
+        Err("Agent question notifications are only supported on Windows.".to_string())
     }
 }
 
@@ -356,6 +431,16 @@ fn validate_notification_request(
     Ok(())
 }
 
+fn validate_agent_question_notification_request(
+    request: &DesktopAgentQuestionNotificationRequest,
+) -> Result<(), String> {
+    validate_notification_id(&request.question_id)?;
+    validate_notification_id(&request.chat_id)?;
+    validate_display_text(&request.title, MAX_TITLE_LENGTH, "title")?;
+    validate_display_text(&request.body, MAX_BODY_LENGTH, "body")?;
+    Ok(())
+}
+
 fn validate_notification_id(value: &str) -> Result<(), String> {
     if value.is_empty()
         || value.len() > MAX_NOTIFICATION_ID_LENGTH
@@ -406,7 +491,8 @@ mod tests {
     use super::approval_notification_icon_path;
     use super::{
         is_approval_notification_activation, parse_sub_agent_review_notification_action,
-        validate_notification_request, DesktopApprovalNotificationRequest,
+        validate_agent_question_notification_request, validate_notification_request,
+        DesktopAgentQuestionNotificationRequest, DesktopApprovalNotificationRequest,
         APPROVAL_NOTIFICATION_APP_ID, APPROVAL_NOTIFICATION_DISPLAY_NAME,
         APPROVAL_NOTIFICATION_ICON_ALT_TEXT, APPROVAL_NOTIFICATION_ICON_BACKGROUND_COLOR,
         APPROVAL_NOTIFICATION_ICON_FILE_NAME,
@@ -419,6 +505,15 @@ mod tests {
             approval_id: "approval_123-abc".to_string(),
             title: "Approval required".to_string(),
             body: "Review this pending operation in VRCForge.".to_string(),
+        }
+    }
+
+    fn question_request() -> DesktopAgentQuestionNotificationRequest {
+        DesktopAgentQuestionNotificationRequest {
+            question_id: "question_123-abc".to_string(),
+            chat_id: "chat_123-abc".to_string(),
+            title: "Agent question".to_string(),
+            body: "Choose how to continue in VRCForge.".to_string(),
         }
     }
 
@@ -470,5 +565,26 @@ mod tests {
         let mut control = request();
         control.body = "line one\nline two".to_string();
         assert!(validate_notification_request(&control).is_err());
+    }
+
+    #[test]
+    fn question_toast_requires_bounded_question_and_chat_identity() {
+        assert!(validate_agent_question_notification_request(&question_request()).is_ok());
+
+        let mut invalid = question_request();
+        invalid.question_id = "question:123".to_string();
+        assert!(validate_agent_question_notification_request(&invalid).is_err());
+
+        let mut invalid_chat = question_request();
+        invalid_chat.chat_id = "".to_string();
+        assert!(validate_agent_question_notification_request(&invalid_chat).is_err());
+
+        let mut invalid_body = question_request();
+        invalid_body.body = "line one\nline two".to_string();
+        assert!(validate_agent_question_notification_request(&invalid_body).is_err());
+
+        let mut invalid_title = question_request();
+        invalid_title.title = "Agent\tquestion".to_string();
+        assert!(validate_agent_question_notification_request(&invalid_title).is_err());
     }
 }

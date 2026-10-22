@@ -130,6 +130,7 @@ import {
   selectedTextAttachment,
 } from "./lib/conversation-utils";
 import { ingestChatAttachment } from "./lib/attachment-ingest";
+import { serializeChatAttachments } from "./lib/conversation-utils";
 import { latestContextWindowUsage, resolveContextLimit } from "./lib/context-compaction";
 import { thinkingTraceLabel } from "./lib/provider-ui";
 import type { ChatAttachment, ComposerAction, ComposerActionId, ContextUsage, ConversationItem } from "./lib/chat-types";
@@ -159,6 +160,10 @@ import {
 } from "./lib/markdown-smoke";
 import { parseDelegateCommand } from "./lib/subagent-delegate";
 import { isAwaitingMergeReview, subAgentProposedNextAction } from "./lib/subagent-merge";
+import {
+  AGENT_QUESTION_NOTIFICATION_ACTION_EVENT,
+  parseAgentQuestionNotificationAction,
+} from "./lib/agent-question-notifications";
 import { pickSubAgentName, reconcileSelectedSubAgent, updateSubAgentList } from "./lib/subagent-state";
 import {
   AgentApproval,
@@ -186,6 +191,7 @@ import {
   fetchAgentGoals,
   fetchAgentMemory,
   fetchAgentApprovals,
+  fetchAgentQuestions,
   fetchAgentTurnResponse,
   fetchAppSession,
   fetchAppHealth,
@@ -331,6 +337,7 @@ export default function App() {
   const [backgroundGoalNotificationsEnabled, setBackgroundGoalNotificationsEnabled] = useState(true);
   const [backgroundGoalRefreshSignal, setBackgroundGoalRefreshSignal] = useState(0);
   const [memoryReviewRefreshSignal, setMemoryReviewRefreshSignal] = useState(0);
+  const initialGlobalQuestionFetchRef = useRef(false);
   const [savingAdvancedSettings, setSavingAdvancedSettings] = useState(false);
   const [handoffSendOpen, setHandoffSendOpen] = useState(false);
   const [appUpdatePrompt, setAppUpdatePrompt] = useState<AppUpdatePromptState | null>(null);
@@ -384,6 +391,10 @@ export default function App() {
   const [selectedSubAgentPanelOpen, setSelectedSubAgentPanelOpen] = useState(() => Boolean(initialSubAgentTask));
   const [subAgentActionBusyTaskIds, setSubAgentActionBusyTaskIds] = useState<Set<string>>(() => new Set());
   const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
+  const [pendingReplyQuestionId, setPendingReplyQuestionId] = useState("");
+  const [attachmentsLoading, setAttachmentsLoading] = useState(false);
+  const attachmentLoadsRef = useRef(0);
+  const replySubmitInFlightRef = useRef(false);
   const [editingMessage, setEditingMessage] = useState<EditingMessageDraft | null>(null);
   const [savingMessageEdit, setSavingMessageEdit] = useState(false);
   const messageEditSaveInFlightRef = useRef(false);
@@ -1088,6 +1099,7 @@ export default function App() {
     agentGoals,
     agentProgress,
     agentQuestions,
+    notifyCallUserQuestions,
     agentMemory,
     memoryReviewUnreadCount,
     memoryReviewNeedsAttention,
@@ -1115,6 +1127,8 @@ export default function App() {
     setBootstrap,
     setAgentApprovals,
     setError,
+    chatIdForSessionId: (ownerSessionId) =>
+      chats.find((chat) => chat.sessionId === ownerSessionId)?.id || "",
   });
   const applyQuestionRuntimeDelta = useQuestionContinuationActivity({
     chats,
@@ -1548,6 +1562,56 @@ export default function App() {
       return;
     }
     let active = true;
+    let unlistenQuestionAction: (() => void) | null = null;
+    void listen<unknown>(AGENT_QUESTION_NOTIFICATION_ACTION_EVENT, (event) => {
+      const action = parseAgentQuestionNotificationAction(event.payload);
+      if (!action || !active) return;
+      let chat = chats.find((item) => item.id === action.chatId);
+      void (async () => {
+        let question = agentQuestions.find((item) => item.questionId === action.questionId);
+        if (!question || !chat) {
+          const result = await fetchAgentQuestions(endpoint, {
+            sessionId: chat?.sessionId,
+            projectRoot: chat?.projectPath || undefined,
+            includeAnswered: true,
+            limit: 1000,
+          });
+          question = result.questions.find((item) => item.questionId === action.questionId);
+          if (!chat && question?.sessionId) {
+            chat = chats.find((item) => item.sessionId === question?.sessionId);
+          }
+        }
+        if (!active || !question) return;
+        upsertAgentQuestion(question, true);
+        const questionSessionId = String(question.sessionId || "").trim();
+        const chatSessionId = String(chat?.sessionId || "").trim();
+        if (!questionSessionId || !chat || !chatSessionId || questionSessionId !== chatSessionId) {
+          if (!chat) setActiveView("chat");
+          return;
+        }
+        setActiveChatId(chat.id);
+        setActiveView("chat");
+      })().catch((cause) => active && setError(cause instanceof Error ? cause.message : String(cause)));
+    })
+      .then((unlisten) => {
+        if (active) {
+          unlistenQuestionAction = unlisten;
+        } else {
+          unlisten();
+        }
+      })
+      .catch((cause) => active && setError(cause instanceof Error ? cause.message : String(cause)));
+    return () => {
+      active = false;
+      unlistenQuestionAction?.();
+    };
+  }, [agentQuestions, chats, endpoint, setActiveChatId, setActiveView, setError]);
+
+  useEffect(() => {
+    if (!isTauriRuntime()) {
+      return;
+    }
+    let active = true;
     let unlistenSubAgentAction: (() => void) | null = null;
     void listen<unknown>(SUB_AGENT_REVIEW_NOTIFICATION_ACTION_EVENT, (event) =>
       subAgentReviewNotificationActionHandlerRef.current(event.payload)
@@ -1897,8 +1961,8 @@ export default function App() {
       const payload = await answerAgentQuestion(endpoint, questionId, {
         answer: value,
         selectedOptionId: optionId,
-        sessionId,
-        projectRoot: activeRuntimeProjectPath || undefined,
+        sessionId: answeredQuestion?.sessionId || sessionId,
+        projectRoot: answeredQuestion?.projectRoot || activeRuntimeProjectPath || undefined,
       });
       upsertAgentQuestion({
         ...payload.question,
@@ -1906,10 +1970,13 @@ export default function App() {
           ? { ...payload.runtimeContinuation, sessionId: payload.runtimeContinuation.sessionId || sessionId }
           : agentQuestions.find((item) => item.questionId === questionId)?.runtimeContinuation,
       });
-      const answerItemId = `question-answer-${questionId}`;
-      const answerChatId = activeChatId || ensureActiveChat();
-      const answerChat = getChatById(answerChatId);
-      if (answerChat && !answerChat.items.some((item) => item.id === answerItemId)) {
+      const questionResolution = payload.question as AgentQuestion & { resolution?: unknown };
+      const answerRevision = String(questionResolution.updatedAt || questionResolution.resolution || questionResolution.answer || `${optionId}:${value}`).trim();
+      const answerItemSuffix = answerRevision.replace(/[^a-zA-Z0-9_-]+/g, "-").slice(0, 96) || "resolved";
+      const answerItemId = `question-answer-${questionId}-${answerItemSuffix}`;
+      const answerChat = chats.find((chat) => chat.sessionId === answeredQuestion?.sessionId);
+      const answerChatId = answerChat?.id;
+      if (answerChat && answerChatId && !answerChat.items.some((item) => item.id === answerItemId)) {
         appendToChat(answerChatId, {
           id: answerItemId,
           type: "user",
@@ -1925,6 +1992,11 @@ export default function App() {
       setError(cause instanceof Error ? cause.message : String(cause));
       throw cause;
     }
+  };
+  const replyToAgentQuestionInComposer = (questionId: string) => {
+    if (!agentQuestions.some((question) => question.questionId === questionId && question.status === "pending")) return;
+    setPendingReplyQuestionId(questionId);
+    setActiveView("chat");
   };
   const stopRuntimeQuestionContinuation = async (question: AgentQuestion) => {
     const continuation = question.runtimeContinuation;
@@ -2189,6 +2261,19 @@ export default function App() {
   }, [chatRunSending, runtimeConnected, endpoint]);
 
   useEffect(() => {
+    if (!runtimeConnected || !isTauriRuntime() || initialGlobalQuestionFetchRef.current) {
+      return;
+    }
+    initialGlobalQuestionFetchRef.current = true;
+    void fetchAgentQuestions(endpoint, { limit: 1000 }).then((result) => {
+      notifyCallUserQuestions(result.questions);
+      result.questions.forEach((question) => upsertAgentQuestion(question, true));
+    }).catch(() => {
+      // The regular runtime snapshot/event path remains authoritative after startup.
+    });
+  }, [endpoint, notifyCallUserQuestions, runtimeConnected, upsertAgentQuestion]);
+
+  useEffect(() => {
     if (!runtimeConnected || !isTauriRuntime()) {
       return;
     }
@@ -2264,7 +2349,8 @@ export default function App() {
       if (eventType === "agentQuestions") {
         const payload = event.payload as { question?: AgentQuestion; questions?: AgentQuestion[] } | undefined;
         const questions = Array.isArray(payload?.questions) ? payload.questions : payload?.question ? [payload.question] : [];
-        questions.forEach((question) => upsertAgentQuestion(question));
+        notifyCallUserQuestions(questions);
+        questions.forEach((question) => upsertAgentQuestion(question, true));
       }
       if (bootstrapEvents.has(eventType)) {
         scheduleBootstrapRefresh();
@@ -3249,6 +3335,7 @@ export default function App() {
 
   async function submitMessage(event?: FormEvent, deliveryMode: "steer" | "queue" = "steer") {
     event?.preventDefault();
+    if (attachmentLoadsRef.current > 0) return;
     const composerMessage = input.trim();
     let message = composerMessage;
     let computerUseRequested = false;
@@ -3256,6 +3343,46 @@ export default function App() {
       return;
     }
     setError("");
+    if (pendingReplyQuestionId) {
+      if (replySubmitInFlightRef.current) return;
+      const question = agentQuestions.find((item) => item.questionId === pendingReplyQuestionId);
+      if (!question) {
+        setPendingReplyQuestionId("");
+        return;
+      }
+      replySubmitInFlightRef.current = true;
+      try {
+        await answerAgentQuestion(endpoint, pendingReplyQuestionId, {
+          answer: composerMessage,
+          selectedOptionId: "custom",
+          attachments: serializeChatAttachments(attachments),
+          sessionId: question.sessionId || sessionId,
+          projectRoot: question.projectRoot || activeRuntimeProjectPath || undefined,
+        });
+        const answerChat = activeChat && (!question.sessionId || activeChat.sessionId === question.sessionId)
+          ? activeChat
+          : undefined;
+        if (answerChat) {
+          appendToChat(answerChat.id, {
+            id: `question-answer-${pendingReplyQuestionId}-${Date.now()}`,
+            type: "user",
+            text: composerMessage,
+            attachments: attachments.length ? attachments : undefined,
+            createdAt: new Date().toISOString(),
+          });
+          void persistChatsNow().catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
+        }
+        setPendingReplyQuestionId("");
+        setInput("");
+        setAttachments([]);
+        void refreshRuntimeRuns(false);
+      } catch (cause) {
+        setError(cause instanceof Error ? cause.message : String(cause));
+      } finally {
+        replySubmitInFlightRef.current = false;
+      }
+      return;
+    }
     if (!chatAvailable) {
       const message = chatDisabledReason || t("chat.connectProviderBeforeSend");
       setError(message);
@@ -3373,22 +3500,32 @@ export default function App() {
       return;
     }
     const selected = Array.from(files).slice(0, remaining);
-    const chatId = ensureActiveChat();
+    const replyQuestion = pendingReplyQuestionId
+      ? agentQuestions.find((question) => question.questionId === pendingReplyQuestionId)
+      : undefined;
+    const chatId = replyQuestion?.sessionId || ensureActiveChat();
     const nextAttachments: ChatAttachment[] = [];
-    for (const file of selected) {
-      try {
-        const attachment = await ingestChatAttachment(file, { endpoint, chatId }, t);
-        nextAttachments.push(attachment);
-        if (attachment.error) {
-          showTransientFailure("upload", attachment.error);
+    attachmentLoadsRef.current += 1;
+    setAttachmentsLoading(true);
+    try {
+      for (const file of selected) {
+        try {
+          const attachment = await ingestChatAttachment(file, { endpoint, chatId }, t);
+          nextAttachments.push(attachment);
+          if (attachment.error) {
+            showTransientFailure("upload", attachment.error);
+          }
+        } catch (cause) {
+          const message = cause instanceof Error ? cause.message : String(cause);
+          setError(message);
+          showTransientFailure("upload", message);
         }
-      } catch (cause) {
-        const message = cause instanceof Error ? cause.message : String(cause);
-        setError(message);
-        showTransientFailure("upload", message);
       }
+      setAttachments((current) => [...current, ...nextAttachments].slice(0, MAX_ATTACHMENTS_PER_TURN));
+    } finally {
+      attachmentLoadsRef.current -= 1;
+      setAttachmentsLoading(attachmentLoadsRef.current > 0);
     }
-    setAttachments((current) => [...current, ...nextAttachments].slice(0, MAX_ATTACHMENTS_PER_TURN));
     if (files.length > remaining) {
       const message = t("attachments.limitOneTurn", { max: MAX_ATTACHMENTS_PER_TURN });
       setError(message);
@@ -4369,7 +4506,7 @@ export default function App() {
               }}
               actions={composerActions}
               onAction={runExplicitWorkspaceAction}
-              disabledReason={chatDisabledReason}
+              disabledReason={attachmentsLoading ? t("common.loading") : pendingReplyQuestionId ? "" : chatDisabledReason}
               attachments={attachments}
               onAttachFiles={(files) => void addComposerFiles(files)}
               onRemoveAttachment={removeAttachment}
@@ -4397,8 +4534,9 @@ export default function App() {
               attachmentPayloads={activeChat?.attachmentPayloads}
               queued={visibleQueued}
               agentQuestions={hasAgentRuntimeScope
-                ? agentQuestions.filter((item) => questionBelongsToRuntimeScope(item, runtimeScope, { requireSession: true }))
-                : []}
+                ? agentQuestions.filter((item) => questionBelongsToRuntimeScope(item, runtimeScope, { requireSession: true })
+                  || !chats.some((chat) => chat.sessionId === item.sessionId))
+                : agentQuestions}
               backgroundGoalDeliveries={
                 activeChatId
                   ? (backgroundGoalState?.recent || []).filter((delivery) => delivery.chatId === activeChatId)
@@ -4409,6 +4547,12 @@ export default function App() {
               onBackgroundGoalProviderWarningsRendered={onBackgroundGoalProviderWarningsRendered}
               onBackgroundGoalCatchUpDismiss={dismissBackgroundGoalCatchUp}
               onAnswerQuestion={answerRuntimeQuestion}
+              onReplyInChat={replyToAgentQuestionInComposer}
+              focusInput={Boolean(pendingReplyQuestionId)}
+              pendingReplyQuestionId={pendingReplyQuestionId}
+              onCancelReply={() => {
+                setPendingReplyQuestionId("");
+              }}
               onStopQuestionContinuation={stopRuntimeQuestionContinuation}
               conversationEndRef={conversationEndRef}
               onConversationMouseUp={handleConversationMouseUp}

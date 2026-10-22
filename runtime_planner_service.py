@@ -272,7 +272,7 @@ def planner_tool_input_schema(name: str, *, tool_block_ids: list[str] | None = N
         return bounded_planner_tool_schema(request_model.model_json_schema(by_alias=True))
     if name == "vrcforge_request_project_selection":
         return {"type": "object", "properties": {}, "required": [], "additionalProperties": False}
-    if name == "vrcforge_ask_user":
+    if name in {"vrcforge_ask_user", "vrcforge_call_user"}:
         from agent_question_service import QUESTION_INPUT_SCHEMA
         return deepcopy(QUESTION_INPUT_SCHEMA)
     from agent_tool_result_reader import INPUT_SCHEMA as result_reader_schema, TOOL_NAME as result_reader_tool
@@ -3876,7 +3876,7 @@ class RuntimePlannerService:
             if superseded_by:
                 fields.append("supersededBy=" + sanitize_planner_observation_text(superseded_by, None))
             tool_name = str(step.get("tool") or "").strip()
-            if tool_name == "vrcforge_ask_user" and isinstance(result, dict) and "answer" in result:
+            if tool_name in {"vrcforge_ask_user", "vrcforge_call_user"} and isinstance(result, dict) and "answer" in result:
                 fields.append("userAnswer=" + json.dumps({
                     "questionId": sanitize_planner_observation_text(result.get("questionId"), None),
                     # The answer is user-authored task input. Keep needed locators

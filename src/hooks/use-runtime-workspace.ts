@@ -19,6 +19,15 @@ import {
   refreshUnityReadiness,
 } from "../lib/api";
 import { isTauriRuntime } from "../lib/app-runtime";
+import {
+  isCallUserQuestion,
+  loadAgentQuestionNotificationIds,
+  markAgentQuestionNotificationDelivered,
+  normalizeAgentQuestionNotificationBody,
+  saveAgentQuestionNotificationIds,
+  shouldStartAgentQuestionNotification,
+  showAgentQuestionNotification,
+} from "../lib/agent-question-notifications";
 import { isProjectWorkbenchSmokeMode, markdownSmokeGoals, markdownSmokeMemories, markdownSmokeProgress, markdownSmokeRuns } from "../lib/markdown-smoke";
 import { normalizeProjectPathKey } from "../lib/project-path";
 
@@ -33,6 +42,7 @@ type UseRuntimeWorkspaceParams = {
   setBootstrap: Dispatch<SetStateAction<AppBootstrap | null>>;
   setAgentApprovals: Dispatch<SetStateAction<AgentApproval[] | null>>;
   setError: Dispatch<SetStateAction<string>>;
+  chatIdForSessionId?: (sessionId: string) => string;
 };
 
 export function useRuntimeWorkspace({
@@ -46,6 +56,7 @@ export function useRuntimeWorkspace({
   setBootstrap,
   setAgentApprovals,
   setError,
+  chatIdForSessionId,
 }: UseRuntimeWorkspaceParams) {
   const { t } = useTranslation();
   const [workspaceDiff, setWorkspaceDiff] = useState<WorkspaceDiffSummary | null>(null);
@@ -82,6 +93,55 @@ export function useRuntimeWorkspace({
     projectRoot: activeRuntimeProjectPath || "",
   });
   const runtimeSnapshotInFlightRef = useRef(new Map<string, Promise<DesktopRuntimeSnapshot>>());
+  const agentQuestionNotificationIdsRef = useRef<Set<string>>(loadAgentQuestionNotificationIds());
+  const agentQuestionNotificationInflightRef = useRef<Set<string>>(new Set());
+  const agentQuestionNotificationStatusRef = useRef(new Map<string, string>());
+
+  function notifyCallUserQuestions(questions: AgentQuestion[]) {
+    if (!isTauriRuntime()) return;
+    for (const question of questions) {
+      const questionId = String(question.questionId || "").trim();
+      if (!questionId) continue;
+      agentQuestionNotificationStatusRef.current.set(questionId, question.status || "");
+      if (question.status !== "pending") {
+        agentQuestionNotificationIdsRef.current.delete(questionId);
+      }
+    }
+    saveAgentQuestionNotificationIds(agentQuestionNotificationIdsRef.current);
+    const pending = questions.filter((question) => question.status === "pending" && isCallUserQuestion(question));
+    for (const question of pending) {
+      const questionId = String(question.questionId || "").trim();
+      if (!questionId) continue;
+      if (
+        !shouldStartAgentQuestionNotification(
+          questionId,
+          agentQuestionNotificationIdsRef.current,
+          agentQuestionNotificationInflightRef.current,
+        )
+      ) continue;
+      const chatId = chatIdForSessionId?.(String(question.sessionId || "").trim()) || "";
+      const notificationChatId = chatId || `question-${questionId.replace(/[^a-zA-Z0-9_-]+/g, "-").slice(0, 96)}`;
+      agentQuestionNotificationInflightRef.current.add(questionId);
+      void showAgentQuestionNotification({
+        questionId,
+        chatId: notificationChatId,
+        title: t("questionCard.label"),
+        body: normalizeAgentQuestionNotificationBody(question.question || question.header || questionId),
+      }).then(() => {
+        if (agentQuestionNotificationStatusRef.current.get(questionId) === "pending") {
+          markAgentQuestionNotificationDelivered(questionId, agentQuestionNotificationIdsRef.current);
+        } else {
+          agentQuestionNotificationIdsRef.current.delete(questionId);
+          saveAgentQuestionNotificationIds(agentQuestionNotificationIdsRef.current);
+        }
+      }).catch(() => {
+        agentQuestionNotificationIdsRef.current.delete(questionId);
+        saveAgentQuestionNotificationIds(agentQuestionNotificationIdsRef.current);
+      }).finally(() => {
+        agentQuestionNotificationInflightRef.current.delete(questionId);
+      });
+    }
+  }
 
   function clearScopedRuntimeProjection() {
     if (isProjectWorkbenchSmokeMode()) {
@@ -300,7 +360,22 @@ export function useRuntimeWorkspace({
       setDesktopBridge(snapshot.desktopBridge ?? null);
       setAgentGoals(snapshot.goals?.goals ?? []);
       setAgentProgress(snapshot.progress?.items ?? []);
-      setAgentQuestions(snapshot.questions?.questions ?? []);
+      const nextQuestions = snapshot.questions?.questions ?? [];
+      const scopedSessionId = requestSessionId.trim();
+      const normalizeScopedRoot = (value?: string) => normalizeProjectPathKey(value).replace(/[\\]+$/, "");
+      const scopedProjectRoot = normalizeScopedRoot(requestProjectRoot);
+      setAgentQuestions((current) => [
+        ...nextQuestions,
+        ...current.filter((question) => {
+          const questionSessionId = String(question.sessionId || "").trim();
+          const questionProjectRoot = normalizeScopedRoot(question.projectRoot);
+          return (scopedSessionId && questionSessionId !== scopedSessionId)
+            || (!scopedSessionId && questionSessionId)
+            || (scopedProjectRoot && questionProjectRoot !== scopedProjectRoot)
+            || (!scopedProjectRoot && questionProjectRoot);
+        }),
+      ].slice(0, 8));
+      notifyCallUserQuestions(nextQuestions);
       setAgentMemory(snapshot.memory?.memories ?? []);
       setMemoryReviewUnreadCount(Math.max(0, Number(snapshot.memoryReview?.unreadCount) || 0));
       setMemoryReviewNeedsAttention(snapshot.memoryReview?.needsAttention === true);
@@ -370,7 +445,11 @@ export function useRuntimeWorkspace({
     setAgentProgress((items) => [progress, ...items.filter((item) => item.progressId !== progress.progressId)].slice(0, 12));
   }
 
-  function upsertAgentQuestion(question: AgentQuestion) {
+  function upsertAgentQuestion(question: AgentQuestion, allowOutOfScope = false) {
+    if (allowOutOfScope) {
+      setAgentQuestions((items) => [question, ...items.filter((item) => item.questionId !== question.questionId)].slice(0, 8));
+      return;
+    }
     const scope = runtimeScopeRef.current;
     const scopedSessionId = scope.sessionId.trim();
     const questionSessionId = String(question.sessionId || "").trim();
@@ -430,6 +509,7 @@ export function useRuntimeWorkspace({
     upsertAgentGoal,
     upsertAgentProgress,
     upsertAgentQuestion,
+    notifyCallUserQuestions,
     updateAgentQuestionContinuation,
     upsertAgentMemory,
   };

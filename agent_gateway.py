@@ -1283,6 +1283,7 @@ class AgentGateway:
                 "vrcforge_delegate_subagent",
                 "vrcforge_vision_audit_multi",
                 "vrcforge_ask_user",
+                "vrcforge_call_user",
                 PROJECT_SELECTION_TOOL,
             }:
                 tool_params = dict(tool_params)
@@ -1601,6 +1602,43 @@ class AgentGateway:
             values["_runtimeClientTurnId"] = str(seed.get("clientTurnId") or "")
         return self.questions.create(values)
 
+    def call_user(self, params: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        """Create a scope-bound user checkpoint through the existing Question service.
+
+        ``vrcforge_ask_user`` remains the compatibility name.  This alias is
+        deliberately a method rather than a second state machine so internal
+        and external callers share persistence, answer gating, and replay.
+        Runtime continuation fields are accepted only through the same trusted
+        task-link authority as the legacy entry point.
+        """
+        values = dict(params or {})
+        external_authority = values.pop("_externalQuestionAuthority", None)
+        if external_authority is not None:
+            if not isinstance(external_authority, Mapping):
+                raise AgentGatewayError("External Question authority is invalid.", status_code=409)
+            trusted_session = str(external_authority.get("sessionId") or "").strip()
+            trusted_project = str(external_authority.get("projectRoot") or "").strip()
+            supplied_session = str(values.get("sessionId") or "").strip()
+            supplied_project = str(values.get("projectRoot") or values.get("projectPath") or "").strip()
+            if not trusted_session or not trusted_project:
+                raise AgentGatewayError("External Question authority is incomplete.", status_code=409)
+            if supplied_session and supplied_session != trusted_session:
+                raise AgentGatewayError("Question session does not match the authenticated MCP session.", status_code=409)
+            if supplied_project and os.path.normcase(os.path.abspath(supplied_project)) != os.path.normcase(os.path.abspath(trusted_project)):
+                raise AgentGatewayError("Question project does not match the authenticated MCP project.", status_code=409)
+            values["sessionId"] = trusted_session
+            values["projectRoot"] = trusted_project
+        values.setdefault("kind", "decision")
+        if values["kind"] == "visual_checkpoint" and not values.get("options") and not values.get("choices"):
+            values["options"] = [
+                {"id": "pass", "label": "Pass", "value": "pass"},
+                {"id": "fail", "label": "Fail", "value": "fail"},
+                {"id": "uncertain", "label": "Uncertain", "value": "uncertain"},
+                {"id": "later", "label": "Later", "value": "later"},
+            ]
+        values["sourceTool"] = "call_user"
+        return self.create_runtime_question(values)
+
     def request_runtime_project_selection(
         self,
         params: Mapping[str, Any] | None = None,
@@ -1657,6 +1695,18 @@ class AgentGateway:
                 result = self._dispatch_runtime_task_after_question(stable_id, task_seed, continuation_prompt)
                 if result is None:
                     raise AgentGatewayError("The Question has no resumable task context.", status_code=409)
+                if bool(task_seed.get("_authenticatedQuestionFeedbackPending")) and isinstance(result, Mapping):
+                    result = dict(result)
+                    result["status"] = "needs_user_action"
+                    result["completionGate"] = {"status": "needs_user_action", "reason": "visual_checkpoint_pending"}
+                    plan = dict(ensure_dict(result.get("plan")))
+                    plan["nextStep"] = "needs_user_action"
+                    plan["continueLoop"] = False
+                    plan["completionGate"] = dict(result["completionGate"])
+                    result["plan"] = plan
+                    task = dict(ensure_dict(result.get("task")))
+                    task["status"] = "needs_user_action"
+                    result["task"] = task
                 self.questions.record_runtime_continuation(stable_id, "delivered")
                 try:
                     self._runtime_turn_completed(result)
@@ -1669,9 +1719,19 @@ class AgentGateway:
                     summary="Your answer was saved, but the task continuation stopped. " + summarize_text(str(exc), 500),
                 )
             finally:
+                retry_queued_question = False
                 with self._lock:
                     self._question_continuations_inflight.discard(stable_id)
                     self._runtime_continuation_condition.notify_all()
+                    retry_queued_question = self._runtime_continuation_accepting
+                # If the user answered the same visual checkpoint while the
+                # prior provider turn was unwinding, its durable queued marker
+                # must be drained after this worker releases its ownership.
+                if retry_queued_question:
+                    try:
+                        self.questions.reconcile_runtime_continuation(stable_id)
+                    except Exception:  # noqa: BLE001 - durable marker remains for startup recovery.
+                        pass
         try:
             threading.Thread(target=run, name="vrcforge-question-continuation", daemon=True).start()
         except Exception:
@@ -1689,6 +1749,11 @@ class AgentGateway:
     ) -> Mapping[str, Any] | None:
         """Resume one foreground task through the existing planner continuation path."""
         seed = dict(task_seed or {})
+        feedback_pending = bool(seed.pop("_authenticatedQuestionFeedbackPending", False))
+        try:
+            feedback_revision = int(seed.pop("_questionFeedbackRevision", 0) or 0)
+        except (TypeError, ValueError):
+            feedback_revision = 0
         task_context = approval_task_context(seed, tool="vrcforge_ask_user", arguments=ensure_dict(seed.get("requestedArguments")))
         if task_context is None:
             return None
@@ -1711,8 +1776,19 @@ class AgentGateway:
         if prepared is None:
             return None
         params = ensure_dict(prepared.get("params"))
-        params["clientTurnId"] = (str(seed.get("clientTurnId") or "") + ":question:" + question_id)[:240]
+        client_turn_id = str(seed.get("clientTurnId") or "") + ":question:" + question_id
+        # Visual checkpoint feedback can be submitted more than once for the
+        # same durable Question.  Keep ordinary ask_user compatibility while
+        # giving each visual revision a distinct provider turn identity.
+        if feedback_revision > 0 and str(seed.get("_questionKind") or seed.get("requestedKind") or "") == "visual_checkpoint":
+            client_turn_id += ":feedback:" + str(feedback_revision)
+        params["clientTurnId"] = client_turn_id[:240]
         params["message"] = str(seed.get("objective") or "") + "\n" + continuation_prompt
+        if feedback_pending:
+            params["_questionFeedbackPending"] = True
+        authenticated_attachments = seed.pop("_authenticatedUserAttachments", None)
+        if isinstance(authenticated_attachments, list) and authenticated_attachments:
+            params["attachments"] = authenticated_attachments
         continuation = ensure_dict(prepared.get("taskContinuation"))
         continuation["source"] = "question_answered"
         authenticated_answer = str(seed.pop("_authenticatedUserAnswer", "") or "")
@@ -1726,6 +1802,8 @@ class AgentGateway:
                 "clientTurnId": str(seed.get("clientTurnId") or ""),
                 "projectRoot": str(seed.get("projectRoot") or ""),
             }
+        if isinstance(authenticated_attachments, list) and authenticated_attachments:
+            continuation["authenticatedQuestionAttachments"] = authenticated_attachments
         continuation["plannerObservation"] = {
             "tool": "vrcforge_ask_user", "kind": "skill", "status": "completed",
             "result": {"questionId": question_id, "answer": continuation_prompt},
@@ -3120,6 +3198,28 @@ class AgentGateway:
         params_summary = self._tool_params_audit(tool.name, params)
         user_constraints = self.read_user_constraints()
         tool_params = self._inject_user_constraints(params, tool, user_constraints)
+        if tool.name == "vrcforge_call_user":
+            question_project_bound = bool(tool_params.pop("_externalQuestionProjectBound", False))
+            if "_externalQuestionAuthority" in params:
+                # Session identity is minted by the authenticated execution target;
+                # callers cannot claim another session through ordinary arguments.
+                if "_externalQuestionAuthority" in params:
+                    raise AgentGatewayError(
+                        "External Question authority is server-owned.", status_code=400,
+                    )
+            verified_question_target = None
+            if params.get("executionTarget") is not None:
+                verified_question_target = self._validate_external_mcp_execution_target(tool.name, params)
+            elif not question_project_bound:
+                raise AgentGatewayError(
+                    "External call_user requires an authenticated project binding.",
+                    status_code=409,
+                    cause_code="external_project_binding_missing",
+                )
+            tool_params["_externalQuestionAuthority"] = {
+                "sessionId": self.execution_target_session_context(),
+                "projectRoot": str((verified_question_target or {}).get("projectRoot") or params.get("projectRoot") or ""),
+            }
         if tool.name in _EXTERNAL_GENERAL_READ_TOOLS:
             # General file reads are exposed to external MCP only with an
             # explicit caller-selected root.  The private authorization list
@@ -3577,6 +3677,19 @@ class AgentGateway:
                 status_code=409,
                 cause_code="prompt_skill_provenance_mismatch",
             ) from exc
+        external_question_project_bound = False
+        if name == "vrcforge_call_user":
+            if "_externalQuestionProjectBound" in arguments or "_externalQuestionAuthority" in arguments:
+                raise AgentGatewayError("External Question authority is server-owned.", status_code=400)
+            raw_project = str(arguments.get("projectRoot") or arguments.get("projectPath") or "").strip()
+            if raw_project:
+                try:
+                    project_key = command_safety.normalize_filesystem_path(raw_project)
+                except (OSError, ValueError):
+                    project_key = raw_project.casefold()
+                with self._lock:
+                    external_question_project_bound = project_key in self._external_mcp_project_paths
+            arguments["_externalQuestionProjectBound"] = external_question_project_bound
         self._guard_external_mcp_project_scope(name, arguments)
         write_handler = self._write_handlers.get(name)
         if write_handler is None:
@@ -7155,7 +7268,7 @@ class AgentGateway:
                         provider_usage=task_seed_provider_usage(),
                         continue_after_approval=bool(plan.get("continueLoop")),
                     )
-                if step_tool in {"vrcforge_ask_user", PROJECT_SELECTION_TOOL}:
+                if step_tool in {"vrcforge_ask_user", "vrcforge_call_user", PROJECT_SELECTION_TOOL}:
                     for key in ("_runtimeTaskLinkAuthority", "_taskSeed", "_runtimeTaskSeed", "_runtimeTaskId", "_runtimeSessionId", "_runtimeClientTurnId"):
                         step_params.pop(key, None)
                     step_params["sessionId"] = session_id
@@ -7164,7 +7277,7 @@ class AgentGateway:
                     if step_tool == PROJECT_SELECTION_TOOL:
                         step_params["chatId"] = chat_id
                         step_params["requestText"] = message
-                if step_tool in {"vrcforge_ask_user", PROJECT_SELECTION_TOOL} and not goal_delivery_id:
+                if step_tool in {"vrcforge_ask_user", "vrcforge_call_user", PROJECT_SELECTION_TOOL} and not goal_delivery_id:
                     step_params["_runtimeSessionId"] = session_id
                     step_params["_runtimeClientTurnId"] = client_turn_id
                     step_params["_taskSeed"] = runtime_approval_seed(
@@ -7180,7 +7293,7 @@ class AgentGateway:
                 if (
                     step_tool == "vrcforge_agent_desktop_action"
                     or step_tool.startswith("vrcforge_progress_")
-                    or step_tool in {"vrcforge_ask_user", PROJECT_SELECTION_TOOL}
+                    or step_tool in {"vrcforge_ask_user", "vrcforge_call_user", PROJECT_SELECTION_TOOL}
                     or step_tool in {
                         "vrcforge_list_internal_tool_blocks",
                         "vrcforge_load_internal_tool_block",
@@ -7335,7 +7448,7 @@ class AgentGateway:
                         arguments=requirement_arguments,
                     )
                 action_outcome = ensure_dict(step_payload.get("outcome"))
-                if step_tool in {"vrcforge_ask_user", PROJECT_SELECTION_TOOL} and str(
+                if step_tool in {"vrcforge_ask_user", "vrcforge_call_user", PROJECT_SELECTION_TOOL} and str(
                     action_outcome.get("status") or ""
                 ).strip() == "needs_user_action":
                     question_payload = ensure_dict(step_payload.get("result")).get("question")
@@ -7661,7 +7774,7 @@ class AgentGateway:
                     continue
                 requires_direct_user_input = bool(
                     step_waits_for_approval
-                    or step_tool in {"vrcforge_ask_user", PROJECT_SELECTION_TOOL}
+                    or step_tool in {"vrcforge_ask_user", "vrcforge_call_user", PROJECT_SELECTION_TOOL}
                 )
                 safe_failure_recovery = (
                     not requires_direct_user_input
@@ -8038,6 +8151,18 @@ class AgentGateway:
                 for field in ("reply", "summary"):
                     if isinstance(last_plan.get(field), str):
                         top_plan[field] = last_plan[field]
+        if params.get("_questionFeedbackPending") and isinstance(top_plan, dict):
+            # Keep the human visual checkpoint authoritative before public
+            # turn and runtime-ledger finalization.
+            top_plan["nextStep"] = "needs_user_action"
+            top_plan["continueLoop"] = False
+            top_plan["completionGate"] = {
+                "status": "needs_user_action",
+                "reason": "visual_checkpoint_pending",
+            }
+            task_snapshot = ensure_dict(top_plan.get("task"))
+            task_snapshot["status"] = "needs_user_action"
+            top_plan["task"] = task_snapshot
         native_turn.settle(top_plan)
 
         # Non-analyzed image state is rendered by the structured vision step.
@@ -10102,7 +10227,7 @@ def find_current_pending_question(steps: Any) -> dict[str, Any] | None:
     for step in reversed(steps):
         if not isinstance(step, dict) or bool(step.get("historical")):
             continue
-        if str(step.get("tool") or "") not in {"vrcforge_ask_user", PROJECT_SELECTION_TOOL}:
+        if str(step.get("tool") or "") not in {"vrcforge_ask_user", "vrcforge_call_user", PROJECT_SELECTION_TOOL}:
             continue
         if str(ensure_dict(step.get("outcome")).get("status") or "") != "needs_user_action":
             continue

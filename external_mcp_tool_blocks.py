@@ -64,6 +64,7 @@ EXTERNAL_MCP_READ_TOOL_BLOCKS: dict[str, frozenset[str]] = {
             "vrcforge_get_gameobject",
             "vrcforge_get_property",
             "vrcforge_inspect_skinned_mesh_deformation",
+            "vrcforge_call_user",
         }
     ),
     "project": frozenset(

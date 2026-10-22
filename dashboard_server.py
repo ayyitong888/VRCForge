@@ -3729,6 +3729,8 @@ async def app_answer_agent_question(question_id: str, request: AgentQuestionAnsw
             question_id,
             {
                 "answer": request.answer,
+                "resolution": request.resolution,
+                "attachments": request.attachments,
                 "value": request.value,
                 "optionId": request.option_id,
                 "selectedOptionId": request.selected_option_id,
@@ -9844,7 +9846,7 @@ async def call_agent_tool(tool_name: str, request: Request, tool_request: AgentT
     project_root = str(params.get("projectRoot") or params.get("project_root") or params.get("projectPath") or "")
     if tool_name.startswith("vrcforge_progress_"):
         await EVENT_BUS.broadcast("agentProgress", AGENT_GATEWAY.list_agent_progress(limit=30, session_id=session_id, project_root=project_root))
-    elif tool_name == "vrcforge_ask_user":
+    elif tool_name in {"vrcforge_ask_user", "vrcforge_call_user"}:
         await EVENT_BUS.broadcast("agentQuestions", AGENT_GATEWAY.questions.list(limit=30, session_id=session_id, project_root=project_root, include_answered=True))
     elif tool_name == "vrcforge_agent_desktop_action":
         await EVENT_BUS.broadcast("agentDesktopActions", AGENT_GATEWAY.desktop.list_desktop_actions(limit=30, session_id=session_id, project_root=project_root))
@@ -16477,6 +16479,7 @@ RUNTIME_PLANNER_GENERAL_AGENT_TOOLS = frozenset(
         "vrcforge_progress_delete",
         "vrcforge_ask_user",
         "vrcforge_request_project_selection",
+        "vrcforge_call_user",
         "vrcforge_delegate_subagent",
         "vrcforge_classify_shell",
         "vrcforge_execute_shell",
@@ -16503,6 +16506,7 @@ RUNTIME_PLANNER_CORE_AGENT_TOOLS = frozenset(
         "vrcforge_progress_delete",
         "vrcforge_ask_user",
         "vrcforge_request_project_selection",
+        "vrcforge_call_user",
         "vrcforge_delegate_subagent",
         "vrcforge_classify_shell",
         "vrcforge_execute_shell",
@@ -26972,6 +26976,12 @@ def register_agent_gateway_tools() -> None:
         "when-to-use: ask the user for a missing decision during the active Agent task; options may be omitted for a free text answer. when-NOT-to-use: do not use for ordinary conversation, hypothetical examples, or when the required decision is already known.",
         "plan/preview",
         AGENT_GATEWAY.create_runtime_question,
+    )
+    AGENT_GATEWAY.register_tool(
+        "vrcforge_call_user",
+        "when-to-use: request a specific human action or judgment that available tools cannot provide, such as visual acceptance or a genuine manual blocker. Use kind=visual_checkpoint for visual acceptance and offer pass, fail, uncertain, and later; only an explicit pass or fail resolves acceptance. Include the relevant view or location and preserve the current task for continuation. Consolidate related questions and reuse a pending request rather than repeatedly calling. when-NOT-to-use: do not request routine checks, progress acknowledgments, already granted approval, or work the Agent can complete with existing tools. Negative example: do not call after every tool or treat silence, a dismissed notification, or uncertainty as acceptance.",
+        "plan/preview",
+        AGENT_GATEWAY.call_user,
     )
     AGENT_GATEWAY.register_tool(
         "vrcforge_delegate_subagent",

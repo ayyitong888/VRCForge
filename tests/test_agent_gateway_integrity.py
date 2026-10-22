@@ -37,6 +37,44 @@ def _gateway(tmp_path: Path) -> AgentGateway:
     return AgentGateway(tmp_path / "config" / "agent_gateway.json", tmp_path / "audit")
 
 
+def test_call_user_binds_external_question_to_gateway_authority(tmp_path: Path) -> None:
+    gateway = _gateway(tmp_path)
+    captured: list[dict] = []
+    gateway.create_runtime_question = lambda params=None: captured.append(dict(params or {})) or {"ok": True}  # type: ignore[method-assign]
+
+    result = gateway.call_user({
+        "question": "Confirm the preview",
+        "sessionId": "trusted-session",
+        "projectRoot": str(tmp_path / "Project"),
+        "_externalQuestionAuthority": {
+            "sessionId": "trusted-session",
+            "projectRoot": str(tmp_path / "Project"),
+        },
+    })
+    assert result["ok"] is True
+    assert captured[0]["sessionId"] == "trusted-session"
+    assert captured[0]["kind"] == "decision"
+
+    visual = gateway.call_user({
+        "kind": "visual_checkpoint",
+        "question": "Confirm the screenshot",
+        "sessionId": "trusted-session",
+        "projectRoot": str(tmp_path / "Project"),
+    })
+    assert visual["ok"] is True
+    assert [item["id"] for item in captured[1]["options"]] == ["pass", "fail", "uncertain", "later"]
+
+    with pytest.raises(AgentGatewayError, match="does not match"):
+        gateway.call_user({
+            "question": "Confirm the preview",
+            "sessionId": "forged-session",
+            "_externalQuestionAuthority": {
+                "sessionId": "trusted-session",
+                "projectRoot": str(tmp_path / "Project"),
+            },
+        })
+
+
 def test_runtime_cancel_requests_only_matching_active_subagents(tmp_path: Path) -> None:
     gateway = _gateway(tmp_path)
     tasks = [

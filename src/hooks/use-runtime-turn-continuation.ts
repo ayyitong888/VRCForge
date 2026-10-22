@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef } from "react";
 import type { AgentQuestion, AgentRuntimeResponse, AgentRuntimeRun } from "../lib/api";
 import type { ChatThread, ConversationItem } from "../lib/chat-types";
 import type { AgentRuntimeDeltaEvent } from "../lib/chat-streaming";
-import { applyAgentRuntimeDeltaToStreamingItem } from "../lib/chat-streaming";
+import { applyAgentRuntimeDeltaToStreamingItem, elapsedSecondsFromTimeline } from "../lib/chat-streaming";
 
 const RUNTIME_TURN_EVENT_SCHEMA = "vrcforge.runtime_turn_event.v1";
 const RUNTIME_CONTINUATION_SOURCES = new Set(["approval_finished", "shell_process_finished", "sub_agent_finished", "question_answered", "foreground_completed", "foreground_interrupted"]);
@@ -436,25 +436,34 @@ export function useRuntimeTurnContinuationDelivery({
       }));
     }
     if (deliveryState === "replace-failed") {
+      const response = responseFromRuntimeTurnEvent(event);
+      const elapsedSeconds = elapsedSecondsFromTimeline(response.timeline);
       const replaced = updateChatRef.current?.(ownerChat.id, (chat) => ({
         ...chat,
         items: chat.items.map((item) => item.type === "agent"
           && ((event.clientTurnId?.trim() && item.response.clientTurnId === event.clientTurnId.trim())
             || (item.response.turnId || item.response.turn_id) === event.turnId)
-          ? { ...item, response: responseFromRuntimeTurnEvent(event), elapsedSeconds: 0 }
+          ? { ...item, response, ...(elapsedSeconds === undefined ? {} : { elapsedSeconds }) }
           : item),
       }));
       if (replaced) return true;
     }
     if (deliveryState === "append" || deliveryState === "replace-failed") {
+      const response = responseFromRuntimeTurnEvent(event);
+      const elapsedSeconds = elapsedSecondsFromTimeline(response.timeline);
+      const timeline = response.timeline || [];
+      const lastTimestamp = timeline
+        .map((entry) => entry.timestamp)
+        .filter((timestamp): timestamp is string => typeof timestamp === "string" && Number.isFinite(Date.parse(timestamp)))
+        .at(-1);
       appendToChatRef.current(ownerChat.id, {
         // Keep the app-owned identifier outside the bridge's secret-prefix
         // filter (the previous task- prefix contains sk-).
         id: `runtime-reply-${continuationId}`,
         type: "agent",
-        response: responseFromRuntimeTurnEvent(event),
-        elapsedSeconds: 0,
-        createdAt: new Date().toISOString(),
+        response,
+        ...(elapsedSeconds === undefined ? {} : { elapsedSeconds }),
+        createdAt: lastTimestamp || new Date().toISOString(),
       });
     }
     return true;

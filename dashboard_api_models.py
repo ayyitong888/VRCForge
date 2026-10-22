@@ -771,6 +771,8 @@ class AgentQuestionCreateRequest(BaseModel):
 
 class AgentQuestionAnswerRequest(BaseModel):
     answer: str = ""
+    resolution: Literal["", "pass", "fail", "uncertain", "later"] = ""
+    attachments: list[dict[str, Any]] = Field(default_factory=list)
     value: str = ""
     option_id: str = Field(default="", alias="optionId")
     selected_option_id: str = Field(default="", alias="selectedOptionId")

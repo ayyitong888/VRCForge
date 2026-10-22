@@ -23,6 +23,12 @@ import {
 import { buildChatStoragePatches } from "../lib/chat-storage-delta";
 import { chatStorageOriginId } from "../lib/chat-storage-origin";
 import {
+  loadChatSidebarCache,
+  removeChatFromSidebarCache,
+  saveChatSidebarCache,
+  type ChatSidebarCacheEntry,
+} from "../lib/chat-sidebar-cache";
+import {
   cacheChatContextUsageFast,
   cacheChatTimestampsFast,
   filterPersistableChats,
@@ -100,6 +106,8 @@ export function useChatSessions({
 }: UseChatSessionsParams) {
   const { i18n, t } = useTranslation();
   const [chats, setChats] = useState<ChatThread[]>(() => initialChatState.chats);
+  const [sidebarCacheEntries, setSidebarCacheEntries] = useState<ChatSidebarCacheEntry[]>(() => loadChatSidebarCache());
+  const [chatStorageLoadSucceeded, setChatStorageLoadSucceeded] = useState(false);
   const [chatStorageReady, setChatStorageReady] = useState(false);
   const [activeChatId, setActiveChatId] = useState(() => initialChatState.activeChatId);
   const [chatMenu, setChatMenu] = useState<{ chatId: string; x: number; y: number } | null>(null);
@@ -139,12 +147,22 @@ export function useChatSessions({
   const chatStorageConflictRef = useRef(false);
   const chatStorageRecoveryBlockedRef = useRef(false);
   const chatDeletedIdsRef = useRef<Set<string>>(new Set());
+  const pendingCachedDeletesRef = useRef(new Set<string>());
   const chatSidebarActivityCacheRef = useRef(new WeakMap<ChatThread, SidebarChatActivity | null>());
 
   const activeChat = chats.find((chat) => chat.id === activeChatId) || null;
+  const sidebarChats = useMemo<ChatThread[]>(() => {
+    if (chatStorageLoadSucceeded || sidebarCacheEntries.length === 0) return chats;
+    const authoritativeIds = new Set(chats.map((chat) => chat.id));
+    const cached = sidebarCacheEntries
+      .filter((entry) => !authoritativeIds.has(entry.id))
+      .map((entry) => ({ ...entry, items: [] }));
+    return [...chats, ...cached];
+  }, [chatStorageLoadSucceeded, chats, sidebarCacheEntries]);
+
   const chatSidebarBase = useMemo(() => {
     const activityByChat = new Map<string, SidebarChatActivity>();
-    for (const chat of chats) {
+    for (const chat of sidebarChats) {
       if (!chatSidebarActivityCacheRef.current.has(chat)) {
         chatSidebarActivityCacheRef.current.set(chat, chatSidebarActivity(chat) || null);
       }
@@ -154,14 +172,14 @@ export function useChatSessions({
       }
     }
     return {
-      ...groupSidebarChats(chats, normalizeProjectPathKey),
+      ...groupSidebarChats(sidebarChats, normalizeProjectPathKey),
       activityByChat,
     };
-  }, [chats, i18n.language]);
+  }, [i18n.language, sidebarChats]);
   const chatSidebarTimes = useMemo(() => {
     const nowMs = Date.now();
-    return new Map(chats.map((chat) => [chat.id, formatChatSidebarTime(chat, nowMs, i18n.language)] as const));
-  }, [activeChatId, activeView, chats, i18n.language]);
+    return new Map(sidebarChats.map((chat) => [chat.id, formatChatSidebarTime(chat, nowMs, i18n.language)] as const));
+  }, [activeChatId, activeView, i18n.language, sidebarChats]);
   const chatSidebar = useMemo(() => {
     const visibleChatId = activeView === "chat" ? activeChatId : "";
     let activityByChat = chatSidebarBase.activityByChat;
@@ -179,6 +197,26 @@ export function useChatSessions({
     if (!chat || !marker || chat.lastViewedAt === marker) return;
     updateChat(activeChatId, (current) => ({ ...current, lastViewedAt: marker }));
   }, [activeChatId, activeView, chats]);
+
+  useEffect(() => {
+    if (chatStorageLoadSucceeded) {
+      saveChatSidebarCache(chats);
+      setSidebarCacheEntries(chats.map(({ id, sessionId, title, projectPath, projectType, pinned, archived, createdAt, updatedAt, lastViewedAt }) => ({
+        id, sessionId, title, projectPath, projectType, pinned, archived, createdAt, updatedAt, lastViewedAt,
+      })));
+      return;
+    }
+    if (chats.length > 0) {
+      const byId = new Map(sidebarCacheEntries.map((entry) => [entry.id, entry]));
+      for (const chat of chats) {
+        const { id, sessionId, title, projectPath, projectType, pinned, archived, createdAt, updatedAt, lastViewedAt } = chat;
+        byId.set(id, { id, sessionId, title, projectPath, projectType, pinned, archived, createdAt, updatedAt, lastViewedAt });
+      }
+      const merged = [...byId.values()];
+      saveChatSidebarCache(merged.map((entry) => ({ ...entry, items: [] } as ChatThread)));
+      setSidebarCacheEntries(merged);
+    }
+  }, [chatStorageLoadSucceeded, chats]);
 
   useEffect(() => {
     chatRestoreMountedRef.current = true;
@@ -380,6 +418,12 @@ export function useChatSessions({
     chatServerMetadataShapesRef.current = remoteShapes;
     chatsRef.current = reconciled.chats;
     setChats(reconciled.chats);
+    for (const chatId of pendingCachedDeletesRef.current) {
+      if (reconciled.chats.some((chat) => chat.id === chatId)) {
+        pendingCachedDeletesRef.current.delete(chatId);
+        void deleteChatPermanently(chatId);
+      }
+    }
     chatPersistenceBlockedRef.current = false;
     chatStorageRecoveryBlockedRef.current = false;
     setChatPersistenceBlocked(false);
@@ -482,6 +526,7 @@ export function useChatSessions({
     chatRestoreIntentKeyRef.current = restoreRequestKey;
     chatRestoreInFlightKeysRef.current.add(restoreRequestKey);
     chatsLoadedRef.current = false;
+    setChatStorageLoadSucceeded(false);
     setChatStorageReady(false);
     restoredChatRequestKeyRef.current = restoreRequestKey;
     const isCurrentRestore = () => (
@@ -503,6 +548,7 @@ export function useChatSessions({
           return;
         }
         chatsLoadedRef.current = true;
+        setChatStorageLoadSucceeded(true);
         setChatStorageReady(true);
         if (outcome.chats.length > 0) {
           const initialSaveVersion = chatsSaveVersionRef.current;
@@ -864,14 +910,22 @@ export function useChatSessions({
     setRenameDraft("");
   }
 
-  function deleteChatPermanently(chatId: string) {
+  async function deleteChatPermanently(chatId: string) {
     const removedSnapshot = chatsRef.current.find((chat) => chat.id === chatId) || null;
+    if (!removedSnapshot) {
+      // A cached row has no authoritative transcript yet. Keep it visible and
+      // replay the normal delete only after the restore supplies the real chat.
+      pendingCachedDeletesRef.current.add(chatId);
+      return;
+    }
     const removedIndex = removedSnapshot ? chatsRef.current.indexOf(removedSnapshot) : -1;
     chatDeletedIdsRef.current.add(chatId);
     markChatsDirty();
     const next = chatsRef.current.filter((chat) => chat.id !== chatId);
     chatsRef.current = next;
     setChats(next);
+    setSidebarCacheEntries((current) => current.filter((entry) => entry.id !== chatId));
+    removeChatFromSidebarCache(chatId);
     if (activeChatId === chatId) {
       setActiveChatId("");
     }
@@ -881,24 +935,26 @@ export function useChatSessions({
     // the agent run (chat.sessionId), not by the client chat id. A chat that
     // never ran has no runtime session and no native history to discard.
     const runtimeSessionId = String(removedSnapshot?.sessionId || "").trim();
-    if (runtimeSessionId) {
-      void deleteChatPermanentlyApi(endpoint, runtimeSessionId)
-        .then((result) => {
-          if (result.ok !== true) {
-            throw new ApiError(t("chat.deletePermanentlyFailed"), 0);
-          }
-        })
-        .catch((cause: unknown) => {
-          if (removedSnapshot && removedIndex >= 0 && !chatsRef.current.some((chat) => chat.id === chatId)) {
-            chatDeletedIdsRef.current.delete(chatId);
-            const restored = [...chatsRef.current];
-            restored.splice(Math.min(removedIndex, restored.length), 0, removedSnapshot);
-            chatsRef.current = restored;
-            setChats(restored);
-            markChatsDirty();
-          }
-          setError(chatSaveErrorMessage(cause, t("chat.deletePermanentlyFailed")));
-        });
+    try {
+      if (runtimeSessionId) {
+        const result = await deleteChatPermanentlyApi(endpoint, runtimeSessionId);
+        if (result.ok !== true) throw new ApiError(t("chat.deletePermanentlyFailed"), 0);
+      }
+      await persistChatsNow();
+    } catch (cause: unknown) {
+      if (removedSnapshot && removedIndex >= 0 && !chatsRef.current.some((chat) => chat.id === chatId)) {
+        chatDeletedIdsRef.current.delete(chatId);
+        const restored = [...chatsRef.current];
+        restored.splice(Math.min(removedIndex, restored.length), 0, removedSnapshot);
+        chatsRef.current = restored;
+        setChats(restored);
+        saveChatSidebarCache(restored);
+        setSidebarCacheEntries(restored.map(({ id, sessionId, title, projectPath, projectType, pinned, archived, createdAt, updatedAt, lastViewedAt }) => ({
+          id, sessionId, title, projectPath, projectType, pinned, archived, createdAt, updatedAt, lastViewedAt,
+        })));
+        markChatsDirty();
+      }
+      setError(chatSaveErrorMessage(cause, t("chat.deletePermanentlyFailed")));
     }
   }
 

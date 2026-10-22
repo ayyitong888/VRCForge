@@ -127,6 +127,16 @@ export function elapsedSecondsSince(startedAt: string | undefined, nowMs = Date.
   return Math.max(0, Math.round((nowMs - startedMs) / 1000));
 }
 
+/** Derive a durable turn duration from public runtime event timestamps. */
+export function elapsedSecondsFromTimeline(events: Array<{ timestamp?: string }> | undefined): number | undefined {
+  const times = (events || []).map((event) => typeof event.timestamp === "string" ? Date.parse(event.timestamp) : Number.NaN).filter(Number.isFinite);
+  if (!times.length) return undefined;
+  const start = Math.min(...times);
+  const end = Math.max(...times);
+  if (end <= start) return undefined;
+  return Math.max(0, Math.round((end - start) / 1000));
+}
+
 /**
  * Apply one bounded Runtime delta to its owning transient Agent card.
  * Provider reasoning never enters this projection. Same-id events update in

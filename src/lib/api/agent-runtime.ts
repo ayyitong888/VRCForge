@@ -855,7 +855,7 @@ export async function createAgentQuestion(
 export async function answerAgentQuestion(
   endpoint: string,
   questionId: string,
-  payload: { answer?: string; value?: string; optionId?: string; selectedOptionId?: string; sessionId?: string; projectRoot?: string },
+  payload: { answer?: string; value?: string; optionId?: string; selectedOptionId?: string; attachments?: AgentMessageAttachment[]; sessionId?: string; projectRoot?: string },
 ): Promise<{ ok: boolean; question: AgentQuestion; runtimeContinuation?: AgentRuntimeContinuation }> {
   if (hasTauriInternals()) {
     return invokeTauriWithAbort("answer_agent_question", {

@@ -1035,6 +1035,9 @@ export type AgentQuestion = {
   schema?: string;
   id?: string;
   questionId: string;
+  kind?: string;
+  sourceTool?: string;
+  tool?: string;
   header?: string;
   question?: string;
   options?: AgentQuestionOption[];

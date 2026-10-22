@@ -625,17 +625,17 @@ class AgentRuntimeRunLedger:
         # A live ask-user boundary is the current turn terminal even when an
         # earlier diagnostic/write step in the same turn failed.  Keep this
         # narrow: only the explicit question_pending plan reason and a real
-        # questionId from vrcforge_ask_user qualify; generic needs_user_action
+        # questionId from either user-question tool qualifies; generic needs_user_action
         # receipts (scope denial, failed verification, etc.) remain terminal
         # failures/blocked outcomes below.
         question_boundary = (
             str(top_plan.get("nextStep") or "").strip() == "needs_user_action"
             and str(_ensure_dict(top_plan.get("completionGate")).get("reason") or "").strip()
-            == "question_pending"
+            in {"question_pending", "visual_checkpoint_pending"}
         )
         question_payload = _ensure_dict(skill_payload)
         question_id = ""
-        if question_boundary and question_payload.get("tool") == "vrcforge_ask_user":
+        if question_boundary and question_payload.get("tool") in {"vrcforge_ask_user", "vrcforge_call_user"}:
             for candidate in (
                 _ensure_dict(question_payload.get("result")).get("question"),
                 question_payload.get("outcome"),
