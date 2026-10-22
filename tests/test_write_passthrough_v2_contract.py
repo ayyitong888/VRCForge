@@ -64,13 +64,19 @@ def test_add_modular_avatar_component_reports_memory_state_without_adding_saveas
     source = (ROOT / "Assets/VRCForge/Editor/MAComponentWriter.cs").read_text(
         encoding="utf-8"
     )
-    write_index = source.index("var component = Undo.AddComponent")
+    write_index = source.index("Undo.AddComponent(target, componentType)")
     readback_index = source.index("var after = DescribeComponents(target, componentType);", write_index)
     assert write_index < readback_index
     assert "AssetDatabase.SaveAssets();" not in source
     assert "var before = DescribeComponents(target, componentType);" in source
     assert "before," in source
     assert "after," in source
+    assert "action must be 'add' or 'update'." in source
+    assert "action=update requires an integer componentIndex." in source
+    assert "expectedComponentGlobalObjectId" in source
+    assert "GlobalObjectId.GetGlobalObjectIdSlow(existingComponent)" in source
+    assert "action=update cannot be combined with allowDuplicate=true." in source
+    assert "action=update requires at least one field or reference assignment." in source
     assert "pending = !sceneSaved" in source
     assert 'note = sceneSaved ? "已修改并落盘" : "已修改，尚未落盘"' in source
 

@@ -80,7 +80,7 @@ def _run(root, tool, arguments, *, fresh=None, plan=_plan, prepared=None):
     return result, observed
 
 
-def _installation(root):
+def _installation(root, *, unpack=False):
     target = _target(root)
     owner = {"globalObjectId":"avatar-id", "gameObjectPath":"Avatar",
              "scenePath":"Assets/Main.unity", "children":[]}
@@ -93,20 +93,28 @@ def _installation(root):
             "expectedPrefabGuid":asset["guid"], "expectedAssetDependencyHash":asset["dependencyHash"],
             "expectedScenePath":"Assets/Main.unity", "expectedParentGlobalObjectId":"avatar-id",
             "expectedResultPath":"Avatar/Outfit", "preview":False,
-            "approvedObjectReceiptNonce":nonce, "approvedContinuationTools":["vrc_setup_outfit"],
+            "approvedObjectReceiptNonce":nonce,
+            "approvedContinuationTools":(["vrc_unpack_prefab", "vrc_setup_outfit"] if unpack else ["vrc_setup_outfit"]),
         }),
-        ("vrc_setup_outfit", {"projectPath":str(root), "avatarPath":"Avatar", "outfitPath":"Avatar/Outfit",
-            "confirmSetup":True, "saveScene":True, "approvedObjectReceiptNonce":nonce}),
     ]
+    if unpack:
+        calls.append(("vrc_unpack_prefab", {
+            "projectPath":str(root), "gameObjectPath":"Avatar/Outfit",
+            "expectedPrefabGuid":asset["guid"], "expectedAssetDependencyHash":asset["dependencyHash"],
+            "expectedScenePath":"Assets/Main.unity", "mode":"completely", "preview":False,
+            "approvedObjectReceiptNonce":nonce,
+        }))
+    calls.append(("vrc_setup_outfit", {"projectPath":str(root), "avatarPath":"Avatar", "outfitPath":"Avatar/Outfit",
+        "confirmSetup":True, "saveScene":True, "approvedObjectReceiptNonce":nonce}))
     evidence = {"schema":"vrcforge.prepared-add-outfit.v1", "projectIdentity":{"projectPath":str(root)},
         "readFacts":{"asset":asset,"avatar":deepcopy(owner),"parent":deepcopy(owner),"outfitPath":"Avatar/Outfit"},
-        "manageWardrobe":False, "setupOutfit":True, "unpackPrefab":False, "outfitName":"Outfit"}
+        "manageWardrobe":False, "setupOutfit":True, "unpackPrefab":unpack, "outfitName":"Outfit"}
     return target, calls, evidence
 
 
-def _run_installation(root, monkeypatch, *, mutate=None, drift=False):
+def _run_installation(root, monkeypatch, *, mutate=None, drift=False, unpack=False):
     import dashboard_server as dashboard
-    target, calls, evidence = _installation(root)
+    target, calls, evidence = _installation(root, unpack=unpack)
     if mutate is not None:
         mutate(calls,evidence)
     args = install_prepared_calls({"executionTarget":target,"_checkpointTargetTool":"vrcforge_add_outfit"},calls,evidence)
@@ -124,6 +132,70 @@ def test_sealed_install_then_setup_prepares_only_exact_scene(scene_case,monkeypa
     assert result["ok"] is True,result
     assert result["archiveAssetPaths"] == ["Assets/Main.unity"]
     assert observed == [{"checkpoint_files":["Assets/Main.unity"]}]
+
+
+def test_sealed_install_unpack_completely_then_setup_prepares_only_exact_scene(scene_case,monkeypatch):
+    import dashboard_server as dashboard
+    target,calls,evidence = _installation(scene_case,unpack=True)
+    args = install_prepared_calls({"executionTarget":target,"_checkpointTargetTool":"vrcforge_add_outfit"},calls,evidence)
+    seal = deepcopy(args["_vrcforge_prepared_unity_execution"])
+    observed = []
+    monkeypatch.setattr(dashboard,"list_execution_targets_sync",lambda _query:{"ok":True,"targets":[deepcopy(target)]})
+    monkeypatch.setattr(dashboard,"prepare_unity_checkpoint_sync",lambda _root,**kw:observed.append(kw) or {"ok":True})
+    result = dashboard.prepare_authoritative_unity_checkpoint_sync(scene_case,args)
+    assert result["ok"] is True,result
+    assert result["archiveAssetPaths"] == ["Assets/Main.unity"]
+    assert observed == [{"checkpoint_files":["Assets/Main.unity"]}]
+    assert args["_vrcforge_prepared_unity_execution"] == seal
+
+
+def test_original_failed_add_outfit_preview_plan_now_prepares_checkpoint(scene_case,monkeypatch):
+    import dashboard_server as dashboard
+    # Replay the failed preview structure with anonymized asset identities.
+    target,calls,evidence = _installation(scene_case,unpack=True)
+    avatar_path = "AcceptanceAvatar"
+    outfit_path = avatar_path + "/Sample_Outfit"
+    asset_path = "Assets/Outfits/Sample Outfit/Prefab/Avatar/Variant)Body/Color 1.prefab"
+    asset_guid = "11111111111111111111111111111111"
+    dependency_hash = "22222222222222222222222222222222"
+    target["avatar"]["exactHierarchyPath"] = avatar_path
+    owner = evidence["readFacts"]["avatar"]
+    owner.update(gameObjectPath=avatar_path, exactHierarchyPath=avatar_path)
+    parent = evidence["readFacts"]["parent"]
+    parent.update(gameObjectPath=avatar_path, globalObjectId=owner["globalObjectId"], scenePath="Assets/Main.unity")
+    facts = evidence["readFacts"]
+    facts["asset"].update(assetPath=asset_path, guid=asset_guid, dependencyHash=dependency_hash)
+    facts["outfitPath"] = outfit_path
+    evidence["outfitName"] = "Sample_Outfit"
+    instantiate,unpack_call,setup = (call[1] for call in calls)
+    instantiate.update(assetPath=asset_path, guid=asset_guid, expectedPrefabGuid=asset_guid,
+        expectedAssetDependencyHash=dependency_hash, parentPath=avatar_path, name="Sample_Outfit",
+        expectedParentGlobalObjectId=owner["globalObjectId"], expectedResultPath=outfit_path)
+    unpack_call.update(gameObjectPath=outfit_path, expectedPrefabGuid=asset_guid,
+        expectedAssetDependencyHash=dependency_hash)
+    setup.update(avatarPath=avatar_path, outfitPath=outfit_path)
+    args = install_prepared_calls({"executionTarget":target,"_checkpointTargetTool":"vrcforge_add_outfit"},calls,evidence)
+    observed = []
+    monkeypatch.setattr(dashboard,"list_execution_targets_sync",lambda _query:{"ok":True,"targets":[deepcopy(target)]})
+    monkeypatch.setattr(dashboard,"prepare_unity_checkpoint_sync",lambda _root,**kw:observed.append(kw) or {"ok":True})
+    result = dashboard.prepare_authoritative_unity_checkpoint_sync(scene_case,args)
+    assert result["ok"] is True,result
+    assert result["archiveAssetPaths"] == ["Assets/Main.unity"]
+    assert observed == [{"checkpoint_files":["Assets/Main.unity"]}]
+
+
+@pytest.mark.parametrize("mutate",[
+    lambda calls,evidence:calls[1][1].update(expectedScenePath="Assets/Other.unity"),
+    lambda calls,evidence:calls[1][1].update(expectedPrefabGuid="e"*32),
+    lambda calls,evidence:calls[1][1].update(gameObjectPath="Avatar/Other"),
+    lambda calls,evidence:calls[1][1].update(approvedObjectReceiptNonce="e"*64),
+    lambda calls,evidence:calls[0][1].update(approvedContinuationTools=["vrc_setup_outfit"]),
+    lambda calls,evidence:evidence["readFacts"]["parent"].update(globalObjectId="other-parent"),
+])
+def test_unpack_installation_rejects_frozen_identity_or_nonce_drift(scene_case,monkeypatch,mutate):
+    result,observed = _run_installation(scene_case,monkeypatch,mutate=mutate,unpack=True)
+    assert result["ok"] is False and result["mutationStarted"] is False
+    assert observed == []
 
 
 @pytest.mark.parametrize("mutate",[
@@ -157,7 +229,7 @@ def test_installation_checkpoint_archive_does_not_fall_back_to_whole_project(sce
         (scene_case/folder).mkdir()
     (scene_case/"Assets/Main.unity.meta").write_text("guid: "+"a"*32)
     (scene_case/"Assets/Unrelated.txt").write_text("keep unrelated file")
-    target,calls,evidence = _installation(scene_case)
+    target,calls,evidence = _installation(scene_case,unpack=True)
     sealed = install_prepared_calls({"projectPath":str(scene_case),"executionTarget":target},calls,evidence)
     gateway = AgentGateway(scene_case.parent/"app/config.json",scene_case.parent/"app/audit")
     service = gateway.approval_transactions
@@ -445,3 +517,25 @@ def test_visibility_rejects_object_outside_bound_avatar(scene_case):
         "executionTarget": target, "gameObjectPath": "Other/Outfit", "active": False,
     })
     assert result.get("ok") is False and observed == []
+
+
+@pytest.mark.parametrize("unpack,setup", [(False,False),(True,False),(False,True),(True,True)])
+def test_optional_scene_only_installation_steps_are_checkpointable(scene_case,monkeypatch,unpack,setup):
+    from unity_scene_workflow_checkpoint import prepare_add_outfit_checkpoint
+    target,calls,evidence = _installation(scene_case,unpack=unpack)
+    if not setup:
+        calls.pop()
+        evidence["setupOutfit"] = False
+        if unpack:
+            calls[0][1]["approvedContinuationTools"] = ["vrc_unpack_prefab"]
+        else:
+            calls[0][1].pop("approvedObjectReceiptNonce")
+            calls[0][1].pop("approvedContinuationTools")
+    args = install_prepared_calls({"executionTarget":target},calls,evidence)
+    observed=[]
+    result = prepare_add_outfit_checkpoint(scene_case,args,
+        discover=lambda _query:{"ok":True,"targets":[deepcopy(target)]},
+        prepare=lambda _root,**kw:observed.append(kw) or {"ok":True})
+    assert result["ok"] is True,result
+    assert result["archiveAssetPaths"] == ["Assets/Main.unity"]
+    assert observed == [{"checkpoint_files":["Assets/Main.unity"]}]

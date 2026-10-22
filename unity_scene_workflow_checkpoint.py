@@ -12,22 +12,32 @@ _CORE_TOOLS = {
     "vrcforge_unpack_prefab": "vrc_unpack_prefab",
     "vrcforge_create_gameobject": "vrc_create_gameobject",
     "vrcforge_set_gameobject_active": "vrc_set_gameobject_active",
+    "vrcforge_add_modular_avatar_component": "vrc_add_modular_avatar_component",
+    "vrcforge_create_component_feature": "vrc_create_component_feature",
 }
 
 
 def prepare_add_outfit_checkpoint(project_root: Path, arguments: dict[str, Any], *, discover, prepare) -> dict[str, Any]:
-    """Bind a sealed instantiate+setup installation to its one saved scene."""
+    """Bind a sealed scene-only Add Outfit installation to its one saved scene."""
     def reject(message):
         return {"ok": False, "blocking": True, "code": "checkpoint_scope_unresolved",
                 "error": message, "mutationStarted": False, "saved": False}
     try:
         evidence = prepared_evidence(arguments)
         calls = build_prepared_execution_plan(arguments)
+        unpack = evidence.get("unpackPrefab") is True
+        setup = evidence.get("setupOutfit") is True
+        continuation_tools = []
+        if unpack:
+            continuation_tools.append("vrc_unpack_prefab")
+        if setup:
+            continuation_tools.append("vrc_setup_outfit")
+        expected_tools = ["vrc_instantiate_prefab", *continuation_tools]
         if (evidence.get("schema") != "vrcforge.prepared-add-outfit.v1"
                 or evidence.get("manageWardrobe") is not False
-                or evidence.get("setupOutfit") is not True
-                or evidence.get("unpackPrefab") is not False
-                or [call[0] for call in calls] != ["vrc_instantiate_prefab", "vrc_setup_outfit"]):
+                or type(evidence.get("setupOutfit")) is not bool
+                or type(evidence.get("unpackPrefab")) is not bool
+                or [call[0] for call in calls] != expected_tools):
             raise ValueError("This Add Outfit plan has no proven scene-only installation footprint.")
         target = arguments["executionTarget"]
         avatar = target["avatar"]
@@ -51,25 +61,42 @@ def prepare_add_outfit_checkpoint(project_root: Path, arguments: dict[str, Any],
                 or any(len(asset[key]) != 32 or any(c not in "0123456789abcdef" for c in asset[key])
                        for key in ("guid", "dependencyHash"))):
             raise ValueError("The sealed installation identity differs from its bound scene owner.")
-        instantiate, setup = calls[0][1], calls[1][1]
+        instantiate = calls[0][1]
         nonce = instantiate.get("approvedObjectReceiptNonce")
-        if not isinstance(nonce, str) or len(nonce) != 64 or any(c not in "0123456789abcdef" for c in nonce):
+        if continuation_tools and (not isinstance(nonce, str) or len(nonce) != 64
+                                   or any(c not in "0123456789abcdef" for c in nonce)):
             raise ValueError("The installation has no exact approved continuation nonce.")
         project = evidence["projectIdentity"]["projectPath"]
-        if type(instantiate.get("worldPositionStays")) is not bool or instantiate != {
+        expected_instantiate = {
             "projectPath": project, "assetPath": asset["assetPath"], "guid": asset["guid"],
             "parentPath": parent["gameObjectPath"], "name": name,
             "worldPositionStays": instantiate["worldPositionStays"],
             "expectedPrefabGuid": asset["guid"], "expectedAssetDependencyHash": asset["dependencyHash"],
             "expectedScenePath": scene["assetPath"], "expectedParentGlobalObjectId": parent["globalObjectId"],
             "expectedResultPath": facts["outfitPath"], "preview": False,
-            "approvedObjectReceiptNonce": nonce, "approvedContinuationTools": ["vrc_setup_outfit"],
-        } or setup != {
+        }
+        if continuation_tools:
+            expected_instantiate.update(approvedObjectReceiptNonce=nonce,
+                                        approvedContinuationTools=continuation_tools)
+        if type(instantiate.get("worldPositionStays")) is not bool or instantiate != expected_instantiate:
+            raise ValueError("The sealed installation calls do not match their exact scene-only effects.")
+        if setup and calls[-1][1] != {
             "projectPath": project, "avatarPath": owner["gameObjectPath"],
             "outfitPath": facts["outfitPath"], "confirmSetup": True, "saveScene": True,
             "approvedObjectReceiptNonce": nonce,
         }:
             raise ValueError("The sealed installation calls do not match their exact scene-only effects.")
+        if unpack:
+            unpack_tool, unpack_request = calls[1]
+            if unpack_tool != "vrc_unpack_prefab" or unpack_request != {
+                "projectPath": project, "gameObjectPath": facts["outfitPath"],
+                "expectedPrefabGuid": asset["guid"],
+                "expectedAssetDependencyHash": asset["dependencyHash"],
+                "expectedScenePath": scene["assetPath"],
+                "mode": unpack_request.get("mode"), "preview": False,
+                "approvedObjectReceiptNonce": nonce,
+            } or unpack_request.get("mode") not in {"outermost", "completely"}:
+                raise ValueError("The sealed unpack call does not continue the exact instantiated prefab in its bound scene.")
     except (KeyError, TypeError, ValueError, RuntimeError, OSError) as exc:
         return reject(str(exc))
     result = prepare_scene_workflow_checkpoint(
@@ -179,6 +206,17 @@ def prepare_scene_workflow_checkpoint(
     ):
         return reject("The approved workflow must contain exactly one matching Core scene call.")
     request = calls[0][1]
+    if checkpoint_target == "vrcforge_create_component_feature":
+        try:
+            expected_project = Path(str(request.get("expectedProjectPath") or "")).resolve()
+        except (OSError, RuntimeError, ValueError):
+            expected_project = None
+        if (scope not in {"object", "component"}
+                or request.get("scenePath") != scene_path
+                or request.get("expectedSceneGuid") != scene.get("guid")
+                or request.get("expectedHostObjectId") != obj.get("globalObjectId")
+                or expected_project != project_root.resolve()):
+            return reject("The frozen component feature call does not match its exact scene, project, and host identities.")
     selector_error = _selector_error(checkpoint_target, request, scope, avatar, obj)
     if selector_error:
         return reject(selector_error)
@@ -233,6 +271,23 @@ def _selector_error(
 ) -> str:
     avatar_path = _hierarchy_path(avatar.get("exactHierarchyPath"))
     object_path = _hierarchy_path(obj.get("exactHierarchyPath"))
+    if checkpoint_target == "vrcforge_add_modular_avatar_component":
+        if (scope not in {"object", "component"}
+                or not object_path or request.get("gameObjectPath") != object_path
+                or not avatar_path or not (object_path == avatar_path or object_path.startswith(avatar_path + "/"))
+                or request.get("avatarPath", avatar_path) != avatar_path
+                or request.get("preview") is not False
+                or type(request.get("saveScene")) is not bool):
+            return "Modular Avatar configuration must select the exact freshly bound Avatar object."
+        return ""
+    if checkpoint_target == "vrcforge_create_component_feature":
+        if (scope not in {"object", "component"}
+                or not object_path
+                or request.get("gameObjectPath") != object_path
+                or request.get("preview") is not False
+                or request.get("saveScene") is not True):
+            return "Component feature creation must select the exact bound host in one saved scene."
+        return ""
     if checkpoint_target == "vrcforge_set_gameobject_active":
         if (scope not in {"object", "component"}
                 or not object_path or request.get("gameObjectPath") != object_path

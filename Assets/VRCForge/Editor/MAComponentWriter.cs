@@ -19,12 +19,12 @@ namespace VRCForge.Editor
     //   - sets scalar/enum/string fields by name.
     // Friendly type aliases (MergeArmature, BoneProxy, MenuInstaller, MergeAnimator,
     // Parameters) map to nadena.dev.modular_avatar.core.* ; a fully-qualified type
-    // name is also accepted. Add-only by default (won't duplicate an existing MA
-    // component of the same type unless allowDuplicate=true). Undo-registered.
+    // name is also accepted. Add is the default; update requires explicit component
+    // identity. Both operations are Undo-registered.
     // Supports preview.
     [VRCForgeCommand(
         toolId: "vrc_add_modular_avatar_component",
-        Summary = "Add a common Modular Avatar component (MergeArmature, BoneProxy, MenuInstaller, MergeAnimator, Parameters, or a fully-qualified nadena.dev type) to a scene object. Resolves AvatarObjectReference fields from object paths, loads asset/scene object references by member type, and sets scalar/enum fields. Add-only by default, Undo-registered. Supports preview."
+        Summary = "Add or update a common Modular Avatar component (MergeArmature, BoneProxy, MenuInstaller, MergeAnimator, Parameters, or a fully-qualified nadena.dev type) on a scene object. Add is the default and preserves add-only behavior; update requires action=update, an explicit componentIndex, and expectedComponentGlobalObjectId. Resolves AvatarObjectReference fields from object paths, loads asset/scene object references by member type, and sets scalar/enum fields. Undo-registered. Supports preview."
     )]
     public static class MAComponentWriter
     {
@@ -44,6 +44,12 @@ namespace VRCForge.Editor
             public bool? preview { get; set; } = false;
             [VRCForgeInput("Permit adding another component when the same type already exists.", IsRequired = false)]
             public bool? allowDuplicate { get; set; } = false;
+            [VRCForgeInput("Operation: add (default) or update one existing component at componentIndex.", IsRequired = false)]
+            public string action { get; set; } = "add";
+            [VRCForgeInput("Exact zero-based component index for action=update; required for update and defaults to 0 for add.", IsRequired = false)]
+            public int? componentIndex { get; set; } = 0;
+            [VRCForgeInput("Exact GlobalObjectId of the existing component for action=update.", IsRequired = false)]
+            public string expectedComponentGlobalObjectId { get; set; } = "";
             [VRCForgeInput("Save the target scene after a successful write.", IsRequired = false)]
             public bool? saveScene { get; set; } = false;
         }
@@ -78,6 +84,19 @@ namespace VRCForge.Editor
                 var avatarPath = (@params["avatarPath"]?.ToString() ?? string.Empty).Trim();
                 var preview = @params["preview"] != null && @params["preview"].ToObject<bool>();
                 var allowDuplicate = @params["allowDuplicate"] != null && @params["allowDuplicate"].ToObject<bool>();
+                var action = (@params["action"]?.ToString() ?? "add").Trim().ToLowerInvariant();
+                if (action != "add" && action != "update")
+                {
+                    return VRCForgeToolResult.Failed("action must be 'add' or 'update'.");
+                }
+                var updateExisting = action == "update";
+                var componentIndexToken = @params["componentIndex"];
+                if (updateExisting && (componentIndexToken == null || componentIndexToken.Type != JTokenType.Integer))
+                {
+                    return VRCForgeToolResult.Failed("action=update requires an integer componentIndex.");
+                }
+                var componentIndex = componentIndexToken?.ToObject<int>() ?? 0;
+                var expectedComponentGlobalObjectId = (@params["expectedComponentGlobalObjectId"]?.ToString() ?? string.Empty).Trim();
                 var saveSceneToken = @params["saveScene"] ?? @params["save_scene"];
                 var saveScene = saveSceneToken != null
                     && saveSceneToken.Type != JTokenType.Null
@@ -123,8 +142,29 @@ namespace VRCForge.Editor
                 }
 
                 var existing = target.GetComponents(componentType).Length;
+                if (componentIndex < 0 || (updateExisting && componentIndex >= existing))
+                {
+                    return VRCForgeToolResult.Failed($"componentIndex {componentIndex} is not valid for {componentType.Name} on '{target.name}'.");
+                }
+                if (updateExisting && string.IsNullOrWhiteSpace(expectedComponentGlobalObjectId))
+                {
+                    return VRCForgeToolResult.Failed("updateExisting requires expectedComponentGlobalObjectId.");
+                }
+                if (updateExisting && allowDuplicate)
+                {
+                    return VRCForgeToolResult.Failed("action=update cannot be combined with allowDuplicate=true.");
+                }
+                if (updateExisting)
+                {
+                    var existingComponent = target.GetComponents(componentType)[componentIndex];
+                    var actualComponentGlobalObjectId = GlobalObjectId.GetGlobalObjectIdSlow(existingComponent).ToString();
+                    if (!string.Equals(actualComponentGlobalObjectId, expectedComponentGlobalObjectId, StringComparison.Ordinal))
+                    {
+                        return VRCForgeToolResult.Failed("The existing Modular Avatar component identity changed before configuration.");
+                    }
+                }
                 var warnings = new List<string>();
-                if (existing > 0 && !allowDuplicate)
+                if (!updateExisting && existing > 0 && !allowDuplicate)
                 {
                     return VRCForgeToolResult.Completed(
                         $"'{target.name}' already has {existing} {componentType.Name} component(s); skipped (pass allowDuplicate=true to add another).",
@@ -138,6 +178,7 @@ namespace VRCForge.Editor
                             gameObjectPath = targetPath,
                             componentType = componentType.FullName,
                             existingCount = existing,
+                            componentIndex,
                             saveScene,
                             sceneSaved = false,
                             sceneDirty = target.scene.IsValid() && target.scene.isDirty
@@ -147,6 +188,10 @@ namespace VRCForge.Editor
                 // Plan field + reference assignments (resolve everything before mutating).
                 var references = @params["references"] as JObject ?? new JObject();
                 var fields = @params["fields"] as JObject ?? new JObject();
+                if (updateExisting && references.Count == 0 && fields.Count == 0)
+                {
+                    return VRCForgeToolResult.Failed("action=update requires at least one field or reference assignment.");
+                }
                 var refPlan = new List<AssignmentPlan>();
                 var fieldPlan = new List<AssignmentPlan>();
 
@@ -200,15 +245,18 @@ namespace VRCForge.Editor
                     var refDesc = refPlan.Select(p => new { field = p.member.Name, type = p.memberType.Name, path = p.raw, resolved = p.resolvedDisplay, kind = p.kind.ToString() }).ToList();
                     var fieldDesc = fieldPlan.Select(p => new { field = p.member.Name, type = p.memberType.Name, value = p.token?.ToString() }).ToList();
                     return VRCForgeToolResult.Completed(
-                        $"Preview: would add {componentType.Name} to '{target.name}'.",
+                        $"Preview: would {(updateExisting ? "update" : "add")} {componentType.Name} on '{target.name}'.",
                         new
                         {
                             ok = true,
                             preview = true,
                             action = "add_modular_avatar_component",
+                            operation = action,
                             gameObjectPath = targetPath,
                             avatarPath = avatarRoot != null ? GetTransformPath(avatarRoot) : null,
                             componentType = componentType.FullName,
+                            componentIndex,
+                            expectedComponentGlobalObjectId = updateExisting ? expectedComponentGlobalObjectId : null,
                             existingCount = existing,
                             saveScene,
                             sceneSaved = false,
@@ -231,13 +279,14 @@ namespace VRCForge.Editor
                 var sceneSaved = false;
                 try
                 {
-                    var component = Undo.AddComponent(target, componentType);
+                    var component = updateExisting
+                        ? target.GetComponents(componentType)[componentIndex]
+                        : Undo.AddComponent(target, componentType);
                     if (component == null)
                     {
-                        throw new InvalidOperationException(
-                            $"Failed to add {componentType.Name} to '{target.name}'.");
+                        throw new InvalidOperationException($"Failed to resolve {componentType.Name} on '{target.name}'.");
                     }
-                    Undo.RegisterCompleteObjectUndo(component, $"Configure {componentType.Name}");
+                    Undo.RegisterCompleteObjectUndo(component, $"{(updateExisting ? "Update" : "Configure")} {componentType.Name}");
 
                     foreach (var plan in refPlan)
                     {
@@ -290,18 +339,31 @@ namespace VRCForge.Editor
                     throw new InvalidOperationException($"Could not re-read target GameObject after adding {componentType.Name}: '{targetPath}'.");
                 }
                 var after = DescribeComponents(target, componentType);
+                var resolvedComponentIndex = updateExisting ? componentIndex : existing;
+                var resolvedComponents = target.GetComponents(componentType);
+                if (resolvedComponentIndex < 0 || resolvedComponentIndex >= resolvedComponents.Length)
+                {
+                    throw new InvalidOperationException($"Could not resolve the persisted {componentType.Name} component index {resolvedComponentIndex}.");
+                }
+                var componentGlobalObjectId = GlobalObjectId.GetGlobalObjectIdSlow(
+                    resolvedComponents[resolvedComponentIndex]).ToString();
 
                 return VRCForgeToolResult.Completed(
-                    $"Added {componentType.Name} to '{target.name}'.",
+                    $"{(updateExisting ? "Updated" : "Added")} {componentType.Name} on '{target.name}'.",
                     new
                     {
                         ok = true,
                         preview = false,
                         action = "add_modular_avatar_component",
+                        operation = action,
                         gameObjectPath = targetPath,
                         avatarPath = avatarRoot != null ? GetTransformPath(avatarRoot) : null,
                         componentType = componentType.FullName,
-                        addedComponent = true,
+                        componentIndex = resolvedComponentIndex,
+                        componentGlobalObjectId,
+                        expectedComponentGlobalObjectId = updateExisting ? expectedComponentGlobalObjectId : null,
+                        updatedComponent = updateExisting,
+                        addedComponent = !updateExisting,
                         saveScene,
                         sceneSaved,
                         sceneDirty = targetScene.IsValid() && targetScene.isDirty,

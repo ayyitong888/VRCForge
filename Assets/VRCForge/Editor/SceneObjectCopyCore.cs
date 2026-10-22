@@ -294,6 +294,23 @@ namespace VRCForge.Editor
 
         internal static SavedSceneSnapshot ResolveSavedScene(string rawPath, string label)
         {
+            return ResolveSavedScene(rawPath, label, false);
+        }
+
+        internal static SavedSceneSnapshot ResolveSavedSceneForPrefabUnpack(GameObject gameObject)
+        {
+            if (gameObject == null
+                || !gameObject.scene.IsValid()
+                || !gameObject.scene.isLoaded
+                || string.IsNullOrWhiteSpace(gameObject.scene.path))
+            {
+                throw new SceneObjectCopyException("Prefab unpack requires one loaded saved scene object.");
+            }
+            return ResolveSavedScene(gameObject.scene.path, "prefab unpack target scene", true);
+        }
+
+        private static SavedSceneSnapshot ResolveSavedScene(string rawPath, string label, bool allowDirtyScene)
+        {
             var path = NormalizeSceneAssetPath(rawPath, label);
             var matches = new List<Scene>();
             for (var index = 0; index < SceneManager.sceneCount; index++)
@@ -311,7 +328,7 @@ namespace VRCForge.Editor
                 throw new SceneObjectCopyException("The saved scene selector is missing or ambiguous.");
             }
             var sceneMatch = matches[0];
-            if (sceneMatch.isDirty)
+            if (!allowDirtyScene && sceneMatch.isDirty)
             {
                 throw new SceneObjectCopyException("The selected scene has unsaved changes.");
             }

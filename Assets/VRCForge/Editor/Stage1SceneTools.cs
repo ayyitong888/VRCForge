@@ -244,9 +244,9 @@ namespace VRCForge.Editor
                     AssetDatabase.SaveAssets();
                     AssetDatabase.Refresh(ImportAssetOptions.ForceSynchronousImport);
                 }
-                else
+                else if (action == "save_as")
                 {
-                    AssetDatabase.ImportAsset(action == "save_as" ? destination : scenePath, ImportAssetOptions.ForceSynchronousImport);
+                    AssetDatabase.ImportAsset(destination, ImportAssetOptions.ForceSynchronousImport);
                 }
                 var loaded = SceneManager.GetSceneByPath(action == "save_as" ? destination : scenePath);
                 var afterEvidence = SceneObjectCopyCore.ReadStableAssetEvidence(action == "save_as" ? destination : scenePath, "saved scene asset");

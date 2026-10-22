@@ -30,6 +30,7 @@ namespace VRCForge.Core.MCP
             public string ScenePath = "";
             public string HierarchyPath = "";
             public string[] Tools = Array.Empty<string>();
+            public GameObject TargetObject;
             public int NextIndex;
             public DateTime ExpiresUtc;
             public bool Bound;
@@ -79,6 +80,7 @@ namespace VRCForge.Core.MCP
                     throw new InvalidOperationException("Approval-bound continuation reservation is unavailable.");
                 }
                 receipt.GlobalObjectId = globalObjectId;
+                receipt.TargetObject = target;
                 receipt.ScenePath = target.scene.path ?? "";
                 receipt.HierarchyPath = HierarchyPath(target.transform);
                 receipt.Bound = true;
@@ -121,7 +123,8 @@ namespace VRCForge.Core.MCP
                     throw new InvalidOperationException("Approval-bound object continuation order drifted.");
                 }
                 var globalObjectId = GlobalObjectId.GetGlobalObjectIdSlow(target).ToString();
-                if (!string.Equals(globalObjectId, receipt.GlobalObjectId, StringComparison.Ordinal)
+                if (target != receipt.TargetObject
+                    || !string.Equals(globalObjectId, receipt.GlobalObjectId, StringComparison.Ordinal)
                     || !string.Equals(target.scene.path ?? "", receipt.ScenePath, StringComparison.Ordinal)
                     || !string.Equals(HierarchyPath(target.transform), receipt.HierarchyPath, StringComparison.Ordinal))
                 {
@@ -129,11 +132,45 @@ namespace VRCForge.Core.MCP
                     throw new InvalidOperationException("Approval-bound object continuation target was replaced or moved.");
                 }
                 receipt.NextIndex += 1;
-                if (receipt.NextIndex == receipt.Tools.Length)
+                if (receipt.NextIndex == receipt.Tools.Length
+                    && !string.Equals(toolName, "vrc_unpack_prefab", StringComparison.Ordinal))
                 {
                     Receipts.Remove(nonce);
                 }
                 return globalObjectId;
+            }
+        }
+
+        public static void AdvanceAfterVerifiedUnpack(string nonce, GameObject target,
+            string previousGlobalObjectId, string persistedGlobalObjectId, string persistedScenePath, string persistedHierarchyPath)
+        {
+            ValidateNonce(nonce);
+            if (target == null || string.IsNullOrWhiteSpace(persistedGlobalObjectId))
+            {
+                throw new InvalidOperationException("Verified unpack continuation identity is invalid.");
+            }
+            lock (Gate)
+            {
+                PruneExpired();
+                if (!Receipts.TryGetValue(nonce, out var receipt) || !receipt.Bound
+                    || receipt.NextIndex == 0
+                    || !string.Equals(receipt.Tools[receipt.NextIndex - 1], "vrc_unpack_prefab", StringComparison.Ordinal)
+                    || target != receipt.TargetObject
+                    || !string.Equals(previousGlobalObjectId, receipt.GlobalObjectId, StringComparison.Ordinal)
+                    || !string.Equals(target.scene.path ?? "", receipt.ScenePath, StringComparison.Ordinal)
+                    || !string.Equals(HierarchyPath(target.transform), receipt.HierarchyPath, StringComparison.Ordinal)
+                    || !string.Equals(persistedScenePath ?? "", receipt.ScenePath, StringComparison.Ordinal)
+                    || !string.Equals(persistedHierarchyPath ?? "", receipt.HierarchyPath, StringComparison.Ordinal)
+                    || !string.Equals(GlobalObjectId.GetGlobalObjectIdSlow(target).ToString(), persistedGlobalObjectId, StringComparison.Ordinal))
+                {
+                    Receipts.Remove(nonce);
+                    throw new InvalidOperationException("Verified unpack continuation target changed before identity advance.");
+                }
+                receipt.GlobalObjectId = persistedGlobalObjectId;
+                if (receipt.NextIndex == receipt.Tools.Length)
+                {
+                    Receipts.Remove(nonce);
+                }
             }
         }
 

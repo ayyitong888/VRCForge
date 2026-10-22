@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 import dashboard_server
 from unity_write_input_schemas import EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS
 from wardrobe_outfit_workflow_service import (
@@ -173,7 +175,7 @@ def test_requested_direct_unity_object_rejects_null_or_mismatched_property_readb
         assert "direct Unity Object" in result["error"]
 
 
-def test_readback_rejects_dirty_scene_and_count_mismatch() -> None:
+def test_readback_treats_post_save_editor_dirty_as_pending_and_rejects_count_mismatch() -> None:
     dirty = _inspection()
     dirty["sceneDirty"] = True
     result = finalize_add_modular_avatar_component_verification(
@@ -181,8 +183,12 @@ def test_readback_rejects_dirty_scene_and_count_mismatch() -> None:
         _write_result(),
         lambda _request: dirty,
     )
-    assert result["ok"] is False
-    assert "still dirty" in result["error"]
+    # ExecuteAlways components can legitimately dirty a scene after SaveScene;
+    # the component exists, but a fresh dirty scene must not be called committed.
+    assert result["ok"] is True
+    assert result["verified"] is True
+    assert result["pending"] is True
+    assert result["commitState"] == "pending"
 
     mismatched = _inspection()
     mismatched["count"] = 2
@@ -373,3 +379,111 @@ def test_structured_field_rejects_nested_incomplete_marker() -> None:
 def test_registered_write_handler_uses_readback_finalizer() -> None:
     handler = dashboard_server.AGENT_GATEWAY._write_handlers["vrcforge_add_modular_avatar_component"]
     assert handler.verification_finalize_handler is not None
+
+
+def _sync_readback_request() -> dict[str, Any]:
+    return {
+        "gameObjectPath": "FixtureAvatar/Shirt", "avatarPath": "FixtureAvatar",
+        "componentType": "nadena.dev.modular_avatar.core.ModularAvatarBlendshapeSync",
+        "saveScene": True,
+        "fields": {"Bindings": [
+            {"ReferenceMesh": {"referencePath": "Body"}, "Blendshape": name, "LocalBlendshape": name}
+            for name in ("(Wear bra)Breasts_Big", "(Wear bra)Breasts_Cow")
+        ]},
+    }
+
+
+def _sync_inspection() -> dict[str, Any]:
+    request = _sync_readback_request()
+    return {"ok": True, "present": True, "count": 1, "type": request["componentType"],
+            "gameObjectPath": request["gameObjectPath"], "sceneDirty": True, "references": []}
+
+
+def test_sync_delayed_editor_update_verifies_bindings_but_preserves_pending_save() -> None:
+    from agent_tool_result_contract import normalize_agent_tool_result
+
+    request = _sync_readback_request()
+    reads = []
+    result = finalize_add_modular_avatar_component_verification(
+        request, {**_write_result(), "before": {"count": 0}, "after": {"count": 1}},
+        lambda _: _sync_inspection(),
+        lambda args: reads.append(args) or {"ok": True, "propertyValue": request["fields"]["Bindings"],
+                                          "valueTruncated": False, "valueIncomplete": False},
+    )
+    assert result["ok"] is True
+    assert result["verified"] is True
+    assert result["pending"] is True
+    assert result["commitState"] == "pending"
+    assert result.get("committed") is not True
+    assert result["readback"]["fields"] == request["fields"]
+    assert reads[0]["propertyPath"] == "Bindings"
+    outcome = normalize_agent_tool_result(result, fallback_summary="MA Sync configuration", write=True)
+    assert outcome["status"] != "failed", outcome
+    assert outcome.get("commitState") != "committed"
+
+
+def test_sync_dirty_scene_does_not_bypass_mismatched_binding_readback() -> None:
+    request = _sync_readback_request()
+    reads = []
+    result = finalize_add_modular_avatar_component_verification(
+        request, _write_result(), lambda _: _sync_inspection(),
+        lambda args: reads.append(args) or {"ok": True, "propertyValue": [], "valueTruncated": False},
+    )
+    assert reads, "Dirty scene must not skip the requested field verification."
+    assert result["ok"] is False
+    assert "mismatched field 'Bindings'" in result["error"]
+    assert result.get("verified") is not True
+
+
+@pytest.mark.parametrize("dirty", [None, "false", 0])
+def test_save_requested_requires_boolean_fresh_dirty_evidence(dirty) -> None:
+    inspected = _sync_inspection()
+    inspected["sceneDirty"] = dirty
+    request = _sync_readback_request()
+    result = finalize_add_modular_avatar_component_verification(
+        request, _write_result(), lambda _: inspected,
+        lambda _: {"ok": True, "propertyValue": request["fields"]["Bindings"]},
+    )
+    assert result["ok"] is False
+    assert result.get("verified") is not True
+
+
+def test_verified_sync_pending_save_does_not_fail_approval_or_create_recovery_lock(tmp_path) -> None:
+    from test_mcp_write_transaction_contract import _gateway
+
+    gateway = _gateway(tmp_path)
+    request = _sync_readback_request()
+    project = tmp_path / "project"
+    for folder in ("Assets", "Packages", "ProjectSettings"):
+        (project / folder).mkdir(parents=True)
+    (project / "Assets/Main.unity").write_text("scene")
+    (project / "Assets/Main.unity.meta").write_text("guid: scene")
+    request["projectPath"] = str(project)
+    tool = "vrcforge_contract_sync_editor_update"
+    gateway.approval_transactions.register_write_handler(
+        tool, "MA Sync pending save contract", "medium", lambda _: _write_result(),
+        checkpoint_prepare_handler=lambda _root, _arguments:
+            {"ok": True, "archiveAssetPaths": ["Assets/Main.unity"]},
+        verification_profile="fresh_readback",
+        verification_prepare_handler=lambda _: {},
+        verification_finalize_handler=lambda arguments, _baseline, result:
+            finalize_add_modular_avatar_component_verification(
+                arguments, result, lambda _: _sync_inspection(),
+                lambda _: {"ok": True, "propertyValue": request["fields"]["Bindings"]}),
+    )
+    created = gateway.approval_transactions.create_apply_request({"target_tool": tool, "arguments": request})
+    approval_id = created["approval"]["id"]
+    gateway.approval_transactions.approve(approval_id)
+    applied = gateway.approval_transactions.apply_approved({"approval_id": approval_id})
+    assert applied["ok"] is True, applied
+    assert applied["approval"]["status"] == "applied"
+    assert applied["result"]["verified"] is True
+    assert applied["result"]["pending"] is True
+    assert applied["result"]["commitState"] == "pending"
+    assert applied["outcome"]["status"] != "failed"
+    assert applied["outcome"].get("commitState") != "committed"
+    assert "writeFailure" not in applied
+    assert applied["checkpoint"]["ok"] is True
+    assert not gateway.approval_transactions._ports.checkpoint.active_apply_recoveries()
+    assert not any(entry.get("event") == "approval_apply_failed"
+                   for entry in gateway.approval_transactions.recent_audit_logs())

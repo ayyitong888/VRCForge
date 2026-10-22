@@ -312,6 +312,9 @@ EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
         "required": ["projectPath", "gameObjectPath", "componentType"],
         "properties": {
             "projectPath": _PROJECT_PATH_PROPERTY,
+            "action": {"type": "string", "enum": ["add", "update"], "default": "add", "description": "Use update to change an existing MA component without adding another one."},
+            "componentIndex": {"type": "integer", "minimum": 0, "description": "Required for update: index among components of this type, from an actual read."},
+            "expectedComponentGlobalObjectId": {"type": "string", "pattern": "^GlobalObjectId_V1-", "description": "Required for update: exact existing component identity from an actual read."},
             "gameObjectPath": {"type": "string", "minLength": 1},
             "avatarPath": {"type": "string"},
             "componentType": {"type": "string", "minLength": 1},

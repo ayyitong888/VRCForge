@@ -1153,7 +1153,9 @@ namespace VRCForge.Editor
                         previewPayload);
                 }
 
-                var beforeScene = ComponentCrudCore.ResolveSavedSceneFor(go);
+                var beforeScene = completely
+                    ? SceneObjectCopyCore.ResolveSavedSceneForPrefabUnpack(go)
+                    : ComponentCrudCore.ResolveSavedSceneFor(go);
                 var continuationConsumed = false;
                 if (!string.IsNullOrWhiteSpace(p.approvedObjectReceiptNonce))
                 {
@@ -1197,6 +1199,12 @@ namespace VRCForge.Editor
                 if (!IsPersistedUnpackMatch(goPath, readbackGlobalObjectId, persistedPath,
                     persistedGlobalObjectId, persistedPrefabPath, persistedIsPartOfAnyPrefab))
                     return CommittedFailure("Saved unpacked prefab readback differs from the committed target.", mutatedPath, mutatedGlobalObjectId);
+                if (continuationConsumed && !string.IsNullOrWhiteSpace(p.approvedObjectReceiptNonce))
+                {
+                    VRCForgeApprovedObjectReceipt.AdvanceAfterVerifiedUnpack(
+                        p.approvedObjectReceiptNonce.Trim(), go, globalObjectId, persistedGlobalObjectId,
+                        afterScene.Scene.path ?? "", persistedPath);
+                }
                 Undo.CollapseUndoOperations(undoGroup);
                 var after = new
                 {

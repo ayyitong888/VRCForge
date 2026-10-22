@@ -67,12 +67,12 @@ class Probe {
  static void Run(bool corrupt){globalSaves=sceneWrites=imports=evidenceReads=sceneReads=0;unrelatedDiskValue=1;unrelatedMemoryValue=2;unrelatedDirty=true;badReadback=corrupt;bool rejected=false;
  try{Save();}catch(SceneObjectCopyException){rejected=true;}
  if(globalSaves!=EXPECTED_SAVE||unrelatedDiskValue!=EXPECTED_DISK||unrelatedDirty!=EXPECTED_DIRTY)throw new Exception("scene-only save wrote unrelated dirty assets or explicit project-save behavior regressed");
- if(sceneWrites!=EXPECTED_SCENE||imports!=1||evidenceReads!=1||sceneReads!=1||saved.isDirty)throw new Exception("scene save/import/readback regressed");
+ if(sceneWrites!=EXPECTED_SCENE||imports!=EXPECTED_IMPORTS||evidenceReads!=1||sceneReads!=1||saved.isDirty)throw new Exception("scene save/import/readback regressed");
  if(rejected!=corrupt)throw new Exception("scene hierarchy readback guard regressed");
  Console.WriteLine("PASS scoped scene save; unrelated asset retained; corruptReadback="+corrupt);}
  static void Main(){Run(false);Run(true);}
 }
-'''.replace('//SETUP', setup).replace('//SEGMENT', segment).replace('EXPECTED_SAVE', '1' if save_project_assets else '0').replace('EXPECTED_DISK', '2' if save_project_assets else '1').replace('EXPECTED_DIRTY', 'false' if save_project_assets else 'true').replace('EXPECTED_SCENE', '0' if kind == 'save_clean' else '1')
+'''.replace('//SETUP', setup).replace('//SEGMENT', segment).replace('EXPECTED_SAVE', '1' if save_project_assets else '0').replace('EXPECTED_DISK', '2' if save_project_assets else '1').replace('EXPECTED_DIRTY', 'false' if save_project_assets else 'true').replace('EXPECTED_SCENE', '0' if kind == 'save_clean' else '1').replace('EXPECTED_IMPORTS', '0' if kind == 'save' and not save_project_assets else '1')
     dotnet = shutil.which('dotnet')
     base = Path(os.environ.get('ProgramFiles', 'C:/Program Files')) / 'dotnet'
     compilers = sorted((base/'sdk').glob('*/Roslyn/bincore/csc.dll'))

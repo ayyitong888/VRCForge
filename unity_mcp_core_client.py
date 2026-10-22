@@ -385,6 +385,10 @@ class UnityMcpCoreClient:
             if name != "vrc_build_test_avatar" or not _is_strict_build_test_job_poll(arguments):
                 raise ValueError("Build & Test job polling requires exact jobId arguments.")
         call_arguments = arguments or {}
+        if name == "vrc_add_modular_avatar_component" and call_arguments.get("action") == "update":
+            contract = self._connection.tool_contract_version
+            if not contract.isascii() or not contract.isdecimal() or int(contract) < 186:
+                raise UnityMcpCoreError("Updating an existing Modular Avatar component requires Core tool contract 186 or newer.")
         if name == "vrc_reparent_gameobject" and "siblingIndex" in call_arguments:
             contract = self._connection.tool_contract_version
             if not contract.isascii() or not contract.isdecimal() \

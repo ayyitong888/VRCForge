@@ -710,6 +710,11 @@ def build_add_modular_avatar_component_request(
     ).strip()
     if avatar_path:
         request["avatarPath"] = avatar_path
+    if params.get("action") is not None:
+        request["action"] = str(params["action"]).strip()
+    for key in ("componentIndex", "expectedComponentGlobalObjectId"):
+        if params.get(key) is not None:
+            request[key] = params[key]
     if (
         params.get("allow_duplicate") is not None
         or params.get("allowDuplicate") is not None
@@ -1302,6 +1307,19 @@ def validate_add_modular_avatar_component_request(
                 "MenuInstaller, MergeAnimator, Parameters)."
             ),
         }
+    action = request.get("action", "add")
+    if action not in {"add", "update"}:
+        return {"ok": False, "error": "action must be add or update."}
+    if action == "update":
+        if type(request.get("componentIndex")) is not int or request["componentIndex"] < 0:
+            return {"ok": False, "error": "update requires the existing componentIndex."}
+        identity = request.get("expectedComponentGlobalObjectId")
+        if not isinstance(identity, str) or not identity.startswith("GlobalObjectId_V1-"):
+            return {"ok": False, "error": "update requires the existing component GlobalObjectId."}
+        if request.get("allowDuplicate"):
+            return {"ok": False, "error": "update cannot add a duplicate component."}
+        if not request.get("fields") and not request.get("references"):
+            return {"ok": False, "error": "update requires fields or references to change."}
     return None
 
 
@@ -1347,6 +1365,20 @@ def finalize_add_modular_avatar_component_verification(
     after = source.get("after")
     before = source.get("before")
     expected_component_index = inspected_count - 1 if source.get("addedComponent") is True else 0
+    updating = arguments.get("action") == "update"
+    if updating:
+        expected_component_index = arguments.get("componentIndex")
+        if (
+            type(expected_component_index) is not int
+            or expected_component_index < 0
+            or source.get("updatedComponent") is not True
+            or source.get("addedComponent") is True
+            or source.get("componentIndex") != expected_component_index
+            or source.get("componentGlobalObjectId") != arguments.get("expectedComponentGlobalObjectId")
+        ):
+            return {**source, "ok": False, "error": "Modular Avatar update did not confirm the exact existing component identity."}
+        if not isinstance(before, dict) or before.get("count") != inspected_count:
+            return {**source, "ok": False, "error": "Modular Avatar update changed the component count."}
     if isinstance(after, dict) and isinstance(after.get("count"), int) and inspected_count != after["count"]:
         return {**source, "ok": False, "error": "Independent Modular Avatar readback count differs from the write receipt."}
     if source.get("addedComponent") is True and isinstance(before, dict) and isinstance(before.get("count"), int) and inspected_count < before["count"] + 1:
@@ -1399,8 +1431,8 @@ def finalize_add_modular_avatar_component_verification(
     if inspected.get("present") is not True or int(inspected.get("count") or 0) < 1:
         return {**source, "ok": False, "error": "Independent Modular Avatar readback found no added component."}
     save_scene = arguments.get("saveScene") is True
-    if save_scene and inspected.get("sceneDirty") is not False:
-        return {**source, "ok": False, "error": "Independent Modular Avatar readback found the scene still dirty after saveScene=true."}
+    if save_scene and type(inspected.get("sceneDirty")) is not bool:
+        return {**source, "ok": False, "error": "Independent Modular Avatar readback could not determine the scene save state."}
     field_readback = {}
     if fields:
         if read_property is None:
@@ -1436,14 +1468,21 @@ def finalize_add_modular_avatar_component_verification(
         "sceneDirty": inspected.get("sceneDirty"),
         "fields": field_readback,
     }
+    # ExecuteAlways components may update the scene after the Core save. Exact
+    # configuration readback is still valid; expose pending persistence so the
+    # caller saves the scene rather than repeating a successful component add.
+    pending = not save_scene or inspected.get("sceneDirty") is True
     return {
         **source,
         "verified": True,
         "readback": readback,
-        "mutationStarted": source.get("addedComponent") is True,
-        "mutationApplied": source.get("addedComponent") is True,
-        "changed": source.get("addedComponent") is True,
-        "commitState": "committed" if save_scene else "pending",
+        "mutationStarted": source.get("addedComponent") is True or source.get("updatedComponent") is True,
+        "mutationApplied": source.get("addedComponent") is True or source.get("updatedComponent") is True,
+        "changed": source.get("addedComponent") is True or source.get("updatedComponent") is True,
+        "commitState": "pending" if pending else "committed",
+        "pending": pending,
+        "sceneDirty": inspected.get("sceneDirty"),
+        **({"note": "Component configuration verified; save the target scene to persist the remaining changes. Do not add the component again."} if pending else {}),
     }
 
 
