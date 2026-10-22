@@ -24,7 +24,6 @@ export function AgentQuestionCard({
   );
   const [index, setIndex] = useState(0);
   const [customValues, setCustomValues] = useState<Record<string, string>>({});
-  const [checkpointNotes, setCheckpointNotes] = useState<Record<string, string>>({});
   const [busyChoice, setBusyChoice] = useState("");
   const [questionErrors, setQuestionErrors] = useState<Record<string, string>>({});
   const [retryAnswers, setRetryAnswers] = useState<Record<string, { optionId: string; value: string }>>({});
@@ -45,13 +44,12 @@ export function AgentQuestionCard({
   const continuationSettled = continuationDisplay === "settled" && Boolean(question.runtimeContinuation);
   const customValue = customValues[question.questionId] || "";
   const isVisualCheckpoint = question.kind === "visual_checkpoint";
-  const checkpointNote = checkpointNotes[question.questionId] || "";
   const optionLabel = (option: NonNullable<AgentQuestion["options"]>[number]) => isVisualCheckpoint
     ? t(`questionCard.visualCheckpoint.options.${option.id.toLowerCase()}`, option.label)
     : option.label;
   const optionAnswer = (option: NonNullable<AgentQuestion["options"]>[number]) => {
     const label = optionLabel(option);
-    const note = checkpointNote.trim();
+    const note = customValue.trim();
     return note ? `${label}\n\n${note}` : label;
   };
   const answer = async (optionId: string, value: string) => {
@@ -188,26 +186,14 @@ export function AgentQuestionCard({
         })}
         </div>
 
-        {isVisualCheckpoint ? (
-          <textarea
-            value={checkpointNote}
-            onChange={(event) => setCheckpointNotes((current) => ({ ...current, [question.questionId]: event.target.value.slice(0, 2000) }))}
-            maxLength={2000}
-            rows={2}
-            className="app-scrollbar min-w-0 max-h-24 resize-y rounded-lg border border-border bg-background px-2 py-1.5 text-sm outline-none placeholder:text-muted-foreground"
-            placeholder={t("questionCard.visualCheckpoint.notePlaceholder")}
-            aria-label={t("questionCard.visualCheckpoint.notePlaceholder")}
-            disabled={Boolean(busyChoice) || continuationActive || continuationSettled}
-          />
-        ) : null}
-
-          {!isVisualCheckpoint ? <form
+          <form
             className="mt-2 flex min-w-0 items-center gap-2 px-1 py-1"
             onSubmit={(event) => {
               event.preventDefault();
               void answer("custom", customValue.trim());
             }}
           >
+            <Pencil className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden="true" />
             <textarea
               value={customValue}
               onChange={(event) => setCustomValues((current) => ({ ...current, [question.questionId]: event.target.value.slice(0, 2000) }))}
@@ -235,19 +221,10 @@ export function AgentQuestionCard({
                 {t("chat.send")}
               </button>
             </div>
-          </form> : null}
+          </form>
       </div>
 
-      {isVisualCheckpoint ? <div className="mt-2 flex justify-end">
-        <button
-          type="button"
-          className="rounded-lg border border-border bg-background px-2.5 py-1.5 text-xs font-medium transition-colors hover:bg-muted disabled:opacity-60"
-          onClick={() => void answer("skip", t("questionCard.skipAnswer"))}
-          disabled={Boolean(busyChoice) || continuationActive || continuationSettled}
-        >
-          {t("questionCard.skip")}
-        </button>
-      </div> : null}</> : null}
+      </> : null}
     </section>
   );
 }

@@ -18,7 +18,7 @@ function Fixture() {
   ] });
   const [answer, setAnswer] = useState(null);
   const [replyQuestionId, setReplyQuestionId] = useState("");
-  async function onAnswerQuestion(questionId, optionId, value) { setAnswer({ questionId, optionId, value }); setQuestion((current) => ({ ...current, status: answer ? "answered" : "pending" })); }
+  async function onAnswerQuestion(questionId, optionId, value) { setAnswer({ questionId, optionId, value }); setQuestion((current) => ({ ...current, status: "pending" })); }
   return React.createElement("main", null,
     React.createElement("output", { "data-answer": true }, answer ? JSON.stringify(answer) : ""),
     React.createElement("output", { "data-reply-question": true }, replyQuestionId),
@@ -35,7 +35,7 @@ await build({
     plugin.onResolve({ filter: /^lucide-react$/ }, () => ({ path: "icons", namespace: "checkpoint" }));
     plugin.onLoad({ filter: /.*/, namespace: "checkpoint" }, (args) => ({
       contents: args.path === "translation"
-        ? 'export const useTranslation=()=>({t:(key,fallback)=>({"questionCard.visualCheckpoint.options.pass":"Pass","questionCard.visualCheckpoint.options.fail":"Fail","questionCard.visualCheckpoint.options.uncertain":"Uncertain","questionCard.visualCheckpoint.options.later":"Later","questionCard.visualCheckpoint.notePlaceholder":"Optional visual-checkpoint note...","questionCard.replyInChat":"Reply in chat"}[key]||fallback||key)});'
+        ? 'export const useTranslation=()=>({t:(key,fallback)=>({"questionCard.visualCheckpoint.options.pass":"Pass","questionCard.visualCheckpoint.options.fail":"Fail","questionCard.visualCheckpoint.options.uncertain":"Uncertain","questionCard.visualCheckpoint.options.later":"Later","questionCard.visualCheckpoint.notePlaceholder":"Optional visual-checkpoint note...","questionCard.customPlaceholder":"Type another answer...","chat.send":"Send","questionCard.skip":"Skip","questionCard.skipAnswer":"Skipped","questionCard.replyInChat":"Reply in chat"}[key]||fallback||key)});'
         : 'export const ChevronLeft=()=>null; export const ChevronRight=()=>null; export const HelpCircle=()=>null; export const Pencil=()=>null; export const X=()=>null;',
       loader: "js",
     }));
@@ -52,10 +52,19 @@ try {
   const page = await browser.newPage();
   await page.goto(`http://127.0.0.1:${server.address().port}`);
   assert.equal(await page.getByText("Recommended", { exact: true }).count(), 0, "visual checkpoints do not recommend Pass");
-  assert.equal(await page.getByPlaceholder("Type another answer...").count(), 0, "visual checkpoints use one note field instead of a duplicate custom field");
+  const input = page.getByPlaceholder("Type another answer...");
+  assert.equal(await input.count(), 1, "visual checkpoints share the compact text reply row");
+  assert.equal(await input.getAttribute("rows"), "1");
+  assert.equal(await page.locator('input[type="file"]').count(), 0);
+  assert.equal(await page.getByRole("button", { name: "Send", exact: true }).isDisabled(), true);
+  await input.fill("Please inspect the shoe opening; I have not decided yet.");
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+  assert.deepEqual(JSON.parse(await page.locator("[data-answer]").textContent()), {
+    questionId: "visual-1", optionId: "custom", value: "Please inspect the shoe opening; I have not decided yet.",
+  }, "free text must not fabricate a pass/fail decision");
   await page.getByRole("button", { name: "Reply in chat" }).click();
   assert.equal(await page.locator("[data-reply-question]").textContent(), "visual-1", "reply-in-chat keeps the question id");
-  await page.getByPlaceholder("Optional visual-checkpoint note...").fill("Shoulder is clear; feet still need review.");
+  await input.fill("Shoulder is clear; feet still need review.");
   await page.getByRole("button", { name: "Fail" }).click();
   const answer = JSON.parse(await page.locator("[data-answer]").textContent());
   assert.equal(answer.questionId, "visual-1");
@@ -64,6 +73,8 @@ try {
   await page.getByRole("button", { name: "Uncertain" }).click();
   const deferredAnswer = JSON.parse(await page.locator("[data-answer]").textContent());
   assert.equal(deferredAnswer.optionId, "uncertain", "a deferred pending checkpoint can be answered again");
+  await page.getByRole("button", { name: "Skip", exact: true }).click();
+  assert.equal(JSON.parse(await page.locator("[data-answer]").textContent()).optionId, "skip");
   console.log("visual checkpoint question UI: translated fixed choices, no default recommendation, question-id reply handoff, explicit decision/note, deferred retry passed");
 } finally {
   await browser?.close();
