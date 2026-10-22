@@ -984,6 +984,7 @@ BUILTIN_SKILL_GROUPS: list[dict[str, Any]] = [
             "vrcforge_restore_last_backup",
             "vrcforge_refresh_execution_target",
             "vrcforge_capture_screenshot",
+            "vrcforge_call_user",
         ],
         "entrypointTool": "",
         "instructions": (
@@ -999,8 +1000,11 @@ BUILTIN_SKILL_GROUPS: list[dict[str, Any]] = [
             "vrcforge_plan_face_tuning only when that extra planning is actually needed. "
             "After visual review, save and reuse the apply receipt's persisted values; do not repeat discovery or "
             "build an additional numerical acceptance audit. Keep the approved write's checkpoint and same-target "
-            "refresh after saving. If the image has not been seen, say visual review is unverified rather than "
-            "claiming success from parameter values alone."
+            "refresh after saving. If the target or visible result is uncertain, or the current method cannot resolve "
+            "the fit, call vrcforge_call_user with the relevant managed view and a focused question about the exact "
+            "area; only an explicit pass or fail closes visual acceptance. Keep tentative acceptance separate from "
+            "items awaiting GM confirmation. If the image has not been seen, say visual review is unverified rather "
+            "than claiming success from parameter values alone."
         ),
         "tags": ["builtin", "group", "face", "blendshape", "write"],
     },
@@ -1017,6 +1021,9 @@ BUILTIN_SKILL_GROUPS: list[dict[str, Any]] = [
         "sideEffects": "can write Unity material settings after approval",
         "backupRestore": "requires preview, backup, apply, validate, restore path",
         "allowedTools": [
+            "vrcforge_list_directory",
+            "vrcforge_find_files",
+            "vrcforge_read_text_file",
             "vrcforge_scan_materials",
             "vrcforge_plan_shader_tuning",
             "vrcforge_preview_shader_apply",
@@ -1034,6 +1041,10 @@ BUILTIN_SKILL_GROUPS: list[dict[str, Any]] = [
             "do not repeat full scans, delivered pages or loaded tool definitions. A changed scope or rejected freshness "
             "requires fresh evidence. For known exact changes, use the existing batch preview and approved apply; "
             "only call vrcforge_plan_shader_tuning when the user's goal needs semantic planning. "
+            "For replacing an author-supplied material/texture set on a body or clothing, read the relevant author "
+            "installation notes as needed and match the target model/version, UV use, material slots, textures, and "
+            "required dependencies before assignment. Do not require author-document research for a simple color or "
+            "shader-parameter adjustment when no author-specific assignment is involved. "
             "Keep exact target validation, shared-material impact, approval, checkpoint and persisted readback."
         ),
         "tags": ["builtin", "group", "shader", "material", "write"],

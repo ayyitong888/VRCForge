@@ -27,3 +27,20 @@ def test_gateway_and_registry_share_the_catalog_objects():
     for name in vars(catalog):
         if name.startswith("AVATAR_ENCRYPTION_"):
             assert getattr(gateway, name) is getattr(catalog, name)
+
+
+def test_avatar_visual_feedback_and_author_material_guidance_are_scoped():
+    import agent_builtin_skill_catalog as catalog
+
+    by_name = {item["name"]: item for item in catalog.BUILTIN_SKILL_GROUPS}
+    face = by_name["face-tuning-workflow"]
+    assert "vrcforge_call_user" in face["allowedTools"]
+    assert "only an explicit pass or fail" in face["instructions"]
+    assert "awaiting GM confirmation" in face["instructions"]
+
+    material = by_name["shader-material-workflow"]
+    assert {
+        "vrcforge_list_directory", "vrcforge_find_files", "vrcforge_read_text_file"
+    } <= set(material["allowedTools"])
+    assert "body or clothing" in material["instructions"]
+    assert "simple color or" in material["instructions"]

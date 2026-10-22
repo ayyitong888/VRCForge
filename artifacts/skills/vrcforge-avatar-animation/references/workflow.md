@@ -10,13 +10,19 @@
 
 涉及骨骼、参数、FX、动画、菜单、约束、PhysBone、Modular Avatar、NDMF 或作者 prefab 时，先查成熟社区教程、资产作者说明和官方文档。只使用已经存在的 VRCForge 原子工具；无法证明或没有精确安全原子时停止并报告 `capabilityGap=true`，不能编造功能或碰未经授权的付费资源。
 
+<a id="existing-clip-targeted-read"></a>
+
 ## 1. 目标绑定与现状盘点
 
 绑定用户指定的 Avatar 与实际 FX controller。读取相关 state、transition、motion、clip 及其真实 binding、目标对象和 Body renderer/BlendShape；只深入足以判定用户目标的路径，不把全项目或无关 controller 扫描当成前提。需要补证时使用现有只读扫描工具，并遵循其分页/精确选择器。
 
+已有换衣动画只需改少量曲线时，先从衣柜状态定位现有 clip，再用 `vrcforge_scan_animation_bindings` 的 `clipPaths` 和 `bindingSelectors` 精读目标属性；先确认 index 中的精确绑定，再读所需 details/key 页。不要为局部体型补偿分页遍历完整 FX、面捕或无关 clip。调用前以当前目录和已加载工具 block 返回的 `selectedTools` 为准，使用其中的精确 Agent 工具名；若因跨 block 而拒绝，返回目录选择正确 block，不猜别名或重试相近名称。
+
 ## 2. 真实结构和社区规则
 
 按用户要求列出目标服装/发型/饰品精确的启用、关闭和保持不变对象；仅在本 Avatar/资产证据支持时区分原服装、内衣、袜子、兽尾、胸型和高跟。未证明的补偿一律不写。
+
+胸部形态补偿只改获批的胸型键，不用全身缩放替代。用户要求单件衣服局部改胸型时，只编辑该衣服现有 clip，其他衣服状态保持原样；先核对已有退出／默认恢复机制，只有证据确认恢复缺失时才提出最小补充。并核对 Modular Avatar 同步与动画是否重复控制同一属性。
 
 ## 3. 精确原子与适用条件
 

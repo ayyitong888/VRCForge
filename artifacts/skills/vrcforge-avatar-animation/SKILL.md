@@ -46,5 +46,6 @@ support-files:
 替换同一功能时，先读 `references/workflow.md` 的替换分支，列旧/新驱动、目标 bindings、参数及临时共存结束条件；新组件存在不代表替换完成，也不证明重复驱动已造成运行冲突。新链路验证后按批准差异精确退役旧驱动，并核对 neutral、开/关及受影响的手势/表情。仅对同一 controller 且实际 schema 支持的 action 合批，不构造未支持的 batch。
 
 详细步骤见 [操作说明](references/workflow.md) 和受签名保护的 [工作流指引](workflows/animation.json)；由 Agent 根据现场证据选择适用路线与真实原子工具。
+修改已有衣柜中的少量曲线时，直接按[目标绑定与现状盘点](references/workflow.md#existing-clip-targeted-read)读取指定 clip 和绑定，不先展开整个 FX 或面捕。
 同一 controller 删除多个精确层时，加载当前工具 schema；支持 `edits[].action=delete_layer` 时使用一个有序批次，先删同步依赖层再删目标层。整批 preview、批准、检查点和写后回读一次完成；不要拆成多个并发写入或擅自清理共享子资产。
 每项写入通过用户当前配置的权限策略、现有监督通道、精确 preview 和检查点；回滚需要单独确认。
