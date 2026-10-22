@@ -21588,16 +21588,55 @@ def prepare_authoritative_unity_checkpoint_sync(
         from unity_planned_checkpoint import prepare_planned_asset_checkpoint
 
         preview = ensure_dict(write_animation_curve_sync(arguments, preview=True))
-        plan = ensure_dict(preview.get("plan"))
-        path = plan.get("clipPath")
-        if (preview.get("ok") is not True or preview.get("preview") is not True
-                or not isinstance(path, str) or not path.startswith("Assets/")
-                or plan.get("action") not in {"set_curve", "delete_curve", "retarget_curve"}):
+        raw_plan = preview.get("plan")
+        plan = ensure_dict(raw_plan)
+        asset_plan = plan if plan.get("clipPath") else preview
+        path = asset_plan.get("clipPath")
+        action = asset_plan.get("action")
+        if preview.get("ok") is not True or preview.get("preview") is not True:
+            return {"ok": False, "blocking": True, "code": "checkpoint_scope_unresolved",
+                    "error": "The approved curve plan did not identify one exact clip asset.",
+                    "mutationStarted": False, "saved": False}
+        # Primitive previews and one-clip curve batches both identify one exact
+        # target with action + clipPath; the latter may create the asset, which
+        # prepare_planned_asset_checkpoint already snapshots as absent.
+        if (isinstance(path, str) and path.startswith("Assets/")
+                and action in {"set_curve", "delete_curve", "retarget_curve"}):
+            clip_paths = [path]
+        elif preview.get("batch") is True:
+            clips = preview.get("clips")
+            if not isinstance(clips, list) or not 1 <= len(clips) <= 32:
+                return {"ok": False, "blocking": True, "code": "checkpoint_scope_unresolved",
+                        "error": "The approved curve batch did not identify a bounded exact clip set.",
+                        "mutationStarted": False, "saved": False}
+            clip_paths = []
+            asset_guids = set()
+            for clip in clips:
+                if not isinstance(clip, dict):
+                    clip_paths = []
+                    break
+                clip_path = clip.get("clipPath")
+                asset_guid = clip.get("assetGuid")
+                file_digest = clip.get("fileDigest")
+                if (not isinstance(clip_path, str) or not clip_path.startswith("Assets/")
+                        or not isinstance(asset_guid, str) or not asset_guid.strip()
+                        or not isinstance(file_digest, str) or not file_digest.strip()
+                        or clip_path.casefold() in {item.casefold() for item in clip_paths}
+                        or asset_guid.casefold() in asset_guids):
+                    clip_paths = []
+                    break
+                clip_paths.append(clip_path)
+                asset_guids.add(asset_guid.casefold())
+            if not clip_paths:
+                return {"ok": False, "blocking": True, "code": "checkpoint_scope_unresolved",
+                        "error": "The approved curve batch did not identify one exact saved asset per clip.",
+                        "mutationStarted": False, "saved": False}
+        else:
             return {"ok": False, "blocking": True, "code": "checkpoint_scope_unresolved",
                     "error": "The approved curve plan did not identify one exact clip asset.",
                     "mutationStarted": False, "saved": False}
         return prepare_planned_asset_checkpoint(
-            project_root, [path], prepare=prepare_unity_checkpoint_sync,
+            project_root, clip_paths, prepare=prepare_unity_checkpoint_sync,
         )
     if not nested_tool and PREPARED_UNITY_EXECUTION_ARGUMENT_KEY in arguments:
         # Shader tuning wrappers seal the real Core calls instead of exposing a
