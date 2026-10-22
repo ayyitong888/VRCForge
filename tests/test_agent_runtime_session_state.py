@@ -16,6 +16,29 @@ def make_state() -> tuple[AgentRuntimeSessionState, threading.RLock]:
     return AgentRuntimeSessionState(AgentRuntimeSessionStatePorts(shared_state_lock=lock)), lock
 
 
+def test_approval_freezes_selected_tool_blocks_as_durable_lists(tmp_path: Path) -> None:
+    from agent_native_history_store import NativeHistoryStore
+
+    state, _ = make_state()
+    store = NativeHistoryStore(tmp_path / "native-history")
+    state.configure_native_store(store)
+    snapshot = state.begin_native_turn(
+        "selected-session", binding="binding", turn_id="turn", message="save scene"
+    )
+    state.load_internal_tool_block_selected("selected-session", "scene", ["save", "read"])
+    state.load_internal_tool_block_selected("selected-session", "whole", None)
+    state.load_internal_tool_block_selected("selected-session", "empty", [])
+    reference = state.freeze_native_conversation("appr_selected", "selected-session", snapshot)
+    frozen = store.load_approval(reference)
+    assert frozen["selections"] == {"scene": ["read", "save"], "whole": None, "empty": []}
+    assert frozen["native"] == snapshot
+    state.load_internal_tool_block_selected("selected-session", "scene", ["later"])
+    assert store.load_approval(reference) == frozen
+    restarted, _ = make_state()
+    restarted.configure_native_store(store)
+    assert restarted.frozen_native_conversation(reference) == snapshot
+
+
 def test_gateway_owns_one_runtime_session_state_with_the_gateway_lock(tmp_path: Path) -> None:
     gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
 

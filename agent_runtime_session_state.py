@@ -509,9 +509,8 @@ class AgentRuntimeSessionState:
             store = self._ports.native_history_store
             if store is None:
                 raise ValueError("native history store is unavailable")
-            session = self._sessions.get(session_id) or {}
-            selections = session.get("internalToolSelections") or {}
-            return store.save_approval(approval_id, session_id, copy.deepcopy(snapshot), copy.deepcopy(selections))
+            selections = self.internal_tool_selections(session_id)
+            return store.save_approval(approval_id, session_id, copy.deepcopy(snapshot), selections)
 
     def frozen_native_conversation(self, reference: dict[str, Any]) -> dict[str, Any] | None:
         with self._ports.shared_state_lock:
