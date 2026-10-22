@@ -138,13 +138,23 @@ namespace VRCForge.Editor
 
         internal static object NoMutation(string schema, string operation, string projectPath, string digest, string message, bool ok = false)
         {
-            return new
+            // Reuse the complete pre-mutation facts; the caller still owns the
+            // result kind and error code, including successful no-op outcomes.
+            var payload = JObject.FromObject(VRCForgeToolResult.RejectedBeforeMutation(
+                "scene_operation_rejected", message, "unity_core_tool", "before_mutation").Payload);
+            if (ok)
+            {
+                payload.Remove("failureLayer");
+                payload.Remove("failurePhase");
+            }
+            payload.Merge(JObject.FromObject(new
             {
                 schema, operation, ok, preview = false, verified = false, changed = false,
                 mutationStarted = false, commitState = "not_started", projectPath,
                 previewDigest = digest ?? string.Empty, applyBinding = new { }, readback = new { },
                 message
-            };
+            }));
+            return payload;
         }
 
         internal static object UnknownAfterMutation(string schema, string operation, string projectPath, string message)
