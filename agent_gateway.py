@@ -1000,6 +1000,9 @@ class AgentGateway:
                 resolve_execution_target_reference=self.resolve_execution_target_reference,
                 invalidate_scan_results=self._invalidate_scan_results,
                 complete_scan_mutation=self._scan_results.end_mutation,
+                freeze_native_history=lambda approval_id, session_id, snapshot: self._runtime_session_state.freeze_native_conversation(
+                    approval_id, session_id, snapshot
+                ),
             ),
             ApprovalGoalPorts(
                 deny_approval=self._goal.deny_agent_goal_approval,
@@ -4699,6 +4702,23 @@ class AgentGateway:
         trusted_context = self.approval_transactions.get_trusted_task_context(str(approval.get("id") or ""))
         if trusted_context is not None:
             approval["taskContext"] = trusted_context
+            native_ref = trusted_context.get("_nativeConversationRef")
+            if isinstance(native_ref, dict):
+                session_id = str(native_ref.get("sessionId") or trusted_context.get("sessionId") or "").strip()
+                binding = str(native_ref.get("binding") or "").strip()
+                if not session_id or not binding:
+                    raise AgentGatewayError(
+                        "Private approval continuation reference is invalid; inspect the operation before retrying.",
+                        status_code=409,
+                    )
+                native_snapshot = self._runtime_session_state.frozen_native_conversation(native_ref)
+                if native_snapshot is None:
+                    raise AgentGatewayError(
+                        "Private approval continuation history is unavailable; inspect the operation before retrying.",
+                        status_code=409,
+                    )
+                trusted_context["_nativeConversation"] = native_snapshot
+                trusted_context.pop("_nativeConversationRef", None)
         elif "_nativeConversation" in ensure_dict(approval.get("taskContext")):
             raise AgentGatewayError("Private approval continuation is unavailable; inspect the operation before retrying.", status_code=409)
         prepared = prepare_approval_task_continuation(

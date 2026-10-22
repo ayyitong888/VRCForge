@@ -503,6 +503,22 @@ class AgentRuntimeSessionState:
                 return None
             return copy.deepcopy(snapshot)
 
+    def freeze_native_conversation(self, approval_id: str, session_id: str, snapshot: dict[str, Any]) -> dict[str, Any]:
+        """Persist the exact approval snapshot under an immutable approval key."""
+        with self._ports.shared_state_lock:
+            store = self._ports.native_history_store
+            if store is None:
+                raise ValueError("native history store is unavailable")
+            session = self._sessions.get(session_id) or {}
+            selections = session.get("internalToolSelections") or {}
+            return store.save_approval(approval_id, session_id, copy.deepcopy(snapshot), copy.deepcopy(selections))
+
+    def frozen_native_conversation(self, reference: dict[str, Any]) -> dict[str, Any] | None:
+        with self._ports.shared_state_lock:
+            store = self._ports.native_history_store
+            value = store.load_approval(reference) if store is not None else None
+            return copy.deepcopy(value.get("native")) if value is not None else None
+
     def order_native_tools(self, session_id: str, *, binding: str, visible_names: list[str]) -> list[str]:
         """Retain visible prior order; append newly exposed names, never permissions."""
         if any(not isinstance(name, str) or not name.strip() for name in visible_names) or len(set(visible_names)) != len(visible_names):

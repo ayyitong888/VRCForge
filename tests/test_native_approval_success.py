@@ -114,6 +114,52 @@ def test_native_pending_write_approval_apply_resume_readback_and_final_evidence(
     assert len(model.requests) == 3
 
 
+def test_large_native_pending_approval_uses_durable_history_reference(tmp_path: Path) -> None:
+    project = _project(tmp_path)
+    gateway, _model, handler_calls, _ = _setup_write(
+        project, [*_write_replies(project), finish]
+    )
+    initial_history = [
+        {"role": "assistant", "content": "history-" + ("x" * 50_000)}
+        for _ in range(92)
+    ]
+    first = gateway.runtime_message(
+        {
+            "message": "write fixture",
+            "sessionId": "native-large-approval-session",
+            "clientTurnId": "native-large-approval-turn",
+            "projectRoot": str(project),
+            "maxAgenticTurns": 5,
+            "history": initial_history,
+        }
+    )
+    approval_id = first["approval_id"]
+    approval = gateway._approvals[approval_id]
+    context = approval["taskContext"]
+    native = context["_nativeConversation"]
+
+    persisted = json.loads(
+        (project / "audit" / "pending-approvals.json").read_text(encoding="utf-8")
+    )
+    persisted_context = persisted["approvals"][0]["taskContext"]
+    assert "_nativeConversation" not in persisted_context
+    assert persisted_context["_nativeConversationRef"] == {
+        "schema": "vrcforge.native-history-ref.v1",
+        "approvalId": approval_id,
+        "sessionId": "native-large-approval-session",
+        "binding": native["binding"],
+    }
+
+    restarted, _resumed_model, restarted_calls, _ = _setup_write(project, [finish])
+    restored = restarted._approvals[approval_id]
+    assert "_nativeConversation" not in restored["taskContext"]
+    restarted.approval_transactions.approve(approval_id)
+    applied = restarted.approval_transactions.apply_approved({"approval_id": approval_id})
+    resumed = restarted.resume_runtime_task_after_approval(restored, applied)
+    assert resumed is not None and resumed["plan"]["nextStep"] == "done"
+    assert len(handler_calls) == 0 and len(restarted_calls) == 1
+
+
 def test_native_revision_preserves_same_call_rejection_without_reexecuting_handler(tmp_path: Path) -> None:
     project = _project(tmp_path)
     gateway, _model, handler_calls, _ = _setup_write(
@@ -156,6 +202,31 @@ def test_native_revision_preserves_same_call_rejection_without_reexecuting_handl
     ]
 
 
+def test_native_approval_freeze_isolated_from_later_same_session_history(tmp_path: Path) -> None:
+    project = _project(tmp_path)
+    original, _model, _calls, _ = _setup_write(project, _write_replies(project))
+    initial = original.runtime_message({
+        "message": "write fixture", "sessionId": "native-freeze-session",
+        "clientTurnId": "before-freeze", "projectRoot": str(project), "maxAgenticTurns": 5,
+    })
+    approval_id = initial["approval_id"]
+    saved = original._approvals[approval_id]["taskContext"]["_nativeConversation"]
+    later = {**saved, "messages": [*saved["messages"], {"role": "user", "content": "later same SID"}]}
+    with original.runtime_sessions.shared_state_lock:
+        original.runtime_sessions._save_native("native-freeze-session", later)
+
+    restarted, resumed_model, calls, _ = _setup_write(project, [finish])
+    restored = restarted._approvals[approval_id]
+    restarted.approval_transactions.approve(approval_id)
+    applied = restarted.approval_transactions.apply_approved({"approval_id": approval_id})
+    with pytest.raises(AgentGatewayError, match="already been settled|earlier user turn|pending"):
+        restarted.resume_runtime_task_after_approval(restored, applied)
+    assert len(calls) == 1
+    assert resumed_model.requests == []
+    native_files = list((project / "audit" / "native-history").glob("*.json"))
+    assert any("later same SID" in path.read_text(encoding="utf-8") for path in native_files)
+
+
 def test_native_pending_restart_approve_executes_once_and_resumes_from_durable_snapshot(tmp_path: Path) -> None:
     project = _project(tmp_path)
     original, original_model, original_calls, _ = _setup_write(project, _write_replies(project))
@@ -177,7 +248,8 @@ def test_native_pending_restart_approve_executes_once_and_resumes_from_durable_s
     assert restarted.runtime_sessions._native_conversations == {}
     restored = restarted._approvals[approval_id]
     assert restored["status"] == "pending"
-    assert restored["taskContext"]["_nativeConversation"] == saved
+    assert "_nativeConversation" not in restored["taskContext"]
+    assert restored["taskContext"]["_nativeConversationRef"]["binding"] == saved["binding"]
     assert restarted_calls == []
     assert "private-fixture-replay" not in json.dumps(restarted.approval_transactions.list_approvals())
 

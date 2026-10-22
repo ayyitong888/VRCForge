@@ -703,6 +703,7 @@ class ApprovalTransactionPorts:
     resolve_execution_target_reference: Callable[..., dict[str, Any]]
     invalidate_scan_results: Callable[[str, str], Any] = _noop_scan_invalidation
     complete_scan_mutation: Callable[[str, str, Any, Any], None] = _noop_scan_completion
+    freeze_native_history: Callable[[str, str, dict[str, Any]], dict[str, Any]] | None = None
 
 
 class AgentApprovalTransactionService:
@@ -914,7 +915,7 @@ class AgentApprovalTransactionService:
 
     def _persist_pending_approvals_locked(self) -> None:
         pending = [
-            dict(item)
+            copy.deepcopy(item)
             for item in self._ports.state.approvals.values()
             if item.get("status") == "pending"
         ]
@@ -926,10 +927,28 @@ class AgentApprovalTransactionService:
             "updatedAt": utc_now_iso(),
             "approvals": pending,
         }
-        if (
-            len(json.dumps(snapshot, ensure_ascii=False).encode("utf-8"))
-            > PENDING_APPROVAL_SNAPSHOT_MAX_BYTES
-        ):
+        # Native continuation history is frozen by approval identity.  The
+        # ordinary session record is mutable and may be overwritten by a later
+        # turn with the same SID, so it cannot be a continuation reference.
+        for approval in pending:
+            context = approval.get("taskContext")
+            native = context.get("_nativeConversation") if isinstance(context, dict) else None
+            if not isinstance(native, Mapping) or self._ports.freeze_native_history is None:
+                continue
+            session_id = str(context.get("sessionId") or "").strip()
+            if not session_id:
+                continue
+            context["_nativeConversationRef"] = self._ports.freeze_native_history(
+                str(approval.get("id") or ""), session_id, dict(native)
+            )
+            context.pop("_nativeConversation", None)
+            # The native snapshot already contains the complete provider
+            # history; retaining the request's duplicate history would still
+            # overflow the approval queue for a large but valid turn.
+            context.pop("history", None)
+        snapshot["approvals"] = pending
+        encoded = json.dumps(snapshot, ensure_ascii=False).encode("utf-8")
+        if len(encoded) > PENDING_APPROVAL_SNAPSHOT_MAX_BYTES:
             raise ValueError("pending approval snapshot exceeds the size limit")
         atomic_write_json(self._pending_approval_snapshot_path(), snapshot)
 
