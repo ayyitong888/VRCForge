@@ -36,7 +36,7 @@ await build({
     plugin.onLoad({ filter: /.*/, namespace: "checkpoint" }, (args) => ({
       contents: args.path === "translation"
         ? 'export const useTranslation=()=>({t:(key,fallback)=>({"questionCard.visualCheckpoint.options.pass":"Pass","questionCard.visualCheckpoint.options.fail":"Fail","questionCard.visualCheckpoint.options.uncertain":"Uncertain","questionCard.visualCheckpoint.options.later":"Later","questionCard.visualCheckpoint.notePlaceholder":"Optional visual-checkpoint note...","questionCard.replyInChat":"Reply in chat"}[key]||fallback||key)});'
-        : 'export const ChevronLeft=()=>null; export const ChevronRight=()=>null;',
+        : 'export const ChevronLeft=()=>null; export const ChevronRight=()=>null; export const HelpCircle=()=>null; export const Pencil=()=>null; export const X=()=>null;',
       loader: "js",
     }));
   } }],

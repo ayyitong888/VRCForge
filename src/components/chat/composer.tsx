@@ -73,6 +73,7 @@ export function Composer({
   onBindProject: _onBindProject,
   focusInput = false,
   onCancelReply,
+  questionPromptVisible = false,
 }: {
   input: string;
   setInput: (value: string) => void;
@@ -109,6 +110,8 @@ export function Composer({
   onBindProject?: (path: string) => void;
   focusInput?: boolean;
   onCancelReply?: () => void;
+  /** Render the pending-question composer as a compact single-row prompt. */
+  questionPromptVisible?: boolean;
 }) {
   const { t } = useTranslation();
   const [modeMenuOpen, setModeMenuOpen] = useState(false);
@@ -117,7 +120,21 @@ export function Composer({
   const [paletteDismissed, setPaletteDismissed] = useState(false);
   const [dragDepth, setDragDepth] = useState(0);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const composerRef = useRef<HTMLFormElement | null>(null);
+  useEffect(() => {
+    const textarea = inputRef.current;
+    if (!textarea) return;
+    if (!questionPromptVisible) {
+      textarea.style.height = "";
+      textarea.style.overflowY = "";
+      return;
+    }
+    textarea.style.height = "28px";
+    const nextHeight = Math.min(128, Math.max(28, textarea.scrollHeight));
+    textarea.style.height = `${nextHeight}px`;
+    textarea.style.overflowY = textarea.scrollHeight > 128 ? "auto" : "hidden";
+  }, [input, questionPromptVisible]);
   useEffect(() => {
     if (focusInput) {
       composerRef.current?.querySelector<HTMLTextAreaElement>("textarea")?.focus();
@@ -287,7 +304,7 @@ export function Composer({
       onDrop={handleDrop}
       onPaste={handlePaste}
       data-vrcforge-composer-dropzone
-      className={cn("relative rounded-3xl bg-muted/70 shadow-composer", dragActive && "ring-2 ring-primary/35")}
+      className={cn("relative rounded-3xl bg-muted/70 shadow-composer", questionPromptVisible && "rounded-2xl", dragActive && "ring-2 ring-primary/35")}
     >
       {paletteOpen ? (
         <div className="absolute bottom-full left-0 right-0 z-30 mb-2 max-h-72 overflow-y-auto rounded-xl border border-border bg-card p-1 shadow-panel" data-composer-command-palette>
@@ -329,17 +346,29 @@ export function Composer({
           ))}
         </div>
       ) : null}
-      <div className={cn("rounded-3xl border bg-card/80 transition-colors", dragActive ? "border-primary/50 bg-primary/5" : "border-border", compact ? "p-3" : "p-4")}>
+      <div className={cn(
+        "rounded-3xl border transition-colors",
+        questionPromptVisible ? "grid min-w-0 grid-cols-[auto_minmax(0,1fr)_auto_auto_auto_auto_auto] items-center gap-1 rounded-2xl border-0 bg-transparent p-1" : "bg-card/80",
+        !questionPromptVisible && (dragActive ? "border-primary/50 bg-primary/5" : "border-border"),
+        !questionPromptVisible && (compact ? "p-3" : "p-4"),
+      )}>
         {selectedTextAttachments.length ? (
-          <SelectedTextQuoteChip
-            attachments={selectedTextAttachments}
-            onRemove={onRemoveAttachment}
-          />
+          <div className={questionPromptVisible ? "col-span-full row-start-2" : ""}>
+            <SelectedTextQuoteChip
+              attachments={selectedTextAttachments}
+              onRemove={onRemoveAttachment}
+            />
+          </div>
         ) : null}
         <textarea
+          ref={inputRef}
           value={input}
           onChange={(event) => { setPaletteDismissed(false); setInput(event.target.value); }}
-          className="app-scrollbar min-h-[76px] w-full resize-none bg-transparent px-1 text-base outline-none placeholder:text-muted-foreground"
+          className={cn(
+            "app-scrollbar w-full resize-none bg-transparent px-1 outline-none placeholder:text-muted-foreground",
+            questionPromptVisible ? "col-start-2 row-start-1 min-h-[28px] max-h-32 min-w-0 flex-1 text-sm" : "min-h-[76px] text-base",
+          )}
+          rows={questionPromptVisible ? 1 : undefined}
           placeholder={disabledReason || t(planMode ? "composerAction.planPlaceholder" : "chat.inputPlaceholder")}
           disabled={Boolean(disabledReason)}
           onKeyDown={(event) => {
@@ -389,12 +418,18 @@ export function Composer({
           }}
         />
         {regularAttachments.length ? (
-          <div className="mt-3">
+          <div className={questionPromptVisible ? "col-span-full order-last min-w-0" : "mt-3"}>
             <AttachmentStrip attachments={regularAttachments} onRemove={onRemoveAttachment} />
           </div>
         ) : null}
-        <div className="mt-3 grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-2 xl:grid-cols-[auto_minmax(0,1fr)_auto]">
-          <div className="col-start-1 row-start-1 flex min-w-0 items-center gap-2">
+        <div className={cn(
+          "min-w-0 items-center",
+          questionPromptVisible ? "contents" : "mt-3 grid grid-cols-[minmax(0,1fr)_auto] gap-x-3 gap-y-2 xl:grid-cols-[auto_minmax(0,1fr)_auto]",
+        )}>
+          <div className={cn(
+            "flex min-w-0 items-center gap-2",
+            questionPromptVisible ? "contents" : "col-start-1 row-start-1",
+          )}>
             <input
               ref={fileInputRef}
               type="file"
@@ -407,7 +442,10 @@ export function Composer({
             />
             <button
               type="button"
-              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:opacity-50"
+              className={cn(
+                "flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:opacity-50",
+                questionPromptVisible && "col-start-1 row-start-1",
+              )}
               onClick={() => setActionMenuOpen((open) => !open)}
               title={t("composerAction.addContext")}
               data-composer-action-menu
@@ -421,7 +459,10 @@ export function Composer({
                 data-composer-plan-mode
                 aria-pressed="true"
                 title={t("composerAction.planDisable")}
-                className="flex h-8 shrink-0 items-center gap-1.5 rounded-md bg-primary/10 px-2 text-sm text-primary"
+                className={cn(
+                  "flex h-8 shrink-0 items-center gap-1.5 rounded-md bg-primary/10 px-2 text-sm text-primary",
+                  questionPromptVisible && "col-start-3 row-start-1",
+                )}
                 onClick={() => onPlanModeChange?.(false)}
               >
                 <ClipboardList className="h-4 w-4" />
@@ -429,15 +470,21 @@ export function Composer({
                 <X className="h-3.5 w-3.5" />
               </button>
             ) : null}
-            <div className="relative">
+            <div className={cn("relative", questionPromptVisible && "col-start-5 row-start-1")}>
               <button
                 type="button"
-                className={cn("flex h-8 min-w-0 max-w-full items-center gap-2 rounded-md px-2 text-sm transition-colors", currentModeVisual.textClass, currentModeVisual.hoverClass)}
+                className={cn(
+                  "flex h-8 min-w-0 max-w-full items-center gap-2 rounded-md px-2 text-sm transition-colors",
+                  currentModeVisual.textClass,
+                  currentModeVisual.hoverClass,
+                  questionPromptVisible && "h-8 w-8 justify-center px-0",
+                )}
+                title={executionModeLabel(currentMode)}
                 onClick={() => setModeMenuOpen((open) => !open)}
               >
                 <Shield className="h-4 w-4 shrink-0" />
-                <span className="truncate">{executionModeLabel(currentMode)}</span>
-                <ChevronDown className="h-3.5 w-3.5 shrink-0" />
+                <span className={questionPromptVisible ? "sr-only" : "truncate"}>{executionModeLabel(currentMode)}</span>
+                <ChevronDown className={cn("h-3.5 w-3.5 shrink-0", questionPromptVisible && "hidden")} />
               </button>
               {modeMenuOpen ? <div className="fixed inset-0 z-20" onClick={() => setModeMenuOpen(false)} /> : null}
               {modeMenuOpen ? (
@@ -475,7 +522,10 @@ export function Composer({
             </div>
             {!editing && goalEndpoint && activeGoal ? (
               <span
-                className="flex h-8 items-center gap-1.5 rounded-md px-2 text-sm text-muted-foreground"
+                className={cn(
+                  "flex h-8 items-center gap-1.5 rounded-md px-2 text-sm text-muted-foreground",
+                  questionPromptVisible ? "hidden" : "",
+                )}
                 data-composer-goal
               >
                 <Target className="h-4 w-4 shrink-0" />
@@ -483,9 +533,12 @@ export function Composer({
               </span>
             ) : null}
           </div>
-          <div className="col-start-2 row-start-1 flex shrink-0 items-center gap-2 xl:col-start-3">
+          <div className={cn(
+            "flex shrink-0 items-center gap-2",
+            questionPromptVisible ? "contents" : "col-start-2 row-start-1 xl:col-start-3",
+          )}>
             {effectiveContextUsage ? (
-              <ContextUsageMeter usage={effectiveContextUsage} />
+              <ContextUsageMeter usage={effectiveContextUsage} className={questionPromptVisible ? "col-start-6 row-start-1" : ""} />
             ) : null}
             {editing && !sending ? (
               <>
@@ -498,7 +551,7 @@ export function Composer({
               </>
             ) : (
               <Button
-                className="h-10 w-10 rounded-full p-0"
+                className={cn("h-10 w-10 rounded-full p-0", questionPromptVisible && "col-start-7 row-start-1")}
                 disabled={primaryAction === "stop" ? stopDisabled : !canSubmit}
                 type={primaryAction === "stop" ? "button" : "submit"}
                 onClick={primaryAction === "stop" ? onStop : undefined}
@@ -514,7 +567,10 @@ export function Composer({
             )}
           </div>
           {providerModelLabel ? (
-            <div className="col-span-2 col-start-1 row-start-2 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 px-1 xl:col-span-1 xl:col-start-2 xl:row-start-1 xl:flex-nowrap xl:whitespace-nowrap">
+            <div className={cn(
+              "flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 px-1",
+              questionPromptVisible ? "col-start-4 row-start-1 max-w-[min(28vw,16rem)] flex-nowrap whitespace-nowrap" : "col-span-2 col-start-1 row-start-2 xl:col-span-1 xl:col-start-2 xl:row-start-1 xl:flex-nowrap xl:whitespace-nowrap",
+            )}>
               <span className="min-w-0 break-words text-sm text-muted-foreground" title={providerModelLabel} aria-label={providerModelLabel}>
                 {providerModelLabel}
               </span>

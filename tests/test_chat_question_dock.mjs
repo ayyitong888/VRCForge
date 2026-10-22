@@ -54,14 +54,14 @@ try {
       plugin.onLoad({ filter: /.*/, namespace: "dock" }, args => ({ contents: args.path === "translation"
         ? 'export const useTranslation=()=>({t:(key,fallback)=>typeof fallback==="string"?fallback:key});'
         : args.path === "icons"
-          ? 'export const AlertTriangle=()=>null,ArrowDown=()=>null,ArrowUp=()=>null,Loader2=()=>null,MoreHorizontal=()=>null,Pause=()=>null,Play=()=>null,X=()=>null,ChevronLeft=()=>null,ChevronRight=()=>null;'
+          ? 'export const AlertTriangle=()=>null,ArrowDown=()=>null,ArrowUp=()=>null,Loader2=()=>null,MoreHorizontal=()=>null,Pause=()=>null,Play=()=>null,X=()=>null,ChevronLeft=()=>null,ChevronRight=()=>null,HelpCircle=()=>null,Pencil=()=>null;'
           : `import React from 'react';${mocks[args.path]}`, resolveDir: root }));
       if (process.env.QUESTION_DOCK_COUNTERFACTUAL === "1") {
         plugin.onLoad({ filter: /chat-workspace\.tsx$/ }, async args => ({
           contents: (await fs.readFile(args.path, "utf8"))
             .replaceAll('questionContinuationDisplay(question) !== "settled"', 'Boolean(question.runtimeContinuation) || question.status === "pending"')
-            .replaceAll('(waitingForQuestion ? null : composer(false))', 'composer(false)')
-            .replaceAll('(waitingForQuestion ? null : composer(true))', 'composer(true)'), loader: "tsx",
+            .replaceAll('approvalComposer || composer(false)', 'approvalComposer || (pendingQuestionPrompts.length ? null : composer(false))')
+            .replaceAll('approvalComposer || composer(true)', 'approvalComposer || (pendingQuestionPrompts.length ? null : composer(true))'), loader: "tsx",
         }));
       }
     } }],
@@ -72,8 +72,11 @@ try {
     { id: "later", label: "Later", description: "Leave the project unchanged." },
   ] };
   for (const hasHistory of [false, true]) {
-    const {html} = render([pending], [], hasHistory);
-    assert.ok(!html.includes("data-ordinary-composer"), "pending Question must replace the ordinary composer");
+    const {html, composer} = render([pending], [], hasHistory);
+    assert.equal(composer.questionPromptVisible, true, "pending ask uses the single-row chat composer");
+    assert.match(html, /data-ordinary-composer/, "pending Question must retain the ordinary composer");
+    assert.match(html, /data-composer-attachment/, "normal chat attachments remain available below ask");
+    assert.equal((html.match(/data-ordinary-composer/g) || []).length, 1);
     assert.match(html, /Reinstall/); assert.match(html, /Later/);
     const custom = html.match(/<textarea\b[^>]*>/)?.[0];
     assert.ok(custom && !custom.includes("disabled"), "pending custom reply must be editable");
@@ -81,6 +84,7 @@ try {
     const settled = render([{ ...pending, status: "answered", runtimeContinuation: { status: "blocked" } }], [], hasHistory).html;
     assert.ok(!settled.includes("Choose a repair"), "answered historical cards must leave the dock");
     assert.match(settled, /data-ordinary-composer/); assert.match(settled, /Keep my draft/);
+    assert.equal(render([], [], hasHistory).composer.questionPromptVisible, false, "without ask the ordinary composer height is restored");
     const approval = render([], [{ id: "a", status: "pending" }], hasHistory).html;
     assert.match(approval, /data-approval-card/); assert.ok(!approval.includes("data-ordinary-composer"));
   }
@@ -110,7 +114,7 @@ try {
   const restored = render([pending], [], true, false, "");
   assert.match(restored.html, /Reinstall/);
   assert.ok(!restored.html.includes("data-question-reply-mode"));
-  console.log("question dock: pending replaces composer; custom reply editable; success exits; continuation uses shared Composer Stop");
+  console.log("question dock: pending retains composer and attachments; custom reply editable; success exits; continuation uses shared Composer Stop");
 } finally {
   assert.ok(path.resolve(temp).startsWith(path.join(root, "tests", ".question-dock-")));
   await fs.rm(temp, { recursive: true, force: true });

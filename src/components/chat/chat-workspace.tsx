@@ -344,9 +344,6 @@ export function ChatWorkspace({
       ),
     [agentQuestions, runtimeRuns],
   );
-  const waitingForQuestion = pendingAgentQuestions.some(
-    (question) => questionContinuationDisplay(question) === "pending",
-  );
   const activeQuestionContinuation = pendingAgentQuestions.find(
     (question) => questionContinuationDisplay(question) === "active",
   );
@@ -424,6 +421,7 @@ export function ChatWorkspace({
       actions={actions}
       onAction={onAction}
       compact={compact}
+      questionPromptVisible={pendingQuestionPrompts.length > 0 && !pendingReplyQuestion}
       disabledReason={disabledReason}
       attachments={attachments}
       onAttachFiles={onAttachFiles}
@@ -568,7 +566,7 @@ export function ChatWorkspace({
             {queueControls}
             <CompactionStatus state={compaction} onCancel={onCancelCompaction} />
             {activeGoalBar}
-            {pendingReplyQuestion ? composer(false) : approvalComposer || (waitingForQuestion ? null : composer(false))}
+            {pendingReplyQuestion ? composer(false) : approvalComposer || composer(false)}
           </div>
         </div>
       </div>
@@ -733,7 +731,7 @@ export function ChatWorkspace({
             </div>
           ) : null}
           {activeGoalBar}
-          {pendingReplyQuestion ? composer(true) : approvalComposer || (waitingForQuestion ? null : composer(true))}
+          {pendingReplyQuestion ? composer(true) : approvalComposer || composer(true)}
         </div>
       </div>
     </div>

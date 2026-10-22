@@ -1,4 +1,4 @@
-import { ChevronLeft, ChevronRight } from "lucide-react";
+import { ChevronLeft, ChevronRight, HelpCircle, Pencil, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { AgentQuestion } from "../../lib/api";
@@ -73,9 +73,22 @@ export function AgentQuestionCard({
   };
 
   return (
-    <section className="app-scrollbar max-h-[70vh] overflow-y-auto rounded-2xl border border-border bg-card p-3 shadow-sm" aria-label={t("questionCard.label")}>
-      <div className="mb-2 flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
-        <span className="min-w-0 flex-1 whitespace-pre-wrap break-words font-medium text-foreground">{question.header || t("questionCard.title")}</span>
+    <section className="app-scrollbar max-h-[48vh] overflow-y-auto rounded-2xl border border-border bg-card p-4" aria-label={t("questionCard.label")}>
+      <div className="mb-1.5 flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
+        <HelpCircle className="h-4 w-4 shrink-0" />
+        <span className="min-w-0 flex-1 font-normal">{t("questionCard.title")}</span>
+        {onReplyInChat ? (
+          <button
+            type="button"
+            className="shrink-0 rounded-md px-1 py-0.5 text-xs text-muted-foreground underline-offset-2 hover:bg-muted hover:text-foreground hover:underline disabled:opacity-60"
+            onClick={() => onReplyInChat(question.questionId)}
+            disabled={Boolean(busyChoice) || continuationActive || continuationSettled}
+            data-question-reply-in-chat={question.questionId}
+            aria-label={t("questionCard.replyInChat")}
+          >
+            <Pencil className="h-4 w-4" aria-label={t("questionCard.replyInChat")} />
+          </button>
+        ) : null}
         {pendingQuestions.length > 1 ? (
           <div className="flex shrink-0 items-center gap-1">
             <button
@@ -99,9 +112,10 @@ export function AgentQuestionCard({
             </button>
           </div>
         ) : null}
+        <button type="button" className="flex h-7 w-7 items-center justify-center rounded-md hover:bg-muted disabled:opacity-50" aria-label={t("common.close")} title={t("questionCard.skip")} onClick={() => void answer("skip", t("questionCard.skipAnswer"))} disabled={Boolean(busyChoice) || continuationActive || continuationSettled}><X className="h-4 w-4" /></button>
       </div>
 
-      {!continuationActive && !continuationSettled ? <div className="app-scrollbar mb-3 max-h-[28vh] overflow-y-auto whitespace-pre-wrap break-words text-sm font-medium text-foreground">
+      {!continuationActive && !continuationSettled ? <div className="app-scrollbar mb-2 max-h-[20vh] overflow-y-auto whitespace-pre-wrap break-words text-sm font-normal text-foreground">
         {question.question || question.questionId}
       </div> : null}
 
@@ -147,7 +161,7 @@ export function AgentQuestionCard({
       ) : null}
 
       {!continuationActive && !continuationSettled ? <><div className="grid gap-1.5">
-        <div className="app-scrollbar grid max-h-64 gap-1.5 overflow-y-auto pr-1">
+        <div className="app-scrollbar grid max-h-48 gap-1 overflow-y-auto pr-1">
         {options.map((option, optionIndex) => {
           const value = isVisualCheckpoint ? optionAnswer(option) : option.value || option.label;
           const busy = busyChoice === option.id;
@@ -155,22 +169,17 @@ export function AgentQuestionCard({
             <button
               key={option.id}
               type="button"
-              className="grid min-w-0 grid-cols-[32px_minmax(0,1fr)] items-center gap-2 rounded-xl bg-muted/60 px-2.5 py-2 text-left transition-colors hover:bg-muted disabled:opacity-60"
+              className="grid min-w-0 grid-cols-[20px_minmax(0,1fr)] items-center gap-2 rounded-lg px-2 py-1.5 text-left transition-colors hover:bg-muted/50 disabled:opacity-60"
               onClick={() => void answer(option.id, value)}
               disabled={Boolean(busyChoice) || continuationActive || continuationSettled}
               title={option.description || option.label}
             >
-              <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-background text-sm font-semibold text-muted-foreground">
+              <span className="flex h-5 w-5 items-center justify-center rounded border border-border bg-muted/40 text-xs tabular-nums text-muted-foreground">
                 {formatCount(optionIndex + 1)}
               </span>
               <span className="min-w-0">
-                <span className={cn("flex min-w-0 items-center gap-2 text-sm font-medium", busy && "text-muted-foreground")}>
+                <span className={cn("flex min-w-0 items-center gap-2 text-sm font-normal", busy && "text-muted-foreground")}>
                   <span className="min-w-0 whitespace-pre-wrap break-words">{optionLabel(option)}</span>
-                  {optionIndex === 0 && !isVisualCheckpoint ? (
-                    <span className="shrink-0 rounded-md bg-background px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
-                      {t("questionCard.recommended")}
-                    </span>
-                  ) : null}
                 </span>
                 {option.description ? <span className="block whitespace-pre-wrap break-words text-xs text-muted-foreground">{option.description}</span> : null}
               </span>
@@ -185,7 +194,7 @@ export function AgentQuestionCard({
             onChange={(event) => setCheckpointNotes((current) => ({ ...current, [question.questionId]: event.target.value.slice(0, 2000) }))}
             maxLength={2000}
             rows={2}
-            className="app-scrollbar min-w-0 max-h-32 resize-y rounded-xl border border-border bg-background px-2.5 py-2 text-sm outline-none placeholder:text-muted-foreground"
+            className="app-scrollbar min-w-0 max-h-24 resize-y rounded-lg border border-border bg-background px-2 py-1.5 text-sm outline-none placeholder:text-muted-foreground"
             placeholder={t("questionCard.visualCheckpoint.notePlaceholder")}
             aria-label={t("questionCard.visualCheckpoint.notePlaceholder")}
             disabled={Boolean(busyChoice) || continuationActive || continuationSettled}
@@ -193,7 +202,7 @@ export function AgentQuestionCard({
         ) : null}
 
           {!isVisualCheckpoint ? <form
-            className="grid gap-2 rounded-xl border border-border bg-background p-2"
+            className="mt-2 flex min-w-0 items-center gap-2 px-1 py-1"
             onSubmit={(event) => {
               event.preventDefault();
               void answer("custom", customValue.trim());
@@ -203,47 +212,33 @@ export function AgentQuestionCard({
               value={customValue}
               onChange={(event) => setCustomValues((current) => ({ ...current, [question.questionId]: event.target.value.slice(0, 2000) }))}
               maxLength={2000}
-              rows={2}
-              className="app-scrollbar min-w-0 max-h-32 resize-y bg-transparent text-sm outline-none placeholder:text-muted-foreground"
+              rows={1}
+              className="app-scrollbar h-6 min-w-0 flex-1 resize-none bg-transparent text-base leading-6 outline-none placeholder:text-muted-foreground"
               placeholder={t("questionCard.customPlaceholder")}
               aria-label={t("questionCard.customPlaceholder")}
               disabled={Boolean(busyChoice) || continuationActive || continuationSettled}
-              autoFocus
             />
-            <div className="flex justify-end gap-2">
+            <div className="flex shrink-0 items-center justify-end gap-2">
               <button
                 type="button"
-                className="rounded-md px-2 py-1 text-xs text-muted-foreground hover:bg-muted"
-                onClick={() => {
-                  setCustomValues((current) => ({ ...current, [question.questionId]: "" }));
-                }}
-                disabled={Boolean(busyChoice)}
+                className="rounded-full border border-border px-2.5 py-1 text-sm hover:bg-muted disabled:opacity-60"
+                onClick={() => void answer("skip", t("questionCard.skipAnswer"))}
+                disabled={Boolean(busyChoice) || continuationActive || continuationSettled}
               >
-                {t("questionCard.clear")}
+                {t("questionCard.skip")}
               </button>
               <button
                 type="submit"
-                className="rounded-md bg-primary px-2 py-1 text-xs font-medium text-primary-foreground disabled:opacity-50"
+                className="rounded-full bg-primary px-3 py-1 text-sm font-medium text-primary-foreground disabled:bg-muted-foreground/50"
               disabled={!customValue.trim() || Boolean(busyChoice) || continuationActive || continuationSettled}
               >
-                {t("questionCard.answer")}
+                {t("chat.send")}
               </button>
             </div>
           </form> : null}
       </div>
 
-      <div className="mt-3 flex justify-end">
-        {onReplyInChat ? (
-          <button
-            type="button"
-            className="mr-auto rounded-lg border border-border bg-background px-2.5 py-1.5 text-xs font-medium transition-colors hover:bg-muted disabled:opacity-60"
-            onClick={() => onReplyInChat(question.questionId)}
-            disabled={Boolean(busyChoice) || continuationActive || continuationSettled}
-            data-question-reply-in-chat={question.questionId}
-          >
-            {t("questionCard.replyInChat")}
-          </button>
-        ) : null}
+      {isVisualCheckpoint ? <div className="mt-2 flex justify-end">
         <button
           type="button"
           className="rounded-lg border border-border bg-background px-2.5 py-1.5 text-xs font-medium transition-colors hover:bg-muted disabled:opacity-60"
@@ -252,7 +247,7 @@ export function AgentQuestionCard({
         >
           {t("questionCard.skip")}
         </button>
-      </div></> : null}
+      </div> : null}</> : null}
     </section>
   );
 }
