@@ -291,7 +291,7 @@ from scene_asset_duplicate import (
     TOOL_NAME as SCENE_ASSET_DUPLICATE_TOOL,
     build_wrapper_arguments as build_scene_asset_duplicate_wrapper_arguments,
 )
-from context_compaction import ContextCompactionInputError, compact_context
+from context_compaction import ContextCompactionInputError, compact_context, estimate_compaction_prompt_tokens
 from session_handoff import SessionHandoffError, SessionHandoffStore
 from session_handoff_service import SessionHandoffService
 from session_handoff_chat_port import ChatPortConflict, SessionHandoffChatPort
@@ -15882,7 +15882,7 @@ class _RuntimePlannerProviderTurnBinding:
             model=str(request.get("model") or ""),
         ) as config:
             requested_limit = request.get("_requestedContextLimit")
-            verified_limit: int | None = None
+            verified_limit = PROVIDER_MODEL_CATALOG.resolve_context_limit(config)
             requested_provider = str(request.get("provider") or "").strip()
             requested_model = _runtime_planner_model_id(request.get("model"))
             if requested_limit is not None and requested_provider and requested_model:
@@ -15891,7 +15891,9 @@ class _RuntimePlannerProviderTurnBinding:
                 except RuntimeError:
                     provider_matches = False
                 if provider_matches and requested_model == _runtime_planner_model_id(config.model):
-                    verified_limit = int(requested_limit)
+                    requested_bound = int(requested_limit)
+                    if requested_bound > 0:
+                        verified_limit = min(verified_limit, requested_bound) if verified_limit else requested_bound
             label = " · ".join(
                 part
                 for part in (provider_display_name(config.provider), str(config.model or "").strip())
@@ -16348,6 +16350,7 @@ class _RuntimePlannerCompactor:
     def __init__(self, turn: _RuntimePlannerProviderTurnBinding, model: "_RuntimePlannerModel") -> None:
         self._turn = turn
         self._model = model
+        self._input_estimates: dict[tuple[str, str, str, str], tuple[int, int]] = {}
 
     def compact(
         self,
@@ -16355,16 +16358,25 @@ class _RuntimePlannerCompactor:
         metadata: Mapping[str, object],
     ) -> Mapping[str, object]:
         config = self._turn.current_config()
+        estimate_key = (config.provider, config.model, config.base_url, config.api_type or "")
+        previous = self._input_estimates.get(estimate_key)
+        ratio = max(1.0, previous[1] / previous[0]) if previous else 1.0
         deadline = time.monotonic() + self._TOTAL_TIMEOUT_SECONDS
         record_usage = metadata.get("_recordUsage")
         deadline_exceeded = False
+        def record(prompt: str, usage: Mapping[str, Any]) -> None:
+            actual = usage.get("inputTokens")
+            if usage.get("exact") is True and isinstance(actual, int) and actual > 0:
+                self._input_estimates[estimate_key] = (estimate_compaction_prompt_tokens(prompt), actual)
+            if callable(record_usage):
+                record_usage(prompt, dict(usage))
         summarizer: Callable[[str], Any] | None = None
         if not provider_requires_api_key(config.provider) or str(config.api_key or "").strip():
             def summarize(prompt: str) -> str:
                 nonlocal deadline_exceeded
                 try:
                     return self._model.plan(prompt, _deadline=deadline,
-                        _usage_callback=(lambda usage: record_usage(prompt, dict(usage))) if callable(record_usage) else None).text
+                        _usage_callback=lambda usage: record(prompt, usage)).text
                 except RuntimePlannerProviderTimeoutError as exc:
                     if exc.phase != "compaction":
                         raise
@@ -16383,6 +16395,8 @@ class _RuntimePlannerCompactor:
             model=config.model,
             target_tokens=metadata.get("targetTokens"),
             real_context_limit=metadata.get("realContextLimit"),
+            input_mode=str(metadata.get("inputMode") or "complete"),
+            input_estimate_ratio=ratio,
         )
         if deadline_exceeded:
             result["fallbackReason"] = "compaction_deadline"

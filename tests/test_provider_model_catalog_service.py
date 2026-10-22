@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -293,3 +294,93 @@ def test_catalog_wraps_sdk_failure_without_fallback() -> None:
 
     with pytest.raises(RuntimeError, match="model list request failed: offline fake"):
         service.fetch_provider_models(_config("openai"))
+
+
+def test_catalog_resolves_smallest_configured_and_model_advertised_limit() -> None:
+    service = _service(response={"data": [{
+        "id": "selected-model",
+        "context_window": 500_000,
+        "input_token_limit": 450_000,
+    }]})
+
+    assert service.resolve_context_limit(_config("openai")) == 450_000
+    assert service.resolve_context_limit(
+        replace(_config("openai"), context_window=400_000)
+    ) == 400_000
+
+
+def test_catalog_resolution_caches_by_provider_base_url_and_credential_identity() -> None:
+    calls: list[tuple[Any, ...]] = []
+    service = _service(
+        calls=calls,
+        response={"data": [{"id": "selected-model", "context_window": 500_000}]},
+    )
+
+    assert service.resolve_context_limit(_config("openai")) == 500_000
+    assert service.resolve_context_limit(_config("openai")) == 500_000
+    assert len([call for call in calls if call[0] == "openai"]) == 1
+
+    other_account = _config("openai", api_key="other-safe-key")
+    assert service.resolve_context_limit(other_account) == 500_000
+    assert len([call for call in calls if call[0] == "openai"]) == 2
+
+
+def test_catalog_refresh_fetches_again_and_resolve_uses_refreshed_metadata() -> None:
+    calls: list[tuple[Any, ...]] = []
+    responses = iter([
+        {"data": [{"id": "selected-model", "context_window": 500_000}]},
+        {"data": [{"id": "selected-model", "context_window": 300_000}]},
+    ])
+    service = ProviderModelCatalogService(
+        ProviderModelCatalogPolicyPorts(
+            validate_provider_api_key=lambda key: calls.append(("validate", key)),
+            provider_requires_api_key=lambda _provider: True,
+            provider_display_name=lambda provider: provider.title(),
+            provider_model_descriptor=_descriptor,
+            resolve_vertex_project_location=lambda _value: ("project", "location"),
+        ),
+        ProviderModelCatalogSdkPorts(
+            openai_client=lambda _key, _url, _timeout: _client(next(responses)),
+            google_ai_studio_client=lambda _key: pytest.fail("unexpected SDK"),
+            google_vertex_client=lambda _project, _location: pytest.fail("unexpected SDK"),
+            anthropic_client=lambda _key: pytest.fail("unexpected SDK"),
+        ),
+    )
+
+    config = _config("openai")
+    assert service.resolve_context_limit(config) == 500_000
+    assert service.fetch_provider_models(config)[0]["contextWindow"] == 300_000
+    assert service.resolve_context_limit(config) == 300_000
+
+
+def test_catalog_resolution_uses_static_descriptor_without_remote_fetch() -> None:
+    calls: list[tuple[Any, ...]] = []
+    service = ProviderModelCatalogService(
+        ProviderModelCatalogPolicyPorts(
+            validate_provider_api_key=lambda key: calls.append(("validate", key)),
+            provider_requires_api_key=lambda _provider: True,
+            provider_display_name=lambda provider: provider.title(),
+            provider_model_descriptor=lambda provider, model, api_type: {
+                **_descriptor(provider, model, api_type),
+                "modelContextWindow": 600_000,
+            },
+            resolve_vertex_project_location=lambda _value: ("project", "location"),
+        ),
+        ProviderModelCatalogSdkPorts(
+            openai_client=lambda *_args: pytest.fail("descriptor should avoid fetch"),
+            google_ai_studio_client=lambda _key: pytest.fail("unexpected SDK"),
+            google_vertex_client=lambda _project, _location: pytest.fail("unexpected SDK"),
+            anthropic_client=lambda _key: pytest.fail("unexpected SDK"),
+        ),
+    )
+
+    assert service.resolve_context_limit(_config("openai")) == 600_000
+
+
+def test_catalog_resolution_keeps_explicit_bound_when_catalog_is_unavailable() -> None:
+    service = _service(response={"data": [{"id": "different-model", "context_window": 500_000}]})
+    configured = replace(_config("openai"), context_window=300_000)
+
+    assert service.resolve_context_limit(configured) == 300_000
+    unknown = _config("openai")
+    assert service.resolve_context_limit(unknown) is None

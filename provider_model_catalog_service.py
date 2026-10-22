@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -37,6 +38,9 @@ class ProviderModelCatalogService:
     ) -> None:
         self._policy = policy
         self._sdk = sdk or default_provider_model_catalog_sdk_ports()
+        # The catalog is process-local and keyed by non-secret provider/base URL
+        # plus a credential fingerprint.  Values are model metadata only.
+        self._model_cache: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
 
     def provider_config_descriptor(self, config: ProviderApiConfig) -> dict[str, Any]:
         return self._policy.provider_model_descriptor(
@@ -72,10 +76,14 @@ class ProviderModelCatalogService:
         return enriched
 
     def fetch_provider_models(self, config: ProviderApiConfig) -> list[dict[str, Any]]:
+        """Fetch a fresh catalog and refresh the process-local cache."""
+        cache_key = self._model_cache_key(config)
         if config.provider == "chatgpt":
             from chatgpt_integration.service import get_chatgpt_auth_service
 
-            return get_chatgpt_auth_service().models(config.api_key)
+            models = get_chatgpt_auth_service().models(config.api_key)
+            self._model_cache[cache_key] = [dict(item) for item in models]
+            return [dict(item) for item in models]
         self._policy.validate_provider_api_key(config.api_key)
         if self._policy.provider_requires_api_key(config.provider) and not config.api_key.strip():
             raise RuntimeError(
@@ -83,12 +91,57 @@ class ProviderModelCatalogService:
                 "Enter an API key before loading models."
             )
         if config.provider == "gemini":
-            return self.fetch_google_ai_studio_models(config)
-        if config.provider == "vertexai":
-            return self.fetch_vertex_ai_models(config)
-        if config.provider == "anthropic":
-            return self.fetch_anthropic_models(config)
-        return self.fetch_openai_compatible_models(config)
+            models = self.fetch_google_ai_studio_models(config)
+        elif config.provider == "vertexai":
+            models = self.fetch_vertex_ai_models(config)
+        elif config.provider == "anthropic":
+            models = self.fetch_anthropic_models(config)
+        else:
+            models = self.fetch_openai_compatible_models(config)
+        self._model_cache[cache_key] = [dict(item) for item in models]
+        return [dict(item) for item in models]
+
+    def resolve_context_limit(self, config: ProviderApiConfig) -> int | None:
+        """Resolve the verified input window without inventing a model limit.
+
+        An explicit configured limit and provider catalog metadata are both
+        bounds; when both are known the smaller one is authoritative.  A
+        failed or incomplete catalog lookup leaves an explicit bound usable and
+        otherwise returns ``None`` so callers can apply their unknown-limit
+        policy.
+        """
+        configured = self.coerce_positive_int(config.context_window)
+        descriptor = self.provider_config_descriptor(config)
+        descriptor_limit = self.coerce_positive_int(descriptor.get("modelContextWindow"))
+        cache_key = self._model_cache_key(config)
+        models = self._model_cache.get(cache_key)
+        if models is None and descriptor_limit is None:
+            try:
+                models = self.fetch_provider_models(config)
+            except Exception:  # noqa: BLE001 - unknown metadata is not a connection failure
+                models = []
+        catalog_limit = descriptor_limit
+        for item in models or []:
+            if str(item.get("id") or "").strip() != config.model:
+                continue
+            limits = [
+                self.coerce_positive_int(item.get(key))
+                for key in ("contextWindow", "inputTokenLimit", "maxInputTokens")
+            ]
+            known = [value for value in limits if value is not None]
+            if known:
+                catalog_limit = min([value for value in (catalog_limit, *known) if value is not None])
+            break
+        if configured is None:
+            return catalog_limit
+        if catalog_limit is None:
+            return configured
+        return min(configured, catalog_limit)
+
+    @staticmethod
+    def _model_cache_key(config: ProviderApiConfig) -> tuple[str, str, str]:
+        credential_fingerprint = hashlib.sha256(config.api_key.encode("utf-8")).hexdigest()
+        return (config.provider.strip().lower(), config.base_url.strip(), credential_fingerprint)
 
     def supported_reasoning_efforts(self, config: ProviderApiConfig) -> list[str] | None:
         """Return catalog effort support, or None when metadata is unavailable."""

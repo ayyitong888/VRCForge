@@ -58,15 +58,15 @@ def test_failed_second_page_never_claims_complete_or_retains_rejected_candidate(
     assert result["fallbackReason"] == "sensitive_provider_output"
 
 
-def test_call_budget_is_global_and_preflight_never_samples_first_and_last():
+def test_complete_pages_are_not_limited_by_transport_retry_budget():
     prompts = []
     result = compact_context([{"role": "user", "text": "中" * 12000}], target_tokens=2200,
                              real_context_limit=REAL_CONTEXT_LIMIT,
                              summarizer=lambda p: prompts.append(p) or "wrong")
-    assert prompts == []
-    assert result["providerAttempts"] == 0
-    assert result["fallbackReason"] == "provider_call_budget"
-    assert result["coverage"]["complete"] is False
+    assert len(prompts) > 3
+    assert result["providerAttempts"] == len(prompts)
+    assert "".join(row["text"] for p in prompts for row in entries(p)) == "中" * 12000
+    assert result["coverage"]["complete"] is True
     assert len(result["recovery"]["sourceEntries"][0]["text"]) == 12000
 
 
@@ -79,7 +79,7 @@ def test_long_validated_summary_uses_navigation_not_a_cut_candidate():
     assert result["recovery"]["summaryDigest"] in result["summary"]
 
 
-def test_retry_consumes_global_call_budget_without_skipping_an_unread_page():
+def test_retry_does_not_consume_later_pages_budget():
     prompts = []
     def summarize(prompt):
         prompts.append(prompt)
@@ -89,13 +89,13 @@ def test_retry_consumes_global_call_budget_without_skipping_an_unread_page():
     result = compact_context([{"role": "user", "text": "中" * 4900}], target_tokens=2200,
                              real_context_limit=5_000,
                              summarizer=summarize, sleep=lambda _: None)
-    assert len(prompts) == result["providerAttempts"] == 3
+    assert len(prompts) == result["providerAttempts"] == 4
     assert prompts[0] == prompts[1]
-    assert result["coverage"]["completedPages"] == 2
+    assert result["coverage"]["completedPages"] == 3
     assert result["coverage"]["pageCount"] == 3
-    assert result["coverage"]["complete"] is False
-    assert result["fallbackReason"] == "provider_call_budget"
-    assert result["coverage"]["nextSourcePosition"]["textOffset"] > 0
+    assert result["coverage"]["complete"] is True
+    assert "".join(row["text"] for p in prompts[1:] for row in entries(p)) == "中" * 4900
+    assert result["coverage"]["nextSourcePosition"] == {"entryIndex": 1, "textOffset": 0}
 
 
 def test_cancelled_later_page_escapes_without_retry_or_fallback():

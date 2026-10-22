@@ -271,7 +271,7 @@ class ContextCompactionTests(unittest.TestCase):
         self.assertEqual(result["model"], "test-model")
         self.assertEqual(len(result["summaryDigest"]), 64)
 
-    def test_minimum_history_that_cannot_fit_never_reaches_provider(self) -> None:
+    def test_small_context_window_is_processed_in_complete_pages(self) -> None:
         provider_called = False
 
         def should_not_run(_prompt: str) -> str:
@@ -289,9 +289,10 @@ class ContextCompactionTests(unittest.TestCase):
             real_context_limit=6_000,
         )
 
-        self.assertFalse(provider_called)
-        self.assertEqual(result["fidelity"], "fallback")
-        self.assertEqual(result["fallbackReason"], "provider_call_budget")
+        self.assertTrue(provider_called)
+        self.assertEqual(result["fidelity"], "paged")
+        self.assertTrue(result["coverage"]["complete"])
+        self.assertTrue(result["completeness"]["summarizerInputComplete"])
         self.assertLessEqual(len(result["summary"]), 1_000)
 
     def test_standalone_phase_is_supported_for_manual_command(self) -> None:
@@ -346,16 +347,17 @@ class ContextCompactionTests(unittest.TestCase):
         )
         inline = json.dumps({key: value for key, value in result.items() if key != "recovery"}, ensure_ascii=False)
 
-        self.assertFalse(provider_called)
-        self.assertEqual(result["fidelity"], "fallback")
-        self.assertEqual(result["fallbackReason"], "provider_call_budget")
-        self.assertIn("Goal: validate the install safely.", result["summary"])
+        self.assertTrue(provider_called)
+        self.assertEqual(result["fidelity"], "paged")
+        self.assertTrue(result["coverage"]["complete"])
+        self.assertTrue(result["completeness"]["summarizerInputComplete"])
+        self.assertEqual(result["recovery"]["sourceEntries"][0]["text"], "Goal: validate the install safely.")
         self.assertNotIn(tool_payload[:128], result["summary"])
         self.assertNotIn(tool_payload[:128], inline)
         self.assertEqual(result["recovery"]["sourceEntries"][1], {"role": "tool", "text": tool_payload})
         self.assertEqual(result["recovery"]["authority"], "historical_context_data")
         self.assertTrue(result["completeness"]["sourceRecoveryComplete"])
-        self.assertIn("entry omitted", result["summary"])
+        self.assertIn("Historical page", result["summary"])
 
     def test_provider_retry_success_reports_stable_metadata_and_no_raw_input(self) -> None:
         raw_secret = "sk-proj-do-not-retain-123456"

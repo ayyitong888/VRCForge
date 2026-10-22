@@ -2050,6 +2050,7 @@ class RuntimePlannerService:
             metadata["attempts"] = 1
             result = dict(self._compactor.compact(tuple(entries), {
                 "trigger": "auto", "phase": "mid_turn", "targetTokens": summary_target,
+                "inputMode": "native",
                 "realContextLimit": guard["contextLimit"],
                 "_recordUsage": lambda prompt, usage: self.record_context_usage(
                     context_usage if context_usage is not None else {}, prompt, [], usage,
@@ -2057,7 +2058,11 @@ class RuntimePlannerService:
             }))
             metadata["attempts"] = bounded_runtime_compaction_integer(result.get("providerAttempts"), 16)
             if ensure_dict(result.get("completeness")).get("summarizerInputComplete") is False:
-                raise ValueError("incomplete_summarizer_input")
+                coverage = ensure_dict(result.get("coverage"))
+                if not (coverage.get("selectedInputComplete") is True
+                        and ensure_dict(result.get("completeness")).get("sourceRecoveryComplete") is True
+                        and result.get("fidelity") != "fallback"):
+                    raise ValueError("incomplete_summarizer_input")
             summary = str(result.get("summary") or "").strip()
             if not summary:
                 raise ValueError("empty_summary")
@@ -2076,6 +2081,7 @@ class RuntimePlannerService:
             # The facade checks cancellation and exact snapshot identity inside
             # the owner's existing lock. No mutation precedes this commit.
             native_turn.replace_compacted_history(snapshot, summary, recovery=recovery)
+            native_turn.compaction_attempted = False
             runtime_messages = [deepcopy(candidate["messages"][-1])]
             metadata.update({"applied": True, "blocked": False, "afterTokens": after["beforeTokens"],
                              "entryCount": result.get("entryCount"), "retainedEntryCount": result.get("retainedEntryCount"),

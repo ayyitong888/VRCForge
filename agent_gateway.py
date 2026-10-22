@@ -5391,6 +5391,11 @@ class AgentGateway:
                     or getattr(self.ensure_config(), "advanced_settings", None)
                 ),
             )
+        # Persist the host-resolved bound in every continuation seed, including
+        # questions restored before the frontend had discovered model capacity.
+        bound_context_limit = params.get("_contextCompactionLimit")
+        if isinstance(bound_context_limit, int) and bound_context_limit > 0:
+            task_loop.context_limit = bound_context_limit
         handoff_terminal = self._accept_user_adjustment_receipt(
             ensure_dict(task_continuation).get("execution"),
             ensure_dict(continuation_context.get("requestedArguments")),
@@ -6391,7 +6396,7 @@ class AgentGateway:
                         runtime_exposure_layer=runtime_exposure_layer,
                     )
                 if compaction_result is not None:
-                    runtime_compaction_attempted = True
+                    runtime_compaction_attempted = not bool(compaction_result.get("applied"))
                     if compaction_result.get("applied"):
                         if compaction_result.get("recovery"):
                             observe["compactionRecoveryInformation"] = [

@@ -13,6 +13,11 @@ from tests.test_dashboard_server import _TestRuntimePlannerCatalog, _TestRuntime
 from tests.test_provider_configuration_service import _owner
 
 
+@pytest.fixture(autouse=True)
+def offline_model_capacity(monkeypatch):
+    monkeypatch.setattr(host.PROVIDER_MODEL_CATALOG, "resolve_context_limit", lambda config: None)
+
+
 def configured_owner(tmp_path):
     owner = _owner(tmp_path / "providers.json")
     owner.save_api_config(ProviderApiConfig("deepseek", "saved-deepseek-key", "https://old-deepseek.example/v1", "deepseek-old", "chat_completions"))

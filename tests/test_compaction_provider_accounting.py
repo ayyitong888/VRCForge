@@ -111,7 +111,7 @@ def test_compactor_records_each_page_and_failed_attempt_without_forwarding_priva
     model = model_fixture(monkeypatch, request)
     compactor = dashboard._RuntimePlannerCompactor(SimpleNamespace(current_config=fixture_config), model)
     result = compactor.compact(({"role": "user", "text": "字" * 3000},), {
-        "targetTokens": 2000, "_recordUsage": lambda prompt, usage: receipts.append((prompt, usage))})
+        "targetTokens": 2000, "realContextLimit": 6000, "_recordUsage": lambda prompt, usage: receipts.append((prompt, usage))})
     assert len(receipts) == len(calls) == result["providerAttempts"] == 3
     assert receipts[0][1] == USAGE and receipts[2][1] == USAGE
     assert receipts[1][1].get("exact") is not True
@@ -130,7 +130,7 @@ def test_compaction_absolute_deadline_stops_active_worker_and_later_pages(monkey
     compactor = dashboard._RuntimePlannerCompactor(SimpleNamespace(current_config=fixture_config), model)
     compactor._TOTAL_TIMEOUT_SECONDS = 0.05
     result = compactor.compact(({"role": "user", "text": "字" * 3000},), {
-        "targetTokens": 2000, "_recordUsage": lambda p, u: receipts.append(u)})
+        "targetTokens": 2000, "realContextLimit": 6000, "_recordUsage": lambda p, u: receipts.append(u)})
     assert len(calls) == len(receipts) == 2
     assert result["fallbackReason"] == "compaction_deadline"
     assert result["completeness"]["summarizerInputComplete"] is False
@@ -179,3 +179,28 @@ def test_gateway_cancel_restores_window_but_keeps_compaction_cost(tmp_path):
     phases = response["contextUsage"]["usageByPhase"]
     assert phases["planner"]["inputTokens"] == 18000
     assert phases["compaction"]["inputTokens"] == 100
+
+
+def test_compaction_calibration_uses_paired_receipt_and_is_scoped_to_model_protocol(monkeypatch):
+    from dataclasses import replace
+    from context_compaction import estimate_compaction_prompt_tokens
+    calls = []
+    def request(_settings, prompt, **kwargs):
+        calls.append(prompt)
+        return PlannerModelResult("Safe summary", usage={
+            **USAGE, "inputTokens": estimate_compaction_prompt_tokens(prompt) * 2})
+    model = model_fixture(monkeypatch, request)
+    config = fixture_config()
+    turn = SimpleNamespace(current_config=lambda: config)
+    compactor = dashboard._RuntimePlannerCompactor(turn, model)
+    history = tuple({"role": "user", "text": "historical observation " * 100} for _ in range(30))
+    metadata = {"targetTokens": 1000, "realContextLimit": 10000, "inputMode": "native"}
+    first = compactor.compact(history, metadata)
+    second = compactor.compact(history, metadata)
+    assert first["inputEstimateRatio"] == 1
+    assert second["inputEstimateRatio"] == 2
+    assert second["retainedEntryCount"] < first["retainedEntryCount"]
+    assert estimate_compaction_prompt_tokens(calls[-1]) * 2 <= second["requestBudgetTokens"]
+    for changed in (replace(config, model="different-model"), replace(config, api_type="different-protocol")):
+        turn.current_config = lambda: changed
+        assert compactor.compact(history, metadata)["inputEstimateRatio"] == 1

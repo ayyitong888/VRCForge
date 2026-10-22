@@ -25,6 +25,13 @@ from profiled_tool_registry import CapabilityProfile
 from vrchat_blendshape_agent import LlmPlanResponse, McpResult
 
 
+@pytest.fixture(autouse=True)
+def offline_model_capacity(monkeypatch):
+    # These wiring tests stub model transport; catalog transport is independent
+    # and is exercised in test_provider_model_catalog_service.
+    monkeypatch.setattr(dashboard_server.PROVIDER_MODEL_CATALOG, "resolve_context_limit", lambda config: None)
+
+
 def test_real_compile_mcp_result_exposes_typed_diagnostic_to_next_planner_turn():
     diagnostic = {"file": "Assets/VRCForge/Editor/UserToolCommands.cs", "line": 183,
                   "column": 53, "message": "CS0117: 'VRCForgeToolRegistry' does not contain a definition for 'Describe'",

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 import time
 from concurrent.futures import CancelledError
@@ -320,6 +321,10 @@ def _estimate_entry_tokens(entry: Mapping[str, str]) -> int:
     return max(1, int(units + 0.999))
 
 
+def estimate_compaction_prompt_tokens(prompt: str) -> int:
+    return _estimate_entry_tokens({"role": "user", "text": prompt})
+
+
 def _effective_budget(target_tokens: int | None, real_context_limit: int | None) -> int:
     requested = int(target_tokens or DEFAULT_TARGET_TOKENS)
     requested = max(64, min(requested, MAX_INPUT_BUDGET_TOKENS))
@@ -340,10 +345,10 @@ def _safe_metadata(value: str, limit: int = 128) -> str:
 
 def _continuous_pages(entries: Sequence[dict[str, str]], budget: int,
                       fits_request: Callable[[Sequence[dict[str, str]]], bool]) -> list[dict[str, Any]]:
-    """Plan at most the total call budget plus one, without sampling any entries."""
+    """Partition the finite source completely; retries do not limit page count."""
     pages: list[dict[str, Any]] = []
     index = offset = 0
-    while index < len(entries) and len(pages) <= MAX_PROVIDER_ATTEMPTS:
+    while index < len(entries):
         start = {"entryIndex": index, "textOffset": offset}
         rows: list[dict[str, str]] = []
         used = 0
@@ -553,12 +558,15 @@ def _provider_error_kind(exc: Exception) -> tuple[str, bool]:
     message_status_match = re.search(r"\b(400|401|402|403|404|408|413|422|429|5\d\d)\b", message)
     if status_code is None and message_status_match:
         status_code = int(message_status_match.group(1))
+    if status_code in {None, 400, 422} and any(term in message for term in (
+            "context length", "context window", "context_length_exceeded", "maximum context")):
+        return "provider_size", False
     if status_code in {400, 401, 402, 403, 404, 413, 422}:
         if status_code in {401, 403}:
             return "provider_auth", False
         if status_code == 402:
             return "provider_credit", False
-        if status_code in {413, 422}:
+        if status_code == 413:
             return "provider_size", False
         return "provider_request", False
     if any(term in message for term in ("api key", "unauthorized", "forbidden", "authentication")):
@@ -627,6 +635,8 @@ def compact_context(
     model: str = "",
     target_tokens: int | None = None,
     real_context_limit: int | None = None,
+    input_mode: str = "complete",
+    input_estimate_ratio: float = 1.0,
     sleep: Callable[[float], None] = time.sleep,
 ) -> dict[str, Any]:
     """Compact chat history without ever sending unredacted content to a provider."""
@@ -635,7 +645,12 @@ def compact_context(
         raise ContextCompactionInputError("trigger must be manual or auto")
     if phase not in {"standalone", "pre_turn", "mid_turn"}:
         raise ContextCompactionInputError("phase must be standalone, pre_turn, or mid_turn")
+    if input_mode not in {"complete", "native"}:
+        raise ContextCompactionInputError("input_mode must be complete or native")
 
+    ratio = float(input_estimate_ratio)
+    if not math.isfinite(ratio) or ratio < 1:
+        raise ContextCompactionInputError("input_estimate_ratio must be finite and at least one")
     redactor = _Redactor()
     entries = _normalize_entries(history, redactor)
     if not entries:
@@ -661,18 +676,43 @@ def compact_context(
     )
     # targetTokens is the summary output goal, not the source page size.
     # Reserve room for framing and output under the verified context limit.
-    request_budget = min(MAX_INPUT_BUDGET_TOKENS,
-                         normalized_real_context_limit // 2 if normalized_real_context_limit else MAX_INPUT_BUDGET_TOKENS)
-    overhead = _estimate_entry_tokens({"role": "user", "text": _build_prompt([], **prompt_options)}) + 256
-    source_budget = request_budget - overhead
+    # A verified context limit reserves the other half for the summary output
+    # and provider framing.  The fixed 64k cap remains the safe default when
+    # the provider has not supplied a limit.
+    request_budget = (max(64, normalized_real_context_limit // 2)
+                      if normalized_real_context_limit else MAX_INPUT_BUDGET_TOKENS)
+    if input_mode == "native" and normalized_real_context_limit:
+        request_budget = max(0, normalized_real_context_limit * 95 // 100 - budget)
+    def request_tokens(prompt: str) -> int:
+        return math.ceil(estimate_compaction_prompt_tokens(prompt) * ratio)
+
+    overhead = estimate_compaction_prompt_tokens(_build_prompt([], **prompt_options)) + 256
+    source_budget = int(request_budget / ratio) - overhead
     def fits_request(rows: Sequence[dict[str, str]]) -> bool:
         # Account for JSON escapes in the actual framed prompt as well as the
         # source entry budget. Leave bounded room for continuous-page metadata.
-        return _estimate_entry_tokens({"role": "user", "text": _build_prompt(rows, **prompt_options)}) + 256 <= request_budget
+        return request_tokens(_build_prompt(rows, **prompt_options)) + 256 <= request_budget
 
-    pages = _continuous_pages(entries, source_budget, fits_request) if source_budget >= 64 else []
+    selected_start = 0
+    if input_mode == "native":
+        # Keep whole historical transactions. Full source remains in recovery;
+        # only the model's bounded working input drops the oldest entries.
+        low, high = 0, len(entries)
+        while low < high:
+            middle = (low + high) // 2
+            if fits_request(entries[middle:]):
+                high = middle
+            else:
+                low = middle + 1
+        selected_start = low
+        pages = ([{"entries": entries[selected_start:],
+                   "start": {"entryIndex": selected_start, "textOffset": 0},
+                   "end": {"entryIndex": len(entries), "textOffset": 0}}]
+                 if selected_start < len(entries) else [])
+    else:
+        pages = _continuous_pages(entries, source_budget, fits_request) if source_budget >= 64 else []
     planned_all = bool(pages) and pages[-1]["end"] == {"entryIndex": len(entries), "textOffset": 0}
-    within_calls = planned_all and len(pages) <= MAX_PROVIDER_ATTEMPTS
+    within_calls = planned_all
     prompts = []
     if within_calls:
         for page_index, page in enumerate(pages):
@@ -683,7 +723,7 @@ def compact_context(
                 + json.dumps({"pageIndex": page_index, "pageCount": len(pages),
                               "start": page["start"], "end": page["end"]}, separators=(",", ":")) + "\n")
             prompts.append(prefix + _build_prompt(page["entries"], **prompt_options))
-    request_estimates = [_estimate_entry_tokens({"role": "user", "text": prompt}) for prompt in prompts]
+    request_estimates = [request_tokens(prompt) for prompt in prompts]
     within_request = bool(prompts) and max(request_estimates) <= request_budget
     summary_max_chars = max(1_000, min(MAX_SUMMARY_CHARS, budget * 4))
     attempts = 0
@@ -700,17 +740,26 @@ def compact_context(
         fallback_reason = "provider_call_budget"
 
     if summarizer is not None and within_calls and within_request:
-        while completed_pages < len(pages) and attempts < MAX_PROVIDER_ATTEMPTS:
+        page_attempts = 0
+        while completed_pages < len(pages):
             attempts += 1
+            page_attempts += 1
             try:
                 raw = summarizer(prompts[completed_pages])
             except CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001 - provider adapters have heterogeneous errors.
                 fallback_reason, retryable = _provider_error_kind(exc)
-                if not retryable or attempts >= MAX_PROVIDER_ATTEMPTS:
+                if input_mode == "native" and fallback_reason == "provider_size" and len(pages[0]["entries"]) > 1:
+                    selected_start += 1
+                    pages[0]["entries"] = entries[selected_start:]
+                    pages[0]["start"] = {"entryIndex": selected_start, "textOffset": 0}
+                    prompts[0] = _build_prompt(pages[0]["entries"], **prompt_options)
+                    page_attempts = 0
+                    continue
+                if not retryable or page_attempts >= MAX_PROVIDER_ATTEMPTS:
                     break
-                sleep(0.05 * (2 ** (attempts - 1)))
+                sleep(0.05 * (2 ** (page_attempts - 1)))
                 continue
             try:
                 payload_kind, payload = _extract_provider_payload(raw)
@@ -729,6 +778,7 @@ def compact_context(
                     break
                 completed_summaries.append(candidate)
                 completed_pages += 1
+                page_attempts = 0
                 fallback_reason = ""
             except ValueError as exc:
                 fallback_reason = str(exc) if str(exc) in {"empty_response", "schema_error"} else "schema_error"
@@ -747,7 +797,7 @@ def compact_context(
             complete_summary = f"[Incomplete historical summary: {completed_pages}/{len(pages)} pages validated; {fallback_reason}]\n" + complete_summary
         summary = _bound_summary(complete_summary, summary_max_chars)
         summary_source = "provider"
-        fidelity = "full" if complete and len(pages) == 1 else "paged" if complete else "fallback"
+        fidelity = "selected" if complete and selected_start else "full" if complete and len(pages) == 1 else "paged" if complete else "fallback"
     else:
         summary = _fallback_summary(
             entries,
@@ -767,21 +817,23 @@ def compact_context(
         "schema": COMPACTION_SCHEMA,
         "summary": summary,
         "entryCount": len(entries),
-        "retainedEntryCount": len(entries) if complete else next_position["entryIndex"],
+        "retainedEntryCount": len(entries) - selected_start if complete else next_position["entryIndex"],
         "sourceDigest": computed_source_digest,
         "summaryDigest": hashlib.sha256(summary.encode("utf-8")).hexdigest(),
         "completeness": {
             "inlineSummaryComplete": summary == complete_summary,
             "sourceRecoveryComplete": True,
-            "summarizerInputComplete": complete,
+            "summarizerInputComplete": complete and selected_start == 0,
         },
-        "coverage": {"complete": complete, "pageCount": len(pages) if planned_all else None,
+        "coverage": {"complete": complete and selected_start == 0,
+                     "selectedInputComplete": complete, "omittedEntries": selected_start,
+                     "pageCount": len(pages) if planned_all else None,
                      "requiredPagesAtLeast": len(pages), "completedPages": completed_pages,
                      "failedPageIndex": completed_pages if not complete else None,
                      "nextSourcePosition": next_position,
                      "completedRanges": [{"start": page["start"], "end": page["end"]}
                                          for page in pages[:completed_pages]],
-                     "maxProviderCalls": MAX_PROVIDER_ATTEMPTS},
+                     "maxProviderCalls": (len(entries) if input_mode == "native" else len(pages)) * MAX_PROVIDER_ATTEMPTS},
         # Data returned to the existing caller, not a store or a reader promise.
         # Source completeness means all accepted, normalized, redacted entries;
         # it does not mean every page reached and passed the summarizer.
@@ -807,6 +859,7 @@ def compact_context(
         "estimatedInputTokens": estimated_tokens,
         "maxRequestEstimatedTokens": max(request_estimates, default=0),
         "requestBudgetTokens": request_budget,
+        "inputEstimateRatio": ratio,
         "providerAttempts": attempts,
     }
     if fallback_reason:
