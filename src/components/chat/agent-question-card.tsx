@@ -73,7 +73,7 @@ export function AgentQuestionCard({
   };
 
   return (
-    <section className="app-scrollbar max-h-[48vh] overflow-y-auto rounded-2xl border border-border bg-card p-4" aria-label={t("questionCard.label")}>
+    <section className="app-scrollbar max-h-[48vh] overflow-y-auto rounded-2xl border border-border bg-workspace p-4" aria-label={t("questionCard.label")}>
       <div className="mb-1.5 flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
         <HelpCircle className="h-4 w-4 shrink-0" />
         <span className="min-w-0 flex-1 font-normal">{t("questionCard.title")}</span>
