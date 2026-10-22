@@ -34,13 +34,13 @@ from unity_mcp_tool_contract import (
     PRODUCT_VERSION,
     READ_ONLY_TOOL_NAMES,
     SCAN_SCOPE_TOOL_NAMES,
-    TOOL_CONTRACT_VERSION,
 )
 
 
 APP_SETUP_OUTFIT_POLL_LANE = "app_setup_outfit_poll"
 APP_UNITYPACKAGE_IMPORT_POLL_LANE = "app_unitypackage_import_poll"
 APP_BUILD_TEST_POLL_LANE = "app_build_test_poll"
+SIBLING_ORDER_MINIMUM_CORE_CONTRACT_VERSION = 175
 SUPPORTED_PROTOCOL_VERSIONS = (MODERN_PROTOCOL_VERSION,)
 MAX_FRAME_BYTES = 1024 * 1024
 MAX_RESPONSE_FRAME_BYTES = 8 * 1024 * 1024
@@ -385,9 +385,11 @@ class UnityMcpCoreClient:
             if name != "vrc_build_test_avatar" or not _is_strict_build_test_job_poll(arguments):
                 raise ValueError("Build & Test job polling requires exact jobId arguments.")
         call_arguments = arguments or {}
-        if (name == "vrc_reparent_gameobject" and "siblingIndex" in call_arguments
-                and self._connection.tool_contract_version != TOOL_CONTRACT_VERSION):
-            raise UnityMcpCoreError("siblingIndex requires the current Core tool contract; update Core before sorting siblings.")
+        if name == "vrc_reparent_gameobject" and "siblingIndex" in call_arguments:
+            contract = self._connection.tool_contract_version
+            if not contract.isascii() or not contract.isdecimal() \
+                    or int(contract) < SIBLING_ORDER_MINIMUM_CORE_CONTRACT_VERSION:
+                raise UnityMcpCoreError("siblingIndex requires Core tool contract 175 or newer; update Core before sorting siblings.")
         request_id = _new_request_id()
         started_at = time.perf_counter()
         audit_base = {

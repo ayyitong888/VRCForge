@@ -51,9 +51,37 @@ def test_model_visible_projection_keeps_sort_argument_and_exact_identity():
     assert descriptor['permission']=='RequiresApproval'
     assert descriptor['checkpoint']['required'] is True
 
-@pytest.mark.parametrize('contract',['87','174'])
+@pytest.mark.parametrize('contract',['87','174','unknown','175.0',''])
 def test_old_core_cannot_silently_ignore_new_sort_argument(contract):
     client=object.__new__(UnityMcpCoreClient);client._connection=SimpleNamespace(tool_contract_version=contract)
     client._request=lambda *a,**kw:pytest.fail('must reject before tools/call')
     with pytest.raises(UnityMcpCoreError,match='Core tool contract'):
         client.call_tool('vrc_reparent_gameobject',{'gameObjectPath':'Avatar/C','newParentPath':'Avatar','siblingIndex':0})
+
+
+@pytest.mark.parametrize('contract',['175','176','177','182','183'])
+def test_sort_capability_survives_newer_core_contracts(contract):
+    client=object.__new__(UnityMcpCoreClient)
+    client._connection=SimpleNamespace(tool_contract_version=contract)
+    calls=[]
+    def request(method,params,**kwargs):
+        calls.append((method,params,kwargs))
+        return {'content':[{'type':'text','text':'ok'}],'isError':False,'structuredContent':{'success':True}}
+    client._request=request
+    arguments={'gameObjectPath':'Avatar/C','newParentPath':'Avatar','siblingIndex':0}
+    context={'approvalId':'approved-sort','checkpointId':'exact-scene-checkpoint'}
+    result=client.call_tool('vrc_reparent_gameobject',arguments,execution_context=context)
+    assert result['content'][0]['text']=='ok'
+    assert len(calls)==1
+    assert calls[0][:2]==('tools/call',{'name':'vrc_reparent_gameobject','arguments':arguments})
+    assert calls[0][2]['execution_context']==context
+
+
+def test_older_core_reparent_without_sort_keeps_existing_request():
+    client=object.__new__(UnityMcpCoreClient)
+    client._connection=SimpleNamespace(tool_contract_version='174')
+    calls=[]
+    client._request=lambda method,params,**kwargs:calls.append((method,params)) or {'content':[{'type':'text','text':'ok'}],'isError':False,'structuredContent':{'success':True}}
+    arguments={'gameObjectPath':'Avatar/C','newParentPath':'Other'}
+    client.call_tool('vrc_reparent_gameobject',arguments)
+    assert calls==[('tools/call',{'name':'vrc_reparent_gameobject','arguments':arguments})]

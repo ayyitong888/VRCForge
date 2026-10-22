@@ -730,13 +730,15 @@ _PLANNER_TOOL_OBSERVATION_SECRET_PATTERN = re.compile(
 _PLANNER_TOOL_OBSERVATION_BEARER_PATTERN = re.compile(r"(?i)\bbearer\s+[a-z0-9._~+/-]+")
 
 _PLANNER_TOOL_OBSERVATION_KNOWN_TOKEN_PATTERN = re.compile(
-    r"\b(?:(?:sk-(?:proj-)?|gh[pousr]_|github_pat_|hf_|xox[baprs]-)[A-Za-z0-9_-]{4,}|"
+    # Hyphens belong to opaque identifiers; a word boundary inside one is not
+    # a standalone credential boundary. Sensitive fields remain redacted above.
+    r"(?<![\w-])(?:(?:sk-(?:proj-)?|gh[pousr]_|github_pat_|hf_|xox[baprs]-)[A-Za-z0-9_-]{4,}|"
     r"AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{20,})",
     re.IGNORECASE,
 )
 
 _PLANNER_TOOL_OBSERVATION_JWT_PATTERN = re.compile(
-    r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b"
+    r"(?<![\w-])eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b"
 )
 
 _PLANNER_TOOL_OBSERVATION_WINDOWS_PATH_PATTERN = re.compile(r"(?<![\w])(?:[a-z]:[\\/]|\\\\)[^\s,;]+", re.IGNORECASE)
@@ -2543,10 +2545,10 @@ class RuntimePlannerService:
                 persist_scan_policy = getattr(native_turn, "persist_scan_result_policy", None) if native else None
                 if queued_receipt is None and callable(persist_scan_policy):
                     persist_scan_policy()
-                native_history_messages = native_turn.messages() if native_turn is not None else []
+                native_history_messages = native_turn.messages() if native and queued_receipt is None else []
                 tool_block_ids = ["core", *(row["id"] for row in canonical_tool_tree()["roots"])]
-                binding_tool_definition = self._binding_tool_definition(project_context_active)
-                if native:
+                binding_tool_definition = self._binding_tool_definition(project_context_active) if queued_receipt is None else None
+                if native and queued_receipt is None:
                     tool_block_ids = native_turn.freeze_tool_block_ids(tool_block_ids)
                     if project_context_active:
                         binding_tool_definition = native_turn.freeze_binding_tool_definition(binding_tool_definition)
@@ -2558,8 +2560,9 @@ class RuntimePlannerService:
                     current_message=message,
                     tool_block_ids=tool_block_ids,
                     binding_tool_definition=binding_tool_definition,
+                    dispatch_only=queued_receipt is not None,
                 ) if native else ({}, [])
-                if native and ensure_dict(observe.get("turn")).get("directImageInput") is True:
+                if native and queued_receipt is None and ensure_dict(observe.get("turn")).get("directImageInput") is True:
                     image_bound = any(
                         isinstance(item.get("content"), list)
                         and any(isinstance(part, Mapping) and part.get("type") == "image_url"
@@ -2632,7 +2635,7 @@ class RuntimePlannerService:
                         planner_label=planner_label,
                     )
                 # Count the complete request, including schemas and history. Never log it.
-                prompt = json.dumps(
+                prompt = "" if queued_receipt is not None else json.dumps(
                     _native_measurement_projection(dict(native_request)),
                     ensure_ascii=False, separators=(",", ":"),
                 ) if native else self._build_llm_plan_prompt(
@@ -4560,6 +4563,7 @@ class RuntimePlannerService:
         current_message: str | None = None,
         tool_block_ids: list[str] | None = None,
         binding_tool_definition: dict | None = None,
+        dispatch_only: bool = False,
     ):
         """Project the existing catalog once; do not repeat native history or schemas in prose."""
         exposure_layer = normalize_exposure_layer(exposure_layer)
@@ -4623,6 +4627,10 @@ class RuntimePlannerService:
             ("load_internal_tool_block", 'When to use: first search with short task keywords, e.g. {"query":"change Animator state speed","tools":[]}. Effective query limit is 160 characters; longer input uses the first whole keywords within that limit and reports queryTruncated=true. For modifications include the intended change and target properties to obtain the required same-leaf preview/write bundle together, without unrelated authoring pairs. Inspection queries remain read-only. Results include full leaf paths and exact tool names. Call only currently available tools from alreadyLoadedTools directly; copy loadCall.tools exactly to load missing definitions once. If no match, omit block to browse roots, e.g. {"tools":[]}; copy an exact root or leaf ID from the tree or enum. Load exact tools from one leaf; allTools:true explicitly loads that leaf. Definitions are returned for call_tool. When NOT to use: guess a block, repeat loaded definitions, execute a tool or grant approval. Negative example: mentioning a tool is not an instruction to load it.'),
             ("unload_internal_tool_block", "When to use: unload one selected tool leaf. When NOT to use: execute tools or erase conversation evidence. Negative example: unloading does not undo an asset edit."),
         )]
+        if dispatch_only:
+            # Queued calls still use fresh schemas and authority, but no model
+            # request, history projection, or request composition is needed.
+            return {}, [*selected, dispatcher, control]
         definitions = [{"type": "function", "function": {
             "name": tool.name,
             "description": planner_tool_usage_description(tool.name, tool.description, write=tool.write),

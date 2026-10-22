@@ -531,6 +531,21 @@ def test_llm_completion_rejects_other_task_evidence_and_false_claim() -> None:
         assert 'taskCompletion' not in result
 
 
+@pytest.mark.parametrize('state', ['running', 'unverified'])
+def test_native_final_does_not_complete_an_unfinished_write(state) -> None:
+    loop = AgentTaskLoop('write then verify')
+    loop.require_action(kind='write', tool='write', arguments={}, verification_profile='persisted_scene_write')
+    raw = {'ok': True, 'persistedReadback': True, 'sceneSaved': state == 'running'}
+    if state == 'running':
+        raw['status'] = 'running'
+    action = loop.record_action(kind='write', tool='write', arguments={}, raw_result=raw, outcome=ok_outcome())
+    result = loop.gate_terminal({'planner': 'llm', 'nextStep': 'done', 'reply': 'Stopped',
+                                'completionClaim': {'satisfied': False}})
+    assert action['status'] != 'completed'
+    assert result['nextStep'] != 'done'
+    assert 'taskCompletion' not in result
+
+
 def test_llm_completion_requires_satisfied_and_valid_references() -> None:
     loop = AgentTaskLoop("inspect materials")
     action = loop.record_action(

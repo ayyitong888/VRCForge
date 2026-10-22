@@ -1,6 +1,7 @@
 from contextlib import nullcontext
 from copy import deepcopy
 import json
+from unittest.mock import patch
 
 import pytest
 
@@ -422,6 +423,91 @@ def test_native_gateway_host_binds_completion_without_model_copying_ids(tmp_path
     expected = [a["actionId"] for a in result["plan"]["task"]["actions"] if a["status"] == "completed"]
     assert expected
     assert result["plan"]["taskCompletion"]["evidenceActionIds"] == expected
+
+
+@pytest.mark.parametrize("budget", [2, 5])
+def test_native_plain_final_stops_without_reasking_completion_and_keeps_reply(tmp_path, budget):
+    reply = "I read the fixture; further work remains unverified."
+    gateway, model, invoked = setup_gateway(tmp_path, [
+        call("read-1", "vrcforge_read_text_file", {"path": "a.txt"}),
+        {"role": "assistant", "content": reply},
+    ])
+    result = run(gateway, tmp_path, maxAgenticTurns=budget)
+    plan = result["plan"]
+    assert len(model.requests) == 2
+    assert len(invoked) == 1
+    assert plan["reply"] == reply
+    assert plan["summary"] == reply
+    assert plan["nextStep"] == "completion_unverified"
+    assert plan["task"]["status"] == "completion_unverified"
+    assert plan["completionClaim"] == {"satisfied": False}
+    assert "taskCompletion" not in plan
+    assert not plan.get("stepLimitReached")
+    assert not plan.get("plannerFailed")
+    assert all("reply_completion_claim" not in json.dumps(r["messages"]) for r in model.requests)
+
+
+def test_native_plain_final_after_failed_read_keeps_failure_canonical(tmp_path):
+    reply = "The read failed; this task remains incomplete."
+    gateway, model, _ = setup_gateway(tmp_path, [
+        call("read-1", "vrcforge_read_text_file", {"path": "a.txt"}),
+        {"role": "assistant", "content": reply},
+    ])
+    gateway._tools["vrcforge_read_text_file"].handler = lambda _: {"ok": False, "error": "fixture read failed"}
+    result = run(gateway, tmp_path)
+    assert len(model.requests) == 2
+    assert result["plan"]["reply"] == reply
+    assert result["plan"]["nextStep"] != "done"
+    assert "taskCompletion" not in result["plan"]
+    assert result["plan"]["task"]["actions"][0]["status"] == "failed"
+
+
+def test_native_post_tool_provider_error_still_stops_with_preserved_action(tmp_path):
+    def failed_provider(_request):
+        raise RuntimeError("fixture provider failed")
+    gateway, model, invoked = setup_gateway(tmp_path, [
+        call("read-1", "vrcforge_read_text_file", {"path": "a.txt"}), failed_provider,
+    ])
+    result = run(gateway, tmp_path)
+    assert len(model.requests) == 2
+    assert len(invoked) == 1
+    assert result["plan"]["nextStep"] == "planner_failed"
+    assert result["plan"]["plannerFailure"]["phase"] == "post_tool"
+    assert "taskCompletion" not in result["plan"]
+    assert result["plan"]["task"]["actions"][0]["status"] == "completed"
+
+
+@pytest.mark.parametrize("with_image", [False, True])
+def test_native_queued_calls_skip_request_projection(tmp_path, with_image):
+    batch = call("read-1", "vrcforge_read_text_file", {"path": "a.txt"})
+    batch["tool_calls"].extend(call("read-2", "vrcforge_read_text_file", {"path": "b.txt"})["tool_calls"])
+    gateway, model, invoked = setup_gateway(tmp_path, [batch, finish])
+    planner = gateway.runtime_planner
+    with patch.object(planner, "_build_native_plan_request", wraps=planner._build_native_plan_request) as builds:
+        result = run(gateway, tmp_path, maxAgenticTurns=2, **({"attachments": [{
+            "id": "image-1", "name": "probe.png", "type": "image/png", "size": 68,
+            "dataUrl": "data:image/png;base64,iVBORw0KGgo=", "payloadKind": "data_url",
+        }]} if with_image else {}))
+    assert len(model.requests) == 2
+    assert len(invoked) == 2
+    assert result["plan"]["nextStep"] == "done"
+    assert [bool(c.kwargs.get("dispatch_only")) for c in builds.call_args_list] == [False, True, False]
+
+
+def test_native_queued_call_rechecks_revoked_tool_before_dispatch(tmp_path):
+    batch = call("read-1", "vrcforge_read_text_file", {"path": "a.txt"})
+    batch["tool_calls"].extend(call("read-2", "vrcforge_read_text_file", {"path": "b.txt"})["tool_calls"])
+    gateway, model, invoked = setup_gateway(tmp_path, [batch, {"role": "assistant", "content": "The tool was revoked."}])
+    def first_read(arguments):
+        invoked.append(arguments)
+        gateway._tools.pop("vrcforge_read_text_file")
+        return {"text": "first result"}
+    gateway._tools["vrcforge_read_text_file"].handler = first_read
+    result = run(gateway, tmp_path)
+    assert len(model.requests) == 2
+    assert len(invoked) == 1
+    assert "tool_not_visible" in json.dumps(model.requests[-1]["messages"])
+    assert result["plan"]["nextStep"] != "done"
 
 
 def test_native_gateway_completion_rejection_is_returned_to_same_call(tmp_path):

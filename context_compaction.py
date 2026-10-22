@@ -75,11 +75,11 @@ class _Redactor:
         r"([\"']?)\s*([:=])\s*(?:\"[^\"]*\"|'[^']*'|[^\s,;\"']+)"
     )
     _known_token_pattern = re.compile(
-        r"\b(?:(?:sk-(?:proj-)?|gh[pousr]_|github_pat_|hf_|xox[baprs]-)[A-Za-z0-9_-]{4,}|"
+        r"(?<![\w-])(?:(?:sk-(?:proj-)?|gh[pousr]_|github_pat_|hf_|xox[baprs]-)[A-Za-z0-9_-]{4,}|"
         r"AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{20,})",
         re.IGNORECASE,
     )
-    _jwt_pattern = re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b")
+    _jwt_pattern = re.compile(r"(?<![\w-])eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b")
     _avatar_pattern = re.compile(r"\bavtr_[A-Za-z0-9_-]{3,}\b", re.IGNORECASE)
     _quoted_path_pattern = re.compile(
         r"(?P<quote>[\"'])(?P<path>(?:[A-Za-z]:[\\/]|/(?:Users|home|root|mnt|opt|var|tmp)/)[^\r\n\"']+)(?P=quote)",

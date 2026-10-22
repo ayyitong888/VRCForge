@@ -6528,6 +6528,7 @@ class AgentGateway:
                 and not (plan.get("writeNeeded") and plan.get("writeTool"))
                 and not (plan.get("skillNeeded") and plan.get("skillTool"))
                 and not completion_claim_correction_attempted
+                and not (native_binding and not plan.get("nativeCallIds"))
                 and str(plan.get("planner") or "").strip().casefold() == "llm"
                 and task_loop.completed_action_ids()
                 and ensure_dict(
@@ -8030,6 +8031,13 @@ class AgentGateway:
             top_plan = {**handoff_terminal, "task": task_loop.snapshot("await_user_instruction")}
         elif isinstance(top_plan, dict):
             top_plan = task_loop.gate_terminal(top_plan)
+            if (native_binding and last_plan.get("nextStep") == "done"
+                    and not last_plan.get("nativeCallIds")):
+                # A native final ends conversation; canonical gates above still
+                # decide task completion independently of its displayed text.
+                for field in ("reply", "summary"):
+                    if isinstance(last_plan.get(field), str):
+                        top_plan[field] = last_plan[field]
         native_turn.settle(top_plan)
 
         # Non-analyzed image state is rendered by the structured vision step.
