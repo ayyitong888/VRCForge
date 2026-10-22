@@ -60,9 +60,7 @@ function isSentFollowup(item: UserConversationItem): boolean {
 }
 
 function terminalEventTime(turn: Extract<ConversationItem, { type: "agent" }>): number {
-  const timeline = turn.response.timeline || turn.timeline || [];
-  const values = timeline.map((event) => parseTime(event.timestamp)).filter(Number.isFinite);
-  return values.length ? Math.max(...values) : parseTime(turn.createdAt);
+  return parseTime(turn.completedAt || turn.response.completedAt);
 }
 
 function parseTime(value?: string): number {

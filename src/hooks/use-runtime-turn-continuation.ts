@@ -68,6 +68,10 @@ export type RuntimeTurnEvent = {
   sessionId?: string;
   turnId?: string;
   clientTurnId?: string;
+  startedAt?: string;
+  completedAt?: string;
+  updatedAt?: string;
+  model?: string;
   consumedSteerInputIds?: string[];
   contextUsage?: AgentRuntimeResponse["contextUsage"];
   plan?: {
@@ -151,7 +155,6 @@ export function projectQuestionContinuationActivity(
   questions: AgentQuestion[],
   runs: AgentRuntimeRun[],
   settledClientTurnIds: ReadonlySet<string> = new Set(),
-  nowIso = new Date().toISOString(),
 ): ChatThread {
   const active = new Map<string, Extract<ConversationItem, { type: "streaming" }>>();
   for (const source of questions) {
@@ -166,15 +169,16 @@ export function projectQuestionContinuationActivity(
     if (turnSessionId !== chat.sessionId) continue;
     const id = `${QUESTION_CONTINUATION_STREAM_PREFIX}${clientTurnId}`;
     const run = runs.find((candidate) => candidate.sessionId === chat.sessionId && candidate.clientTurnId === clientTurnId);
+    const prior = chat.items.find((candidate) => candidate.type === "streaming" && candidate.id === id);
     active.set(id, {
       id,
       type: "streaming",
       clientTurnId,
       text: "",
       phase: undefined,
-      providerLabel: run?.providerLabel || run?.provider,
-      model: run?.model,
-      createdAt: run?.createdAt || nowIso,
+      // Only a ledger-backed runtime_turn_started timestamp represents this
+      // continuation's start; createdAt is the latest folded run event.
+      createdAt: run?.startedAt || (prior?.type === "streaming" ? prior.createdAt : undefined),
     });
   }
 
@@ -199,8 +203,10 @@ export function projectQuestionContinuationActivity(
       continue;
     }
     const existing = items[existingIndex];
-    if (existing?.type === "streaming" && (existing.providerLabel !== item.providerLabel || existing.model !== item.model)) {
-      items[existingIndex] = { ...existing, providerLabel: item.providerLabel, model: item.model };
+    if (existing.type === "streaming" && item.createdAt && existing.createdAt !== item.createdAt) {
+      // A queued snapshot can arrive before the exact runtime_turn_started
+      // timestamp. Fill only that verified field when the started event lands.
+      items[existingIndex] = { ...existing, createdAt: item.createdAt };
       changed = true;
     }
   }
@@ -350,6 +356,7 @@ export function responseFromRuntimeTurnEvent(event: RuntimeTurnEvent): AgentRunt
     turn_id: turnId,
     turnId,
     clientTurnId: event.clientTurnId?.trim() || undefined,
+    model: event.model?.trim() || undefined,
     consumedSteerInputIds: event.consumedSteerInputIds?.filter((id) => typeof id === "string" && /^[A-Za-z0-9_.:-]{1,240}$/.test(id)).slice(0, 256),
     contextUsage: event.contextUsage,
     observe: {},
@@ -438,12 +445,13 @@ export function useRuntimeTurnContinuationDelivery({
     if (deliveryState === "replace-failed") {
       const response = responseFromRuntimeTurnEvent(event);
       const elapsedSeconds = elapsedSecondsFromTimeline(response.timeline);
+      const completedAt = event.completedAt;
       const replaced = updateChatRef.current?.(ownerChat.id, (chat) => ({
         ...chat,
         items: chat.items.map((item) => item.type === "agent"
           && ((event.clientTurnId?.trim() && item.response.clientTurnId === event.clientTurnId.trim())
             || (item.response.turnId || item.response.turn_id) === event.turnId)
-          ? { ...item, response, ...(elapsedSeconds === undefined ? {} : { elapsedSeconds }) }
+          ? { ...item, response, completedAt, ...(elapsedSeconds === undefined ? {} : { elapsedSeconds }) }
           : item),
       }));
       if (replaced) return true;
@@ -451,11 +459,7 @@ export function useRuntimeTurnContinuationDelivery({
     if (deliveryState === "append" || deliveryState === "replace-failed") {
       const response = responseFromRuntimeTurnEvent(event);
       const elapsedSeconds = elapsedSecondsFromTimeline(response.timeline);
-      const timeline = response.timeline || [];
-      const lastTimestamp = timeline
-        .map((entry) => entry.timestamp)
-        .filter((timestamp): timestamp is string => typeof timestamp === "string" && Number.isFinite(Date.parse(timestamp)))
-        .at(-1);
+      const completedAt = event.completedAt;
       appendToChatRef.current(ownerChat.id, {
         // Keep the app-owned identifier outside the bridge's secret-prefix
         // filter (the previous task- prefix contains sk-).
@@ -463,7 +467,7 @@ export function useRuntimeTurnContinuationDelivery({
         type: "agent",
         response,
         ...(elapsedSeconds === undefined ? {} : { elapsedSeconds }),
-        createdAt: lastTimestamp || new Date().toISOString(),
+        ...(completedAt ? { completedAt } : {}),
       });
     }
     return true;

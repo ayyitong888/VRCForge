@@ -4863,7 +4863,7 @@ class AgentGateway:
         )
         if projected is None:
             return None
-        self._runtime_run_ledger.append(
+        terminal_record = self._runtime_run_ledger.append(
             {
                 "event": "runtime_turn_completed",
                 "status": "needs_user_action",
@@ -4876,6 +4876,7 @@ class AgentGateway:
                 "continuationEvent": projected,
             }
         )
+        projected = ensure_dict(terminal_record).get("continuationEvent") or projected
         try:
             self._runtime_turn_completed(projected)
         except Exception:  # noqa: BLE001 - reconnect reads the durable UI-only projection.
@@ -5091,6 +5092,9 @@ class AgentGateway:
                     "error": failure,
                     **({"contextUsage": failed_turn["contextUsage"]} if "contextUsage" in failed_turn else {}),
                 }
+                if progress.get("model"):
+                    failed_turn["model"] = progress["model"]
+                    response_payload["model"] = progress["model"]
                 consumed_ids = (
                     native_turn.consumed_steer_input_ids
                     if isinstance(native_turn, NativeRuntimeTurn) and progress.get("_nativeBinding")
@@ -5109,7 +5113,7 @@ class AgentGateway:
                 except Exception:  # Recording failure must preserve the original HTTP error.
                     pass
                 try:
-                    self._runtime_run_ledger.append({
+                    terminal_record = self._runtime_run_ledger.append({
                         "event": "runtime_turn_completed", "status": "failed", "agent": agent_name,
                         "sessionId": session_id, "turnId": failed_turn["id"],
                         "clientTurnId": failed_turn["clientTurnId"], "error": failure,
@@ -5119,6 +5123,12 @@ class AgentGateway:
                         **({"contextUsage": failed_turn["contextUsage"]} if "contextUsage" in failed_turn else {}),
                         **{key: owned_params[key] for key in ("provider", "providerLabel", "model", "projectPath") if owned_params.get(key)},
                     })
+                    terminal_record = ensure_dict(terminal_record)
+                    continuation_event = terminal_record.get("continuationEvent") or continuation_event
+                    if terminal_record.get("completedAt"):
+                        response_payload["completedAt"] = terminal_record["completedAt"]
+                    if terminal_record.get("startedAt"):
+                        response_payload["startedAt"] = terminal_record["startedAt"]
                 except Exception:  # Best effort if the ledger storage itself is unavailable.
                     pass
                 if continuation_event:
@@ -6529,6 +6539,10 @@ class AgentGateway:
                 ),
                 **({"native_turn": native_turn} if native_binding else {}),
             )
+            # Planner model is populated only from the provider response;
+            # preserve it before cancellation or a subsequent tool can fail.
+            if str(plan.get("model") or "").strip():
+                params["_runtimeFailureProgress"]["model"] = str(plan["model"]).strip()
             if native_binding and native_turn.compaction is not None:
                 runtime_compaction = native_turn.compaction
             if not queued_native_action:
@@ -8045,7 +8059,8 @@ class AgentGateway:
             )
         )
         actual_response_model = str(
-            last_plan.get("model") or first_plan.get("model") or ""
+            params["_runtimeFailureProgress"].get("model")
+            or last_plan.get("model") or first_plan.get("model") or ""
         ).strip()
         if actual_response_model and isinstance(top_plan, dict):
             top_plan["model"] = actual_response_model
@@ -8312,9 +8327,10 @@ class AgentGateway:
                 "plan": top_plan,
                 "timeline": timeline,
                 "contextUsage": context_usage,
+                **({"model": actual_response_model} if actual_response_model else {}),
             }
         )
-        self._runtime_run_ledger.append(
+        terminal_record = self._runtime_run_ledger.append(
             self._runtime_run_ledger.build_run_from_turn(
                 event="runtime_turn_completed",
                 status=run_status,
@@ -8348,6 +8364,10 @@ class AgentGateway:
             "plan": top_plan,
             "task": ensure_dict(top_plan.get("task")) or task_loop.snapshot(),
         }
+        if ensure_dict(terminal_record).get("completedAt"):
+            payload["completedAt"] = terminal_record["completedAt"]
+        if ensure_dict(terminal_record).get("startedAt"):
+            payload["startedAt"] = terminal_record["startedAt"]
         if actual_response_model:
             payload["model"] = actual_response_model
         if timeline:

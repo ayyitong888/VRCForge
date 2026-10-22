@@ -14,6 +14,24 @@ from background_goal_runtime import classify_runtime_plan_outcome, classify_runt
 from runtime_planner_service import public_runtime_payload
 
 
+_COMPLETED_RUN_STATUSES = frozenset({"completed", "failed", "denied", "cancelled"})
+
+
+def _terminal_continuation(event: dict[str, Any]) -> dict[str, Any] | None:
+    continuation = event.get("continuationEvent")
+    if not isinstance(continuation, dict):
+        return None
+    projected = dict(continuation)
+    if event.get("startedAt"):
+        projected["startedAt"] = event["startedAt"]
+    if event.get("event") == "runtime_turn_completed":
+        # A runtime invocation can end at a question/approval boundary while
+        # the user's task is still waiting. Only terminal runs own this time.
+        projected.pop("completedAt", None)
+        if event.get("status") in _COMPLETED_RUN_STATUSES and event.get("createdAt"):
+            projected["completedAt"] = event["createdAt"]
+    return projected
+
 
 
 def _ensure_dict(value: Any) -> dict[str, Any]:
@@ -111,7 +129,7 @@ class AgentRuntimeRunLedger:
     def normalize_visual_accent(self, value: Any) -> str:
         return self._ports.normalize_visual_accent(value)
 
-    def append(self, entry: dict[str, Any]) -> None:
+    def append(self, entry: dict[str, Any]) -> dict[str, Any]:
         source_entry = {
                 "schema": "vrcforge.runtime_run.v1",
                 "id": f"runevt_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')}_{secrets.token_hex(3)}",
@@ -121,6 +139,17 @@ class AgentRuntimeRunLedger:
             }
         if entry.get("event") == "runtime_turn_started":
             source_entry["runtimeOwnerNonce"] = self._instance_nonce
+            source_entry["startedAt"] = source_entry["createdAt"]
+        if entry.get("event") == "runtime_turn_completed":
+            started_at = self._start_times().get((str(entry.get("sessionId") or ""), str(entry.get("turnId") or "")))
+            if started_at:
+                source_entry["startedAt"] = started_at
+            source_entry.pop("completedAt", None)
+            if entry.get("status") in _COMPLETED_RUN_STATUSES:
+                source_entry["completedAt"] = source_entry["createdAt"]
+        continuation = _terminal_continuation(source_entry)
+        if continuation is not None:
+            source_entry["continuationEvent"] = continuation
         safe_entry = _restore_private_native_snapshot(
             self._ports.redact(source_entry), source_entry
         )
@@ -131,6 +160,7 @@ class AgentRuntimeRunLedger:
             with path.open("a", encoding="utf-8") as log_file:
                 log_file.write(json.dumps(safe_entry, ensure_ascii=False, sort_keys=True) + "\n")
                 self._ports.flush_and_fsync(log_file)
+        return safe_entry
 
     @staticmethod
     def _turn_key(event: dict[str, Any]) -> str:
@@ -242,16 +272,30 @@ class AgentRuntimeRunLedger:
                 created += 1
             return created
 
-    def read_events(self, *, limit: int = 400, contains: str | None = None) -> list[dict[str, Any]]:
+    def read_events(
+        self, *, limit: int = 400, contains: str | None = None,
+        start_times: dict[tuple[str, str], str] | None = None,
+    ) -> list[dict[str, Any]]:
         path = self.log_path
         if not path.exists():
             return []
         try:
             with path.open("r", encoding="utf-8") as source:
-                lines = deque(
-                    (line for line in source if contains is None or contains in line),
-                    maxlen=None if int(limit) <= 0 else max(1, min(int(limit), 2000)),
-                )
+                lines = deque(maxlen=None if int(limit) <= 0 else max(1, min(int(limit), 2000)))
+                for line in source:
+                    # Reuse this scan rather than rereading the whole ledger
+                    # on each UI poll when starts precede the recent window.
+                    if start_times is not None and '"runtime_turn_started"' in line:
+                        try:
+                            started = json.loads(line)
+                        except json.JSONDecodeError:
+                            started = None
+                        if (isinstance(started, dict) and started.get("event") == "runtime_turn_started"
+                                and started.get("sessionId") and started.get("turnId") and started.get("createdAt")):
+                            key = (str(started["sessionId"]), str(started["turnId"]))
+                            start_times[key] = str(started["createdAt"])
+                    if contains is None or contains in line:
+                        lines.append(line)
         except OSError:
             return []
         events: list[dict[str, Any]] = []
@@ -263,6 +307,16 @@ class AgentRuntimeRunLedger:
             if isinstance(payload, dict):
                 events.append(payload)
         return events
+
+    def _start_times(self) -> dict[tuple[str, str], str]:
+        # Progress can push a start beyond the bounded recent-event window.
+        # Read only start records and bind by the exact invocation identity.
+        return {
+            (str(row.get("sessionId") or ""), str(row.get("turnId") or "")): str(row["createdAt"])
+            for row in self.read_events(limit=0, contains='"runtime_turn_started"')
+            if row.get("event") == "runtime_turn_started" and row.get("createdAt")
+            and row.get("sessionId") and row.get("turnId")
+        }
 
     def record_queue_event(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         params = params or {}
@@ -292,7 +346,8 @@ class AgentRuntimeRunLedger:
         project_root: str = "",
         client_turn_id: str = "",
     ) -> dict[str, Any]:
-        events = self.read_events(limit=max(limit * 8, 100))
+        start_times: dict[tuple[str, str], str] = {}
+        events = self.read_events(limit=max(limit * 8, 100), start_times=start_times)
         session_id = session_id.strip()
         project_root = project_root.strip()
         client_turn_id = client_turn_id.strip()
@@ -354,6 +409,10 @@ class AgentRuntimeRunLedger:
             key=lambda item: str(item.get("updatedAt") or item.get("createdAt") or item.get("timestamp") or ""),
             reverse=True,
         )[: max(1, min(limit, 200))]
+        for run in runs:
+            started_at = start_times.get((str(run.get("sessionId") or ""), str(run.get("turnId") or "")))
+            if started_at:
+                run["startedAt"] = started_at
         return {
             "ok": True,
             "schema": "vrcforge.runtime_runs.v1",
@@ -370,11 +429,12 @@ class AgentRuntimeRunLedger:
 
         self.recover_interrupted_runs()
         # Count durable continuations, not the intervening live progress rows.
-        events = self.read_events(limit=max(limit * 8, 100), contains='"continuationEvent"')
+        start_times: dict[tuple[str, str], str] = {}
+        events = self.read_events(limit=max(limit * 8, 100), contains='"continuationEvent"', start_times=start_times)
         by_key: dict[str, dict[str, Any]] = {}
         order: list[str] = []
         for event in events:
-            continuation = event.get("continuationEvent")
+            continuation = _terminal_continuation(event)
             if not isinstance(continuation, dict):
                 continue
             session_id = str(continuation.get("sessionId") or "").strip()
@@ -382,12 +442,24 @@ class AgentRuntimeRunLedger:
             client_turn_id = str(continuation.get("clientTurnId") or "").strip()
             if not session_id or not turn_id:
                 continue
+            started_at = start_times.get((session_id, turn_id))
+            if started_at:
+                continuation["startedAt"] = started_at
             key = f"{session_id}:{client_turn_id or turn_id}"
             if key not in by_key:
                 order.append(key)
             elif (continuation.get("continuationSource") == "foreground_interrupted"
                   and by_key[key].get("continuationSource") != "foreground_interrupted"):
                 continue
+            # Older receipt rows can replace a terminal projection without
+            # carrying its timestamp. Retain that same turn's terminal fact;
+            # issuing a receipt or reconnecting must never move the clock.
+            previous = by_key.get(key, {})
+            if (event.get("event") == "runtime_turn_journey_receipt_issued"
+                    and not continuation.get("completedAt")
+                    and previous.get("turnId") == turn_id
+                    and previous.get("completedAt")):
+                continuation["completedAt"] = previous["completedAt"]
             by_key[key] = self._ports.redact(public_runtime_payload(continuation))
         selected = order[-max(1, min(int(limit), 200)) :]
         return [by_key[key] for key in selected]

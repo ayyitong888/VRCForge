@@ -16,8 +16,7 @@ import { Composer } from "./composer";
 import { AgentQuestionCard } from "./agent-question-card";
 import { projectAgentQuestionContinuation, questionContinuationCancelTarget, questionContinuationDisplay } from "../../hooks/use-runtime-turn-continuation";
 import { BackgroundGoalCatchUpCard } from "./background-goal-catch-up-card";
-import { ConversationCard } from "./conversation-card";
-import { MessageDateSeparator } from "./conversation-card";
+import { ConversationCard, MessageDateSeparator, StreamingPhaseStatus } from "./conversation-card";
 import { SessionHandoffCard } from "./session-handoff-card";
 import { SessionHandoffSend, type SessionHandoffTargetChat } from "./session-handoff-send";
 import { ScopedPendingApprovalCard } from "../approvals/scoped-pending-approval-card";
@@ -370,6 +369,13 @@ export function ChatWorkspace({
     (item) => item.type !== "user" || item.composerQueued !== true,
   )));
   const conversationItems = steeringProjection.items;
+  const activeStreamingItems = conversationItems.filter((item): item is Extract<ConversationItem, { type: "streaming" }> => item.type === "streaming");
+  const [activityNowMs, setActivityNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    if (!activeStreamingItems.length) return undefined;
+    const timer = window.setInterval(() => setActivityNowMs(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, [activeStreamingItems.length]);
   const conversationItemKeyOccurrences = new Map<string, number>();
   const conversationRenderScope = sessionHandoffSourceChatId || "chat";
   const [goalActionBusy, setGoalActionBusy] = useState(false);
@@ -583,6 +589,9 @@ export function ChatWorkspace({
           onScroll={(event) => onConversationScroll(event.currentTarget)}
         >
           <div className="mx-auto max-w-3xl space-y-7">
+          {activeStreamingItems.map((item) => (
+            <StreamingPhaseStatus key={`active-${item.id}`} item={item} nowMs={activityNowMs} showElapsed={false} />
+          ))}
           <BackgroundGoalCatchUpCard
             deliveries={backgroundGoalDeliveries}
             providerWarnings={backgroundGoalProviderWarnings}

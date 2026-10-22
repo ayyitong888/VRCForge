@@ -1,6 +1,33 @@
 from agent_runtime_event_projection import project_runtime_turn_event
 
 
+def test_runtime_turn_projection_preserves_terminal_time_across_reprojection() -> None:
+    payload = {
+        "continuationSource": "foreground_completed",
+        "sessionId": "session",
+        "turnId": "turn",
+        "completedAt": "2026-10-22T22:05:23.405718+00:00",
+        "plan": {"nextStep": "done"},
+        "timeline": [{"kind": "assistant", "timestamp": "2026-10-22T22:05:10Z"}],
+    }
+    projected = project_runtime_turn_event(payload)
+    assert projected["completedAt"] == payload["completedAt"]
+    assert project_runtime_turn_event(projected)["completedAt"] == payload["completedAt"]
+
+
+def test_runtime_turn_projection_never_invents_completion_time() -> None:
+    payload = {
+        "continuationSource": "question_answered",
+        "sessionId": "session",
+        "turnId": "turn",
+        "createdAt": "2026-10-22T22:05:23Z",
+        "updatedAt": "2026-10-22T22:05:24Z",
+        "plan": {"nextStep": "needs_user_action"},
+        "timeline": [{"kind": "assistant", "timestamp": "2026-10-22T22:05:10Z"}],
+    }
+    assert "completedAt" not in project_runtime_turn_event(payload)
+
+
 def test_shell_runtime_turn_projection_is_bounded_and_drops_internal_state() -> None:
     projected = project_runtime_turn_event(
         {

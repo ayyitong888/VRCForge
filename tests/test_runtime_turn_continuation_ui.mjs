@@ -20,6 +20,9 @@ assert.match(hook, /const continuationId = event\.clientTurnId\?\.trim\(\) \|\| 
 assert.match(hook, /item\.response\.clientTurnId === event\.clientTurnId\.trim\(\)/);
 assert.match(hook, /item\.response\.turnId \|\| item\.response\.turn_id/);
 assert.match(hook, /appendToChatRef\.current\(ownerChat\.id/);
+assert.match(hook, /completedAt\?: string;/);
+assert.match(hook, /const completedAt = event\.completedAt;/);
+assert.doesNotMatch(hook, /createdAt: lastTimestamp \|\||completedAt \|\| new Date\(\)\.toISOString\(\)/, "missing server terminal time is not replaced with a local timestamp");
 const replyIdPrefix = hook.match(/id: `([^`$]+)\$\{continuationId\}`/)?.[1];
 assert.ok(replyIdPrefix, "continuation reply must have an app-owned identity");
 assert.equal(replyIdPrefix.includes("sk-"), false, "continuation ids must survive the bridge secret-prefix filter instead of collapsing to [redacted]");

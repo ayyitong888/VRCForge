@@ -59,7 +59,7 @@ export function useApprovalExecution({
       type: "agent",
       response,
       elapsedSeconds: 0,
-      createdAt: new Date().toISOString(),
+      ...(response.completedAt ? { completedAt: response.completedAt } : {}),
     });
     return true;
   }

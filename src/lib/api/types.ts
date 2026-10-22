@@ -596,6 +596,8 @@ export type AgentRuntimeResponse = {
   status?: string;
   /** Provider-reported model actually used for this completed response. */
   model?: string;
+  /** Ledger-backed terminal timestamp for the full runtime turn. */
+  completedAt?: string;
   providerWarningKey?: string;
   approval_id?: string;
   approvalId?: string;
@@ -785,6 +787,7 @@ export type AgentRuntimeRun = {
   writeTool?: string;
   resultSummary?: unknown;
   error?: string;
+  startedAt?: string;
   createdAt?: string;
   updatedAt?: string;
   steps?: Array<{
@@ -1046,6 +1049,8 @@ export type AgentQuestion = {
   needsUserAction?: boolean;
   answer?: string;
   selectedOptionId?: string;
+  attachments?: AgentMessageAttachment[];
+  questionFeedbackRevision?: number;
   projectRoot?: string;
   sessionId?: string;
   owner?: string;

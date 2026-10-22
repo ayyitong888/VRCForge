@@ -74,6 +74,11 @@ try {
   const replies = items.filter(item => item.type === "agent" && item.response.clientTurnId === event.clientTurnId);
   assert.equal(replies.length, 1, "question activity cleanup must preserve the final reply appended earlier in the same effect round");
   assert.equal(replies[0].response.plan.reply, event.plan.reply, "the original model final text survives unchanged");
+  if (event.completedAt) {
+    assert.equal(replies[0].completedAt, event.completedAt, "terminal display time follows the ledger completion timestamp");
+  } else {
+    assert.equal(replies[0].completedAt, undefined, "updatedAt or missing server completion time is never presented as completion");
+  }
   assert.equal(items.some(item => item.type === "streaming"), false);
   assert.deepEqual(items.filter(item => item.type === "user" && ![confirmedId, unconfirmedId].includes(item.clientTurnId)), fixture.chat.items.filter(item => item.type === "user"));
   assert.equal(items.find(item => item.clientTurnId === confirmedId).queueStatus, undefined, "only the backend-confirmed consumed steer becomes ordinary history");

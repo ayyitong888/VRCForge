@@ -222,7 +222,7 @@ export function collectCompactedAttachmentReferences(
 ): CompactedAttachmentReference[] | undefined {
   const references: CompactedAttachmentReference[] = [];
   for (const item of items) {
-    if (item.type !== "user") {
+    if (item.type !== "user" && item.type !== "question_answer") {
       continue;
     }
     for (const attachment of item.attachments || []) {
@@ -253,7 +253,7 @@ export function mergeCompactedAttachmentReferences(
   return merged.length ? merged : undefined;
 }
 
-/** Keep only payloads referenced by durable user messages or compacted refs. */
+/** Keep only payloads referenced by durable user inputs, question answers, or compacted refs. */
 export function referencedAttachmentPayloadVault(
   items: readonly ConversationItem[],
   vault: AttachmentPayloadVault,
@@ -261,7 +261,7 @@ export function referencedAttachmentPayloadVault(
 ): AttachmentPayloadVault | undefined {
   const referenced = new Set<string>();
   for (const item of items) {
-    if (item.type !== "user") {
+    if (item.type !== "user" && item.type !== "question_answer") {
       continue;
     }
     for (const attachment of item.attachments || []) {
@@ -415,7 +415,7 @@ function historicalPayloadAttachments(
   const seen = new Set<string>();
   for (let itemIndex = items.length - 1; itemIndex >= 0; itemIndex -= 1) {
     const item = items[itemIndex];
-    if (item.type !== "user") {
+    if (item.type !== "user" && item.type !== "question_answer") {
       continue;
     }
     for (const attachment of item.attachments || []) {

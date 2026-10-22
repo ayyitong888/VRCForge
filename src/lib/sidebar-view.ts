@@ -43,7 +43,7 @@ export function chatLatestAgentMarker(chat: ChatThread): string | undefined {
   if (latestUserIndex < 0) return undefined;
   for (let index = chat.items.length - 1; index > latestUserIndex; index -= 1) {
     const item = chat.items[index];
-    if (item?.type === "agent") return item.createdAt || item.id;
+    if (item?.type === "agent") return item.completedAt || item.response.completedAt || item.id;
   }
   return undefined;
 }

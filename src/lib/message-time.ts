@@ -61,5 +61,6 @@ export function shouldShowMessageDateSeparator(
 
 export function conversationItemTimestamp(item: ConversationItem): number | undefined {
   if (item.type === "timeline_event") return parseMessageTimestamp(item.event.timestamp || item.createdAt);
+  if (item.type === "agent") return parseMessageTimestamp(item.completedAt || item.response.completedAt);
   return parseMessageTimestamp("createdAt" in item ? item.createdAt : undefined);
 }

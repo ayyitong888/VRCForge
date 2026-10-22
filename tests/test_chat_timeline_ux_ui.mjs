@@ -59,7 +59,7 @@ assert.match(card, /buildDurableTimelineRows\(\[item\.event\], undefined, "", \[
 const timelineEventBranch = card.slice(card.indexOf('if (item.type === "timeline_event")'), card.indexOf("const response ="));
 assert.doesNotMatch(timelineEventBranch, /MessageActions|createdAt/, "an event row must not receive its own chat-message timestamp");
 const agentBranch = card.slice(card.indexOf("const response ="));
-assert.doesNotMatch(agentBranch.slice(agentBranch.indexOf("<MessageActions"), agentBranch.indexOf("</div>", agentBranch.indexOf("<MessageActions"))), /createdAt=/, "the Agent card uses its one elapsed marker instead of a second wall-clock label");
+assert.match(agentBranch, /<MessageActions\s+createdAt=\{item\.completedAt \|\| response\.completedAt\}/, "the Agent card shows only a backend-confirmed terminal time");
 
 assert.match(projection, /event\.kind === "planner" \|\| event\.kind === "assistant"/);
 assert.match(projection, /visibleTimelineProse\.join\("\\n\\n"\)/);

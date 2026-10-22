@@ -1410,7 +1410,7 @@ export function useChatRunController({
                 providerLabel: turn.providerLabel,
                 model: turn.model,
                 compactionRecovery: responseRecovery,
-                createdAt: new Date().toISOString(),
+                ...(response.completedAt ? { completedAt: response.completedAt } : {}),
               },
             ],
           };
@@ -1594,7 +1594,7 @@ export function useChatRunController({
           compaction,
           items: [
             ...durableItems,
-            { id: responseItemId, type: "agent", response: responseForChat, timeline: mergedTimeline, compactionRecovery: responseRecovery, elapsedSeconds, providerLabel: turn.providerLabel, model: turn.model, createdAt: new Date().toISOString() },
+            { id: responseItemId, type: "agent", response: responseForChat, timeline: mergedTimeline, compactionRecovery: responseRecovery, elapsedSeconds, providerLabel: turn.providerLabel, model: turn.model, ...(response.completedAt ? { completedAt: response.completedAt } : {}) },
           ],
         };
       }
@@ -1646,7 +1646,6 @@ export function useChatRunController({
       }
       if (cancelled) {
         const cancelledText = t("chat.cancelled");
-        const completedAt = new Date().toISOString();
         const elapsedSeconds = Math.max(1, Math.round((Date.now() - startedAt) / 1000));
         updateChat(chatId, (current) => ({
           ...touchChat(current),
@@ -1655,7 +1654,6 @@ export function useChatRunController({
                 sessionId: current.sessionId || turn.sessionId,
                 cancelledText,
                 elapsedSeconds,
-                completedAt,
               })
             : item),
         }));

@@ -752,7 +752,7 @@ def test_foreground_completion_replay_is_idempotent_by_session_and_client_turn(t
             "continuationEvent": completion,
         })
     replay = ledger.list_runtime_continuations(limit=10)
-    assert replay == [completion]
+    assert replay == [{**completion, "completedAt": "2026-08-09T00:00:00+00:00"}]
 
     assert ledger.turn_run_status(
         top_plan={"nextStep": "context_compaction_required"},

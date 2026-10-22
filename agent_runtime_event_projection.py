@@ -216,6 +216,12 @@ def project_runtime_turn_event(payload: Mapping[str, Any] | None) -> dict[str, A
             },
         },
     }
+    # This is the owning ledger's terminal time, never a message timestamp or
+    # projection/reconnect time. Waiting boundaries do not supply this field.
+    for field in ("completedAt", "startedAt"):
+        timestamp = payload.get(field)
+        if isinstance(timestamp, str) and timestamp.strip():
+            result[field] = timestamp.strip()[:80]
     for key in ("provider", "providerLabel", "model", "projectRoot"):
         bounded = _text(payload.get(key), 1000 if key == "projectRoot" else 160)
         if bounded:

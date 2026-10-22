@@ -202,19 +202,7 @@ export function finalizeCancelledStreamingTurn(
   item: StreamingConversationItem,
   options: CancelledStreamingTurnOptions,
 ): AgentConversationItem {
-  const completedAt = options.completedAt || new Date().toISOString();
-  const sequence = (item.timeline || []).reduce((max, event) => Math.max(max, event.sequence), -1) + 1;
-  const cancelledEvent: ChatTimelineEvent = {
-    id: `assistant-cancelled-${item.clientTurnId}`,
-    sequence,
-    timestamp: completedAt,
-    kind: "assistant",
-    payload: {
-      summary: options.cancelledText,
-      status: "cancelled",
-    },
-  };
-  const timeline = [...(item.timeline || []), cancelledEvent];
+  const timeline = [...(item.timeline || [])];
   const sessionId = options.sessionId || "";
   return {
     id: `cancelled-${item.clientTurnId}`,
@@ -242,7 +230,7 @@ export function finalizeCancelledStreamingTurn(
     elapsedSeconds: Math.max(0, options.elapsedSeconds),
     providerLabel: item.providerLabel,
     model: item.model,
-    createdAt: completedAt,
+    ...(options.completedAt ? { completedAt: options.completedAt } : {}),
   };
 }
 

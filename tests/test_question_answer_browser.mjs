@@ -10,11 +10,26 @@ import { build } from "esbuild";
 const root = process.cwd();
 const appSource = await fs.readFile(path.join(root, "src", "App.tsx"), "utf8");
 const workspaceSource = await fs.readFile(path.join(root, "src", "components", "chat", "chat-workspace.tsx"), "utf8");
-assert.match(appSource, /const answerItemId = `question-answer-\$\{questionId\}`/);
-assert.match(appSource, /appendToChat\(answerChatId,\s*\{/);
-assert.match(appSource, /answeredQuestion\?\.question \|\| questionId/);
+assert.match(appSource, /questionAnswerItem\(payload\.question/);
+assert.match(appSource, /persistQuestionAnswer\(answerChatId, answerItem\)/);
+const answerHelperSource = await fs.readFile(path.join(root, "src", "lib", "question-answer.ts"), "utf8");
+assert.match(answerHelperSource, /question\.header\?\.trim\(\)/);
+assert.doesNotMatch(answerHelperSource, /question\.question \|\| question\.questionId/, "the visible answer label never duplicates the full question");
+assert.match(appSource, /questionAnswerItem\(payload\.question, payload\.question\.answer \|\| composerMessage, attachments\)/);
+const answerHandler = appSource.slice(appSource.indexOf("const answerRuntimeQuestion"), appSource.indexOf("const replyToAgentQuestionInComposer"));
+assert.doesNotMatch(answerHandler, /type: "user"/, "question answers are not persisted as ordinary user turns");
 assert.ok(!workspaceSource.includes("data-question-continuation-status"), "successful answers must not leave a question-specific continuation dock");
 const temp = await fs.mkdtemp(path.join(root, "tests", ".question-answer-browser-"));
+const helperOutput = path.join(temp, "question-answer.mjs");
+await build({ entryPoints: [path.join(root, "src/lib/question-answer.ts")], outfile: helperOutput, bundle: true, format: "esm", platform: "node" });
+const { questionAnswerItem } = await import(pathToFileURL(helperOutput).href);
+const answer = questionAnswerItem({ questionId: "q-browser", header: "Repair avatar", question: "Choose a repair" }, "Safe repair", [
+  { id: "attachment-1", name: "review.png", size: 42, type: "image/png", dataUrl: "data:image/png;base64,AA==" },
+]);
+assert.deepEqual(answer, {
+  id: "question-answer-q-browser", type: "question_answer", questionId: "q-browser", header: "Repair avatar", text: "Safe repair",
+  attachments: [{ id: "attachment-1", name: "review.png", size: 42, type: "image/png", dataUrl: "data:image/png;base64,AA==" }],
+});
 const bundle = path.join(temp, "bundle.mjs");
 const entry = `
 import React, { useState } from "react";
@@ -48,7 +63,7 @@ await build({
     plugin.onLoad({ filter: /.*/, namespace: "qa" }, (args) => ({
       contents: args.path === "translation"
         ? 'export const useTranslation=()=>({t:(_key,fallback)=>fallback||_key});'
-        : 'export const ChevronLeft=()=>null; export const ChevronRight=()=>null;',
+        : 'export const ChevronLeft=()=>null; export const ChevronRight=()=>null; export const HelpCircle=()=>null; export const Pencil=()=>null; export const X=()=>null;',
       loader: "js",
     }));
   } }],

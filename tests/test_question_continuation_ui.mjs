@@ -13,7 +13,11 @@ await build({ entryPoints: [path.join(root, "src/hooks/use-runtime-turn-continua
 const continuation = await import(`${pathToFileURL(hookOutput).href}?logic=question-continuation`);
 const appSource = await fs.readFile(path.join(root, "src/App.tsx"), "utf8");
 assert.match(appSource, /queueAllowed=\{\(chatRunSending \|\| pendingQuestionSessionIds\.has\(activeChat\?\.sessionId \|\| ""\)\) && !stopRequested\}/, "question continuations allow the same durable Enter queue as foreground turns");
-const { applyQuestionContinuationDelta, projectAgentQuestionContinuation, projectQuestionContinuationActivity, questionContinuationCancelTarget, questionContinuationDisplay, questionContinuationStatus } = continuation;
+const { applyQuestionContinuationDelta, projectAgentQuestionContinuation, projectQuestionContinuationActivity, questionContinuationCancelTarget, questionContinuationDisplay, questionContinuationStatus, responseFromRuntimeTurnEvent } = continuation;
+const workspaceSource = await fs.readFile(path.join(root, "src/components/chat/chat-workspace.tsx"), "utf8");
+const cardSource = await fs.readFile(path.join(root, "src/components/chat/conversation-card.tsx"), "utf8");
+assert.match(workspaceSource, /activeStreamingItems\.map\(\(item\) => \(\s*<StreamingPhaseStatus/);
+assert.doesNotMatch(cardSource, /<StreamingPhaseStatus item=\{item\}/, "live phase status is not left underneath the empty continuation card");
 
 assert.equal(questionContinuationDisplay({ status: "answered", runtimeContinuation: { status: "queued" } }), "active");
 assert.deepEqual(
@@ -24,6 +28,10 @@ assert.equal(questionContinuationCancelTarget({ sessionId: "session", runtimeCon
 assert.equal(questionContinuationStatus("delivered", "needs_user_action"), "blocked");
 assert.equal(questionContinuationStatus("delivered", "cancel_requested"), "cancelling");
 assert.equal(questionContinuationStatus("delivered"), "delivered");
+const responseWithActualModel = responseFromRuntimeTurnEvent({ sessionId: "s", turnId: "t", model: "provider-confirmed-model", plan: { reply: "Done" } });
+assert.equal(responseWithActualModel.model, "provider-confirmed-model", "final summary carries only the backend-reported actual model");
+const responseWithoutActualModel = responseFromRuntimeTurnEvent({ sessionId: "s", turnId: "t", plan: { reply: "Done" } });
+assert.equal(responseWithoutActualModel.model, undefined, "missing model evidence is not guessed from provider settings");
 const projected = projectAgentQuestionContinuation(
   { questionId: "q-run", sessionId: "s", status: "answered", runtimeContinuationStatus: "claimed" },
   [{ sessionId: "s", turnId: "t", clientTurnId: "c:question:q-run", status: "running" }],
@@ -44,12 +52,25 @@ const replayQuestion = {
 const blockedRun = [{ sessionId: replayChat.sessionId, turnId: "turn-blocked", clientTurnId: "run-live:question:q-live", status: "blocked", nextStep: "pending_approval" }];
 assert.equal(projectQuestionContinuationActivity(replayChat, [replayQuestion], blockedRun).items.some((item) => item.type === "streaming"), false);
 const runningQuestion = { ...replayQuestion, runtimeContinuation: { ...replayQuestion.runtimeContinuation, status: "queued" } };
-const runningRun = [{ sessionId: replayChat.sessionId, turnId: "turn-live", clientTurnId: "run-live:question:q-live", status: "running", lastEvent: "provider_request_metrics", providerLabel: "Test provider", model: "test-model" }];
-const runningChat = projectQuestionContinuationActivity(replayChat, [runningQuestion], runningRun, new Set(), "2026-10-19T02:52:15.249Z");
+const runningRun = [{ sessionId: replayChat.sessionId, turnId: "turn-live", clientTurnId: "run-live:question:q-live", status: "running", startedAt: "2026-10-19T02:52:15.249Z", createdAt: "2026-10-19T02:52:16.200Z", lastEvent: "provider_request_metrics", providerLabel: "Test provider", model: "test-model" }];
+const runningChat = projectQuestionContinuationActivity(replayChat, [runningQuestion], runningRun);
 const liveActivity = runningChat.items.find((item) => item.type === "streaming");
 assert.equal(liveActivity?.id, "question-continuation:run-live:question:q-live");
 assert.equal(liveActivity?.clientTurnId, "run-live:question:q-live");
-assert.equal(liveActivity?.providerLabel, "Test provider");
+assert.equal(liveActivity?.providerLabel, undefined, "live continuation must not show the old run's provider signature");
+assert.equal(liveActivity?.model, undefined, "live continuation must not show the old run's model signature");
+assert.equal(liveActivity?.createdAt, "2026-10-19T02:52:15.249Z", "continuation activity uses the ledger-backed runtime_turn_started timestamp, not the latest run event");
+const unverifiedStart = projectQuestionContinuationActivity(replayChat, [runningQuestion], [{ ...runningRun[0], startedAt: undefined }]);
+assert.equal(unverifiedStart.items.find((item) => item.type === "streaming")?.createdAt, undefined, "missing runtime_turn_started evidence never fabricates elapsed time");
+const queuedWithoutStart = projectQuestionContinuationActivity(replayChat, [runningQuestion], [{ ...runningRun[0], startedAt: undefined }]);
+const queuedRow = queuedWithoutStart.items.find((item) => item.type === "streaming");
+const queuedWithProgress = { ...queuedWithoutStart, items: queuedWithoutStart.items.map((item) => item.type === "streaming" ? { ...item, text: "kept progress", timeline: [{ id: "kept-event", sequence: 1 }] } : item) };
+const startedAfterQueue = projectQuestionContinuationActivity(queuedWithProgress, [runningQuestion], runningRun);
+const updatedStartedRow = startedAfterQueue.items.find((item) => item.type === "streaming");
+assert.equal(updatedStartedRow?.createdAt, runningRun[0].startedAt, "later ledger start enriches an existing queued activity row");
+assert.equal(updatedStartedRow?.text, "kept progress", "start enrichment preserves progress text");
+assert.equal(updatedStartedRow?.timeline?.[0]?.id, "kept-event", "start enrichment preserves timeline without reordering the row");
+assert.equal(startedAfterQueue.items.indexOf(updatedStartedRow), queuedWithProgress.items.indexOf(queuedWithProgress.items.find((item) => item.type === "streaming")), "same CID update preserves row position");
 let deltaChat = runningChat;
 assert.equal(applyQuestionContinuationDelta([deltaChat], (chatId, updater) => {
   assert.equal(chatId, replayChat.id);
@@ -89,9 +110,9 @@ const mockI18n = path.join(temp, "i18n.mjs");
 const entry = path.join(temp, "entry.mjs");
 const output = path.join(temp, "rendered.mjs");
 await fs.writeFile(mockTranslation, 'export function useTranslation(){return {t:(key,fallback)=>typeof fallback === "string" ? fallback : key};}\n');
-await fs.writeFile(mockIcons, 'export const Check=()=>null; export const ChevronLeft=()=>null; export const ChevronRight=()=>null; export const Copy=()=>null; export const FilePlus2=()=>null; export const Loader2=()=>null; export const MessageSquare=()=>null; export const Pencil=()=>null; export const Save=()=>null; export const RotateCcw=()=>null; export const Wrench=()=>null; export const X=()=>null;\n');
+await fs.writeFile(mockIcons, 'export const Check=()=>null; export const ChevronLeft=()=>null; export const ChevronRight=()=>null; export const Copy=()=>null; export const FilePlus2=()=>null; export const HelpCircle=()=>null; export const Loader2=()=>null; export const MessageSquare=()=>null; export const Pencil=()=>null; export const Save=()=>null; export const RotateCcw=()=>null; export const Wrench=()=>null; export const X=()=>null;\n');
 await fs.writeFile(mockI18n, 'export default { t: (key) => key };\n');
-await fs.writeFile(path.join(temp, "chat-markdown.mjs"), 'export const ChatMarkdown=()=>null; export const ChatResourceImageContext=({children})=>children;\n');
+await fs.writeFile(path.join(temp, "chat-markdown.mjs"), 'export const ChatMarkdown=({text})=>text; export const ChatResourceImageContext=({children})=>children;\n');
 await fs.writeFile(path.join(temp, "composer.mjs"), 'export const AttachmentStrip=()=>null;\n');
 await fs.writeFile(path.join(temp, "conversation-timeline.mjs"), 'export const RunRow=()=>null; export const buildAgentTimelineRows=()=>[]; export const buildDurableTimelineRows=()=>[]; export const displayPlanner=()=>""; export const formatPayload=()=>""; export const formatRuntimeModelLine=()=>"";\n');
 await fs.writeFile(path.join(temp, "badge.mjs"), 'export const Badge=()=>null;\n');
@@ -102,7 +123,7 @@ await fs.writeFile(entry, `
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { AgentQuestionCard } from ${JSON.stringify(path.join(root, "src/components/chat/agent-question-card.tsx"))};
-import { StreamingPhaseStatus } from ${JSON.stringify(path.join(root, "src/components/chat/conversation-card.tsx"))};
+import { ConversationCard, StreamingPhaseStatus } from ${JSON.stringify(path.join(root, "src/components/chat/conversation-card.tsx"))};
 import { projectAgentQuestionContinuation } from ${JSON.stringify(path.join(root, "src/hooks/use-runtime-turn-continuation.ts"))};
 const base = { questionId: "q-1", status: "answered", question: "Approve repair?", options: [] };
 const active = renderToStaticMarkup(React.createElement(AgentQuestionCard, {
@@ -131,6 +152,17 @@ const liveCard = renderToStaticMarkup(React.createElement(StreamingPhaseStatus, 
   id: "question-continuation:run-live:question:q-live", type: "streaming", clientTurnId: "run-live:question:q-live", text: "", createdAt: "2026-10-19T02:52:15.249Z",
 }, nowMs: Date.parse("2026-10-19T02:52:16Z"), showElapsed: false }));
 if (!liveCard.includes("data-chat-current-activity") || !liveCard.includes('role="status"')) throw new Error("active question continuation must render the bottom live activity row");
+const answerCard = renderToStaticMarkup(React.createElement(ConversationCard, { attachmentPayloads: { "e2c4bf98685a8d0674e42fe055e6768d7da848691d4fa7c9dbd5b0703d9dfaf4": { payloadHash: "e2c4bf98685a8d0674e42fe055e6768d7da848691d4fa7c9dbd5b0703d9dfaf4", payloadKind: "data_url", dataUrl: "data:image/png;base64,AA==" } }, item: {
+  id: "question-answer-q-live", type: "question_answer", questionId: "q-live", header: "Inspect preview", text: "The left shoe still needs review.",
+  attachments: [{ id: "image-ref", name: "review.png", type: "image/png", payloadHash: "e2c4bf98685a8d0674e42fe055e6768d7da848691d4fa7c9dbd5b0703d9dfaf4" }],
+} }));
+if (!answerCard.includes('data-question-answer="q-live"') || !answerCard.includes("The left shoe still needs review.") || !answerCard.includes("data:image/png;base64,AA==") || answerCard.includes("data-user-message-bubble")) {
+  throw new Error("ask answer must be visible as a question-linked item, separate from ordinary user turns: " + answerCard);
+}
+const emptyContinuationCard = renderToStaticMarkup(React.createElement(ConversationCard, { item: {
+  id: "question-continuation:run-live:question:q-live", type: "streaming", clientTurnId: "run-live:question:q-live", text: "", createdAt: "2026-10-19T02:52:15.249Z", providerLabel: "Old provider", model: "old-model",
+} }));
+if (emptyContinuationCard) throw new Error("an empty continuation must not leave an old-time/model placeholder below the top progress area");
 const terminalActivity = [];
 const settledCard = terminalActivity.length ? renderToStaticMarkup(React.createElement(StreamingPhaseStatus, { item: terminalActivity[0], nowMs: Date.now(), showElapsed: false })) : "";
 if (settledCard.includes("data-chat-current-activity")) throw new Error("terminal reply must not retain the bottom live activity row");

@@ -133,6 +133,7 @@ import { ingestChatAttachment } from "./lib/attachment-ingest";
 import { serializeChatAttachments } from "./lib/conversation-utils";
 import { latestContextWindowUsage, resolveContextLimit } from "./lib/context-compaction";
 import { thinkingTraceLabel } from "./lib/provider-ui";
+import { questionAnswerItem } from "./lib/question-answer";
 import type { ChatAttachment, ComposerAction, ComposerActionId, ContextUsage, ConversationItem } from "./lib/chat-types";
 import { executionModeLabel, permissionVisualState } from "./lib/permission-ui";
 import { resolveComputerUseAccentHex } from "./lib/computer-use-visuals";
@@ -1198,7 +1199,7 @@ export default function App() {
       const resumePrompt = (delivery.resumePrompt || "").trim();
       if (delivery.response) {
         const response = delivery.response;
-        const completedAt = delivery.completedAt || delivery.updatedAt || new Date().toISOString();
+        const completedAt = delivery.completedAt || response.completedAt;
         updateChat(targetChat.id, (chat) => ({
           ...touchChat(chat, completedAt),
           sessionId: response.sessionId || response.session_id || chat.sessionId,
@@ -1212,7 +1213,7 @@ export default function App() {
               type: "user",
               text: resumePrompt,
               attachments: [],
-              createdAt: delivery.createdAt || completedAt,
+              ...(delivery.createdAt ? { createdAt: delivery.createdAt } : {}),
             },
             {
               id: delivery.agentItemId,
@@ -1221,7 +1222,7 @@ export default function App() {
               elapsedSeconds: 1,
               providerLabel: delivery.providerLabel || providerSnapshot.providerLabel,
               model: delivery.model || providerSnapshot.model,
-              createdAt: completedAt,
+              ...(completedAt ? { completedAt } : {}),
             },
           ],
         }));
@@ -1954,6 +1955,18 @@ export default function App() {
         (project) => normalizeProjectPathKey(projectKey(project)) === normalizeProjectPathKey(workspaceProjectPath),
       )) || shortPath(workspaceProjectPath)
     : t("workspace.noProjectSelected");
+  const persistQuestionAnswer = (chatId: string, answerItem: Extract<ConversationItem, { type: "question_answer" }>) => {
+    updateChat(chatId, (chat) => {
+      const index = chat.items.findIndex((item) => item.type === "question_answer" && item.id === answerItem.id);
+      if (index < 0) return { ...chat, items: [...chat.items, answerItem] };
+      const items = [...chat.items];
+      items[index] = answerItem;
+      return { ...chat, items };
+    });
+    void persistChatsNow().catch((cause) => {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    });
+  };
   const answerRuntimeQuestion = async (questionId: string, optionId: string, value: string) => {
     setActiveView("chat");
     const answeredQuestion = agentQuestions.find((item) => item.questionId === questionId);
@@ -1970,22 +1983,11 @@ export default function App() {
           ? { ...payload.runtimeContinuation, sessionId: payload.runtimeContinuation.sessionId || sessionId }
           : agentQuestions.find((item) => item.questionId === questionId)?.runtimeContinuation,
       });
-      const questionResolution = payload.question as AgentQuestion & { resolution?: unknown };
-      const answerRevision = String(questionResolution.updatedAt || questionResolution.resolution || questionResolution.answer || `${optionId}:${value}`).trim();
-      const answerItemSuffix = answerRevision.replace(/[^a-zA-Z0-9_-]+/g, "-").slice(0, 96) || "resolved";
-      const answerItemId = `question-answer-${questionId}-${answerItemSuffix}`;
       const answerChat = chats.find((chat) => chat.sessionId === answeredQuestion?.sessionId);
       const answerChatId = answerChat?.id;
-      if (answerChat && answerChatId && !answerChat.items.some((item) => item.id === answerItemId)) {
-        appendToChat(answerChatId, {
-          id: answerItemId,
-          type: "user",
-          text: `${answeredQuestion?.header ? `${answeredQuestion.header}\n` : ""}${answeredQuestion?.question || questionId}\n\n${value}`,
-          createdAt: new Date().toISOString(),
-        });
-        void persistChatsNow().catch((cause) => {
-          setError(cause instanceof Error ? cause.message : String(cause));
-        });
+      const answerItem = questionAnswerItem(payload.question, payload.question.answer || value);
+      if (answerChat && answerChatId) {
+        persistQuestionAnswer(answerChatId, answerItem);
       }
       void refreshRuntimeRuns(false);
     } catch (cause) {
@@ -3352,25 +3354,20 @@ export default function App() {
       }
       replySubmitInFlightRef.current = true;
       try {
-        await answerAgentQuestion(endpoint, pendingReplyQuestionId, {
+        const payload = await answerAgentQuestion(endpoint, pendingReplyQuestionId, {
           answer: composerMessage,
           selectedOptionId: "custom",
           attachments: serializeChatAttachments(attachments),
           sessionId: question.sessionId || sessionId,
           projectRoot: question.projectRoot || activeRuntimeProjectPath || undefined,
         });
+        upsertAgentQuestion(payload.question);
         const answerChat = activeChat && (!question.sessionId || activeChat.sessionId === question.sessionId)
           ? activeChat
           : undefined;
         if (answerChat) {
-          appendToChat(answerChat.id, {
-            id: `question-answer-${pendingReplyQuestionId}-${Date.now()}`,
-            type: "user",
-            text: composerMessage,
-            attachments: attachments.length ? attachments : undefined,
-            createdAt: new Date().toISOString(),
-          });
-          void persistChatsNow().catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
+          const answerItem = questionAnswerItem(payload.question, payload.question.answer || composerMessage, attachments);
+          persistQuestionAnswer(answerChat.id, answerItem);
         }
         setPendingReplyQuestionId("");
         setInput("");

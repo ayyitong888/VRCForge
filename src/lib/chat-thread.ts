@@ -101,7 +101,7 @@ export function filterPersistableChats(list: ChatThread[]): ChatThread[] {
           const { steps: _duplicateSteps, ...plan } = runtimePlan;
           return { ...item, response: { ...item.response, plan } };
         }
-        if (item.type !== "user" || !item.attachments?.length) {
+        if ((item.type !== "user" && item.type !== "question_answer") || !item.attachments?.length) {
           return item;
         }
         return { ...item, attachments: item.attachments.map((attachment) => persistAttachmentReference(attachment, vault)) };

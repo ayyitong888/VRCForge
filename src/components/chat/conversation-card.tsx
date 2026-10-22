@@ -89,7 +89,7 @@ export function ConversationCard({
   onSaveOperationAsSkill?: (summary: PathToSkillOperationSummary) => void;
 }) {
   const { t } = useTranslation();
-  const storedAttachments = item.type === "user" ? item.attachments : undefined;
+  const storedAttachments = item.type === "user" || item.type === "question_answer" ? item.attachments : undefined;
   const restoredAttachments = useMemo(
     () => resolveAttachmentPayloadReferences(storedAttachments || [], attachmentPayloads),
     [storedAttachments, attachmentPayloads],
@@ -224,6 +224,26 @@ export function ConversationCard({
     );
   }
 
+  if (item.type === "question_answer") {
+    const attachments = resolveAttachmentPayloadReferences(item.attachments || [], attachmentPayloads);
+    const images = attachments.filter((attachment) => attachment.dataUrl && attachment.type.startsWith("image/"));
+    const otherAttachments = attachments.filter((attachment) => !attachment.dataUrl || !attachment.type.startsWith("image/"));
+    return (
+      <div className="group flex min-w-0 justify-end" data-question-answer={item.questionId} data-question-continuation-input>
+        <div className="relative flex min-w-0 max-w-[78%] flex-col items-end gap-2">
+          <div className="text-[10px] text-muted-foreground">{t("questionCard.answer")}{item.header ? ` · ${item.header}` : ""}</div>
+          {images.length ? <UserImageAttachments messageId={item.id} attachments={images} onImport={onImportAttachment} /> : null}
+          {item.text ? (
+            <div className="min-w-0 max-w-full rounded-2xl bg-muted px-4 py-2.5 text-sm text-foreground [&_.chat-markdown]:[overflow-wrap:anywhere]" data-question-answer-text data-chat-quote-content>
+              <ChatMarkdown text={item.text} />
+            </div>
+          ) : null}
+          {otherAttachments.length ? <div className="max-w-full rounded-xl bg-muted/70 px-3 py-2 text-sm"><AttachmentStrip attachments={otherAttachments} onImport={onImportAttachment} compact /></div> : null}
+        </div>
+      </div>
+    );
+  }
+
   if (item.type === "error") {
     return (
       <div className="rounded-lg border border-destructive/20 bg-destructive/5 px-3 py-2 text-xs text-destructive/80">
@@ -242,7 +262,7 @@ export function ConversationCard({
   }
 
   if (item.type === "streaming") {
-    const runtimeModelLabel = formatRuntimeModelLine(item.providerLabel, item.model);
+    if (item.id.startsWith("question-continuation:") && !item.text && !item.timeline?.length) return null;
     const streamingElapsed = elapsedSecondsSince(item.createdAt, streamingNowMs);
     // Keep public assistant updates at their durable timeline position. The
     // trailing event is suppressed only when it is the same text as the live
@@ -251,7 +271,7 @@ export function ConversationCard({
       live: true,
       renderElapsed: false,
       processTitleElapsed: streamingElapsed,
-      providerLine: runtimeModelLabel,
+      providerLine: "",
       suppressTrailingAssistantText: item.text,
       interleavedUserMessages,
       initialUserContent,
@@ -269,16 +289,6 @@ export function ConversationCard({
           {!hasTimelineProcessRows ? initialUserContent : null}
           {timelineRows.length ? <div className="space-y-3" data-vrcforge-live-runtime-timeline>{timelineRows}</div> : null}
           {item.text ? <div className="leading-relaxed" data-chat-quote-content><ChatMarkdown text={item.text} /></div> : null}
-          {!hasTimelineProcessRows && streamingElapsed !== undefined || runtimeModelLabel ? (
-            <div className="flex flex-wrap items-center gap-x-2 gap-y-1 border-t border-border/60 pt-2 text-[10px] leading-relaxed text-muted-foreground">
-              {!hasTimelineProcessRows && streamingElapsed !== undefined ? (
-                <span>{t("agent.turnDuration", { duration: `${streamingElapsed}s` })}</span>
-              ) : null}
-              {runtimeModelLabel ? <span className="text-muted-foreground/75">{runtimeModelLabel}</span> : null}
-            </div>
-          ) : null}
-          <MessageActions createdAt={item.createdAt} />
-          <StreamingPhaseStatus item={item} nowMs={streamingNowMs} showElapsed={false} />
         </div>
       </div>
     );
@@ -414,7 +424,7 @@ export function ConversationCard({
           {!hasTimelineProcessRows ? initialUserContent : null}
           {timelineRows}
           <MessageActions
-            createdAt={item.createdAt}
+            createdAt={item.completedAt || response.completedAt}
             onCopy={copyableReply ? () => onCopyItem?.({ ...item, response }) : undefined}
             onRetry={canRetry ? () => onRetryItem?.(item.id) : undefined}
             onEdit={canEdit ? () => onEditItem?.(item.id) : undefined}
