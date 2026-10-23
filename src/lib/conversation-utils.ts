@@ -258,12 +258,25 @@ export function isCancelledRuntimeResponse(response: AgentRuntimeResponse): bool
     || String(response?.plan?.nextStep || "").trim().toLowerCase() === "cancelled";
 }
 
+/** Only model words may become a reply; cancellation evidence stays in history. */
+export function cancelledAgentReplyText(response: AgentRuntimeResponse): string {
+  const reply = String(response.plan?.reply || "").trim();
+  if (!reply || isCancellationMarkerAssistantText(reply)) return "";
+  const assistantEntries = buildTimelinePresentation(materializeRuntimeTimeline(response)).entries
+    .filter((entry) => entry.type === "assistant");
+  // A partial reply can survive Stop, but a proposed unaccepted final cannot
+  // bypass the completion guard through this legacy field.
+  if (assistantEntries.some((entry) => entry.status === "completion_unverified")) return "";
+  if (assistantEntries.some((entry) => !["cancelled", "canceled"].includes(entry.status.toLowerCase())
+    && entry.text.trim() === reply)) return "";
+  return reply;
+}
+
 /**
  * Compose the durable dialogue text for a cancelled turn: the cancellation
  * marker, whatever the model had already said, and a bounded list of the work
  * that completed before cancellation. Next-turn history uses the full text;
- * the transcript's final row passes includeSpoken:false because non-final
- * assistant entries are already rendered as timeline rows above it.
+ * this is model context, never the transcript's visible reply.
  */
 export function cancelledAgentDialogueText(
   response: AgentRuntimeResponse,
@@ -298,6 +311,15 @@ export function cancelledAgentDialogueText(
   const invocations = presentation.entries
     .flatMap((entry) => entry.type === "batch" ? entry.invocations : [])
     .map((invocation) => `- ${timelineInvocationDisplayLabel(invocation.label)} (${invocation.status})`);
+  // Legacy responses persisted execution as steps instead of timeline items.
+  // Use that evidence only when the timeline has no execution to avoid repeats.
+  if (!invocations.length) {
+    for (const step of response.steps || []) {
+      if (("historical" in step && step.historical === true)
+        || !(step.tool || /shell|command|write|skill|tool/.test(step.kind || ""))) continue;
+      invocations.push(`- ${timelineInvocationDisplayLabel(step.tool || step.kind || "tool")} (${step.status || "unknown"})`);
+    }
+  }
   if (invocations.length) {
     const bounded = invocations.slice(0, 12).join("\n");
     const overflow = invocations.length > 12 ? `\n… ${invocations.length - 12} more` : "";
@@ -361,6 +383,15 @@ export function cloneChatAttachments(attachments: ChatAttachment[]): ChatAttachm
 }
 
 export function copyableAgentDialogueText(response: AgentRuntimeResponse): string {
+  if (isCancelledRuntimeResponse(response)) {
+    const spoken = buildTimelinePresentation(materializeRuntimeTimeline(response)).entries
+      .filter((entry) => entry.type === "assistant"
+        && entry.status !== "completion_unverified"
+        && !["cancelled", "canceled"].includes(entry.status.toLowerCase())
+        && !isCancellationMarkerAssistantText(entry.text))
+      .map((entry) => entry.type === "assistant" ? entry.text.trim() : "");
+    return [...new Set([...spoken, cancelledAgentReplyText(response)].filter(Boolean))].join("\n\n");
+  }
   const visibleTimelineProse = (response.timeline || [])
     .filter((event) => event.kind === "planner" || event.kind === "assistant")
     .map((event) => String(event.payload?.summary || "").trim())

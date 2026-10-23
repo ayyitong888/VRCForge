@@ -1,4 +1,4 @@
-import { AlertTriangle, Check, ChevronDown, ChevronRight, Eye, ListChecks, Pencil, TerminalSquare, Wrench } from "lucide-react";
+import { AlertTriangle, Check, ChevronDown, ChevronRight, CircleStop, Eye, ListChecks, Pencil, TerminalSquare, Wrench } from "lucide-react";
 import { ReactNode, useState } from "react";
 import { useTranslation } from "react-i18next";
 import i18n from "../../i18n";
@@ -9,6 +9,7 @@ import {
   buildTimelinePresentation,
   hasDurableExecutionEvents,
   isCancellationMarkerTimelineEvent,
+  isCancellationMarkerAssistantText,
   isFinalAssistantTimelineEvent,
   isFinalAssistantPresentationEntry,
   runtimeTerminalStatusKey,
@@ -18,7 +19,7 @@ import {
   type TimelinePresentationEntry,
 } from "../../lib/chat-timeline-presentation";
 import type { ApprovalActionState, ChatTimelineEvent, ConversationItem } from "../../lib/chat-types";
-import { cancelledAgentDialogueText, isCancelledRuntimeResponse } from "../../lib/conversation-utils";
+import { cancelledAgentReplyText, isCancelledRuntimeResponse } from "../../lib/conversation-utils";
 import { isAgentShellResult } from "../../lib/runtime-parsing";
 import { cn } from "../../lib/utils";
 import { Badge } from "../ui/badge";
@@ -86,6 +87,24 @@ export function buildAgentTimelineRows({
   renderInterleavedUserMessage?: (message: InterleavedUserMessage) => ReactNode;
   t: typeof i18n.t;
 }): ReactNode[] {
+  const cancelled = isCancelledRuntimeResponse(response);
+  // Turn state is UI chrome, not an assistant answer. Preserve the durable
+  // activity and model words; never render the model-context recovery digest.
+  if (cancelled) {
+    response = {
+      ...response,
+      plan: { ...response.plan, reply: cancelledAgentReplyText(response), summary: "" },
+      steps: response.steps?.filter((step) => !isStepKindAnswer(step.kind)
+        || (!isCancellationMarkerAssistantText(step.summary || "") && step.status !== "completion_unverified")),
+    };
+    showIntent = false;
+  }
+  const finishRows = (rows: ReactNode[]): ReactNode[] => cancelled ? [...rows,
+    <div key="turn-cancelled" data-agent-turn-cancelled role="status" className="flex items-center gap-1.5 px-1 text-xs text-muted-foreground">
+      <CircleStop className="h-3.5 w-3.5" aria-hidden="true" />
+      <span>{t("chat.cancelled")}</span>
+    </div>,
+  ] : rows;
   const durableTimeline = (response.timeline || []) as ChatTimelineEvent[];
   const durableRows = buildDurableTimelineRows(
     durableTimeline,
@@ -95,10 +114,7 @@ export function buildAgentTimelineRows({
     {
       providerLine,
       renderElapsed: true,
-      // The composer's final row already carries the cancellation marker;
-      // the runtime's placeholder assistant event must not render as a
-      // second, content-free final answer row.
-      dropCancellationMarkers: isCancelledRuntimeResponse(response),
+      dropCancellationMarkers: cancelled,
       interleavedUserMessages,
       initialUserContent,
       interleavedUsersExpanded,
@@ -139,12 +155,9 @@ export function buildAgentTimelineRows({
     const hasDurableFinalAssistant = durableTimeline.some(
       (event) => isFinalAssistantTimelineEvent(event) && !isCancellationMarkerTimelineEvent(event),
     );
-    const cancelledDialogue = isCancelledRuntimeResponse(response)
-      ? cancelledAgentDialogueText(response, { includeSpoken: false })
-      : "";
     const fallbackAnswer = phaseTaggedAssistant && !hasDurableFinalAssistant
-      ? cancelledDialogue
-      : cancelledDialogue || response.plan.reply || response.plan.summary;
+      ? (cancelled ? response.plan.reply : "")
+      : response.plan.reply || response.plan.summary;
     const hasStepAnswer = orderedSteps.some(({ step }) => isStepKindAnswer(step.kind));
     if (!hasDurableFinalAssistant && !hasStepAnswer) {
       if (fallbackAnswer) {
@@ -157,7 +170,7 @@ export function buildAgentTimelineRows({
     } else if (!fallbackAnswer && shouldSurfaceModelIdentity && planLabel && hasDurableAssistant) {
       rows.push(renderPlanIdentityRow(planLabel, elapsedSeconds, t, "assistant-model"));
     }
-    return rows;
+    return finishRows(rows);
   }
   const orderedSteps = normalizeAgentSteps(response.steps);
   const legacyFallback = orderedSteps.length === 0;
@@ -181,11 +194,11 @@ export function buildAgentTimelineRows({
     });
     if (Number.isFinite(elapsedSeconds) || providerLine) legacyRows.push(renderTurnMetadataRow(elapsedSeconds, providerLine));
     if (missingFinalAnswer) legacyRows.push(renderMissingFinalAnswerNotice(t));
-    return legacyRows;
+    return finishRows(legacyRows);
   }
 
   const rows = buildAgentTimelineRowsFromSteps({
-    steps: orderedSteps,
+    steps: cancelled ? orderedSteps.filter(({ step }) => !isStepKindAnswer(step.kind)) : orderedSteps,
     response,
     shell,
     vision,
@@ -200,12 +213,26 @@ export function buildAgentTimelineRows({
     elapsedSeconds,
     t,
   });
+  if (cancelled && rows.length) {
+    const processRows = rows.splice(0);
+    rows.push(
+      <div key="agent-turn-process" data-agent-turn-process-group>
+        <WorkSegmentRow kind="process" title={turnProcessDisplayTitle(elapsedSeconds, [], t)} statusLabel="" statusTone="muted" processHeader beforeContent={initialUserContent}>
+          {processRows}
+        </WorkSegmentRow>
+      </div>,
+    );
+  }
+  if (cancelled) {
+    rows.push(...buildAgentTimelineRowsFromSteps({
+      steps: orderedSteps.filter(({ step }) => isStepKindAnswer(step.kind)),
+      response, shell, vision, skill, write, approval, approvalAction,
+      onModifyApproval, providerLine, planLabel, awaitingApproval, elapsedSeconds, t,
+    }));
+  }
   const hasAnswer = orderedSteps.some(({ step }) => isStepKindAnswer(step.kind));
   if (!hasAnswer) {
-    const cancelledDialogue = isCancelledRuntimeResponse(response)
-      ? cancelledAgentDialogueText(response, { includeSpoken: false })
-      : "";
-    const fallbackAnswer = cancelledDialogue || response.plan.reply || response.plan.summary;
+    const fallbackAnswer = response.plan.reply || response.plan.summary;
     if (fallbackAnswer) {
       rows.push(renderPlanReplyRow(fallbackAnswer, planLabel, elapsedSeconds, t));
     } else if (missingFinalAnswer) {
@@ -234,7 +261,7 @@ export function buildAgentTimelineRows({
   if (Number.isFinite(elapsedSeconds) && !fallbackRows.some((row) => row && typeof row === "object" && "key" in row && (row as { key?: string }).key === "agent-turn-metadata")) {
     fallbackRows.push(renderTurnMetadataRow(elapsedSeconds, providerLine));
   }
-  return fallbackRows;
+  return finishRows(fallbackRows);
 }
 
 /** Render the server-owned ordered projection without exposing hidden reasoning. */
@@ -259,10 +286,11 @@ export function buildDurableTimelineRows(
   } = {},
 ): ReactNode[] {
   // Lifecycle evidence stays durable; the right sidebar owns its presentation.
-  // A dropped cancellation marker is replaced by the composer's final row.
+  // A dropped cancellation marker is replaced by the turn's status row.
   const presentation = buildTimelinePresentation(
     events.filter((event) => event.kind !== "subagent"
-      && !(options.dropCancellationMarkers && isCancellationMarkerTimelineEvent(event))),
+      && !(options.dropCancellationMarkers && (isCancellationMarkerTimelineEvent(event)
+        || (event.kind === "assistant" && event.payload?.status === "completion_unverified")))),
     elapsedSeconds,
   );
   if (!presentation.entries.length) {
@@ -858,7 +886,7 @@ function buildLegacyAgentTimelineRows({
   const shellExecutionResult = shell && isAgentShellResult(shell.result) ? shell.result : undefined;
   const planReply = response.plan.reply || response.plan.summary;
   const shouldSurfaceModelIdentity = Boolean(response.plan.plannerFailure?.code);
-  rows.push(
+  if (planReply) rows.push(
     <div key="reply" className="px-1 text-sm">
       <div data-chat-quote-content><ChatMarkdown text={planReply} /></div>
       {planLabel ? <div className="mt-2 text-[10px] leading-relaxed text-muted-foreground/75">{planLabel}</div> : null}

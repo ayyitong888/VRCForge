@@ -133,7 +133,9 @@ export function isFinalAssistantPresentationEntry(
   return FINAL_ASSISTANT_STATUSES.has(entry.status.toLowerCase());
 }
 
-const CANCELLED_ASSISTANT_PLACEHOLDER_TEXTS = new Set(["request cancelled.", "已取消"]);
+const CANCELLED_ASSISTANT_PLACEHOLDER_TEXTS = new Set([
+  "request cancelled.", "request canceled.", "runtime turn was cancelled by the user.", "已取消",
+]);
 
 /** The runtime's cancellation placeholder, not model words. */
 export function isCancellationMarkerAssistantText(text: string): boolean {
