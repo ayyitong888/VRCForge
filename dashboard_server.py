@@ -14588,9 +14588,27 @@ def _require_camera_evidence(payload: Mapping[str, Any], expected: Mapping[str, 
         expected_aspect = float(expected["width"]) / float(expected["height"])
         if not math.isclose(float(evidence.get("aspect", 0.0)), expected_aspect, rel_tol=0.0, abs_tol=0.0001):
             raise RuntimeError("Unity returned camera aspect outside the approved free-camera plan.")
-    checked = _finite_camera_value(dict(evidence), "cameraEvidence")
+    checked_fields = dict(evidence)
+    # Free world-space cameras do not require an Avatar. Core then reports its
+    # complete unbound TargetVisibility value, rather than a missing camera.
+    # Preserve that typed state without relaxing any geometry or other strings.
+    unbound_target = (
+        expected.get("cameraMode") == "free"
+        and not str(expected.get("avatarPath") or "").strip()
+        and evidence.get("targetSceneValid") is False
+        and evidence.get("targetSceneName") == ""
+        and evidence.get("targetPath") == ""
+        and evidence.get("targetRendererLayersIncluded") is False
+        and all(type(evidence.get(key)) is int and evidence[key] == 0 for key in (
+            "targetRendererCount", "targetVisibleRendererCount", "targetRendererLayerMask"))
+    )
+    empty_target_fields = {}
+    if unbound_target:
+        empty_target_fields = {key: checked_fields.pop(key) for key in ("targetSceneName", "targetPath")}
+    checked = _finite_camera_value(checked_fields, "cameraEvidence")
     if not isinstance(checked, dict):
         raise RuntimeError("Unity returned invalid camera evidence.")
+    checked.update(empty_target_fields)
     expected_projection = expected.get("projection")
     if expected_projection and projection != expected_projection:
         raise RuntimeError("Unity returned camera projection outside the approved capture plan.")
