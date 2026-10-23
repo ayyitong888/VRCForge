@@ -27,7 +27,33 @@ def test_authoring_workflows_require_complete_unpack_and_rebind() -> None:
         assert unpack["rebindAfterUnpack"] is True
         assert unpack["persistedReadbackRequired"] is True
         assert unpack["preserveSourcePrefabAsset"] is True
-        assert any(step["tool"] == "vrcforge_unpack_prefab" for step in data["steps"])
+        write_step = next(step for step in data["steps"] if step["tool"] == "vrcforge_unpack_prefab")
+        if skill == "vrcforge-avatar-wardrobe":
+            assert unpack["previewTool"] == "vrcforge_preview_unpack_prefab"
+            place_step = next(
+                step for step in data["steps"] if step["name"] == "place_one_imported_outfit_instance_without_setup"
+            )
+            preview_step = next(
+                step for step in data["steps"] if step["tool"] == "vrcforge_preview_unpack_prefab"
+            )
+            setup_step = next(
+                step for step in data["steps"] if step["name"] == "setup_installed_outfit_after_prefab_unpack"
+            )
+            assert preview_step["writes"] is False
+            assert preview_step["conditional"] == write_step["conditional"]
+            assert data["steps"].index(place_step) < data["steps"].index(preview_step)
+            assert data["steps"].index(preview_step) < data["steps"].index(write_step)
+            assert data["steps"].index(write_step) < data["steps"].index(setup_step)
+            assert unpack["placementOnlyArguments"] == {
+                "manageWardrobe": False, "setupOutfit": False, "unpackPrefab": False
+            }
+            assert unpack["existingPlacedOutfitsMustBeCheckedIndividually"] is True
+            assert unpack["previewResultFields"] == [
+                "gameObjectPath", "unpackMode", "globalObjectId", "prefabGuid", "dependencyHash", "scenePath"
+            ]
+            assert "Do not pass preview=true to this write tool" in write_step["guidance"]
+        else:
+            assert any(step["tool"] == "vrcforge_unpack_prefab" for step in data["steps"])
 
 
 def test_face_tracking_configuration_and_play_acceptance_are_separate() -> None:

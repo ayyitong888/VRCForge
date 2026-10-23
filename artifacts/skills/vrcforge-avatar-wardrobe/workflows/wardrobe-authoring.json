@@ -215,11 +215,18 @@
       "projectPathMustRemainConstant": true
     },
     "prefabInstanceAuthoring": {
-      "beforeAnyInstanceModification": "preview_and_completely_unpack_exact_instance",
+      "beforeAnyInstanceModification": "place_one_imported_instance_then_immediately_read_preview_and_approved_completely_unpack",
       "tool": "vrcforge_unpack_prefab",
+      "previewTool": "vrcforge_preview_unpack_prefab",
       "previewRequired": true,
+      "placementOnlyArguments": {"manageWardrobe": false, "setupOutfit": false, "unpackPrefab": false},
+      "existingPlacedOutfitsMustBeCheckedIndividually": true,
+      "skipWhen": ["target_is_not_a_scene_prefab_instance", "target_is_already_unpacked"],
+      "neverUnpack": ["imported_asset_package_file", "source_prefab_asset", "preview_generated_object", "unrelated_scene_object"],
       "mode": "completely",
       "identityFields": ["expectedGlobalObjectId", "expectedPrefabGuid", "expectedAssetDependencyHash", "expectedScenePath"],
+      "previewResultFields": ["gameObjectPath", "unpackMode", "globalObjectId", "prefabGuid", "dependencyHash", "scenePath"],
+      "writePreviewMustNotBeRequestedByToolParameter": true,
       "approvalAndCheckpointRequired": true,
       "rebindAfterUnpack": true,
       "persistedReadbackRequired": true,
@@ -392,11 +399,31 @@
       "optional": true
     },
     {
+      "name": "place_one_imported_outfit_instance_without_setup",
+      "tool": "vrcforge_preview_add_outfit",
+      "tools": ["vrcforge_add_outfit"],
+      "guidance": "After importing the clothing asset, place one exact prefab instance under the target Avatar. For this placement-only pass use manageWardrobe=false, setupOutfit=false and unpackPrefab=false; do not fit, configure Setup Outfit or add wardrobe behavior in the same pass. If the outfit is already in the target scene, skip placement and inspect that existing object instead.",
+      "writes": true,
+      "conditional": "imported_outfit_prefab_is_not_yet_in_target_avatar_scene",
+      "runtimePermissionGateRequired": true,
+      "runtimeApprovalRequired": true,
+      "checkpointRequired": true,
+      "optional": true
+    },
+    {
+      "name": "read_prefab_unpack_preview_before_authoring_write",
+      "tool": "vrcforge_preview_unpack_prefab",
+      "guidance": "For a planned structural write to a scene Prefab instance, call this read-only tool with the bound executionTarget, constant projectPath, exact gameObjectPath and mode=completely. Verify the returned gameObjectPath, unpackMode, globalObjectId, prefabGuid, dependencyHash and scenePath match the target. Do not hand-guess expected identity guards.",
+      "writes": false,
+      "conditional": "newly_placed_or_existing_target_is_prefab_instance",
+      "optional": true
+    },
+    {
       "name": "completely_unpack_prefab_instance_before_authoring",
       "tool": "vrcforge_unpack_prefab",
-      "guidance": "For any planned write to a prefab instance, preview the exact instance first with expectedGlobalObjectId, expectedPrefabGuid, expectedAssetDependencyHash and expectedScenePath, then approve and run mode=completely. Rebind the returned unpacked scene identity and require persisted readback before any other write. Preserve the source prefab asset and author Modular Avatar components, skeleton and animation references; ordinary material-property writes follow their own tool contract.",
+      "guidance": "After the read-only vrcforge_preview_unpack_prefab result matches the exact target, enter the normal formal approval preview and checkpoint flow; the write request preparer binds the verified identity guards. Do not pass preview=true to this write tool. After approval, run mode=completely, rebind the returned unpacked scene identity and require persisted readback before any other write. Preserve the source prefab asset and author Modular Avatar components, skeleton and animation references; ordinary material-property writes follow their own tool contract.",
       "writes": true,
-      "conditional": "affected_target_is_prefab_instance_and_authoring_write_is_requested",
+      "conditional": "newly_placed_or_existing_target_is_prefab_instance",
       "runtimePermissionGateRequired": true,
       "runtimeApprovalRequired": true,
       "checkpointRequired": true,
@@ -406,13 +433,11 @@
       "optional": true
     },
     {
-      "name": "install_using_compatible_tool_when_requested",
-      "guidance": "Only when the approved design selects an Int wardrobe may a one-value Int skeleton be created. For an independent Bool, Float, or other approved topology, use the existing parameter, animator, FX, curve, and menu atomic tools with preview, approval, write, and independent readback; do not convert the design to Int. For an approved Int skeleton, set manageWardrobe=false for the first outfit; verify exact installed object paths before the separate add_wardrobe_outfit primitive. Existing objects must not be reinstalled. manageWardrobe=true requires an existing strict wardrobe scan record.",
+      "name": "setup_installed_outfit_after_prefab_unpack",
+      "guidance": "Continue only after every newly placed or existing prefab instance has passed its preview, approved complete unpack, identity rebind and persisted readback gate. Preserve the imported object; do not reinstall it. Apply Setup Outfit and the approved wardrobe topology through their separate preview, approval, write and readback routes. Only an approved Int design may add a one-value Int skeleton; manageWardrobe=true requires an existing strict wardrobe scan record.",
       "tool": "vrcforge_preview_setup_outfit",
       "tools": [
         "vrcforge_setup_outfit",
-        "vrcforge_preview_add_outfit",
-        "vrcforge_add_outfit",
         "vrcforge_preview_add_modular_avatar_component",
         "vrcforge_add_modular_avatar_component"
       ],

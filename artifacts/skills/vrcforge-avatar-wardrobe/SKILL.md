@@ -16,6 +16,7 @@ allowed-tools:
   - vrcforge_scene_save
   - vrcforge_get_gameobject
   - vrcforge_get_property
+  - vrcforge_preview_unpack_prefab
   - vrcforge_unpack_prefab
   - vrcforge_scan_avatar_controls
   - vrcforge_scan_parameters
@@ -141,7 +142,9 @@ support-files:
 
 一次只推进当前失败点；前序安装或写入已有独立成功回执时保留其进度，不重复安装或从头执行。保存时只保存本轮目标场景，保留作者配置与原灯光；临时预览显示按授权恢复后再保存。dirty 状态要按本次动作与精确写入范围判断，不能一概当作阻断或据此扩大保存范围。
 
-凡是要修改场景中的 Prefab instance，先用 `vrcforge_unpack_prefab` 的 preview 核对精确对象身份、源 prefab GUID、依赖 hash 和场景路径，再以 `mode=completely` 在同一批准与 checkpoint 边界内解包。解包本身必须有身份重绑定和持久读回；后续写入使用解包后的新对象身份。保留源 prefab 资产、作者 Modular Avatar 组件、作者骨架与动画引用；普通材质属性写入按其实际组件/材质工具契约处理，不得把它误判为必须破坏源 prefab 资产。未完成完全解包和身份重绑定，不进入后续写入。
+每套衣服素材导入后，在本次目标 Avatar 场景层级放入一个对象；若该对象仍是 Prefab instance，立刻走下述只读预览与审批/checkpoint 流程完全解包，再做 fitting、Setup Outfit、添加衣柜或其他 authoring。当前已经放入的衣服也逐套核对并补齐这一步。使用 `vrcforge_preview_add_outfit` / `vrcforge_add_outfit` 放入对象时，先用 `manageWardrobe=false`、`setupOutfit=false`、`unpackPrefab=false` 单独实例化；解包并完成身份读回后，再执行 Setup Outfit 和衣柜配置。已是普通对象或已解包对象不重复处理。这里解包的是目标场景中的那一个 Prefab instance，不是导入的素材包文件、源 prefab 资产、预览生成对象或无关场景对象；保留作者组件、骨架和动画引用以及用户既有手动修改。
+
+对需要解包的场景 Prefab instance，调用只读工具 `vrcforge_preview_unpack_prefab`，以本轮绑定的 `executionTarget`、`projectPath`、精确 `gameObjectPath` 和 `mode=completely` 预览解包计划；核对回执中的对象路径、解包模式、`globalObjectId`、源 `prefabGuid`、`dependencyHash` 和 `scenePath`。只有预览身份与目标一致，才进入 `vrcforge_unpack_prefab` 写入；由正式审批 preview 与 checkpoint 按该回执准备并执行 `mode=completely` 解包，不给写工具传 `preview=true`，也不手填或猜测身份 guard。解包后重新绑定新对象身份并持久读回，再进行后续写入。保留源 prefab 资产、作者 Modular Avatar 组件、作者骨架与动画引用；普通材质属性写入按其实际组件/材质工具契约处理，不得把它误判为必须破坏源 prefab 资产。未完成预览、获批解包、身份重绑定和持久读回，不进入后续写入。
 
 安装工具或高级衣柜工具可能有自身支持的参数、拓扑和默认行为；使用前核对其说明和 preview 是否符合本次需求。工具不支持某种设计时报告限制或使用合适的已暴露工具，不把用户设计改成工具的默认方案。特别是省略参数可能触发自动分配，不能把 `max+1` 当作批准过的映射。
 

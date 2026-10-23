@@ -55,7 +55,8 @@
 ## 通用写入约束
 
 - 修改前保存受影响事实和 checkpoint，执行权限与精确 preview 批准缺一不可。
-- 场景目标属于 Prefab instance 时，任何 authoring write 前先对精确 instance 调用 `vrcforge_unpack_prefab` preview，核对 GlobalObjectId、源 prefab GUID、依赖 hash 和 scene path；批准后使用 `mode=completely`，重新绑定解包后的对象身份并确认 persisted readback。源 prefab 资产、作者 Modular Avatar 组件、骨架和动画引用保留；普通材质属性按其自身工具契约判断，不把材质写入等同于破坏源 prefab。
+- 每套衣服素材导入并放进本次目标 Avatar 场景层级后，若该对象仍是 Prefab instance，立即先解包再适配、Setup Outfit 或添加衣柜；当前已放入的衣服逐套核对并完成这一步。用 `vrcforge_preview_add_outfit` / `vrcforge_add_outfit` 放入时，先将 `manageWardrobe=false`、`setupOutfit=false`、`unpackPrefab=false`，只实例化；完成独立解包和身份读回后再 Setup Outfit 或建衣柜。素材包文件导入与场景对象解包是两件事；不解包素材包文件、源 prefab 资产、预览生成对象或无关场景对象。普通对象或已解包对象直接跳过，不重复处理。保留作者组件、骨架和动画引用及用户已经做过的手动修改。
+- 对需要解包的场景对象，先用只读 `vrcforge_preview_unpack_prefab`，按当前绑定的 `executionTarget`、`projectPath`、精确对象路径和 `mode=completely` 读取预览；核对回执的对象路径、解包模式、GlobalObjectId、源 prefab GUID、依赖 hash 和 scene path。匹配后才调用写工具，由系统的正式审批 preview 与 checkpoint 基于这份回执准备 `mode=completely` 解包；不要给 write 工具传 `preview=true` 或猜写身份 guard。审批通过并解包后重绑定新对象身份、确认持久读回，再继续写入。源 prefab 资产、作者 Modular Avatar 组件、骨架和动画引用保留；普通材质属性按其自身工具契约判断，不把材质写入等同于破坏源 prefab。
 - 只修证据证明与批准目标不符的内容，保留正确行为与源时间线。
 - 修改后回读真实结果，与批准差异比较；验证范围包含实际受影响的依赖，而不是固定服装矩阵。
 - 参数、开关、曲线、形态键、菜单路径和过渡语义均不由此 Skill 提供默认答案。
