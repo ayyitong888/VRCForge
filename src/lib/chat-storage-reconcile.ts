@@ -153,13 +153,28 @@ function mergeChatAppends(
   // Revision and update time describe mutations; neither is user content.
   const contentMetadata = (chat: ChatThread) => {
     const { items: _items, revision: _revision, updatedAt: _updatedAt, ...metadata } = chat;
-    return stableFingerprint(metadata);
+    return metadata;
   };
-  if (contentMetadata(left) !== contentMetadata(base) || contentMetadata(right) !== contentMetadata(base)) return null;
+  const baseMetadata = contentMetadata(base);
+  const leftMetadata = contentMetadata(left);
+  const rightMetadata = contentMetadata(right);
+  const mergedMetadata: Record<string, unknown> = {};
+  for (const key of new Set([...Object.keys(baseMetadata), ...Object.keys(leftMetadata), ...Object.keys(rightMetadata)])) {
+    const before = baseMetadata[key as keyof typeof baseMetadata];
+    const localValue = leftMetadata[key as keyof typeof leftMetadata];
+    const remoteValue = rightMetadata[key as keyof typeof rightMetadata];
+    const localChanged = stableFingerprint(localValue) !== stableFingerprint(before);
+    const remoteChanged = stableFingerprint(remoteValue) !== stableFingerprint(before);
+    if (localChanged && remoteChanged && stableFingerprint(localValue) !== stableFingerprint(remoteValue)) return null;
+    const source = localChanged ? local : remote;
+    if (Object.prototype.hasOwnProperty.call(source, key)) mergedMetadata[key] = source[key as keyof ChatThread];
+  }
   const prefix = (chat: ChatThread) => chat.items.length >= base.items.length
     && base.items.every((item, index) => stableFingerprint(chat.items[index]) === stableFingerprint(item));
   if (!prefix(left) || !prefix(right)) return null;
-  // A changed opaque server version without a visible append remains a conflict.
+  // A metadata display difference can be redaction rather than the mutation
+  // behind an opaque server version. Require the proven remote append before
+  // merging concurrent edits; metadata alone cannot establish that evidence.
   if (right.items.length === base.items.length) return null;
   const all = new Map<string, ChatThread["items"][number]>();
   const edges = new Map<string, Set<string>>();
@@ -204,7 +219,7 @@ function mergeChatAppends(
   const times = [local.updatedAt, remote.updatedAt].filter((value): value is string => value !== undefined);
   if (!times.every((value) => Number.isFinite(Date.parse(value)))) return null;
   const updatedAt = times.sort((a, b) => Date.parse(b) - Date.parse(a))[0];
-  return { ...local, items, revision: Math.max(...revisions) + 1, ...(updatedAt ? { updatedAt } : {}) };
+  return { ...mergedMetadata, items, revision: Math.max(...revisions) + 1, ...(updatedAt ? { updatedAt } : {}) } as ChatThread;
 }
 
 /**

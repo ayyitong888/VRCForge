@@ -5,7 +5,8 @@ import type { ChatThread } from "../lib/chat-types";
 import { applyAgentRuntimeDeltaToStreamingItem, type AgentRuntimeDeltaEvent } from "../lib/chat-streaming";
 import { mergeRuntimeTimelines, materializeRuntimeTimeline } from "../lib/chat-timeline-presentation";
 import { normalizeAgentRuntimeTimelineEvent } from "../lib/chat-streaming";
-import { RUNTIME_ACTIVITY_STREAM_PREFIX, type RuntimeTurnEvent } from "./use-runtime-turn-continuation";
+import { type RuntimeTurnEvent } from "./use-runtime-turn-continuation";
+import { coalesceRuntimeTurnStreams, isExternalRuntimeStream, RUNTIME_ACTIVITY_STREAM_PREFIX } from "../lib/runtime-stream-owner";
 
 const ACTIVE_STATUSES = new Set(["running", "starting", "queued", "claimed", "cancelling", "cancel_requested", "waiting_for_model", "waiting_for_tool"]);
 type Identity = { sessionId: string; clientTurnId: string; turnId?: string };
@@ -47,7 +48,7 @@ export function projectRuntimeTurnActivity(chat: ChatThread, run: AgentRuntimeRu
   const sessionId = String(run.sessionId || "").trim();
   const clientTurnId = String(run.clientTurnId || "").trim();
   if (!sessionId || !clientTurnId || chat.sessionId !== sessionId || hasReply(chat, { sessionId, clientTurnId, turnId: run.turnId })) return chat;
-  if (chat.items.some((item) => item.type === "streaming" && item.clientTurnId === clientTurnId)) return chat;
+  if (chat.items.some((item) => item.type === "streaming" && item.clientTurnId === clientTurnId)) return coalesceRuntimeTurnStreams(chat, clientTurnId);
   if (!ACTIVE_STATUSES.has(String(run.status || ""))) return chat;
   return { ...chat, items: [...chat.items, {
     id: `${RUNTIME_ACTIVITY_STREAM_PREFIX}${clientTurnId}`, type: "streaming", clientTurnId,
@@ -57,6 +58,7 @@ export function projectRuntimeTurnActivity(chat: ChatThread, run: AgentRuntimeRu
 
 export function applyRuntimeActivityDelta(chat: ChatThread, delta: AgentRuntimeDeltaEvent): ChatThread {
   if (!delta.sessionId || chat.sessionId !== delta.sessionId || !delta.clientTurnId) return chat;
+  chat = coalesceRuntimeTurnStreams(chat, delta.clientTurnId);
   let changed = false;
   const items = chat.items.map((item) => {
     // A terminal notification may race the first history page. Continue filling
@@ -68,7 +70,7 @@ export function applyRuntimeActivityDelta(chat: ChatThread, delta: AgentRuntimeD
       return { ...item, timeline: mergeRuntimeTimelines(materializeRuntimeTimeline(item.response), item.timeline || [], [event]) };
     }
     if (item.type !== "streaming" || item.clientTurnId !== delta.clientTurnId
-      || !item.id.startsWith(RUNTIME_ACTIVITY_STREAM_PREFIX)) return item;
+      || !isExternalRuntimeStream(item)) return item;
     changed = true;
     return applyAgentRuntimeDeltaToStreamingItem(item, delta);
   });
@@ -159,7 +161,7 @@ export function useRuntimeTurnActivity(params: Params) {
     if (!owner) return;
     const stream = owner.items.find((item) => item.type === "streaming" && item.clientTurnId === identity.clientTurnId);
     // UI sends and question continuations retain their existing projection owner.
-    if (stream && !stream.id.startsWith(RUNTIME_ACTIVITY_STREAM_PREFIX)) return;
+    if (stream && !isExternalRuntimeStream(stream)) return;
     const key = identityKey(identity);
     if (finished.current.has(key)) return;
     let activity = activities.current.get(key);
@@ -225,6 +227,10 @@ export function useRuntimeTurnActivity(params: Params) {
     const activity = activities.current.get(identityKey(identity));
     if (activity?.turnId && delta.turnId && activity.turnId !== delta.turnId) return;
     if (!activity) observe({ ...identity, status: "running" });
+    // The question observer applies its own live delta once; this observer
+    // still owns history catch-up and the terminal receipt for that same row.
+    const stream = owner.items.find((item) => item.type === "streaming" && item.clientTurnId === identity.clientTurnId);
+    if (stream && !stream.id.startsWith(RUNTIME_ACTIVITY_STREAM_PREFIX)) return;
     latest.current.updateChat(owner.id, (chat) => applyRuntimeActivityDelta(chat, delta));
   }, [observe]);
 }

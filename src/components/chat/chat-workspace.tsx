@@ -26,7 +26,7 @@ import { mergeConversationTimelineItems } from "../../lib/chat-thread";
 import { projectConversationSteeringMessages } from "../../lib/chat-steering-projection";
 import { conversationItemRenderKey } from "../../lib/conversation-utils";
 import type { AttachmentPayloadVault } from "../../lib/attachment-payloads";
-import { conversationItemTimestamp, shouldShowMessageDateSeparator } from "../../lib/message-time";
+import { conversationRoundDateSeparators } from "../../lib/message-time";
 
 function formatGoalElapsed(totalSeconds: number): string {
   const seconds = Math.max(0, Math.round(totalSeconds));
@@ -373,6 +373,7 @@ export function ChatWorkspace({
     (item) => item.type !== "user" || item.composerQueued !== true,
   )));
   const conversationItems = steeringProjection.items;
+  const roundDateSeparators = conversationRoundDateSeparators(conversationItems, steeringProjection.initialUsersByTurnId);
   const activeStreamingItems = conversationItems.filter((item): item is Extract<ConversationItem, { type: "streaming" }> => item.type === "streaming");
   const [activityNowMs, setActivityNowMs] = useState(() => Date.now());
   useEffect(() => {
@@ -606,15 +607,12 @@ export function ChatWorkspace({
             onDismiss={onBackgroundGoalCatchUpDismiss}
           />
           {(() => {
-            let previousMessageAt: number | undefined;
             return conversationItems.map((item) => {
-            const currentMessageAt = conversationItemTimestamp(item);
-            const showDateSeparator = shouldShowMessageDateSeparator(previousMessageAt, currentMessageAt);
-            if (currentMessageAt !== undefined) previousMessageAt = currentMessageAt;
+            const roundStartedAt = roundDateSeparators.get(item);
             if (item.type === "handoff_card") {
               return (
                 <div key={item.id}>
-                {showDateSeparator ? <MessageDateSeparator timestamp={currentMessageAt} /> : null}
+                {roundStartedAt !== undefined ? <MessageDateSeparator timestamp={roundStartedAt} /> : null}
                 <SessionHandoffCard
                   handoff={{
                     id: item.handoffId,
@@ -646,7 +644,7 @@ export function ChatWorkspace({
               : null;
             return (
               <div key={conversationItemRenderKey(item, conversationRenderScope, conversationItemKeyOccurrences)} data-conversation-item-id={item.id}>
-                {showDateSeparator ? <MessageDateSeparator timestamp={currentMessageAt} /> : null}
+                {roundStartedAt !== undefined ? <MessageDateSeparator timestamp={roundStartedAt} /> : null}
                 <ConversationCard
                 item={item}
                 interleavedUserMessages={turnId ? steeringProjection.messagesByTurnId.get(turnId) : undefined}

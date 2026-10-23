@@ -84,10 +84,10 @@ assert.equal(deltaActivity?.phase, "running_tool");
 assert.equal(deltaActivity?.timeline?.[0]?.payload.tool, "read_scene");
 const terminalRun = [{ ...runningRun[0], status: "completed", nextStep: "done" }];
 const terminalChat = projectQuestionContinuationActivity(deltaChat, [runningQuestion], terminalRun);
-assert.equal(terminalChat.items.some((item) => item.type === "streaming" && item.id.startsWith("question-continuation:")), false);
+assert.equal(terminalChat.items.find((item) => item.id === liveActivity.id)?.timeline?.[0]?.payload.tool, "read_scene", "terminal snapshots preserve progress until the authoritative receipt transfers it");
 // A delayed stale run snapshot after the terminal event must not resurrect the row.
 const settledChat = projectQuestionContinuationActivity(deltaChat, [runningQuestion], runningRun, new Set([liveActivity.clientTurnId]));
-assert.equal(settledChat.items.some((item) => item.type === "streaming" && item.id.startsWith("question-continuation:")), false);
+assert.equal(settledChat.items.find((item) => item.id === liveActivity.id)?.timeline?.[0]?.payload.tool, "read_scene", "a settled flag cannot delete progress before receipt delivery");
 const foregroundItem = { id: "stream-foreground", type: "streaming", clientTurnId: "foreground-turn", text: "", phase: "waiting_for_model" };
 const foregroundChat = { ...replayChat, items: [...replayChat.items, foregroundItem] };
 assert.equal(projectQuestionContinuationActivity(foregroundChat, [], []).items.some((item) => item.clientTurnId === "foreground-turn"), true);

@@ -4,8 +4,9 @@ import type { ChatThread, ConversationItem } from "../lib/chat-types";
 import type { AgentRuntimeDeltaEvent } from "../lib/chat-streaming";
 import { applyAgentRuntimeDeltaToStreamingItem, elapsedSecondsFromTimeline } from "../lib/chat-streaming";
 import { materializeRuntimeTimeline, mergeRuntimeTimelines } from "../lib/chat-timeline-presentation";
+import { coalesceRuntimeTurnStreams, isExternalRuntimeStream, QUESTION_CONTINUATION_STREAM_PREFIX } from "../lib/runtime-stream-owner";
 
-export const RUNTIME_ACTIVITY_STREAM_PREFIX = "runtime-activity:";
+export { RUNTIME_ACTIVITY_STREAM_PREFIX } from "../lib/runtime-stream-owner";
 
 const RUNTIME_TURN_EVENT_SCHEMA = "vrcforge.runtime_turn_event.v1";
 const RUNTIME_CONTINUATION_SOURCES = new Set(["approval_finished", "shell_process_finished", "sub_agent_finished", "question_answered", "foreground_completed", "foreground_interrupted"]);
@@ -149,7 +150,6 @@ export function projectAgentQuestionContinuation(
   };
 }
 
-const QUESTION_CONTINUATION_STREAM_PREFIX = "question-continuation:";
 const ACTIVE_QUESTION_CONTINUATION_STATUSES = new Set(["running", "queued", "cancelling"]);
 
 /** Project only server-confirmed active question continuations into their owning chat. */
@@ -170,9 +170,10 @@ export function projectQuestionContinuationActivity(
     if (!clientTurnId || settledClientTurnIds.has(clientTurnId) || !ACTIVE_QUESTION_CONTINUATION_STATUSES.has(status)) continue;
     const turnSessionId = continuation?.sessionId || question.sessionId;
     if (turnSessionId !== chat.sessionId) continue;
-    const id = `${QUESTION_CONTINUATION_STREAM_PREFIX}${clientTurnId}`;
+    chat = coalesceRuntimeTurnStreams(chat, clientTurnId);
+    const prior = chat.items.find((candidate) => candidate.type === "streaming" && candidate.clientTurnId === clientTurnId);
+    const id = prior?.id || `${QUESTION_CONTINUATION_STREAM_PREFIX}${clientTurnId}`;
     const run = runs.find((candidate) => candidate.sessionId === chat.sessionId && candidate.clientTurnId === clientTurnId);
-    const prior = chat.items.find((candidate) => candidate.type === "streaming" && candidate.id === id);
     active.set(id, {
       id,
       type: "streaming",
@@ -186,12 +187,9 @@ export function projectQuestionContinuationActivity(
   }
 
   let changed = false;
-  const items = chat.items.filter((item) => {
-    if (item.type !== "streaming" || !item.id.startsWith(QUESTION_CONTINUATION_STREAM_PREFIX)) return true;
-    if (active.has(item.id)) return true;
-    changed = true;
-    return false;
-  });
+  // A terminal snapshot can precede its receipt. Keep accepted progress until
+  // delivery transfers the timeline into the durable Agent response.
+  const items = [...chat.items];
   for (const [id, item] of active) {
     const existingIndex = items.findIndex((candidate) => candidate.type === "streaming" && candidate.id === id);
     if (existingIndex < 0) {
@@ -224,10 +222,13 @@ export function applyQuestionContinuationDelta(
   const clientTurnId = String(delta.clientTurnId || "").trim();
   const sessionId = String(delta.sessionId || "").trim();
   if (!clientTurnId || !sessionId) return false;
-  const id = `${QUESTION_CONTINUATION_STREAM_PREFIX}${clientTurnId}`;
   const ownerChat = chats.find((chat) => chat.sessionId === sessionId
-    && chat.items.some((item) => item.type === "streaming" && item.id === id));
+    && chat.items.some((item) => item.type === "streaming" && item.clientTurnId === clientTurnId));
   if (!ownerChat) return false;
+  const streams = ownerChat.items.filter((item) => item.type === "streaming" && item.clientTurnId === clientTurnId);
+  const owner = streams.find((item) => !isExternalRuntimeStream(item)) || streams[0];
+  if (!owner?.id.startsWith(QUESTION_CONTINUATION_STREAM_PREFIX)) return false;
+  const id = owner.id;
   return updateChat(ownerChat.id, (chat) => {
     if (chat.sessionId !== sessionId) return chat;
     const index = chat.items.findIndex((item) => item.type === "streaming" && item.id === id);
@@ -319,7 +320,7 @@ export function runtimeContinuationDeliveryState(
       || (item.response.turnId || item.response.turn_id) === event.turnId);
   if (event.continuationSource === "foreground_completed"
     && items.some((item) => item.type === "streaming" && clientTurnId && item.clientTurnId === clientTurnId
-      && !item.id.startsWith(RUNTIME_ACTIVITY_STREAM_PREFIX))) {
+      && !isExternalRuntimeStream(item))) {
     return "defer";
   }
   const stored = items.find(matches);
@@ -440,6 +441,18 @@ export function useRuntimeTurnContinuationDelivery({
       }
     }
     pendingRef.current.delete(key);
+    if (deliveryState === "stored") {
+      updateChatRef.current?.(ownerChat.id, (chat) => {
+        const streams = chat.items.filter((item) => isExternalRuntimeStream(item) && item.clientTurnId === event.clientTurnId);
+        if (!streams.length) return chat;
+        const timeline = streams.flatMap((item) => item.type === "streaming" ? item.timeline || [] : []);
+        return { ...chat, items: chat.items.filter((item) => !streams.includes(item)).map((item) => item.type === "agent"
+          && ((event.clientTurnId && item.response.clientTurnId === event.clientTurnId)
+            || (item.response.turnId || item.response.turn_id) === event.turnId)
+          ? { ...item, timeline: mergeRuntimeTimelines(timeline, materializeRuntimeTimeline(item.response), item.timeline || []) }
+          : item) };
+      });
+    }
     const consumed = new Set(responseFromRuntimeTurnEvent(event).consumedSteerInputIds || []);
     if (consumed.size) {
       updateChatRef.current?.(ownerChat.id, (current) => ({
@@ -467,10 +480,11 @@ export function useRuntimeTurnContinuationDelivery({
       const response = responseFromRuntimeTurnEvent(event);
       const elapsedSeconds = elapsedSecondsFromTimeline(response.timeline);
       const completedAt = event.completedAt;
-      const externalStream = ownerChat.items.find((item) => item.type === "streaming"
-        && item.clientTurnId === event.clientTurnId && item.id.startsWith(RUNTIME_ACTIVITY_STREAM_PREFIX));
+      const externalStream = ownerChat.items.find((item) => isExternalRuntimeStream(item)
+        && item.clientTurnId === event.clientTurnId);
       if (externalStream && updateChatRef.current) {
         updateChatRef.current(ownerChat.id, (chat) => {
+          chat = coalesceRuntimeTurnStreams(chat, event.clientTurnId!);
           const stream = chat.items.find((item) => item.type === "streaming" && item.id === externalStream.id);
           const timeline = mergeRuntimeTimelines(stream?.type === "streaming" ? stream.timeline || [] : [], materializeRuntimeTimeline(response));
           return { ...chat, items: [...chat.items.filter((item) => item.id !== externalStream.id), {

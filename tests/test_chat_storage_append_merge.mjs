@@ -36,7 +36,8 @@ const durable = (chat) => ({ ...chat, items: chat.items.filter((value) => value.
 result = reconcile(fingerprints([base], durable), [streamed], [right], durable, versions);
 assert.equal(result.status, "merged");
 assert.ok(result.chats[0].items.some((value) => value.id === "live"), "keep the active in-memory stream");
-assert.equal(run({ ...left, title: "user edit" }).status, "conflict");
+assert.equal(run({ ...left, title: "user edit" }).chats[0].title, "user edit", "a unilateral metadata edit merges with independent appends");
+assert.equal(run({ ...left, title: "local edit" }, { ...right, title: "remote edit" }).status, "conflict");
 assert.equal(run({ ...left, items: [item("original", "edited"), item("local")] }).status, "conflict");
 assert.equal(run({ ...left, items: [] }).status, "conflict");
 assert.equal(run({ ...left, items: [...base.items, item("remote", "different")] }).status, "conflict");

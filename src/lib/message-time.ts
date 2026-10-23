@@ -64,3 +64,41 @@ export function conversationItemTimestamp(item: ConversationItem): number | unde
   if (item.type === "agent") return parseMessageTimestamp(item.completedAt || item.response.completedAt);
   return parseMessageTimestamp("createdAt" in item ? item.createdAt : undefined);
 }
+
+/** Date markers belong between completed user tasks, never between runtime requests. */
+export function conversationRoundDateSeparators(
+  items: ConversationItem[],
+  initialUsersByTurnId: ReadonlyMap<string, Extract<ConversationItem, { type: "user" }>>,
+): Map<ConversationItem, number> {
+  const separators = new Map<ConversationItem, number>();
+  let taskEnded = false;
+  let completedAt: number | undefined;
+  const seenInputs = new Set<string>();
+
+  for (const item of items) {
+    const turnId = item.type === "agent" ? item.response.clientTurnId
+      : item.type === "streaming" ? item.clientTurnId : undefined;
+    const input = item.type === "user" ? item
+      : turnId ? initialUsersByTurnId.get(turnId) : undefined;
+    if (input && !seenInputs.has(input.id)) {
+      seenInputs.add(input.id);
+      const startedAt = parseMessageTimestamp(input.createdAt);
+      if (taskEnded && completedAt !== undefined && startedAt !== undefined
+        && shouldShowMessageDateSeparator(completedAt, startedAt)) {
+        separators.set(item, startedAt);
+      }
+      // Steering, question answers and approval continuations extend the
+      // unfinished task; only an explicit terminal response closes it.
+      taskEnded = false;
+      completedAt = undefined;
+    }
+    if (item.type === "streaming") {
+      taskEnded = false;
+      completedAt = undefined;
+    } else if (item.type === "agent") {
+      taskEnded = ["done", "cancelled", "failed", "planner_failed", "interrupted"].includes(item.response.plan.nextStep || "");
+      completedAt = taskEnded ? conversationItemTimestamp(item) : undefined;
+    }
+  }
+  return separators;
+}
