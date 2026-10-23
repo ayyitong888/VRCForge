@@ -595,13 +595,13 @@ def test_continuation_cache_serves_two_cursors_concurrently():
     transport.clear_snapshot_cache()
 
 
-def test_snapshot_cache_does_not_store_over_128_mib(monkeypatch):
+def test_snapshot_cache_spills_over_memory_cap(monkeypatch):
     import chat_snapshot_transport as transport
 
     transport.clear_snapshot_cache()
     monkeypatch.setattr(transport, 'SNAPSHOT_CACHE_MAX_BYTES', 10)
     first = transport.snapshot_page(
-        {'chats': [{'id': 'large', 'text': 'x' * 100}]},
+        {'chats': [{'id': 'large', 'text': 'x' * (transport.PAGE_CHARACTERS + 100)}]},
         cache_context=('principal-a', ['scope']),
     )
     assert transport.cached_snapshot_page(
@@ -609,5 +609,147 @@ def test_snapshot_cache_does_not_store_over_128_mib(monkeypatch):
         snapshot_digest=first['snapshotDigest'],
         principal_hash='principal-a',
         project_paths=['scope'],
-    ) is None
+    ) is not None
     transport.clear_snapshot_cache()
+
+
+def test_oversize_snapshot_spill_reuses_one_build_and_preserves_unicode(tmp_path, monkeypatch):
+    import chat_snapshot_transport as transport
+
+    transport.clear_snapshot_cache()
+    monkeypatch.setattr(transport, 'SNAPSHOT_CACHE_MAX_BYTES', 10)
+    monkeypatch.setattr(transport.tempfile, 'tempdir', str(tmp_path))
+    snapshot = {'chats': [{'id': 'spill', 'items': [{'type': 'user', 'text': '中😺"\\\n' * 900000}]}]}
+    builds = 0
+    original = transport._validated_chat_text_paths
+
+    def counted(snapshot_value):
+        nonlocal builds
+        builds += 1
+        return original(snapshot_value)
+
+    monkeypatch.setattr(transport, '_validated_chat_text_paths', counted)
+    first = transport.snapshot_page(
+        snapshot,
+        cache_context=('principal-a', ['scope']),
+    )
+    spill_files = [entry.spill_file for entry in transport._SNAPSHOT_CACHE.values()]
+    assert len(spill_files) == 1 and spill_files[0] and not spill_files[0].closed
+    assert transport.cached_snapshot_page(
+        text_offset=first['nextOffset'],
+        snapshot_digest=first['snapshotDigest'],
+        principal_hash='principal-b',
+        project_paths=['scope'],
+    ) is None
+    assert transport.cached_snapshot_page(
+        text_offset=first['nextOffset'],
+        snapshot_digest=first['snapshotDigest'],
+        principal_hash='principal-a',
+        project_paths=['other-scope'],
+    ) is None
+    pieces = [first['text']]
+    offset = first['nextOffset']
+    while offset is not None:
+        page = transport.cached_snapshot_page(
+            text_offset=offset,
+            snapshot_digest=first['snapshotDigest'],
+            principal_hash='principal-a',
+            project_paths=['scope'],
+        )
+        assert page is not None
+        pieces.append(page['text'])
+        offset = page['nextOffset']
+    assert builds == 1
+    assert json.loads(''.join(pieces)) == {
+        **snapshot,
+        '_validatedCompactionRecoveryPaths': [],
+        '_validatedChatTextPaths': ['/chats/0/items/0/text'],
+    }
+    transport.clear_snapshot_cache()
+    assert spill_files[0].closed
+
+
+def test_oversize_snapshot_spill_is_removed_on_ttl_and_eviction(tmp_path, monkeypatch):
+    import chat_snapshot_transport as transport
+
+    transport.clear_snapshot_cache()
+    monkeypatch.setattr(transport, 'SNAPSHOT_CACHE_MAX_BYTES', 1)
+    monkeypatch.setattr(transport, 'SNAPSHOT_CACHE_MAX_ENTRIES', 1)
+    monkeypatch.setattr(transport.tempfile, 'tempdir', str(tmp_path))
+    now = [100.0]
+    monkeypatch.setattr(transport.time, 'monotonic', lambda: now[0])
+    first = transport.snapshot_page(
+        {'chats': [{'id': 'first', 'text': 'x' * (transport.PAGE_CHARACTERS + 100)}]},
+        cache_context=('principal-a', ['first']),
+    )
+    first_file = next(entry.spill_file for entry in transport._SNAPSHOT_CACHE.values())
+    assert not first_file.closed
+    now[0] += transport.SNAPSHOT_CACHE_TTL_SECONDS
+    assert transport.cached_snapshot_page(
+        text_offset=transport.PAGE_CHARACTERS,
+        snapshot_digest=first['snapshotDigest'],
+        principal_hash='principal-a',
+        project_paths=['first'],
+    ) is None
+    assert first_file.closed
+
+    second = transport.snapshot_page(
+        {'chats': [{'id': 'second', 'text': 'y' * (transport.PAGE_CHARACTERS + 100)}]},
+        cache_context=('principal-a', ['second']),
+    )
+    second_file = next(entry.spill_file for entry in transport._SNAPSHOT_CACHE.values())
+    assert not second_file.closed
+    transport.snapshot_page(
+        {'chats': [{'id': 'third', 'text': 'z' * (transport.PAGE_CHARACTERS + 100)}]},
+        cache_context=('principal-a', ['third']),
+    )
+    assert second_file.closed
+    transport.clear_snapshot_cache()
+
+
+def test_oversize_snapshot_spill_failure_closes_partial_file(monkeypatch):
+    import chat_snapshot_transport as transport
+
+    transport.clear_snapshot_cache()
+    monkeypatch.setattr(transport, 'SNAPSHOT_CACHE_MAX_BYTES', 1)
+
+    class FailingFile:
+        closed = False
+
+        def write(self, _data):
+            raise OSError('disk full')
+
+        def close(self):
+            self.closed = True
+
+    spill_file = FailingFile()
+    monkeypatch.setattr(transport.tempfile, 'TemporaryFile', lambda **_kwargs: spill_file)
+
+    with pytest.raises(HTTPException) as error:
+        transport.snapshot_page(
+            {'chats': [{'id': 'failed-spill', 'text': 'x' * (transport.PAGE_CHARACTERS + 100)}]},
+            cache_context=('principal-a', ['scope']),
+        )
+    assert error.value.status_code == 503
+    assert spill_file.closed
+    assert not transport._SNAPSHOT_CACHE
+
+
+def test_oversize_snapshot_read_failure_evicts_closed_handle(monkeypatch):
+    import chat_snapshot_transport as transport
+
+    transport.clear_snapshot_cache()
+    monkeypatch.setattr(transport, 'SNAPSHOT_CACHE_MAX_BYTES', 1)
+    first = transport.snapshot_page(
+        {'chats': [{'id': 'closed-spill', 'text': 'x' * (transport.PAGE_CHARACTERS + 100)}]},
+        cache_context=('principal-a', ['scope']),
+    )
+    spill_file = next(entry.spill_file for entry in transport._SNAPSHOT_CACHE.values())
+    spill_file.close()
+    assert transport.cached_snapshot_page(
+        text_offset=first['nextOffset'],
+        snapshot_digest=first['snapshotDigest'],
+        principal_hash='principal-a',
+        project_paths=['scope'],
+    ) is None
+    assert not transport._SNAPSHOT_CACHE

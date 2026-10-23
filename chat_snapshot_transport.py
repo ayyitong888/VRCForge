@@ -6,11 +6,12 @@ space for the fixed-size envelope under the native transport's 32 MiB cap.
 """
 import hashlib
 import json
+import tempfile
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
 from threading import RLock
-from typing import Any
+from typing import Any, BinaryIO
 
 from fastapi import HTTPException
 
@@ -30,10 +31,13 @@ _VALIDATED_TEXT_MARKER = "_validatedChatTextPaths"
 class _SnapshotCacheEntry:
     """Immutable in-process continuation data for one authenticated scope."""
 
-    text: str
+    text: str | None
     digest: str
     created_at: float
     byte_size: int
+    total_characters: int
+    page_offsets: tuple[int, ...] | None = None
+    spill_file: BinaryIO | None = None
 
 
 # This cache belongs to one dashboard process and is deliberately never
@@ -67,8 +71,11 @@ def clear_snapshot_cache() -> None:
 
     global _SNAPSHOT_CACHE_BYTES
     with _SNAPSHOT_CACHE_LOCK:
+        entries = tuple(_SNAPSHOT_CACHE.values())
         _SNAPSHOT_CACHE.clear()
         _SNAPSHOT_CACHE_BYTES = 0
+        for entry in entries:
+            _release_snapshot_entry(entry)
 
 
 def _snapshot_cache_key(
@@ -87,6 +94,60 @@ def _evict_expired_snapshot_cache(now: float) -> None:
     for key in expired:
         entry = _SNAPSHOT_CACHE.pop(key)
         _SNAPSHOT_CACHE_BYTES -= entry.byte_size
+        _release_snapshot_entry(entry)
+
+
+def _release_snapshot_entry(entry: _SnapshotCacheEntry) -> None:
+    """Release the process-owned spill file, if this entry has one."""
+
+    if entry.spill_file is None:
+        return
+    try:
+        entry.spill_file.close()
+    except OSError:
+        # Cache cleanup is best effort; never turn an eviction into a request
+        # failure when the operating system has already reclaimed the file.
+        pass
+
+
+def _prepare_snapshot_storage(
+    text: str, max_bytes: int
+) -> tuple[int, BinaryIO | None, tuple[int, ...] | None]:
+    """Encode pages once, spilling only after the bounded byte limit is crossed."""
+
+    spill_file: BinaryIO | None = None
+    pending_pages: list[bytes] = []
+    offsets = [0]
+    byte_offset = 0
+    try:
+        for start in range(0, len(text), PAGE_CHARACTERS):
+            encoded_page = text[start : start + PAGE_CHARACTERS].encode("utf-8")
+            byte_offset += len(encoded_page)
+            if spill_file is None and byte_offset > max_bytes:
+                spill_file = tempfile.TemporaryFile(
+                    mode="w+b", prefix="vrcforge-chat-snapshot-", suffix=".json"
+                )
+                for pending_page in pending_pages:
+                    spill_file.write(pending_page)
+                pending_pages.clear()
+            if spill_file is None:
+                pending_pages.append(encoded_page)
+            else:
+                spill_file.write(encoded_page)
+            if start + PAGE_CHARACTERS < len(text):
+                offsets.append(byte_offset)
+        offsets.append(byte_offset)
+        if spill_file is None:
+            return byte_offset, None, None
+        spill_file.seek(0)
+        return byte_offset, spill_file, tuple(offsets)
+    except Exception:
+        if spill_file is not None:
+            try:
+                spill_file.close()
+            except OSError:
+                pass
+        raise
 
 
 def _store_snapshot_cache(
@@ -97,10 +158,21 @@ def _store_snapshot_cache(
     project_paths: list[str] | tuple[str, ...] | None,
 ) -> None:
     global _SNAPSHOT_CACHE_BYTES
-    byte_size = len(text.encode("utf-8"))
-    if byte_size > SNAPSHOT_CACHE_MAX_BYTES:
-        return
-    entry = _SnapshotCacheEntry(text, digest, time.monotonic(), byte_size)
+    try:
+        byte_size, spill_file, page_offsets = _prepare_snapshot_storage(text, SNAPSHOT_CACHE_MAX_BYTES)
+    except OSError as exc:
+        raise HTTPException(status_code=503, detail="Chat snapshot continuation cache unavailable") from exc
+    retained_text: str | None = text if spill_file is None else None
+    accounted_bytes = byte_size if spill_file is None else 0
+    entry = _SnapshotCacheEntry(
+        retained_text,
+        digest,
+        time.monotonic(),
+        accounted_bytes,
+        len(text),
+        page_offsets,
+        spill_file,
+    )
     key = _snapshot_cache_key(principal_hash=principal_hash, project_paths=project_paths, digest=digest)
     with _SNAPSHOT_CACHE_LOCK:
         now = time.monotonic()
@@ -108,14 +180,16 @@ def _store_snapshot_cache(
         previous = _SNAPSHOT_CACHE.pop(key, None)
         if previous is not None:
             _SNAPSHOT_CACHE_BYTES -= previous.byte_size
+            _release_snapshot_entry(previous)
         while _SNAPSHOT_CACHE and (
             len(_SNAPSHOT_CACHE) >= SNAPSHOT_CACHE_MAX_ENTRIES
-            or _SNAPSHOT_CACHE_BYTES + byte_size > SNAPSHOT_CACHE_MAX_BYTES
+            or _SNAPSHOT_CACHE_BYTES + accounted_bytes > SNAPSHOT_CACHE_MAX_BYTES
         ):
             _old_key, old_entry = _SNAPSHOT_CACHE.popitem(last=False)
             _SNAPSHOT_CACHE_BYTES -= old_entry.byte_size
+            _release_snapshot_entry(old_entry)
         _SNAPSHOT_CACHE[key] = entry
-        _SNAPSHOT_CACHE_BYTES += byte_size
+        _SNAPSHOT_CACHE_BYTES += accounted_bytes
 
 
 def cached_snapshot_page(
@@ -127,6 +201,7 @@ def cached_snapshot_page(
 ) -> dict[str, Any] | None:
     """Return a continuation page only for the exact auth/scope/digest key."""
 
+    global _SNAPSHOT_CACHE_BYTES
     if text_offset <= 0 or not snapshot_digest:
         return None
     key = _snapshot_cache_key(
@@ -140,19 +215,34 @@ def cached_snapshot_page(
         if entry is None:
             return None
         _SNAPSHOT_CACHE.move_to_end(key)
-        text = entry.text
-    if text_offset < 0 or text_offset % PAGE_CHARACTERS:
-        raise HTTPException(status_code=400, detail="Invalid chat snapshot page offset")
-    if text_offset >= len(text):
-        raise HTTPException(status_code=400, detail="Chat snapshot page offset is outside the snapshot")
-    end = min(text_offset + PAGE_CHARACTERS, len(text))
+        if text_offset < 0 or text_offset % PAGE_CHARACTERS:
+            raise HTTPException(status_code=400, detail="Invalid chat snapshot page offset")
+        if text_offset >= entry.total_characters:
+            raise HTTPException(status_code=400, detail="Chat snapshot page offset is outside the snapshot")
+        end = min(text_offset + PAGE_CHARACTERS, entry.total_characters)
+        if entry.text is not None:
+            page_text = entry.text[text_offset:end]
+        else:
+            assert entry.spill_file is not None and entry.page_offsets is not None
+            page_index = text_offset // PAGE_CHARACTERS
+            byte_start = entry.page_offsets[page_index]
+            byte_end = entry.page_offsets[page_index + 1]
+            try:
+                entry.spill_file.seek(byte_start)
+                page_text = entry.spill_file.read(byte_end - byte_start).decode("utf-8")
+            except (OSError, UnicodeDecodeError, ValueError):
+                removed = _SNAPSHOT_CACHE.pop(key, None)
+                if removed is not None:
+                    _SNAPSHOT_CACHE_BYTES -= removed.byte_size
+                    _release_snapshot_entry(removed)
+                return None
     return {
         "schema": SCHEMA,
-        "text": text[text_offset:end],
+        "text": page_text,
         "textOffset": text_offset,
-        "nextOffset": end if end < len(text) else None,
-        "totalCharacters": len(text),
-        "hasMore": end < len(text),
+        "nextOffset": end if end < entry.total_characters else None,
+        "totalCharacters": entry.total_characters,
+        "hasMore": end < entry.total_characters,
         "snapshotDigest": entry.digest,
     }
 
