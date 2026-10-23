@@ -28,6 +28,7 @@ import {
   saveChatSidebarCache,
   type ChatSidebarCacheEntry,
 } from "../lib/chat-sidebar-cache";
+import { readChatTranscriptCache, removeChatTranscriptCache, writeChatTranscriptCache } from "../lib/chat-transcript-cache";
 import {
   cacheChatContextUsageFast,
   cacheChatTimestampsFast,
@@ -107,6 +108,7 @@ export function useChatSessions({
   const { i18n, t } = useTranslation();
   const [chats, setChats] = useState<ChatThread[]>(() => initialChatState.chats);
   const [sidebarCacheEntries, setSidebarCacheEntries] = useState<ChatSidebarCacheEntry[]>(() => loadChatSidebarCache());
+  const [cachedDisplayChat, setCachedDisplayChat] = useState<{ endpoint: string; chat: ChatThread } | null>(null);
   const [chatStorageLoadSucceeded, setChatStorageLoadSucceeded] = useState(false);
   const [chatStorageReady, setChatStorageReady] = useState(false);
   const [activeChatId, setActiveChatId] = useState(() => initialChatState.activeChatId);
@@ -151,6 +153,34 @@ export function useChatSessions({
   const chatSidebarActivityCacheRef = useRef(new WeakMap<ChatThread, SidebarChatActivity | null>());
 
   const activeChat = chats.find((chat) => chat.id === activeChatId) || null;
+  const selectedSidebarEntry = sidebarCacheEntries.find((entry) => entry.id === activeChatId);
+  const selectedProjectPath = selectedSidebarEntry?.projectPath ?? activeProjectPath;
+  // This provisional snapshot is display-only. It must never enter chatsRef,
+  // reconciliation, an outgoing model request, or the authoritative save queue.
+  const displayChat = useMemo<ChatThread | null>(() => {
+    if (activeChat || chatStorageLoadSucceeded) return activeChat;
+    if (cachedDisplayChat?.endpoint === endpoint
+      && cachedDisplayChat.chat.id === activeChatId
+      && normalizeProjectPathKey(cachedDisplayChat.chat.projectPath) === normalizeProjectPathKey(selectedProjectPath)) {
+      return cachedDisplayChat.chat;
+    }
+    return selectedSidebarEntry ? { ...selectedSidebarEntry, items: [] } : null;
+  }, [activeChat, activeChatId, cachedDisplayChat, chatStorageLoadSucceeded, endpoint, selectedProjectPath, selectedSidebarEntry]);
+  const activeChatPending = Boolean(activeChatId && !activeChat && !chatStorageLoadSucceeded);
+
+  useEffect(() => {
+    if (!activeChatPending) return;
+    let cancelled = false;
+    void readChatTranscriptCache(endpoint, activeChatId, selectedProjectPath).then((chat) => {
+      if (!cancelled && chat) setCachedDisplayChat({ endpoint, chat });
+    });
+    return () => { cancelled = true; };
+  }, [activeChatId, activeChatPending, endpoint, selectedProjectPath]);
+
+  useEffect(() => {
+    if (!activeChat || !chatStorageLoadSucceeded || activeChat.items.some((item) => item.type === "streaming")) return;
+    void writeChatTranscriptCache(endpoint, activeChat);
+  }, [activeChat, chatStorageLoadSucceeded, endpoint]);
   const sidebarChats = useMemo<ChatThread[]>(() => {
     if (chatStorageLoadSucceeded || sidebarCacheEntries.length === 0) return chats;
     const authoritativeIds = new Set(chats.map((chat) => chat.id));
@@ -941,6 +971,7 @@ export function useChatSessions({
         if (result.ok !== true) throw new ApiError(t("chat.deletePermanentlyFailed"), 0);
       }
       await persistChatsNow();
+      await removeChatTranscriptCache(endpoint, chatId, removedSnapshot.projectPath);
     } catch (cause: unknown) {
       if (removedSnapshot && removedIndex >= 0 && !chatsRef.current.some((chat) => chat.id === chatId)) {
         chatDeletedIdsRef.current.delete(chatId);
@@ -1012,6 +1043,8 @@ export function useChatSessions({
     chatStorageReady,
     setChats,
     activeChat,
+    displayChat,
+    activeChatPending,
     activeChatId,
     setActiveChatId,
     chatMenu,

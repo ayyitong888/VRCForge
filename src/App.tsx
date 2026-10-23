@@ -839,6 +839,8 @@ export default function App() {
     chats,
     chatStorageReady,
     activeChat,
+    displayChat,
+    activeChatPending,
     activeChatId,
     setActiveChatId,
     chatMenu,
@@ -987,7 +989,7 @@ export default function App() {
     newTemporaryChat();
   }
 
-  const conversation = activeChat?.items ?? [];
+  const conversation = displayChat?.items ?? [];
   const sessionId = activeChat?.sessionId ?? "";
   const activeRuntimeProjectPath = activeChat?.projectPath || activeProjectPath;
   const hasAgentRuntimeScope = Boolean(sessionId || activeRuntimeProjectPath);
@@ -3345,6 +3347,10 @@ export default function App() {
 
   async function submitMessage(event?: FormEvent, deliveryMode: "steer" | "queue" = "steer") {
     event?.preventDefault();
+    if (activeChatPending) {
+      setRuntimeNotice(t("common.loading"));
+      return;
+    }
     if (attachmentLoadsRef.current > 0) return;
     const composerMessage = input.trim();
     let message = composerMessage;
@@ -4203,7 +4209,7 @@ export default function App() {
           <WorkspaceHeader
             activeProjectLabel={activeProjectPath ? activeProjectName : t("sidebar.tempChat")}
             activeView={activeView}
-            activeChatTitle={activeChat ? activeChat.title || t("header.currentSession") : ""}
+            activeChatTitle={displayChat ? displayChat.title || t("header.currentSession") : activeChatPending ? t("header.currentSession") : ""}
             theme={theme}
             showDoctorStartupPrompt={showDoctorStartupPrompt}
             hasStartupIssue={hasStartupIssue}
@@ -4488,6 +4494,8 @@ export default function App() {
           ) : (
             <ChatWorkspace
               projectPromptTitle={projectPromptTitle}
+              conversationPending={activeChatPending}
+              conversationPendingMessage={chatStorageReady ? t("chat.sessionRestoreFailed") : t("common.loading")}
               input={input}
               setInput={setInput}
               sending={sending}
@@ -4511,7 +4519,7 @@ export default function App() {
               }}
               actions={composerActions}
               onAction={runExplicitWorkspaceAction}
-              disabledReason={attachmentsLoading ? t("common.loading") : pendingReplyQuestionId ? "" : chatDisabledReason}
+              disabledReason={activeChatPending || attachmentsLoading ? t("common.loading") : pendingReplyQuestionId ? "" : chatDisabledReason}
               attachments={attachments}
               onAttachFiles={(files) => void addComposerFiles(files)}
               onRemoveAttachment={removeAttachment}
@@ -4536,7 +4544,7 @@ export default function App() {
               }))}
               onBindProject={bindProject}
               conversation={conversation}
-              attachmentPayloads={activeChat?.attachmentPayloads}
+              attachmentPayloads={displayChat?.attachmentPayloads}
               queued={visibleQueued}
               agentQuestions={hasAgentRuntimeScope ? filterQuestionsForRuntimeScope(agentQuestions, runtimeScope) : []}
               backgroundGoalDeliveries={

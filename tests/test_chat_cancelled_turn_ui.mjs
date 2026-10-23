@@ -46,7 +46,7 @@ const fixtures = [
   { name: "commentary", item: variant("commentary", {
     timeline: [commentary, ...tool, marker],
     steps: [{ actionId: "read-action", result: { text: "READ_RESULT_RETAINED" } }],
-  }), tools: true, spoken: commentary.payload.summary },
+  }), tools: true, spoken: commentary.payload.summary, expectedInvocationStatusKey: "step.done", expectedInvocationSuccess: true },
   { name: "accepted-final", item: variant("accepted-final", {
     timeline: [commentary, ...tool,
       event("accepted", 3, "assistant", { summary: "The original file is valid.", phase: "final_answer", status: "done" }), marker],
@@ -65,6 +65,20 @@ const fixtures = [
     timeline: [commentary, ...tool,
       event("unaccepted", 3, "assistant", { summary: "UNACCEPTED_FINAL_MUST_NOT_APPEAR", phase: "final_answer", status: "completion_unverified" }), marker],
   }), tools: true, spoken: commentary.payload.summary },
+  { name: "pending-tool", item: variant("pending-tool", {
+    timeline: [event("pending-call", 1, "tool_call", {
+      actionId: "pending-action", tool: "vrcforge_inspect_avatar", status: "started",
+    }), marker],
+  }), tools: true, expectedInvocationStatusKey: "subagent.statusInterrupted" },
+  ...["cancelled", "rejected", "interrupted"].map((status) => ({
+    name: `terminal-tool-${status}`, item: variant(`terminal-tool-${status}`, {
+      timeline: [tool[0], event(`tool-result-${status}`, 2, "tool_result", {
+        actionId: "read-action", tool: "vrcforge_inspect_avatar", status,
+        summary: "The tool did not complete successfully.",
+      }), marker],
+    }), tools: true, expectedInvocationStatusKey: status === "cancelled" ? "subagent.statusCancelled"
+      : status === "rejected" ? "agent.rejected" : "subagent.statusInterrupted",
+  })),
   ...replayItems.map((item, index) => ({ name: `original-${index}`, item, original: true })),
 ];
 const css = (await postcss([tailwindcss("./tailwind.config.ts")]).process(
@@ -80,6 +94,7 @@ import { buildChatHistory, copyableAgentDialogueText } from "./src/lib/conversat
 import i18n from "./src/i18n";
 const fixtures = ${JSON.stringify(fixtures)};
 window.cancelledLabel = () => i18n.t("chat.cancelled");
+window.invocationStatusLabel = (key) => i18n.t(key);
 window.fixtureText = (name) => {
   const item = fixtures.find((fixture) => fixture.name === name).item;
   return { copy: copyableAgentDialogueText(item.response), history: buildChatHistory([item], i18n.t).map((entry) => entry.text).join("\\n\\n") };
@@ -145,6 +160,18 @@ try {
         if (fixture.name === "commentary") {
           await group.locator("button.group\\/run").first().click();
           assert.match(await group.innerText(), /READ_RESULT_RETAINED/, "expanding the tool keeps its full original result");
+        }
+        if (fixture.expectedInvocationStatusKey) {
+          if (fixture.name !== "commentary") await group.locator("button.group\\/run").first().click();
+          const detail = group.locator("[data-agent-invocation-output-card]").first();
+          const footer = detail.locator(":scope > div").last();
+          const label = await page.evaluate((key) => window.invocationStatusLabel(key), fixture.expectedInvocationStatusKey);
+          assert.equal((await footer.innerText()).trim(), label,
+            `${fixture.name}: terminal tool detail shows its actual outcome instead of started or done`);
+          assert.equal(await footer.locator("svg.lucide-check").count(), fixture.expectedInvocationSuccess ? 1 : 0,
+            `${fixture.name}: success check is reserved for explicitly completed tools`);
+          assert.doesNotMatch(await footer.getAttribute("class") || "", /amber|yellow/,
+            `${fixture.name}: settled tool must not remain in a running visual state`);
         }
         assert.equal(await status.count(), 1, `${fixture.name}: expansion never duplicates the status`);
         await toggle.click();

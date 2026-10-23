@@ -143,6 +143,8 @@ function PendingQueuedTurnCard({
 
 export function ChatWorkspace({
   projectPromptTitle,
+  conversationPending = false,
+  conversationPendingMessage,
   input,
   setInput,
   sending,
@@ -239,6 +241,8 @@ export function ChatWorkspace({
   onHandoffSendOpenChange,
 }: {
   projectPromptTitle: string;
+  conversationPending?: boolean;
+  conversationPendingMessage?: string;
   input: string;
   setInput: (value: string) => void;
   sending: boolean;
@@ -537,7 +541,12 @@ export function ChatWorkspace({
       <div className="relative flex min-h-0 flex-1 flex-col">
         <div className="flex min-h-0 flex-1 items-center justify-center overflow-auto p-5 md:p-8" data-empty-chat-content>
           <div className="w-full max-w-3xl">
-            {projectPromptTitle ? <h1 className="mb-5 text-center text-2xl font-semibold tracking-normal">{projectPromptTitle}</h1> : null}
+            {conversationPending ? (
+              <div role="status" data-chat-transcript-loading className="mx-auto max-w-2xl space-y-4 text-sm text-muted-foreground">
+                <div className="flex items-center gap-2"><Loader2 className="h-4 w-4 animate-spin motion-reduce:animate-none" aria-hidden="true" />{conversationPendingMessage || t("common.loading")}</div>
+                <div aria-hidden="true" className="space-y-3 motion-safe:animate-pulse"><div className="h-4 w-3/4 rounded bg-muted" /><div className="h-4 w-full rounded bg-muted" /><div className="h-4 w-1/2 rounded bg-muted" /></div>
+              </div>
+            ) : projectPromptTitle ? <h1 className="mb-5 text-center text-2xl font-semibold tracking-normal">{projectPromptTitle}</h1> : null}
             {handoffSendOpen ? (
               <div className="mb-3">
                 <SessionHandoffSend

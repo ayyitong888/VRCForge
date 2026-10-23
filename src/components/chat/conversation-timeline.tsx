@@ -95,7 +95,9 @@ export function buildAgentTimelineRows({
       ...response,
       plan: { ...response.plan, reply: cancelledAgentReplyText(response), summary: "" },
       steps: response.steps?.filter((step) => !isStepKindAnswer(step.kind)
-        || (!isCancellationMarkerAssistantText(step.summary || "") && step.status !== "completion_unverified")),
+        || (!isCancellationMarkerAssistantText(step.summary || "") && step.status !== "completion_unverified"))
+        .map((step) => ["started", "running", "pending"].includes(step.status || "")
+          ? { ...step, status: "interrupted" } : step),
     };
     showIntent = false;
   }
@@ -377,7 +379,13 @@ export function buildDurableTimelineRows(
       }
       continue;
     }
-    for (const invocation of entry.invocations) {
+    for (const storedInvocation of entry.invocations) {
+      // Stop ends the client observation, not the tool's side effects. Without
+      // a result we can say interrupted, never success or still running.
+      const invocation = options.dropCancellationMarkers
+        && ["started", "running", "pending"].includes(storedInvocation.status.toLowerCase())
+        ? { ...storedInvocation, status: "interrupted" }
+        : storedInvocation;
       processInvocations.push(invocation);
       if (invocation.kind === "process") {
         flushToolCalls();
@@ -470,13 +478,14 @@ function renderDirectTimelineInvocation(invocation: TimelineInvocation, detail?:
     );
   }
   const danger = ["failed", "error"].includes(invocation.status.toLowerCase());
+  const halted = ["interrupted", "cancelled", "canceled", "rejected"].includes(invocation.status.toLowerCase());
   const showToolFailure = invocation.kind === "tool" && danger;
   return (
     <RunRow
       key={invocation.id}
       icon={workBatchIcon(invocation.kind)}
       title={[invocationOperationTitle(invocation, i18n.t), invocationTarget(detail)].filter(Boolean).join(" · ")}
-      statusTone={danger ? "danger" : invocation.status === "started" ? "warn" : "ok"}
+      statusTone={danger ? "danger" : halted ? "muted" : invocation.status === "started" ? "warn" : "ok"}
       statusLabel={showToolFailure ? i18n.t("skillStatus.failed") : invocation.status}
       showCompactStatus={showToolFailure}
       detailCard
@@ -497,7 +506,7 @@ function invocationTarget(detail: unknown): string {
 function invocationOperationTitle(invocation: TimelineInvocation, t: typeof i18n.t): string {
   const tool = timelineInvocationDisplayLabel(invocation.label);
   const normalizedStatus = invocation.status.toLowerCase();
-  if (["failed", "error", "rejected", "cancelled", "canceled"].some((value) => normalizedStatus.includes(value))) {
+  if (["failed", "error"].some((value) => normalizedStatus.includes(value))) {
     return invocation.kind === "tool" && ["failed", "error"].includes(normalizedStatus)
       ? tool
       : t("agent.timeline.failedTool", { tool });
@@ -558,6 +567,10 @@ function InvocationDetailCard({ invocation, detail }: { invocation: TimelineInvo
   const normalizedStatus = invocation.status.toLowerCase();
   const danger = ["failed", "error"].includes(normalizedStatus);
   const running = ["started", "running", "pending"].includes(normalizedStatus);
+  const stoppedLabel = normalizedStatus === "interrupted" ? i18n.t("subagent.statusInterrupted")
+    : ["cancelled", "canceled"].includes(normalizedStatus) ? i18n.t("subagent.statusCancelled")
+    : normalizedStatus === "rejected" ? i18n.t("agent.rejected") : "";
+  const succeeded = ["ok", "done", "completed", "success", "succeeded", "applied", "executed"].includes(normalizedStatus);
   const content = detail !== undefined
     ? formatPayload(detail)
     : invocation.summary || (invocation.kind === "command" ? `$ ${invocation.label}` : "-");
@@ -568,11 +581,11 @@ function InvocationDetailCard({ invocation, detail }: { invocation: TimelineInvo
       : invocation.kind === "subagent"
         ? "Sub-agent"
         : "Tool";
-  const status = danger
+  const status = stoppedLabel || (danger
     ? i18n.t("skillStatus.failed")
     : running
       ? invocation.status
-      : i18n.t("step.done");
+      : succeeded ? i18n.t("step.done") : invocation.status);
   return (
     <div
       data-agent-invocation-output-card
@@ -591,7 +604,7 @@ function InvocationDetailCard({ invocation, detail }: { invocation: TimelineInvo
           danger ? "text-destructive" : running ? "text-amber-600" : "text-muted-foreground",
         )}
       >
-        {danger ? <AlertTriangle className="h-3.5 w-3.5" aria-hidden="true" /> : !running ? <Check className="h-3.5 w-3.5" aria-hidden="true" /> : null}
+        {danger ? <AlertTriangle className="h-3.5 w-3.5" aria-hidden="true" /> : stoppedLabel ? <CircleStop className="h-3.5 w-3.5" aria-hidden="true" /> : succeeded ? <Check className="h-3.5 w-3.5" aria-hidden="true" /> : null}
         <span>{status}</span>
       </div>
     </div>
