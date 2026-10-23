@@ -53,6 +53,11 @@ def identity_scope(name: str, *, write: bool = False, arguments: Mapping[str, An
         if isinstance(values.get(key), Mapping):
             values = values[key]
             break
+    # First save creates the scene asset identity. The project/editor binding
+    # protects discovery; the authoritative preview locks the unsaved scene's
+    # handle, hierarchy and absent destination before approval and mutation.
+    if normalized.endswith("save_new_scene"):
+        return "project"
     # Opening an existing scene addresses a project asset; it does not require
     # the currently loaded scene to have a saved identity.  Keep every other
     # transition action scene-scoped until its identity requirements differ.
