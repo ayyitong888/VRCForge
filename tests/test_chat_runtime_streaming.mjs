@@ -154,6 +154,35 @@ assert.equal(cancelledToolBatch.invocations[0].status, "ok");
 assert.equal(cancelledPresentation.entries.filter((entry) => entry.type === "assistant").length, 0, "local abort is not inserted as a timestamped runtime event");
 assert.equal(cancelled.response.plan.reply, "Request cancelled.", "the durable terminal card still carries its cancellation summary");
 
+const partialStream = applyAgentRuntimeDeltaToStreamingItem(completed, {
+  type: "agentRuntimeDelta",
+  clientTurnId: "client-live",
+  phase: "receiving_response",
+  textDelta: '{"reply": "已定位到调参块，准备写入新的数值',
+});
+const cancelledWithPartial = finalizeCancelledStreamingTurn(partialStream, {
+  sessionId: "session-live",
+  cancelledText: "Request cancelled.",
+  elapsedSeconds: 12,
+});
+assert.equal(cancelledWithPartial.response.plan.summary, "Request cancelled.", "the cancellation marker stays in summary");
+assert.equal(cancelledWithPartial.response.plan.reply, "已定位到调参块，准备写入新的数值",
+  "partial model dialogue already streamed must survive Stop instead of being discarded");
+const partialFromPlainStream = finalizeCancelledStreamingTurn(
+  applyAgentRuntimeDeltaToStreamingItem(completed, {
+    type: "agentRuntimeDelta", clientTurnId: "client-live", phase: "receiving_response", textDelta: "纯文本协议的部分回复",
+  }),
+  { sessionId: "session-live", cancelledText: "Request cancelled.", elapsedSeconds: 5 },
+);
+assert.equal(partialFromPlainStream.response.plan.reply, "纯文本协议的部分回复");
+const partialFromBrokenJson = finalizeCancelledStreamingTurn(
+  applyAgentRuntimeDeltaToStreamingItem(completed, {
+    type: "agentRuntimeDelta", clientTurnId: "client-live", phase: "receiving_response", textDelta: '{"summary": "wor',
+  }),
+  { sessionId: "session-live", cancelledText: "Request cancelled.", elapsedSeconds: 5 },
+);
+assert.equal(partialFromBrokenJson.response.plan.reply, "wor", "unterminated JSON fields still yield their partial text");
+
 const nextCallAt = "2026-08-14T00:01:40.000Z";
 const nextWaiting = applyAgentRuntimeDeltaToStreamingItem(completed, {
   type: "agentRuntimeDelta",

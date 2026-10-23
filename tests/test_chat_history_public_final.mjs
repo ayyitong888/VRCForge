@@ -101,3 +101,53 @@ for (const status of ['tool_failed', 'needs_user_action', 'planner_failed', 'loo
     assert.equal(visibleAgentDialogueText(response), response.plan.reply);
   });
 }
+
+const runtimeEvent = (id, sequence, kind, payload) => ({ id, sequence, timestamp: '2026-01-01T00:00:00Z', kind, payload });
+const cancelledWorkTimeline = [
+  event('comment', 0, 'commentary', '已读取 fixture，正在核对调参块。'),
+  runtimeEvent('call-1', 1, 'tool_call', { actionId: 'action-1', tool: 'vrcforge_read_text_file', status: 'dispatched' }),
+  runtimeEvent('result-1', 2, 'tool_result', { actionId: 'action-1', tool: 'vrcforge_read_text_file', status: 'ok', summary: 'read fixture' }),
+];
+const cancelledResponse = {
+  plan: { summary: 'Runtime turn was cancelled by the user.', reply: 'Request cancelled.', nextStep: 'cancelled' },
+  timeline: cancelledWorkTimeline,
+};
+
+test('cancelled turn history keeps the marker, model words, and completed work instead of the placeholder', () => {
+  const entries = history(cancelledResponse);
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].role, 'agent');
+  assert.match(entries[0].text, /Runtime turn was cancelled by the user\./);
+  assert.match(entries[0].text, /已读取 fixture，正在核对调参块。/);
+  assert.match(entries[0].text, /read_text_file \(ok\)/);
+  assert.ok(!entries[0].text.includes('Request cancelled.'), 'the content-free placeholder must not reach the next model turn');
+});
+
+test('cancelled turn never promotes an unaccepted final but still keeps the completed work', () => {
+  const unaccepted = event('proposed', 0, 'final_answer', 'Unaccepted proposed final.');
+  unaccepted.payload.status = 'completion_unverified';
+  const response = { ...cancelledResponse, timeline: [
+    unaccepted,
+    runtimeEvent('call-1', 1, 'tool_call', { actionId: 'action-1', tool: 'vrcforge_read_text_file', status: 'dispatched' }),
+    runtimeEvent('result-1', 2, 'tool_result', { actionId: 'action-1', tool: 'vrcforge_read_text_file', status: 'ok', summary: 'read fixture' }),
+  ] };
+  const text = visibleAgentDialogueText(response);
+  assert.ok(!text.includes('Unaccepted proposed final.'));
+  assert.match(text, /Runtime turn was cancelled by the user\./);
+  assert.match(text, /read_text_file \(ok\)/);
+});
+
+test('a turn that finished its accepted final before cancellation keeps that final answer', () => {
+  const response = { ...cancelledResponse, timeline: [
+    ...cancelledWorkTimeline,
+    event('final', 3, 'final_answer', '检查完成，调参块保持原样。'),
+  ] };
+  assert.equal(visibleAgentDialogueText(response), '检查完成，调参块保持原样。');
+});
+
+test('frontend-aborted cancelled turns keep partial dialogue as the reply', () => {
+  const response = { plan: { summary: '已取消', reply: '已定位到调参块，准备写入。', nextStep: 'cancelled' }, timeline: [] };
+  const text = visibleAgentDialogueText(response);
+  assert.match(text, /已取消/);
+  assert.match(text, /已定位到调参块，准备写入。/);
+});

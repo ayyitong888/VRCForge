@@ -20,7 +20,7 @@ import {
 import { subAgentAdoptedHistoryText } from "./subagent-merge";
 import { formatCount } from "./utils";
 import type { CompactionRecoveryEntry } from "./api/types";
-import { buildTimelinePresentation, materializeRuntimeTimeline, isFinalAssistantPresentationEntry } from "./chat-timeline-presentation";
+import { buildTimelinePresentation, materializeRuntimeTimeline, isFinalAssistantPresentationEntry, timelineInvocationDisplayLabel } from "./chat-timeline-presentation";
 
 const CONTEXT_TOKEN_LIMIT_DISPLAY_ESTIMATE = 128000;
 export const MAX_ATTACHMENT_PAYLOAD_BYTES = 4 * 1024 * 1024;
@@ -227,11 +227,14 @@ export function visibleAgentDialogueText(response: AgentRuntimeResponse): string
     (entry) => entry.type === "assistant",
   );
   const finalEntry = [...assistantEntries].reverse().find(isFinalAssistantPresentationEntry);
-  const hasUnacceptedFinal = assistantEntries.some((entry) => entry.status === "completion_unverified");
   const hasStructuredPhases = assistantEntries.some((entry) => entry.phase === "commentary" || entry.phase === "final_answer");
   // A structured timeline may terminate with status=done without repeating
   // final_answer; legacy unphased timelines retain the plan.reply fallback.
   if (finalEntry && (finalEntry.phase === "final_answer" || hasStructuredPhases)) return finalEntry.text;
+  // Cancellation cannot roll back completed effects: keep the marker, the
+  // model's own words, and the executed work instead of a bare placeholder.
+  if (isCancelledRuntimeResponse(response)) return cancelledAgentDialogueText(response);
+  const hasUnacceptedFinal = assistantEntries.some((entry) => entry.status === "completion_unverified");
   // A durable unaccepted final must not reappear through the model-only fallback.
   if (hasUnacceptedFinal) return "";
 
@@ -243,6 +246,44 @@ export function visibleAgentDialogueText(response: AgentRuntimeResponse): string
   if (assistantEntries.some((entry) => entry.phase === "commentary")
     || publicMessages.some((message) => message.phase === "commentary")) return "";
   return String(response.plan?.reply || response.plan?.summary || "");
+}
+
+export function isCancelledRuntimeResponse(response: AgentRuntimeResponse): boolean {
+  return String(response?.status || "").trim().toLowerCase() === "cancelled"
+    || String(response?.plan?.nextStep || "").trim().toLowerCase() === "cancelled";
+}
+
+const CANCELLED_PLACEHOLDER_REPLIES = new Set(["request cancelled.", "已取消"]);
+
+/**
+ * Compose the durable dialogue text for a cancelled turn: the cancellation
+ * marker, whatever the model had already said, and a bounded list of the work
+ * that completed before cancellation. Display and next-turn history share it.
+ */
+export function cancelledAgentDialogueText(response: AgentRuntimeResponse): string {
+  const presentation = buildTimelinePresentation(materializeRuntimeTimeline(response));
+  const sections: string[] = [];
+  const marker = String(response?.plan?.summary || "").trim();
+  if (marker) sections.push(marker);
+  const reply = String(response?.plan?.reply || "").trim();
+  if (reply && !CANCELLED_PLACEHOLDER_REPLIES.has(reply.toLowerCase())) sections.push(reply);
+  const commentary = presentation.entries
+    .filter((entry): entry is Extract<typeof entry, { type: "assistant" }> => (
+      entry.type === "assistant" && entry.phase === "commentary"
+    ))
+    .map((entry) => entry.text.trim().slice(0, 2_000))
+    .filter(Boolean);
+  const unseenCommentary = commentary.filter((text) => !sections.some((section) => section.includes(text)));
+  if (unseenCommentary.length) sections.push(unseenCommentary.join("\n\n"));
+  const invocations = presentation.entries
+    .flatMap((entry) => entry.type === "batch" ? entry.invocations : [])
+    .map((invocation) => `- ${timelineInvocationDisplayLabel(invocation.label)} (${invocation.status})`);
+  if (invocations.length) {
+    const bounded = invocations.slice(0, 12).join("\n");
+    const overflow = invocations.length > 12 ? `\n… ${invocations.length - 12} more` : "";
+    sections.push(`Completed or in flight before cancellation:\n${bounded}${overflow}`);
+  }
+  return sections.join("\n\n");
 }
 
 export function appendAttachmentSummary(text: string, attachments: ChatAttachment[], t: TFunction): string {

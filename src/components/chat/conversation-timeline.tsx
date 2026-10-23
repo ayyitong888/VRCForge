@@ -17,6 +17,7 @@ import {
   type TimelinePresentationEntry,
 } from "../../lib/chat-timeline-presentation";
 import type { ApprovalActionState, ChatTimelineEvent, ConversationItem } from "../../lib/chat-types";
+import { cancelledAgentDialogueText, isCancelledRuntimeResponse } from "../../lib/conversation-utils";
 import { isAgentShellResult } from "../../lib/runtime-parsing";
 import { cn } from "../../lib/utils";
 import { Badge } from "../ui/badge";
@@ -131,9 +132,12 @@ export function buildAgentTimelineRows({
       (event) => event.kind === "assistant" && Boolean(event.payload?.summary),
     );
     const hasDurableFinalAssistant = durableTimeline.some(isFinalAssistantTimelineEvent);
+    const cancelledDialogue = isCancelledRuntimeResponse(response)
+      ? cancelledAgentDialogueText(response)
+      : "";
     const fallbackAnswer = phaseTaggedAssistant && !hasDurableFinalAssistant
-      ? ""
-      : response.plan.reply || response.plan.summary;
+      ? cancelledDialogue
+      : cancelledDialogue || response.plan.reply || response.plan.summary;
     const hasStepAnswer = orderedSteps.some(({ step }) => isStepKindAnswer(step.kind));
     if (!hasDurableFinalAssistant && !hasStepAnswer) {
       if (fallbackAnswer) {
@@ -191,7 +195,10 @@ export function buildAgentTimelineRows({
   });
   const hasAnswer = orderedSteps.some(({ step }) => isStepKindAnswer(step.kind));
   if (!hasAnswer) {
-    const fallbackAnswer = response.plan.reply || response.plan.summary;
+    const cancelledDialogue = isCancelledRuntimeResponse(response)
+      ? cancelledAgentDialogueText(response)
+      : "";
+    const fallbackAnswer = cancelledDialogue || response.plan.reply || response.plan.summary;
     if (fallbackAnswer) {
       rows.push(renderPlanReplyRow(fallbackAnswer, planLabel, elapsedSeconds, t));
     } else if (missingFinalAnswer) {

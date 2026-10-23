@@ -194,10 +194,27 @@ export function applyAgentRuntimeDeltaToStreamingItem(
   };
 }
 
+const PARTIAL_DIALOGUE_CHARACTER_LIMIT = 8_000;
+
+/**
+ * Recover displayable dialogue from the raw partial stream: planner JSON
+ * yields its partial reply/summary field; a plain-text protocol yields its
+ * bounded text. Unparsed JSON fragments yield nothing rather than noise.
+ */
+function partialDialogueText(raw: string): string {
+  const text = (raw || "").trim();
+  if (!text) return "";
+  const extracted = extractDialogueTextFromPartialJson(text).text.trim();
+  if (extracted) return extracted.slice(0, PARTIAL_DIALOGUE_CHARACTER_LIMIT);
+  if (text.startsWith("{") || text.startsWith("[")) return "";
+  return text.slice(0, PARTIAL_DIALOGUE_CHARACTER_LIMIT);
+}
+
 /**
  * Settle an aborted live turn without discarding its bounded runtime facts.
- * Partial model text is intentionally omitted: it may be incomplete planner
- * output, while the safe tool timeline remains durable and auditable.
+ * The safe tool timeline remains durable and auditable, and the partial model
+ * dialogue is kept in plan.reply (never as an invented timeline event) so the
+ * card and the next-turn history retain what was said before the stop.
  */
 export function finalizeCancelledStreamingTurn(
   item: StreamingConversationItem,
@@ -205,6 +222,7 @@ export function finalizeCancelledStreamingTurn(
 ): AgentConversationItem {
   const timeline = [...(item.timeline || [])];
   const sessionId = options.sessionId || "";
+  const partialDialogue = partialDialogueText(item.text);
   return {
     id: `cancelled-${item.clientTurnId}`,
     type: "agent",
@@ -219,7 +237,7 @@ export function finalizeCancelledStreamingTurn(
       observe: {},
       plan: {
         summary: options.cancelledText,
-        reply: options.cancelledText,
+        reply: partialDialogue || options.cancelledText,
         planner: "runtime",
         plannerLabel: item.providerLabel,
         shellNeeded: false,

@@ -1600,7 +1600,11 @@ export function useChatRunController({
       }
     } catch (cause) {
       const text = cause instanceof Error ? cause.message : String(cause);
-      const cancelled = abortController.signal.aborted || text.trim().toLowerCase() === "request cancelled.";
+      // Any transport/gateway failure that says the turn was cancelled must
+      // settle as a cancelled turn; the exact-match variant let backend cancel
+      // wordings fall through to the generic error path, which deleted the
+      // user's own question from the transcript.
+      const cancelled = abortController.signal.aborted || text.toLowerCase().includes("cancel");
       if (!background && turn.queueId && (!runtimeRequestStarted || text.includes("followup_queue_not_ready"))) {
         turn.queueStatus = "waiting_for_resources";
         markQueuedTurnStatus(turn.id, "waiting_for_resources");

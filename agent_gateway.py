@@ -6555,9 +6555,13 @@ class AgentGateway:
                 client_turn_id=client_turn_id,
             ):
                 discard_runtime_compaction_for_cancel()
+                # Cancellation cannot roll back completed effects: a provider
+                # response that already arrived keeps its model text instead of
+                # being overwritten by a content-free placeholder.
+                preserved_reply = str(plan.get("reply") or plan.get("summary") or "").strip()
                 last_plan = {
                     "summary": "Runtime turn was cancelled by the user.",
-                    "reply": "Request cancelled.",
+                    "reply": preserved_reply or "Request cancelled.",
                     "planner": "runtime",
                     "shellNeeded": False,
                     "nextStep": "cancelled",

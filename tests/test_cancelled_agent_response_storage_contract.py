@@ -63,6 +63,40 @@ def test_cancelled_native_response_is_valid_for_saved_chat(
         assert not _is_valid_agent_response(broken)
 
 
+def test_cancelled_after_model_reply_preserves_model_text(tmp_path, monkeypatch):
+    """Cancellation at the post-provider seam keeps the arrived model text."""
+    gateway, model, invoked = setup_gateway(tmp_path, [
+        call("stop-1", "vrcforge_runtime_action", {
+            "action": "reply", "reply": "Checked the fixture before cancellation.",
+        }),
+    ])
+    state = gateway.runtime_sessions
+    consume = type(state).consume_cancel_request
+    consumed_boundaries = 0
+
+    def stop_at_boundary(owner, **identity):
+        nonlocal consumed_boundaries
+        if owner is not state:
+            return consume(owner, **identity)
+        consumed_boundaries += 1
+        if consumed_boundaries == 2:
+            assert state.mark_cancel_requested(**identity)
+        return consume(owner, **identity)
+
+    monkeypatch.setattr(type(state), "consume_cancel_request", stop_at_boundary)
+    response = run(gateway, tmp_path)
+    assert consumed_boundaries == 2
+    assert response["plan"]["nextStep"] == "cancelled"
+    assert response["task"]["status"] == "cancelled"
+    assert response["plan"]["reply"] == "Checked the fixture before cancellation."
+    assert response["plan"]["summary"] == "Runtime turn was cancelled by the user."
+    assert _is_valid_agent_response(response)
+    assert is_valid_chat_record({
+        "id": "cancelled-replied-chat", "sessionId": "native-session",
+        "items": [{"id": "cancelled-replied-agent", "type": "agent", "response": response}],
+    })
+
+
 def test_original_cancelled_response_replays_with_producer_contract_only(tmp_path, monkeypatch):
     """Opt-in raw incident replay; private evidence never enters source fixtures."""
     source = os.environ.get("VRCFORGE_CANCELLED_RESPONSE_REPLAY")
