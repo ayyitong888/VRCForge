@@ -81,6 +81,38 @@ def _gameobject_target(params: dict[str, Any]) -> str:
     return _text(params.get("game_object_path") or params.get("gameObjectPath") or params.get("object_path") or params.get("objectPath"))
 
 
+def build_unpack_prefab_request(params: dict[str, Any], *, preview: bool | None = None) -> dict[str, Any]:
+    """Use the same object and prefab guards for approval and Core execution."""
+    request = {
+        "gameObjectPath": _gameobject_target(params),
+        "mode": _text(params.get("mode") or "completely"),
+        "preview": bool(params.get("preview", False)) if preview is None else preview,
+    }
+    for key in ("expectedGlobalObjectId", "expectedPrefabGuid", "expectedAssetDependencyHash",
+                "expectedScenePath", "approvedObjectReceiptNonce"):
+        if key in params:
+            request[key] = params[key]
+    return request
+
+
+def build_instantiate_prefab_request(params: dict[str, Any], *, preview: bool | None = None) -> dict[str, Any]:
+    """Freeze the exact asset, destination and continuation facts sent to Core."""
+    request = {
+        "assetPath": _text(params.get("asset_path") or params.get("assetPath")),
+        "guid": _text(params.get("guid")),
+        "parentPath": _text(params.get("parent_path") or params.get("parentPath")),
+        "name": _text(params.get("name")),
+        "worldPositionStays": bool(params.get("world_position_stays", params.get("worldPositionStays", True))),
+        "preview": bool(params.get("preview", False)) if preview is None else preview,
+    }
+    for key in ("expectedPrefabGuid", "expectedAssetDependencyHash", "expectedScenePath",
+                "expectedParentGlobalObjectId", "expectedResultPath", "approvedObjectReceiptNonce",
+                "approvedContinuationTools"):
+        if key in params:
+            request[key] = params[key]
+    return request
+
+
 _AVATAR_KEYS = (
     "expectedSpeed", "expectedStateDigest",
     "expectedPlanAssetPaths",
@@ -218,7 +250,7 @@ def build_scene_execution_plan(target_name: str, arguments: dict[str, Any]) -> l
             },
         ),
         "vrcforge_set_gameobject_active": ("vrc_set_gameobject_active", lambda: {"gameObjectPath": _gameobject_target(params), "active": bool(params.get("active", params.get("isActive"))), "preview": False}),
-        "vrcforge_unpack_prefab": ("vrc_unpack_prefab", lambda: {"gameObjectPath": _gameobject_target(params), "mode": _text(params.get("mode") or "completely"), "preview": False}),
+        "vrcforge_unpack_prefab": ("vrc_unpack_prefab", lambda: build_unpack_prefab_request(params, preview=False)),
     }
     if target_name in gameobject_tools:
         tool, factory = gameobject_tools[target_name]
@@ -226,7 +258,7 @@ def build_scene_execution_plan(target_name: str, arguments: dict[str, Any]) -> l
     if target_name == "vrcforge_create_gameobject":
         return [("vrc_create_gameobject", {"name": _text(params.get("name")), "parentPath": _text(params.get("parent_path") or params.get("parentPath")), "preview": False})]
     if target_name == "vrcforge_instantiate_prefab":
-        return [("vrc_instantiate_prefab", {"assetPath": _text(params.get("asset_path") or params.get("assetPath")), "guid": _text(params.get("guid")), "parentPath": _text(params.get("parent_path") or params.get("parentPath")), "name": _text(params.get("name")), "worldPositionStays": bool(params.get("world_position_stays", params.get("worldPositionStays", True))), "preview": False})]
+        return [("vrc_instantiate_prefab", build_instantiate_prefab_request(params, preview=False))]
     if target_name == "vrcforge_duplicate_scene_object":
         nested = params.get("arguments") if isinstance(params.get("arguments"), dict) else params
         request = {

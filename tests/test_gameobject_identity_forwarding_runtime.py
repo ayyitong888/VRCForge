@@ -5,6 +5,7 @@ from pathlib import Path
 import subprocess
 
 import pytest
+from unity_execution_plans_scene import build_unpack_prefab_request
 
 from test_constraint_conversion_scope_runtime import run
 
@@ -23,6 +24,7 @@ def test_unpack_public_callback_preserves_identity_guards(preview):
     callback = next(n for n in module.body if isinstance(n, ast.FunctionDef) and n.name == "unpack_prefab_sync")
     calls = []
     env = {"Any": object, "build_gameobject_target": lambda p: p["gameObjectPath"],
+        "build_unpack_prefab_request": build_unpack_prefab_request,
         "build_agent_connection_request": lambda p: p, "load_dashboard_settings": lambda p: {},
         "invoke_unity_mcp": lambda settings, tool, request: calls.append((tool, request)) or {"ok": False, "error": "identity mismatch"},
         "extract_tool_result_payload": lambda p: p, "ensure_dict_payload": lambda p, label: p,

@@ -376,6 +376,8 @@ from unity_execution_plans_scene import (
     build_ensure_expression_parameter_request,
     build_ensure_expression_menu_control_request,
     build_ensure_animator_state_request,
+    build_instantiate_prefab_request,
+    build_unpack_prefab_request,
     sibling_index_arguments,
 )
 from unity_execution_plans_tuning import (
@@ -25851,8 +25853,8 @@ def _project_safe_backup_restore_verification(payload: dict[str, Any]) -> None:
 
 def instantiate_prefab_sync(params: dict[str, Any]) -> dict[str, Any]:
     params = params or {}
-    asset_path = build_asset_path_target(params)
-    guid = str(params.get("guid") or "").strip()
+    request = build_instantiate_prefab_request(params)
+    asset_path, guid = request["assetPath"], request["guid"]
     if not asset_path and not guid:
         return external_handler_argument_rejection(
             tool="vrcforge_instantiate_prefab",
@@ -25860,29 +25862,7 @@ def instantiate_prefab_sync(params: dict[str, Any]) -> dict[str, Any]:
             error_code="prefab_asset_identity_required",
             error="assetPath or guid is required.",
         )
-    parent_path = str(params.get("parent_path") or params.get("parentPath") or "").strip()
-    name = str(params.get("name") or "").strip()
-    world_position_stays = bool(params.get("world_position_stays", params.get("worldPositionStays", True)))
-    preview = bool(params.get("preview", False))
-    request = {
-        "assetPath": asset_path,
-        "guid": guid,
-        "parentPath": parent_path,
-        "name": name,
-        "worldPositionStays": world_position_stays,
-        "preview": preview,
-    }
-    for key in (
-        "expectedPrefabGuid",
-        "expectedAssetDependencyHash",
-        "expectedScenePath",
-        "expectedParentGlobalObjectId",
-        "expectedResultPath",
-        "approvedObjectReceiptNonce",
-        "approvedContinuationTools",
-    ):
-        if key in params:
-            request[key] = params[key]
+    parent_path, preview = request["parentPath"], request["preview"]
     settings = load_dashboard_settings(build_agent_connection_request(params))
     payload = ensure_dict_payload(
         extract_tool_result_payload(invoke_unity_mcp(settings, "vrc_instantiate_prefab", request)),
@@ -25904,7 +25884,8 @@ def instantiate_prefab_sync(params: dict[str, Any]) -> dict[str, Any]:
 
 def unpack_prefab_sync(params: dict[str, Any]) -> dict[str, Any]:
     params = params or {}
-    go_path = build_gameobject_target(params)
+    request = build_unpack_prefab_request(params)
+    go_path = request["gameObjectPath"]
     if not go_path:
         return external_handler_argument_rejection(
             tool="vrcforge_unpack_prefab",
@@ -25912,18 +25893,7 @@ def unpack_prefab_sync(params: dict[str, Any]) -> dict[str, Any]:
             error_code="gameobject_path_required",
             error="gameObjectPath is required.",
         )
-    mode = str(params.get("mode") or "completely").strip()
-    preview = bool(params.get("preview", False))
-    request = {"gameObjectPath": go_path, "mode": mode, "preview": preview}
-    for key in (
-        "expectedGlobalObjectId",
-        "expectedPrefabGuid",
-        "expectedAssetDependencyHash",
-        "expectedScenePath",
-        "approvedObjectReceiptNonce",
-    ):
-        if key in params:
-            request[key] = params[key]
+    mode, preview = request["mode"], request["preview"]
     settings = load_dashboard_settings(build_agent_connection_request(params))
     payload = ensure_dict_payload(
         extract_tool_result_payload(invoke_unity_mcp(settings, "vrc_unpack_prefab", request)),
