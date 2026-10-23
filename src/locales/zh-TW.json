@@ -907,6 +907,7 @@
     "workSegmentItems": "{{count}} 個事件",
     "turnDuration": "已處理 {{duration}}",
     "timeline": {
+      "process": "處理過程",
       "readFile": "讀取了檔案",
       "readFiles": "讀取了 {{count}} 個檔案",
       "listDirectory": "列出了目錄",

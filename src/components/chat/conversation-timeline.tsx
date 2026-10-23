@@ -60,7 +60,6 @@ export function buildAgentTimelineRows({
   awaitingApproval,
   elapsedSeconds,
   interleavedUserMessages = [],
-  initialUserContent,
   interleavedUsersExpanded = false,
   onInterleavedUsersExpandedChange,
   renderInterleavedUserMessage,
@@ -81,7 +80,6 @@ export function buildAgentTimelineRows({
   awaitingApproval: boolean;
   elapsedSeconds?: number;
   interleavedUserMessages?: InterleavedUserMessage[];
-  initialUserContent?: ReactNode;
   interleavedUsersExpanded?: boolean;
   onInterleavedUsersExpandedChange?: (expanded: boolean) => void;
   renderInterleavedUserMessage?: (message: InterleavedUserMessage) => ReactNode;
@@ -118,7 +116,6 @@ export function buildAgentTimelineRows({
       renderElapsed: true,
       dropCancellationMarkers: cancelled,
       interleavedUserMessages,
-      initialUserContent,
       interleavedUsersExpanded,
       onInterleavedUsersExpandedChange,
       renderInterleavedUserMessage,
@@ -219,7 +216,7 @@ export function buildAgentTimelineRows({
     const processRows = rows.splice(0);
     rows.push(
       <div key="agent-turn-process" data-agent-turn-process-group>
-        <WorkSegmentRow kind="process" title={turnProcessDisplayTitle(elapsedSeconds, [], t)} statusLabel="" statusTone="muted" processHeader beforeContent={initialUserContent}>
+        <WorkSegmentRow kind="process" title={turnProcessDisplayTitle(elapsedSeconds, [], t)} statusLabel="" statusTone="muted" processHeader>
           {processRows}
         </WorkSegmentRow>
       </div>,
@@ -281,7 +278,6 @@ export function buildDurableTimelineRows(
     suppressTrailingAssistantText?: string;
     dropCancellationMarkers?: boolean;
     interleavedUserMessages?: InterleavedUserMessage[];
-    initialUserContent?: ReactNode;
     interleavedUsersExpanded?: boolean;
     onInterleavedUsersExpandedChange?: (expanded: boolean) => void;
     renderInterleavedUserMessage?: (message: InterleavedUserMessage) => ReactNode;
@@ -405,18 +401,19 @@ export function buildDurableTimelineRows(
     ));
   }
   if (processRows.length) {
+    const toolCallCount = processInvocations.filter((invocation) => invocation.kind === "tool").length;
     const group = (
       <div key="agent-turn-process" data-agent-turn-process-group>
         <WorkSegmentRow
           kind="process"
           title={turnProcessDisplayTitle(turnElapsed, processInvocations, i18n.t)}
+          summaryMeta={toolCallCount ? i18n.t("agent.timeline.callTools", { count: toolCallCount }) : undefined}
           statusLabel=""
           statusTone="muted"
           openByDefault={Boolean(options.live)}
           controlledOpen={interleavedMessages.length ? options.interleavedUsersExpanded : undefined}
           onOpenChange={options.onInterleavedUsersExpandedChange}
           processHeader
-          beforeContent={options.initialUserContent}
         >
           {processRows}
         </WorkSegmentRow>
@@ -545,8 +542,7 @@ function turnProcessDisplayTitle(
   if (kind === "command") return t("agent.timeline.runCommands", { count: invocations.length });
   if (kind === "subagent") return t("agent.timeline.runSubagents", { count: invocations.length });
   if (kind === "file_edit") return t("agent.timeline.editFiles", { count: invocations.length });
-  if (kind === "process") return t("agent.timeline.progressUpdates", { count: invocations.length });
-  return t("agent.timeline.callTools", { count: invocations.length });
+  return t("agent.timeline.process");
 }
 
 function renderTurnMetadataRow(elapsedSeconds?: number, providerLine?: string): ReactNode {
@@ -1221,6 +1217,7 @@ export function RunRow({
 function WorkSegmentRow({
   kind,
   title,
+  summaryMeta,
   statusLabel,
   statusTone,
   showStatus = false,
@@ -1228,11 +1225,11 @@ function WorkSegmentRow({
   controlledOpen,
   onOpenChange,
   processHeader = false,
-  beforeContent,
   children,
 }: {
   kind: TimelineBatchKind;
   title: string;
+  summaryMeta?: string;
   statusLabel: string;
   statusTone: "danger" | "warn" | "muted";
   showStatus?: boolean;
@@ -1240,7 +1237,6 @@ function WorkSegmentRow({
   controlledOpen?: boolean;
   onOpenChange?: (open: boolean) => void;
   processHeader?: boolean;
-  beforeContent?: ReactNode;
   children: ReactNode;
 }) {
   const [localOpen, setLocalOpen] = useState(openByDefault);
@@ -1260,9 +1256,10 @@ function WorkSegmentRow({
         {processHeader ? (
           <>
             <span className="inline-flex min-w-0 items-center gap-1.5 text-sm leading-relaxed">
-              <span className="truncate">{title}</span>
+              <span className="truncate" data-agent-turn-process-title>{title}</span>
               {open ? <ChevronDown className="h-3.5 w-3.5 shrink-0" /> : <ChevronRight className="h-3.5 w-3.5 shrink-0" />}
             </span>
+            {summaryMeta ? <span className="min-w-0 truncate text-xs text-muted-foreground/70" data-agent-turn-tool-count>{summaryMeta}</span> : null}
             {showStatus ? <span className={cn("shrink-0 text-xs", statusTone === "danger" ? "text-destructive" : statusTone === "warn" ? "text-amber-600" : "text-muted-foreground")}>{statusLabel}</span> : null}
           </>
         ) : (
@@ -1276,7 +1273,6 @@ function WorkSegmentRow({
           </>
         )}
       </button>
-      {beforeContent ? <div className="mt-3">{beforeContent}</div> : null}
       {open ? <div className="mt-3 space-y-3 py-1" data-agent-process-content>{children}</div> : null}
     </div>
   );

@@ -907,6 +907,7 @@
     "workSegmentItems": "{{count}} 件のイベント",
     "turnDuration": "処理時間 {{duration}}",
     "timeline": {
+      "process": "作業の記録",
       "readFile": "ファイルを読み取り",
       "readFiles": "{{count}} 件のファイルを読み取り",
       "listDirectory": "ディレクトリを一覧表示",

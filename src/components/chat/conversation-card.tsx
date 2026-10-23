@@ -10,7 +10,7 @@ import {
   Wrench,
   X,
 } from "lucide-react";
-import { isValidElement, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import i18n from "../../i18n";
 import type { AgentApproval } from "../../lib/api";
@@ -274,19 +274,14 @@ export function ConversationCard({
       providerLine: "",
       suppressTrailingAssistantText: item.text,
       interleavedUserMessages,
-      initialUserContent,
       interleavedUsersExpanded,
       onInterleavedUsersExpandedChange: setInterleavedUsersExpanded,
       renderInterleavedUserMessage: (message) => renderInterleavedUserMessage(message, attachmentPayloads, onImportAttachment),
     });
-    const hasTimelineProcessRows = timelineRows.some((row) => (
-      isValidElement(row)
-      && Boolean((row.props as { "data-agent-turn-process-group"?: boolean })["data-agent-turn-process-group"])
-    ));
     return (
       <div className="group flex justify-start" data-conversation-streaming-turn={item.clientTurnId}>
         <div className="relative flex w-full flex-col gap-3 text-sm leading-relaxed">
-          {!hasTimelineProcessRows ? initialUserContent : null}
+          {initialUserContent}
           {timelineRows.length ? <div className="space-y-3" data-vrcforge-live-runtime-timeline>{timelineRows}</div> : null}
           {item.text ? <div className="leading-relaxed" data-chat-quote-content><ChatMarkdown text={item.text} /></div> : null}
         </div>
@@ -405,23 +400,17 @@ export function ConversationCard({
     awaitingApproval,
     elapsedSeconds: item.elapsedSeconds,
     interleavedUserMessages,
-    initialUserContent,
     interleavedUsersExpanded,
     onInterleavedUsersExpandedChange: setInterleavedUsersExpanded,
     renderInterleavedUserMessage: (message) => renderInterleavedUserMessage(message, attachmentPayloads, onImportAttachment),
     t,
   });
 
-  const hasTimelineProcessRows = timelineRows.some((row) => (
-    isValidElement(row)
-    && Boolean((row.props as { "data-agent-turn-process-group"?: boolean })["data-agent-turn-process-group"])
-  ));
-
   return (
     <ChatResourceImageContext.Provider value={resourceImageContext}>
       <div className="group flex justify-start" data-vrcforge-agent-client-turn={response.clientTurnId || undefined}>
         <div className="relative flex w-full flex-col gap-3 text-sm leading-relaxed">
-          {!hasTimelineProcessRows ? initialUserContent : null}
+          {initialUserContent}
           {timelineRows}
           <MessageActions
             createdAt={item.completedAt || response.completedAt}

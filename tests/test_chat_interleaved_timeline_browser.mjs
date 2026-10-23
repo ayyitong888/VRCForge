@@ -11,6 +11,8 @@ const { chromium } = createRequire(import.meta.url)(
 );
 const originalChat = process.env.VRCFORGE_TURN_REPLAY_PATH
   ? JSON.parse(await readFile(process.env.VRCFORGE_TURN_REPLAY_PATH, "utf8")) : null;
+const currentReplay = process.env.VRCFORGE_CURRENT_TURN_REPLAY_PATH
+  ? JSON.parse(await readFile(process.env.VRCFORGE_CURRENT_TURN_REPLAY_PATH, "utf8")) : null;
 const css = (await postcss([tailwindcss("./tailwind.config.ts")]).process(
   (await readFile("src/theme.css", "utf8")) + "\n@tailwind base; @tailwind components; @tailwind utilities;", { from: undefined },
 )).css;
@@ -31,6 +33,9 @@ window.turnActions = [];
 const originalChat = ${JSON.stringify(originalChat)};
 const originalProjection = projectConversationSteeringMessages(mergeConversationTimelineItems(
   (originalChat?.items || []).filter((item) => !item.composerQueued)));
+const currentReplay = ${JSON.stringify(currentReplay)};
+const currentProjection = projectConversationSteeringMessages(mergeConversationTimelineItems(
+  (currentReplay?.items || []).filter((item) => !item.composerQueued)));
 
 const event = (id, sequence, kind, payload) => ({
   id,
@@ -65,6 +70,15 @@ const item = {
   },
 };
 const restoredItem = JSON.parse(JSON.stringify(item));
+const noElapsedItem = {
+  ...item,
+  id: "no-elapsed-agent",
+  response: {
+    ...item.response,
+    clientTurnId: "no-elapsed-turn",
+    timeline: [event("no-elapsed-call", 0, "tool_call", { actionId: "no-elapsed-action", tool: "vrcforge_list_directory", status: "ok" })],
+  },
+};
 const streamingItem = {
   id: "interleaved-streaming",
   type: "streaming",
@@ -139,9 +153,14 @@ function InitialUser() {
 window.turnLabels = () => ({copy:i18n.t("chat.copyMessage"),retry:i18n.t("chat.retryMessage"),edit:i18n.t("chat.editMessage"),save:i18n.t("chat.saveEdit")});
 void initializeI18n().then(() => createRoot(document.getElementById("root")).render(
   <>
-    <section id="live"><ConversationCard item={item} /></section>
-    <section id="restored"><ConversationCard item={restoredItem} /></section>
-    <section id="streaming"><ConversationCard item={streamingItem} /></section>
+    <section id="live"><ConversationCard item={item}
+      initialUserContent={<div data-turn-initial-user><ConversationCard item={userTrigger} /></div>} /></section>
+    <section id="restored"><ConversationCard item={restoredItem}
+      initialUserContent={<div data-turn-initial-user><ConversationCard item={JSON.parse(JSON.stringify(userTrigger))} /></div>} /></section>
+    <section id="streaming"><ConversationCard item={streamingItem}
+      initialUserContent={<div data-turn-initial-user><ConversationCard item={userTrigger} /></div>} /></section>
+    <section id="no-elapsed"><ConversationCard item={noElapsedItem}
+      initialUserContent={<div data-turn-initial-user><ConversationCard item={userTrigger} /></div>} /></section>
     <section id="active-streaming"><ConversationCard item={activeStreamingItem}
       initialUserContent={<div data-turn-initial-user><ConversationCard item={userTrigger} /></div>} /></section>
     <section id="resumed-streaming"><ConversationCard item={resumedStreamingItem} /></section>
@@ -156,6 +175,13 @@ void initializeI18n().then(() => createRoot(document.getElementById("root")).ren
       const initial = originalProjection.initialUsersByTurnId.get(turnId);
       return <div key={entry.id} data-original-turn><ConversationCard item={entry}
         interleavedUserMessages={originalProjection.messagesByTurnId.get(turnId)}
+        initialUserContent={initial ? <div data-turn-initial-user><ConversationCard item={initial} /></div> : undefined} /></div>;
+    })}</section>
+    <section id="current-replay">{currentProjection.items.map((entry) => {
+      const turnId = entry.type === "agent" ? entry.response.clientTurnId : entry.clientTurnId;
+      const initial = currentProjection.initialUsersByTurnId.get(turnId);
+      return <div key={entry.id} data-current-replay-turn={turnId || entry.id}><ConversationCard item={entry}
+        interleavedUserMessages={currentProjection.messagesByTurnId.get(turnId)}
         initialUserContent={initial ? <div data-turn-initial-user><ConversationCard item={initial} /></div> : undefined} /></div>;
     })}</section>
   </>,
@@ -187,6 +213,81 @@ try {
   await page.goto(`http://127.0.0.1:${server.address().port}`);
   await page.locator("#live [data-vrcforge-agent-client-turn]").waitFor();
 
+  if (currentReplay) {
+    const current = page.locator("#current-replay");
+    const sourceUsers = currentReplay.items.filter((entry) => entry.type === "user");
+    const sourceTurns = currentReplay.items.filter((entry) => entry.type === "agent" || entry.type === "streaming");
+    assert.ok(sourceUsers.length > 0 && sourceTurns.length > 0, "current replay includes real user triggers and runtime turns");
+    assert.equal(await current.locator("[data-turn-initial-user]").count(), sourceUsers.length, "each actual initial user renders once");
+    const receipts = [];
+    for (const item of sourceTurns) {
+      const turnId = item.type === "agent" ? item.response.clientTurnId : item.clientTurnId;
+      const turn = current.locator("[data-current-replay-turn]").filter({ has: page.locator(item.type === "agent"
+        ? `[data-vrcforge-agent-client-turn="${turnId}"]`
+        : `[data-conversation-streaming-turn="${turnId}"]`) });
+      const header = turn.locator("[data-agent-turn-process-group] button").first();
+      assert.equal(await header.count(), 1, "real runtime turn retains one process header");
+      const initial = turn.locator("[data-turn-initial-user] [data-user-message-bubble]");
+      const checkOrder = async () => {
+        const userBox = await initial.boundingBox();
+        const headerBox = await header.boundingBox();
+        assert.ok(userBox && headerBox && userBox.y + userBox.height <= headerBox.y, "actual user precedes the process header in either fold state");
+      };
+      await checkOrder();
+      if (await header.getAttribute("aria-expanded") === "true") await header.click();
+      await checkOrder();
+      const title = (await header.locator("[data-agent-turn-process-title]").innerText()).trim();
+      const metadata = header.locator("[data-agent-turn-tool-count]");
+      assert.equal(await metadata.count(), 1, "real tool total is visible as secondary metadata");
+      assert.notEqual(title, (await metadata.innerText()).trim(), "real runtime tool count does not replace the process title");
+      const events = item.type === "agent" ? item.response.timeline || [] : item.timeline || [];
+      const pendingActions = new Map();
+      let invocations = 0;
+      const uniqueEvents = [...new Map(events.map((entry) => [entry.id, entry])).values()]
+        .sort((left, right) => Date.parse(left.timestamp) - Date.parse(right.timestamp) || left.sequence - right.sequence || left.id.localeCompare(right.id));
+      for (const entry of uniqueEvents) {
+        const action = entry.payload?.actionId || entry.id;
+        if (entry.kind === "tool_call") {
+          invocations += 1;
+          pendingActions.set(action, (pendingActions.get(action) || 0) + 1);
+        } else if (entry.kind === "tool_result") {
+          const pending = pendingActions.get(action) || 0;
+          if (pending) pendingActions.set(action, pending - 1);
+          else invocations += 1;
+        }
+      }
+      const displayedCount = Number((await metadata.innerText()).match(/[0-9]+/)?.[0]);
+      assert.equal(displayedCount, invocations, "real owning-turn tool count matches original call/result occurrences without duplicate prepared-write events");
+      receipts.push({ turnId, invocations, title, initialUserBeforeProcessHeader: true });
+    }
+    if (process.env.VRCFORGE_TURN_EVIDENCE_DIR) {
+      await current.screenshot({ path: process.env.VRCFORGE_TURN_EVIDENCE_DIR + "/current-collapsed.png" });
+    }
+    for (const turn of await current.locator("[data-current-replay-turn]").all()) {
+      const header = turn.locator("[data-agent-turn-process-group] button").first();
+      if (!await header.count()) continue;
+      await header.click();
+      const userBox = await turn.locator("[data-turn-initial-user] [data-user-message-bubble]").boundingBox();
+      const headerBox = await header.boundingBox();
+      assert.ok(userBox.y + userBox.height <= headerBox.y, "expanded current replay preserves user-first order");
+      const firstTools = turn.locator("[data-agent-tool-call-group]").first();
+      await firstTools.locator("button").first().click();
+      const firstInvocation = firstTools.locator("button.group\\/run").first();
+      assert.equal(await firstInvocation.count(), 1, "real grouped tools remain individually inspectable");
+      await firstInvocation.click();
+      const outputCard = firstTools.locator("[data-agent-invocation-output-card]");
+      assert.equal(await outputCard.count(), 1, "real tool expansion retains its original result card");
+      assert.ok((await outputCard.locator("pre").innerText()).trim(), "real tool result content is not lost behind the process fold");
+      await firstInvocation.click();
+      await firstTools.locator("button").first().click();
+    }
+    if (process.env.VRCFORGE_TURN_EVIDENCE_DIR) {
+      await current.screenshot({ path: process.env.VRCFORGE_TURN_EVIDENCE_DIR + "/current-expanded.png" });
+      await writeFile(process.env.VRCFORGE_TURN_EVIDENCE_DIR + "/current-browser-validation.json", JSON.stringify({ replayId: currentReplay.id, receipts, errors }, null, 2));
+    }
+    assert.deepEqual(errors, [], "actual current runtime data renders without browser errors");
+    console.log("current runtime replay: initial user order, semantic process titles, tool ownership counts, collapsed and expanded passed");
+  } else {
   const live = page.locator("#live");
   const restored = page.locator("#restored");
   const streaming = page.locator("#streaming");
@@ -224,13 +325,33 @@ try {
     const header = await turn.locator("[data-agent-turn-process-group] button").first().boundingBox();
     const initial = await turn.locator("[data-turn-initial-user] [data-user-message-bubble]").boundingBox();
     const steers = await turn.locator("[data-chat-steering-message] [data-user-message-bubble]").all();
-    assert.ok(header.y + header.height <= initial.y, "fold header precedes initial user");
+    assert.ok(initial && header, "initial user and process header have visible bounds");
+    assert.ok(initial.y + initial.height <= header.y, "initial user precedes its own process header");
     for (const steer of steers) {
       const rect = await steer.boundingBox();
       assert.ok(Math.abs(rect.x + rect.width - initial.x - initial.width) < 1, "initial and steering bubbles share the right edge");
       assert.ok(rect.y > initial.y, "steering follows initial user");
     }
   };
+  for (const turn of [live, restored, streaming]) {
+    await assertTurnLayout(turn);
+    const toggle = turn.locator("[data-agent-turn-process-group] button").first();
+    await toggle.click();
+    await assertTurnLayout(turn);
+    await toggle.click();
+    await assertTurnLayout(turn);
+  }
+  const noElapsed = page.locator("#no-elapsed");
+  await assertTurnLayout(noElapsed);
+  const noElapsedHeader = noElapsed.locator("[data-agent-turn-process-group] button").first();
+  const processTitle = noElapsedHeader.locator("[data-agent-turn-process-title]");
+  const toolCount = noElapsedHeader.locator("[data-agent-turn-tool-count]");
+  assert.equal(await processTitle.count(), 1, "process has one semantic primary title when elapsed time is unavailable");
+  assert.equal(await toolCount.count(), 1, "tool count remains available as secondary process metadata");
+  assert.ok((await processTitle.innerText()).trim(), "the semantic process title is not empty");
+  assert.doesNotMatch(await processTitle.innerText(), /1|工具|tools?\b|calls?\b/i, "tool count is not the primary process title");
+  assert.match(await toolCount.innerText(), /1/, "secondary tool metadata retains the actual invocation count");
+  assert.ok(await toolCount.evaluate((node) => !node.closest("[data-agent-turn-process-title]")), "tool count is separate from the primary title");
   await assertTurnLayout(steeringExpanded);
   await steeringGroup.locator("button").first().click();
   const steeringRows = await steeringGroup.locator("[data-agent-process-content] > div").evaluateAll((rows) => rows.map((row) => (
@@ -275,7 +396,7 @@ try {
       await original.screenshot({path: process.env.VRCFORGE_TURN_EVIDENCE_DIR + "/original-expanded.png"});
       await originalTurn.locator("[data-agent-turn-process-group] button").first().click();
       await original.screenshot({path: process.env.VRCFORGE_TURN_EVIDENCE_DIR + "/original-collapsed.png"});
-      await writeFile(process.env.VRCFORGE_TURN_EVIDENCE_DIR + "/browser-validation.json", JSON.stringify({originalChatId:originalChat.id, initialUsers:2, steeringUsers:1, headerBeforeAllUsers:true,rightEdgeEqual:true,finalAnswersVisible:true,collapsedAndExpanded:true},null,2));
+      await writeFile(process.env.VRCFORGE_TURN_EVIDENCE_DIR + "/browser-validation.json", JSON.stringify({originalChatId:originalChat.id, initialUsers:2, steeringUsers:1, initialUserBeforeProcessHeader:true,rightEdgeEqual:true,finalAnswersVisible:true,collapsedAndExpanded:true},null,2));
     }
   }
   await commentaryOnly.locator("[data-agent-turn-process-group] button").first().click();
@@ -286,7 +407,7 @@ try {
   assert.doesNotMatch(await groups.nth(0).locator("button svg").first().getAttribute("class"), /opacity-0/, "process chevron is not hover-only");
   await groups.nth(0).locator("button").first().click();
   const expandedText = await live.innerText();
-  const expandedKinds = await groups.nth(0).locator("div.mt-3 > div").evaluateAll((rows) => rows.map((row) => (
+  const expandedKinds = await groups.nth(0).locator("[data-agent-process-content] > div").evaluateAll((rows) => rows.map((row) => (
     row.querySelector("[data-testid='chat-markdown-agent']")
       ? "progress"
       : row.hasAttribute("data-agent-tool-call-group")
@@ -328,6 +449,7 @@ try {
   assert.equal(await live.locator("[data-agent-invocation-output-card]").count(), 2, "all grouped results remain inspectable");
   assert.deepEqual(errors, []);
   console.log("interleaved timeline browser: order, expansion, and serialized restore passed");
+  }
 } finally {
   await browser?.close();
   await new Promise((resolve) => server.close(resolve));

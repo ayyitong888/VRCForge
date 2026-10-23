@@ -912,6 +912,7 @@
     "workSegmentItems": "{{count}} 个事件",
     "turnDuration": "已处理 {{duration}}",
     "timeline": {
+      "process": "处理过程",
       "readFile": "读取了文件",
       "readFiles": "读取了 {{count}} 个文件",
       "listDirectory": "列出了目录",

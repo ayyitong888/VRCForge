@@ -912,6 +912,7 @@
     "workSegmentItems": "{{count}} events",
     "turnDuration": "Handled in {{duration}}",
     "timeline": {
+      "process": "Work log",
       "readFile": "Read a file",
       "readFiles": "Read {{count}} files",
       "listDirectory": "Listed a directory",
