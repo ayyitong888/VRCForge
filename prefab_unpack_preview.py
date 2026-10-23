@@ -6,6 +6,7 @@ from pathlib import Path
 import re
 from typing import Any, Callable
 
+from agent_tool_result_contract import normalize_agent_tool_result
 from unity_execution_plans_scene import build_unpack_prefab_request
 
 
@@ -53,8 +54,15 @@ def prepare_unpack_prefab(
     if not isinstance(payload, dict):
         raise PrefabUnpackPreviewError("Core prefab preview did not return an object.")
     # Preserve Core's own non-prefab/no-unpack rejection before parsing guards.
-    if payload.get("isError") is True or payload.get("success") is False or payload.get("ok") is False:
-        message = str(payload.get("error") or payload.get("message") or "Core rejected the prefab preview.")
+    # Authoritative preview transport may return the MCP envelope so its raw
+    # error remains available. Reuse the transport-neutral contract parser to
+    # read structuredContent/result/content text without replacing the
+    # original raw payload kept on PrefabUnpackPreviewError.
+    normalized = normalize_agent_tool_result(
+        payload, fallback_summary="Core rejected the prefab preview.", write=False
+    )
+    if normalized.get("status") == "failed":
+        message = str(normalized.get("summary") or "Core rejected the prefab preview.")
         raise PrefabUnpackPreviewError(message, payload)
     if (payload.get("action") != "unpack_prefab" or payload.get("preview") is not True
             or payload.get("gameObjectPath") != path or payload.get("unpackMode") != request["mode"]

@@ -1,6 +1,8 @@
 from copy import deepcopy
 from pathlib import Path
 import ast
+import subprocess
+import sys
 
 import pytest
 
@@ -107,6 +109,42 @@ def test_nonprefab_core_rejection_keeps_noop_evidence(tmp_path):
     with pytest.raises(PrefabUnpackPreviewError, match="nothing to unpack") as error:
         prepare_unpack_prefab(arguments, lambda _: payload)
     assert error.value.raw_result == payload
+
+
+def test_nested_core_failure_keeps_original_reason_and_raw_envelope(tmp_path):
+    arguments, _ = values(tmp_path)
+    payload = {
+        "isError": True,
+        "structuredContent": {
+            "success": False,
+            "code": "prefab_not_outermost",
+            "error": "Target is not the outermost root of a prefab instance; nothing to unpack.",
+        },
+    }
+    with pytest.raises(PrefabUnpackPreviewError, match="not the outermost root") as error:
+        prepare_unpack_prefab(arguments, lambda _: payload)
+    assert error.value.raw_result == payload
+
+
+def test_content_text_core_failure_keeps_reason_and_raw_envelope(tmp_path):
+    arguments, _ = values(tmp_path)
+    payload = {
+        "isError": True,
+        "content": [{"type": "text", "text": "Core says this target is not unpackable."}],
+        "structuredContent": {"success": False, "code": "prefab_not_unpackable"},
+    }
+    with pytest.raises(PrefabUnpackPreviewError, match="not unpackable") as error:
+        prepare_unpack_prefab(arguments, lambda _: payload)
+    assert error.value.raw_result == payload
+
+
+def test_preview_module_does_not_import_dashboard_server():
+    result = subprocess.run(
+        [sys.executable, "-c", "import sys; import prefab_unpack_preview; "
+         "assert 'dashboard_server' not in sys.modules"],
+        check=False, capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 @pytest.mark.parametrize("change", ["other_avatar", "other_project", "unsaved_scene", "replaced_avatar"])
