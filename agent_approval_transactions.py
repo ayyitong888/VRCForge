@@ -2720,9 +2720,35 @@ class AgentApprovalTransactionService:
             frozen_execution_plan,
         )
         try:
-            with bind_approved_unity_execution(execution_plan):
+            from unity_import_recovery import make_import_operation_journal, import_operation_journal_path
+            from prepared_outfit_import_workflow_service import bind_import_operation_journal
+            journal_writer = None
+            journal = make_import_operation_journal(
+                recovery or {}, {"id": approval_id, "targetTool": target_tool,
+                                 "taskContext": task_context, "approvedUnityExecutionPlan": frozen_execution_plan},
+                handler_arguments,
+            )
+            if journal is not None:
+                journal_path = import_operation_journal_path(approval_id, self._ports.audit_log_path())
+                # Full private source facts must not pass through audit redaction
+                # or summaries. Atomic persistence precedes remote dispatch.
+                atomic_write_json(journal_path, journal)
+                recovery["importOperation"] = {
+                    "schema": journal["schema"], "journalFile": journal_path.name,
+                    "sealSha256": journal["preparedSeal"]["sealSha256"],
+                }
+                saved = self._ports.checkpoint.append_apply_recovery_entry(recovery)
+                recovery.update(saved)
+                def journal_writer(progress):
+                    updated = {**journal, **copy.deepcopy(progress)}
+                    atomic_write_json(journal_path, updated)
+                    journal.clear()
+                    journal.update(updated)
+            with bind_approved_unity_execution(execution_plan), bind_import_operation_journal(journal_writer):
                 with self._scan_mutation(project_root, target_tool, recovery) as mutation:
                     result = write_handler.handler(handler_arguments)
+                    if journal_writer is not None and isinstance(result, dict) and result.get("ok") is False:
+                        journal_writer({"handlerResult": result})
                     mutation["outcome"] = _domain_write_receipt(result)
         finally:
             if not execution_plan.consumed:
@@ -3139,6 +3165,7 @@ class AgentApprovalTransactionService:
             "recoveryIncidentKey",
             "unityEvidenceReferences",
             "unityEvidenceWarnings",
+            "importOperation",
         ):
             if key in recovery:
                 record[key] = recovery[key]
@@ -3192,7 +3219,7 @@ class AgentApprovalTransactionService:
         self, arguments: Mapping[str, Any], status: Mapping[str, Any],
     ) -> list[dict[str, Any]]:
         """Resolve only a host-witnessed, independently read-back single import."""
-        from unity_import_recovery import verify_interrupted_package_import
+        from unity_import_recovery import verify_interrupted_package_import, release_verified_import_sources
         import tarfile
 
         project_root = extract_project_root(arguments)
@@ -3208,7 +3235,7 @@ class AgentApprovalTransactionService:
                     return []
             resolved = []
             for recovery in self._ports.checkpoint.active_apply_recoveries():
-                if (recovery.get("targetTool") != "vrcforge_import_outfit_package"
+                if (not recovery.get("importOperation") and recovery.get("targetTool") != "vrcforge_import_outfit_package"
                         or self._entry_project_key(recovery) != key):
                     continue
                 try:
@@ -3221,10 +3248,17 @@ class AgentApprovalTransactionService:
                     self._ports.append_audit({"event": "unitypackage_import_recovery_not_reconciled",
                                               "recoveryId": recovery.get("id"), "reason": str(exc)[:400]})
                     continue
-                resolved.append(self._finish_apply_recovery(
+                saved = self._finish_apply_recovery(
                     recovery, status="resolved", resolution="verified_partial_import", result_summary=proof,
-                    note="The single package commit was independently verified. The original approval remains failed; refresh and cleanup require normal approval.",
-                ))
+                    note="The single package commit was independently verified. The original approval remains failed; refresh requires normal approval.",
+                )
+                try:
+                    cleanup = release_verified_import_sources(saved, self._ports.audit_log_path())
+                except (OSError, ValueError, TypeError, KeyError, RuntimeError, tarfile.TarError) as exc:
+                    cleanup = {"performed": False, "required": True, "errors": [str(exc)[:400]]}
+                if recovery.get("importOperation"):
+                    saved = self._ports.checkpoint.append_apply_recovery_entry({**saved, "sourceCleanup": cleanup})
+                resolved.append(saved)
             return resolved
         finally:
             self._release_project_write(key)

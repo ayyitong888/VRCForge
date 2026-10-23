@@ -21,7 +21,13 @@ UNITY_IMPORT_CODE_PAYLOAD_SUFFIXES = {
     ".dll",
     ".dylib",
     ".js",
+    ".rsp",
     ".so",
+    # Assembly definitions and references can cause Unity editor/runtime
+    # callbacks to load or compile code during package import. They therefore
+    # need the same full-project checkpoint treatment as executable payloads.
+    ".asmdef",
+    ".asmref",
 }
 SUPPORT_PACKAGE_PATTERNS = [
     r"material(?:s)?",
@@ -581,6 +587,12 @@ def build_unitypackage_import_risk_facts(
         reason_codes.append("unsupported_project_path")
     if existing_target_paths:
         reason_codes.append("existing_asset_overwrite")
+    code_bearing_package = bool(code_payload_paths)
+    if code_bearing_package:
+        # A pathname list cannot prove the write footprint of import callbacks
+        # or compilation side effects. The checkpoint dispatcher must select
+        # the established full-project snapshot path for this package.
+        reason_codes.append("code_bearing_package_requires_full_project_checkpoint")
     if project_root is None:
         reason_codes.append("target_absence_unverified")
     if plan_kind != "unitypackage_import" or import_queue_count != 1:
@@ -594,6 +606,9 @@ def build_unitypackage_import_risk_facts(
         "unsafePathnameCount": unsafe_pathname_count,
         "codePayloadCount": len(code_payload_paths),
         "codePayloadPaths": code_payload_paths[:32],
+        "codeBearingPackage": code_bearing_package,
+        "fullProjectCheckpointRequired": code_bearing_package,
+        "checkpointScope": "full_project" if code_bearing_package else "exact_assets",
         "automaticCodeExecutionPlanned": False,
         "projectSettingsPathCount": len(project_settings_paths),
         "packagesPathCount": len(packages_paths),
@@ -633,6 +648,38 @@ def build_loose_prefab_plan(
     if not ready:
         plan_warnings.append("Single loose asset inputs need a folder context before VRCForge can safely copy related textures/materials.")
     expected_assets = loose_asset_paths_from_inspection(inspection)
+    code_payload_paths = [
+        path for path in expected_assets
+        if Path(path).suffix.casefold() in UNITY_IMPORT_CODE_PAYLOAD_SUFFIXES
+    ]
+    risk_facts = None
+    if code_payload_paths:
+        # A loose copy is followed by AssetDatabase.Refresh.  Code-related
+        # files can compile and run editor callbacks during that refresh, so
+        # the approved checkpoint must cover the whole Unity project.
+        risk_facts = {
+            "schema": "vrcforge.outfit_import_risk_facts.v1",
+            "pathnameEvidenceComplete": expected_assets_complete,
+            "pathnameCount": len(expected_assets),
+            "unsafePathnameCount": 0,
+            "codePayloadCount": len(code_payload_paths),
+            "codePayloadPaths": code_payload_paths[:32],
+            "codeBearingPackage": True,
+            "fullProjectCheckpointRequired": True,
+            "checkpointScope": "full_project",
+            "automaticCodeExecutionPlanned": False,
+            "projectSettingsPathCount": 0,
+            "packagesPathCount": 0,
+            "unsupportedProjectPathCount": 0,
+            "targetAbsenceChecked": project_root is not None,
+            "existingTargetPathCount": 0,
+            "existingTargetPaths": [],
+            "deleteRequested": False,
+            "importQueueCount": 0,
+            "mediumEligible": False,
+            "recommendedRiskLevel": "high",
+            "reasonCodes": ["code_bearing_package_requires_full_project_checkpoint"],
+        }
     return {
         "id": f"outfit_import_{stable_slug(source_path.stem)}_{timestamp_compact()}",
         "kind": "loose_prefab_copy",
@@ -654,6 +701,7 @@ def build_loose_prefab_plan(
         "expectedAssetPaths": [f"{target_root}/{path}" for path in expected_assets],
         "expectedAssetPathCount": len(expected_assets),
         "expectedAssetPathsComplete": expected_assets_complete,
+        **({"riskFacts": risk_facts} if risk_facts is not None else {}),
         "dependencyPreflight": dependency_preflight,
         "writeTarget": "vrcforge_import_outfit_package" if ready else "",
         "steps": [

@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Mapping, Any
 
 import pytest
+from camera_evidence_contract import validate_camera_evidence
 
 
 @lru_cache(maxsize=1)
@@ -17,7 +18,8 @@ def validator():
              '_free_camera_look_rotation_up', '_require_camera_evidence'}
     tree = ast.parse(source)
     tree.body = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in names]
-    scope = {'math': math, 'Mapping': Mapping, 'Any': Any}
+    scope = {'math': math, 'Mapping': Mapping, 'Any': Any,
+             'validate_camera_evidence': validate_camera_evidence}
     exec(compile(tree, 'dashboard_server.py', 'exec'), scope)
     return scope['_require_camera_evidence']
 
@@ -56,11 +58,16 @@ def test_free_camera_without_avatar_accepts_core_unbound_target_diagnostics():
     assert evidence == before
 
 
-@pytest.mark.parametrize('mode,avatar', [('framed', ''), ('free', 'Avatar/Explicit')])
-def test_absent_target_diagnostics_never_satisfy_framed_or_explicit_avatar(mode, avatar):
+@pytest.mark.parametrize('mode,avatar', [('framed', 'Avatar/Explicit'), ('free', 'Avatar/Explicit')])
+def test_absent_target_diagnostics_never_satisfy_explicit_avatar(mode, avatar):
     expected = {**original_request_shape(), 'cameraMode': mode, 'avatarPath': avatar}
     with pytest.raises(RuntimeError, match='targetSceneName'):
         validator()({'cameraEvidence': source_derived_evidence()}, expected)
+
+
+def test_optional_target_is_independent_of_camera_mode():
+    evidence = source_derived_evidence()
+    assert validator()({'cameraEvidence': evidence}, {**original_request_shape(), 'cameraMode': 'framed'}) == evidence
 
 
 @pytest.mark.parametrize('key,value', [
@@ -97,3 +104,51 @@ def test_bound_camera_target_diagnostics_remain_supported():
                     targetRendererLayerMask=1, targetRendererLayersIncluded=True)
     expected = {**original_request_shape(), 'avatarPath': 'Avatar'}
     assert validator()({'cameraEvidence': evidence}, expected) == evidence
+
+
+@pytest.mark.parametrize('path,value', [
+    (('matrix', 'worldToCamera', 0), 'not-a-number'),
+    (('matrix', 'projection', 0), False),
+    (('position', 'x'), True), (('aspect',), '1'),
+    (('nearClip',), 0), (('farClip',), 0.001),
+    (('orthographicSize',), True), (('targetRendererCount',), -5),
+    (('targetRendererCount',), 'two'), (('targetVisibleRendererCount',), 3),
+    (('targetSceneValid',), 'false'), (('targetRendererLayersIncluded',), 1),
+    (('targetPath',), 'OtherAvatar'), (('matrix', 'extra'), [1]*16),
+])
+def test_typed_core_evidence_rejects_invalid_values_and_wrong_target(path, value):
+    evidence = source_derived_evidence()
+    evidence.update(targetSceneValid=True, targetSceneName='Fresh', targetPath='Avatar',
+                    targetRendererCount=2, targetVisibleRendererCount=2,
+                    targetRendererLayerMask=1, targetRendererLayersIncluded=True)
+    owner = evidence
+    for key in path[:-1]:
+        owner = owner[key]
+    owner[path[-1]] = value
+    with pytest.raises(RuntimeError):
+        validator()({'cameraEvidence': evidence}, {**original_request_shape(), 'avatarPath': 'Avatar'})
+
+
+def test_bound_target_with_empty_unsaved_scene_name_is_valid():
+    evidence = source_derived_evidence()
+    evidence.update(targetSceneValid=True, targetSceneName='', targetPath='Avatar',
+                    targetRendererCount=0, targetVisibleRendererCount=0,
+                    targetRendererLayerMask=0, targetRendererLayersIncluded=False)
+    assert validator()({'cameraEvidence': evidence}, {**original_request_shape(), 'avatarPath': 'Avatar'}) == evidence
+
+
+@pytest.mark.parametrize('requested', ['/Root/Avatar/', 'Root\\Avatar', 'Avatar'])
+def test_target_binding_preserves_core_path_resolution(requested):
+    evidence = source_derived_evidence()
+    evidence.update(targetSceneValid=True, targetSceneName='Fresh', targetPath='Root/Avatar')
+    assert validator()({'cameraEvidence': evidence}, {**original_request_shape(), 'avatarPath': requested}) == evidence
+
+
+@pytest.mark.parametrize('count,mask,included', [(0, 1, False), (2, 0, True), (1, 3, True)])
+def test_renderer_layers_require_corresponding_renderers(count, mask, included):
+    evidence = source_derived_evidence()
+    evidence.update(targetSceneValid=True, targetSceneName='Fresh', targetPath='Avatar',
+                    targetRendererCount=count, targetVisibleRendererCount=0,
+                    targetRendererLayerMask=mask, targetRendererLayersIncluded=included)
+    with pytest.raises(RuntimeError):
+        validator()({'cameraEvidence': evidence}, {**original_request_shape(), 'avatarPath': 'Avatar'})

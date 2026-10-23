@@ -14,6 +14,7 @@ from prepared_file_imports import capture_regular_file
 from prepared_loose_outfit_import import prepare_loose_outfit_import
 from prepared_unity_execution import (
     PREPARED_UNITY_EXECUTION_ARGUMENT_KEY,
+    build_prepared_execution_plan,
     install_prepared_calls,
 )
 from unity_import_checkpoint import prepare_import_asset_checkpoint
@@ -67,6 +68,23 @@ def _loose_fixture(tmp_path: Path) -> tuple[Path, Path, dict]:
     return project, source, install_prepared_calls({}, [_refresh(project)], evidence)
 
 
+def _loose_code_fixture(tmp_path: Path) -> tuple[Path, Path, dict]:
+    project, source, _ = _loose_fixture(tmp_path)
+    (source / "Editor.asmdef").write_text('{"name":"Editor"}', encoding="utf-8")
+    loose = prepare_loose_outfit_import(
+        source_root=source,
+        project_root=project,
+        target_folder="Assets/Imports/New",
+    )
+    evidence = {
+        "kind": "loose_prefab_copy",
+        "plan": {"kind": "loose_prefab_copy"},
+        "projectIdentity": {"projectPath": str(project)},
+        "loosePlan": loose,
+    }
+    return project, source, install_prepared_calls({}, [_refresh(project)], evidence)
+
+
 def _tar_member(archive: tarfile.TarFile, name: str, data: bytes) -> None:
     member = tarfile.TarInfo(name)
     member.size = len(data)
@@ -109,6 +127,21 @@ def _package_fixture(project: Path, packages: list[Path], *, kind: str) -> dict:
         "queue": queue,
     }
     return install_prepared_calls({}, calls, evidence)
+
+
+def _with_code_bearing_risk_facts(arguments: dict) -> dict:
+    evidence = deepcopy(arguments[PREPARED_UNITY_EXECUTION_ARGUMENT_KEY]["evidence"])
+    evidence["plan"]["riskFacts"] = {
+        "codeBearingPackage": True,
+        "fullProjectCheckpointRequired": True,
+        "checkpointScope": "full_project",
+        "recommendedRiskLevel": "high",
+        "mediumEligible": False,
+        "reasonCodes": ["code_bearing_package_requires_full_project_checkpoint"],
+    }
+    return install_prepared_calls(
+        {}, build_prepared_execution_plan(arguments), evidence
+    )
 
 
 def test_loose_import_derives_only_new_files_metadata_and_new_parent_metadata(tmp_path: Path) -> None:
@@ -168,6 +201,63 @@ def test_loose_import_rejects_valid_seal_with_wrong_core_call(tmp_path: Path) ->
     result = _prepare(project, forged)
     assert result["ok"] is False and result["code"] == "checkpoint_scope_unresolved"
     assert "sealed Core calls changed" in result["error"]
+
+
+def test_loose_code_bearing_import_uses_full_project_checkpoint_scope(tmp_path: Path) -> None:
+    project, _source, arguments = _loose_code_fixture(tmp_path)
+    prepared: list[object] = []
+
+    result = prepare_import_asset_checkpoint(
+        project,
+        _with_code_bearing_risk_facts(arguments),
+        verify_project=lambda identity: Path(identity["projectPath"]),
+        prepare=lambda _root, *, checkpoint_files=None: prepared.append(checkpoint_files) or {"ok": True},
+    )
+
+    assert result["ok"] is True, result
+    assert result["checkpointScope"] == "full_project"
+    assert result["codeBearingPaths"] == ["Assets/Imports/New/Editor.asmdef"]
+    assert result["archiveScopeReason"] == "code_bearing_package_full_project"
+    assert prepared == [None]
+
+
+def test_loose_code_bearing_prepare_failure_does_not_fallback_to_asset_scope(tmp_path: Path) -> None:
+    project, _source, arguments = _loose_code_fixture(tmp_path)
+    prepared: list[object] = []
+
+    result = prepare_import_asset_checkpoint(
+        project,
+        _with_code_bearing_risk_facts(arguments),
+        verify_project=lambda identity: Path(identity["projectPath"]),
+        prepare=lambda _root, *, checkpoint_files=None: prepared.append(checkpoint_files) or {
+            "ok": False,
+            "blocking": True,
+            "code": "unity_checkpoint_prepare_failed",
+            "error": "full project snapshot unavailable",
+        },
+    )
+
+    assert result["ok"] is False
+    assert result["code"] == "unity_checkpoint_prepare_failed"
+    assert prepared == [None]
+    assert "archiveScopeReason" not in result
+
+
+def test_loose_code_bearing_import_rejects_legacy_plan_before_full_project_prepare(tmp_path: Path) -> None:
+    project, _source, arguments = _loose_code_fixture(tmp_path)
+    prepared: list[object] = []
+
+    result = prepare_import_asset_checkpoint(
+        project,
+        arguments,
+        verify_project=lambda identity: Path(identity["projectPath"]),
+        prepare=lambda _root, *, checkpoint_files=None: prepared.append(checkpoint_files) or {"ok": True},
+    )
+
+    assert result["ok"] is False
+    assert result["code"] == "checkpoint_scope_unresolved"
+    assert "predates code-bearing" in result["error"]
+    assert prepared == []
 
 
 def test_package_sequence_scans_every_dependency_queue_asset(tmp_path: Path) -> None:
@@ -239,10 +329,9 @@ def test_package_overwrite_only_archives_existing_asset_and_meta(tmp_path: Path)
     [
         (["Packages/com.example/file.asset"], "canonical Assets/ destinations"),
         (["Assets/Outfits/Dress.prefab", "Assets/outfits/dress.prefab"], "duplicate asset paths"),
-        (["Assets/Outfits/Editor/Setup.cs"], "code-bearing package"),
     ],
 )
-def test_package_rejects_outside_duplicate_or_code_bearing_paths(
+def test_package_rejects_outside_or_duplicate_paths(
     tmp_path: Path, asset_paths: list[str], error_text: str
 ) -> None:
     project = _project(tmp_path)
@@ -250,6 +339,78 @@ def test_package_rejects_outside_duplicate_or_code_bearing_paths(
     result = _prepare(project, _package_fixture(project, [package], kind="unitypackage_import"))
     assert result["ok"] is False and result["code"] == "checkpoint_scope_unresolved"
     assert error_text in result["error"]
+
+
+def test_code_bearing_package_uses_full_project_checkpoint_scope(tmp_path: Path) -> None:
+    project = _project(tmp_path)
+    package = _unitypackage(
+        tmp_path / "Scripted.unitypackage",
+        ["Assets/Outfits/Dress.prefab", "Assets/Outfits/Editor/Setup.cs"],
+    )
+    prepared: list[object] = []
+
+    result = prepare_import_asset_checkpoint(
+        project,
+        _with_code_bearing_risk_facts(
+            _package_fixture(project, [package], kind="unitypackage_import")
+        ),
+        verify_project=lambda identity: Path(identity["projectPath"]),
+        prepare=lambda _root, *, checkpoint_files=None: prepared.append(checkpoint_files) or {"ok": True},
+    )
+
+    assert result["ok"] is True, result
+    assert result["checkpointScope"] == "full_project"
+    assert result["archiveScopeReason"] == "code_bearing_package_full_project"
+    assert prepared == [None]
+
+
+def test_code_bearing_full_project_prepare_failure_does_not_fallback_to_asset_scope(tmp_path: Path) -> None:
+    project = _project(tmp_path)
+    package = _unitypackage(
+        tmp_path / "Scripted.unitypackage",
+        ["Assets/Outfits/Dress.prefab", "Assets/Outfits/Editor/Setup.asmdef"],
+    )
+    prepared: list[object] = []
+
+    result = prepare_import_asset_checkpoint(
+        project,
+        _with_code_bearing_risk_facts(
+            _package_fixture(project, [package], kind="unitypackage_import")
+        ),
+        verify_project=lambda identity: Path(identity["projectPath"]),
+        prepare=lambda _root, *, checkpoint_files=None: prepared.append(checkpoint_files) or {
+            "ok": False,
+            "blocking": True,
+            "code": "unity_checkpoint_prepare_failed",
+            "error": "full project snapshot unavailable",
+        },
+    )
+
+    assert result["ok"] is False
+    assert result["code"] == "unity_checkpoint_prepare_failed"
+    assert prepared == [None]
+    assert "archiveScopeReason" not in result
+
+
+def test_code_bearing_package_rejects_legacy_plan_before_full_project_prepare(tmp_path: Path) -> None:
+    project = _project(tmp_path)
+    package = _unitypackage(
+        tmp_path / "LegacyScripted.unitypackage",
+        ["Assets/Outfits/Editor/Setup.asmdef"],
+    )
+    prepared: list[object] = []
+
+    result = prepare_import_asset_checkpoint(
+        project,
+        _package_fixture(project, [package], kind="unitypackage_import"),
+        verify_project=lambda identity: Path(identity["projectPath"]),
+        prepare=lambda _root, *, checkpoint_files=None: prepared.append(checkpoint_files) or {"ok": True},
+    )
+
+    assert result["ok"] is False
+    assert result["code"] == "checkpoint_scope_unresolved"
+    assert "predates code-bearing" in result["error"]
+    assert prepared == []
 
 
 def test_package_rejects_tampered_call_seal(tmp_path: Path) -> None:

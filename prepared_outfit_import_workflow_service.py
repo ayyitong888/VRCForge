@@ -4,6 +4,8 @@ import copy
 import hashlib
 import os
 import tarfile
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable
@@ -17,6 +19,28 @@ from prepared_unity_execution import (
 
 
 PreparedImportCall = tuple[str, dict[str, Any]]
+
+
+# The approval owner binds this only around its synchronous handler. It is not
+# an argument/provider capability and cannot be installed by a tool caller.
+_IMPORT_JOURNAL: ContextVar[Callable[[dict[str, Any]], None] | None] = ContextVar(
+    "vrcforge_import_operation_journal", default=None
+)
+
+
+@contextmanager
+def bind_import_operation_journal(writer: Callable[[dict[str, Any]], None] | None):
+    token = _IMPORT_JOURNAL.set(writer)
+    try:
+        yield
+    finally:
+        _IMPORT_JOURNAL.reset(token)
+
+
+def _journal_import_progress(**progress: Any) -> None:
+    writer = _IMPORT_JOURNAL.get()
+    if writer is not None:
+        writer(copy.deepcopy(progress))
 
 
 def verify_unitypackage_asset_content(
@@ -862,6 +886,8 @@ class PreparedOutfitImportApprovedWriteService:
                 materialization_receipts.append(
                     self._ports.execute_zip_member(facts)
                 )
+                # Durable ownership must precede the first remote consumer.
+                _journal_import_progress(materializations=materialization_receipts)
             settings = self._ports.load_settings(arguments)
             settings.unity_mcp_timeout_seconds = max(
                 int(settings.unity_mcp_timeout_seconds or 30), 300
@@ -963,13 +989,17 @@ class PreparedOutfitImportApprovedWriteService:
                 )
                 write_started = True
                 failure_layer = "unity_core_transport"
+                _journal_import_progress(activeImportIndex=index, importDispatched=True)
                 payload = self._ports.start_import(settings, tool_arguments)
+                _journal_import_progress(jobReceipt=payload)
                 import_readback_pending = (
                     payload.get("mutationStarted") is True
                     or payload.get("pending") is True
                 )
                 if payload.get("ok") is not True:
-                    cleanup_error = cleanup_materializations()
+                    # Dispatch failure is not proof that the remote consumer
+                    # stopped, and recovery still needs the exact source.
+                    cleanup_error = ""
                     return {
                         "ok": False,
                         "failureLayer": "unity_core_transport",
@@ -1007,7 +1037,7 @@ class PreparedOutfitImportApprovedWriteService:
                     payload.get("ok") is not True
                     or str(payload.get("status") or "") != "completed"
                 ):
-                    cleanup_error = cleanup_materializations()
+                    cleanup_error = ""
                     return {
                         "ok": False,
                         "failureLayer": str(
@@ -1076,7 +1106,7 @@ class PreparedOutfitImportApprovedWriteService:
             failure_layer = "unity_asset_database_refresh"
             refresh = self._ports.refresh_assets(settings, refresh_arguments)
             if refresh.get("ok") is not True:
-                cleanup_error = cleanup_materializations()
+                cleanup_error = ""
                 return {
                     "ok": False,
                     "failureLayer": "unity_asset_database_refresh",
@@ -1123,7 +1153,7 @@ class PreparedOutfitImportApprovedWriteService:
                 )
             )
             if not nested_receipts_complete or not content_receipt_verified:
-                cleanup_error = cleanup_materializations()
+                cleanup_error = ""
                 return {
                     "ok": False,
                     "failureLayer": "unity_core_receipt_validation",
@@ -1176,7 +1206,9 @@ class PreparedOutfitImportApprovedWriteService:
                 **({"contentReadback": content_readback} if content_readback is not None else {}),
             }
         except self._ports.handled_errors as exc:
-            cleanup_error = cleanup_materializations()
+            cleanup_error = (
+                "" if write_started or imports else cleanup_materializations()
+            )
             self._ports.log(
                 "error",
                 "outfit",

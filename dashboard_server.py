@@ -68,6 +68,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, SecretStr, ValidationError, model_validator
 from mcp_resource_registry import McpResourceError
 from chat_resource_image import read_chat_scene_image_resource
+from camera_evidence_contract import validate_camera_evidence
 
 from dashboard_foundation import (
     app_auth_disabled_for_test_process,
@@ -14461,20 +14462,6 @@ def _prepared_capture_base(request: VisionCaptureRequest | VisionCaptureMultiReq
     return prepared
 
 
-def _finite_camera_value(value: Any, label: str) -> Any:
-    if isinstance(value, (int, float)):
-        if not math.isfinite(float(value)):
-            raise RuntimeError(f"Unity returned non-finite camera evidence: {label}.")
-        return value
-    if isinstance(value, list):
-        return [_finite_camera_value(item, label) for item in value]
-    if isinstance(value, dict):
-        return {key: _finite_camera_value(item, f"{label}.{key}") for key, item in value.items()}
-    if isinstance(value, str) and value:
-        return value
-    raise RuntimeError(f"Unity returned invalid camera evidence: {label}.")
-
-
 def _camera_vector(evidence: Mapping[str, Any], key: str, *, dimensions: int = 3) -> list[float]:
     value = evidence.get(key)
     if not isinstance(value, Mapping):
@@ -14543,35 +14530,9 @@ def _require_camera_evidence(payload: Mapping[str, Any], expected: Mapping[str, 
         return None
     if not isinstance(evidence, Mapping):
         raise RuntimeError("Unity returned invalid camera evidence.")
-    required = ("position", "target", "basis", "quaternion", "projection", "matrix")
-    missing = [key for key in required if key not in evidence]
-    if missing:
-        raise RuntimeError("Unity camera evidence is missing: " + ", ".join(missing))
-    projection = str(evidence.get("projection") or "")
-    if projection not in {"perspective", "orthographic"}:
-        raise RuntimeError("Unity returned an invalid camera projection evidence value.")
-    if projection == "perspective" and "fieldOfView" not in evidence:
-        raise RuntimeError("Unity perspective evidence is missing fieldOfView.")
-    if projection == "orthographic" and "orthographicSize" not in evidence:
-        raise RuntimeError("Unity orthographic evidence is missing orthographicSize.")
-    _camera_vector(evidence, "position")
-    _camera_vector(evidence, "target")
-    _camera_vector(evidence, "quaternion", dimensions=4)
-    basis = evidence.get("basis")
-    if not isinstance(basis, Mapping):
-        raise RuntimeError("Unity camera evidence basis must be an object.")
-    for axis in ("right", "up", "forward"):
-        _camera_vector(basis, axis)
-    matrices = evidence.get("matrix")
-    if not isinstance(matrices, Mapping):
-        raise RuntimeError("Unity camera evidence matrix must be an object.")
-    for matrix_name in ("cameraToWorld", "worldToCamera", "projection", "gpuProjection", "viewProjection"):
-        values = matrices.get(matrix_name)
-        if not isinstance(values, list) or len(values) != 16:
-            raise RuntimeError(f"Unity camera evidence matrix.{matrix_name} must contain 16 values.")
-        _finite_camera_value(values, f"cameraEvidence.matrix.{matrix_name}")
-    if evidence.get("matrixOrder") != "row_major" or evidence.get("coordinateSpace") != "unity_world":
-        raise RuntimeError("Unity camera evidence matrix metadata is invalid.")
+    evidence = validate_camera_evidence(evidence, expected)
+    projection = evidence["projection"]
+    basis = evidence["basis"]
     if expected.get("cameraMode") == "free":
         _camera_values_close(_camera_vector(evidence, "position"), expected["cameraPosition"], "camera position")
         _camera_values_close(_camera_vector(evidence, "target"), expected["targetPosition"], "camera target")
@@ -14588,31 +14549,10 @@ def _require_camera_evidence(payload: Mapping[str, Any], expected: Mapping[str, 
         expected_aspect = float(expected["width"]) / float(expected["height"])
         if not math.isclose(float(evidence.get("aspect", 0.0)), expected_aspect, rel_tol=0.0, abs_tol=0.0001):
             raise RuntimeError("Unity returned camera aspect outside the approved free-camera plan.")
-    checked_fields = dict(evidence)
-    # Free world-space cameras do not require an Avatar. Core then reports its
-    # complete unbound TargetVisibility value, rather than a missing camera.
-    # Preserve that typed state without relaxing any geometry or other strings.
-    unbound_target = (
-        expected.get("cameraMode") == "free"
-        and not str(expected.get("avatarPath") or "").strip()
-        and evidence.get("targetSceneValid") is False
-        and evidence.get("targetSceneName") == ""
-        and evidence.get("targetPath") == ""
-        and evidence.get("targetRendererLayersIncluded") is False
-        and all(type(evidence.get(key)) is int and evidence[key] == 0 for key in (
-            "targetRendererCount", "targetVisibleRendererCount", "targetRendererLayerMask"))
-    )
-    empty_target_fields = {}
-    if unbound_target:
-        empty_target_fields = {key: checked_fields.pop(key) for key in ("targetSceneName", "targetPath")}
-    checked = _finite_camera_value(checked_fields, "cameraEvidence")
-    if not isinstance(checked, dict):
-        raise RuntimeError("Unity returned invalid camera evidence.")
-    checked.update(empty_target_fields)
     expected_projection = expected.get("projection")
     if expected_projection and projection != expected_projection:
         raise RuntimeError("Unity returned camera projection outside the approved capture plan.")
-    return checked
+    return dict(evidence)
 
 
 def prepare_capture_screenshot_request(arguments: dict[str, Any], preview: Any) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -21437,10 +21377,54 @@ def prepare_authoritative_unity_checkpoint_sync(
     if checkpoint_target == "vrcforge_import_outfit_package":
         from unity_import_checkpoint import prepare_import_asset_checkpoint
 
-        return prepare_import_asset_checkpoint(
+        # The planner seals the code-bearing classification with the approval
+        # evidence. A pathname-only footprint is insufficient for package
+        # callbacks, so reject an incomplete/mismatched scope contract before
+        # invoking the importer checkpoint helper. The helper owns the actual
+        # full-project snapshot and must return its explicit scope receipt.
+        try:
+            import_evidence = prepared_evidence(arguments)
+        except (TypeError, ValueError):
+            import_evidence = None
+        import_plan = import_evidence.get("plan") if isinstance(import_evidence, dict) else None
+        risk_facts = import_plan.get("riskFacts") if isinstance(import_plan, dict) else None
+        try:
+            code_payload_count = int(risk_facts.get("codePayloadCount") or 0) if isinstance(risk_facts, dict) else 0
+        except (TypeError, ValueError):
+            code_payload_count = -1
+        code_bearing = (
+            code_payload_count > 0
+            or isinstance(risk_facts, dict) and risk_facts.get("codeBearingPackage") is True
+        )
+        sealed_code_bearing_scope = (
+            isinstance(risk_facts, dict)
+            and risk_facts.get("codeBearingPackage") is True
+            and risk_facts.get("fullProjectCheckpointRequired") is True
+            and risk_facts.get("checkpointScope") == "full_project"
+            and risk_facts.get("recommendedRiskLevel") == "high"
+            and risk_facts.get("mediumEligible") is False
+            and isinstance(risk_facts.get("reasonCodes"), list)
+            and "code_bearing_package_requires_full_project_checkpoint"
+            in (risk_facts.get("reasonCodes") or [])
+        )
+        if code_bearing and not sealed_code_bearing_scope:
+            return {"ok": False, "blocking": True, "code": "checkpoint_scope_unresolved",
+                    "error": "The approved code-bearing import did not seal a full-project checkpoint scope.",
+                    "mutationStarted": False, "saved": False}
+        prepared = prepare_import_asset_checkpoint(
             project_root, arguments, verify_project=_verify_prepared_import_project_identity,
             prepare=prepare_unity_checkpoint_sync,
         )
+        full_project_code_receipt = prepared.get("archiveScopeReason") == "code_bearing_package_full_project"
+        if full_project_code_receipt and not sealed_code_bearing_scope:
+            return {"ok": False, "blocking": True, "code": "checkpoint_scope_unresolved",
+                    "error": "The sealed import plan predates code-bearing full-project scope classification; re-plan and approve it again.",
+                    "mutationStarted": False, "saved": False}
+        if code_bearing and prepared.get("ok") is True and not full_project_code_receipt:
+            return {"ok": False, "blocking": True, "code": "checkpoint_scope_unresolved",
+                    "error": "The code-bearing import checkpoint did not return a full-project scope receipt.",
+                    "mutationStarted": False, "saved": False}
+        return prepared
     if checkpoint_target == "vrcforge_duplicate_project_asset":
         from unity_asset_copy_checkpoint import prepare_asset_copy_checkpoint
 
@@ -21572,9 +21556,9 @@ def prepare_authoritative_unity_checkpoint_sync(
     nested_tool = str(arguments.get("toolName") or arguments.get("tool_name") or "").strip()
 
     if checkpoint_target in {"vrcforge_import_chat_image", "vrcforge_import_chat_archive"}:
-        from prepared_unity_execution import prepared_evidence
+        from prepared_unity_execution import prepared_evidence as read_prepared_evidence
 
-        evidence = prepared_evidence(arguments)
+        evidence = read_prepared_evidence(arguments)
         if checkpoint_target == "vrcforge_import_chat_archive" and ensure_dict(evidence).get("branch") == "unitypackage":
             nested_evidence = ensure_dict(evidence).get("outfitEvidence")
             if not isinstance(nested_evidence, dict):
@@ -28056,7 +28040,7 @@ def register_agent_gateway_tools() -> None:
     )
     register_write_handler(
         "vrcforge_import_outfit_package",
-        "When to use: import an approved UnityPackage or copy external prefab, material, PNG/JPG texture files, or a single standalone FBX model from an unpacked folder into the Unity project's Assets folder. Texture-only and single-FBX folders are supported without a prefab; inspect and plan first, then use the sealed exact-file checkpoint. When NOT to use: do not guess among multiple standalone FBX models, change existing importer settings, assign material slots, extract a texture-only ZIP, or copy arbitrary project files. Negative example: a generated FBX needs its own output folder, not a fabricated prefab; a PNG already inside Assets needs material assignment rather than another import.",
+        "When to use: import an approved UnityPackage or copy external prefab, material, PNG/JPG texture files, or a single standalone FBX model from an unpacked folder into the Unity project's Assets folder. Texture-only and single-FBX folders are supported without a prefab; inspect and plan first, then use the sealed exact-file checkpoint for ordinary packages. A code-bearing package requires the established full-project checkpoint because Unity import callbacks and compilation can write beyond its pathname list. When NOT to use: do not guess among multiple standalone FBX models, change existing importer settings, assign material slots, extract a texture-only ZIP, or copy arbitrary project files. Negative example: a generated FBX needs its own output folder, not a fabricated prefab; a PNG already inside Assets needs material assignment rather than another import.",
         "medium",
         WARDROBE_OUTFIT_APPROVED_WRITES.import_package,
         risk_level_resolver=classify_prepared_outfit_import_risk,

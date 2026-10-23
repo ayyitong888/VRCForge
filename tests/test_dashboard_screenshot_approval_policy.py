@@ -686,6 +686,14 @@ def _free_camera_evidence(arguments: dict[str, object]) -> dict[str, object]:
         },
         "matrixOrder": "row_major",
         "coordinateSpace": "unity_world",
+        "cullingMask": -1,
+        "targetSceneValid": False,
+        "targetSceneName": "",
+        "targetPath": "",
+        "targetRendererCount": 0,
+        "targetVisibleRendererCount": 0,
+        "targetRendererLayerMask": 0,
+        "targetRendererLayersIncluded": False,
     }
 
 

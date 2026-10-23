@@ -9,6 +9,7 @@ import zipfile
 from prepared_archive_imports import _entry_manifest, _opened_source_matches
 from prepared_file_imports import verify_directory, verify_regular_file
 from prepared_unity_execution import build_prepared_execution_plan, prepared_evidence
+from outfit_import_planner import UNITY_IMPORT_CODE_PAYLOAD_SUFFIXES
 
 
 def prepare_import_asset_checkpoint(project_root: Path, arguments: dict, *, verify_project, prepare=None) -> dict:
@@ -28,6 +29,7 @@ def prepare_import_asset_checkpoint(project_root: Path, arguments: dict, *, veri
             raise ValueError("The sealed import kind differs from its plan.")
         destinations = set()
         directories = set()
+        code_bearing_paths = []
 
         def canonical(name):
             if (not isinstance(name, str) or not name.startswith("Assets/")
@@ -85,13 +87,16 @@ def prepare_import_asset_checkpoint(project_root: Path, arguments: dict, *, veri
             for item in loose["files"]:
                 verify_regular_file(item["sourceIdentity"], item["sourceSha256"], label="Import source")
                 target = item["target"]
+                target_relative_path = target["targetRelativePath"]
+                if PurePosixPath(target_relative_path).suffix.casefold() in UNITY_IMPORT_CODE_PAYLOAD_SUFFIXES:
+                    code_bearing_paths.append(target_relative_path)
                 for identity in target.get("parentIdentities", []):
                     verify_directory(identity, label="Import parent")
-                for name in [target["targetRelativePath"], *target.get("absentParentRelativePaths", [])]:
+                for name in [target_relative_path, *target.get("absentParentRelativePaths", [])]:
                     candidate = canonical(name)
                     if candidate.exists():
                         raise ValueError("An approved absent import destination appeared.")
-                include(target["targetRelativePath"])
+                include(target_relative_path)
         elif evidence["kind"] in {"unitypackage_import", "unitypackage_import_sequence"}:
             queue = evidence["queue"]
             if not queue or len(calls) != len(queue) + 1 or calls[-1] != refresh:
@@ -182,9 +187,12 @@ def prepare_import_asset_checkpoint(project_root: Path, arguments: dict, *, veri
                         if name.casefold() in seen:
                             raise ValueError("The package contains duplicate asset paths.")
                         seen.add(name.casefold())
-                        # Importing code can run arbitrary asset callbacks; its scope is not proved here.
-                        if PurePosixPath(name).suffix.casefold() in {".cs", ".dll", ".asmdef", ".asmref"}:
-                            raise ValueError("A code-bearing package needs its own proven write footprint.")
+                        # Importing code can run arbitrary asset callbacks; a
+                        # pathname list cannot prove their write footprint. Keep
+                        # scanning the sealed archive for identity/path checks,
+                        # then use the established full-project snapshot below.
+                        if PurePosixPath(name).suffix.casefold() in UNITY_IMPORT_CODE_PAYLOAD_SUFFIXES:
+                            code_bearing_paths.append(name)
                         prefix = member.name.rsplit("/", 1)[0]
                         meta = archive.getmember(prefix + "/asset.meta")
                         with archive.extractfile(meta) as source:
@@ -200,6 +208,33 @@ def prepare_import_asset_checkpoint(project_root: Path, arguments: dict, *, veri
             raise ValueError("This import kind has no proven asset footprint.")
         if not destinations or len(destinations) > 4096:
             raise ValueError("The import has no bounded file footprint.")
+        if code_bearing_paths:
+            risk_facts = plan.get("riskFacts") if isinstance(plan, dict) else None
+            sealed_code_scope = (
+                isinstance(risk_facts, dict)
+                and risk_facts.get("codeBearingPackage") is True
+                and risk_facts.get("fullProjectCheckpointRequired") is True
+                and risk_facts.get("checkpointScope") == "full_project"
+                and risk_facts.get("recommendedRiskLevel") == "high"
+                and risk_facts.get("mediumEligible") is False
+                and isinstance(risk_facts.get("reasonCodes"), list)
+                and "code_bearing_package_requires_full_project_checkpoint"
+                in (risk_facts.get("reasonCodes") or [])
+            )
+            if not sealed_code_scope:
+                raise ValueError(
+                    "The sealed import plan predates code-bearing full-project scope classification; re-plan and approve it again."
+                )
+            inspected = prepare(project_root, checkpoint_files=None) if prepare else {"ok": True}
+            if inspected.get("ok") is not True:
+                return inspected
+            return {
+                **inspected,
+                "ok": True,
+                "checkpointScope": "full_project",
+                "codeBearingPaths": sorted(set(code_bearing_paths)),
+                "archiveScopeReason": "code_bearing_package_full_project",
+            }
         existing, absent = [], []
         for name in sorted(destinations):
             target = canonical(name)

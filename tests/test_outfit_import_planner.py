@@ -180,14 +180,37 @@ def test_script_payload_is_reported_but_does_not_imply_execution(tmp_path: Path)
     with tarfile.open(package, mode="w:gz") as archive:
         write_tar_member(archive, "0001/pathname", b"Assets/Outfits/Dress.prefab")
         write_tar_member(archive, "0002/pathname", b"Assets/Outfits/Editor/Setup.cs")
+        write_tar_member(archive, "0003/pathname", b"Assets/Outfits/Editor/Setup.asmdef")
+        write_tar_member(archive, "0004/pathname", b"Assets/Outfits/Editor/Setup.asmref")
+        write_tar_member(archive, "0005/pathname", b"Assets/Outfits/Editor/Setup.dll")
+        write_tar_member(archive, "0006/pathname", b"Assets/Outfits/Editor/csc.rsp")
 
     facts = build_outfit_import_plan(package, project_path=project)["plan"]["riskFacts"]
 
-    assert facts["codePayloadCount"] == 1
+    assert facts["codePayloadCount"] == 5
+    assert facts["codeBearingPackage"] is True
+    assert facts["fullProjectCheckpointRequired"] is True
+    assert facts["checkpointScope"] == "full_project"
     assert facts["automaticCodeExecutionPlanned"] is False
+    assert facts["mediumEligible"] is False
+    assert facts["recommendedRiskLevel"] == "high"
+    assert "code_bearing_package_requires_full_project_checkpoint" in facts["reasonCodes"]
+
+
+def test_non_code_package_keeps_exact_asset_checkpoint_scope(tmp_path: Path) -> None:
+    project = tmp_path / "Project"
+    make_project(project)
+    package = tmp_path / "Plain.unitypackage"
+    make_unitypackage(package)
+
+    facts = build_outfit_import_plan(package, project_path=project)["plan"]["riskFacts"]
+
+    assert facts["codePayloadCount"] == 0
+    assert facts["codeBearingPackage"] is False
+    assert facts["fullProjectCheckpointRequired"] is False
+    assert facts["checkpointScope"] == "exact_assets"
     assert facts["mediumEligible"] is True
     assert facts["recommendedRiskLevel"] == "medium"
-    assert "unity_import_auto_execution" not in facts["reasonCodes"]
 
 
 def test_existing_import_target_is_concrete_high_risk_overwrite(tmp_path: Path) -> None:
@@ -626,6 +649,12 @@ def test_loose_prefab_plan_includes_asmdef_dependency(tmp_path: Path) -> None:
     plan = build_outfit_import_plan(folder, target_folder="Assets/VRCForge/ImportedOutfits/Dress")["plan"]
 
     assert "Assets/VRCForge/ImportedOutfits/Dress/Editor.asmdef" in plan["expectedAssetPaths"]
+    assert plan["riskFacts"]["codePayloadCount"] == 1
+    assert plan["riskFacts"]["codePayloadPaths"] == ["Editor.asmdef"]
+    assert plan["riskFacts"]["codeBearingPackage"] is True
+    assert plan["riskFacts"]["fullProjectCheckpointRequired"] is True
+    assert plan["riskFacts"]["checkpointScope"] == "full_project"
+    assert plan["riskFacts"]["recommendedRiskLevel"] == "high"
 
 
 # --- Fix #2: post-import magenta / missing-shader validation -----------------
