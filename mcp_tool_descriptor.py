@@ -58,6 +58,10 @@ def identity_scope(name: str, *, write: bool = False, arguments: Mapping[str, An
     # handle, hierarchy and absent destination before approval and mutation.
     if normalized.endswith("save_new_scene"):
         return "project"
+    # Source inspection and asset import address the project, before an Avatar
+    # instance exists. Outfit setup/installation still bind the existing Avatar.
+    if normalized.endswith(("inspect_outfit_package", "plan_outfit_import", "import_outfit_package", "import_unitypackage")):
+        return "project"
     # Opening an existing scene addresses a project asset; it does not require
     # the currently loaded scene to have a saved identity.  Keep every other
     # transition action scene-scoped until its identity requirements differ.
