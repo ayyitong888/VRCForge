@@ -262,7 +262,9 @@ def test_package_rejects_tampered_call_seal(tmp_path: Path) -> None:
     assert "digest is invalid" in result["error"]
 
 
-def _nested_package_fixture(tmp_path: Path, *, package_bytes: bytes | None = None):
+def _nested_package_fixture(
+    tmp_path: Path, *, package_bytes: bytes | None = None, companion_members: bool = False
+):
     project = _project(tmp_path)
     package = _unitypackage(tmp_path / "Dress.unitypackage", ["Assets/Outfits/Dress.prefab"])
     if package_bytes is not None:
@@ -271,6 +273,9 @@ def _nested_package_fixture(tmp_path: Path, *, package_bytes: bytes | None = Non
     source = tmp_path / "Clothes.zip"
     with zipfile.ZipFile(source, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         archive.write(package, "Nested/Dress.unitypackage")
+        if companion_members:
+            archive.writestr("Nested/Readme.txt", b"selected-only import companion")
+            archive.writestr("Nested/preview.png", b"not an actual image")
     temp_parent = tmp_path / "staging"
     temp_parent.mkdir()
     facts = prepare_zip_member_materialization(
@@ -298,6 +303,16 @@ def test_nested_package_checkpoint_reads_sealed_member_before_materialization(tm
         "Assets/Outfits.meta", "Assets/Outfits/Dress.prefab", "Assets/Outfits/Dress.prefab.meta",
     ]
     assert list(staging.iterdir()) == []  # Checkpoint inspection owns no persistent staging file.
+    assert list((project / "Assets").iterdir()) == []
+
+
+def test_nested_package_checkpoint_ignores_unselected_outer_zip_companions(tmp_path: Path) -> None:
+    project, _source, staging, calls, evidence = _nested_package_fixture(
+        tmp_path, companion_members=True
+    )
+    result = _prepare(project, install_prepared_calls({}, calls, evidence))
+    assert result["ok"] is True, result
+    assert list(staging.iterdir()) == []
     assert list((project / "Assets").iterdir()) == []
 
 

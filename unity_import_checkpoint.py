@@ -138,7 +138,15 @@ def prepare_import_asset_checkpoint(project_root: Path, arguments: dict, *, veri
                         handle = resources.enter_context(source.open("rb"))
                         _opened_source_matches(handle, facts["sourceIdentity"], facts["sourceSha256"])
                         container = resources.enter_context(zipfile.ZipFile(handle))
-                        manifest = _entry_manifest(container)
+                        # The producer seals only the selected member(s). Rebuild that
+                        # same bounded manifest at checkpoint time; comparing against
+                        # every companion file in the outer ZIP rejects valid
+                        # selected-only imports before the member hash is checked.
+                        manifest = _entry_manifest(
+                            container,
+                            selected_paths={str(selected["path"])},
+                            max_uncompressed_bytes=None,
+                        )
                         if manifest != facts.get("manifest") or not any(
                             selected == {**entry, "targetName": target_name} for entry in manifest
                         ):
