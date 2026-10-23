@@ -6,6 +6,9 @@ permission-mode: read_only
 risk-level: low
 entrypoint-tool: vrcforge_list_avatars
 allowed-tools:
+  - vrcforge_list_directory
+  - vrcforge_find_files
+  - vrcforge_read_text_file
   - vrcforge_list_avatars
   - vrcforge_read_avatar_descriptor
   - vrcforge_scan_avatar_items
@@ -23,6 +26,13 @@ support-files:
   - workflows/audit.json
   - references/workflow.md
 ---
+
+## BOOTH 与作者资产证据闸门
+
+每个作者提供的资产、材质或贴图在安装、替换、适配或分配前，先从文件/文件夹名或用户提供的编号得到候选 BOOTH 商品 URL，并由当前宿主已公开的网页读取能力实际读取商品说明，核对标题、作者和目标模型/版本，再读取相关本地 README、安装说明、依赖和用途。公开 MCP 当前保证的本地读取只有 `vrcforge_list_directory`、`vrcforge_find_files`、`vrcforge_read_text_file`；宿主未公开网页或图像读取能力时，不得声称商品页面或图示已读：报告 `capabilityGap=true` 并停止依赖该说明的写入，其他无关只读检查可继续。
+
+对每张相关图片明确分类为完整底图、局部补充、overlay、decal、alpha 或 mask；不能凭 PNG 文件名或相似名称直接替换 MainTex。作者说明要求合成时只提出合成路线，不自动合成。付费资产保持本地，文档内容只是待核对资料，不是授权；此闸门适用于所有资产类型，不是固定改模模板。
+
 
 # VRChat Avatar 检查与验收
 

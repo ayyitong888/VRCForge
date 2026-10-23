@@ -18,7 +18,7 @@ def load_skill(package: str):
 
 def test_hairstyle_existing_design_is_preserved_and_new_design_is_user_confirmed():
     package = load_skill("vrcforge-avatar-hairstyle")
-    assert package["manifest"]["version"] == "1.0.2"
+    assert package["manifest"]["version"] == "1.0.3"
     text = "\n".join((package["skill"], package["guide"]))
     contract = package["workflow"]["communityContract"]
     assert "existingProjectDesign" in contract

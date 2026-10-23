@@ -1,6 +1,30 @@
 {
   "schema": "vrcforge.skill-package.workflow.v1",
   "mode": "approval_required",
+  "boothAssetEvidenceContract": {
+    "appliesBefore": ["install", "replace", "adapt", "assign_author_asset", "texture_change"],
+    "candidateUrl": {
+      "deriveFrom": ["asset_filename", "asset_folder_name", "user_supplied_product_number"],
+      "verify": ["title", "author", "target_model_or_version"],
+      "whenMissing": "report_capability_gap_and_stop_dependent_writes"
+    },
+    "readOrder": ["booth_product_description", "local_author_readme_install_notes_dependencies_usage"],
+    "pageEvidence": {
+      "bodyAndImagesMustBeReadable": true,
+      "unreadableReasons": ["login_or_age_confirmation", "expired", "fetch_failed"],
+      "onUnreadable": "report_not_read_and_stop_dependent_writes_allow_unrelated_read_only"
+    },
+    "textureRoles": ["full_base", "local_supplement", "overlay", "decal", "alpha", "mask"],
+    "mainTextureRule": "never_replace_from_filename_or_similar_name_alone",
+    "composition": "if_author_requires_compositing_propose_route_only_no_automatic_execution",
+    "boundaries": ["do_not_download_paid_assets", "documentation_is_not_authorization"],
+    "scope": "all_asset_types_current_decision_only_not_a_fixed_modelling_template",
+    "publicReadBoundary": {
+      "localTools": ["vrcforge_list_directory", "vrcforge_find_files", "vrcforge_read_text_file"],
+      "hostProvidedWebAndImageReadRequired": true,
+      "onMissing": "report_capability_gap_and_stop_dependent_writes"
+    }
+  },
   "uncertaintyPolicy": {
     "whenUnclear": ["skeleton", "neck_seam", "material", "accessory", "physbone", "modular_avatar", "vrcfury"],
     "consult": ["mature_community_guides", "asset_author_instructions", "official_documentation"],
@@ -318,6 +342,14 @@
     }
   },
   "steps": [
+    {
+      "name": "read_booth_asset_author_evidence_before_asset_change",
+      "tool": "vrcforge_list_directory",
+      "tools": ["vrcforge_find_files", "vrcforge_read_text_file"],
+      "when": "an author asset, material, or texture is installed, replaced, adapted, or assigned, or its filename/folder carries a Booth/product number",
+      "arguments": "locate the candidate Booth number and local author notes; require the host to provide readable product page and image evidence, classify each image role, and stop dependent writes when required page evidence is unavailable",
+      "writes": false
+    },
     {
       "name": "completely_unpack_structural_prefab_instance_before_head_authoring",
       "tool": "vrcforge_unpack_prefab",

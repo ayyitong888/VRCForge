@@ -44,3 +44,13 @@ def test_avatar_visual_feedback_and_author_material_guidance_are_scoped():
     } <= set(material["allowedTools"])
     assert "body or clothing" in material["instructions"]
     assert "simple color or" in material["instructions"]
+
+
+def test_author_material_workflow_can_read_product_instructions_and_source_pixels():
+    from agent_builtin_skill_catalog import BUILTIN_SKILL_GROUPS
+
+    material = next(item for item in BUILTIN_SKILL_GROUPS if item['name'] == 'shader-material-workflow')
+    assert {'vrcforge_web_search', 'vrcforge_web_fetch', 'vrcforge_read_local_image'} <= set(material['allowedTools'])
+    assert 'BOOTH' in material['instructions']
+    assert 'not evidence of having read' in material['instructions']
+    assert 'base, overlay, decal, alpha, or mask' in material['instructions']

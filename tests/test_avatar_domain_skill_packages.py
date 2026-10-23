@@ -22,6 +22,16 @@ CASES = (
     ("vrcforge-avatar-breast-physics-audit", "com.vrcforge.skills.avatar_breast_physics_audit", "VRChat 胸部动态骨骼检查", True),
     ("vrcforge-avatar-audit", "com.vrcforge.skills.avatar_audit", "VRChat Avatar 检查与验收", True),
 )
+ALL_OFFICIAL_SOURCE_ROOTS = (
+    ROOT / "examples" / "skill-packages" / "vrcforge-avatar-head-transplant",
+    ROOT / "examples" / "skill-packages" / "vrcforge-avatar-part-transplant",
+    *(ARTIFACTS / slug for slug, _package_id, _title, _read_only in CASES),
+)
+BOOTH_EVIDENCE_LOCAL_READ_TOOLS = {
+    "vrcforge_list_directory",
+    "vrcforge_find_files",
+    "vrcforge_read_text_file",
+}
 
 
 def _json(path: Path) -> dict[str, object]:
@@ -114,7 +124,7 @@ def test_wardrobe_skill_preserves_capabilities_without_project_presets() -> None
     manifest = _json(root / "manifest.json")
     workflow = _json(root / manifest["entrypoints"]["workflow"])
     skill = parse_skill_markdown(root / "SKILL.md")
-    assert manifest["version"] == "1.1.25"
+    assert manifest["version"] == "1.1.26"
     assert {
         "vrcforge_setup_outfit", "vrcforge_add_wardrobe_outfit",
         "vrcforge_ensure_expression_parameter", "vrcforge_ensure_animator_state",
@@ -122,7 +132,9 @@ def test_wardrobe_skill_preserves_capabilities_without_project_presets() -> None
         "vrcforge_get_runtime_observation", "vrcforge_scan_inbound_reference_closure",
     } <= set(skill["allowedTools"])
     assert workflow["selectionPolicy"]["presetProjectDesign"] is False
-    assert all(step["optional"] for step in workflow["steps"])
+    assert workflow["steps"][0]["name"] == "read_booth_asset_author_evidence_before_asset_change"
+    assert workflow["steps"][0]["writes"] is False
+    assert all(step["optional"] for step in workflow["steps"][1:])
     contract = workflow["communityWardrobeContract"]
     assert not {"name", "type", "default", "saved", "synced"} & contract["selector"].keys()
     assert "newBasicDefaults" not in contract["fx"]
@@ -136,6 +148,62 @@ def test_wardrobe_skill_preserves_capabilities_without_project_presets() -> None
     assert contract["replacementCleanup"]["neverDeleteSourceAvatarOrSourceAsset"] is True
     assert contract["runtimeEvidence"]["observationLifecycle"]["completedDoesNotMeanVisualAcceptance"] is True
     assert workflow["requiresOtherSkills"] == []
+
+
+@pytest.mark.parametrize(
+    "root", ALL_OFFICIAL_SOURCE_ROOTS, ids=lambda path: path.name
+)
+def test_official_avatar_packages_declare_booth_evidence_gate_and_read_tools(
+    root: Path,
+) -> None:
+    manifest = _json(root / "manifest.json")
+    skill = parse_skill_markdown(root / "SKILL.md")
+    workflow = _json(root / manifest["entrypoints"]["workflow"])
+
+    contract = workflow["boothAssetEvidenceContract"]
+    assert contract["candidateUrl"]["verify"] == [
+        "title", "author", "target_model_or_version"
+    ]
+    assert contract["readOrder"] == [
+        "booth_product_description",
+        "local_author_readme_install_notes_dependencies_usage",
+    ]
+    assert contract["textureRoles"] == [
+        "full_base", "local_supplement", "overlay", "decal", "alpha", "mask"
+    ]
+    assert contract["pageEvidence"]["bodyAndImagesMustBeReadable"] is True
+    assert set(BOOTH_EVIDENCE_LOCAL_READ_TOOLS) <= set(skill["allowedTools"])
+    assert set(BOOTH_EVIDENCE_LOCAL_READ_TOOLS) <= {
+        tool["name"]
+        for tool in dashboard_server.AGENT_GATEWAY.build_external_mcp_tools(
+            "planning", tool_blocks=["*"]
+        )
+    }
+    assert "vrcforge_web_search" not in skill["allowedTools"]
+    assert "vrcforge_web_fetch" not in skill["allowedTools"]
+    assert "vrcforge_read_local_image" not in skill["allowedTools"]
+    public_boundary = workflow["boothAssetEvidenceContract"]["publicReadBoundary"]
+    assert set(public_boundary["localTools"]) == BOOTH_EVIDENCE_LOCAL_READ_TOOLS
+    assert public_boundary["hostProvidedWebAndImageReadRequired"] is True
+    assert public_boundary["onMissing"] == "report_capability_gap_and_stop_dependent_writes"
+    evidence_step = workflow["steps"][0]
+    assert evidence_step["name"] == "read_booth_asset_author_evidence_before_asset_change"
+    assert evidence_step["writes"] is False
+    assert evidence_step["tool"] == "vrcforge_list_directory"
+    assert set(evidence_step["tools"]) <= BOOTH_EVIDENCE_LOCAL_READ_TOOLS
+
+
+def test_booth_web_and_image_readers_are_internal_only_in_public_mcp_inventory() -> None:
+    public = {
+        tool["name"]
+        for tool in dashboard_server.AGENT_GATEWAY.build_external_mcp_tools(
+            "execution", tool_blocks=["*"]
+        )
+    }
+    assert BOOTH_EVIDENCE_LOCAL_READ_TOOLS <= public
+    assert not public & {
+        "vrcforge_web_search", "vrcforge_web_fetch", "vrcforge_read_local_image"
+    }
 
 
 def test_new_wardrobe_guidance_requires_reference_and_bounded_delivery_checks() -> None:
