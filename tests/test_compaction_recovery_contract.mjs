@@ -38,6 +38,7 @@ test("malformed recovery is rejected without entering the model payload", () => 
 
 const conversation = await readFile(path.join(root, "src/lib/conversation-utils.ts"), "utf8");
 const runController = await readFile(path.join(root, "src/hooks/use-chat-run-controller.ts"), "utf8");
+const contextController = await readFile(path.join(root, "src/hooks/use-context-compaction-controller.ts"), "utf8");
 test("ordinary chat history remains separate from recovery collection", () => {
   assert.match(conversation, /export function collectCompactionRecovery/);
   const historyBody = conversation.slice(conversation.indexOf("export function buildChatHistory"), conversation.indexOf("/** Recovery is sent"));
@@ -49,4 +50,10 @@ test("runtime replacement merges durable archives before projecting old items", 
   const projectionStart = runController.indexOf("const projection = projectRuntimeCompactionItems", compactStart);
   const replacement = runController.slice(compactStart, projectionStart);
   assert.match(replacement, /mergeCompactionRecovery\(\s*collectCompactionRecovery\(durableItems\),\s*responseRecovery/s);
+  assert.ok((runController.match(/item\.type === "question_answer"/g) || []).length >= 2);
+  const replacementSource = contextController.slice(
+    contextController.indexOf("function buildReplacementItems"),
+    contextController.indexOf("function applyCompactedAttachmentReferences"),
+  );
+  assert.match(replacementSource, /item\.type === "question_answer"/);
 });

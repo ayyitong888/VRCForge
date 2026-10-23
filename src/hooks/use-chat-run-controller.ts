@@ -1191,12 +1191,12 @@ export function useChatRunController({
       const summarizedSourceDigest = fingerprintCompactionSource(history);
       const summarizedSourceItemIds = new Set(
         baseItems
-          .filter((item) => item.type === "user" || item.type === "agent" || item.type === "compact" || item.type === "subagent")
+          .filter((item) => item.type === "user" || item.type === "question_answer" || item.type === "agent" || item.type === "compact" || item.type === "subagent")
           .map((item) => item.id),
       );
       const summarizedItemIds = new Set(
         baseItems
-          .filter((item) => item.type === "user" || item.type === "agent" || item.type === "compact")
+          .filter((item) => item.type === "user" || item.type === "question_answer" || item.type === "agent" || item.type === "compact")
           .map((item) => item.id),
       );
       const userItem: Extract<ConversationItem, { type: "user" }> = {

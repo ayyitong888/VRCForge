@@ -322,6 +322,7 @@ test("bounded fallback keeps the primary goal and newest complete turns without 
 test("mid-turn projection marks summarized dialogue and preserves the full durable order", () => {
   const items = [
     { id: "old-user", type: "user", text: "old request" },
+    { id: "old-answer", type: "question_answer", questionId: "q-1", header: "Review", text: "old answer" },
     { id: "task", type: "subagent", task: { id: "task", status: "running" } },
     { id: "old-agent", type: "agent", response: { plan: { reply: "old answer" } } },
     { id: "approval", type: "result", approvalId: "approval-1" },
@@ -336,20 +337,21 @@ test("mid-turn projection marks summarized dialogue and preserves the full durab
   };
   const projected = policy.projectRuntimeCompactionItems(
     items,
-    new Set(["old-user", "old-agent"]),
+    new Set(["old-user", "old-answer", "old-agent"]),
     compactItem,
   );
-  assert.equal(projected.replacedCount, 2);
+  assert.equal(projected.replacedCount, 3);
   assert.deepEqual(projected.items.map((item) => item.id), [
     "compact-window",
     "old-user",
+    "old-answer",
     "task",
     "old-agent",
     "approval",
     "current-user",
   ]);
   assert.equal(projected.items[0].detail, "safe successor summary");
-  assert.deepEqual(projected.items[0].summarizedItemIds, ["old-user", "old-agent"]);
+  assert.deepEqual(projected.items[0].summarizedItemIds, ["old-user", "old-answer", "old-agent"]);
 
   const stale = policy.projectRuntimeCompactionItems(items, new Set(["missing"]), compactItem);
   assert.equal(stale.replacedCount, 0);

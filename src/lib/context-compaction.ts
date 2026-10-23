@@ -338,12 +338,12 @@ export function projectRuntimeCompactionItems(
 ): RuntimeCompactionProjection {
   const projected: ConversationItem[] = [];
   const marker = { ...compactItem, contextUsageBoundaryItemId: contextUsageBoundaryItemId(items), summarizedItemIds: [...summarizedItemIds].filter((id) =>
-    items.some((item) => item.id === id && (item.type === "user" || item.type === "agent" || item.type === "compact"))) };
+    items.some((item) => item.id === id && (item.type === "user" || item.type === "question_answer" || item.type === "agent" || item.type === "compact"))) };
   let inserted = false;
   let replacedCount = 0;
   for (const item of items) {
     const summarizedDialogue = summarizedItemIds.has(item.id)
-      && (item.type === "user" || item.type === "agent" || item.type === "compact");
+      && (item.type === "user" || item.type === "question_answer" || item.type === "agent" || item.type === "compact");
     if (!summarizedDialogue) {
       projected.push(item);
       continue;

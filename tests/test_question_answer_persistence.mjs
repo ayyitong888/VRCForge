@@ -56,11 +56,22 @@ try {
   assert.equal(refs.length, 1, "question answer attachment survives compaction archival");
   assert.ok(compactedVault[refs[0].payloadHash]);
   const history = buildChatHistory(chat.items, (key) => key);
-  assert.deepEqual(history.map((entry) => entry.text), ["Inspect the preview"], "visible answer is not duplicated into provider continuation history");
+  assert.deepEqual(history, [
+    { role: "user", text: "Inspect the preview" },
+    {
+      role: "user",
+      text: "The left side is clear.\n\nattachments.summaryHeader:\n- review.png (image/png, 42 B, attachments.metadataOnly)",
+    },
+  ], "question answer remains available as user history for native cold recovery");
+  const compactedHistory = buildChatHistory([
+    ...chat.items,
+    { id: "compact-answer", type: "compact", text: "Answer summary", summarizedItemIds: [answer.id] },
+  ], (key) => key);
+  assert.deepEqual(compactedHistory, [{ role: "user", text: "Inspect the preview" }, { role: "agent", text: "Answer summary" }], "summarized question answer is not reintroduced");
   const switchedSession = { id: "other-chat", sessionId: "session-other", title: "Other task", projectPath: "", items: [] };
   assert.deepEqual(filterPersistableChats([chat, switchedSession]).map((item) => item.sessionId), ["session-original", "session-other"]);
   assert.equal(filterPersistableChats([chat, switchedSession])[1].items.some((item) => item.type === "question_answer"), false, "answer remains scoped to its original chat");
-  console.log("question answer persistence: reload, attachment vault, compaction archive, provider-history exclusion, and session isolation passed");
+  console.log("question answer persistence: reload, attachment vault, cold-recovery history, compaction archive, and session isolation passed");
 } finally {
   const target = await fs.realpath(temp);
   const testRoot = await fs.realpath(path.join(root, "tests"));

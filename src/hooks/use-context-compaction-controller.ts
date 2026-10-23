@@ -500,7 +500,7 @@ function buildReplacementItems(
   const durable = stripTransientConversationItems(items);
   let lastUserIndex = -1;
   for (let index = durable.length - 1; index >= 0; index -= 1) {
-    if (durable[index]?.type === "user") {
+    if (durable[index]?.type === "user" || durable[index]?.type === "question_answer") {
       lastUserIndex = index;
       break;
     }
@@ -512,7 +512,7 @@ function buildReplacementItems(
     .filter((item) => item.type === "subagent" || item.type === "result");
   const retainedIds = new Set([...recentDialogue, ...stateCards].map((item) => item.id));
   const summarizedItemIds = durable
-    .filter((item) => (item.type === "user" || item.type === "agent" || item.type === "compact") && !retainedIds.has(item.id))
+    .filter((item) => (item.type === "user" || item.type === "question_answer" || item.type === "agent" || item.type === "compact") && !retainedIds.has(item.id))
     .map((item) => item.id);
   const marker = { ...compactItem, summarizedItemIds, contextUsageBoundaryItemId: contextUsageBoundaryItemId(durable) };
   const result: ConversationItem[] = [];

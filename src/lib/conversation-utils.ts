@@ -190,6 +190,11 @@ export function buildChatHistory(items: ConversationItem[], t: TFunction): ChatH
       if (text) {
         history.push({ role: "user", text });
       }
+    } else if (item.type === "question_answer") {
+      const text = appendAttachmentSummary(item.text, item.attachments || [], t).trim();
+      if (text) {
+        history.push({ role: "user", text });
+      }
     } else if (item.type === "agent") {
       const text = visibleAgentDialogueText(item.response).trim();
       if (text) {
