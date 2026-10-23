@@ -70,7 +70,10 @@ test('unaccepted original stays out of copy/history until the accepted control f
   assert.equal(response.timeline[0].payload.summary, 'Original proposed final.');
   response.timeline[1].payload.status = 'cancelled';
   response.timeline[1].payload.summary = 'Request cancelled.';
-  assert.equal(visibleAgentDialogueText(response), 'Request cancelled.');
+  // The cancellation placeholder is a marker, never history text; the
+  // unaccepted proposed final must still not reappear through the composer.
+  assert.equal(visibleAgentDialogueText(response), '');
+  assert.deepEqual(history(response), []);
 });
 test('actual local receipt keeps the accepted final and excludes the earlier unaccepted proposal', { skip: !fixturePath }, async () => {
   const report = JSON.parse(await readFile(fixturePath, 'utf8'));
@@ -151,3 +154,44 @@ test('frontend-aborted cancelled turns keep partial dialogue as the reply', () =
   assert.match(text, /已取消/);
   assert.match(text, /已定位到调参块，准备写入。/);
 });
+
+test('cancelled legacy turn keeps unphased progress narration in history', () => {
+  const response = {
+    plan: { summary: 'Runtime turn was cancelled by the user.', reply: 'Request cancelled.', nextStep: 'cancelled' },
+    timeline: [
+      runtimeEvent('update-1', 0, 'assistant', { label: 'Assistant update', summary: '正在检查材质配置。', status: 'progress' }),
+      runtimeEvent('call-1', 1, 'tool_call', { actionId: 'action-1', tool: 'vrcforge_search_text', status: 'dispatched' }),
+      runtimeEvent('result-1', 2, 'tool_result', { actionId: 'action-1', tool: 'vrcforge_search_text', status: 'ok', summary: 'found' }),
+    ],
+  };
+  const entries = history(response);
+  assert.equal(entries.length, 1);
+  assert.match(entries[0].text, /Runtime turn was cancelled by the user\./);
+  assert.match(entries[0].text, /正在检查材质配置。/);
+  assert.match(entries[0].text, /search_text \(ok\)/);
+  assert.ok(!entries[0].text.includes('Request cancelled.'));
+});
+
+// The gateway projects its cancellation placeholder as an assistant timeline
+// event — unphased in older builds, phase="final_answer" in current builds.
+// Neither shape may win the final-answer path or leak into history.
+for (const [id, placeholderPayload] of [
+  ['unphased', { label: 'Assistant', summary: 'Request cancelled.', status: 'cancelled' }],
+  ['phased', { label: 'Assistant', summary: 'Request cancelled.', status: 'cancelled', phase: 'final_answer' }],
+]) {
+  test(`cancelled turn ignores the ${id} gateway placeholder final event`, () => {
+    const response = {
+      plan: { summary: 'Runtime turn was cancelled by the user.', reply: 'Request cancelled.', nextStep: 'cancelled' },
+      timeline: [
+        runtimeEvent('marker', 0, 'assistant', placeholderPayload),
+        runtimeEvent('call-1', 1, 'tool_call', { actionId: 'action-1', tool: 'vrcforge_read_text_file', status: 'dispatched' }),
+        runtimeEvent('result-1', 2, 'tool_result', { actionId: 'action-1', tool: 'vrcforge_read_text_file', status: 'ok', summary: 'read fixture' }),
+      ],
+    };
+    const entries = history(response);
+    assert.equal(entries.length, 1);
+    assert.match(entries[0].text, /Runtime turn was cancelled by the user\./);
+    assert.match(entries[0].text, /read_text_file \(ok\)/);
+    assert.ok(!entries[0].text.includes('Request cancelled.'), 'the placeholder event must not reappear as model words');
+  });
+}

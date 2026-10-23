@@ -8,6 +8,7 @@ import {
   buildRuntimeStepResultQueues,
   buildTimelinePresentation,
   hasDurableExecutionEvents,
+  isCancellationMarkerTimelineEvent,
   isFinalAssistantTimelineEvent,
   isFinalAssistantPresentationEntry,
   runtimeTerminalStatusKey,
@@ -94,6 +95,10 @@ export function buildAgentTimelineRows({
     {
       providerLine,
       renderElapsed: true,
+      // The composer's final row already carries the cancellation marker;
+      // the runtime's placeholder assistant event must not render as a
+      // second, content-free final answer row.
+      dropCancellationMarkers: isCancelledRuntimeResponse(response),
       interleavedUserMessages,
       initialUserContent,
       interleavedUsersExpanded,
@@ -131,9 +136,11 @@ export function buildAgentTimelineRows({
     const hasDurableAssistant = durableTimeline.some(
       (event) => event.kind === "assistant" && Boolean(event.payload?.summary),
     );
-    const hasDurableFinalAssistant = durableTimeline.some(isFinalAssistantTimelineEvent);
+    const hasDurableFinalAssistant = durableTimeline.some(
+      (event) => isFinalAssistantTimelineEvent(event) && !isCancellationMarkerTimelineEvent(event),
+    );
     const cancelledDialogue = isCancelledRuntimeResponse(response)
-      ? cancelledAgentDialogueText(response)
+      ? cancelledAgentDialogueText(response, { includeSpoken: false })
       : "";
     const fallbackAnswer = phaseTaggedAssistant && !hasDurableFinalAssistant
       ? cancelledDialogue
@@ -196,7 +203,7 @@ export function buildAgentTimelineRows({
   const hasAnswer = orderedSteps.some(({ step }) => isStepKindAnswer(step.kind));
   if (!hasAnswer) {
     const cancelledDialogue = isCancelledRuntimeResponse(response)
-      ? cancelledAgentDialogueText(response)
+      ? cancelledAgentDialogueText(response, { includeSpoken: false })
       : "";
     const fallbackAnswer = cancelledDialogue || response.plan.reply || response.plan.summary;
     if (fallbackAnswer) {
@@ -243,6 +250,7 @@ export function buildDurableTimelineRows(
     processTitleElapsed?: number;
     providerLine?: string;
     suppressTrailingAssistantText?: string;
+    dropCancellationMarkers?: boolean;
     interleavedUserMessages?: InterleavedUserMessage[];
     initialUserContent?: ReactNode;
     interleavedUsersExpanded?: boolean;
@@ -251,7 +259,12 @@ export function buildDurableTimelineRows(
   } = {},
 ): ReactNode[] {
   // Lifecycle evidence stays durable; the right sidebar owns its presentation.
-  const presentation = buildTimelinePresentation(events.filter((event) => event.kind !== "subagent"), elapsedSeconds);
+  // A dropped cancellation marker is replaced by the composer's final row.
+  const presentation = buildTimelinePresentation(
+    events.filter((event) => event.kind !== "subagent"
+      && !(options.dropCancellationMarkers && isCancellationMarkerTimelineEvent(event))),
+    elapsedSeconds,
+  );
   if (!presentation.entries.length) {
     return (options.interleavedUserMessages || []).map((message) => options.renderInterleavedUserMessage?.(message) || (
       <div key={`steer-${message.id}`} data-chat-steering-message={message.id} className="flex justify-end">

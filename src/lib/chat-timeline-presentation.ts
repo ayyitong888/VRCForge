@@ -133,6 +133,21 @@ export function isFinalAssistantPresentationEntry(
   return FINAL_ASSISTANT_STATUSES.has(entry.status.toLowerCase());
 }
 
+const CANCELLED_ASSISTANT_PLACEHOLDER_TEXTS = new Set(["request cancelled.", "已取消"]);
+
+/** The runtime's cancellation placeholder, not model words. */
+export function isCancellationMarkerAssistantText(text: string): boolean {
+  return CANCELLED_ASSISTANT_PLACEHOLDER_TEXTS.has(String(text || "").trim().toLowerCase());
+}
+
+/** A terminal cancellation marker event; it is never the model's final answer. */
+export function isCancellationMarkerTimelineEvent(event: ChatTimelineEvent): boolean {
+  if (event.kind !== "assistant") return false;
+  const status = String(event.payload?.status || "").toLowerCase();
+  if (status === "cancelled" || status === "canceled") return true;
+  return isCancellationMarkerAssistantText(String(event.payload?.summary || ""));
+}
+
 /** Resolve an explicit terminal label from structured Runtime state, never assistant prose. */
 export function runtimeTerminalStatusKey(failureCode = ""): string | undefined {
   if (failureCode === "planner_no_progress") {

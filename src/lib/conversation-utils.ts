@@ -20,7 +20,7 @@ import {
 import { subAgentAdoptedHistoryText } from "./subagent-merge";
 import { formatCount } from "./utils";
 import type { CompactionRecoveryEntry } from "./api/types";
-import { buildTimelinePresentation, materializeRuntimeTimeline, isFinalAssistantPresentationEntry, timelineInvocationDisplayLabel } from "./chat-timeline-presentation";
+import { buildTimelinePresentation, materializeRuntimeTimeline, isFinalAssistantPresentationEntry, timelineInvocationDisplayLabel, isCancellationMarkerAssistantText } from "./chat-timeline-presentation";
 
 const CONTEXT_TOKEN_LIMIT_DISPLAY_ESTIMATE = 128000;
 export const MAX_ATTACHMENT_PAYLOAD_BYTES = 4 * 1024 * 1024;
@@ -228,12 +228,17 @@ export function visibleAgentDialogueText(response: AgentRuntimeResponse): string
   );
   const finalEntry = [...assistantEntries].reverse().find(isFinalAssistantPresentationEntry);
   const hasStructuredPhases = assistantEntries.some((entry) => entry.phase === "commentary" || entry.phase === "final_answer");
-  // A structured timeline may terminate with status=done without repeating
-  // final_answer; legacy unphased timelines retain the plan.reply fallback.
-  if (finalEntry && (finalEntry.phase === "final_answer" || hasStructuredPhases)) return finalEntry.text;
+  // The runtime's cancellation placeholder (a cancelled-status event or the
+  // "Request cancelled." text, phased or not) is a marker, never the model's
+  // final words; a real accepted final still survives cancellation.
+  const placeholderFinal = finalEntry
+    ? isCancellationMarkerAssistantText(finalEntry.text)
+      || ["cancelled", "canceled"].includes(finalEntry.status.toLowerCase())
+    : false;
+  if (finalEntry && !placeholderFinal && (finalEntry.phase === "final_answer" || hasStructuredPhases)) return finalEntry.text;
   // Cancellation cannot roll back completed effects: keep the marker, the
   // model's own words, and the executed work instead of a bare placeholder.
-  if (isCancelledRuntimeResponse(response)) return cancelledAgentDialogueText(response);
+  if (isCancelledRuntimeResponse(response) || placeholderFinal) return cancelledAgentDialogueText(response);
   const hasUnacceptedFinal = assistantEntries.some((entry) => entry.status === "completion_unverified");
   // A durable unaccepted final must not reappear through the model-only fallback.
   if (hasUnacceptedFinal) return "";
@@ -253,28 +258,43 @@ export function isCancelledRuntimeResponse(response: AgentRuntimeResponse): bool
     || String(response?.plan?.nextStep || "").trim().toLowerCase() === "cancelled";
 }
 
-const CANCELLED_PLACEHOLDER_REPLIES = new Set(["request cancelled.", "已取消"]);
-
 /**
  * Compose the durable dialogue text for a cancelled turn: the cancellation
  * marker, whatever the model had already said, and a bounded list of the work
- * that completed before cancellation. Display and next-turn history share it.
+ * that completed before cancellation. Next-turn history uses the full text;
+ * the transcript's final row passes includeSpoken:false because non-final
+ * assistant entries are already rendered as timeline rows above it.
  */
-export function cancelledAgentDialogueText(response: AgentRuntimeResponse): string {
+export function cancelledAgentDialogueText(
+  response: AgentRuntimeResponse,
+  { includeSpoken = true }: { includeSpoken?: boolean } = {},
+): string {
   const presentation = buildTimelinePresentation(materializeRuntimeTimeline(response));
+  const assistantEntries = presentation.entries.filter((entry) => entry.type === "assistant");
+  const hasUnacceptedFinal = assistantEntries.some((entry) => entry.status === "completion_unverified");
   const sections: string[] = [];
   const marker = String(response?.plan?.summary || "").trim();
   if (marker) sections.push(marker);
+  // An unaccepted proposed final must never reappear through the reply field.
   const reply = String(response?.plan?.reply || "").trim();
-  if (reply && !CANCELLED_PLACEHOLDER_REPLIES.has(reply.toLowerCase())) sections.push(reply);
-  const commentary = presentation.entries
-    .filter((entry): entry is Extract<typeof entry, { type: "assistant" }> => (
-      entry.type === "assistant" && entry.phase === "commentary"
-    ))
-    .map((entry) => entry.text.trim().slice(0, 2_000))
-    .filter(Boolean);
-  const unseenCommentary = commentary.filter((text) => !sections.some((section) => section.includes(text)));
-  if (unseenCommentary.length) sections.push(unseenCommentary.join("\n\n"));
+  if (reply && !hasUnacceptedFinal && !isCancellationMarkerAssistantText(reply)) sections.push(reply);
+  if (includeSpoken) {
+    // The model's own words before cancellation. Native protocols tag them
+    // phase="commentary"; the legacy JSON planner projects them as unphased
+    // progress events. Phased finals, unaccepted finals, and cancellation
+    // markers never reappear here.
+    const spoken = assistantEntries
+      .filter((entry) => (
+        entry.phase !== "final_answer"
+        && entry.status !== "completion_unverified"
+        && !["cancelled", "canceled"].includes(entry.status.toLowerCase())
+        && !isCancellationMarkerAssistantText(entry.text)
+      ))
+      .map((entry) => entry.text.trim().slice(0, 2_000))
+      .filter(Boolean);
+    const unseenSpoken = spoken.filter((text) => !sections.some((section) => section.includes(text)));
+    if (unseenSpoken.length) sections.push(unseenSpoken.join("\n\n"));
+  }
   const invocations = presentation.entries
     .flatMap((entry) => entry.type === "batch" ? entry.invocations : [])
     .map((invocation) => `- ${timelineInvocationDisplayLabel(invocation.label)} (${invocation.status})`);
