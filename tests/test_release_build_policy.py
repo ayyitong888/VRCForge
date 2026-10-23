@@ -174,7 +174,8 @@ def test_desktop_project_selection_is_confirmed_before_unity_readiness() -> None
     assert "state.selectedProjectPath" in hook
     assert "!projectPath.trim()" in hook
     assert "confirmedProjectPath" in hook
-    assert "normalizeProjectPathKey(confirmedProjectPath) === normalizeProjectPathKey(projectPath)" in hook
+    assert "normalizeProjectPathKey(confirmedProjectPath)" in hook
+    assert "normalizedConfirmedProjectPath === normalizedProjectPath" in hook
 
 
 def test_desktop_restores_authoritative_project_without_guessing_first_item() -> None:

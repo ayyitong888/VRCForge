@@ -483,15 +483,6 @@ export default function App() {
     || bootstrap?.health.projects?.selectedProjectPath
     || ""
   ).trim();
-  useDashboardProjectSelection({
-    endpoint,
-    runtimeConnected,
-    projectPath: activeProjectPath,
-    projectType: activeProjectType,
-    confirmedProjectPath: authoritativeSelectedProjectPath,
-    setBootstrap,
-    setError,
-  });
   const {
     apiProvider,
     apiKey,
@@ -927,6 +918,17 @@ export default function App() {
     [chats, pinnedProjectSet, projectItems, projectOrder],
   );
   chatSessionActionsRef.current = { selectProject, newConversation };
+  useDashboardProjectSelection({
+    endpoint,
+    runtimeConnected,
+    projectPath: activeProjectPath,
+    projectType: activeProjectType,
+    activeChatId,
+    confirmedProjectPath: authoritativeSelectedProjectPath,
+    onConfirmedProjectPath: (projectPath) => chatSessionActionsRef.current?.selectProject(projectPath, "unity"),
+    setBootstrap,
+    setError,
+  });
   const projectTypeForPath = (projectPath: string): ProjectType => {
     const normalized = normalizeProjectPathKey(projectPath);
     const project = projectItems.find((candidate) => normalizeProjectPathKey(projectKey(candidate)) === normalized);
