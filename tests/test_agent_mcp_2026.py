@@ -35,6 +35,44 @@ def router():
     )
 
 
+@pytest.mark.parametrize(
+    "method,params",
+    [
+        ("server/discover", {}),
+        ("tools/list", {}),
+        ("prompts/list", {}),
+        ("resources/list", {}),
+        ("resources/templates/list", {}),
+        ("resources/read", {"uri": "test://resource"}),
+    ],
+)
+def test_cacheable_results_declare_private_immediately_stale_policy(method, params):
+    # MCP 2026-07-28 CacheableResult, also enforced by strict external hosts.
+    routed = Mcp2026Router(
+        lambda _params: [], lambda _name, _arguments: {"ok": True},
+        resource_list=lambda _params: {"resources": [], "nextCursor": "page-2"},
+        resource_templates=lambda _params: {"resourceTemplates": []},
+        resource_read=lambda uri: {"contents": [{"uri": uri, "text": "content"}]},
+        prompt_list=lambda _params: {"prompts": []},
+    )
+    response, status = routed.handle(_request(method, params))
+    assert status == 200
+    result = response["result"]
+    assert result["resultType"] == "complete"
+    assert type(result.get("ttlMs")) is int
+    assert result["ttlMs"] == 0
+    assert result.get("cacheScope") == "private"
+    if method == "resources/list":
+        assert result["nextCursor"] == "page-2"
+
+
+def test_non_cacheable_results_do_not_advertise_caching(router):
+    response, status = router.handle(_request("tools/call", {"name": "echo", "arguments": {}}))
+    assert status == 200
+    assert "ttlMs" not in response["result"]
+    assert "cacheScope" not in response["result"]
+
+
 def test_discover_list_and_call_are_strict_2026(router):
     discover, status = router.handle(_request("server/discover"))
     assert status == 200
@@ -319,6 +357,8 @@ def test_stdio_is_newline_json_without_length_prefix(router):
     assert run_stdio_loop(router, input_stream=source, output_stream=sink) == 0
     output = [json.loads(line) for line in sink.getvalue().splitlines()]
     assert output[0]["result"]["resultType"] == "complete"
+    assert output[0]["result"]["ttlMs"] == 0
+    assert output[0]["result"]["cacheScope"] == "private"
     assert output[1]["error"]["code"] == -32700
     assert "Content-Length" not in sink.getvalue()
 

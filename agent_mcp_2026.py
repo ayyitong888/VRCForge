@@ -166,9 +166,18 @@ def _server_info(name: str, version: str) -> JsonObject:
     return {"name": name, "version": version}
 
 
-def _success(request_id: Any, result: Mapping[str, Any], *, server_name: str, server_version: str) -> JsonObject:
+def _success(
+    request_id: Any, result: Mapping[str, Any], *, server_name: str,
+    server_version: str, cacheable: bool = False,
+) -> JsonObject:
     completed = dict(result)
     completed["resultType"] = "complete"
+    if cacheable:
+        # MCP 2026-07-28 CacheableResult (SEP-2549). Catalogues and resources
+        # depend on this session's authorization, exposure and active blocks.
+        # Match the SDK default: always fresh-read, never share across users.
+        completed["ttlMs"] = 0
+        completed["cacheScope"] = "private"
     result_meta = completed.get("_meta")
     if not isinstance(result_meta, Mapping):
         result_meta = {}
@@ -505,6 +514,7 @@ class Mcp2026Router:
                     },
                     server_name=self.server_name,
                     server_version=self.server_version,
+                    cacheable=True,
                 ), 200
             if method == "resources/list" and self._resource_list is not None:
                 supplied = await _resolve(self._resource_list(params))
@@ -515,6 +525,7 @@ class Mcp2026Router:
                     _strict_json_clone(supplied),
                     server_name=self.server_name,
                     server_version=self.server_version,
+                    cacheable=True,
                 ), 200
             if method == "resources/templates/list" and self._resource_templates is not None:
                 supplied = await _resolve(self._resource_templates(params))
@@ -525,6 +536,7 @@ class Mcp2026Router:
                     _strict_json_clone(supplied),
                     server_name=self.server_name,
                     server_version=self.server_version,
+                    cacheable=True,
                 ), 200
             if method == "resources/read" and self._resource_read is not None:
                 uri = params.get("uri")
@@ -545,6 +557,7 @@ class Mcp2026Router:
                     _strict_json_clone(supplied),
                     server_name=self.server_name,
                     server_version=self.server_version,
+                    cacheable=True,
                 ), 200
             if method == "prompts/list" and self._prompt_list is not None:
                 supplied = await _resolve(self._prompt_list(params))
@@ -555,6 +568,7 @@ class Mcp2026Router:
                     _strict_json_clone(supplied),
                     server_name=self.server_name,
                     server_version=self.server_version,
+                    cacheable=True,
                 ), 200
             if method == "prompts/get" and self._prompt_get is not None:
                 name = params.get("name")
@@ -601,6 +615,7 @@ class Mcp2026Router:
                     result_payload,
                     server_name=self.server_name,
                     server_version=self.server_version,
+                    cacheable=True,
                 ), 200
             if method == "tools/call":
                 tool_name = params.get("name")
