@@ -336,6 +336,76 @@ def test_attachment_vault_and_compacted_references_require_ui_safe_shapes() -> N
         assert not is_valid_chat_record(malformed), label
 
 
+def test_frontend_conversation_union_variants_are_admitted_with_strict_fields(tmp_path: Path) -> None:
+    valid = {
+        "id": "chat-question-answer",
+        "items": [
+            {
+                "id": "question-answer-q1",
+                "type": "question_answer",
+                "questionId": "q1",
+                "header": "Choose a color",
+                "text": "blue",
+                "revision": 2,
+                "updatedAt": "2026-10-23T00:00:00Z",
+                "attachments": [{
+                    "id": "answer-attachment",
+                    "name": "Selected text",
+                    "size": 4,
+                    "type": "text/plain",
+                    "text": "blue",
+                    "originalText": "blue",
+                    "payloadKind": "text",
+                }],
+            },
+            {
+                "id": "approval-revision-1",
+                "type": "approval_revision",
+                "approvalId": "approval-1",
+                "targetTool": "vrcforge_write",
+                "requestedAt": "2026-10-23T00:00:00Z",
+                "reason": "wrong target",
+                "note": "Retry against the selected avatar.",
+                "status": "retrying",
+                "createdAt": "2026-10-23T00:00:00Z",
+            },
+            {
+                "id": "handoff-card-1",
+                "type": "handoff_card",
+                "cardId": "card-1",
+                "handoffId": "handoff-1",
+                "kind": "agent_handoff",
+                "payloadDigest": "digest-1",
+                "sourceChatId": "chat-source",
+                "targetChatId": "chat-target",
+                "sourceRevision": None,
+                "targetRevision": 4,
+                "summary": {"title": "Continue safely", "count": 1},
+                "status": "pending_review",
+            },
+        ],
+    }
+    assert is_valid_chat_record(valid)
+
+    malformed = deepcopy(valid)
+    malformed["items"][0]["questionId"] = 1
+    assert not is_valid_chat_record(malformed)
+    malformed = deepcopy(valid)
+    malformed["items"][1]["status"] = "completed"
+    assert not is_valid_chat_record(malformed)
+    malformed = deepcopy(valid)
+    malformed["items"][2]["summary"] = []
+    assert not is_valid_chat_record(malformed)
+    malformed = deepcopy(valid)
+    malformed["items"][0]["unexpected"] = True
+    assert not is_valid_chat_record(malformed)
+
+    path = tmp_path / "question-answer-chat.json"
+    path.write_text(json.dumps({"version": 1, "chats": [valid]}), encoding="utf-8")
+    scanned = scan_session_store(target(path, required_list_field="chats", required_list_item_kind="chat"))
+    assert scanned["status"] == "ok"
+
+
 def test_nested_agent_response_fields_require_react_safe_shapes(tmp_path: Path) -> None:
     valid = {
         "id": "chat-agent-nested",

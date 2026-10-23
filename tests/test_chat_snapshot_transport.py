@@ -383,6 +383,23 @@ def test_paged_snapshot_marks_only_fixed_display_text_paths():
     ]
 
 
+def test_paged_snapshot_marks_question_answer_text_as_fixed_user_display():
+    from chat_snapshot_transport import snapshot_response
+
+    answer = '回答中的技术字段名 api_key 仅作说明，不是凭据。'
+    snapshot = {
+        'chats': [{
+            'items': [
+                {'type': 'question_answer', 'text': answer},
+                {'type': 'tool', 'text': 'api_key=private-tool-result'},
+            ],
+        }],
+    }
+
+    projected = json.loads(snapshot_response(snapshot, {'snapshotPage': '1'})['text'])
+    assert projected['_validatedChatTextPaths'] == ['/chats/0/items/0/text']
+
+
 def test_paged_snapshot_marks_all_fixed_agent_display_paths_regardless_of_content():
     from chat_snapshot_transport import snapshot_response
 

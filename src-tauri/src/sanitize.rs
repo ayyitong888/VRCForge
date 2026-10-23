@@ -344,7 +344,7 @@ fn validated_plain_chat_text_path(
         let item = value.pointer(&item_path)?.as_object()?;
         let item_type = item.get("type")?.as_str()?;
         let valid = if parts[5] == "text" {
-            matches!(item_type, "user" | "streaming" | "error" | "compact")
+            matches!(item_type, "user" | "streaming" | "error" | "compact" | "question_answer")
         } else {
             item_type == "compact"
         };
@@ -612,6 +612,27 @@ mod chat_snapshot_sanitizer_tests {
             }]}],
         }));
         assert_eq!(actual["chats"][0]["items"][0]["text"], "Authorization: Bearer live-token");
+    }
+
+    #[test]
+    fn question_answer_text_is_retained_in_a_typed_user_display_slot() {
+        let actual = sanitize_chat_snapshot_response(json!({
+            "_validatedChatTextPaths": [
+                "/chats/0/items/0/text",
+                "/chats/0/items/1/text",
+            ],
+            "chats": [{"items": [
+                {"type": "question_answer", "text": "回答中的技术字段名 api_key 仅作说明，不是凭据。"},
+                {"type": "tool", "text": "api_key=private-tool-result"},
+            ]}],
+            "diagnostic": "api_key=private-diagnostic-token",
+        }));
+        assert_eq!(
+            actual["chats"][0]["items"][0]["text"],
+            "回答中的技术字段名 api_key 仅作说明，不是凭据。"
+        );
+        assert_eq!(actual["chats"][0]["items"][1]["text"], "[redacted]");
+        assert_eq!(actual["diagnostic"], "[redacted]");
     }
 
     #[test]

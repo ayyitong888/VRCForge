@@ -309,7 +309,7 @@ def _validated_chat_text_paths(snapshot: dict[str, Any]) -> list[str]:
             if not isinstance(item, dict):
                 continue
             item_type = item.get("type")
-            if item_type in {"user", "streaming", "error", "compact"}:
+            if item_type in {"user", "streaming", "error", "compact", "question_answer"}:
                 append_if_safe(f"/chats/{chat_index}/items/{item_index}/text", item.get("text"))
             if item_type == "compact":
                 append_if_safe(f"/chats/{chat_index}/items/{item_index}/detail", item.get("detail"))

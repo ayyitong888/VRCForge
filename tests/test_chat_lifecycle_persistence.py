@@ -36,6 +36,40 @@ def test_lifecycle_events_survive_actual_chat_storage_write_and_read(tmp_path, m
     assert all(is_valid_chat_record(row) for row in saved)
 
 
+def test_question_answer_item_survives_actual_chat_storage_write(tmp_path, monkeypatch):
+    import dashboard_server as server
+    from dashboard_api_models import ChatTranscriptsRequest
+
+    monkeypatch.setattr(server, "chat_transcripts_path", lambda: tmp_path / "chats.json")
+    monkeypatch.setattr(server, "chat_project_index_path", lambda: tmp_path / "projects.json")
+    chat = {
+        "id": "question-answer-chat",
+        "items": [{
+            "id": "question-answer-q1",
+            "type": "question_answer",
+            "questionId": "q1",
+            "header": "Choose a color",
+            "text": "blue",
+            "revision": 1,
+            "updatedAt": "2026-10-23T00:00:00Z",
+            "attachments": [{
+                "id": "answer-attachment",
+                "name": "Selected text",
+                "size": 4,
+                "type": "text/plain",
+                "text": "blue",
+                "originalText": "blue",
+                "payloadKind": "text",
+            }],
+        }],
+    }
+    assert is_valid_chat_record(chat)
+    result, _, _ = server.write_chat_transcripts_storage(ChatTranscriptsRequest(chats=[chat]))
+    assert result["ok"] is True
+    saved = json.loads((tmp_path / "chats.json").read_text(encoding="utf-8"))["chats"]
+    assert saved == [chat]
+
+
 def test_generated_title_and_generic_runtime_failure_reply_survive_chat_storage(tmp_path, monkeypatch):
     import dashboard_server as server
     from dashboard_api_models import ChatTranscriptsRequest

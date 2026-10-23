@@ -31,7 +31,10 @@ ListItemKind = Literal["any", "nonempty_string", "chat"]
 _STORE_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$")
 _SAFE_REASON_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_]{0,63}$")
 _PAYLOAD_HASH_PATTERN = re.compile(r"^[a-f0-9]{64}$")
-_CHAT_ITEM_TYPES = frozenset({"user", "streaming", "agent", "result", "error", "compact", "subagent", "timeline_event"})
+_CHAT_ITEM_TYPES = frozenset({
+    "user", "question_answer", "streaming", "agent", "result", "timeline_event",
+    "approval_revision", "error", "compact", "subagent", "handoff_card",
+})
 _MAX_JSON_DEPTH = 64
 MAX_STREAMED_JSONL_LINE_BYTES = 8 * 1024 * 1024
 _MAX_SAFE_JSON_INTEGER = 9_007_199_254_740_991
@@ -1171,6 +1174,8 @@ def is_valid_chat_record(value: Any) -> bool:
             attachments = item.get("attachments")
             if not isinstance(attachments, list) or any(not _is_valid_chat_attachment(value) for value in attachments):
                 return False
+        if item_type == "question_answer" and not _is_valid_question_answer_item(item):
+            return False
         if item_type == "user" and "queuedFrom" in item and not isinstance(item.get("queuedFrom"), bool):
             return False
         if item_type == "timeline_event" and not _is_valid_chat_timeline_event(item.get("event")):
@@ -1201,6 +1206,10 @@ def is_valid_chat_record(value: Any) -> bool:
                 return False
             if any(field in task and not isinstance(task.get(field), str) for field in ("summary", "error", "mergeDecision", "mergedAt")):
                 return False
+        if item_type == "approval_revision" and not _is_valid_approval_revision_item(item):
+            return False
+        if item_type == "handoff_card" and not _is_valid_handoff_card_item(item):
+            return False
         if item_type == "compact":
             if any(field in item and not isinstance(item.get(field), str) for field in ("detail", "status")):
                 return False
@@ -1220,7 +1229,7 @@ def _is_valid_chat_attachment(value: Any) -> bool:
     size = value.get("size")
     if not _is_safe_nonnegative_integer(size):
         return False
-    if any(field in value and not isinstance(value.get(field), str) for field in ("dataUrl", "text", "vaultKind", "error")):
+    if any(field in value and not isinstance(value.get(field), str) for field in ("dataUrl", "text", "originalText", "vaultKind", "error")):
         return False
     if "payloadKind" in value and value.get("payloadKind") not in {"data_url", "text", "metadata", "vault_file"}:
         return False
@@ -1230,6 +1239,74 @@ def _is_valid_chat_attachment(value: Any) -> bool:
     ):
         return False
     return "truncated" not in value or isinstance(value.get("truncated"), bool)
+
+
+def _is_valid_question_answer_item(value: Any) -> bool:
+    allowed = {"id", "type", "questionId", "header", "text", "revision", "updatedAt", "attachments"}
+    if not isinstance(value, dict) or not set(value).issubset(allowed):
+        return False
+    if value.get("type") != "question_answer":
+        return False
+    if not isinstance(value.get("questionId"), str) or not value["questionId"].strip():
+        return False
+    if not isinstance(value.get("text"), str):
+        return False
+    if any(field in value and not isinstance(value.get(field), str) for field in ("header", "updatedAt")):
+        return False
+    if "revision" in value and not _is_safe_nonnegative_integer(value.get("revision")):
+        return False
+    if "attachments" in value:
+        attachments = value.get("attachments")
+        if not isinstance(attachments, list) or any(not _is_valid_chat_attachment(item) for item in attachments):
+            return False
+    return True
+
+
+def _is_valid_approval_revision_item(value: Any) -> bool:
+    allowed = {
+        "id", "type", "approvalId", "targetTool", "requestedAt", "reason", "note",
+        "denyReasonCode", "status", "createdAt",
+    }
+    if not isinstance(value, dict) or not set(value).issubset(allowed):
+        return False
+    required_strings = ("approvalId", "targetTool", "requestedAt", "reason", "note")
+    if value.get("type") != "approval_revision" or any(
+        not isinstance(value.get(field), str) or not value[field].strip() for field in required_strings
+    ):
+        return False
+    if value.get("status") != "retrying":
+        return False
+    return all(
+        field not in value or (isinstance(value.get(field), str) and bool(value[field].strip()))
+        for field in ("denyReasonCode", "createdAt")
+    )
+
+
+def _is_valid_handoff_card_item(value: Any) -> bool:
+    allowed = {
+        "id", "type", "cardId", "handoffId", "kind", "payloadDigest", "sourceChatId", "targetChatId",
+        "sourceRevision", "targetRevision", "summary", "status",
+    }
+    if not isinstance(value, dict) or not set(value).issubset(allowed):
+        return False
+    required_strings = ("cardId", "handoffId", "kind", "payloadDigest")
+    if value.get("type") != "handoff_card" or any(
+        not isinstance(value.get(field), str) or not value[field].strip() for field in required_strings
+    ):
+        return False
+    if any(
+        field in value and not isinstance(value.get(field), str)
+        for field in ("sourceChatId", "targetChatId", "status")
+    ):
+        return False
+    if any(
+        field in value and value.get(field) is not None and not _is_safe_nonnegative_integer(value.get(field))
+        for field in ("sourceRevision", "targetRevision")
+    ):
+        return False
+    if "summary" in value and (not isinstance(value.get("summary"), dict) or not _is_json_safe_runtime_value(value["summary"])):
+        return False
+    return True
 
 
 def _is_valid_shell_result(value: Any) -> bool:
