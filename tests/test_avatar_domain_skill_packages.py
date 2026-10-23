@@ -124,7 +124,7 @@ def test_wardrobe_skill_preserves_capabilities_without_project_presets() -> None
     manifest = _json(root / "manifest.json")
     workflow = _json(root / manifest["entrypoints"]["workflow"])
     skill = parse_skill_markdown(root / "SKILL.md")
-    assert manifest["version"] == "1.1.26"
+    assert manifest["version"] == "1.1.27"
     assert {
         "vrcforge_setup_outfit", "vrcforge_add_wardrobe_outfit",
         "vrcforge_ensure_expression_parameter", "vrcforge_ensure_animator_state",

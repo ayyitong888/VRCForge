@@ -16,3 +16,12 @@ def test_wardrobe_binding_claims_preserve_missing_and_sampled_boundaries():
     assert "未绑定不等于写入 0" in text
     assert "按 clip 身份、绑定身份和分页覆盖核对" in text
     assert "不能仅凭总数或状态命名宣称全部链路完整" in text
+
+
+def test_default_outfit_uses_confirmed_pre_inspection_worn_state():
+    skill = (ROOT / "artifacts/skills/vrcforge-avatar-wardrobe/SKILL.md").read_text(encoding="utf-8")
+    guide = (ROOT / "artifacts/skills/vrcforge-avatar-wardrobe/references/workflow.md").read_text(encoding="utf-8")
+    assert "原装／默认穿搭" in skill and "原装／默认穿搭" in guide
+    assert "不能只凭当前 `activeSelf`" in skill
+    assert "不能仅凭当下显示状态" in guide
+    assert "先询问" in skill and "应先询问" in guide
