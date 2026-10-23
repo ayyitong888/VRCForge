@@ -287,6 +287,7 @@ fn main() {
             fetch_agent_progress,
             fetch_agent_questions,
             fetch_agent_runs,
+            fetch_agent_run_timeline,
             fetch_agent_resource_image,
             fetch_agent_turn_response,
             fetch_adjustment_checkpoints,

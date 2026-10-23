@@ -598,6 +598,8 @@ export type AgentRuntimeResponse = {
   model?: string;
   /** Ledger-backed terminal timestamp for the full runtime turn. */
   completedAt?: string;
+  /** Ledger-backed invocation start; absent when no start event was retained. */
+  startedAt?: string;
   providerWarningKey?: string;
   approval_id?: string;
   approvalId?: string;

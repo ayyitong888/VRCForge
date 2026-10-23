@@ -3,6 +3,9 @@ import type { AgentQuestion, AgentRuntimeResponse, AgentRuntimeRun } from "../li
 import type { ChatThread, ConversationItem } from "../lib/chat-types";
 import type { AgentRuntimeDeltaEvent } from "../lib/chat-streaming";
 import { applyAgentRuntimeDeltaToStreamingItem, elapsedSecondsFromTimeline } from "../lib/chat-streaming";
+import { materializeRuntimeTimeline, mergeRuntimeTimelines } from "../lib/chat-timeline-presentation";
+
+export const RUNTIME_ACTIVITY_STREAM_PREFIX = "runtime-activity:";
 
 const RUNTIME_TURN_EVENT_SCHEMA = "vrcforge.runtime_turn_event.v1";
 const RUNTIME_CONTINUATION_SOURCES = new Set(["approval_finished", "shell_process_finished", "sub_agent_finished", "question_answered", "foreground_completed", "foreground_interrupted"]);
@@ -315,7 +318,8 @@ export function runtimeContinuationDeliveryState(
     && ((clientTurnId && item.response.clientTurnId === clientTurnId)
       || (item.response.turnId || item.response.turn_id) === event.turnId);
   if (event.continuationSource === "foreground_completed"
-    && items.some((item) => item.type === "streaming" && clientTurnId && item.clientTurnId === clientTurnId)) {
+    && items.some((item) => item.type === "streaming" && clientTurnId && item.clientTurnId === clientTurnId
+      && !item.id.startsWith(RUNTIME_ACTIVITY_STREAM_PREFIX))) {
     return "defer";
   }
   const stored = items.find(matches);
@@ -407,7 +411,10 @@ export function useRuntimeTurnContinuationDelivery({
       return true;
     }
     onContinuationRef.current?.(event);
-    const ownerChat = chatsRef.current.find((chat) => chat.sessionId === event.sessionId);
+    const candidates = chatsRef.current.filter((chat) => chat.sessionId === event.sessionId);
+    const exactOwners = candidates.filter((chat) => chat.items.some((item) =>
+      (item.type === "user" || item.type === "streaming") && item.clientTurnId === event.clientTurnId));
+    const ownerChat = candidates.length === 1 ? candidates[0] : exactOwners.length === 1 ? exactOwners[0] : undefined;
     if (!ownerChat) {
       pendingRef.current.set(key, event);
       while (pendingRef.current.size > MAX_PENDING_CONTINUATIONS) {
@@ -460,6 +467,20 @@ export function useRuntimeTurnContinuationDelivery({
       const response = responseFromRuntimeTurnEvent(event);
       const elapsedSeconds = elapsedSecondsFromTimeline(response.timeline);
       const completedAt = event.completedAt;
+      const externalStream = ownerChat.items.find((item) => item.type === "streaming"
+        && item.clientTurnId === event.clientTurnId && item.id.startsWith(RUNTIME_ACTIVITY_STREAM_PREFIX));
+      if (externalStream && updateChatRef.current) {
+        updateChatRef.current(ownerChat.id, (chat) => {
+          const stream = chat.items.find((item) => item.type === "streaming" && item.id === externalStream.id);
+          const timeline = mergeRuntimeTimelines(stream?.type === "streaming" ? stream.timeline || [] : [], materializeRuntimeTimeline(response));
+          return { ...chat, items: [...chat.items.filter((item) => item.id !== externalStream.id), {
+            id: `runtime-reply-${continuationId}`, type: "agent", response, timeline,
+            ...(elapsedSeconds === undefined ? {} : { elapsedSeconds }),
+            ...(completedAt ? { completedAt } : {}),
+          }] };
+        });
+        return true;
+      }
       appendToChatRef.current(ownerChat.id, {
         // Keep the app-owned identifier outside the bridge's secret-prefix
         // filter (the previous task- prefix contains sk-).

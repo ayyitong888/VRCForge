@@ -86,7 +86,8 @@ export function normalizeAgentRuntimeTimelineEvent(value: unknown): ChatTimeline
     kind,
     payload: {
       ...(boundedTimelineText(rawPayload.label, 160) ? { label: boundedTimelineText(rawPayload.label, 160) } : {}),
-      ...(boundedTimelineText(rawPayload.summary, 1000) ? { summary: boundedTimelineText(rawPayload.summary, 1000) } : {}),
+      ...(boundedTimelineText(rawPayload.summary, kind === "assistant" ? 32_000 : 1000)
+        ? { summary: boundedTimelineText(rawPayload.summary, kind === "assistant" ? 32_000 : 1000) } : {}),
       ...(boundedTimelineText(rawPayload.status, 80) ? { status: boundedTimelineText(rawPayload.status, 80) } : {}),
       ...(boundedTimelineText(rawPayload.tool, 160) ? { tool: boundedTimelineText(rawPayload.tool, 160) } : {}),
       ...(boundedTimelineText(rawPayload.phase, 80) ? { phase: boundedTimelineText(rawPayload.phase, 80) } : {}),

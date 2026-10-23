@@ -23,6 +23,7 @@ window.notify=sessions.notifyChatStorageChanged;
 window.originId=chatStorageOriginId();
 window.persist=sessions.persistChatsNow;
 window.localEdit=()=>sessions.updateChat('chat',chat=>({...chat,title:'local-dirty'}));
+window.localAppend=()=>sessions.appendToChat('chat',{id:'local-extra',type:'user',text:'local-added'});
 return <pre id="state">{JSON.stringify({chats:sessions.chats,blocked:sessions.chatPersistenceBlocked})}</pre>}
 const root=createRoot(document.getElementById('root'));root.render(<Fixture/>);window.unmount=()=>root.unmount();
 `},bundle:true,write:false,format:"esm",jsx:"automatic",define:{"process.env.NODE_ENV":'"test"'},plugins:(process.env.VRCFORGE_TEST_LEGACY_CHAT_ECHO==="1"||process.env.VRCFORGE_TEST_LEGACY_CHAT_RELOAD_QUEUE==="1")?[{
@@ -83,6 +84,15 @@ assert.equal(gets,before+1,'external events during an active reload must not sta
 heldReload.release();
 await page.waitForFunction(()=>document.querySelector('#state')?.textContent.includes('telegram-visible-latest'));
 await page.waitForTimeout(250);assert.equal(gets,before+2,'events during an active reload collapse into one trailing refresh');
+await page.evaluate(()=>window.localAppend());
+chats=[{...chats[0],items:[...chats[0].items,{id:'remote-extra',type:'user',text:'remote-added'}]}];
+await page.evaluate(()=>window.notify());
+await page.waitForFunction(()=>{
+const state=JSON.parse(document.querySelector('#state').textContent);
+return state.chats[0].items.some(item=>item.id==='local-extra')&&state.chats[0].items.some(item=>item.id==='remote-extra');
+});
+assert.equal(await page.evaluate(()=>JSON.parse(document.querySelector('#state').textContent).blocked),false,
+  'independent appended messages reconcile without pausing storage or discarding local content');
 await page.evaluate(()=>window.localEdit());
 chats=[{...chats[0],title:'remote-dirty'}];
 await page.evaluate(()=>window.notify());

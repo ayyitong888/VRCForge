@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 import pytest
 
-from agent_gateway import AgentGateway
+from agent_gateway import AgentGateway, explicit_corrective_tool_failure
 from runtime_planner_service import PlannerModelResult, PlannerTurnMetadata, RuntimePlannerService
 from tests.test_dashboard_server import _TestRuntimePlannerCatalog, _TestRuntimePlannerDesktop
 
@@ -353,6 +353,93 @@ def test_native_gateway_failure_reaches_model_without_success_claim(tmp_path):
     result = run(gateway, tmp_path)
     assert "fixture-read-failed" in budgeted_request_history(model.requests[1])[-1]["content"]
     assert result["plan"]["nextStep"] != "done"
+
+
+def test_native_gateway_refeeds_distinct_read_failures_until_correction_succeeds(tmp_path):
+    gateway, model, invoked = setup_gateway(tmp_path, [
+        call("read-a", "vrcforge_read_text_file", {"path": "a.txt"}),
+        call("read-b", "vrcforge_read_text_file", {"path": "b.txt"}),
+        call("read-c", "vrcforge_read_text_file", {"path": "c.txt"}),
+        finish,
+    ])
+
+    def handler(arguments):
+        invoked.append(arguments)
+        if arguments["path"] in {"a.txt", "b.txt"}:
+            return {"ok": False, "error": f"fixture-{arguments['path']}-failed"}
+        return {"ok": True, "text": "fixture-body"}
+
+    gateway._tools["vrcforge_read_text_file"].handler = handler
+    result = run(gateway, tmp_path, maxAgenticTurns=6)
+    assert result["plan"]["nextStep"] == "done", result
+    assert [item["path"] for item in invoked] == ["a.txt", "b.txt", "c.txt"]
+
+
+def test_native_gateway_repeated_identical_read_failure_is_suppressed(tmp_path):
+    gateway, model, invoked = setup_gateway(tmp_path, [
+        call("read-1", "vrcforge_read_text_file", {"path": "same.txt"}),
+        call("read-2", "vrcforge_read_text_file", {"path": "same.txt"}),
+        call("read-3", "vrcforge_read_text_file", {"path": "same.txt"}),
+    ])
+    gateway._tools["vrcforge_read_text_file"].handler = lambda arguments: (
+        invoked.append(arguments) or {"ok": False, "error": "same-read-failure"}
+    )
+    result = run(gateway, tmp_path, maxAgenticTurns=6)
+    assert result["plan"]["nextStep"] == "loop_suppressed", result
+    assert len(invoked) == 3
+
+
+def test_native_selection_failure_with_explicit_next_action_is_correctable():
+    payload = {
+        "status": "failed",
+        "result": {
+            "ok": False,
+            "errorCode": "internal_tool_selection_invalid",
+            "mutationStarted": False,
+            "commitState": "not_started",
+            "nextActions": ["Retry the load in the returned owner block."],
+        },
+        "outcome": {
+            "status": "failed",
+            "error": {"code": "internal_tool_selection_invalid"},
+            "mutationStarted": False,
+            "commitState": "not_started",
+        },
+    }
+    assert explicit_corrective_tool_failure(payload, payload["outcome"], action_kind="skill")
+
+
+def test_native_read_failure_is_correctable_without_next_actions():
+    payload = {"status": "failed", "write": False, "result": {"ok": False, "error": "read failed"}}
+    assert explicit_corrective_tool_failure(payload, {}, action_kind="skill")
+
+
+def test_native_skill_write_unknown_effect_is_not_treated_as_read():
+    payload = {
+        "status": "failed",
+        "write": True,
+        "result": {
+            "ok": False,
+            "nextActions": ["Recover the pending operation."],
+            "mutationStarted": None,
+            "commitState": "unknown",
+        },
+    }
+    assert not explicit_corrective_tool_failure(payload, {}, action_kind="skill")
+
+
+def test_native_unknown_write_failure_with_next_action_is_not_correctable():
+    payload = {
+        "status": "failed",
+        "result": {
+            "ok": False,
+            "nextActions": ["Recover the pending operation."],
+            "mutationStarted": True,
+            "commitState": "unknown",
+            "checkpointRecoveryRequired": True,
+        },
+    }
+    assert not explicit_corrective_tool_failure(payload, {}, action_kind="write")
 
 
 def test_native_read_observation_notfound_create_verified_then_targeted_read_finishes(tmp_path):

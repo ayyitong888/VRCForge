@@ -12,6 +12,7 @@ from typing import Any, Callable
 
 from background_goal_runtime import classify_runtime_plan_outcome, classify_runtime_step_failure
 from runtime_planner_service import public_runtime_payload
+from agent_runtime_event_projection import project_runtime_turn_event
 
 
 _COMPLETED_RUN_STATUSES = frozenset({"completed", "failed", "denied", "cancelled"})
@@ -275,6 +276,7 @@ class AgentRuntimeRunLedger:
     def read_events(
         self, *, limit: int = 400, contains: str | None = None,
         start_times: dict[tuple[str, str], str] | None = None,
+        predicate: Callable[[dict[str, Any]], bool] | None = None,
     ) -> list[dict[str, Any]]:
         path = self.log_path
         if not path.exists():
@@ -294,8 +296,16 @@ class AgentRuntimeRunLedger:
                                 and started.get("sessionId") and started.get("turnId") and started.get("createdAt")):
                             key = (str(started["sessionId"]), str(started["turnId"]))
                             start_times[key] = str(started["createdAt"])
-                    if contains is None or contains in line:
-                        lines.append(line)
+                    if contains is not None and contains not in line:
+                        continue
+                    if predicate is not None:
+                        try:
+                            candidate = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        if not isinstance(candidate, dict) or not predicate(candidate):
+                            continue
+                    lines.append(line)
         except OSError:
             return []
         events: list[dict[str, Any]] = []
@@ -317,6 +327,94 @@ class AgentRuntimeRunLedger:
             if row.get("event") == "runtime_turn_started" and row.get("createdAt")
             and row.get("sessionId") and row.get("turnId")
         }
+
+    def _exact_run_events(self, session_id: str, client_turn_id: str):
+        """Stream the owned ledger with exact identity filtering before paging.
+
+        The request owns this read handle. Do not recover runs here: a read
+        of a currently running turn must never change its lifecycle.
+        """
+        try:
+            with self.log_path.open("r", encoding="utf-8") as source:
+                for line in source:
+                    try:
+                        event = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue  # A concurrent append can leave an incomplete tail.
+                    if (isinstance(event, dict) and (not session_id or event.get("sessionId") == session_id)
+                            and (not client_turn_id or event.get("clientTurnId") == client_turn_id)):
+                        yield event
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            raise self._ports.error_factory("Runtime timeline is temporarily unavailable.", 503) from exc
+
+    def read_timeline(
+        self, *, session_id: str, client_turn_id: str,
+        after_sequence: int = 0, limit: int = 200,
+    ) -> dict[str, Any]:
+        """Read bounded public events from the next inclusive sequence cursor."""
+        session_id, client_turn_id = session_id.strip(), client_turn_id.strip()
+        if not session_id or not client_turn_id:
+            raise self._ports.error_factory("sessionId and clientTurnId are required.", 400)
+        cursor, page_size = max(0, int(after_sequence)), max(1, min(int(limit), 200))
+        run: dict[str, Any] | None = None
+        events: list[dict[str, Any]] = []
+        has_more = False
+        last_sequence = cursor - 1
+        run_fields = ("sessionId", "turnId", "clientTurnId", "status", "provider", "providerLabel",
+                      "model", "projectRoot", "createdAt", "updatedAt", "startedAt", "completedAt")
+        for row in self._exact_run_events(session_id, client_turn_id):
+            name = row.get("event")
+            previous = run or {}
+            # Requests made after completion cannot reopen an execution.
+            if not (previous.get("status") in _COMPLETED_RUN_STATUSES
+                    and name not in {"runtime_turn_started", "runtime_turn_completed"}):
+                run = {**previous, **{key: row[key] for key in run_fields if key in row}}
+                if name == "runtime_turn_started":
+                    run["startedAt"] = row.get("startedAt") or row.get("createdAt") or ""
+                    run.pop("completedAt", None)
+            if name != "runtime_turn_timeline_event":
+                continue
+            item = row.get("timelineEvent")
+            if not isinstance(item, dict) or type(item.get("sequence")) is not int:
+                continue
+            sequence = item["sequence"]
+            if sequence < cursor or sequence <= last_sequence:
+                continue
+            if len(events) >= page_size:
+                has_more = True
+                continue
+            # Reuse the public continuation projector's timeline allowlist;
+            # its temporary envelope is never exposed as run/completion state.
+            projected = project_runtime_turn_event({
+                "continuationSource": "foreground_completed", "sessionId": session_id,
+                "turnId": str(row.get("turnId") or "timeline"),
+                "timeline": [_public_event(item)],
+            })
+            public_items = _ensure_list(_ensure_dict(projected).get("timeline"))
+            if public_items:
+                events.append(self._ports.redact(public_items[0]))
+                last_sequence = sequence
+        return {
+            "ok": True, "run": self._ports.redact(_public_event(run)) if run else None,
+            "events": events, "nextSequence": last_sequence + 1, "hasMore": has_more,
+        }
+
+    def read_terminal_continuation(
+        self, *, session_id: str, client_turn_id: str, turn_id: str,
+    ) -> dict[str, Any] | None:
+        """Return only this invocation's already-persisted public terminal."""
+        if not session_id or not client_turn_id or not turn_id:
+            return None
+        terminal = None
+        for row in self._exact_run_events(session_id, client_turn_id):
+            if row.get("turnId") != turn_id or row.get("event") != "runtime_turn_completed":
+                continue
+            continuation = _terminal_continuation(row)
+            if continuation is not None:
+                terminal = project_runtime_turn_event(self._ports.redact(_public_event(continuation)))
+        return terminal
 
     def record_queue_event(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         params = params or {}
@@ -347,7 +445,6 @@ class AgentRuntimeRunLedger:
         client_turn_id: str = "",
     ) -> dict[str, Any]:
         start_times: dict[tuple[str, str], str] = {}
-        events = self.read_events(limit=max(limit * 8, 100), start_times=start_times)
         session_id = session_id.strip()
         project_root = project_root.strip()
         client_turn_id = client_turn_id.strip()
@@ -368,9 +465,20 @@ class AgentRuntimeRunLedger:
 
         related_approval_ids: set[str] = set()
         if session_id:
-            for event in events:
-                if str(event.get("sessionId") or "") == session_id:
-                    related_approval_ids.update(event_approval_ids(event))
+            for event in self._exact_run_events(session_id, ""):
+                related_approval_ids.update(event_approval_ids(event))
+
+        def identity_matches(event: dict[str, Any]) -> bool:
+            related = bool(related_approval_ids.intersection(event_approval_ids(event)))
+            return ((not session_id or event.get("sessionId") == session_id or related)
+                    and (not client_turn_id or event.get("clientTurnId") == client_turn_id)
+                    and project_matches(str(event.get("projectRoot") or "")))
+
+        # A busy unrelated session must not evict this chat before filtering.
+        events = self.read_events(
+            limit=max(limit * 8, 100), start_times=start_times,
+            predicate=identity_matches if session_id or client_turn_id or project_root else None,
+        )
 
         runs_by_key: dict[str, dict[str, Any]] = {}
         event_count_by_key: dict[str, int] = {}

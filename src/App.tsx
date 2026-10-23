@@ -116,6 +116,7 @@ import {
 import { FALLBACK_ENDPOINT, isAbsoluteLocalPath, isRuntimeSessionVerificationError, isTauriRuntime } from "./lib/app-runtime";
 import { useDashboardProjectSelection } from "./hooks/use-dashboard-project-selection";
 import type { AgentRuntimeDeltaEvent } from "./lib/chat-streaming";
+import { useRuntimeTurnActivity } from "./hooks/use-runtime-turn-activity";
 import {
   buildChatHistory,
   buildContextUsageFromRuntime,
@@ -1139,6 +1140,10 @@ export default function App() {
     runs: runtimeRuns,
     updateChat,
     settledClientTurnIds: settledQuestionContinuationIdsRef.current,
+  });
+  const applyExternalRuntimeDelta = useRuntimeTurnActivity({
+    endpoint, runtimeConnected, chats, runs: runtimeRuns, updateChat,
+    deliver: deliverRuntimeTurnContinuation, recoverySignal: bootstrap,
   });
   const queuedQuestionSessionIds = useMemo(() => new Set(queued.map((turn) => (
     turn.sessionId || chats.find((chat) => chat.id === turn.chatId)?.sessionId || ""
@@ -2342,6 +2347,7 @@ export default function App() {
         const delta = event.payload as AgentRuntimeDeltaEvent;
         applyRuntimeDelta(delta);
         applyQuestionRuntimeDelta(delta);
+        applyExternalRuntimeDelta(delta);
         return;
       }
       if (eventType === "agentRuntimeTurn") {
@@ -2408,7 +2414,7 @@ export default function App() {
         desktopEventSubAgentTimerRef.current = null;
       }
     };
-  }, [runtimeConnected, endpoint, sessionId, activeRuntimeProjectPath, activeProjectPath, workspaceDiffReviewOpen, deliverRuntimeTurnContinuation, applyQuestionRuntimeDelta]);
+  }, [runtimeConnected, endpoint, sessionId, activeRuntimeProjectPath, activeProjectPath, workspaceDiffReviewOpen, deliverRuntimeTurnContinuation, applyQuestionRuntimeDelta, applyExternalRuntimeDelta]);
 
   useEffect(() => {
     if (!runtimeConnected || bootstrap?.health.deferredDiagnostics !== true) {

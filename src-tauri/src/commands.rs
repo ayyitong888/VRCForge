@@ -185,6 +185,16 @@ pub(crate) struct DesktopAgentTurnResponseRequest {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopAgentRunTimelineRequest {
+    session_id: String,
+    client_turn_id: String,
+    after_sequence: Option<u64>,
+    limit: Option<u64>,
+    timeout_ms: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct DesktopAgentRunQueuedRequest {
     #[serde(default)]
     plan_mode: bool,
@@ -2531,6 +2541,50 @@ pub async fn fetch_agent_runs(
         .map(sanitize_webview_response)
     })
     .await
+}
+
+#[tauri::command]
+pub async fn fetch_agent_run_timeline(
+    request: DesktopAgentRunTimelineRequest,
+) -> Result<serde_json::Value, String> {
+    let path = agent_run_timeline_path(&request)?;
+    // Request-owned blocking read through the existing authenticated backend.
+    // This does not start/recover a turn or create a background process.
+    blocking_backend_json_request(move || {
+        backend_json_request("GET", path, None, request.timeout_ms.or(Some(10_000)))
+            .map(sanitize_webview_response)
+    })
+    .await
+}
+
+fn agent_run_timeline_path(request: &DesktopAgentRunTimelineRequest) -> Result<String, String> {
+    if request.session_id.trim().is_empty() || request.client_turn_id.trim().is_empty() {
+        return Err("sessionId and clientTurnId are required.".to_string());
+    }
+    Ok(format!(
+        "/api/app/agent/runs/timeline?sessionId={}&clientTurnId={}&afterSequence={}&limit={}",
+        percent_encode_query_component(&request.session_id),
+        percent_encode_query_component(&request.client_turn_id),
+        request.after_sequence.unwrap_or(0),
+        request.limit.unwrap_or(200).clamp(1, 200),
+    ))
+}
+
+#[cfg(test)]
+mod agent_run_timeline_tests {
+    use super::{agent_run_timeline_path, DesktopAgentRunTimelineRequest};
+
+    #[test]
+    fn exact_public_timeline_read_encodes_identity_and_bounds_page() {
+        let request = DesktopAgentRunTimelineRequest {
+            session_id: "s/a?b".into(), client_turn_id: "c&other=1".into(),
+            after_sequence: Some(200), limit: Some(5000), timeout_ms: None,
+        };
+        assert_eq!(agent_run_timeline_path(&request).unwrap(),
+            "/api/app/agent/runs/timeline?sessionId=s%2Fa%3Fb&clientTurnId=c%26other%3D1&afterSequence=200&limit=200");
+        let empty = DesktopAgentRunTimelineRequest { session_id: " ".into(), ..request };
+        assert!(agent_run_timeline_path(&empty).is_err());
+    }
 }
 
 #[tauri::command]

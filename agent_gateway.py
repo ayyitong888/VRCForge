@@ -6053,7 +6053,6 @@ class AgentGateway:
         last_successful_action_id = ""
         repeated_failure_guard = RepeatedFailureGuard()
         shell_scope_denials = 0
-        recoverable_block_selection_attempts = 0
         recoverable_failure_refeeds = 0
         shell_payload: dict[str, Any] | None = None
         skill_payload: dict[str, Any] | None = None
@@ -7842,22 +7841,11 @@ class AgentGateway:
                 unresolved_completion_outcomes[action_key] = step_outcome
                 if task_action_id:
                     unresolved_completion_action_keys[task_action_id] = action_key
-                # A cross-block selection is a bounded routing error.  The
-                # loader returns the authoritative owner block, so give the
-                # planner one normal post-tool turn to correct the selection
-                # even when the original action came from the LLM.  Other
-                # LLM-selected failures remain terminal as before.
-                selection_error = ensure_dict(step_outcome.get("error"))
-                selection_code = str(
-                    selection_error.get("code")
-                    or step_outcome.get("errorCode")
-                    or ""
-                ).strip().casefold()
-                recoverable_block_selection = (
-                    step_tool == "vrcforge_load_internal_tool_block"
-                    and selection_code == "internal_tool_selection_invalid"
-                    and bool(selection_error.get("nextActions") or step_outcome.get("nextAction") or step_outcome.get("nextActions"))
-                    and recoverable_block_selection_attempts == 0
+                # Explicitly correctable failures return to the model. The
+                # shared repeated-failure guard below bounds identical loops;
+                # unknown or partial writes stay terminal.
+                corrective_failure = (
+                    explicit_corrective_tool_failure(step_payload, step_outcome, action_kind=action_kind)
                 )
                 safe_failure_recovery = (
                     recoverable_failure_refeeds == 0
@@ -7865,11 +7853,9 @@ class AgentGateway:
                 )
                 if (
                     str(plan.get("planner") or "").strip().casefold() != "llm"
-                    or recoverable_block_selection
+                    or corrective_failure
                     or safe_failure_recovery
                 ):
-                    if recoverable_block_selection:
-                        recoverable_block_selection_attempts += 1
                     if safe_failure_recovery:
                         recoverable_failure_refeeds += 1
                     # Deterministic routing owns fast first selection, not the
@@ -7877,11 +7863,6 @@ class AgentGateway:
                     # model so it can correct arguments or choose a diagnostic
                     # action instead of terminating at the first tool error.
                     plan["continueLoop"] = True
-                elif selection_code == "internal_tool_selection_invalid":
-                    gated_plan = completion_gate_plan(plan, step_outcome)
-                    if gated_plan is not None:
-                        last_plan = gated_plan
-                    break
             elif not step_failure_class:
                 unresolved_completion_outcomes.pop(action_key, None)
                 if task_action_id:
@@ -10432,6 +10413,96 @@ def runtime_step_failure_class(payload: Any) -> str:
     """Return one bounded failure class for a runtime tool step."""
 
     return classify_runtime_step_failure(payload)
+
+
+def explicit_corrective_tool_failure(
+    payload: Mapping[str, Any],
+    outcome: Mapping[str, Any],
+    *,
+    action_kind: str,
+) -> bool:
+    """Allow one model correction for an explicit, pre-mutation tool failure.
+
+    Tool routing and argument validation failures can carry their own recovery
+    action even when the public ``retryable`` flag is false.  Re-feed only when
+    the envelope proves that no mutation started; unknown or partial writes
+    remain governed by the normal recovery path.
+    """
+    candidates: list[Mapping[str, Any]] = []
+
+    def collect(value: Any, depth: int = 0) -> None:
+        if depth > 5 or not isinstance(value, Mapping):
+            return
+        candidates.append(value)
+        for key in ("result", "outcome", "error", "errorDetails", "diagnostics", "failureCause"):
+            collect(value.get(key), depth + 1)
+
+    collect(payload)
+    collect(outcome)
+    if not candidates:
+        return False
+    write_facts = {
+        candidate.get("write")
+        for candidate in candidates
+        if isinstance(candidate.get("write"), bool)
+    }
+    declared_write = True if True in write_facts else False if write_facts == {False} else None
+    has_next_action = any(
+        bool(candidate.get("nextAction")) or bool(candidate.get("nextActions"))
+        for candidate in candidates
+    )
+    if (action_kind == "write" or declared_write is True) and not has_next_action:
+        return False
+    failure_codes = {
+        str(candidate.get("errorCode") or candidate.get("code") or "")
+        .strip()
+        .casefold()
+        for candidate in candidates
+    }
+    if failure_codes & {
+        "permission_denied",
+        "authorization_scope_denied",
+        "user_stop",
+        "cancelled",
+        "approval_denied",
+        "checkpoint_recovery_required",
+    }:
+        return False
+    if any(
+        candidate.get("mutationStarted") is True
+        or candidate.get("saved") is True
+        or candidate.get("committed") is True
+        or candidate.get("checkpointRecoveryRequired") is True
+        or candidate.get("temporaryCleanupRequired") is True
+        or candidate.get("safeToRetry") is False
+        or (
+            candidate.get("commitState") is not None
+            and str(candidate.get("commitState") or "").strip().casefold()
+            not in {"", "not_started"}
+        )
+        for candidate in candidates
+    ):
+        return False
+    mutation_facts = {
+        candidate.get("mutationStarted")
+        for candidate in candidates
+        if isinstance(candidate.get("mutationStarted"), bool)
+    }
+    commit_states = {
+        str(candidate.get("commitState") or "").strip().casefold()
+        for candidate in candidates
+        if candidate.get("commitState") is not None
+    }
+    if action_kind == "write" or declared_write is True:
+        if mutation_facts != {False} or commit_states != {"not_started"}:
+            return False
+    elif declared_write is None and (
+        mutation_facts != {False} or commit_states != {"not_started"}
+    ):
+        # A skill/adapter without effect metadata is not assumed read-only;
+        # only an explicit no-mutation envelope can make it correctable.
+        return False
+    return True
 
 
 def visual_audit_correction_candidate(

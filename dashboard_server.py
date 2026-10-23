@@ -3012,7 +3012,18 @@ async def app_agent_runtime_message(runtime_request: AgentRuntimeMessageRequest)
                 )
             except OSError:
                 pass
-    await EVENT_BUS.broadcast("agentRuntimeTurn", payload)
+    try:
+        terminal_event = await asyncio.to_thread(
+            AGENT_GATEWAY.runtime_runs.read_terminal_continuation,
+            session_id=str(payload.get("sessionId") or payload.get("session_id") or ""),
+            client_turn_id=str(payload.get("clientTurnId") or ""),
+            turn_id=str(payload.get("turnId") or payload.get("turn_id") or ""),
+        )
+    except AgentGatewayError:
+        # A transient read failure cannot discard the already-completed HTTP
+        # response. Subsequent exact timeline polling can retry the read.
+        terminal_event = None
+    await EVENT_BUS.broadcast("agentRuntimeTurn", terminal_event or payload)
     TELEGRAM_SERVICE.notify_foreground_result(payload)
     await EVENT_BUS.broadcast(
         "agentRuntimeRuns",
@@ -3227,6 +3238,19 @@ def app_agent_runtime_runs(
         project_root=projectRoot,
         client_turn_id=clientTurnId,
     )
+
+
+@app.get("/api/app/agent/runs/timeline")
+def app_agent_runtime_timeline(
+    sessionId: str = "", clientTurnId: str = "", afterSequence: int = 0, limit: int = 200,
+) -> dict[str, Any]:
+    try:
+        return AGENT_GATEWAY.runtime_runs.read_timeline(
+            session_id=sessionId, client_turn_id=clientTurnId,
+            after_sequence=afterSequence, limit=limit,
+        )
+    except AgentGatewayError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
 
 @app.post("/api/app/agent/runs/cancel")

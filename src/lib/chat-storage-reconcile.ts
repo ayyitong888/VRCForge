@@ -67,7 +67,8 @@ export function snapshotChatFingerprints(
  * Three-way reconcile a fresh server snapshot with in-memory edits.
  *
  * `baseline` is the last server state observed by this window. A chat changed
- * on only one side wins; divergent changes to the same chat fail closed so a
+ * on only one side wins; independent append-only item additions can merge.
+ * Divergent edits to existing content fail closed so a
  * refreshed source digest can never be paired with a stale whole-store write.
  */
 export function reconcileChatStorage(
@@ -101,6 +102,11 @@ export function reconcileChatStorage(
     if (nextFingerprint !== undefined) nextBaseline.set(id, nextFingerprint);
 
     if (localChanged && remoteChanged && (versions || localFingerprint !== remoteFingerprint)) {
+      const appended = mergeChatAppends(baseFingerprint, localChat, remoteChat, project);
+      if (appended) {
+        selected.set(id, appended);
+        continue;
+      }
       conflicts.push(id);
       continue;
     }
@@ -124,6 +130,81 @@ export function reconcileChatStorage(
     return chat ? [chat] : [];
   });
   return { status: "merged", chats, conflictIds: [], baselineFingerprints: Object.fromEntries(nextBaseline) };
+}
+
+/** Merge proven appends, never guess whether existing content was edited. */
+function mergeChatAppends(
+  baseline: string | undefined,
+  local: ChatThread | undefined,
+  remote: ChatThread | undefined,
+  project: ChatFingerprintProjector,
+): ChatThread | null {
+  if (!baseline || !local || !remote) return null;
+  let base: ChatThread;
+  try {
+    base = JSON.parse(baseline) as ChatThread;
+  } catch {
+    return null;
+  }
+  const left = project(local) as ChatThread | null;
+  const right = project(remote) as ChatThread | null;
+  if (!base || !left || !right || base.id !== local.id || base.id !== remote.id
+    || !Array.isArray(base.items) || !Array.isArray(left.items) || !Array.isArray(right.items)) return null;
+  // Revision and update time describe mutations; neither is user content.
+  const contentMetadata = (chat: ChatThread) => {
+    const { items: _items, revision: _revision, updatedAt: _updatedAt, ...metadata } = chat;
+    return stableFingerprint(metadata);
+  };
+  if (contentMetadata(left) !== contentMetadata(base) || contentMetadata(right) !== contentMetadata(base)) return null;
+  const prefix = (chat: ChatThread) => chat.items.length >= base.items.length
+    && base.items.every((item, index) => stableFingerprint(chat.items[index]) === stableFingerprint(item));
+  if (!prefix(left) || !prefix(right)) return null;
+  // A changed opaque server version without a visible append remains a conflict.
+  if (right.items.length === base.items.length) return null;
+  const all = new Map<string, ChatThread["items"][number]>();
+  const edges = new Map<string, Set<string>>();
+  const incoming = new Map<string, number>();
+  for (const chat of [remote, local]) {
+    const seen = new Set<string>();
+    let previous: string | undefined;
+    for (const item of chat.items) {
+      if (!item.id || seen.has(item.id)) return null;
+      seen.add(item.id);
+      const other = all.get(item.id);
+      if (other && stableFingerprint(other) !== stableFingerprint(item)) return null;
+      if (!other) {
+        all.set(item.id, item);
+        incoming.set(item.id, 0);
+      }
+      if (previous) {
+        const next = edges.get(previous) || new Set<string>();
+        if (!next.has(item.id)) {
+          next.add(item.id);
+          incoming.set(item.id, (incoming.get(item.id) || 0) + 1);
+        }
+        edges.set(previous, next);
+      }
+      previous = item.id;
+    }
+  }
+  const ready = [...all.keys()].filter((id) => incoming.get(id) === 0);
+  const items: ChatThread["items"] = [];
+  while (ready.length) {
+    const id = ready.shift()!;
+    items.push(all.get(id)!);
+    for (const next of edges.get(id) || []) {
+      const count = incoming.get(next)! - 1;
+      incoming.set(next, count);
+      if (count === 0) ready.push(next);
+    }
+  }
+  if (items.length !== all.size) return null;
+  const revisions = [local.revision ?? 0, remote.revision ?? 0];
+  if (!revisions.every((value) => Number.isSafeInteger(value) && value >= 0 && value < Number.MAX_SAFE_INTEGER)) return null;
+  const times = [local.updatedAt, remote.updatedAt].filter((value): value is string => value !== undefined);
+  if (!times.every((value) => Number.isFinite(Date.parse(value)))) return null;
+  const updatedAt = times.sort((a, b) => Date.parse(b) - Date.parse(a))[0];
+  return { ...local, items, revision: Math.max(...revisions) + 1, ...(updatedAt ? { updatedAt } : {}) };
 }
 
 /**

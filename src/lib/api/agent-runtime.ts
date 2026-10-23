@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { hasTauriInternals, invokeTauriWithAbort, requestJson } from "./http";
 import { ApiError } from "./http";
 import type { AgentApproval, AgentApprovalExecution, AgentContextUsage, AgentDesktopAction, AgentGoal, AgentGoalBackgroundAcknowledgement, AgentGoalBackgroundState, AgentGoalDelivery, AgentMemory, AgentMessageAttachment, AgentProgress, AgentQuestion, AgentRuntimeContinuation, AgentRuntimeResponse, AgentRuntimeRun, AgentRuntimeRunLedger, AgentTurnResponseRecovery, CompactionRecoveryEntry, DesktopBridgeStatus, DesktopRuntimeSnapshot } from "./types";
+import type { ChatTimelineEvent } from "../chat-types";
 
 /** Finite model-turn budget required for unattended/background delivery. */
 export const DEFAULT_BACKGROUND_MAX_AGENTIC_TURNS = 25;
@@ -192,8 +193,33 @@ export function fetchAgentTurnResponse(
   endpoint: string,
   sessionId: string,
   clientTurnId: string,
+  signal?: AbortSignal,
 ): Promise<AgentTurnResponseRecovery> {
-  return recoveryReader(endpoint)(sessionId, clientTurnId);
+  return recoveryReader(endpoint)(sessionId, clientTurnId, signal);
+}
+
+export type AgentRunTimelinePage = {
+  ok: boolean;
+  run: AgentRuntimeRun | null;
+  events: ChatTimelineEvent[];
+  nextSequence: number;
+  hasMore: boolean;
+};
+
+/** Read only one exact turn's durable public timeline, starting at the next sequence. */
+export function fetchAgentRunTimeline(
+  endpoint: string,
+  sessionId: string,
+  clientTurnId: string,
+  afterSequence = 0,
+  signal?: AbortSignal,
+): Promise<AgentRunTimelinePage> {
+  const request = { endpoint, sessionId, clientTurnId, afterSequence, limit: 200, timeoutMs: 10000 };
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort<AgentRunTimelinePage>("fetch_agent_run_timeline", { request }, signal);
+  }
+  const query = new URLSearchParams({ sessionId, clientTurnId, afterSequence: String(afterSequence), limit: "200" });
+  return requestJson<AgentRunTimelinePage>(`${endpoint}/api/app/agent/runs/timeline?${query}`, { signal, timeoutMs: 10000 });
 }
 
 export async function sendAgentMessage(
