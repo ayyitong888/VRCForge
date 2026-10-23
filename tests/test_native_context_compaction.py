@@ -29,7 +29,8 @@ def fixture(compactor=None, *, prior=True, current="Continue checking", limit=80
     planner = RuntimePlannerService(catalog=_Catalog(), desktop=_Desktop(), model=model, compactor=compactor,
                                     turn=_Turn(PlannerTurnMetadata(verified_context_limit=limit)))
     if prior:
-        state.begin_native_turn("s", binding="b", turn_id="old", message="old context " * 5000)
+        state.begin_native_turn("s", binding="b", turn_id="old", message="Inspect the historical tool context")
+        state.append_native_assistant("s", binding="b", message={"role": "assistant", "content": "old context " * 5000})
         state.append_native_assistant("s", binding="b", message={
             "role": "assistant", "content": None, "reasoning_content": "PRIVATE_REASONING_SENTINEL",
             "tool_calls": [{"id": "read-old", "type": "function", "function": {
@@ -57,7 +58,7 @@ def test_native_compaction_reuses_port_and_summarizes_settled_current_receipts()
     state.settle_native_call("s", binding="b", call_id="current-read", content='{"status":"ok"}')
     state.append_native_user("s", binding="b", message="Keep checking")
     before = state.native_conversation("s", binding="b")
-    suffix = [deepcopy(item) for item in before["messages"][before["activeTurnStart"]:] if item["role"] == "user"]
+    suffix = [deepcopy(item) for item in before["messages"] if item["role"] == "user"]
     usage = {"requestCount": 9, "cumulativeInputTokens": 9000, "peakInputTokens": 15000}
 
     result = plan(planner, turn, usage)
@@ -73,7 +74,7 @@ def test_native_compaction_reuses_port_and_summarizes_settled_current_receipts()
     assert "CURRENT_EXACT_REPLAY" not in str(compactor.calls[0][0])
     assert model.requests[0]["messages"][1:-1] == suffix
     assert model.requests[0]["messages"][-1]["role"] == "system"
-    assert state.native_conversation("s", binding="b")["activeTurnStart"] == 1
+    assert state.native_conversation("s", binding="b")["activeTurnStart"] == 2
     assert turn.compaction["applied"] is True and turn.compaction["afterTokens"] < turn.compaction["beforeTokens"]
     assert "summary" not in turn.compaction and "PRIVATE_REASONING_SENTINEL" not in json.dumps(turn.compaction)
     assert usage["cumulativeInputTokens"] >= 9000 and usage["compactionCount"] == 1
@@ -200,7 +201,7 @@ def test_native_compaction_restores_exact_prefix_policy_once_without_touching_su
     compactor = Compactor(summary="Old work. " + SCAN_RESULT_CONTINUATION_POLICY)
     state, planner, model, turn = fixture(compactor, prior_policy=True)
     before = state.native_conversation("s", binding="b")
-    suffix = deepcopy(before["messages"][before["activeTurnStart"]:])
+    suffix = [deepcopy(item) for item in before["messages"] if item["role"] == "user"]
     measured = []
     measured_tools = []
     native_guard = planner.native_context_guard
@@ -229,7 +230,7 @@ def test_native_compaction_restores_exact_prefix_policy_once_without_touching_su
     assert state.native_conversation("s", binding="b")["messages"][1:1 + len(suffix)] == suffix
     persisted = state.native_conversation("s", binding="b")["messages"]
     assert persisted[1 + len(suffix)] == policy
-    assert state.native_conversation("s", binding="b")["activeTurnStart"] == 1
+    assert state.native_conversation("s", binding="b")["activeTurnStart"] == 2
 
 
 def test_native_retained_suffix_policy_is_not_duplicated_and_untrusted_summary_is_not_policy():
@@ -272,7 +273,7 @@ def test_persisted_policy_survives_store_restart_and_compaction_without_new_scan
     assert sum(is_scan_result_policy_message(message) for message in resumed_turn.snapshot()["messages"]) == 1
     assert sum(is_scan_result_policy_message(message) for message in model.requests[0]["messages"]) == 1
     assert resumed_turn.snapshot()["messages"].count(policy) == 1
-    assert len(compactor.calls) == 1 and resumed_turn.snapshot()["activeTurnStart"] == 1
+    assert len(compactor.calls) == 1 and resumed_turn.snapshot()["activeTurnStart"] == 2
 
 
 def test_pending_current_call_defers_compaction_before_compactor_and_preserves_history():

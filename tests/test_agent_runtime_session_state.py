@@ -537,6 +537,7 @@ def test_native_conversation_is_private_and_tracks_pending_calls() -> None:
         "turnId": "turn-1",
         "messages": [{"role": "user", "content": "hello"}],
         "activeTurnStart": 0,
+        "humanUserMessageIndices": [0],
     }
     state.append_native_assistant(
         "native-1",
@@ -593,7 +594,7 @@ def test_native_conversation_same_turn_is_idempotent_and_binding_changes_after_s
     with pytest.raises(ValueError, match="non-empty"):
         state.begin_native_turn("s", binding="", turn_id="t2", message="x")
     changed = state.begin_native_turn("s", binding="new", turn_id="t2", message="new-u")
-    assert changed == {"binding": "new", "turnId": "t2", "messages": [{"role": "user", "content": "new-u"}], "activeTurnStart": 0}
+    assert changed == {"binding": "new", "turnId": "t2", "messages": [{"role": "user", "content": "new-u"}], "activeTurnStart": 0, "humanUserMessageIndices": [0]}
 
 
 def test_native_conversation_size_rejection_is_atomic_and_cleanup_releases_private_state() -> None:
@@ -705,9 +706,10 @@ def test_native_completed_prefix_replace_is_atomic_cas_and_preserves_current_suf
     replaced = state.replace_native_compacted_history(
         "s", binding="b", expected_snapshot=source, summary="Older continuity"
     )
-    assert replaced["activeTurnStart"] == 1
+    assert replaced["activeTurnStart"] == 2
     assert replaced["messages"] == [
         {"role": "assistant", "content": "Older continuity"},
+        {"role": "user", "content": "old"},
         {"role": "user", "content": "current"},
     ]
     with pytest.raises(ValueError, match="snapshot"):
@@ -740,14 +742,14 @@ def test_native_compaction_tail_restores_exact_prefix_policy_in_same_save_and_is
     )
     policy = {"role": "system", "content": SCAN_RESULT_CONTINUATION_POLICY}
     assert compacted["messages"].count(policy) == 1
-    assert compacted["messages"][-1] == policy and compacted["activeTurnStart"] == 1
+    assert compacted["messages"][-1] == policy and compacted["activeTurnStart"] == 2
     state.begin_native_turn("s", binding="b", turn_id="t3", message="next turn")
     next_source = state.native_conversation("s", binding="b")
     next_compacted = state.replace_native_compacted_history(
         "s", binding="b", expected_snapshot=next_source, summary="summary again",
     )
     assert next_compacted["messages"].count(policy) == 1
-    assert next_compacted["activeTurnStart"] == 1
+    assert next_compacted["activeTurnStart"] == 3
 
     failing_store = FailingStore()
     failed_state = AgentRuntimeSessionState(AgentRuntimeSessionStatePorts(

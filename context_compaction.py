@@ -166,7 +166,7 @@ class _Redactor:
         digest = self._stable_hash("avatar", match.group(0))
         return "{{avatar:" + digest + "}}"
 
-    def redact(self, value: str) -> str:
+    def redact(self, value: str, *, preserve_user_paths: bool = False) -> str:
         text = str(value or "")
         text = self._pem_pattern.sub(self._replace_secret, text)
         text = self._bearer_pattern.sub(self._replace_secret, text)
@@ -174,6 +174,8 @@ class _Redactor:
         text = self._known_token_pattern.sub(self._replace_secret, text)
         text = self._jwt_pattern.sub(self._replace_secret, text)
         text = self._avatar_pattern.sub(self._replace_avatar, text)
+        if preserve_user_paths:
+            return text
         text = self._quoted_path_pattern.sub(self._replace_path, text)
         text = self._delimited_path_pattern.sub(self._replace_path, text)
         text = self._spaced_home_pattern.sub(self._replace_path, text)
@@ -198,6 +200,17 @@ def redact_context_text(value: Any, *, limit: int | None = None) -> tuple[str, d
     if limit is not None and len(text) > limit:
         text = text[: max(0, limit - 1)].rstrip() + "…"
     return text, scanner.report.as_dict()
+
+
+def redact_user_context_text(value: str) -> str:
+    """Project host-owned human text for working history, never an archive.
+
+    A user's operational paths must remain usable, including paths that do not
+    exist yet. This does not grant file access. Credentials and Avatar IDs use
+    the same scanner as the privacy-safe compaction archive; the default archive
+    scanner deliberately continues to alias every path.
+    """
+    return _Redactor().redact(value, preserve_user_paths=True)
 
 
 def _canonical_digest(value: Any) -> str:

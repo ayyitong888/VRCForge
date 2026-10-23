@@ -9,6 +9,7 @@ from dataclasses import dataclass, replace
 from typing import Any, Callable
 from context_compaction import normalize_compaction_recovery
 from agent_native_history_store import NativeHistoryStore
+from agent_user_path_context import confirmed_human_indices, human_indices, human_user_projection, missing_human_history
 from agent_scan_result_policy import (
     SCAN_RESULT_CONTINUATION_POLICY, SCAN_RESULT_CONTINUATION_POLICY_V2,
     is_scan_result_policy_message, restored_scan_result_policy,
@@ -326,7 +327,7 @@ class AgentRuntimeSessionState:
         cls, snapshot: dict[str, Any], *, binding: str,
     ) -> dict[str, Any]:
         required = {"binding", "turnId", "messages", "activeTurnStart"}
-        if not isinstance(snapshot, dict) or not required <= set(snapshot) or set(snapshot) - required - {"toolOrder", "compactionRecovery", "toolBlockIds", "bindingToolDefinition"}:
+        if not isinstance(snapshot, dict) or not required <= set(snapshot) or set(snapshot) - required - {"toolOrder", "compactionRecovery", "toolBlockIds", "bindingToolDefinition", "humanUserMessageIndices"}:
             raise ValueError("native snapshot fields are invalid")
         if "bindingToolDefinition" in snapshot:
             definition = snapshot["bindingToolDefinition"]
@@ -411,6 +412,13 @@ class AgentRuntimeSessionState:
             "messages": normalized_messages,
             "activeTurnStart": active_turn_start,
         }
+        if "humanUserMessageIndices" in snapshot:
+            indices = snapshot["humanUserMessageIndices"]
+            if (not isinstance(indices, list) or any(type(index) is not int or index < 0
+                    or index >= len(messages) or messages[index].get("role") != "user" for index in indices)
+                    or indices != sorted(set(indices))):
+                raise ValueError("native human user provenance is invalid")
+            normalized["humanUserMessageIndices"] = list(indices)
         if "bindingToolDefinition" in snapshot:
             normalized["bindingToolDefinition"] = copy.deepcopy(snapshot["bindingToolDefinition"])
         if "toolOrder" in snapshot:
@@ -463,8 +471,14 @@ class AgentRuntimeSessionState:
                     return copy.deepcopy(existing)
                 if existing["binding"] == binding:
                     candidate = copy.deepcopy(existing)
+                    indices = confirmed_human_indices(candidate, initial_history or [])
+                    missing = missing_human_history(initial_history or [], [candidate["messages"][index] for index in indices])
+                    if missing:
+                        candidate["messages"][0:0] = missing
+                    candidate["humanUserMessageIndices"] = list(range(len(missing))) + [index + len(missing) for index in indices]
                     candidate["turnId"] = turn_id
                     candidate["activeTurnStart"] = len(candidate["messages"])
+                    candidate["humanUserMessageIndices"].append(len(candidate["messages"]))
                     candidate["messages"].append({"role": "user", "content": message})
                     self._native_size_ok(candidate)
                     self._save_native(session_id, candidate)
@@ -488,6 +502,8 @@ class AgentRuntimeSessionState:
                 "turnId": turn_id,
                 "messages": history_messages + [{"role": "user", "content": message}],
                 "activeTurnStart": len(history_messages),
+                "humanUserMessageIndices": [index for index, item in enumerate(history_messages)
+                                            if item["role"] == "user"] + [len(history_messages)],
             }
             self._native_size_ok(candidate)
             self._save_native(session_id, candidate)
@@ -582,10 +598,15 @@ class AgentRuntimeSessionState:
         if cls._native_pending(snapshot):
             raise ValueError("native compaction has pending calls")
         start = snapshot["activeTurnStart"]
-        retained = [copy.deepcopy(item) for item in snapshot["messages"][start:]
-                    if item["role"] == "user"]
+        retained = []
+        for index in human_indices(snapshot):
+            item = snapshot["messages"][index]
+            projected = human_user_projection(item)
+            if projected is not None:
+                retained.append(projected)
+        known_humans = set(human_indices(snapshot))
         source = [copy.deepcopy(item) for index, item in enumerate(snapshot["messages"])
-                  if index < start or item["role"] != "user"]
+                  if index < start or index not in known_humans]
         if not retained or not source:
             raise ValueError("native compaction source is unavailable")
         retained.extend(restored_scan_result_policy(snapshot["messages"], retained))
@@ -613,7 +634,11 @@ class AgentRuntimeSessionState:
                 "binding": binding,
                 "turnId": current["turnId"],
                 "messages": [{"role": "assistant", "content": summary}] + retained_messages,
-                "activeTurnStart": 1,
+                "activeTurnStart": 1 + sum(index < current["activeTurnStart"]
+                                           and human_user_projection(current["messages"][index]) is not None
+                                           for index in human_indices(current)),
+                "humanUserMessageIndices": [index + 1 for index, item in enumerate(retained_messages)
+                                            if item["role"] == "user"],
             }
             for key in ("toolOrder", "toolBlockIds", "bindingToolDefinition"):
                 if key in current:
@@ -625,7 +650,7 @@ class AgentRuntimeSessionState:
             self._save_native(session_id, normalized)
             return copy.deepcopy(normalized)
 
-    def append_native_user(self, session_id: str, *, binding: str, message: str) -> None:
+    def append_native_user(self, session_id: str, *, binding: str, message: str, human: bool = True) -> None:
         session_id = self._native_required(session_id, "session id")
         binding = self._native_required(binding, "binding")
         message = self._native_required(message, "message")
@@ -636,6 +661,9 @@ class AgentRuntimeSessionState:
             if self._native_pending(snapshot):
                 raise ValueError("native conversation has pending tool calls")
             candidate = copy.deepcopy(snapshot)
+            candidate["humanUserMessageIndices"] = human_indices(snapshot)
+            if human:
+                candidate["humanUserMessageIndices"].append(len(candidate["messages"]))
             candidate["messages"].append({"role": "user", "content": message})
             self._native_size_ok(candidate)
             self._save_native(session_id, candidate)
