@@ -148,18 +148,54 @@ export function ProviderSetupTour({ open, onReturn }: ProviderSetupTourProps) {
 
     // Settings scroll inside a pane; its scroll events do not bubble to window.
     let refreshFrame = 0;
-    const refreshPosition = () => {
+    let restartAfterLayoutChange = false;
+    const scheduleRefresh = (restart = false) => {
+      restartAfterLayoutChange ||= restart;
       if (refreshFrame || disposed) return;
       refreshFrame = window.requestAnimationFrame(() => {
         refreshFrame = 0;
-        if (!disposed) tour.refresh();
+        if (disposed) return;
+        if (restartAfterLayoutChange) {
+          restartAfterLayoutChange = false;
+          tour.drive(tour.getActiveIndex() ?? 0);
+        } else {
+          tour.refresh();
+        }
       });
     };
+    const refreshPosition = () => scheduleRefresh();
     document.addEventListener("scroll", refreshPosition, true);
+    window.addEventListener("resize", refreshPosition);
+    // Provider selection can replace the compact ChatGPT OAuth provider picker
+    // with the full API form. Driver.js does not recalculate the spotlight
+    // when that subtree changes, so the overlay can remain over the old
+    // coordinates and intercept the next click.
+    const settingsSurface = document.querySelector<HTMLElement>("[data-vrcforge-settings-scroll]");
+    const settingsMutationObserver = settingsSurface
+      ? new MutationObserver(() => {
+        const activeElement = tour.getActiveElement();
+        const activeSelector = targetSelectors[tour.getActiveIndex() ?? 0];
+        const currentElement = activeSelector ? document.querySelector(activeSelector) : undefined;
+        const activeTargetReplaced = !activeElement
+          || !activeElement.isConnected
+          || (Boolean(activeSelector) && currentElement !== activeElement);
+        scheduleRefresh(activeTargetReplaced);
+      })
+      : undefined;
+    if (settingsSurface) {
+      settingsMutationObserver?.observe(settingsSurface, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+        attributeFilter: ["data-onboarding-provider"],
+      });
+    }
     tour.drive();
     return () => {
       disposed = true;
       document.removeEventListener("scroll", refreshPosition, true);
+      window.removeEventListener("resize", refreshPosition);
+      settingsMutationObserver?.disconnect();
       window.cancelAnimationFrame(refreshFrame);
       tour.destroy();
     };

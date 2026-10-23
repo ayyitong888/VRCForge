@@ -254,7 +254,7 @@ export function SettingsWorkspace({
   };
 
   return (
-    <div className="app-scrollbar min-h-0 flex-1 overflow-y-auto px-6 py-10">
+    <div className="app-scrollbar min-h-0 flex-1 overflow-y-auto px-6 py-10" data-vrcforge-settings-scroll>
       <div className="mx-auto w-full max-w-3xl">
         {visibleSection === "general" ? (
           <>
@@ -404,6 +404,7 @@ export function SettingsWorkspace({
           <p className="mt-1 text-sm text-muted-foreground">{t("settings.providerDesc")}</p>
           {providerConfigurationLocked ? <p role="status" className="mt-2 text-sm text-muted-foreground">{t("provider.runtimeConfigLocked")}</p> : null}
           <fieldset disabled={providerConfigurationLocked} className="min-w-0 disabled:opacity-60">
+          <div data-onboarding-provider={apiProvider === "chatgpt" ? "connection" : undefined}>
           <div className="mt-4">
             <ChatGptOAuthSettings
               endpoint={endpoint}
@@ -462,6 +463,7 @@ export function SettingsWorkspace({
                 onSubmit={onSaveApiProvider}
               />
             )}
+          </div>
           </div>
           </fieldset>
           <div className="mt-10 flex min-w-0 items-center gap-2">
