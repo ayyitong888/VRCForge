@@ -54,6 +54,15 @@ _BLENDSHAPE_PREVIEW_ITEM: dict[str, Any] = {
 
 
 UNITY_READ_TOOL_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
+    "vrcforge_preview_unpack_prefab": {
+        "type": "object", "additionalProperties": False,
+        "required": ["projectPath", "gameObjectPath"],
+        "properties": {
+            "projectPath": _PROJECT_PATH_PROPERTY,
+            "gameObjectPath": {"type": "string", "minLength": 1, "description": "Exact prefab instance root below the bound Avatar."},
+            "mode": {"type": "string", "enum": ["completely", "outermost"], "default": "completely"},
+        },
+    },
     "vrcforge_inspect_unity_editor_dialogs": {
         "type": "object", "additionalProperties": False,
         "required": ["projectPath"],

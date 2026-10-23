@@ -25908,6 +25908,30 @@ def instantiate_prefab_sync(params: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
+def prepare_unpack_prefab_request(params: dict[str, Any], _caller_preview: Any) -> tuple[dict[str, Any], Any]:
+    from prefab_unpack_preview import PrefabUnpackPreviewError, prepare_unpack_prefab
+    arguments = dict(params or {})
+    target = arguments.get("executionTarget")
+    if is_execution_target_reference(target):
+        arguments["executionTarget"] = AGENT_GATEWAY.resolve_execution_target_reference(
+            target, project_root=str(arguments.get("projectPath") or ""), required_scope="avatar",
+        )
+    try:
+        return prepare_unpack_prefab(arguments, lambda request: _invoke_authoritative_unity_preview(
+            arguments, "vrc_unpack_prefab", request,
+        ))
+    except PrefabUnpackPreviewError as exc:
+        error = AgentGatewayError(str(exc), status_code=409)
+        if exc.raw_result is not None:
+            error.raw_result = exc.raw_result
+        raise error from exc
+
+
+def preview_unpack_prefab_sync(params: dict[str, Any]) -> dict[str, Any]:
+    _arguments, preview = prepare_unpack_prefab_request(params or {}, None)
+    return {"ok": True, "preview": preview}
+
+
 def unpack_prefab_sync(params: dict[str, Any]) -> dict[str, Any]:
     params = params or {}
     request = build_unpack_prefab_request(params)
@@ -27458,6 +27482,12 @@ def register_agent_gateway_tools() -> None:
         lambda params: preview_scene_object_copy_sync(params or {}, SAVE_SCENE_OBJECT_AS_PREFAB_TOOL),
     )
     AGENT_GATEWAY.register_tool(
+        "vrcforge_preview_unpack_prefab",
+        "When to use: inspect one exact prefab instance under the bound Avatar before requesting unpack approval; returns the current object, prefab and saved-scene identities without writing. When NOT to use: do not use to unpack, guess an object identity, or retry an already unpacked object as if it were a prefab. Negative example: preview=true on vrcforge_unpack_prefab is not the read-only entry; call this tool instead.",
+        "plan/preview",
+        preview_unpack_prefab_sync,
+    )
+    AGENT_GATEWAY.register_tool(
         "vrcforge_preview_project_asset_duplicate",
         "When to use: preview one create-new copy, or a bounded copies array with existing parents, of materials (.mat), controllers, ScriptableObject assets, animations, or override controllers in Assets/VRCForgeGenerated before deriving final Avatar assets. Choose an existing folder classified by Avatar and asset type; never place project output in Assets/VRCForge. "
         "When NOT to use: do not overwrite or modify the source material, move, merge, import, or copy scripts, DLLs, prefabs, textures, or arbitrary files. "
@@ -28215,9 +28245,10 @@ def register_agent_gateway_tools() -> None:
     )
     register_write_handler(
         "vrcforge_unpack_prefab",
-        "Unpack a prefab instance in the scene so its contents become plain GameObjects through VRCForge.",
+        "When to use: unpack one exact prefab instance after vrcforge_preview_unpack_prefab and explicit approval; the request rechecks and freezes current object, prefab, dependency and scene identities. When NOT to use: do not pass preview=true, unpack an already plain object, or reuse stale target references after unpack. Negative example: use vrcforge_preview_unpack_prefab for inspection, then rebind after the approved persisted unpack.",
         "high",
         unpack_prefab_sync,
+        request_preparer=prepare_unpack_prefab_request,
     )
     register_write_handler(
         "vrcforge_install_vpm_package",

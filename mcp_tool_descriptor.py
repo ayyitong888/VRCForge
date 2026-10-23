@@ -58,6 +58,8 @@ def identity_scope(name: str, *, write: bool = False, arguments: Mapping[str, An
     # handle, hierarchy and absent destination before approval and mutation.
     if normalized.endswith("save_new_scene"):
         return "project"
+    if normalized.endswith("unpack_prefab"):
+        return "avatar"
     # Source inspection and asset import address the project, before an Avatar
     # instance exists. Outfit setup/installation still bind the existing Avatar.
     if normalized.endswith(("inspect_outfit_package", "plan_outfit_import", "import_outfit_package", "import_unitypackage")):

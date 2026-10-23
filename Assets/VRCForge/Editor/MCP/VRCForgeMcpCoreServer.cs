@@ -86,6 +86,7 @@ namespace VRCForge.Editor
             "vrc_manage_expression_menu",
             "vrc_manage_fx_animator",
             "vrc_convert_unity_constraint",
+            "vrc_unpack_prefab",
             "vrc_add_wardrobe_outfit",
             "vrc_add_outfit_part",
             "vrc_add_modular_avatar_component",
