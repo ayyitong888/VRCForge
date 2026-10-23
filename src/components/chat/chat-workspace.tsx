@@ -589,9 +589,6 @@ export function ChatWorkspace({
           onScroll={(event) => onConversationScroll(event.currentTarget)}
         >
           <div className="mx-auto max-w-3xl space-y-7">
-          {activeStreamingItems.map((item) => (
-            <StreamingPhaseStatus key={`active-${item.id}`} item={item} nowMs={activityNowMs} showElapsed={false} />
-          ))}
           <BackgroundGoalCatchUpCard
             deliveries={backgroundGoalDeliveries}
             providerWarnings={backgroundGoalProviderWarnings}
@@ -696,6 +693,9 @@ export function ChatWorkspace({
                 saveOperationTool={capturedOperation?.tool}
                 onSaveOperationAsSkill={onSaveOperationAsSkill}
                 />
+                {item.type === "streaming" ? (
+                  <StreamingPhaseStatus item={item} nowMs={activityNowMs} showElapsed={false} />
+                ) : null}
               </div>
             );
             });
