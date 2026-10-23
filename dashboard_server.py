@@ -20314,6 +20314,9 @@ def get_unitypackage_import_status_sync(params: dict[str, Any]) -> dict[str, Any
         "UnityPackage import status",
     )
     payload.setdefault("ok", True)
+    reconciled = AGENT_GATEWAY.approval_transactions.reconcile_unitypackage_import_recovery(params, payload)
+    if reconciled:
+        payload["reconciledRecoveries"] = reconciled
     return payload
 
 

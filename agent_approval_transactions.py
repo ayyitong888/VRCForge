@@ -2428,6 +2428,7 @@ class AgentApprovalTransactionService:
                         else "write_failed_after_checkpoint"
                     ),
                     error=str(exc),
+                    result_summary=summarize_params(redacted_failure_result),
                     write_failure=write_failure,
                 )
             payload = {
@@ -3186,6 +3187,47 @@ class AgentApprovalTransactionService:
                 )
             )
         return resolved
+
+    def reconcile_unitypackage_import_recovery(
+        self, arguments: Mapping[str, Any], status: Mapping[str, Any],
+    ) -> list[dict[str, Any]]:
+        """Resolve only a host-witnessed, independently read-back single import."""
+        from unity_import_recovery import verify_interrupted_package_import
+        import tarfile
+
+        project_root = extract_project_root(arguments)
+        if (not project_root or arguments.get("jobId", arguments.get("job_id")) != status.get("jobId")
+                or status.get("ok") is not True or status.get("status") != "completed"):
+            return []
+        key, acquired = self._try_acquire_project_write(project_root)
+        if not acquired:
+            return []
+        try:
+            with self._ports.state.shared_state_lock:
+                if self._project_has_in_flight_write(project_root):
+                    return []
+            resolved = []
+            for recovery in self._ports.checkpoint.active_apply_recoveries():
+                if (recovery.get("targetTool") != "vrcforge_import_outfit_package"
+                        or self._entry_project_key(recovery) != key):
+                    continue
+                try:
+                    validate_runtime_execution_target(recovery.get("executionTarget"), project_root=project_root, required_scope="project")
+                    proof = verify_interrupted_package_import(
+                        recovery, dict(status), audit_path=self._ports.audit_log_path(),
+                        runtime_path=self._ports.audit_log_path().with_name("runtime-runs.jsonl"),
+                    )
+                except (ExecutionTargetError, OSError, ValueError, TypeError, KeyError, RuntimeError, tarfile.TarError) as exc:
+                    self._ports.append_audit({"event": "unitypackage_import_recovery_not_reconciled",
+                                              "recoveryId": recovery.get("id"), "reason": str(exc)[:400]})
+                    continue
+                resolved.append(self._finish_apply_recovery(
+                    recovery, status="resolved", resolution="verified_partial_import", result_summary=proof,
+                    note="The single package commit was independently verified. The original approval remains failed; refresh and cleanup require normal approval.",
+                ))
+            return resolved
+        finally:
+            self._release_project_write(key)
 
     def reconcile_gesture_manager_pending_recovery(
         self,
