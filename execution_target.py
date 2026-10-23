@@ -141,6 +141,30 @@ def canonical_namespace(target: Mapping[str, Any]) -> str:
     return EXECUTION_NAMESPACE_PREFIX + "/".join(parts)
 
 
+def same_scene_content(left: Mapping[str, Any], right: Mapping[str, Any]) -> bool:
+    """Only an equal scene GUID and complete SHA256 supersede file mtime."""
+    if not isinstance(left, Mapping) or not isinstance(right, Mapping):
+        return False
+    digest = left.get("digest")
+    return bool(left.get("guid")) and left.get("guid") == right.get("guid") and (
+        isinstance(digest, str) and len(digest) == 64
+        and all(char in "0123456789abcdef" for char in digest)
+        and digest == right.get("digest")
+    )
+
+
+def scene_identity_matches(left: Mapping[str, Any], right: Mapping[str, Any]) -> bool:
+    """Retain every scene identity field; equal content may differ only in mtime."""
+    if not isinstance(left, Mapping) or not isinstance(right, Mapping):
+        return False
+    if left == right:
+        return True
+    return same_scene_content(left, right) and (
+        {key: value for key, value in left.items() if key != "revision"}
+        == {key: value for key, value in right.items() if key != "revision"}
+    )
+
+
 def validate_execution_target(
     value: Any,
     *,
@@ -199,15 +223,11 @@ def validate_execution_target(
             # Checkpoint saving can change the file mtime without changing any
             # approved bytes. Keep the frozen target/digest intact; only a full
             # matching SHA256 for the same scene GUID can supersede its mtime.
-            scene_digest = str(scene.get("digest"))
-            same_scene_content = (
-                scene.get("guid") == core_identity.get("sceneGuid")
-                and len(scene_digest) == 64
-                and all(char in "0123456789abcdef" for char in scene_digest)
-                and scene_digest == core_identity.get("sceneDigest")
-            )
+            content_matches = same_scene_content(scene, {
+                "guid": core_identity.get("sceneGuid"), "digest": core_identity.get("sceneDigest"),
+            })
             for target_key, core_key in (("guid", "sceneGuid"), ("revision", "sceneRevision"), ("digest", "sceneDigest")):
-                if target_key == "revision" and same_scene_content:
+                if target_key == "revision" and content_matches:
                     continue
                 expected_scene_value = str(core_identity.get(core_key) or "").strip()
                 if expected_scene_value and str(scene.get(target_key)) != expected_scene_value:

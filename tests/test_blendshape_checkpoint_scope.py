@@ -1,4 +1,7 @@
 from pathlib import Path
+import copy
+
+import pytest
 
 from prepared_unity_execution import build_prepared_execution_plan, install_prepared_calls
 from unity_blendshape_checkpoint import prepare_blendshape_checkpoint
@@ -72,6 +75,70 @@ def test_blendshape_checkpoint_proves_each_renderer_owner_and_archives_only_scen
     assert captured["owner"][0]["propertyPath"] == "enabled"
     assert captured["owner"][0]["executionTarget"]["scope"] == "component"
     assert captured["owner"][0]["executionTarget"]["component"]["globalObjectId"] == "component-guid"
+
+
+def saved_scene_identities():
+    bound = copy.deepcopy(TARGET)
+    bound["scene"].update(digest="a" * 64, revision="before-save")
+    fresh = copy.deepcopy(RENDERER)
+    fresh["scene"] = {**bound["scene"], "revision": "after-save"}
+    return bound, fresh
+
+
+def run_saved_scene(bound, fresh):
+    return run(
+        resolve_reference=lambda *_args, **_kwargs: bound,
+        discover=lambda query: {"ok": True, "complete": True, "hasMore": False,
+                               "totalCandidateCount": 1, "candidateSetHash": "set-hash", "targets": [fresh]},
+        inspect_owner=lambda query: {"ok": True, "checkpointScope": {**OWNER_SCOPE, "sceneDigest": "a" * 64}},
+    )
+
+
+def test_blendshape_checkpoint_accepts_saved_scene_revision_change_with_same_content():
+    bound, fresh = saved_scene_identities()
+    original = copy.deepcopy(bound)
+    result, captured = run_saved_scene(bound, fresh)
+    assert result["ok"] is True
+    assert captured["prepare"] == [(ROOT, [SCENE["assetPath"]])]
+    assert bound == original, "The frozen target must not be refreshed or rewritten."
+
+
+@pytest.mark.parametrize("section,key,value", [
+    ("scene", "digest", "b" * 64), ("scene", "guid", "other-guid"),
+    ("scene", "assetPath", "Assets/Other.unity"),
+    ("avatar", "globalObjectId", "other-avatar"), ("avatar", "exactHierarchyPath", "OtherAvatar"),
+    ("project", "projectId", "other-project"), ("project", "root", str(ROOT / "Other")),
+    ("editor", "unityPid", 999), ("editor", "processStartTime", "other-start"),
+    ("editor", "coreInstanceId", "other-core"),
+    ("object", "exactHierarchyPath", "OtherAvatar/Body"),
+])
+def test_blendshape_checkpoint_still_rejects_content_or_identity_change(section, key, value):
+    bound, fresh = saved_scene_identities()
+    fresh[section][key] = value
+    result, captured = run_saved_scene(bound, fresh)
+    assert result["ok"] is False
+    assert captured["prepare"] == []
+
+
+@pytest.mark.parametrize("digest", [None, "", "not-sha256", "a" * 63, "A" * 64])
+def test_scene_revision_exception_requires_a_complete_valid_content_hash(digest):
+    bound, fresh = saved_scene_identities()
+    bound["scene"]["digest"] = fresh["scene"]["digest"] = digest
+    result, captured = run_saved_scene(bound, fresh)
+    assert result["ok"] is False and captured["prepare"] == []
+
+
+def test_scene_revision_exception_does_not_ignore_additional_scene_fields():
+    bound, fresh = saved_scene_identities()
+    fresh["scene"]["unexpectedIdentityField"] = "changed"
+    result, captured = run_saved_scene(bound, fresh)
+    assert result["ok"] is False and captured["prepare"] == []
+
+
+def test_shared_scene_identity_comparison_rejects_malformed_sections():
+    from execution_target import scene_identity_matches
+    assert scene_identity_matches({}, None) is False
+    assert scene_identity_matches([], {}) is False
 
 
 def test_blendshape_checkpoint_rejects_owner_or_identity_drift_before_prepare():

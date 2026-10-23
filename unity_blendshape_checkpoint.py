@@ -1,6 +1,7 @@
 """Resolve the exact saved scene owner for a sealed blendshape write."""
 from pathlib import Path
 from typing import Any, Callable
+from execution_target import scene_identity_matches
 
 
 def prepare_blendshape_checkpoint(
@@ -127,7 +128,8 @@ def prepare_blendshape_checkpoint(
                 or not obj.get("globalObjectId") or not component.get("globalObjectId")
                 or obj.get("exactHierarchyPath") != renderer_path
                 or component.get("exactHierarchyPath") not in (None, renderer_path)
-                or renderer.get("avatar") != avatar or renderer.get("scene") != scene
+                or renderer.get("avatar") != avatar
+                or not scene_identity_matches(renderer.get("scene") or {}, scene)
                 or renderer.get("project") != project or renderer.get("editor") != target.get("editor")):
             return reject("The adjusted renderer is outside the approved Avatar scene identity.")
         # Read-only Core owner proof. It does not change the enabled property.
