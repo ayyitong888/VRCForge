@@ -21326,6 +21326,12 @@ def prepare_authoritative_unity_checkpoint_sync(
         except AgentGatewayError as exc:
             return {"ok": False, "blocking": True, "code": "checkpoint_scope_unresolved",
                     "error": str(exc), "mutationStarted": False, "saved": False}
+    if checkpoint_target == "vrcforge_refresh_asset_database":
+        # Package resolution may reinstall/remove packages and importer repair
+        # may update metadata. Their existing conditional policy requires the
+        # full project snapshot; no exact asset list can describe that scope.
+        # Plain refresh/reimport is excluded by the registered checkpoint policy.
+        return prepare_unity_checkpoint_sync(project_root)
     if checkpoint_target == "vrcforge_set_property":
         from unity_component_checkpoint import prepare_component_property_checkpoint
 

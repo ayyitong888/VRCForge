@@ -6,6 +6,41 @@ from test_console_baseline_provenance import snapshot
 from test_external_mcp_apply_recovery import _gateway, _project
 
 NAME='vrcforge_refresh_asset_database'
+
+@pytest.mark.parametrize('mode', ['package_resolution', 'importer_restoration'])
+def test_registered_project_refresh_creates_checkpoint_before_dispatch(tmp_path, monkeypatch, mode):
+    gateway = _gateway(tmp_path)
+    project = _project(tmp_path)
+    gateway._write_handlers[NAME] = copy(server.AGENT_GATEWAY._write_handlers[NAME])
+    service = gateway.approval_transactions
+    (project/'Packages/manifest.json').write_text('{}', encoding='utf-8')
+    order = []
+    def prepare(root, checkpoint_asset_paths=None, *, checkpoint_files=None):
+        assert root == project
+        assert checkpoint_asset_paths is None
+        assert checkpoint_files is None
+        order.append('prepare_full_project')
+        return {'ok': True, 'projectPath': str(root)}
+    monkeypatch.setattr(server, 'prepare_unity_checkpoint_sync', prepare)
+    reads = [snapshot(), snapshot(), snapshot()]
+    monkeypatch.setattr(server, 'UNITY_CONSOLE_COMPLETION_VERIFIER', UnityConsoleCompletionVerifier(
+        lambda _: reads.pop(0), timeout_seconds=2, sleep=lambda _: None))
+    def transport(*args, **kwargs):
+        order.append('dispatch')
+        return {'ok': True, 'status': 'done', 'completionKnown': True,
+                'mutationStarted': False, 'committed': True, 'commitState': 'none'}
+    monkeypatch.setattr(type(service), '_call_external_mcp_write_handler', transport)
+    changes = {'resolvePackages': True} if mode == 'package_resolution' else {
+        'resolvePackages': False,
+        'reimportAssets': [dict(item(), restoreScriptedImporterReference={
+            'scriptGuid': 'c'*32, 'expectedMetadataSha256': 'd'*64, 'restoredMetadataSha256': 'e'*64})],
+    }
+    prepared = service.prepare_external_mcp_write(NAME, {'projectPath': str(project), **changes})
+    assert order == []
+    result = service.execute_prepared_external_mcp_write(prepared)
+    assert result['ok'] is True, result
+    assert order == ['prepare_full_project', 'dispatch']
+    assert result.get('checkpoint'), result
 def item():
     return {'assetPath':'Assets/Editor/AnyScript.cs','guid':'a'*32,'expectedSourceSha256':'b'*64,'expectedImporterType':'UnityEditor.MonoImporter'}
 
