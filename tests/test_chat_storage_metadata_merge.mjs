@@ -21,7 +21,7 @@ assert.equal(result.status, "merged", "external mode change + append must merge 
 assert.equal(result.chats[0].planMode, false);
 assert.equal(result.chats[0].lastViewedAt, local.lastViewedAt);
 assert.deepEqual(new Set(result.chats[0].items.map(item => item.id)), new Set([...base.items.map(item => item.id), "stream", "continued"]));
-assert.equal(result.baselineFingerprints[base.id], fingerprints([remote], durable)[base.id]);
+assert.deepEqual(result.baselineFingerprints[base.id], fingerprints([remote], durable)[base.id]);
 assert.equal(run({ ...local, planMode: false }).status, "merged", "identical metadata changes merge");
 assert.equal(run(local, { ...remote, items: base.items }).status, "conflict", "metadata display differences alone cannot explain an opaque server version");
 assert.equal(run({ ...local, title: "mine" }, { ...remote, title: "theirs" }).status, "conflict", "real same-field disagreement remains protected");

@@ -2,8 +2,10 @@ import type { ChatThread } from "./chat-types";
 import type { ChatSourceRevision } from "./api/notes-chats";
 
 export type ChatStorageReconcileResult =
-  | { status: "merged"; chats: ChatThread[]; conflictIds: []; baselineFingerprints: Record<string, string> }
+  | { status: "merged"; chats: ChatThread[]; conflictIds: []; baselineFingerprints: ChatStorageBaseline }
   | { status: "conflict"; chats: ChatThread[]; conflictIds: string[] };
+
+export type ChatStorageBaseline = Record<string, ChatThread | null>;
 
 export type ChatFingerprintProjector = (chat: ChatThread) => unknown;
 
@@ -59,8 +61,8 @@ export function sourceRevisionsFromPayload(
 export function snapshotChatFingerprints(
   chats: ChatThread[],
   project: ChatFingerprintProjector = identityChatProjection,
-): Record<string, string> {
-  return Object.fromEntries(chats.map((chat) => [chat.id, stableFingerprint(project(chat))]));
+): ChatStorageBaseline {
+  return Object.fromEntries(chats.map((chat) => [chat.id, snapshotChatValue(project(chat)) as ChatThread | null]));
 }
 
 /**
@@ -72,7 +74,7 @@ export function snapshotChatFingerprints(
  * refreshed source digest can never be paired with a stale whole-store write.
  */
 export function reconcileChatStorage(
-  baseline: Readonly<Record<string, string>>,
+  baseline: Readonly<ChatStorageBaseline>,
   local: ChatThread[],
   remote: ChatThread[],
   project: ChatFingerprintProjector = identityChatProjection,
@@ -83,25 +85,26 @@ export function reconcileChatStorage(
   const allIds = new Set([...Object.keys(baseline), ...localById.keys(), ...remoteById.keys()]);
   const selected = new Map<string, ChatThread>();
   const conflicts: string[] = [];
-  const nextBaseline = new Map<string, string>();
+  const nextBaseline = new Map<string, ChatThread | null>();
 
   for (const id of allIds) {
     const baseFingerprint = baseline[id];
     const localChat = localById.get(id);
     const remoteChat = remoteById.get(id);
-    const localFingerprint = localChat ? stableFingerprint(project(localChat)) : undefined;
-    const remoteFingerprint = remoteChat ? stableFingerprint(project(remoteChat)) : undefined;
-    const localChanged = localFingerprint !== baseFingerprint;
+    const localFingerprint = localChat ? project(localChat) : undefined;
+    const remoteFingerprint = remoteChat ? project(remoteChat) : undefined;
+    const localChanged = !chatStorageValuesEqual(localFingerprint, baseFingerprint);
     // IPC display redaction is not a storage edit. Compare the server-owned
     // version with its acknowledged version, independently of local content.
     const remoteChanged = versions
       ? versions.remote[id] !== versions.baseline[id]
-      : remoteFingerprint !== baseFingerprint;
+      : !chatStorageValuesEqual(remoteFingerprint, baseFingerprint);
 
     const nextFingerprint = remoteChanged ? remoteFingerprint : baseFingerprint;
-    if (nextFingerprint !== undefined) nextBaseline.set(id, nextFingerprint);
+    if (nextFingerprint !== undefined) nextBaseline.set(id, remoteChanged
+      ? snapshotChatValue(nextFingerprint) as ChatThread | null : baseFingerprint);
 
-    if (localChanged && remoteChanged && (versions || localFingerprint !== remoteFingerprint)) {
+    if (localChanged && remoteChanged && (versions || !chatStorageValuesEqual(localFingerprint, remoteFingerprint))) {
       const appended = mergeChatAppends(baseFingerprint, localChat, remoteChat, project);
       if (appended) {
         selected.set(id, appended);
@@ -134,18 +137,13 @@ export function reconcileChatStorage(
 
 /** Merge proven appends, never guess whether existing content was edited. */
 function mergeChatAppends(
-  baseline: string | undefined,
+  baseline: ChatThread | null | undefined,
   local: ChatThread | undefined,
   remote: ChatThread | undefined,
   project: ChatFingerprintProjector,
 ): ChatThread | null {
   if (!baseline || !local || !remote) return null;
-  let base: ChatThread;
-  try {
-    base = JSON.parse(baseline) as ChatThread;
-  } catch {
-    return null;
-  }
+  const base = baseline;
   const left = project(local) as ChatThread | null;
   const right = project(remote) as ChatThread | null;
   if (!base || !left || !right || base.id !== local.id || base.id !== remote.id
@@ -163,14 +161,14 @@ function mergeChatAppends(
     const before = baseMetadata[key as keyof typeof baseMetadata];
     const localValue = leftMetadata[key as keyof typeof leftMetadata];
     const remoteValue = rightMetadata[key as keyof typeof rightMetadata];
-    const localChanged = stableFingerprint(localValue) !== stableFingerprint(before);
-    const remoteChanged = stableFingerprint(remoteValue) !== stableFingerprint(before);
-    if (localChanged && remoteChanged && stableFingerprint(localValue) !== stableFingerprint(remoteValue)) return null;
+    const localChanged = !chatStorageValuesEqual(localValue, before);
+    const remoteChanged = !chatStorageValuesEqual(remoteValue, before);
+    if (localChanged && remoteChanged && !chatStorageValuesEqual(localValue, remoteValue)) return null;
     const source = localChanged ? local : remote;
     if (Object.prototype.hasOwnProperty.call(source, key)) mergedMetadata[key] = source[key as keyof ChatThread];
   }
   const prefix = (chat: ChatThread) => chat.items.length >= base.items.length
-    && base.items.every((item, index) => stableFingerprint(chat.items[index]) === stableFingerprint(item));
+    && base.items.every((item, index) => chatStorageValuesEqual(chat.items[index], item));
   if (!prefix(left) || !prefix(right)) return null;
   // A metadata display difference can be redaction rather than the mutation
   // behind an opaque server version. Require the proven remote append before
@@ -186,7 +184,7 @@ function mergeChatAppends(
       if (!item.id || seen.has(item.id)) return null;
       seen.add(item.id);
       const other = all.get(item.id);
-      if (other && stableFingerprint(other) !== stableFingerprint(item)) return null;
+      if (other && !chatStorageValuesEqual(other, item)) return null;
       if (!other) {
         all.set(item.id, item);
         incoming.set(item.id, 0);
@@ -228,7 +226,7 @@ function mergeChatAppends(
  * variant is cloned under a caller-generated id before the next CAS write.
  */
 export function preserveConflictingChatCopies(
-  baseline: Readonly<Record<string, string>>,
+  baseline: Readonly<ChatStorageBaseline>,
   local: ChatThread[],
   remote: ChatThread[],
   cloneLocal: (chat: ChatThread, index: number) => ChatThread,
@@ -287,7 +285,7 @@ export function preserveConflictingChatCopies(
 
 function restrictVersionsToChats(
   versions: ChatStorageVersions | undefined,
-  baseline: Readonly<Record<string, string>>,
+  baseline: Readonly<ChatStorageBaseline>,
   local: ReadonlyArray<{ id: string }>,
   remote: ReadonlyArray<{ id: string }>,
 ): ChatStorageVersions | undefined {
@@ -307,21 +305,35 @@ function restrictVersionsToChats(
   };
 }
 
-function stableFingerprint(value: unknown): string {
-  return JSON.stringify(canonicalize(value));
+/** Compare JSON-shaped chat values without materializing serialized copies.
+ * Undefined object properties are absent in durable JSON, while array slots
+ * remain ordered. Chat payloads arrive through JSON and have no prototypes.
+ */
+export function chatStorageValuesEqual(left: unknown, right: unknown): boolean {
+  if (left === right) return true;
+  if (!left || !right || typeof left !== "object" || typeof right !== "object") return false;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return Array.isArray(left) && Array.isArray(right) && left.length === right.length
+      && left.every((value, index) => chatStorageValuesEqual(value ?? null, right[index] ?? null));
+  }
+  const a = left as Record<string, unknown>;
+  const b = right as Record<string, unknown>;
+  const keys = Object.keys(a).filter((key) => a[key] !== undefined);
+  return keys.length === Object.keys(b).filter((key) => b[key] !== undefined).length
+    && keys.every((key) => Object.prototype.hasOwnProperty.call(b, key)
+      && chatStorageValuesEqual(a[key], b[key]));
 }
 
-function canonicalize(value: unknown): unknown {
-  if (Array.isArray(value)) {
-    return value.map(canonicalize);
-  }
+/** Snapshot containers, sharing immutable strings instead of copying huge JSON.
+ * A baseline cannot alias mutable live containers: even an in-place UI edit
+ * must still compare as a change and produce a delta against the old value.
+ */
+function snapshotChatValue(value: unknown): unknown {
+  if (Array.isArray(value)) return Object.freeze(value.map((item) => snapshotChatValue(item ?? null)));
   if (value && typeof value === "object") {
-    return Object.fromEntries(
-      Object.entries(value as Record<string, unknown>)
-        .filter(([, item]) => item !== undefined)
-        .sort(([left], [right]) => left.localeCompare(right))
-        .map(([key, item]) => [key, canonicalize(item)]),
-    );
+    return Object.freeze(Object.fromEntries(Object.entries(value as Record<string, unknown>)
+      .filter(([, item]) => item !== undefined)
+      .map(([key, item]) => [key, snapshotChatValue(item)])));
   }
   return value;
 }

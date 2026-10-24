@@ -52,6 +52,8 @@ export type StoredChats<T> = {
   recoveries?: ChatRecoveryMarker[];
   writeBlocked?: boolean;
   chatDigests?: Record<string, string>;
+  incremental?: boolean;
+  chatManifest?: { schema: "vrcforge.chat_manifest.v1"; complete: boolean; ids: string[]; scopeDigest: string };
   /** Field/container names only; never includes metadata values or items. */
   chatMetadataShapes?: Record<string, Record<string, unknown>>;
 };
@@ -84,17 +86,18 @@ export async function requestChatTitle(
   });
 }
 
-export async function fetchChats<T>(endpoint: string, projectPaths: string[] = []): Promise<StoredChats<T>> {
+export async function fetchChats<T>(endpoint: string, projectPaths: string[] = [], knownChatDigests?: Record<string, string>): Promise<StoredChats<T>> {
   const params = new URLSearchParams();
   for (const projectPath of projectPaths) {
     if (projectPath.trim()) {
       params.append("projectPath", projectPath);
     }
   }
+  if (knownChatDigests !== undefined) params.set("knownChatDigests", JSON.stringify(knownChatDigests));
   const suffix = params.toString() ? `?${params.toString()}` : "";
   if (hasTauriInternals()) {
     return invokeTauriWithAbort<StoredChats<T>>("fetch_chats", {
-      request: { projectPaths, timeoutMs: 60000 },
+      request: { projectPaths, knownChatDigests, timeoutMs: 60000 },
     });
   }
   return requestJson<StoredChats<T>>(`${endpoint}/api/app/chats${suffix}`);
@@ -115,10 +118,18 @@ export async function saveChats<T>(
   chatDigests?: Record<string, string>;
   chatMetadataShapes?: Record<string, Record<string, unknown>>;
 }> {
+  // Patched records are reconstructed against their authoritative server digest.
+  // Sending their full bodies as well doubles the payload without contributing
+  // data; retain complete bodies only for new/unpatched records.
+  const wireChats = chatPatches ? chats.map((chat) => {
+    const id = (chat as { id?: unknown } | null)?.id;
+    return typeof id === "string" && Object.prototype.hasOwnProperty.call(chatPatches, id)
+      ? { id } : chat;
+  }) : chats;
   if (hasTauriInternals()) {
     return invokeTauriWithAbort("save_chats", {
       request: {
-        body: { chats, sourceRevisions, chatOriginId: chatStorageOriginId(), ...(chatPatches ? { chatPatches } : {}) },
+        body: { chats: wireChats, sourceRevisions, chatOriginId: chatStorageOriginId(), ...(chatPatches ? { chatPatches } : {}) },
         timeoutMs: 60000,
       },
     });
@@ -126,6 +137,6 @@ export async function saveChats<T>(
   return requestJson(`${endpoint}/api/app/chats`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ chats, sourceRevisions, chatOriginId: chatStorageOriginId(), ...(chatPatches ? { chatPatches } : {}) }),
+    body: JSON.stringify({ chats: wireChats, sourceRevisions, chatOriginId: chatStorageOriginId(), ...(chatPatches ? { chatPatches } : {}) }),
   });
 }

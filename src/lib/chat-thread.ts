@@ -1,3 +1,4 @@
+import { chatStorageValuesEqual } from "./chat-storage-reconcile";
 import type { AgentContextUsage } from "./api";
 import type { ChatThread, ConversationItem } from "./chat-types";
 import { latestContextWindowUsage } from "./context-compaction";
@@ -96,7 +97,7 @@ export function filterPersistableChats(list: ChatThread[]): ChatThread[] {
           : undefined;
         if (item.type === "agent" && Array.isArray(item.response.steps)
           && runtimePlan && Array.isArray(runtimePlan.steps)
-          && JSON.stringify(runtimePlan.steps) === JSON.stringify(item.response.steps)) {
+          && chatStorageValuesEqual(runtimePlan.steps, item.response.steps)) {
           // Timeline consumers read response.steps; retain differing or legacy-only history.
           const { steps: _duplicateSteps, ...plan } = runtimePlan;
           return { ...item, response: { ...item.response, plan } };

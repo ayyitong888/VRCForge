@@ -457,6 +457,52 @@ def snapshot_page(
     }
 
 
+def incremental_snapshot(snapshot: dict[str, Any], query: Any) -> dict[str, Any]:
+    """Return changed payloads with a complete, authoritative ordered manifest.
+
+    Digests are a transport hint only, never write authorization. Full source
+    revisions and all server digests remain available for normal CAS saves.
+    """
+    if "knownChatDigests" not in query:
+        return snapshot
+    raw = query.get("knownChatDigests", "")
+    if not isinstance(raw, str) or len(raw.encode("utf-8")) > 65536:
+        raise HTTPException(status_code=400, detail="Known chat digests exceed the request limit")
+    try:
+        known = json.loads(raw)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="Invalid known chat digests") from None
+    def valid_digest(value: Any) -> bool:
+        return isinstance(value, str) and len(value) == 64 and all(c in "0123456789abcdef" for c in value)
+    if not isinstance(known, dict) or any(
+        not key or not valid_digest(value) for key, value in known.items()
+    ):
+        raise HTTPException(status_code=400, detail="Invalid known chat digests")
+    chats = snapshot.get("chats")
+    digests = snapshot.get("chatDigests")
+    if not isinstance(chats, list) or not isinstance(digests, dict):
+        raise HTTPException(status_code=500, detail="Chat manifest is incomplete")
+    ids = [chat.get("id") if isinstance(chat, dict) else None for chat in chats]
+    if (any(not isinstance(key, str) or not key for key in ids)
+            or len(set(ids)) != len(ids) or set(ids) != set(digests)
+            or snapshot.get("count") != len(ids)
+            or any(not valid_digest(value) for value in digests.values())):
+        raise HTTPException(status_code=500, detail="Chat manifest is incomplete")
+    project_paths = query.getlist("projectPath") if hasattr(query, "getlist") else []
+    scope_digest = hashlib.sha256(normalize_snapshot_scope(project_paths).encode("utf-8")).hexdigest()
+    return {
+        **snapshot,
+        "incremental": True,
+        "chatManifest": {
+            "schema": "vrcforge.chat_manifest.v1",
+            "complete": True,
+            "ids": ids,
+            "scopeDigest": scope_digest,
+        },
+        "chats": [chat for chat in chats if known.get(chat["id"]) != digests[chat["id"]]],
+    }
+
+
 def snapshot_response(
     snapshot: dict[str, Any],
     query: Any,
@@ -464,6 +510,7 @@ def snapshot_response(
     cache_context: tuple[str, list[str] | tuple[str, ...] | None] | None = None,
 ) -> dict[str, Any]:
     """Opt in on the existing route; preserve the default response unchanged."""
+    snapshot = incremental_snapshot(snapshot, query)
     if "snapshotPage" not in query:
         return snapshot
     if query.get("snapshotPage") != "1":

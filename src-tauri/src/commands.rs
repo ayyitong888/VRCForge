@@ -527,6 +527,7 @@ pub(crate) struct DesktopAgentListRequest {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DesktopChatListRequest {
     project_paths: Option<Vec<String>>,
+    known_chat_digests: Option<std::collections::BTreeMap<String, String>>,
     timeout_ms: Option<u64>,
 }
 
@@ -3370,6 +3371,13 @@ pub async fn fetch_chats(request: DesktopChatListRequest) -> Result<serde_json::
                     percent_encode_query_component(project_path.trim())
                 ));
             }
+        }
+        if let Some(known) = request.known_chat_digests {
+            let encoded = serde_json::to_string(&known).map_err(|error| error.to_string())?;
+            if encoded.len() > 65536 {
+                return Err("known chat digests exceed the request limit".to_string());
+            }
+            query.push(format!("knownChatDigests={}", percent_encode_query_component(&encoded)));
         }
         let timeout = bounded_backend_request_timeout(request.timeout_ms, 60_000);
         let deadline = Instant::now()

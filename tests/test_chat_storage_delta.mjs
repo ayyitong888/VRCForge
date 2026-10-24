@@ -47,7 +47,7 @@ const reorderedWithAppend = {
 };
 const patches = buildChatStoragePatches(
   [reorderedWithAppend],
-  { 'chat-1': JSON.stringify(baseline) },
+  { 'chat-1': baseline },
   { 'chat-1': digest },
   { 'chat-1': shape },
 );
@@ -65,7 +65,7 @@ const deleteAndEdit = {
 };
 const deletePatches = buildChatStoragePatches(
   [deleteAndEdit],
-  { 'chat-1': JSON.stringify(baseline) },
+  { 'chat-1': baseline },
   { 'chat-1': digest },
   { 'chat-1': shape },
 );
@@ -81,7 +81,7 @@ const maskedProjectionEcho = {
 };
 const maskedPatches = buildChatStoragePatches(
   [maskedProjectionEcho],
-  { 'chat-1': JSON.stringify(baseline) },
+  { 'chat-1': baseline },
   { 'chat-1': digest },
   { 'chat-1': shape },
 );
@@ -95,7 +95,7 @@ const newChat = {
 };
 const mixed = buildChatStoragePatches(
   [baseline, newChat],
-  { 'chat-1': JSON.stringify(baseline) },
+  { 'chat-1': baseline },
   { 'chat-1': digest },
   { 'chat-1': shape },
 );
@@ -104,13 +104,13 @@ assert.equal(mixed['chat-new'], undefined, 'new chats without a server digest us
 
 assert.throws(() => buildChatStoragePatches(
   [{ ...baseline, items: [{ ...baseline.items[0] }, { ...baseline.items[0] }] }],
-  { 'chat-1': JSON.stringify(baseline) },
+  { 'chat-1': baseline },
   { 'chat-1': digest },
   { 'chat-1': shape },
 ), /unique stable item IDs/);
 assert.equal(buildChatStoragePatches(
   [baseline],
-  { 'chat-1': JSON.stringify(baseline) },
+  { 'chat-1': baseline },
   undefined,
 ), undefined, 'legacy responses without chat digests retain full-snapshot behavior');
 
@@ -120,7 +120,7 @@ const normalizedMissingParent = {
 };
 const synthesizedParent = buildChatStoragePatches(
   [normalizedMissingParent],
-  { 'chat-1': JSON.stringify(baseline) },
+  { 'chat-1': baseline },
   { 'chat-1': digest },
   { 'chat-1': shape },
 );
@@ -133,7 +133,7 @@ const nestedCurrent = { ...nestedBaseline, contextUsageCache: { source: 'provide
 const nestedShape = { ...shape, contextUsageCache: { source: true } };
 const nestedAdd = buildChatStoragePatches(
   [nestedCurrent],
-  { 'chat-1': JSON.stringify(nestedBaseline) },
+  { 'chat-1': nestedBaseline },
   { 'chat-1': digest },
   { 'chat-1': nestedShape },
 );
@@ -142,7 +142,7 @@ assert.deepEqual(nestedAdd['chat-1'].metadataPatch, [
 ], 'nested synthesized fields use add when their parent exists but the field does not');
 
 assert.throws(() => buildChatStoragePatches(
-  [baseline], { 'chat-1': JSON.stringify(baseline) }, { 'chat-1': digest }, undefined,
+  [baseline], { 'chat-1': baseline }, { 'chat-1': digest }, undefined,
 ), /metadata shape/);
 
 console.log('PASS chat storage deltas: metadata, item edit, reorder, append, delete, masked raw preservation');

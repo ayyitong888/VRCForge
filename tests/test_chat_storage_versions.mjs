@@ -10,7 +10,7 @@ let result=r(fp,[{...a,title:'local'},bChat],[projected,{...bChat,title:'externa
 assert.equal(result.status,'merged');
 assert.deepEqual(result.chats,[{...a,title:'local'},{...bChat,title:'external'}]);
 assert.equal(result.baselineFingerprints.a,fp.a,'local edit still compares to its acknowledged raw baseline');
-assert.equal(result.baselineFingerprints.b,f([{...bChat,title:'external'}]).b);
+assert.deepEqual(result.baselineFingerprints.b,f([{...bChat,title:'external'}]).b);
 result=r(fp,base,[bChat],undefined,{baseline:versions,remote:{b:versions.b}});
 assert.deepEqual(result.chats,[bChat],'clean local chat accepts an external deletion');
 assert.equal(result.baselineFingerprints.a,undefined);

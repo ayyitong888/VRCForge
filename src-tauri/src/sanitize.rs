@@ -223,6 +223,20 @@ pub(crate) fn sanitize_chat_snapshot_response(mut value: serde_json::Value) -> s
     let chat_metadata_shapes = value.as_object_mut()
         .and_then(|object| object.remove("chatMetadataShapes"))
         .and_then(|shapes| validated_chat_metadata_shapes(&shapes));
+    let chat_manifest = value.as_object_mut()
+        .and_then(|object| object.remove("chatManifest"))
+        .filter(|manifest| {
+            manifest["schema"] == "vrcforge.chat_manifest.v1"
+                && manifest["complete"] == true
+                && manifest["scopeDigest"].as_str().is_some_and(|digest|
+                    digest.len() == 64 && digest.chars().all(|c| c.is_ascii_hexdigit()))
+                && manifest["ids"].as_array().is_some_and(|ids| {
+                    let Some(digests) = chat_digests.as_ref().and_then(|v| v.as_object()) else { return false; };
+                    let unique: std::collections::HashSet<_> = ids.iter().filter_map(|v| v.as_str()).collect();
+                    unique.len() == ids.len() && ids.len() == digests.len()
+                        && unique.iter().all(|id| digests.contains_key(*id))
+                })
+        });
     let paths = value.as_object_mut()
         .and_then(|object| object.remove("_validatedCompactionRecoveryPaths"))
         .and_then(|paths| paths.as_array().cloned())
@@ -266,6 +280,11 @@ pub(crate) fn sanitize_chat_snapshot_response(mut value: serde_json::Value) -> s
     if let Some(digests) = chat_digests {
         if let Some(object) = value.as_object_mut() {
             object.insert("chatDigests".to_string(), digests);
+        }
+    }
+    if let Some(manifest) = chat_manifest {
+        if let Some(object) = value.as_object_mut() {
+            object.insert("chatManifest".to_string(), manifest);
         }
     }
     if let Some(shapes) = chat_metadata_shapes {
@@ -1154,5 +1173,23 @@ mod memory_review_sanitizer_tests {
         assert_eq!(sanitized["preview"], "member api_key=[REDACTED]");
         assert!(sanitized.get("api_key").is_none());
         assert_eq!(sanitized["detail"], "[redacted]");
+    }
+}
+
+#[cfg(test)]
+mod incremental_manifest_tests {
+    use super::*;
+    #[test]
+    fn preserves_complete_manifest_through_sanitizer_and_rejects_missing_digest() {
+        let manifest = serde_json::json!({"schema":"vrcforge.chat_manifest.v1", "complete":true,
+            "ids":["unchanged", "changed"], "scopeDigest":"a".repeat(64)});
+        let snapshot = serde_json::json!({"incremental":true, "chatManifest":manifest,
+            "chats":[{"id":"changed"}], "chatDigests":{"unchanged":"b".repeat(64), "changed":"c".repeat(64)}});
+        let result = sanitize_chat_snapshot_response(snapshot.clone());
+        assert_eq!(result["chatManifest"], manifest);
+        assert_eq!(result["chats"].as_array().unwrap().len(), 1);
+        let mut broken = snapshot;
+        broken["chatDigests"].as_object_mut().unwrap().remove("unchanged");
+        assert!(sanitize_chat_snapshot_response(broken).get("chatManifest").is_none());
     }
 }

@@ -29,7 +29,7 @@ assert.equal(result.status, "merged", "independent append-only messages must not
 assert.deepEqual(result.chats[0].items.map((value) => value.id), ["original", "remote", "local"]);
 assert.equal(result.chats[0].revision, 6, "invalidate stale in-flight mutations after merging");
 assert.equal(result.chats[0].updatedAt, right.updatedAt);
-assert.equal(result.baselineFingerprints.chat, fingerprints([right]).chat, "delta baseline remains the acknowledged remote version");
+assert.deepEqual(result.baselineFingerprints.chat, fingerprints([right]).chat, "delta baseline remains the acknowledged remote version");
 assert.equal(run({ ...base, revision: 9 }).status, "merged", "local runtime activity must not hide a remote append");
 const streamed = { ...base, revision: 4, items: [...base.items, { id: "live", type: "streaming", clientTurnId: "turn", text: "working" }] };
 const durable = (chat) => ({ ...chat, items: chat.items.filter((value) => value.type !== "streaming") });

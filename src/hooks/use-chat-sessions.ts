@@ -14,12 +14,15 @@ import {
 } from "../lib/chat-compaction-state";
 import {
   chatDigestsFromPayload,
+  chatStorageValuesEqual,
+  type ChatStorageBaseline,
   chatMetadataShapesFromPayload,
   preserveConflictingChatCopies,
   reconcileChatStorage,
   snapshotChatFingerprints,
   sourceRevisionsFromPayload,
 } from "../lib/chat-storage-reconcile";
+import { expandChatRefresh } from "../lib/chat-refresh-snapshot";
 import { buildChatStoragePatches } from "../lib/chat-storage-delta";
 import { chatStorageOriginId } from "../lib/chat-storage-origin";
 import {
@@ -139,7 +142,7 @@ export function useChatSessions({
   // server baseline. An empty baseline preserves it as a local addition during
   // the first three-way merge instead of interpreting a missing server row as
   // a confirmed deletion.
-  const chatBaselineFingerprintsRef = useRef<Record<string, string>>({});
+  const chatBaselineFingerprintsRef = useRef<ChatStorageBaseline>({});
   const chatServerDigestsRef = useRef<Record<string, string> | undefined>(undefined);
   const chatServerMetadataShapesRef = useRef<Record<string, Record<string, unknown>> | undefined>(undefined);
   const chatPersistenceBlockedRef = useRef(false);
@@ -377,17 +380,18 @@ export function useChatSessions({
     const recoveringFromDamagedSource = chatStorageRecoveryBlockedRef.current
       || recoveries.some((recovery) => recovery.status === "recovered");
     const { chats: unfilteredRemoteChats, shouldPersist } = normalizeStoredChatSnapshot(
-      payload.chats || [],
+      expandChatRefresh(payload, chatBaselineFingerprintsRef.current, chatServerDigestsRef.current),
       chatsLoadedRef.current ? chatsRef.current : [],
     );
-    const unfilteredRemoteFingerprints = snapshotChatFingerprints(unfilteredRemoteChats, projectDurableChatFingerprint);
+    const unfilteredRemoteFingerprints = recoveringFromDamagedSource
+      ? snapshotChatFingerprints(unfilteredRemoteChats, projectDurableChatFingerprint) : {};
     const remoteChats = recoveringFromDamagedSource
       ? unfilteredRemoteChats.filter((chat) => {
           if (!chatDeletedIdsRef.current.has(chat.id)) {
             return true;
           }
           const baselineFingerprint = chatBaselineFingerprintsRef.current[chat.id];
-          return baselineFingerprint !== undefined && unfilteredRemoteFingerprints[chat.id] !== baselineFingerprint;
+          return baselineFingerprint !== undefined && !chatStorageValuesEqual(unfilteredRemoteFingerprints[chat.id], baselineFingerprint);
         })
       : unfilteredRemoteChats;
     if (!shouldCommit()) {
@@ -441,8 +445,8 @@ export function useChatSessions({
       return { status: "conflict", chats: chatsRef.current, shouldPersist: false };
     }
     const remoteFingerprints = reconciled.baselineFingerprints;
-    const mergedFingerprints = snapshotChatFingerprints(reconciled.chats, projectDurableChatFingerprint);
-    const mergedDiffersFromRemote = !chatFingerprintSnapshotsEqual(mergedFingerprints, remoteFingerprints);
+    const mergedDiffersFromRemote = reconciled.chats.length !== Object.keys(remoteFingerprints).length
+      || reconciled.chats.some(chat => !chatStorageValuesEqual(projectDurableChatFingerprint(chat), remoteFingerprints[chat.id]));
     chatBaselineFingerprintsRef.current = remoteFingerprints;
     chatServerDigestsRef.current = remoteDigests;
     chatServerMetadataShapesRef.current = remoteShapes;
@@ -527,7 +531,7 @@ export function useChatSessions({
         if (attempt > 0 || !(cause instanceof ApiError) || cause.status !== 409) {
           throw cause;
         }
-        const payload = await fetchChats<unknown>(endpoint, collectChatStorageProjectPaths());
+        const payload = await fetchChats<unknown>(endpoint, collectChatStorageProjectPaths(), chatServerDigestsRef.current);
         const outcome = await reconcileFetchedChatStorage(payload);
         if (outcome.status !== "ready") {
           throw cause;
@@ -617,7 +621,7 @@ export function useChatSessions({
       return false;
     }
     return enqueueChatStorageOperation(async () => {
-      const payload = await fetchChats<unknown>(endpoint, collectChatStorageProjectPaths());
+      const payload = await fetchChats<unknown>(endpoint, collectChatStorageProjectPaths(), chatServerDigestsRef.current);
       const outcome = await reconcileFetchedChatStorage(payload);
       if (outcome.status !== "ready") {
         return false;
@@ -694,13 +698,13 @@ export function useChatSessions({
     setResolvingChatStorageConflict(true);
     try {
       return await enqueueChatStorageOperation(async () => {
-        const payload = await fetchChats<unknown>(endpoint, collectChatStorageProjectPaths());
+        const payload = await fetchChats<unknown>(endpoint, collectChatStorageProjectPaths(), chatServerDigestsRef.current);
         if (payload.writeBlocked === true || (payload.recoveries || []).length > 0) {
           await reconcileFetchedChatStorage(payload);
           return false;
         }
         const sourceRevisions = sourceRevisionsFromPayload(payload.sources);
-        const { chats: remoteChats } = normalizeStoredChatSnapshot(payload.chats || []);
+        const { chats: remoteChats } = normalizeStoredChatSnapshot(expandChatRefresh(payload, chatBaselineFingerprintsRef.current, chatServerDigestsRef.current));
         const remoteDigests = chatDigestsFromPayload(payload.chatDigests, remoteChats);
         const remoteShapes = chatMetadataShapesFromPayload(payload.chatMetadataShapes, remoteChats);
         if (chatServerDigestsRef.current !== undefined && remoteDigests === undefined) {
@@ -1081,15 +1085,6 @@ export function useChatSessions({
     openChat,
     selectProject,
   };
-}
-
-function chatFingerprintSnapshotsEqual(
-  left: Readonly<Record<string, string>>,
-  right: Readonly<Record<string, string>>,
-): boolean {
-  const leftKeys = Object.keys(left);
-  const rightKeys = Object.keys(right);
-  return leftKeys.length === rightKeys.length && leftKeys.every((key) => left[key] === right[key]);
 }
 
 function normalizeStoredChatSnapshot(values: unknown[], liveChats: ChatThread[] = []): { chats: ChatThread[]; shouldPersist: boolean } {

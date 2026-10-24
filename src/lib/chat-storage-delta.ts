@@ -1,4 +1,5 @@
 import { compare, type Operation } from "fast-json-patch";
+import type { ChatStorageBaseline } from "./chat-storage-reconcile";
 import type { ChatThread, ConversationItem } from "./chat-types";
 
 export type ChatStoragePatch = {
@@ -21,7 +22,7 @@ const SHA256 = /^[a-f0-9]{64}$/;
  */
 export function buildChatStoragePatches(
   chats: ReadonlyArray<ChatThread>,
-  baselineFingerprints: Readonly<Record<string, string>>,
+  baselineFingerprints: Readonly<ChatStorageBaseline>,
   serverDigests: Readonly<Record<string, string>> | undefined,
   serverShapes: Readonly<Record<string, ChatMetadataShape>> | undefined,
 ): ChatStoragePatches | undefined {
@@ -40,7 +41,10 @@ export function buildChatStoragePatches(
     if (fingerprint === undefined) {
       throw new Error("Chat storage delta baseline is unavailable for an acknowledged chat.");
     }
-    const baseline = parseBaseline(fingerprint);
+    const baseline = fingerprint;
+    if (!baseline || typeof baseline !== "object" || Array.isArray(baseline)) {
+      throw new Error("Chat storage delta baseline is not a chat snapshot.");
+    }
     if (baseline.id !== chat.id) {
       throw new Error("Chat storage delta baseline does not belong to the current chat.");
     }
@@ -106,20 +110,9 @@ function projectMetadataToShape(value: Record<string, unknown>, shape: ChatMetad
   return result;
 }
 
-function parseBaseline(fingerprint: string): ChatThread {
-  try {
-    const value: unknown = JSON.parse(fingerprint);
-    if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error();
-    return value as ChatThread;
-  } catch {
-    throw new Error("Chat storage delta baseline is not valid JSON.");
-  }
-}
-
 function withoutItems(chat: ChatThread): Record<string, unknown> {
-  const copy = structuredClone(chat) as unknown as Record<string, unknown>;
-  delete copy.items;
-  return copy;
+  const { items: _items, ...metadata } = chat;
+  return metadata;
 }
 
 function requireItems(value: unknown): ConversationItem[] {

@@ -22,3 +22,14 @@ for (const variant of [
 }
 assert.deepEqual(filterPersistableChats([projected]), [projected], "projection is idempotent");
 console.log("chat persistence exact duplicate projection passed");
+
+const stringify = JSON.stringify;
+try {
+  JSON.stringify = () => { throw new Error("durable projection must not serialize full tool results"); };
+  const largeSteps = [{ output: "tool result ".repeat(600000) }];
+  const large = { ...chat, items: [{ id: "large", type: "agent", response: { steps: largeSteps, plan: { steps: largeSteps.map(step => ({...step})) } } }] };
+  const result = filterPersistableChats([large])[0];
+  assert.equal(result.items[0].response.plan.steps, undefined);
+  assert.equal(result.items[0].response.steps, largeSteps);
+} finally { JSON.stringify = stringify; }
+console.log("PASS duplicate tool-result projection without serialized copies");
