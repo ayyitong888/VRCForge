@@ -12,7 +12,7 @@ from typing import Any, Callable
 
 from background_goal_runtime import classify_runtime_plan_outcome, classify_runtime_step_failure
 from runtime_planner_service import public_runtime_payload
-from agent_runtime_event_projection import project_runtime_turn_event
+from agent_runtime_event_projection import project_runtime_turn_event, capture_timeline_from_steps
 
 
 _COMPLETED_RUN_STATUSES = frozenset({"completed", "failed", "denied", "cancelled"})
@@ -23,6 +23,17 @@ def _terminal_continuation(event: dict[str, Any]) -> dict[str, Any] | None:
     if not isinstance(continuation, dict):
         return None
     projected = dict(continuation)
+    # The terminal ledger owns the full result; restore only public capture
+    # metadata for old chat projections that omitted it. Never write history.
+    exact_owner = all(event.get(key) and event.get(key) == continuation.get(key)
+                      for key in ("sessionId", "clientTurnId", "turnId"))
+    same_project = not continuation.get("projectRoot") or (
+        str(continuation["projectRoot"]).replace("\\", "/").rstrip("/").casefold()
+        == str(event.get("projectRoot") or "").replace("\\", "/").rstrip("/").casefold())
+    if (event.get("event") == "runtime_turn_completed" and exact_owner and same_project
+            and event.get("projectRoot") and isinstance(event.get("steps"), list)
+            and isinstance(continuation.get("timeline"), list)):
+        projected["timeline"] = capture_timeline_from_steps(continuation["timeline"], event["steps"])
     if event.get("startedAt"):
         projected["startedAt"] = event["startedAt"]
     if event.get("event") == "runtime_turn_completed":
@@ -362,10 +373,19 @@ class AgentRuntimeRunLedger:
         events: list[dict[str, Any]] = []
         has_more = False
         last_sequence = cursor - 1
+        terminal_captures: dict[tuple[str, str], dict] = {}
         run_fields = ("sessionId", "turnId", "clientTurnId", "status", "provider", "providerLabel",
                       "model", "projectRoot", "createdAt", "updatedAt", "startedAt", "completedAt")
         for row in self._exact_run_events(session_id, client_turn_id):
             name = row.get("event")
+            if name == "runtime_turn_completed":
+                terminal = _terminal_continuation(row) or {}
+                for item in terminal.get("timeline", []):
+                    if not isinstance(item, dict):
+                        continue
+                    payload = item.get("payload", {})
+                    if item.get("kind") == "tool_result" and payload.get("captures"):
+                        terminal_captures[(str(row.get("turnId")), str(item.get("id")))] = item
             previous = run or {}
             # Requests made after completion cannot reopen an execution.
             if not (previous.get("status") in _COMPLETED_RUN_STATUSES
@@ -396,6 +416,15 @@ class AgentRuntimeRunLedger:
             if public_items:
                 events.append(self._ports.redact(public_items[0]))
                 last_sequence = sequence
+        for index, item in enumerate(events):
+            captured = terminal_captures.get((str((run or {}).get("turnId")), str(item.get("id"))))
+            if (captured and captured.get("payload", {}).get("actionId") == item.get("payload", {}).get("actionId")
+                    and not item.get("payload", {}).get("captures")):
+                projected = project_runtime_turn_event({
+                    "continuationSource": "foreground_completed", "sessionId": session_id,
+                    "turnId": str((run or {}).get("turnId")), "timeline": [captured],
+                })
+                events[index] = self._ports.redact(projected["timeline"][0])
         return {
             "ok": True, "run": self._ports.redact(_public_event(run)) if run else None,
             "events": events, "nextSequence": last_sequence + 1, "hasMore": has_more,

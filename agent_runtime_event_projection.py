@@ -175,6 +175,31 @@ def _sequence(value: Any, fallback: int) -> int:
         return fallback
 
 
+def capture_timeline_from_steps(timeline: list, steps: list) -> list:
+    """Project capture metadata at its original result occurrence, never full results."""
+    from collections import defaultdict, deque
+    from chat_resource_image import public_capture_previews
+
+    results = defaultdict(deque)
+    for step in steps:
+        if isinstance(step, Mapping) and isinstance(step.get("actionId"), str) and step["actionId"]:
+            results[step["actionId"]].append(public_capture_previews(step.get("result")))
+    output = []
+    for item in timeline:
+        if not isinstance(item, Mapping) or item.get("kind") != "tool_result":
+            output.append(item)
+            continue
+        payload = item.get("payload")
+        payload = payload if isinstance(payload, Mapping) else {}
+        queue = results.get(payload.get("actionId"))
+        captures = queue.popleft() if queue else []
+        # An existing result owns its metadata. Only repair absent projection.
+        if captures and not payload.get("captures"):
+            item = {**item, "payload": {**payload, "captures": captures}}
+        output.append(item)
+    return output
+
+
 def project_runtime_turn_event(payload: Mapping[str, Any] | None) -> dict[str, Any] | None:
     """Expose only the chat-owned fields needed to render one terminal reply."""
 
