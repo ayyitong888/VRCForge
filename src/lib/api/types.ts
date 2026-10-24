@@ -634,6 +634,7 @@ export type AgentRuntimeResponse = {
       providerError?: { type?: string; code?: string; statusCode?: number; streamStarted?: boolean };
     };
     taskCompletion?: Record<string, unknown>;
+    completionGate?: { status?: string; reason?: string };
     choices?: Array<{
       id?: string;
       label: string;

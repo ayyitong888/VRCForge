@@ -1097,6 +1097,7 @@ export default function App() {
     loadingWorkspaceDiffPatch,
     loadingUnityStatus,
     runtimeRuns,
+    runtimeAttention,
     desktopActions,
     activeDesktopActions,
     desktopBridge,
@@ -4664,6 +4665,7 @@ export default function App() {
               onOpenUserAttachmentSource={openUserAttachmentSource}
               approvalsLoaded={agentApprovals !== null}
               pendingApprovals={pendingApprovals}
+              runtimeReviewCount={runtimeAttention.length}
               workspaceSummary={workspaceDiff}
               activeDesktopActions={activeDesktopActions}
               refreshUnityStatus={refreshUnityStatus}

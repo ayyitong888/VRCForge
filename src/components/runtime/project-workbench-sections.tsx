@@ -137,6 +137,7 @@ export function ProjectWorkbenchSections({
   onOpenUserAttachmentSource,
   approvalsLoaded,
   pendingApprovals,
+  runtimeReviewCount = 0,
   workspaceSummary,
   activeDesktopActions,
   onTestAgentConnection,
@@ -165,6 +166,7 @@ export function ProjectWorkbenchSections({
   onOpenUserAttachmentSource?: (source: UserAttachmentSource) => void;
   approvalsLoaded: boolean;
   pendingApprovals: number;
+  runtimeReviewCount?: number;
   workspaceSummary: WorkspaceDiffSummary | null;
   activeDesktopActions: AgentDesktopAction[];
   onTestAgentConnection?: () => void | Promise<void>;
@@ -483,6 +485,16 @@ export function ProjectWorkbenchSections({
                 )}
               </>
             )}
+            {runtimeReviewCount > 0 ? (
+              <div data-vrcforge-status="runtime-attention">
+                <RuntimeInfoRow
+                  icon={<ListChecks className="h-4 w-4" />}
+                  label={t("workspace.runtimeReviewTitle")}
+                  value={t("workspace.runtimeReviewCount", { count: runtimeReviewCount })}
+                  suffix={<StatusDot status="warning" />}
+                />
+              </div>
+            ) : null}
             {isUnityProject ? (
               <button type="button" className="w-full text-left" data-vrcforge-status="approval" onClick={pendingApprovals > 0 ? onOpenPendingApprovals : undefined} disabled={pendingApprovals === 0}>
                 <RuntimeInfoRow

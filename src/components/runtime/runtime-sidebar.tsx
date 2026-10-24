@@ -45,6 +45,7 @@ export function RightRuntimeSidebar({
   onOpenUserAttachmentSource,
   approvalsLoaded,
   pendingApprovals,
+  runtimeReviewCount = 0,
   workspaceSummary,
   activeDesktopActions,
   refreshUnityStatus,
@@ -77,6 +78,7 @@ export function RightRuntimeSidebar({
   onOpenUserAttachmentSource?: (source: UserAttachmentSource) => void;
   approvalsLoaded: boolean;
   pendingApprovals: number;
+  runtimeReviewCount?: number;
   workspaceSummary: WorkspaceDiffSummary | null;
   activeDesktopActions: AgentDesktopAction[];
   refreshUnityStatus: () => void | Promise<void>;
@@ -157,6 +159,7 @@ export function RightRuntimeSidebar({
             onOpenUserAttachmentSource={onOpenUserAttachmentSource}
             approvalsLoaded={approvalsLoaded}
             pendingApprovals={pendingApprovals}
+            runtimeReviewCount={runtimeReviewCount}
             workspaceSummary={workspaceSummary}
             activeDesktopActions={activeDesktopActions}
             onTestAgentConnection={onTestAgentConnection}
@@ -239,6 +242,16 @@ export function RightRuntimeSidebar({
                     />
                   </div>
                 </>
+              ) : null}
+              {runtimeReviewCount > 0 ? (
+                <div data-vrcforge-status="runtime-attention">
+                  <RuntimeInfoRow
+                    icon={<ListChecks className="h-4 w-4" />}
+                    label={t("workspace.runtimeReviewTitle")}
+                    value={t("workspace.runtimeReviewCount", { count: runtimeReviewCount })}
+                    suffix={<StatusDot status="warning" />}
+                  />
+                </div>
               ) : null}
               <button type="button" className="w-full text-left" data-vrcforge-status="approval" onClick={pendingApprovals > 0 ? onOpenPendingApprovals : undefined} disabled={pendingApprovals === 0}>
                 <RuntimeInfoRow

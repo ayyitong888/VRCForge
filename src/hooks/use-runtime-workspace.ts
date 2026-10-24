@@ -32,6 +32,8 @@ import {
 import { playNotificationSoundOnce } from "../lib/notification-sound-delivery";
 import { isProjectWorkbenchSmokeMode, markdownSmokeGoals, markdownSmokeMemories, markdownSmokeProgress, markdownSmokeRuns } from "../lib/markdown-smoke";
 import { normalizeProjectPathKey } from "../lib/project-path";
+import { fetchAgentTurnResponse } from "../lib/api/agent-runtime";
+import { createRuntimeAttentionDelivery, latestRuntimeAttentionCandidates, runtimeAttentionFromResponse, type RuntimeAttention } from "../lib/runtime-attention";
 
 type UseRuntimeWorkspaceParams = {
   endpoint: string;
@@ -98,6 +100,45 @@ export function useRuntimeWorkspace({
   const agentQuestionNotificationIdsRef = useRef<Set<string>>(loadAgentQuestionNotificationIds());
   const agentQuestionNotificationInflightRef = useRef<Set<string>>(new Set());
   const agentQuestionNotificationStatusRef = useRef(new Map<string, string>());
+  const [verifiedAttention, setVerifiedAttention] = useState<RuntimeAttention[]>([]);
+  const attentionReceipts = useRef(new Map<string, Promise<RuntimeAttention | null>>());
+  const deliverAttention = useRef(createRuntimeAttentionDelivery());
+  const attentionCandidates = useMemo(() => latestRuntimeAttentionCandidates(runtimeRuns), [runtimeRuns]);
+  const runtimeAttention = runtimeConnected ? verifiedAttention.filter(item => attentionCandidates.some(run =>
+    run.sessionId === item.sessionId && run.clientTurnId === item.clientTurnId && run.turnId === item.turnId)) : [];
+
+  useEffect(() => {
+    let current = true;
+    if (!runtimeConnected) return;
+    // Snapshot is shared by local and externally initiated turns. Read each exact
+    // terminal receipt once; ordinary runtime polling does not reload history.
+    void Promise.all(attentionCandidates.map(run => {
+      const key = JSON.stringify([endpoint, run.sessionId, run.clientTurnId, run.turnId]);
+      let receipt = attentionReceipts.current.get(key);
+      if (!receipt) {
+        receipt = fetchAgentTurnResponse(endpoint, run.sessionId!, run.clientTurnId!).then(state => {
+          if (!state.ok || !state.response || !["completed", "failed"].includes(state.status)) {
+            attentionReceipts.current.delete(key);
+            return null;
+          }
+          return runtimeAttentionFromResponse(run, state.response);
+        }).catch(() => { attentionReceipts.current.delete(key); return null; });
+        attentionReceipts.current.set(key, receipt);
+      }
+      return receipt;
+    })).then(results => {
+      if (!current) return;
+      const attention = results.filter((item): item is RuntimeAttention => item !== null);
+      setVerifiedAttention(attention);
+      if (!isTauriRuntime()) return;
+      for (const item of attention) {
+        void deliverAttention.current(endpoint, item, t("workspace.runtimeReviewTitle"), t("workspace.runtimeReviewBody"), () => current).catch(() => {
+          // Native submission failed: no delivered marker; next snapshot retries.
+        });
+      }
+    });
+    return () => { current = false; };
+  }, [endpoint, runtimeConnected, attentionCandidates, t]);
 
   function notifyCallUserQuestions(questions: AgentQuestion[]) {
     if (!isTauriRuntime()) return;
@@ -492,6 +533,7 @@ export function useRuntimeWorkspace({
     loadingWorkspaceDiffPatch,
     loadingUnityStatus,
     runtimeRuns,
+    runtimeAttention,
     runtimeRunsError,
     desktopActions,
     activeDesktopActions,
