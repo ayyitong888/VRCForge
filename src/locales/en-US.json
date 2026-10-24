@@ -737,6 +737,7 @@
     "roslynFullAutoDesc": "Auto approve all requests with an audit trail. Highest risk; no extra startup confirmation."
   },
   "chat": {
+    "transportInterrupted": "Connection interrupted · execution status unconfirmed",
     "markdown": {
       "copy": "Copy code",
       "copied": "Copied",
@@ -912,6 +913,8 @@
     "workSegmentItems": "{{count}} events",
     "turnDuration": "Handled in {{duration}}",
     "timeline": {
+      "preparedTool": "Prepared {{tool}}",
+      "failureRecords": "Includes {{count}} failure records",
       "process": "Work log",
       "readFile": "Read a file",
       "readFiles": "Read {{count}} files",

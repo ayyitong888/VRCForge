@@ -8,6 +8,7 @@ import {
 } from "../../lib/path-to-skill-context";
 import type { RuntimeFileReference, RuntimeReviewEvidence, RuntimeScheduleItem } from "../../lib/runtime-ui-types";
 import { cn, formatCount } from "../../lib/utils";
+import { isActiveRuntimeRunStatus } from "../../lib/runtime-run-status";
 
 export function RuntimeToolButton({ icon, label, onClick }: { icon: ReactNode; label: string; onClick: () => void }) {
   return (
@@ -265,6 +266,11 @@ function runtimeFileSourceLabel(source: RuntimeFileReference["source"]) {
 
 function runtimeRunStatusLabel(status: string) {
   const normalized = status.trim().toLowerCase();
+  if (normalized === "queued") return i18n.t("chat.queued");
+  if (normalized === "waiting_for_model") return i18n.t("chat.runtimePhase.waitingForModel");
+  if (normalized === "waiting_for_tool") return i18n.t("chat.runtimePhase.runningTool");
+  if (["starting", "claimed", "dispatching"].includes(normalized)) return i18n.t("chat.runtimePhase.preparing");
+  if (normalized === "cancelling") return i18n.t("workspace.runStatusCancelRequested");
   const labels: Record<string, string> = {
     running: i18n.t("workspace.runStatusRunning"),
     completed: i18n.t("workspace.runStatusCompleted"),
@@ -282,14 +288,14 @@ function runtimeRunStatusLabel(status: string) {
     approval: i18n.t("workspace.approvalShort"),
     run: i18n.t("workspace.runShort"),
   };
-  return labels[normalized] || status || i18n.t("workspace.runStatusUnknown");
+  return labels[normalized] || (isActiveRuntimeRunStatus(normalized) ? i18n.t("workspace.runStatusRunning") : status) || i18n.t("workspace.runStatusUnknown");
 }
 
 
 
 function runtimeRunStatusClass(status: string) {
   const normalized = status.trim().toLowerCase();
-  if (["running", "applying", "cancel_requested"].includes(normalized)) {
+  if (isActiveRuntimeRunStatus(normalized)) {
     return "bg-primary animate-pulse";
   }
   if (["completed", "applied", "approved"].includes(normalized)) {

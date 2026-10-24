@@ -7036,18 +7036,14 @@ class AgentGateway:
             # created/started/completed/failed lifecycle is projected only by
             # the durable Sub Agent registry, so no synthetic lifecycle event
             # is emitted here.
-            timeline_kind = (
-                "command"
-                if action_kind == "shell"
-                else "file_edit"
-                if action_kind == "write"
-                else "tool_call"
-            )
+            # Preparation and the eventual tool_result share one occurrence.
+            # A supervised request is not evidence that a file is being edited.
+            timeline_kind = "tool_call"
             append_timeline_event(
                 timeline_kind,
                 label=("Run command" if action_kind == "shell" else planned_tool or action_kind),
                 summary=str(plan.get("summary") or ""),
-                status="started",
+                status="prepared" if action_kind in {"write", "shell"} else "started",
                 tool=planned_tool,
                 action_id=planned_action_id,
             )

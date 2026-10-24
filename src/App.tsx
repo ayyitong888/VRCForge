@@ -72,6 +72,7 @@ import type { AppUpdatePromptState, AppUpdateResult } from "./lib/api/app-update
 import { useCheckpointWorkspaceController } from "./hooks/use-checkpoint-workspace-controller";
 import { useChatRunController, type QueuedTurn } from "./hooks/use-chat-run-controller";
 import { useChatSessions } from "./hooks/use-chat-sessions";
+import { useConversationScroll } from "./hooks/use-conversation-scroll";
 import { useContextCompactionController } from "./hooks/use-context-compaction-controller";
 import { useDoctorFixController } from "./hooks/use-doctor-fix-controller";
 import { useBackgroundGoalRuns } from "./hooks/use-background-goal-runs";
@@ -409,14 +410,8 @@ export default function App() {
   const [startupIssue, setStartupIssue] = useState("");
   const [dismissedDoctorPromptSignature, setDismissedDoctorPromptSignature] = useState("");
   const conversationEndRef = useRef<HTMLDivElement | null>(null);
-  const conversationPinnedRef = useRef(true);
   const persistChatsNowRef = useRef<() => Promise<void>>(async () => undefined);
   const quitRequestedRef = useRef(false);
-  const [pinnedToConversationBottom, setPinnedToConversationBottom] = useState(true);
-  const updateConversationPinned = useCallback((pinned: boolean) => {
-    conversationPinnedRef.current = pinned;
-    setPinnedToConversationBottom(pinned);
-  }, []);
   const projectInitRef = useRef(false);
   const refreshRuntimeRunsRef = useRef<(includeEvents?: boolean, target?: string) => Promise<void>>(async () => undefined);
   const pendingApprovalsRef = useRef<AgentApproval[]>([]);
@@ -990,6 +985,10 @@ export default function App() {
   }
 
   const conversation = displayChat?.items ?? [];
+  const conversationScroll = useConversationScroll({
+    chatKey: `${endpoint}\n${activeChatId || ""}`,
+    endRef: conversationEndRef,
+  });
   const sessionId = activeChat?.sessionId ?? "";
   const activeRuntimeProjectPath = activeChat?.projectPath || activeProjectPath;
   const hasAgentRuntimeScope = Boolean(sessionId || activeRuntimeProjectPath);
@@ -2236,17 +2235,6 @@ export default function App() {
       unlistenStartStatus?.();
     };
   }, []);
-
-  useEffect(() => {
-    updateConversationPinned(true);
-  }, [activeChatId, updateConversationPinned]);
-
-  useEffect(() => {
-    if (!conversationPinnedRef.current) {
-      return;
-    }
-    conversationEndRef.current?.scrollIntoView({ behavior: "auto", block: "end" });
-  }, [activeChatId, conversation.length]);
 
   useEffect(() => {
     if (projectInitRef.current || activeProjectPath || !authoritativeSelectedProjectPath) {
@@ -4567,17 +4555,13 @@ export default function App() {
               conversationEndRef={conversationEndRef}
               onConversationMouseUp={handleConversationMouseUp}
               onConversationScroll={(scrollElement) => {
-                const nearBottom = scrollElement.scrollHeight - scrollElement.scrollTop - scrollElement.clientHeight < 24;
-                updateConversationPinned(nearBottom);
+                conversationScroll.onScroll(scrollElement);
                 if (selectionMenu) {
                   setSelectionMenu(null);
                 }
               }}
-              showScrollToBottom={!pinnedToConversationBottom}
-              onScrollToBottom={() => {
-                updateConversationPinned(true);
-                conversationEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-              }}
+              showScrollToBottom={!conversationScroll.pinned}
+              onScrollToBottom={conversationScroll.scrollToBottom}
               pendingApprovalForResponse={pendingApprovalForResponse}
               scopedPendingApprovals={pendingApprovalItems}
               approvalActions={approvalActions}

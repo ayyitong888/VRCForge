@@ -86,6 +86,15 @@ export function buildAgentTimelineRows({
   t: typeof i18n.t;
 }): ReactNode[] {
   const cancelled = isCancelledRuntimeResponse(response);
+  const interrupted = response.continuationSource === "foreground_interrupted";
+  const interruptedPartial = interrupted ? response.plan.reply?.trim() || "" : "";
+  if (interrupted) {
+    // A retained partial is public model text, not a confirmed final receipt.
+    response = { ...response, plan: { ...response.plan, reply: "", summary: "" } };
+    providerLine = "";
+    planLabel = "";
+    showIntent = false;
+  }
   // Turn state is UI chrome, not an assistant answer. Preserve the durable
   // activity and model words; never render the model-context recovery digest.
   if (cancelled) {
@@ -99,7 +108,17 @@ export function buildAgentTimelineRows({
     };
     showIntent = false;
   }
-  const finishRows = (rows: ReactNode[]): ReactNode[] => cancelled ? [...rows,
+  const finishRows = (rows: ReactNode[]): ReactNode[] => interrupted ? [...rows,
+    ...(interruptedPartial && !response.timeline?.some((event) => event.kind === "assistant" && event.payload?.summary?.trim() === interruptedPartial) ? [
+      <div key="interrupted-partial" data-agent-partial-reply className="space-y-1 px-1 text-sm leading-relaxed" data-chat-quote-content>
+        <ChatMarkdown text={interruptedPartial} />
+      </div>,
+    ] : []),
+    <div key="transport-interrupted" data-agent-transport-interrupted role="status" className="flex items-center gap-1.5 px-1 text-xs text-muted-foreground">
+      <AlertTriangle className="h-3.5 w-3.5" aria-hidden="true" />
+      <span>{t("chat.transportInterrupted")}</span>
+    </div>,
+  ] : cancelled ? [...rows,
     <div key="turn-cancelled" data-agent-turn-cancelled role="status" className="flex items-center gap-1.5 px-1 text-xs text-muted-foreground">
       <CircleStop className="h-3.5 w-3.5" aria-hidden="true" />
       <span>{t("chat.cancelled")}</span>
@@ -327,6 +346,7 @@ export function buildDurableTimelineRows(
     }
   };
   const processInvocations: TimelineInvocation[] = [];
+  let lastPublicUpdate = "";
   let pendingCalls: Array<{ invocation: TimelineInvocation; detail: unknown }> = [];
   const flushToolCalls = () => {
     if (!pendingCalls.length) return;
@@ -336,8 +356,10 @@ export function buildDurableTimelineRows(
       <div key={`tools-${calls[0].invocation.id}`} data-agent-tool-call-group>
         <WorkSegmentRow
           kind="tool"
-          title={i18n.t("agent.timeline.callTools", { count: calls.length })}
-          statusLabel=""
+          title={[...new Set(calls.map(({ invocation }) => invocationOperationTitle(invocation, i18n.t)))].slice(0, 2).join(" · ")}
+          summaryMeta={i18n.t("agent.timeline.callTools", { count: calls.length })}
+          statusLabel={historicalFailureLabel(calls.map(({ invocation }) => invocation))}
+          showStatus={calls.some(({ invocation }) => ["failed", "error"].includes(invocation.status.toLowerCase()))}
           statusTone="muted"
         >
           {calls.map(({ invocation, detail }) => renderDirectTimelineInvocation(invocation, detail))}
@@ -367,6 +389,7 @@ export function buildDurableTimelineRows(
       if (entry.id === finalAssistant?.id) {
         rows.push(renderFinalAssistantRow(entry, terminalFailureCode));
       } else {
+        lastPublicUpdate = entry.text.split("\n").find((line) => line.trim())?.trim() || "";
         processRows.push(
           <div key={entry.id} className="space-y-1 px-1 text-sm leading-relaxed" data-chat-quote-content>
             <ChatMarkdown text={entry.text} />
@@ -401,14 +424,16 @@ export function buildDurableTimelineRows(
     ));
   }
   if (processRows.length) {
-    const toolCallCount = processInvocations.filter((invocation) => invocation.kind === "tool").length;
+    const toolCallCount = processInvocations.filter((invocation) => !["process", "subagent"].includes(invocation.kind)).length;
     const group = (
       <div key="agent-turn-process" data-agent-turn-process-group>
         <WorkSegmentRow
           kind="process"
           title={turnProcessDisplayTitle(turnElapsed, processInvocations, i18n.t)}
           summaryMeta={toolCallCount ? i18n.t("agent.timeline.callTools", { count: toolCallCount }) : undefined}
-          statusLabel=""
+          summary={lastPublicUpdate}
+          statusLabel={historicalFailureLabel(processInvocations)}
+          showStatus={processInvocations.some((invocation) => ["failed", "error"].includes(invocation.status.toLowerCase()))}
           statusTone="muted"
           openByDefault={Boolean(options.live)}
           controlledOpen={interleavedMessages.length ? options.interleavedUsersExpanded : undefined}
@@ -482,7 +507,7 @@ function renderDirectTimelineInvocation(invocation: TimelineInvocation, detail?:
       key={invocation.id}
       icon={workBatchIcon(invocation.kind)}
       title={[invocationOperationTitle(invocation, i18n.t), invocationTarget(detail)].filter(Boolean).join(" · ")}
-      statusTone={danger ? "danger" : halted ? "muted" : invocation.status === "started" ? "warn" : "ok"}
+      statusTone={danger ? "danger" : halted ? "muted" : ["started", "running", "pending", "prepared"].includes(invocation.status.toLowerCase()) ? "warn" : "ok"}
       statusLabel={showToolFailure ? i18n.t("skillStatus.failed") : invocation.status}
       showCompactStatus={showToolFailure}
       detailCard
@@ -503,6 +528,7 @@ function invocationTarget(detail: unknown): string {
 function invocationOperationTitle(invocation: TimelineInvocation, t: typeof i18n.t): string {
   const tool = timelineInvocationDisplayLabel(invocation.label);
   const normalizedStatus = invocation.status.toLowerCase();
+  if (normalizedStatus === "prepared") return t("agent.timeline.preparedTool", { tool });
   if (["failed", "error"].some((value) => normalizedStatus.includes(value))) {
     return invocation.kind === "tool" && ["failed", "error"].includes(normalizedStatus)
       ? tool
@@ -525,6 +551,11 @@ function invocationOperationTitle(invocation: TimelineInvocation, t: typeof i18n
     case "delegate_subagent": return t("agent.timeline.runSubagent");
     default: return t("agent.timeline.callTool", { tool });
   }
+}
+
+function historicalFailureLabel(invocations: TimelineInvocation[]): string {
+  const count = invocations.filter((invocation) => ["failed", "error"].includes(invocation.status.toLowerCase())).length;
+  return count ? i18n.t("agent.timeline.failureRecords", { count }) : "";
 }
 
 function turnProcessDisplayTitle(
@@ -577,7 +608,7 @@ function InvocationDetailCard({ invocation, detail }: { invocation: TimelineInvo
       : invocation.kind === "subagent"
         ? "Sub-agent"
         : "Tool";
-  const status = stoppedLabel || (danger
+  const status = normalizedStatus === "prepared" ? i18n.t("chat.runtimePhase.preparing") : stoppedLabel || (danger
     ? i18n.t("skillStatus.failed")
     : running
       ? invocation.status
@@ -1218,6 +1249,7 @@ function WorkSegmentRow({
   kind,
   title,
   summaryMeta,
+  summary,
   statusLabel,
   statusTone,
   showStatus = false,
@@ -1230,6 +1262,7 @@ function WorkSegmentRow({
   kind: TimelineBatchKind;
   title: string;
   summaryMeta?: string;
+  summary?: string;
   statusLabel: string;
   statusTone: "danger" | "warn" | "muted";
   showStatus?: boolean;
@@ -1251,7 +1284,7 @@ function WorkSegmentRow({
           if (controlledOpen === undefined) setLocalOpen(next);
           onOpenChange?.(next);
         }}
-        className="group/work-segment flex w-full min-w-0 items-center gap-2 px-1 py-2 text-left transition-colors hover:bg-muted/50"
+        className="group/work-segment flex w-full min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5 px-1 py-2 text-left transition-colors hover:bg-muted/50"
       >
         {processHeader ? (
           <>
@@ -1260,18 +1293,20 @@ function WorkSegmentRow({
               {open ? <ChevronDown className="h-3.5 w-3.5 shrink-0" /> : <ChevronRight className="h-3.5 w-3.5 shrink-0" />}
             </span>
             {summaryMeta ? <span className="min-w-0 truncate text-xs text-muted-foreground/70" data-agent-turn-tool-count>{summaryMeta}</span> : null}
-            {showStatus ? <span className={cn("shrink-0 text-xs", statusTone === "danger" ? "text-destructive" : statusTone === "warn" ? "text-amber-600" : "text-muted-foreground")}>{statusLabel}</span> : null}
+            {showStatus ? <span data-agent-operation-summary-status className={cn("shrink-0 text-xs", statusTone === "danger" ? "text-destructive" : statusTone === "warn" ? "text-amber-600" : "text-muted-foreground")}>{statusLabel}</span> : null}
           </>
         ) : (
           <>
             {kind === "command" ? <TerminalSquare className="h-3.5 w-3.5 shrink-0" /> : kind === "tool" || kind === "file_edit" ? <Wrench className="h-3.5 w-3.5 shrink-0" /> : <ListChecks className="h-3.5 w-3.5 shrink-0" />}
-            <span className="min-w-0 truncate text-sm leading-relaxed">{title}</span>
-            {showStatus ? <span className={cn("shrink-0 text-xs", statusTone === "danger" ? "text-destructive" : statusTone === "warn" ? "text-amber-600" : "text-muted-foreground")}>{statusLabel}</span> : null}
+            <span className="min-w-0 truncate text-sm leading-relaxed" data-agent-tool-group-title>{title}</span>
+            {summaryMeta ? <span className="min-w-0 truncate text-xs text-muted-foreground/70">{summaryMeta}</span> : null}
+            {showStatus ? <span data-agent-operation-summary-status className={cn("shrink-0 text-xs", statusTone === "danger" ? "text-destructive" : statusTone === "warn" ? "text-amber-600" : "text-muted-foreground")}>{statusLabel}</span> : null}
             <span className="ml-auto shrink-0 opacity-0 transition-opacity group-hover/work-segment:opacity-100 group-focus-visible/work-segment:opacity-100">
               {open ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
             </span>
           </>
         )}
+        {summary ? <span className="basis-full truncate text-xs font-normal text-muted-foreground/80" title={summary} data-agent-turn-process-summary>{summary}</span> : null}
       </button>
       {open ? <div className="mt-3 space-y-3 py-1" data-agent-process-content>{children}</div> : null}
     </div>

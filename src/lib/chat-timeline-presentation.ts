@@ -281,7 +281,7 @@ function batchKind(event: ChatTimelineEvent): TimelineBatchKind {
 
 function invocationIdentity(event: ChatTimelineEvent): string {
   const actionId = String(event.payload?.actionId || "").trim();
-  if (actionId) return `${batchKind(event)}:${actionId}`;
+  if (actionId) return `${event.kind === "subagent" ? "subagent" : "tool"}:${actionId}`;
   if (event.kind === "subagent") {
     const lifecycleMatch = event.id.match(/^(subagent-event-.+)-\d+$/);
     if (lifecycleMatch) return `subagent:${lifecycleMatch[1]}`;
@@ -300,7 +300,11 @@ function materializeInvocations(events: ChatTimelineEvent[]): TimelineInvocation
     if (event.kind === "assistant" || event.kind === "phase") continue;
     const identity = invocationIdentity(event);
 
-    if (event.kind === "tool_call") {
+    // Older supervised request records used file_edit/command before the
+    // authoritative result. Pair them by action occurrence, never by prose
+    // or a later unrelated success. New requests use tool_call/prepared.
+    if (event.kind === "tool_call"
+      || ((event.kind === "file_edit" || event.kind === "command") && event.payload?.actionId)) {
       const index = invocations.push({ first: event, last: event }) - 1;
       openToolCalls.set(identity, [...(openToolCalls.get(identity) || []), index]);
       continue;

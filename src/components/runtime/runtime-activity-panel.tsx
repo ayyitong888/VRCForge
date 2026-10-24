@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 
 import type { AgentRuntimeRun } from "../../lib/api";
 import type { PathToSkillOperationSummary } from "../../lib/path-to-skill-context";
+import { isActiveRuntimeRunStatus } from "../../lib/runtime-run-status";
 import { RuntimeRunRow } from "./runtime-sidebar-ui";
 
 export function RuntimeActivityPanel({
@@ -16,7 +17,7 @@ export function RuntimeActivityPanel({
   onSaveOperationAsSkill: (summary: PathToSkillOperationSummary) => void;
 }) {
   const { t } = useTranslation();
-  const hasActiveRun = runs.some((run) => ["in_progress", "running", "applying", "dispatching"].includes((run.status || "").toLowerCase()));
+  const hasActiveRun = runs.some((run) => isActiveRuntimeRunStatus(run.status));
   const [open, setOpen] = useState(hasActiveRun);
   const hasActivity = runs.length > 0 || Boolean(error);
 

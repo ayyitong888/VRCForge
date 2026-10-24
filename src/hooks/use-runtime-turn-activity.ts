@@ -7,11 +7,11 @@ import { mergeRuntimeTimelines, materializeRuntimeTimeline } from "../lib/chat-t
 import { normalizeAgentRuntimeTimelineEvent } from "../lib/chat-streaming";
 import { type RuntimeTurnEvent } from "./use-runtime-turn-continuation";
 import { coalesceRuntimeTurnStreams, isExternalRuntimeStream, RUNTIME_ACTIVITY_STREAM_PREFIX } from "../lib/runtime-stream-owner";
+import { isActiveRuntimeRunStatus } from "../lib/runtime-run-status";
 
-const ACTIVE_STATUSES = new Set(["running", "starting", "queued", "claimed", "cancelling", "cancel_requested", "waiting_for_model", "waiting_for_tool"]);
 type Identity = { sessionId: string; clientTurnId: string; turnId?: string };
 type UpdateChat = (chatId: string, updater: (chat: ChatThread) => ChatThread) => boolean;
-type Activity = Identity & { chatId: string; nextSequence: number; stamp: string; controller: AbortController; reading: boolean; caughtUp: boolean; timer?: number };
+type Activity = Identity & { chatId: string; nextSequence: number; stamp: string; controller: AbortController; reading: boolean; caughtUp: boolean; receiptRecovered?: boolean; timer?: number };
 
 function identityKey(identity: Identity): string {
   return JSON.stringify([identity.sessionId, identity.clientTurnId]);
@@ -21,8 +21,12 @@ function responseMatchesIdentity(response: AgentRuntimeResponse, identity: Ident
   const sessionId = response.sessionId || response.session_id;
   if (sessionId && sessionId !== identity.sessionId) return false;
   const turnId = response.turnId || response.turn_id;
+  // Older local transport placeholders used the CID as a synthetic backend
+  // turn id. Exact CID ownership still permits their authoritative readback.
+  const localPlaceholder = needsRuntimeReceipt(response)
+    && (response.continuationSource === "foreground_interrupted" || turnId === response.clientTurnId);
   if (response.clientTurnId) return response.clientTurnId === identity.clientTurnId
-    && (!identity.turnId || !turnId || turnId === identity.turnId);
+    && (!identity.turnId || !turnId || turnId === identity.turnId || localPlaceholder);
   // An exact backend turn from this run is authoritative even on older reply
   // records that omitted their client-turn alias. Never guess from text/time.
   return Boolean(identity.turnId && turnId === identity.turnId);
@@ -34,7 +38,8 @@ export function runtimeActivityOwner(chats: ChatThread[], identity: Identity): C
   const candidates = chats.filter((chat) => chat.sessionId === identity.sessionId);
   if (candidates.length === 1) return candidates[0];
   const exact = candidates.filter((chat) => chat.items.some((item) =>
-    ((item.type === "user" || item.type === "streaming") && item.clientTurnId === identity.clientTurnId)
+    ((item.type === "user" || item.type === "streaming") && (item.clientTurnId === identity.clientTurnId
+      || (item.type === "user" && item.id === `user-${identity.clientTurnId}`)))
     || (item.type === "agent" && responseMatchesIdentity(item.response, identity))));
   return exact.length === 1 ? exact[0] : undefined;
 }
@@ -43,13 +48,25 @@ function hasReply(chat: ChatThread, identity: Identity): boolean {
   return chat.items.some((item) => item.type === "agent" && responseMatchesIdentity(item.response, identity));
 }
 
+function needsRuntimeReceipt(response: AgentRuntimeResponse): boolean {
+  if (response.continuationSource === "foreground_interrupted") return true;
+  if (!["cancelled", "canceled", "failed", "error", "interrupted"].includes(String(response.status || "").toLowerCase())) return false;
+  const turnId = response.turnId || response.turn_id;
+  return !turnId || turnId === response.clientTurnId;
+}
+
+function hasAuthoritativeReply(chat: ChatThread, identity: Identity): boolean {
+  return chat.items.some((item) => item.type === "agent"
+    && responseMatchesIdentity(item.response, identity) && !needsRuntimeReceipt(item.response));
+}
+
 /** Only this observer's rows are managed here; local sends keep their own lifecycle. */
 export function projectRuntimeTurnActivity(chat: ChatThread, run: AgentRuntimeRun): ChatThread {
   const sessionId = String(run.sessionId || "").trim();
   const clientTurnId = String(run.clientTurnId || "").trim();
   if (!sessionId || !clientTurnId || chat.sessionId !== sessionId || hasReply(chat, { sessionId, clientTurnId, turnId: run.turnId })) return chat;
   if (chat.items.some((item) => item.type === "streaming" && item.clientTurnId === clientTurnId)) return coalesceRuntimeTurnStreams(chat, clientTurnId);
-  if (!ACTIVE_STATUSES.has(String(run.status || ""))) return chat;
+  if (!isActiveRuntimeRunStatus(run.status)) return chat;
   return { ...chat, items: [...chat.items, {
     id: `${RUNTIME_ACTIVITY_STREAM_PREFIX}${clientTurnId}`, type: "streaming", clientTurnId,
     text: "", createdAt: run.startedAt, model: run.model, providerLabel: run.providerLabel,
@@ -138,11 +155,11 @@ export function useRuntimeTurnActivity(params: Params) {
         activity.nextSequence = page.nextSequence;
         if (!page.hasMore) {
           activity.caughtUp = true;
-          if (!ACTIVE_STATUSES.has(String(page.run.status || ""))) {
+          if (!isActiveRuntimeRunStatus(page.run.status)) {
             const state = await fetchAgentTurnResponse(endpoint, activity.sessionId, activity.clientTurnId, activity.controller.signal);
             if (!valid()) return;
             const event = runtimeEventFromExactResponse(state, activity);
-            if (event) latest.current.deliver(event);
+            if (event && latest.current.deliver(event)) activity.receiptRecovered = true;
           }
           return;
         }
@@ -166,15 +183,26 @@ export function useRuntimeTurnActivity(params: Params) {
     if (finished.current.has(key)) return;
     let activity = activities.current.get(key);
     if (!activity) {
-      const knownTurn = owner.items.some((item) => item.type === "user" && item.clientTurnId === identity.clientTurnId)
+      // A persisted real terminal receipt is already authoritative after a
+      // reload. Existing in-flight history readers still finish their catch-up.
+      if (hasAuthoritativeReply(owner, identity)) {
+        finished.current.add(key);
+        return;
+      }
+      const knownTurn = owner.items.some((item) => item.type === "user"
+        && (item.clientTurnId === identity.clientTurnId || item.id === `user-${identity.clientTurnId}`))
         || owner.items.some((item) => item.type === "agent" && responseMatchesIdentity(item.response, identity));
-      if (!ACTIVE_STATUSES.has(String(run.status || "")) && !knownTurn) return;
+      if (!isActiveRuntimeRunStatus(run.status) && !knownTurn) return;
       activity = { ...identity, chatId: owner.id, nextSequence: 0, stamp: "", controller: new AbortController(), reading: false, caughtUp: false };
       activities.current.set(key, activity);
       latest.current.updateChat(owner.id, (chat) => projectRuntimeTurnActivity(chat, run));
     }
     const stamp = JSON.stringify([run.turnId, run.status, run.updatedAt, run.eventCount]);
-    if (activity.stamp !== stamp) {
+    // The ledger can settle before the response is durable. Existing runtime
+    // snapshots retry that read even when no later ledger event changes stamp.
+    const awaitingReceipt = !isActiveRuntimeRunStatus(run.status)
+      && !activity.receiptRecovered && !hasAuthoritativeReply(owner, identity);
+    if (activity.stamp !== stamp || awaitingReceipt) {
       activity.stamp = stamp;
       void read(activity);
     }
@@ -185,11 +213,12 @@ export function useRuntimeTurnActivity(params: Params) {
     for (const run of params.runs) observe(run);
     for (const [key, activity] of activities.current) {
       const owner = runtimeActivityOwner(params.chats, activity);
-      if (!owner || owner.id !== activity.chatId || (hasReply(owner, activity) && activity.caughtUp && !activity.reading)) {
+      const settled = owner && (activity.receiptRecovered || hasAuthoritativeReply(owner, activity));
+      if (!owner || owner.id !== activity.chatId || (settled && activity.caughtUp && !activity.reading)) {
         activity.controller.abort();
         if (activity.timer !== undefined) window.clearTimeout(activity.timer);
         activities.current.delete(key);
-        if (owner && hasReply(owner, activity)) finished.current.add(key);
+        if (settled) finished.current.add(key);
       }
     }
   }, [params.chats, params.runs, params.runtimeConnected, params.endpoint, observe]);
@@ -223,7 +252,7 @@ export function useRuntimeTurnActivity(params: Params) {
     if (!latest.current.runtimeConnected || !delta.sessionId || !delta.clientTurnId) return;
     const identity = { sessionId: delta.sessionId, clientTurnId: delta.clientTurnId, turnId: delta.turnId };
     const owner = runtimeActivityOwner(latest.current.chats, identity);
-    if (!owner || hasReply(owner, identity)) return;
+    if (!owner || hasAuthoritativeReply(owner, identity)) return;
     const activity = activities.current.get(identityKey(identity));
     if (activity?.turnId && delta.turnId && activity.turnId !== delta.turnId) return;
     if (!activity) observe({ ...identity, status: "running" });

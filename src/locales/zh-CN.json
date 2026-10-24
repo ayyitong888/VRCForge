@@ -737,6 +737,7 @@
     "roslynFullAutoDesc": "所有请求自动通过并留痕；风险最高，不再需要启动额外确认。"
   },
   "chat": {
+    "transportInterrupted": "连接中断，执行状态待核对",
     "markdown": {
       "copy": "复制代码",
       "copied": "已复制",
@@ -912,6 +913,8 @@
     "workSegmentItems": "{{count}} 个事件",
     "turnDuration": "已处理 {{duration}}",
     "timeline": {
+      "preparedTool": "准备执行 {{tool}}",
+      "failureRecords": "含 {{count}} 次失败记录",
       "process": "处理过程",
       "readFile": "读取了文件",
       "readFiles": "读取了 {{count}} 个文件",

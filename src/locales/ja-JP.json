@@ -737,6 +737,7 @@
     "roslynFullAutoDesc": "すべてのリクエストを監査記録付きで自動承認します。最もリスクが高く、起動時の追加確認はありません。"
   },
   "chat": {
+    "transportInterrupted": "接続が中断されました。実行状態は未確認です",
     "markdown": {
       "copy": "コードをコピー",
       "copied": "コピーしました",
@@ -907,6 +908,8 @@
     "workSegmentItems": "{{count}} 件のイベント",
     "turnDuration": "処理時間 {{duration}}",
     "timeline": {
+      "preparedTool": "{{tool}} の実行準備",
+      "failureRecords": "失敗記録 {{count}} 件",
       "process": "作業の記録",
       "readFile": "ファイルを読み取り",
       "readFiles": "{{count}} 件のファイルを読み取り",

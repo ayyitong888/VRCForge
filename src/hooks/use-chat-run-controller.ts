@@ -211,6 +211,7 @@ export function useChatRunController({
   const steerIntentRef = useRef(new Map<string, QueuedTurn>());
   const streamingTurnChatRef = useRef(new Map<string, string>());
   const activeTurnAbortRef = useRef<AbortController | null>(null);
+  const dispatchedTurnAbortRef = useRef<AbortController | null>(null);
   const backgroundTurnAbortRefs = useRef(new Map<string, AbortController>());
   const titleGenerationAttemptedRef = useRef(new Set<string>());
   const rehydratedRef = useRef(false);
@@ -1261,7 +1262,9 @@ export function useChatRunController({
             projectRoot: chat?.projectPath || activeRuntimeProjectPath || undefined,
           })
         : null;
+      if (abortController.signal.aborted) throw new Error("Request cancelled.");
       runtimeRequestStarted = true;
+      if (!background) dispatchedTurnAbortRef.current = abortController;
       const response = await sendAgentMessage(targetEndpoint, messageForModel, chatSessionId || undefined, history, chatAgentName, {
         signal: abortController.signal,
         planMode: turn.planMode === true,
@@ -1600,11 +1603,10 @@ export function useChatRunController({
       }
     } catch (cause) {
       const text = cause instanceof Error ? cause.message : String(cause);
-      // Any transport/gateway failure that says the turn was cancelled must
-      // settle as a cancelled turn; the exact-match variant let backend cancel
-      // wordings fall through to the generic error path, which deleted the
-      // user's own question from the transcript.
-      const cancelled = abortController.signal.aborted || text.toLowerCase().includes("cancel");
+      // A broken/aborted response channel does not prove backend cancellation.
+      // Preserve its accepted dialogue as an interrupted transport placeholder;
+      // the exact runtime receipt owns the eventual execution status.
+      const interrupted = abortController.signal.aborted || text.toLowerCase().includes("cancel");
       if (!background && turn.queueId && (!runtimeRequestStarted || text.includes("followup_queue_not_ready"))) {
         turn.queueStatus = "waiting_for_resources";
         markQueuedTurnStatus(turn.id, "waiting_for_resources");
@@ -1648,22 +1650,40 @@ export function useChatRunController({
         ]);
         return false;
       }
-      if (cancelled) {
-        const cancelledText = t("chat.cancelled");
+      if (interrupted) {
         const elapsedSeconds = Math.max(1, Math.round((Date.now() - startedAt) / 1000));
         updateChat(chatId, (current) => ({
           ...touchChat(current),
-          items: current.items.map((item) => item.type === "streaming" && item.clientTurnId === turn.id
-            ? finalizeCancelledStreamingTurn(item, {
-                sessionId: current.sessionId || turn.sessionId,
-                cancelledText,
-                elapsedSeconds,
-              })
-            : item),
+          items: current.items.map((item) => {
+            if (item.type !== "streaming" || item.clientTurnId !== turn.id) return item;
+            const placeholder = finalizeCancelledStreamingTurn(item, {
+              sessionId: current.sessionId || turn.sessionId,
+              cancelledText: text,
+              elapsedSeconds,
+            });
+            return {
+              ...placeholder,
+              id: `interrupted-${turn.id}`,
+              response: {
+                ...placeholder.response,
+                status: "interrupted",
+                continuationSource: "foreground_interrupted",
+                turnId: "",
+                turn_id: "",
+                plan: {
+                  ...placeholder.response.plan,
+                  summary: "",
+                  reply: placeholder.response.plan.reply === text ? "" : placeholder.response.plan.reply,
+                  nextStep: "interrupted",
+                },
+              },
+            };
+          }),
         }));
         if (persistChatsNow) {
           await persistChatsNow().catch(() => undefined);
         }
+        setError(text);
         return false;
       }
       if (options?.restoreOnFailure) {
@@ -1708,6 +1728,9 @@ export function useChatRunController({
         if (activeTurnAbortRef.current === abortController) {
           activeTurnAbortRef.current = null;
         }
+        if (dispatchedTurnAbortRef.current === abortController) {
+          dispatchedTurnAbortRef.current = null;
+        }
         currentTurnRef.current = null;
         setCurrentTurn(null);
       }
@@ -1721,21 +1744,34 @@ export function useChatRunController({
     for (const turn of queueRef.current) {
       markQueuedTurnStatus(turn.id, "paused");
     }
-    // Keep pending turns durable and visible; only the backend cancel ack may
-    // transition the active turn to cancelled.
+    // Keep pending turns durable and visible; only the backend terminal receipt
+    // may transition the active turn to cancelled.
     // React state can lag while a send completes; the ref is the CAS owner
     // for the currently active turn and avoids cancelling a stale turn.
     const current = currentTurnRef.current;
+    const controller = activeTurnAbortRef.current;
+    if (controller && dispatchedTurnAbortRef.current !== controller) {
+      // No backend turn has been dispatched yet. Stop local preparation and
+      // let the pre-dispatch signal check prevent admission after pending I/O.
+      controller.abort();
+      return;
+    }
     if (current?.clientTurnId) {
       void requestAgentRunCancel(endpoint, {
         sessionId: current.sessionId,
         clientTurnId: current.clientTurnId,
         reason: "user_stop",
       })
-        .then(() => refreshRuntimeRuns(false))
-        .catch(() => undefined);
+        .then((result) => {
+          if (!result.ok) {
+            setError(result.status || "Agent cancellation was not accepted.");
+          }
+          return refreshRuntimeRuns(false);
+        })
+        .catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
     }
-    activeTurnAbortRef.current?.abort();
+    // A cancel request only asks the backend to stop. Keep the owned response
+    // reader alive until its real terminal receipt, including in-flight tools.
   }
 
   return {
