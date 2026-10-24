@@ -19,10 +19,11 @@ const bundled = await build({
       const [queued,setQueued]=useState([{id:'queued-turn-1',text:'待发送提示',attachments:[{id:'queued-image',name:'model.png',size:9,type:'image/png'}],queueStatus:'queued',composerQueued:true}]);
       window.queueState=queued;
       window.setQueueText=text=>setQueued(current=>current.map(turn=>({...turn,text})));
-      const edit=(id,patch)=>{window.queueCalls.push({kind:'edit',id,patch});setQueued(current=>current.map(turn=>turn.id===id?{...turn,...patch}:turn));};
+      const [input,setInput]=useState('');
+      const edit=id=>{const turn=queued.find(turn=>turn.id===id);window.queueCalls.push({kind:'edit',id,attachments:turn.attachments});setInput(turn.text);setQueued(current=>current.filter(turn=>turn.id!==id));};
       const remove=id=>{window.queueCalls.push({kind:'remove',id});setQueued(current=>current.filter(turn=>turn.id!==id));};
       const steer=id=>window.queueCalls.push({kind:'steer',id});
-      return <ChatWorkspace input='' setInput={()=>{}} sending={true} queueAllowed={true} onSubmit={()=>{}} onQueue={()=>{}} onSteerNow={()=>{}} onSwitchMode={()=>{}}
+      return <ChatWorkspace input={input} setInput={setInput} sending={true} queueAllowed={true} onSubmit={()=>{}} onQueue={()=>{}} onSteerNow={()=>{}} onSwitchMode={()=>{}}
         conversation={[{id:'old',type:'user',text:'已发送历史'},{id:'queued-user',type:'user',text:'待发送提示',composerQueued:true}]}
         queued={queued} onEditQueuedTurn={edit} onRemoveQueuedTurn={remove} onSteerQueuedTurn={steer}
         agentQuestions={[]} runtimeRuns={[]} scopedPendingApprovals={[]} approvalActions={{}} activeGoal={null}
@@ -96,19 +97,9 @@ try {
   }
 
   await row.locator("[data-chat-pending-turn-edit]").click();
-  assert.equal(await row.locator("textarea").inputValue(), "待发送提示", "edit message is available from the more menu");
-  await row.locator("textarea").fill("修订后的提示");
-  await row.locator("[data-chat-pending-turn-save]").click();
-  await page.waitForFunction(() => window.queueCalls.some(call => call.kind === "edit"));
-  assert.deepEqual(await page.evaluate(() => window.queueCalls[0]), {kind:"edit",id:"queued-turn-1",patch:{text:"修订后的提示"}});
-  await row.getByRole("button", {name:"attachments.remove"}).click();
-  await page.waitForFunction(() => window.queueCalls.filter(call => call.kind === "edit").length === 2);
-  assert.deepEqual(await page.evaluate(() => window.queueCalls[1]), {kind:"edit",id:"queued-turn-1",patch:{text:"修订后的提示",attachments:[]}});
-  await row.locator("[data-chat-pending-turn-steer]").click();
-  await page.waitForFunction(() => window.queueCalls.some(call => call.kind === "steer"));
-  await row.locator("[data-chat-pending-turn-remove]").click();
-  await page.waitForFunction(() => window.queueCalls.some(call => call.kind === "remove"));
-  assert.equal(await page.locator("[data-chat-pending-turn]").count(), 0, "removing a queued message clears the pending queue row");
+  assert.equal(await page.locator('[data-composer]').inputValue(), '待发送提示', 'edit returns the complete message to the main composer');
+  assert.equal(await row.count(),0,'editing withdraws the queued row instead of sending again');
+  assert.deepEqual(await page.evaluate(()=>window.queueCalls),[{kind:'edit',id:'queued-turn-1',attachments:[{id:'queued-image',name:'model.png',size:9,type:'image/png'}]}]);
   assert.deepEqual(errors, []);
   console.log("chat pending queue: hidden from history, editable, steerable, and removable");
 } finally {

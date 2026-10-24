@@ -4496,7 +4496,12 @@ export default function App() {
               onStop={stopInteractiveActivity}
               onResumeQueue={() => void resumeQueuedTurns()}
               onCancelQueue={() => void cancelQueuedTurns()}
-              onEditQueuedTurn={(turnId, patch) => editQueuedTurn(turnId, patch)}
+              onEditQueuedTurn={async (turnId) => {
+                const turn = await editQueuedTurn(turnId);
+                if (!turn) return;
+                setInput(current => current ? `${current}\n\n${turn.text}` : turn.text);
+                setAttachments(current => [...current, ...turn.attachments.filter(item => !current.some(existing => existing.id === item.id))]);
+              }}
               onRemoveQueuedTurn={(turnId) => void removeQueuedTurn(turnId)}
               onSteerQueuedTurn={(turnId) => void steerQueuedTurn(turnId)}
               onSwitchMode={switchMode}

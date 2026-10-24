@@ -130,7 +130,7 @@ window.__submitFixtureQueued = () => window.__controller.submitTurn({
   id: "console-queued-fixture", text: "queued fixture text", attachments: [], provider: "fixture",
   providerLabel: "Fixture", model: "fixture", sessionId: "session-fixture", planMode: false,
 }, { deliveryMode: "queue" });
-window.__editFixtureQueued = () => window.__controller.editQueuedTurn("console-queued-fixture", { text: "edited queued fixture" });
+window.__editFixtureQueued = () => window.__controller.editQueuedTurn("console-queued-fixture");
 window.__queueFixture = (id, text) => window.__controller.submitTurn({
   id, text, attachments: [], provider: "fixture", providerLabel: "Fixture", model: "fixture",
   sessionId: "session-fixture", planMode: false,
@@ -225,8 +225,13 @@ try {
   assert.equal(Object.hasOwn(queueState.request, "targetClientTurnId"), false, "Enter queue mode omits the active target so the backend stores a durable follow-up");
   assert.deepEqual(queueState.queued.at(-1), { id: "console-queued-fixture", queueId: "queue-console-queued-fixture", status: "queued" });
   assert.equal(queueState.item.composerQueued, true, "pending entry remains durable but is marked for queue UI instead of transcript history");
-  const edited = await page.evaluate(() => window.__editFixtureQueued());
-  assert.ok(edited && edited.id !== "console-queued-fixture", "editing cancels and re-enqueues with a fresh idempotency identity");
+  const beforeEditRequests = await page.evaluate(()=>window.__queueRequests.length);
+  const withdrawn = await page.evaluate(() => window.__editFixtureQueued());
+  assert.equal(withdrawn.id, "console-queued-fixture", "editing returns the withdrawn message");
+  assert.equal(await page.evaluate(()=>window.__queueRequests.length),beforeEditRequests,"editing must not re-enqueue or send");
+  assert.equal(await page.evaluate(()=>window.__queuedTurns().some(turn=>turn.id==='console-queued-fixture')),false);
+  await page.evaluate(()=>window.__queueFixture("edited-resubmitted", "edited queued fixture"));
+  const edited = {id:"edited-resubmitted"};
   queueState = await page.evaluate(() => ({
     request: window.__queueRequests.at(-1),
     queued: window.__queuedTurns().map((turn) => turn.id),

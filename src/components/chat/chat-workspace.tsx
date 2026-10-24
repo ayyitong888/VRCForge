@@ -55,69 +55,21 @@ function PendingQueuedTurnCard({
 }: {
   turn: QueuedChatTurn;
   sending: boolean;
-  onEdit?: (turnId: string, patch: { text?: string; attachments?: ChatAttachment[] }) => void | Promise<unknown>;
+  onEdit?: (turnId: string) => void | Promise<unknown>;
   onRemove?: (turnId: string) => void;
   onSteer?: (turnId: string) => void;
   onResume?: () => void;
 }) {
   const { t } = useTranslation();
-  const [draftText, setDraftText] = useState(turn.text);
-  const [saving, setSaving] = useState(false);
-  const [editing, setEditing] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
-  useEffect(() => setDraftText(turn.text), [turn.id, turn.text]);
-  const dirty = draftText !== turn.text;
-  async function save(patch: { text?: string; attachments?: ChatAttachment[] }) {
-    if (!onEdit || saving) return;
-    setSaving(true);
-    try {
-      await onEdit(turn.id, patch);
-    } finally {
-      setSaving(false);
-    }
-  }
+  const [restoring, setRestoring] = useState(false);
   return (
     <div className="relative flex items-center gap-2 px-3 py-1" data-chat-pending-turn={turn.id}>
       <div className="min-w-0 flex-1">
-        {editing ? (
-          <textarea
-            className="app-scrollbar min-h-10 w-full resize-y rounded-md bg-transparent px-1 py-1 text-sm outline-none focus-visible:ring-1 focus-visible:ring-ring"
-            value={draftText}
-            aria-label={t("chat.editQueued")}
-            onChange={(event) => setDraftText(event.currentTarget.value)}
-            disabled={saving}
-            data-chat-pending-turn-text
-          />
-        ) : (
-          <p className="truncate px-1 py-1 text-sm" data-chat-pending-turn-preview>{turn.text || t("chat.pendingQueue")}</p>
-        )}
-        {turn.attachments.length && editing ? (
-          <div className="flex flex-wrap gap-1.5">
-            {turn.attachments.map((attachment) => (
-              <span key={attachment.id} className="inline-flex max-w-full items-center gap-1 rounded-md bg-muted px-2 py-1 text-xs" data-chat-pending-turn-attachment={attachment.id}>
-                <span className="max-w-48 truncate">{attachment.name}</span>
-                  {editing ? <button
-                  type="button"
-                  className="rounded p-0.5 text-muted-foreground hover:bg-background hover:text-foreground"
-                  aria-label={t("attachments.remove")}
-                  title={t("attachments.remove")}
-                  disabled={dirty || saving}
-                  onClick={() => void save({ text: draftText, attachments: turn.attachments.filter((item) => item.id !== attachment.id) })}
-                >
-                  <X className="h-3 w-3" />
-                  </button> : null}
-              </span>
-            ))}
-          </div>
-        ) : null}
+        <p className="truncate px-1 py-1 text-sm" data-chat-pending-turn-preview>{turn.text || t("chat.pendingQueue")}</p>
       </div>
-        {editing && dirty ? (
-          <Button type="button" variant="outline" className="h-8 shrink-0 px-2 text-xs" disabled={saving} onClick={() => void save({ text: draftText })} data-chat-pending-turn-save={turn.id}>
-            {t("chat.saveQueued")}
-          </Button>
-        ) : null}
         {sending ? (
-          <Button type="button" variant="ghost" className="h-8 shrink-0 px-2 text-xs" disabled={editing && dirty} onClick={() => onSteer?.(turn.id)} data-chat-pending-turn-steer={turn.id}>
+          <Button type="button" variant="ghost" className="h-8 shrink-0 px-2 text-xs" disabled={restoring} onClick={() => onSteer?.(turn.id)} data-chat-pending-turn-steer={turn.id}>
             <ArrowUp className="mr-1 h-3 w-3" />
             {t("chat.guideNow")}
           </Button>
@@ -131,15 +83,10 @@ function PendingQueuedTurnCard({
         </Button>
         {menuOpen ? (
           <div role="menu" className="absolute right-2 bottom-full mb-1 z-20 min-w-36 rounded-md border border-border bg-popover p-1 text-popover-foreground shadow-md" data-chat-pending-turn-menu={turn.id}>
-            <button type="button" role="menuitem" className="w-full rounded-sm px-2 py-1.5 text-left text-sm hover:bg-accent" onClick={() => { setEditing(true); setMenuOpen(false); }} data-chat-pending-turn-edit={turn.id}>
+            <button type="button" role="menuitem" className="w-full rounded-sm px-2 py-1.5 text-left text-sm hover:bg-accent" disabled={restoring} onClick={() => { setRestoring(true); void Promise.resolve(onEdit?.(turn.id)).finally(() => setRestoring(false)); setMenuOpen(false); }} data-chat-pending-turn-edit={turn.id}>
               {t("chat.editQueuedMessage")}
             </button>
           </div>
-        ) : null}
-        {editing ? (
-          <Button type="button" variant="ghost" className="h-8 shrink-0 px-2 text-xs" onClick={() => { setDraftText(turn.text); setEditing(false); }} data-chat-pending-turn-edit-cancel={turn.id}>
-            {t("common.cancel")}
-          </Button>
         ) : null}
     </div>
   );
@@ -258,7 +205,7 @@ export function ChatWorkspace({
   onStop?: () => void;
   onResumeQueue?: () => void;
   onCancelQueue?: () => void;
-  onEditQueuedTurn?: (turnId: string, patch: { text?: string; attachments?: ChatAttachment[] }) => void | Promise<unknown>;
+  onEditQueuedTurn?: (turnId: string) => void | Promise<unknown>;
   onRemoveQueuedTurn?: (turnId: string) => void;
   onSteerQueuedTurn?: (turnId: string) => void;
   planMode?: boolean;

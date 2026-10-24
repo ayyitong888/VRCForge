@@ -1058,40 +1058,11 @@ export function useChatRunController({
     return true;
   }
 
-  async function editQueuedTurn(turnId: string, patch: QueuedTurnEdit): Promise<QueuedTurn | null> {
+  async function editQueuedTurn(turnId: string): Promise<QueuedTurn | null> {
     const current = queueRef.current.find((candidate) => candidate.id === turnId);
-    if (!current) return null;
-    if (!current.queueId && current.queueStatus === "delivery_unverified") return null;
-    if (current.queueId) {
-      const cancelled = await cancelAgentRunFollowup(endpoint, current.queueId, {
-        sessionId: current.queueLaneId || current.chatId || "",
-      }).catch(() => null);
-      if (cancelled?.status !== "cancelled") return null;
-    }
-    queueRef.current = queueRef.current.filter((candidate) => candidate.id !== turnId);
-    setQueued([...queueRef.current]);
-    const chatId = current.chatId || current.queueLaneId;
-    if (chatId) {
-      updateChat(chatId, (chat) => ({
-        ...touchChat(chat),
-        items: chat.items.map((item) => item.type === "user" && item.clientTurnId === turnId
-          ? { ...item, queueStatus: "cancelled" }
-          : item),
-      }));
-      await persistChatsNow?.().catch(() => undefined);
-    }
-    const replacement: QueuedTurn = {
-      ...current,
-      ...patch,
-      id: createClientTurnId(current.id),
-      queueId: undefined,
-      queueSequence: undefined,
-      queueStatus: "queued",
-    };
-    const result = await enqueueFollowupTurn(replacement);
-    return result === "queued"
-      ? queueRef.current.find((candidate) => candidate.id === replacement.id) || replacement
-      : null;
+    if (!current || !await removeQueuedTurn(turnId)) return null;
+    // Editing withdraws the queued send; only a new composer submission sends it again.
+    return current;
   }
 
   async function steerQueuedTurn(turnId: string): Promise<SubmitTurnResult> {
