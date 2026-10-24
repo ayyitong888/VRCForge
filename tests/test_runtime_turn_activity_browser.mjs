@@ -111,6 +111,21 @@ try {
   // A duplicate live occurrence on an already observed turn must not refetch
   // history for every delta (snapshot stamps remain owned by snapshots).
   assert.ok(await page.evaluate(() => window.requests.length) <= Math.ceil(events.length / pageSize) + 1);
+  // Storage reconciliation can restore a stale stream after delivery was recorded.
+  // A settled observer must still reconcile it without another terminal event.
+  await page.evaluate(({ restored, run }) => {
+    window.resetChats([{ ...restored, items: [...restored.items, {
+      id: 'runtime-activity:' + run.clientTurnId, type: 'streaming', clientTurnId: run.clientTurnId,
+      text: '', phase: 'verifying', timeline: [{ id: 'late-progress', kind: 'assistant',
+        timestamp: '2026-10-23T12:10:00Z', payload: { phase: 'commentary', summary: 'Late accepted progress' } }],
+    }] }]);
+    window.replaceRuns([{ ...run, status: 'blocked' }]);
+  }, { restored, run });
+  await page.waitForTimeout(100);
+  assert.equal(await page.evaluate(() => window.visibleChats[0].items.some(i => i.type === 'streaming')), false,
+    'exact terminal receipt removes a restored stale activity even after observer marked the turn finished');
+  assert.ok(await page.evaluate(() => window.visibleChats[0].items.find(i => i.type === 'agent').timeline.some(e => e.id === 'late-progress')),
+    'settlement transfers accepted stream history into the existing receipt');
   // A reused session with two chats cannot be guessed; an exact CID owns one.
   await page.evaluate(() => {
     window.resetChats([{ id: 'wrong', sessionId: 'other-session', items: [] }, { id: 'owner', sessionId: window.identity.sessionId, items: [] }]);

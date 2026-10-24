@@ -27,6 +27,13 @@ try {
   assert.deepEqual(api.latestRuntimeAttentionCandidates([run]), [run]);
   const attention = api.runtimeAttentionFromResponse(run, response);
   assert.ok(attention);
+  const failedRun={...run,status:'failed'};
+  const failedResponse={...response,plan:{completionGate:{status:'failed',reason:'verification_failed'}}};
+  assert.deepEqual(api.latestRuntimeAttentionCandidates([failedRun]),[failedRun]);
+  assert.ok(api.runtimeAttentionFromResponse(failedRun,failedResponse),'terminal verification failure requires attention');
+  assert.equal(api.runtimeAttentionFromResponse({...failedRun,status:'running'},failedResponse),null,'intermediate failed checks do not notify');
+  assert.equal(api.runtimeAttentionFromResponse(failedRun,{...failedResponse,plan:{completionGate:{status:'failed',reason:'tool_failed'}}}),null,'unrelated failures keep their own notification path');
+
   assert.equal(api.runtimeAttentionFromResponse(run, {...response,clientTurnId:'wrong'}), null);
   assert.equal(api.runtimeAttentionFromResponse(run, {...response,plan:{nextStep:'needs_user_action',completionGate:{status:'needs_user_action',reason:'question_pending'}}}), null);
   assert.equal(api.latestRuntimeAttentionCandidates([{...run,status:'running'}]).length, 0);

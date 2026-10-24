@@ -489,6 +489,23 @@ def normalize_agent_tool_result(
             ),
             **_structured_error_route_fields(projected_error),
         }
+    elif verification_needs_action and not write and not any(
+        _status(view.get("status")) in _NEEDS_ACTION_STATUSES | _TOP_LEVEL_PENDING_STATUSES
+        or _status(view.get("toolExecutionStatus")) in _NEEDS_ACTION_STATUSES | _TOP_LEVEL_PENDING_STATUSES
+        or (
+            isinstance(view.get("verification"), Mapping)
+            and _status(view["verification"].get("state")) in {"needs_user_action", "pending"}
+        )
+        for view in views
+    ):
+        status = "failed"
+        summary = "Required verification did not pass; inspect the evidence and correct the cause."
+        verification = {**verification, "state": "failed"}
+        error = {
+            "type": "verification", "code": "verification_failed", "retryable": True,
+            "likelyCauses": [],
+            "nextActions": ["Inspect the failed checks, correct the cause, and verify again."],
+        }
     elif observation_pending:
         status = "pending"
         summary = "Runtime observation is sampling. Poll the same job; do not repeat start."
@@ -625,7 +642,13 @@ def completion_gate_plan(
             "nextStep": next_step,
             "completionGate": {
                 "status": outcome_status,
-                "reason": "tool_failed" if outcome_status == "failed" else "verification_required",
+                "reason": (
+                    "verification_failed"
+                    if outcome_status == "failed"
+                    and isinstance(outcome.get("error"), Mapping)
+                    and outcome["error"].get("code") == "verification_failed"
+                    else "tool_failed" if outcome_status == "failed" else "verification_required"
+                ),
             },
         }
     )

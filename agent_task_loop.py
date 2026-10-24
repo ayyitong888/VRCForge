@@ -756,8 +756,19 @@ def apply_declared_verification(
         if state == "failed":
             failed.append(field_name)
     if failed:
+        # A failed read-only check is model feedback, not a request for a human.
+        # Persisted-write uncertainty retains its protected recovery boundary.
+        corrective = profile == "multi_angle_visual"
         return {
-            "status": "needs_user_action",
+            **({
+                **bounded, "success": False,
+                "error": {
+                    "type": "verification", "code": "verification_failed",
+                    "retryable": True,
+                    "nextActions": ["Inspect the failed checks, correct the cause, and verify again."],
+                },
+            } if corrective else {}),
+            "status": "failed" if corrective else "needs_user_action",
             "summary": (
                 ("The visual audit did not pass its required checks: "
                  if profile == "multi_angle_visual" else
@@ -765,7 +776,7 @@ def apply_declared_verification(
                 + ", ".join(failed)
                 + "."
             ),
-            "verification": {"state": "needs_user_action", "checks": checks},
+            "verification": {"state": "failed" if corrective else "needs_user_action", "checks": checks},
         }
     bounded["verification"] = {"state": "passed", "checks": checks}
     return bounded

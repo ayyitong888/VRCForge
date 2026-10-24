@@ -938,7 +938,7 @@ def test_multi_angle_visual_requires_managed_capture_evidence_verification() -> 
         outcome=ok_outcome("visual audit passed"),
     )
 
-    assert missing["status"] == "needs_user_action"
+    assert missing["status"] == "failed"
     assert missing["outcome"]["verification"]["checks"][-1] == {
         "kind": "captureEvidenceVerified",
         "state": "failed",
@@ -975,7 +975,7 @@ def test_failed_visual_verification_is_not_reported_as_a_unity_write_failure() -
                     "captureEvidenceVerified": True},
         outcome=ok_outcome("visual findings"),
     )
-    assert result["status"] == "needs_user_action"
+    assert result["status"] == "failed"
     assert "visual audit" in result["outcome"]["summary"]
     assert "Unity write" not in result["outcome"]["summary"]
     assert result["outcome"]["verification"]["checks"][0] == {"kind": "visualVerified", "state": "failed"}
@@ -1603,8 +1603,8 @@ def test_visual_capture_and_audit_use_registered_completion_verifiers() -> None:
         outcome=ok_outcome("partial audit"),
         action_id=visual["actionId"],
     )
-    assert incomplete["status"] == "needs_user_action"
-    assert incomplete["outcome"]["verification"]["state"] == "needs_user_action"
+    assert incomplete["status"] == "failed"
+    assert incomplete["outcome"]["verification"]["state"] == "failed"
 
 
 @pytest.mark.parametrize(

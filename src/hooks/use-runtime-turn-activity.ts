@@ -60,6 +60,19 @@ function hasAuthoritativeReply(chat: ChatThread, identity: Identity): boolean {
     && responseMatchesIdentity(item.response, identity) && !needsRuntimeReceipt(item.response));
 }
 
+/** Exact durable receipts own completion, even after a storage merge restores a live row. */
+export function settleRuntimeTurnActivity(chat: ChatThread, identity: Identity): ChatThread {
+  if (chat.sessionId !== identity.sessionId || !hasAuthoritativeReply(chat, identity)) return chat;
+  const streams = chat.items.filter((item) => isExternalRuntimeStream(item)
+    && item.clientTurnId === identity.clientTurnId);
+  if (!streams.length) return chat;
+  const timeline = streams.flatMap((item) => item.type === "streaming" ? item.timeline || [] : []);
+  return { ...chat, items: chat.items.filter((item) => !streams.includes(item)).map((item) =>
+    item.type === "agent" && responseMatchesIdentity(item.response, identity)
+      ? { ...item, timeline: mergeRuntimeTimelines(timeline, materializeRuntimeTimeline(item.response), item.timeline || []) }
+      : item) };
+}
+
 /** Only this observer's rows are managed here; local sends keep their own lifecycle. */
 export function projectRuntimeTurnActivity(chat: ChatThread, run: AgentRuntimeRun): ChatThread {
   const sessionId = String(run.sessionId || "").trim();
@@ -103,6 +116,7 @@ export function runtimeEventFromExactResponse(state: AgentTurnResponseRecovery, 
   if (!turnId || (identity.turnId && turnId !== identity.turnId)) return undefined;
   return {
     schema: "vrcforge.runtime_turn_event.v1", continuationSource: "foreground_completed",
+    ok: response.ok, status: response.status,
     sessionId: identity.sessionId, clientTurnId: identity.clientTurnId, turnId,
     plan: response.plan, timeline: response.timeline, contextUsage: response.contextUsage,
     consumedSteerInputIds: response.consumedSteerInputIds, model: response.model,
@@ -176,6 +190,9 @@ export function useRuntimeTurnActivity(params: Params) {
     const identity = { sessionId: String(run.sessionId || "").trim(), clientTurnId: String(run.clientTurnId || "").trim(), turnId: run.turnId };
     const owner = runtimeActivityOwner(latest.current.chats, identity);
     if (!owner) return;
+    // The finished cache suppresses network work, never reconciliation. A saved
+    // receipt and a restored transient row may arrive in separate storage updates.
+    latest.current.updateChat(owner.id, (chat) => settleRuntimeTurnActivity(chat, identity));
     const stream = owner.items.find((item) => item.type === "streaming" && item.clientTurnId === identity.clientTurnId);
     // UI sends and question continuations retain their existing projection owner.
     if (stream && !isExternalRuntimeStream(stream)) return;

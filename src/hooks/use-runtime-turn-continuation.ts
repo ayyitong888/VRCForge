@@ -68,6 +68,8 @@ function sanitizePlannerFailure(value: unknown): PlannerFailure | undefined {
 
 export type RuntimeTurnEvent = {
   schema?: string;
+  ok?: boolean;
+  status?: string;
   continuationSource?: string;
   sessionId?: string;
   turnId?: string;
@@ -91,6 +93,7 @@ export type RuntimeTurnEvent = {
     }>;
     plannerFailure?: AgentRuntimeResponse["plan"]["plannerFailure"];
     taskCompletion?: Record<string, unknown>;
+    completionGate?: AgentRuntimeResponse["plan"]["completionGate"];
   };
   timeline?: AgentRuntimeResponse["timeline"];
 };
@@ -358,7 +361,8 @@ export function responseFromRuntimeTurnEvent(event: RuntimeTurnEvent): AgentRunt
   const turnId = event.turnId!.trim();
   const plannerFailure = sanitizePlannerFailure(event.plan?.plannerFailure);
   return {
-    ok: true,
+    ok: event.ok ?? true,
+    ...(event.status ? { status: event.status } : {}),
     ...(event.continuationSource === "foreground_interrupted" ? { status: "interrupted" } : {}),
     continuationSource: event.continuationSource,
     session_id: sessionId,
@@ -380,6 +384,7 @@ export function responseFromRuntimeTurnEvent(event: RuntimeTurnEvent): AgentRunt
       publicMessages: event.plan?.publicMessages,
       plannerFailure,
       taskCompletion: event.plan?.taskCompletion,
+      completionGate: event.plan?.completionGate,
     },
     timeline: event.timeline,
   };

@@ -4057,14 +4057,14 @@ class AgentLoopP0Tests(unittest.TestCase):
         assert len(plans) >= 2, result
         assert execute_skill.call_count == 1
         assert "overallStatus" in plans[1]["prompt"]
-        assert result["plan"]["nextStep"] in {"needs_user_action", "completion_unverified"}, result
+        assert result["plan"]["nextStep"] in {"tool_failed", "completion_unverified"}, result
         assert any(
             step.get("tool") == "vision_audit_multi"
             for step in result["steps"]
         )
 
 
-    def test_visual_correction_continues_after_proven_progress_but_stops_without_it(self) -> None:
+    def test_visual_correction_is_bounded_even_when_receipt_ids_change(self) -> None:
         gateway = self.gateway
         session_id = "visual-progress-correction-session"
         gateway.runtime_sessions.load_internal_tool_block(session_id, "attachments")
@@ -4098,7 +4098,7 @@ class AgentLoopP0Tests(unittest.TestCase):
                          {"angle": "side_right", "status": "clipping"}]
                     ),
                 },
-                "outcome": {"status": "needs_user_action", "summary": "structured visual findings"},
+                "outcome": {"status": "ok", "summary": "structured visual findings"},
             }
 
         with patch.object(gateway.runtime_planner, "plan_agent_turn", side_effect=plan_agent_turn), patch.object(
@@ -4112,7 +4112,7 @@ class AgentLoopP0Tests(unittest.TestCase):
 
         assert execute_skill.call_count == 3, result["plan"]
         assert len(plans) == 3
-        assert result["plan"]["nextStep"] in {"needs_user_action", "completion_unverified"}
+        assert result["plan"]["nextStep"] in {"tool_failed", "completion_unverified"}
         assert all(step["result"]["visualVerified"] is False for step in result["steps"])
         assert result["task"]["status"] != "completed"
 

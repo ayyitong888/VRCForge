@@ -14,17 +14,19 @@ export function latestRuntimeAttentionCandidates(runs: AgentRuntimeRun[]): Agent
     const prior = latest.get(run.sessionId);
     if (!prior || time(run) > time(prior)) latest.set(run.sessionId, run);
   }
-  return [...latest.values()].filter(run => run.status === "blocked");
+  return [...latest.values()].filter(run => run.status === "blocked" || run.status === "failed");
 }
 
 /** Verify the exact terminal receipt; a tool failure inside an active run is not attention. */
 export function runtimeAttentionFromResponse(run: AgentRuntimeRun, response: AgentRuntimeResponse): RuntimeAttention | null {
-  if (run.status !== "blocked" || !run.sessionId || !run.clientTurnId || !run.turnId
+  if (!["blocked", "failed"].includes(run.status || "") || !run.sessionId || !run.clientTurnId || !run.turnId
     || (response.sessionId || response.session_id) !== run.sessionId
     || response.clientTurnId !== run.clientTurnId
     || (response.turnId || response.turn_id) !== run.turnId) return null;
   const gate = response.plan?.completionGate;
-  if (gate?.status !== "needs_user_action" || gate.reason !== "verification_required") return null;
+  const blockedReview = run.status === "blocked" && gate?.status === "needs_user_action" && gate.reason === "verification_required";
+  const failedVerification = run.status === "failed" && gate?.status === "failed" && gate.reason === "verification_failed";
+  if (!blockedReview && !failedVerification) return null;
   return { sessionId: run.sessionId, clientTurnId: run.clientTurnId, turnId: run.turnId };
 }
 
