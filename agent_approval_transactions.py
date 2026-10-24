@@ -1222,15 +1222,12 @@ class AgentApprovalTransactionService:
                 "writeFailure": external_write_failure_view(error_details),
             }
         outcome = ensure_dict(outcome)
-        approval = extract_approval_id(outcome)
-        if not approval:
-            approval_record = ensure_dict(outcome.get("approval"))
-            if not approval_record:
-                approval_record = ensure_dict(ensure_dict(outcome.get("result")).get("approval"))
-            approval = str(approval_record.get("id") or "").strip()
+        # The current owner's receipt is authoritative. Recursive extraction can
+        # find an older approval inside continuation history or task context.
         approval_record = ensure_dict(outcome.get("approval"))
         if not approval_record:
             approval_record = ensure_dict(ensure_dict(outcome.get("result")).get("approval"))
+        approval = str(approval_record.get("id") or "").strip() or extract_approval_id(outcome)
         approval_status = str(approval_record.get("status") or "").strip().casefold()
         if approval and approval_status in {"pending", "approved", "applying"}:
             status = "approval_pending"

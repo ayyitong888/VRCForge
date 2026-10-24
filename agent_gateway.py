@@ -6160,7 +6160,8 @@ class AgentGateway:
         write_payload: dict[str, Any] | None = (
             ensure_dict(ensure_dict(task_continuation).get("execution")) or None
         )
-        approval_id = str(ensure_dict(task_continuation).get("approvalId") or "").strip()
+        resumed_approval_id = str(ensure_dict(task_continuation).get("approvalId") or "").strip()
+        approval_id = resumed_approval_id
         if continuation_context and write_payload is not None:
             completed_action_id = str(
                 continuation_context.get("requestedActionId") or ""
@@ -7837,7 +7838,7 @@ class AgentGateway:
                 in {"approval_pending", "pending", "pending_approval"}
             )
             if step_approval:
-                approval_id = approval_id or step_approval
+                approval_id = step_approval if step_waits_for_approval else (approval_id or step_approval)
             approval_result = ensure_dict(
                 ensure_dict(step_payload.get("result")).get("approval")
             )
@@ -8500,8 +8501,8 @@ class AgentGateway:
             payload["timeline"] = timeline
         if continuation_source:
             payload["continuationSource"] = continuation_source
-        if approval_id and continuation_context:
-            payload["resumedApprovalId"] = approval_id
+        if resumed_approval_id and continuation_context:
+            payload["resumedApprovalId"] = resumed_approval_id
         if client_turn_id:
             payload["clientTurnId"] = client_turn_id
         if consumed_steer_input_ids:

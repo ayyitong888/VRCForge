@@ -482,6 +482,16 @@ class NativeRuntimeTurn:
                     ),
                 )
             self._native_decision = None
+            # A receipt is a serial proposal, not permission to run its remaining
+            # side effects after a predecessor fails. Return every cancelled ID
+            # before asking the model to decide what to do with the new evidence.
+            if any(
+                str((item.get("outcome") or {}).get("status") or item.get("status") or "")
+                in {"failed", "denied", "rejected", "cancelled", "not_executed", "needs_user_action"}
+                for item in observations if isinstance(item, Mapping)
+                and isinstance(item.get("outcome", {}), Mapping)
+            ):
+                self._settle_unexecuted("predecessor_not_successful")
         if terminal is not None:
             self._settle_unexecuted(str(terminal.get("nextStep") or "terminal"))
         if self._queued_calls:

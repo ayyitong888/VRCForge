@@ -1,7 +1,7 @@
-"""Offline behavior contracts for multiple reads and single supervised writes.
+"""Offline behavior contracts for multiple proposals with serial supervised writes.
 
 No new batch API is assumed: a standard native assistant receipt carries calls.
-The first test is intentionally red until the host can admit independent reads.
+Every proposal retains its ordinary per-call execution gates.
 """
 import json
 
@@ -56,24 +56,68 @@ def test_two_independent_reads_share_one_model_response_and_keep_results_separat
 
 
 @pytest.mark.parametrize("mode", ["approval", "auto"])
-def test_two_writes_in_one_receipt_never_dispatch_as_a_batch(tmp_path, mode):
+def test_six_known_writes_share_response_and_keep_serial_approval_boundaries(tmp_path, mode):
     project = str(tmp_path / "UnityProject")
-    receipt = _receipt(
-        call("write-alpha", "fixture_write", {"projectRoot": project, "value": "alpha"}),
-        call("write-beta", "fixture_write", {"projectRoot": project, "value": "beta"}),
-    )
-    gateway, model, invoked = _write_gateway_for_mode(tmp_path, [receipt, {
-        "role": "assistant", "content": "The proposed write batch was not executed."
-    }])
+    receipt = _receipt(*(call(f"toggle-{i}", "fixture_write", {"projectRoot": project, "value": i}) for i in range(6)))
+    gateway, model, invoked = _write_gateway_for_mode(tmp_path, [receipt, finish])
     _set_mode(gateway, mode)
-
-    run(gateway, tmp_path, message="Write the fixture", maxAgenticTurns=2)
-
-    assert not invoked, "A multi-write receipt must not bypass single-write admission, including auto mode"
+    if mode == "auto":
+        gateway.approval_transactions.auto_approval_reviewer = lambda _approval: "allow_auto"
+    result = run(gateway, tmp_path, message="Apply the six known independent states", maxAgenticTurns=2)
+    if mode == "approval":
+        for index in range(6):
+            assert len(invoked) == index, "Unapproved later calls must not execute"
+            assert len(model.requests) == 1
+            approval_id = result["approval_id"]
+            approval = gateway._approvals[approval_id]
+            gateway.approval_transactions.approve(approval_id)
+            applied = gateway.approval_transactions.apply_approved({"approval_id": approval_id})
+            assert applied["status"] == "applied"
+            result = gateway.resume_runtime_task_after_approval(approval, applied)
+            assert result["resumedApprovalId"] == approval_id
+            if index < 5:
+                assert result["approval_id"] != approval_id
+                assert gateway._approvals[result["approval_id"]]["status"] == "pending"
+    assert [item["value"] for item in invoked] == list(range(6))
     assert len(model.requests) == 2
-    tool_results = [m for m in model.requests[1]["messages"] if m["role"] == "tool"]
-    assert {m["tool_call_id"] for m in tool_results} == {"write-alpha", "write-beta"}
-    assert all("failed" in m["content"] or "invalid" in m["content"] for m in tool_results)
+    results = [m for m in model.requests[-1]["messages"] if m["role"] == "tool"]
+    assert [m["tool_call_id"] for m in results] == [f"toggle-{i}" for i in range(6)]
+    assert all(len(json.loads(m["content"])["observations"]) == 1 for m in results)
+
+
+def test_invalid_later_write_rejects_entire_receipt_before_side_effects(tmp_path):
+    project = str(tmp_path / "UnityProject")
+    receipt = _receipt(call("valid", "fixture_write", {"projectRoot": project, "value": 1}),
+                       call("invalid", "fixture_write", {"projectRoot": project, "value": 2}))
+    receipt["tool_calls"][1]["function"]["arguments"] = "{invalid"
+    gateway, model, invoked = _write_gateway_for_mode(tmp_path, [receipt, finish])
+    _set_mode(gateway, "auto")
+    gateway.approval_transactions.auto_approval_reviewer = lambda _approval: "allow_auto"
+    run(gateway, tmp_path, maxAgenticTurns=2)
+    assert not invoked
+
+
+@pytest.mark.parametrize("mode", ["approval", "auto"])
+def test_failed_first_write_does_not_execute_queued_siblings(tmp_path, mode):
+    project = str(tmp_path / "UnityProject")
+    receipt = _receipt(*(call(f"write-{i}", "fixture_write", {"projectRoot": project, "value": i}) for i in range(3)))
+    gateway, model, invoked = _write_gateway_for_mode(tmp_path, [receipt, {"role":"assistant","content":"The write failed."}], handler_result={"ok":False,"error":"fixture failure"})
+    _set_mode(gateway, mode)
+    if mode == "auto":
+        gateway.approval_transactions.auto_approval_reviewer = lambda _approval: "allow_auto"
+    result = run(gateway, tmp_path, maxAgenticTurns=2)
+    if mode == "approval":
+        approval_id = result["approval_id"]
+        approval = gateway._approvals[approval_id]
+        gateway.approval_transactions.approve(approval_id)
+        applied = gateway.approval_transactions.apply_approved({"approval_id":approval_id})
+        gateway.resume_runtime_task_after_approval(approval, applied)
+    assert len(invoked) == 1
+    from tests.test_native_runtime_continuations import _binding
+    snapshot = gateway.runtime_sessions.native_conversation("native-session", binding=_binding(tmp_path))
+    assert not gateway.runtime_sessions._native_pending(snapshot)
+    later = [json.loads(m["content"]) for m in snapshot["messages"] if m.get("tool_call_id") in {"write-1","write-2"}]
+    assert len(later)==2 and all(m.get("status")=="not_executed" for m in later)
 
 
 def test_single_write_still_requires_the_existing_real_approval_owner(tmp_path):
@@ -188,7 +232,7 @@ def test_loader_cannot_authorize_a_previously_unadvertised_same_receipt_call(tmp
     run(gateway, tmp_path, maxAgenticTurns=2)
     assert not late
     result = next(m for m in model.requests[1]["messages"] if m.get("tool_call_id") == "guess")
-    assert "not advertised" in result["content"] or "not visible" in result["content"]
+    assert "No call was executed" in result["content"]
 
 
 def test_real_question_pauses_queue_until_answer(tmp_path):
@@ -284,3 +328,46 @@ def test_stop_question_settles_remaining_proposals(tmp_path):
     assert not reads and len(model.requests) == 1
     snapshot = gateway.runtime_sessions.native_conversation("native-session", binding=_binding(tmp_path))
     assert not gateway.runtime_sessions._native_pending(snapshot)
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+def test_write_queue_is_serial_and_stop_prevents_later_writes(tmp_path, cancel):
+    import threading
+    import time
+    from tests.test_native_runtime_continuations import _binding
+    receipt = _receipt(*(call(f"serial-{i}", "fixture_write", {
+        "projectRoot": str(tmp_path / "UnityProject"), "value": i,
+    }) for i in range(6)))
+    gateway, model, _ = _write_gateway_for_mode(tmp_path, [receipt, finish])
+    _set_mode(gateway, "auto")
+    gateway.approval_transactions.auto_approval_reviewer = lambda _approval: "allow_auto"
+    gate = threading.Lock()
+    invoked = []
+    def handler(args):
+        assert gate.acquire(blocking=False), "Only one writer may be in flight"
+        try:
+            invoked.append(args["value"])
+            if cancel:
+                gateway.request_runtime_cancel({"sessionId": "native-session"})
+            time.sleep(0.01)
+            return {"ok": True}
+        finally:
+            gate.release()
+    gateway.approval_transactions.register_write_handler("fixture_write", "Write fixture", "medium", handler)
+    result = run(gateway, tmp_path, maxAgenticTurns=2)
+    assert invoked == ([0] if cancel else list(range(6)))
+    assert result["plan"]["nextStep"] == ("cancelled" if cancel else "done")
+    snapshot = gateway.runtime_sessions.native_conversation("native-session", binding=_binding(tmp_path))
+    assert not gateway.runtime_sessions._native_pending(snapshot)
+
+
+def test_plan_mode_rejects_write_receipt_without_any_side_effect(tmp_path):
+    receipt = _receipt(*(call(f"write-{i}", "fixture_write", {
+        "projectRoot": str(tmp_path / "UnityProject"), "value": i,
+    }) for i in range(2)))
+    gateway, model, invoked = _write_gateway_for_mode(tmp_path, [receipt, finish])
+    _set_mode(gateway, "auto")
+    gateway.approval_transactions.auto_approval_reviewer = lambda _approval: "allow_auto"
+    run(gateway, tmp_path, planMode=True, maxAgenticTurns=2)
+    assert not invoked
+    assert not gateway.approval_transactions.list_approvals()
